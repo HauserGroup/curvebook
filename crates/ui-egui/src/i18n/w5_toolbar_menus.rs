@@ -4,7 +4,7 @@
 //! `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW`, `it`, `nl`, `pl`, `ru`, `tr`, `ar`, `he`) and register
 //! into [`super::EXTRA_SHARD_CATALOGS`] once wired in `i18n.rs`.
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 /// Toolbar and context-menu localization entries (`w5c1`).
 pub const ENTRIES: &[CatalogEntry] = &[
@@ -425,21 +425,21 @@ pub const ENTRIES: &[CatalogEntry] = &[
     ]),
     entry!("toolbar.palette" => [
         en: "Cmd+K",
-        de: "Cmd+K",
-        es: "Cmd+K",
-        fr: "Cmd+K",
-        ja: "Cmd+K",
-        ko: "Cmd+K",
-        pt_br: "Cmd+K",
-        zh_cn: "Cmd+K",
-        zh_tw: "Cmd+K",
-        it: "Cmd+K",
-        nl: "Cmd+K",
-        pl: "Cmd+K",
-        ru: "Cmd+K",
-        tr: "Cmd+K",
-        ar: "Cmd+K",
-        he: "Cmd+K",
+        de: "Befehle",
+        es: "Comandos",
+        fr: "Commandes",
+        ja: "コマンド",
+        ko: "명령",
+        pt_br: "Comandos",
+        zh_cn: "命令",
+        zh_tw: "命令",
+        it: "Comandi",
+        nl: "Opdrachten",
+        pl: "Polecenia",
+        ru: "Команды",
+        tr: "Komutlar",
+        ar: "الأوامر",
+        he: "פקודות",
     ]),
     entry!("toolbar.overflow" => [
         en: "More",

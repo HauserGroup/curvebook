@@ -20,6 +20,7 @@ use crate::modal_predicates::ControlEnablement;
 use crate::text_bridge::UiTextStyle;
 
 use super::a11y::{labeled_meta, selectable_meta};
+use super::analyze_picker::scaled_u32;
 
 const DOMAIN_MV_FORMULA: &str = "mv_formula";
 const WID_FORMULA_INPUT: &str = "formula_bar.input";
@@ -1004,6 +1005,12 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut MvFormulaViewState, pay
 /// Desired pixel width for a docked right-side calculated variable editor panel.
 #[must_use]
 pub fn right_panel_desired_width(app: &UiApp, ds: &DataSheet, sheet_rect: LayoutRectPx) -> u32 {
+    right_panel_desired_width_for_scale(app, ds, sheet_rect, 1.0)
+}
+
+/// HiDPI-scaled right panel width reservation for the calculated-variable editor dock.
+#[must_use]
+pub fn right_panel_desired_width_for_scale(app: &UiApp, ds: &DataSheet, sheet_rect: LayoutRectPx, scale: f64) -> u32 {
     if !matches!(ds.archetype, TableArchetype::MultipleVariables(_)) {
         return 0;
     }
@@ -1011,7 +1018,9 @@ pub fn right_panel_desired_width(app: &UiApp, ds: &DataSheet, sheet_rect: Layout
     if !st.right_panel_open && !st.variables_drawer_open {
         return 0;
     }
-    (sheet_rect.width / 2).clamp(220, 308).min(sheet_rect.width.saturating_sub(16))
+    let min_w = scaled_u32(220.0, scale, 180, 440);
+    let max_w = scaled_u32(308.0, scale, 260, 620);
+    (sheet_rect.width / 2).clamp(min_w, max_w).min(sheet_rect.width.saturating_sub(16))
 }
 
 fn effective_commit_ok(builder: &LayoutBuilder<'_>, ds: &DataSheet) -> (bool, Option<String>) {
@@ -1040,7 +1049,8 @@ fn effective_commit_ok(builder: &LayoutBuilder<'_>, ds: &DataSheet) -> (bool, Op
 /// Emit the calculated-variable formula bar strip when active or on a `MultipleVariables` sheet,
 /// returning its allocated pixel height (`52`, `24`, or `0`).
 pub fn build_formula_bar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sheet_rect: LayoutRectPx, show_formula: bool) -> u32 {
-    if !show_formula || sheet_rect.height <= 80 || sheet_rect.width < 120 {
+    let scale = builder.scale();
+    if !show_formula || sheet_rect.height <= scaled_u32(80.0, scale, 70, 160) || sheet_rect.width < scaled_u32(120.0, scale, 100, 240) {
         return 0;
     }
     // In split-pane mode, prevent duplicate singleton formula bar/overlay node IDs.
@@ -1053,20 +1063,26 @@ pub fn build_formula_bar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sh
     };
 
     let state = builder.app.view_shards.mv_formula.clone();
-    let show_badges_row = sheet_rect.height >= 160 && sheet_rect.width >= 240;
-    let formula_h = if show_badges_row { 52u32 } else { 24u32 };
+    let show_badges_row = sheet_rect.height >= scaled_u32(160.0, scale, 130, 320) && sheet_rect.width >= scaled_u32(240.0, scale, 200, 480);
+    let top_row_h = scaled_u32(22.0, scale, 18, 44);
+    let badge_row_h = scaled_u32(22.0, scale, 18, 44);
+    let formula_h = if show_badges_row { top_row_h + badge_row_h + scaled_u32(8.0, scale, 6, 16) } else { top_row_h + 2 };
 
     build_mv_top_toolbar_row(builder, ds, sheet_rect, &state);
     if show_badges_row {
-        let badges_rect = LayoutRectPx::new(sheet_rect.x + 4, sheet_rect.y + 26, sheet_rect.width.saturating_sub(8), 22);
+        let badges_y = sheet_rect.y + i32::try_from(top_row_h + 4).unwrap_or(26);
+        let badges_rect = LayoutRectPx::new(sheet_rect.x + 4, badges_y, sheet_rect.width.saturating_sub(8), badge_row_h);
         build_mv_column_badges(builder, ds, mv, badges_rect, &state);
     }
 
     let body_top = sheet_rect.y + i32::try_from(formula_h).unwrap_or(52) + 2;
     let body_h = sheet_rect.height.saturating_sub(formula_h + 4);
-    if body_h >= 120 && sheet_rect.width >= 240 {
-        let panel_w = (sheet_rect.width / 2).clamp(224, 308).min(sheet_rect.width.saturating_sub(12));
-        let narrow_conflict = state.right_panel_open && state.variables_drawer_open && sheet_rect.width < panel_w + 224;
+    if body_h >= scaled_u32(120.0, scale, 100, 240) && sheet_rect.width >= scaled_u32(240.0, scale, 200, 480) {
+        let panel_w = (sheet_rect.width / 2)
+            .clamp(scaled_u32(224.0, scale, 190, 448), scaled_u32(308.0, scale, 260, 620))
+            .min(sheet_rect.width.saturating_sub(12));
+        let min_drawer_gap = scaled_u32(224.0, scale, 190, 448);
+        let narrow_conflict = state.right_panel_open && state.variables_drawer_open && sheet_rect.width < panel_w + min_drawer_gap;
         if state.right_panel_open {
             let panel_x = if builder.tree.is_rtl { sheet_rect.x + 4 } else { sheet_rect.right() - i32::try_from(panel_w).unwrap_or(280) - 4 };
             let panel_rect = LayoutRectPx::new(panel_x, body_top, panel_w, body_h);
@@ -1074,9 +1090,11 @@ pub fn build_formula_bar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sh
         }
         if state.variables_drawer_open && !narrow_conflict {
             let drawer_w = if state.right_panel_open {
-                sheet_rect.width.saturating_sub(panel_w + 14).clamp(212, 276)
+                sheet_rect.width.saturating_sub(panel_w + 14).clamp(scaled_u32(212.0, scale, 180, 424), scaled_u32(276.0, scale, 230, 552))
             } else {
-                (sheet_rect.width / 2).clamp(228, 304).min(sheet_rect.width.saturating_sub(12))
+                (sheet_rect.width / 2)
+                    .clamp(scaled_u32(228.0, scale, 190, 456), scaled_u32(304.0, scale, 260, 608))
+                    .min(sheet_rect.width.saturating_sub(12))
             };
             let drawer_x = if state.right_panel_open {
                 if builder.tree.is_rtl {
@@ -1102,8 +1120,9 @@ pub fn build_formula_bar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sh
 }
 
 fn build_legacy_formula_strip(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sheet_rect: LayoutRectPx) -> u32 {
-    let formula_h = 24u32;
-    let btn_w = 54u32;
+    let scale = builder.scale();
+    let formula_h = scaled_u32(24.0, scale, 20, 48);
+    let btn_w = scaled_u32(54.0, scale, 46, 108);
     let input_w = sheet_rect.width.saturating_sub(btn_w * 2 + 16).max(40);
     let fx_rect = LayoutRectPx::new(sheet_rect.x + 4, sheet_rect.y + 2, input_w, formula_h - 4);
     emit_text_field(
@@ -1167,20 +1186,22 @@ fn build_legacy_formula_strip(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, s
 }
 
 fn build_mv_top_toolbar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, sheet_rect: LayoutRectPx, state: &MvFormulaViewState) {
+    let scale = builder.scale();
     let row_y = sheet_rect.y + 2;
-    let row_h = 22u32;
-    let compact = sheet_rect.width < 540;
-    let w_new = if compact { 46u32 } else { 58u32 };
-    let w_vars = if compact { 66u32 } else { 84u32 };
-    let w_defs = if compact { 48u32 } else { 58u32 };
-    let w_edit = if compact { 52u32 } else { 66u32 };
-    let right_group_w = w_new + w_vars + w_defs + w_edit + 12;
+    let row_h = scaled_u32(22.0, scale, 18, 44);
+    let compact = sheet_rect.width < scaled_u32(540.0, scale, 460, 1080);
+    let w_new = scaled_u32(if compact { 46.0 } else { 58.0 }, scale, 40, 120);
+    let w_vars = scaled_u32(if compact { 66.0 } else { 84.0 }, scale, 58, 176);
+    let w_defs = scaled_u32(if compact { 48.0 } else { 58.0 }, scale, 42, 120);
+    let w_edit = scaled_u32(if compact { 52.0 } else { 66.0 }, scale, 46, 140);
+    let btn_gap = scaled_u32(4.0, scale, 3, 8);
+    let right_group_w = w_new + w_vars + w_defs + w_edit + btn_gap.saturating_mul(3);
     let right_x = sheet_rect.right() - i32::try_from(right_group_w + 4).unwrap_or(260);
     let left_avail = u32::try_from((right_x - (sheet_rect.x + 8)).max(0)).unwrap_or(0);
 
-    if !state.right_panel_open && left_avail >= 120 {
-        let btn_w = if left_avail >= 220 { 48u32 } else { 38u32 };
-        let input_w = left_avail.saturating_sub(btn_w * 2 + 8).max(36);
+    if !state.right_panel_open && left_avail >= scaled_u32(120.0, scale, 100, 240) {
+        let btn_w = if left_avail >= scaled_u32(220.0, scale, 180, 440) { scaled_u32(48.0, scale, 40, 96) } else { scaled_u32(38.0, scale, 32, 76) };
+        let input_w = left_avail.saturating_sub(btn_w * 2 + 8).max(scaled_u32(36.0, scale, 32, 80));
         let fx_rect = LayoutRectPx::new(sheet_rect.x + 4, row_y, input_w, row_h);
         emit_text_field(
             builder,
@@ -1256,7 +1277,7 @@ fn build_mv_top_toolbar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, she
             state: WidgetVisualState::default(),
             action: WidgetAction::NoOp,
         });
-        let size_px = (11.5 * builder.scale()).clamp(9.0, 20.0);
+        let size_px = (11.5 * scale).clamp(9.0, 24.0);
         paint_text_fitted(
             builder,
             &wid,
@@ -1316,7 +1337,7 @@ fn build_mv_top_toolbar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, she
                 action: custom_action(payload),
             },
         );
-        bx += i32::try_from(w + 4).unwrap_or(54);
+        bx += i32::try_from(w + btn_gap).unwrap_or(54);
     }
 }
 
@@ -1329,12 +1350,14 @@ pub fn build_mv_column_badges(
     rect: LayoutRectPx,
     state: &MvFormulaViewState,
 ) {
-    if rect.width < 80 || rect.height < 18 || mv.variables.is_empty() {
+    let scale = builder.scale();
+    if rect.width < scaled_u32(80.0, scale, 70, 160) || rect.height < scaled_u32(18.0, scale, 16, 36) || mv.variables.is_empty() {
         return;
     }
     let total = mv.variables.len();
     let start_col = state.badge_scroll_col.min(total.saturating_sub(1));
-    let nav_w = if total > 1 && (start_col > 0 || rect.width < (total as u32) * 116) { 20u32 } else { 0 };
+    let min_slot_threshold = scaled_u32(116.0, scale, 96, 232);
+    let nav_w = if total > 1 && (start_col > 0 || rect.width < (total as u32) * min_slot_threshold) { scaled_u32(20.0, scale, 18, 40) } else { 0 };
     let mut cx = rect.x;
     let right_limit = rect.right() - i32::try_from(nav_w).unwrap_or(0);
 
@@ -1360,12 +1383,12 @@ pub fn build_mv_column_badges(
         cx += i32::try_from(nav_w + 3).unwrap_or(23);
     }
 
-    let lock_w = 22u32;
+    let lock_w = scaled_u32(22.0, scale, 18, 44);
     let remaining_w = u32::try_from((right_limit - cx).max(0)).unwrap_or(0);
     let visible_count = mv.variables.len().saturating_sub(start_col).max(1);
-    let item_slot_w = (remaining_w / (visible_count as u32)).clamp(108, 158);
-    let badge_w = item_slot_w.saturating_sub(lock_w + 4).max(76);
-    let size_px = (10.5 * builder.scale()).clamp(8.5, 18.0);
+    let item_slot_w = (remaining_w / (visible_count as u32)).clamp(scaled_u32(108.0, scale, 90, 216), scaled_u32(158.0, scale, 130, 316));
+    let badge_w = item_slot_w.saturating_sub(lock_w + 4).max(scaled_u32(76.0, scale, 64, 152));
+    let size_px = (10.5 * scale).clamp(8.5, 22.0);
     let style = UiTextStyle::ui_sans(size_px);
 
     for (col_idx, var) in mv.variables.iter().enumerate().skip(start_col) {
@@ -1407,7 +1430,8 @@ pub fn build_mv_column_badges(
             role_color,
         );
 
-        let txt_rect = LayoutRectPx::new(badge_rect.x + 5, badge_rect.y, badge_rect.width.saturating_sub(17), badge_rect.height);
+        let arrow_reserve = scaled_u32(17.0, scale, 14, 34);
+        let txt_rect = LayoutRectPx::new(badge_rect.x + 5, badge_rect.y, badge_rect.width.saturating_sub(arrow_reserve), badge_rect.height);
         paint_text_fitted(
             builder,
             &wid,
@@ -1421,7 +1445,7 @@ pub fn build_mv_column_badges(
                 scroll_container: None,
             },
         );
-        let ax = badge_rect.right() - 8;
+        let ax = badge_rect.right() - i32::try_from(scaled_u32(8.0, scale, 6, 16)).unwrap_or(8);
         let ay = badge_rect.center()[1];
         builder.paint_line(ZLayer::Workspace, Some(&wid), [ax - 3, ay - 1], [ax, ay + 2], builder.palette.text, 1);
         builder.paint_line(ZLayer::Workspace, Some(&wid), [ax, ay + 2], [ax + 3, ay - 1], builder.palette.text, 1);
@@ -1485,12 +1509,13 @@ fn emit_role_dropdown_popup(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, mv:
     let Some(var) = mv.variables.get(col) else {
         return;
     };
+    let scale = builder.scale();
+    let row_h = scaled_u32(22.0, scale, 18, 44);
+    let pop_w = scaled_u32(190.0, scale, 160, 380).min(sheet_rect.width.saturating_sub(8));
     let anchor = builder
         .tree
         .node(&format!("mv_formula.role_badge.{col}"))
-        .map_or(LayoutRectPx::new(sheet_rect.x + 4, sheet_rect.y + 48, 120, 22), |n| n.bounds.rect_px);
-    let pop_w = 190u32.min(sheet_rect.width.saturating_sub(8));
-    let row_h = 22u32;
+        .map_or(LayoutRectPx::new(sheet_rect.x + 4, sheet_rect.y + 48, 120, row_h), |n| n.bounds.rect_px);
     let is_calc = matches!(var.source, VariableSource::Calculated { .. });
     let loc = builder.tree.locale.clone();
     let opts: [(&str, &str, bool); 5] = [
@@ -1520,7 +1545,7 @@ fn emit_role_dropdown_popup(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, mv:
     builder.paint_fill(ZLayer::DropdownMenu, Some(&pop_wid), pop_rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::DropdownMenu, Some(&pop_wid), pop_rect, builder.palette.accent, 1);
 
-    let size_px = (11.5 * builder.scale()).clamp(9.0, 20.0);
+    let size_px = (11.5 * scale).clamp(9.0, 24.0);
     let style = UiTextStyle::ui_sans(size_px);
     for (idx, (key, label, enabled)) in opts.into_iter().enumerate() {
         let item_rect =
@@ -1592,7 +1617,8 @@ pub fn build_calculated_variable_panel(
     panel_rect: LayoutRectPx,
     state: &MvFormulaViewState,
 ) {
-    if panel_rect.width < 180 || panel_rect.height < 200 {
+    let scale = builder.scale();
+    if panel_rect.width < scaled_u32(180.0, scale, 150, 360) || panel_rect.height < scaled_u32(200.0, scale, 170, 400) {
         return;
     }
     let panel_wid = builder.push_node(NodeSpec {
@@ -1607,20 +1633,28 @@ pub fn build_calculated_variable_panel(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&panel_wid), panel_rect, builder.palette.panel);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&panel_wid), panel_rect, builder.palette.accent, 1);
 
-    let inner = panel_rect.inset(6);
+    let inner = panel_rect.inset(scaled_u32(6.0, scale, 4, 12));
     let loc = builder.tree.locale.clone();
-    let size_px = (11.0 * builder.scale()).clamp(8.5, 20.0);
+    let size_px = (11.0 * scale).clamp(8.5, 24.0);
     let lbl_style = UiTextStyle::ui_bold(size_px);
     let text_style = UiTextStyle::ui_sans(size_px);
+    let lbl_h = scaled_u32(18.0, scale, 16, 36);
+    let hdr_h = scaled_u32(20.0, scale, 18, 40);
+    let row_h = scaled_u32(22.0, scale, 18, 44);
+    let gap_h = scaled_u32(4.0, scale, 3, 8);
+    let hdr_step = i32::try_from(hdr_h + gap_h).unwrap_or(24);
+    let lbl_step = i32::try_from(lbl_h).unwrap_or(18);
+    let row_step = i32::try_from(row_h + gap_h).unwrap_or(26);
+    let close_w = scaled_u32(22.0, scale, 18, 44);
     let mut cy = inner.y;
 
     // 1. Header + close
-    let hdr_w = inner.width.saturating_sub(26);
+    let hdr_w = inner.width.saturating_sub(close_w + gap_h);
     emit_overlay_label(
         builder,
         &panel_wid,
         "mv_formula.panel_title",
-        LayoutRectPx::new(inner.x, cy, hdr_w, 20),
+        LayoutRectPx::new(inner.x, cy, hdr_w, hdr_h),
         mv_tr(&loc, "inspector.calculated_variable", "Calculated Variable"),
         &lbl_style,
         builder.palette.text,
@@ -1631,7 +1665,7 @@ pub fn build_calculated_variable_panel(
             id: "mv_formula.panel_close",
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.right() - 22, cy, 22, 20),
+            rect: LayoutRectPx::new(inner.right() - i32::try_from(close_w).unwrap_or(22), cy, close_w, hdr_h),
             label: "X",
             keyboard_path: "Escape",
             focus_scope: FocusScope::Workspace,
@@ -1643,26 +1677,26 @@ pub fn build_calculated_variable_panel(
             action: custom_action("close_panel"),
         },
     );
-    cy += 24;
+    cy += hdr_step;
 
     // 2. Variable Name input
     emit_overlay_label(
         builder,
         &panel_wid,
         "mv_formula.name_lbl",
-        LayoutRectPx::new(inner.x, cy, inner.width, 18),
+        LayoutRectPx::new(inner.x, cy, inner.width, lbl_h),
         mv_tr(&loc, "mv.panel.var_name", "Variable Name"),
         &text_style,
         builder.palette.muted,
     );
-    cy += 18;
+    cy += lbl_step;
     emit_text_field(
         builder,
         TextFieldSpec {
             id: WID_NAME_INPUT,
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, inner.width, 22),
+            rect: LayoutRectPx::new(inner.x, cy, inner.width, row_h),
             label: mv_tr(&loc, "mv.panel.var_name", "Variable Name"),
             fallback_text: &builder.app.grid.formula_bar.target_title,
             keyboard_path: WID_NAME_INPUT,
@@ -1672,26 +1706,26 @@ pub fn build_calculated_variable_panel(
             enablement: if ds.frozen { ControlEnablement::disabled("Data sheet is frozen (read-only).") } else { ControlEnablement::enabled() },
         },
     );
-    cy += 26;
+    cy += row_step;
 
     // 3. Live Formula input
     emit_overlay_label(
         builder,
         &panel_wid,
         "mv_formula.formula_lbl",
-        LayoutRectPx::new(inner.x, cy, inner.width, 18),
+        LayoutRectPx::new(inner.x, cy, inner.width, lbl_h),
         mv_tr(&loc, "mv.panel.live_formula", "Live Formula"),
         &text_style,
         builder.palette.muted,
     );
-    cy += 18;
+    cy += lbl_step;
     emit_text_field(
         builder,
         TextFieldSpec {
             id: WID_FORMULA_INPUT,
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, inner.width, 22),
+            rect: LayoutRectPx::new(inner.x, cy, inner.width, row_h),
             label: mv_tr(&loc, "mv.panel.live_formula", "Live Formula"),
             fallback_text: &builder.app.grid.formula_bar.input,
             keyboard_path: "F2",
@@ -1701,7 +1735,7 @@ pub fn build_calculated_variable_panel(
             enablement: if ds.frozen { ControlEnablement::disabled("Data sheet is frozen (read-only).") } else { ControlEnablement::enabled() },
         },
     );
-    cy += 26;
+    cy += row_step;
 
     // 4. Live syntax / circularity validation banner
     let fb = &builder.app.grid.formula_bar;
@@ -1730,7 +1764,7 @@ pub fn build_calculated_variable_panel(
             builder.palette.muted,
         )
     };
-    let val_rect = LayoutRectPx::new(inner.x, cy, inner.width, 22);
+    let val_rect = LayoutRectPx::new(inner.x, cy, inner.width, row_h);
     let val_wid = builder.push_node(NodeSpec {
         id: WidgetId::from("mv_formula.validation_status"),
         parent: Some(panel_wid.clone()),
@@ -1755,17 +1789,17 @@ pub fn build_calculated_variable_panel(
             scroll_container: None,
         },
     );
-    cy += 26;
+    cy += row_step;
 
     // 5. Apply / Cancel / Defs row
-    let act_w = ((inner.width.saturating_sub(8)) / 3).max(46);
+    let act_w = ((inner.width.saturating_sub(8)) / 3).max(scaled_u32(46.0, scale, 40, 96));
     emit_button(
         builder,
         ButtonWidgetSpec {
             id: "formula_bar.commit",
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, act_w, 22),
+            rect: LayoutRectPx::new(inner.x, cy, act_w, row_h),
             label: mv_tr(&loc, "btn.apply", "Apply"),
             keyboard_path: "Enter",
             focus_scope: FocusScope::Workspace,
@@ -1787,7 +1821,7 @@ pub fn build_calculated_variable_panel(
             id: "formula_bar.cancel",
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from(act_w + 4).unwrap_or(52), cy, act_w, 22),
+            rect: LayoutRectPx::new(inner.x + i32::try_from(act_w + 4).unwrap_or(52), cy, act_w, row_h),
             label: mv_tr(&loc, "btn.cancel", "Cancel"),
             keyboard_path: "Escape",
             focus_scope: FocusScope::Workspace,
@@ -1805,7 +1839,7 @@ pub fn build_calculated_variable_panel(
             id: "mv_formula.panel_defs_toggle",
             parent: Some(panel_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from((act_w + 4) * 2).unwrap_or(104), cy, inner.width.saturating_sub((act_w + 4) * 2), 22),
+            rect: LayoutRectPx::new(inner.x + i32::try_from((act_w + 4) * 2).unwrap_or(104), cy, inner.width.saturating_sub((act_w + 4) * 2), row_h),
             label: mv_tr(&loc, "mv.defs_toggle", "fx Defs"),
             keyboard_path: "mv_formula.panel_defs_toggle",
             focus_scope: FocusScope::Workspace,
@@ -1817,47 +1851,47 @@ pub fn build_calculated_variable_panel(
             action: custom_action("toggle_defs"),
         },
     );
-    cy += 26;
+    cy += row_step;
 
     // 6. Optional Formula Definitions summary when toggle enabled
     let rem_total = u32::try_from((inner.bottom() - cy).max(0)).unwrap_or(0);
-    if state.show_formula_definitions && rem_total >= 150 {
-        let defs_box_h = (rem_total / 4).clamp(44, 72);
+    if state.show_formula_definitions && rem_total >= scaled_u32(150.0, scale, 120, 300) {
+        let defs_box_h = (rem_total / 4).clamp(scaled_u32(44.0, scale, 36, 88), scaled_u32(72.0, scale, 56, 144));
         emit_overlay_label(
             builder,
             &panel_wid,
             "mv_formula.defs_lbl",
-            LayoutRectPx::new(inner.x, cy, inner.width, 18),
+            LayoutRectPx::new(inner.x, cy, inner.width, lbl_h),
             mv_tr(&loc, "mv.panel.defs_heading", "Formula Definitions"),
             &lbl_style,
             builder.palette.text,
         );
-        cy += 18;
+        cy += lbl_step;
         build_formula_definitions_list(builder, &panel_wid, mv, LayoutRectPx::new(inner.x, cy, inner.width, defs_box_h), &text_style);
-        cy += i32::try_from(defs_box_h + 4).unwrap_or(48);
+        cy += i32::try_from(defs_box_h + gap_h).unwrap_or(48);
     }
 
     // 7. Clickable Column-Variable List
     let rem_after_defs = u32::try_from((inner.bottom() - cy).max(0)).unwrap_or(0);
-    if rem_after_defs < 100 {
+    if rem_after_defs < scaled_u32(100.0, scale, 84, 200) {
         return;
     }
-    let cols_box_h = (rem_after_defs * 32 / 100).clamp(48, 108);
+    let cols_box_h = (rem_after_defs * 32 / 100).clamp(scaled_u32(48.0, scale, 40, 96), scaled_u32(108.0, scale, 84, 216));
     emit_overlay_label(
         builder,
         &panel_wid,
         "mv_formula.cols_lbl",
-        LayoutRectPx::new(inner.x, cy, inner.width, 18),
+        LayoutRectPx::new(inner.x, cy, inner.width, lbl_h),
         mv_tr(&loc, "mv.panel.column_vars", "Column Variables"),
         &lbl_style,
         builder.palette.text,
     );
-    cy += 18;
+    cy += lbl_step;
     build_clickable_columns_list(builder, &panel_wid, mv, fb.target_column, LayoutRectPx::new(inner.x, cy, inner.width, cols_box_h), &text_style);
-    cy += i32::try_from(cols_box_h + 4).unwrap_or(52);
+    cy += i32::try_from(cols_box_h + gap_h).unwrap_or(52);
 
     // 8. Searchable Function Reference with Parameter Hints
-    if inner.bottom() - cy >= 92 {
+    if inner.bottom() - cy >= i32::try_from(scaled_u32(92.0, scale, 76, 184)).unwrap_or(92) {
         build_function_reference_section(
             builder,
             &panel_wid,
@@ -1909,7 +1943,9 @@ fn build_formula_definitions_list(
             VariableSource::Entered => None,
         })
         .collect();
-    let row_h = 20u32;
+    let scale = builder.scale();
+    let row_h = scaled_u32(20.0, scale, 18, 40);
+    let sb_reserve = scaled_u32(14.0, scale, 12, 28);
     let content_h = (defs.len().max(1) as u32) * row_h + 4;
     let scroll_id = String::from("scroll.mv_formula.defs");
     let scroll_off = builder.scroll_offset(&scroll_id);
@@ -1928,7 +1964,7 @@ fn build_formula_definitions_list(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.border, 1);
 
-    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(14), rect.height.saturating_sub(4));
+    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(4));
     builder.push_clip(clip);
     if defs.is_empty() {
         paint_text_fitted(
@@ -1936,7 +1972,7 @@ fn build_formula_definitions_list(
             &list_wid,
             FittedTextSpec {
                 z_layer: ZLayer::FloatingOverlay,
-                rect: LayoutRectPx::new(clip.x, clip.y, clip.width, 18),
+                rect: LayoutRectPx::new(clip.x, clip.y, clip.width, row_h.saturating_sub(2)),
                 pad_x: 4,
                 text: "No calculated variables defined yet.",
                 style,
@@ -2022,7 +2058,9 @@ fn build_clickable_columns_list(
         }
     }
 
-    let row_h = 20u32;
+    let scale = builder.scale();
+    let row_h = scaled_u32(20.0, scale, 18, 40);
+    let sb_reserve = scaled_u32(14.0, scale, 12, 28);
     let content_h = (items.len().max(1) as u32) * row_h + 4;
     let scroll_id = String::from("scroll.mv_formula.cols");
     let scroll_off = builder.scroll_offset(&scroll_id);
@@ -2041,7 +2079,7 @@ fn build_clickable_columns_list(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.border, 1);
 
-    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(14), rect.height.saturating_sub(4));
+    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(4));
     builder.push_clip(clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
     for (idx, (id, lbl, en, payload)) in items.iter().enumerate() {
@@ -2095,21 +2133,27 @@ fn build_function_reference_section(
     lbl_style: &UiTextStyle,
     style: &UiTextStyle,
 ) {
+    let scale = builder.scale();
+    let lbl_h = scaled_u32(18.0, scale, 16, 36);
+    let cat_h = scaled_u32(20.0, scale, 18, 40);
+    let cat_step = i32::try_from(cat_h + scaled_u32(2.0, scale, 2, 6)).unwrap_or(22);
+    let row_h_ctl = scaled_u32(22.0, scale, 18, 44);
+    let row_step = i32::try_from(row_h_ctl + scaled_u32(2.0, scale, 2, 6)).unwrap_or(24);
     let loc = builder.tree.locale.clone();
     let mut cy = rect.y;
     emit_overlay_label(
         builder,
         parent,
         "mv_formula.func_lbl",
-        LayoutRectPx::new(rect.x, cy, rect.width, 18),
+        LayoutRectPx::new(rect.x, cy, rect.width, lbl_h),
         mv_tr(&loc, "mv.panel.func_ref", "Function Reference"),
         lbl_style,
         builder.palette.text,
     );
-    cy += 18;
+    cy += i32::try_from(lbl_h).unwrap_or(18);
 
     let cats = [("all", "All"), ("math", "Math"), ("stats", "Stats"), ("window", "Win"), ("logic", "Logic")];
-    let cat_w = ((rect.width.saturating_sub(12)) / 5).max(36);
+    let cat_w = ((rect.width.saturating_sub(12)) / 5).max(scaled_u32(36.0, scale, 32, 72));
     for (idx, (cat_id, cat_lbl)) in cats.iter().enumerate() {
         let cx = rect.x + i32::try_from(idx as u32 * (cat_w + 3)).unwrap_or(0);
         if cx + i32::try_from(cat_w).unwrap_or(36) > rect.right() {
@@ -2122,7 +2166,7 @@ fn build_function_reference_section(
                 id: &format!("mv_formula.func_cat.{cat_id}"),
                 parent: Some(parent.clone()),
                 z_layer: ZLayer::FloatingOverlay,
-                rect: LayoutRectPx::new(cx, cy, cat_w, 20),
+                rect: LayoutRectPx::new(cx, cy, cat_w, cat_h),
                 label: cat_lbl,
                 keyboard_path: &format!("mv_formula.func_cat.{cat_id}"),
                 focus_scope: FocusScope::Workspace,
@@ -2135,9 +2179,9 @@ fn build_function_reference_section(
             },
         );
     }
-    cy += 22;
+    cy += cat_step;
 
-    let clr_w = 24u32;
+    let clr_w = scaled_u32(24.0, scale, 20, 46);
     let search_w = rect.width.saturating_sub(clr_w + 4).max(40);
     let raw_query = builder.app.interaction.text_field_buffers.get(WID_FUNC_SEARCH).map_or(state.function_search.as_str(), |b| b.text.as_str());
     emit_text_field(
@@ -2146,7 +2190,7 @@ fn build_function_reference_section(
             id: WID_FUNC_SEARCH,
             parent: Some(parent.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(rect.x, cy, search_w, 22),
+            rect: LayoutRectPx::new(rect.x, cy, search_w, row_h_ctl),
             label: mv_tr(&loc, "mv.panel.search_funcs", "Search functions"),
             fallback_text: &state.function_search,
             keyboard_path: WID_FUNC_SEARCH,
@@ -2162,7 +2206,7 @@ fn build_function_reference_section(
             id: "mv_formula.func.clear",
             parent: Some(parent.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(rect.x + i32::try_from(search_w + 4).unwrap_or(44), cy, clr_w, 22),
+            rect: LayoutRectPx::new(rect.x + i32::try_from(search_w + 4).unwrap_or(44), cy, clr_w, row_h_ctl),
             label: "X",
             keyboard_path: "mv_formula.func.clear",
             focus_scope: FocusScope::Workspace,
@@ -2174,7 +2218,7 @@ fn build_function_reference_section(
             action: custom_action("func_search_clear"),
         },
     );
-    cy += 24;
+    cy += row_step;
 
     let q_lower = raw_query.trim().to_ascii_lowercase();
     let filtered: Vec<&FormulaFnSpec> = FORMULA_FUNCTIONS
@@ -2197,7 +2241,7 @@ fn build_function_reference_section(
         || format!("{}: Select a function", mv_tr(&loc, "mv.panel.param_hint", "Parameter Hint")),
         |f| format!("{} — {}", f.signature, f.params_hint),
     );
-    let hint_rect = LayoutRectPx::new(rect.x, cy, rect.width, 22);
+    let hint_rect = LayoutRectPx::new(rect.x, cy, rect.width, row_h_ctl);
     let hint_wid = builder.push_node(NodeSpec {
         id: WidgetId::from("mv_formula.param_hint"),
         parent: Some(parent.clone()),
@@ -2222,14 +2266,15 @@ fn build_function_reference_section(
             scroll_container: None,
         },
     );
-    cy += 24;
+    cy += row_step;
 
     let list_h = u32::try_from((rect.bottom() - cy).max(0)).unwrap_or(0);
-    if list_h < 24 {
+    if list_h < scaled_u32(24.0, scale, 20, 48) {
         return;
     }
     let list_rect = LayoutRectPx::new(rect.x, cy, rect.width, list_h);
-    let row_h = 20u32;
+    let row_h = scaled_u32(20.0, scale, 18, 40);
+    let sb_reserve = scaled_u32(14.0, scale, 12, 28);
     let content_h = (filtered.len().max(1) as u32) * row_h + 4;
     let scroll_id = String::from("scroll.mv_formula.funcs");
     let scroll_off = builder.scroll_offset(&scroll_id);
@@ -2248,7 +2293,7 @@ fn build_function_reference_section(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&list_wid), list_rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&list_wid), list_rect, builder.palette.border, 1);
 
-    let clip = LayoutRectPx::new(list_rect.x + 2, list_rect.y + 2, list_rect.width.saturating_sub(14), list_rect.height.saturating_sub(4));
+    let clip = LayoutRectPx::new(list_rect.x + 2, list_rect.y + 2, list_rect.width.saturating_sub(sb_reserve), list_rect.height.saturating_sub(4));
     builder.push_clip(clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
     for (idx, spec) in filtered.iter().enumerate() {
@@ -2305,7 +2350,8 @@ pub fn build_variables_drawer(
     drawer_rect: LayoutRectPx,
     state: &MvFormulaViewState,
 ) {
-    if drawer_rect.width < 180 || drawer_rect.height < 220 || mv.variables.is_empty() {
+    let scale = builder.scale();
+    if drawer_rect.width < scaled_u32(180.0, scale, 150, 360) || drawer_rect.height < scaled_u32(220.0, scale, 180, 440) || mv.variables.is_empty() {
         return;
     }
     let drawer_wid = builder.push_node(NodeSpec {
@@ -2320,18 +2366,26 @@ pub fn build_variables_drawer(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&drawer_wid), drawer_rect, builder.palette.panel);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&drawer_wid), drawer_rect, builder.palette.accent, 1);
 
-    let inner = drawer_rect.inset(6);
+    let inner = drawer_rect.inset(scaled_u32(6.0, scale, 4, 12));
     let loc = builder.tree.locale.clone();
-    let size_px = (11.0 * builder.scale()).clamp(8.5, 20.0);
+    let size_px = (11.0 * scale).clamp(8.5, 24.0);
     let lbl_style = UiTextStyle::ui_bold(size_px);
     let text_style = UiTextStyle::ui_sans(size_px);
+    let hdr_h = scaled_u32(20.0, scale, 18, 40);
+    let lbl_h = scaled_u32(18.0, scale, 16, 36);
+    let row_h = scaled_u32(22.0, scale, 18, 44);
+    let gap_h = scaled_u32(4.0, scale, 3, 8);
+    let close_w = scaled_u32(22.0, scale, 18, 44);
+    let step_24 = i32::try_from(hdr_h + gap_h).unwrap_or(24);
+    let step_18 = i32::try_from(lbl_h).unwrap_or(18);
+    let step_26 = i32::try_from(row_h + gap_h).unwrap_or(26);
     let mut cy = inner.y;
 
     emit_overlay_label(
         builder,
         &drawer_wid,
         "mv_formula.vars.title",
-        LayoutRectPx::new(inner.x, cy, inner.width.saturating_sub(26), 20),
+        LayoutRectPx::new(inner.x, cy, inner.width.saturating_sub(close_w + gap_h), hdr_h),
         mv_tr(&loc, "mv.vars.title", "Variables & Level Recoding"),
         &lbl_style,
         builder.palette.text,
@@ -2342,7 +2396,7 @@ pub fn build_variables_drawer(
             id: "mv_formula.vars.close",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.right() - 22, cy, 22, 20),
+            rect: LayoutRectPx::new(inner.right() - i32::try_from(close_w).unwrap_or(22), cy, close_w, hdr_h),
             label: "X",
             keyboard_path: "Escape",
             focus_scope: FocusScope::Workspace,
@@ -2354,7 +2408,7 @@ pub fn build_variables_drawer(
             action: custom_action("vars_close"),
         },
     );
-    cy += 24;
+    cy += step_24;
 
     let vd = &builder.app.grid.variables_dialog;
     let sel_col = vd.selected_column.filter(|&c| c < mv.variables.len()).unwrap_or(0);
@@ -2364,10 +2418,10 @@ pub fn build_variables_drawer(
 
     // Column pills (up to what fits, centered around sel_col if many)
     let col_count = mv.variables.len();
-    let max_pills = (inner.width / 54).clamp(1, col_count as u32) as usize;
+    let max_pills = (inner.width / scaled_u32(54.0, scale, 46, 108)).clamp(1, col_count as u32) as usize;
     let start_idx = if col_count <= max_pills { 0 } else { sel_col.saturating_sub(max_pills / 2).min(col_count - max_pills) };
     let shown = (col_count - start_idx).min(max_pills);
-    let pill_w = ((inner.width.saturating_sub((shown as u32).saturating_sub(1) * 3)) / (shown as u32).max(1)).max(36);
+    let pill_w = ((inner.width.saturating_sub((shown as u32).saturating_sub(1) * 3)) / (shown as u32).max(1)).max(scaled_u32(36.0, scale, 32, 72));
     for (offset, c_idx) in (start_idx..start_idx + shown).enumerate() {
         if let Some(col_var) = mv.variables.get(c_idx) {
             let px = inner.x + i32::try_from((offset as u32) * (pill_w + 3)).unwrap_or(0);
@@ -2377,7 +2431,7 @@ pub fn build_variables_drawer(
                     id: &format!("mv_formula.vars.col.{c_idx}"),
                     parent: Some(drawer_wid.clone()),
                     z_layer: ZLayer::FloatingOverlay,
-                    rect: LayoutRectPx::new(px, cy, pill_w, 20),
+                    rect: LayoutRectPx::new(px, cy, pill_w, hdr_h),
                     label: &col_var.title,
                     keyboard_path: &format!("mv_formula.vars.col.{c_idx}"),
                     focus_scope: FocusScope::Workspace,
@@ -2391,11 +2445,11 @@ pub fn build_variables_drawer(
             );
         }
     }
-    cy += 24;
+    cy += step_24;
 
     // Role + Lock strip inside drawer
     let is_calc = matches!(var.source, VariableSource::Calculated { .. });
-    let role_w = ((inner.width.saturating_sub(12)) / 4).max(38);
+    let role_w = ((inner.width.saturating_sub(12)) / 4).max(scaled_u32(38.0, scale, 32, 76));
     let role_items: [(&str, &str, bool); 3] = [
         ("continuous", "Cont", var.role == VariableRole::Continuous && !var.role_inferred),
         ("categorical", "Cat", var.role == VariableRole::Categorical && !var.role_inferred),
@@ -2415,7 +2469,7 @@ pub fn build_variables_drawer(
                 id: &format!("mv_formula.vars.role.{key}"),
                 parent: Some(drawer_wid.clone()),
                 z_layer: ZLayer::FloatingOverlay,
-                rect: LayoutRectPx::new(inner.x + i32::try_from((idx as u32) * (role_w + 4)).unwrap_or(0), cy, role_w, 20),
+                rect: LayoutRectPx::new(inner.x + i32::try_from((idx as u32) * (role_w + 4)).unwrap_or(0), cy, role_w, hdr_h),
                 label: lbl,
                 keyboard_path: &format!("mv_formula.vars.role.{key}"),
                 focus_scope: FocusScope::Workspace,
@@ -2435,7 +2489,12 @@ pub fn build_variables_drawer(
             id: "mv_formula.vars.lock_toggle",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from(3 * (role_w + 4)).unwrap_or(120), cy, inner.width.saturating_sub(3 * (role_w + 4)), 20),
+            rect: LayoutRectPx::new(
+                inner.x + i32::try_from(3 * (role_w + 4)).unwrap_or(120),
+                cy,
+                inner.width.saturating_sub(3 * (role_w + 4)),
+                hdr_h,
+            ),
             label: if locked { "Locked" } else { "Auto" },
             keyboard_path: "mv_formula.vars.lock_toggle",
             focus_scope: FocusScope::Workspace,
@@ -2453,19 +2512,19 @@ pub fn build_variables_drawer(
             action: custom_action(format!("toggle_role_lock:{sel_col}")),
         },
     );
-    cy += 24;
+    cy += step_24;
 
     // Level ordering buttons
     emit_overlay_label(
         builder,
         &drawer_wid,
         "mv_formula.vars.order_lbl",
-        LayoutRectPx::new(inner.x, cy, inner.width, 18),
+        LayoutRectPx::new(inner.x, cy, inner.width, lbl_h),
         mv_tr(&loc, "mv.vars.order_mode", "Level Ordering"),
         &lbl_style,
         builder.palette.text,
     );
-    cy += 18;
+    cy += step_18;
     let ord_spec = if vd.selected_column == Some(sel_col) { &vd.level_order } else { &var.level_order };
     let ord_modes: [(&str, &str, bool); 4] = [
         ("entry", mv_tr(&loc, "mv.vars.order_entry", "Entry"), matches!(ord_spec.order, LevelOrderKind::EntryOrder)),
@@ -2473,7 +2532,7 @@ pub fn build_variables_drawer(
         ("freq_desc", mv_tr(&loc, "mv.vars.order_freq_desc", "Freq-"), matches!(ord_spec.order, LevelOrderKind::FrequencyDescending)),
         ("freq_asc", mv_tr(&loc, "mv.vars.order_freq_asc", "Freq+"), matches!(ord_spec.order, LevelOrderKind::FrequencyAscending)),
     ];
-    let ord_w = ((inner.width.saturating_sub(9)) / 4).max(36);
+    let ord_w = ((inner.width.saturating_sub(9)) / 4).max(scaled_u32(36.0, scale, 32, 72));
     for (idx, (key, lbl, selected)) in ord_modes.into_iter().enumerate() {
         emit_button(
             builder,
@@ -2481,7 +2540,7 @@ pub fn build_variables_drawer(
                 id: &format!("mv_formula.vars.order.{key}"),
                 parent: Some(drawer_wid.clone()),
                 z_layer: ZLayer::FloatingOverlay,
-                rect: LayoutRectPx::new(inner.x + i32::try_from((idx as u32) * (ord_w + 3)).unwrap_or(0), cy, ord_w, 20),
+                rect: LayoutRectPx::new(inner.x + i32::try_from((idx as u32) * (ord_w + 3)).unwrap_or(0), cy, ord_w, hdr_h),
                 label: lbl,
                 keyboard_path: &format!("mv_formula.vars.order.{key}"),
                 focus_scope: FocusScope::Workspace,
@@ -2494,16 +2553,16 @@ pub fn build_variables_drawer(
             },
         );
     }
-    cy += 24;
+    cy += step_24;
 
-    let rev_w = inner.width.saturating_sub(86).max(80);
+    let rev_w = inner.width.saturating_sub(scaled_u32(86.0, scale, 72, 172)).max(scaled_u32(80.0, scale, 68, 160));
     emit_toggle(
         builder,
         ToggleWidgetSpec {
             id: "mv_formula.vars.order.reversed",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, rev_w, 20),
+            rect: LayoutRectPx::new(inner.x, cy, rev_w, hdr_h),
             label: mv_tr(&loc, "mv.vars.reverse_order", "Reverse Order"),
             keyboard_path: "mv_formula.vars.order.reversed",
             focus_scope: FocusScope::Workspace,
@@ -2521,7 +2580,7 @@ pub fn build_variables_drawer(
             id: "mv_formula.vars.order.apply",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from(rev_w + 4).unwrap_or(84), cy, inner.width.saturating_sub(rev_w + 4), 20),
+            rect: LayoutRectPx::new(inner.x + i32::try_from(rev_w + 4).unwrap_or(84), cy, inner.width.saturating_sub(rev_w + 4), hdr_h),
             label: mv_tr(&loc, "mv.vars.apply_order", "Apply Order"),
             keyboard_path: "mv_formula.vars.order.apply",
             focus_scope: FocusScope::Workspace,
@@ -2533,12 +2592,12 @@ pub fn build_variables_drawer(
             action: custom_action("vars_order_apply"),
         },
     );
-    cy += 24;
+    cy += step_24;
 
     // Distinct levels list + Up/Down/Ref controls + Recode block
-    let recode_block_h = 136u32;
+    let recode_block_h = scaled_u32(136.0, scale, 110, 272);
     let levels_h = u32::try_from((inner.bottom() - cy).max(0)).unwrap_or(0).saturating_sub(recode_block_h);
-    if levels_h >= 44 {
+    if levels_h >= scaled_u32(44.0, scale, 36, 88) {
         let levels = if vd.selected_column == Some(sel_col) {
             vd.preview_recode(ds).map_or_else(|| var.ordered_levels_with(ord_spec), |(_, lvls)| lvls)
         } else {
@@ -2546,7 +2605,7 @@ pub fn build_variables_drawer(
         };
         let levels_rect = LayoutRectPx::new(inner.x, cy, inner.width, levels_h);
         build_vars_levels_list(builder, &drawer_wid, ds, is_calc, &levels, levels_rect, &text_style, mv_tr(&loc, "mv.vars.set_ref", "Ref"));
-        cy += i32::try_from(levels_h + 4).unwrap_or(48);
+        cy += i32::try_from(levels_h + gap_h).unwrap_or(48);
     }
 
     // Bulk Recoding section
@@ -2562,7 +2621,7 @@ pub fn build_variables_drawer(
         builder,
         &drawer_wid,
         "mv_formula.vars.recode_from_lbl",
-        LayoutRectPx::new(inner.x, cy, half_w, 18),
+        LayoutRectPx::new(inner.x, cy, half_w, lbl_h),
         mv_tr(&loc, "mv.vars.recode_from", "From Level"),
         &text_style,
         builder.palette.muted,
@@ -2571,12 +2630,12 @@ pub fn build_variables_drawer(
         builder,
         &drawer_wid,
         "mv_formula.vars.recode_to_lbl",
-        LayoutRectPx::new(inner.x + i32::try_from(half_w + 4).unwrap_or(80), cy, inner.width.saturating_sub(half_w + 4), 18),
+        LayoutRectPx::new(inner.x + i32::try_from(half_w + 4).unwrap_or(80), cy, inner.width.saturating_sub(half_w + 4), lbl_h),
         mv_tr(&loc, "mv.vars.recode_to", "To Level"),
         &text_style,
         builder.palette.muted,
     );
-    cy += 18;
+    cy += step_18;
 
     emit_text_field(
         builder,
@@ -2584,7 +2643,7 @@ pub fn build_variables_drawer(
             id: WID_RECODE_FROM,
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, half_w, 22),
+            rect: LayoutRectPx::new(inner.x, cy, half_w, row_h),
             label: mv_tr(&loc, "mv.vars.recode_from", "From Level"),
             fallback_text: &state.recode_from,
             keyboard_path: WID_RECODE_FROM,
@@ -2600,7 +2659,7 @@ pub fn build_variables_drawer(
             id: WID_RECODE_TO,
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from(half_w + 4).unwrap_or(80), cy, inner.width.saturating_sub(half_w + 4), 22),
+            rect: LayoutRectPx::new(inner.x + i32::try_from(half_w + 4).unwrap_or(80), cy, inner.width.saturating_sub(half_w + 4), row_h),
             label: mv_tr(&loc, "mv.vars.recode_to", "To Level"),
             fallback_text: &state.recode_to,
             keyboard_path: WID_RECODE_TO,
@@ -2610,16 +2669,16 @@ pub fn build_variables_drawer(
             enablement: recode_en.clone(),
         },
     );
-    cy += 26;
+    cy += step_26;
 
-    let b3_w = ((inner.width.saturating_sub(8)) / 3).max(46);
+    let b3_w = ((inner.width.saturating_sub(8)) / 3).max(scaled_u32(46.0, scale, 40, 96));
     emit_button(
         builder,
         ButtonWidgetSpec {
             id: "mv_formula.vars.recode_stage",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x, cy, b3_w, 22),
+            rect: LayoutRectPx::new(inner.x, cy, b3_w, row_h),
             label: mv_tr(&loc, "mv.vars.stage_recode", "Stage"),
             keyboard_path: "mv_formula.vars.recode_stage",
             focus_scope: FocusScope::Workspace,
@@ -2637,7 +2696,7 @@ pub fn build_variables_drawer(
             id: "mv_formula.vars.recode_clear",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from(b3_w + 4).unwrap_or(50), cy, b3_w, 22),
+            rect: LayoutRectPx::new(inner.x + i32::try_from(b3_w + 4).unwrap_or(50), cy, b3_w, row_h),
             label: "Clear",
             keyboard_path: "mv_formula.vars.recode_clear",
             focus_scope: FocusScope::Workspace,
@@ -2655,7 +2714,7 @@ pub fn build_variables_drawer(
             id: "mv_formula.vars.recode_apply",
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::FloatingOverlay,
-            rect: LayoutRectPx::new(inner.x + i32::try_from((b3_w + 4) * 2).unwrap_or(100), cy, inner.width.saturating_sub((b3_w + 4) * 2), 22),
+            rect: LayoutRectPx::new(inner.x + i32::try_from((b3_w + 4) * 2).unwrap_or(100), cy, inner.width.saturating_sub((b3_w + 4) * 2), row_h),
             label: mv_tr(&loc, "mv.vars.apply_recode", "Apply Recode"),
             keyboard_path: "mv_formula.vars.recode_apply",
             focus_scope: FocusScope::Workspace,
@@ -2667,7 +2726,7 @@ pub fn build_variables_drawer(
             action: custom_action("vars_recode_apply"),
         },
     );
-    cy += 26;
+    cy += step_26;
 
     let preview_msg = if !vd.recode_mappings.is_empty() {
         let changed = vd.preview_recode(ds).map_or(0, |(cnt, _)| cnt);
@@ -2681,7 +2740,7 @@ pub fn build_variables_drawer(
         builder,
         &drawer_wid,
         "mv_formula.vars.recode_preview",
-        LayoutRectPx::new(inner.x, cy, inner.width, 20),
+        LayoutRectPx::new(inner.x, cy, inner.width, hdr_h),
         &preview_msg,
         &text_style,
         builder.palette.muted,
@@ -2699,7 +2758,9 @@ fn build_vars_levels_list(
     style: &UiTextStyle,
     ref_label: &str,
 ) {
-    let row_h = 22u32;
+    let scale = builder.scale();
+    let row_h = scaled_u32(22.0, scale, 18, 44);
+    let sb_reserve = scaled_u32(14.0, scale, 12, 28);
     let content_h = (levels.len().max(1) as u32) * row_h + 4;
     let scroll_id = String::from("scroll.mv_formula.vars_levels");
     let scroll_off = builder.scroll_offset(&scroll_id);
@@ -2718,7 +2779,7 @@ fn build_vars_levels_list(
     builder.paint_fill(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::FloatingOverlay, Some(&list_wid), rect, builder.palette.border, 1);
 
-    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(14), rect.height.saturating_sub(4));
+    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(4));
     builder.push_clip(clip);
     if levels.is_empty() {
         paint_text_fitted(
@@ -2726,7 +2787,7 @@ fn build_vars_levels_list(
             &list_wid,
             FittedTextSpec {
                 z_layer: ZLayer::FloatingOverlay,
-                rect: LayoutRectPx::new(clip.x, clip.y, clip.width, 18),
+                rect: LayoutRectPx::new(clip.x, clip.y, clip.width, row_h.saturating_sub(4)),
                 pad_x: 4,
                 text: "No categorical levels in column.",
                 style,
@@ -2737,10 +2798,10 @@ fn build_vars_levels_list(
     } else {
         let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
         let ord_en = if ds.frozen { ControlEnablement::disabled("Data sheet is frozen (read-only).") } else { ControlEnablement::enabled() };
-        let up_w = 22u32;
-        let dn_w = 22u32;
-        let ref_w = 34u32;
-        let lbl_w = clip.width.saturating_sub(up_w + dn_w + ref_w + 6).max(40);
+        let up_w = scaled_u32(22.0, scale, 18, 44);
+        let dn_w = scaled_u32(22.0, scale, 18, 44);
+        let ref_w = scaled_u32(34.0, scale, 28, 68);
+        let lbl_w = clip.width.saturating_sub(up_w + dn_w + ref_w + 6).max(scaled_u32(40.0, scale, 32, 80));
         for (idx, lvl) in levels.iter().enumerate() {
             let ry = clip.y + i32::try_from(idx as u32 * row_h).unwrap_or(0) - y_scroll;
             if ry + i32::try_from(row_h).unwrap_or(22) <= clip.y || ry >= clip.bottom() {
@@ -2899,6 +2960,10 @@ pub fn emit_mv_column_fx_button(
         return;
     }
     let fx_rect = LayoutRectPx::new(lbl_rect.right(), h_rect.y, fx_w, h_rect.height);
+    let vis_fx = fx_rect.intersect(builder.active_clip_rect());
+    if vis_fx.width < 4 || vis_fx.height < 4 {
+        return;
+    }
     let en = if ds.frozen { ControlEnablement::disabled("Data sheet is frozen (read-only).") } else { ControlEnablement::enabled() };
     emit_button(
         builder,

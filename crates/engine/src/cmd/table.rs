@@ -3474,6 +3474,7 @@ fn run_set_variable_role(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     if let Some(role) = requested_role {
         var.lock_role(role);
     } else {
+        var.role_inferred = true;
         var.refresh_inferred_role();
     }
     let final_role = var.role;

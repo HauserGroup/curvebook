@@ -15,7 +15,8 @@ pub fn hit_test_physical(tree: &LayoutTree, px: i32, py: i32) -> Option<&WidgetN
         if !node.drawn_in_frame {
             continue;
         }
-        if node.z_layer != ZLayer::ModalBackdrop && node.a11y.role == WidgetRole::Label && node.action == WidgetAction::NoOp {
+        if node.z_layer != ZLayer::ModalBackdrop && node.a11y.role == WidgetRole::Label && node.action == WidgetAction::NoOp && node.scroll.is_none()
+        {
             continue;
         }
         if node.bounds.visible_rect_px.contains_px(px, py) {

@@ -10,7 +10,7 @@ use curvebook_doc::{
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::i18n::{CatalogEntry, LOCALES, all_keys};
+use curvebook_ui_egui::i18n::{LOCALES, all_keys, w5_import_paste};
 use curvebook_ui_egui::layout::a11y::FocusScope;
 use curvebook_ui_egui::layout::{LayoutTree, WidgetId};
 use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, TextMeasurer, UiTextStyle};
@@ -20,9 +20,6 @@ use human_wf_common::{
     assert_input_to_paint_budget, assert_zero_shortcut_compliance, click_and_type, click_widget_center, default_viewport, new_human_driver,
     press_cmd_shortcut, press_key_combo, scroll_until_widget_visible, type_into_focused,
 };
-
-#[path = "../src/i18n/w5_import_paste.rs"]
-mod w5_import_paste;
 
 fn wid(id: &str) -> WidgetId {
     WidgetId::from(id)
@@ -509,7 +506,7 @@ fn r10_12_and_r10_4_responsive_hidpi_themes_and_i18n_shard_probe() -> Result<(),
         }
     }
 
-    // Verify w5_import_paste.rs i18n shard entries: 16 locales non-empty, measurable glyphs, zero key collisions.
+    // Verify w5_import_paste.rs i18n shard entries: registered in global catalog, 16 locales non-empty, measurable glyphs, zero key collisions.
     let existing: BTreeSet<&str> = all_keys().collect();
     let mut seen = BTreeSet::new();
     let measurer = DesktopTextMeasurer::new();
@@ -518,8 +515,8 @@ fn r10_12_and_r10_4_responsive_hidpi_themes_and_i18n_shard_probe() -> Result<(),
         if !seen.insert(entry.key) {
             return Err(format!("duplicate shard i18n key `{}`", entry.key));
         }
-        if existing.contains(entry.key) {
-            return Err(format!("shard i18n key `{}` collides with core i18n catalog", entry.key));
+        if !existing.contains(entry.key) {
+            return Err(format!("shard i18n key `{}` missing from global i18n catalog", entry.key));
         }
         if entry.translations.len() != LOCALES.len() {
             return Err(format!("key `{}` has {} translations, expected {}", entry.key, entry.translations.len(), LOCALES.len()));

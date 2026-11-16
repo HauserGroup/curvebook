@@ -143,7 +143,7 @@ fn open_analysis_and_edit_via_cmd_t(driver: &mut curvebook_ui_egui::human_driver
     click_widget_center(driver, &WidgetId::from("toolbar.analyze"))?;
     check(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }), "AnalyzeSheet dialog did not open")?;
     let entry_wid = WidgetId::from(format!("analyze.entry.{catalog_entry}"));
-    scroll_until_widget_visible(driver, &WidgetId::from("analyze.entries_list"), &entry_wid, -140.0, 10)?;
+    scroll_until_widget_visible(driver, &WidgetId::from("analyze.entries_list"), &entry_wid, 140.0, 10)?;
     click_widget_center(driver, &entry_wid)?;
     click_widget_center(driver, &WidgetId::from("modal.ok"))?;
     check(!driver.app().document().result_sheets.is_empty(), format!("ResultSheet not created for `{catalog_entry}`"))?;
@@ -159,7 +159,7 @@ fn open_analysis_and_edit_via_cmd_t(driver: &mut curvebook_ui_egui::human_driver
 fn click_in_content_scroll(driver: &mut curvebook_ui_egui::human_driver::HumanPathDriver, target_id: &str) -> Result<(), String> {
     let target = WidgetId::from(target_id);
     if driver.find_widget(target_id).is_none_or(|n| !n.drawn_in_frame) {
-        scroll_until_widget_visible(driver, &WidgetId::from("edit.content_panel"), &target, -120.0, 8)?;
+        scroll_until_widget_visible(driver, &WidgetId::from("edit.content_panel"), &target, 120.0, 8)?;
     }
     click_widget_center(driver, &target)?;
     Ok(())
@@ -195,7 +195,7 @@ fn w5f2_open_via_menu_toolbar_and_cmd_t_plus_tab_parity_one_way_anova() -> Resul
     click_widget_center(&mut driver, &WidgetId::from("toolbar.analyze"))?;
     let _ = assert_zero_shortcut_compliance(&mut driver)?;
     let anova_id = WidgetId::from("analyze.entry.stats.one_way_anova");
-    scroll_until_widget_visible(&mut driver, &WidgetId::from("analyze.entries_list"), &anova_id, -140.0, 8)?;
+    scroll_until_widget_visible(&mut driver, &WidgetId::from("analyze.entries_list"), &anova_id, 140.0, 8)?;
     click_widget_center(&mut driver, &anova_id)?;
     click_widget_center(&mut driver, &WidgetId::from("modal.ok"))?;
 

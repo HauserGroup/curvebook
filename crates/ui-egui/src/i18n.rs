@@ -57,9 +57,39 @@ pub(crate) use entry;
 pub mod cjk_rtl;
 pub mod eu;
 pub mod shard_extra;
+pub mod w5_analyze_picker;
+pub mod w5_dialogs_graph_misc;
+pub mod w5_fit_params;
+pub mod w5_grid_core;
+pub mod w5_import_paste;
+pub mod w5_inspector;
+pub mod w5_mv_formula;
+pub mod w5_nav_notes;
+pub mod w5_power_wizard;
+pub mod w5_results;
+pub mod w5_stat_params;
+pub mod w5_toolbar_menus;
+pub mod w5_welcome;
 
 /// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
-pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[shard_extra::ENTRIES, eu::ENTRIES, cjk_rtl::ENTRIES];
+pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
+    shard_extra::ENTRIES,
+    eu::ENTRIES,
+    cjk_rtl::ENTRIES,
+    w5_welcome::ENTRIES,
+    w5_nav_notes::ENTRIES,
+    w5_toolbar_menus::ENTRIES,
+    w5_grid_core::ENTRIES,
+    w5_mv_formula::ENTRIES,
+    w5_results::ENTRIES,
+    w5_analyze_picker::ENTRIES,
+    w5_stat_params::ENTRIES,
+    w5_fit_params::ENTRIES,
+    w5_power_wizard::ENTRIES,
+    w5_dialogs_graph_misc::ENTRIES,
+    w5_import_paste::ENTRIES,
+    w5_inspector::ENTRIES,
+];
 
 /// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
 /// archetypes, analysis/fit families, dialog actions, inspector controls, and themes.
@@ -6062,7 +6092,7 @@ mod tests {
         assert!(has_hebrew(locale_display_name("he")));
 
         for key in all_keys() {
-            if key == "table.xy" {
+            if matches!(key, "table.xy" | "w5.grid_core.n_col" | "w5.grid_core.x_col" | "w5.grid_core.row_number_header") {
                 continue;
             }
             assert!(has_cyrillic(try_tr("ru", key).unwrap()), "expected Cyrillic in ru:{key}");
@@ -6076,12 +6106,12 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 312);
-        assert_eq!(LOCALES.len() * catalog_len(), 4_992);
+        assert_eq!(catalog_len(), 653);
+        assert_eq!(LOCALES.len() * catalog_len(), 10_448);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
-        for entry in CATALOG {
+        for entry in super::all_entries() {
             assert!(seen_keys.insert(entry.key), "duplicate i18n catalog key: {}", entry.key);
         }
 
@@ -6430,7 +6460,7 @@ mod tests {
 
     #[test]
     fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 3);
+        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 16);
         let eu_slice = &[entry!("shard.test.key" => [
             en: "Test Key",
             de: "Testschlüssel",

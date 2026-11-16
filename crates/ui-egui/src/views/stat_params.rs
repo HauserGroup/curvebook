@@ -29,6 +29,7 @@ use crate::modal_predicates::{
 use crate::text_bridge::UiTextStyle;
 
 use super::a11y::labeled_meta;
+use super::analyze_picker::scaled_u32;
 use super::dialogs_graph_misc::emit_descriptor_controls_grid;
 use super::fit_params::{build_fit_params_extra_section, is_fit_analysis_draft};
 
@@ -1286,8 +1287,11 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
         ("diagnostics", label_i18n(locale, "stat_params.tab.diagnostics", "Diagnostics / Residuals")),
     ];
 
-    let tab_gap = 4u32;
-    let tab_w = (body_rect.width.saturating_sub(tab_gap * 4) / (tabs.len() as u32)).max(44);
+    let scale = builder.scale();
+    let tab_gap = scaled_u32(4.0, scale, 3, 10);
+    let tab_h = scaled_u32(24.0, scale, 20, 48);
+    let min_tab_w = scaled_u32(44.0, scale, 40, 110);
+    let tab_w = (body_rect.width.saturating_sub(tab_gap * 4) / (tabs.len() as u32)).max(min_tab_w);
     for (idx, (tid, lbl)) in tabs.iter().enumerate() {
         let tx = body_rect.x + i32::try_from(idx as u32 * (tab_w + tab_gap)).unwrap_or(0);
         let en = evaluate_edit_params_tab(edit, tid);
@@ -1297,7 +1301,7 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
                 id: &format!("edit.tab.{tid}"),
                 parent: Some(parent.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(tx, body_rect.y, tab_w, 24),
+                rect: LayoutRectPx::new(tx, body_rect.y, tab_w, tab_h),
                 label: lbl,
                 keyboard_path: &format!("edit.tab.{idx}"),
                 focus_scope: FocusScope::ModalDialog,
@@ -1315,9 +1319,11 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
     let src_sheet = resolve_source_sheet(doc, spec);
     let (rows, cols, max_sub) = source_table_shape(doc, Some(&spec.source_sheet_id));
 
-    let summary_y = body_rect.y + 28;
-    if body_rect.height >= 54 {
-        let banner_rect = LayoutRectPx::new(body_rect.x, summary_y, body_rect.width, 20);
+    let banner_gap = scaled_u32(4.0, scale, 3, 10);
+    let banner_h = scaled_u32(20.0, scale, 18, 42);
+    let summary_y = body_rect.y + i32::try_from(tab_h + banner_gap).unwrap_or(28);
+    if body_rect.height >= scaled_u32(54.0, scale, 48, 120) {
+        let banner_rect = LayoutRectPx::new(body_rect.x, summary_y, body_rect.width, banner_h);
         let banner_wid = builder.push_node(NodeSpec {
             id: WidgetId::from("edit.summary_banner"),
             parent: Some(parent.clone()),
@@ -1332,14 +1338,14 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
         let src_name = src_sheet.map_or("Source", |ds| ds.title.as_str());
         let alpha = (1.0 - spec.confidence_level.percent() / 100.0).max(0.001);
         let banner_text = format!("{}  |  {} ({rows}×{cols})  |  α = {alpha:.3}", spec.effective_title(), src_name);
-        let size_px = (11.5 * builder.scale()).clamp(8.5, 20.0);
+        let size_px = (11.5 * scale).clamp(8.5, 24.0);
         paint_text_fitted(
             builder,
             &banner_wid,
             FittedTextSpec {
                 z_layer: ZLayer::ModalDialog,
                 rect: banner_rect,
-                pad_x: 8,
+                pad_x: scaled_u32(8.0, scale, 6, 16),
                 text: &banner_text,
                 style: &UiTextStyle::ui_bold(size_px),
                 color: builder.palette.text,
@@ -1348,8 +1354,14 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
         );
     }
 
-    let content_rect = LayoutRectPx::new(body_rect.x, body_rect.y + 52, body_rect.width, body_rect.height.saturating_sub(52));
-    if content_rect.height < 28 || content_rect.width < 80 {
+    let content_off = tab_h + banner_h + scaled_u32(8.0, scale, 6, 20);
+    let content_rect = LayoutRectPx::new(
+        body_rect.x,
+        body_rect.y + i32::try_from(content_off).unwrap_or(52),
+        body_rect.width,
+        body_rect.height.saturating_sub(content_off),
+    );
+    if content_rect.height < scaled_u32(28.0, scale, 24, 60) || content_rect.width < scaled_u32(80.0, scale, 70, 160) {
         return;
     }
 
@@ -1446,11 +1458,11 @@ enum StatItem {
 }
 
 impl StatItem {
-    const fn height(&self) -> u32 {
+    fn height(&self, scale: f64) -> u32 {
         match self {
-            Self::Section(..) | Self::Info(..) => 20,
-            Self::Toggle { .. } | Self::ButtonRow { .. } => 24,
-            Self::Dropdown { .. } | Self::AlphaSpinner { .. } | Self::CustomSpinner { .. } => 26,
+            Self::Section(..) | Self::Info(..) => scaled_u32(20.0, scale, 18, 42),
+            Self::Toggle { .. } | Self::ButtonRow { .. } => scaled_u32(24.0, scale, 20, 48),
+            Self::Dropdown { .. } | Self::AlphaSpinner { .. } | Self::CustomSpinner { .. } => scaled_u32(26.0, scale, 22, 52),
         }
     }
 }
@@ -1507,19 +1519,22 @@ fn render_single_column_tab(
     items: Vec<StatItem>,
     extra_descriptors_for: Option<&AnalysisSpec>,
 ) {
-    let items_h: u32 = items.iter().map(|it| it.height() + 4).sum::<u32>() + 12;
+    let scale = builder.scale();
+    let row_gap = scaled_u32(4.0, scale, 3, 10);
+    let list_pad = scaled_u32(12.0, scale, 8, 24);
+    let items_h: u32 = items.iter().map(|it| it.height(scale) + row_gap).sum::<u32>() + list_pad;
     let scroll_id = String::from("scroll.modal.stat_params");
     let scroll_off = builder.scroll_offset(&scroll_id);
 
     if extra_descriptors_for.is_some()
-        && rect.height > items_h + 44
+        && rect.height > items_h + scaled_u32(44.0, scale, 36, 96)
         && let Some((_, _, _, _, controls, _)) = crate::inspect::dialog_widget_descriptors(builder.app)
     {
         let top_rect = LayoutRectPx::new(rect.x, rect.y, rect.width, items_h.min(rect.height / 2));
         emit_scrolled_item_list(builder, parent, top_rect, &scroll_id, scroll_off, &items, 30);
-        let desc_y = top_rect.bottom() + 4;
+        let desc_y = top_rect.bottom() + i32::try_from(row_gap).unwrap_or(4);
         let desc_h = (rect.bottom() - desc_y).max(0) as u32;
-        if desc_h >= 36 {
+        if desc_h >= scaled_u32(36.0, scale, 28, 72) {
             emit_descriptor_controls_grid(builder, parent, LayoutRectPx::new(rect.x, desc_y, rect.width, desc_h), &controls, 160);
         }
         return;
@@ -1537,7 +1552,11 @@ fn emit_scrolled_item_list(
     items: &[StatItem],
     base_tab_order: u32,
 ) {
-    let content_h: u32 = items.iter().map(|it| it.height() + 4).sum::<u32>() + 12;
+    let scale = builder.scale();
+    let row_gap = scaled_u32(4.0, scale, 3, 10);
+    let list_pad = scaled_u32(12.0, scale, 8, 24);
+    let sb_reserve = scaled_u32(18.0, scale, 16, 36);
+    let content_h: u32 = items.iter().map(|it| it.height(scale) + row_gap).sum::<u32>() + list_pad;
     let scroll_meta = ScrollMeta::new(scroll_id.to_owned(), rect, [rect.width, content_h], scroll_off, ScrollAxes::Vertical);
     let panel_wid = builder.push_node(NodeSpec {
         id: WidgetId::from("edit.content_panel"),
@@ -1552,7 +1571,7 @@ fn emit_scrolled_item_list(
     builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.border, 1);
 
-    let scroll_clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(18), rect.height.saturating_sub(8));
+    let scroll_clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(8));
     if scroll_clip.width < 32 || scroll_clip.height < 16 {
         return;
     }
@@ -1561,12 +1580,12 @@ fn emit_scrolled_item_list(
     let mut cur_y = scroll_clip.y + 2 - y_scroll;
     let mut tab_ord = base_tab_order;
     for item in items {
-        let h = item.height();
+        let h = item.height(scale);
         let row_rect = LayoutRectPx::new(scroll_clip.x + 2, cur_y, scroll_clip.width.saturating_sub(4), h);
         if row_rect.y >= scroll_clip.y - 2 && row_rect.bottom() <= scroll_clip.bottom() + 2 {
             emit_stat_item(builder, &panel_wid, row_rect, item, &mut tab_ord, Some(scroll_id));
         }
-        cur_y += i32::try_from(h + 4).unwrap_or(28);
+        cur_y += i32::try_from(h + row_gap).unwrap_or(28);
     }
     builder.pop_clip();
     emit_scrollbars_for_meta(builder, ZLayer::ModalDialog, &scroll_meta, Some(panel_wid));
@@ -1580,9 +1599,13 @@ fn render_design_two_column(
     spec: &AnalysisSpec,
     shape: &TableShapeInfo<'_>,
 ) {
-    let split = rect.width >= 480;
-    let left_h: u32 = left_items.iter().map(|it| it.height() + 4).sum::<u32>() + 12;
-    let schematic_block_h = 260u32;
+    let scale = builder.scale();
+    let row_gap = scaled_u32(4.0, scale, 3, 10);
+    let list_pad = scaled_u32(12.0, scale, 8, 24);
+    let sb_reserve = scaled_u32(18.0, scale, 16, 36);
+    let split = rect.width >= scaled_u32(480.0, scale, 420, 960);
+    let left_h: u32 = left_items.iter().map(|it| it.height(scale) + row_gap).sum::<u32>() + list_pad;
+    let schematic_block_h = scaled_u32(260.0, scale, 220, 520);
     let content_h = if split { left_h.max(schematic_block_h + 16) } else { left_h + schematic_block_h + 16 };
 
     let scroll_id = String::from("scroll.modal.stat_params");
@@ -1602,15 +1625,16 @@ fn render_design_two_column(
     builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.border, 1);
 
-    let scroll_clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(18), rect.height.saturating_sub(8));
+    let scroll_clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(8));
     if scroll_clip.width < 40 || scroll_clip.height < 20 {
         return;
     }
     builder.push_clip(scroll_clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
 
+    let min_left_w = scaled_u32(180.0, scale, 150, 360);
     let (left_w, right_x, right_w, right_y_start) = if split {
-        let lw = (scroll_clip.width.saturating_mul(55) / 100).max(180);
+        let lw = (scroll_clip.width.saturating_mul(55) / 100).max(min_left_w);
         let rx = scroll_clip.x + i32::try_from(lw + 8).unwrap_or(200);
         let rw = scroll_clip.width.saturating_sub(lw + 10);
         (lw, rx, rw, scroll_clip.y + 2 - y_scroll)
@@ -1626,16 +1650,17 @@ fn render_design_two_column(
     let mut cur_y = scroll_clip.y + 2 - y_scroll;
     let mut tab_ord = 30u32;
     for item in &left_items {
-        let h = item.height();
+        let h = item.height(scale);
         let row_rect = LayoutRectPx::new(scroll_clip.x + 2, cur_y, left_w.saturating_sub(4), h);
         if row_rect.y >= scroll_clip.y - 2 && row_rect.bottom() <= scroll_clip.bottom() + 2 {
             emit_stat_item(builder, &panel_wid, row_rect, item, &mut tab_ord, Some(&scroll_id));
         }
-        cur_y += i32::try_from(h + 4).unwrap_or(28);
+        cur_y += i32::try_from(h + row_gap).unwrap_or(28);
     }
 
-    if right_w >= 110 {
-        let hdr_rect = LayoutRectPx::new(right_x, right_y_start, right_w, 20);
+    if right_w >= scaled_u32(110.0, scale, 96, 220) {
+        let hdr_h = scaled_u32(20.0, scale, 18, 42);
+        let hdr_rect = LayoutRectPx::new(right_x, right_y_start, right_w, hdr_h);
         if hdr_rect.y >= scroll_clip.y - 2 && hdr_rect.bottom() <= scroll_clip.bottom() + 2 {
             let hdr_label = label_i18n(builder.tree.locale.as_str(), "stat_params.section.schematic", "Design Schematic");
             emit_stat_item(
@@ -1648,14 +1673,19 @@ fn render_design_two_column(
             );
         }
 
-        let schem_h = 196u32.min(scroll_clip.height.saturating_sub(56)).max(96);
-        let schem_rect = LayoutRectPx::new(right_x, right_y_start + 24, right_w, schem_h);
+        let schem_off = i32::try_from(scaled_u32(24.0, scale, 20, 48)).unwrap_or(24);
+        let schem_h = scaled_u32(196.0, scale, 160, 392)
+            .min(scroll_clip.height.saturating_sub(scaled_u32(56.0, scale, 44, 112)))
+            .max(scaled_u32(96.0, scale, 80, 192));
+        let schem_rect = LayoutRectPx::new(right_x, right_y_start + schem_off, right_w, schem_h);
         let vis_schem = schem_rect.intersect(scroll_clip);
         if vis_schem.width >= 40 && vis_schem.height >= 28 {
             emit_design_schematic_canvas(builder, &panel_wid, schem_rect, spec, shape, tab_ord + 100);
         }
 
-        let cap_rect = LayoutRectPx::new(right_x, schem_rect.bottom() + 6, right_w, 22);
+        let cap_gap = i32::try_from(scaled_u32(6.0, scale, 4, 12)).unwrap_or(6);
+        let cap_h = scaled_u32(22.0, scale, 18, 44);
+        let cap_rect = LayoutRectPx::new(right_x, schem_rect.bottom() + cap_gap, right_w, cap_h);
         if cap_rect.y >= scroll_clip.y - 2 && cap_rect.bottom() <= scroll_clip.bottom() + 2 {
             let cap_text = schematic_caption(builder.app, spec, shape);
             emit_stat_item(
@@ -1681,7 +1711,8 @@ fn emit_stat_item(
     tab_ord: &mut u32,
     scroll_id: Option<&str>,
 ) {
-    let size_px = (11.5 * builder.scale()).clamp(8.5, 21.0);
+    let scale = builder.scale();
+    let size_px = (11.5 * scale).clamp(8.5, 26.0);
     match item {
         StatItem::Section(id, title) => {
             let wid = builder.push_node(NodeSpec {
@@ -1738,7 +1769,7 @@ fn emit_stat_item(
                     rect,
                     pad_x: 6,
                     text,
-                    style: &UiTextStyle::ui_sans((11.0 * builder.scale()).clamp(8.5, 20.0)),
+                    style: &UiTextStyle::ui_sans((11.0 * scale).clamp(8.5, 24.0)),
                     color: if *accent { builder.palette.text } else { builder.palette.muted },
                     scroll_container: scroll_id,
                 },
@@ -1769,9 +1800,10 @@ fn emit_stat_item(
             if items.is_empty() {
                 return;
             }
-            let gap = 4u32;
+            let gap = scaled_u32(4.0, scale, 3, 10);
+            let min_bw = scaled_u32(36.0, scale, 32, 76);
             let count = items.len() as u32;
-            let bw = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(36);
+            let bw = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(min_bw);
             for (idx, seg) in items.iter().enumerate() {
                 let bx = rect.x + i32::try_from((idx as u32) * (bw + gap)).unwrap_or(0);
                 if bx + i32::try_from(bw).unwrap_or(36) > rect.right() + 2 {
@@ -1817,7 +1849,8 @@ fn emit_stat_item(
             );
         }
         StatItem::AlphaSpinner { value_text } => {
-            let lbl_w = (rect.width * 48 / 100).max(80);
+            let lbl_w = (rect.width * 48 / 100).max(scaled_u32(80.0, scale, 70, 180));
+            let spin_gap = scaled_u32(6.0, scale, 4, 12);
             let lbl_rect = LayoutRectPx::new(rect.x, rect.y, lbl_w, rect.height);
             let lbl = label_i18n(builder.tree.locale.as_str(), "stat_params.label.alpha", "Alpha (1 - Confidence)");
             let lbl_wid = builder.push_node(NodeSpec {
@@ -1842,7 +1875,12 @@ fn emit_stat_item(
                     scroll_container: scroll_id,
                 },
             );
-            let spin_rect = LayoutRectPx::new(lbl_rect.right() + 6, rect.y, rect.width.saturating_sub(lbl_w + 6).max(90), rect.height);
+            let spin_rect = LayoutRectPx::new(
+                lbl_rect.right() + i32::try_from(spin_gap).unwrap_or(6),
+                rect.y,
+                rect.width.saturating_sub(lbl_w + spin_gap).max(scaled_u32(90.0, scale, 80, 200)),
+                rect.height,
+            );
             *tab_ord += 2;
             emit_numeric_spinner(
                 builder,
@@ -1861,7 +1899,8 @@ fn emit_stat_item(
             );
         }
         StatItem::CustomSpinner { id_prefix, label, value_text, step, enablement } => {
-            let lbl_w = (rect.width * 50 / 100).max(80);
+            let lbl_w = (rect.width * 50 / 100).max(scaled_u32(80.0, scale, 70, 180));
+            let spin_gap = scaled_u32(6.0, scale, 4, 12);
             let lbl_rect = LayoutRectPx::new(rect.x, rect.y, lbl_w, rect.height);
             let lbl_wid = builder.push_node(NodeSpec {
                 id: WidgetId::from(format!("{id_prefix}.label")),
@@ -1885,7 +1924,12 @@ fn emit_stat_item(
                     scroll_container: scroll_id,
                 },
             );
-            let spin_rect = LayoutRectPx::new(lbl_rect.right() + 6, rect.y, rect.width.saturating_sub(lbl_w + 6).max(90), rect.height);
+            let spin_rect = LayoutRectPx::new(
+                lbl_rect.right() + i32::try_from(spin_gap).unwrap_or(6),
+                rect.y,
+                rect.width.saturating_sub(lbl_w + spin_gap).max(scaled_u32(90.0, scale, 80, 200)),
+                rect.height,
+            );
             emit_custom_spinner(builder, parent, spin_rect, id_prefix, label, value_text, *step, enablement, tab_ord, scroll_id);
         }
     }
@@ -1904,10 +1948,11 @@ fn emit_custom_spinner(
     tab_ord: &mut u32,
     scroll_id: Option<&str>,
 ) {
-    let btn_w = rect.height.clamp(18, 28);
+    let scale = builder.scale();
+    let btn_w = rect.height.clamp(scaled_u32(18.0, scale, 16, 36), scaled_u32(28.0, scale, 24, 56));
     let dec_rect = LayoutRectPx::new(rect.x, rect.y, btn_w, rect.height);
     let inc_rect = LayoutRectPx::new(rect.right() - i32::try_from(btn_w).unwrap_or(20), rect.y, btn_w, rect.height);
-    let val_w = rect.width.saturating_sub(btn_w.saturating_mul(2)).max(24);
+    let val_w = rect.width.saturating_sub(btn_w.saturating_mul(2)).max(scaled_u32(24.0, scale, 20, 56));
     let val_rect = LayoutRectPx::new(dec_rect.right(), rect.y, val_w, rect.height);
 
     *tab_ord += 1;
@@ -1945,7 +1990,7 @@ fn emit_custom_spinner(
     });
     builder.paint_fill(ZLayer::ModalDialog, Some(&wid), val_rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::ModalDialog, Some(&wid), val_rect, builder.palette.border, 1);
-    let size_px = (11.5 * builder.scale()).clamp(8.5, 21.0);
+    let size_px = (11.5 * scale).clamp(8.5, 26.0);
     paint_text_fitted(
         builder,
         &wid,

@@ -154,7 +154,8 @@ pub fn render_workspace_region_png(
     region: ScreenshotRegionTarget,
 ) -> Result<(Vec<u8>, u32, u32), RenderError> {
     let image = render_workspace_rgba(app, target)?;
-    let layout = compute_workspace_layout(app, image.width_px, image.height_px);
+    let scale = (f64::from(target.dpi.max(48)) / 96.0).clamp(0.75, 4.0);
+    let layout = crate::views::compute_frame_geometry_for_scale(app, image.width_px, image.height_px, scale);
     let crop = match region {
         ScreenshotRegionTarget::FullWindow => WorkspacePixelRect::new(0, 0, image.width_px, image.height_px),
         ScreenshotRegionTarget::Canvas => layout.canvas,

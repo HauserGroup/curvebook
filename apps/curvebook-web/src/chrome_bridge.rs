@@ -4,6 +4,7 @@
 
 use curvebook_engine::cmd;
 use curvebook_ui_egui::compositor::FramePalette;
+use curvebook_ui_egui::layout::a11y::project_accessible_tree_with_announcement;
 use curvebook_ui_egui::layout::{
     AccessibilityMeta, ClipId, FocusScope, LayoutRectPx as TreeLayoutRectPx, LayoutTextRun, LayoutTree, NodeBounds, PaintOp, PaintOpKind,
     WidgetAction, WidgetId, WidgetNode, WidgetRole, WidgetVisualState, ZLayer as TreeZLayer, cycle_focus_in_scope, find_scroll_container_at,
@@ -12,6 +13,7 @@ use curvebook_ui_egui::layout::{
 use curvebook_ui_egui::menus::normalize_shortcut_combo;
 use curvebook_ui_egui::serde_json::{Value, json};
 use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, TextMeasurer, UiTextStyle as TreeUiTextStyle, ellipsize_text};
+use curvebook_ui_egui::views::a11y::resolve_live_announcement;
 use curvebook_ui_egui::views::build_workspace_layout_tree;
 use curvebook_ui_egui::{
     ActiveDialog, ControlEnablement, KeyModifiers, PointerButton, UiApp, UiEventOutcome, UiInputEvent, ViewportMetrics, command_tooltip,
@@ -642,6 +644,7 @@ pub struct WebChromeSnapshot {
     pub menu_titles: Vec<String>,
     pub toolbar_ids: Vec<String>,
     pub status_summary: String,
+    pub a11y_tree: Option<Box<Value>>,
 }
 
 impl WebChromeSnapshot {
@@ -661,6 +664,7 @@ impl WebChromeSnapshot {
             "menu_titles": self.menu_titles,
             "toolbar_ids": self.toolbar_ids,
             "status_summary": self.status_summary,
+            "a11y_tree": self.a11y_tree,
         })
     }
 
@@ -686,6 +690,7 @@ impl WebChromeSnapshot {
             menu_titles: str_list("menu_titles"),
             toolbar_ids: str_list("toolbar_ids"),
             status_summary: obj.get("status_summary").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            a11y_tree: obj.get("a11y_tree").filter(|v| !v.is_null()).cloned().map(Box::new),
         }
     }
 }
@@ -796,19 +801,23 @@ impl WebChromeBridge {
             }
         }
         let status_summary = build_status_summary(app, self);
+        let focused_id = app.focus_widget_id.clone().or_else(|| self.focused_node_id.clone());
+        let (announcement, politeness) = resolve_live_announcement(app, &tree);
+        let a11y_update = project_accessible_tree_with_announcement(&tree, focused_id.as_deref(), announcement.as_deref(), politeness);
         let snapshot = WebChromeSnapshot {
             menu_bar_visible: !menu_titles.is_empty(),
             open_menu_key: self.open_menu_key.clone().or_else(|| app.interaction.open_menu.clone()),
             context_menu_open: self.context_menu.is_some(),
             active_dialog: format!("{:?}", app.canvas_dialogs.active_dialog),
             hovered_node_id: app.interaction.hovered_widget_id.clone().or_else(|| self.hovered_node_id.clone()),
-            focused_node_id: app.focus_widget_id.clone().or_else(|| self.focused_node_id.clone()),
+            focused_node_id: focused_id,
             ime_preedit: self.ime_preedit.clone(),
             drag_active: self.drag_active,
             node_count: nodes.len(),
             menu_titles,
             toolbar_ids,
             status_summary,
+            a11y_tree: Some(Box::new(a11y_update.to_aria_json_value())),
         };
         WebChromeLayout { tree, nodes, snapshot }
     }
@@ -846,8 +855,10 @@ impl WebChromeBridge {
             app.interaction.open_dropdown = None;
             self.open_menu_key = None;
             let target = classify_tree_context_target(app, &layout.tree, logical_pos);
-            app.interaction.context_menu_target = Some(target.to_owned());
-            self.context_menu = Some(WebContextMenuState { target: target.to_owned(), anchor_px: [px, py] });
+            app.interaction.context_menu_target = Some(target.clone());
+            app.view_shards.toolbar_menus.active_context_menu_id = Some(target.clone());
+            app.view_shards.toolbar_menus.context_menu_anchor_px = Some([px, py]);
+            self.context_menu = Some(WebContextMenuState { target: target.clone(), anchor_px: [px, py] });
             return WebChromeDispatch::HandledRedraw { action: format!("context_menu.open:{target}"), command_result: None };
         }
 
@@ -863,6 +874,8 @@ impl WebChromeBridge {
             }
             self.context_menu = None;
             app.interaction.context_menu_target = None;
+            app.view_shards.toolbar_menus.active_context_menu_id = None;
+            app.view_shards.toolbar_menus.context_menu_anchor_px = None;
             app.interaction.pressed_widget_id = None;
             return WebChromeDispatch::HandledRedraw { action: String::from("context_menu.dismissed"), command_result: None };
         }
@@ -955,6 +968,8 @@ impl WebChromeBridge {
             if node.z_layer == TreeZLayer::ContextMenu {
                 self.context_menu = None;
                 app.interaction.context_menu_target = None;
+                app.view_shards.toolbar_menus.active_context_menu_id = None;
+                app.view_shards.toolbar_menus.context_menu_anchor_px = None;
             }
             if !node.state.enablement.enabled {
                 let reason = node.state.enablement.disabled_reason.clone();
@@ -1026,7 +1041,9 @@ impl WebChromeBridge {
 
         #[allow(clippy::cast_possible_truncation)]
         let (px_i, py_i) = (px_f.round() as i32, py_f.round() as i32);
-        if let Some(scroll_meta) = find_scroll_container_at(&layout.tree, px_i, py_i) {
+        if let Some(scroll_meta) = find_scroll_container_at(&layout.tree, px_i, py_i)
+            && (scroll_meta.has_vertical_overflow() || scroll_meta.has_horizontal_overflow())
+        {
             let owner_layer = layout.tree.node(scroll_meta.container_id.as_str()).map_or_else(
                 || {
                     layout
@@ -1040,6 +1057,12 @@ impl WebChromeBridge {
             );
             if owner_layer >= min_layer {
                 app.interaction.scroll_offsets.apply_wheel(scroll_meta, delta_x, delta_y);
+                if owner_layer == TreeZLayer::Workspace
+                    && !(modifiers.ctrl || modifiers.meta)
+                    && scroll_meta.container_id.as_str().contains("grid.sheet.")
+                {
+                    return WebChromeDispatch::WheelScrollGrid { dx_px: delta_x, dy_px: delta_y };
+                }
                 return WebChromeDispatch::HandledRedraw {
                     action: format!("scroll.wheel:{}", scroll_meta.container_id.as_str()),
                     command_result: None,
@@ -1082,6 +1105,8 @@ impl WebChromeBridge {
                 app.interaction.open_menu = None;
                 app.interaction.open_dropdown = None;
                 app.interaction.context_menu_target = None;
+                app.view_shards.toolbar_menus.active_context_menu_id = None;
+                app.view_shards.toolbar_menus.context_menu_anchor_px = None;
                 return WebChromeDispatch::HandledRedraw { action: String::from("chrome.escape_popup"), command_result: None };
             }
             if app.canvas_dialogs.active_dialog != ActiveDialog::None && !app.inline_editor.active {
@@ -1385,23 +1410,33 @@ fn handle_grid_navigation_key(app: &mut UiApp, key: &str, shift: bool) -> Option
     }
 }
 
-fn classify_tree_context_target(app: &UiApp, tree: &LayoutTree, logical_pos: [f64; 2]) -> &'static str {
+fn classify_tree_context_target(app: &UiApp, tree: &LayoutTree, logical_pos: [f64; 2]) -> String {
     if let Some(hit) = hit_test_logical(tree, logical_pos[0], logical_pos[1]) {
         let id = hit.id.as_str();
+        if let Some(sid) = id.strip_prefix("nav.sheet.") {
+            return format!("navigator:{sid}");
+        }
         if id.starts_with("nav.") || id == "navigator.pane" || id == "navigator.family_toggle" {
-            return "navigator";
+            return String::from("navigator");
+        }
+        if id.starts_with("grid.header.") || id.starts_with("grid.col_hdr.") || id.starts_with("grid.x_hdr.") {
+            return String::from("column_header");
         }
         if id.starts_with("grid.") {
-            return "grid";
+            return String::from("grid");
         }
     }
     let layout = app.layout_map(tree.metrics);
     match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
-        curvebook_ui_egui::WorkspaceHitTarget::NavigatorEntry { .. } => "navigator",
-        curvebook_ui_egui::WorkspaceHitTarget::GridCell { .. } | curvebook_ui_egui::WorkspaceHitTarget::GridXCell { .. } => "grid",
+        curvebook_ui_egui::WorkspaceHitTarget::NavigatorEntry { sheet_id, .. } => format!("navigator:{}", sheet_id.as_str()),
+        curvebook_ui_egui::WorkspaceHitTarget::GridCell { .. } | curvebook_ui_egui::WorkspaceHitTarget::GridXCell { .. } => String::from("grid"),
         _ => {
             let doc = app.document();
-            if doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) { "grid" } else { "canvas" }
+            if doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) {
+                String::from("grid")
+            } else {
+                String::from("graph_object")
+            }
         }
     }
 }
@@ -2060,7 +2095,7 @@ fn enforce_qol7_remediation(tree: &mut LayoutTree, palette: &FramePalette) {
 }
 
 fn append_context_menu_to_tree(tree: &mut LayoutTree, app: &UiApp, bridge: &WebChromeBridge, palette: &FramePalette) {
-    if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None || tree.node("popup.context_menu").is_some() {
         return;
     }
     let ctx_state = if let Some(ctx) = &bridge.context_menu {

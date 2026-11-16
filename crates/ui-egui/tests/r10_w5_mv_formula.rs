@@ -268,6 +268,14 @@ fn r10_8_right_panel_new_calc_r2_s10_13_funcs_refs_validation_and_defs() -> Resu
     assert_eq!(current_mv(driver.app())?.variables.len(), 6);
 
     // Re-open column 4 via column `fx` button and introduce a 2-hop cycle (`= DoubleLog + 1`): live circularity check must disable Apply.
+    let active_sid = driver.app().document().active_sheet_id.as_ref().ok_or_else(|| String::from("missing active sheet"))?.as_str().to_owned();
+    let grid_scroll_wid = WidgetId::from(format!("grid.sheet.{active_sid}"));
+    for _ in 0..8 {
+        if driver.find_widget("formula_bar.open_col.4").is_some_and(|n| n.drawn_in_frame && n.bounds.visible_rect_px.width > 0) {
+            break;
+        }
+        let _ = human_wf_common::scroll_widget_wheel(&mut driver, &grid_scroll_wid, 180.0, 0.0)?;
+    }
     let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("formula_bar.open_col.4"))?;
     assert!(driver.find_widget("mv_formula.panel").is_some());
     assert_eq!(driver.app().grid.formula_bar.target_column, Some(4));

@@ -2,7 +2,7 @@
 //!
 //! Integrated into `crates/ui-egui/src/i18n.rs` (`EXTRA_SHARD_CATALOGS`) by `w5-integ`.
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 pub const ENTRIES: &[CatalogEntry] = &[
     entry!(

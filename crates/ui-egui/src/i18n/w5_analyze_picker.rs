@@ -2,7 +2,7 @@
 //!
 //! Registered into `crate::i18n::EXTRA_SHARD_CATALOGS` by `w5-integ`.
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 /// 16-locale UI string catalog entries for `views/analyze_picker.rs`.
 pub const ENTRIES: &[CatalogEntry] = &[

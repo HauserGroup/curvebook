@@ -1220,6 +1220,14 @@ impl std::fmt::Debug for PreferencesPersistHook {
     }
 }
 
+struct OpenFileDialogHook(Box<dyn FnMut(DesktopWindowId) -> Result<Option<PathBuf>, String>>);
+
+impl std::fmt::Debug for OpenFileDialogHook {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("OpenFileDialogHook(..)")
+    }
+}
+
 /// Injectable OS clipboard adapter used by [`DesktopHostRuntime`].
 pub trait OsClipboardAdapter: fmt::Debug + Send + Sync {
     /// Write plain UTF-8 / TSV text to the OS pasteboard.
@@ -1270,6 +1278,7 @@ pub struct DesktopHostRuntime {
     clipboard_bundle: Option<ClipboardBundle>,
     clipboard_adapter: Box<dyn OsClipboardAdapter>,
     preferences_persist_hook: Option<PreferencesPersistHook>,
+    open_file_dialog_hook: Option<OpenFileDialogHook>,
 }
 
 impl DesktopHostRuntime {
@@ -1285,6 +1294,7 @@ impl DesktopHostRuntime {
             clipboard_bundle: None,
             clipboard_adapter: Box::new(SystemOsClipboardAdapter),
             preferences_persist_hook: None,
+            open_file_dialog_hook: None,
         }
     }
 
@@ -1300,6 +1310,14 @@ impl DesktopHostRuntime {
         F: FnMut(&UiApp) + 'static,
     {
         self.preferences_persist_hook = Some(PreferencesPersistHook(Box::new(hook)));
+    }
+
+    /// Install a host file-picker callback invoked when the UI emits `"welcome.open_file_requested"`.
+    pub fn set_open_file_dialog_hook<F>(&mut self, hook: F)
+    where
+        F: FnMut(DesktopWindowId) -> Result<Option<PathBuf>, String> + 'static,
+    {
+        self.open_file_dialog_hook = Some(OpenFileDialogHook(Box::new(hook)));
     }
 
     fn persist_window_preferences(&mut self, window_id: DesktopWindowId) {
@@ -1775,11 +1793,21 @@ impl DesktopHostRuntime {
         if prefs_changed {
             self.persist_window_preferences(window_id);
         }
+        if ui_out.action == "welcome.open_file_requested"
+            && let Some(mut hook) = self.open_file_dialog_hook.take()
+        {
+            let picked = (hook.0)(window_id);
+            self.open_file_dialog_hook = Some(hook);
+            if let Some(path) = picked? {
+                return self.handle_file_dropped(window_id, path);
+            }
+        }
+        let command_id = ui_out.command_id.or_else(|| (ui_out.action == "welcome.open_file_requested").then(|| String::from("project.open")));
         Ok(DesktopEventOutcome {
             handled: ui_out.handled,
             action: ui_out.action,
             window_id: Some(window_id),
-            command_id: ui_out.command_id,
+            command_id,
             command_result: ui_out.command_result,
             ..Default::default()
         })
@@ -1872,10 +1900,49 @@ impl DesktopHostRuntime {
             });
         }
 
+        if !(modifiers.ctrl || modifiers.meta) {
+            let scroll_target = {
+                let win = self.window(window_id)?;
+                let vp = win.viewport;
+                let tree = win.app.layout_tree_cow(vp);
+                let [px, py] = vp.logical_to_physical_px([x_pt, y_pt]);
+                #[allow(clippy::cast_possible_truncation)]
+                let (ipx, ipy) = (px.round() as i32, py.round() as i32);
+                curvebook_ui_egui::layout::find_scroll_container_at(&tree, ipx, ipy)
+                    .filter(|meta| {
+                        (meta.has_vertical_overflow() || meta.has_horizontal_overflow()) && !meta.container_id.as_str().starts_with("grid.sheet.")
+                    })
+                    .map(|_| vp)
+            };
+            if let Some(vp) = scroll_target {
+                let win = self.window_mut(window_id)?;
+                let outcome = curvebook_ui_egui::interaction::dispatch_mouse_wheel(&mut win.app, vp, x_pt, y_pt, -delta_x, -delta_y, modifiers)?;
+                return Ok(DesktopEventOutcome {
+                    handled: outcome.handled,
+                    action: outcome.action,
+                    command_id: outcome.command_id,
+                    command_result: outcome.command_result,
+                    window_id: Some(window_id),
+                    ..Default::default()
+                });
+            }
+        }
+
         if let Some(sheet_id) = grid_sheet_id {
             let win = self.window_mut(window_id)?;
             if let Some(sheet) = win.app.document().data_sheet(&sheet_id).cloned() {
+                let vp = win.viewport;
+                let tree = win.app.build_and_cache_layout_tree(vp);
+                if let Some(scroll_meta) = tree
+                    .nodes
+                    .iter()
+                    .filter_map(|n| n.scroll.as_ref())
+                    .find(|s| s.container_id.as_str().contains(&format!("grid.sheet.{}", sheet_id.as_str())))
+                {
+                    win.app.interaction.scroll_offsets.apply_wheel(scroll_meta, -delta_x, -delta_y);
+                }
                 win.app.grid.tool.scroll_for_sheet(&sheet, -delta_x, -delta_y);
+                win.app.sync_views();
                 return Ok(DesktopEventOutcome {
                     handled: true,
                     action: String::from("grid.scroll"),

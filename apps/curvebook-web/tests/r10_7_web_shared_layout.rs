@@ -286,10 +286,21 @@ fn shared_tree_toolbar_enablement_tooltips_and_execution() -> TestRes {
     let (_, en_tips, _, _) = first_frame(&en_hover)?;
     check(en_tips.iter().any(|op| op.z_layer == ZLayer::Tooltip), "enabled toolbar hover emits Tooltip text op")?;
 
-    let svg_cmds = pointer_click_node(&mut session, "toolbar.export_svg")?;
+    let svg_dlg_cmds = pointer_click_node(&mut session, "toolbar.export_svg")?;
+    let (_, _, svg_dlg_chrome, _) = first_frame(&svg_dlg_cmds)?;
+    check(svg_dlg_chrome.active_dialog.contains("ExportFigure"), "toolbar.export_svg opens ExportFigure dialog")?;
+    let svg_cmds = pointer_click_node(&mut session, "modal.ok")?;
     check(
-        matches!(svg_cmds.as_slice(), [WebBridgeCommand::SaveOrDownloadFile { format: WebExportFormat::Svg, .. }]),
-        "toolbar.export_svg must trigger SVG export",
+        svg_cmds.iter().any(|c| matches!(c, WebBridgeCommand::SaveOrDownloadFile { format: WebExportFormat::Svg, .. })),
+        "confirming ExportFigure dialog triggers SVG SaveOrDownloadFile",
+    )?;
+
+    let _ = pointer_click_node(&mut session, "menu.file")?;
+    scroll_container_until_visible(&mut session, "popup.menu.file", "menu.export.svg")?;
+    let direct_svg_cmds = pointer_click_node(&mut session, "menu.export.svg")?;
+    check(
+        matches!(direct_svg_cmds.as_slice(), [WebBridgeCommand::SaveOrDownloadFile { format: WebExportFormat::Svg, .. }]),
+        "menu.export.svg triggers immediate SVG export",
     )?;
 
     let axes_cmds = pointer_click_node(&mut session, "toolbar.axes")?;
@@ -420,28 +431,28 @@ fn shared_tree_context_menus_navigator_workspace_slots_hidpi_and_rtl() -> TestRe
     check(ctx_layers.iter().any(|l| l.z_band == ZLayerBand::TopOverlay), "ContextMenu renders in TopOverlay RGBA band")?;
     check(ctx_text.iter().any(|op| op.z_layer == ZLayer::ContextMenu), "ContextMenu emits ContextMenu text ops")?;
     let ctx_tree = verify_shared_tree_clean(&session, "grid_context_menu")?;
-    check(ctx_tree.node("ctx.ui.analyze.open").is_some(), "grid context menu contains ctx.ui.analyze.open")?;
+    check(ctx_tree.node("ctx.grid.exclude_reason").is_some(), "grid context menu contains ctx.grid.exclude_reason")?;
 
     let tab_ctx = session
         .handle_event(WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("Tab"), modifiers: KeyModifiers::default() } })?;
     let focused_ctx = first_frame(&tab_ctx)?.2.focused_node_id.clone().unwrap_or_default();
     check(focused_ctx.starts_with("ctx."), format!("Tab in ContextMenu focuses ctx.* item, got {focused_ctx}"))?;
 
-    let ctx_click = pointer_click_node(&mut session, "ctx.ui.analyze.open")?;
-    check(first_frame(&ctx_click)?.2.active_dialog.contains("AnalyzeSheet"), "ctx.ui.analyze.open launches AnalyzeSheet")?;
+    let ctx_click = pointer_click_node(&mut session, "ctx.grid.exclude_reason")?;
+    check(first_frame(&ctx_click)?.2.active_dialog.contains("ExcludeWithReason"), "ctx.grid.exclude_reason launches ExcludeWithReason")?;
     let _ = session
         .handle_event(WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() } })?;
 
-    // 2. Right-click Navigator entry -> opens "navigator" context menu; click ctx.sheet.createData.
+    // 2. Right-click Navigator entry -> opens "navigator" context menu; click ctx.nav.duplicate.
     let nav_ctx = pointer_right_click_node(&mut session, &format!("nav.sheet.{d1}"))?;
     check(first_frame(&nav_ctx)?.2.context_menu_open, "right-click on navigator entry opens context menu")?;
     let nav_ctx_tree = verify_shared_tree_clean(&session, "navigator_context_menu")?;
-    check(nav_ctx_tree.node("ctx.sheet.createData").is_some(), "navigator context menu includes ctx.sheet.createData")?;
+    check(nav_ctx_tree.node("ctx.nav.duplicate").is_some(), "navigator context menu includes ctx.nav.duplicate")?;
     let ds_before = session.host.app().document().data_sheets.len();
-    let _ = pointer_click_node(&mut session, "ctx.sheet.createData")?;
-    check(session.host.app().document().data_sheets.len() == ds_before + 1, "ctx.sheet.createData creates DataSheet")?;
+    let _ = pointer_click_node(&mut session, "ctx.nav.duplicate")?;
+    check(session.host.app().document().data_sheets.len() == ds_before + 1, "ctx.nav.duplicate creates duplicate DataSheet")?;
 
-    // 3. Right-click GraphSheet canvas -> opens "canvas" context menu; outside click dismisses; ctx.export.svg exports.
+    // 3. Right-click GraphSheet canvas -> opens "graph_object" context menu; outside click dismisses; ctx.graph.export_svg -> ExportFigure SVG export.
     let _ = session.handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": g1 }) })?;
     let canvas_ctx = session.handle_event(WebBridgeEvent::UiInput {
         event: UiInputEvent::PointerDown { x: 600.0, y: 360.0, button: PointerButton::Secondary, modifiers: KeyModifiers::default() },
@@ -454,10 +465,12 @@ fn shared_tree_context_menus_navigator_workspace_slots_hidpi_and_rtl() -> TestRe
     let _ = session.handle_event(WebBridgeEvent::UiInput {
         event: UiInputEvent::PointerDown { x: 600.0, y: 360.0, button: PointerButton::Secondary, modifiers: KeyModifiers::default() },
     })?;
-    let ctx_export = pointer_click_node(&mut session, "ctx.export.svg")?;
+    let ctx_export_dlg = pointer_click_node(&mut session, "ctx.graph.export_svg")?;
+    check(first_frame(&ctx_export_dlg)?.2.active_dialog.contains("ExportFigure"), "ctx.graph.export_svg opens ExportFigure modal")?;
+    let ctx_export = pointer_click_node(&mut session, "modal.ok")?;
     check(
-        matches!(ctx_export.as_slice(), [WebBridgeCommand::SaveOrDownloadFile { format: WebExportFormat::Svg, .. }]),
-        "ctx.export.svg triggers SVG export",
+        ctx_export.iter().any(|c| matches!(c, WebBridgeCommand::SaveOrDownloadFile { format: WebExportFormat::Svg, .. })),
+        "confirming ExportFigure from context menu triggers SVG export",
     )?;
 
     // 4. Navigator collapse, family toggle, overflow wheel scroll, inspector mode, zoom controls, grid inline edit.
@@ -557,6 +570,38 @@ fn shared_tree_context_menus_navigator_workspace_slots_hidpi_and_rtl() -> TestRe
         text_ops.iter().any(|op| op.direction == WebTextDirection::Rtl && op.align == WebTextAlign::Left),
         "HiDPI RTL text ops keep Rtl + Left origin anchor",
     )?;
+
+    Ok(())
+}
+
+#[test]
+fn web_chrome_snapshot_projects_aria_tree_and_modal_hidden_parity() -> TestRes {
+    let mut session = WebBridgeSession::new();
+    let _ = session.handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 1.0 })?;
+    let init_cmds = session.handle_event(WebBridgeEvent::ExecuteCommand {
+        command_id: String::from("sheet.createData"),
+        params: json!({ "sheet_id": "aria-xy", "kind": "xy", "title": "ARIA XY", "data_sets": 1, "rows": 4 }),
+    })?;
+    let (_, _, chrome, _) = first_frame(&init_cmds)?;
+    let a11y_json = chrome.a11y_tree.as_ref().ok_or_else(|| TestMsg(String::from("WebChromeSnapshot.a11y_tree missing")))?;
+    let nodes = a11y_json["nodes"].as_array().ok_or_else(|| TestMsg(String::from("a11y_tree.nodes must be array")))?;
+    let analyze_ws =
+        nodes.iter().find(|n| n["widget_id"].as_str() == Some("toolbar.analyze")).ok_or_else(|| TestMsg(String::from("missing toolbar.analyze")))?;
+    check(analyze_ws["attributes"].get("aria-hidden").is_none(), "workspace toolbar.analyze must not be aria-hidden when modal is closed")?;
+
+    // Open AnalyzeSheet via toolbar click and verify modal aria-modal + background aria-hidden parity.
+    let modal_cmds = pointer_click_node(&mut session, "toolbar.analyze")?;
+    let (_, _, modal_chrome, _) = first_frame(&modal_cmds)?;
+    let modal_a11y = modal_chrome.a11y_tree.as_ref().ok_or_else(|| TestMsg(String::from("modal a11y_tree missing")))?;
+    let modal_nodes = modal_a11y["nodes"].as_array().ok_or_else(|| TestMsg(String::from("modal nodes must be array")))?;
+    let dlg_node =
+        modal_nodes.iter().find(|n| n["widget_id"].as_str() == Some("modal.dialog")).ok_or_else(|| TestMsg(String::from("missing modal.dialog")))?;
+    check(dlg_node["attributes"]["aria-modal"].as_str() == Some("true"), "open modal.dialog must project aria-modal=\"true\"")?;
+    let analyze_bg = modal_nodes
+        .iter()
+        .find(|n| n["widget_id"].as_str() == Some("toolbar.analyze"))
+        .ok_or_else(|| TestMsg(String::from("missing background toolbar.analyze")))?;
+    check(analyze_bg["attributes"]["aria-hidden"].as_str() == Some("true"), "background toolbar.analyze must project aria-hidden=\"true\"")?;
 
     Ok(())
 }

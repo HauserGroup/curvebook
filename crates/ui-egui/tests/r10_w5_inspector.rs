@@ -14,12 +14,7 @@
 #[path = "human_wf_common/mod.rs"]
 mod human_wf_common;
 
-mod i18n {
-    pub use curvebook_ui_egui::i18n::CatalogEntry;
-}
-
-#[path = "../src/i18n/w5_inspector.rs"]
-mod w5_i18n;
+use curvebook_ui_egui::i18n::w5_inspector as w5_i18n;
 
 use curvebook_chart::{ScenePrimitive, compile_graph, compile_layout};
 use curvebook_doc::{

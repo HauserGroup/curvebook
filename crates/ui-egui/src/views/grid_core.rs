@@ -906,12 +906,40 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
     let is_rtl = builder.tree.is_rtl;
     let mut cursor_y = rect.y;
 
+    let mut formula_dock_active = false;
+
     // Preserve `fx` formula bar seam without duplicate IDs in dual split mode.
+    let ui_scale = builder.scale();
     if slot_tag != "secondary" || builder.tree.node("formula_bar.input").is_none() {
         let show_formula = matches!(ds.archetype, TableArchetype::MultipleVariables(_)) || builder.app.grid.formula_bar.active;
         let consumed = mv_formula::build_formula_bar_row(builder, ds, rect, show_formula);
         cursor_y = cursor_y.saturating_add(i32::try_from(consumed).unwrap_or(0));
+        formula_dock_active =
+            consumed > 0 && rect.width >= scale_u32(240, ui_scale) && rect.height.saturating_sub(consumed + 4) >= scale_u32(120, ui_scale);
     }
+
+    let dock_reserve = if formula_dock_active {
+        let base = mv_formula::right_panel_desired_width_for_scale(builder.app, ds, rect, ui_scale);
+        if base > 0 {
+            let mv_state = &builder.app.view_shards.mv_formula;
+            let min_panel = scale_u32(224, ui_scale);
+            let panel_w = base.max(min_panel).min(rect.width.saturating_sub(12));
+            let drawer_min = scale_u32(212, ui_scale);
+            let drawer_max = scale_u32(276, ui_scale);
+            let extra_drawer = if mv_state.right_panel_open && mv_state.variables_drawer_open && rect.width >= panel_w + min_panel {
+                rect.width.saturating_sub(panel_w + 14).clamp(drawer_min, drawer_max) + 8
+            } else {
+                0
+            };
+            (panel_w + 8 + extra_drawer).min(rect.width.saturating_sub(scale_u32(120, ui_scale)))
+        } else {
+            0
+        }
+    } else {
+        0
+    };
+    let grid_w = rect.width.saturating_sub(dock_reserve);
+    let grid_x = if is_rtl { rect.x.saturating_add(i32::try_from(dock_reserve).unwrap_or(0)) } else { rect.x };
 
     // Linked-region provenance strip when the sheet carries active `LinkedDataRegion`s.
     let show_warning = state.link_edit_warning.as_ref().is_some_and(|w| w.sheet_id == ds.id.to_string());
@@ -919,7 +947,7 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
         let rem_h = u32::try_from((rect.bottom() - cursor_y).max(0)).unwrap_or(0);
         let strip_h = scale_u32(LINK_STRIP_H_PX, scale).min(rem_h);
         if strip_h >= 18 {
-            let strip_rect = LayoutRectPx::new(rect.x, cursor_y, rect.width, strip_h);
+            let strip_rect = LayoutRectPx::new(grid_x, cursor_y, grid_w, strip_h);
             emit_link_provenance_strip(builder, ds, state, strip_rect, slot_tag, locale, scale);
             cursor_y = cursor_y.saturating_add(i32::try_from(strip_h).unwrap_or(0));
         }
@@ -933,10 +961,10 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
     let resize_w = scale_u32(RESIZE_HANDLE_W_PX, scale);
 
     let avail_h = u32::try_from((rect.bottom() - cursor_y).max(0)).unwrap_or(0);
-    if avail_h < header_h + 8 {
+    if avail_h < header_h + 8 || grid_w < 32 {
         return;
     }
-    let grid_rect = LayoutRectPx::new(rect.x, cursor_y, rect.width, avail_h);
+    let grid_rect = LayoutRectPx::new(grid_x, cursor_y, grid_w, avail_h);
 
     let x_subcol_count = x_subcolumn_count(&ds.archetype);
     let total_rows = ds.archetype.row_count();
@@ -1044,10 +1072,13 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
     // Strictly preserve R2-S10-09: secondary split pane must not overwrite primary hit geometry.
     if slot_tag != "secondary" || builder.tree.grid_geometry.is_none() {
         let mut geom_cols = Vec::with_capacity(vis_data_cols.len());
+        let mut col_spans = Vec::with_capacity(vis_data_cols.len());
         let start_col = vis_data_cols.first().map_or(0, |v| v.flat_col);
         for d in &vis_data_cols {
             geom_cols.push((d.flat_col, GridCellCoord::new(0, d.col, d.subcol)));
+            col_spans.push((u32::try_from(d.x_px.max(0)).unwrap_or(0), d.width_px));
         }
+        let x_col_spans = vis_x_cols.iter().map(|x| (u32::try_from(x.x_px.max(0)).unwrap_or(0), x.width_px)).collect();
         let geom = GridHitGeometry {
             sheet_id: ds.id.clone(),
             sheet_rect: WorkspacePixelRect {
@@ -1067,6 +1098,8 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
             end_row,
             start_col,
             visible_cols: geom_cols,
+            x_col_spans,
+            col_spans,
             is_rtl,
         };
         builder.tree.grid_geometry = Some(geom);
@@ -1461,7 +1494,8 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
         if args.excluded {
             style = style.italic();
         }
-        let text_rect = compute_aligned_text_rect(builder, args.rect, &label, &style, args.is_numeric, 4);
+        let vis_rect = args.rect.intersect(builder.active_clip_rect());
+        let text_rect = compute_aligned_text_rect(builder, vis_rect, &label, &style, args.is_numeric, 4);
         let _ = paint_text_fitted(
             builder,
             &wid,
@@ -1660,6 +1694,7 @@ fn emit_column_headers_3tier(
     vis_spans: &[ColSpanSlice],
     slot_tag: &str,
 ) {
+    let is_rtl = builder.tree.is_rtl;
     let header_clip = LayoutRectPx::new(metrics.cols_x, metrics.header_y, metrics.cols_w, metrics.header_h);
     builder.push_clip(header_clip);
 
@@ -1687,7 +1722,8 @@ fn emit_column_headers_3tier(
         );
 
         let r2_w = xcol.width_px.saturating_sub(rw + 1);
-        let r2 = LayoutRectPx::new(xcol.x_px, y2, r2_w, metrics.tier2_h);
+        let content_x = if is_rtl { xcol.x_px.saturating_add(i32::try_from(rw + 1).unwrap_or(0)) } else { xcol.x_px };
+        let r2 = LayoutRectPx::new(content_x, y2, r2_w, metrics.tier2_h);
         if r2_w >= 8 && rect_visible_in_clip(r2, header_clip) {
             let x_title = x_column_header_title(ds, x_ident);
             let x_wid_str = scoped_id(slot_tag, &format!("grid.x_title.{}", xcol.subcol));
@@ -1711,7 +1747,7 @@ fn emit_column_headers_3tier(
             );
         }
 
-        let resize_x = xcol.x_px.saturating_add(i32::try_from(xcol.width_px.saturating_sub(rw)).unwrap_or(0));
+        let resize_x = if is_rtl { xcol.x_px } else { xcol.x_px.saturating_add(i32::try_from(xcol.width_px.saturating_sub(rw)).unwrap_or(0)) };
         let resize_rect = LayoutRectPx::new(resize_x, y2, rw, handle_h);
         if rect_visible_in_clip(resize_rect, header_clip) {
             emit_col_resize_handle(
@@ -1724,7 +1760,7 @@ fn emit_column_headers_3tier(
         }
 
         if r2_w >= 8 {
-            let r3 = LayoutRectPx::new(xcol.x_px, y3, r2_w, metrics.tier3_h);
+            let r3 = LayoutRectPx::new(content_x, y3, r2_w, metrics.tier3_h);
             let x_sub = x_subcolumn_label(ds, xcol.subcol);
             emit_header_band_cell(
                 builder,
@@ -1758,7 +1794,8 @@ fn emit_column_headers_3tier(
         let col_title = crate::dialogs_canvas::data_column_title(ds, span.col)
             .map(ToOwned::to_owned)
             .unwrap_or_else(|| curvebook_doc::default_column_label(span.col));
-        let r2_lbl = LayoutRectPx::new(span.x_px, y2, title_w, metrics.tier2_h);
+        let title_x = if is_rtl { span.x_px.saturating_add(i32::try_from(rw + 1).unwrap_or(0)) } else { span.x_px };
+        let r2_lbl = LayoutRectPx::new(title_x, y2, title_w, metrics.tier2_h);
         if title_w >= 8 && rect_visible_in_clip(r2_lbl, header_clip) {
             let wid_str = scoped_id(slot_tag, &format!("grid.col_title.{}", span.col));
             let _ = emit_button(
@@ -1796,8 +1833,9 @@ fn emit_column_headers_3tier(
     for dcol in vis_data_cols {
         let sub_label = subcolumn_header_label(ds, dcol.col, dcol.subcol, preset);
         let btn_w = dcol.width_px.saturating_sub(rw + 1);
+        let dcol_x = if is_rtl { dcol.x_px.saturating_add(i32::try_from(rw + 1).unwrap_or(0)) } else { dcol.x_px };
         if btn_w >= 8 {
-            let r3 = LayoutRectPx::new(dcol.x_px, y3, btn_w, metrics.tier3_h);
+            let r3 = LayoutRectPx::new(dcol_x, y3, btn_w, metrics.tier3_h);
             let sub_wid = scoped_id(slot_tag, &format!("grid.subcol_title.{}.{}", dcol.col, dcol.subcol));
             if matches!(ds.archetype, TableArchetype::Nested(_)) {
                 if rect_visible_in_clip(r3, header_clip) {
@@ -1830,7 +1868,7 @@ fn emit_column_headers_3tier(
 
         let sub_count = data_set_subcolumn_count(&ds.archetype, dcol.col).max(1);
         let is_group_end = dcol.subcol + 1 >= sub_count;
-        let rx = dcol.x_px.saturating_add(i32::try_from(dcol.width_px.saturating_sub(rw)).unwrap_or(0));
+        let rx = if is_rtl { dcol.x_px } else { dcol.x_px.saturating_add(i32::try_from(dcol.width_px.saturating_sub(rw)).unwrap_or(0)) };
         let (ry, rh) = if is_group_end { (y2, handle_h) } else { (y3, metrics.tier3_h) };
         let resize_rect = LayoutRectPx::new(rx, ry, rw, rh);
         if rect_visible_in_clip(resize_rect, header_clip) {

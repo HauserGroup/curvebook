@@ -271,16 +271,7 @@ fn verify_modal_scope_navigation(driver: &mut HumanPathDriver, metrics: Viewport
     assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
     let modal_tree = driver.layout_tree();
     assert_eq!(modal_tree.active_focus_scope, FocusScope::ModalDialog);
-    // Note: on pre-w5 `main`, `views/stat_params.rs` emits `edit.assume_gaussian` and
-    // `edit.paired_or_matched` both directly and via `emit_descriptor_controls_grid`;
-    // assert zero non-duplicate or unexpected accessibility gate violations here.
-    let modal_report = audit_layout_tree_accessibility(&modal_tree);
-    let unexpected: Vec<_> = modal_report
-        .violations
-        .iter()
-        .filter(|v| !(v.check == "unique_widget_id" && matches!(v.widget_id.as_str(), "edit.assume_gaussian" | "edit.paired_or_matched")))
-        .collect();
-    assert!(unexpected.is_empty(), "unexpected EditAnalysisParameters accessibility violations: {unexpected:?}");
+    validate_layout_tree_accessibility(&modal_tree)?;
 
     let modal_proj = project_accessible_tree(&modal_tree, driver.app().focus_widget_id.as_deref());
     let dlg_node = modal_proj.node("modal.dialog").ok_or("missing modal.dialog in projection")?;
@@ -290,7 +281,7 @@ fn verify_modal_scope_navigation(driver: &mut HumanPathDriver, metrics: Viewport
 
     driver.app_mut().focus_widget_id = None;
     let mut visited_modal = Vec::new();
-    for _ in 0..8 {
+    for _ in 0..20 {
         driver.press_key("Tab", KeyModifiers::default())?;
         let fid = driver.app().focus_widget_id.clone().ok_or("Tab in ModalDialog must focus modal control")?;
         let node = driver.layout_tree().node(&fid).cloned().ok_or_else(|| format!("missing `{fid}`"))?;

@@ -1,7 +1,6 @@
 //! Interactive 4-stage Power & Sample Size wizard modal body (`R10.3`).
 
-#[path = "../i18n/w5_power_wizard.rs"]
-mod w5_i18n;
+use crate::i18n::w5_power_wizard as w5_i18n;
 
 use curvebook_math::dist::norm_ppf;
 use curvebook_palette::Rgba8;

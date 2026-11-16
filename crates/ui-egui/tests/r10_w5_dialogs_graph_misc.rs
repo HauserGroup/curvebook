@@ -242,8 +242,8 @@ fn verify_duplicate_and_change_data_dialogs(driver: &mut HumanPathDriver) {
     click_widget_center(driver, &WidgetId::from("modal.ok")).expect("triggers DuplicateAnalysisPrompt");
     assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }));
     assert_modal_parity_clean(driver, "DuplicateAnalysisPrompt");
-    click_widget_center(driver, &WidgetId::from("dup.choice.modify_existing")).expect("select modify existing");
-    click_widget_center(driver, &WidgetId::from("dup.confirm")).expect("apply duplicate choice");
+    click_widget_center(driver, &WidgetId::from("analyze_picker.dup.modify_existing")).expect("select modify existing");
+    click_widget_center(driver, &WidgetId::from("modal.ok")).expect("apply duplicate choice");
     assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::None));
 
     // 2. R1-R10 modal_predicates.rs disabled tooltip check on EditAnalysisParameters + Data-Col

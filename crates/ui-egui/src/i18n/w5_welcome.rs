@@ -4,7 +4,7 @@
 //! pre-computed error formats, Column paired/unpaired design hints, `.cbtemplate` starter labels,
 //! and Clone Pipeline options across all 16 registered UI locales.
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 /// Localization entries registered into [`super::EXTRA_SHARD_CATALOGS`] by `w5-integ`.
 pub const ENTRIES: &[CatalogEntry] = &[

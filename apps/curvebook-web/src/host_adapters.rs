@@ -2710,11 +2710,32 @@ impl WebBridgeSession {
                 }
                 let was_print_dialog = matches!(self.host.app().canvas_dialogs.active_dialog, curvebook_ui_egui::ActiveDialog::Print { .. });
                 let print_scale = self.host.app().canvas_dialogs.print.job.scale_percent;
+                let export_info = if let ActiveDialog::ExportFigure { sheet_id } = &self.host.app().canvas_dialogs.active_dialog {
+                    let st = &self.host.app().canvas_dialogs.export_figure;
+                    let fmt = match st.format {
+                        curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Svg => WebExportFormat::Svg,
+                        curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Pdf => WebExportFormat::Pdf,
+                        curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Png => WebExportFormat::Png,
+                        curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Tiff(_) => WebExportFormat::Tiff,
+                    };
+                    Some((sheet_id.clone(), fmt, st.dpi.clamp(72, 1200)))
+                } else {
+                    None
+                };
                 match commit_active_modal_dialog(self.host.app_mut()) {
                     Ok(out) => {
                         let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(out.action), out.command_result)?];
                         if was_print_dialog && let Ok(print_cmd) = self.build_print_command(None, print_scale) {
                             cmds.push(print_cmd);
+                        }
+                        if let Some((export_sid, web_fmt, export_dpi)) = export_info {
+                            let art = self.fs.export_bytes(&mut self.host, web_fmt, Some(export_sid.as_str()), export_dpi)?;
+                            cmds.push(WebBridgeCommand::SaveOrDownloadFile {
+                                file_name: art.file_name,
+                                mime_type: art.mime_type,
+                                bytes: art.bytes,
+                                format: art.format,
+                            });
                         }
                         Ok(cmds)
                     }

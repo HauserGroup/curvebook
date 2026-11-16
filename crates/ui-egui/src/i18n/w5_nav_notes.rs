@@ -3,7 +3,7 @@
 //! Downstream integration registers `pub mod w5_nav_notes;` and appends `w5_nav_notes::ENTRIES`
 //! to `super::EXTRA_SHARD_CATALOGS` in `i18n.rs`.
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 /// Navigator, Family pane, and Floating Notes localization entries across all 16 supported locales.
 pub const ENTRIES: &[CatalogEntry] = &[

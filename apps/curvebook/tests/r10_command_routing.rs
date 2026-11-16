@@ -670,3 +670,129 @@ fn native_open_template_filters_and_foreign_import_file_path_clearing() -> Resul
     let _ = std::fs::remove_file(&csv_path);
     Ok(())
 }
+
+#[test]
+fn welcome_open_file_dialog_hook_invoked_and_escape_closes_welcome() -> Result<(), Box<dyn std::error::Error>> {
+    // Prepare a real saved `.curvebook` archive file so the native open hook returns a valid path.
+    let base_doc = build_populated_routing_app()?.document().clone();
+    let (mut save_rt, save_wid) = spawn_window_from_session(Session::from_document(base_doc))?;
+    let archive_path = unique_temp_file("welcome-open.curvebook");
+    save_rt.window_mut(save_wid)?.execute_and_journal("project.save", json!({ "path": archive_path.to_string_lossy(), "unpacked": false }))?;
+    drop(save_rt);
+
+    let (mut rt, wid) = spawn_window_from_session(Session::new())?;
+    let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+    let hook_calls = Arc::new(AtomicUsize::new(0));
+    let hook_calls_cb = Arc::clone(&hook_calls);
+    let archive_cb = archive_path.clone();
+    rt.set_open_file_dialog_hook(move |_win_id| {
+        hook_calls_cb.fetch_add(1, Ordering::SeqCst);
+        Ok(Some(archive_cb.clone()))
+    });
+
+    // Empty session shows Welcome Launcher; clicking `welcome.action.open_existing` emits `welcome.open_file_requested`
+    // and routes through `desktop_host::open_file_dialog_hook`, opening the project cleanly.
+    let tree = rt.window(wid)?.app().layout_tree_cow(metrics);
+    let open_node = tree.node("welcome.action.open_existing").ok_or("missing welcome.action.open_existing on empty session")?;
+    let [cx, cy] = open_node.bounds.visible_rect_px.center();
+    let [lx, ly] = metrics.physical_to_logical_px([f64::from(cx), f64::from(cy)]);
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: lx,
+        y_pt: ly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: true,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: lx,
+        y_pt: ly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: false,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
+    assert!(rt.window(wid)?.app().document().total_sheet_count() >= 1);
+
+    // Re-open Welcome overlay via `nav.welcome.open` and verify Escape dismisses it cleanly.
+    rt.window_mut(wid)?.app_mut().nav.welcome.open = true;
+    let esc_out = rt.dispatch(DesktopHostEvent::KeyboardInput {
+        window_id: wid,
+        key: String::from("Escape"),
+        pressed: true,
+        modifiers: KeyModifiers::default(),
+        text: None,
+    })?;
+    assert!(esc_out.handled);
+    assert!(!rt.window(wid)?.app().nav.welcome.open);
+
+    // Also verify `File > Open...` menu command invokes the same open file dialog hook.
+    let file_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
+    let file_btn = file_tree.node("menu.file").ok_or("missing menu.file button")?;
+    let [fx, fy] = file_btn.bounds.visible_rect_px.center();
+    let [flx, fly] = metrics.physical_to_logical_px([f64::from(fx), f64::from(fy)]);
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: flx,
+        y_pt: fly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: true,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: flx,
+        y_pt: fly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: false,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    for _ in 0..8 {
+        let probe_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
+        if probe_tree.node("menu.project.open").is_some_and(|n| n.drawn_in_frame) {
+            break;
+        }
+        let pop = probe_tree.node("popup.menu.file").ok_or("missing popup.menu.file container")?;
+        let [px, py] = pop.bounds.visible_rect_px.center();
+        let [plx, ply] = metrics.physical_to_logical_px([f64::from(px), f64::from(py)]);
+        let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
+            window_id: wid,
+            x_pt: plx,
+            y_pt: ply,
+            delta_x: 0.0,
+            delta_y: -80.0,
+            modifiers: KeyModifiers::default(),
+        })?;
+    }
+    let menu_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
+    let open_menu = menu_tree.node("menu.project.open").ok_or("missing menu.project.open item")?;
+    let [mx, my] = open_menu.bounds.visible_rect_px.center();
+    let [mlx, mly] = metrics.physical_to_logical_px([f64::from(mx), f64::from(my)]);
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: mlx,
+        y_pt: mly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: true,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+        window_id: wid,
+        x_pt: mlx,
+        y_pt: mly,
+        button: curvebook_ui_egui::interaction::PointerButton::Primary,
+        pressed: false,
+        click_count: 1,
+        modifiers: KeyModifiers::default(),
+    })?;
+    assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
+
+    let _ = std::fs::remove_file(&archive_path);
+    Ok(())
+}

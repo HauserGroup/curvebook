@@ -935,6 +935,9 @@ pub(crate) fn parse_selected_points_with_subcols(val: &Value, field: &str) -> Re
 }
 
 fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Value) -> Result<Option<Value>, ControlCallError> {
+    if command_id == "analysis.updateParams" && (params.is_null() || params.as_object().is_some_and(serde_json::Map::is_empty)) {
+        return map_ui_result(dispatch_ui_edit_params_open(app, params));
+    }
     if !matches!(
         command_id,
         "ui.navigator.toggle"
@@ -942,6 +945,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.family.toggle"
             | "ui.palette.open"
             | "ui.analyze.open"
+            | "ui.editParams.open"
             | "ui.powerWizard.open"
             | "ui.formatPoints.open"
             | "ui.changeGraphType.open"
@@ -1009,6 +1013,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             })))
         }
         "ui.analyze.open" => map_ui_result(dispatch_ui_analyze_open(app, params)),
+        "ui.editParams.open" => map_ui_result(dispatch_ui_edit_params_open(app, params)),
         "ui.powerWizard.open" => map_ui_result(dispatch_ui_power_wizard_open(app, params)),
         "ui.formatPoints.open" => map_ui_result(dispatch_ui_format_points_open(app, params)),
         "ui.changeGraphType.open" => map_ui_result(dispatch_ui_change_graph_type_open(app, params)),
@@ -2352,6 +2357,19 @@ fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Resu
         return Ok(active.clone());
     }
     doc.result_sheets.first().map(|r| r.id.clone()).ok_or_else(|| String::from("no result sheet available"))
+}
+
+fn dispatch_ui_edit_params_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let rs_id = resolve_target_result_sheet_id(&doc, params)?;
+    if !app.canvas_dialogs.open_edit_parameters(&doc, &rs_id) {
+        return Err(format!("result sheet `{}` not found", rs_id.as_str()));
+    }
+    Ok(json!({
+        "dialog": "EditAnalysisParameters",
+        "result_sheet_id": rs_id.as_str(),
+        "opened": true,
+    }))
 }
 
 fn dispatch_ui_result_apply_remediation(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {

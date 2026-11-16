@@ -4,8 +4,7 @@
 //! `Pairwise & CLD`, `Page Layout`) and interactive `Point & Drill-Back` controls,
 //! dispatching instant undoable engine commands and reflecting live state on undo/redo.
 
-#[path = "../i18n/w5_inspector.rs"]
-mod w5_i18n;
+use crate::i18n::w5_inspector as w5_i18n;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -165,6 +164,21 @@ fn push_btn_widget(builder: &mut LayoutBuilder<'_>, args: BtnArgs<'_>) {
     }
 }
 
+fn insp_u32(base: u32, scale: f64) -> u32 {
+    let s = if scale.is_finite() { scale.clamp(0.75, 4.0) } else { 1.0 };
+    (f64::from(base) * s).round().clamp(1.0, 4096.0) as u32
+}
+
+fn insp_i32(base: i32, scale: f64) -> i32 {
+    let s = if scale.is_finite() { scale.clamp(0.75, 4.0) } else { 1.0 };
+    (f64::from(base) * s).round().clamp(-4096.0, 4096.0) as i32
+}
+
+fn insp_pt(base: f64, scale: f64) -> f64 {
+    let s = if scale.is_finite() { scale.clamp(0.75, 4.0) } else { 1.0 };
+    (base * s).clamp(8.5, 28.0)
+}
+
 struct SectionDrawCtx<'a, 'b> {
     builder: &'a mut LayoutBuilder<'b>,
     scroll_clip: LayoutRectPx,
@@ -199,16 +213,33 @@ struct StepperArgs<'a> {
 }
 
 impl<'a, 'b> SectionDrawCtx<'a, 'b> {
+    fn scale(&self) -> f64 {
+        self.builder.scale()
+    }
+
+    fn su(&self, base: u32) -> u32 {
+        insp_u32(base, self.scale())
+    }
+
+    fn si(&self, base: i32) -> i32 {
+        insp_i32(base, self.scale())
+    }
+
+    fn sp(&self, base: f64) -> f64 {
+        insp_pt(base, self.scale())
+    }
+
     fn is_row_visible(&self, rect: LayoutRectPx) -> bool {
         rect.height > 0 && rect.width > 0 && rect.y >= self.scroll_clip.y && rect.bottom() <= self.scroll_clip.bottom()
     }
 
     fn paint_label(&mut self, text: &str, y: i32, h: u32, size_px: f64, color: Rgba8, bold: bool) {
-        let rect = LayoutRectPx::new(self.panel_x, y, self.panel_w, h);
+        let scaled_h = self.su(h);
+        let rect = LayoutRectPx::new(self.panel_x, y, self.panel_w, scaled_h);
         if !self.is_row_visible(rect) {
             return;
         }
-        let style = if bold { UiTextStyle::ui_bold(size_px) } else { UiTextStyle::ui_sans(size_px) };
+        let style = if bold { UiTextStyle::ui_bold(self.sp(size_px)) } else { UiTextStyle::ui_sans(self.sp(size_px)) };
         paint_text_fitted(
             self.builder,
             self.parent_wid,
@@ -240,16 +271,16 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
     }
 
     fn emit_checkbox_row(&mut self, id: &str, y: i32, label: &str, checked: bool, payload: &str, enabled: bool) -> i32 {
-        let rect = LayoutRectPx::new(self.panel_x, y, self.panel_w, 24);
+        let rect = LayoutRectPx::new(self.panel_x, y, self.panel_w, self.su(24));
         if self.is_row_visible(rect) {
             let box_text = if checked { format!("[x] {label}") } else { format!("[ ] {label}") };
             self.emit_action_btn(id, rect, (&box_text, label), payload, checked, enabled);
         }
-        y + 28
+        y + self.si(28)
     }
 
     fn emit_dropdown_trigger(&mut self, args: DropdownArgs<'_>) -> i32 {
-        let btn_rect = LayoutRectPx::new(self.panel_x, args.y + 16, self.panel_w, 24);
+        let btn_rect = LayoutRectPx::new(self.panel_x, args.y + self.si(16), self.panel_w, self.su(24));
         let is_open = args.open_popup == Some(args.popup_kind);
         if self.is_row_visible(btn_rect) {
             let muted = self.builder.app.theme.text_muted;
@@ -262,7 +293,7 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
                 self.pending_popup = Some(PendingPopup { kind: String::from(args.popup_kind), anchor: btn_rect, options: args.options });
             }
         }
-        args.y + 44
+        args.y + self.si(44)
     }
 
     fn emit_chip_row(&mut self, y: i32, title: Option<&str>, items: &[(&str, &str, &str, bool)], enabled: bool) -> i32 {
@@ -270,17 +301,19 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
         if let Some(t) = title {
             let muted = self.builder.app.theme.text_muted;
             self.paint_label(t, cy, 15, 10.5, muted, false);
-            cy += 16;
+            cy += self.si(16);
         }
         let n = items.len().max(1);
-        let max_per_row = if self.panel_w < 210 {
+        let max_per_row = if self.panel_w < self.su(210) {
             2
         } else if n > 4 {
             3
         } else {
             n
         };
-        let gap = 4u32;
+        let gap = self.su(4);
+        let btn_h = self.su(22);
+        let step_y = self.si(26);
         let rows = n.div_ceil(max_per_row);
         for row_idx in 0..rows {
             let start = row_idx * max_per_row;
@@ -288,24 +321,28 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
             let slice = &items[start..end];
             let cols = slice.len().max(1) as u32;
             let total_gaps = gap * (cols.saturating_sub(1));
-            let btn_w = (self.panel_w.saturating_sub(total_gaps) / cols).max(24);
+            let btn_w = (self.panel_w.saturating_sub(total_gaps) / cols).max(self.su(24));
             for (idx, (id, lbl, payload, active)) in slice.iter().enumerate() {
                 let bx = self.panel_x + ((idx as u32) * (btn_w + gap)) as i32;
-                let rect = LayoutRectPx::new(bx, cy, btn_w, 22);
+                let rect = LayoutRectPx::new(bx, cy, btn_w, btn_h);
                 self.emit_action_btn(id, rect, (lbl, lbl), payload, *active, enabled);
             }
-            cy += 26;
+            cy += step_y;
         }
         cy
     }
 
     fn emit_stepper_row(&mut self, args: StepperArgs<'_>) -> i32 {
         let fg = self.builder.app.theme.text_primary;
-        let lbl_w = self.panel_w.saturating_sub(62).max(60);
-        let lbl_rect = LayoutRectPx::new(self.panel_x, args.y + 3, lbl_w, 18);
+        let btn_w = self.su(27);
+        let btn_h = self.su(22);
+        let gap = self.su(4);
+        let stepper_w = btn_w.saturating_mul(2).saturating_add(gap);
+        let lbl_w = self.panel_w.saturating_sub(stepper_w.saturating_add(gap)).max(self.su(60));
+        let lbl_rect = LayoutRectPx::new(self.panel_x, args.y + self.si(3), lbl_w, self.su(18));
         if self.is_row_visible(lbl_rect) {
             let txt = format!("{}: {}", args.title, args.value_display);
-            let txt_style = UiTextStyle::ui_sans(10.5);
+            let txt_style = UiTextStyle::ui_sans(self.sp(10.5));
             paint_text_fitted(
                 self.builder,
                 self.parent_wid,
@@ -321,11 +358,11 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
             );
         }
         let right_x = self.panel_x + (self.panel_w as i32);
-        let dec_rect = LayoutRectPx::new(right_x - 58, args.y, 27, 22);
-        let inc_rect = LayoutRectPx::new(right_x - 27, args.y, 27, 22);
+        let dec_rect = LayoutRectPx::new(right_x - i32::try_from(stepper_w).unwrap_or(58), args.y, btn_w, btn_h);
+        let inc_rect = LayoutRectPx::new(right_x - i32::try_from(btn_w).unwrap_or(27), args.y, btn_w, btn_h);
         self.emit_action_btn(args.dec_id, dec_rect, ("-", &format!("Decrease {}", args.title)), args.dec_payload, false, args.enabled);
         self.emit_action_btn(args.inc_id, inc_rect, ("+", &format!("Increase {}", args.title)), args.inc_payload, false, args.enabled);
-        args.y + 26
+        args.y + self.si(26)
     }
 }
 
@@ -1778,13 +1815,13 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut InspectorViewState, pay
 }
 
 fn draw_section_header(ctx: &mut SectionDrawCtx<'_, '_>, id: &str, title: &str, sec: SectionKind, expanded: bool) {
-    let rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, 26);
+    let rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(26));
     if ctx.is_row_visible(rect) {
         let prefix = if expanded { "[-] " } else { "[+] " };
         let label = format!("{prefix}{title}");
         ctx.emit_action_btn(id, rect, (&label, title), &format!("section:{}", sec.id()), expanded, true);
     }
-    ctx.cursor_y += 30;
+    ctx.cursor_y += ctx.si(30);
 }
 
 fn draw_drill_back_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSheet>) {
@@ -1809,27 +1846,28 @@ fn draw_drill_back_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSh
         None => String::from("No plotted points on active sheet"),
     };
     ctx.paint_label(&summary, ctx.cursor_y, 16, 10.5, muted, false);
-    ctx.cursor_y += 18;
+    ctx.cursor_y += ctx.si(18);
 
-    let half = (ctx.panel_w.saturating_sub(4) / 2).max(40);
-    let prev_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, 22);
-    let next_rect = LayoutRectPx::new(ctx.panel_x + (half as i32) + 4, ctx.cursor_y, half, 22);
+    let gap = ctx.su(4);
+    let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
+    let prev_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, ctx.su(22));
+    let next_rect = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, ctx.su(22));
     let prev_lbl = insp_text(app, "inspector.drill_back.prev_pt", "Prev Pt");
     let next_lbl = insp_text(app, "inspector.drill_back.next_pt", "Next Pt");
     ctx.emit_action_btn("inspector.drill.prev", prev_rect, (prev_lbl, prev_lbl), "drill.point:prev", false, has_pts);
     ctx.emit_action_btn("inspector.drill.next", next_rect, (next_lbl, next_lbl), "drill.point:next", false, has_pts);
-    ctx.cursor_y += 26;
+    ctx.cursor_y += ctx.si(26);
 
     let on_data_sheet = app.document().active_sheet_id.as_ref().is_some_and(|id| app.document().data_sheet(id).is_some());
     let go_lbl = insp_text(app, "inspector.drill_back.go", "Go to Data Cell");
-    let go_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, 24);
+    let go_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(24));
     ctx.emit_action_btn("inspector.drill.go_to_cell", go_rect, (go_lbl, "Go to Data Cell / Drill Back"), "drill.go_to_cell", false, has_target);
-    ctx.cursor_y += 28;
+    ctx.cursor_y += ctx.si(28);
 
     if on_data_sheet && gs.is_some() {
-        let back_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, 22);
+        let back_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(22));
         ctx.emit_action_btn("inspector.drill.return_graph", back_rect, ("Return to Graph", "Return to Graph"), "drill.return_to_graph", false, true);
-        ctx.cursor_y += 26;
+        ctx.cursor_y += ctx.si(26);
     }
 }
 
@@ -1853,7 +1891,7 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
             muted,
             false,
         );
-        ctx.cursor_y += 22;
+        ctx.cursor_y += ctx.si(22);
         return;
     };
 
@@ -1864,12 +1902,14 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
 
     let ds_title = insp_text(app, "inspector.fg.dataset", "Dataset / Series");
     ctx.paint_label(ds_title, ctx.cursor_y, 15, 10.5, muted, false);
-    ctx.cursor_y += 16;
-    let nav_w = 24u32;
-    let mid_w = ctx.panel_w.saturating_sub(2 * nav_w + 8).max(50);
-    let prev_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, nav_w, 24);
-    let mid_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + 4, ctx.cursor_y, mid_w, 24);
-    let next_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + 4 + (mid_w as i32) + 4, ctx.cursor_y, nav_w, 24);
+    ctx.cursor_y += ctx.si(16);
+    let nav_w = ctx.su(24);
+    let nav_gap = ctx.su(4);
+    let row_h = ctx.su(24);
+    let mid_w = ctx.panel_w.saturating_sub(2 * nav_w + 2 * nav_gap).max(ctx.su(50));
+    let prev_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, nav_w, row_h);
+    let mid_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + (nav_gap as i32), ctx.cursor_y, mid_w, row_h);
+    let next_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + (nav_gap as i32) + (mid_w as i32) + (nav_gap as i32), ctx.cursor_y, nav_w, row_h);
     ctx.emit_action_btn("inspector.fg.dataset_prev", prev_r, ("<", "Previous series"), "fg.dataset:prev", false, has_series);
     ctx.emit_action_btn(
         "inspector.fg.dataset_btn",
@@ -1894,7 +1934,7 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
             .collect();
         ctx.pending_popup = Some(PendingPopup { kind: String::from("dataset"), anchor: mid_r, options });
     }
-    ctx.cursor_y += 28;
+    ctx.cursor_y += ctx.si(28);
 
     let pal_options = vec![
         PopupOptionSpec {
@@ -1941,15 +1981,17 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
     });
 
     ctx.paint_label(insp_text(app, "inspector.fg.color", "Series Colour"), ctx.cursor_y, 15, 10.5, muted, false);
-    ctx.cursor_y += 16;
+    ctx.cursor_y += ctx.si(16);
     let cur_hex = cur_series.map(|s| rgba_to_hex(series_primary_color(s))).unwrap_or_default();
-    let sw_gap = 4u32;
+    let sw_gap = ctx.su(4);
     let sw_cols = 4u32;
-    let sw_w = (ctx.panel_w.saturating_sub(sw_gap * (sw_cols - 1)) / sw_cols).max(24);
+    let sw_h = ctx.su(20);
+    let sw_step = ctx.su(24);
+    let sw_w = (ctx.panel_w.saturating_sub(sw_gap * (sw_cols - 1)) / sw_cols).max(ctx.su(24));
     for (idx, (cname, hex)) in COLOR_SWATCHES.iter().enumerate() {
         let r = (idx as u32) / sw_cols;
         let c = (idx as u32) % sw_cols;
-        let sw_rect = LayoutRectPx::new(ctx.panel_x + (c * (sw_w + sw_gap)) as i32, ctx.cursor_y + (r * 24) as i32, sw_w, 20);
+        let sw_rect = LayoutRectPx::new(ctx.panel_x + (c * (sw_w + sw_gap)) as i32, ctx.cursor_y + (r * sw_step) as i32, sw_w, sw_h);
         if ctx.is_row_visible(sw_rect) {
             let rgba = parse_hex_rgba8(hex).unwrap_or(Rgba8::BLACK);
             let active = cur_hex.eq_ignore_ascii_case(hex);
@@ -1961,7 +2003,7 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
             push_rect_op(ctx.builder, strip, rgba, ZLayer::Workspace, Some(ctx.scroll_clip_id), Some(wid(&id)));
         }
     }
-    ctx.cursor_y += 50;
+    ctx.cursor_y += ctx.si(50);
 
     let cur_shape = cur_series.map_or(MarkerShape::Circle, |s| series_marker_style(s).shape);
     let shape_options = all_marker_shapes()
@@ -2057,13 +2099,17 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
     let muted = app.theme.text_muted;
     let fallback_clean = if args.live_text.eq_ignore_ascii_case("auto") { "" } else { args.live_text };
     let display_val = app.interaction.text_field_buffers.get(args.input_id).map_or_else(|| String::from(fallback_clean), |st| st.text.clone());
-    let label_w = if ctx.panel_w < 210 { 52u32 } else { 68u32 };
-    let stepper_w = 56u32;
-    let field_w = ctx.panel_w.saturating_sub(label_w + stepper_w + 10).max(44);
+    let label_w = if ctx.panel_w < ctx.su(210) { ctx.su(52) } else { ctx.su(68) };
+    let btn_w = ctx.su(25);
+    let btn_gap = ctx.su(2);
+    let stepper_w = btn_w.saturating_mul(2).saturating_add(btn_gap).saturating_add(ctx.su(4));
+    let row_h = ctx.su(22);
+    let gap = ctx.su(4);
+    let field_w = ctx.panel_w.saturating_sub(label_w + stepper_w + gap * 2).max(ctx.su(44));
 
-    let lbl_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y + 3, label_w, 18);
+    let lbl_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y + ctx.si(3), label_w, ctx.su(18));
     if ctx.is_row_visible(lbl_rect) {
-        let lbl_style = UiTextStyle::ui_sans(10.5);
+        let lbl_style = UiTextStyle::ui_sans(ctx.sp(10.5));
         paint_text_fitted(
             ctx.builder,
             ctx.parent_wid,
@@ -2079,7 +2125,7 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
         );
     }
 
-    let field_rect = LayoutRectPx::new(ctx.panel_x + (label_w as i32) + 4, ctx.cursor_y, field_w, 22);
+    let field_rect = LayoutRectPx::new(ctx.panel_x + (label_w as i32) + (gap as i32), ctx.cursor_y, field_w, row_h);
     if ctx.is_row_visible(field_rect) {
         let kbd_path = format!("Inspector > {}", args.label);
         emit_text_field(
@@ -2100,13 +2146,13 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
         );
     }
 
-    let dec_x = ctx.panel_x + (label_w as i32) + 4 + (field_w as i32) + 4;
-    let dec_r = LayoutRectPx::new(dec_x, ctx.cursor_y, 25, 22);
-    let inc_r = LayoutRectPx::new(dec_x + 27, ctx.cursor_y, 25, 22);
+    let dec_x = ctx.panel_x + (label_w as i32) + (gap as i32) + (field_w as i32) + (gap as i32);
+    let dec_r = LayoutRectPx::new(dec_x, ctx.cursor_y, btn_w, row_h);
+    let inc_r = LayoutRectPx::new(dec_x + i32::try_from(btn_w + btn_gap).unwrap_or(27), ctx.cursor_y, btn_w, row_h);
     ctx.emit_action_btn(args.dec_id, dec_r, ("-", &format!("Decrease {}", args.label)), args.dec_payload, false, true);
     ctx.emit_action_btn(args.inc_id, inc_r, ("+", &format!("Increase {}", args.label)), args.inc_payload, false, true);
 
-    ctx.cursor_y += 26;
+    ctx.cursor_y += ctx.si(26);
 }
 
 fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSheet>) {
@@ -2129,7 +2175,7 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
             muted,
             false,
         );
-        ctx.cursor_y += 22;
+        ctx.cursor_y += ctx.si(22);
         return;
     };
 
@@ -2235,12 +2281,13 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
         },
     );
 
-    let half = (ctx.panel_w.saturating_sub(4) / 2).max(40);
-    let apply_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, 22);
-    let auto_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + 4, ctx.cursor_y, half, 22);
+    let gap = ctx.su(4);
+    let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
+    let apply_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, ctx.su(22));
+    let auto_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, ctx.su(22));
     ctx.emit_action_btn("inspector.axes.apply_range", apply_r, ("Apply Range", "Apply Range"), "axes.apply_range", false, true);
     ctx.emit_action_btn("inspector.axes.auto_range", auto_r, ("Auto Range", "Auto Range"), "axes.auto_range", false, true);
-    ctx.cursor_y += 26;
+    ctx.cursor_y += ctx.si(26);
 
     let seg_cnt = axis.segments.len().max(1);
     ctx.cursor_y = ctx.emit_chip_row(
@@ -2286,7 +2333,7 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
             muted,
             false,
         );
-        ctx.cursor_y += 22;
+        ctx.cursor_y += ctx.si(22);
         return;
     };
 
@@ -2423,15 +2470,17 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
             muted,
             false,
         );
-        ctx.cursor_y += 22;
+        ctx.cursor_y += ctx.si(22);
         return;
     };
 
     let maybe_rid = find_pairwise_result_sheet_id(app.document(), gs);
     let has_result = maybe_rid.is_some();
-    let half = (ctx.panel_w.saturating_sub(4) / 2).max(40);
-    let auto_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, 24);
-    let clr_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + 4, ctx.cursor_y, half, 24);
+    let gap = ctx.su(4);
+    let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
+    let row_h = ctx.su(24);
+    let auto_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, row_h);
+    let clr_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, row_h);
     let auto_lbl = insp_text(app, "inspector.pw.auto_brackets", "Auto Brackets");
     let clr_lbl = insp_text(app, "inspector.pw.clear_brackets", "Clear");
     ctx.emit_action_btn("inspector.pw.auto_brackets", auto_r, (auto_lbl, auto_lbl), "pw.auto_brackets", false, has_result);
@@ -2443,7 +2492,7 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
         false,
         !gs.spec.comparisons.is_empty(),
     );
-    ctx.cursor_y += 28;
+    ctx.cursor_y += ctx.si(28);
 
     let is_stars = matches!(app.canvas_dialogs.pairwise.label_mode, BracketLabelMode::SummaryStars);
     ctx.cursor_y = ctx.emit_chip_row(
@@ -2527,7 +2576,7 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
 
     let info_line = format!("Brackets: {} · CLD: {}", gs.spec.comparisons.len(), if cld_enabled { "On" } else { "Off" });
     ctx.paint_label(&info_line, ctx.cursor_y, 16, 10.5, muted, false);
-    ctx.cursor_y += 20;
+    ctx.cursor_y += ctx.si(20);
 }
 
 fn draw_page_layout_section(ctx: &mut SectionDrawCtx<'_, '_>, ls: Option<&LayoutSheet>) {
@@ -2543,7 +2592,7 @@ fn draw_page_layout_section(ctx: &mut SectionDrawCtx<'_, '_>, ls: Option<&Layout
 
     let Some(ls) = ls else {
         ctx.paint_label("No Page Layout sheet in project yet.", ctx.cursor_y, 18, 10.5, muted, false);
-        ctx.cursor_y += 22;
+        ctx.cursor_y += ctx.si(22);
         return;
     };
 
@@ -2629,20 +2678,22 @@ fn push_border_op(
 }
 
 fn draw_popup_overlay(builder: &mut LayoutBuilder<'_>, popup: &PendingPopup, parent_panel: &WidgetId, vp: LayoutRectPx) {
+    let scale = builder.scale();
     let surface = builder.app.theme.surface;
     let accent = builder.app.theme.accent;
-    let item_h = 24u32;
-    let pad = 4i32;
+    let item_h = insp_u32(24, scale);
+    let pad = insp_i32(4, scale);
+    let gap = insp_u32(2, scale);
     let visible_n = popup.options.len().min(7) as u32;
-    let pop_w = popup.anchor.width.max(150).min(vp.width.saturating_sub(16).max(120));
+    let pop_w = popup.anchor.width.max(insp_u32(150, scale)).min(vp.width.saturating_sub(insp_u32(16, scale)).max(insp_u32(120, scale)));
     let pop_h = visible_n * item_h + (2 * pad) as u32;
-    let min_x = vp.x + 4;
-    let max_x = (vp.right() - (pop_w as i32) - 4).max(min_x);
+    let min_x = vp.x + pad;
+    let max_x = (vp.right() - (pop_w as i32) - pad).max(min_x);
     let pop_x = popup.anchor.x.clamp(min_x, max_x);
-    let pop_y = if popup.anchor.bottom() + 2 + (pop_h as i32) <= vp.bottom() - 4 {
-        popup.anchor.bottom() + 2
+    let pop_y = if popup.anchor.bottom() + (gap as i32) + (pop_h as i32) <= vp.bottom() - pad {
+        popup.anchor.bottom() + (gap as i32)
     } else {
-        (popup.anchor.y - (pop_h as i32) - 2).max(vp.y + 4)
+        (popup.anchor.y - (pop_h as i32) - (gap as i32)).max(vp.y + pad)
     };
     let pop_rect = LayoutRectPx::new(pop_x, pop_y, pop_w, pop_h);
     let pop_id_str = format!("inspector.popup.{}", popup.kind);
@@ -2665,7 +2716,12 @@ fn draw_popup_overlay(builder: &mut LayoutBuilder<'_>, popup: &PendingPopup, par
     });
 
     for (idx, opt) in popup.options.iter().take(7).enumerate() {
-        let ir = LayoutRectPx::new(pop_x + pad, pop_y + pad + (idx as i32) * (item_h as i32), pop_w.saturating_sub(8), item_h - 2);
+        let ir = LayoutRectPx::new(
+            pop_x + pad,
+            pop_y + pad + (idx as i32) * (item_h as i32),
+            pop_w.saturating_sub((pad as u32) * 2),
+            item_h.saturating_sub(gap),
+        );
         let item_id = format!("inspector.popup.{}.item_{idx}", popup.kind);
         push_btn_widget(
             builder,
@@ -2687,6 +2743,7 @@ fn draw_popup_overlay(builder: &mut LayoutBuilder<'_>, popup: &PendingPopup, par
 
 /// Build the docked right-hand inspector panel inside `rect`.
 pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
+    let scale = builder.scale();
     let bg = builder.app.theme.bg;
     let border = builder.app.theme.border;
     let fg = builder.app.theme.text_primary;
@@ -2706,13 +2763,13 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
     });
 
     let app = builder.app;
-    let pad = 8i32;
-    let inner_w = rect.width.saturating_sub(16).max(40);
-    let header_rect = LayoutRectPx::new(rect.x + pad, rect.y + pad, inner_w, 20);
+    let pad = insp_i32(8, scale);
+    let inner_w = rect.width.saturating_sub((pad as u32) * 2).max(insp_u32(40, scale));
+    let header_rect = LayoutRectPx::new(rect.x + pad, rect.y + pad, inner_w, insp_u32(20, scale));
     let title_str = insp_text(app, "inspector.live_subtitle", "Live engine controls (undoable)");
     let active_insp = app.canvas_dialogs.active_inspector;
     let header_title = if active_insp != ActiveInspector::None { String::from(active_insp.label()) } else { String::from("Inspector") };
-    let hdr_style = UiTextStyle::ui_bold(12.5);
+    let hdr_style = UiTextStyle::ui_bold(insp_pt(12.5, scale));
     paint_text_fitted(
         builder,
         &inspector_wid,
@@ -2727,8 +2784,8 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         },
     );
 
-    let sub_rect = LayoutRectPx::new(rect.x + pad, header_rect.bottom() + 2, inner_w, 15);
-    let sub_style = UiTextStyle::ui_sans(10.0);
+    let sub_rect = LayoutRectPx::new(rect.x + pad, header_rect.bottom() + insp_i32(2, scale), inner_w, insp_u32(15, scale));
+    let sub_style = UiTextStyle::ui_sans(insp_pt(10.0, scale));
     paint_text_fitted(
         builder,
         &inspector_wid,
@@ -2752,12 +2809,13 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         ("inspector.tab.layout", insp_text(app, "inspector.tab.layout", "Layout"), "tab:layout", active_sec == SectionKind::PageLayout),
     ];
 
-    let tab_top = sub_rect.bottom() + 6;
-    let tab_gap = 3u32;
-    let two_rows = rect.width < 236;
-    let tab_h = 24u32;
+    let tab_top = sub_rect.bottom() + insp_i32(6, scale);
+    let tab_gap = insp_u32(3, scale);
+    let two_rows = rect.width < insp_u32(236, scale);
+    let tab_h = insp_u32(24, scale);
+    let min_tab_w = insp_u32(30, scale);
     let tabs_bottom = if two_rows {
-        let w1 = (inner_w.saturating_sub(2 * tab_gap) / 3).max(32);
+        let w1 = (inner_w.saturating_sub(2 * tab_gap) / 3).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs[0..3].iter().enumerate() {
             let tr_rect = LayoutRectPx::new(rect.x + pad + (i as u32 * (w1 + tab_gap)) as i32, tab_top, w1, tab_h);
             push_btn_widget(
@@ -2776,9 +2834,10 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
                 },
             );
         }
-        let w2 = (inner_w.saturating_sub(tab_gap) / 2).max(32);
+        let w2 = (inner_w.saturating_sub(tab_gap) / 2).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs[3..5].iter().enumerate() {
-            let tr_rect = LayoutRectPx::new(rect.x + pad + (i as u32 * (w2 + tab_gap)) as i32, tab_top + (tab_h as i32) + 3, w2, tab_h);
+            let tr_rect =
+                LayoutRectPx::new(rect.x + pad + (i as u32 * (w2 + tab_gap)) as i32, tab_top + (tab_h as i32) + (tab_gap as i32), w2, tab_h);
             push_btn_widget(
                 builder,
                 BtnArgs {
@@ -2795,9 +2854,9 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
                 },
             );
         }
-        tab_top + (tab_h as i32) * 2 + 3
+        tab_top + (tab_h as i32) * 2 + (tab_gap as i32)
     } else {
-        let tw = (inner_w.saturating_sub(4 * tab_gap) / 5).max(30);
+        let tw = (inner_w.saturating_sub(4 * tab_gap) / 5).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs.iter().enumerate() {
             let tr_rect = LayoutRectPx::new(rect.x + pad + (i as u32 * (tw + tab_gap)) as i32, tab_top, tw, tab_h);
             push_btn_widget(
@@ -2819,10 +2878,10 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         tab_top + (tab_h as i32)
     };
 
-    let sb_w = 10u32;
-    let scroll_top = tabs_bottom + 6;
-    let scroll_h = rect.bottom().saturating_sub(scroll_top + pad).max(40) as u32;
-    let scroll_w = rect.width.saturating_sub(16 + sb_w + 2).max(80);
+    let sb_w = insp_u32(10, scale).max(crate::layout::scroll::scrollbar_thickness_px(scale));
+    let scroll_top = tabs_bottom + insp_i32(6, scale);
+    let scroll_h = rect.bottom().saturating_sub(scroll_top + pad).max(insp_i32(40, scale)) as u32;
+    let scroll_w = rect.width.saturating_sub((pad as u32) * 2 + sb_w + 2).max(insp_u32(80, scale));
     let scroll_clip = LayoutRectPx::new(rect.x + pad, scroll_top, scroll_w, scroll_h);
     let scroll_off = builder.app.interaction.scroll_offsets.offsets.get(SCROLL_ID).copied().unwrap_or([0.0, 0.0]);
     let scroll_y = scroll_off[1].max(0.0) as i32;
@@ -2838,7 +2897,7 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         rect_px: scroll_clip,
         parent: Some(inspector_wid.clone()),
         z_layer: ZLayer::Workspace,
-        action: WidgetAction::FocusWidget(String::from(SCROLL_ID)),
+        action: WidgetAction::NoOp,
         a11y: AccessibilityMeta::new(WidgetRole::Label, "Inspector scroll", FocusScope::Workspace),
         state: WidgetVisualState::default(),
     });

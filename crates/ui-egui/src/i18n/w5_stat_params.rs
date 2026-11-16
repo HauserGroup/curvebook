@@ -3,7 +3,7 @@
 //! Ready for `w5-integ` registration in `crates/ui-egui/src/i18n.rs` (`pub mod w5_stat_params;` +
 //! `w5_stat_params::ENTRIES` in `EXTRA_SHARD_CATALOGS`).
 
-use super::{CatalogEntry, entry};
+use super::CatalogEntry;
 
 /// 16-locale entries for statistical, ANOVA/RM/REML, survival, contingency, ROC, and GLM parameter tabs.
 pub const ENTRIES: &[CatalogEntry] = &[

@@ -38,7 +38,7 @@ use crate::text_bridge::{DesktopTextMeasurer, UiTextStyle};
 use crate::workspace_nav::ActiveWorkspacePane;
 
 use a11y::labeled_meta;
-use analyze_picker::{AnalyzePickerViewState, build_analyze_modal_body};
+use analyze_picker::{AnalyzePickerViewState, build_analyze_modal_body, build_duplicate_analysis_modal_body};
 use dialogs_graph_misc::{
     DialogsGraphMiscViewState, build_canvas_or_layout_view, build_command_palette_body, build_descriptor_modal_body, draw_rulers_if_visible,
     modal_title,
@@ -48,12 +48,15 @@ use grid_core::{GridCoreViewState, build_data_grid_view};
 use import_paste::{ImportPasteViewState, build_import_or_convert_modal_body};
 use inspector::{InspectorViewState, build_inspector_slot};
 use mv_formula::MvFormulaViewState;
-use nav_notes::{NavNotesViewState, build_info_sheet_view, build_navigator_slot};
+use nav_notes::{NavNotesViewState, build_floating_notes_overlay, build_info_sheet_view, build_navigator_slot};
 use power_wizard::{PowerWizardViewState, build_power_wizard_modal_body};
 use results::{ResultsViewState, build_result_viewer_view};
 use stat_params::{StatParamsViewState, build_edit_params_modal_body};
-use toolbar_menus::{ToolbarMenusViewState, build_open_menu_popup, build_status_bar_slot, build_toolbar_slot};
-use welcome::{WelcomeViewState, build_portfolio_gallery};
+use toolbar_menus::{
+    ToolbarMenusViewState, build_open_context_menu_popup, build_open_menu_popup, build_status_bar_slot, build_toolbar_overflow_popup,
+    build_toolbar_slot,
+};
+use welcome::{WelcomeViewState, build_portfolio_gallery, build_welcome_launcher};
 
 /// Aggregated transient UI state for all interactive view shards wired onto [`UiApp`].
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
@@ -108,17 +111,12 @@ pub fn dispatch_custom_view_action(
 pub fn build_workspace_layout_tree(app: &UiApp, metrics: ViewportMetrics, measurer: &DesktopTextMeasurer, palette: &FramePalette) -> LayoutTree {
     let w_px = metrics.physical_width_px().max(1);
     let h_px = metrics.physical_height_px().max(1);
-    let frame = compute_frame_geometry(app, w_px, h_px);
+    let frame = compute_frame_geometry_for_scale(app, w_px, h_px, metrics.clamped_scale_factor());
 
     let mut builder = LayoutBuilder::new(app, metrics, measurer, palette);
     builder.tree.frame = frame;
-    builder.tree.active_focus_scope = if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-        FocusScope::ModalDialog
-    } else if app.interaction.open_menu.is_some() || app.interaction.open_dropdown.is_some() {
-        FocusScope::PopupMenu
-    } else {
-        FocusScope::Workspace
-    };
+    builder.tree.active_focus_scope =
+        if app.canvas_dialogs.active_dialog != ActiveDialog::None { FocusScope::ModalDialog } else { FocusScope::Workspace };
 
     let full_rect = LayoutRectPx::new(0, 0, w_px, h_px);
     builder.paint_fill(ZLayer::Workspace, None, full_rect, palette.surface);
@@ -134,6 +132,15 @@ pub fn build_workspace_layout_tree(app: &UiApp, metrics: ViewportMetrics, measur
     build_center_slot(&mut builder, center_rect);
 
     if !app.presentation_mode {
+        if !app.nav.gallery.open
+            && !(app.nav.welcome.open || app.document().total_sheet_count() == 0)
+            && let Some(active_id) = app.document().active_sheet_id.clone()
+        {
+            let notes = nav_notes::sheet_floating_notes(app.document(), &active_id).to_vec();
+            if !notes.is_empty() {
+                build_floating_notes_overlay(&mut builder, &active_id, &notes, center_rect);
+            }
+        }
         if frame.inspector.width > 0 {
             build_inspector_slot(&mut builder, LayoutRectPx::from_workspace_rect(frame.inspector));
         }
@@ -148,15 +155,36 @@ pub fn build_workspace_layout_tree(app: &UiApp, metrics: ViewportMetrics, measur
         if let Some(open_dd) = &app.interaction.open_dropdown {
             emit_open_dropdown_popup(&mut builder, open_dd);
         }
+        if app.canvas_dialogs.active_dialog == ActiveDialog::None && app.interaction.open_menu.is_none() {
+            let active_ctx_target =
+                app.interaction.context_menu_target.as_deref().or(app.view_shards.toolbar_menus.active_context_menu_id.as_deref());
+            if let Some(target) = active_ctx_target {
+                build_open_context_menu_popup(&mut builder, target);
+            } else if app.view_shards.toolbar_menus.overflow_open {
+                build_toolbar_overflow_popup(&mut builder);
+            }
+        }
         emit_active_tooltip(&mut builder, full_rect);
     }
 
-    builder.finish()
+    let mut tree = builder.finish();
+    if tree.active_focus_scope != FocusScope::ModalDialog
+        && !crate::layout::a11y::ordered_focus_targets(&tree.nodes, FocusScope::PopupMenu).is_empty()
+    {
+        tree.active_focus_scope = FocusScope::PopupMenu;
+    }
+    tree
 }
 
 /// Pure frame partitioning preserving [`crate::compositor::WorkspaceFrameLayout`].
 #[must_use]
 pub fn compute_frame_geometry(app: &UiApp, width_px: u32, height_px: u32) -> WorkspaceFrameLayout {
+    compute_frame_geometry_for_scale(app, width_px, height_px, 1.0)
+}
+
+/// HiDPI-aware frame partitioning scaling chrome widths/heights with `scale_factor`.
+#[must_use]
+pub fn compute_frame_geometry_for_scale(app: &UiApp, width_px: u32, height_px: u32, scale_factor: f64) -> WorkspaceFrameLayout {
     if app.presentation_mode {
         return WorkspaceFrameLayout {
             total_width: width_px,
@@ -170,14 +198,24 @@ pub fn compute_frame_geometry(app: &UiApp, width_px: u32, height_px: u32) -> Wor
         };
     }
 
+    let s = if scale_factor.is_finite() { scale_factor.clamp(1.0, 4.0) } else { 1.0 };
+    let su = |px: u32| -> u32 { (f64::from(px) * s).round().clamp(1.0, 16_384.0) as u32 };
     let is_rtl = crate::i18n::is_rtl_locale(&app.locale);
-    let toolbar_h = if height_px >= 240 { clamp_u32_safe(height_px / 11, 46, 52) } else { clamp_u32_safe(height_px / 14, 24, 38).min(height_px) };
-    let status_h = clamp_u32_safe(height_px / 22, 18, 26).min(height_px.saturating_sub(toolbar_h));
+    let toolbar_h = if height_px >= su(240) {
+        clamp_u32_safe(height_px / 11, su(46), su(52))
+    } else {
+        clamp_u32_safe(height_px / 14, 24.min(height_px), su(38)).min(height_px)
+    };
+    let status_h = clamp_u32_safe(height_px / 22, 18.min(height_px), su(26)).min(height_px.saturating_sub(toolbar_h));
     let mid_y = toolbar_h;
     let mid_h = height_px.saturating_sub(toolbar_h).saturating_sub(status_h);
 
-    let nav_w = if app.nav.navigator_open && width_px >= 320 { clamp_u32_safe(width_px / 5, 140, 244) } else { 0 };
-    let insp_w = if app.nav.inspector_open && width_px >= 420 { clamp_u32_safe(width_px / 4, 180, 288) } else { 0 };
+    let nav_w = if app.nav.navigator_open && width_px >= su(320) { clamp_u32_safe(width_px / 5, su(140), su(244)) } else { 0 };
+    let insp_w = if app.nav.inspector_open && width_px >= su(420) {
+        clamp_u32_safe(width_px / 4, su(180), su(288)).min(width_px.saturating_sub(nav_w).saturating_sub(1))
+    } else {
+        0
+    };
     let canvas_w = width_px.saturating_sub(nav_w).saturating_sub(insp_w);
 
     let nav_x = crate::i18n::mirror_x_for_rtl(0, nav_w, width_px, is_rtl);
@@ -224,6 +262,10 @@ fn build_center_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
     }
     if builder.app.nav.gallery.open {
         build_portfolio_gallery(builder, rect);
+        return;
+    }
+    if builder.app.nav.welcome.open || builder.app.document().total_sheet_count() == 0 {
+        build_welcome_launcher(builder, rect);
         return;
     }
     if builder.app.split.enabled && rect.width >= 120 && rect.height >= 24 {
@@ -302,21 +344,18 @@ fn draw_active_pane_focus(builder: &mut LayoutBuilder<'_>, layout: &WorkspaceFra
         ActiveWorkspacePane::MainCanvasOrGrid => layout.canvas,
         ActiveWorkspacePane::Inspector => layout.inspector,
         ActiveWorkspacePane::FloatingNotes => {
-            let w = layout.canvas.width.clamp(24, 130);
-            let h = layout.canvas.height.clamp(12, 26);
-            WorkspacePixelRect::new(
-                layout.canvas.x + layout.canvas.width.saturating_sub(w + 8),
-                layout.canvas.y + layout.canvas.height.saturating_sub(h + 8),
-                w,
-                h,
-            )
+            let active_id = builder.app.view_shards.nav_notes.active_note_id.as_deref();
+            let note_node = active_id
+                .and_then(|nid| {
+                    let suffix = format!(".{nid}.card");
+                    builder.tree.nodes.iter().find(|n| n.id.as_str().starts_with("floating_note.") && n.id.as_str().ends_with(&suffix))
+                })
+                .or_else(|| builder.tree.nodes.iter().find(|n| n.id.as_str().starts_with("floating_note.") && n.id.as_str().ends_with(".card")));
+            note_node.map_or(WorkspacePixelRect::new(0, 0, 0, 0), |n| n.bounds.rect_px.to_workspace_rect())
         }
     };
     if target.width >= 8 && target.height >= 8 {
         let r = LayoutRectPx::from_workspace_rect(target);
-        if builder.app.nav.active_pane == ActiveWorkspacePane::FloatingNotes {
-            builder.paint_fill(ZLayer::FloatingOverlay, None, r, builder.palette.panel);
-        }
         builder.paint_stroke(ZLayer::FloatingOverlay, None, r, builder.palette.accent, 2);
     }
 }
@@ -485,27 +524,7 @@ fn build_modal_body(builder: &mut LayoutBuilder<'_>, parent: WidgetId, body_rect
     match &builder.app.canvas_dialogs.active_dialog {
         ActiveDialog::AnalyzeSheet { .. } => build_analyze_modal_body(builder, parent, body_rect),
         ActiveDialog::EditAnalysisParameters { .. } => build_edit_params_modal_body(builder, parent, body_rect),
-        ActiveDialog::DuplicateAnalysisPrompt { existing_result_ids, .. } => {
-            let msg = format!("{} existing analysis sheet(s) match this analysis.", existing_result_ids.len());
-            paint_text_fitted(
-                builder,
-                &parent,
-                FittedTextSpec {
-                    z_layer: ZLayer::ModalDialog,
-                    rect: body_rect,
-                    pad_x: 8,
-                    text: &msg,
-                    style: &UiTextStyle::ui_sans(13.0),
-                    color: builder.palette.text,
-                    scroll_container: None,
-                },
-            );
-            build_descriptor_modal_body(
-                builder,
-                parent,
-                LayoutRectPx::new(body_rect.x, body_rect.y + 24, body_rect.width, body_rect.height.saturating_sub(24)),
-            );
-        }
+        ActiveDialog::DuplicateAnalysisPrompt { .. } => build_duplicate_analysis_modal_body(builder, parent, body_rect),
         ActiveDialog::ImportReshape | ActiveDialog::ConvertArchetype { .. } => build_import_or_convert_modal_body(builder, parent, body_rect),
         ActiveDialog::PowerAndSampleSize => build_power_wizard_modal_body(builder, parent, body_rect),
         ActiveDialog::CommandPalette => build_command_palette_body(builder, parent, body_rect),

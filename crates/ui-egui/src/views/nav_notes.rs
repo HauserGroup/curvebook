@@ -1634,7 +1634,7 @@ fn wrap_note_lines(builder: &LayoutBuilder<'_>, text: &str, style: &UiTextStyle,
     out
 }
 
-fn sheet_floating_notes<'a>(doc: &'a ProjectDocument, id: &SheetId) -> &'a [FloatingNote] {
+pub(crate) fn sheet_floating_notes<'a>(doc: &'a ProjectDocument, id: &SheetId) -> &'a [FloatingNote] {
     if let Some(ds) = doc.data_sheet(id) {
         &ds.floating_notes
     } else if let Some(info) = doc.info_sheet(id) {

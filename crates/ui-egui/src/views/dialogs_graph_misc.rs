@@ -15,9 +15,7 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::compositor::{FramePalette, WorkspacePixelRect};
-use crate::dialogs_canvas::{
-    ActiveDialog, AnalyzeDuplicateChoice, ExportFigureFormat, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind, variable_role_color,
-};
+use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind, variable_role_color};
 use crate::dialogs_r9::RandomizationSchemeKind;
 use crate::interaction::{CanvasDragTarget, ScenePaperMapping, UiEventOutcome};
 use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
@@ -35,6 +33,7 @@ use crate::modal_predicates::ControlEnablement;
 use crate::text_bridge::UiTextStyle;
 
 use super::a11y::labeled_meta;
+use super::analyze_picker::scaled_u32;
 
 const DOMAIN_W5G1: &str = "dialogs_graph_misc";
 
@@ -48,10 +47,6 @@ fn default_export_color_space() -> String {
 
 fn default_export_unit() -> String {
     String::from("px")
-}
-
-fn default_duplicate_choice() -> String {
-    String::from("create_new")
 }
 
 fn w5_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
@@ -80,10 +75,6 @@ pub struct DialogsGraphMiscViewState {
     pub export_color_space: String,
     #[serde(default = "default_export_unit")]
     pub export_unit: String,
-    #[serde(default = "default_duplicate_choice")]
-    pub duplicate_choice: String,
-    #[serde(default)]
-    pub duplicate_target_idx: usize,
     #[serde(default)]
     pub sim_selected_col_idx: usize,
     #[serde(default)]
@@ -102,8 +93,6 @@ impl Default for DialogsGraphMiscViewState {
             export_transparent_bg: false,
             export_color_space: default_export_color_space(),
             export_unit: default_export_unit(),
-            duplicate_choice: default_duplicate_choice(),
-            duplicate_target_idx: 0,
             sim_selected_col_idx: 0,
             layout_revision: 0,
         }
@@ -430,51 +419,9 @@ fn handle_remaining_dialog_action(app: &mut UiApp, state: &mut DialogsGraphMiscV
 
 fn handle_dup_change_fmt_exclude_action(
     app: &mut UiApp,
-    state: &mut DialogsGraphMiscViewState,
+    _state: &mut DialogsGraphMiscViewState,
     payload: &str,
 ) -> Option<Result<UiEventOutcome, String>> {
-    if payload == "dup:choice:create_new" {
-        state.duplicate_choice = String::from("create_new");
-        return Some(handled_outcome(true));
-    }
-    if payload == "dup:choice:modify_existing" {
-        state.duplicate_choice = String::from("modify_existing");
-        return Some(handled_outcome(true));
-    }
-    if let Some(raw_idx) = payload.strip_prefix("dup:target:")
-        && let Ok(idx) = raw_idx.parse::<usize>()
-    {
-        state.duplicate_choice = String::from("modify_existing");
-        state.duplicate_target_idx = idx;
-        return Some(handled_outcome(true));
-    }
-    if payload == "dup:confirm" {
-        if let ActiveDialog::DuplicateAnalysisPrompt { existing_result_ids, .. } = &app.canvas_dialogs.active_dialog {
-            let choice = if state.duplicate_choice == "modify_existing" {
-                existing_result_ids
-                    .get(state.duplicate_target_idx)
-                    .cloned()
-                    .map_or(AnalyzeDuplicateChoice::CreateNew, AnalyzeDuplicateChoice::ModifyExisting)
-            } else {
-                AnalyzeDuplicateChoice::CreateNew
-            };
-            if let Some(intent) = app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice) {
-                app.canvas_dialogs.close_dialog();
-                let cmd_id = intent.command_id.clone();
-                return Some(
-                    app.execute_command(&intent.command_id, intent.params)
-                        .map(|_| UiEventOutcome {
-                            handled: true,
-                            action: String::from("duplicate.confirm"),
-                            command_id: Some(cmd_id),
-                            ..UiEventOutcome::default()
-                        })
-                        .map_err(|err| err.to_string()),
-                );
-            }
-        }
-        return Some(handled_outcome(false));
-    }
     if let Some(raw_idx) = payload.strip_prefix("change_data:cand:")
         && let Ok(idx) = raw_idx.parse::<usize>()
     {
@@ -1502,7 +1449,16 @@ fn custom_action(payload: String) -> WidgetAction {
 }
 
 fn ui_text_style(builder: &LayoutBuilder<'_>, pts: f64) -> UiTextStyle {
-    UiTextStyle::ui_sans((pts * builder.scale()).clamp(8.5, 20.0))
+    UiTextStyle::ui_sans((pts * builder.scale()).clamp(8.5, 28.0))
+}
+
+fn mpx(base: u32, scale: f64) -> u32 {
+    let min_px = if base == 0 { 0 } else { 1 };
+    scaled_u32(f64::from(base), scale, min_px, base.saturating_mul(4).max(min_px))
+}
+
+fn mi(base: u32, scale: f64) -> i32 {
+    i32::try_from(mpx(base, scale)).unwrap_or(base as i32)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1615,8 +1571,10 @@ fn emit_stepper_row(
     st: &UiTextStyle,
     scroll_id: &str,
 ) {
-    let controls_w = 136i32.min((rect.width as i32) / 2).max(96);
-    let label_w = (rect.width as i32 - controls_w - 6).max(60) as u32;
+    let scale = builder.scale();
+    let controls_w = mi(136, scale).min((rect.width as i32) / 2).max(mi(96, scale));
+    let lbl_gap = mpx(6, scale);
+    let label_w = (rect.width as i32 - controls_w - lbl_gap as i32).max(mi(60, scale)) as u32;
     emit_modal_label(
         builder,
         parent,
@@ -1628,9 +1586,10 @@ fn emit_stepper_row(
         en.clone(),
         Some(scroll_id),
     );
-    let cx = rect.x + i32::try_from(label_w).unwrap_or(80) + 6;
-    let btn_w = 24u32;
-    let val_w = (controls_w as u32).saturating_sub(btn_w * 2 + 8).max(40);
+    let cx = rect.x + i32::try_from(label_w + lbl_gap).unwrap_or(86);
+    let btn_w = mpx(24, scale);
+    let btn_gap = mpx(4, scale);
+    let val_w = (controls_w as u32).saturating_sub(btn_w * 2 + btn_gap * 2).max(mpx(40, scale));
     emit_cbtn(
         builder,
         parent,
@@ -1643,7 +1602,7 @@ fn emit_stepper_row(
         en.clone(),
         custom_action(dec_payload),
     );
-    let val_rect = LayoutRectPx::new(cx + i32::try_from(btn_w + 4).unwrap_or(28), rect.y, val_w, rect.height);
+    let val_rect = LayoutRectPx::new(cx + i32::try_from(btn_w + btn_gap).unwrap_or(28), rect.y, val_w, rect.height);
     let val_wid = builder.push_node(NodeSpec {
         id: WidgetId::from(format!("{id_prefix}.val")),
         parent: Some(parent.clone()),
@@ -1672,7 +1631,7 @@ fn emit_stepper_row(
         builder,
         parent,
         &format!("{id_prefix}.inc"),
-        LayoutRectPx::new(val_rect.right() + 4, rect.y, btn_w, rect.height),
+        LayoutRectPx::new(val_rect.right() + i32::try_from(btn_gap).unwrap_or(4), rect.y, btn_w, rect.height),
         "+",
         false,
         false,
@@ -1691,16 +1650,17 @@ struct PillItem<'a> {
 }
 
 fn emit_pill_row(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: LayoutRectPx, items: &[PillItem<'_>], base_tab: u32) {
-    if items.is_empty() || rect.width < 40 {
+    let scale = builder.scale();
+    if items.is_empty() || rect.width < mpx(40, scale) {
         return;
     }
-    let gap = 4u32;
+    let gap = mpx(4, scale);
     let count = u32::try_from(items.len()).unwrap_or(1).max(1);
-    let pill_w = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(40);
+    let pill_w = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(mpx(40, scale));
     let mut x = rect.x;
     for (idx, item) in items.iter().enumerate() {
-        let w = if idx + 1 == items.len() { (rect.right() - x).max(32) as u32 } else { pill_w.min((rect.right() - x).max(0) as u32) };
-        if w < 24 || x >= rect.right() {
+        let w = if idx + 1 == items.len() { (rect.right() - x).max(mi(32, scale)) as u32 } else { pill_w.min((rect.right() - x).max(0) as u32) };
+        if w < mpx(24, scale) || x >= rect.right() {
             break;
         }
         emit_cbtn(
@@ -1727,8 +1687,9 @@ fn begin_modal_scroll<'a>(
     panel_id: &str,
     content_h: u32,
 ) -> (WidgetId, ScrollMeta, LayoutRectPx, i32) {
+    let scale = builder.scale();
     let scroll_off = builder.scroll_offset(scroll_id);
-    let total_h = content_h.max(rect.height.saturating_sub(8));
+    let total_h = mpx(content_h, scale).max(rect.height.saturating_sub(8));
     let meta = ScrollMeta::new(String::from(scroll_id), rect, [rect.width, total_h], scroll_off, ScrollAxes::Vertical);
     let panel_wid = builder.push_node(NodeSpec {
         id: WidgetId::from(panel_id),
@@ -1741,7 +1702,8 @@ fn begin_modal_scroll<'a>(
     });
     builder.attach_scroll(&panel_wid, meta.clone());
     builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.panel);
-    let clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(18), rect.height.saturating_sub(8));
+    let sb_reserve = scaled_u32(18.0, scale, 16, 36);
+    let clip = LayoutRectPx::new(rect.x + 4, rect.y + 4, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(8));
     builder.push_clip(clip);
     let y_scroll = meta.scroll_offset_px[1].round() as i32;
     (panel_wid, meta, clip, y_scroll)
@@ -1758,7 +1720,9 @@ fn row_visible(ry: i32, rh: u32, clip: LayoutRectPx) -> bool {
 
 /// Build the `Cmd/Ctrl+K` command palette search input and matched command rows inside `body_rect`.
 pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: WidgetId, body_rect: LayoutRectPx) {
-    let search_rect = LayoutRectPx::new(body_rect.x, body_rect.y, body_rect.width, 26);
+    let scale = builder.scale();
+    let search_h = mpx(26, scale);
+    let search_rect = LayoutRectPx::new(body_rect.x, body_rect.y, body_rect.width, search_h);
     emit_text_field(
         builder,
         TextFieldSpec {
@@ -1778,7 +1742,8 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
 
     let matches = builder.app.canvas_dialogs.command_palette.matches_for_session(builder.app.session());
     let sel_idx = if matches.is_empty() { 0 } else { builder.app.canvas_dialogs.command_palette.selected_index.min(matches.len() - 1) };
-    let bar_y = body_rect.y + 30;
+    let bar_y = body_rect.y + mi(30, scale);
+    let bar_h = mpx(20, scale);
     let st = ui_text_style(builder, 10.5);
     let locale = builder.app.locale.clone();
     let prev_lbl = w5_tr(&locale, "w5.palette.prev", "Prev");
@@ -1788,12 +1753,15 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
     let empty_reason = ControlEnablement::disabled("No matching commands for the active filter.");
     let nav_en = if has_matches { ControlEnablement::enabled() } else { empty_reason };
 
-    if body_rect.height >= 58 {
+    let btn_w = mpx(56, scale);
+    let run_w = mpx(64, scale);
+    let gap = mpx(4, scale);
+    if body_rect.height >= mpx(58, scale) {
         emit_cbtn(
             builder,
             &parent,
             "palette.prev",
-            LayoutRectPx::new(body_rect.x, bar_y, 56, 20),
+            LayoutRectPx::new(body_rect.x, bar_y, btn_w, bar_h),
             prev_lbl,
             false,
             false,
@@ -1805,7 +1773,7 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
             builder,
             &parent,
             "palette.next",
-            LayoutRectPx::new(body_rect.x + 60, bar_y, 56, 20),
+            LayoutRectPx::new(body_rect.x + i32::try_from(btn_w + gap).unwrap_or(60), bar_y, btn_w, bar_h),
             next_lbl,
             false,
             false,
@@ -1817,10 +1785,21 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
             || custom_action(String::from("palette:run")),
             |item| WidgetAction::InvokeCommand { command_id: item.id.to_owned(), params: json!({}) },
         );
-        emit_cbtn(builder, &parent, "palette.run", LayoutRectPx::new(body_rect.x + 120, bar_y, 64, 20), run_lbl, false, true, 14, nav_en, run_action);
-        let status_x = body_rect.x + 190;
+        emit_cbtn(
+            builder,
+            &parent,
+            "palette.run",
+            LayoutRectPx::new(body_rect.x + i32::try_from((btn_w + gap) * 2).unwrap_or(120), bar_y, run_w, bar_h),
+            run_lbl,
+            false,
+            true,
+            14,
+            nav_en,
+            run_action,
+        );
+        let status_x = body_rect.x + mi(190, scale);
         let status_w = (body_rect.right() - status_x).max(0) as u32;
-        if status_w >= 48 {
+        if status_w >= mpx(48, scale) {
             let status = if matches.is_empty() {
                 String::from(w5_tr(&locale, "w5.palette.empty", "No matching commands"))
             } else {
@@ -1830,7 +1809,7 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
                 builder,
                 &parent,
                 "palette.status",
-                LayoutRectPx::new(status_x, bar_y, status_w, 20),
+                LayoutRectPx::new(status_x, bar_y, status_w, bar_h),
                 &status,
                 builder.palette.muted,
                 &st,
@@ -1840,19 +1819,19 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
         }
     }
 
-    let list_y = body_rect.y + 54;
+    let list_y = body_rect.y + mi(54, scale);
     let list_h = (body_rect.bottom() - list_y).max(0) as u32;
-    if list_h < 22 {
+    if list_h < mpx(22, scale) {
         return;
     }
     let list_rect = LayoutRectPx::new(body_rect.x, list_y, body_rect.width, list_h);
-    let row_h = 26u32;
-    let total_h = u32::try_from(matches.len()).unwrap_or(1).max(1) * row_h + 8;
+    let row_h = mpx(26, scale);
+    let total_h = u32::try_from(matches.len()).unwrap_or(1).max(1) * 26 + 8;
     let scroll_id = "scroll.palette.list";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, &parent, list_rect, scroll_id, "palette.list_panel", total_h);
 
     if matches.is_empty() {
-        let empty_rect = LayoutRectPx::new(clip.x, clip.y + 4, clip.width, 22);
+        let empty_rect = LayoutRectPx::new(clip.x, clip.y + 4, clip.width, mpx(22, scale));
         if row_visible(empty_rect.y, empty_rect.height, clip) {
             emit_modal_label(
                 builder,
@@ -1870,9 +1849,10 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
         return;
     }
 
+    let item_h = row_h.saturating_sub(mpx(3, scale));
     for (idx, item) in matches.iter().enumerate() {
         let ry = clip.y + i32::try_from(idx as u32 * row_h).unwrap_or(0) - y_scroll;
-        if !row_visible(ry, row_h - 3, clip) {
+        if !row_visible(ry, item_h, clip) {
             continue;
         }
         let en = if item.enabled {
@@ -1887,7 +1867,7 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
                 id: &format!("palette.hit.{idx}"),
                 parent: Some(panel_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(clip.x, ry, clip.width, row_h - 3),
+                rect: LayoutRectPx::new(clip.x, ry, clip.width, item_h),
                 label: &label,
                 keyboard_path: &format!("palette.{idx}"),
                 focus_scope: FocusScope::ModalDialog,
@@ -1911,8 +1891,8 @@ pub fn build_descriptor_modal_body(builder: &mut LayoutBuilder<'_>, parent: Widg
         ActiveDialog::ChangeGraphType { .. } => build_change_graph_type_body(builder, &parent, body_rect),
         ActiveDialog::ConstantHookPicker { .. } => build_hook_constant_body(builder, &parent, body_rect),
         ActiveDialog::ExportFigure { .. } => build_export_figure_body(builder, &parent, body_rect),
-        ActiveDialog::DuplicateAnalysisPrompt { existing_result_ids, .. } => {
-            build_duplicate_prompt_body(builder, &parent, body_rect, &existing_result_ids);
+        ActiveDialog::DuplicateAnalysisPrompt { .. } => {
+            super::analyze_picker::build_duplicate_analysis_modal_body(builder, parent, body_rect);
         }
         ActiveDialog::ChangeDataAnalyzed { .. } => build_change_data_analyzed_body(builder, &parent, body_rect),
         ActiveDialog::FormatSelectedPoints { .. } => build_format_selected_points_body(builder, &parent, body_rect),
@@ -1933,9 +1913,14 @@ fn build_fallback_descriptor_grid(builder: &mut LayoutBuilder<'_>, parent: &Widg
     let Some((_, _, _, tabs, controls, _)) = crate::inspect::dialog_widget_descriptors(builder.app) else {
         return;
     };
+    let scale = builder.scale();
+    let tab_h = scaled_u32(22.0, scale, 20, 44);
+    let tab_step = scaled_u32(26.0, scale, 24, 52);
+    let min_tab_w = scaled_u32(56.0, scale, 48, 120);
+    let min_ctrl_h = scaled_u32(20.0, scale, 18, 40);
     let mut content_y = body_rect.y;
-    if !tabs.is_empty() && body_rect.height >= 48 {
-        let tab_w = (body_rect.width.saturating_sub(8) / (tabs.len() as u32).max(1)).max(56);
+    if !tabs.is_empty() && body_rect.height >= tab_step.saturating_add(min_ctrl_h) {
+        let tab_w = (body_rect.width.saturating_sub(8) / (tabs.len() as u32).max(1)).max(min_tab_w);
         for (idx, tab) in tabs.iter().enumerate() {
             let tx = body_rect.x + i32::try_from(idx as u32 * (tab_w + 4)).unwrap_or(0);
             if tx + i32::try_from(tab_w).unwrap_or(56) > body_rect.right() {
@@ -1949,7 +1934,7 @@ fn build_fallback_descriptor_grid(builder: &mut LayoutBuilder<'_>, parent: &Widg
                     id: &tab.widget_id,
                     parent: Some(parent.clone()),
                     z_layer: ZLayer::ModalDialog,
-                    rect: LayoutRectPx::new(tx, body_rect.y, tab_w, 22),
+                    rect: LayoutRectPx::new(tx, body_rect.y, tab_w, tab_h),
                     label: &tab.label,
                     keyboard_path: &tab.widget_id,
                     focus_scope: FocusScope::ModalDialog,
@@ -1962,10 +1947,10 @@ fn build_fallback_descriptor_grid(builder: &mut LayoutBuilder<'_>, parent: &Widg
                 },
             );
         }
-        content_y += 26;
+        content_y += i32::try_from(tab_step).unwrap_or(26);
     }
     let ctrl_h = (body_rect.bottom() - content_y).max(0) as u32;
-    if ctrl_h >= 20 {
+    if ctrl_h >= min_ctrl_h {
         emit_descriptor_controls_grid(builder, parent, LayoutRectPx::new(body_rect.x, content_y, body_rect.width, ctrl_h), &controls, 30);
     }
 }
@@ -2091,25 +2076,29 @@ fn paint_plot_family_glyph(builder: &mut LayoutBuilder<'_>, owner: &WidgetId, re
 }
 
 fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let locale = builder.app.locale.clone();
     let show_all = builder.app.view_shards.dialogs_graph_misc.graph_type_show_all;
     let cgt = &builder.app.canvas_dialogs.change_graph_type;
 
     let options: Vec<&GraphTypeOption> = if show_all { GRAPH_TYPE_OPTIONS.iter().collect() } else { cgt.recommended_options() };
-    let two_pane = body_rect.width >= 420 && body_rect.height >= 160;
+    let two_pane = body_rect.width >= mpx(420, scale) && body_rect.height >= mpx(160, scale);
     let left_w = if two_pane { (body_rect.width * 58) / 100 } else { body_rect.width };
-    let right_w = body_rect.width.saturating_sub(left_w + 8);
+    let right_w = body_rect.width.saturating_sub(left_w + mpx(8, scale));
     let left_rect = LayoutRectPx::new(body_rect.x, body_rect.y, left_w, body_rect.height);
 
-    let cols = if left_w >= 340 { 2u32 } else { 1u32 };
-    let card_h = 54u32;
+    let cols = if left_w >= mpx(340, scale) { 2u32 } else { 1u32 };
+    let card_h_logical = 54u32;
+    let card_h = mpx(card_h_logical, scale);
+    let card_pad = mpx(4, scale);
     let rows = u32::try_from(options.len()).unwrap_or(1).div_ceil(cols);
-    let content_h = 30 + rows * card_h + 12;
+    let content_h = 30 + rows * card_h_logical + 12;
     let scroll_id = "scroll.graph_type.cards";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, left_rect, scroll_id, "graph_type.panel", content_h);
 
-    let toggle_rect = LayoutRectPx::new(clip.x, clip.y - y_scroll, clip.width, 22);
+    let row_22 = mpx(22, scale);
+    let toggle_rect = LayoutRectPx::new(clip.x, clip.y - y_scroll, clip.width, row_22);
     if row_visible(toggle_rect.y, toggle_rect.height, clip) {
         emit_ctoggle(
             builder,
@@ -2126,16 +2115,17 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
         );
     }
 
-    let card_w = (clip.width.saturating_sub(cols.saturating_sub(1) * 6) / cols).max(110);
+    let col_gap = mpx(6, scale);
+    let card_w = (clip.width.saturating_sub(cols.saturating_sub(1) * col_gap) / cols).max(mpx(110, scale));
     for (idx, opt) in options.iter().enumerate() {
         let r = u32::try_from(idx).unwrap_or(0) / cols;
         let c = u32::try_from(idx).unwrap_or(0) % cols;
-        let cy = clip.y + 28 + i32::try_from(r * card_h).unwrap_or(0) - y_scroll;
-        if !row_visible(cy, card_h - 4, clip) {
+        let cy = clip.y + mi(28, scale) + i32::try_from(r * card_h).unwrap_or(0) - y_scroll;
+        if !row_visible(cy, card_h - card_pad, clip) {
             continue;
         }
-        let cx = clip.x + i32::try_from(c * (card_w + 6)).unwrap_or(0);
-        let card_rect = LayoutRectPx::new(cx, cy, card_w, card_h - 4);
+        let cx = clip.x + i32::try_from(c * (card_w + col_gap)).unwrap_or(0);
+        let card_rect = LayoutRectPx::new(cx, cy, card_w, card_h - card_pad);
         let selected = opt.id == cgt.selected_option_id;
         let card_id = format!("graph_type.card.{}", opt.id);
         let card_wid = builder.push_node(NodeSpec {
@@ -2160,16 +2150,16 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
             if selected { builder.palette.accent } else { builder.palette.border },
             if selected { 2 } else { 1 },
         );
-        let thumb_rect = LayoutRectPx::new(card_rect.x + 4, card_rect.y + 4, 42, card_rect.height.saturating_sub(8));
+        let thumb_rect = LayoutRectPx::new(card_rect.x + 4, card_rect.y + 4, mpx(42, scale), card_rect.height.saturating_sub(8));
         paint_plot_family_glyph(builder, &card_wid, thumb_rect, opt.thumbnail);
-        let text_x = thumb_rect.right() + 6;
+        let text_x = thumb_rect.right() + mi(6, scale);
         let text_w = (card_rect.right() - text_x - 4).max(20) as u32;
         paint_text_fitted(
             builder,
             &card_wid,
             FittedTextSpec {
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(text_x, card_rect.y + 4, text_w, 18),
+                rect: LayoutRectPx::new(text_x, card_rect.y + 4, text_w, mpx(18, scale)),
                 pad_x: 2,
                 text: opt.label,
                 style: &st,
@@ -2182,7 +2172,7 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
             &card_wid,
             FittedTextSpec {
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(text_x, card_rect.y + 24, text_w, 18),
+                rect: LayoutRectPx::new(text_x, card_rect.y + mi(24, scale), text_w, mpx(18, scale)),
                 pad_x: 2,
                 text: opt.subtitle,
                 style: &ui_text_style(builder, 9.0),
@@ -2193,8 +2183,8 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
     }
     end_modal_scroll(builder, panel_wid, &meta);
 
-    if two_pane && right_w >= 140 {
-        let rx = body_rect.x + i32::try_from(left_w).unwrap_or(0) + 8;
+    if two_pane && right_w >= mpx(140, scale) {
+        let rx = body_rect.x + i32::try_from(left_w + mpx(8, scale)).unwrap_or(0);
         let right_rect = LayoutRectPx::new(rx, body_rect.y, right_w, body_rect.height);
         let r_wid = builder.push_node(NodeSpec {
             id: WidgetId::from("graph_type.preview_pane"),
@@ -2211,15 +2201,15 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
             builder,
             &r_wid,
             "graph_type.preview_title",
-            LayoutRectPx::new(rx + 4, body_rect.y + 4, right_w.saturating_sub(8), 18),
+            LayoutRectPx::new(rx + 4, body_rect.y + 4, right_w.saturating_sub(8), mpx(18, scale)),
             w5_tr(&locale, "w5.graph_type.preview", "Live Preview"),
             builder.palette.text,
             &st,
             ControlEnablement::enabled(),
             None,
         );
-        let pv_h = (body_rect.height / 2).clamp(72, 136);
-        let pv_rect = LayoutRectPx::new(rx + 6, body_rect.y + 24, right_w.saturating_sub(12), pv_h);
+        let pv_h = (body_rect.height / 2).clamp(mpx(72, scale), mpx(136, scale));
+        let pv_rect = LayoutRectPx::new(rx + 6, body_rect.y + mi(24, scale), right_w.saturating_sub(12), pv_h);
         let selected_opt = GRAPH_TYPE_OPTIONS.iter().find(|o| o.id == cgt.selected_option_id);
         let mut blitted = false;
         if let Some(gs) = cgt
@@ -2253,26 +2243,30 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
             paint_plot_family_glyph(builder, &r_wid, pv_rect, glyph);
         }
 
-        let mut cy = pv_rect.bottom() + 8;
-        if cy + 20 <= right_rect.bottom() {
+        let lbl_h = mpx(16, scale);
+        let lbl_step = mi(18, scale);
+        let row_h = mpx(22, scale);
+        let row_step = mi(26, scale);
+        let mut cy = pv_rect.bottom() + mi(8, scale);
+        if cy + mi(20, scale) <= right_rect.bottom() {
             emit_modal_label(
                 builder,
                 &r_wid,
                 "graph_type.summary_lbl",
-                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), 16),
+                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), lbl_h),
                 w5_tr(&locale, "w5.graph_type.summary", "Summary"),
                 builder.palette.muted,
                 &st,
                 ControlEnablement::enabled(),
                 None,
             );
-            cy += 18;
+            cy += lbl_step;
         }
-        if cy + 22 <= right_rect.bottom() {
+        if cy + mi(22, scale) <= right_rect.bottom() {
             emit_pill_row(
                 builder,
                 &r_wid,
-                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), 22),
+                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), row_h),
                 &[
                     PillItem {
                         id: String::from("graph_type.sum.mean"),
@@ -2298,27 +2292,27 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
                 ],
                 80,
             );
-            cy += 26;
+            cy += row_step;
         }
-        if cy + 18 <= right_rect.bottom() {
+        if cy + lbl_step <= right_rect.bottom() {
             emit_modal_label(
                 builder,
                 &r_wid,
                 "graph_type.eb_lbl",
-                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), 16),
+                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), lbl_h),
                 w5_tr(&locale, "w5.graph_type.error_bars", "Error Bars"),
                 builder.palette.muted,
                 &st,
                 ControlEnablement::enabled(),
                 None,
             );
-            cy += 18;
+            cy += lbl_step;
         }
-        if cy + 22 <= right_rect.bottom() {
+        if cy + mi(22, scale) <= right_rect.bottom() {
             emit_pill_row(
                 builder,
                 &r_wid,
-                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), 22),
+                LayoutRectPx::new(rx + 4, cy, right_w.saturating_sub(8), row_h),
                 &[
                     PillItem {
                         id: String::from("graph_type.eb.sd"),
@@ -2356,20 +2350,23 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
 }
 
 fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let locale = builder.app.locale.clone();
     let hp = &builder.app.canvas_dialogs.hook_picker;
     let vs = &builder.app.view_shards.dialogs_graph_misc;
     let query_str = active_text(builder.app, "hook.search_input", &hp.search_query);
 
-    let search_w = body_rect.width.saturating_sub(72).max(120);
+    let clear_w = mpx(68, scale);
+    let search_h = mpx(24, scale);
+    let search_w = body_rect.width.saturating_sub(clear_w + 4).max(mpx(120, scale));
     emit_text_field(
         builder,
         TextFieldSpec {
             id: "hook.search_input",
             parent: Some(parent.clone()),
             z_layer: ZLayer::ModalDialog,
-            rect: LayoutRectPx::new(body_rect.x, body_rect.y, search_w, 24),
+            rect: LayoutRectPx::new(body_rect.x, body_rect.y, search_w, search_h),
             label: "Search constants",
             fallback_text: &hp.search_query,
             keyboard_path: "hook.search_input",
@@ -2383,7 +2380,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         builder,
         parent,
         "hook.clear",
-        LayoutRectPx::new(body_rect.x + i32::try_from(search_w + 4).unwrap_or(124), body_rect.y, 68, 24),
+        LayoutRectPx::new(body_rect.x + i32::try_from(search_w + 4).unwrap_or(124), body_rect.y, clear_w, search_h),
         "Clear",
         false,
         false,
@@ -2396,12 +2393,12 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         || String::from("Select a constant from Info, Analysis, or Document branches"),
         |opt| format!("Selected: {} ({}) = {}", opt.label, opt.template_token, opt.preview_value),
     );
-    if body_rect.height >= 76 {
+    if body_rect.height >= mpx(76, scale) {
         emit_modal_label(
             builder,
             parent,
             "hook.preview",
-            LayoutRectPx::new(body_rect.x, body_rect.y + 28, body_rect.width, 18),
+            LayoutRectPx::new(body_rect.x, body_rect.y + mi(28, scale), body_rect.width, mpx(18, scale)),
             &tok_preview,
             builder.palette.accent,
             &st,
@@ -2410,9 +2407,9 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         );
     }
 
-    let tree_y = body_rect.y + 50;
+    let tree_y = body_rect.y + mi(50, scale);
     let tree_h = (body_rect.bottom() - tree_y).max(0) as u32;
-    if tree_h < 28 {
+    if tree_h < mpx(28, scale) {
         return;
     }
 
@@ -2435,7 +2432,9 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         }
     }
 
-    let row_h = 24u32;
+    let row_h = mpx(24, scale);
+    let item_h = row_h.saturating_sub(mpx(2, scale));
+    let indent = mpx(16, scale);
     let mut total_rows = 3u32;
     if vs.hook_expand_info {
         total_rows += u32::try_from(info_items.len().max(1)).unwrap_or(1);
@@ -2454,7 +2453,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         LayoutRectPx::new(body_rect.x, tree_y, body_rect.width, tree_h),
         scroll_id,
         "hook.tree_panel",
-        total_rows * row_h + 8,
+        total_rows * 24 + 8,
     );
 
     struct HookBranch<'a> {
@@ -2482,7 +2481,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
     let mut cur_y = clip.y - y_scroll;
     let mut tab = 20u32;
     for br in &branches {
-        let cat_rect = LayoutRectPx::new(clip.x, cur_y, clip.width, row_h - 2);
+        let cat_rect = LayoutRectPx::new(clip.x, cur_y, clip.width, item_h);
         if row_visible(cat_rect.y, cat_rect.height, clip) {
             let arrow = if br.expanded { "v" } else { ">" };
             emit_cbtn(
@@ -2502,7 +2501,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         tab += 1;
         if br.expanded {
             if br.items.is_empty() {
-                let empty_rect = LayoutRectPx::new(clip.x + 16, cur_y, clip.width.saturating_sub(16), row_h - 2);
+                let empty_rect = LayoutRectPx::new(clip.x + indent as i32, cur_y, clip.width.saturating_sub(indent), item_h);
                 if row_visible(empty_rect.y, empty_rect.height, clip) {
                     emit_modal_label(
                         builder,
@@ -2519,7 +2518,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
                 cur_y += i32::try_from(row_h).unwrap_or(24);
             } else {
                 for &(orig_idx, opt) in br.items {
-                    let item_rect = LayoutRectPx::new(clip.x + 16, cur_y, clip.width.saturating_sub(16), row_h - 2);
+                    let item_rect = LayoutRectPx::new(clip.x + indent as i32, cur_y, clip.width.saturating_sub(indent), item_h);
                     if row_visible(item_rect.y, item_rect.height, clip) {
                         let lbl = format!("{} = {}  {}", opt.label, opt.preview_value, opt.template_token);
                         emit_cbtn(
@@ -2545,24 +2544,30 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
 }
 
 fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let locale = builder.app.locale.clone();
     let ef = &builder.app.canvas_dialogs.export_figure;
     let vs = &builder.app.view_shards.dialogs_graph_misc;
     let scroll_id = "scroll.export.body";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "export.panel", 290);
-    let row_h = 26i32;
+    let row_h = mi(26, scale);
+    let lbl_h = mpx(18, scale);
+    let ctl_h = mpx(22, scale);
+    let pil_h = mpx(24, scale);
+    let gap_2 = mi(2, scale);
+    let step_20 = mi(20, scale);
     let mut y = clip.y - y_scroll;
 
     let is_vector = matches!(ef.format, ExportFigureFormat::Svg | ExportFigureFormat::Pdf);
     let is_pdf = matches!(ef.format, ExportFigureFormat::Pdf);
 
-    if row_visible(y, 18, clip) {
+    if row_visible(y, lbl_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "export.fmt_lbl",
-            LayoutRectPx::new(clip.x, y, clip.width, 18),
+            LayoutRectPx::new(clip.x, y, clip.width, lbl_h),
             "Format",
             builder.palette.muted,
             &st,
@@ -2570,12 +2575,12 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
             Some(scroll_id),
         );
     }
-    y += 20;
-    if row_visible(y, 24, clip) {
+    y += step_20;
+    if row_visible(y, pil_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 24),
+            LayoutRectPx::new(clip.x, y, clip.width, pil_h),
             &[
                 PillItem {
                     id: String::from("export.fmt.svg"),
@@ -2616,19 +2621,19 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
             10,
         );
     }
-    y += row_h + 2;
+    y += row_h + gap_2;
 
     let dpi_en = if is_vector {
         ControlEnablement::disabled("Vector SVG/PDF is resolution-independent (DPI applies to PNG/TIFF).")
     } else {
         ControlEnablement::enabled()
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "export.dpi",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             "Resolution (DPI)",
             &format!("{} DPI", ef.dpi),
             String::from("export:dpi_dec"),
@@ -2640,11 +2645,11 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         );
     }
     y += row_h;
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             &[
                 PillItem {
                     id: String::from("export.dpi.72"),
@@ -2678,13 +2683,13 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
             25,
         );
     }
-    y += row_h + 2;
+    y += row_h + gap_2;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             &[
                 PillItem {
                     id: String::from("export.unit.px"),
@@ -2722,12 +2727,12 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         }
     };
     let size_lbl = w5_tr(&locale, "w5.export.physical_size", "Physical Size");
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "export.width",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             &format!("{size_lbl} Width"),
             &fmt_dim(ef.width_px),
             String::from("export:size:w_dec"),
@@ -2739,12 +2744,12 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         );
     }
     y += row_h;
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "export.height",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             &format!("{size_lbl} Height"),
             &fmt_dim(ef.height_px),
             String::from("export:size:h_dec"),
@@ -2755,19 +2760,19 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
             scroll_id,
         );
     }
-    y += row_h + 2;
+    y += row_h + gap_2;
 
     let transp_en = if is_pdf {
         ControlEnablement::disabled("PDF print export uses an opaque page background; select SVG, PNG, or TIFF for transparency.")
     } else {
         ControlEnablement::enabled()
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, ctl_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "export.transparent_bg",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             w5_tr(&locale, "w5.export.transparency", "Transparent Background"),
             vs.export_transparent_bg,
             false,
@@ -2779,12 +2784,12 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
     }
     y += row_h;
 
-    if row_visible(y, 18, clip) {
+    if row_visible(y, lbl_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "export.cs_lbl",
-            LayoutRectPx::new(clip.x, y, clip.width, 18),
+            LayoutRectPx::new(clip.x, y, clip.width, lbl_h),
             w5_tr(&locale, "w5.export.colorspace", "Color Space"),
             builder.palette.muted,
             &st,
@@ -2792,12 +2797,12 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
             Some(scroll_id),
         );
     }
-    y += 20;
-    if row_visible(y, 22, clip) {
+    y += step_20;
+    if row_visible(y, ctl_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, ctl_h),
             &[
                 PillItem {
                     id: String::from("export.cs.srgb"),
@@ -2834,127 +2839,31 @@ fn build_export_figure_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
     end_modal_scroll(builder, panel_wid, &meta);
 }
 
-fn build_duplicate_prompt_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx, existing: &[SheetId]) {
-    let st = ui_text_style(builder, 10.5);
-    let vs = &builder.app.view_shards.dialogs_graph_misc;
-    let cover_rect = LayoutRectPx::new(body_rect.x, body_rect.y - 24, body_rect.width, body_rect.height + 24);
-    builder.paint_fill(ZLayer::ModalDialog, None, cover_rect, builder.palette.surface);
-
-    let scroll_id = "scroll.duplicate_prompt";
-    let content_h = 128 + u32::try_from(existing.len().max(1)).unwrap_or(1) * 26;
-    let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "dup.panel", content_h);
-    let mut y = clip.y - y_scroll;
-
-    if row_visible(y, 20, clip) {
-        emit_modal_label(
-            builder,
-            &panel_wid,
-            "dup.summary",
-            LayoutRectPx::new(clip.x, y, clip.width, 20),
-            &format!("{} matching analysis sheet(s) already exist for this data table:", existing.len()),
-            builder.palette.text,
-            &st,
-            ControlEnablement::enabled(),
-            Some(scroll_id),
-        );
-    }
-    y += 24;
-    if row_visible(y, 22, clip) {
-        emit_ctoggle(
-            builder,
-            &panel_wid,
-            "dup.choice.create_new",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
-            "Create a new analysis sheet",
-            vs.duplicate_choice != "modify_existing",
-            true,
-            10,
-            ControlEnablement::enabled(),
-            scroll_id,
-            custom_action(String::from("dup:choice:create_new")),
-        );
-    }
-    y += 26;
-    let mod_en = if existing.is_empty() {
-        ControlEnablement::disabled("No existing matching analysis sheet is available to overwrite.")
-    } else {
-        ControlEnablement::enabled()
-    };
-    if row_visible(y, 22, clip) {
-        emit_ctoggle(
-            builder,
-            &panel_wid,
-            "dup.choice.modify_existing",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
-            "Modify an existing analysis sheet",
-            vs.duplicate_choice == "modify_existing",
-            true,
-            11,
-            mod_en,
-            scroll_id,
-            custom_action(String::from("dup:choice:modify_existing")),
-        );
-    }
-    y += 26;
-    for (idx, sid) in existing.iter().enumerate() {
-        if row_visible(y, 22, clip) {
-            let selected = vs.duplicate_choice == "modify_existing" && vs.duplicate_target_idx == idx;
-            emit_ctoggle(
-                builder,
-                &panel_wid,
-                &format!("dup.target.{idx}"),
-                LayoutRectPx::new(clip.x + 18, y, clip.width.saturating_sub(18), 22),
-                &format!("Target sheet: {}", sid.as_str()),
-                selected,
-                true,
-                15 + idx as u32,
-                ControlEnablement::enabled(),
-                scroll_id,
-                custom_action(format!("dup:target:{idx}")),
-            );
-        }
-        y += 24;
-    }
-    let mid = clip.y + (clip.height as i32) / 2;
-    if (mid - 20..mid + 20).contains(&y) {
-        y = mid + 22;
-    }
-    if row_visible(y, 24, clip) {
-        emit_cbtn(
-            builder,
-            &panel_wid,
-            "dup.confirm",
-            LayoutRectPx::new(clip.x, y, 160, 24),
-            "Apply Selected Action",
-            false,
-            true,
-            30,
-            ControlEnablement::enabled(),
-            custom_action(String::from("dup:confirm")),
-        );
-    }
-    end_modal_scroll(builder, panel_wid, &meta);
-}
-
 fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let cd = &builder.app.canvas_dialogs.change_data;
     let scroll_id = "scroll.change_data";
     let content_h = 80 + u32::try_from(cd.candidates.len()).unwrap_or(1) * 26 + 34;
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "change_data.panel", content_h);
     let mut y = clip.y - y_scroll;
+    let hdr_h = mpx(20, scale);
+    let row_h = mpx(22, scale);
+    let lbl_h = mpx(18, scale);
+    let step_24 = mi(24, scale);
+    let step_20 = mi(20, scale);
 
     let hdr = format!(
         "Current source: {}  ->  Target: {}",
         cd.current_source_id.as_ref().map_or("None", SheetId::as_str),
         cd.selected_target_id.as_ref().map_or("Select candidate", SheetId::as_str)
     );
-    if row_visible(y, 20, clip) {
+    if row_visible(y, hdr_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "change_data.hdr",
-            LayoutRectPx::new(clip.x, y, clip.width, 20),
+            LayoutRectPx::new(clip.x, y, clip.width, hdr_h),
             &hdr,
             builder.palette.text,
             &st,
@@ -2962,10 +2871,10 @@ fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             Some(scroll_id),
         );
     }
-    y += 24;
+    y += step_24;
 
     for (idx, cand) in cd.candidates.iter().enumerate() {
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             let en = if cand.compatible {
                 ControlEnablement::enabled()
             } else {
@@ -2979,7 +2888,7 @@ fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
                 builder,
                 &panel_wid,
                 &format!("change_data.cand.{idx}"),
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 &lbl,
                 selected,
                 true,
@@ -2989,15 +2898,15 @@ fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
                 custom_action(format!("change_data:cand:{idx}")),
             );
         }
-        y += 24;
+        y += step_24;
     }
 
-    if row_visible(y, 18, clip) {
+    if row_visible(y, lbl_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "change_data.ds_hdr",
-            LayoutRectPx::new(clip.x, y, clip.width, 18),
+            LayoutRectPx::new(clip.x, y, clip.width, lbl_h),
             "Included data sets:",
             builder.palette.muted,
             &st,
@@ -3005,14 +2914,14 @@ fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             Some(scroll_id),
         );
     }
-    y += 20;
+    y += step_20;
     let ds_count = cd
         .selected_target_id
         .as_ref()
         .or(cd.current_source_id.as_ref())
         .and_then(|sid| builder.app.document().data_sheet(sid))
         .map_or(2, |ds| crate::inspect::table_dimensions_summary(&ds.archetype).1.clamp(1, 6));
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let pills: Vec<PillItem<'_>> = (0..ds_count)
             .map(|i| PillItem {
                 id: format!("change_data.ds.{i}"),
@@ -3029,29 +2938,34 @@ fn build_change_data_analyzed_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
                 en: ControlEnablement::enabled(),
             })
             .collect();
-        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 40);
+        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 40);
     }
     end_modal_scroll(builder, panel_wid, &meta);
 }
 
 fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let fp = &builder.app.canvas_dialogs.format_points;
     let scroll_id = "scroll.fmt_pts";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "fmt_pts.panel", 260);
     let mut y = clip.y - y_scroll;
+    let hdr_h = mpx(20, scale);
+    let row_h = mpx(22, scale);
+    let step_24 = mi(24, scale);
+    let step_26 = mi(26, scale);
 
     let pt_en = if fp.selected_points.is_empty() {
         ControlEnablement::disabled("Select at least one data point on the graph first.")
     } else {
         ControlEnablement::enabled()
     };
-    if row_visible(y, 20, clip) {
+    if row_visible(y, hdr_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "fmt_pts.count",
-            LayoutRectPx::new(clip.x, y, clip.width, 20),
+            LayoutRectPx::new(clip.x, y, clip.width, hdr_h),
             &format!("{} selected data point(s) targeted", fp.selected_points.len()),
             builder.palette.text,
             &st,
@@ -3059,14 +2973,14 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             Some(scroll_id),
         );
     }
-    y += 24;
+    y += step_24;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let cur = fp.color.as_deref().unwrap_or("");
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("fmt_pts.col.black"),
@@ -3114,14 +3028,14 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             10,
         );
     }
-    y += 26;
+    y += step_26;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let cur_sym = fp.symbol.as_deref().unwrap_or("");
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("fmt_pts.sym.circle"),
@@ -3155,14 +3069,14 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             20,
         );
     }
-    y += 26;
+    y += step_26;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "fmt_pts.size",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Marker size (pt)",
             &format!("{:.1} pt", fp.size_pt.unwrap_or(5.0)),
             String::from("fmt_pts:size_dec"),
@@ -3173,13 +3087,13 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "fmt_pts.bw",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Border width (pt)",
             &format!("{:.1} pt", fp.border_width_pt.unwrap_or(1.0)),
             String::from("fmt_pts:bw_dec"),
@@ -3190,13 +3104,13 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "fmt_pts.fill_open",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Open symbol fill (hollow)",
             fp.fill_mode.as_deref() == Some("open"),
             false,
@@ -3206,13 +3120,13 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             custom_action(String::from("fmt_pts:fill_mode")),
         );
     }
-    y += 24;
-    if row_visible(y, 22, clip) {
+    y += step_24;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "fmt_pts.hidden",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Hide selected points",
             fp.hidden.unwrap_or(false),
             false,
@@ -3222,13 +3136,13 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             custom_action(String::from("fmt_pts:hidden")),
         );
     }
-    y += 24;
-    if row_visible(y, 22, clip) {
+    y += step_24;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "fmt_pts.labels",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Show row labels on selected points",
             fp.show_row_labels,
             false,
@@ -3238,13 +3152,13 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
             custom_action(String::from("fmt_pts:show_row_labels")),
         );
     }
-    y += 24;
-    if row_visible(y, 22, clip) {
+    y += step_24;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "fmt_pts.clear",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Clear all per-point style overrides",
             fp.clear_overrides,
             false,
@@ -3258,18 +3172,24 @@ fn build_format_selected_points_body(builder: &mut LayoutBuilder<'_>, parent: &W
 }
 
 fn build_exclude_with_reason_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let ex = &builder.app.canvas_dialogs.exclude_with_reason;
     let scroll_id = "scroll.exclude";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "exclude.panel", 200);
     let mut y = clip.y - y_scroll;
+    let hdr_h = mpx(20, scale);
+    let row_h = mpx(22, scale);
+    let field_h = mpx(24, scale);
+    let step_24 = mi(24, scale);
+    let step_26 = mi(26, scale);
 
-    if row_visible(y, 20, clip) {
+    if row_visible(y, hdr_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "exclude.target",
-            LayoutRectPx::new(clip.x, y, clip.width, 20),
+            LayoutRectPx::new(clip.x, y, clip.width, hdr_h),
             &format!("Targeting {} cell(s) — active tag: {}", ex.coords.len(), ex.reason_tag),
             builder.palette.text,
             &st,
@@ -3277,12 +3197,12 @@ fn build_exclude_with_reason_body(builder: &mut LayoutBuilder<'_>, parent: &Widg
             Some(scroll_id),
         );
     }
-    y += 24;
+    y += step_24;
 
     let tags = crate::dialogs_canvas::ExcludeWithReasonDialogState::preset_reason_tags();
     for chunk_idx in [0usize, 3] {
         let end = (chunk_idx + 3).min(tags.len());
-        if chunk_idx < end && row_visible(y, 22, clip) {
+        if chunk_idx < end && row_visible(y, row_h, clip) {
             let pills: Vec<PillItem<'_>> = (chunk_idx..end)
                 .map(|idx| PillItem {
                     id: format!("exclude.tag.{idx}"),
@@ -3292,20 +3212,21 @@ fn build_exclude_with_reason_body(builder: &mut LayoutBuilder<'_>, parent: &Widg
                     en: ControlEnablement::enabled(),
                 })
                 .collect();
-            emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 10 + chunk_idx as u32);
+            emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 10 + chunk_idx as u32);
         }
-        y += 26;
+        y += step_26;
     }
 
-    if row_visible(y, 24, clip) {
-        let field_w = clip.width.saturating_sub(92).max(120);
+    if row_visible(y, field_h, clip) {
+        let save_w = mpx(88, scale);
+        let field_w = clip.width.saturating_sub(save_w + 4).max(mpx(120, scale));
         emit_text_field(
             builder,
             TextFieldSpec {
                 id: "exclude.note_input",
                 parent: Some(panel_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(clip.x, y, field_w, 24),
+                rect: LayoutRectPx::new(clip.x, y, field_w, field_h),
                 label: "Audit Note",
                 fallback_text: &ex.note,
                 keyboard_path: "exclude.note_input",
@@ -3319,7 +3240,7 @@ fn build_exclude_with_reason_body(builder: &mut LayoutBuilder<'_>, parent: &Widg
             builder,
             &panel_wid,
             "exclude.apply_note",
-            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(124), y, 88, 24),
+            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(124), y, save_w, field_h),
             "Save Note",
             false,
             false,
@@ -3332,19 +3253,25 @@ fn build_exclude_with_reason_body(builder: &mut LayoutBuilder<'_>, parent: &Widg
 }
 
 fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let asf = &builder.app.canvas_dialogs.apply_style;
     let scroll_id = "scroll.apply_style";
     let content_h = 120 + u32::try_from(asf.donor_candidates.len().max(1)).unwrap_or(1) * 24;
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "apply_style.panel", content_h);
     let mut y = clip.y - y_scroll;
+    let lbl_h = mpx(18, scale);
+    let row_h = mpx(22, scale);
+    let step_20 = mi(20, scale);
+    let step_24 = mi(24, scale);
+    let step_26 = mi(26, scale);
 
-    if row_visible(y, 18, clip) {
+    if row_visible(y, lbl_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "apply_style.hdr",
-            LayoutRectPx::new(clip.x, y, clip.width, 18),
+            LayoutRectPx::new(clip.x, y, clip.width, lbl_h),
             "Donor Graph Sheet:",
             builder.palette.muted,
             &st,
@@ -3352,15 +3279,15 @@ fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             Some(scroll_id),
         );
     }
-    y += 20;
+    y += step_20;
 
     if asf.donor_candidates.is_empty() {
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             emit_cbtn(
                 builder,
                 &panel_wid,
                 "apply_style.no_donors",
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 "No other graph sheets available",
                 false,
                 false,
@@ -3369,16 +3296,16 @@ fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
                 WidgetAction::NoOp,
             );
         }
-        y += 26;
+        y += step_26;
     } else {
         for (idx, (sid, title)) in asf.donor_candidates.iter().enumerate() {
-            if row_visible(y, 22, clip) {
+            if row_visible(y, row_h, clip) {
                 let selected = asf.donor_graph_id.as_ref() == Some(sid);
                 emit_ctoggle(
                     builder,
                     &panel_wid,
                     &format!("apply_style.donor.{idx}"),
-                    LayoutRectPx::new(clip.x, y, clip.width, 22),
+                    LayoutRectPx::new(clip.x, y, clip.width, row_h),
                     &format!("{title} ({})", sid.as_str()),
                     selected,
                     true,
@@ -3388,7 +3315,7 @@ fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
                     custom_action(format!("apply_style:donor:{idx}")),
                 );
             }
-            y += 24;
+            y += step_24;
         }
     }
 
@@ -3397,12 +3324,12 @@ fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
         ("apply_style.clone_frame_and_axes", "frame", "Clone frame preset, axis scale, and ticks", asf.clone_frame_and_axes, 41),
         ("apply_style.clone_error_bars_and_legend", "legend", "Clone error-bar metric and legend visibility", asf.clone_error_bars_and_legend, 42),
     ] {
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             emit_ctoggle(
                 builder,
                 &panel_wid,
                 wid,
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 label,
                 checked,
                 false,
@@ -3412,24 +3339,30 @@ fn build_apply_style_from_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
                 custom_action(format!("apply_style:toggle:{toggle_key}")),
             );
         }
-        y += 24;
+        y += step_24;
     }
     end_modal_scroll(builder, panel_wid, &meta);
 }
 
 fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let pl = &builder.app.canvas_dialogs.page_layout;
     let scroll_id = "scroll.page_layout";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "page_layout.panel", 260);
     let mut y = clip.y - y_scroll;
+    let lbl_h = mpx(18, scale);
+    let row_h = mpx(22, scale);
+    let field_h = mpx(24, scale);
+    let step_20 = mi(20, scale);
+    let step_26 = mi(26, scale);
 
-    if row_visible(y, 18, clip) {
+    if row_visible(y, lbl_h, clip) {
         emit_modal_label(
             builder,
             &panel_wid,
             "page_layout.preset_lbl",
-            LayoutRectPx::new(clip.x, y, clip.width, 18),
+            LayoutRectPx::new(clip.x, y, clip.width, lbl_h),
             "Journal Page Preset:",
             builder.palette.muted,
             &st,
@@ -3437,12 +3370,12 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             Some(scroll_id),
         );
     }
-    y += 20;
-    if row_visible(y, 22, clip) {
+    y += step_20;
+    if row_visible(y, row_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("page_layout.p.0"),
@@ -3483,9 +3416,9 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             10,
         );
     }
-    y += 26;
+    y += step_26;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let orient_lbl = match pl.orientation {
             PageOrientation::Portrait => "Orientation: Portrait (click to switch)",
             PageOrientation::Landscape => "Orientation: Landscape (click to switch)",
@@ -3494,7 +3427,7 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             builder,
             &panel_wid,
             "page_layout.orientation",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             orient_lbl,
             pl.orientation == PageOrientation::Landscape,
             false,
@@ -3503,14 +3436,14 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             custom_action(String::from("page_layout:orientation")),
         );
     }
-    y += 26;
+    y += step_26;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "page_layout.rows",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Grid Rows",
             &pl.rows.to_string(),
             String::from("page_layout:rows_dec"),
@@ -3521,13 +3454,13 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "page_layout.cols",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Grid Columns",
             &pl.cols.to_string(),
             String::from("page_layout:cols_dec"),
@@ -3538,13 +3471,13 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "layout.align_plot_origins",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Align plot origins across grid panels",
             pl.align_plot_origins,
             false,
@@ -3554,12 +3487,12 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             custom_action(String::from("page_layout:align_origins")),
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("page_layout.badge.upper"),
@@ -3593,16 +3526,17 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             30,
         );
     }
-    y += 26;
-    if row_visible(y, 24, clip) {
-        let field_w = clip.width.saturating_sub(106).max(110);
+    y += step_26;
+    if row_visible(y, field_h, clip) {
+        let add_w = mpx(102, scale);
+        let field_w = clip.width.saturating_sub(add_w + 4).max(mpx(110, scale));
         emit_text_field(
             builder,
             TextFieldSpec {
                 id: "page_layout.callout_input",
                 parent: Some(panel_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(clip.x, y, field_w, 24),
+                rect: LayoutRectPx::new(clip.x, y, field_w, field_h),
                 label: "Callout Markdown",
                 fallback_text: &pl.new_callout_markdown,
                 keyboard_path: "page_layout.callout_input",
@@ -3616,7 +3550,7 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
             builder,
             &panel_wid,
             "page_layout.add_callout",
-            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(114), y, 102, 24),
+            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(114), y, add_w, field_h),
             "Add Callout",
             false,
             false,
@@ -3629,20 +3563,24 @@ fn build_page_layout_composer_body(builder: &mut LayoutBuilder<'_>, parent: &Wid
 }
 
 fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let eq = &builder.app.canvas_dialogs.insert_model_equation;
     let scroll_id = "scroll.insert_eq";
     let content_h = 204 + u32::try_from(eq.available_result_ids.len().max(1)).unwrap_or(1) * 24;
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "eq.panel", content_h);
     let mut y = clip.y - y_scroll;
+    let row_h = mpx(22, scale);
+    let step_24 = mi(24, scale);
+    let step_26 = mi(26, scale);
 
     if eq.available_result_ids.is_empty() {
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             emit_cbtn(
                 builder,
                 &panel_wid,
                 "eq.no_result",
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 "No regression/fit result sheet found",
                 false,
                 false,
@@ -3651,15 +3589,15 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
                 WidgetAction::NoOp,
             );
         }
-        y += 26;
+        y += step_26;
     } else {
         for (idx, rid) in eq.available_result_ids.iter().enumerate() {
-            if row_visible(y, 22, clip) {
+            if row_visible(y, row_h, clip) {
                 emit_ctoggle(
                     builder,
                     &panel_wid,
                     &format!("eq.result.{idx}"),
-                    LayoutRectPx::new(clip.x, y, clip.width, 22),
+                    LayoutRectPx::new(clip.x, y, clip.width, row_h),
                     &format!("Upstream fit result: {}", rid.as_str()),
                     eq.result_sheet_id.as_ref() == Some(rid),
                     true,
@@ -3669,16 +3607,16 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
                     custom_action(format!("eq:result:{idx}")),
                 );
             }
-            y += 24;
+            y += step_24;
         }
     }
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "eq.ds",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Data Set Index",
             &eq.data_set_index.to_string(),
             String::from("eq:ds_dec"),
@@ -3689,13 +3627,13 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "eq.font",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Equation Font (pt)",
             &format!("{:.0} pt", eq.font_size_pt),
             String::from("eq:font_dec"),
@@ -3706,8 +3644,8 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         let mode_lbl = match eq.mode {
             EquationDisplayMode::Substituted => "Display Mode: Substituted Parameter Values",
             EquationDisplayMode::Symbolic => "Display Mode: Symbolic Model Form",
@@ -3716,7 +3654,7 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
             builder,
             &panel_wid,
             "equation.toggle_mode",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             mode_lbl,
             eq.mode == EquationDisplayMode::Substituted,
             false,
@@ -3725,13 +3663,13 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
             custom_action(String::from("eq:toggle_mode")),
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "equation.bordered",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Frame equation callout with border",
             eq.bordered,
             false,
@@ -3741,13 +3679,13 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
             custom_action(String::from("eq:bordered")),
         );
     }
-    y += 24;
-    if row_visible(y, 22, clip) {
+    y += step_24;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "equation.update_existing",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Update existing equation callout on graph",
             eq.update_existing,
             false,
@@ -3761,22 +3699,28 @@ fn build_insert_model_equation_body(builder: &mut LayoutBuilder<'_>, parent: &Wi
 }
 
 fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let rg = &builder.app.canvas_dialogs.randomize_groups;
     let scroll_id = "scroll.rand_groups";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "rand_groups.panel", 230);
     let mut y = clip.y - y_scroll;
+    let row_h = mpx(22, scale);
+    let field_h = mpx(24, scale);
+    let step_28 = mi(28, scale);
+    let step_26 = mi(26, scale);
 
     let arms_text = rg.groups.iter().map(|(n, w)| if *w == 1 { n.clone() } else { format!("{n}:{w}") }).collect::<Vec<_>>().join(", ");
-    if row_visible(y, 24, clip) {
-        let field_w = clip.width.saturating_sub(96).max(110);
+    if row_visible(y, field_h, clip) {
+        let apply_w = mpx(92, scale);
+        let field_w = clip.width.saturating_sub(apply_w + 4).max(mpx(110, scale));
         emit_text_field(
             builder,
             TextFieldSpec {
                 id: "rand_groups.arms_input",
                 parent: Some(panel_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(clip.x, y, field_w, 24),
+                rect: LayoutRectPx::new(clip.x, y, field_w, field_h),
                 label: "Treatment Arms",
                 fallback_text: &arms_text,
                 keyboard_path: "rand_groups.arms_input",
@@ -3790,7 +3734,7 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             builder,
             &panel_wid,
             "rand_groups.apply_text",
-            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(114), y, 92, 24),
+            LayoutRectPx::new(clip.x + i32::try_from(field_w + 4).unwrap_or(114), y, apply_w, field_h),
             "Apply Arms",
             false,
             false,
@@ -3799,12 +3743,12 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             custom_action(String::from("rand_groups:apply_text")),
         );
     }
-    y += 28;
-    if row_visible(y, 22, clip) {
+    y += step_28;
+    if row_visible(y, row_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("rand_groups.p2"),
@@ -3831,13 +3775,13 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             14,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "rand_groups.n",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Subject Count",
             &rg.subject_count.to_string(),
             String::from("rand_groups:n_dec"),
@@ -3848,12 +3792,12 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("rand_groups.sch.balanced"),
@@ -3873,19 +3817,19 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             24,
         );
     }
-    y += 26;
+    y += step_26;
     let block_en = if rg.scheme == RandomizationSchemeKind::PermutedBlock {
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Block size applies only when Permuted Block randomization is selected.")
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let bs = rg.block_sizes.first().copied().unwrap_or(4);
         emit_stepper_row(
             builder,
             &panel_wid,
             "rand_groups.block",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Block Size",
             &bs.to_string(),
             String::from("rand_groups:block_dec"),
@@ -3896,13 +3840,13 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "rand_groups.seed",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "RNG Seed",
             &rg.seed.to_string(),
             String::from("rand_groups:seed_dec"),
@@ -3913,8 +3857,8 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         let info_en = if builder.app.document().info_sheets.is_empty() {
             ControlEnablement::disabled("Add an Info sheet to link randomization constants.")
         } else {
@@ -3924,7 +3868,7 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
             builder,
             &panel_wid,
             "rand_groups.target_info",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Write allocation summary to Info sheet",
             rg.target_info_sheet_id.is_some(),
             false,
@@ -3938,14 +3882,17 @@ fn build_randomize_groups_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
 }
 
 fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let rs = &builder.app.canvas_dialogs.random_sample_rows;
     let scroll_id = "scroll.rand_sample";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "rand_sample.panel", 200);
     let mut y = clip.y - y_scroll;
+    let row_h = mpx(22, scale);
+    let step_26 = mi(26, scale);
 
     let sheets = &builder.app.document().data_sheets;
-    if row_visible(y, 22, clip) && !sheets.is_empty() {
+    if row_visible(y, row_h, clip) && !sheets.is_empty() {
         let pills: Vec<PillItem<'_>> = sheets
             .iter()
             .take(4)
@@ -3958,16 +3905,16 @@ fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &Widge
                 en: ControlEnablement::enabled(),
             })
             .collect();
-        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 10);
+        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 10);
     }
-    y += 26;
+    y += step_26;
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "rand_sample.n",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Sample Size (rows)",
             &rs.sample_size.to_string(),
             String::from("rand_sample:n_dec"),
@@ -3978,13 +3925,13 @@ fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &Widge
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "rand_sample.seed",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "RNG Seed",
             &rs.seed.to_string(),
             String::from("rand_sample:seed_dec"),
@@ -3995,8 +3942,8 @@ fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &Widge
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         let mut pills = vec![PillItem {
             id: String::from("rand_sample.strat.none"),
             label: "Unstratified",
@@ -4013,20 +3960,20 @@ fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &Widge
                 en: ControlEnablement::enabled(),
             });
         }
-        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 24);
+        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 24);
     }
-    y += 26;
+    y += step_26;
     let prop_en = if rs.stratify_column.is_some() {
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Select a stratification column above to enable proportional allocation.")
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "sample.proportional_allocation",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Proportional stratum allocation",
             rs.proportional_allocation,
             false,
@@ -4040,19 +3987,22 @@ fn build_random_sample_rows_body(builder: &mut LayoutBuilder<'_>, parent: &Widge
 }
 
 fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let sd = &builder.app.canvas_dialogs.simulate_distributions;
     let vs = &builder.app.view_shards.dialogs_graph_misc;
     let scroll_id = "scroll.sim_dist";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "sim_dist.panel", 230);
     let mut y = clip.y - y_scroll;
+    let row_h = mpx(22, scale);
+    let step_26 = mi(26, scale);
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "sim_dist.rows",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Row Count (n)",
             &sd.n_rows.to_string(),
             String::from("sim_dist:rows_dec"),
@@ -4063,13 +4013,13 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "sim_dist.seed",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "RNG Seed",
             &sd.seed.to_string(),
             String::from("sim_dist:seed_dec"),
@@ -4080,13 +4030,13 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "simulate.use_multiple_variables",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Generate as Multiple Variables table",
             sd.use_multiple_variables,
             false,
@@ -4096,10 +4046,10 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
             custom_action(String::from("sim_dist:multi_var")),
         );
     }
-    y += 26;
+    y += step_26;
 
     let col_idx = vs.sim_selected_col_idx.min(sd.columns.len().saturating_sub(1));
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let mut pills: Vec<PillItem<'_>> = sd
             .columns
             .iter()
@@ -4120,16 +4070,16 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
             payload: String::from("sim_dist:add_col"),
             en: ControlEnablement::enabled(),
         });
-        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 20);
+        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 20);
     }
-    y += 26;
+    y += step_26;
 
     if let Some(col) = sd.columns.get(col_idx) {
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             emit_pill_row(
                 builder,
                 &panel_wid,
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 &[
                     PillItem {
                         id: String::from("sim_dist.d.uni"),
@@ -4177,7 +4127,7 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
                 30,
             );
         }
-        y += 26;
+        y += step_26;
         let (p1_lbl, p1_val, p2_spec): (&str, String, Option<(&str, String)>) = match col.distribution {
             crate::dialogs_r9::SimDistKind::Uniform => ("Minimum", format!("{:.1}", col.min), Some(("Maximum", format!("{:.1}", col.max)))),
             crate::dialogs_r9::SimDistKind::Gaussian => ("Mean", format!("{:.2}", col.mean), Some(("Std Dev", format!("{:.2}", col.sd)))),
@@ -4188,12 +4138,12 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
             crate::dialogs_r9::SimDistKind::Poisson => ("Lambda", format!("{:.1}", col.lambda), None),
             crate::dialogs_r9::SimDistKind::Exponential => ("Rate", format!("{:.2}", col.rate), None),
         };
-        if row_visible(y, 22, clip) {
+        if row_visible(y, row_h, clip) {
             emit_stepper_row(
                 builder,
                 &panel_wid,
                 "sim_dist.p1",
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 p1_lbl,
                 &p1_val,
                 String::from("sim_dist:param:p1_dec"),
@@ -4204,15 +4154,15 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
                 scroll_id,
             );
         }
-        y += 26;
+        y += step_26;
         if let Some((p2_lbl, p2_val)) = p2_spec
-            && row_visible(y, 22, clip)
+            && row_visible(y, row_h, clip)
         {
             emit_stepper_row(
                 builder,
                 &panel_wid,
                 "sim_dist.p2",
-                LayoutRectPx::new(clip.x, y, clip.width, 22),
+                LayoutRectPx::new(clip.x, y, clip.width, row_h),
                 p2_lbl,
                 &p2_val,
                 String::from("sim_dist:param:p2_dec"),
@@ -4228,13 +4178,16 @@ fn build_simulate_distributions_body(builder: &mut LayoutBuilder<'_>, parent: &W
 }
 
 fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let pr = &builder.app.canvas_dialogs.print;
     let scroll_id = "scroll.print";
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "print.panel", 230);
     let mut y = clip.y - y_scroll;
+    let row_h = mpx(22, scale);
+    let step_26 = mi(26, scale);
 
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         let mut pills = vec![PillItem {
             id: String::from("print.printer.default"),
             label: "OS Default (PDF Spool)",
@@ -4251,15 +4204,15 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
                 en: ControlEnablement::enabled(),
             });
         }
-        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, 22), &pills, 10);
+        emit_pill_row(builder, &panel_wid, LayoutRectPx::new(clip.x, y, clip.width, row_h), &pills, 10);
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "print.copies",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Copies",
             &pr.copies.to_string(),
             String::from("print:copies_dec"),
@@ -4270,13 +4223,13 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "print.scale",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Physical Scale (%)",
             &format!("{:.0}%", pr.job.scale_percent),
             String::from("print:scale_dec"),
@@ -4287,13 +4240,13 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             scroll_id,
         );
     }
-    y += 26;
-    if row_visible(y, 22, clip) {
+    y += step_26;
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "print.crop_marks",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Include corner crop marks",
             pr.job.crop_marks,
             false,
@@ -4303,18 +4256,18 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             custom_action(String::from("print:crop_marks")),
         );
     }
-    y += 26;
+    y += step_26;
     let bleed_en = if pr.job.crop_marks {
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Enable crop marks to configure print bleed margin.")
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_stepper_row(
             builder,
             &panel_wid,
             "print.bleed",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Bleed Margin (pt)",
             &format!("{:.0} pt", pr.job.bleed_pt),
             String::from("print:bleed_dec"),
@@ -4325,18 +4278,18 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             scroll_id,
         );
     }
-    y += 26;
+    y += step_26;
     let os_en = if builder.app.is_gui_only() {
         ControlEnablement::disabled("Submitting print jobs to the OS queue is blocked under --gui-only.")
     } else {
         ControlEnablement::enabled()
     };
-    if row_visible(y, 22, clip) {
+    if row_visible(y, row_h, clip) {
         emit_ctoggle(
             builder,
             &panel_wid,
             "print.submit_to_os",
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             "Submit directly to OS print queue",
             pr.submit_to_os,
             false,
@@ -4350,6 +4303,7 @@ fn build_print_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
 }
 
 fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body_rect: LayoutRectPx) {
+    let scale = builder.scale();
     let st = ui_text_style(builder, 10.5);
     let locale = builder.app.locale.clone();
     let sec = builder.app.view_shards.dialogs_graph_misc.active_section.as_str();
@@ -4362,14 +4316,17 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
     let (panel_wid, meta, clip, y_scroll) = begin_modal_scroll(builder, parent, body_rect, scroll_id, "about.panel", 220);
     let mut y = clip.y - y_scroll;
 
-    let logo_rect = LayoutRectPx::new(clip.x + 2, y, 52, 42);
+    let logo_w = mpx(52, scale);
+    let logo_h = mpx(42, scale);
+    let logo_rect = LayoutRectPx::new(clip.x + 2, y, logo_w, logo_h);
+    let txt_off = logo_w + mpx(14, scale);
     if row_visible(logo_rect.y, logo_rect.height, clip) {
         paint_plot_family_glyph(builder, &panel_wid, logo_rect, ThumbnailGlyphKind::ScatterLine);
         emit_modal_label(
             builder,
             &panel_wid,
             "about.title",
-            LayoutRectPx::new(logo_rect.right() + 10, y, clip.width.saturating_sub(66), 20),
+            LayoutRectPx::new(logo_rect.right() + mi(10, scale), y, clip.width.saturating_sub(txt_off), mpx(20, scale)),
             &format!("CurveBook Desktop  v{}", env!("CARGO_PKG_VERSION")),
             builder.palette.text,
             &ui_text_style(builder, 13.0),
@@ -4380,7 +4337,7 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             builder,
             &panel_wid,
             "about.tagline",
-            LayoutRectPx::new(logo_rect.right() + 10, y + 22, clip.width.saturating_sub(66), 18),
+            LayoutRectPx::new(logo_rect.right() + mi(10, scale), y + mi(22, scale), clip.width.saturating_sub(txt_off), mpx(18, scale)),
             w5_tr(&locale, "w5.about.tagline", "Publication-grade scientific data analysis & graphing"),
             builder.palette.muted,
             &st,
@@ -4388,13 +4345,14 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             Some(scroll_id),
         );
     }
-    y += 48;
+    y += mi(48, scale);
 
-    if row_visible(y, 22, clip) {
+    let row_h = mpx(22, scale);
+    if row_visible(y, row_h, clip) {
         emit_pill_row(
             builder,
             &panel_wid,
-            LayoutRectPx::new(clip.x, y, clip.width, 22),
+            LayoutRectPx::new(clip.x, y, clip.width, row_h),
             &[
                 PillItem {
                     id: String::from("about.tab.overview"),
@@ -4421,7 +4379,7 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             10,
         );
     }
-    y += 28;
+    y += mi(28, scale);
 
     let lines: &[&str] = match active_tab {
         "fonts" => &[
@@ -4438,13 +4396,15 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
             "Localization: 16-locale LTR/RTL adaptive layout & number formatting.",
         ],
     };
+    let line_h = mpx(20, scale);
+    let line_step = mi(22, scale);
     for (idx, text) in lines.iter().enumerate() {
-        if row_visible(y, 20, clip) {
+        if row_visible(y, line_h, clip) {
             emit_modal_label(
                 builder,
                 &panel_wid,
                 &format!("about.line.{idx}"),
-                LayoutRectPx::new(clip.x, y, clip.width, 20),
+                LayoutRectPx::new(clip.x, y, clip.width, line_h),
                 text,
                 builder.palette.text,
                 &st,
@@ -4452,7 +4412,7 @@ fn build_about_dialog_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, b
                 Some(scroll_id),
             );
         }
-        y += 22;
+        y += line_step;
     }
     end_modal_scroll(builder, panel_wid, &meta);
 }
@@ -4469,16 +4429,17 @@ pub fn emit_descriptor_controls_grid(
     if remaining.is_empty() || rect.width < 60 || rect.height < 18 {
         return;
     }
-    let cols = if rect.width >= 500 {
+    let scale = builder.scale();
+    let cols = if rect.width >= scaled_u32(500.0, scale, 400, 1100) {
         3u32
-    } else if rect.width >= 300 {
+    } else if rect.width >= scaled_u32(300.0, scale, 240, 680) {
         2u32
     } else {
         1u32
     };
-    let row_h = 20u32;
+    let row_h = scaled_u32(22.0, scale, 20, 48);
     let total_rows = (remaining.len() as u32).div_ceil(cols);
-    let content_h = total_rows.saturating_mul(row_h) + 6;
+    let content_h = total_rows.saturating_mul(row_h) + scaled_u32(6.0, scale, 4, 14);
     let scroll_id = String::from("scroll.modal.controls");
     let scroll_off = builder.scroll_offset(&scroll_id);
     let scroll_meta = ScrollMeta::new(scroll_id.clone(), rect, [rect.width, content_h], scroll_off, ScrollAxes::Vertical);
@@ -4495,22 +4456,25 @@ pub fn emit_descriptor_controls_grid(
     builder.attach_scroll(&panel_wid, scroll_meta.clone());
     builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), rect, builder.palette.panel);
 
-    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(14), rect.height.saturating_sub(4));
+    let sb_reserve = crate::layout::scroll::scrollbar_thickness_px(scale).saturating_add(4);
+    let clip = LayoutRectPx::new(rect.x + 2, rect.y + 2, rect.width.saturating_sub(sb_reserve), rect.height.saturating_sub(4));
     builder.push_clip(clip);
-    let col_w = (clip.width.saturating_sub(cols.saturating_sub(1) * 6) / cols).max(60);
+    let col_gap = scaled_u32(6.0, scale, 4, 14);
+    let col_w = (clip.width.saturating_sub(cols.saturating_sub(1) * col_gap) / cols).max(60);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
-    let size_px = (11.0 * builder.scale()).clamp(8.5, 20.0);
+    let size_px = (11.0 * scale).clamp(8.5, 20.0);
     let st = UiTextStyle::ui_sans(size_px);
+    let row_pad = scaled_u32(2.0, scale, 2, 6);
 
     for (idx, ctrl) in remaining.iter().enumerate() {
         let r_idx = (idx as u32) / cols;
         let c_idx = (idx as u32) % cols;
         let cy = clip.y + i32::try_from(r_idx * row_h).unwrap_or(0) - y_scroll;
-        if !row_visible(cy, row_h - 2, clip) {
+        if !row_visible(cy, row_h - row_pad, clip) {
             continue;
         }
-        let cx = clip.x + i32::try_from(c_idx * (col_w + 6)).unwrap_or(0);
-        let item_rect = LayoutRectPx::new(cx, cy, col_w, row_h - 2);
+        let cx = clip.x + i32::try_from(c_idx * (col_w + col_gap)).unwrap_or(0);
+        let item_rect = LayoutRectPx::new(cx, cy, col_w, row_h - row_pad);
         let en = ControlEnablement { enabled: ctrl.enabled, disabled_reason: ctrl.disabled_reason.clone() };
         emit_single_descriptor_control(builder, &panel_wid, item_rect, ctrl, en, base_tab_order + idx as u32, &st, &scroll_id);
     }

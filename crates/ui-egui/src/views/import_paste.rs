@@ -1049,12 +1049,16 @@ fn execute_import_paste_commit(app: &mut UiApp, state: &mut ImportPasteViewState
         let raw = app.grid.import_reshape.title.trim();
         if raw.is_empty() { "Imported Table" } else { raw }
     };
+    let target_kind = app.grid.import_reshape.target_kind;
+    let subcol_wire = if matches!(target_kind, TableKind::Grouped | TableKind::Nested) { "raw_replicates" } else { "single" };
     let out = app
         .execute_command(
             "table.importCsv",
             json!({
                 "title": title,
-                "archetype": table_kind_wire_name(app.grid.import_reshape.target_kind),
+                "archetype": table_kind_wire_name(target_kind),
+                "subcolumn_mode": subcol_wire,
+                "replicates": 1,
                 "csv": csv_text,
                 "delimiter": "\t",
                 "decimal_separator": ".",

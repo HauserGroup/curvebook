@@ -987,6 +987,6 @@ fn picker_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn scaled_u32(base: f64, scale: f64, min: u32, max: u32) -> u32 {
+pub(super) fn scaled_u32(base: f64, scale: f64, min: u32, max: u32) -> u32 {
     ((base * scale).round().max(0.0) as u32).clamp(min, max)
 }

@@ -12,7 +12,7 @@ use crate::dialogs_canvas::{ActiveDialog, ActiveInspector, ResultSheetViewState}
 use crate::grid_view::data_set_subcolumn_count;
 use crate::interaction::UiEventOutcome;
 use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
-use crate::layout::scroll::{ScrollAxes, ScrollMeta};
+use crate::layout::scroll::{ScrollAxes, ScrollMeta, scrollbar_thickness_px};
 use crate::layout::widgets::{FittedTextSpec, emit_scrollbars_for_meta, maybe_paint_focus_ring, paint_text_fitted, widget_state};
 use crate::layout::{LayoutBuilder, LayoutRectPx, NodeSpec, WidgetAction, WidgetId, WidgetVisualState, ZLayer};
 use crate::menus::command_tooltip;
@@ -1567,10 +1567,14 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
     let max_row_font = f64::from(menu_h.saturating_sub(5)).max(8.5) * 0.78;
     let menu_size_px = (11.5 * builder.scale()).min(max_row_font).clamp(8.5, 18.0);
     let menu_style = UiTextStyle::ui_sans(menu_size_px);
+    let scale = builder.scale();
+    let max_bw = (f64::from(96u32) * scale).round().clamp(96.0, 240.0) as u32;
+    let min_bw = (f64::from(38u32) * scale).round().clamp(38.0, 96.0) as u32;
+    let pad_bw = (f64::from(14u32) * scale).round().clamp(14.0, 32.0) as u32;
     let menus = crate::menus::menu_bar_tooltips(builder.app);
     for (idx, sec) in menus.iter().enumerate() {
         let measured = builder.measurer.measure(sec.title, &menu_style, &builder.tree.locale).width_px.ceil() as u32;
-        let bw = (measured + 14).clamp(38, 96);
+        let bw = (measured + pad_bw).clamp(min_bw, max_bw);
         if cur_x + i32::try_from(bw).unwrap_or(44) > rect.right() - 8 {
             break;
         }
@@ -1733,7 +1737,7 @@ fn resolve_menu_item_action(app: &UiApp, command_id: &str) -> WidgetAction {
     let target_gid = target_graph_id(doc);
     let target_vis = target_visual_sheet_id(doc);
     match command_id {
-        "project.open" => WidgetAction::Custom { domain: String::from("toolbar_menus"), payload: String::from("project.open_browser") },
+        "project.open" => WidgetAction::InvokeCommand { command_id: String::from("project.open"), params: json!({}) },
         "project.save" => WidgetAction::InvokeCommand { command_id: String::from("project.save"), params: json!({ "return_bytes": true }) },
         "graph.setAxes" => {
             WidgetAction::InvokeCommand { command_id: String::from("ui.graph.axes.open"), params: non_null_obj_with_sheet(target_gid.as_ref()) }
@@ -1806,11 +1810,13 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     let Some(section) = sections.into_iter().find(|s| s.menu_key == menu_key) else {
         return;
     };
+    let scale = builder.scale();
+    let su = |px: u32| -> u32 { (f64::from(px) * scale).round().clamp(f64::from(px) * 0.75, f64::from(px) * 3.0) as u32 };
     let anchor_x = builder.tree.node(menu_key).map_or(toolbar_rect.x + 8, |n| n.bounds.rect_px.x);
-    let pop_w = 256u32;
-    let row_h = 22u32;
-    let max_h = builder.tree.metrics.physical_height_px().saturating_sub(toolbar_rect.bottom() as u32 + 12).clamp(60, 320);
-    let content_h = (section.items.len() as u32).saturating_mul(row_h) + 6;
+    let pop_w = su(256).min(builder.tree.metrics.physical_width_px().saturating_sub(12).max(120));
+    let row_h = su(22).max(20);
+    let max_h = builder.tree.metrics.physical_height_px().saturating_sub(toolbar_rect.bottom() as u32 + 12).clamp(60, su(320));
+    let content_h = (section.items.len() as u32).saturating_mul(row_h) + su(6);
     let pop_h = content_h.min(max_h);
     let clamped_x = anchor_x.min(i32::try_from(builder.tree.metrics.physical_width_px().saturating_sub(pop_w + 6)).unwrap_or(0)).max(2);
     let pop_rect = LayoutRectPx::new(clamped_x, toolbar_rect.bottom(), pop_w, pop_h);
@@ -1832,7 +1838,8 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     builder.paint_fill(ZLayer::DropdownMenu, Some(&wid), pop_rect, builder.palette.surface);
     builder.paint_stroke(ZLayer::DropdownMenu, Some(&wid), pop_rect, builder.palette.accent, 1);
 
-    let clip = LayoutRectPx::new(pop_rect.x + 2, pop_rect.y + 2, pop_w.saturating_sub(14), pop_h.saturating_sub(4));
+    let sb_reserve = scrollbar_thickness_px(scale).saturating_add(4);
+    let clip = LayoutRectPx::new(pop_rect.x + 2, pop_rect.y + 2, pop_w.saturating_sub(sb_reserve), pop_h.saturating_sub(4));
     builder.push_clip(clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
     let size_px = (12.0 * builder.scale()).clamp(9.0, 22.0);
@@ -1883,7 +1890,7 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     emit_scrollbars_for_meta(builder, ZLayer::DropdownMenu, &scroll_meta, Some(wid));
 }
 
-fn build_toolbar_overflow_popup(builder: &mut LayoutBuilder<'_>) {
+pub(crate) fn build_toolbar_overflow_popup(builder: &mut LayoutBuilder<'_>) {
     let locale = builder.tree.locale.clone();
     let shard_state = &builder.app.view_shards.toolbar_menus;
     let toolbar_rect = LayoutRectPx::from_workspace_rect(builder.tree.frame.toolbar);
@@ -2391,7 +2398,7 @@ pub fn build_open_context_menu_popup(builder: &mut LayoutBuilder<'_>, target: &s
     }
 }
 
-/// Build the bottom workspace status bar inside `rect`, and overlay active context/overflow popups.
+/// Build the bottom workspace status bar inside `rect`.
 pub fn build_status_bar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
     if rect.width > 0 && rect.height > 0 {
         builder.paint_fill(ZLayer::Workspace, None, rect, builder.palette.panel);
@@ -2449,15 +2456,5 @@ pub fn build_status_bar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx
                 scroll_container: None,
             },
         );
-    }
-
-    if builder.app.canvas_dialogs.active_dialog == ActiveDialog::None && builder.app.interaction.open_menu.is_none() {
-        let active_ctx_target =
-            builder.app.interaction.context_menu_target.as_deref().or(builder.app.view_shards.toolbar_menus.active_context_menu_id.as_deref());
-        if let Some(target) = active_ctx_target {
-            build_open_context_menu_popup(builder, target);
-        } else if builder.app.view_shards.toolbar_menus.overflow_open && builder.tree.node("popup.toolbar_overflow").is_none() {
-            build_toolbar_overflow_popup(builder);
-        }
     }
 }

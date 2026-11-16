@@ -6172,7 +6172,7 @@ impl SplitWorkspaceState {
             })
             .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
 
-        let secondary = self.secondary_sheet_id.clone().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).or_else(|| {
+        let secondary = self.secondary_sheet_id.clone().filter(|id| doc.sheet_section(id).is_some()).or_else(|| {
             if let Some(act) = &active
                 && (doc.graph_sheet(act).is_some() || doc.layout_sheet(act).is_some())
             {
