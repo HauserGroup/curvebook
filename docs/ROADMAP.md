@@ -420,6 +420,8 @@ Owner: open · Status: done · Priority: after `R0.18`, before new `R10` GUI imp
 ### R7.4 Accessible MCP guide and minimal README
 Owner: open · Status: done · Priority: immediately after verified `R7.3`, before the GUI handoff · Depends on: `R7.3` · Was: MCP onboarding and README simplification request 2026-11-15
 
+- [x] Added the approved [plain-language MCP beginner's guide](mcp-for-beginners.md), with Mac/Windows configuration examples, a first analysis, saving/reopening work, troubleshooting, and privacy guidance; linked it directly below the README title with a temporary "technical babble ahead" warning. Documentation links and JSON examples checked on 2026-11-16; this follow-up makes no new application-readiness claim.
+
 Provide a short, welcoming entry point for a researcher or first-time MCP user, written after the `R7.3` MCP implementation and transport acceptance checks passed.
 
 - [x] Reduced [`README.md`](../README.md) (`124` lines) to a presentable functional minimum: concise introduction, restrained seven-pane icon (`assets/app-icon/curvebook-win95-2508.png`, `width="160"`), honest pre-alpha GUI status (`0/50` human-operable workflows until `R10`), Rust `1.99.1+` (`rust-toolchain.toml`) prerequisites and working `curvebook-cli` quick start, beginner MCP guide, compact documentation/support links, and MIT/Apache-2.0 + zero-telemetry notices (`cargo fmt --all -- --check`, `cargo xtask {assets,brands,secrets,telemetry,cleanroom,screenshots --check,layers}`: `26` attributed assets, `0/598` brands/secrets, `0` telemetry violations).
