@@ -205,6 +205,20 @@ fn oracle_normality_shapiro_wilk_lognormality_and_outliers() {
     assert_approx_eq(sw_n.p_value, 0.996_882_906_945_392, 5e-3, 0.0, "R shapiro p");
     assert!(sw_n.passed);
 
+    // D1 Provenance: Shapiro & Wilk (1965) / Royston (1995 AS R94); R 4.5.2 stats::shapiro.test
+    // small-sample n = 3..5 oracles (before R4.6 fix, n = 3 returned 1 - p via acos instead of asin - pi/3).
+    for &(sample, exp_w, exp_p, label) in &[
+        (&[1.0_f64, 2.0, 3.0][..], 1.0, 1.0, "n=3 symmetric [1,2,3]"),
+        (&[1.0, 1.0, 2.0][..], 0.75, 0.0, "n=3 degenerate [1,1,2]"),
+        (&[1.0, 1.5, 10.0][..], 0.791_530_944_625_407_1, 0.094_436_484_202_600_3, "n=3 skewed [1,1.5,10]"),
+        (&[1.0, 2.0, 3.0, 10.0][..], 0.806_885_664_567_700_2, 0.115_152_981_754_536_6, "n=4 skewed [1,2,3,10]"),
+        (&[1.0, 2.0, 3.0, 4.0, 20.0][..], 0.687_579_225_298_494, 0.007_068_598_540_515_0, "n=5 skewed [1,2,3,4,20]"),
+    ] {
+        let sw = shapiro_wilk(sample, 0.05).unwrap();
+        assert_approx_eq(sw.statistic, exp_w, 1e-11, 1e-11, &format!("{label} W"));
+        assert_approx_eq(sw.p_value, exp_p, 1e-9, 1e-9, &format!("{label} p"));
+    }
+
     // All four normality tests + lognormal comparison on strictly positive skewed data
     let skewed = [1.1, 1.3, 1.5, 1.7, 2.0, 2.4, 2.9, 3.6, 4.5, 5.8, 8.2, 14.5];
     let bat = normality_battery(&skewed, 0.05).unwrap();

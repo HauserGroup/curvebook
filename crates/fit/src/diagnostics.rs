@@ -40,6 +40,8 @@
 //!
 //! Reference: Shapiro, S. S. & Wilk, M. B. (1965). An analysis of variance test for normality (complete samples). *Biometrika* 52(3/4), 591–611.
 //!
+//! Reference: Royston, P. (1992). Approximating the Shapiro–Wilk W-test for non-normality. *Statistics and Computing* 2(3), 117–119.
+//!
 //! Reference: Royston, P. (1995). Remark AS R94: A remark on algorithm AS 181: The W-test for normality. *Journal of the Royal Statistical Society, Series C (Applied Statistics)* 44(4), 547–551.
 //!
 //! Reference: D'Agostino, R. B., Belanger, A. & D'Agostino, R. B., Jr. (1990). A suggestion for using powerful and informative tests of normality. *The American Statistician* 44(4), 316–321.
@@ -76,7 +78,7 @@ use lumencraft_math::special::ln_choose;
 use lumencraft_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 
 use crate::error::FitError;
-use crate::types::DataPoint;
+use crate::types::{DataPoint, validated_replicate_moments};
 
 /// Asymptotic covariance, standard errors, symmetric CIs, correlation matrix, and parameter dependency.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -1014,53 +1016,81 @@ fn exact_runs_two_sided(r_obs: usize, n1: usize, n2: usize) -> f64 {
     acc.total().clamp(0.0, 1.0)
 }
 
+#[derive(Clone, Copy)]
+struct ReplicateRow {
+    y: f64,
+    n_f: f64,
+    ss_within: f64,
+}
+
+fn canonical_x_bits(x: &[f64]) -> Vec<u64> {
+    x.iter().map(|&v| if v == 0.0 { 0.0_f64.to_bits() } else { v.to_bits() }).collect()
+}
+
+fn group_pure_error_ss(rows: &[ReplicateRow]) -> Option<f64> {
+    let mut within_acc = NeumaierSum::new();
+    let mut n_sum_acc = NeumaierSum::new();
+    let mut ny_sum_acc = NeumaierSum::new();
+    for row in rows {
+        within_acc.add(row.ss_within);
+        n_sum_acc.add(row.n_f);
+        ny_sum_acc.add(row.n_f * row.y);
+    }
+    let within_ss = within_acc.total();
+    if rows.len() <= 1 {
+        return within_ss.is_finite().then_some(within_ss.max(0.0));
+    }
+    let n_sum = n_sum_acc.total();
+    if !n_sum.is_finite() || n_sum <= 0.0 {
+        return None;
+    }
+    let y_bar = ny_sum_acc.total() / n_sum;
+    if !y_bar.is_finite() {
+        return None;
+    }
+    let mut between_acc = NeumaierSum::new();
+    for row in rows {
+        let diff = row.y - y_bar;
+        between_acc.add(row.n_f * diff * diff);
+    }
+    let total = within_ss + between_acc.total();
+    total.is_finite().then_some(total.max(0.0))
+}
+
 /// Replicates test for lack of fit (partitions residual sum of squares into pure error at
-/// replicate `X` values and lack-of-fit).
+/// replicate `(data_set_index, x)` coordinates and lack-of-fit).
 ///
 /// Pure-error / lack-of-fit partition and `F = MS_LOF / MS_PE` per Draper & Smith (1998) and
-/// Motulsky & Christopoulos (2004). Pure error is computed from unweighted replicate `Y`
-/// values (or `(n - 1) SD^2` for pre-summarised points), so `ss_res` should be on the same
-/// unweighted scale for the partition to be exact.
+/// Motulsky & Christopoulos (2004). Groups raw, pre-summarised (`Mean/SD/N`), or mixed
+/// observations by `(data_set_index, x)` so each group contributes both within-row
+/// `(n_i - 1) SD_i^2` and between-row `n_i (y_i - ybar_g)^2` pure error with
+/// `df_PE = sum_i n_i - n_groups`. Pure error is unweighted (`w = 1`), so `ss_res` must be
+/// on the same unweighted scale (weighted / Poisson fits use weighted deviance/SS partitions).
 #[must_use]
 pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) -> Option<LackOfFitResult> {
     if points.is_empty() || df_res == 0 || !ss_res.is_finite() || ss_res < 0.0 {
         return None;
     }
-    let mut groups: BTreeMap<u64, Vec<f64>> = BTreeMap::new();
-    let mut has_summarized = false;
-    let mut ss_pe_acc = NeumaierSum::new();
-    let mut df_pe = 0_usize;
+    let mut groups: BTreeMap<(usize, Vec<u64>), Vec<ReplicateRow>> = BTreeMap::new();
+    let mut n_total = 0_usize;
 
     for pt in points {
-        if let (Some(sd), Some(n)) = (pt.sd, pt.n) {
-            has_summarized = true;
-            if !n.is_finite() || !(1.0..=1e9).contains(&n) || !sd.is_finite() {
-                return None;
-            }
-            if n > 1.0 {
-                let df_i = (n - 1.0).round() as usize;
-                ss_pe_acc.add((n - 1.0) * sd * sd);
-                df_pe = df_pe.checked_add(df_i)?;
-            }
-        } else {
-            let key = pt.x0().to_bits();
-            groups.entry(key).or_default().push(pt.y);
+        if !pt.y.is_finite() || pt.x.iter().any(|x| !x.is_finite()) {
+            return None;
         }
+        let (n_f, n_u, ss_within) = validated_replicate_moments(pt).ok()?;
+        n_total = n_total.checked_add(n_u)?;
+        groups.entry((pt.data_set_index, canonical_x_bits(&pt.x))).or_default().push(ReplicateRow { y: pt.y, n_f, ss_within });
     }
 
-    if !has_summarized {
-        for ys in groups.values() {
-            if ys.len() > 1
-                && let Ok(m) = SummaryMoments::from_slice(ys)
-            {
-                ss_pe_acc.add(m.css);
-                df_pe = df_pe.checked_add(ys.len() - 1)?;
-            }
-        }
-    }
-
+    let df_pe = n_total.saturating_sub(groups.len());
     if df_pe == 0 || df_res <= df_pe {
         return None;
+    }
+
+    let mut ss_pe_acc = NeumaierSum::new();
+    for rows in groups.values() {
+        ss_pe_acc.add(group_pure_error_ss(rows)?);
     }
     let ss_pure_error = ss_pe_acc.total().max(0.0);
     if !ss_pure_error.is_finite() {
@@ -1089,14 +1119,11 @@ pub fn replicates_lack_of_fit(points: &[DataPoint], ss_res: f64, df_res: usize) 
     })
 }
 
-/// Shapiro–Wilk normality test (Royston 1995 AS R94) on residuals (`3 <= n <= 5000`).
+/// Shapiro–Wilk normality test (Royston 1992; 1995 AS R94) on residuals (`3 <= n <= 5000`).
 ///
-/// Shapiro & Wilk (1965) `W` with Royston's (1995) polynomial approximations for the
-/// coefficients `a_n`, `a_{n-1}` and the normalising transformations for the p-value
-/// (exact arcsine form at `n = 3`).
-///
-/// Deviation: for `4 <= n <= 5` the coefficients are the normalised Blom scores `m / ||m||`
-/// rather than AS R94's polynomial-corrected `a_n`; `n = 3` coincides with AS R94.
+/// Shapiro & Wilk (1965) `W` with Royston's (1992, 1995 AS R94) polynomial approximations for
+/// `a_n` (`n >= 4`) and `a_{n-1}` (`n >= 6`), exact `a = [-1/sqrt(2), 0, 1/sqrt(2)]` and arcsine
+/// p-value at `n = 3`, and Royston's normalising transformations for `4 <= n <= 5000`.
 #[must_use]
 pub fn shapiro_wilk_test(values: &[f64]) -> Option<NormalityTestResult> {
     let n = values.len();
@@ -1115,54 +1142,58 @@ pub fn shapiro_wilk_test(values: &[f64]) -> Option<NormalityTestResult> {
         return None;
     }
 
-    let nf = n as f64;
-    let mut m = Vec::with_capacity(n);
-    for i in 1..=n {
-        let p = ((i as f64) - 0.375) / (nf + 0.25);
-        m.push(norm_ppf(p).ok()?);
-    }
-    let m_ss: f64 = m.iter().map(|&v| v * v).sum();
-    let u = 1.0 / nf.sqrt();
-    let mut a = vec![0.0_f64; n];
-
-    if n <= 5 {
-        let denom = m_ss.sqrt();
-        for (slot, &mi) in a.iter_mut().zip(m.iter()) {
-            *slot = mi / denom;
-        }
-    } else {
-        let c_last = m[n - 1] / m_ss.sqrt();
-        let c_prev = m[n - 2] / m_ss.sqrt();
-        let a_n = royston_poly_an(u) + c_last;
-        let a_n1 = royston_poly_an1(u) + c_prev;
-        let (phi, start_idx) = if n > 5 {
-            let num = m_ss - 2.0 * m[n - 1] * m[n - 1] - 2.0 * m[n - 2] * m[n - 2];
-            let den = 1.0 - 2.0 * a_n * a_n - 2.0 * a_n1 * a_n1;
-            ((num / den.max(1e-12)).sqrt(), 2)
-        } else {
-            let num = m_ss - 2.0 * m[n - 1] * m[n - 1];
-            let den = 1.0 - 2.0 * a_n * a_n;
-            ((num / den.max(1e-12)).sqrt(), 1)
-        };
-        a[n - 1] = a_n;
-        a[0] = -a_n;
-        if start_idx == 2 {
-            a[n - 2] = a_n1;
-            a[1] = -a_n1;
-        }
-        for i in start_idx..(n - start_idx) {
-            a[i] = m[i] / phi;
-        }
-    }
-
+    let a = royston_sw_weights(n)?;
     let mut num_acc = NeumaierSum::new();
-    for (&ai, &xi) in a.iter().zip(sorted.iter()) {
-        num_acc.add(ai * xi);
+    for i in 0..(n / 2) {
+        num_acc.add(a[n - 1 - i] * (sorted[n - 1 - i] - sorted[i]));
     }
     let num = num_acc.total();
     let w = ((num * num) / moments.css).clamp(0.0, 1.0);
-    let p_value = royston_sw_p_value(w, nf);
+    let p_value = royston_sw_p_value(w, n as f64);
     Some(NormalityTestResult { test_name: String::from("Shapiro-Wilk"), statistic: w, p_value, passed: p_value >= 0.05 })
+}
+
+fn royston_sw_weights(n: usize) -> Option<Vec<f64>> {
+    if n == 3 {
+        let s = core::f64::consts::FRAC_1_SQRT_2;
+        return Some(vec![-s, 0.0, s]);
+    }
+    let nf = n as f64;
+    let mut m = Vec::with_capacity(n);
+    let mut m_ss = 0.0_f64;
+    for i in 1..=n {
+        let p = ((i as f64) - 0.375) / (nf + 0.25);
+        let mi = norm_ppf(p).ok()?;
+        m_ss += mi * mi;
+        m.push(mi);
+    }
+    let m_norm = m_ss.sqrt();
+    let u = 1.0 / nf.sqrt();
+    let a_n = royston_poly_an(u) + m[n - 1] / m_norm;
+
+    let mut a = vec![0.0_f64; n];
+    a[n - 1] = a_n;
+    a[0] = -a_n;
+
+    if n <= 5 {
+        let num = m_ss - 2.0 * m[n - 1] * m[n - 1];
+        let den = (1.0 - 2.0 * a_n * a_n).max(1e-12);
+        let phi = (num / den).sqrt();
+        for i in 1..(n - 1) {
+            a[i] = m[i] / phi;
+        }
+    } else {
+        let a_n1 = royston_poly_an1(u) + m[n - 2] / m_norm;
+        a[n - 2] = a_n1;
+        a[1] = -a_n1;
+        let num = m_ss - 2.0 * m[n - 1] * m[n - 1] - 2.0 * m[n - 2] * m[n - 2];
+        let den = (1.0 - 2.0 * a_n * a_n - 2.0 * a_n1 * a_n1).max(1e-12);
+        let phi = (num / den).sqrt();
+        for i in 2..(n - 2) {
+            a[i] = m[i] / phi;
+        }
+    }
+    Some(a)
 }
 
 fn royston_poly_an(u: f64) -> f64 {
@@ -1184,19 +1215,24 @@ fn royston_poly_an1(u: f64) -> f64 {
 }
 
 fn royston_sw_p_value(w: f64, nf: f64) -> f64 {
-    let one_minus_w = (1.0 - w).max(1e-16);
+    if w >= 1.0 {
+        return 1.0;
+    }
     if nf == 3.0 {
-        let sqrtw = w.sqrt();
+        let sqrtw = w.max(0.0).sqrt();
         let pi6 = 6.0 / core::f64::consts::PI;
         let p = pi6 * (sqrtw.clamp(-1.0, 1.0).asin() - core::f64::consts::FRAC_PI_3);
         return p.clamp(0.0, 1.0);
     }
-    let y = one_minus_w.ln();
+    let y = (1.0 - w).max(1e-16).ln();
     let z = if nf <= 11.0 {
         let gamma = 0.459 * nf - 2.273;
+        if y >= gamma {
+            return 0.0;
+        }
         let mu = -0.000_671_4 * nf.powi(3) + 0.025_054 * nf.powi(2) - 0.399_78 * nf + 0.544;
         let sigma = (-0.002_032_2 * nf.powi(3) + 0.062_767 * nf.powi(2) - 0.778_57 * nf + 1.382_2).exp();
-        let w_trans = -(gamma - y).max(1e-16).ln();
+        let w_trans = -(gamma - y).ln();
         (w_trans - mu) / sigma
     } else {
         let lnn = nf.ln();
@@ -1406,18 +1442,14 @@ pub fn compute_rsdr(abs_residuals: &[f64], k_free: usize) -> f64 {
 /// Nonlinear ROUT outlier detection (`Motulsky & Brown 2006`):
 /// 1. Compute `RSDR` with `K = k_free` adjusted degrees of freedom from the Cauchy robust fit residuals,
 /// 2. Compute two-sided Student-*t* *p*-values `t_i = |r_i| / RSDR` with `df = N - K`,
-/// 3. Apply Benjamini–Hochberg FDR at caller threshold `Q%` (`q_percent / 100`).
-///
-/// Motulsky & Brown's rule `alpha_i = Q (N - (i - 1)) / N` over residuals ranked by size is the
-/// Benjamini & Hochberg (1995) step-up threshold `Q j / N` on the `j`-th smallest p-value, which
-/// is what this function applies.
-///
-/// Deviation: Motulsky & Brown only test the 30% of points furthest from the curve (`i` from
-/// `int(0.70 N)` to `N`); this implementation applies the step-up rule across all `N` points,
-/// so with a large `Q` it can flag points the paper's procedure would never test.
+/// 3. Apply Benjamini–Hochberg (1995) step-up FDR at caller threshold `Q%` (`q_percent / 100`)
+///    **only** across the top ~30% of points furthest from the fitted curve (`m_test = N - floor(0.70 N)`,
+///    thresholds `Q j / N` for `j = 1..=m_test`). The remaining ~70% closest points are not tested
+///    (`q_value = 1.0`, `is_outlier = false`), matching Motulsky & Brown (2006).
 ///
 /// # Errors
-/// Returns [`FitError::InsufficientData`] if `points.len() <= k_free`.
+/// Returns [`FitError::InsufficientData`] if `points.len() <= k_free`, or
+/// [`FitError::InvalidParameter`] if `residuals` length/finiteness or `q_percent` is invalid.
 pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usize, q_percent: f64) -> Result<RoutDetectionResult, FitError> {
     let n = points.len();
     if n <= k_free {
@@ -1425,6 +1457,12 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     }
     if residuals.len() != n {
         return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("length mismatch") });
+    }
+    if !q_percent.is_finite() || !(0.0..=100.0).contains(&q_percent) {
+        return Err(FitError::InvalidParameter { name: "q_percent", reason: format!("FDR Q% must lie in [0, 100], got {q_percent}") });
+    }
+    if residuals.iter().any(|r| !r.is_finite()) {
+        return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("ROUT residuals must all be finite") });
     }
     let df = n - k_free;
     let abs_res: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
@@ -1444,12 +1482,15 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     }
 
     let mut order: Vec<usize> = (0..n).collect();
-    order.sort_by(|&a, &b| p_vals[a].total_cmp(&p_vals[b]));
+    order.sort_by(|&a, &b| p_vals[a].total_cmp(&p_vals[b]).then_with(|| abs_res[b].total_cmp(&abs_res[a])).then_with(|| a.cmp(&b)));
 
-    // Benjamini-Hochberg step-up adjusted q-values & cutoff.
+    // Motulsky & Brown (2006): test only the top ~30% furthest points (`m_test = N - floor(0.70 * N)`).
+    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
+    let m_test = n - start;
+
     let mut bh_q = vec![1.0_f64; n];
     let mut running_min = 1.0_f64;
-    for rank_rev in (0..n).rev() {
+    for rank_rev in (0..m_test).rev() {
         let idx = order[rank_rev];
         let rank_1 = (rank_rev + 1) as f64;
         let raw_q = (p_vals[idx] * (n as f64) / rank_1).min(1.0);
@@ -1458,7 +1499,7 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     }
 
     let mut max_reject_rank: Option<usize> = None;
-    for (rank0, &idx) in order.iter().enumerate() {
+    for (rank0, &idx) in order.iter().take(m_test).enumerate() {
         let threshold = ((rank0 + 1) as f64) / (n as f64) * q_fdr;
         if p_vals[idx] <= threshold {
             max_reject_rank = Some(rank0);

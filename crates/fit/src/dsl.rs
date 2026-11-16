@@ -1252,15 +1252,14 @@ enum Rk45Outcome {
 ///
 /// Butcher tableau, 5th-order propagating weights, and embedded error weights `b - b*` of
 /// Dormand & Prince (1980) (local extrapolation: the 5th-order solution is advanced). Error
-/// control follows Hairer, Nørsett & Wanner (1993), Sec. II.4: `err <= atol + rtol * max(|y|,
-/// |y_new|)` with `rtol = 1e-8`, `atol = 1e-10`; accepted steps grow by
-/// `0.9 * ratio^(-1/5)` clamped to `[0.2, 5]`.
+/// control follows Hairer, Nørsett & Wanner (1993), §II.4 eq. (4.13): `err <= atol + rtol *
+/// max(|y|, |y_new|)` with `rtol = 1e-8`, `atol = 1e-10`; both accepted and rejected steps scale
+/// by `0.9 * ratio^(-1/5)` (`1/(q+1) = 1/5` for the 4th-order embedded error estimator), clamped
+/// to `[0.2, 5]` on accept and `[0.1, 0.5]` on rejection.
 ///
-/// Deviations: rejected steps shrink by `0.9 * ratio^(-1/4)` clamped to `[0.1, 0.5]` (the
-/// reference controller uses exponent `-1/5` throughout); the first-same-as-last stage is
-/// recomputed rather than reused (cost only); there is no automatic initial step selection
-/// (the first step is 5% of the span). Non-finite stages shrink the step by 4; integration
-/// fails (`None`) below `1e-13 * max(span, 1)` or after `MAX_ODE_STEPS` steps.
+/// Design notes: the first-same-as-last stage is recomputed rather than reused (cost only), and
+/// the initial step is `0.05 * span`. Non-finite stages shrink the step by 4; integration fails
+/// (`None`) below `1e-13 * max(span, 1)` or after `MAX_ODE_STEPS` steps.
 pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, rhs: F) -> Option<f64>
 where
     F: FnMut(f64, f64) -> Option<f64>,
@@ -1421,7 +1420,8 @@ where
                 knots_out.push((t, y, h));
             }
         } else {
-            let factor = (0.9 * ratio.powf(-0.25)).clamp(0.1, 0.5);
+            // Hairer, Nørsett & Wanner (1993) §II.4 eq. (4.13): error-per-step exponent -1/(q+1) = -1/5.
+            let factor = (0.9 * ratio.powf(-0.2)).clamp(0.1, 0.5);
             h *= factor;
             if h < min_h {
                 return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };

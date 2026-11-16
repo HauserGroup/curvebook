@@ -776,7 +776,8 @@ pub fn dagostino_pearson_k2(values: &[f64], alpha: f64) -> Result<NormalityTestO
     Ok(NormalityTestOutcome { test_name: String::from("D'Agostino-Pearson K2"), statistic: k2, p_value, passed: p_value > alpha })
 }
 
-/// Shapiro–Wilk `W` normality test (`3 <= n <= 5000`) using Royston (1992/1995) AS R94.
+/// Shapiro–Wilk `W` normality test (`3 <= n <= 5000`) using Shapiro & Wilk (1965) and
+/// Royston (1992; 1995 AS R94).
 pub fn shapiro_wilk(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
@@ -863,7 +864,8 @@ fn shapiro_wilk_p_value(w: f64, n: usize) -> f64 {
         return 1.0;
     }
     if n == 3 {
-        let p = (6.0 / std::f64::consts::PI) * w.max(0.0).sqrt().clamp(0.0, 1.0).acos();
+        // Shapiro & Wilk (1965) / Royston (1995 AS R94): exact null CDF on [3/4, 1].
+        let p = (6.0 / std::f64::consts::PI) * (w.max(0.0).sqrt().clamp(0.0, 1.0).asin() - std::f64::consts::FRAC_PI_3);
         return p.clamp(0.0, 1.0);
     }
     let one_minus_w = (1.0 - w).max(1e-16);
