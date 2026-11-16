@@ -106,7 +106,16 @@ A task is **Done** only when:
 - Generated files (`crates/mcp/src/ui_catalog.rs`, `docs/commands.md`, and `docs/schemas/*.schema.json`) match source definitions (`--check` passes).
 - Relevant roadmap/status entries accurately reflect what landed (never leave stale hardcoded counts in docs).
 
-Run the applicable verification checks before opening a PR or reporting completion:
+Verification policy:
+
+1. **Use scoped checks while iterating.** Run the tests, lints, oracle assertions, and generated-file or policy checks affected by the change, including relevant dependent crates and integration paths. Documentation and workflow edits normally need their corresponding checks, not a workspace rebuild.
+2. **Run full CI once changes are stable.** For broad changes such as workspace renames, dependency updates, or architecture changes, run `cargo xtask ci` on the stable integrated candidate before opening a PR or reporting completion. Do not restart the full suite after every edit or have multiple workers repeat the same full run with identical inputs.
+3. **Reuse passing results when inputs are unchanged.** Record the commands, source revision (including any uncommitted changes), and relevant configuration with the results. Reuse them while the checked source, dependencies/lockfile, toolchain, target, features, flags, environment, and fixtures remain unchanged. A new worktree, agent handoff, or documentation-only commit does not by itself invalidate unrelated passing checks.
+4. **Rerun what a fix invalidates.** After a failure, rerun the failed checks and checks affected by the fix first. Repeat full CI when subsequent changes could invalidate broader results; explain why another full run is needed. Never report a failed or partial full run as a complete pass.
+
+Keep each worker's verification worktree and isolated `CARGO_TARGET_DIR` stable across iterations to retain build caches; do not share a build directory between concurrent workers. Required checks and numerical tolerances remain unchanged.
+
+Select the applicable verification checks below before opening a PR or reporting completion; this is a catalogue, not a requirement to rerun every command for every change:
 
 ```sh
 cargo fmt --all -- --check
