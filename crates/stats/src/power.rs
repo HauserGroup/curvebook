@@ -32,6 +32,10 @@
 //! - Owen, D. B. (1965). The power of Student's t-test. *Journal of the American Statistical
 //!   Association*, 60(309), 320-333. doi:10.2307/2283156.
 
+use curvebook_doc::{
+    AnalysisSpec, Cell, ChecklistStatus, DataSheet, ResultCell, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, XColumnMode,
+    XyTable,
+};
 use curvebook_math::dist::{
     chi2_isf, f_isf, ncchi2_sf, ncf_sf, nct_cdf, nct_sf, norm_cdf, norm_isf, norm_ppf, norm_sf, norm_two_sided_isf, student_t_isf,
     student_t_two_sided_isf,
@@ -42,6 +46,7 @@ use curvebook_math::special::ln_gamma;
 use curvebook_math::sum::SummaryMoments;
 use serde::{Deserialize, Serialize};
 
+use crate::common::{build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, push_scalar, sanitize_result_sheet_floats};
 use crate::error::StatsError;
 
 const MAX_CONTINUOUS_N: f64 = 1e12;
@@ -2298,6 +2303,235 @@ pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], tar
         }
     }
     Ok(out)
+}
+
+/// Convert a serialized document [`curvebook_doc::PowerAnalysisSpec`] into a solver
+/// [`PowerAnalysisRequest`].
+#[must_use]
+pub fn power_request_from_doc_spec(spec: &curvebook_doc::PowerAnalysisSpec) -> PowerAnalysisRequest {
+    let family = match spec.family {
+        curvebook_doc::PowerTestFamily::TwoSampleUnpairedT => PowerTestFamily::TwoSampleUnpairedT,
+        curvebook_doc::PowerTestFamily::TwoSamplePairedT => PowerTestFamily::TwoSamplePairedT,
+        curvebook_doc::PowerTestFamily::OneSampleT => PowerTestFamily::OneSampleT,
+        curvebook_doc::PowerTestFamily::OneWayAnova => PowerTestFamily::OneWayAnova,
+        curvebook_doc::PowerTestFamily::TwoProportions => PowerTestFamily::TwoProportions,
+        curvebook_doc::PowerTestFamily::Correlation => PowerTestFamily::Correlation,
+        curvebook_doc::PowerTestFamily::ChiSquare => PowerTestFamily::ChiSquare,
+        curvebook_doc::PowerTestFamily::SimpleLinearRegression => PowerTestFamily::SimpleLinearRegression,
+    };
+    let solve_target = match spec.solve_target {
+        curvebook_doc::PowerSolveTarget::SampleSize => PowerSolveTarget::SampleSize,
+        curvebook_doc::PowerSolveTarget::Power => PowerSolveTarget::Power,
+        curvebook_doc::PowerSolveTarget::DetectableEffect => PowerSolveTarget::DetectableEffect,
+    };
+    let tail_mode = match spec.tail_mode {
+        curvebook_doc::PowerTailMode::TwoSided => TailMode::TwoSided,
+        curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Greater) => TailMode::OneSided(OneSidedDirection::Greater),
+        curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Less) => TailMode::OneSided(OneSidedDirection::Less),
+    };
+    let two_proportions_mode = match spec.two_proportions_mode {
+        curvebook_doc::TwoProportionsMethod::PooledNullUnpooledAlt => TwoProportionsMethod::PooledNullUnpooledAlt,
+        curvebook_doc::TwoProportionsMethod::Unpooled => TwoProportionsMethod::Unpooled,
+        curvebook_doc::TwoProportionsMethod::CohensH => TwoProportionsMethod::CohensH,
+    };
+    let correlation_method = match spec.correlation_method {
+        curvebook_doc::CorrelationPowerMethod::FisherZ => CorrelationPowerMethod::FisherZ,
+        curvebook_doc::CorrelationPowerMethod::FisherZWithTCrit => CorrelationPowerMethod::FisherZWithTCrit,
+        curvebook_doc::CorrelationPowerMethod::ExactTTransform => CorrelationPowerMethod::ExactTTransform,
+        curvebook_doc::CorrelationPowerMethod::ConditionalSlopeT => CorrelationPowerMethod::ConditionalSlopeT,
+    };
+    let effect = match &spec.effect {
+        curvebook_doc::PowerEffectSpec::Unspecified => PowerEffectSpec::Unspecified,
+        curvebook_doc::PowerEffectSpec::Standardized(d) => PowerEffectSpec::Standardized(*d),
+        curvebook_doc::PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation } => PowerEffectSpec::MeanDiffAndSd {
+            mean_diff: *mean_diff,
+            sd: *sd,
+            sd_group2: *sd_group2,
+            within_pair_correlation: *within_pair_correlation,
+        },
+        curvebook_doc::PowerEffectSpec::PairedDiff { mean_diff, sd_diff } => PowerEffectSpec::PairedDiff { mean_diff: *mean_diff, sd_diff: *sd_diff },
+        curvebook_doc::PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+            PowerEffectSpec::GroupMeansAndSd { means: means.clone(), within_sd: *within_sd }
+        }
+        curvebook_doc::PowerEffectSpec::TwoProportions { p1, p2 } => PowerEffectSpec::TwoProportions { p1: *p1, p2: *p2 },
+        curvebook_doc::PowerEffectSpec::BaselineProportion { p1 } => PowerEffectSpec::BaselineProportion { p1: *p1 },
+        curvebook_doc::PowerEffectSpec::RSquared(r2) => PowerEffectSpec::RSquared(*r2),
+        curvebook_doc::PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
+            PowerEffectSpec::RegressionSlope { beta1: *beta1, sigma_x: *sigma_x, sigma_eps: *sigma_eps }
+        }
+    };
+    PowerAnalysisRequest {
+        family,
+        solve_target,
+        tail_mode,
+        alpha: spec.alpha,
+        target_power: spec.target_power,
+        sample_size: spec.sample_size,
+        sample_size_group2: spec.sample_size_group2,
+        allocation_ratio: spec.allocation_ratio,
+        effect,
+        num_groups: spec.num_groups,
+        chi_square_df: spec.chi_square_df,
+        two_proportions_mode,
+        continuity_correction: spec.continuity_correction,
+        correlation_method,
+    }
+}
+
+/// Execute [`curvebook_doc::PowerAnalysisSpec`] and emit a complete [`ResultSheet`] containing
+/// summary metrics, sensitivity table, power-curve tab, scalars, checklist, and `analyzable_data`.
+pub fn run_power_analysis(_sheet: &DataSheet, spec: &AnalysisSpec, doc_power: &curvebook_doc::PowerAnalysisSpec) -> Result<ResultSheet, StatsError> {
+    let req = power_request_from_doc_spec(doc_power);
+    let solved = solve_power(&req)?;
+    let mut res = init_result_sheet(spec)?;
+
+    let solve_label = match solved.solve_target {
+        PowerSolveTarget::SampleSize => "Required sample size",
+        PowerSolveTarget::Power => "Achievable power (1 - beta)",
+        PowerSolveTarget::DetectableEffect => "Minimum detectable effect",
+    };
+    let tail_label = match solved.tail_mode {
+        TailMode::TwoSided => "Two-sided",
+        TailMode::OneSided(OneSidedDirection::Greater) => "One-sided (greater)",
+        TailMode::OneSided(OneSidedDirection::Less) => "One-sided (less)",
+    };
+
+    let sum_headers = vec![String::from("Estimate")];
+    let sum_row_labels = vec![
+        String::from("Test family"),
+        String::from("Solve target"),
+        String::from("Tail mode"),
+        String::from("Significance level (alpha)"),
+        String::from("Target power (1 - beta)"),
+        String::from("Standardized effect size"),
+        String::from("Raw effect size"),
+        String::from("Sample size (n1 / per group)"),
+        String::from("Sample size (group 2)"),
+        String::from("Total N"),
+        String::from("Achieved power"),
+        String::from("Power at continuous N"),
+        String::from("Continuous N"),
+        String::from("Denominator df"),
+        String::from("Critical threshold"),
+        String::from("Noncentrality parameter"),
+        String::from("Implied proportion p2"),
+        String::from("Cohen's h"),
+        String::from("Implied R^2"),
+    ];
+    let sum_rows = vec![
+        vec![ResultCell::Text(String::from(solved.family.label()))],
+        vec![ResultCell::Text(String::from(solve_label))],
+        vec![ResultCell::Text(String::from(tail_label))],
+        vec![num_cell(solved.alpha)],
+        vec![opt_num_cell(solved.target_power)],
+        vec![num_cell(solved.effect_size)],
+        vec![opt_num_cell(solved.raw_effect_size)],
+        vec![num_cell(solved.n_per_group as f64)],
+        vec![opt_num_cell(solved.n_group2.map(|v| v as f64))],
+        vec![num_cell(solved.total_n as f64)],
+        vec![num_cell(solved.achieved_power)],
+        vec![num_cell(solved.power_at_continuous_n)],
+        vec![num_cell(solved.continuous_n)],
+        vec![opt_num_cell(solved.actual_df)],
+        vec![num_cell(solved.critical_value)],
+        vec![num_cell(solved.noncentrality_param)],
+        vec![opt_num_cell(solved.implied_p2)],
+        vec![opt_num_cell(solved.cohens_h)],
+        vec![opt_num_cell(solved.implied_r_squared)],
+    ];
+    res.tabs.push(build_tab("power-summary", "Power & Sample Size — Summary", ResultTabKind::MainSummary, sum_headers, sum_row_labels, sum_rows));
+
+    if !solved.sensitivity_table.is_empty() {
+        let sens_headers = vec![
+            String::from("Alpha"),
+            String::from("Target power"),
+            String::from("Effect size"),
+            String::from("Sample size (n1)"),
+            String::from("Total N"),
+        ];
+        let mut sens_labels = Vec::with_capacity(solved.sensitivity_table.len());
+        let mut sens_rows = Vec::with_capacity(solved.sensitivity_table.len());
+        for (idx, cell) in solved.sensitivity_table.iter().enumerate() {
+            sens_labels.push(format!("Scenario {}", idx + 1));
+            sens_rows.push(vec![
+                num_cell(cell.alpha),
+                num_cell(cell.target_power),
+                num_cell(cell.effect_size),
+                num_cell(cell.sample_size as f64),
+                num_cell(cell.total_n as f64),
+            ]);
+        }
+        res.tabs.push(build_tab("power-sensitivity", "Sensitivity Matrix", ResultTabKind::MultipleComparisons, sens_headers, sens_labels, sens_rows));
+    }
+
+    if !solved.power_curve.is_empty() {
+        let curve_headers =
+            vec![String::from("Sample size (N)"), String::from("Power (1 - beta)"), String::from("Effect size"), String::from("Total N")];
+        let mut curve_labels = Vec::with_capacity(solved.power_curve.len());
+        let mut curve_rows = Vec::with_capacity(solved.power_curve.len());
+        let mut xy = XyTable::new_with_x_mode(
+            XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single },
+            SubcolumnMode::Single,
+            1,
+            solved.power_curve.len(),
+        )?;
+        xy.x_title = String::from("Sample Size (N)");
+        xy.data_sets[0].title = String::from("Power (1 - beta)");
+        for (r, pt) in solved.power_curve.iter().enumerate() {
+            curve_labels.push(format!("Point {}", r + 1));
+            curve_rows.push(vec![num_cell(pt.n), num_cell(pt.power), num_cell(pt.effect_size), num_cell(pt.total_n)]);
+            if r < xy.x_cells.len() {
+                xy.x_cells[r][0] = Cell::number(pt.n);
+            }
+            if r < xy.data_sets[0].cells.len() {
+                xy.data_sets[0].cells[r][0] = Cell::number(pt.power);
+            }
+        }
+        res.tabs.push(build_tab("power-curve", "Power Curve", ResultTabKind::CurveCoordinates, curve_headers, curve_labels, curve_rows));
+        let data_id = SheetId::try_new(format!("{}-curve-data", spec.id.as_str())).unwrap_or_else(|_| SheetId::new("power-curve-data"));
+        let analyzable = DataSheet::new(data_id, "Power Curve Data", TableArchetype::Xy(xy))?;
+        res.analyzable_data = Some(analyzable);
+    }
+
+    push_scalar(&mut res, "Alpha", None, solved.alpha);
+    if let Some(tp) = solved.target_power {
+        push_scalar(&mut res, "TargetPower", None, tp);
+    }
+    push_scalar(&mut res, "EffectSize", None, solved.effect_size);
+    if let Some(raw_eff) = solved.raw_effect_size {
+        push_scalar(&mut res, "RawEffectSize", None, raw_eff);
+    }
+    push_scalar(&mut res, "NPerGroup", None, solved.n_per_group as f64);
+    if let Some(n2) = solved.n_group2 {
+        push_scalar(&mut res, "NGroup2", None, n2 as f64);
+    }
+    push_scalar(&mut res, "TotalN", None, solved.total_n as f64);
+    push_scalar(&mut res, "AchievedPower", None, solved.achieved_power);
+    push_scalar(&mut res, "PowerAtContinuousN", None, solved.power_at_continuous_n);
+    push_scalar(&mut res, "ContinuousN", None, solved.continuous_n);
+    push_scalar(&mut res, "CriticalValue", None, solved.critical_value);
+    push_scalar(&mut res, "NoncentralityParam", None, solved.noncentrality_param);
+    if let Some(df) = solved.actual_df {
+        push_scalar(&mut res, "ActualDf", None, df);
+    }
+    if let Some(p2) = solved.implied_p2 {
+        push_scalar(&mut res, "ImpliedP2", None, p2);
+    }
+    if let Some(h) = solved.cohens_h {
+        push_scalar(&mut res, "CohensH", None, h);
+    }
+    if let Some(r2) = solved.implied_r_squared {
+        push_scalar(&mut res, "ImpliedRSquared", None, r2);
+    }
+
+    res.checklist.push(checklist_item(
+        "Power & sample-size calculation",
+        ChecklistStatus::Pass,
+        Some(format!("n1 = {}, total N = {}, power = {:.4}", solved.n_per_group, solved.total_n, solved.achieved_power)),
+        solved.notes.join(" "),
+    ));
+    sanitize_result_sheet_floats(&mut res)?;
+    Ok(res)
 }
 
 #[cfg(test)]

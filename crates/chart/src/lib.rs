@@ -92,7 +92,7 @@ pub(crate) fn resolve_overridden_marker_for_cell(
     subcol: Option<usize>,
     base: MarkerStyle,
 ) -> Option<MarkerStyle> {
-    let Some(ov) = select_point_override(&spec.point_overrides, series_index, point_index, subcol, |_| None) else {
+    let Some(ov) = select_point_override(&spec.point_overrides, series_index, point_index, subcol, |ov| ov.subcol) else {
         return Some(base);
     };
     apply_point_override(ov, base)

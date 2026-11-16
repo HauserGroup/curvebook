@@ -74,5 +74,6 @@ pub fn run_analysis(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<ResultShee
             Err(StatsError::IncompatibleTable { analysis: "curve fitting (handled by curvebook-fit)", actual: sheet.archetype.kind() })
         }
         AnalysisKind::PValueStack(ps) => pvalue_stack::run_pvalue_stack_analysis(sheet, spec, ps),
+        AnalysisKind::PowerAnalysis(p) => power::run_power_analysis(sheet, spec, p),
     }
 }

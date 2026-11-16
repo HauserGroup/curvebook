@@ -14,6 +14,9 @@ use curvebook_stats::power::{
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::LocalePreset;
+
 /// Wizard step across the 4-stage Power & Sample Size flow (`docs/gui-workflows.md` §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum PowerWizardStage {
@@ -338,6 +341,75 @@ impl PowerWizardState {
         req
     }
 
+    /// Build a persistent document [`curvebook_doc::PowerAnalysisSpec`] capturing all wizard parameters.
+    #[must_use]
+    pub fn to_doc_spec(&self, info_sheet_id: Option<SheetId>) -> curvebook_doc::PowerAnalysisSpec {
+        let req = self.to_request();
+        let family = match req.family {
+            PowerTestFamily::TwoSampleUnpairedT => curvebook_doc::PowerTestFamily::TwoSampleUnpairedT,
+            PowerTestFamily::TwoSamplePairedT => curvebook_doc::PowerTestFamily::TwoSamplePairedT,
+            PowerTestFamily::OneSampleT => curvebook_doc::PowerTestFamily::OneSampleT,
+            PowerTestFamily::OneWayAnova => curvebook_doc::PowerTestFamily::OneWayAnova,
+            PowerTestFamily::TwoProportions => curvebook_doc::PowerTestFamily::TwoProportions,
+            PowerTestFamily::Correlation => curvebook_doc::PowerTestFamily::Correlation,
+            PowerTestFamily::ChiSquare => curvebook_doc::PowerTestFamily::ChiSquare,
+            PowerTestFamily::SimpleLinearRegression => curvebook_doc::PowerTestFamily::SimpleLinearRegression,
+        };
+        let solve_target = match req.solve_target {
+            PowerSolveTarget::SampleSize => curvebook_doc::PowerSolveTarget::SampleSize,
+            PowerSolveTarget::Power => curvebook_doc::PowerSolveTarget::Power,
+            PowerSolveTarget::DetectableEffect => curvebook_doc::PowerSolveTarget::DetectableEffect,
+        };
+        let tail_mode = match req.tail_mode {
+            TailMode::TwoSided => curvebook_doc::PowerTailMode::TwoSided,
+            TailMode::OneSided(OneSidedDirection::Greater) => curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Greater),
+            TailMode::OneSided(OneSidedDirection::Less) => curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Less),
+        };
+        let two_proportions_mode = match req.two_proportions_mode {
+            TwoProportionsMethod::PooledNullUnpooledAlt => curvebook_doc::TwoProportionsMethod::PooledNullUnpooledAlt,
+            TwoProportionsMethod::Unpooled => curvebook_doc::TwoProportionsMethod::Unpooled,
+            TwoProportionsMethod::CohensH => curvebook_doc::TwoProportionsMethod::CohensH,
+        };
+        let correlation_method = match req.correlation_method {
+            CorrelationPowerMethod::FisherZ => curvebook_doc::CorrelationPowerMethod::FisherZ,
+            CorrelationPowerMethod::FisherZWithTCrit => curvebook_doc::CorrelationPowerMethod::FisherZWithTCrit,
+            CorrelationPowerMethod::ExactTTransform => curvebook_doc::CorrelationPowerMethod::ExactTTransform,
+            CorrelationPowerMethod::ConditionalSlopeT => curvebook_doc::CorrelationPowerMethod::ConditionalSlopeT,
+        };
+        let effect = match req.effect {
+            PowerEffectSpec::Unspecified => curvebook_doc::PowerEffectSpec::Unspecified,
+            PowerEffectSpec::Standardized(d) => curvebook_doc::PowerEffectSpec::Standardized(d),
+            PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation } => {
+                curvebook_doc::PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation }
+            }
+            PowerEffectSpec::PairedDiff { mean_diff, sd_diff } => curvebook_doc::PowerEffectSpec::PairedDiff { mean_diff, sd_diff },
+            PowerEffectSpec::GroupMeansAndSd { means, within_sd } => curvebook_doc::PowerEffectSpec::GroupMeansAndSd { means, within_sd },
+            PowerEffectSpec::TwoProportions { p1, p2 } => curvebook_doc::PowerEffectSpec::TwoProportions { p1, p2 },
+            PowerEffectSpec::BaselineProportion { p1 } => curvebook_doc::PowerEffectSpec::BaselineProportion { p1 },
+            PowerEffectSpec::RSquared(r2) => curvebook_doc::PowerEffectSpec::RSquared(r2),
+            PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
+                curvebook_doc::PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps }
+            }
+        };
+        curvebook_doc::PowerAnalysisSpec {
+            family,
+            solve_target,
+            tail_mode,
+            alpha: req.alpha,
+            target_power: req.target_power,
+            sample_size: req.sample_size,
+            sample_size_group2: req.sample_size_group2,
+            allocation_ratio: req.allocation_ratio,
+            effect,
+            num_groups: req.num_groups,
+            chi_square_df: req.chi_square_df,
+            two_proportions_mode,
+            continuity_correction: req.continuity_correction,
+            correlation_method,
+            info_sheet_id,
+        }
+    }
+
     fn build_effect_spec(&self) -> PowerEffectSpec {
         if self.solve_target == PowerSolveTarget::DetectableEffect {
             return match self.family {
@@ -444,6 +516,17 @@ impl PowerWizardState {
         Ok(prev)
     }
 
+    /// Move sequentially between wizard stages (`advance` validates each intermediate stage).
+    pub fn step_to_stage(&mut self, target: PowerWizardStage) -> Result<(), String> {
+        while self.stage.index() < target.index() {
+            let _ = self.advance()?;
+        }
+        while self.stage.index() > target.index() {
+            let _ = self.go_back()?;
+        }
+        Ok(())
+    }
+
     /// Clear any Stage 4 curve hover readout.
     pub fn clear_hover(&mut self) {
         self.hover_n = None;
@@ -510,95 +593,132 @@ impl PowerWizardState {
 
     /// Apply a UI patch map (used by `ui.answer_dialog` and dialog form updates) and live-recalculate.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         for (key, val) in fields {
-            self.apply_single_field(key, val)?;
+            self.apply_single_field(key, val, preset)?;
         }
-        let _ = self.recalculate();
+        if matches!(self.stage, PowerWizardStage::SignificanceAndSolve | PowerWizardStage::Results) || self.result.is_some() {
+            let _ = self.recalculate()?;
+        } else {
+            let _ = self.recalculate();
+        }
         Ok(())
     }
 
-    fn apply_single_field(&mut self, key: &str, val: &Value) -> Result<(), String> {
+    fn apply_single_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
         match key {
             "stage" | "power.stage" => self.patch_stage(val)?,
             "family" | "power.family" => self.patch_family(val)?,
             "solve_target" | "power.solve_target" => self.patch_solve_target(val)?,
             "effect_mode" | "power.effect_mode" => self.patch_effect_mode(val)?,
             "standardized_effect" | "power.standardized_effect" | "effect_size" | "d" => {
-                self.standardized_effect = parse_num(val, key)?;
+                self.standardized_effect = parse_num_localized(val, key, preset)?;
             }
-            "mean_diff" | "power.mean_diff" => self.mean_diff = parse_num(val, key)?,
-            "sd" | "sigma" | "power.sd" => self.sd = parse_num(val, key)?,
-            "sd_group2" | "power.sd_group2" => self.sd_group2 = val.as_f64(),
+            "mean_diff" | "power.mean_diff" => self.mean_diff = parse_num_localized(val, key, preset)?,
+            "sd" | "sigma" | "power.sd" => self.sd = parse_num_localized(val, key, preset)?,
+            "sd_group2" | "power.sd_group2" => self.sd_group2 = parse_opt_num_localized(val, key, preset)?,
             "within_pair_correlation" | "r" | "power.within_pair_correlation" => {
-                self.within_pair_correlation = parse_num(val, key)?;
+                self.within_pair_correlation = parse_num_localized(val, key, preset)?;
             }
-            "paired_sd_diff" | "sigma_d" | "power.paired_sd_diff" => self.paired_sd_diff = parse_num(val, key)?,
+            "paired_sd_diff" | "sigma_d" | "power.paired_sd_diff" => self.paired_sd_diff = parse_num_localized(val, key, preset)?,
             "anova_groups" | "num_groups" | "k" | "power.anova_groups" => {
-                let k = parse_positive_usize_arg(val, key)?;
+                let k = parse_positive_usize_arg(val, key, preset)?;
                 self.anova_groups = k.max(2);
             }
-            "group_means" | "power.group_means" => self.patch_group_means(val)?,
-            "p1" | "power.p1" => self.p1 = parse_num(val, key)?,
-            "p2" | "power.p2" => self.p2 = parse_num(val, key)?,
-            "r_squared" | "power.r_squared" => self.r_squared = parse_num(val, key)?,
-            "beta1" | "power.beta1" => self.beta1 = parse_num(val, key)?,
-            "sigma_x" | "power.sigma_x" => self.sigma_x = parse_num(val, key)?,
-            "sigma_eps" | "power.sigma_eps" => self.sigma_eps = parse_num(val, key)?,
+            "group_means" | "power.group_means" => self.patch_group_means(val, preset)?,
+            "p1" | "power.p1" => self.p1 = parse_num_localized(val, key, preset)?,
+            "p2" | "power.p2" => self.p2 = parse_num_localized(val, key, preset)?,
+            "r_squared" | "power.r_squared" => self.r_squared = parse_num_localized(val, key, preset)?,
+            "beta1" | "power.beta1" => self.beta1 = parse_num_localized(val, key, preset)?,
+            "sigma_x" | "power.sigma_x" => self.sigma_x = parse_num_localized(val, key, preset)?,
+            "sigma_eps" | "power.sigma_eps" => self.sigma_eps = parse_num_localized(val, key, preset)?,
             "two_tailed" | "power.two_tailed" => {
-                self.two_tailed = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                let two = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                if !two && !self.family.supports_one_sided() {
+                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
+                }
+                self.two_tailed = two;
+            }
+            "one_sided" | "power.one_sided" => {
+                let one = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                if one && !self.family.supports_one_sided() {
+                    return Err(format!("{} only supports two-tailed tests", self.family.label()));
+                }
+                self.two_tailed = !one;
             }
             "one_sided_greater" | "power.one_sided_greater" => {
                 self.one_sided_greater = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
             }
             "tail_mode" | "power.tail_mode" => self.patch_tail_mode(val)?,
-            "alpha" | "power.alpha" => self.alpha = parse_num(val, key)?,
-            "target_power" | "power" | "power.target_power" => self.target_power = parse_num(val, key)?,
-            "sample_size" | "n" | "power.sample_size" => self.sample_size = parse_num(val, key)?,
-            "sample_size_group2" | "n2" | "power.sample_size_group2" => self.sample_size_group2 = val.as_f64(),
-            "allocation_ratio" | "power.allocation_ratio" => self.allocation_ratio = parse_num(val, key)?,
-            "chi_square_df" | "df" | "power.chi_square_df" => self.chi_square_df = parse_num(val, key)?,
+            "alpha" | "power.alpha" => self.alpha = parse_num_localized(val, key, preset)?,
+            "target_power" | "power" | "power.target_power" => self.target_power = parse_num_localized(val, key, preset)?,
+            "sample_size" | "n" | "power.sample_size" => self.sample_size = parse_num_localized(val, key, preset)?,
+            "sample_size_group2" | "n2" | "power.sample_size_group2" => {
+                self.sample_size_group2 = parse_opt_num_localized(val, key, preset)?;
+            }
+            "allocation_ratio" | "power.allocation_ratio" => self.allocation_ratio = parse_num_localized(val, key, preset)?,
+            "chi_square_df" | "df" | "power.chi_square_df" => self.chi_square_df = parse_num_localized(val, key, preset)?,
             "continuity_correction" | "power.continuity_correction" => {
                 self.continuity_correction = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
             }
             "hover_n" | "power.hover_n" => {
-                let hn = parse_num(val, key)?;
+                let hn = parse_num_localized(val, key, preset)?;
                 if self.result.is_none() {
-                    let _ = self.recalculate();
+                    let _ = self.recalculate()?;
                 }
                 let _ = self.hover_at_n(hn);
             }
             "hover_fraction_x" | "power.hover_fraction_x" => {
-                let f = parse_num(val, key)?;
+                let f = parse_num_localized(val, key, preset)?;
                 if self.result.is_none() {
-                    let _ = self.recalculate();
+                    let _ = self.recalculate()?;
                 }
                 let _ = self.hover_at_fraction(f);
             }
-            _ => {}
+            "power.curve_hover" | "curve_hover" => {
+                if self.result.is_none() {
+                    let _ = self.recalculate()?;
+                }
+                if let Some(obj) = val.as_object() {
+                    if let Some(hn_v) = obj.get("hover_n") {
+                        let hn = parse_num_localized(hn_v, "power.curve_hover.hover_n", preset)?;
+                        let _ = self.hover_at_n(hn);
+                    } else if let Some(fx_v) = obj.get("hover_fraction_x").or_else(|| obj.get("fraction_x")) {
+                        let f = parse_num_localized(fx_v, "power.curve_hover.hover_fraction_x", preset)?;
+                        let _ = self.hover_at_fraction(f);
+                    } else {
+                        return Err(String::from("`power.curve_hover` object must specify `hover_n` or `hover_fraction_x`"));
+                    }
+                } else {
+                    let hn = parse_num_localized(val, key, preset)?;
+                    let _ = self.hover_at_n(hn);
+                }
+            }
+            other => return Err(format!("unknown power wizard field `{other}`")),
         }
         Ok(())
     }
 
     fn patch_stage(&mut self, val: &Value) -> Result<(), String> {
-        if let Some(idx) = val.as_u64() {
-            if let Some(st) = PowerWizardStage::from_index(idx as usize) {
-                self.stage = st;
-                return Ok(());
-            }
-            return Err(format!("invalid power wizard stage index `{idx}`"));
-        }
-        if let Some(raw) = val.as_str() {
+        let target = if let Some(idx) = val.as_u64() {
+            PowerWizardStage::from_index(idx as usize).ok_or_else(|| format!("invalid power wizard stage index `{idx}`"))?
+        } else if let Some(raw) = val.as_str() {
             let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
-            self.stage = match norm.as_str() {
+            match norm.as_str() {
                 "1" | "experimentdesign" | "design" => PowerWizardStage::ExperimentDesign,
                 "2" | "effectsize" | "effect" => PowerWizardStage::EffectSize,
                 "3" | "significanceandsolve" | "significance" => PowerWizardStage::SignificanceAndSolve,
                 "4" | "results" | "resultssensitivity" => PowerWizardStage::Results,
                 _ => return Err(format!("unknown power wizard stage `{raw}`")),
-            };
-            return Ok(());
-        }
-        Err(String::from("`stage` must be a string or stage index"))
+            }
+        } else {
+            return Err(String::from("`stage` must be a string or stage index"));
+        };
+        self.step_to_stage(target)
     }
 
     fn patch_family(&mut self, val: &Value) -> Result<(), String> {
@@ -646,12 +766,8 @@ impl PowerWizardState {
         Ok(())
     }
 
-    fn patch_group_means(&mut self, val: &Value) -> Result<(), String> {
-        let arr = val.as_array().ok_or_else(|| String::from("`group_means` must be an array of numbers"))?;
-        let mut parsed = Vec::with_capacity(arr.len());
-        for v in arr {
-            parsed.push(parse_num(v, "group_means")?);
-        }
+    fn patch_group_means(&mut self, val: &Value, preset: &LocalePreset) -> Result<(), String> {
+        let parsed = crate::dialogs_r9::parse_f64_list_with_locale(val, "group_means", preset)?;
         if parsed.len() < 2 {
             return Err(String::from("`group_means` must contain at least 2 group means"));
         }
@@ -735,18 +851,16 @@ impl PowerWizardState {
             configure_power_graph_sheet(exec, graph_id, &res)?;
         }
 
+        let info_sid =
+            info_id_str.as_deref().map(SheetId::try_new).transpose().map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?;
+        let power_doc_spec = self.to_doc_spec(info_sid.clone());
         let res_outcome = exec(
             "analysis.run",
             json!({
                 "source_sheet_id": &data_id_str,
                 "title": format!("Power & Sample Size — {}", res.family.label()),
                 "kind": {
-                    "Transform": {
-                        "PruneRows": {
-                            "every_k_rows": 1,
-                            "average_window": false
-                        }
-                    }
+                    "PowerAnalysis": power_doc_spec
                 }
             }),
         )?;
@@ -755,10 +869,7 @@ impl PowerWizardState {
 
         let created = PowerWizardCreatedSheets {
             data_sheet_id: SheetId::try_new(&data_id_str).map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
-            info_sheet_id: info_id_str
-                .map(|s| SheetId::try_new(&s))
-                .transpose()
-                .map_err(|e| EngineError::with_code(ErrorCode::InternalError, e.to_string()))?,
+            info_sheet_id: info_sid,
             graph_sheet_id: graph_id_str
                 .map(|s| SheetId::try_new(&s))
                 .transpose()
@@ -867,16 +978,23 @@ fn interpolate_curve_power(curve: &[PowerCurvePoint], target_n: f64) -> Option<f
     curve.last().map(|p| p.power)
 }
 
-fn parse_num(val: &Value, field: &str) -> Result<f64, String> {
-    let parsed = val.as_f64().or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
+fn parse_num_localized(val: &Value, field: &str, preset: &LocalePreset) -> Result<f64, String> {
+    let parsed = val.as_f64().or_else(|| val.as_str().and_then(|s| parse_localized_number_input(s, preset)));
     parsed.filter(|v| v.is_finite()).ok_or_else(|| format!("`{field}` must be a finite number"))
 }
 
-fn parse_positive_usize_arg(val: &Value, field: &str) -> Result<usize, String> {
+fn parse_opt_num_localized(val: &Value, field: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
+    if val.is_null() || val.as_str().is_some_and(|s| s.trim().is_empty()) {
+        return Ok(None);
+    }
+    parse_num_localized(val, field, preset).map(Some)
+}
+
+fn parse_positive_usize_arg(val: &Value, field: &str, preset: &LocalePreset) -> Result<usize, String> {
     if let Some(u) = val.as_u64().filter(|&n| n >= 1) {
         return usize::try_from(u).map_err(|_| format!("`{field}` exceeds platform integer bounds"));
     }
-    let f = parse_num(val, field).map_err(|_| format!("`{field}` must be a positive integer"))?;
+    let f = parse_num_localized(val, field, preset).map_err(|_| format!("`{field}` must be a positive integer"))?;
     if f < 1.0 || (f - f.round()).abs() > 1e-9 || f > (usize::MAX as f64) {
         return Err(format!("`{field}` must be a positive integer"));
     }

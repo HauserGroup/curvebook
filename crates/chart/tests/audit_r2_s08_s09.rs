@@ -608,3 +608,70 @@ fn r2_s11_16_equation_box_single_axis_overflow_pushes_clip() {
     let y_pops = sc_y_clip.primitives.iter().filter(|p| matches!(p, ScenePrimitive::PopClip)).count();
     assert!(y_pushes >= 1 && y_pushes == y_pops, "expected balanced PushClip/PopClip for shallow 0 x h=14 box");
 }
+
+#[test]
+fn r2_s08_03_point_override_subcol_targets_single_replicate() -> TestResult {
+    // 1. XY raw replicates (k = 3): override on (series=0, point=1, subcol=Some(1)) hides ONLY replicate 1,
+    // and override on (series=0, point=1, subcol=Some(2)) restyles ONLY replicate 2.
+    let mut xy = XyTable::new(SubcolumnMode::RawReplicates(3), 1, 2)?;
+    xy.x_mode = curvebook_doc::XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
+    xy.x_cells = vec![vec![Cell::number(1.0)], vec![Cell::number(2.0)]];
+    xy.data_sets[0].cells =
+        vec![vec![Cell::number(10.0), Cell::number(11.0), Cell::number(12.0)], vec![Cell::number(20.0), Cell::number(25.0), Cell::number(30.0)]];
+    let xy_ds = DataSheet::new(SheetId::new("xy_rep"), "XYRep", TableArchetype::Xy(xy))?;
+    let mut xy_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_xy_rep"), &xy_ds)?;
+    let highlight = Rgba8::rgb(213, 94, 0);
+    xy_gs.spec.series[0].y_error_bars = None;
+    xy_gs.spec.series[0].gdo = GraphicalDataObject::ScatterAndLine {
+        marker: Some(MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: MarkerFillMode::Filled,
+            size_pt: 6.0,
+            fill_color: Rgba8::rgb(0, 114, 178),
+            stroke_color: Rgba8::rgb(0, 114, 178),
+            stroke_width_pt: 0.5,
+        }),
+        line: None,
+        area_fill: None,
+    };
+    xy_gs.spec.point_overrides = vec![
+        PointStyleOverride { series_index: 0, point_index: 1, subcol: Some(1), hidden: true, ..PointStyleOverride::default() },
+        PointStyleOverride {
+            series_index: 0,
+            point_index: 1,
+            subcol: Some(2),
+            color: Some(highlight),
+            size_pt: Some(12.0),
+            ..PointStyleOverride::default()
+        },
+    ];
+
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(xy_ds)?;
+    doc.add_graph_sheet(xy_gs.clone())?;
+    let xy_scene = compile_graph(&xy_gs, &doc)?;
+
+    assert_eq!(xy_scene.plotted_points.len(), 5, "only row=1 subcol=1 should be hidden (6 - 1 = 5)");
+    assert!(!xy_scene.plotted_points.iter().any(|p| p.source_cell.row == 1 && p.source_cell.subcol == 1));
+    let subcol0 = xy_scene.plotted_points.iter().find(|p| p.source_cell.row == 1 && p.source_cell.subcol == 0).expect("subcol 0");
+    let subcol2 = xy_scene.plotted_points.iter().find(|p| p.source_cell.row == 1 && p.source_cell.subcol == 2).expect("subcol 2");
+    assert!((subcol0.radius_pt - 3.0).abs() < 1e-6, "subcol 0 must keep base radius 3.0 pt");
+    assert!((subcol2.radius_pt - 6.0).abs() < 1e-6, "subcol 2 must receive size_pt=12 -> radius 6.0 pt");
+    assert!(xy_scene.primitives.iter().any(|prim| matches!(prim, ScenePrimitive::Path { fill: Some(f), .. } if f.color == highlight)));
+
+    // 2. Grouped replicates (k = 3) with AlignedDotPlot: hiding subcol=Some(0) on (series=0, point=0) hides only replicate 0.
+    let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(3), 1, 1)?;
+    grp.data_sets[0].cells = vec![vec![Cell::number(5.0), Cell::number(8.0), Cell::number(11.0)]];
+    let grp_ds = DataSheet::new(SheetId::new("grp_rep"), "GrpRep", TableArchetype::Grouped(grp))?;
+    let mut grp_gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_grp_rep"), &grp_ds)?;
+    grp_gs.spec.series[0].gdo =
+        GraphicalDataObject::AlignedDotPlot { summary: curvebook_doc::SummaryMeasure::Mean, marker: MarkerStyle::default(), show_crossbar: false };
+    grp_gs.spec.point_overrides =
+        vec![PointStyleOverride { series_index: 0, point_index: 0, subcol: Some(0), hidden: true, ..PointStyleOverride::default() }];
+    doc.add_data_sheet(grp_ds)?;
+    doc.add_graph_sheet(grp_gs.clone())?;
+    let grp_scene = compile_graph(&grp_gs, &doc)?;
+    assert_eq!(grp_scene.plotted_points.len(), 2, "only subcol=0 of grouped replicates should be hidden");
+    assert!(!grp_scene.plotted_points.iter().any(|p| p.source_cell.row == 0 && p.source_cell.subcol == 0));
+    Ok(())
+}

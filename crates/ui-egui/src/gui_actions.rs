@@ -25,7 +25,7 @@ use crate::control_io::{
     require_params_object_or_null, write_host_file,
 };
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, equation_display_mode_str};
-use crate::inspect::inspect_ui_tree;
+use crate::inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
 use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event, sync_dialogs_on_sheet_switch};
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
@@ -82,9 +82,10 @@ fn disabled_err(reason: impl Into<String>) -> EngineError {
 
 fn handle_ui_inspect(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     app.sync_views();
+    let metrics = parse_metrics(params)?;
     let scope = opt_str_param(params, &["scope"]).map_err(bad_input)?;
     let include_bounds = opt_bool_param(params, &["include_bounds"]).map_err(bad_input)?.unwrap_or(true);
-    let snap = inspect_ui_tree(app, scope, include_bounds);
+    let snap = inspect_ui_tree_for_metrics(app, metrics, scope, include_bounds);
     serde_json::to_value(snap).map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed to serialize ui tree: {err}")))
 }
 
@@ -107,14 +108,14 @@ fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineErro
     let dpi_u32 = parse_bounded_u32(params.get("dpi"), u32::from(DEFAULT_SCREENSHOT_DPI), u32::from(MIN_DPI), 600, "dpi").map_err(bad_input)?;
     let dpi = u16::try_from(dpi_u32).map_err(|_| bad_input("dpi out of range"))?;
 
-    let opt_path = opt_str_param(params, &["path"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
-    if opt_path.is_some() && app.is_gui_only() {
+    if app.is_gui_only() && params.get("path").is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty())) {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
             "direct filesystem writes via `ui.screenshot` `path` are blocked under --gui-only",
         )
         .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."));
     }
+    let opt_path = opt_str_param(params, &["path"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
 
     let (png_bytes, out_w, out_h) = render_workspace_region_png(app, RenderTargetSpec { width_px, height_px, dpi }, region)
         .map_err(|err| EngineError::with_code(ErrorCode::Conflict, format!("screenshot capture failed: {err}")))?;
@@ -190,7 +191,7 @@ fn handle_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, Engi
     let modifiers = parse_modifiers(params.get("modifiers"))?;
     let widget_id = opt_str_param(params, &["widget_id", "target_id"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
 
-    let tree = inspect_ui_tree(app, None, true);
+    let tree = inspect_ui_tree_for_metrics(app, metrics, None, true);
     let target_node = match widget_id {
         Some(wid) => Some(tree.find_widget(wid).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("widget `{wid}` not found")))?),
         None => None,
@@ -656,9 +657,6 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
             dispatch_ui_event(app, UiInputEvent::PointerDown { x, y, button: PointerButton::Secondary, modifiers }, metrics).map_err(map_err)?;
             let out =
                 dispatch_ui_event(app, UiInputEvent::PointerUp { x, y, button: PointerButton::Secondary, modifiers }, metrics).map_err(map_err)?;
-            if app.interaction.context_menu_target.is_none() && (!app.brushed_points.is_empty() || !app.grid.selected_rows.is_empty()) {
-                app.interaction.context_menu_target = Some(String::from("Format Selected Points..."));
-            }
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
         "drag" => {
@@ -781,6 +779,13 @@ fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, commit
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
         app.canvas_dialogs.command_palette.query = text.to_owned();
         if commit_enter && let Some(hit) = app.canvas_dialogs.command_palette.matches_for_session(app.session()).first().cloned() {
+            if app.is_gui_only() && is_gui_only_blocked_menu_command(hit.id) {
+                return Err(EngineError::with_code(
+                    ErrorCode::GuiOnlyViolation,
+                    format!("command palette execution of `{}` is blocked under --gui-only", hit.id),
+                )
+                .with_remediation("Select a parameterless menu/dialog command or toggle under --gui-only."));
+            }
             if let Some(res) = dispatch_ui_command_as_ui(app, hit.id, &Value::Null)? {
                 return Ok(json!({ "typed": text, "executed": hit.id, "result": res }));
             }
@@ -791,7 +796,7 @@ fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, commit
         return Ok(json!({ "typed": text, "widget_id": field_id, "dialog": "command_palette" }));
     }
 
-    let val = parse_typed_json_scalar(text);
+    let val = parse_typed_json_scalar(text, &app.locale_preset);
     let mut patch = Map::new();
     patch.insert(field_id.to_owned(), val);
     patch_active_dialog(app, &patch)?;
@@ -813,6 +818,11 @@ fn apply_type_text_to_grid(
     }
 
     let coord = wid.and_then(parse_grid_cell_widget_id).or(app.grid.tool.active).unwrap_or_else(|| GridCellCoord::new(0, 0, 0));
+    if app.inline_editor.active
+        && !matches!(app.inline_editor.target, Some(crate::interaction::InlineEditorTarget::GridCell { coord: c, .. }) if c == coord)
+    {
+        crate::interaction::commit_inline_edit_if_active(app).map_err(bad_input)?;
+    }
 
     if let Some(TableArchetype::MultipleVariables(mv)) = app.document().data_sheet(sheet_id).map(|ds| &ds.archetype)
         && mv.variables.get(coord.col).is_some_and(|v| matches!(v.source, VariableSource::Calculated { .. }))
@@ -830,6 +840,8 @@ fn apply_type_text_to_grid(
                 "start_col": coord.col,
                 "start_subcol": coord.subcol,
                 "mode": "overwrite",
+                "delimiter": "\t",
+                "decimal_separator": app.locale_preset.decimal_separator.to_string(),
             }),
         )?;
         app.grid.select_single_sync(coord);
@@ -844,7 +856,7 @@ fn apply_type_text_to_grid(
             cell_existing_text(app.document().data_sheet(sheet_id).and_then(|ds| ds.archetype.data_cell(curvebook_doc::CellCoord::from(coord))));
         format!("{existing}{text}")
     };
-    let scalar = parse_grid_scalar_value(&final_text);
+    let scalar = parse_grid_scalar_value(&final_text, &app.locale_preset);
     let out = app.execute_command(
         "table.setCell",
         json!({
@@ -882,6 +894,9 @@ fn apply_type_text_to_x_cell(
     clear_existing: bool,
     commit_enter: bool,
 ) -> Result<Value, EngineError> {
+    if app.inline_editor.active {
+        crate::interaction::commit_inline_edit_if_active(app).map_err(bad_input)?;
+    }
     {
         let Some(ds) = app.document().data_sheet(sheet_id) else {
             return Err(EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", sheet_id.as_str())));
@@ -899,11 +914,12 @@ fn apply_type_text_to_x_cell(
     }
 
     if text.contains('\n') || text.contains('\t') {
+        let preset = app.locale_preset.clone();
         let vals: Vec<Value> = text
             .lines()
             .map(|line| {
                 let first = line.split('\t').next().unwrap_or("");
-                parse_grid_scalar_value(first)
+                parse_grid_scalar_value(first, &preset)
             })
             .collect();
         let out = app.execute_command(
@@ -933,7 +949,7 @@ fn apply_type_text_to_x_cell(
         let existing = cell_existing_text(app.document().data_sheet(sheet_id).and_then(|ds| ds.x_or_time_cell(x_row, x_subcol)));
         format!("{existing}{text}")
     };
-    let scalar = parse_grid_scalar_value(&final_text);
+    let scalar = parse_grid_scalar_value(&final_text, &app.locale_preset);
     let out = app.execute_command(
         "table.setXCells",
         json!({
@@ -968,10 +984,10 @@ fn cell_existing_text(cell: Option<&Cell>) -> String {
     .unwrap_or_default()
 }
 
-fn parse_grid_scalar_value(final_text: &str) -> Value {
+fn parse_grid_scalar_value(final_text: &str, preset: &crate::LocalePreset) -> Value {
     if final_text.starts_with('*') {
         Value::String(final_text.to_owned())
-    } else if let Ok(num) = final_text.trim().parse::<f64>()
+    } else if let Some(num) = crate::grid_view::parse_localized_number_input(final_text, preset)
         && num.is_finite()
     {
         json!(num)
@@ -1008,7 +1024,7 @@ fn parse_x_cell_widget_id(wid: &str) -> Option<(usize, usize)> {
     None
 }
 
-fn parse_typed_json_scalar(text: &str) -> Value {
+fn parse_typed_json_scalar(text: &str, preset: &crate::LocalePreset) -> Value {
     let trimmed = text.trim();
     if trimmed.eq_ignore_ascii_case("true") {
         return Value::Bool(true);
@@ -1016,7 +1032,20 @@ fn parse_typed_json_scalar(text: &str) -> Value {
     if trimmed.eq_ignore_ascii_case("false") {
         return Value::Bool(false);
     }
-    if let Ok(num) = trimmed.parse::<f64>()
+    if !trimmed.is_empty()
+        && trimmed.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(u) = trimmed.parse::<u64>()
+    {
+        return json!(u);
+    }
+    if let Some(rest) = trimmed.strip_prefix('-')
+        && !rest.is_empty()
+        && rest.bytes().all(|b| b.is_ascii_digit())
+        && let Ok(i) = trimmed.parse::<i64>()
+    {
+        return json!(i);
+    }
+    if let Some(num) = crate::grid_view::parse_localized_number_input(trimmed, preset)
         && num.is_finite()
     {
         return json!(num);
@@ -1113,12 +1142,108 @@ fn extract_menu_path(val: Option<&Value>) -> Result<Option<String>, EngineError>
     Err(bad_input("ui.invoke_menu `path` must be a string or array of strings"))
 }
 
+pub(crate) fn is_gui_only_blocked_menu_command(cmd_id: &str) -> bool {
+    if matches!(
+        cmd_id,
+        "table.setCell"
+            | "ui.screenshot"
+            | "ui.event.dispatch"
+            | "ui.shortcut.set"
+            | "ui.shortcut.reset"
+            | "ui.brush.point"
+            | "app.quit"
+            | "ui.result.copyMethodsReport"
+            | "file.print"
+    ) {
+        return true;
+    }
+    cmd::registry().get(cmd_id).is_some_and(|spec| spec.menu_path.is_empty())
+}
+
+fn has_print_submit_to_os_true(val: &Value) -> bool {
+    match val {
+        Value::Object(map) => {
+            if map.get("submit_to_os").and_then(Value::as_bool) == Some(true)
+                || map.get("print").and_then(|v| v.get("submit_to_os")).and_then(Value::as_bool) == Some(true)
+            {
+                return true;
+            }
+            map.values().any(has_print_submit_to_os_true)
+        }
+        Value::Array(arr) => arr.iter().any(has_print_submit_to_os_true),
+        _ => false,
+    }
+}
+
+fn find_non_empty_path_key(val: &Value) -> Option<&'static str> {
+    const PATH_KEYS: [&str; 12] = [
+        "path",
+        "file_path",
+        "filePath",
+        "source_path",
+        "sourcePath",
+        "template_path",
+        "templatePath",
+        "ttf_font",
+        "ttfFont",
+        "font_path",
+        "fontPath",
+        "destination_path",
+    ];
+    match val {
+        Value::Object(map) => {
+            for &key in &PATH_KEYS {
+                if let Some(v) = map.get(key)
+                    && !v.is_null()
+                    && v.as_str().is_none_or(|s| !s.trim().is_empty())
+                {
+                    return Some(key);
+                }
+            }
+            for child in map.values() {
+                if let Some(found) = find_non_empty_path_key(child) {
+                    return Some(found);
+                }
+            }
+            None
+        }
+        Value::Array(arr) => arr.iter().find_map(find_non_empty_path_key),
+        _ => None,
+    }
+}
+
+fn enforce_gui_only_menu_command_policy(app: &UiApp, cmd_id: &str, extra_params: &Value) -> Result<(), EngineError> {
+    if !app.is_gui_only() {
+        return Ok(());
+    }
+    if is_gui_only_blocked_menu_command(cmd_id) {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, format!("menu command `{cmd_id}` is blocked under --gui-only"))
+            .with_remediation("Use visible interactive workspace controls and dialogs under --gui-only."));
+    }
+    if cmd_id == "ui.print.open" && has_print_submit_to_os_true(extra_params) {
+        return Err(EngineError::with_code(ErrorCode::GuiOnlyViolation, "OS print submission (`submit_to_os: true`) is blocked under --gui-only")
+            .with_remediation("Preview or spool in-memory PDF output without submitting to an OS printer."));
+    }
+    if !app.session().path_policy().is_constrained()
+        && let Some(path_key) = find_non_empty_path_key(extra_params)
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("unconstrained host filesystem `{path_key}` parameter via `ui.invoke_menu` is blocked under --gui-only without --workdir"),
+        )
+        .with_remediation("Configure `--workdir` confinement or use in-memory workflows without host path parameters."));
+    }
+    Ok(())
+}
+
 fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
-    if app.is_human_path_only() && params.get("params").is_some_and(|v| !v.is_null()) {
+    let has_non_empty_params = params.get("params").is_some_and(|v| !v.is_null() && !v.as_object().is_some_and(Map::is_empty));
+    if app.is_human_path_only() && has_non_empty_params {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
             "ui.invoke_menu with semantic `params` bypass is blocked under human_path_only",
-        ));
+        )
+        .with_remediation("Open dialogs via parameterless menu items and interact via visible widgets or `ui.answer_dialog`."));
     }
     let explicit_cmd = opt_non_empty_str_param(params, &["command_id"]).map_err(bad_input)?;
     let path = extract_menu_path(params.get("path"))?;
@@ -1128,6 +1253,17 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
 
     let sections = menu_bar_tooltips(app);
     let norm_path = path.as_deref().map(normalize_menu_token);
+    if app.is_gui_only()
+        && let Some(ref np) = norm_path
+        && matches!(np.as_str(), "analyzecopymethodsreport" | "copymethodsreport" | "graphbrushpoint" | "brushpoint")
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("menu path `{}` is blocked under --gui-only", path.as_deref().unwrap_or_default()),
+        )
+        .with_remediation("Use visible interactive workspace controls and dialogs under --gui-only."));
+    }
+
     let matched_tip = sections.iter().find_map(|sec| {
         sec.items.iter().find(|tip| {
             if let Some(cid) = explicit_cmd
@@ -1146,7 +1282,12 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         })
     });
 
-    let cmd_id = if let Some(tip) = matched_tip {
+    let cmd_id = if let Some(cid) = explicit_cmd
+        && app.is_gui_only()
+        && is_gui_only_blocked_menu_command(cid)
+    {
+        cid.to_owned()
+    } else if let Some(tip) = matched_tip {
         if !tip.enabled {
             return Err(disabled_err(format!("{} is disabled in the current workspace context.", tip.label)));
         }
@@ -1166,11 +1307,16 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         return Err(EngineError::with_code(ErrorCode::NotFound, format!("menu item `{}` not found", path.as_deref().unwrap_or_default())));
     };
 
-    let extra_params = match params.get("params") {
-        None | Some(Value::Null) => Value::Null,
-        Some(other @ Value::Object(_)) => other.clone(),
-        Some(_) => return Err(bad_input("ui.invoke_menu `params` must be a JSON object or null")),
+    let extra_params = if app.is_human_path_only() {
+        Value::Null
+    } else {
+        match params.get("params") {
+            None | Some(Value::Null) => Value::Null,
+            Some(other @ Value::Object(_)) => other.clone(),
+            Some(_) => return Err(bad_input("ui.invoke_menu `params` must be a JSON object or null")),
+        }
     };
+    enforce_gui_only_menu_command_policy(app, &cmd_id, &extra_params)?;
     if let Some(ui_val) = dispatch_ui_command_as_ui(app, &cmd_id, &extra_params)? {
         return Ok(json!({
             "invoked": true,
@@ -1195,7 +1341,8 @@ fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineErr
     let sheet_param = opt_non_empty_str_param(params, &["sheet_id"]).map_err(bad_input)?;
     let widget_param = opt_non_empty_str_param(params, &["widget_id"]).map_err(bad_input)?;
     if let Some(sheet_raw) = sheet_param.or_else(|| widget_param.and_then(|w| w.strip_prefix("nav.sheet."))) {
-        app.inline_editor.cancel();
+        crate::interaction::commit_inline_edit_if_active(app).map_err(bad_input)?;
+        app.interaction.context_menu_target = None;
         let out = app.execute_command("sheet.select", json!({ "sheet_id": sheet_raw }))?;
         if let Ok(sid) = SheetId::try_new(sheet_raw) {
             sync_dialogs_on_sheet_switch(app, &sid);
@@ -1225,12 +1372,7 @@ fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineErr
         }
         ActiveDialog::PowerAndSampleSize => {
             let stage = parse_power_stage_value(tab_val)?;
-            let current = app.canvas_dialogs.power_wizard.stage.index();
-            if stage.index() > current {
-                app.canvas_dialogs.power_wizard.can_advance().map_err(disabled_err)?;
-                let _ = app.canvas_dialogs.power_wizard.recalculate();
-            }
-            app.canvas_dialogs.power_wizard.stage = stage;
+            app.canvas_dialogs.power_wizard.step_to_stage(stage).map_err(disabled_err)?;
             Ok(json!({ "dialog": "power_and_sample_size", "stage": stage.label(), "stage_index": stage.index() }))
         }
         _ => switch_result_sheet_tab(app, tab_val),
@@ -1326,6 +1468,17 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
     if app.canvas_dialogs.active_dialog == ActiveDialog::None {
         return Err(EngineError::with_code(ErrorCode::Conflict, "no modal dialog is currently open"));
     }
+    if let Some(expected_id) = opt_non_empty_str_param(params, &["dialog_id"]).map_err(bad_input)? {
+        let active_slug = crate::inspect::active_dialog_slug(&app.canvas_dialogs.active_dialog);
+        let norm_expected: String = expected_id.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        let norm_active: String = active_slug.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        if norm_expected != norm_active {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("expected modal dialog `{expected_id}`, but `{active_slug}` is currently open"),
+            ));
+        }
+    }
     let explicit_action = opt_non_empty_str_param(params, &["action"]).map_err(bad_input)?.map(|s| s.to_ascii_lowercase());
     if let Some(ref act) = explicit_action
         && !matches!(act.as_str(), "ok" | "cancel" | "apply" | "back" | "next" | "create" | "preview")
@@ -1350,6 +1503,7 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
     if action == "cancel" {
         let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
         app.canvas_dialogs.close_dialog();
+        app.interaction.context_menu_target = None;
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
 
@@ -1358,7 +1512,11 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
         return Err(disabled_err(check.disabled_reason.unwrap_or_else(|| format!("dialog button `{action}` is currently disabled"))));
     }
 
-    commit_active_dialog_action(app, &action, params)
+    let res = commit_active_dialog_action(app, &action, params)?;
+    if app.canvas_dialogs.active_dialog == ActiveDialog::None {
+        app.interaction.context_menu_target = None;
+    }
+    Ok(res)
 }
 
 fn map_opt_str<'a>(fields: &'a Map<String, Value>, keys: &[&str]) -> Result<Option<&'a str>, EngineError> {
@@ -1386,46 +1544,82 @@ fn map_opt_bool(fields: &Map<String, Value>, keys: &[&str]) -> Result<Option<boo
 }
 
 fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
+    let preset = app.locale_preset.clone();
     match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch(fields).map_err(disabled_err)?,
-        ActiveDialog::FormatSelectedPoints { .. } => app.canvas_dialogs.format_points.apply_field_patch(fields).map_err(bad_input)?,
+        ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch_localized(fields, &preset).map_err(disabled_err)?,
+        ActiveDialog::FormatSelectedPoints { .. } => {
+            app.canvas_dialogs.format_points.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
+        }
         ActiveDialog::AnalyzeSheet { .. } => {
             let src = app.canvas_dialogs.analyze.source_sheet_id.as_ref();
             validate_pre_summarized_patch(app.document(), src, fields)?;
-            app.canvas_dialogs.analyze.apply_field_patch(fields).map_err(disabled_err)?;
+            app.canvas_dialogs.analyze.apply_field_patch_localized(fields, &preset).map_err(disabled_err)?;
         }
         ActiveDialog::EditAnalysisParameters { .. } => {
             let src = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.source_sheet_id);
             validate_pre_summarized_patch(app.document(), src, fields)?;
-            app.canvas_dialogs.edit_params.apply_field_patch(fields).map_err(disabled_err)?;
+            app.canvas_dialogs.edit_params.apply_field_patch_localized(fields, &preset).map_err(disabled_err)?;
         }
         ActiveDialog::ChangeDataAnalyzed { .. } => {
-            if let Some(sid) = map_opt_str(fields, &["target_sheet_id", "source_sheet_id"])? {
-                let parsed = SheetId::try_new(sid).map_err(|e| bad_input(e.to_string()))?;
-                app.canvas_dialogs.change_data.select_target(&parsed).map_err(disabled_err)?;
+            for (key, val) in fields {
+                match key.as_str() {
+                    "target_sheet_id" | "source_sheet_id" | "change_data.target_sheet_id" => {
+                        if !val.is_null() {
+                            let sid = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                            let parsed = SheetId::try_new(sid).map_err(|e| bad_input(e.to_string()))?;
+                            app.canvas_dialogs.change_data.select_target(&parsed).map_err(disabled_err)?;
+                        }
+                    }
+                    "selected_data_sets" | "change_data.selected_data_sets" => {
+                        let arr = val.as_array().ok_or_else(|| bad_input(format!("`{key}` must be an array of indices")))?;
+                        let mut indices = Vec::with_capacity(arr.len());
+                        for (i, v) in arr.iter().enumerate() {
+                            let raw = v.as_u64().ok_or_else(|| bad_input(format!("`{key}[{i}]` must be a non-negative integer")))?;
+                            let idx = usize::try_from(raw).map_err(|_| bad_input(format!("`{key}[{i}]` exceeds usize")))?;
+                            indices.push(idx);
+                        }
+                        app.canvas_dialogs.change_data.selected_data_sets = indices;
+                    }
+                    other => return Err(bad_input(format!("unknown ChangeDataAnalyzed field `{other}`"))),
+                }
             }
         }
         ActiveDialog::ChangeGraphType { .. } => {
-            if let Some(opt) = map_opt_str(fields, &["option_id", "selected_option_id", "graph_type.selected"])? {
-                app.canvas_dialogs.change_graph_type.selected_option_id = opt.to_owned();
-            }
-            if let Some(raw) = map_opt_str(fields, &["summary_measure", "graph_type.summary_measure"])? {
-                app.canvas_dialogs.change_graph_type.summary_measure = parse_summary_measure_str(raw).map_err(bad_input)?;
-            }
-            if let Some(raw) = map_opt_str(fields, &["error_bar_metric", "graph_type.error_bar_metric"])? {
-                app.canvas_dialogs.change_graph_type.error_bar_metric = parse_error_bar_metric_str(raw).map_err(bad_input)?;
+            for (key, val) in fields {
+                match key.as_str() {
+                    "option_id" | "selected_option_id" | "graph_type.selected" => {
+                        let opt = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.change_graph_type.selected_option_id = opt.to_owned();
+                    }
+                    "summary_measure" | "graph_type.summary_measure" => {
+                        let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.change_graph_type.summary_measure = parse_summary_measure_str(raw).map_err(bad_input)?;
+                    }
+                    "error_bar_metric" | "graph_type.error_bar_metric" => {
+                        let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.change_graph_type.error_bar_metric = parse_error_bar_metric_str(raw).map_err(bad_input)?;
+                    }
+                    other => return Err(bad_input(format!("unknown ChangeGraphType field `{other}`"))),
+                }
             }
         }
         ActiveDialog::ExcludeWithReason { .. } => {
-            if let Some(tag) = map_opt_str(fields, &["reason_tag"])? {
-                app.canvas_dialogs.exclude_with_reason.reason_tag = tag.to_owned();
-            }
-            if let Some(note) = map_opt_str(fields, &["note"])? {
-                app.canvas_dialogs.exclude_with_reason.note = note.to_owned();
+            for (key, val) in fields {
+                match key.as_str() {
+                    "reason_tag" | "exclude.reason_tag" => {
+                        let tag = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.exclude_with_reason.reason_tag = tag.to_owned();
+                    }
+                    "note" | "exclude.note" => {
+                        let note = if val.is_null() { "" } else { val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))? };
+                        app.canvas_dialogs.exclude_with_reason.note = note.to_owned();
+                    }
+                    other => return Err(bad_input(format!("unknown ExcludeWithReason field `{other}`"))),
+                }
             }
         }
         ActiveDialog::ImportReshape => {
-            app.grid.import_reshape.apply_field_patch(fields).map_err(bad_input)?;
+            app.grid.import_reshape.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::ConvertArchetype { .. } => {
             let prev_target = app.canvas_dialogs.convert_archetype.target_kind;
@@ -1439,20 +1633,64 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
             }
         }
         ActiveDialog::CommandPalette => {
-            if let Some(q) = map_opt_str(fields, &["query", "palette.query"])? {
-                app.canvas_dialogs.command_palette.query = q.to_owned();
+            for (key, val) in fields {
+                match key.as_str() {
+                    "query" | "palette.query" => {
+                        let q = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.command_palette.query = q.to_owned();
+                    }
+                    "selected_index" | "palette.selected_index" => {
+                        let raw = val.as_u64().ok_or_else(|| bad_input(format!("`{key}` must be a non-negative integer")))?;
+                        let idx = usize::try_from(raw).map_err(|_| bad_input(format!("`{key}` exceeds usize")))?;
+                        app.canvas_dialogs.command_palette.selected_index = idx;
+                    }
+                    other => return Err(bad_input(format!("unknown CommandPalette field `{other}`"))),
+                }
+            }
+        }
+        ActiveDialog::DuplicateAnalysisPrompt { .. } => {
+            for (key, val) in fields {
+                match key.as_str() {
+                    "choice" | "duplicate.choice" => {
+                        let s = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        if !s.eq_ignore_ascii_case("create_new") && !s.eq_ignore_ascii_case("modify_existing") {
+                            return Err(bad_input(format!("unsupported duplicate analysis choice `{s}`; expected create_new or modify_existing")));
+                        }
+                    }
+                    other => return Err(bad_input(format!("unknown DuplicateAnalysisPrompt field `{other}`"))),
+                }
+            }
+        }
+        ActiveDialog::ConstantHookPicker { .. } => {
+            for (key, val) in fields {
+                match key.as_str() {
+                    "search_query" | "hook.search_query" => {
+                        let q = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.hook_picker.search_query = q.to_owned();
+                    }
+                    "selected_index" | "hook.selected_index" => {
+                        if val.is_null() {
+                            app.canvas_dialogs.hook_picker.selected_index = None;
+                        } else {
+                            let raw = val.as_u64().ok_or_else(|| bad_input(format!("`{key}` must be a non-negative integer")))?;
+                            let idx = usize::try_from(raw).map_err(|_| bad_input(format!("`{key}` exceeds usize")))?;
+                            app.canvas_dialogs.hook_picker.selected_index = Some(idx);
+                        }
+                    }
+                    other => return Err(bad_input(format!("unknown ConstantHookPicker field `{other}`"))),
+                }
             }
         }
         ActiveDialog::FormatGraph { .. } => {
-            app.canvas_dialogs.format_graph.apply_field_patch(fields).map_err(bad_input)?;
+            app.canvas_dialogs.format_graph.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::FormatAxes { .. } => {
             let doc = app.document().clone();
-            app.canvas_dialogs.format_axes.apply_field_patch(fields, Some(&doc)).map_err(bad_input)?;
+            app.canvas_dialogs.format_axes.apply_field_patch_localized(fields, Some(&doc), &preset).map_err(bad_input)?;
         }
         ActiveDialog::PairwiseComparisons { .. } => {
             let doc = app.document().clone();
-            app.canvas_dialogs.pairwise.apply_field_patch(fields, Some(&doc)).map_err(bad_input)?;
+            app.canvas_dialogs.pairwise.apply_field_patch_localized(fields, Some(&doc), &preset).map_err(bad_input)?;
         }
         ActiveDialog::BubblePlotInspector { .. } => {
             app.canvas_dialogs.bubble_plot.apply_field_patch(fields).map_err(bad_input)?;
@@ -1474,15 +1712,26 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
             app.canvas_dialogs.random_sample_rows.apply_field_patch(fields).map_err(bad_input)?;
         }
         ActiveDialog::SimulateDistributions => {
-            app.canvas_dialogs.simulate_distributions.apply_field_patch(fields).map_err(bad_input)?;
+            app.canvas_dialogs.simulate_distributions.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::InsertModelEquation { .. } => {
-            app.canvas_dialogs.insert_model_equation.apply_field_patch(fields).map_err(bad_input)?;
+            app.canvas_dialogs.insert_model_equation.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
         ActiveDialog::Print { .. } => {
-            app.canvas_dialogs.print.apply_field_patch(fields).map_err(bad_input)?;
+            if map_opt_bool(fields, &["submit_to_os", "print.submit_to_os"])? == Some(true) && app.is_gui_only() {
+                return Err(EngineError::with_code(
+                    ErrorCode::GuiOnlyViolation,
+                    "submitting print jobs directly to the OS queue is blocked under --gui-only",
+                )
+                .with_remediation("Keep `submit_to_os` false under --gui-only to spool in-memory PDF safely."));
+            }
+            app.canvas_dialogs.print.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
-        _ => {}
+        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::None => {
+            if !fields.is_empty() {
+                return Err(bad_input("active dialog does not accept field patches"));
+            }
+        }
     }
     Ok(())
 }
@@ -1573,9 +1822,24 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             commit_single_intent(app, Some(intent), true)
         }
         ActiveDialog::Print { .. } => {
-            let out = app.execute_print_dialog_spool(false).map_err(bad_input)?;
+            let submit = app.canvas_dialogs.print.submit_to_os;
+            if submit && app.is_gui_only() {
+                return Err(EngineError::with_code(
+                    ErrorCode::GuiOnlyViolation,
+                    "submitting print jobs directly to the OS queue is blocked under --gui-only",
+                )
+                .with_remediation("Uncheck `Submit to OS print queue` to spool in-memory PDF output safely."));
+            }
+            let out = app.execute_print_dialog_spool(submit).map_err(bad_input)?;
             app.canvas_dialogs.close_dialog();
-            Ok(json!({ "action": action, "printed": true, "page_count": out.page_count }))
+            Ok(json!({
+                "action": action,
+                "printed": submit,
+                "spooled": true,
+                "submitted_to_os": submit,
+                "page_count": out.page_count,
+                "last_status": app.canvas_dialogs.print.last_status,
+            }))
         }
         ActiveDialog::RandomizeGroups => commit_single_intent(app, app.canvas_dialogs.randomize_groups.commit_intent(), true),
         ActiveDialog::RandomSampleRows { .. } => commit_single_intent(app, app.canvas_dialogs.random_sample_rows.commit_intent(), true),
@@ -1627,15 +1891,16 @@ fn commit_format_points_action(app: &mut UiApp) -> Result<Value, EngineError> {
         && let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
         && let Some(ds) = app.document().data_sheet(&active_ds_id)
     {
-        let pts = app.grid.selected_graph_point_indices(ds, usize::MAX);
-        app.canvas_dialogs.format_points.selected_points = pts;
+        let targets = app.grid.selected_graph_point_targets(ds, usize::MAX);
+        app.canvas_dialogs.format_points.set_selected_targets(targets);
     }
     let mut outcomes = Vec::new();
     if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
         let out = app.execute_command(&intent.command_id, intent.params)?;
         outcomes.push(out.payload);
     }
-    let row_label_intents = app.canvas_dialogs.format_points.build_row_label_intents(app.document());
+    let scene = app.canvas_dialogs.format_points.graph_sheet_id.as_ref().and_then(|gid| app.session().render_sheet_scene(gid).ok());
+    let row_label_intents = app.canvas_dialogs.format_points.build_row_label_intents_for_scene(app.document(), scene.as_ref());
     for intent in row_label_intents {
         let out = app.execute_command(&intent.command_id, intent.params)?;
         outcomes.push(out.payload);
@@ -1732,6 +1997,13 @@ fn commit_command_palette_action(app: &mut UiApp) -> Result<Value, EngineError> 
         .or_else(|| hits.first())
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, "no matching command in palette"))?
         .clone();
+    if app.is_gui_only() && is_gui_only_blocked_menu_command(selected.id) {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            format!("command palette execution of `{}` is blocked under --gui-only", selected.id),
+        )
+        .with_remediation("Select a parameterless menu/dialog command or toggle under --gui-only."));
+    }
     app.canvas_dialogs.close_dialog();
     if let Some(res) = dispatch_ui_command_as_ui(app, selected.id, &Value::Null)? {
         return Ok(json!({ "action": "ok", "command_id": selected.id, "result": res }));

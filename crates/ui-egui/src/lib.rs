@@ -56,7 +56,7 @@ pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use human_driver::HumanPathDriver;
 pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
-pub use inspect::{UiTreeSnapshot, inspect_ui_tree};
+pub use inspect::{UiTreeSnapshot, inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
     LayoutResizeHandle, NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics,
@@ -674,7 +674,12 @@ impl UiApp {
         if let Some(tracker) = self.batch_undo_log.as_mut() {
             tracker.capture_fallback_baseline_before(&self.session, true);
         }
-        self.session = Session::from_document(doc);
+        let gui_only = self.session.gui_only();
+        let path_policy = self.session.path_policy().clone();
+        let mut next = Session::from_document(doc);
+        next.set_gui_only(gui_only);
+        next.set_path_policy(path_policy);
+        self.session = next;
         self.sync_views();
         Ok(())
     }

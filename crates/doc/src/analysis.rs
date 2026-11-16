@@ -1332,6 +1332,7 @@ pub enum AnalysisKind {
     LinearRegression(LinearRegressionSpec),
     NonlinearRegression(NonlinearFitSpec),
     PValueStack(PValueStackSpec),
+    PowerAnalysis(PowerAnalysisSpec),
 }
 
 impl AnalysisKind {
@@ -1425,6 +1426,7 @@ impl AnalysisKind {
             Self::LinearRegression(_) => String::from("Simple linear regression"),
             Self::NonlinearRegression(fit) => format!("Nonlinear regression ({})", fit.equation_id),
             Self::PValueStack(s) => format!("Analyze stack of P values ({})", s.method.label()),
+            Self::PowerAnalysis(s) => s.derive_auto_title(),
         }
     }
 
@@ -1466,6 +1468,7 @@ impl AnalysisKind {
             Self::PValueStack(_) => {
                 matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
             }
+            Self::PowerAnalysis(_) => true,
         }
     }
 
@@ -1498,6 +1501,11 @@ impl AnalysisKind {
     #[must_use]
     pub fn upstream_sheet_ids(&self) -> Vec<SheetId> {
         let mut ids: Vec<SheetId> = self.hooked_sources().into_iter().filter_map(|h| h.upstream_sheet_id().cloned()).collect();
+        if let Self::PowerAnalysis(p) = self
+            && let Some(info_id) = &p.info_sheet_id
+        {
+            ids.push(info_id.clone());
+        }
         ids.sort();
         ids.dedup();
         ids

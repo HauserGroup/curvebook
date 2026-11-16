@@ -235,13 +235,22 @@ pub fn menu_bar_tooltips(app: &UiApp) -> Vec<MenuSectionTooltips> {
         MenuSectionTooltips { menu_key: "menu.help", title: app.tr("menu.help"), items: Vec::new() },
     ];
 
+    let gui_only = app.is_gui_only();
     for spec in cmd::registry().specs() {
+        if gui_only && spec.menu_path.is_empty() {
+            continue;
+        }
         let bucket = menu_key_for_path(spec.menu_path);
         if let (Some(section), Some(tip)) = (sections.iter_mut().find(|s| s.menu_key == bucket), command_tooltip(app, spec.id)) {
             section.items.push(tip);
         }
     }
     for spec in UI_COMMANDS {
+        if gui_only
+            && matches!(spec.id, "ui.screenshot" | "ui.event.dispatch" | "ui.shortcut.set" | "ui.shortcut.reset" | "ui.brush.point" | "app.quit")
+        {
+            continue;
+        }
         let (bucket, _) = ui_command_menu_info(spec.id);
         if let (Some(section), Some(tip)) = (sections.iter_mut().find(|s| s.menu_key == bucket), command_tooltip(app, spec.id)) {
             section.items.push(tip);

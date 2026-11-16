@@ -17,6 +17,8 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 use crate::dialogs_canvas::{ExportFigureFormat, data_column_title};
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::LocalePreset;
 
 // ============================================================================
 // Shared String / Enum / JSON Parsers (reused across R9.12, R9.14, R9.16, WF-44..48)
@@ -28,20 +30,20 @@ pub(crate) fn norm_key(raw: &str) -> String {
     raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect()
 }
 
-/// Parse a finite `f64` from JSON number or numeric string.
-pub(crate) fn parse_finite_f64(val: &Value, field: &str) -> Result<f64, String> {
+/// Parse a finite `f64` from JSON number or localized numeric string.
+pub(crate) fn parse_finite_f64_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<f64, String> {
     val.as_f64()
-        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
+        .or_else(|| val.as_str().and_then(|s| parse_localized_number_input(s, preset)))
         .filter(|v| v.is_finite())
         .ok_or_else(|| format!("`{field}` must be a finite number"))
 }
 
-/// Parse an optional finite `f64` (null or empty string resets to `None`).
-pub(crate) fn parse_opt_finite_f64(val: &Value, field: &str) -> Result<Option<f64>, String> {
+/// Parse an optional finite `f64` using regional numeric parsing (`preset`).
+pub(crate) fn parse_opt_finite_f64_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
     if val.is_null() || val.as_str().is_some_and(|s| s.trim().is_empty()) {
         return Ok(None);
     }
-    parse_finite_f64(val, field).map(Some)
+    parse_finite_f64_with_locale(val, field, preset).map(Some)
 }
 
 /// Parse a positive `usize` (`>= min_val`) from JSON integer or numeric string.
@@ -88,12 +90,13 @@ pub(crate) fn parse_usize_list(val: &Value, field: &str) -> Result<Vec<usize>, S
     Err(format!("`{field}` must be an integer array or comma-separated list"))
 }
 
-/// Parse a list of finite `f64` values from JSON array or comma-separated string.
-pub(crate) fn parse_f64_list(val: &Value, field: &str) -> Result<Vec<f64>, String> {
+/// Parse a list of finite `f64` values from JSON array or locale-appropriate delimited string
+/// (preserving `,` decimal separators in comma-decimal locales where `;` or whitespace delimit entries).
+pub(crate) fn parse_f64_list_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<Vec<f64>, String> {
     if let Some(arr) = val.as_array() {
         let mut out = Vec::with_capacity(arr.len());
         for item in arr {
-            out.push(parse_finite_f64(item, field)?);
+            out.push(parse_finite_f64_with_locale(item, field, preset)?);
         }
         return Ok(out);
     }
@@ -103,18 +106,20 @@ pub(crate) fn parse_f64_list(val: &Value, field: &str) -> Result<Vec<f64>, Strin
             return Ok(Vec::new());
         }
         let mut out = Vec::new();
-        for tok in trimmed.split([',', ';', ' ']).filter(|t| !t.trim().is_empty()) {
-            let v = tok
-                .trim()
-                .parse::<f64>()
-                .ok()
+        let iter: Box<dyn Iterator<Item = &str>> = if preset.decimal_separator == ',' {
+            Box::new(trimmed.split([';', ' ', '\t', '\n', '\r']))
+        } else {
+            Box::new(trimmed.split([',', ';', ' ', '\t', '\n', '\r']))
+        };
+        for tok in iter.map(str::trim).filter(|t| !t.is_empty()) {
+            let v = parse_localized_number_input(tok, preset)
                 .filter(|x| x.is_finite())
                 .ok_or_else(|| format!("`{field}` contains invalid finite number `{tok}`"))?;
             out.push(v);
         }
         return Ok(out);
     }
-    Err(format!("`{field}` must be a numeric array or comma-separated list"))
+    Err(format!("`{field}` must be a numeric array or delimited list"))
 }
 
 /// Parse `(column, level)` reference-level overrides from JSON array or `"0:Control, 1:Placebo"` text.
@@ -343,14 +348,6 @@ pub(crate) fn parse_pvalue_stack_method_val(val: &Value) -> Result<PValueStackMe
         "by" | "benjaminiyekutieli" | "benjaminiyekutieli2001" | "benjaminiyekutielifdr" | "fdrby" => Ok(PValueStackMethod::BenjaminiYekutieli),
         _ => Err(format!("unknown P-value stack multiplicity method `{raw}`")),
     }
-}
-
-pub(crate) fn parse_pvalue_stack_threshold_val(val: &Value, field: &str) -> Result<f64, String> {
-    let t = parse_finite_f64(val, field)?;
-    if !(0.0 < t && t < 1.0) {
-        return Err(format!("`{field}` ({t}) must lie strictly in (0, 1)"));
-    }
-    Ok(t)
 }
 
 pub(crate) fn parse_break_ornament_str(raw: &str) -> Result<BreakOrnament, String> {
@@ -712,7 +709,7 @@ impl RandomizeGroupsDialogState {
                 "info_sheet_id" | "target_info_sheet_id" | "randomize.info_sheet_id" => {
                     self.target_info_sheet_id = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
                 }
-                _ => {}
+                other => return Err(format!("unknown Randomize Groups field `{other}`")),
             }
         }
         Ok(())
@@ -831,7 +828,7 @@ impl RandomSampleRowsDialogState {
                 "info_sheet_id" | "target_info_sheet_id" | "sample.info_sheet_id" => {
                     self.target_info_sheet_id = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(SheetId::from);
                 }
-                _ => {}
+                other => return Err(format!("unknown Random Sample Rows field `{other}`")),
             }
         }
         Ok(())
@@ -951,7 +948,7 @@ impl SimulatedDistColumnDraft {
         }
     }
 
-    fn apply_object(&mut self, obj: &serde_json::Map<String, Value>) -> Result<(), String> {
+    fn apply_object_localized(&mut self, obj: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         if let Some(name) = obj.get("name").or_else(|| obj.get("title")).and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty()) {
             self.name = name.to_owned();
         }
@@ -962,17 +959,18 @@ impl SimulatedDistColumnDraft {
         }
         for (field, val) in obj {
             match field.as_str() {
-                "min" => self.min = parse_finite_f64(val, field)?,
-                "max" => self.max = parse_finite_f64(val, field)?,
-                "mean" | "mu" => self.mean = parse_finite_f64(val, field)?,
-                "sd" | "std" | "sigma" => self.sd = parse_finite_f64(val, field)?,
-                "mean_log" | "meanlog" => self.mean_log = parse_finite_f64(val, field)?,
-                "sd_log" | "sdlog" => self.sd_log = parse_finite_f64(val, field)?,
+                "name" | "title" | "distribution" | "kind" => {}
+                "min" => self.min = parse_finite_f64_with_locale(val, field, preset)?,
+                "max" => self.max = parse_finite_f64_with_locale(val, field, preset)?,
+                "mean" | "mu" => self.mean = parse_finite_f64_with_locale(val, field, preset)?,
+                "sd" | "std" | "sigma" => self.sd = parse_finite_f64_with_locale(val, field, preset)?,
+                "mean_log" | "meanlog" => self.mean_log = parse_finite_f64_with_locale(val, field, preset)?,
+                "sd_log" | "sdlog" => self.sd_log = parse_finite_f64_with_locale(val, field, preset)?,
                 "trials" | "n" => self.trials = parse_u64_val(val, field)?,
-                "p" | "prob" | "probability" => self.p = parse_finite_f64(val, field)?,
-                "lambda" => self.lambda = parse_finite_f64(val, field)?,
-                "rate" => self.rate = parse_finite_f64(val, field)?,
-                _ => {}
+                "p" | "prob" | "probability" => self.p = parse_finite_f64_with_locale(val, field, preset)?,
+                "lambda" => self.lambda = parse_finite_f64_with_locale(val, field, preset)?,
+                "rate" => self.rate = parse_finite_f64_with_locale(val, field, preset)?,
+                other => return Err(format!("unknown simulated column field `{other}`")),
             }
         }
         Ok(())
@@ -1004,6 +1002,11 @@ impl Default for SimulateDistributionsDialogState {
 impl SimulateDistributionsDialogState {
     /// Apply modal field updates from `ui.answer_dialog` / widget controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         if self.columns.is_empty() {
             self.columns.push(SimulatedDistColumnDraft::default());
         }
@@ -1033,12 +1036,12 @@ impl SimulateDistributionsDialogState {
                     for item in arr {
                         let obj = item.as_object().ok_or_else(|| String::from("each column item must be an object"))?;
                         let mut col = SimulatedDistColumnDraft::default();
-                        col.apply_object(obj)?;
+                        col.apply_object_localized(obj, preset)?;
                         if let Some(params) = obj.get("params").and_then(Value::as_object) {
-                            col.apply_object(params)?;
+                            col.apply_object_localized(params, preset)?;
                         }
                         if let Some(params) = obj.get("distribution").and_then(Value::as_object) {
-                            col.apply_object(params)?;
+                            col.apply_object_localized(params, preset)?;
                         }
                         parsed.push(col);
                     }
@@ -1054,17 +1057,17 @@ impl SimulateDistributionsDialogState {
                     let raw = val.as_str().ok_or_else(|| String::from("`distribution` must be a string"))?;
                     self.columns[0].distribution = SimDistKind::from_str(raw)?;
                 }
-                "min" | "simulate.min" => self.columns[0].min = parse_finite_f64(val, key)?,
-                "max" | "simulate.max" => self.columns[0].max = parse_finite_f64(val, key)?,
-                "mean" | "simulate.mean" => self.columns[0].mean = parse_finite_f64(val, key)?,
-                "sd" | "simulate.sd" => self.columns[0].sd = parse_finite_f64(val, key)?,
-                "mean_log" | "simulate.mean_log" => self.columns[0].mean_log = parse_finite_f64(val, key)?,
-                "sd_log" | "simulate.sd_log" => self.columns[0].sd_log = parse_finite_f64(val, key)?,
+                "min" | "simulate.min" => self.columns[0].min = parse_finite_f64_with_locale(val, key, preset)?,
+                "max" | "simulate.max" => self.columns[0].max = parse_finite_f64_with_locale(val, key, preset)?,
+                "mean" | "simulate.mean" => self.columns[0].mean = parse_finite_f64_with_locale(val, key, preset)?,
+                "sd" | "simulate.sd" => self.columns[0].sd = parse_finite_f64_with_locale(val, key, preset)?,
+                "mean_log" | "simulate.mean_log" => self.columns[0].mean_log = parse_finite_f64_with_locale(val, key, preset)?,
+                "sd_log" | "simulate.sd_log" => self.columns[0].sd_log = parse_finite_f64_with_locale(val, key, preset)?,
                 "trials" | "simulate.trials" => self.columns[0].trials = parse_u64_val(val, key)?,
-                "p" | "simulate.p" => self.columns[0].p = parse_finite_f64(val, key)?,
-                "lambda" | "simulate.lambda" => self.columns[0].lambda = parse_finite_f64(val, key)?,
-                "rate" | "simulate.rate" => self.columns[0].rate = parse_finite_f64(val, key)?,
-                _ => {}
+                "p" | "simulate.p" => self.columns[0].p = parse_finite_f64_with_locale(val, key, preset)?,
+                "lambda" | "simulate.lambda" => self.columns[0].lambda = parse_finite_f64_with_locale(val, key, preset)?,
+                "rate" | "simulate.rate" => self.columns[0].rate = parse_finite_f64_with_locale(val, key, preset)?,
+                other => return Err(format!("unknown Simulate Distributions field `{other}`")),
             }
         }
         Ok(())
@@ -1171,6 +1174,11 @@ impl InsertModelEquationDialogState {
 
     /// Apply modal field updates from `ui.answer_dialog` / widget controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         for (key, val) in fields {
             match key.as_str() {
                 "result_sheet_id" | "equation.result_sheet_id" => {
@@ -1188,7 +1196,7 @@ impl InsertModelEquationDialogState {
                     self.mode = parse_equation_display_mode_str(raw)?;
                 }
                 "font_size_pt" | "equation.font_size_pt" => {
-                    let pt = parse_finite_f64(val, key)?;
+                    let pt = parse_finite_f64_with_locale(val, key, preset)?;
                     if !(4.0..=72.0).contains(&pt) {
                         return Err(format!("`font_size_pt` ({pt}) must be within 4.0..=72.0"));
                     }
@@ -1200,11 +1208,11 @@ impl InsertModelEquationDialogState {
                 "update_existing" | "equation.update_existing" => {
                     self.update_existing = val.as_bool().ok_or_else(|| String::from("`update_existing` must be boolean"))?;
                 }
-                "x_pt" | "equation.x_pt" => self.bounds_pt.x = parse_finite_f64(val, key)?,
-                "y_pt" | "equation.y_pt" => self.bounds_pt.y = parse_finite_f64(val, key)?,
-                "width_pt" | "equation.width_pt" => self.bounds_pt.width = parse_finite_f64(val, key)?.max(24.0),
-                "height_pt" | "equation.height_pt" => self.bounds_pt.height = parse_finite_f64(val, key)?.max(12.0),
-                _ => {}
+                "x_pt" | "equation.x_pt" => self.bounds_pt.x = parse_finite_f64_with_locale(val, key, preset)?,
+                "y_pt" | "equation.y_pt" => self.bounds_pt.y = parse_finite_f64_with_locale(val, key, preset)?,
+                "width_pt" | "equation.width_pt" => self.bounds_pt.width = parse_finite_f64_with_locale(val, key, preset)?.max(24.0),
+                "height_pt" | "equation.height_pt" => self.bounds_pt.height = parse_finite_f64_with_locale(val, key, preset)?.max(12.0),
+                other => return Err(format!("unknown Insert Model Equation field `{other}`")),
             }
         }
         Ok(())

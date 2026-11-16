@@ -5,9 +5,10 @@ use curvebook_doc::{
     CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
     LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
     NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus,
-    RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
-    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
+    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
+    PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId,
+    SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableRole, WeightingScheme,
 };
 use curvebook_fit::get_builtin_model;
 use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -1337,6 +1338,7 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
         "pvalue_stack" | "stats.pvalue_stack" | "p_value_stack" | "pvalues" | "pvaluestack" | "stats.pvaluestack" => {
             AnalysisKind::PValueStack(PValueStackSpec::default())
         }
+        "power" | "power_analysis" | "stats.power" | "power_sample_size" => AnalysisKind::PowerAnalysis(PowerAnalysisSpec::default()),
         "contingency"
         | "chi_square"
         | "fisher_exact"
@@ -1452,6 +1454,7 @@ fn apply_shorthand_kind_overrides(kind: &mut AnalysisKind, params: &Value) -> Re
         AnalysisKind::BlandAltman(spec) => apply_bland_altman_overrides(spec, params)?,
         AnalysisKind::PassingBablok(spec) => apply_passing_bablok_overrides(spec, params)?,
         AnalysisKind::PValueStack(spec) => apply_pvalue_stack_overrides(spec, params)?,
+        AnalysisKind::PowerAnalysis(spec) => apply_power_overrides(spec, params)?,
         AnalysisKind::TwoGroupComparison(spec) => apply_two_group_overrides(spec, params)?,
         AnalysisKind::Contingency(spec) => apply_contingency_overrides(spec, params)?,
         AnalysisKind::Survival(spec) => apply_survival_overrides(spec, params)?,
@@ -1593,6 +1596,62 @@ fn apply_pvalue_stack_overrides(spec: &mut PValueStackSpec, params: &Value) -> R
         spec.threshold = t;
     }
     apply_opt_usize_field(params, &["column", "pvalue_stack_column"], &mut spec.column)?;
+    Ok(())
+}
+
+fn apply_power_overrides(spec: &mut PowerAnalysisSpec, params: &Value) -> Result<(), EngineError> {
+    if let Some(fam_val) = params.get("family").and_then(Value::as_str) {
+        let norm: String = fam_val.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        spec.family = match norm.as_str() {
+            "unpairedt" | "twosampleunpairedt" | "independentt" => PowerTestFamily::TwoSampleUnpairedT,
+            "pairedt" | "twosamplepairedt" | "dependentt" => PowerTestFamily::TwoSamplePairedT,
+            "onesamplet" | "singlesamplet" => PowerTestFamily::OneSampleT,
+            "onewayanova" | "anova" => PowerTestFamily::OneWayAnova,
+            "twoproportions" | "proportions" => PowerTestFamily::TwoProportions,
+            "correlation" | "pearsoncorrelation" => PowerTestFamily::Correlation,
+            "chisquare" | "chi2" => PowerTestFamily::ChiSquare,
+            "simplelinearregression" | "linearregression" | "regression" => PowerTestFamily::SimpleLinearRegression,
+            _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown power test family `{fam_val}`"))),
+        };
+    }
+    if let Some(target_val) = params.get("solve_target").and_then(Value::as_str) {
+        let norm: String = target_val.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+        spec.solve_target = match norm.as_str() {
+            "samplesize" | "n" => PowerSolveTarget::SampleSize,
+            "power" => PowerSolveTarget::Power,
+            "detectableeffect" | "effect" | "mde" => PowerSolveTarget::DetectableEffect,
+            _ => return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown power solve target `{target_val}`"))),
+        };
+    }
+    if let Some(two_tailed) = params.get("two_tailed").and_then(Value::as_bool) {
+        spec.tail_mode = if two_tailed { PowerTailMode::TwoSided } else { PowerTailMode::OneSided(PowerOneSidedDirection::Greater) };
+    }
+    if let Some(a) = params.get("alpha").and_then(Value::as_f64) {
+        spec.alpha = a;
+    }
+    if let Some(pw) = params.get("target_power").and_then(Value::as_f64) {
+        spec.target_power = Some(pw);
+    }
+    if let Some(n) = params.get("sample_size").or_else(|| params.get("n")).and_then(Value::as_f64) {
+        spec.sample_size = Some(n);
+    }
+    if let Some(n2) = params.get("sample_size_group2").or_else(|| params.get("n2")).and_then(Value::as_f64) {
+        spec.sample_size_group2 = Some(n2);
+    }
+    if let Some(r) = params.get("allocation_ratio").and_then(Value::as_f64) {
+        spec.allocation_ratio = r;
+    }
+    if let Some(df) = params.get("chi_square_df").or_else(|| params.get("df")).and_then(Value::as_f64) {
+        spec.chi_square_df = df;
+    }
+    if let Some(eff) = params.get("effect_size").or_else(|| params.get("standardized_effect")).and_then(Value::as_f64) {
+        spec.effect = PowerEffectSpec::Standardized(eff);
+    }
+    if let Some(info_raw) = params.get("info_sheet_id") {
+        spec.info_sheet_id = info_raw.as_str().map(SheetId::try_new).transpose()?;
+    }
+    apply_bool_opt(params, &["continuity_correction"], &mut spec.continuity_correction);
+    apply_opt_usize_field(params, &["num_groups", "anova_groups"], &mut spec.num_groups)?;
     Ok(())
 }
 

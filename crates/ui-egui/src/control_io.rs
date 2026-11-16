@@ -909,7 +909,7 @@ pub(crate) fn opt_non_empty_str_param<'a>(params: &'a Value, fields: &[&str]) ->
     }
 }
 
-pub(crate) fn parse_selected_points_array(val: &Value, field: &str) -> Result<Vec<(usize, usize)>, String> {
+pub(crate) fn parse_selected_points_with_subcols(val: &Value, field: &str) -> Result<Vec<(usize, usize, Option<usize>)>, String> {
     let arr = val.as_array().ok_or_else(|| format!("`{field}` must be an array of `{{series_index, point_index}}` objects"))?;
     let mut pts = Vec::with_capacity(arr.len());
     for (idx, item) in arr.iter().enumerate() {
@@ -922,7 +922,14 @@ pub(crate) fn parse_selected_points_array(val: &Value, field: &str) -> Result<Ve
             obj.get("point_index").and_then(Value::as_u64).ok_or_else(|| format!("`{field}[{idx}].point_index` must be a non-negative integer"))?;
         let s = usize::try_from(s_u64).map_err(|_| format!("`{field}[{idx}].series_index` exceeds usize"))?;
         let p = usize::try_from(p_u64).map_err(|_| format!("`{field}[{idx}].point_index` exceeds usize"))?;
-        pts.push((s, p));
+        let subcol = match obj.get("subcol") {
+            None | Some(Value::Null) => None,
+            Some(v) => {
+                let sc_u64 = v.as_u64().ok_or_else(|| format!("`{field}[{idx}].subcol` must be a non-negative integer or null"))?;
+                Some(usize::try_from(sc_u64).map_err(|_| format!("`{field}[{idx}].subcol` exceeds usize"))?)
+            }
+        };
+        pts.push((s, p, subcol));
     }
     Ok(pts)
 }
@@ -1096,6 +1103,9 @@ fn dispatch_request_inner(
 ) -> (ControlResponse, ControlLoopAction) {
     let ControlRequest { id, method, params } = req;
     if method == "app.quit" {
+        if let Err(err) = reject_control_if_gui_only(app, "app.quit") {
+            return (ControlResponse::err_with_detail(id, err), ControlLoopAction::Continue);
+        }
         return (ControlResponse::ok(id, json!({ "quit": true })), ControlLoopAction::Quit);
     }
 
@@ -1112,8 +1122,10 @@ fn dispatch_request_inner(
             "command.list" => Ok(handle_command_list(app)),
             "command.run" => handle_command_run(app, &params, recorded.as_deref_mut()),
             "command.batch" => handle_command_batch(app, &params, recorded, rolled_back),
-            "doc.inspect" => handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)
-                .map_err(ControlCallError::from),
+            "doc.inspect" => reject_control_if_gui_only(app, "doc.inspect").and_then(|()| {
+                handle_doc_inspect(app.session().document(), app.session().is_dirty(), app.session().file_path(), &params)
+                    .map_err(ControlCallError::from)
+            }),
             "doc.export" => handle_doc_export(app, &params),
             "render.svg" => handle_render_svg(app, &params),
             "render.pdf" => handle_render_pdf(app, &params),
@@ -1132,7 +1144,7 @@ fn dispatch_request_inner(
 }
 
 fn is_control_readonly_ui_command(command_id: &str) -> bool {
-    matches!(command_id, "ui.canvas.preflight" | "ui.result.inspectDiagnostics" | "result.inspect_diagnostics")
+    command_id == "ui.canvas.preflight"
 }
 
 fn dispatch_command_by_id(
@@ -1711,6 +1723,7 @@ fn inspect_single_sheet(doc: &ProjectDocument, sheet_id: &SheetId, include_cells
 }
 
 fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    reject_control_if_gui_only(app, "render.svg")?;
     require_params_object_or_null(params, "render.svg")?;
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     let scene = app.session().render_sheet_scene(&sheet_id)?;
@@ -1730,6 +1743,7 @@ fn handle_render_svg(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
 }
 
 fn handle_render_pdf(app: &UiApp, params: &Value) -> Result<Value, ControlCallError> {
+    reject_control_if_gui_only(app, "render.pdf")?;
     require_params_object_or_null(params, "render.pdf")?;
     let doc = app.document();
     let all = opt_bool_param(params, &["all"])?.unwrap_or(false);
@@ -2117,12 +2131,19 @@ fn dispatch_ui_analyze_open(app: &mut UiApp, params: &Value) -> Result<Value, St
     }))
 }
 
+fn filtered_open_patch_fields(params: &Value, ignore_keys: &[&str]) -> Map<String, Value> {
+    let Some(obj) = params.as_object() else {
+        return Map::new();
+    };
+    obj.iter().filter(|(k, _)| !ignore_keys.contains(&k.as_str())).map(|(k, v)| (k.clone(), v.clone())).collect()
+}
+
 fn dispatch_ui_power_wizard_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_power_wizard();
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.power_wizard.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.power_wizard.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({
         "dialog": "PowerAndSampleSize",
@@ -2141,12 +2162,19 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
         doc.graph_sheets.first().ok_or_else(|| String::from("no graph sheet available to format points"))?
     };
 
-    let mut points: Vec<(usize, usize)> = match params.get("points") {
-        Some(v) if !v.is_null() => parse_selected_points_array(v, "points")?,
-        _ if !app.brushed_points.is_empty() => app.brushed_points.iter().map(|pt| (pt.col, pt.row)).collect(),
+    let mut points: Vec<(usize, usize, Option<usize>)> = match params.get("points") {
+        Some(v) if !v.is_null() => parse_selected_points_with_subcols(v, "points")?,
+        _ if !app.brushed_points.is_empty() => app
+            .brushed_points
+            .iter()
+            .map(|pt| {
+                let subcols = doc.data_sheet(&pt.sheet_id).map_or(1, |ds| crate::grid_view::data_set_subcolumn_count(&ds.archetype, pt.col));
+                (pt.col, pt.row, (subcols > 1).then_some(pt.subcol))
+            })
+            .collect(),
         _ => {
             if let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) {
-                app.grid.selected_graph_point_indices(ds, graph.spec.series.len().max(1))
+                app.grid.selected_graph_point_targets(ds, graph.spec.series.len().max(1))
             } else {
                 Vec::new()
             }
@@ -2156,11 +2184,11 @@ fn dispatch_ui_format_points_open(app: &mut UiApp, params: &Value) -> Result<Val
     points.dedup();
 
     let graph_id = graph.id.clone();
-    app.canvas_dialogs.open_format_selected_points(&doc, &graph_id, points);
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.format_points.apply_field_patch(fields)?;
+    app.canvas_dialogs.open_format_selected_points_with_subcols(&doc, &graph_id, points);
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "points"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.format_points.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({
         "dialog": "FormatSelectedPoints",
@@ -2287,7 +2315,7 @@ fn dispatch_ui_result_copy_methods_report(app: &mut UiApp, params: &Value) -> Re
     if let Some(fmt) = opt_non_empty_str_param(params, &["format"])? {
         app.canvas_dialogs.result_view.report_format = fmt.to_owned();
     }
-    let skip_os_clipboard = opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
+    let skip_os_clipboard = app.is_gui_only() || opt_bool_param(params, &["skip_os_clipboard"])? == Some(true);
     let intent = app.canvas_dialogs.result_view.generate_report_intent(&rs_id);
     let outcome = app.execute_command(&intent.command_id, intent.params)?;
     let report = outcome.payload.get("report").and_then(Value::as_str).unwrap_or_default().to_owned();
@@ -2546,10 +2574,9 @@ fn resolve_target_data_id(doc: &ProjectDocument, params: &Value) -> Result<Sheet
 fn dispatch_ui_randomize_groups_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
     app.canvas_dialogs.open_randomize_groups(&doc);
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.randomize_groups.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.randomize_groups.apply_field_patch(&fields)?;
     }
     Ok(json!({
         "dialog": "RandomizeGroups",
@@ -2564,10 +2591,9 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
     if !app.canvas_dialogs.open_random_sample_rows(&doc, Some(&sheet_id)) {
         return Err(format!("data sheet `{}` not found", sheet_id.as_str()));
     }
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.random_sample_rows.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["source_sheet_id", "sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.random_sample_rows.apply_field_patch(&fields)?;
     }
     Ok(json!({
         "dialog": "RandomSampleRows",
@@ -2578,10 +2604,10 @@ fn dispatch_ui_random_sample_rows_open(app: &mut UiApp, params: &Value) -> Resul
 
 fn dispatch_ui_simulate_distributions_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     app.canvas_dialogs.open_simulate_distributions();
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.simulate_distributions.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.simulate_distributions.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({
         "dialog": "SimulateDistributions",
@@ -2596,10 +2622,10 @@ fn dispatch_ui_insert_model_equation_open(app: &mut UiApp, params: &Value) -> Re
     if !app.canvas_dialogs.open_insert_model_equation(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
     }
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.insert_model_equation.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.insert_model_equation.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({
         "dialog": "InsertModelEquation",
@@ -2615,10 +2641,9 @@ fn dispatch_ui_bubble_plot_open(app: &mut UiApp, params: &Value) -> Result<Value
     if !app.canvas_dialogs.open_bubble_plot(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
     }
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.bubble_plot.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.bubble_plot.apply_field_patch(&fields)?;
     }
     Ok(json!({ "dialog": "BubblePlotInspector", "graph_sheet_id": graph_id.as_str() }))
 }
@@ -2629,10 +2654,10 @@ fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
     if !app.canvas_dialogs.open_format_graph(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
     }
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.format_graph.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.format_graph.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({ "dialog": "FormatGraph", "graph_sheet_id": graph_id.as_str() }))
 }
@@ -2649,10 +2674,10 @@ fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value
     };
     app.canvas_dialogs.format_axes.sync_from_graph(graph, initial_target);
     app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: graph_id.clone() };
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.format_axes.apply_field_patch(fields, Some(&doc))?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.format_axes.apply_field_patch_localized(&fields, Some(&doc), &preset)?;
     }
     Ok(json!({
         "dialog": "FormatAxes",
@@ -2836,10 +2861,10 @@ fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, S
     if !app.canvas_dialogs.open_pairwise_comparisons(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
     }
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.pairwise.apply_field_patch(fields, Some(&doc))?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        let preset = app.locale_preset.clone();
+        app.canvas_dialogs.pairwise.apply_field_patch_localized(&fields, Some(&doc), &preset)?;
     }
     Ok(json!({ "dialog": "PairwiseComparisons", "graph_sheet_id": graph_id.as_str() }))
 }
@@ -2857,10 +2882,9 @@ fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<V
         doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))?
     };
     let _ = app.canvas_dialogs.open_page_layout_composer(&doc, &layout_id);
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.page_layout.apply_field_patch(fields, Some(&doc))?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.page_layout.apply_field_patch(&fields, Some(&doc))?;
     }
     Ok(json!({ "dialog": "PageLayoutComposer", "layout_sheet_id": layout_id.as_str() }))
 }
@@ -2868,10 +2892,9 @@ fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<V
 fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let sheet_id = resolve_renderable_sheet_id(app.document(), params)?;
     app.canvas_dialogs.open_export_figure(&sheet_id);
-    if let Some(fields) = params.as_object()
-        && !fields.is_empty()
-    {
-        app.canvas_dialogs.export_figure.apply_field_patch(fields)?;
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.export_figure.apply_field_patch(&fields)?;
     }
     Ok(json!({
         "dialog": "ExportFigure",
@@ -2907,9 +2930,13 @@ fn dispatch_ui_print_open(app: &mut UiApp, params: &Value) -> Result<Value, Stri
     let bleed_pt_opt = opt_finite_f64_param(params, &["bleed_pt"])?;
     let spool = opt_bool_param(params, &["spool"])?.unwrap_or(false);
     let submit = opt_bool_param(params, &["submit_to_os"])?.unwrap_or(false);
+    if app.is_gui_only() && submit {
+        return Err(String::from("submitting print jobs directly to the OS queue is blocked under --gui-only"));
+    }
 
     let active = app.session.document().active_sheet_id.clone();
     app.open_print_dialog_for(sheet_override.as_ref().or(active.as_ref()));
+    app.canvas_dialogs.print.submit_to_os = submit;
 
     if let Some(copies) = copies_opt {
         let clamped = u16::try_from(copies.clamp(1, 999)).unwrap_or(999);

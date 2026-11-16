@@ -1568,6 +1568,13 @@ fn validate_analysis_kind_floats(spec: &curvebook_doc::AnalysisSpec, sheet_id: &
         | curvebook_doc::AnalysisKind::Multivariate(_)
         | curvebook_doc::AnalysisKind::LinearRegression(_) => Ok(()),
         curvebook_doc::AnalysisKind::PValueStack(ps) => check_finite(ps.threshold, || format!("{sheet_id}.analysis.pvalue_stack.threshold")),
+        curvebook_doc::AnalysisKind::PowerAnalysis(p) => {
+            if let Some(field) = p.first_non_finite_float() {
+                Err(FormatError::NonFiniteFloat { location: format!("{sheet_id}.analysis.{field}") })
+            } else {
+                Ok(())
+            }
+        }
     }
 }
 
@@ -1863,6 +1870,11 @@ pub fn detect_dependency_cycles(doc: &ProjectDocument) -> Result<(), FormatError
             if let Some(up) = resolve_hook_target(&hook, paired_info.as_ref()) {
                 deps.push(up);
             }
+        }
+        if let AnalysisKind::PowerAnalysis(p) = &res.analysis.kind
+            && let Some(info_id) = &p.info_sheet_id
+        {
+            deps.push(info_id.clone());
         }
         adj.insert(res.id.clone(), deps);
     }

@@ -702,6 +702,10 @@ fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), 
             ("b6", "doc.export", json!({ "format": "csv" })),
             ("b7", "render.preview", json!({})),
             ("b8", "ui.screenshot", json!({ "target": "full_window", "path": forbidden_shot })),
+            ("b9", "doc.inspect", json!({})),
+            ("b10", "render.svg", json!({})),
+            ("b11", "render.pdf", json!({})),
+            ("b12", "app.quit", json!({})),
         ] {
             let reply = send_tcp(req_id, method, params)?;
             if reply["ok"] != json!(false) || reply["error_detail"]["code"] != json!("gui_only_violation") {
@@ -712,7 +716,7 @@ fn r73_stdio_strict_gui_only_rejections_and_control_port_parity() -> Result<(), 
             return Err("direct TCP ui.screenshot path wrote file under --gui-only".to_owned());
         }
 
-        for (req_id, method, expect_gui_only) in [("r1", "ping", true), ("r2", "doc.inspect", false), ("r3", "state.snapshot", true)] {
+        for (req_id, method, expect_gui_only) in [("r1", "ping", true), ("r2", "state.snapshot", true)] {
             let reply = send_tcp(req_id, method, json!({}))?;
             if reply["ok"] != json!(true) {
                 return Err(format!("expected read-only direct TCP `{method}` ok=true, got {reply}"));

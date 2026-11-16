@@ -14,8 +14,8 @@ use curvebook_doc::{
     NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
     PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
     PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell, ResultSheet,
-    ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype,
-    TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
+    ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec,
+    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -27,6 +27,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
 pub use crate::dialogs_r9::*;
+use crate::i18n::LocalePreset;
 use crate::menus::shortcuts::ShortcutRegistry;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::power_wizard::PowerWizardState;
@@ -491,6 +492,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             predictor_columns: Vec::new(),
         })),
         "stats.pvalue_stack" => Some(AnalysisKind::PValueStack(PValueStackSpec::default())),
+        "stats.power" => Some(AnalysisKind::PowerAnalysis(curvebook_doc::PowerAnalysisSpec::default())),
         _ => None,
     }
 }
@@ -698,11 +700,15 @@ pub struct AnalyzeDialogState {
     #[serde(default = "default_true_flag")]
     pub sample_proportional: bool,
     #[serde(default)]
+    pub descriptive_aggregation: SubcolumnAggregation,
+    #[serde(default)]
     pub pvalue_stack_method: PValueStackMethod,
     #[serde(default = "default_pvalue_stack_threshold")]
     pub pvalue_stack_threshold: f64,
     #[serde(default)]
     pub pvalue_stack_column: Option<usize>,
+    #[serde(default)]
+    pub compute_effect_sizes: Option<bool>,
 }
 
 const fn default_pvalue_stack_threshold() -> f64 {
@@ -805,9 +811,11 @@ impl Default for AnalyzeDialogState {
             sample_size: 10,
             sample_stratify_column: None,
             sample_proportional: true,
+            descriptive_aggregation: SubcolumnAggregation::RowMeans,
             pvalue_stack_method: PValueStackMethod::default(),
             pvalue_stack_threshold: default_pvalue_stack_threshold(),
             pvalue_stack_column: None,
+            compute_effect_sizes: None,
         }
     }
 }
@@ -861,9 +869,11 @@ impl AnalyzeDialogState {
         self.sample_size = 10;
         self.sample_stratify_column = None;
         self.sample_proportional = true;
+        self.descriptive_aggregation = SubcolumnAggregation::RowMeans;
         self.pvalue_stack_method = PValueStackMethod::default();
         self.pvalue_stack_threshold = default_pvalue_stack_threshold();
         self.pvalue_stack_column = None;
+        self.compute_effect_sizes = None;
     }
 
     /// Populate defaults and variable candidates for `sheet`.
@@ -925,20 +935,25 @@ impl AnalyzeDialogState {
 
     /// Apply modal field updates from `ui.answer_dialog` / interactive controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
-        for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry"] {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+        for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry", "analyze.entries_list"] {
             if let Some(s) = fields.get(key).and_then(Value::as_str) {
                 self.selected_entry_id = Some(s.to_owned());
             }
         }
         for (key, val) in fields {
             match key.as_str() {
-                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" => {}
+                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" | "analyze.entries_list" => {}
                 "search" | "search_query" | "analyze.search" => {
                     if let Some(s) = val.as_str() {
                         self.search_query = s.to_owned();
                     }
                 }
-                "equation_id" | "analyze.equation_id" => {
+                "equation_id" | "analyze.equation_id" | "analyze.fit.model_id" => {
                     if let Some(s) = val.as_str() {
                         self.equation_id = s.to_owned();
                     }
@@ -951,7 +966,7 @@ impl AnalyzeDialogState {
                         }
                     }
                 }
-                "correlation_heatmap" | "analyze.correlation_heatmap" => {
+                "correlation_heatmap" | "analyze.correlation_heatmap" | "analyze.correlation.heatmap" => {
                     if let Some(b) = val.as_bool() {
                         if b && !self.correlation_all_pairs {
                             return Err(String::from("Create correlation heatmap is disabled in X vs every Y mode."));
@@ -1019,20 +1034,75 @@ impl AnalyzeDialogState {
                 "error_propagation" | "analyze.transform.error_propagation" => {
                     self.transform_error_propagation = parse_error_prop_value(val)?;
                 }
-                _ => self.apply_r9_analyze_field(key, val)?,
+                _ => self.apply_r9_analyze_field(key, val, preset)?,
             }
         }
         Ok(())
     }
 
-    fn apply_r9_analyze_field(&mut self, key: &str, val: &Value) -> Result<(), String> {
+    fn apply_r9_analyze_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
+        if let Some(col_raw) = key.strip_prefix("analyze.pcr.outcome.")
+            && let Ok(col) = col_raw.parse::<usize>()
+        {
+            let selected = val.as_bool().unwrap_or(true);
+            if selected {
+                if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
+                    return Err(format!(
+                        "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                    ));
+                }
+                self.pcr_outcome_column = Some(col);
+                self.set_response_column(col);
+            } else if self.pcr_outcome_column == Some(col) {
+                self.pcr_outcome_column = None;
+            }
+            return Ok(());
+        }
         match key {
-            "two_group_method" | "analyze.two_group.method" => {
+            "assume_gaussian" | "analyze.assume_gaussian" => {
+                let g = val.as_bool().ok_or_else(|| String::from("`assume_gaussian` must be boolean"))?;
+                let paired = matches!(
+                    self.two_group_method,
+                    Some(TwoGroupMethod::PairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest)
+                );
+                self.two_group_method = Some(match (g, paired) {
+                    (true, true) => TwoGroupMethod::PairedT,
+                    (true, false) => TwoGroupMethod::UnpairedT,
+                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
+                    (false, false) => TwoGroupMethod::MannWhitneyU,
+                });
+            }
+            "paired_or_matched" | "analyze.paired_or_matched" => {
+                let paired = val.as_bool().ok_or_else(|| String::from("`paired_or_matched` must be boolean"))?;
+                let gaussian = !matches!(
+                    self.two_group_method,
+                    Some(
+                        TwoGroupMethod::MannWhitneyU
+                            | TwoGroupMethod::WilcoxonSignedRank
+                            | TwoGroupMethod::PairedSignTest
+                            | TwoGroupMethod::KolmogorovSmirnov
+                    )
+                );
+                self.two_group_method = Some(match (gaussian, paired) {
+                    (true, true) => TwoGroupMethod::PairedT,
+                    (true, false) => TwoGroupMethod::UnpairedT,
+                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
+                    (false, false) => TwoGroupMethod::MannWhitneyU,
+                });
+            }
+            "descriptive_subcolumn_agg" | "subcolumn_agg" | "analyze.descriptive.subcolumn_agg" => {
+                self.descriptive_aggregation = parse_subcolumn_aggregation_val(val)?;
+            }
+            "two_group_method" | "analyze.two_group.method" | "analyze.two_group_method" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
                 self.two_group_method = Some(parse_two_group_method_str(raw, self.two_group_hypothetical)?);
             }
+            "compute_effect_sizes" | "analyze.compute_effect_sizes" | "analyze.two_group.compute_effect_sizes" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`compute_effect_sizes` must be boolean"))?;
+                self.compute_effect_sizes = Some(b);
+            }
             "hypothetical" | "two_group_hypothetical" | "analyze.two_group.hypothetical" => {
-                self.two_group_hypothetical = parse_finite_f64(val, key)?;
+                self.two_group_hypothetical = parse_finite_f64_with_locale(val, key, preset)?;
             }
             "mv_group_column" | "analyze.mv_group_column" | "analyze.km.mv_group_column" => {
                 self.mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
@@ -1040,7 +1110,7 @@ impl AnalyzeDialogState {
             "mv_response_column" | "analyze.mv_response_column" => {
                 self.mv_response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
             }
-            "contingency_method" | "analyze.contingency.method" => {
+            "contingency_method" | "analyze.contingency.method" | "analyze.contingency_method" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`contingency_method` must be a string"))?;
                 self.contingency_method = Some(parse_contingency_method_name(raw)?);
             }
@@ -1059,11 +1129,11 @@ impl AnalyzeDialogState {
             "fit_weighting" | "analyze.fit.weighting" => {
                 self.fit_weighting = parse_weighting_scheme(val)?;
             }
-            "null_proportion" | "analyze.contingency.null_proportion" => {
-                self.contingency_null_proportion = parse_opt_finite_f64(val, key)?;
+            "null_proportion" | "analyze.contingency.null_proportion" | "analyze.null_proportion" => {
+                self.contingency_null_proportion = parse_opt_finite_f64_with_locale(val, key, preset)?;
             }
-            "expected_proportions" | "analyze.contingency.expected_proportions" => {
-                self.contingency_expected_proportions = if val.is_null() { None } else { Some(parse_f64_list(val, key)?) };
+            "expected_proportions" | "analyze.contingency.expected_proportions" | "analyze.expected_proportions" => {
+                self.contingency_expected_proportions = if val.is_null() { None } else { Some(parse_f64_list_with_locale(val, key, preset)?) };
             }
             "three_way" | "analyze.factorial.three_way" => {
                 self.factorial_three_way = val.as_bool().ok_or_else(|| String::from("`three_way` must be boolean"))?;
@@ -1080,7 +1150,7 @@ impl AnalyzeDialogState {
                 let raw = val.as_str().ok_or_else(|| String::from("`ss_type` must be a string"))?;
                 self.factorial_ss_type = parse_ss_type_str(raw)?;
             }
-            "multiplicity_method" | "analyze.multiplicity_method" => {
+            "multiplicity_method" | "analyze.multiplicity_method" | "analyze.factorial.multiplicity" => {
                 if self.selected_entry_id.as_deref() == Some("stats.pvalue_stack") {
                     self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
                 } else {
@@ -1107,10 +1177,10 @@ impl AnalyzeDialogState {
             "standardize" | "pca_standardize" | "analyze.pca.standardize" => {
                 self.pca_standardize = val.as_bool().ok_or_else(|| String::from("`standardize` must be boolean"))?;
             }
-            "spearman_rank" | "analyze.corr.spearman_rank" => {
+            "spearman_rank" | "analyze.corr.spearman_rank" | "analyze.correlation.spearman_rank" => {
                 self.corr_spearman_rank = val.as_bool().ok_or_else(|| String::from("`spearman_rank` must be boolean"))?;
             }
-            "imputations_m" | "m" | "analyze.mi.imputations_m" => {
+            "imputations_m" | "m" | "analyze.mi.imputations_m" | "analyze.imputation.m" => {
                 self.imputation_m = parse_usize_min(val, key, 1)?;
             }
             "family" | "glm_family" | "analyze.glm.family" => {
@@ -1187,19 +1257,23 @@ impl AnalyzeDialogState {
             "proportional_allocation" | "analyze.sample.proportional_allocation" => {
                 self.sample_proportional = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
             }
-            _ => self.apply_pvalue_stack_analyze_field(key, val)?,
+            _ => self.apply_pvalue_stack_analyze_field(key, val, preset)?,
         }
         Ok(())
     }
 
-    fn apply_pvalue_stack_analyze_field(&mut self, key: &str, val: &Value) -> Result<(), String> {
+    fn apply_pvalue_stack_analyze_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
         let is_pstack = self.selected_entry_id.as_deref() == Some("stats.pvalue_stack");
         match key {
             "pvalue_stack_method" | "analyze.pvalue_stack.method" | "analyze.pvalue_stack.multiplicity_method" => {
                 self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
             }
             "pvalue_stack_threshold" | "analyze.pvalue_stack.threshold" => {
-                self.pvalue_stack_threshold = parse_pvalue_stack_threshold_val(val, key)?;
+                let t = parse_finite_f64_with_locale(val, key, preset)?;
+                if !(0.0 < t && t < 1.0) {
+                    return Err(format!("`{key}` ({t}) must lie strictly in (0, 1)"));
+                }
+                self.pvalue_stack_threshold = t;
             }
             "pvalue_stack_column" | "analyze.pvalue_stack.column" => {
                 self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
@@ -1208,12 +1282,16 @@ impl AnalyzeDialogState {
                 self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
             }
             "threshold" | "alpha" | "q" | "fdr_q" if is_pstack => {
-                self.pvalue_stack_threshold = parse_pvalue_stack_threshold_val(val, key)?;
+                let t = parse_finite_f64_with_locale(val, key, preset)?;
+                if !(0.0 < t && t < 1.0) {
+                    return Err(format!("`{key}` ({t}) must lie strictly in (0, 1)"));
+                }
+                self.pvalue_stack_threshold = t;
             }
             "column" if is_pstack => {
                 self.pvalue_stack_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
             }
-            _ => {}
+            other => return Err(format!("unknown Analyze field `{other}`")),
         }
         Ok(())
     }
@@ -1298,15 +1376,26 @@ impl AnalyzeDialogState {
             .collect();
 
         match &mut kind {
+            AnalysisKind::DescriptiveStats(desc) => {
+                desc.aggregation = self.descriptive_aggregation;
+            }
             AnalysisKind::TwoGroupComparison(tg) => {
                 if let Some(m) = self.two_group_method {
                     tg.method = m;
+                }
+                if let Some(ces) = self.compute_effect_sizes {
+                    tg.compute_effect_sizes = ces;
                 }
                 if self.mv_group_column.is_some() {
                     tg.mv_group_column = self.mv_group_column;
                 }
                 if self.mv_response_column.is_some() {
                     tg.mv_response_column = self.mv_response_column;
+                }
+            }
+            AnalysisKind::OneWayAnova(anova) => {
+                if let Some(ces) = self.compute_effect_sizes {
+                    anova.compute_effect_sizes = ces;
                 }
             }
             AnalysisKind::Contingency(cont) => {
@@ -1404,6 +1493,9 @@ impl AnalyzeDialogState {
                 fac.residual_covariance = self.factorial_residual_covariance;
                 fac.ss_type = self.factorial_ss_type;
                 fac.multiplicity.method = self.factorial_multiplicity;
+                if let Some(ces) = self.compute_effect_sizes {
+                    fac.compute_effect_sizes = ces;
+                }
                 if !predictor_cols.is_empty() {
                     fac.multifactor_columns = predictor_cols;
                     fac.response_column = response_col;
@@ -1744,24 +1836,30 @@ impl EditAnalysisParametersState {
 
     /// Apply modal field updates from `ui.answer_dialog` / parameter widgets while enforcing R1–R9 predicates.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`) while enforcing R1–R9 predicates.
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         for key in ["assume_gaussian", "edit.assume_gaussian", "paired_or_matched", "matched", "edit.paired_or_matched"] {
             if let Some(val) = fields.get(key) {
-                self.apply_single_param_patch(key, val)?;
+                self.apply_single_param_patch(key, val, preset)?;
             }
         }
         for (key, val) in fields {
             if matches!(key.as_str(), "assume_gaussian" | "edit.assume_gaussian" | "paired_or_matched" | "matched" | "edit.paired_or_matched") {
                 continue;
             }
-            self.apply_single_param_patch(key, val)?;
+            self.apply_single_param_patch(key, val, preset)?;
         }
         Ok(())
     }
 
-    fn apply_single_param_patch(&mut self, key: &str, val: &Value) -> Result<(), String> {
-        if self.apply_contingency_param_patch(key, val)?
+    fn apply_single_param_patch(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
+        if self.apply_contingency_param_patch(key, val, preset)?
             || self.apply_transform_param_patch(key, val)?
-            || self.apply_pvalue_stack_param_patch(key, val)?
+            || self.apply_pvalue_stack_param_patch(key, val, preset)?
+            || self.apply_power_analysis_param_patch(key, val, preset)?
             || self.apply_r9_param_patch(key, val)?
         {
             return Ok(());
@@ -1806,7 +1904,7 @@ impl EditAnalysisParametersState {
                     self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: col });
                 }
             }
-            "welch_correction" | "edit.welch_correction" => {
+            "welch_correction" | "edit.welch_correction" | "edit.two_group.welch" => {
                 let w = val.as_bool().ok_or_else(|| String::from("`welch_correction` must be boolean"))?;
                 if let Some(spec) = &mut self.draft
                     && let AnalysisKind::TwoGroupComparison(mut two) = spec.kind.clone()
@@ -1819,6 +1917,39 @@ impl EditAnalysisParametersState {
                     spec.update_kind(AnalysisKind::TwoGroupComparison(two));
                 }
             }
+            "graph_differences" | "edit.two_group.graph_differences" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`graph_differences` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_graph_differences(two.method).enabled
+                {
+                    return Err(String::from("Estimation plot of differences is disabled in nonparametric/rank mode."));
+                }
+                self.graph_differences = b;
+            }
+            "graph_ranks" | "edit.two_group.graph_ranks" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`graph_ranks` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
+                {
+                    return Err(String::from("Rank-based option is disabled in Gaussian parametric mode."));
+                }
+                self.graph_ranks = b;
+            }
+            "hodges_lehmann_ci" | "hodges_lehmann" | "edit.two_group.hodges_lehmann" => {
+                let b = val.as_bool().ok_or_else(|| String::from("`hodges_lehmann_ci` must be boolean"))?;
+                if let Some(spec) = &mut self.draft
+                    && let AnalysisKind::TwoGroupComparison(two) = &spec.kind
+                    && b
+                    && !crate::modal_predicates::r4_two_group_nonparametric_options(two.method).enabled
+                {
+                    return Err(String::from("Hodges-Lehmann CI is disabled in Gaussian parametric mode."));
+                }
+                self.hodges_lehmann_ci = b;
+            }
             "correlation_all_pairs" | "edit.correlation_all_pairs" => {
                 if let Some(b) = val.as_bool() {
                     self.correlation_all_pairs = b;
@@ -1827,7 +1958,7 @@ impl EditAnalysisParametersState {
                     }
                 }
             }
-            "correlation_heatmap" | "edit.correlation_heatmap" => {
+            "correlation_heatmap" | "edit.correlation_heatmap" | "edit.correlation.heatmap" => {
                 if let Some(b) = val.as_bool() {
                     if b && !self.correlation_all_pairs {
                         return Err(String::from("Correlation heatmap is disabled unless all-pairs Correlation matrix mode is active."));
@@ -1846,8 +1977,8 @@ impl EditAnalysisParametersState {
                     self.set_p_value_format(next);
                 }
             }
-            "p_value_decimals" | "edit.p_value_digits" => {
-                let d = val.as_u64().ok_or_else(|| String::from("`p_value_decimals` must be integer"))? as u8;
+            "p_value_decimals" | "edit.p_value_digits" | "edit.pvalue.digits" => {
+                let d = u8::try_from(parse_usize_min(val, key, 0)?).map_err(|_| String::from("`p_value_decimals` out of range"))?;
                 if let Some(spec) = &mut self.draft {
                     if !matches!(spec.p_value_format, PValueFormat::Custom { .. }) {
                         return Err(String::from("Custom decimal precision spinner is disabled unless Custom P-value format is selected."));
@@ -1860,7 +1991,8 @@ impl EditAnalysisParametersState {
                 }
             }
             "confidence_percent" | "edit.confidence_percent" => {
-                if let Some(c) = val.as_f64() {
+                if !val.is_null() {
+                    let c = parse_finite_f64_with_locale(val, key, preset)?;
                     self.set_confidence_percent(c)?;
                 }
             }
@@ -1894,6 +2026,31 @@ impl EditAnalysisParametersState {
                     self.set_anova_multiplicity(method);
                 }
             }
+            "edit.post_hoc.tukey" | "edit.posthoc.tukey" => {
+                if val.as_bool().unwrap_or(true) {
+                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, true).enabled {
+                        return Err(String::from("Parametric Tukey post-hoc test is disabled when Assume Gaussian = No."));
+                    }
+                    self.set_anova_multiplicity(MultiplicityMethod::TukeyHsd);
+                }
+            }
+            "edit.post_hoc.dunnett" | "edit.posthoc.dunnett" => {
+                if val.as_bool().unwrap_or(true) {
+                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, true).enabled {
+                        return Err(String::from("Parametric Dunnett post-hoc test is disabled when Assume Gaussian = No."));
+                    }
+                    let ctrl = self.control_column;
+                    self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: ctrl });
+                }
+            }
+            "edit.post_hoc.dunn" | "edit.posthoc.dunn" => {
+                if val.as_bool().unwrap_or(true) {
+                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, false).enabled {
+                        return Err(String::from("Nonparametric Dunn post-hoc test is disabled when Assume Gaussian = Yes."));
+                    }
+                    self.set_anova_multiplicity(MultiplicityMethod::DunnRankSum);
+                }
+            }
             "anova_method" | "one_way_method" | "edit.anova_method" | "edit.one_way_method" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`anova_method` must be a string"))?.trim().to_ascii_lowercase();
                 let next_method = match raw.as_str() {
@@ -1912,17 +2069,17 @@ impl EditAnalysisParametersState {
                     self.sync_rule_flags_from_kind();
                 }
             }
-            _ => {}
+            other => return Err(format!("unknown Edit Analysis Parameters field `{other}`")),
         }
         Ok(())
     }
 
     /// Applies Contingency-specific field patches on `EditAnalysisParametersState`.
-    fn apply_contingency_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+    fn apply_contingency_param_patch(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<bool, String> {
         let method_flag = match key {
             "fisher" | "edit.contingency.fisher" => Some(ContingencyMethod::FisherExact),
-            "barnard" | "edit.contingency.barnard" => Some(ContingencyMethod::BarnardExact),
-            "likelihood_ratio_g2" | "g2" | "edit.contingency.g2" => Some(ContingencyMethod::LikelihoodRatioG2),
+            "barnard" | "edit.contingency.barnard" | "edit.contingency.barnard_exact" => Some(ContingencyMethod::BarnardExact),
+            "likelihood_ratio_g2" | "g2" | "edit.contingency.g2" | "edit.contingency.likelihood_g2" => Some(ContingencyMethod::LikelihoodRatioG2),
             "mcnemar" | "edit.contingency.mcnemar" => Some(ContingencyMethod::McNemarPaired),
             "cochran_armitage" | "edit.contingency.cochran_armitage" => Some(ContingencyMethod::CochranArmitageTrend),
             "cohen_kappa" | "edit.contingency.cohen_kappa" => {
@@ -1949,7 +2106,7 @@ impl EditAnalysisParametersState {
                 self.update_contingency_spec(|c| c.method = ContingencyMethod::CohenKappa { weighting: w });
             }
             "null_proportion" | "edit.contingency.null_proportion" => {
-                let p = parse_opt_finite_f64(val, key)?;
+                let p = parse_opt_finite_f64_with_locale(val, key, preset)?;
                 if let Some(v) = p
                     && !(0.0 < v && v < 1.0)
                 {
@@ -1958,8 +2115,24 @@ impl EditAnalysisParametersState {
                 self.update_contingency_spec(|c| c.null_proportion = p);
             }
             "expected_proportions" | "edit.contingency.expected_proportions" => {
-                let props = if val.is_null() { None } else { Some(parse_f64_list(val, key)?) };
+                let props = if val.is_null() { None } else { Some(parse_f64_list_with_locale(val, key, preset)?) };
                 self.update_contingency_spec(|c| c.expected_proportions = props);
+            }
+            "edit.contingency.ci.baptista_pike" => {
+                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                self.contingency_or_ci_method = s.to_owned();
+            }
+            "edit.contingency.ci.koopman" => {
+                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                self.contingency_rr_ci_method = s.to_owned();
+            }
+            "edit.contingency.ci.newcombe_wilson" => {
+                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                self.contingency_arr_ci_method = s.to_owned();
+            }
+            "edit.contingency.ci.wilson_brown" => {
+                let s = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                self.contingency_diag_ci_method = s.to_owned();
             }
             "compute_odds_and_risk_ratios" | "contingency_odds_ratio_checked" | "edit.contingency.odds_ratio" => {
                 if let Some(b) = val.as_bool() {
@@ -1999,7 +2172,7 @@ impl EditAnalysisParametersState {
     }
 
     /// Applies `PValueStack`-specific field patches on `EditAnalysisParametersState`.
-    fn apply_pvalue_stack_param_patch(&mut self, key: &str, val: &Value) -> Result<bool, String> {
+    fn apply_pvalue_stack_param_patch(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<bool, String> {
         let Some(spec) = &mut self.draft else {
             return Ok(false);
         };
@@ -2017,7 +2190,11 @@ impl EditAnalysisParametersState {
                 true
             }
             "threshold" | "pvalue_stack_threshold" | "alpha" | "q" | "fdr_q" | "edit.pvalue_stack.threshold" => {
-                ps.threshold = parse_pvalue_stack_threshold_val(val, key)?;
+                let t = parse_finite_f64_with_locale(val, key, preset)?;
+                if !(0.0 < t && t < 1.0) {
+                    return Err(format!("`{key}` ({t}) must lie strictly in (0, 1)"));
+                }
+                ps.threshold = t;
                 true
             }
             "column" | "pvalue_stack_column" | "edit.pvalue_stack.column" => {
@@ -2028,6 +2205,107 @@ impl EditAnalysisParametersState {
         };
         if handled {
             spec.update_kind(AnalysisKind::PValueStack(ps));
+        }
+        Ok(handled)
+    }
+
+    /// Applies `PowerAnalysis`-specific field patches on `EditAnalysisParametersState`.
+    fn apply_power_analysis_param_patch(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<bool, String> {
+        let Some(spec) = &mut self.draft else {
+            return Ok(false);
+        };
+        let AnalysisKind::PowerAnalysis(mut pa) = spec.kind.clone() else {
+            return Ok(false);
+        };
+        let handled = match key {
+            "edit.power.family" | "power.family" => {
+                let raw = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+                pa.family = match norm.as_str() {
+                    "unpairedt" | "twosampleunpairedt" | "independentt" => curvebook_doc::PowerTestFamily::TwoSampleUnpairedT,
+                    "pairedt" | "twosamplepairedt" | "dependentt" => curvebook_doc::PowerTestFamily::TwoSamplePairedT,
+                    "onesamplet" | "singlesamplet" => curvebook_doc::PowerTestFamily::OneSampleT,
+                    "onewayanova" | "anova" => curvebook_doc::PowerTestFamily::OneWayAnova,
+                    "twoproportions" | "proportions" => curvebook_doc::PowerTestFamily::TwoProportions,
+                    "correlation" | "pearsoncorrelation" => curvebook_doc::PowerTestFamily::Correlation,
+                    "chisquare" | "chi2" => curvebook_doc::PowerTestFamily::ChiSquare,
+                    "simplelinearregression" | "linearregression" | "regression" => curvebook_doc::PowerTestFamily::SimpleLinearRegression,
+                    _ => return Err(format!("unknown power test family `{raw}`")),
+                };
+                true
+            }
+            "edit.power.solve_target" | "power.solve_target" => {
+                let raw = val.as_str().ok_or_else(|| format!("`{key}` must be a string"))?;
+                let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+                pa.solve_target = match norm.as_str() {
+                    "samplesize" | "n" => curvebook_doc::PowerSolveTarget::SampleSize,
+                    "power" => curvebook_doc::PowerSolveTarget::Power,
+                    "detectableeffect" | "effect" | "mde" => curvebook_doc::PowerSolveTarget::DetectableEffect,
+                    _ => return Err(format!("unknown power solve target `{raw}`")),
+                };
+                true
+            }
+            "edit.power.alpha" => {
+                let a = parse_finite_f64_with_locale(val, key, preset)?;
+                if !(0.0..1.0).contains(&a) || a <= 0.0 {
+                    return Err(format!("`{key}` must lie strictly in (0, 1)"));
+                }
+                pa.alpha = a;
+                true
+            }
+            "edit.power.target_power" => {
+                if val.is_null() {
+                    pa.target_power = None;
+                } else {
+                    let pw = parse_finite_f64_with_locale(val, key, preset)?;
+                    if !(0.0..1.0).contains(&pw) || pw <= 0.0 {
+                        return Err(format!("`{key}` must lie strictly in (0, 1)"));
+                    }
+                    pa.target_power = Some(pw);
+                }
+                true
+            }
+            "edit.power.sample_size" => {
+                pa.sample_size = if val.is_null() { None } else { Some(parse_finite_f64_with_locale(val, key, preset)?) };
+                true
+            }
+            "edit.power.sample_size_group2" => {
+                pa.sample_size_group2 = if val.is_null() { None } else { Some(parse_finite_f64_with_locale(val, key, preset)?) };
+                true
+            }
+            "edit.power.allocation_ratio" => {
+                let r = parse_finite_f64_with_locale(val, key, preset)?;
+                if r <= 0.0 {
+                    return Err(format!("`{key}` must be > 0"));
+                }
+                pa.allocation_ratio = r;
+                true
+            }
+            "edit.power.two_tailed" => {
+                let b = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                pa.tail_mode = if b {
+                    curvebook_doc::PowerTailMode::TwoSided
+                } else {
+                    curvebook_doc::PowerTailMode::OneSided(curvebook_doc::PowerOneSidedDirection::Greater)
+                };
+                true
+            }
+            "edit.power.continuity_correction" => {
+                pa.continuity_correction = val.as_bool().ok_or_else(|| format!("`{key}` must be boolean"))?;
+                true
+            }
+            "edit.power.chi_square_df" => {
+                let df = parse_finite_f64_with_locale(val, key, preset)?;
+                if df <= 0.0 {
+                    return Err(format!("`{key}` must be > 0"));
+                }
+                pa.chi_square_df = df;
+                true
+            }
+            _ => false,
+        };
+        if handled {
+            spec.update_kind(AnalysisKind::PowerAnalysis(pa));
         }
         Ok(handled)
     }
@@ -2167,6 +2445,10 @@ impl EditAnalysisParametersState {
         };
         let mut updated = spec.kind.clone();
         let handled = match (key, &mut updated) {
+            ("descriptive_subcolumn_agg" | "subcolumn_agg" | "edit.descriptive.subcolumn_agg", AnalysisKind::DescriptiveStats(desc)) => {
+                desc.aggregation = parse_subcolumn_aggregation_val(val)?;
+                true
+            }
             ("two_group_method" | "edit.two_group.method", AnalysisKind::TwoGroupComparison(t)) => {
                 let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
                 let hyp = match t.method {
@@ -2235,6 +2517,11 @@ impl EditAnalysisParametersState {
                 f.multifactor_columns = parse_usize_list(val, key)?;
                 true
             }
+            ("factorial_multiplicity" | "edit.factorial.multiplicity", AnalysisKind::FactorialAnova(f)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`factorial.multiplicity` must be a string"))?;
+                f.multiplicity.method = parse_multiplicity_method_name(raw, self.control_column)?;
+                true
+            }
             ("response_column" | "factorial_response_column" | "edit.factorial.response_column", AnalysisKind::FactorialAnova(f)) => {
                 f.response_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
                 true
@@ -2271,12 +2558,15 @@ impl EditAnalysisParametersState {
                 *parallel_analysis_seed = if val.is_null() { None } else { Some(parse_u64_val(val, key)?) };
                 true
             }
-            ("spearman_rank" | "edit.corr.spearman_rank", AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank })) => {
+            (
+                "spearman_rank" | "edit.corr.spearman_rank" | "edit.correlation.spearman_rank",
+                AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank }),
+            ) => {
                 *spearman_rank = val.as_bool().ok_or_else(|| String::from("`spearman_rank` must be boolean"))?;
                 true
             }
             (
-                "imputations_m" | "m" | "edit.mi.imputations_m",
+                "imputations_m" | "m" | "edit.mi.imputations_m" | "edit.imputation.m",
                 AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, .. }),
             ) => {
                 *imputations_m = parse_usize_min(val, key, 1)?;
@@ -2403,7 +2693,7 @@ impl EditAnalysisParametersState {
                 *mv_group_column = if val.is_null() { None } else { Some(parse_usize_min(val, key, 0)?) };
                 true
             }
-            ("equation_id" | "edit.fit.equation_id", AnalysisKind::NonlinearRegression(fit)) => {
+            ("equation_id" | "edit.fit.equation_id" | "edit.fit.model_id", AnalysisKind::NonlinearRegression(fit)) => {
                 let raw = val.as_str().ok_or_else(|| String::from("`equation_id` must be a string"))?.trim();
                 if !raw.is_empty() {
                     fit.equation_id = raw.to_owned();
@@ -2560,9 +2850,8 @@ fn parse_contingency_method_name(raw: &str) -> Result<ContingencyMethod, String>
     }
 }
 
-fn parse_dialog_num(val: &Value, field: &str) -> Result<f64, String> {
-    let parsed = val.as_f64().or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()));
-    parsed.filter(|v| v.is_finite()).ok_or_else(|| format!("`{field}` must be a finite number"))
+fn parse_dialog_num_with_locale(val: &Value, field: &str, preset: &LocalePreset) -> Result<f64, String> {
+    parse_finite_f64_with_locale(val, field, preset)
 }
 
 pub(crate) fn parse_table_kind_str(raw: &str) -> Result<TableKind, String> {
@@ -2577,6 +2866,24 @@ pub(crate) fn parse_table_kind_str(raw: &str) -> Result<TableKind, String> {
         "partsofwhole" | "parts" => Ok(TableKind::PartsOfWhole),
         "nested" => Ok(TableKind::Nested),
         _ => Err(format!("unknown table archetype `{raw}`")),
+    }
+}
+
+fn parse_subcolumn_aggregation_val(val: &Value) -> Result<SubcolumnAggregation, String> {
+    if let Some(idx) = val.as_u64() {
+        return match idx {
+            0 => Ok(SubcolumnAggregation::RowMeans),
+            1 => Ok(SubcolumnAggregation::PerSubcolumn),
+            2 => Ok(SubcolumnAggregation::PooledGrandSample),
+            _ => Err(format!("unknown subcolumn aggregation index `{idx}`")),
+        };
+    }
+    let raw = val.as_str().ok_or_else(|| String::from("`subcolumn_agg` must be a string or index"))?;
+    match norm_key(raw).as_str() {
+        "rowmeans" | "mean" | "means" => Ok(SubcolumnAggregation::RowMeans),
+        "persubcolumn" | "eachreplicate" | "subcolumns" => Ok(SubcolumnAggregation::PerSubcolumn),
+        "pooledgrandsample" | "pooled" => Ok(SubcolumnAggregation::PooledGrandSample),
+        _ => Err(format!("unknown subcolumn aggregation `{raw}`")),
     }
 }
 
@@ -3582,6 +3889,8 @@ pub struct FormatGraphState {
     #[serde(default)]
     pub half_violin_with_points: bool,
     #[serde(default)]
+    pub initial_violin_options: Option<(bool, bool, bool)>,
+    #[serde(default)]
     pub model_equation_mode: Option<EquationDisplayMode>,
     #[serde(default)]
     pub model_equation_annotations: Vec<GraphAnnotation>,
@@ -3607,6 +3916,7 @@ impl Default for FormatGraphState {
             show_legend: true,
             legend_bordered: false,
             half_violin_with_points: false,
+            initial_violin_options: None,
             model_equation_mode: None,
             model_equation_annotations: Vec::new(),
             annotations_dirty: false,
@@ -3635,7 +3945,13 @@ impl FormatGraphState {
         if let Some(series) = graph.spec.series.get(series_idx) {
             self.error_bar_enabled = series.y_error_bars.is_some();
             self.error_bar_spec = series.y_error_bars.unwrap_or_default();
-            self.half_violin_with_points = matches!(series.gdo, GraphicalDataObject::Violin { half_violin_with_points: true, .. });
+            if let GraphicalDataObject::Violin { clip_to_observed_range, show_median_and_quartiles, half_violin_with_points, .. } = series.gdo {
+                self.half_violin_with_points = half_violin_with_points;
+                self.initial_violin_options = Some((clip_to_observed_range, show_median_and_quartiles, half_violin_with_points));
+            } else {
+                self.half_violin_with_points = false;
+                self.initial_violin_options = None;
+            }
             self.extract_series_marker_and_dash(&series.gdo);
         }
     }
@@ -3700,6 +4016,11 @@ impl FormatGraphState {
     /// # Errors
     /// Returns an error if a supplied enum variant or numeric value is invalid.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply field patches using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         for (key, val) in fields {
             match key.as_str() {
                 "show_legend" | "format_graph.show_legend" => {
@@ -3712,11 +4033,10 @@ impl FormatGraphState {
                     self.error_bar_enabled = val.as_bool().ok_or_else(|| String::from("`error_bar_enabled` must be boolean"))?;
                 }
                 "marker_size_pt" | "format_graph.marker_size_pt" => {
-                    let sz = val
-                        .as_f64()
-                        .or_else(|| val.as_str().and_then(|s| s.trim().parse::<f64>().ok()))
-                        .filter(|v| v.is_finite() && *v > 0.0)
-                        .ok_or_else(|| String::from("`marker_size_pt` must be a finite positive number"))?;
+                    let sz = parse_dialog_num_with_locale(val, key, preset)?;
+                    if sz <= 0.0 {
+                        return Err(String::from("`marker_size_pt` must be a finite positive number"));
+                    }
                     self.marker_size_pt = sz.clamp(1.0, 24.0);
                 }
                 "selected_series_index" | "series_index" | "format_graph.selected_series_index" => {
@@ -3757,7 +4077,7 @@ impl FormatGraphState {
                     };
                     self.set_model_equation_mode(next);
                 }
-                _ => {}
+                other => return Err(format!("unknown Format Graph field `{other}`")),
             }
         }
         Ok(())
@@ -3805,18 +4125,19 @@ impl FormatGraphState {
                 "dash_style": self.line_dash,
             },
         });
-        if self.half_violin_with_points
+        if (self.half_violin_with_points || self.initial_violin_options.is_some_and(|(_, _, was_half)| was_half))
             && let Some(obj) = series_obj.as_object_mut()
         {
             let swatch = self.palette.color_at(self.selected_series_index);
+            let (clip_to_observed_range, show_median_and_quartiles, _) = self.initial_violin_options.unwrap_or((true, true, false));
             obj.insert(
                 String::from("gdo"),
                 json!(GraphicalDataObject::Violin {
                     fill_color: swatch.with_alpha(190),
                     stroke_color: swatch,
-                    clip_to_observed_range: true,
-                    show_median_and_quartiles: true,
-                    half_violin_with_points: true,
+                    clip_to_observed_range,
+                    show_median_and_quartiles,
+                    half_violin_with_points: self.half_violin_with_points,
                 }),
             );
         }
@@ -4113,8 +4434,18 @@ impl FormatAxesState {
         Some(ToolCommandIntent::new("graph.setAxes", Value::Object(payload)))
     }
 
-    /// Apply modal/inspector field updates to the axis draft (`WF-37`, `WF-44..48`).
+    /// Apply modal/inspector field updates using regional numeric parsing (`preset`).
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, doc, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal/inspector field updates to the axis draft using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(
+        &mut self,
+        fields: &serde_json::Map<String, Value>,
+        doc: Option<&ProjectDocument>,
+        preset: &LocalePreset,
+    ) -> Result<(), String> {
         if let Some(target_val) = fields.get("target_axis").or_else(|| fields.get("axes.target_axis"))
             && let Some(raw) = target_val.as_str()
         {
@@ -4138,11 +4469,11 @@ impl FormatAxesState {
                     let _ = self.set_segment_scale(0, scale);
                 }
                 "min" | "axis_min" | "axes.min" => {
-                    pending_min = parse_opt_finite_f64(val, key)?;
+                    pending_min = parse_opt_finite_f64_with_locale(val, key, preset)?;
                     bounds_changed = true;
                 }
                 "max" | "axis_max" | "axes.max" => {
-                    pending_max = parse_opt_finite_f64(val, key)?;
+                    pending_max = parse_opt_finite_f64_with_locale(val, key, preset)?;
                     bounds_changed = true;
                 }
                 "break_ornament" | "axes.break_ornament" => {
@@ -4150,10 +4481,10 @@ impl FormatAxesState {
                     self.axis_draft.break_ornament = parse_break_ornament_str(raw)?;
                 }
                 "gap_width_pt" | "axes.gap_width_pt" => {
-                    self.axis_draft.gap_width_pt = parse_finite_f64(val, key)?.clamp(1.0, 48.0);
+                    self.axis_draft.gap_width_pt = parse_finite_f64_with_locale(val, key, preset)?.clamp(1.0, 48.0);
                 }
                 "stroke_width_pt" | "axes.stroke_width_pt" => {
-                    self.axis_draft.stroke_width_pt = parse_finite_f64(val, key)?.clamp(0.2, 8.0);
+                    self.axis_draft.stroke_width_pt = parse_finite_f64_with_locale(val, key, preset)?.clamp(0.2, 8.0);
                 }
                 "add_segment" | "axes.add_segment" if val.as_bool() == Some(true) => {
                     let _ = self.add_segment();
@@ -4164,15 +4495,15 @@ impl FormatAxesState {
                     }
                 }
                 "thresholds" | "axes.thresholds" => {
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.set_active_thresholds(items);
                 }
                 "x_thresholds" | "axes.x_thresholds" => {
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.set_x_thresholds(items);
                 }
                 "y_thresholds" | "axes.y_thresholds" => {
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.set_y_thresholds(items);
                 }
                 "add_threshold" | "axes.add_threshold" => {
@@ -4183,21 +4514,22 @@ impl FormatAxesState {
                             parse_axis_target_str(s)?
                         }
                     };
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.append_thresholds_for_target(axis, items);
                 }
                 "add_x_threshold" | "axes.add_x_threshold" => {
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.append_thresholds_for_target(AxisTarget::X, items);
                 }
                 "add_y_threshold" | "axes.add_y_threshold" => {
-                    let items = parse_axis_thresholds_value(val, key)?;
+                    let items = parse_axis_thresholds_value(val, key, preset)?;
                     self.append_thresholds_for_target(AxisTarget::Y, items);
                 }
                 "clear_thresholds" | "axes.clear_thresholds" if val.as_bool() == Some(true) => {
                     self.set_active_thresholds(Vec::new());
                 }
-                _ => {}
+                "target_axis" | "axes.target_axis" | "add_segment" | "axes.add_segment" | "clear_thresholds" | "axes.clear_thresholds" => {}
+                other => return Err(format!("unknown Format Axes field `{other}`")),
             }
         }
         if bounds_changed {
@@ -4216,19 +4548,17 @@ fn parse_axis_target_str(raw: &str) -> Result<AxisTarget, String> {
     }
 }
 
-fn parse_axis_thresholds_value(val: &Value, key: &str) -> Result<Vec<AxisThreshold>, String> {
+fn parse_axis_thresholds_value(val: &Value, key: &str, preset: &LocalePreset) -> Result<Vec<AxisThreshold>, String> {
     match val {
         Value::Null => Ok(Vec::new()),
-        Value::Array(arr) => arr.iter().map(|item| parse_single_axis_threshold(item, key)).collect(),
-        _ => Ok(vec![parse_single_axis_threshold(val, key)?]),
+        Value::Array(arr) => arr.iter().map(|item| parse_single_axis_threshold(item, key, preset)).collect(),
+        _ => Ok(vec![parse_single_axis_threshold(val, key, preset)?]),
     }
 }
 
-fn parse_single_axis_threshold(val: &Value, key: &str) -> Result<AxisThreshold, String> {
-    if let Some(num) = val.as_f64() {
-        if !num.is_finite() {
-            return Err(format!("`{key}` threshold value must be finite"));
-        }
+fn parse_single_axis_threshold(val: &Value, key: &str, preset: &LocalePreset) -> Result<AxisThreshold, String> {
+    if val.is_number() || val.is_string() {
+        let num = parse_finite_f64_with_locale(val, key, preset)?;
         return Ok(AxisThreshold {
             value: num,
             shade_to: None,
@@ -4247,8 +4577,8 @@ fn parse_single_axis_threshold(val: &Value, key: &str) -> Result<AxisThreshold, 
     }
     let obj = val.as_object().ok_or_else(|| format!("`{key}` entries must be objects or numbers"))?;
     let val_num = obj.get("value").ok_or_else(|| format!("`{key}` threshold missing `value`"))?;
-    let value = parse_finite_f64(val_num, key)?;
-    let shade_to = obj.get("shade_to").map(|v| parse_opt_finite_f64(v, "shade_to")).transpose()?.flatten();
+    let value = parse_finite_f64_with_locale(val_num, key, preset)?;
+    let shade_to = obj.get("shade_to").map(|v| parse_opt_finite_f64_with_locale(v, "shade_to", preset)).transpose()?.flatten();
     let label = match obj.get("label") {
         None | Some(Value::Null) => None,
         Some(v) => Some(v.as_str().ok_or_else(|| format!("`{key}` `label` must be a string"))?.to_owned()),
@@ -4263,7 +4593,7 @@ fn parse_single_axis_threshold(val: &Value, key: &str) -> Result<AxisThreshold, 
     };
     let stroke_width_pt = match obj.get("stroke_width_pt") {
         None | Some(Value::Null) => 1.0,
-        Some(v) => parse_finite_f64(v, "stroke_width_pt")?.clamp(0.2, 8.0),
+        Some(v) => parse_finite_f64_with_locale(v, "stroke_width_pt", preset)?.clamp(0.2, 8.0),
     };
     Ok(AxisThreshold { value, shade_to, color, dash_style, stroke_width_pt, label })
 }
@@ -4575,6 +4905,16 @@ impl PairwiseComparisonsState {
 
     /// Apply field patches for `Pairwise Comparisons` brackets and Compact Letter Display (`WF-46`, `WF-50`).
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, doc, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply field patches using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(
+        &mut self,
+        fields: &serde_json::Map<String, Value>,
+        doc: Option<&ProjectDocument>,
+        preset: &LocalePreset,
+    ) -> Result<(), String> {
         let mut auto_add = false;
         let mut explicit_mode = None;
         let mut explicit_enabled = None;
@@ -4622,7 +4962,7 @@ impl PairwiseComparisonsState {
                     self.cld_uppercase = val.as_bool().ok_or_else(|| String::from("`cld_uppercase` must be boolean"))?;
                 }
                 "cld_alpha_override" | "alpha_override" | "pairwise.cld_alpha_override" => {
-                    let alpha = parse_opt_finite_f64(val, "cld_alpha_override")?;
+                    let alpha = parse_opt_finite_f64_with_locale(val, "cld_alpha_override", preset)?;
                     if let Some(a) = alpha
                         && (a <= 0.0 || a >= 1.0)
                     {
@@ -4631,20 +4971,21 @@ impl PairwiseComparisonsState {
                     self.cld_alpha_override = alpha;
                 }
                 "cld_font_size_pt" | "font_size_pt" | "pairwise.cld_font_size_pt" => {
-                    let fs = parse_finite_f64(val, "cld_font_size_pt")?;
+                    let fs = parse_finite_f64_with_locale(val, "cld_font_size_pt", preset)?;
                     if fs <= 0.0 || fs > 144.0 {
                         return Err(format!("`cld_font_size_pt` must lie in (0, 144], got {fs}"));
                     }
                     self.cld_font_size_pt = fs;
                 }
                 "cld_offset_pt" | "offset_pt" | "pairwise.cld_offset_pt" => {
-                    let off = parse_finite_f64(val, "cld_offset_pt")?;
+                    let off = parse_dialog_num_with_locale(val, "cld_offset_pt", preset)?;
                     if !(0.0..=200.0).contains(&off) {
                         return Err(format!("`cld_offset_pt` must lie in [0, 200], got {off}"));
                     }
                     self.cld_offset_pt = off;
                 }
-                _ => {}
+                "auto_add" | "pairwise.auto_add" => {}
+                other => return Err(format!("unknown Pairwise Comparisons field `{other}`")),
             }
         }
         if let Some(en) = explicit_enabled
@@ -4832,7 +5173,38 @@ impl BubblePlotInspectorState {
                         MultivariatePlotMode::BubbleScatter
                     };
                 }
-                _ => {}
+                "bubble.color_channel" | "color_channel" => {
+                    if let Ok(ch) = serde_json::from_value::<ColorChannelMapping>(val.clone()) {
+                        self.color_channel = ch;
+                    } else if val.is_null() {
+                        self.color_channel = ColorChannelMapping::Constant(PaletteId::OkabeIto.color_at(0));
+                    } else if let Some(s) = val.as_str() {
+                        let norm = norm_key(s);
+                        if norm.contains("constant") {
+                            color_mode = Some(String::from("constant"));
+                        } else if norm.contains("continuous") {
+                            color_mode = Some(String::from("continuous"));
+                        } else if norm.contains("categorical") {
+                            color_mode = Some(String::from("categorical"));
+                        } else {
+                            return Err(format!("unsupported `{key}` value `{s}`"));
+                        }
+                    } else {
+                        return Err(format!("`{key}` must be a ColorChannelMapping object, mode string, or null"));
+                    }
+                }
+                "bubble.size_channel" | "size_channel" => {
+                    if let Ok(sz) = serde_json::from_value::<SizeChannelMapping>(val.clone()) {
+                        self.size_channel = sz;
+                    } else if val.is_null() {
+                        self.size_channel = SizeChannelMapping::Constant { radius_pt: 5.0 };
+                    } else if let Ok(col) = parse_usize_min(val, key, 0) {
+                        self.set_size_variable(col, 2.5, 14.0);
+                    } else {
+                        return Err(format!("`{key}` must be a SizeChannelMapping object, column index, or null"));
+                    }
+                }
+                other => return Err(format!("unknown Bubble Plot field `{other}`")),
             }
         }
         if color_mode.is_some() || color_col.is_some() || palette_override.is_some() || colormap_override.is_some() {
@@ -4930,22 +5302,22 @@ impl ApplyStyleFromState {
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
         for (key, val) in fields {
             match key.as_str() {
-                "donor_graph_id" | "donor_sheet_id" | "style.donor_graph_id" => {
+                "donor_graph_id" | "donor_sheet_id" | "style.donor_graph_id" | "apply_style.donor_graph_id" => {
                     let s = val.as_str().ok_or_else(|| String::from("`donor_graph_id` must be a string"))?.trim();
                     if !s.is_empty() {
                         self.donor_graph_id = Some(SheetId::from(s));
                     }
                 }
-                "clone_palette" | "style.clone_palette" => {
+                "clone_palette" | "style.clone_palette" | "apply_style.clone_palette" => {
                     self.clone_palette = val.as_bool().ok_or_else(|| String::from("`clone_palette` must be boolean"))?;
                 }
-                "clone_frame_and_axes" | "style.clone_frame_and_axes" => {
+                "clone_frame_and_axes" | "style.clone_frame_and_axes" | "apply_style.clone_frame_and_axes" => {
                     self.clone_frame_and_axes = val.as_bool().ok_or_else(|| String::from("`clone_frame_and_axes` must be boolean"))?;
                 }
-                "clone_error_bars_and_legend" | "style.clone_error_bars_and_legend" => {
+                "clone_error_bars_and_legend" | "style.clone_error_bars_and_legend" | "apply_style.clone_error_bars_and_legend" => {
                     self.clone_error_bars_and_legend = val.as_bool().ok_or_else(|| String::from("`clone_error_bars_and_legend` must be boolean"))?;
                 }
-                _ => {}
+                other => return Err(format!("unknown Apply Style From field `{other}`")),
             }
         }
         Ok(())
@@ -5078,6 +5450,7 @@ impl PageLayoutComposerState {
     /// Apply modal/inspector field patches for `Page Layout` (`WF-48`).
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
         let mut grid_changed = false;
+        let mut explicit_graph_ids: Option<Vec<SheetId>> = None;
         for (key, val) in fields {
             match key.as_str() {
                 "preset" | "layout.preset" => {
@@ -5108,10 +5481,21 @@ impl PageLayoutComposerState {
                         self.new_callout_markdown = s.to_owned();
                     }
                 }
-                _ => {}
+                "arrange_graph_ids" | "graph_ids" | "layout.arrange_graph_ids" => {
+                    let arr = val.as_array().ok_or_else(|| format!("`{key}` must be an array of sheet IDs"))?;
+                    let mut ids = Vec::with_capacity(arr.len());
+                    for (idx, item) in arr.iter().enumerate() {
+                        let raw = item.as_str().ok_or_else(|| format!("`{key}[{idx}]` must be a string"))?;
+                        ids.push(SheetId::try_new(raw).map_err(|e| e.to_string())?);
+                    }
+                    explicit_graph_ids = Some(ids);
+                }
+                other => return Err(format!("unknown Page Layout field `{other}`")),
             }
         }
-        if grid_changed && let Some(d) = doc {
+        if let Some(ids) = explicit_graph_ids {
+            self.arrange_grid(&ids, 18.0, 12.0);
+        } else if grid_changed && let Some(d) = doc {
             let graph_ids: Vec<SheetId> = d.graph_sheets.iter().map(|g| g.id.clone()).collect();
             self.arrange_grid(&graph_ids, 18.0, 12.0);
         }
@@ -5190,7 +5574,7 @@ impl ExportFigureState {
                     let d = parse_usize_min(val, key, 72)?;
                     self.dpi = u16::try_from(d.clamp(72, 2400)).unwrap_or(600);
                 }
-                _ => {}
+                other => return Err(format!("unknown Export Figure field `{other}`")),
             }
         }
         Ok(())
@@ -5599,7 +5983,7 @@ impl ConvertArchetypeDialogState {
                 "preview_only" | "convert.preview_only" => {
                     self.preview_only = val.as_bool().ok_or_else(|| String::from("`preview_only` must be boolean"))?;
                 }
-                _ => {}
+                other => return Err(format!("unknown Convert Table Archetype field `{other}`")),
             }
         }
         Ok(())
@@ -5918,6 +6302,8 @@ impl AssumptionDiagnosticBanner {
 pub struct FormatSelectedPointsState {
     pub graph_sheet_id: Option<SheetId>,
     pub selected_points: Vec<(usize, usize)>,
+    #[serde(default)]
+    pub selected_subcols: Vec<Option<usize>>,
     pub color: Option<String>,
     pub fill_color: Option<String>,
     pub symbol: Option<String>,
@@ -5934,11 +6320,30 @@ impl FormatSelectedPointsState {
     pub fn open_for_graph(&mut self, graph_sheet_id: SheetId, points: Vec<(usize, usize)>) {
         self.graph_sheet_id = Some(graph_sheet_id);
         self.selected_points = points;
+        self.selected_subcols.clear();
         self.clear_overrides = false;
     }
 
-    /// Apply field patches from UI widgets or `ui.answer_dialog`.
+    /// Open dialog state targeting `graph_sheet_id` and `(series_index, point_index, subcol)` tuples.
+    pub fn open_for_graph_with_subcols(&mut self, graph_sheet_id: SheetId, targets: Vec<(usize, usize, Option<usize>)>) {
+        self.graph_sheet_id = Some(graph_sheet_id);
+        self.set_selected_targets(targets);
+        self.clear_overrides = false;
+    }
+
+    /// Replace selected targets with explicit `(series_index, point_index, subcol)` tuples.
+    pub fn set_selected_targets(&mut self, targets: Vec<(usize, usize, Option<usize>)>) {
+        self.selected_points = targets.iter().map(|&(s, p, _)| (s, p)).collect();
+        self.selected_subcols = targets.into_iter().map(|(_, _, sc)| sc).collect();
+    }
+
+    /// Apply field patch payload from UI widgets or `ui.answer_dialog`.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply field patch payload using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         let opt_patch_str = |val: &Value, key: &str| -> Result<Option<String>, String> {
             match val {
                 Value::Null => Ok(None),
@@ -5946,25 +6351,20 @@ impl FormatSelectedPointsState {
                 _ => Err(format!("`{key}` must be a string or null")),
             }
         };
-        let opt_patch_f64 = |val: &Value, key: &str| -> Result<Option<f64>, String> {
-            match val {
-                Value::Null => Ok(None),
-                _ => val.as_f64().filter(|n| n.is_finite()).map(Some).ok_or_else(|| format!("`{key}` must be a finite number or null")),
-            }
-        };
         for (key, val) in fields {
             match key.as_str() {
                 "points" | "selected_points" => {
                     if !val.is_null() {
-                        self.selected_points = crate::control_io::parse_selected_points_array(val, key)?;
+                        let targets = crate::control_io::parse_selected_points_with_subcols(val, key)?;
+                        self.set_selected_targets(targets);
                     }
                 }
                 "color" | "symbol_color" | "format_points.color" => self.color = opt_patch_str(val, key)?,
                 "fill_color" | "format_points.fill_color" => self.fill_color = opt_patch_str(val, key)?,
                 "symbol" | "shape" | "symbol_shape" | "format_points.symbol" => self.symbol = opt_patch_str(val, key)?,
-                "size_pt" | "format_points.size_pt" => self.size_pt = opt_patch_f64(val, key)?,
+                "size_pt" | "format_points.size_pt" => self.size_pt = parse_opt_finite_f64_with_locale(val, key, preset)?,
                 "border_width_pt" | "stroke_width_pt" | "format_points.border_width_pt" => {
-                    self.border_width_pt = opt_patch_f64(val, key)?;
+                    self.border_width_pt = parse_opt_finite_f64_with_locale(val, key, preset)?;
                 }
                 "fill_mode" | "format_points.fill_mode" => self.fill_mode = opt_patch_str(val, key)?,
                 "hidden" | "format_points.hidden" => {
@@ -5980,7 +6380,7 @@ impl FormatSelectedPointsState {
                 "clear" | "clear_overrides" | "format_points.clear" => {
                     self.clear_overrides = val.as_bool().ok_or_else(|| format!("`{key}` must be a boolean"))?;
                 }
-                _ => {}
+                other => return Err(format!("unknown Format Selected Points field `{other}`")),
             }
         }
         Ok(())
@@ -5996,7 +6396,16 @@ impl FormatSelectedPointsState {
         let points_json: Vec<Value> = self
             .selected_points
             .iter()
-            .map(|&(series_index, point_index)| json!({ "series_index": series_index, "point_index": point_index }))
+            .enumerate()
+            .map(|(idx, &(series_index, point_index))| {
+                let mut entry = json!({ "series_index": series_index, "point_index": point_index });
+                if let Some(Some(sc)) = self.selected_subcols.get(idx)
+                    && let Some(obj) = entry.as_object_mut()
+                {
+                    obj.insert(String::from("subcol"), json!(sc));
+                }
+                entry
+            })
             .collect();
         let mut payload = serde_json::Map::new();
         payload.insert(String::from("sheet_id"), json!(sheet_id.as_str()));
@@ -6049,6 +6458,13 @@ impl FormatSelectedPointsState {
     /// Build optional `graph.addAnnotation` intents displaying row labels when `show_row_labels` is true.
     #[must_use]
     pub fn build_row_label_intents(&self, doc: &ProjectDocument) -> Vec<ToolCommandIntent> {
+        self.build_row_label_intents_for_scene(doc, None)
+    }
+
+    /// Build `graph.addAnnotation` row-label intents placed near each point's plotted coordinates
+    /// (with deterministic collision-staggered fallback offsets when a point is off-scene).
+    #[must_use]
+    pub fn build_row_label_intents_for_scene(&self, doc: &ProjectDocument, scene: Option<&ChartScene>) -> Vec<ToolCommandIntent> {
         if !self.show_row_labels {
             return Vec::new();
         }
@@ -6062,15 +6478,44 @@ impl FormatSelectedPointsState {
             .data_sheet(&gs.spec.primary_source_sheet_id)
             .or_else(|| doc.result_sheet(&gs.spec.primary_source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()));
         let mut intents = Vec::new();
-        for &(_series_idx, point_idx) in &self.selected_points {
+        let mut placed_positions: Vec<(f64, f64)> = Vec::new();
+        for (idx, &(series_idx, point_idx)) in self.selected_points.iter().enumerate() {
+            let subcol_filter = self.selected_subcols.get(idx).copied().flatten();
             let label =
                 ds.and_then(|d| row_title_at(&d.archetype, point_idx)).filter(|s| !s.is_empty()).unwrap_or_else(|| format!("Row {}", point_idx + 1));
+            let plotted = scene.and_then(|sc| {
+                sc.plotted_points
+                    .iter()
+                    .find(|pt| {
+                        pt.source_cell.row == point_idx
+                            && pt.source_cell.col == series_idx
+                            && subcol_filter.is_none_or(|s| pt.source_cell.subcol == s)
+                    })
+                    .or_else(|| sc.plotted_points.iter().find(|pt| pt.source_cell.row == point_idx))
+            });
+            let (mut x_pt, mut y_pt) = if let Some(pt) = plotted {
+                (pt.center_pt.x + 8.0, (pt.center_pt.y - 18.0).max(4.0))
+            } else {
+                let col_slot = (idx % 3) as f64;
+                let row_slot = (idx / 3) as f64;
+                (72.0 + col_slot * 124.0, 48.0 + row_slot * 30.0)
+            };
+            while placed_positions.iter().any(|&(px, py)| (px - x_pt).abs() < 48.0 && (py - y_pt).abs() < 18.0) {
+                y_pt += 20.0;
+                if y_pt > 260.0 {
+                    y_pt = 24.0;
+                    x_pt += 88.0;
+                }
+            }
+            placed_positions.push((x_pt, y_pt));
             intents.push(ToolCommandIntent::new(
                 "graph.addAnnotation",
                 json!({
                     "sheet_id": graph_id.as_str(),
                     "kind": "text",
                     "text": label,
+                    "x_pt": x_pt,
+                    "y_pt": y_pt,
                 }),
             ));
         }
@@ -6155,6 +6600,8 @@ pub struct PrintDialogState {
     pub discovered_printers: Vec<String>,
     pub last_spool_bytes: usize,
     pub last_status: Option<String>,
+    #[serde(default)]
+    pub submit_to_os: bool,
 }
 
 impl Default for PrintDialogState {
@@ -6166,6 +6613,7 @@ impl Default for PrintDialogState {
             discovered_printers: Vec::new(),
             last_spool_bytes: 0,
             last_status: None,
+            submit_to_os: false,
         }
     }
 }
@@ -6193,6 +6641,7 @@ impl PrintDialogState {
         }
 
         self.copies = self.copies.clamp(1, 999);
+        self.submit_to_os = false;
         self.discovered_printers = discovered_printers;
         if let Some(sel) = &self.selected_printer
             && !self.discovered_printers.is_empty()
@@ -6228,21 +6677,27 @@ impl PrintDialogState {
     ///
     /// # Errors
     /// Returns an error when any numeric field is out of valid range or has an invalid type.
+    /// Apply modal field updates from `ui.answer_dialog` / widget controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         for (key, val) in fields {
             match key.as_str() {
                 "crop_marks" | "print.crop_marks" => {
                     self.job.crop_marks = val.as_bool().ok_or_else(|| String::from("`crop_marks` must be boolean"))?;
                 }
                 "bleed_pt" | "print.bleed_pt" => {
-                    let bleed = parse_dialog_num(val, key)?;
+                    let bleed = parse_dialog_num_with_locale(val, key, preset)?;
                     if !(0.0..=144.0).contains(&bleed) {
                         return Err(format!("`bleed_pt` ({bleed}) must be within 0.0..=144.0"));
                     }
                     self.job.bleed_pt = bleed;
                 }
                 "copies" | "print.copies" => {
-                    let raw = parse_dialog_num(val, key)?;
+                    let raw = parse_dialog_num_with_locale(val, key, preset)?;
                     if raw < 1.0 || raw > 999.0 || (raw - raw.round()).abs() > 1e-9 {
                         return Err(format!("`copies` ({raw}) must be an integer within 1..=999"));
                     }
@@ -6251,13 +6706,13 @@ impl PrintDialogState {
                     self.update_copies(count);
                 }
                 "scale_percent" | "print.scale_percent" => {
-                    let scale = parse_dialog_num(val, key)?;
+                    let scale = parse_dialog_num_with_locale(val, key, preset)?;
                     if !(10.0..=400.0).contains(&scale) {
                         return Err(format!("`scale_percent` ({scale}) must be within 10.0..=400.0"));
                     }
                     self.set_scale_percent(scale);
                 }
-                "selected_printer" | "printer" | "print.printer" => {
+                "selected_printer" | "printer" | "print.printer" | "print.selected_printer" => {
                     if val.is_null() {
                         self.select_printer(None);
                     } else {
@@ -6273,7 +6728,10 @@ impl PrintDialogState {
                         self.job.title = (!s.trim().is_empty()).then(|| s.trim().to_owned());
                     }
                 }
-                _ => {}
+                "submit_to_os" | "print.submit_to_os" => {
+                    self.submit_to_os = val.as_bool().ok_or_else(|| String::from("`submit_to_os` must be boolean"))?;
+                }
+                other => return Err(format!("unknown Print field `{other}`")),
             }
         }
         Ok(())
@@ -6388,6 +6846,21 @@ impl CanvasDialogState {
             return false;
         }
         self.format_points.open_for_graph(graph_sheet_id.clone(), points);
+        self.active_dialog = ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_sheet_id.clone() };
+        true
+    }
+
+    /// Open `Format Selected Points...` dialog preserving optional replicate `subcol` per point (`R2-S08-03`).
+    pub fn open_format_selected_points_with_subcols(
+        &mut self,
+        doc: &ProjectDocument,
+        graph_sheet_id: &SheetId,
+        targets: Vec<(usize, usize, Option<usize>)>,
+    ) -> bool {
+        if doc.graph_sheet(graph_sheet_id).is_none() {
+            return false;
+        }
+        self.format_points.open_for_graph_with_subcols(graph_sheet_id.clone(), targets);
         self.active_dialog = ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_sheet_id.clone() };
         true
     }

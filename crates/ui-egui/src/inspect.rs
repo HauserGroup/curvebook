@@ -218,26 +218,46 @@ impl UiTreeSnapshot {
     }
 }
 
+const MAX_INSPECT_SELECTED_COORDS: usize = 500;
+
 /// Build a deterministic [`UiTreeSnapshot`] from `app` filtered by `scope` (`all`, `menus`,
 /// `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`), projecting every widget bound
-/// strictly from [`LayoutTree::nodes`].
+/// strictly from [`LayoutTree::nodes`] under default viewport metrics.
 #[must_use]
 pub fn inspect_ui_tree(app: &UiApp, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
-    let tree = app.layout_tree_cow(ViewportMetrics::default());
+    inspect_ui_tree_for_metrics(app, ViewportMetrics::default(), scope, include_bounds)
+}
+
+/// Build a deterministic [`UiTreeSnapshot`] under caller-supplied [`ViewportMetrics`].
+#[must_use]
+pub fn inspect_ui_tree_for_metrics(app: &UiApp, metrics: ViewportMetrics, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
+    let tree = app.layout_tree_cow(metrics);
     let layout = tree.to_workspace_layout_map();
     let doc = app.session().document();
     let active_id = doc.active_sheet_id.as_ref();
     let active_kind = active_id.and_then(|id| doc.sheet_section(id)).map(sheet_section_name);
     let active_dialog_name = active_dialog_slug(&app.canvas_dialogs.active_dialog);
 
-    let grid_sel = build_grid_selection_snapshot(app, doc);
-    let brushed_points = collect_brushed_points(app);
-    let result_diagnostic_banner = active_id.and_then(|id| doc.result_sheet(id)).and_then(AssumptionDiagnosticBanner::from_result);
     let scope_norm = scope.map(|s| s.trim().to_ascii_lowercase());
     let want = |name: &str| match scope_norm.as_deref() {
         None | Some("" | "all" | "workspace") => true,
         Some(target) => target == name,
     };
+
+    let grid_sel = if want("grid") {
+        build_grid_selection_snapshot(app, doc)
+    } else {
+        GridSelectionSnapshot {
+            active_cell: app.grid.tool.active.map(GridCoordSnapshot::from),
+            anchor_cell: app.grid.tool.anchor.map(GridCoordSnapshot::from),
+            selected_rows: Vec::new(),
+            selected_coords: Vec::new(),
+            selected_cells_count: app.grid.quick_stats.as_ref().map_or(app.grid.selected_coords.len(), |qs| qs.selected_cells),
+            quick_stats: app.grid.quick_stats,
+        }
+    };
+    let brushed_points = if want("canvas") || want("grid") { collect_brushed_points(app) } else { Vec::new() };
+    let result_diagnostic_banner = active_id.and_then(|id| doc.result_sheet(id)).and_then(AssumptionDiagnosticBanner::from_result);
 
     UiTreeSnapshot {
         active_sheet_id: active_id.map(|id| id.as_str().to_owned()),
@@ -294,8 +314,8 @@ fn build_grid_selection_snapshot(app: &UiApp, doc: &ProjectDocument) -> GridSele
     GridSelectionSnapshot {
         active_cell: app.grid.tool.active.map(GridCoordSnapshot::from),
         anchor_cell: app.grid.tool.anchor.map(GridCoordSnapshot::from),
-        selected_rows,
-        selected_coords: coords.iter().copied().map(GridCoordSnapshot::from).collect(),
+        selected_rows: selected_rows.into_iter().take(MAX_INSPECT_SELECTED_COORDS).collect(),
+        selected_coords: coords.iter().take(MAX_INSPECT_SELECTED_COORDS).copied().map(GridCoordSnapshot::from).collect(),
         selected_cells_count: app.grid.quick_stats.as_ref().map_or(coords.len(), |qs| qs.selected_cells),
         quick_stats: app.grid.quick_stats,
     }
@@ -504,6 +524,9 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
     let frame = app.grid.tool.format_visible_window(ds);
     let win_start_row = frame.window.start_row;
     let win_end_row = frame.window.end_row;
+    let discontig: Option<std::collections::HashSet<GridCellCoord>> = (app.grid.selected_coords.len() > 1
+        || (!app.grid.selected_coords.is_empty() && app.grid.tool.anchor == app.grid.tool.active))
+        .then(|| app.grid.selected_coords.iter().copied().collect());
     let mut nodes: Vec<UiWidgetNode> = frame
         .cells
         .into_iter()
@@ -523,6 +546,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
             } else {
                 None
             };
+            let selected = discontig.as_ref().map_or(cell.is_selected, |set| set.contains(&cell.coord));
             UiWidgetNode {
                 widget_id,
                 role: String::from("gridcell"),
@@ -534,7 +558,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
                     "subcol": cell.coord.subcol,
                     "text": cell.display_text,
                     "excluded": cell.excluded,
-                    "selected": cell.is_selected,
+                    "selected": selected,
                 })),
                 enabled,
                 disabled_reason,
@@ -628,10 +652,11 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
             disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
             bounds: node_bounds_from_tree(tree, "formula_bar.input", include_bounds),
         });
-        let commit_enabled = !ds.frozen && fb.active && fb.target_column.is_some() && fb.is_valid && fb.parse_error.is_none();
+        let has_target = fb.target_column.is_some() || !fb.target_title.trim().is_empty();
+        let commit_enabled = !ds.frozen && fb.active && has_target && fb.is_valid && fb.parse_error.is_none();
         let commit_disabled_reason = if ds.frozen {
             Some(String::from("Data sheet is frozen (read-only)."))
-        } else if !fb.active || fb.target_column.is_none() {
+        } else if !fb.active || !has_target {
             Some(String::from("Formula bar is not active."))
         } else if let Some(err) = &fb.parse_error {
             Some(err.clone())
@@ -694,7 +719,7 @@ pub(crate) fn dialog_widget_descriptors(app: &UiApp) -> Option<DialogBuildParts>
         ActiveDialog::SimulateDistributions => build_simulate_distributions_nodes(app, 0.0, 0.0, false),
         ActiveDialog::InsertModelEquation { graph_sheet_id } => build_insert_model_equation_nodes(app, graph_sheet_id, 0.0, 0.0, false),
         ActiveDialog::Print { sheet_id } => build_print_dialog_nodes(app, sheet_id.as_ref(), 0.0, 0.0, false),
-        other => build_generic_dialog_nodes(other, 0.0, 0.0, false),
+        other => build_generic_dialog_nodes(app, other, 0.0, 0.0, false),
     })
 }
 
@@ -1576,6 +1601,18 @@ fn push_r9_edit_params_controls(
             push("edit.pvalue_stack.threshold", "spinbutton", "Alpha / FDR Q threshold", json!(ps.threshold));
             push("edit.pvalue_stack.column", "combobox", "P-value column", json!(ps.column));
         }
+        AnalysisKind::PowerAnalysis(pa) => {
+            push("edit.power.family", "combobox", "Power test family", json!(format!("{:?}", pa.family)));
+            push("edit.power.solve_target", "combobox", "Solve target", json!(format!("{:?}", pa.solve_target)));
+            push("edit.power.alpha", "spinbutton", "Alpha", json!(pa.alpha));
+            push("edit.power.target_power", "spinbutton", "Target power", json!(pa.target_power));
+            push("edit.power.sample_size", "spinbutton", "Sample size (n1)", json!(pa.sample_size));
+            push("edit.power.sample_size_group2", "spinbutton", "Sample size (n2)", json!(pa.sample_size_group2));
+            push("edit.power.allocation_ratio", "spinbutton", "Allocation ratio", json!(pa.allocation_ratio));
+            push("edit.power.two_tailed", "checkbox", "Two-tailed", json!(matches!(pa.tail_mode, curvebook_doc::PowerTailMode::TwoSided)));
+            push("edit.power.continuity_correction", "checkbox", "Continuity correction", json!(pa.continuity_correction));
+            push("edit.power.chi_square_df", "spinbutton", "Chi-square df", json!(pa.chi_square_df));
+        }
         _ => {}
     }
 }
@@ -2035,22 +2072,71 @@ fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: 
 fn build_print_dialog_nodes(app: &UiApp, sheet_id: Option<&SheetId>, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
     let st = &app.canvas_dialogs.print;
     let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let submit_gate = if app.is_gui_only() {
+        ControlEnablement::disabled("Submitting print jobs to the OS queue is blocked under --gui-only.")
+    } else {
+        ControlEnablement::enabled()
+    };
     let controls = vec![
         node("print.crop_marks", "checkbox", "Crop marks", json!(st.job.crop_marks), ControlEnablement::enabled(), pos(0)),
         node("print.bleed_pt", "spinbutton", "Bleed (pt)", json!(st.job.bleed_pt), ControlEnablement::enabled(), pos(1)),
         node("print.copies", "spinbutton", "Copies", json!(st.copies), ControlEnablement::enabled(), pos(2)),
         node("print.scale_percent", "spinbutton", "Scale (%)", json!(st.job.scale_percent), ControlEnablement::enabled(), pos(3)),
         node("print.selected_printer", "combobox", "Printer", json!(st.selected_printer), ControlEnablement::enabled(), pos(4)),
+        node("print.submit_to_os", "checkbox", "Submit to OS print queue", json!(st.submit_to_os), submit_gate, pos(5)),
     ];
     ("Print...", sheet_id.map(|id| id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Print"), ("cancel", "Cancel")])
 }
 
-fn build_generic_dialog_nodes(dialog: &ActiveDialog, _bx: f64, _by: f64, _include_bounds: bool) -> DialogBuildParts {
+fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
+    let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let mut controls = Vec::new();
     let (title, target) = match dialog {
-        ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } => ("Analysis Already Exists", Some(source_sheet_id)),
-        ActiveDialog::ChangeDataAnalyzed { result_sheet_id } => ("Change Data Analyzed", Some(result_sheet_id)),
+        ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } => {
+            controls.push(node("duplicate.choice", "combobox", "Duplicate handling", json!("create_new"), ControlEnablement::enabled(), pos(0)));
+            ("Analysis Already Exists", Some(source_sheet_id))
+        }
+        ActiveDialog::ChangeDataAnalyzed { result_sheet_id } => {
+            let st = &app.canvas_dialogs.change_data;
+            controls.push(node(
+                "change_data.target_sheet_id",
+                "combobox",
+                "Target Data Sheet",
+                json!(st.selected_target_id.as_ref().map(SheetId::as_str)),
+                ControlEnablement::enabled(),
+                pos(0),
+            ));
+            controls.push(node(
+                "change_data.selected_data_sets",
+                "textbox",
+                "Selected Data Sets",
+                json!(st.selected_data_sets),
+                ControlEnablement::enabled(),
+                pos(1),
+            ));
+            ("Change Data Analyzed", Some(result_sheet_id))
+        }
         ActiveDialog::ResultViewer { result_sheet_id } => ("Result Sheet Viewer", Some(result_sheet_id)),
-        ActiveDialog::ConstantHookPicker { target_sheet_id } => ("Insert Hooked Constant", Some(target_sheet_id)),
+        ActiveDialog::ConstantHookPicker { target_sheet_id } => {
+            let st = &app.canvas_dialogs.hook_picker;
+            controls.push(node(
+                "hook.search_query",
+                "textbox",
+                "Search Constants / Results",
+                json!(st.search_query),
+                ControlEnablement::enabled(),
+                pos(0),
+            ));
+            controls.push(node(
+                "hook.selected_index",
+                "spinbutton",
+                "Selected Hook Index",
+                json!(st.selected_index),
+                ControlEnablement::enabled(),
+                pos(1),
+            ));
+            ("Insert Hooked Constant", Some(target_sheet_id))
+        }
         ActiveDialog::ChangeGraphType { graph_sheet_id } => ("Change Graph Type", Some(graph_sheet_id)),
         ActiveDialog::FormatGraph { graph_sheet_id } => ("Format Graph", Some(graph_sheet_id)),
         ActiveDialog::FormatAxes { sheet_id } => ("Format Axes", Some(sheet_id)),
@@ -2061,17 +2147,34 @@ fn build_generic_dialog_nodes(dialog: &ActiveDialog, _bx: f64, _by: f64, _includ
         ActiveDialog::ExportFigure { sheet_id } => ("Export Publication Figure", Some(sheet_id)),
         ActiveDialog::ConvertArchetype { sheet_id } => ("Convert Table Archetype...", Some(sheet_id)),
         ActiveDialog::ImportReshape => ("Import Reshape (Plate Map / Tidy Long)", None),
-        ActiveDialog::ExcludeWithReason { sheet_id } => ("Exclude Selection with Reason", Some(sheet_id)),
+        ActiveDialog::ExcludeWithReason { sheet_id } => {
+            let st = &app.canvas_dialogs.exclude_with_reason;
+            controls.push(node("exclude.reason_tag", "combobox", "Exclusion Reason", json!(st.reason_tag), ControlEnablement::enabled(), pos(0)));
+            controls.push(node("exclude.note", "textbox", "Audit Note", json!(st.note), ControlEnablement::enabled(), pos(1)));
+            ("Exclude Selection with Reason", Some(sheet_id))
+        }
         ActiveDialog::RandomizeGroups => ("Randomize Groups...", None),
         ActiveDialog::RandomSampleRows { .. } => ("Random Sample Rows...", None),
         ActiveDialog::SimulateDistributions => ("Simulate Distributions...", None),
         ActiveDialog::InsertModelEquation { graph_sheet_id } => ("Insert Model Equation", Some(graph_sheet_id)),
         ActiveDialog::Print { sheet_id } => ("Print...", sheet_id.as_ref()),
-        ActiveDialog::CommandPalette => ("Command Palette (Cmd+K)", None),
+        ActiveDialog::CommandPalette => {
+            let st = &app.canvas_dialogs.command_palette;
+            controls.push(node("palette.query", "textbox", "Search Commands", json!(st.query), ControlEnablement::enabled(), pos(0)));
+            controls.push(node(
+                "palette.selected_index",
+                "spinbutton",
+                "Selected Command Index",
+                json!(st.selected_index),
+                ControlEnablement::enabled(),
+                pos(1),
+            ));
+            ("Command Palette (Cmd+K)", None)
+        }
         ActiveDialog::About => ("About CurveBook", None),
         _ => ("", None),
     };
-    (title, target.map(|id| id.as_str().to_owned()), None, Vec::new(), Vec::new(), vec![("ok", "OK"), ("cancel", "Cancel")])
+    (title, target.map(|id| id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
 }
 
 fn sheet_section_name(sec: curvebook_doc::SheetSection) -> String {
@@ -2084,7 +2187,7 @@ fn sheet_section_name(sec: curvebook_doc::SheetSection) -> String {
     }
 }
 
-fn active_dialog_slug(dialog: &ActiveDialog) -> String {
+pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
     match dialog {
         ActiveDialog::None => String::from("none"),
         ActiveDialog::FormatAxes { .. } => String::from("format_axes"),

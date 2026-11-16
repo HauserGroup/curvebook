@@ -5,6 +5,7 @@
 //! `docs/data-tables-and-transforms.md`).
 
 use std::borrow::Borrow;
+use std::collections::HashSet;
 
 use crate::i18n::LocalePreset;
 use curvebook_doc::{
@@ -208,6 +209,29 @@ impl GridQuickStats {
             }
         }
 
+        Self::from_values(selected_cells, excluded, &mut values)
+    }
+
+    /// Compute descriptive quick stats across an arbitrary (possibly discontiguous) slice of `coords`.
+    #[must_use]
+    pub fn from_coords(sheet: &DataSheet, coords: &[GridCellCoord]) -> Self {
+        let mut selected_cells = 0usize;
+        let mut excluded = 0usize;
+        let mut values = Vec::new();
+        for &coord in coords {
+            selected_cells += 1;
+            if let Some(cell) = sheet.cell(CellCoord::from(coord)) {
+                if cell.excluded {
+                    excluded += 1;
+                    continue;
+                }
+                if let CellValue::Number(v) = cell.value
+                    && v.is_finite()
+                {
+                    values.push(v);
+                }
+            }
+        }
         Self::from_values(selected_cells, excluded, &mut values)
     }
 
@@ -768,6 +792,31 @@ impl ImportReshapeState {
     /// # Errors
     /// Returns an error if `mode`, `target_kind`, `delimiter`, `plate_values`, or `plate_roles` is invalid.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
+    }
+
+    /// Patch `ImportReshape` dialog state using regional numeric parsing (`preset`).
+    ///
+    /// # Errors
+    /// Returns an error if any field name or value is invalid.
+    pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+        let active_preset = if fields.contains_key("decimal_separator") || fields.contains_key("import.decimal_separator") {
+            preset.clone()
+        } else {
+            let mut p = preset.clone();
+            if self.decimal_separator == ',' || self.decimal_separator == '.' {
+                p.decimal_separator = self.decimal_separator;
+            }
+            p
+        };
+        let effective_preset =
+            if let Some(ds) = fields.get("decimal_separator").or_else(|| fields.get("import.decimal_separator")).and_then(Value::as_str) {
+                let mut p = active_preset;
+                p.decimal_separator = if ds.trim() == "," { ',' } else { '.' };
+                p
+            } else {
+                active_preset
+            };
         for key in ["mode", "import.mode", "reshape_mode"] {
             if let Some(val) = fields.get(key) {
                 let raw = val.as_str().ok_or_else(|| String::from("`mode` must be a string"))?;
@@ -804,11 +853,11 @@ impl ImportReshapeState {
                     if self.mode == ImportReshapeMode::TidyLongPivot {
                         self.tidy_csv = s.to_owned();
                     } else {
-                        self.plate_values = parse_plate_values_text(s)?;
+                        self.plate_values = parse_plate_values_text(s, &effective_preset)?;
                     }
                 }
                 "plate_values" | "values" | "import.plate_values" => {
-                    self.plate_values = parse_plate_values_json(val)?;
+                    self.plate_values = parse_plate_values_json(val, &effective_preset)?;
                 }
                 "plate_roles" | "roles" | "import.plate_roles" => {
                     let arr = val.as_array().ok_or_else(|| String::from("`plate_roles` must be an array"))?;
@@ -847,7 +896,7 @@ impl ImportReshapeState {
                 "excluded_col" | "import.excluded_col" => {
                     self.excluded_col = opt_nonempty_string(val, key)?;
                 }
-                _ => {}
+                other => return Err(format!("unknown Import Reshape field `{other}`")),
             }
         }
         Ok(())
@@ -862,53 +911,55 @@ fn opt_nonempty_string(val: &Value, field: &str) -> Result<Option<String>, Strin
     Ok((!s.is_empty()).then(|| s.to_owned()))
 }
 
-fn parse_plate_cell_token(tok: &str) -> Result<Option<f64>, String> {
+fn parse_plate_cell_token(tok: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
     let t = tok.trim();
     if t.is_empty() || t.eq_ignore_ascii_case("na") || t.eq_ignore_ascii_case("null") || t == "-" {
         return Ok(None);
     }
-    t.parse::<f64>().ok().filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("invalid plate numeric token `{t}`"))
+    parse_localized_number_input(t, preset).filter(|v| v.is_finite()).map(Some).ok_or_else(|| format!("invalid plate numeric token `{t}`"))
 }
 
-fn parse_plate_values_text(raw: &str) -> Result<Vec<Option<f64>>, String> {
+fn parse_plate_values_text(raw: &str, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
     let mut out = Vec::new();
     for line in raw.lines() {
         let trimmed = line.trim();
         if trimmed.is_empty() {
             continue;
         }
-        if trimmed.contains(',') || trimmed.contains('\t') || trimmed.contains(';') {
-            for cell in trimmed.split([',', '\t', ';']) {
-                out.push(parse_plate_cell_token(cell)?);
+        if trimmed.contains('\t') || trimmed.contains(';') || (preset.decimal_separator != ',' && trimmed.contains(',')) {
+            let split_iter: Box<dyn Iterator<Item = &str>> =
+                if preset.decimal_separator == ',' { Box::new(trimmed.split(['\t', ';'])) } else { Box::new(trimmed.split([',', '\t', ';'])) };
+            for cell in split_iter {
+                out.push(parse_plate_cell_token(cell, preset)?);
             }
         } else {
             for cell in trimmed.split_whitespace() {
-                out.push(parse_plate_cell_token(cell)?);
+                out.push(parse_plate_cell_token(cell, preset)?);
             }
         }
     }
     Ok(out)
 }
 
-fn parse_plate_values_json(val: &Value) -> Result<Vec<Option<f64>>, String> {
+fn parse_plate_values_json(val: &Value, preset: &LocalePreset) -> Result<Vec<Option<f64>>, String> {
     if let Some(s) = val.as_str() {
-        return parse_plate_values_text(s);
+        return parse_plate_values_text(s, preset);
     }
     let arr = val.as_array().ok_or_else(|| String::from("`plate_values` must be an array or delimited string"))?;
     let mut out = Vec::with_capacity(arr.len());
     for item in arr {
         if let Some(inner) = item.as_array() {
             for sub in inner {
-                out.push(parse_plate_scalar(sub)?);
+                out.push(parse_plate_scalar(sub, preset)?);
             }
         } else {
-            out.push(parse_plate_scalar(item)?);
+            out.push(parse_plate_scalar(item, preset)?);
         }
     }
     Ok(out)
 }
 
-fn parse_plate_scalar(val: &Value) -> Result<Option<f64>, String> {
+fn parse_plate_scalar(val: &Value, preset: &LocalePreset) -> Result<Option<f64>, String> {
     if val.is_null() {
         return Ok(None);
     }
@@ -916,7 +967,7 @@ fn parse_plate_scalar(val: &Value) -> Result<Option<f64>, String> {
         return f.is_finite().then_some(Some(f)).ok_or_else(|| String::from("plate well value must be finite"));
     }
     if let Some(s) = val.as_str() {
-        return parse_plate_cell_token(s);
+        return parse_plate_cell_token(s, preset);
     }
     Err(String::from("plate well value must be a number, string, or null"))
 }
@@ -1296,15 +1347,28 @@ impl GridViewState {
 
     fn refresh_selection_stats_slice(&mut self, sheet: &DataSheet) {
         let coords = self.all_selected_coords(sheet);
-        let Some(first) = coords.first().copied() else {
+        let Some(_first) = coords.first().copied() else {
             return;
         };
         let total = coords.len();
-        if self.formula_bar.active {
-            self.formula_bar.open_for_column(sheet, first.col, None);
-        }
-        if let Some(ref mut qs) = self.quick_stats {
-            qs.selected_cells = total;
+        if total <= MAX_QUICK_STATS_CELLS_FOR_CLONE_PASS {
+            let ext = GridQuickStats::from_coords(sheet, &coords);
+            self.extended_stats = Some(ext);
+            self.quick_stats = Some(SelectionQuickStats {
+                selected_cells: ext.selected_cells,
+                numeric_count: ext.n,
+                excluded_count: ext.excluded,
+                sum: ext.sum,
+                mean: ext.mean,
+                sd: ext.sd,
+                sem: ext.sem,
+                median: ext.median,
+                min: ext.min,
+                max: ext.max,
+            });
+        } else {
+            self.extended_stats = Some(GridQuickStats { selected_cells: total, ..GridQuickStats::default() });
+            self.quick_stats = None;
         }
     }
 
@@ -1313,9 +1377,10 @@ impl GridViewState {
     #[must_use]
     pub fn all_selected_coords(&self, sheet: &DataSheet) -> Vec<GridCellCoord> {
         if !self.selected_coords.is_empty() {
-            let mut out = Vec::new();
+            let mut seen = HashSet::with_capacity(self.selected_coords.len());
+            let mut out = Vec::with_capacity(self.selected_coords.len());
             for &c in &self.selected_coords {
-                if !out.contains(&c) {
+                if seen.insert((c.row, c.col, c.subcol)) {
                     out.push(c);
                 }
             }
@@ -1327,20 +1392,28 @@ impl GridViewState {
     /// Map currently selected grid rows/cells into graph `(series_index, point_index)` targets.
     #[must_use]
     pub fn selected_graph_point_indices(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize)> {
+        self.selected_graph_point_targets(sheet, max_series).into_iter().map(|(s, p, _)| (s, p)).collect()
+    }
+
+    /// Map currently selected grid rows/cells into `(series_index, point_index, subcol)` targets.
+    #[must_use]
+    pub fn selected_graph_point_targets(&self, sheet: &DataSheet, max_series: usize) -> Vec<(usize, usize, Option<usize>)> {
         let coords = self.all_selected_coords(sheet);
-        let mut out: Vec<(usize, usize)> = Vec::new();
+        let mut out: Vec<(usize, usize, Option<usize>)> = Vec::new();
         for c in coords {
             let series = if max_series == 0 { c.col } else { c.col.min(max_series - 1) };
-            let pair = (series, c.row);
-            if !out.contains(&pair) {
-                out.push(pair);
+            let subcols = data_set_subcolumn_count(&sheet.archetype, c.col);
+            let subcol = (subcols > 1).then_some(c.subcol);
+            let target = (series, c.row, subcol);
+            if !out.contains(&target) {
+                out.push(target);
             }
         }
         if out.is_empty() {
             for &row in &self.selected_rows {
-                let pair = (0, row);
-                if !out.contains(&pair) {
-                    out.push(pair);
+                let target = (0, row, None);
+                if !out.contains(&target) {
+                    out.push(target);
                 }
             }
         }
@@ -1389,6 +1462,10 @@ impl GridViewState {
             self.extended_stats = None;
             return;
         };
+        if !self.selected_coords.is_empty() {
+            self.refresh_selection_stats_slice(sheet);
+            return;
+        }
         let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
             self.quick_stats = None;
             self.extended_stats = None;
@@ -1429,7 +1506,13 @@ impl GridViewState {
         let (tier1_groups, tier2_subcolumns) = build_visible_headers(&sheet.archetype, window.start_col, window.end_col);
 
         let sel_bounds = selection_flat_bounds(&sheet.archetype, self.tool.anchor, self.tool.active);
-        let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, active_coord: self.tool.active };
+        let selected_set: std::collections::HashSet<GridCellCoord> =
+            if self.selected_coords.len() > 1 || (!self.selected_coords.is_empty() && self.tool.anchor == self.tool.active) {
+                self.selected_coords.iter().copied().collect()
+            } else {
+                std::collections::HashSet::new()
+            };
+        let fmt_ctx = CellFormatContext { decimal_sep, sel_bounds, selected_set: &selected_set, active_coord: self.tool.active };
         let mut rows = Vec::with_capacity(window.end_row.saturating_sub(window.start_row));
         for r in window.start_row..window.end_row {
             let leading = build_leading_row(sheet, r, decimal_sep);
@@ -1517,22 +1600,41 @@ impl GridViewState {
     /// exclusion across the current selection (`docs/data-tables-and-transforms.md` §1.2).
     /// Returns the number of `"range"` command intents queued into `tool.pending_intents`.
     pub fn emit_toggle_exclude_intents(&mut self, sheet: &DataSheet, excluded: bool) -> usize {
-        let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
-            return 0;
-        };
         let total_rows = sheet.archetype.row_count();
         let total_flat = total_flat_data_subcolumns(&sheet.archetype);
         if total_rows == 0 || total_flat == 0 {
             return 0;
         }
-        let r0 = a.row.min(b.row).min(total_rows - 1);
-        let r1 = a.row.max(b.row).min(total_rows - 1);
-        let f0 = flat_index_for_coord(&sheet.archetype, a.col, a.subcol);
-        let f1 = flat_index_for_coord(&sheet.archetype, b.col, b.subcol);
-        let c0 = f0.min(f1).min(total_flat - 1);
-        let c1 = f0.max(f1).min(total_flat - 1);
-
-        let ranges = build_exclusion_ranges(&sheet.archetype, r0, r1, c0, c1);
+        let ranges = if !self.selected_coords.is_empty() {
+            let mut coords: Vec<(usize, usize, usize)> =
+                self.all_selected_coords(sheet).into_iter().filter(|c| c.row < total_rows).map(|c| (c.col, c.subcol, c.row)).collect();
+            coords.sort_unstable();
+            coords.dedup();
+            let mut out = Vec::new();
+            let mut i = 0;
+            while i < coords.len() {
+                let (col, subcol, start_row) = coords[i];
+                let mut end_row = start_row;
+                while i + 1 < coords.len() && coords[i + 1].0 == col && coords[i + 1].1 == subcol && coords[i + 1].2 == end_row + 1 {
+                    i += 1;
+                    end_row = coords[i].2;
+                }
+                out.push(SheetCellRange::new(CellCoord::new(start_row, col, subcol), CellCoord::new(end_row, col, subcol)));
+                i += 1;
+            }
+            out
+        } else {
+            let (Some(a), Some(b)) = (self.tool.anchor, self.tool.active) else {
+                return 0;
+            };
+            let r0 = a.row.min(b.row).min(total_rows - 1);
+            let r1 = a.row.max(b.row).min(total_rows - 1);
+            let f0 = flat_index_for_coord(&sheet.archetype, a.col, a.subcol);
+            let f1 = flat_index_for_coord(&sheet.archetype, b.col, b.subcol);
+            let c0 = f0.min(f1).min(total_flat - 1);
+            let c1 = f0.max(f1).min(total_flat - 1);
+            build_exclusion_ranges(&sheet.archetype, r0, r1, c0, c1)
+        };
         let emitted = ranges.len();
         for range in ranges {
             self.tool.pending_intents.push(ToolCommandIntent {
@@ -1584,6 +1686,17 @@ pub fn total_flat_data_subcolumns(arch: &TableArchetype) -> usize {
         TableArchetype::MultipleVariables(t) => t.variables.len(),
         TableArchetype::Nested(t) => t.groups.iter().map(|g| g.biological_unit_count().max(1)).sum(),
     }
+}
+
+#[must_use]
+pub(crate) fn data_set_subcolumn_count(arch: &TableArchetype, col: usize) -> usize {
+    if let Some(subs) = uniform_subcolumn_count(arch) {
+        return subs;
+    }
+    if let TableArchetype::Nested(t) = arch {
+        return t.groups.get(col).map_or(1, |g| g.biological_unit_count().max(1));
+    }
+    1
 }
 
 #[must_use]
@@ -1941,20 +2054,31 @@ fn build_leading_row(sheet: &DataSheet, row: usize, decimal_sep: char) -> Leadin
     LeadingRowData { row, row_title, x_or_time_display, x_excluded }
 }
 
-struct CellFormatContext {
+struct CellFormatContext<'a> {
     decimal_sep: char,
     sel_bounds: Option<(usize, usize, usize, usize)>,
+    selected_set: &'a std::collections::HashSet<GridCellCoord>,
     active_coord: Option<GridCellCoord>,
 }
 
-fn format_grid_cell(sheet: &DataSheet, coord: GridCellCoord, hdr: &Tier2SubcolumnHeader, cell: &Cell, ctx: &CellFormatContext) -> FormattedGridCell {
+fn format_grid_cell(
+    sheet: &DataSheet,
+    coord: GridCellCoord,
+    hdr: &Tier2SubcolumnHeader,
+    cell: &Cell,
+    ctx: &CellFormatContext<'_>,
+) -> FormattedGridCell {
     let display_text = format_cell_value(&cell.value, ctx.decimal_sep);
     let region = find_linked_region_at(sheet, coord);
     let provenance_border = region.and_then(LinkedDataRegion::border_color);
     let provenance_border_rgba = provenance_border.map(provenance_border_rgba);
     let link_id = region.map(|r| r.id.clone());
 
-    let is_selected = ctx.sel_bounds.is_some_and(|(r0, r1, f0, f1)| coord.row >= r0 && coord.row <= r1 && hdr.flat_col >= f0 && hdr.flat_col <= f1);
+    let is_selected = if !ctx.selected_set.is_empty() {
+        ctx.selected_set.contains(&coord)
+    } else {
+        ctx.sel_bounds.is_some_and(|(r0, r1, f0, f1)| coord.row >= r0 && coord.row <= r1 && hdr.flat_col >= f0 && hdr.flat_col <= f1)
+    };
     let is_active = ctx.active_coord == Some(coord);
     let validation_error = validate_cell_for_archetype(sheet, coord, cell);
 

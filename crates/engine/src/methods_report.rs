@@ -235,6 +235,7 @@ fn describe_analysis_kind(spec: &AnalysisSpec, res: &ResultSheet, source_ds: Opt
         AnalysisKind::BlandAltman(s) => describe_bland_altman(s, source_ds, spec.confidence_level.percent()),
         AnalysisKind::PassingBablok(s) => describe_passing_bablok(s, source_ds),
         AnalysisKind::PValueStack(s) => describe_pvalue_stack(s, source_ds),
+        AnalysisKind::PowerAnalysis(s) => vec![ReportBlock::Paragraph(vec![plain(describe_power_analysis_spec(s))])],
         AnalysisKind::Contingency(s) => describe_contingency(s, spec, source_ds, res),
         AnalysisKind::Survival(s) => describe_survival(s, source_ds),
         AnalysisKind::RocCurve(s) => describe_roc(s),

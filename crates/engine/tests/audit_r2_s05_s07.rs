@@ -933,3 +933,69 @@ fn r2_s05_01_table_paste_and_clear_prune_exclusion_notes() {
     let after_clear = session.document().data_sheet(&SheetId::new("col-pr")).unwrap();
     assert!(after_clear.exclusion_notes.is_empty());
 }
+
+#[test]
+fn r2_s07_10_power_analysis_runtime_dag_info_hooks_and_methods_report() {
+    let mut doc = ProjectDocument::new("PowerIntegration").unwrap();
+    doc.add_data_sheet(seed_two_group_col("src-p")).unwrap();
+    doc.add_info_sheet(curvebook_doc::InfoSheet::new_preseeded(SheetId::new("info-p"), "Power Info").unwrap()).unwrap();
+    let mut session = Session::from_document(doc);
+
+    ok_cmd(&mut session, "info.setConstant", json!({ "sheet_id": "info-p", "name": "Alpha", "value": 0.05, "kind": "number" }));
+    ok_cmd(&mut session, "info.setConstant", json!({ "sheet_id": "info-p", "name": "Effect Size", "value": 0.5, "kind": "number" }));
+
+    let p_spec = PowerAnalysisSpec {
+        family: PowerTestFamily::TwoSampleUnpairedT,
+        solve_target: PowerSolveTarget::SampleSize,
+        tail_mode: PowerTailMode::TwoSided,
+        alpha: 0.05,
+        target_power: Some(0.80),
+        effect: PowerEffectSpec::Standardized(0.5),
+        info_sheet_id: Some(SheetId::new("info-p")),
+        ..PowerAnalysisSpec::default()
+    };
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "source_sheet_id": "src-p",
+            "sheet_id": "res-pwr",
+            "kind": { "PowerAnalysis": p_spec }
+        }),
+    );
+
+    let rs = session.document().result_sheet(&SheetId::new("res-pwr")).unwrap();
+    assert!(rs.analyzable_data.as_ref().map_or(0, |d| d.archetype.row_count()) >= 41);
+    let n_at_05 = rs.scalars.iter().find(|s| s.key == "NPerGroup").map(|s| s.value).unwrap();
+    assert!((n_at_05 - 64.0).abs() < 1e-9, "expected N=64 per group for d=0.5, alpha=0.05, power=0.80, got {n_at_05}");
+
+    // Linked InfoSheet constant edit must reactively recompute the downstream PowerAnalysis ResultSheet.
+    ok_cmd(&mut session, "info.setConstant", json!({ "sheet_id": "info-p", "name": "Alpha", "value": 0.01, "kind": "number" }));
+    let rs_after_alpha = session.document().result_sheet(&SheetId::new("res-pwr")).unwrap();
+    let n_at_01 = rs_after_alpha.scalars.iter().find(|s| s.key == "NPerGroup").map(|s| s.value).unwrap();
+    assert!(n_at_01 > n_at_05, "tighter alpha=0.01 must raise required N (before={n_at_05}, after={n_at_01})");
+
+    // Shorthand `power_analysis` creates a valid PowerAnalysis ResultSheet and methods report describes it.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "source_sheet_id": "src-p",
+            "sheet_id": "res-pwr-short",
+            "kind": "power_analysis",
+            "effect_size": 0.8,
+            "alpha": 0.05
+        }),
+    );
+    let report = generate_methods_report(session.document(), &SheetId::new("res-pwr"), ReportFormat::PlainText).unwrap();
+    assert!(report.contains("Unpaired t test") && report.contains("required sample size"), "{report}");
+
+    // `.curvebook` archive roundtrip preserves PowerAnalysis ResultSheet + analyzable curve data.
+    let dir = ScratchDir::new("power-archive");
+    let archive_path = dir.root.join("power.curvebook");
+    curvebook_format::save_project_file(&archive_path, session.document()).unwrap();
+    let reloaded = curvebook_format::open_project_file(&archive_path).unwrap();
+    let rs_reloaded = reloaded.result_sheet(&SheetId::new("res-pwr")).unwrap();
+    assert!(matches!(rs_reloaded.analysis.kind, AnalysisKind::PowerAnalysis(_)));
+    assert!(rs_reloaded.analyzable_data.as_ref().map_or(0, |d| d.archetype.row_count()) >= 41);
+}

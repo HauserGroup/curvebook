@@ -992,6 +992,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                 curvebook_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
             }
         }
+        AnalysisKind::PowerAnalysis(p_spec) => resolve_power_analysis_with_info_hooks(doc, &source_ds, &existing, p_spec),
         _ => {
             if !existing.analysis.kind.is_compatible_with(source_ds.kind()) {
                 Err(format!(
@@ -1042,6 +1043,63 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             false
         }
     }
+}
+
+fn resolve_power_analysis_with_info_hooks(
+    doc: &ProjectDocument,
+    source_ds: &DataSheet,
+    existing: &ResultSheet,
+    base: &curvebook_doc::PowerAnalysisSpec,
+) -> Result<ResultSheet, String> {
+    let mut patched = base.clone();
+    let info_opt =
+        base.info_sheet_id.as_ref().and_then(|id| doc.info_sheet(id)).or_else(|| source_ds.info_sheet_id.as_ref().and_then(|id| doc.info_sheet(id)));
+    if let Some(info) = info_opt {
+        let info_f64 =
+            |names: &[&str]| -> Option<f64> { names.iter().find_map(|name| info.get_constant(name).and_then(|c| c.value.as_finite_f64())) };
+        if let Some(alpha) = info_f64(&["Alpha", "alpha"])
+            && alpha > 0.0
+            && alpha < 1.0
+        {
+            patched.alpha = alpha;
+        }
+        if let Some(target_power) = info_f64(&["Target Power", "target_power", "Target power"])
+            && target_power > 0.0
+            && target_power < 1.0
+        {
+            patched.target_power = Some(target_power);
+        }
+        if patched.solve_target != curvebook_doc::PowerSolveTarget::DetectableEffect
+            && let Some(eff) = info_f64(&["Effect Size", "effect_size", "Effect size"])
+        {
+            let matches_rich_baseline = match &base.effect {
+                curvebook_doc::PowerEffectSpec::Standardized(_) | curvebook_doc::PowerEffectSpec::Unspecified => false,
+                _ => curvebook_stats::power::solve_power(&curvebook_stats::power::power_request_from_doc_spec(base))
+                    .ok()
+                    .is_some_and(|r| (eff - r.effect_size).abs() <= 1e-12 * r.effect_size.abs().max(1.0)),
+            };
+            if !matches_rich_baseline {
+                patched.effect = curvebook_doc::PowerEffectSpec::Standardized(eff);
+            }
+        }
+        if patched.solve_target != curvebook_doc::PowerSolveTarget::SampleSize {
+            if let Some(n1) = info_f64(&["N per group", "sample_size", "n1"])
+                && n1 > 0.0
+                && base.sample_size.is_none_or(|prev| (n1 - prev).abs() > 1e-12 * prev.abs().max(1.0))
+            {
+                patched.sample_size = Some(n1);
+            }
+            if let Some(n2) = info_f64(&["N group 2", "sample_size_group2", "n2"])
+                && n2 > 0.0
+                && base.sample_size_group2.is_none_or(|prev| (n2 - prev).abs() > 1e-12 * prev.abs().max(1.0))
+            {
+                patched.sample_size_group2 = Some(n2);
+            }
+        }
+    }
+    let mut patched_spec = existing.analysis.clone();
+    patched_spec.kind = AnalysisKind::PowerAnalysis(patched);
+    curvebook_stats::run_analysis(source_ds, &patched_spec).map_err(|err| err.to_string())
 }
 
 fn validate_result_sheet_finite(res: &ResultSheet, sheet_id: &SheetId) -> Result<(), String> {

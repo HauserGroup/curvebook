@@ -480,6 +480,11 @@ pub(super) fn remap_analysis_hooks(spec: &mut AnalysisSpec, id_map: &HashMap<She
                 }
             }
         }
+        AnalysisKind::PowerAnalysis(p) => {
+            if let Some(ref mut info_id) = p.info_sheet_id {
+                remap_sheet_id(info_id, id_map);
+            }
+        }
         _ => {}
     }
 }

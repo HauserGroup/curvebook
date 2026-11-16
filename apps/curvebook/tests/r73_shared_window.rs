@@ -529,6 +529,8 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
     let mut app = CurveBookNativeApp::new(rt, win_id, None).with_live_control(channel);
 
     let token_owned = auth.as_str().to_owned();
+    let client_done = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let client_done_bg = std::sync::Arc::clone(&client_done);
     let client = std::thread::spawn(move || -> Result<(), String> {
         let s = TcpStream::connect_timeout(&addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
         let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
@@ -554,6 +556,9 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
             json!({"id": "b4", "method": "sheet.createData", "params": {"kind": "xy", "title": "Bypass"}}),
             json!({"id": "b5", "method": "ui.theme.set", "params": {"mode": "dark"}}),
             json!({"id": "b6", "method": "ui.screenshot", "params": {"path": "forbidden-gui-only.png"}}),
+            json!({"id": "b7", "method": "doc.inspect", "params": {}}),
+            json!({"id": "b8", "method": "render.svg", "params": {}}),
+            json!({"id": "b9", "method": "render.pdf", "params": {}}),
         ]
         .into_iter()
         .enumerate()
@@ -583,12 +588,22 @@ fn shared_live_window_enforces_gui_only_and_shares_human_and_agent_state() -> Re
         assert_eq!(shot["ok"], json!(true));
         assert!(shot["result"]["data_base64"].as_str().is_some_and(|b| b.starts_with("iVBORw0K")));
 
+        // Under --gui-only (`R2-S10-04`), `app.quit` is also rejected via control channel.
         let quit = send_json_line(&mut w, &mut r, &json!({"id": "g6", "method": "app.quit"})).map_err(|e| e.to_string())?;
-        assert_eq!(quit["result"]["quit"], json!(true));
+        assert_eq!(quit["ok"], json!(false), "app.quit must be blocked under --gui-only: {quit}");
+        assert_eq!(quit["error_detail"]["code"], json!("gui_only_violation"));
+        client_done_bg.store(true, std::sync::atomic::Ordering::Release);
         Ok(())
     });
 
-    let _ = drive_live_window_until_quit(&mut app, &ctx, Duration::from_secs(10));
+    let deadline = Instant::now() + Duration::from_secs(10);
+    while !client_done.load(std::sync::atomic::Ordering::Acquire) && Instant::now() < deadline {
+        let raw_input =
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1280.0, 800.0))), ..Default::default() };
+        let mut output = ctx.run_ui(raw_input, |ui| app.step_ui(ui));
+        output.textures_delta.clear();
+        std::thread::sleep(Duration::from_millis(5));
+    }
     client.join().map_err(|_| "gui-only client panicked")??;
 
     let live_ui = app.runtime().window(win_id)?.app();

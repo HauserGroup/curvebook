@@ -575,11 +575,11 @@ fn evaluate_edit_params_widget(
     if norm.contains("geissergreenhouse") || norm.contains("sphericity") || norm.contains("reml") {
         return r1_sphericity_or_reml_control(edit.paired_or_matched);
     }
-    if norm.contains("posthoc") || norm.contains("tukey") || norm.contains("sidak") || norm.contains("bonferroni") {
-        return r2_post_hoc_option_enabled(edit.assume_gaussian, true);
-    }
-    if norm.contains("dunn") {
+    if norm.contains("dunn") && !norm.contains("dunnett") {
         return r2_post_hoc_option_enabled(edit.assume_gaussian, false);
+    }
+    if norm.contains("posthoc") || norm.contains("tukey") || norm.contains("dunnett") || norm.contains("sidak") || norm.contains("bonferroni") {
+        return r2_post_hoc_option_enabled(edit.assume_gaussian, true);
     }
     if norm.contains("controlcolumn") {
         let method = match edit.draft.as_ref().map(|s| &s.kind) {
@@ -599,7 +599,14 @@ fn evaluate_edit_params_widget(
             return r4_two_group_welch_correction(two.method);
         }
     }
-    if norm.contains("contingency") || norm.contains("cochranarmitage") || norm.contains("ci") {
+    if norm.contains("contingency")
+        || norm.contains("cochranarmitage")
+        || norm.starts_with("editci")
+        || norm.contains("baptistapike")
+        || norm.contains("koopman")
+        || norm.contains("newcombewilson")
+        || norm.contains("wilsonbrown")
+    {
         let cont = match edit.draft.as_ref().map(|s| &s.kind) {
             Some(AnalysisKind::Contingency(c)) => c.clone(),
             _ => ContingencySpec::default(),

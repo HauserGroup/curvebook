@@ -263,6 +263,11 @@ impl ProjectDocument {
             for hook in rs.analysis.kind.hooked_sources() {
                 push_hook_dep(&mut deps, &hook, paired_info.as_ref());
             }
+            if let crate::AnalysisKind::PowerAnalysis(p) = &rs.analysis.kind
+                && let Some(info_id) = &p.info_sheet_id
+            {
+                deps.push(info_id.clone());
+            }
         } else if let Some(gs) = self.graph_sheet(id) {
             deps.push(gs.spec.primary_source_sheet_id.clone());
             for series in &gs.spec.series {

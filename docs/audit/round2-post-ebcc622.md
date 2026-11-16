@@ -13,6 +13,7 @@
 | **New Round 2 findings** | **`138` findings** (`38` `S1`, `67` `S2`, `31` `S3`, `2` `S4`) — plus `16` previously recorded items in companion reviews [`desktop_host.md`](findings/r2/desktop_host.md) (`11`) and [`interaction-gui_actions.md`](findings/r2/interaction-gui_actions.md) (`5`) |
 | **Re-verified `HEAD` (`main`)** | `1e9dc59c382019026a477eb0a5124e9b943fb7db` (`2026-11-16`, post-`833e98d` Round 1 merge + `R0`/`R3`/`R4`/`R7`/`R10` commits) |
 | **Status on `1e9dc59` (`154` total)** | **`5` `FIXED_ON_MAIN`**, **`18` `PARTIAL_ON_MAIN`**, **`131` `LIVE_ON_MAIN`** -> **`149` surviving open items**: **`135` `R2-*`** (`36` `S1`, `66` `S2`, `31` `S3`, `2` `S4`) + **`14` companion** |
+| **R0.19 Wave A + B Closure (2026-11-16)** | Wave A (`S01`–`S09`, `S11`–`S13`, `desktop_host.md`) landed on `main`; Wave B (`bugfix/R0.19-s10-closure` onto `627abf29`) closes `R2-S07-10`, `R2-S08-03` (`subcol`), `R2-S10-01`..`08`/`10`..`12`/`14`..`19`, `R2-S10-13` (`grid_view.rs` + `inspect.rs`), and all `5` `interaction-gui_actions.md` items (`1`, `3`, `4`, `5`, `NEW-1`). Two isolated `views/**`+`layout/mod.rs` hunks (`R2-S10-09` split-pane `WorkspaceLayoutMap` singleton guard & `R2-S10-13` visual `views/` button check) hand off to Wave 1 integration onto `chore/R10-wave5-scaffold`. |
 
 ---
 
@@ -108,7 +109,7 @@ Two targeted external-audit verifications at `fda1cc0106092834d97b53289ec2a99c1b
 | File | Scope | Confirmed Items (`fda1cc0`) | Status on `1e9dc59` |
 |---|---|---|---|
 | [`findings/r2/desktop_host.md`](findings/r2/desktop_host.md) | `apps/lumencraft/src/desktop_host.rs` & startup/recovery wiring | `11` confirmed items (`B1`, `B2`, `B4`, `U7`, `U8`, `U9`, `M2`, `M3`, `NEW-1`, `NEW-2`, `NEW-3`) | **`2` `FIXED_ON_MAIN`** (`B1`, `U9`), **`1` `PARTIAL_ON_MAIN`** (`NEW-1`), **`8` `LIVE_ON_MAIN`** -> **`9` open** |
-| [`findings/r2/interaction-gui_actions.md`](findings/r2/interaction-gui_actions.md) | `crates/ui-egui/src/interaction.rs` × `gui_actions.rs` | `5` confirmed items (`1`, `3`, `4`, `5`, `NEW-1`) | **`0` `FIXED_ON_MAIN`**, **`0` `PARTIAL_ON_MAIN`**, **`5` `LIVE_ON_MAIN`** -> **`5` open** |
+| [`findings/r2/interaction-gui_actions.md`](findings/r2/interaction-gui_actions.md) | `crates/ui-egui/src/interaction.rs` × `gui_actions.rs` | `5` confirmed items (`1`, `3`, `4`, `5`, `NEW-1`) | **`0` `FIXED_ON_MAIN`** at `1e9dc59` -> **`5/5` closed on `bugfix/R0.19-s10-closure`** (`audit_r2_s10.rs`) |
 
 ---
 
@@ -316,3 +317,16 @@ Two targeted external-audit verifications at `fda1cc0106092834d97b53289ec2a99c1b
 |---|---|---|---|---|---|
 | [`R2-S11-17`](findings/r2/R2-S11.md#r2-s11-17--s4--lumencraftnativeapprender_top_menu_bar-ignores-chromemenu_bar_visible---no-in-window-menus) | `S11` | `contract-drift` | `LIVE_ON_MAIN` | `9db2f2b` | `LumenCraftNativeApp::render_top_menu_bar` ignores `chrome.menu_bar_visible` (`--no-in-window-menus`) |
 | [`R2-S13-11`](findings/r2/R2-S13.md#r2-s13-11--s4--documentation-and-xtask-status-contract-drift-docscontrol-protocolmd-and-docsmcpmd-still-state-32-ui_commands-actual-45-and-xtask-status-never-checks-statusmd-metrics) | `S13` | `cleanup` | `PARTIAL_ON_MAIN` | `6d20653`, `47704e8`, `20117d2`, `c7951a3`, `fda1cc0` | Documentation and `xtask status` contract drift: `docs/control-protocol.md` and `docs/mcp.md` still state `32` `UI_COMMANDS` (actual `45`), and `xtask status` never checks `STATUS.md` metrics |
+
+---
+
+## R0.19 Post-`R0.20` Wave B Closure Notes (`bugfix/R0.19-s10-closure`, 2026-11-16)
+
+Following the Wave A commits on `main` (`S01`–`S09`, `S11`–`S13`, `desktop_host.md`) and `R0.20` CurveBook rename (`824631a`), `bugfix/R0.19-s10-closure` closes:
+
+1. **Cross-Crate Seams (Wave A remainders):**
+   - `R2-S07-10`: `AnalysisKind::PowerAnalysis(PowerAnalysisSpec)` wired end-to-end across `doc`, `format`, `stats`, `engine` (`cmd/analysis`, `dag`, `methods_report`), and `ui-egui` (`power_wizard`, `dialogs_canvas`, `inspect`), verified by `audit_r2_s05_s07`.
+   - `R2-S08-03` (item 3): `PointStyleOverride.subcol` wired end-to-end across `chart` and `ui-egui` (`grid_view`, `control_io`, `dialogs_canvas`, `gui_actions`), verified by `audit_r2_s08_s09`.
+2. **`S10` (`R2-S10`) & `interaction-gui_actions.md`:**
+   - Closed `R2-S10-01`..`08`, `R2-S10-10`..`12`, `R2-S10-14`..`19`, `R2-S10-13` (`grid_view.rs` + `inspect.rs`), and all `5` `interaction-gui_actions.md` items (`1`, `3`, `4`, `5`, `NEW-1`) with permanent regression coverage in `crates/ui-egui/tests/audit_r2_s10.rs`, `os_integration::tests`, `gui_only_surface`, `audit_r2_s12`, `mcp_gui_only_parity`, `r73_mcp_surface_and_headless`, `r73_mcp_gui_only_wf_01_15`, and `r73_shared_window`.
+   - Deferred cleanly to Wave 1 integration on top of `chore/R10-wave5-scaffold`: two small `crates/ui-egui/src/{views/**,layout/mod.rs}` hunks (`R2-S10-09` split-pane `WorkspaceLayoutMap` singleton geometry overwrite guard and `R2-S10-13` visual formula-bar commit button `target_title` check) intentionally omitted here to keep zero merge conflict with the concurrent Wave 5 `views/` refactor.

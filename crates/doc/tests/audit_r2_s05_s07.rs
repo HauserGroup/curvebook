@@ -232,6 +232,17 @@ fn r2_s07_10_power_analysis_spec_serde_validation_and_schema() {
     assert_eq!(schema_val["title"], "PowerAnalysisSpec");
     assert!(schema_val["properties"]["family"].is_object());
     assert!(schema_val["properties"]["solve_target"].is_object());
+
+    // First-class AnalysisKind::PowerAnalysis wiring (`R2-S07-10`).
+    let mut wired = decoded;
+    wired.info_sheet_id = Some(SheetId::new("info-pwr"));
+    let kind = AnalysisKind::PowerAnalysis(wired);
+    assert!(kind.derive_auto_title().contains("Two proportions"));
+    assert!(kind.is_compatible_with(curvebook_doc::TableKind::Xy));
+    assert_eq!(kind.upstream_sheet_ids(), vec![SheetId::new("info-pwr")]);
+    let kind_json = serde_json::to_value(&kind).unwrap();
+    let kind_back: AnalysisKind = serde_json::from_value(kind_json).unwrap();
+    assert_eq!(kind_back, kind);
 }
 
 #[test]

@@ -458,6 +458,7 @@ fn run_project_inspect(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
 fn count_analysis_hooks(spec: &AnalysisSpec) -> usize {
     match &spec.kind {
         AnalysisKind::NonlinearRegression(nl) => nl.parameter_rules.iter().filter(|r| matches!(r.scope, ParameterScope::HookedConstant(_))).count(),
+        AnalysisKind::PowerAnalysis(p) => usize::from(p.info_sheet_id.is_some()),
         _ => 0,
     }
 }

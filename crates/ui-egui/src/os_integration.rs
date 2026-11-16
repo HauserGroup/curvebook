@@ -241,6 +241,57 @@ pub fn build_cf_html_payload(html_fragment: &str) -> String {
 static STAGE_DIR_COUNTER: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 #[cfg(not(target_arch = "wasm32"))]
+const MAX_STAGE_DIR_CREATE_ATTEMPTS: usize = 32;
+
+#[cfg(not(target_arch = "wasm32"))]
+const STALE_PREVIEW_MAX_AGE_SECS: u64 = 3600;
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_dir_nonce(seq: u64) -> u64 {
+    let time_ns =
+        std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0_u64, |d| u64::try_from(d.as_nanos()).unwrap_or(u64::MAX));
+    let stack_probe = (&seq as *const u64) as usize as u64;
+    let pid = u64::from(std::process::id());
+    let mut x = time_ns ^ stack_probe.rotate_left(17) ^ pid.rotate_left(33) ^ seq.wrapping_mul(0x9E37_79B9_7F4A_7C15);
+    x ^= x >> 30;
+    x = x.wrapping_mul(0xBF58_476D_1CE4_E5B9);
+    x ^= x >> 27;
+    x = x.wrapping_mul(0x94D0_49BB_1331_11EB);
+    x ^ (x >> 31)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn cleanup_stale_stage_dirs(base: &std::path::Path, prefix: &str) {
+    let full_prefix = format!("curvebook-{prefix}-");
+    let Ok(entries) = std::fs::read_dir(base) else {
+        return;
+    };
+    let now = std::time::SystemTime::now();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        let Some(name_str) = name.to_str() else {
+            continue;
+        };
+        if !name_str.starts_with(&full_prefix) {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(meta) = std::fs::symlink_metadata(&path) else {
+            continue;
+        };
+        if meta.file_type().is_symlink() || !meta.is_dir() {
+            continue;
+        }
+        if let Ok(modified) = meta.modified()
+            && let Ok(age) = now.duration_since(modified)
+            && age.as_secs() >= STALE_PREVIEW_MAX_AGE_SECS
+        {
+            let _ = std::fs::remove_dir_all(&path);
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 struct StageDirGuard {
     path: std::path::PathBuf,
     disarmed: bool,
@@ -249,16 +300,44 @@ struct StageDirGuard {
 #[cfg(not(target_arch = "wasm32"))]
 impl StageDirGuard {
     fn create(prefix: &str) -> Result<Self, String> {
-        let seq = STAGE_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-        let pid = std::process::id();
-        let path = std::env::temp_dir().join(format!("curvebook-{prefix}-{pid}-{seq}"));
-        std::fs::create_dir_all(&path).map_err(|err| format!("failed to create staging dir '{}': {err}", path.display()))?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            let _ = std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700));
+        let base = std::env::temp_dir();
+        if prefix == "print-preview" {
+            cleanup_stale_stage_dirs(&base, prefix);
         }
-        Ok(Self { path, disarmed: false })
+        Self::create_in(&base, prefix)
+    }
+
+    fn create_in(base: &std::path::Path, prefix: &str) -> Result<Self, String> {
+        let pid = std::process::id();
+        let mut last_err = String::new();
+        for _ in 0..MAX_STAGE_DIR_CREATE_ATTEMPTS {
+            let seq = STAGE_DIR_COUNTER.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            let nonce = stage_dir_nonce(seq);
+            let path = base.join(format!("curvebook-{prefix}-{pid}-{nonce:016x}"));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt;
+                builder.mode(0o700);
+            }
+            match builder.create(&path) {
+                Ok(()) => {
+                    let meta =
+                        std::fs::symlink_metadata(&path).map_err(|err| format!("failed to inspect staging dir '{}': {err}", path.display()))?;
+                    if meta.file_type().is_symlink() || !meta.is_dir() {
+                        return Err(format!("staging path '{}' is not a regular directory", path.display()));
+                    }
+                    return Ok(Self { path, disarmed: false });
+                }
+                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
+                    last_err = err.to_string();
+                }
+                Err(err) => {
+                    return Err(format!("failed to create staging dir '{}': {err}", path.display()));
+                }
+            }
+        }
+        Err(format!("failed to allocate unique staging dir after {MAX_STAGE_DIR_CREATE_ATTEMPTS} attempts: {last_err}"))
     }
 
     fn path(&self) -> &std::path::Path {
@@ -756,6 +835,27 @@ pub fn open_os_print_preview_dialog(spool: &crate::PrintSpoolOutput) -> Result<O
     open_os_print_preview_dialog_titled(spool, "curvebook-print")
 }
 
+#[cfg(any(all(not(target_arch = "wasm32"), target_os = "windows"), all(not(target_arch = "wasm32"), test)))]
+fn build_windows_preview_candidate(stage_dir: &std::path::Path, pdf_path: &std::path::Path) -> Result<OsCommandCandidate, String> {
+    const PS_OPEN_PREVIEW: &str = "param([Parameter(Mandatory=$true)][string]$PdfPath)\nStart-Process -FilePath $PdfPath\n";
+    let ps1_path = stage_dir.join("open_preview.ps1");
+    curvebook_platform::write_atomic(&ps1_path, PS_OPEN_PREVIEW.as_bytes())
+        .map_err(|err| format!("failed to stage PowerShell preview launcher: {err}"))?;
+    Ok(OsCommandCandidate {
+        program: String::from("powershell"),
+        args: vec![
+            String::from("-NoProfile"),
+            String::from("-NonInteractive"),
+            String::from("-ExecutionPolicy"),
+            String::from("Bypass"),
+            String::from("-File"),
+            ps1_path.to_string_lossy().into_owned(),
+            String::from("-PdfPath"),
+            pdf_path.to_string_lossy().into_owned(),
+        ],
+    })
+}
+
 /// Stage a print spool PDF cleanly under `<safe_title>.pdf` and open host print preview when enabled.
 ///
 /// # Errors
@@ -781,22 +881,18 @@ pub fn open_os_print_preview_dialog_titled(spool: &crate::PrintSpoolOutput, titl
         ));
     }
 
-    let path_str = pdf_path.to_string_lossy().into_owned();
     #[cfg(target_os = "macos")]
-    let candidate = OsCommandCandidate { program: String::from("/usr/bin/open"), args: vec![String::from("-a"), String::from("Preview"), path_str] };
-    #[cfg(all(unix, not(target_os = "macos")))]
-    let candidate = OsCommandCandidate { program: String::from("xdg-open"), args: vec![path_str] };
-    #[cfg(target_os = "windows")]
-    let candidate = OsCommandCandidate {
-        program: String::from("powershell"),
-        args: vec![
-            String::from("-NoProfile"),
-            String::from("-NonInteractive"),
-            String::from("-Command"),
-            String::from("Start-Process -FilePath $args[0]"),
-            path_str,
-        ],
+    let candidate = {
+        let path_str = pdf_path.to_string_lossy().into_owned();
+        OsCommandCandidate { program: String::from("/usr/bin/open"), args: vec![String::from("-a"), String::from("Preview"), path_str] }
     };
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let candidate = {
+        let path_str = pdf_path.to_string_lossy().into_owned();
+        OsCommandCandidate { program: String::from("xdg-open"), args: vec![path_str] }
+    };
+    #[cfg(target_os = "windows")]
+    let candidate = build_windows_preview_candidate(stage_dir.path(), &pdf_path)?;
 
     match run_candidate(&candidate, None, ProcessBounds::default())? {
         CandidateOutcome::Completed(_output) => {
@@ -1347,6 +1443,46 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
         if elapsed >= std::time::Duration::from_secs(2) {
             return Err(format!("pasteboard write blocked {elapsed:?} waiting for backgrounded child"));
         }
+        Ok(())
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn r2_s10_11_12_stage_dir_guard_and_windows_ps1_preview_launcher() -> Result<(), String> {
+        let root = std::env::temp_dir().join(format!("curvebook-r2s10-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).map_err(|e| format!("create root: {e}"))?;
+        let d1_path = {
+            let g1 = super::StageDirGuard::create_in(&root, "r2s10")?;
+            let g2 = super::StageDirGuard::create_in(&root, "r2s10")?;
+            if g1.path() == g2.path() {
+                return Err(String::from("expected distinct randomized staging directories"));
+            }
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                let mode = std::fs::metadata(g1.path()).map_err(|e| format!("stat: {e}"))?.permissions().mode() & 0o777;
+                if mode != 0o700 {
+                    return Err(format!("expected 0o700 mode on staging dir, got {mode:o}"));
+                }
+            }
+            let pdf = g1.path().join("figure.pdf");
+            let cand = super::build_windows_preview_candidate(g1.path(), &pdf)?;
+            if cand.program != "powershell" || !cand.args.windows(2).any(|w| w[0] == "-File" && w[1].ends_with("open_preview.ps1")) {
+                return Err(format!("expected -File open_preview.ps1 launcher, got {:?}", cand.args));
+            }
+            if cand.args.iter().any(|a| a == "-Command" || a.contains("$args[0]")) {
+                return Err(format!("unexpected -Command string interpolation in {:?}", cand.args));
+            }
+            let ps1 = std::fs::read_to_string(g1.path().join("open_preview.ps1")).map_err(|e| format!("read ps1: {e}"))?;
+            if !ps1.contains("param(") || !ps1.contains("-FilePath $PdfPath") {
+                return Err(format!("unexpected open_preview.ps1 content: {ps1}"));
+            }
+            g1.path().to_path_buf()
+        };
+        if d1_path.exists() {
+            return Err(format!("StageDirGuard did not remove '{}' on drop", d1_path.display()));
+        }
+        let _ = std::fs::remove_dir_all(&root);
         Ok(())
     }
 }
