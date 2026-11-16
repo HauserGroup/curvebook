@@ -32,6 +32,7 @@ pub const DEFAULT_MAJOR_TICK_LEN_PT: f64 = 4.5;
 pub const DEFAULT_MINOR_TICK_LEN_PT: f64 = 2.5;
 
 const MAX_SEGMENTS_PER_AXIS: usize = 3;
+const MIN_FINITE_AXIS_SPAN: f64 = f64::MIN_POSITIVE * 4.0;
 const ELLIPSE_KAPPA: f64 = 0.552_284_749_830_793_6;
 const SI_PREFIXES: [&str; 17] = ["y", "z", "a", "f", "p", "n", "\u{00B5}", "m", "", "k", "M", "G", "T", "P", "E", "Z", "Y"];
 
@@ -189,7 +190,7 @@ impl AxisMapping {
         let t_max = scale_transform(self.scale, self.max)?;
         let t_val = scale_transform(self.scale, value)?;
         let denom = t_max - t_min;
-        if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
             return None;
         }
         let u = (t_val - t_min) / denom;
@@ -204,13 +205,17 @@ impl AxisMapping {
             return None;
         }
         let span = span_end - span_start;
-        if !span.is_finite() || span.abs() <= f64::EPSILON {
+        if !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN {
             return None;
         }
         let t_min = scale_transform(self.scale, self.min)?;
         let t_max = scale_transform(self.scale, self.max)?;
+        let denom = t_max - t_min;
+        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
+            return None;
+        }
         let u = (coord_pt - span_start) / span;
-        let t_val = t_min + u * (t_max - t_min);
+        let t_val = t_min + u * denom;
         scale_inverse(self.scale, t_val)
     }
 
@@ -399,7 +404,7 @@ impl ResolvedSegment {
         }
         let lo = self.domain_min.min(self.domain_max);
         let hi = self.domain_min.max(self.domain_max);
-        let tol = 1e-12 * (hi - lo).abs().max(1.0);
+        let tol = 1e-12 * (hi - lo).abs().max(lo.abs()).max(hi.abs());
         value >= lo - tol && value <= hi + tol
     }
 
@@ -430,11 +435,11 @@ impl ResolvedSegment {
         let g_max = scale_transform(self.scale, self.domain_max)?;
         let g_u = scale_transform(self.scale, value)?;
         let denom = g_max - g_min;
-        if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+        if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
             return None;
         }
         let g_span = denom.abs();
-        let tol = 1e-9 * g_span.max(1e-12);
+        let tol = 1e-9 * g_span.max(g_min.abs().max(g_max.abs()) * f64::EPSILON);
         let lo = g_min.min(g_max) - tol;
         let hi = g_min.max(g_max) + tol;
         if g_u < lo || g_u > hi {
@@ -867,7 +872,7 @@ fn liang_barsky_clip(p0: (f64, f64), p1: (f64, f64), b_min: (f64, f64), b_max: (
 
 fn map_transformed_to_span(t_val: f64, t_min: f64, t_max: f64, span_start: f64, span_end: f64) -> Option<f64> {
     let denom = t_max - t_min;
-    if !denom.is_finite() || denom.abs() <= f64::EPSILON {
+    if !denom.is_finite() || denom.abs() <= MIN_FINITE_AXIS_SPAN {
         return None;
     }
     let u = (t_val - t_min) / denom;
@@ -995,12 +1000,17 @@ pub(crate) fn prob_auto_domain_max(raw_max: f64, upper: f64, scale: AxisScale) -
     if padded > 0.0 && padded < upper && scale_transform(scale, padded).is_some() { padded.max(raw_max) } else { raw_max }
 }
 
+fn linear_constant_pad(val: f64) -> f64 {
+    if !val.is_finite() || val == 0.0 { 1.0 } else { (val.abs() * 0.1).max(MIN_FINITE_AXIS_SPAN) }
+}
+
 fn is_degenerate_domain(dmin: f64, dmax: f64, scale: AxisScale) -> bool {
     if !dmin.is_finite() || !dmax.is_finite() {
         return true;
     }
     if matches!(scale, AxisScale::Linear) {
-        (dmax - dmin).abs() < 1e-12
+        let span = dmax - dmin;
+        !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN
     } else {
         match (scale_transform(scale, dmin), scale_transform(scale, dmax)) {
             (Some(t_min), Some(t_max)) => (t_max - t_min).abs() < 1e-12,
@@ -1038,7 +1048,7 @@ fn expand_degenerate_domain(center: f64, scale: AxisScale) -> (f64, f64) {
     match scale {
         AxisScale::Linear => {
             let safe_center = if center.is_finite() { center } else { 0.0 };
-            let pad = safe_center.abs().max(1.0) * 0.5;
+            let pad = linear_constant_pad(safe_center);
             (safe_center - pad, safe_center + pad)
         }
         AxisScale::Log10 => expand_log_degenerate(center, 0.1, 10.0, scale),
@@ -1134,7 +1144,8 @@ fn resolve_segment_domain(
 
     let valid_lo = scale_transform(seg.scale, lo).is_some();
     let valid_hi = scale_transform(seg.scale, hi).is_some();
-    let valid_span = (hi - lo).abs() > f64::EPSILON;
+    let span = hi - lo;
+    let valid_span = span.is_finite() && span.abs() > MIN_FINITE_AXIS_SPAN;
     let valid_reciprocal = !matches!(seg.scale, AxisScale::Reciprocal) || (lo != 0.0 && hi != 0.0 && lo.signum() == hi.signum());
 
     if valid_lo && valid_hi && valid_span && valid_reciprocal {
@@ -1233,8 +1244,9 @@ pub(crate) fn sanitize_linear_range(min_v: f64, max_v: f64, fallback: (f64, f64)
         return fallback;
     }
     let (lo, hi) = if min_v <= max_v { (min_v, max_v) } else { (max_v, min_v) };
-    if (hi - lo).abs() <= 1e-12 {
-        let pad = if lo.abs() > 1.0 { lo.abs() * 0.1 } else { 1.0 };
+    let span = hi - lo;
+    if !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN {
+        let pad = linear_constant_pad(lo);
         (lo - pad, hi + pad)
     } else {
         (lo, hi)
@@ -1290,7 +1302,13 @@ pub(crate) fn resolve_exact_domain_with_warnings(axis: &AxisSpec, data_min: f64,
 
     let mut lo = explicit_min.unwrap_or(raw_lo);
     let mut hi = explicit_max.unwrap_or(raw_hi);
-    if (hi - lo).abs() <= 1e-12 {
+    let init_span = hi - lo;
+    let is_init_degen = if matches!(scale, AxisScale::Linear) {
+        !init_span.is_finite() || init_span.abs() <= MIN_FINITE_AXIS_SPAN
+    } else {
+        !init_span.is_finite() || init_span.abs() <= 1e-12
+    };
+    if is_init_degen {
         if explicit_min.is_some() && explicit_max.is_some() {
             warnings.push(ChartWarning::new("invalid_axis_domain", format!("expanded degenerate explicit domain [{lo}, {hi}] for {scale:?} axis")));
         }
@@ -1401,7 +1419,8 @@ fn sample_auto_domain_min(valid: &[f64], scale: AxisScale, include_zero_if_linea
     match scale {
         AxisScale::Linear => {
             let mut base = if include_zero_if_linear && raw_min > 0.0 { 0.0 } else { raw_min };
-            let span = (raw_max - base).max(base.abs() * 0.1).max(1e-6);
+            let raw_span = (raw_max - base).max(base.abs() * 0.1);
+            let span = if raw_span.is_finite() && raw_span > MIN_FINITE_AXIS_SPAN { raw_span } else { 1.0 };
             if !include_zero_if_linear || base < 0.0 {
                 base -= 0.06 * span;
             }
@@ -1429,7 +1448,8 @@ fn sample_auto_domain_max(valid: &[f64], scale: AxisScale, top_headroom_frac: f6
     }
     match scale {
         AxisScale::Linear => {
-            let span = (raw_max - raw_min).max(raw_max.abs() * 0.1).max(1e-6);
+            let raw_span = (raw_max - raw_min).max(raw_max.abs() * 0.1);
+            let span = if raw_span.is_finite() && raw_span > MIN_FINITE_AXIS_SPAN { raw_span } else { 1.0 };
             let padded = raw_max + span * (0.08 + top_headroom_frac.max(0.0));
             let step = nice_linear_step(span / 5.0);
             clean_zero((padded / step).ceil() * step)
@@ -1484,11 +1504,12 @@ fn compute_nice_bounds_for_scale(lo: f64, hi: f64, scale: AxisScale) -> (f64, f6
 }
 
 fn nice_linear_bounds(lo: f64, hi: f64) -> (f64, f64) {
-    if (hi - lo).abs() <= 1e-12 {
-        let pad = (lo.abs() * 0.1).max(1.0);
+    let span = hi - lo;
+    if !span.is_finite() || span.abs() <= MIN_FINITE_AXIS_SPAN {
+        let pad = linear_constant_pad(lo);
         return (lo - pad, hi + pad);
     }
-    let step = nice_linear_step((hi - lo) / 5.0);
+    let step = nice_linear_step(span / 5.0);
     let nice_lo = if lo >= 0.0 && lo <= step { 0.0 } else { (lo / step).floor() * step };
     let nice_hi = (hi / step).ceil() * step;
     let out_hi = if nice_hi.is_finite() { nice_hi } else { hi };
@@ -1518,7 +1539,7 @@ fn extend_upper_bound(lo: f64, scale: AxisScale) -> f64 {
         }
         AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_max(lo, 1.0, scale),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_max(lo, 100.0, scale),
-        AxisScale::Linear => lo + lo.abs().max(1.0),
+        AxisScale::Linear => lo + linear_constant_pad(lo),
         AxisScale::Reciprocal => {
             if lo < 0.0 {
                 lo * 0.5
@@ -1534,7 +1555,7 @@ fn extend_lower_bound(hi: f64, scale: AxisScale) -> f64 {
         AxisScale::Log10 | AxisScale::Log2 | AxisScale::Ln => (hi * 0.1).max(LOG_POSITIVE_FLOOR_DEFAULT),
         AxisScale::Logit(LogitDomain::Proportion) => prob_auto_domain_min(hi, 1.0, scale),
         AxisScale::Logit(LogitDomain::Percent) | AxisScale::Probit => prob_auto_domain_min(hi, 100.0, scale),
-        AxisScale::Linear => hi - hi.abs().max(1.0),
+        AxisScale::Linear => hi - linear_constant_pad(hi),
         AxisScale::Reciprocal => {
             if hi < 0.0 {
                 hi * 2.0
@@ -2272,27 +2293,26 @@ pub fn format_tick_rich(value: f64, scale: AxisScale, format: TickLabelFormat, p
     if matches!(format, TickLabelFormat::PowerOfTenSuperscript) && value.is_finite() { parse_markup(&text) } else { RichText::plain(text) }
 }
 
+fn decompose_scientific_3dp(abs: f64) -> Option<(String, i32)> {
+    let sci = format!("{abs:.3e}");
+    let (mantissa, exp_str) = sci.split_once('e')?;
+    let exp = exp_str.parse::<i32>().ok()?;
+    Some((trim_decimal_str(mantissa.to_owned()), exp))
+}
+
 fn format_power_of_ten_markup(value: f64, policy: &LocaleNumberPolicy) -> String {
     if value == 0.0 {
         return String::from("0");
     }
-    let abs = value.abs();
-    let mut exp = abs.log10().floor() as i32;
-    let mut mant = abs / 10.0_f64.powi(exp);
-    while mant >= 10.0 - 1e-9 && exp < 308 {
-        exp += 1;
-        mant = abs / 10.0_f64.powi(exp);
-    }
-    while mant < 1.0 - 1e-9 && exp > -308 {
-        exp -= 1;
-        mant = abs / 10.0_f64.powi(exp);
-    }
+    let Some((mant_trimmed, exp)) = decompose_scientific_3dp(value.abs()) else {
+        return String::from("NaN");
+    };
     let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
     let exp_str = format_signed_int(exp, policy);
-    if (mant - 1.0).abs() < 1e-7 {
+    if mant_trimmed == "1" {
         format!("{sign}10<sup>{exp_str}</sup>")
     } else {
-        let mant_str = apply_locale_chars(&trim_decimal_str(format!("{mant:.3}")), policy);
+        let mant_str = apply_locale_chars(&mant_trimmed, policy);
         format!("{sign}{mant_str}\u{00D7}10<sup>{exp_str}</sup>")
     }
 }
@@ -2301,42 +2321,41 @@ fn format_scientific_e(value: f64, policy: &LocaleNumberPolicy) -> String {
     if value == 0.0 {
         return String::from("0");
     }
-    let abs = value.abs();
-    let mut exp = abs.log10().floor() as i32;
-    let mut mant = abs / 10.0_f64.powi(exp);
-    while mant >= 10.0 - 1e-9 && exp < 308 {
-        exp += 1;
-        mant = abs / 10.0_f64.powi(exp);
-    }
-    while mant < 1.0 - 1e-9 && exp > -308 {
-        exp -= 1;
-        mant = abs / 10.0_f64.powi(exp);
-    }
+    let Some((mant_trimmed, exp)) = decompose_scientific_3dp(value.abs()) else {
+        return String::from("NaN");
+    };
     let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
-    let mant_str = apply_locale_chars(&trim_decimal_str(format!("{mant:.3}")), policy);
+    let mant_str = apply_locale_chars(&mant_trimmed, policy);
     let exp_str = format_signed_int(exp, policy);
     format!("{sign}{mant_str}e{exp_str}")
 }
 
+#[allow(clippy::cast_possible_truncation)]
 fn format_engineering_si(value: f64, policy: &LocaleNumberPolicy) -> String {
     if value == 0.0 {
         return String::from("0");
     }
     let abs = value.abs();
-    let mut exp3 = (abs.log10() / 3.0).floor() as i32;
-    exp3 = exp3.clamp(-8, 8);
+    let log3 = (abs.log10() / 3.0).floor();
+    let mut exp3 = if log3.is_finite() { (log3 as i32).clamp(-8, 8) } else { 0 };
     let mut scaled = abs / 10.0_f64.powi(exp3 * 3);
-    while scaled >= 1000.0 - 1e-9 && exp3 < 8 {
+    while scaled >= 1000.0 && exp3 < 8 {
         exp3 += 1;
         scaled = abs / 10.0_f64.powi(exp3 * 3);
     }
-    while scaled < 1.0 - 1e-9 && exp3 > -8 {
+    while scaled < 1.0 && exp3 > -8 {
         exp3 -= 1;
         scaled = abs / 10.0_f64.powi(exp3 * 3);
     }
+    let mut rounded = format!("{scaled:.3}");
+    if exp3 < 8 && rounded.split('.').next().and_then(|int_part| int_part.parse::<u64>().ok()).is_some_and(|n| n >= 1000) {
+        exp3 += 1;
+        scaled = abs / 10.0_f64.powi(exp3 * 3);
+        rounded = format!("{scaled:.3}");
+    }
     let prefix = SI_PREFIXES.get((exp3 + 8) as usize).copied().unwrap_or("");
     let sign = if value.is_sign_negative() { policy.minus_sign.as_str() } else { "" };
-    let num_str = apply_locale_chars(&trim_decimal_str(format!("{scaled:.3}")), policy);
+    let num_str = apply_locale_chars(&trim_decimal_str(rounded), policy);
     if prefix.is_empty() { format!("{sign}{num_str}") } else { format!("{sign}{num_str} {prefix}") }
 }
 
@@ -3795,4 +3814,104 @@ pub fn summarize_warnings(warnings: &[ChartWarning]) -> String {
         let _ = write!(out, "[{}] {}", w.code, w.message);
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{AxisSegment, AxisSpec, TickLabelFormat};
+    use curvebook_math::AxisScale;
+    use curvebook_text::{LocaleNumberPolicy, SpanScript};
+
+    use super::{
+        AxisMapping, AxisOrientation, ResolvedAxis, format_tick_rich, nice_linear_bounds, resolve_sample_segment_domain, sanitize_linear_range,
+    };
+    use crate::scene::RectPt;
+
+    #[test]
+    fn rv20_tiny_linear_domains_and_constant_padding_preserve_scale() {
+        // 1. Explicit `[0.0, 1e-16]` maps cleanly without returning `None` or expanding to `[-0.5, 0.5]`.
+        let tiny_map = AxisMapping { min: 0.0, max: 1e-16, scale: AxisScale::Linear };
+        let p0 = tiny_map.map_value(0.0, 0.0, 200.0).expect("map 0.0 on [0, 1e-16]");
+        let p_mid = tiny_map.map_value(0.5e-16, 0.0, 200.0).expect("map midpoint on [0, 1e-16]");
+        let p1 = tiny_map.map_value(1e-16, 0.0, 200.0).expect("map 1e-16 on [0, 1e-16]");
+        assert!((p0 - 0.0).abs() < 1e-12);
+        assert!((p_mid - 100.0).abs() < 1e-12);
+        assert!((p1 - 200.0).abs() < 1e-12);
+        let roundtrip = tiny_map.unmap_coord(p_mid, 0.0, 200.0).expect("unmap midpoint on [0, 1e-16]");
+        assert!((roundtrip - 0.5e-16).abs() < 1e-30);
+
+        let mut explicit_spec = AxisSpec::linear("Tiny");
+        explicit_spec.segments[0].min = Some(0.0);
+        explicit_spec.segments[0].max = Some(1e-16);
+        let mut warnings = Vec::new();
+        let resolved_tiny =
+            ResolvedAxis::resolve(&explicit_spec, AxisOrientation::Horizontal, RectPt::new(0.0, 0.0, 200.0, 100.0), None, &mut warnings);
+        assert!(warnings.is_empty(), "explicit [0, 1e-16] should not warn: {warnings:?}");
+        assert_eq!((resolved_tiny.segments[0].domain_min, resolved_tiny.segments[0].domain_max), (0.0, 1e-16));
+        assert!((resolved_tiny.map_value(0.5e-16).expect("segment map").coord_pt - 100.0).abs() < 1e-12);
+
+        // 2. Auto-domain on picomolar/femtomolar `[1e-13, 6e-13]` (span `5e-13`) is NOT treated as degenerate or padded by +/-1.0.
+        let (n_lo, n_hi) = nice_linear_bounds(1e-13, 6e-13);
+        assert!((0.0..=1e-13).contains(&n_lo), "unexpected nice_lo: {n_lo:e}");
+        assert!((6e-13..=1e-12).contains(&n_hi), "unexpected nice_hi: {n_hi:e}");
+
+        let (san_lo, san_hi) = sanitize_linear_range(1e-13, 6e-13, (0.0, 1.0));
+        assert_eq!((san_lo, san_hi), (1e-13, 6e-13));
+
+        let seg_auto = AxisSegment::default();
+        let mut sample_warnings = Vec::new();
+        let (s_lo, s_hi) = resolve_sample_segment_domain(&seg_auto, &[1e-13, 6e-13], false, 0.05, &mut sample_warnings);
+        assert!(sample_warnings.is_empty());
+        assert!(s_lo <= 1e-13 && s_hi >= 6e-13 && (s_hi - s_lo) < 1e-11, "picomolar sample auto-domain collapsed: [{s_lo:e}, {s_hi:e}]");
+
+        // 3. Single-value `1e-12` pads proportionally by `|lo| * 0.1` (`1e-13`), and `1.0` ONLY when `lo == 0.0`.
+        let (single_lo, single_hi) = nice_linear_bounds(1e-12, 1e-12);
+        assert!((single_lo - 0.9e-12).abs() < 1e-24, "expected 0.9e-12, got {single_lo:e}");
+        assert!((single_hi - 1.1e-12).abs() < 1e-24, "expected 1.1e-12, got {single_hi:e}");
+
+        let (san_single_lo, san_single_hi) = sanitize_linear_range(1e-12, 1e-12, (0.0, 1.0));
+        assert!((san_single_lo - 0.9e-12).abs() < 1e-24);
+        assert!((san_single_hi - 1.1e-12).abs() < 1e-24);
+
+        let (single_samp_lo, single_samp_hi) = resolve_sample_segment_domain(&seg_auto, &[1e-12], false, 0.0, &mut sample_warnings);
+        assert!(single_samp_lo > 0.0 && single_samp_lo < 1e-12 && single_samp_hi > 1e-12 && single_samp_hi < 2e-12);
+
+        let (zero_lo, zero_hi) = nice_linear_bounds(0.0, 0.0);
+        assert_eq!((zero_lo, zero_hi), (-1.0, 1.0));
+    }
+
+    #[test]
+    fn rv21_scientific_and_engineering_si_ticks_carry_after_rounding() {
+        let policy = LocaleNumberPolicy::publication();
+
+        // Scientific superscript: `9.9996e5` rounds to `1.000e6` -> `10^6` (never `10×10^5`).
+        let pos_sup = format_tick_rich(9.9996e5, AxisScale::Log10, TickLabelFormat::PowerOfTenSuperscript, &policy);
+        assert_eq!(pos_sup.spans.len(), 2, "expected 10^6 spans, got {:?}", pos_sup.spans);
+        assert_eq!(pos_sup.spans[0].text, "10");
+        assert_eq!(pos_sup.spans[1].script, SpanScript::Superscript);
+        assert_eq!(pos_sup.spans[1].text, "6");
+
+        let neg_sup = format_tick_rich(-9.9996e5, AxisScale::Linear, TickLabelFormat::PowerOfTenSuperscript, &policy);
+        assert_eq!(neg_sup.spans.len(), 2, "expected -10^6 spans, got {:?}", neg_sup.spans);
+        assert_eq!(neg_sup.spans[0].text, "\u{2212}10");
+        assert_eq!(neg_sup.spans[1].script, SpanScript::Superscript);
+        assert_eq!(neg_sup.spans[1].text, "6");
+
+        // Scientific E: `9.9996e5` -> `1e6`, `-9.9996e5` -> `−1e6`.
+        let pos_sci = format_tick_rich(9.9996e5, AxisScale::Linear, TickLabelFormat::ScientificE, &policy);
+        assert_eq!(pos_sci.plain_text(), "1e6");
+        let neg_sci = format_tick_rich(-9.9996e5, AxisScale::Linear, TickLabelFormat::ScientificE, &policy);
+        assert_eq!(neg_sci.plain_text(), "\u{2212}1e6");
+
+        // Engineering SI: `999.9996` -> `1 k` (not `1000`), `999_999.6` -> `1 M` (not `1000 k`), plus negative counterparts.
+        let pos_si = format_tick_rich(999.9996, AxisScale::Linear, TickLabelFormat::EngineeringSi, &policy);
+        assert_eq!(pos_si.plain_text(), "1 k");
+        let neg_si = format_tick_rich(-999.9996, AxisScale::Linear, TickLabelFormat::EngineeringSi, &policy);
+        assert_eq!(neg_si.plain_text(), "\u{2212}1 k");
+
+        let pos_si_mega = format_tick_rich(999_999.6, AxisScale::Linear, TickLabelFormat::EngineeringSi, &policy);
+        assert_eq!(pos_si_mega.plain_text(), "1 M");
+        let neg_si_mega = format_tick_rich(-999_999.6, AxisScale::Linear, TickLabelFormat::EngineeringSi, &policy);
+        assert_eq!(neg_si_mega.plain_text(), "\u{2212}1 M");
+    }
 }

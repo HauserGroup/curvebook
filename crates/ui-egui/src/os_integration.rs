@@ -808,21 +808,70 @@ fn validate_printer_name_value(name: &str) -> Result<&str, String> {
     Ok(trimmed)
 }
 
-#[cfg(any(not(target_arch = "wasm32"), test))]
-fn sanitize_print_title(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len().min(64));
-    for ch in raw.chars() {
-        if out.len() >= 64 {
+const WINDOWS_RESERVED_STEMS: &[&str] = &[
+    "CON", "PRN", "AUX", "NUL", "COM0", "COM1", "COM2", "COM3", "COM4", "COM5", "COM6", "COM7", "COM8", "COM9", "LPT0", "LPT1", "LPT2", "LPT3",
+    "LPT4", "LPT5", "LPT6", "LPT7", "LPT8", "LPT9",
+];
+
+fn is_windows_reserved_stem(stem: &str) -> bool {
+    WINDOWS_RESERVED_STEMS.iter().any(|&res| stem.eq_ignore_ascii_case(res))
+}
+
+const fn is_forbidden_filename_char(ch: char) -> bool {
+    ch.is_control() || matches!(ch, '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|' | '\0')
+}
+
+/// Sanitize an arbitrary sheet or project title into a cross-platform filename stem,
+/// preserving Unicode letters/digits (`char::is_alphanumeric()`) plus `-` and `_`,
+/// stripping path separators and control characters, guarding Windows reserved device names,
+/// and capping length cleanly on UTF-8 character boundaries.
+#[must_use]
+pub fn sanitize_filename_stem(raw: &str, separator: char, max_chars: usize, fallback: &str) -> String {
+    let sep = if matches!(separator, '-' | '_') { separator } else { '_' };
+    let char_cap = max_chars.clamp(1, 128);
+    let byte_cap = char_cap.saturating_mul(2).clamp(16, 120);
+    let mut out = String::with_capacity(raw.len().min(byte_cap));
+    let mut count = 0usize;
+
+    for ch in raw.trim().chars() {
+        if count >= char_cap {
             break;
         }
-        if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+        if is_forbidden_filename_char(ch) {
+            if !out.is_empty() && !out.ends_with(sep) && out.len() + sep.len_utf8() <= byte_cap {
+                out.push(sep);
+                count += 1;
+            }
+            continue;
+        }
+        if ch.is_alphanumeric() || matches!(ch, '-' | '_') {
+            if out.len() + ch.len_utf8() > byte_cap {
+                break;
+            }
             out.push(ch);
-        } else if (ch.is_whitespace() || ch == '.') && !out.ends_with('-') && !out.is_empty() {
-            out.push('-');
+            count += 1;
+        } else if (ch.is_whitespace() || ch == '.') && !out.is_empty() && !out.ends_with(sep) {
+            if out.len() + sep.len_utf8() > byte_cap {
+                break;
+            }
+            out.push(sep);
+            count += 1;
         }
     }
-    let trimmed = out.trim_matches('-');
-    if trimmed.is_empty() { String::from("curvebook-print") } else { trimmed.to_owned() }
+
+    let trimmed = out.trim_matches(['-', '_', '.']);
+    if trimmed.is_empty() {
+        String::from(fallback)
+    } else if is_windows_reserved_stem(trimmed) {
+        format!("_{trimmed}")
+    } else {
+        trimmed.to_owned()
+    }
+}
+
+#[cfg(any(not(target_arch = "wasm32"), test))]
+fn sanitize_print_title(raw: &str) -> String {
+    sanitize_filename_stem(raw, '-', 64, "curvebook-print")
 }
 
 /// Stage a print spool PDF cleanly via `curvebook_platform::write_atomic` and launch OS print preview
@@ -1484,5 +1533,26 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
         }
         let _ = std::fs::remove_dir_all(&root);
         Ok(())
+    }
+
+    #[test]
+    fn rv53_sanitize_print_title_preserves_unicode_and_guards_traversal_and_reserved_stems() {
+        assert_eq!(super::sanitize_print_title("数据"), "数据");
+        assert_eq!(super::sanitize_print_title("图表"), "图表");
+        assert_ne!(super::sanitize_print_title("数据"), super::sanitize_print_title("图表"));
+        assert_eq!(super::sanitize_print_title("График доза"), "График-доза");
+        assert_eq!(super::sanitize_print_title("منحنى الاستجابة"), "منحنى-الاستجابة");
+        assert_eq!(super::sanitize_print_title("עקומת מינון"), "עקומת-מינון");
+        assert_eq!(super::sanitize_print_title("../foo"), "foo");
+        assert_eq!(super::sanitize_print_title("..\\..\\foo:bar*baz?\0"), "foo-bar-baz");
+        assert_eq!(super::sanitize_print_title("CON"), "_CON");
+        assert_eq!(super::sanitize_print_title("con"), "_con");
+        assert_eq!(super::sanitize_print_title("LPT1"), "_LPT1");
+        assert_eq!(super::sanitize_print_title("COM9..."), "_COM9");
+        assert_eq!(super::sanitize_print_title("   ///...   "), "curvebook-print");
+
+        let long_cjk = "数据图表".repeat(40);
+        let capped = super::sanitize_print_title(&long_cjk);
+        assert!(capped.chars().count() <= 64 && capped.len() <= 120 && !capped.is_empty());
     }
 }
