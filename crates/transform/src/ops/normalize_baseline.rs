@@ -505,9 +505,21 @@ fn apply_baseline_datasets(
     for (r, row_cells) in ds.cells.iter_mut().enumerate() {
         let b_opt = baselines.get(r).copied().flatten();
         match mode {
-            SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+            SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
                 for cell in row_cells {
                     apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
+                }
+            }
+            SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
+                for cell in row_cells.iter_mut() {
+                    apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
+                }
+                if let [_, lo_cell, hi_cell, ..] = row_cells.as_mut_slice()
+                    && lo_cell.excluded == hi_cell.excluded
+                    && let (Some(lo), Some(hi)) = (lo_cell.value.finite_f64(), hi_cell.value.finite_f64())
+                    && lo > hi
+                {
+                    std::mem::swap(lo_cell, hi_cell);
                 }
             }
             SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {

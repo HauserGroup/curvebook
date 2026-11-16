@@ -3657,6 +3657,9 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
     let recoded_count = var.recode_levels(&pairs);
+    for gs in &mut doc.graph_sheets {
+        gs.spec.recode_variable_levels(&id, col_idx, &pairs);
+    }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.recodeLevels",

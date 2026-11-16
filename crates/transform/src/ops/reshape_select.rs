@@ -375,7 +375,7 @@ pub fn execute_prune(source: &DataSheet, method: PruneMethod, ctx: &TransformCon
             if k == 0 {
                 return Err(TransformError::InvalidSpec { message: String::from("AverageBins width k must be >= 1") });
             }
-            average_bins_archetype(&mut out.archetype, k)
+            average_bins_archetype(&mut out.archetype, k)?
         }
         PruneMethod::MinMaxBins(k) => {
             if k == 0 {
@@ -493,11 +493,14 @@ fn primary_row_scalar(arch: &TableArchetype, row: usize) -> Option<f64> {
     }
 }
 
-fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> (usize, Vec<String>) {
+fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> Result<(usize, Vec<String>), TransformError> {
+    if matches!(arch, TableArchetype::Survival(_)) {
+        return Err(TransformError::IncompatibleTable { operation: "PruneRows (AverageBins)", kind: TableKind::Survival });
+    }
     let n = arch.row_count();
     let mut warnings = Vec::new();
     if n == 0 {
-        return (0, warnings);
+        return Ok((0, warnings));
     }
     let bin_count = n.div_ceil(k);
     match arch {
@@ -505,7 +508,7 @@ fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> (usize, Vec<St
             let x_mode = match &t.x_mode {
                 XColumnMode::Numbers { subcolumn_mode } => *subcolumn_mode,
                 _ => {
-                    let mat: Vec<Vec<Cell>> = (0..n).map(|r| vec![t.x_value_at(r).map_or_else(Cell::empty, Cell::number)]).collect();
+                    let mat: Vec<Vec<Cell>> = (0..n).map(|r| vec![t.materialized_x_cell_at(r)]).collect();
                     t.x_cells = mat;
                     t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
                     SubcolumnMode::Single
@@ -550,16 +553,8 @@ fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> (usize, Vec<St
                 ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
             }
         }
-        TableArchetype::Survival(t) => {
-            let time_grid: Vec<Vec<Cell>> = t.times.iter().map(|c| vec![c.clone()]).collect();
-            t.times = average_cell_grid_bins_with_mode(&time_grid, k, SubcolumnMode::Single, &t.time_title, &mut warnings)
-                .into_iter()
-                .map(|r| r.into_iter().next().unwrap_or_default())
-                .collect();
-            t.row_titles = bin_titles(&t.row_titles, k);
-            for ds in &mut t.cohorts {
-                ds.cells = average_cell_grid_bins_with_mode(&ds.cells, k, SubcolumnMode::Single, &ds.title, &mut warnings);
-            }
+        TableArchetype::Survival(_) => {
+            return Err(TransformError::IncompatibleTable { operation: "PruneRows (AverageBins)", kind: TableKind::Survival });
         }
         TableArchetype::MultipleVariables(mv) => {
             mv.row_titles = bin_titles(&mv.row_titles, k);
@@ -579,7 +574,7 @@ fn average_bins_archetype(arch: &mut TableArchetype, k: usize) -> (usize, Vec<St
             }
         }
     }
-    (bin_count, warnings)
+    Ok((bin_count, warnings))
 }
 
 fn bin_titles(titles: &[String], k: usize) -> Vec<String> {
@@ -699,42 +694,68 @@ fn average_cell_grid_bins_with_mode(
     let mut warned_text_conflict = false;
     rows.chunks(k)
         .map(|chunk| {
-            (0..subcols)
-                .map(|s| {
-                    let nums: Vec<f64> = chunk.iter().filter_map(|r| r.get(s).and_then(Cell::active_number)).collect();
-                    let texts: Vec<&str> = chunk.iter().filter_map(|r| r.get(s).and_then(Cell::active_text)).collect();
-                    if !nums.is_empty() {
-                        if !texts.is_empty() && !warned_mixed {
-                            warnings.push(format!("column `{col_label}` contains mixed text and numeric cells in binned rows; ignored text values"));
-                            warned_mixed = true;
-                        }
-                        Cell::number(sum::sum(&nums) / (nums.len() as f64))
-                    } else if let Some(&first_text) = texts.first() {
-                        if texts.iter().all(|&t| t == first_text) {
-                            Cell::text(first_text)
-                        } else {
-                            if !warned_text_conflict {
-                                warnings.push(format!(
-                                    "column `{col_label}` contains conflicting non-numeric/text values in binned rows; cleared ambiguous binned cell"
-                                ));
-                                warned_text_conflict = true;
-                            }
-                            Cell::empty()
-                        }
-                    } else {
-                        Cell::empty()
-                    }
-                })
-                .collect()
+            (0..subcols).map(|s| average_single_bin_subcol(chunk, s, col_label, &mut warned_mixed, &mut warned_text_conflict, warnings)).collect()
         })
         .collect()
+}
+
+fn average_single_bin_subcol(
+    chunk: &[Vec<Cell>],
+    subcol: usize,
+    col_label: &str,
+    warned_mixed: &mut bool,
+    warned_text_conflict: &mut bool,
+    warnings: &mut Vec<String>,
+) -> Cell {
+    let nums: Vec<f64> = chunk.iter().filter_map(|r| r.get(subcol).and_then(Cell::active_number)).collect();
+    let texts: Vec<&str> = chunk.iter().filter_map(|r| r.get(subcol).and_then(Cell::active_text)).collect();
+    if !nums.is_empty() {
+        if !texts.is_empty() && !*warned_mixed {
+            warnings.push(format!("column `{col_label}` contains mixed text and numeric cells in binned rows; ignored text values"));
+            *warned_mixed = true;
+        }
+        return Cell::number(sum::sum(&nums) / (nums.len() as f64));
+    }
+    if let Some(&first_text) = texts.first() {
+        if texts.iter().all(|&t| t == first_text) {
+            return Cell::text(first_text);
+        }
+        if !*warned_text_conflict {
+            warnings.push(format!("column `{col_label}` contains conflicting non-numeric/text values in binned rows; cleared ambiguous binned cell"));
+            *warned_text_conflict = true;
+        }
+        return Cell::empty();
+    }
+    fallback_excluded_bin_cell(chunk, subcol)
+}
+
+fn fallback_excluded_bin_cell(chunk: &[Vec<Cell>], subcol: usize) -> Cell {
+    let excl_nums: Vec<f64> = chunk.iter().filter_map(|r| r.get(subcol)).filter(|c| c.excluded).filter_map(|c| c.value.finite_f64()).collect();
+    if !excl_nums.is_empty() {
+        return Cell::excluded_number(sum::sum(&excl_nums) / (excl_nums.len() as f64));
+    }
+    let excl_texts: Vec<&str> = chunk
+        .iter()
+        .filter_map(|r| r.get(subcol))
+        .filter(|c| c.excluded)
+        .filter_map(|c| match &c.value {
+            curvebook_doc::CellValue::Text(s) if !s.trim().is_empty() => Some(s.as_str()),
+            _ => None,
+        })
+        .collect();
+    if let Some(&first_text) = excl_texts.first()
+        && excl_texts.iter().all(|&t| t == first_text)
+    {
+        return Cell::excluded_text(first_text);
+    }
+    Cell::empty()
 }
 
 pub(crate) fn retain_rows(arch: &mut TableArchetype, indices: &[usize]) {
     match arch {
         TableArchetype::Xy(t) => {
             if matches!(t.x_mode, XColumnMode::GeneratedSequence { .. }) {
-                let mat: Vec<Vec<Cell>> = (0..t.row_count()).map(|r| vec![t.x_value_at(r).map_or_else(Cell::empty, Cell::number)]).collect();
+                let mat: Vec<Vec<Cell>> = (0..t.row_count()).map(|r| vec![t.materialized_x_cell_at(r)]).collect();
                 t.x_cells = mat;
                 t.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };
             }
