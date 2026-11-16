@@ -701,3 +701,215 @@ fn live_control_port_attach_dispatches_ui_and_engine_and_atomic_undo() {
     let methods: Vec<String> = methods_rx.iter().collect();
     assert_eq!(methods, vec!["ping", "state.snapshot", "ui.navigator.toggle", "engine.execute", "engine.execute", "engine.execute"]);
 }
+
+#[test]
+fn rv14_atomic_command_batch_reports_persisted_filesystem_side_effects_accurately() {
+    let dir = TempDirGuard::new("mcp-rv14-atomic-fs");
+    let svg_out = dir.path.join("persisted_after_fail.svg");
+
+    let mut state = McpServerState::new();
+    call_tool_rpc(
+        &mut state,
+        1,
+        "command_run",
+        json!({
+            "command_id": "sheet.createData",
+            "params": {
+                "sheet_id": "rv14-xy",
+                "graph_sheet_id": "rv14-graph",
+                "archetype": "xy",
+                "rows": 3,
+                "cols": 1,
+                "auto_graph": true
+            }
+        }),
+    )
+    .expect("create sheet + graph");
+    call_tool_rpc(
+        &mut state,
+        2,
+        "command_run",
+        json!({ "command_id": "table.setXCells", "params": { "sheet_id": "rv14-xy", "values": [1.0, 2.0, 3.0] } }),
+    )
+    .expect("set X");
+    call_tool_rpc(
+        &mut state,
+        3,
+        "command_run",
+        json!({ "command_id": "table.setCells", "params": { "sheet_id": "rv14-xy", "rows": [[10.0], [20.0], [30.0]] } }),
+    )
+    .expect("set Y");
+
+    // 1. Atomic batch writes `out.svg` on step 1, then fails on step 2 -> session rolls back,
+    //    `out.svg` remains on disk, and response MUST report `rolled_back: false` + `filesystem_side_effects_persisted: true`.
+    let batch_fs_fail = call_tool_rpc(
+        &mut state,
+        4,
+        "command_batch",
+        json!({
+            "atomic": true,
+            "commands": [
+                {
+                    "command_id": "sheet.createData",
+                    "params": { "sheet_id": "rv14-ephemeral", "archetype": "column", "rows": 2, "cols": 1 }
+                },
+                {
+                    "command_id": "export.svg",
+                    "params": { "sheet_id": "rv14-graph", "path": svg_out.display().to_string() }
+                },
+                {
+                    "command_id": "nonexistent.command.boom",
+                    "params": {}
+                }
+            ]
+        }),
+    )
+    .expect("atomic batch with export.svg");
+    assert_eq!(batch_fs_fail["isError"], json!(true));
+    let payload = &batch_fs_fail["structuredContent"];
+    assert!(svg_out.is_file(), "exported SVG remains on disk");
+    assert_eq!(payload["atomic"], json!(true));
+    assert_eq!(payload["session_rolled_back"], json!(true));
+    assert_eq!(payload["filesystem_side_effects_persisted"], json!(true));
+    assert_eq!(payload["rolled_back"], json!(false), "rolled_back must be false when disk writes persisted");
+    assert!(payload["warning"].as_str().is_some_and(|w| w.contains("filesystem writes")));
+    assert_eq!(payload["persisted_filesystem_steps"][0]["command_id"], json!("export.svg"));
+
+    // Confirm in-memory session WAS still rolled back cleanly (rv14-ephemeral is gone).
+    let inspect = first_text_json(&call_tool_rpc(&mut state, 5, "doc_inspect", json!({})).expect("inspect")).expect("inspect json");
+    let data_sheets = inspect["sheets"]["data"].as_array().expect("data sheets");
+    assert_eq!(data_sheets.len(), 1);
+    assert_eq!(data_sheets[0]["id"], json!("rv14-xy"));
+
+    // 2. Contrast: `export.svg` WITHOUT `path` (in-memory SVG render) writes no files, so `rolled_back` stays `true`.
+    let batch_mem_fail = call_tool_rpc(
+        &mut state,
+        6,
+        "command_batch",
+        json!({
+            "atomic": true,
+            "commands": [
+                { "command_id": "export.svg", "params": { "sheet_id": "rv14-graph" } },
+                { "command_id": "nonexistent.command.boom", "params": {} }
+            ]
+        }),
+    )
+    .expect("in-memory export atomic batch");
+    assert_eq!(batch_mem_fail["structuredContent"]["rolled_back"], json!(true));
+    assert_eq!(batch_mem_fail["structuredContent"]["filesystem_side_effects_persisted"], json!(false));
+}
+
+#[test]
+fn rv18_notifications_cancelled_and_registry_abort_commands_batches_and_imports() {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    let dir = TempDirGuard::new("mcp-rv18-cancel");
+    let csv_path = dir.path.join("cancel_me.csv");
+    fs::write(&csv_path, "X,Y\n1,2\n3,4\n").expect("write csv");
+
+    // 1. Wire `notifications/cancelled` aborts matching request ID (both command_run and open_file) and leaves session clean for next request.
+    let mut state = McpServerState::new();
+    let replies = run_ndjson_batch(
+        &mut state,
+        &[
+            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": "req-cmd-1", "reason": "user abort" } }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "req-cmd-1",
+                "method": "tools/call",
+                "params": {
+                    "name": "command_run",
+                    "arguments": { "command_id": "sheet.createData", "params": { "sheet_id": "never-created" } }
+                }
+            }),
+            json!({ "jsonrpc": "2.0", "method": "notifications/cancelled", "params": { "requestId": 202 } }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": 202,
+                "method": "tools/call",
+                "params": {
+                    "name": "open_file",
+                    "arguments": { "path": csv_path.display().to_string() }
+                }
+            }),
+            json!({
+                "jsonrpc": "2.0",
+                "id": "req-ok-after",
+                "method": "tools/call",
+                "params": {
+                    "name": "command_run",
+                    "arguments": { "command_id": "sheet.createData", "params": { "sheet_id": "created-ok" } }
+                }
+            }),
+        ],
+    )
+    .expect("ndjson cancelled batch");
+    assert_eq!(replies.len(), 3);
+    assert_eq!(replies[0]["id"], json!("req-cmd-1"));
+    assert_eq!(replies[0]["result"]["isError"], json!(true));
+    assert_eq!(replies[0]["result"]["structuredContent"]["code"], json!("cancelled"));
+
+    assert_eq!(replies[1]["id"], json!(202));
+    assert_eq!(replies[1]["result"]["isError"], json!(true));
+    assert_eq!(replies[1]["result"]["structuredContent"]["code"], json!("cancelled"));
+
+    assert_eq!(replies[2]["id"], json!("req-ok-after"));
+    assert_eq!(replies[2]["result"]["isError"], json!(false));
+
+    // 2. Live concurrent thread cancelling an in-flight `command_batch` mid-execution via `CancellationRegistry`.
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let reg_holder: Arc<std::sync::OnceLock<curvebook_mcp::CancellationRegistry>> = Arc::new(std::sync::OnceLock::new());
+        let reg_in_hook = Arc::clone(&reg_holder);
+        let tripped_in_flight = Arc::new(AtomicBool::new(false));
+        let tripped_bg = Arc::clone(&tripped_in_flight);
+
+        let mut live_state = McpServerState::with_control_port(49499).expect("port").with_control_handler(move |method, params| {
+            if method == "ping" {
+                return Ok(json!({ "pong": true, "gui_only": false }));
+            }
+            if method == "engine.execute" {
+                let cmd_id = params.get("command_id").and_then(Value::as_str).unwrap_or("");
+                if cmd_id == "sheet.createData"
+                    && let Some(reg) = reg_in_hook.get()
+                {
+                    let reg_clone = reg.clone();
+                    let was_active = std::thread::spawn(move || reg_clone.cancel(&json!("inflight-batch-77"))).join().unwrap_or(false);
+                    tripped_bg.store(was_active, Ordering::Release);
+                }
+                return Ok(json!({ "command_id": cmd_id, "mutated": cmd_id != "edit.undo" }));
+            }
+            Err(format!("unexpected method {method}"))
+        });
+        let _ = reg_holder.set(live_state.cancellation_registry());
+
+        let cancel_reply = curvebook_mcp::dispatch_json_value(
+            json!({
+                "jsonrpc": "2.0",
+                "id": "inflight-batch-77",
+                "method": "tools/call",
+                "params": {
+                    "name": "command_batch",
+                    "arguments": {
+                        "atomic": true,
+                        "commands": [
+                            { "command_id": "sheet.createData", "params": { "sheet_id": "step-0" } },
+                            { "command_id": "table.setCell", "params": { "sheet_id": "step-0", "row": 0, "col": 0, "value": 1.0 } }
+                        ]
+                    }
+                }
+            }),
+            &mut live_state,
+        )
+        .expect("inflight batch reply");
+
+        assert!(tripped_in_flight.load(Ordering::Acquire), "background thread must match active in-flight request ID");
+        assert_eq!(live_state.cancellation_registry().active_count(), 0, "active token must be cleaned up when request finishes");
+        assert_eq!(cancel_reply["result"]["isError"], json!(true));
+        let sc = &cancel_reply["result"]["structuredContent"];
+        assert_eq!(sc["code"], json!("cancelled"));
+        assert_eq!(sc["failed_index"], json!(1), "step 1 must abort cooperatively after step 0 triggered cancellation");
+        assert_eq!(sc["rolled_back"], json!(true));
+    }
+}
