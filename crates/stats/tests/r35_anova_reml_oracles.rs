@@ -517,7 +517,8 @@ fn r35_3b_split_plot_sphericity_pooled_within_group_cov_n_minus_g_oracle() {
     assert_approx_eq(sph.mauchly_chi2, 44.698_774_320_267_9, 1e-6, 1e-6, "Split-plot Mauchly chi2");
     assert_approx_eq(sph.mauchly_p, 1.670_537_188_090_64e-8, 1e-11, 1e-4, "Split-plot Mauchly p");
     assert_approx_eq(sph.greenhouse_geisser_eps, 4.320_567_649_415_32e-1, 1e-9, 1e-9, "Split-plot GG eps");
-    assert_approx_eq(sph.huynh_feldt_eps, 4.774_036_118_012_64e-1, 1e-9, 1e-9, "Split-plot HF eps");
+    // Lecoutre (1991, J. Educ. Stat. 16:371-372) split-plot correction uses (N - g + 1) = 19 in numerator.
+    assert_approx_eq(sph.huynh_feldt_eps, 4.515_378_808_540_866e-1, 1e-9, 1e-9, "Split-plot HF eps");
 
     // Check applied GG and HF p-values on the split-plot design: between-subjects Group is unadjusted,
     // while within-subject Time and Group x Time use eps_GG / eps_HF.
@@ -550,10 +551,10 @@ fn r35_3b_split_plot_sphericity_pooled_within_group_cov_n_minus_g_oracle() {
     assert_approx_eq(sp_gg.anova.terms[0].p_value.unwrap(), 4.197_706_552_045e-10, 1e-13, 1e-4, "Split-plot Group p_GG unchanged");
     assert_approx_eq(sp_unc.anova.terms[1].p_value.unwrap(), 4.005_805_582_440e-36, 1e-37, 1e-3, "Split-plot Time p_unc");
     assert_approx_eq(sp_gg.anova.terms[1].p_value.unwrap(), 7.252_830_749_460e-17, 1e-18, 1e-4, "Split-plot Time p_GG");
-    assert_approx_eq(sp_hf.anova.terms[1].p_value.unwrap(), 2.080_453_936_983e-18, 1e-19, 1e-4, "Split-plot Time p_HF");
+    assert_approx_eq(sp_hf.anova.terms[1].p_value.unwrap(), 1.576_705_607_801e-17, 1e-18, 1e-4, "Split-plot Time p_HF");
     assert_approx_eq(sp_unc.anova.terms[2].p_value.unwrap(), 1.109_537_769_050e-6, 1e-9, 1e-4, "Split-plot Int p_unc");
     assert_approx_eq(sp_gg.anova.terms[2].p_value.unwrap(), 5.764_717_000_559e-4, 1e-7, 1e-4, "Split-plot Int p_GG");
-    assert_approx_eq(sp_hf.anova.terms[2].p_value.unwrap(), 3.474_835_984_128e-4, 1e-7, 1e-4, "Split-plot Int p_HF");
+    assert_approx_eq(sp_hf.anova.terms[2].p_value.unwrap(), 4.637_097_027_772e-4, 1e-7, 1e-4, "Split-plot Int p_HF");
 
     // Transpose symmetry for `RowFactorMatched` (4 rows repeated within 2 column groups).
     let mut row_matched = Vec::with_capacity(10);
