@@ -54,7 +54,7 @@ pub fn simulate_cvd(color: Rgba8, kind: CvdKind, severity: f64) -> Rgba8 {
 }
 
 /// Live non-destructive canvas preview simulation filter (`QOL-9`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum CanvasPreviewFilter {
     #[default]
     Normal,
@@ -86,9 +86,36 @@ impl CanvasPreviewFilter {
             "deuteranopia" | "deutan" => Some(Self::Deuteranopia),
             "protanopia" | "protan" => Some(Self::Protanopia),
             "tritanopia" | "tritan" => Some(Self::Tritanopia),
-            "grayscale" | "grayscale_print" | "achromatopsia" | "print_bw" | "bw" => Some(Self::GrayscalePrint),
+            "grayscale" | "grayscale_print" | "grayscaleprint" | "achromatopsia" | "print_bw" | "bw" => Some(Self::GrayscalePrint),
             _ => None,
         }
+    }
+}
+
+impl serde::Serialize for CanvasPreviewFilter {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(self.as_str())
+    }
+}
+
+struct CanvasPreviewFilterVisitor;
+
+impl serde::de::Visitor<'_> for CanvasPreviewFilterVisitor {
+    type Value = CanvasPreviewFilter;
+
+    fn expecting(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("a canvas preview filter name (`normal`, `deuteranopia`, `protanopia`, `tritanopia`, `grayscale`)")
+    }
+
+    fn visit_str<E: serde::de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        CanvasPreviewFilter::from_name(value)
+            .ok_or_else(|| E::unknown_variant(value, &["normal", "deuteranopia", "protanopia", "tritanopia", "grayscale"]))
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for CanvasPreviewFilter {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        deserializer.deserialize_str(CanvasPreviewFilterVisitor)
     }
 }
 
@@ -101,5 +128,48 @@ pub fn simulate_preview_filter(color: Rgba8, filter: CanvasPreviewFilter) -> Rgb
         CanvasPreviewFilter::Protanopia => simulate_cvd(color, CvdKind::Protanopia, 1.0),
         CanvasPreviewFilter::Tritanopia => simulate_cvd(color, CvdKind::Tritanopia, 1.0),
         CanvasPreviewFilter::GrayscalePrint => simulate_cvd(color, CvdKind::Achromatopsia, 1.0),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::CanvasPreviewFilter;
+
+    #[test]
+    fn serde_uses_canonical_lowercase_strings_and_accepts_legacy_pascal_case() {
+        let canonical = [
+            (CanvasPreviewFilter::Normal, "\"normal\""),
+            (CanvasPreviewFilter::Deuteranopia, "\"deuteranopia\""),
+            (CanvasPreviewFilter::Protanopia, "\"protanopia\""),
+            (CanvasPreviewFilter::Tritanopia, "\"tritanopia\""),
+            (CanvasPreviewFilter::GrayscalePrint, "\"grayscale\""),
+        ];
+
+        for (variant, expected_json) in canonical {
+            let encoded = serde_json::to_string(&variant).unwrap();
+            assert_eq!(encoded, expected_json);
+            let decoded: CanvasPreviewFilter = serde_json::from_str(&encoded).unwrap();
+            assert_eq!(decoded, variant);
+        }
+
+        let legacy_and_aliases = [
+            ("\"Normal\"", CanvasPreviewFilter::Normal),
+            ("\"Deuteranopia\"", CanvasPreviewFilter::Deuteranopia),
+            ("\"Protanopia\"", CanvasPreviewFilter::Protanopia),
+            ("\"Tritanopia\"", CanvasPreviewFilter::Tritanopia),
+            ("\"GrayscalePrint\"", CanvasPreviewFilter::GrayscalePrint),
+            ("\"grayscale-print\"", CanvasPreviewFilter::GrayscalePrint),
+            ("\"grayscale_print\"", CanvasPreviewFilter::GrayscalePrint),
+            ("\"achromatopsia\"", CanvasPreviewFilter::GrayscalePrint),
+            ("\"bw\"", CanvasPreviewFilter::GrayscalePrint),
+        ];
+
+        for (raw_json, expected) in legacy_and_aliases {
+            let decoded: CanvasPreviewFilter = serde_json::from_str(raw_json).unwrap();
+            assert_eq!(decoded, expected);
+        }
+
+        assert!(serde_json::from_str::<CanvasPreviewFilter>("\"sepia\"").is_err());
+        assert!(serde_json::from_str::<CanvasPreviewFilter>("123").is_err());
     }
 }

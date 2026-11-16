@@ -132,9 +132,15 @@ const EVICTION_LOCK_FILE_NAME: &str = ".lumencraft.lock.evict";
 #[cfg(not(target_arch = "wasm32"))]
 const EVICTION_LOCK_TTL_MS: u64 = 5_000;
 #[cfg(not(target_arch = "wasm32"))]
-const MAX_LOCK_ATTEMPTS: usize = 24;
+const MAX_LOCK_ATTEMPTS: usize = 32;
 #[cfg(not(target_arch = "wasm32"))]
 const LOCK_CONTENTION_BACKOFF_MS: u64 = 2;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_CORRUPT_GRACE_ATTEMPTS: usize = 12;
+#[cfg(not(target_arch = "wasm32"))]
+const CORRUPT_GRACE_BACKOFF_MS: u64 = 5;
+#[cfg(not(target_arch = "wasm32"))]
+const FRESH_CORRUPT_LOCK_AGE_MS: u64 = 500;
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_LOCKFILE_BYTES: usize = 64 * 1024;
 #[cfg(not(target_arch = "wasm32"))]
@@ -993,13 +999,14 @@ impl DirectoryJournalBackend {
                 drop(tmp_guard);
                 Ok(false)
             }
-            Err(_) => {
+            Err(err) if matches!(err.kind(), ErrorKind::Unsupported | ErrorKind::PermissionDenied) => {
                 // Fallback for filesystems without hard-link support (e.g. exFAT/FAT32):
                 // clean up the staging temp file and fall back to exclusive file creation.
                 drop(tmp_guard);
                 match OpenOptions::new().write(true).create_new(true).open(target_path) {
                     Ok(mut file) => {
                         let write_res = if durable { file.write_all(bytes).and_then(|()| file.sync_all()) } else { file.write_all(bytes) };
+                        drop(file);
                         if let Err(write_err) = write_res {
                             let _ = std::fs::remove_file(target_path);
                             return Err(FormatError::from(write_err));
@@ -1007,11 +1014,18 @@ impl DirectoryJournalBackend {
                         if durable {
                             sync_directory_best_effort(&self.dir);
                         }
-                        Ok(true)
+                        match read_bounded_lock_bytes(target_path, MAX_LOCKFILE_BYTES)? {
+                            BoundedLockRead::Bytes(actual) if actual == bytes => Ok(true),
+                            _ => Ok(false),
+                        }
                     }
                     Err(create_err) if create_err.kind() == ErrorKind::AlreadyExists => Ok(false),
                     Err(create_err) => Err(FormatError::from(create_err)),
                 }
+            }
+            Err(err) => {
+                drop(tmp_guard);
+                Err(FormatError::from(err))
             }
         }
     }
@@ -1140,6 +1154,17 @@ fn sync_directory_best_effort(dir: &Path) {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+fn is_fresh_corrupt_lockfile(path: &Path) -> bool {
+    let Ok(meta) = std::fs::symlink_metadata(path) else {
+        return false;
+    };
+    let Ok(modified) = meta.modified() else {
+        return false;
+    };
+    SystemTime::now().duration_since(modified).is_ok_and(|age| age < Duration::from_millis(FRESH_CORRUPT_LOCK_AGE_MS))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 impl JournalBackend for DirectoryJournalBackend {
     fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
         lease.validate_version()?;
@@ -1148,7 +1173,7 @@ impl JournalBackend for DirectoryJournalBackend {
         }
         self.pending_warnings.clear();
         let lease_bytes = serde_json::to_vec(lease)?;
-        let mut corrupt_grace_waited = false;
+        let mut corrupt_grace_attempts = 0usize;
 
         for attempt in 0..MAX_LOCK_ATTEMPTS {
             if self.try_create_file_exclusively(&self.lock_path(), LOCKFILE_NAME, &lease_bytes, true)? {
@@ -1167,9 +1192,9 @@ impl JournalBackend for DirectoryJournalBackend {
                         existing.expires_epoch_ms()
                     )));
                 }
-                LockfileState::Corrupt(_) if !corrupt_grace_waited => {
-                    corrupt_grace_waited = true;
-                    std::thread::sleep(Duration::from_millis(LOCK_CONTENTION_BACKOFF_MS));
+                LockfileState::Corrupt(_) if corrupt_grace_attempts < MAX_CORRUPT_GRACE_ATTEMPTS && is_fresh_corrupt_lockfile(&self.lock_path()) => {
+                    corrupt_grace_attempts += 1;
+                    std::thread::sleep(Duration::from_millis(CORRUPT_GRACE_BACKOFF_MS));
                     continue;
                 }
                 LockfileState::Active(_) | LockfileState::Corrupt(_) => {

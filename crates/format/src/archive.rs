@@ -2,7 +2,12 @@
 //! schema migration, dimension/float validation, and circular dependency guards.
 
 use std::collections::{BTreeMap, HashMap, HashSet};
+use std::fs::{OpenOptions, Permissions};
+use std::io::Write;
+#[cfg(all(unix, not(target_arch = "wasm32")))]
+use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use lumencraft_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
@@ -20,6 +25,11 @@ const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
 const FORMAT_MAGIC: &str = "lumencraft-archive";
+const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
+const MAX_SHEET_CSV_STEM_LEN: usize = 64;
+const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
+
+static UNPACKED_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum byte length permitted when reading a `.lumencraft`, `.lctemplate`, or `.prism` archive file.
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -158,9 +168,46 @@ pub(crate) fn platform_read_regular_file(_path: &Path, _max_bytes: usize) -> Res
     Err(FormatError::Io(String::from("filesystem reads are not supported on wasm32")))
 }
 
+fn peek_json_schema_version(bytes: &[u8]) -> Option<u32> {
+    serde_json::from_slice::<DocumentSchemaPeek>(bytes).ok()?.schema_version
+}
+
+fn ensure_schema_version_supported(version: u32) -> Result<(), FormatError> {
+    if version > CURRENT_SCHEMA_VERSION {
+        return Err(FormatError::UnsupportedSchemaVersion { version, max_supported: CURRENT_SCHEMA_VERSION });
+    }
+    Ok(())
+}
+
+fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let Some(bytes) = lumencraft_platform::fs::read_regular_file_bytes_if_exists(path, MAX_ARCHIVE_FILE_BYTES)? else {
+            return Ok(());
+        };
+        let Ok(archive) = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()) else {
+            return Ok(());
+        };
+        for entry_path in [MANIFEST_PATH, DOCUMENT_PATH] {
+            if let Some(entry_bytes) = archive.get(entry_path)
+                && let Some(version) = peek_json_schema_version(entry_bytes)
+            {
+                ensure_schema_version_supported(version)?;
+            }
+        }
+        Ok(())
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = path;
+        Ok(())
+    }
+}
+
 /// Write a `.lumencraft` archive to disk.
 pub fn save_project_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_project_bytes(doc)?;
+    ensure_existing_archive_not_newer(path)?;
     platform_write_atomic(path, &bytes)?;
     Ok(())
 }
@@ -174,6 +221,7 @@ pub fn open_project_file(path: &Path) -> Result<ProjectDocument, FormatError> {
 /// Write a `.lctemplate` archive to disk.
 pub fn save_template_file(path: &Path, doc: &ProjectDocument) -> Result<(), FormatError> {
     let bytes = save_template_bytes(doc)?;
+    ensure_existing_archive_not_newer(path)?;
     platform_write_atomic(path, &bytes)?;
     Ok(())
 }
@@ -193,18 +241,41 @@ pub fn is_unpacked_project_dir(path: &Path) -> bool {
 
 /// Write `doc` to an unpacked, Git-friendly `.lumencraft.d/` project directory using the exact
 /// deterministic `.lumencraft` layout (`manifest.json`, canonical 2-space `document.json`, and
-/// RFC-4180 `sheets/<id>.csv` CSVs), pruning stale sheet files without disturbing `.git` or other
-/// user files and rejecting any relative-path escapes or symlinks resolving outside `dir`.
+/// RFC-4180 `sheets/<id>.csv` CSVs), pruning stale tracked sheet files without disturbing `.git`
+/// or user files, enforcing `ZipLimits::default()`, refusing future-schema overwrites, and
+/// committing transactionally across staged temp files.
 pub fn save_project_unpacked_dir(doc: &ProjectDocument, dir: &Path) -> Result<(), FormatError> {
+    save_project_unpacked_dir_with_hook(doc, dir, |_| Ok(()))
+}
+
+fn save_project_unpacked_dir_with_hook<F>(doc: &ProjectDocument, dir: &Path, mut before_commit: F) -> Result<(), FormatError>
+where
+    F: FnMut(&str) -> Result<(), std::io::Error>,
+{
     let entries = build_archive_entries(doc, ArchiveKind::Project)?;
     ensure_dir_exists(dir)?;
     let canon_root = std::fs::canonicalize(dir)?;
     let prior_paths = preflight_unpacked_save(&canon_root, &entries)?;
 
-    let mut expected_paths = HashSet::with_capacity(entries.len());
-    for (rel, bytes) in &entries {
-        expected_paths.insert(rel.clone());
-        write_file_atomically(&canon_root, rel, bytes)?;
+    let expected_paths: HashSet<String> = entries.iter().map(|(rel, _)| rel.clone()).collect();
+    let sheets_dir = canon_root.join(SHEETS_DIR);
+    let sheets_existed_before = std::fs::symlink_metadata(&sheets_dir).is_ok();
+
+    let (staged, mut stage_guard) = match stage_changed_unpacked_entries(&canon_root, &entries) {
+        Ok(res) => res,
+        Err(err) => {
+            if !sheets_existed_before {
+                let _ = std::fs::remove_dir(&sheets_dir);
+            }
+            return Err(err);
+        }
+    };
+
+    if let Err(err) = commit_staged_unpacked_entries(&staged, &mut stage_guard, &mut before_commit) {
+        if !sheets_existed_before {
+            let _ = std::fs::remove_dir(&sheets_dir);
+        }
+        return Err(err);
     }
 
     prune_stale_unpacked_files(&canon_root, &prior_paths, &expected_paths)
@@ -256,14 +327,30 @@ fn check_unpacked_project_dir(path: &Path) -> Result<bool, FormatError> {
     Ok(doc_meta.is_file() && doc_meta.len() <= crate::zip::MAX_ZIP_ENTRY_BYTES)
 }
 
+fn validate_sheet_csv_path(raw: &str) -> Result<(), FormatError> {
+    let clean = sanitize_zip_path(raw)?;
+    let Some(file_name) = clean.strip_prefix("sheets/") else {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    };
+    if file_name.contains('/') || file_name.len() <= 4 || !file_name.ends_with(".csv") {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    let stem = &file_name[..file_name.len() - 4];
+    if stem.is_empty() || stem.len() > MAX_MANIFEST_CSV_STEM_LEN || !stem.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-' || b == b'_') {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    Ok(())
+}
+
 fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, FormatError> {
+    if let Some(version) = peek_json_schema_version(manifest_text.as_bytes()) {
+        ensure_schema_version_supported(version)?;
+    }
     let manifest: ArchiveManifest = serde_json::from_str(manifest_text)?;
     if manifest.format != FORMAT_MAGIC {
         return Err(FormatError::UnsupportedFormat { reason: format!("unexpected archive format `{}`", manifest.format) });
     }
-    if manifest.schema_version > CURRENT_SCHEMA_VERSION {
-        return Err(FormatError::UnsupportedSchemaVersion { version: manifest.schema_version, max_supported: CURRENT_SCHEMA_VERSION });
-    }
+    ensure_schema_version_supported(manifest.schema_version)?;
     if manifest.sheets.len() > crate::zip::MAX_ZIP_ENTRIES {
         return Err(FormatError::ZipBomb {
             reason: format!("manifest sheet count {} exceeds limit {}", manifest.sheets.len(), crate::zip::MAX_ZIP_ENTRIES),
@@ -271,7 +358,7 @@ fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, F
     }
     for entry in &manifest.sheets {
         if let Some(csv_path) = &entry.csv_path {
-            validate_unpacked_relative_path(csv_path)?;
+            validate_sheet_csv_path(csv_path)?;
         }
     }
     Ok(manifest)
@@ -403,6 +490,14 @@ fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, Forma
 }
 
 fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
+    decode_and_validate_document_inner(doc_bytes, manifest_schema_version, true)
+}
+
+fn decode_and_validate_document_inner(
+    doc_bytes: &[u8],
+    manifest_schema_version: u32,
+    validate_checkpoint_entries: bool,
+) -> Result<ProjectDocument, FormatError> {
     let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
     let doc_version = peek.schema_version.unwrap_or(manifest_schema_version);
     if doc_version > CURRENT_SCHEMA_VERSION {
@@ -417,7 +512,7 @@ fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) 
         let migrated_value = migrate_document_json(raw_value, doc_version)?;
         serde_json::from_value(migrated_value)?
     };
-    validate_project_document(&doc)?;
+    validate_project_document_inner(&doc, validate_checkpoint_entries)?;
     Ok(doc)
 }
 
@@ -430,7 +525,31 @@ fn save_archive_bytes(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<u8
     writer.finish()
 }
 
+fn validate_archive_entry_limits(entries: &[(String, Vec<u8>)], limits: ZipLimits) -> Result<(), FormatError> {
+    if entries.len() > limits.max_entries {
+        return Err(FormatError::ZipBomb { reason: format!("archive entry count {} exceeds limit {}", entries.len(), limits.max_entries) });
+    }
+    let mut total_bytes = 0_u64;
+    for (rel, bytes) in entries {
+        let len = bytes.len() as u64;
+        if len > limits.max_entry_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("entry `{rel}` size {len} exceeds security limit {}", limits.max_entry_uncompressed_bytes),
+            });
+        }
+        total_bytes =
+            total_bytes.checked_add(len).ok_or_else(|| FormatError::ZipBomb { reason: String::from("archive uncompressed size overflow") })?;
+        if total_bytes > limits.max_total_uncompressed_bytes {
+            return Err(FormatError::ZipBomb {
+                reason: format!("archive total size {total_bytes} exceeds security limit {}", limits.max_total_uncompressed_bytes),
+            });
+        }
+    }
+    Ok(())
+}
+
 fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec<(String, Vec<u8>)>, FormatError> {
+    ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
 
     let mut normalized = doc.clone();
@@ -471,6 +590,7 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     entries.push((String::from(MANIFEST_PATH), manifest_json));
+    validate_archive_entry_limits(&entries, ZipLimits::default())?;
     Ok(entries)
 }
 
@@ -526,6 +646,9 @@ fn resolve_contained_path(canon_root: &Path, rel: &str, must_exist: bool) -> Res
                     } else {
                         FormatError::Io(format!("path component `{}` for `{rel}` is not a directory", cur.display()))
                     });
+                }
+                if is_last && !must_exist && std::fs::metadata(&cur).is_ok_and(|m| !m.is_file()) {
+                    return Err(FormatError::Io(format!("target path `{rel}` exists and is not a regular file")));
                 }
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
@@ -597,6 +720,7 @@ fn verify_unpacked_sheet_entries(
 }
 
 fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<Vec<String>, FormatError> {
+    ensure_existing_unpacked_not_newer(canon_root)?;
     for (rel, _) in entries {
         resolve_contained_path(canon_root, rel, false)?;
     }
@@ -617,44 +741,209 @@ fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> 
     collect_prior_manifest_csv_paths(canon_root)
 }
 
+fn ensure_existing_unpacked_not_newer(canon_root: &Path) -> Result<(), FormatError> {
+    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    for rel in [MANIFEST_PATH, DOCUMENT_PATH] {
+        let resolved = match resolve_contained_path(canon_root, rel, true) {
+            Ok(path) => path,
+            Err(FormatError::MissingArchiveEntry { .. }) => continue,
+            Err(err) => return Err(err),
+        };
+        let bytes = match platform_read_regular_file(&resolved, cap) {
+            Ok(bytes) => bytes,
+            Err(err @ FormatError::UnsafePath { .. }) => return Err(err),
+            Err(_) => continue,
+        };
+        if let Some(version) = peek_json_schema_version(&bytes) {
+            ensure_schema_version_supported(version)?;
+        }
+    }
+    Ok(())
+}
+
 fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, FormatError> {
-    let Ok(manifest_path) = resolve_contained_path(canon_root, MANIFEST_PATH, true) else {
-        return Ok(Vec::new());
+    let manifest_path = match resolve_contained_path(canon_root, MANIFEST_PATH, true) {
+        Ok(path) => path,
+        Err(FormatError::MissingArchiveEntry { .. }) => return Ok(Vec::new()),
+        Err(err) => return Err(err),
     };
     let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
     let Ok(bytes) = platform_read_regular_file(&manifest_path, cap) else {
         return Ok(Vec::new());
     };
+    if let Some(version) = peek_json_schema_version(&bytes) {
+        ensure_schema_version_supported(version)?;
+    }
     let Ok(manifest) = serde_json::from_slice::<ArchiveManifest>(&bytes) else {
         return Ok(Vec::new());
     };
-    Ok(manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect())
+    if manifest.format != FORMAT_MAGIC || manifest.kind != ArchiveKind::Project {
+        return Ok(Vec::new());
+    }
+    ensure_schema_version_supported(manifest.schema_version)?;
+    Ok(manifest.sheets.into_iter().filter_map(|e| e.csv_path).filter(|rel| validate_sheet_csv_path(rel).is_ok()).collect())
 }
 
-fn write_file_atomically(canon_root: &Path, rel: &str, bytes: &[u8]) -> Result<(), FormatError> {
-    let target = resolve_contained_path(canon_root, rel, false)?;
-    let parent = target.parent().ok_or_else(|| FormatError::UnsafePath { path: rel.to_owned() })?;
-    std::fs::create_dir_all(parent)?;
-    let canon_parent = std::fs::canonicalize(parent)?;
-    if !canon_parent.starts_with(canon_root) {
-        return Err(FormatError::UnsafePath { path: rel.to_owned() });
-    }
-    if let Ok(meta) = std::fs::symlink_metadata(&target)
-        && !meta.file_type().is_symlink()
-        && meta.is_file()
-        && meta.len() == bytes.len() as u64
-        && let Ok(existing) = platform_read_regular_file(&target, bytes.len())
-        && existing == bytes
-    {
-        return Ok(());
+enum PriorSnapshot {
+    Existed(Vec<u8>),
+    DidNotExist,
+}
+
+struct StagedWrite {
+    rel: String,
+    target_path: PathBuf,
+    stage_path: PathBuf,
+    prior: PriorSnapshot,
+}
+
+struct UnpackedStageGuard {
+    stage_paths: Vec<Option<PathBuf>>,
+}
+
+impl UnpackedStageGuard {
+    fn new(len: usize) -> Self {
+        Self { stage_paths: Vec::with_capacity(len) }
     }
 
-    platform_write_atomic(&target, bytes)
+    fn push(&mut self, path: PathBuf) {
+        self.stage_paths.push(Some(path));
+    }
+
+    fn take(&mut self, idx: usize) {
+        if let Some(slot) = self.stage_paths.get_mut(idx) {
+            slot.take();
+        }
+    }
+}
+
+impl Drop for UnpackedStageGuard {
+    fn drop(&mut self) {
+        for path in self.stage_paths.iter().flatten() {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<(Vec<StagedWrite>, UnpackedStageGuard), FormatError> {
+    let mut staged = Vec::new();
+    let mut guard = UnpackedStageGuard::new(entries.len());
+
+    for (rel, bytes) in entries {
+        let target = resolve_contained_path(canon_root, rel, false)?;
+        let parent = target.parent().ok_or_else(|| FormatError::UnsafePath { path: rel.to_owned() })?;
+        std::fs::create_dir_all(parent)?;
+        let canon_parent = std::fs::canonicalize(parent)?;
+        if !canon_parent.starts_with(canon_root) {
+            return Err(FormatError::UnsafePath { path: rel.to_owned() });
+        }
+
+        let (prior, existing_perms) = match inspect_existing_unpacked_entry(&target, bytes)? {
+            ExistingEntryState::Unchanged => continue,
+            ExistingEntryState::NeedsWrite { prior, perms } => (prior, perms),
+        };
+
+        let stage_path = create_and_write_stage_file(parent, &target, bytes, existing_perms)?;
+        guard.push(stage_path.clone());
+        staged.push(StagedWrite { rel: rel.clone(), target_path: target, stage_path, prior });
+    }
+
+    Ok((staged, guard))
+}
+
+enum ExistingEntryState {
+    Unchanged,
+    NeedsWrite { prior: PriorSnapshot, perms: Option<Permissions> },
+}
+
+fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<ExistingEntryState, FormatError> {
+    match std::fs::symlink_metadata(target) {
+        Ok(meta) => {
+            if !meta.file_type().is_symlink()
+                && meta.is_file()
+                && meta.len() == new_bytes.len() as u64
+                && let Ok(existing) = platform_read_regular_file(target, new_bytes.len())
+                && existing == new_bytes
+            {
+                return Ok(ExistingEntryState::Unchanged);
+            }
+            let existing = platform_read_regular_file(target, MAX_ARCHIVE_FILE_BYTES)?;
+            let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+            Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms })
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {
+            Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::DidNotExist, perms: None })
+        }
+        Err(err) => Err(FormatError::Io(err.to_string())),
+    }
+}
+
+fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], existing_perms: Option<Permissions>) -> Result<PathBuf, FormatError> {
+    let raw_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("entry");
+    let stem: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_').take(48).collect();
+    let safe_stem = if stem.is_empty() { String::from("entry") } else { stem };
+    let pid = std::process::id();
+
+    for _ in 0..32 {
+        let seq = UNPACKED_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
+        let stage_path = parent.join(format!(".{safe_stem}.stage.{pid}.{seq}"));
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        if existing_perms.is_some() {
+            opts.mode(0o600);
+        }
+        let mut file = match opts.open(&stage_path) {
+            Ok(file) => file,
+            Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
+            Err(err) => return Err(FormatError::Io(err.to_string())),
+        };
+        let write_res = (|| -> Result<(), std::io::Error> {
+            file.write_all(bytes)?;
+            if let Some(perms) = existing_perms {
+                file.set_permissions(perms)?;
+            }
+            file.sync_all()
+        })();
+        drop(file);
+        if let Err(err) = write_res {
+            let _ = std::fs::remove_file(&stage_path);
+            return Err(FormatError::Io(err.to_string()));
+        }
+        return Ok(stage_path);
+    }
+    Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
+}
+
+fn commit_staged_unpacked_entries<F>(staged: &[StagedWrite], guard: &mut UnpackedStageGuard, before_commit: &mut F) -> Result<(), FormatError>
+where
+    F: FnMut(&str) -> Result<(), std::io::Error>,
+{
+    for (idx, item) in staged.iter().enumerate() {
+        if let Err(err) = before_commit(&item.rel).and_then(|()| std::fs::rename(&item.stage_path, &item.target_path)) {
+            rollback_unpacked_commits(&staged[..idx]);
+            return Err(FormatError::Io(err.to_string()));
+        }
+        guard.take(idx);
+    }
+    Ok(())
+}
+
+fn rollback_unpacked_commits(committed: &[StagedWrite]) {
+    for item in committed.iter().rev() {
+        match &item.prior {
+            PriorSnapshot::Existed(bytes) => {
+                let _ = platform_write_atomic(&item.target_path, bytes);
+            }
+            PriorSnapshot::DidNotExist => {
+                let _ = std::fs::remove_file(&item.target_path);
+            }
+        }
+    }
 }
 
 fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expected_paths: &HashSet<String>) -> Result<(), FormatError> {
     for rel in prior_paths {
-        if expected_paths.contains(rel) || validate_unpacked_relative_path(rel).is_err() {
+        if expected_paths.contains(rel) || validate_sheet_csv_path(rel).is_err() {
             continue;
         }
         if let Ok(path) = resolve_contained_path(canon_root, rel, true)
@@ -667,28 +956,10 @@ fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expecte
     }
 
     let sheets_dir = canon_root.join(SHEETS_DIR);
-    if let Ok(meta) = std::fs::symlink_metadata(&sheets_dir)
-        && !meta.file_type().is_symlink()
-        && meta.is_dir()
-    {
-        for entry in std::fs::read_dir(&sheets_dir)? {
-            let entry = entry?;
-            let Some(name) = entry.file_name().to_str().map(str::to_owned) else {
-                continue;
-            };
-            let rel = format!("{SHEETS_DIR}/{name}");
-            if expected_paths.contains(&rel) {
-                continue;
-            }
-            let ft = entry.file_type()?;
-            if !ft.is_symlink() && ft.is_file() {
-                std::fs::remove_file(entry.path())?;
-            }
-        }
-        let has_sheet_outputs = expected_paths.iter().any(|p| p.starts_with(&format!("{SHEETS_DIR}/")));
-        if !has_sheet_outputs {
-            let _ = std::fs::remove_dir(&sheets_dir);
-        }
+    let has_sheet_outputs = expected_paths.iter().any(|p| p.starts_with(&format!("{SHEETS_DIR}/")));
+    if !has_sheet_outputs && std::fs::symlink_metadata(&sheets_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+        // `remove_dir` succeeds only when empty, preserving any user-managed files inside `sheets/`.
+        let _ = std::fs::remove_dir(&sheets_dir);
     }
     Ok(())
 }
@@ -726,13 +997,45 @@ fn push_metadata_entries(entries: &mut Vec<SheetManifestEntry>, doc: &ProjectDoc
     }
 }
 
-fn unique_sheet_csv_path(idx: usize, id: &SheetId, used: &mut HashSet<String>) -> String {
+fn is_windows_reserved_stem(stem: &str) -> bool {
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
+}
+
+fn unique_sheet_csv_path(idx: usize, id: &SheetId, used_lower: &mut HashSet<String>) -> String {
     let sanitized: String = id.as_str().chars().map(|ch| if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' { ch } else { '_' }).collect();
-    let stem = if sanitized.is_empty() { format!("sheet_{idx}") } else { sanitized };
-    let mut candidate = format!("sheets/{stem}.csv");
+    let mut stem = if sanitized.is_empty() { format!("sheet_{idx}") } else { sanitized };
+    if is_windows_reserved_stem(&stem) {
+        stem = format!("sheet_{stem}");
+    }
+    stem.truncate(MAX_SHEET_CSV_STEM_LEN);
+    let mut candidate = format!("{SHEETS_DIR}/{stem}.csv");
     let mut suffix = 1_usize;
-    while !used.insert(candidate.clone()) {
-        candidate = format!("sheets/{stem}_{suffix}.csv");
+    while !used_lower.insert(candidate.to_ascii_lowercase()) {
+        candidate = format!("{SHEETS_DIR}/{stem}_{suffix}.csv");
         suffix += 1;
     }
     candidate
@@ -740,9 +1043,11 @@ fn unique_sheet_csv_path(idx: usize, id: &SheetId, used: &mut HashSet<String>) -
 
 /// Strip raw cell values and cached result tables to produce a clean reusable `.lctemplate`.
 pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectDocument, FormatError> {
+    ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
     let mut out = doc.clone();
     out.schema_version = CURRENT_SCHEMA_VERSION;
+    out.checkpoints.clear();
     for ds in &mut out.data_sheets {
         let was_frozen = ds.frozen;
         let notes = ds.floating_notes.clone();
@@ -759,6 +1064,7 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         clean.frozen = was_frozen;
         clean.floating_notes = notes;
         clean.linked_regions = linked;
+        clean.exclusion_notes.clear();
         *ds = clean;
     }
     for res in &mut out.result_sheets {
@@ -951,6 +1257,10 @@ fn backfill_graph_sheet_defaults(gs: &mut serde_json::Value) {
 
 /// Enforce all `lumencraft-doc` structural bounds, finite-float invariants, and DAG cycle absence.
 pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatError> {
+    validate_project_document_inner(doc, true)
+}
+
+fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_entries: bool) -> Result<(), FormatError> {
     validate_title(&doc.title)?;
     let total = doc.total_sheet_count();
     if total > MAX_SHEETS_PER_PROJECT {
@@ -960,9 +1270,7 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
     let mut seen_ids = HashSet::with_capacity(total);
     for ds in &doc.data_sheets {
         register_unique_sheet_id(&mut seen_ids, &ds.id)?;
-        validate_data_sheet(ds)?;
-        validate_archetype_extra_floats(&ds.archetype, ds.id.as_str())?;
-        validate_floating_notes(&ds.floating_notes, ds.id.as_str())?;
+        validate_data_sheet_floats(ds)?;
     }
     for info in &doc.info_sheets {
         register_unique_sheet_id(&mut seen_ids, &info.id)?;
@@ -994,7 +1302,46 @@ pub fn validate_project_document(doc: &ProjectDocument) -> Result<(), FormatErro
         layout.validate()?;
     }
 
+    if validate_checkpoint_entries {
+        validate_checkpoints(doc)?;
+    }
     detect_dependency_cycles(doc)
+}
+
+pub(crate) fn validate_data_sheet_floats(ds: &DataSheet) -> Result<(), FormatError> {
+    validate_data_sheet(ds)?;
+    validate_archetype_extra_floats(&ds.archetype, ds.id.as_str())?;
+    validate_floating_notes(&ds.floating_notes, ds.id.as_str())
+}
+
+fn validate_checkpoints(doc: &ProjectDocument) -> Result<(), FormatError> {
+    if doc.checkpoints.len() > MAX_CHECKPOINTS_PER_PROJECT {
+        return Err(FormatError::Json(format!("checkpoint count {} exceeds maximum {MAX_CHECKPOINTS_PER_PROJECT}", doc.checkpoints.len())));
+    }
+    let max_total_bytes = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let mut total_snapshot_bytes = 0_usize;
+    let mut seen_ids = HashSet::with_capacity(doc.checkpoints.len());
+    for cp in &doc.checkpoints {
+        if cp.id.trim().is_empty() {
+            return Err(FormatError::Doc(lumencraft_doc::DocError::EmptyIdentifier));
+        }
+        validate_title(&cp.id)?;
+        validate_title(&cp.name)?;
+        validate_title(&cp.note)?;
+        validate_title(&cp.created_utc)?;
+        if !seen_ids.insert(cp.id.as_str()) {
+            return Err(FormatError::Json(format!("duplicate checkpoint id `{}`", cp.id)));
+        }
+        total_snapshot_bytes = total_snapshot_bytes.saturating_add(cp.snapshot_json.len());
+        if total_snapshot_bytes > max_total_bytes {
+            return Err(FormatError::ZipBomb { reason: format!("checkpoint snapshot_json total size exceeds limit {max_total_bytes}") });
+        }
+        let snapshot_doc = decode_and_validate_document_inner(cp.snapshot_json.as_bytes(), CURRENT_SCHEMA_VERSION, false)?;
+        if !snapshot_doc.checkpoints.is_empty() {
+            return Err(FormatError::Json(format!("checkpoint `{}` snapshot_json must not contain nested checkpoints", cp.id)));
+        }
+    }
+    Ok(())
 }
 
 fn check_finite(value: f64, location: impl FnOnce() -> String) -> Result<(), FormatError> {
@@ -1289,6 +1636,40 @@ fn validate_data_sheet(ds: &DataSheet) -> Result<(), FormatError> {
                 validate_titles(&grp.subcolumn_titles)?;
                 validate_cell_rows(&grp.cells, MAX_SUBCOLUMNS, &format!("{ctx}.group[{g_idx}]"))?;
             }
+        }
+    }
+    validate_exclusion_notes(ds)
+}
+
+fn validate_exclusion_notes(ds: &DataSheet) -> Result<(), FormatError> {
+    let ctx = ds.id.as_str();
+    let max_notes = ds.archetype.allocated_cell_slots();
+    if ds.exclusion_notes.len() > max_notes {
+        return Err(FormatError::Json(format!("{ctx}.exclusion_notes count {} exceeds allocated cell slots {max_notes}", ds.exclusion_notes.len())));
+    }
+    let mut seen_coords = HashSet::with_capacity(ds.exclusion_notes.len());
+    for entry in &ds.exclusion_notes {
+        validate_title(&entry.reason_tag)?;
+        validate_title(&entry.note)?;
+        validate_title(&entry.timestamp_utc)?;
+        if !seen_coords.insert(entry.coord) {
+            return Err(FormatError::Json(format!(
+                "{ctx}.exclusion_notes contains duplicate entry for coordinate ({}, {}, {})",
+                entry.coord.row, entry.coord.col, entry.coord.subcol
+            )));
+        }
+        let Some(cell) = ds.archetype.data_cell(entry.coord) else {
+            return Err(FormatError::Doc(lumencraft_doc::DocError::CellOutOfBounds {
+                row: entry.coord.row,
+                col: entry.coord.col,
+                subcol: entry.coord.subcol,
+            }));
+        };
+        if !cell.excluded {
+            return Err(FormatError::Json(format!(
+                "{ctx}.exclusion_notes references unexcluded cell at ({}, {}, {})",
+                entry.coord.row, entry.coord.col, entry.coord.subcol
+            )));
         }
     }
     Ok(())
@@ -1724,4 +2105,48 @@ fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, defaul
         *text = out;
     }
     removed
+}
+
+#[cfg(test)]
+#[cfg(not(target_arch = "wasm32"))]
+mod tests {
+    use lumencraft_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
+
+    use super::{MANIFEST_PATH, open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_with_hook};
+
+    #[test]
+    fn unpacked_save_rolls_back_committed_files_on_mid_commit_failure() {
+        let dir = std::env::temp_dir().join(format!("lc-unpacked-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut doc_v1 = ProjectDocument::new("Version One").unwrap();
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
+        col.data_sets[0].cells[0] = vec![lumencraft_doc::Cell::number(10.0)];
+        doc_v1.add_data_sheet(DataSheet::new("sheet-a", "A", TableArchetype::Column(col)).unwrap()).unwrap();
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.title = String::from("Version Two");
+        let mut col2 = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
+        col2.data_sets[0].cells[0] = vec![lumencraft_doc::Cell::number(20.0)];
+        doc_v2.add_data_sheet(DataSheet::new("sheet-b", "B", TableArchetype::Column(col2)).unwrap()).unwrap();
+
+        // Simulate failure right before committing `manifest.json` (after `document.json` and new CSV committed).
+        let err = save_project_unpacked_dir_with_hook(&doc_v2, &dir, |rel| {
+            if rel == MANIFEST_PATH { Err(std::io::Error::other("simulated disk failure")) } else { Ok(()) }
+        })
+        .unwrap_err();
+        assert!(matches!(err, crate::error::FormatError::Io(_)));
+
+        // Re-opening must recover intact `doc_v1` with zero CRC mismatch, zero leaked `sheet-b.csv`, and zero stage temps.
+        let reloaded = open_project_unpacked_dir(&dir).unwrap();
+        assert_eq!(reloaded, doc_v1);
+        assert!(!dir.join("sheets/sheet-b.csv").exists());
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.contains(".stage."), "leaked staging temp file: {name}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

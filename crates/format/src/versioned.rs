@@ -205,7 +205,11 @@ pub fn validate_batch_manifest_version(value: &serde_json::Value) -> Result<(), 
         return Ok(());
     }
     if let Some(ver_suffix) = schema_str.strip_prefix("lumencraft.batch.v")
+        && !ver_suffix.is_empty()
+        && ver_suffix.bytes().all(|b| b.is_ascii_digit())
+        && (ver_suffix == "0" || !ver_suffix.starts_with('0'))
         && let Ok(version) = ver_suffix.parse::<u32>()
+        && version != 1
     {
         return Err(FormatError::UnsupportedSchemaVersion { version, max_supported: 1 });
     }

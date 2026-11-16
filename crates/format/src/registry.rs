@@ -5,12 +5,12 @@ use std::sync::Arc;
 
 use lumencraft_doc::{DataSheet, ProjectDocument, ResultSheet, SheetId, SubcolumnMode, TableKind};
 
-#[cfg(not(target_arch = "wasm32"))]
-use crate::archive::platform_read_regular_file;
 use crate::archive::{
     MAX_ARCHIVE_FILE_BYTES, is_unpacked_project_dir, open_project_bytes, open_project_unpacked_dir, open_template_bytes, save_project_bytes,
-    save_project_unpacked_dir, save_template_bytes,
+    save_project_unpacked_dir, save_template_bytes, validate_data_sheet_floats,
 };
+#[cfg(not(target_arch = "wasm32"))]
+use crate::archive::{platform_read_regular_file, save_project_file, save_template_file};
 use crate::csv::{CsvOptions, MAX_CSV_FILE_BYTES, export_datasheet_to_csv, import_csv_to_datasheet};
 use crate::error::{FormatError, ImportReport};
 use crate::export::{export_result_sheet_json, export_result_sheet_tidy_csv};
@@ -257,19 +257,23 @@ impl FormatRegistry {
         self.importers.iter().find(|imp| descriptor_matches_token(&imp.descriptor(), &token)).map(Arc::as_ref)
     }
 
-    /// Look up a registered [`Importer`] for `path`, checking multi-dot suffixes like `.lumencraft.d`
-    /// and unpacked project directories before single-extension matching.
+    /// Look up a registered [`Importer`] for `path`, checking unpacked project directories and
+    /// multi-dot suffixes like `.lumencraft.d` before single-extension matching, and rejecting
+    /// non-project directories from single-file adapters.
     pub fn importer_for_path(&self, path: &Path) -> Option<&dyn Importer> {
+        if is_unpacked_project_dir(path) {
+            return self.importer_by_format(DESC_PROJECT_DIR.id);
+        }
         if let Some(ext_token) = path_multi_dot_token(path, &self.supported_import_formats()) {
             return self.importer_by_format(ext_token);
+        }
+        if path.is_dir() {
+            return None;
         }
         if let Some(ext) = path.extension().and_then(|s| s.to_str())
             && let Some(found) = self.importer_by_format(ext)
         {
             return Some(found);
-        }
-        if is_unpacked_project_dir(path) {
-            return self.importer_by_format(DESC_PROJECT_DIR.id);
         }
         None
     }
@@ -283,19 +287,23 @@ impl FormatRegistry {
         self.exporters.iter().find(|exp| descriptor_matches_token(&exp.descriptor(), &token)).map(Arc::as_ref)
     }
 
-    /// Look up a registered [`Exporter`] for `path`, checking multi-dot suffixes like `.lumencraft.d`
-    /// before single-extension matching.
+    /// Look up a registered [`Exporter`] for `path`, checking unpacked project directories and
+    /// multi-dot suffixes like `.lumencraft.d` before single-extension matching, and refusing to
+    /// treat arbitrary existing directories as `.lumencraft.d` targets.
     pub fn exporter_for_path(&self, path: &Path) -> Option<&dyn Exporter> {
+        if is_unpacked_project_dir(path) {
+            return self.exporter_by_format(DESC_PROJECT_DIR.id);
+        }
         if let Some(ext_token) = path_multi_dot_token(path, &self.supported_export_formats()) {
             return self.exporter_by_format(ext_token);
+        }
+        if path.is_dir() {
+            return None;
         }
         if let Some(ext) = path.extension().and_then(|s| s.to_str())
             && let Some(found) = self.exporter_by_format(ext)
         {
             return Some(found);
-        }
-        if is_unpacked_project_dir(path) || path.is_dir() {
-            return self.exporter_by_format(DESC_PROJECT_DIR.id);
         }
         None
     }
@@ -362,6 +370,16 @@ const DESC_TIFF: FormatDescriptor =
     FormatDescriptor { id: "tiff", label: "Tagged Image File Format", extensions: &["tiff", "tif"], kind: FormatKind::FigureRaster };
 const DESC_EMF: FormatDescriptor = FormatDescriptor { id: "emf", label: "Enhanced Metafile", extensions: &["emf"], kind: FormatKind::FigureVector };
 
+#[cfg(not(target_arch = "wasm32"))]
+fn ensure_parent_dir_exists(path: &Path) -> Result<(), FormatError> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
 struct LumencraftArchiveAdapter;
 impl Importer for LumencraftArchiveAdapter {
     fn descriptor(&self) -> FormatDescriptor {
@@ -380,6 +398,20 @@ impl Exporter for LumencraftArchiveAdapter {
     fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let doc = expect_document_source(source, DESC_ARCHIVE.id)?;
         save_project_bytes(doc)
+    }
+
+    fn export_path(&self, source: ExportSource<'_>, path: &Path, _opts: &ExportOptions) -> Result<(), FormatError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let doc = expect_document_source(source, DESC_ARCHIVE.id)?;
+            ensure_parent_dir_exists(path)?;
+            save_project_file(path, doc)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (source, path);
+            Err(FormatError::Io(String::from("filesystem export is not supported on wasm32")))
+        }
     }
 }
 
@@ -430,6 +462,20 @@ impl Exporter for LctemplateAdapter {
     fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let doc = expect_document_source(source, DESC_TEMPLATE.id)?;
         save_template_bytes(doc)
+    }
+
+    fn export_path(&self, source: ExportSource<'_>, path: &Path, _opts: &ExportOptions) -> Result<(), FormatError> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let doc = expect_document_source(source, DESC_TEMPLATE.id)?;
+            ensure_parent_dir_exists(path)?;
+            save_template_file(path, doc)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (source, path);
+            Err(FormatError::Io(String::from("filesystem export is not supported on wasm32")))
+        }
     }
 }
 
@@ -524,18 +570,25 @@ impl Exporter for JsonResultAdapter {
     fn export_bytes(&self, source: ExportSource<'_>, opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let text = match source {
             ExportSource::ResultSheet(sheet) => export_result_sheet_json(sheet, opts.pretty)?,
-            ExportSource::DataSheet(sheet) => serialize_json_text(sheet, opts.pretty)?,
+            ExportSource::DataSheet(sheet) => {
+                validate_data_sheet_floats(sheet)?;
+                serialize_json_text(sheet, opts.pretty)?
+            }
             ExportSource::Document(doc) => {
                 if let Some(target_id) = opts.sheet_id.as_deref() {
                     if let Some(rs) = doc.result_sheets.iter().find(|s| s.id.as_str() == target_id) {
                         export_result_sheet_json(rs, opts.pretty)?
                     } else if let Some(ds) = doc.data_sheets.iter().find(|s| s.id.as_str() == target_id) {
+                        validate_data_sheet_floats(ds)?;
                         serialize_json_text(ds, opts.pretty)?
                     } else {
-                        return Err(FormatError::UnsupportedFormat { reason: format!("sheet `{target_id}` not found for JSON export") });
+                        return Err(FormatError::Doc(lumencraft_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
                     }
                 } else {
-                    serialize_json_text(doc, opts.pretty)?
+                    let Some(rs) = doc.result_sheets.first() else {
+                        return Err(FormatError::UnsupportedFormat { reason: String::from("project has no result sheet to export as `json`") });
+                    };
+                    export_result_sheet_json(rs, opts.pretty)?
                 }
             }
         };
@@ -602,7 +655,7 @@ fn export_document_delimited_text(
         if let Some(rs) = doc.result_sheets.iter().find(|s| s.id.as_str() == target_id) {
             return Ok(export_result_sheet_tidy_csv(rs, csv_opts));
         }
-        return Err(FormatError::UnsupportedFormat { reason: format!("sheet `{target_id}` not found for `{format_id}` export") });
+        return Err(FormatError::Doc(lumencraft_doc::DocError::SheetNotFound { sheet_id: SheetId::new(target_id) }));
     }
     if let Some(ds) = doc.data_sheets.first() {
         return export_datasheet_to_csv(ds, csv_opts);

@@ -3,6 +3,10 @@
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{ErrorKind, Read, Write};
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+use std::os::unix::process::CommandExt as _;
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+use std::os::windows::process::CommandExt as _;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -36,6 +40,9 @@ const READER_CHUNK_BYTES: usize = 8192;
 
 #[cfg(not(target_arch = "wasm32"))]
 const EXIT_POLL_INTERVAL: Duration = Duration::from_millis(5);
+
+#[cfg(not(target_arch = "wasm32"))]
+const ERROR_DRAIN_TIMEOUT: Duration = Duration::from_millis(250);
 
 #[cfg(not(target_arch = "wasm32"))]
 const FALLBACK_MAX_DEADLINE: Duration = Duration::from_secs(365 * 24 * 3600);
@@ -223,17 +230,21 @@ impl ProcessCommand {
         let cancelled = Arc::new(AtomicBool::new(false));
         let (tx, rx) = mpsc::channel::<StreamEvent>();
 
-        let stdin_handle = spawn_stdin_writer(stdin_pipe, self.stdin_bytes.clone());
+        let stdin_handle = spawn_stdin_writer(stdin_pipe, self.stdin_bytes.clone(), tx.clone());
         let stdout_handle = stdout_pipe.map(|pipe| spawn_reader(pipe, StreamKind::Stdout, self.max_output_bytes, Arc::clone(&cancelled), tx.clone()));
         let stderr_handle = stderr_pipe.map(|pipe| spawn_reader(pipe, StreamKind::Stderr, self.max_output_bytes, Arc::clone(&cancelled), tx.clone()));
         drop(tx);
 
-        let mut state = MonitorState::new(self, stdout_handle.is_none(), stderr_handle.is_none());
+        let mut state = MonitorState::new(self, stdout_handle.is_none(), stderr_handle.is_none(), stdin_handle.is_none());
         let status = match state.wait_for_completion(&mut guard, &rx, &cancelled) {
-            Ok(status) => status,
+            Ok(status) => {
+                guard.disarm();
+                status
+            }
             Err(err) => {
-                cancelled.store(true, Ordering::Relaxed);
-                guard.kill_and_wait();
+                cancelled.store(true, Ordering::Release);
+                guard.kill_group_and_wait();
+                drain_workers_on_error(&rx, [stdin_handle, stdout_handle, stderr_handle]);
                 return Err(err);
             }
         };
@@ -257,6 +268,13 @@ impl ProcessCommand {
         } else {
             cmd.stdin(Stdio::null());
         }
+        #[cfg(unix)]
+        cmd.process_group(0);
+        #[cfg(windows)]
+        {
+            const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
+            cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
+        }
         for key in &self.env_remove {
             cmd.env_remove(key);
         }
@@ -278,12 +296,19 @@ impl ProcessCommand {
 #[cfg(not(target_arch = "wasm32"))]
 struct ChildGuard {
     child: Option<Child>,
+    pgid: Option<u32>,
+    disarmed: bool,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl ChildGuard {
     fn new(child: Child) -> Self {
-        Self { child: Some(child) }
+        let pid = child.id();
+        Self { child: Some(child), pgid: (pid > 1).then_some(pid), disarmed: false }
+    }
+
+    fn disarm(&mut self) {
+        self.disarmed = true;
     }
 
     fn try_wait(&mut self) -> Result<Option<ExitStatus>, std::io::Error> {
@@ -299,7 +324,13 @@ impl ChildGuard {
         }
     }
 
-    fn kill_and_wait(&mut self) {
+    fn kill_group_and_wait(&mut self) {
+        if self.disarmed {
+            return;
+        }
+        if let Some(pgid) = self.pgid.take() {
+            kill_process_group(pgid);
+        }
         if let Some(mut child) = self.child.take() {
             let _ = child.kill();
             let _ = child.wait();
@@ -310,9 +341,41 @@ impl ChildGuard {
 #[cfg(not(target_arch = "wasm32"))]
 impl Drop for ChildGuard {
     fn drop(&mut self) {
-        self.kill_and_wait();
+        self.kill_group_and_wait();
     }
 }
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn kill_process_group(pgid: u32) {
+    if pgid <= 1 || pgid == std::process::id() {
+        return;
+    }
+    let target = format!("-{pgid}");
+    for bin in ["/bin/kill", "/usr/bin/kill", "kill"] {
+        if let Ok(mut killer) =
+            Command::new(bin).args(["-s", "KILL", "--", &target]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+        {
+            let _ = killer.wait();
+            return;
+        }
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn kill_process_group(pgid: u32) {
+    if pgid <= 1 || pgid == std::process::id() {
+        return;
+    }
+    let pid_str = pgid.to_string();
+    if let Ok(mut killer) =
+        Command::new("taskkill").args(["/PID", &pid_str, "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
+    {
+        let _ = killer.wait();
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
+fn kill_process_group(_pgid: u32) {}
 
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Clone, Copy)]
@@ -335,6 +398,7 @@ impl StreamKind {
 enum StreamEvent {
     Chunk { stream: StreamKind, bytes: Vec<u8> },
     Eof(StreamKind),
+    StdinDone,
     LimitExceeded(StreamKind),
     IoErr { stream: StreamKind, message: String },
 }
@@ -351,12 +415,13 @@ struct MonitorState {
     stderr: Vec<u8>,
     stdout_eof: bool,
     stderr_eof: bool,
+    stdin_done: bool,
     exit_status: Option<ExitStatus>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
 impl MonitorState {
-    fn new(cmd: &ProcessCommand, stdout_eof: bool, stderr_eof: bool) -> Self {
+    fn new(cmd: &ProcessCommand, stdout_eof: bool, stderr_eof: bool, stdin_done: bool) -> Self {
         let now = Instant::now();
         Self {
             program: cmd.program.clone(),
@@ -369,6 +434,7 @@ impl MonitorState {
             stderr: Vec::new(),
             stdout_eof,
             stderr_eof,
+            stdin_done,
             exit_status: None,
         }
     }
@@ -387,7 +453,7 @@ impl MonitorState {
                 self.exit_status = Some(status);
             }
 
-            if self.stdout_eof && self.stderr_eof {
+            if self.stdout_eof && self.stderr_eof && self.stdin_done {
                 if let Some(status) = self.exit_status {
                     return Ok(status);
                 }
@@ -401,13 +467,14 @@ impl MonitorState {
                 Ok(event) => self.handle_event(event)?,
                 Err(RecvTimeoutError::Timeout) => {
                     if let Some(err) = self.check_timeout(Instant::now()) {
-                        cancelled.store(true, Ordering::Relaxed);
+                        cancelled.store(true, Ordering::Release);
                         return Err(err);
                     }
                 }
                 Err(RecvTimeoutError::Disconnected) => {
                     self.stdout_eof = true;
                     self.stderr_eof = true;
+                    self.stdin_done = true;
                 }
             }
         }
@@ -466,6 +533,10 @@ impl MonitorState {
                 self.stderr_eof = true;
                 Ok(())
             }
+            StreamEvent::StdinDone => {
+                self.stdin_done = true;
+                Ok(())
+            }
             StreamEvent::LimitExceeded(stream) => {
                 Err(PlatformError::OutputLimitExceeded { program: self.program.clone(), stream: stream.name(), limit_bytes: self.max_output_bytes })
             }
@@ -477,13 +548,51 @@ impl MonitorState {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn spawn_stdin_writer(stdin_pipe: Option<std::process::ChildStdin>, stdin_bytes: Option<Vec<u8>>) -> Option<JoinHandle<()>> {
+struct WorkerHandle {
+    join: JoinHandle<()>,
+    done: Arc<AtomicBool>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct DoneFlagGuard(Arc<AtomicBool>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for DoneFlagGuard {
+    fn drop(&mut self) {
+        self.0.store(true, Ordering::Release);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl WorkerHandle {
+    fn spawn<F>(f: F) -> Self
+    where
+        F: FnOnce() + Send + 'static,
+    {
+        let done = Arc::new(AtomicBool::new(false));
+        let done_clone = Arc::clone(&done);
+        let join = std::thread::spawn(move || {
+            let _guard = DoneFlagGuard(done_clone);
+            f();
+        });
+        Self { join, done }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn spawn_stdin_writer(
+    stdin_pipe: Option<std::process::ChildStdin>,
+    stdin_bytes: Option<Vec<u8>>,
+    tx: mpsc::Sender<StreamEvent>,
+) -> Option<WorkerHandle> {
     let (Some(mut stdin), Some(bytes)) = (stdin_pipe, stdin_bytes) else {
         return None;
     };
-    Some(std::thread::spawn(move || {
+    Some(WorkerHandle::spawn(move || {
         let _ = stdin.write_all(&bytes);
         drop(stdin);
+        let _ = tx.send(StreamEvent::StdinDone);
+        drop(tx);
     }))
 }
 
@@ -494,12 +603,12 @@ fn spawn_reader<R: Read + Send + 'static>(
     max_bytes: usize,
     cancelled: Arc<AtomicBool>,
     tx: mpsc::Sender<StreamEvent>,
-) -> JoinHandle<()> {
-    std::thread::spawn(move || {
+) -> WorkerHandle {
+    WorkerHandle::spawn(move || {
         let mut buf = [0u8; READER_CHUNK_BYTES];
         let mut total = 0usize;
         loop {
-            if cancelled.load(Ordering::Relaxed) {
+            if cancelled.load(Ordering::Acquire) {
                 break;
             }
             match reader.read(&mut buf) {
@@ -524,13 +633,40 @@ fn spawn_reader<R: Read + Send + 'static>(
                 }
             }
         }
+        drop(reader);
+        drop(tx);
     })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn join_best_effort(handle: Option<JoinHandle<()>>) {
+fn join_best_effort(handle: Option<WorkerHandle>) {
     if let Some(h) = handle {
-        let _ = h.join();
+        let _ = h.join.join();
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_workers_on_error(rx: &mpsc::Receiver<StreamEvent>, handles: [Option<WorkerHandle>; 3]) {
+    let deadline = add_deadline(Instant::now(), ERROR_DRAIN_TIMEOUT);
+    let mut disconnected = false;
+    loop {
+        let now = Instant::now();
+        if now >= deadline {
+            break;
+        }
+        match rx.recv_timeout(deadline.saturating_duration_since(now)) {
+            Ok(_) => {}
+            Err(RecvTimeoutError::Disconnected) => {
+                disconnected = true;
+                break;
+            }
+            Err(RecvTimeoutError::Timeout) => break,
+        }
+    }
+    for handle in handles.into_iter().flatten() {
+        if disconnected || handle.done.load(Ordering::Acquire) {
+            let _ = handle.join.join();
+        }
     }
 }
 
@@ -629,5 +765,82 @@ mod tests {
         assert!(output.stdout.is_empty());
         assert!(output.stderr.is_empty());
         assert!(start.elapsed() < Duration::from_secs(2), "elapsed too long: {:?}", start.elapsed());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_enforces_deadline_even_when_stdin_pipe_stalls_after_stdio_eof() {
+        let huge_stdin = vec![b'x'; 2 * 1024 * 1024];
+        let start = Instant::now();
+        let err = ProcessCommand::new("sh")
+            .args(["-c", "(sleep 10) & exec 1>&- 2>&-"])
+            .stdin_bytes(huge_stdin)
+            .wall_timeout(Duration::from_millis(120))
+            .idle_timeout(Duration::from_millis(120))
+            .run()
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(matches!(err, PlatformError::TimedOut { .. }), "unexpected error: {err:?}");
+        assert!(elapsed < Duration::from_secs(2), "stalled stdin bypassed timeout: {elapsed:?}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn timeout_kills_process_group_descendant_holding_pipes_after_child_exits() {
+        let dir = std::env::temp_dir().join(format!("lc-proc-pgid-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let pid_file = dir.join("descendant.pid");
+        let _ = std::fs::remove_file(&pid_file);
+
+        let start = Instant::now();
+        let err = ProcessCommand::new("sh")
+            .args(["-c", "sleep 10 & printf '%s' \"$!\" > \"$LC_PID_FILE\"; exit 0"])
+            .env("LC_PID_FILE", pid_file.to_string_lossy().as_ref())
+            .wall_timeout(Duration::from_millis(500))
+            .idle_timeout(Duration::from_secs(5))
+            .run()
+            .unwrap_err();
+        let elapsed = start.elapsed();
+        assert!(matches!(err, PlatformError::TimedOut { kind: TimeoutKind::Wall, .. }), "unexpected error: {err:?}");
+        assert!(elapsed < Duration::from_secs(2), "timeout blocked on descendant pipe: {elapsed:?}");
+
+        let pid_str = std::fs::read_to_string(&pid_file).expect("grandchild pid should be recorded").trim().to_string();
+        assert!(!pid_str.is_empty(), "empty descendant pid");
+        let reap_deadline = Instant::now() + Duration::from_secs(1);
+        loop {
+            let alive = std::process::Command::new("kill")
+                .args(["-0", &pid_str])
+                .stdin(std::process::Stdio::null())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .status()
+                .map(|s| s.success())
+                .unwrap_or(false);
+            if !alive {
+                break;
+            }
+            assert!(Instant::now() < reap_deadline, "descendant pid {pid_str} survived process-group kill");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+
+        let _ = std::fs::remove_file(&pid_file);
+        let _ = std::fs::remove_dir(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn output_limit_terminates_cleanly_even_with_large_stdin() {
+        let huge_stdin = vec![b'y'; 2 * 1024 * 1024];
+        let start = Instant::now();
+        let err = ProcessCommand::new("sh")
+            .args(["-c", "yes lumencraft_output_stream"])
+            .stdin_bytes(huge_stdin)
+            .wall_timeout(Duration::from_secs(5))
+            .idle_timeout(Duration::from_secs(5))
+            .max_output_bytes(512)
+            .run()
+            .unwrap_err();
+        assert!(matches!(err, PlatformError::OutputLimitExceeded { stream: "stdout", limit_bytes: 512, .. }));
+        assert!(start.elapsed() < Duration::from_secs(2));
     }
 }

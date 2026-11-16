@@ -1,9 +1,11 @@
 //! Filesystem safety primitives: crash-safe atomic writes and bounded regular-file reads.
 
 #[cfg(not(target_arch = "wasm32"))]
-use std::fs::{File, Metadata, OpenOptions};
+use std::fs::{File, Metadata, OpenOptions, Permissions};
 #[cfg(not(target_arch = "wasm32"))]
 use std::io::{ErrorKind, Read, Write};
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+use std::os::unix::fs::OpenOptionsExt as _;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
@@ -17,6 +19,9 @@ static TMP_FILE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_TEMP_CREATE_ATTEMPTS: usize = 32;
+
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_SYMLINK_HOPS: usize = 40;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct TempFileGuard {
@@ -68,20 +73,78 @@ pub fn write_atomic_with_hook<F>(path: &Path, bytes: &[u8], before_rename: F) ->
 where
     F: FnOnce(&Path) -> Result<(), std::io::Error>,
 {
-    let (parent, file_stem) = validate_target_path(path)?;
-    let (mut file, tmp_path) = create_unique_sibling_temp(parent, &file_stem)?;
+    let _ = validate_target_path(path)?;
+    let (resolved_target, existing_perms) = resolve_atomic_target(path)?;
+    let (parent, file_stem) = validate_target_path(&resolved_target)?;
+    let (mut file, tmp_path) = create_unique_sibling_temp(parent, &file_stem, existing_perms.is_some())?;
     let mut guard = TempFileGuard::new(tmp_path.clone());
 
     file.write_all(bytes).map_err(|err| io_err(&format!("write temp file `{}`", tmp_path.display()), &err))?;
+    if let Some(perms) = existing_perms {
+        file.set_permissions(perms).map_err(|err| io_err(&format!("set permissions on temp file `{}`", tmp_path.display()), &err))?;
+    }
     file.sync_all().map_err(|err| io_err(&format!("sync temp file `{}`", tmp_path.display()), &err))?;
     drop(file);
 
-    before_rename(&tmp_path).map_err(|err| io_err(&format!("pre-rename hook for `{}`", path.display()), &err))?;
-    std::fs::rename(&tmp_path, path).map_err(|err| io_err(&format!("rename `{}` to `{}`", tmp_path.display(), path.display()), &err))?;
+    before_rename(&tmp_path).map_err(|err| io_err(&format!("pre-rename hook for `{}`", resolved_target.display()), &err))?;
+    std::fs::rename(&tmp_path, &resolved_target)
+        .map_err(|err| io_err(&format!("rename `{}` to `{}`", tmp_path.display(), resolved_target.display()), &err))?;
     guard.disarm();
 
     sync_parent_dir_best_effort(parent);
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_atomic_target(path: &Path) -> Result<(PathBuf, Option<Permissions>), PlatformError> {
+    let lmeta = match std::fs::symlink_metadata(path) {
+        Ok(meta) => meta,
+        Err(err) if err.kind() == ErrorKind::NotFound => return Ok((path.to_path_buf(), None)),
+        Err(err) => return Err(io_err(&format!("inspect target `{}`", path.display()), &err)),
+    };
+    if !lmeta.file_type().is_symlink() {
+        if lmeta.is_dir() {
+            return Err(PlatformError::InvalidPath { reason: format!("target path `{}` is a directory", path.display()) });
+        }
+        return Ok((path.to_path_buf(), Some(lmeta.permissions())));
+    }
+    resolve_symlink_target(path)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_symlink_target(path: &Path) -> Result<(PathBuf, Option<Permissions>), PlatformError> {
+    match std::fs::metadata(path) {
+        Ok(meta) => {
+            if meta.is_dir() {
+                return Err(PlatformError::InvalidPath { reason: format!("target path `{}` resolves to a directory", path.display()) });
+            }
+            let canonical = std::fs::canonicalize(path).map_err(|err| io_err(&format!("canonicalize symlink `{}`", path.display()), &err))?;
+            Ok((canonical, Some(meta.permissions())))
+        }
+        Err(err) if err.kind() == ErrorKind::NotFound => {
+            let mut current = path.to_path_buf();
+            for _ in 0..MAX_SYMLINK_HOPS {
+                match std::fs::symlink_metadata(&current) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        let target =
+                            std::fs::read_link(&current).map_err(|read_err| io_err(&format!("read symlink `{}`", current.display()), &read_err))?;
+                        current = if target.is_relative() { resolve_parent_dir(&current).join(target) } else { target };
+                    }
+                    Ok(meta) if meta.is_dir() => {
+                        return Err(PlatformError::InvalidPath { reason: format!("target path `{}` resolves to a directory", current.display()) });
+                    }
+                    Ok(meta) => return Ok((current, Some(meta.permissions()))),
+                    Err(not_found) if not_found.kind() == ErrorKind::NotFound => return Ok((current, None)),
+                    Err(other) => return Err(io_err(&format!("inspect symlink target `{}`", current.display()), &other)),
+                }
+            }
+            Err(PlatformError::Io {
+                context: format!("resolve symlink `{}`", path.display()),
+                message: String::from("too many levels of symbolic links"),
+            })
+        }
+        Err(err) => Err(io_err(&format!("inspect symlink target `{}`", path.display()), &err)),
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -108,12 +171,21 @@ fn resolve_parent_dir(path: &Path) -> &Path {
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn create_unique_sibling_temp(parent: &Path, stem: &str) -> Result<(File, PathBuf), PlatformError> {
+fn create_unique_sibling_temp(parent: &Path, stem: &str, restrict_mode: bool) -> Result<(File, PathBuf), PlatformError> {
     let pid = std::process::id();
     for _ in 0..MAX_TEMP_CREATE_ATTEMPTS {
         let seq = TMP_FILE_SEQ.fetch_add(1, Ordering::Relaxed);
         let tmp_path = parent.join(format!(".{stem}.tmp.{pid}.{seq}"));
-        match OpenOptions::new().write(true).create_new(true).open(&tmp_path) {
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(unix)]
+        if restrict_mode {
+            // Avoid briefly exposing restricted file contents under a permissive umask before chmod.
+            opts.mode(0o600);
+        }
+        #[cfg(not(unix))]
+        let _ = restrict_mode;
+        match opts.open(&tmp_path) {
             Ok(file) => return Ok((file, tmp_path)),
             Err(err) if err.kind() == ErrorKind::AlreadyExists => continue,
             Err(err) => return Err(io_err(&format!("create temp file `{}`", tmp_path.display()), &err)),
@@ -345,6 +417,55 @@ mod tests {
         if dev_zero.exists() {
             assert!(matches!(read_regular_file_bytes(dev_zero, 1024), Err(PlatformError::InvalidPath { .. })));
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn write_atomic_preserves_restrictive_permissions_and_follows_symlinks() {
+        use std::os::unix::fs::{PermissionsExt as _, symlink};
+
+        let dir = temp_dir("perms-symlink");
+        let secret = dir.join("secret.lumencraft");
+        std::fs::write(&secret, b"v1").unwrap();
+        std::fs::set_permissions(&secret, std::fs::Permissions::from_mode(0o600)).unwrap();
+
+        write_atomic(&secret, b"v2").unwrap();
+        let mode_after = std::fs::metadata(&secret).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode_after, 0o600, "restrictive mode must be preserved across atomic overwrite");
+        assert_eq!(std::fs::read(&secret).unwrap(), b"v2");
+
+        // Update through a multi-hop symlink chain: link_outer -> link_inner -> target_dir/prefs.json
+        let target_dir = dir.join("real");
+        std::fs::create_dir_all(&target_dir).unwrap();
+        let real_prefs = target_dir.join("prefs.json");
+        std::fs::write(&real_prefs, b"{\"theme\":\"light\"}").unwrap();
+        std::fs::set_permissions(&real_prefs, std::fs::Permissions::from_mode(0o640)).unwrap();
+
+        let link_inner = dir.join("inner_prefs.json");
+        symlink("real/prefs.json", &link_inner).unwrap();
+        let link_outer = dir.join("outer_prefs.json");
+        symlink(&link_inner, &link_outer).unwrap();
+
+        write_atomic(&link_outer, b"{\"theme\":\"dark\"}").unwrap();
+        assert!(std::fs::symlink_metadata(&link_outer).unwrap().file_type().is_symlink(), "outer symlink should remain a symlink");
+        assert!(std::fs::symlink_metadata(&link_inner).unwrap().file_type().is_symlink(), "inner symlink should remain a symlink");
+        assert_eq!(std::fs::read(&real_prefs).unwrap(), b"{\"theme\":\"dark\"}");
+        assert_eq!(std::fs::metadata(&real_prefs).unwrap().permissions().mode() & 0o777, 0o640);
+        assert!(list_dir_entries(&target_dir).iter().all(|name| !name.starts_with('.')));
+
+        // Dangling symlink populates target without clobbering the symlink itself.
+        let dangling_target = target_dir.join("future.json");
+        let dangling_link = dir.join("dangling.json");
+        symlink(&dangling_target, &dangling_link).unwrap();
+        write_atomic(&dangling_link, b"created-via-symlink").unwrap();
+        assert!(std::fs::symlink_metadata(&dangling_link).unwrap().file_type().is_symlink());
+        assert_eq!(std::fs::read(&dangling_target).unwrap(), b"created-via-symlink");
+        assert_eq!(std::fs::read(&dangling_link).unwrap(), b"created-via-symlink");
+
+        // Writing over an existing directory is rejected explicitly.
+        assert!(matches!(write_atomic(&target_dir, b"nope"), Err(PlatformError::InvalidPath { .. })));
 
         let _ = std::fs::remove_dir_all(&dir);
     }

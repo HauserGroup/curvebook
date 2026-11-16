@@ -133,13 +133,9 @@ fn build_rich_valid_project() -> Result<ProjectDocument, FormatError> {
     gsheet.spec.point_overrides.push(PointStyleOverride {
         series_index: 0,
         point_index: 0,
-        color: None,
-        symbol: None,
         size_pt: Some(6.0),
         border_width_pt: Some(1.0),
-        fill_color: None,
-        fill_mode: None,
-        hidden: false,
+        ..PointStyleOverride::default()
     });
     gsheet.spec.legend.position_pt = Some((20.0, 20.0));
     gsheet.floating_notes.push(FloatingNote::new("gn-1", RectPt::new(10.0, 10.0, 50.0, 25.0), "Graph Note"));
