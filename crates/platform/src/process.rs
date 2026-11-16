@@ -2,7 +2,11 @@
 //! wall-clock and idle timeouts, output byte caps, and guaranteed drop-kill cleanup.
 
 #[cfg(not(target_arch = "wasm32"))]
+use std::ffi::OsString;
+#[cfg(not(target_arch = "wasm32"))]
 use std::io::{ErrorKind, Read, Write};
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+use std::os::unix::fs::PermissionsExt as _;
 #[cfg(all(not(target_arch = "wasm32"), unix))]
 use std::os::unix::process::CommandExt as _;
 #[cfg(all(not(target_arch = "wasm32"), windows))]
@@ -12,11 +16,11 @@ use std::path::{Path, PathBuf};
 #[cfg(not(target_arch = "wasm32"))]
 use std::process::{Child, Command, ExitStatus, Stdio};
 #[cfg(not(target_arch = "wasm32"))]
-use std::sync::Arc;
-#[cfg(not(target_arch = "wasm32"))]
 use std::sync::atomic::{AtomicBool, Ordering};
 #[cfg(not(target_arch = "wasm32"))]
 use std::sync::mpsc::{self, RecvTimeoutError};
+#[cfg(not(target_arch = "wasm32"))]
+use std::sync::{Arc, OnceLock};
 #[cfg(not(target_arch = "wasm32"))]
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -257,7 +261,13 @@ impl ProcessCommand {
     }
 
     fn spawn_child(&self) -> Result<Child, PlatformError> {
-        let mut cmd = Command::new(&self.program);
+        let sanitized_env = build_sanitized_env_from(std::env::vars_os(), &self.env_vars, &self.env_remove);
+        let executable = resolve_program_path(&self.program, &sanitized_env)?;
+        let mut cmd = Command::new(&executable);
+        cmd.env_clear();
+        for (key, value) in &sanitized_env {
+            cmd.env(key, value);
+        }
         cmd.args(&self.args).stdout(if self.capture_stdout { Stdio::piped() } else { Stdio::null() }).stderr(if self.capture_stderr {
             Stdio::piped()
         } else {
@@ -275,12 +285,6 @@ impl ProcessCommand {
             const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
             cmd.creation_flags(CREATE_NEW_PROCESS_GROUP);
         }
-        for key in &self.env_remove {
-            cmd.env_remove(key);
-        }
-        for (key, value) in &self.env_vars {
-            cmd.env(key, value);
-        }
         if let Some(dir) = &self.current_dir {
             cmd.current_dir(dir);
         }
@@ -291,6 +295,256 @@ impl ProcessCommand {
             Err(err) => Err(PlatformError::Io { context: format!("spawn `{}`", self.program), message: err.to_string() }),
         }
     }
+}
+
+/// Return a cached, non-secret local host/machine fingerprint (`"<os>:<arch>:<host>"`) when
+/// running on a native OS, or `None` on `wasm32` / when unavailable.
+#[must_use]
+pub fn local_host_fingerprint() -> Option<String> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        static CACHED_HOST: OnceLock<Option<String>> = OnceLock::new();
+        CACHED_HOST.get_or_init(detect_local_host_fingerprint).clone()
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        None
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn sanitize_host_token(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let clean: String = trimmed.chars().filter(|ch| !ch.is_control() && *ch != '/').take(128).collect();
+    let normalized = clean.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        return None;
+    }
+    Some(format!("{}:{}:{normalized}", std::env::consts::OS, std::env::consts::ARCH))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn detect_local_host_fingerprint() -> Option<String> {
+    for path in ["/etc/machine-id", "/var/lib/dbus/machine-id", "/proc/sys/kernel/hostname"] {
+        if let Ok(raw) = crate::fs::read_regular_file_utf8(Path::new(path), 256)
+            && let Some(fp) = sanitize_host_token(&raw)
+        {
+            return Some(fp);
+        }
+    }
+    for (bin, args) in [("/bin/hostname", &[][..]), ("/usr/bin/uname", &["-n"][..])] {
+        if let Ok(out) =
+            ProcessCommand::new(bin).args(args).wall_timeout(Duration::from_secs(2)).idle_timeout(Duration::from_secs(2)).max_output_bytes(1024).run()
+            && out.success
+            && let Ok(text) = String::from_utf8(out.stdout)
+            && let Some(fp) = sanitize_host_token(&text)
+        {
+            return Some(fp);
+        }
+    }
+    None
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn detect_local_host_fingerprint() -> Option<String> {
+    std::env::var("COMPUTERNAME").ok().and_then(|raw| sanitize_host_token(&raw))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
+fn detect_local_host_fingerprint() -> Option<String> {
+    None
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+const DEFAULT_SAFE_UNIX_PATH: &str = "/usr/bin:/bin:/usr/sbin:/sbin";
+
+#[cfg(not(target_arch = "wasm32"))]
+fn env_keys_match(a: &str, b: &str) -> bool {
+    #[cfg(windows)]
+    {
+        a.eq_ignore_ascii_case(b)
+    }
+    #[cfg(not(windows))]
+    {
+        a == b
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn set_env_entry(entries: &mut Vec<(String, String)>, key: String, value: String) {
+    if let Some((_, existing_val)) = entries.iter_mut().find(|(k, _)| env_keys_match(k, &key)) {
+        *existing_val = value;
+    } else {
+        entries.push((key, value));
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn remove_env_entry(entries: &mut Vec<(String, String)>, key: &str) {
+    entries.retain(|(k, _)| !env_keys_match(k, key));
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn is_safe_scalar_env_value(val: &str, max_len: usize) -> bool {
+    !val.is_empty() && val.len() <= max_len && !val.chars().any(char::is_control)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn is_safe_unix_abs_path(val: &str) -> bool {
+    is_safe_scalar_env_value(val, 1024) && val.starts_with('/') && !val.split('/').any(|seg| seg == "..")
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn allowlisted_parent_env_entry(key: &str, val: &str) -> bool {
+    if key.starts_with("DYLD_") || key.starts_with("LD_") {
+        return false;
+    }
+    match key {
+        "TMPDIR" | "HOME" | "XDG_RUNTIME_DIR" | "XAUTHORITY" => is_safe_unix_abs_path(val),
+        "LANG" | "LC_CTYPE" | "LC_ALL" | "TZ" | "CUPS_SERVER" | "DISPLAY" | "WAYLAND_DISPLAY" | "__CF_USER_TEXT_ENCODING" => {
+            is_safe_scalar_env_value(val, 256)
+        }
+        _ => false,
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn allowlisted_parent_env_entry(key: &str, val: &str) -> bool {
+    if !is_safe_scalar_env_value(val, 512) {
+        return false;
+    }
+    ["SystemRoot", "WINDIR", "SystemDrive", "COMSPEC", "PATHEXT", "TEMP", "TMP", "USERPROFILE", "APPDATA", "LOCALAPPDATA"]
+        .iter()
+        .any(|allowed| key.eq_ignore_ascii_case(allowed))
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(any(unix, windows))))]
+fn allowlisted_parent_env_entry(_key: &str, _val: &str) -> bool {
+    false
+}
+
+#[cfg(all(not(target_arch = "wasm32"), windows))]
+fn resolve_windows_system_root_from_pairs(pairs: &[(String, String)]) -> String {
+    for candidate_key in ["SystemRoot", "WINDIR"] {
+        if let Some((_, val)) = pairs.iter().find(|(k, _)| k.eq_ignore_ascii_case(candidate_key))
+            && is_safe_scalar_env_value(val, 260)
+        {
+            return val.trim_end_matches(['\\', '/']).to_owned();
+        }
+    }
+    String::from(r"C:\Windows")
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn build_sanitized_env_from<I>(parent_env: I, explicit_vars: &[(String, String)], explicit_remove: &[String]) -> Vec<(String, String)>
+where
+    I: IntoIterator<Item = (OsString, OsString)>,
+{
+    let mut parent_utf8 = Vec::new();
+    for (raw_k, raw_v) in parent_env {
+        if let (Ok(k), Ok(v)) = (raw_k.into_string(), raw_v.into_string())
+            && !k.is_empty()
+            && !k.contains('=')
+            && !k.contains('\0')
+            && !v.contains('\0')
+        {
+            parent_utf8.push((k, v));
+        }
+    }
+
+    let mut out = Vec::new();
+    #[cfg(unix)]
+    set_env_entry(&mut out, String::from("PATH"), String::from(DEFAULT_SAFE_UNIX_PATH));
+    #[cfg(windows)]
+    {
+        let root = resolve_windows_system_root_from_pairs(&parent_utf8);
+        let safe_path = format!(r"{root}\System32;{root};{root}\System32\Wbem;{root}\System32\WindowsPowerShell\v1.0");
+        set_env_entry(&mut out, String::from("PATH"), safe_path);
+    }
+
+    for (key, val) in parent_utf8 {
+        if allowlisted_parent_env_entry(&key, &val) {
+            set_env_entry(&mut out, key, val);
+        }
+    }
+    for key in explicit_remove {
+        remove_env_entry(&mut out, key);
+    }
+    for (key, val) in explicit_vars {
+        if !key.is_empty() && !key.contains('=') && !key.contains('\0') && !val.contains('\0') {
+            set_env_entry(&mut out, key.clone(), val.clone());
+        }
+    }
+    out
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn has_explicit_path_separator(program: &str) -> bool {
+    #[cfg(windows)]
+    {
+        program.contains('/') || program.contains('\\') || program.contains(':')
+    }
+    #[cfg(not(windows))]
+    {
+        program.contains('/')
+    }
+}
+
+#[cfg(all(not(target_arch = "wasm32"), unix))]
+fn is_executable_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file() && (meta.permissions().mode() & 0o111) != 0)
+}
+
+#[cfg(all(not(target_arch = "wasm32"), not(unix)))]
+fn is_executable_regular_file(path: &Path) -> bool {
+    std::fs::metadata(path).is_ok_and(|meta| meta.is_file())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn resolve_program_path(program: &str, sanitized_env: &[(String, String)]) -> Result<PathBuf, PlatformError> {
+    if program.is_empty() || program.contains('\0') {
+        return Err(PlatformError::ProgramNotFound { program: program.to_owned() });
+    }
+    if has_explicit_path_separator(program) {
+        return Ok(PathBuf::from(program));
+    }
+    let Some((_, path_val)) = sanitized_env.iter().find(|(k, _)| env_keys_match(k, "PATH")) else {
+        return Err(PlatformError::ProgramNotFound { program: program.to_owned() });
+    };
+    #[cfg(windows)]
+    let pathext: Vec<String> = sanitized_env
+        .iter()
+        .find(|(k, _)| env_keys_match(k, "PATHEXT"))
+        .map(|(_, v)| v.as_str())
+        .unwrap_or(".COM;.EXE;.BAT;.CMD;.PS1")
+        .split(';')
+        .map(str::trim)
+        .filter(|ext| ext.starts_with('.'))
+        .map(str::to_owned)
+        .collect();
+
+    for dir in std::env::split_paths(path_val) {
+        if dir.as_os_str().is_empty() {
+            continue;
+        }
+        let direct = dir.join(program);
+        if is_executable_regular_file(&direct) {
+            return Ok(direct);
+        }
+        #[cfg(windows)]
+        if Path::new(program).extension().is_none() {
+            for ext in &pathext {
+                let with_ext = dir.join(format!("{program}{ext}"));
+                if is_executable_regular_file(&with_ext) {
+                    return Ok(with_ext);
+                }
+            }
+        }
+    }
+    Err(PlatformError::ProgramNotFound { program: program.to_owned() })
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -351,12 +605,16 @@ fn kill_process_group(pgid: u32) {
         return;
     }
     let target = format!("-{pgid}");
-    for bin in ["/bin/kill", "/usr/bin/kill", "kill"] {
-        if let Ok(mut killer) =
-            Command::new(bin).args(["-s", "KILL", "--", &target]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-        {
-            let _ = killer.wait();
-            return;
+    for bin in ["/bin/kill", "/usr/bin/kill"] {
+        let mut cmd = Command::new(bin);
+        cmd.env_clear().args(["-s", "KILL", "--", &target]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+        match cmd.spawn() {
+            Ok(mut killer) => {
+                let _ = killer.wait();
+                return;
+            }
+            Err(err) if err.kind() == ErrorKind::NotFound => continue,
+            Err(_) => return,
         }
     }
 }
@@ -366,10 +624,16 @@ fn kill_process_group(pgid: u32) {
     if pgid <= 1 || pgid == std::process::id() {
         return;
     }
+    let system_root = std::env::var("SystemRoot")
+        .or_else(|_| std::env::var("WINDIR"))
+        .ok()
+        .filter(|v| is_safe_scalar_env_value(v, 260))
+        .unwrap_or_else(|| String::from(r"C:\Windows"));
+    let taskkill_path = PathBuf::from(system_root.trim_end_matches(['\\', '/'])).join("System32").join("taskkill.exe");
     let pid_str = pgid.to_string();
-    if let Ok(mut killer) =
-        Command::new("taskkill").args(["/PID", &pid_str, "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null()).spawn()
-    {
+    let mut cmd = Command::new(taskkill_path);
+    cmd.env_clear().args(["/PID", &pid_str, "/T", "/F"]).stdin(Stdio::null()).stdout(Stdio::null()).stderr(Stdio::null());
+    if let Ok(mut killer) = cmd.spawn() {
         let _ = killer.wait();
     }
 }
@@ -807,7 +1071,7 @@ mod tests {
         assert!(!pid_str.is_empty(), "empty descendant pid");
         let reap_deadline = Instant::now() + Duration::from_secs(1);
         loop {
-            let alive = std::process::Command::new("kill")
+            let alive = std::process::Command::new("/bin/kill")
                 .args(["-0", &pid_str])
                 .stdin(std::process::Stdio::null())
                 .stdout(std::process::Stdio::null())
@@ -841,5 +1105,121 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, PlatformError::OutputLimitExceeded { stream: "stdout", limit_bytes: 512, .. }));
         assert!(start.elapsed() < Duration::from_secs(2));
+    }
+
+    #[test]
+    fn sanitized_environment_strips_secrets_loader_vars_and_untrusted_path() {
+        use std::ffi::OsString;
+
+        use super::{build_sanitized_env_from, local_host_fingerprint};
+
+        let fake_parent = vec![
+            (OsString::from("LD_PRELOAD"), OsString::from("/tmp/evil.so")),
+            (OsString::from("LD_LIBRARY_PATH"), OsString::from("/tmp/evil-lib")),
+            (OsString::from("DYLD_INSERT_LIBRARIES"), OsString::from("/tmp/evil.dylib")),
+            (OsString::from("DYLD_LIBRARY_PATH"), OsString::from("/tmp/evil-dyld")),
+            (OsString::from("DYLD_FRAMEWORK_PATH"), OsString::from("/tmp/evil-fw")),
+            (OsString::from("CURVEBOOK_CONTROL_TOKEN"), OsString::from("secret-control-token")),
+            (OsString::from("AWS_SECRET_ACCESS_KEY"), OsString::from("aws-secret")),
+            (OsString::from("GITHUB_TOKEN"), OsString::from("dummy-git-credential-placeholder")),
+            (OsString::from("ARBITRARY_USER_VAR"), OsString::from("leaked")),
+            (OsString::from("PATH"), OsString::from("/tmp/attacker-bin:/usr/bin:/bin")),
+            (OsString::from("LANG"), OsString::from("en_US.UTF-8")),
+            (OsString::from("TMPDIR"), OsString::from("/tmp/safe-sub")),
+            (OsString::from("HOME"), OsString::from("/tmp/../escape")),
+        ];
+        let overrides = vec![(String::from("EXPLICIT_KEY"), String::from("explicit-val"))];
+        let removals = vec![String::from("TMPDIR")];
+        let env = build_sanitized_env_from(fake_parent, &overrides, &removals);
+
+        for forbidden in [
+            "LD_PRELOAD",
+            "LD_LIBRARY_PATH",
+            "DYLD_INSERT_LIBRARIES",
+            "DYLD_LIBRARY_PATH",
+            "DYLD_FRAMEWORK_PATH",
+            "CURVEBOOK_CONTROL_TOKEN",
+            "AWS_SECRET_ACCESS_KEY",
+            "GITHUB_TOKEN",
+            "ARBITRARY_USER_VAR",
+            "TMPDIR",
+            "HOME",
+        ] {
+            assert!(!env.iter().any(|(k, _)| k == forbidden), "forbidden variable `{forbidden}` leaked into child env: {env:?}");
+        }
+        let path_val = env.iter().find(|(k, _)| k.eq_ignore_ascii_case("PATH")).map(|(_, v)| v.as_str()).expect("pinned PATH present");
+        assert!(!path_val.contains("attacker-bin"), "untrusted parent PATH leaked: {path_val}");
+        assert!(env.iter().any(|(k, v)| k == "EXPLICIT_KEY" && v == "explicit-val"));
+        #[cfg(unix)]
+        {
+            assert_eq!(path_val, "/usr/bin:/bin:/usr/sbin:/sbin");
+            assert!(env.iter().any(|(k, v)| k == "LANG" && v == "en_US.UTF-8"));
+        }
+
+        let fp = local_host_fingerprint().expect("native host fingerprint");
+        assert!(fp.starts_with(std::env::consts::OS));
+        assert!(fp.split(':').count() >= 3);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn end_to_end_child_process_receives_cleaned_env_and_safe_kill_path() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        if std::env::var_os("CB_RV06_INJECTED_PARENT_MODE").is_some() {
+            assert_eq!(std::env::var("CURVEBOOK_CONTROL_TOKEN").as_deref(), Ok("top-secret-bearer-token"));
+            let marker = std::env::var("CB_RV06_MARKER_FILE").expect("marker path");
+
+            let env_out = ProcessCommand::new("sh").args(["-c", "env"]).env("CB_EXPLICIT_OK", "allowed-1").run().expect("run sh env");
+            assert!(env_out.success);
+            let child_env = String::from_utf8_lossy(&env_out.stdout);
+            assert!(!child_env.contains("top-secret-bearer-token"), "control token leaked: {child_env}");
+            assert!(!child_env.contains("CURVEBOOK_CONTROL_TOKEN="), "token key leaked: {child_env}");
+            assert!(!child_env.contains("AWS_SECRET_ACCESS_KEY="), "aws secret leaked: {child_env}");
+            assert!(!child_env.contains("CB_ARBITRARY_SHELL_VAR="), "arbitrary var leaked: {child_env}");
+            assert!(!child_env.contains("cb-rv06-hijack"), "untrusted PATH leaked: {child_env}");
+            assert!(child_env.contains("CB_EXPLICIT_OK=allowed-1"), "explicit env missing: {child_env}");
+
+            let id_out = ProcessCommand::new("id").arg("-u").run().expect("run system id");
+            assert!(id_out.success);
+            assert!(String::from_utf8_lossy(&id_out.stdout).trim().parse::<u32>().is_ok(), "hijacked `id` executed instead of system `id`");
+
+            let _ = ProcessCommand::new("sh")
+                .args(["-c", "sleep 5"])
+                .wall_timeout(Duration::from_millis(80))
+                .idle_timeout(Duration::from_secs(2))
+                .run()
+                .expect_err("sleep must time out");
+            assert!(!std::path::Path::new(&marker).exists(), "hostile PATH hijacked `kill` or `id`!");
+            return;
+        }
+
+        let hijack_dir = std::env::temp_dir().join(format!("cb-rv06-hijack-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&hijack_dir);
+        std::fs::create_dir_all(&hijack_dir).expect("create hijack dir");
+        let marker_file = hijack_dir.join("hijacked.txt");
+        for fake_bin in ["kill", "id"] {
+            let script_path = hijack_dir.join(fake_bin);
+            let script = format!("#!/bin/sh\necho hijacked > '{}'\necho 999999\nexit 0\n", marker_file.display());
+            std::fs::write(&script_path, script).expect("write fake script");
+            std::fs::set_permissions(&script_path, std::fs::Permissions::from_mode(0o755)).expect("chmod +x");
+        }
+
+        let orig_path = std::env::var("PATH").unwrap_or_else(|_| String::from("/usr/bin:/bin"));
+        let poisoned_path = format!("{}:{orig_path}", hijack_dir.display());
+        let status = std::process::Command::new(std::env::current_exe().expect("current test exe"))
+            .args(["--exact", "process::tests::end_to_end_child_process_receives_cleaned_env_and_safe_kill_path", "--nocapture"])
+            .env("CB_RV06_INJECTED_PARENT_MODE", "1")
+            .env("CB_RV06_MARKER_FILE", &marker_file)
+            .env("CURVEBOOK_CONTROL_TOKEN", "top-secret-bearer-token")
+            .env("AWS_SECRET_ACCESS_KEY", "fake-aws-secret-value")
+            .env("CB_ARBITRARY_SHELL_VAR", "should-not-inherit")
+            .env("PATH", poisoned_path)
+            .status()
+            .expect("spawn re-entrant env check");
+        let marker_existed = marker_file.exists();
+        let _ = std::fs::remove_dir_all(&hijack_dir);
+        assert!(status.success(), "re-entrant subprocess env check failed: {status}");
+        assert!(!marker_existed, "hostile PATH script was invoked");
     }
 }

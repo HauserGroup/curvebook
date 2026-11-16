@@ -101,10 +101,18 @@ impl Effects {
         names
     }
 
-    /// Hint for callers (such as MCP tool metadata) whether this command is effectively read-only.
+    /// Hint for callers (such as MCP tool metadata) whether this command is document/system read-only.
     #[must_use]
     pub const fn read_only_hint(self) -> bool {
         !self.intersects(Self::MUTATES_DOCUMENT.with(Self::WRITES_FILESYSTEM).with(Self::LAUNCHES_PROCESS).with(Self::MAY_DISCARD_DATA))
+    }
+
+    /// Return `true` when this command is a pure read-only inspection with zero document, UI-state,
+    /// filesystem, process, or data-discard side effects (safe for non-UI callers under strict
+    /// `--gui-only` policy).
+    #[must_use]
+    pub const fn strict_gui_only_allowed(self) -> bool {
+        self.read_only_hint() && !self.intersects(Self::READS_FILESYSTEM.with(Self::CHANGES_UI_STATE))
     }
 
     /// Hint for callers whether this command may discard or overwrite user data.
@@ -142,9 +150,14 @@ mod tests {
     fn combinators_and_hints_work_accurately() {
         assert!(Effects::NONE.is_empty());
         assert!(Effects::NONE.read_only_hint());
+        assert!(Effects::NONE.strict_gui_only_allowed());
         assert!(!Effects::NONE.destructive_hint());
         assert!(!Effects::NONE.needs_consent());
         assert!(Effects::NONE.flag_names().is_empty());
+
+        let ui_select = Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT);
+        assert!(ui_select.read_only_hint());
+        assert!(!ui_select.strict_gui_only_allowed());
 
         let export = Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT);
         assert!(!export.read_only_hint());

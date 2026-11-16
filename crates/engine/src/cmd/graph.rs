@@ -467,7 +467,7 @@ fn schema_graph_set_kind() -> Value {
         ],
         &["sheet_id", "kind"],
         vec![("sheet_id", &["id"])],
-        true,
+        false,
     )
 }
 

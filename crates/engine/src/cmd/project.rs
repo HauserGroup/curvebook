@@ -78,7 +78,7 @@ fn new_project_schema() -> Value {
         vec![("title", nullable_schema(str_schema("Title for the new project (defaults to `Untitled Project`)")))],
         &[],
         vec![("title", &["name"])],
-        true,
+        false,
     )
 }
 
@@ -123,7 +123,7 @@ fn open_project_schema() -> Value {
             ("bytes_base64", &["bytesBase64", "archive_base64"]),
             ("unpacked", &["unpacked_dir", "unpackedDir"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -189,7 +189,7 @@ fn save_project_schema() -> Value {
             ("return_bytes", &["returnBytes", "include_bytes", "includeBytes"]),
             ("unpacked", &["unpacked_dir", "unpackedDir"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -255,7 +255,7 @@ fn save_template_schema() -> Value {
         ],
         &[],
         vec![("path", &["file_path", "filePath"]), ("return_bytes", &["returnBytes", "include_bytes", "includeBytes"])],
-        true,
+        false,
     )
 }
 
@@ -302,7 +302,7 @@ fn instantiate_template_schema() -> Value {
             ("bytes_base64", &["bytesBase64", "archive_base64"]),
             ("title", &["project_title", "projectTitle"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -345,7 +345,7 @@ fn inspect_project_schema() -> Value {
         vec![("sheet_id", nullable_schema(str_schema("Optional sheet ID to focus dependency and section inspection on")))],
         &[],
         vec![("sheet_id", &["sheetId", "id"])],
-        true,
+        false,
     )
 }
 
@@ -477,7 +477,7 @@ fn recalculate_schema() -> Value {
         )],
         &[],
         vec![("include_external_links", &["includeExternalLinks"])],
-        true,
+        false,
     )
 }
 
@@ -523,7 +523,7 @@ fn create_checkpoint_schema() -> Value {
             ("note", &["description"]),
             ("timestamp_utc", &["timestampUtc", "created_utc", "createdUtc"]),
         ],
-        true,
+        false,
     )
 }
 
@@ -665,7 +665,7 @@ fn checkpoint_ref_schema() -> Value {
         vec![("id", nullable_schema(str_schema("Checkpoint ID to locate"))), ("name", nullable_schema(str_schema("Checkpoint name to locate")))],
         &[],
         vec![("id", &["checkpoint_id", "checkpointId"]), ("name", &["checkpoint_name", "checkpointName", "title"])],
-        true,
+        false,
     )
 }
 

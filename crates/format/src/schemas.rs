@@ -303,6 +303,7 @@ pub fn journal_record_schema() -> serde_json::Value {
             ("owner_id", string_schema().with_min_length(1)),
             ("acquired_epoch_ms", integer_schema().with_minimum_i64(0)),
             ("ttl_ms", integer_schema().with_minimum_i64(0)),
+            ("host_id", nullable_schema(string_schema().with_min_length(1))),
         ],
         &["owner_id", "acquired_epoch_ms", "ttl_ms"],
         false,

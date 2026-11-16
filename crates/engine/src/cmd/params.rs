@@ -41,11 +41,22 @@ pub fn obj_schema(props: Vec<(&str, Value)>, required: &[&str], additional_prope
 /// `canonical_key` during [`parse_params`] before validation and deserialization.
 #[must_use]
 pub fn obj_schema_with_aliases(props: Vec<(&str, Value)>, required: &[&str], aliases: Vec<(&str, &[&str])>, additional_properties: bool) -> Value {
+    let has_variables_and_auto_family = props.iter().any(|(name, _)| *name == "variables") && props.iter().any(|(name, _)| *name == "auto_family");
     let mut schema = obj_schema(props, required, additional_properties);
     let mut alias_map = Map::new();
     for (canonical, list) in aliases {
-        let items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
+        let mut items: Vec<Value> = list.iter().map(|a| Value::String((*a).to_owned())).collect();
+        if canonical == "titles" && list.contains(&"data_set_titles") {
+            for extra in ["y_titles", "yTitles"] {
+                if !list.contains(&extra) {
+                    items.push(Value::String(String::from(extra)));
+                }
+            }
+        }
         alias_map.insert(canonical.to_owned(), Value::Array(items));
+    }
+    if has_variables_and_auto_family && !alias_map.contains_key("variables") {
+        alias_map.insert(String::from("variables"), json!(["titles", "variable_titles", "variableTitles"]));
     }
     if let Value::Object(ref mut map) = schema
         && !alias_map.is_empty()
@@ -163,16 +174,475 @@ pub fn schema_node_to_value(node: &curvebook_doc::SchemaNode) -> Result<Value, E
 }
 
 /// Validate `raw` against a Draft 2020-12 JSON Schema, reporting RFC-6901 JSON-pointer errors,
-/// and deserialize into `T`.
+/// and deserialize into `T` while rejecting undeclared fields on closed parameter structs.
 ///
 /// # Errors
 /// Returns [`EngineError`] with [`ErrorCode::BadInput`] and `details: { "pointer": "..." }`
 /// if validation or deserialization fails.
 pub fn parse_params<T: DeserializeOwned>(schema: &Value, mut raw: Value) -> Result<T, EngineError> {
     validate_value(schema, schema, &mut raw, "", 0)?;
-    serde_json::from_value::<T>(raw).map_err(|err| {
-        EngineError::with_code(ErrorCode::BadInput, format!("invalid command parameters: {err}")).with_details(json!({ "pointer": "" }))
-    })
+    let de = StrictValueDeserializer { value: &raw, pointer: String::new(), field_name: None, allow_ignored_fields: is_open_catchall_schema(schema) };
+    T::deserialize(de).map_err(StrictDeError::into_engine_error)
+}
+
+fn is_open_catchall_schema(schema: &Value) -> bool {
+    let Some(obj) = schema.as_object() else {
+        return false;
+    };
+    let props_empty = obj.get("properties").and_then(Value::as_object).is_some_and(Map::is_empty);
+    let additional_true = obj.get("additionalProperties") == Some(&Value::Bool(true));
+    props_empty && additional_true
+}
+
+#[derive(Debug)]
+struct StrictDeError {
+    pointer: String,
+    message: String,
+    is_unknown_field: bool,
+}
+
+impl StrictDeError {
+    fn from_serde(pointer: String, err: impl std::fmt::Display) -> Self {
+        Self { pointer, message: err.to_string(), is_unknown_field: false }
+    }
+
+    fn unknown_field(pointer: String, field_name: Option<String>) -> Self {
+        let message = match field_name {
+            Some(name) => format!("unknown field `{name}`"),
+            None => String::from("unexpected extra parameter"),
+        };
+        Self { pointer, message, is_unknown_field: true }
+    }
+
+    fn with_fallback_pointer(mut self, fallback: &str) -> Self {
+        if self.pointer.is_empty() && !fallback.is_empty() {
+            self.pointer = fallback.to_owned();
+        }
+        self
+    }
+
+    fn into_engine_error(self) -> EngineError {
+        if self.is_unknown_field {
+            pointer_error(&self.pointer, self.message)
+        } else {
+            pointer_error(&self.pointer, format!("invalid command parameters: {}", self.message))
+        }
+    }
+}
+
+impl std::fmt::Display for StrictDeError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for StrictDeError {}
+
+impl serde::de::Error for StrictDeError {
+    fn custom<T: std::fmt::Display>(msg: T) -> Self {
+        Self { pointer: String::new(), message: msg.to_string(), is_unknown_field: false }
+    }
+}
+
+macro_rules! forward_strict_scalar {
+    ($($method:ident),* $(,)?) => {
+        $(
+            fn $method<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+            where
+                V: serde::de::Visitor<'de>,
+            {
+                let ptr = self.pointer;
+                serde::Deserializer::$method(self.value, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        )*
+    };
+}
+
+struct StrictValueDeserializer<'de> {
+    value: &'de Value,
+    pointer: String,
+    field_name: Option<String>,
+    allow_ignored_fields: bool,
+}
+
+impl<'de> StrictValueDeserializer<'de> {
+    fn visit_array<V>(self, arr: &'de [Value], visitor: V) -> Result<V::Value, StrictDeError>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        let ptr = self.pointer;
+        let seq = StrictSeqAccess { iter: arr.iter().enumerate(), base_pointer: ptr.clone(), allow_ignored_fields: self.allow_ignored_fields };
+        visitor.visit_seq(seq).map_err(|err| err.with_fallback_pointer(&ptr))
+    }
+
+    fn visit_object<V>(self, map: &'de Map<String, Value>, visitor: V) -> Result<V::Value, StrictDeError>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        let ptr = self.pointer;
+        let access = StrictMapAccess { iter: map.iter(), pending: None, base_pointer: ptr.clone(), allow_ignored_fields: self.allow_ignored_fields };
+        visitor.visit_map(access).map_err(|err| err.with_fallback_pointer(&ptr))
+    }
+}
+
+impl<'de> serde::Deserializer<'de> for StrictValueDeserializer<'de> {
+    type Error = StrictDeError;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Array(arr) => self.visit_array(arr, visitor),
+            Value::Object(map) => self.visit_object(map, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_any(self.value, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    forward_strict_scalar!(
+        deserialize_bool,
+        deserialize_i8,
+        deserialize_i16,
+        deserialize_i32,
+        deserialize_i64,
+        deserialize_i128,
+        deserialize_u8,
+        deserialize_u16,
+        deserialize_u32,
+        deserialize_u64,
+        deserialize_u128,
+        deserialize_f32,
+        deserialize_f64,
+        deserialize_char,
+        deserialize_str,
+        deserialize_string,
+        deserialize_bytes,
+        deserialize_byte_buf,
+        deserialize_unit,
+        deserialize_identifier,
+    );
+
+    fn deserialize_unit_struct<V>(self, name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        let ptr = self.pointer;
+        serde::Deserializer::deserialize_unit_struct(self.value, name, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        if self.value.is_null() {
+            let ptr = self.pointer;
+            visitor.visit_none().map_err(|err: StrictDeError| err.with_fallback_pointer(&ptr))
+        } else {
+            let ptr = self.pointer.clone();
+            visitor.visit_some(self).map_err(|err| err.with_fallback_pointer(&ptr))
+        }
+    }
+
+    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        let ptr = self.pointer.clone();
+        visitor.visit_newtype_struct(self).map_err(|err| err.with_fallback_pointer(&ptr))
+    }
+
+    fn deserialize_seq<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Array(arr) => self.visit_array(arr, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_seq(self.value, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_tuple<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Array(arr) => self.visit_array(arr, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_tuple(self.value, len, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_tuple_struct<V>(self, name: &'static str, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Array(arr) => self.visit_array(arr, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_tuple_struct(self.value, name, len, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_map<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Object(map) => self.visit_object(map, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_map(self.value, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_struct<V>(self, name: &'static str, fields: &'static [&'static str], visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::Array(arr) => self.visit_array(arr, visitor),
+            Value::Object(map) => self.visit_object(map, visitor),
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_struct(self.value, name, fields, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_enum<V>(self, name: &'static str, variants: &'static [&'static str], visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        match self.value {
+            Value::String(variant) => {
+                let ptr = self.pointer;
+                visitor
+                    .visit_enum(serde::de::value::BorrowedStrDeserializer::<StrictDeError>::new(variant.as_str()))
+                    .map_err(|err| err.with_fallback_pointer(&ptr))
+            }
+            Value::Object(map) if map.len() == 1 => {
+                if let Some((variant, payload)) = map.iter().next() {
+                    let variant_ptr = append_pointer(&self.pointer, variant);
+                    let ptr = self.pointer;
+                    return visitor
+                        .visit_enum(StrictEnumAccess {
+                            variant: variant.as_str(),
+                            payload,
+                            pointer: variant_ptr,
+                            allow_ignored_fields: self.allow_ignored_fields,
+                        })
+                        .map_err(|err| err.with_fallback_pointer(&ptr));
+                }
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_enum(self.value, name, variants, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+            _ => {
+                let ptr = self.pointer;
+                serde::Deserializer::deserialize_enum(self.value, name, variants, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+            }
+        }
+    }
+
+    fn deserialize_ignored_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        if self.allow_ignored_fields {
+            let ptr = self.pointer;
+            serde::Deserializer::deserialize_ignored_any(self.value, visitor).map_err(|err| StrictDeError::from_serde(ptr, err))
+        } else {
+            Err(StrictDeError::unknown_field(self.pointer, self.field_name))
+        }
+    }
+}
+
+struct StrictSeqAccess<I> {
+    iter: I,
+    base_pointer: String,
+    allow_ignored_fields: bool,
+}
+
+impl<'de, I> serde::de::SeqAccess<'de> for StrictSeqAccess<I>
+where
+    I: Iterator<Item = (usize, &'de Value)>,
+{
+    type Error = StrictDeError;
+
+    fn next_element_seed<T>(&mut self, seed: T) -> Result<Option<T::Value>, Self::Error>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
+        let Some((idx, item)) = self.iter.next() else {
+            return Ok(None);
+        };
+        let child_ptr = append_pointer(&self.base_pointer, &idx.to_string());
+        let de =
+            StrictValueDeserializer { value: item, pointer: child_ptr.clone(), field_name: None, allow_ignored_fields: self.allow_ignored_fields };
+        seed.deserialize(de).map(Some).map_err(|err| err.with_fallback_pointer(&child_ptr))
+    }
+}
+
+struct StrictMapAccess<'de, I> {
+    iter: I,
+    pending: Option<(&'de String, &'de Value)>,
+    base_pointer: String,
+    allow_ignored_fields: bool,
+}
+
+impl<'de, I> serde::de::MapAccess<'de> for StrictMapAccess<'de, I>
+where
+    I: Iterator<Item = (&'de String, &'de Value)>,
+{
+    type Error = StrictDeError;
+
+    fn next_key_seed<K>(&mut self, seed: K) -> Result<Option<K::Value>, Self::Error>
+    where
+        K: serde::de::DeserializeSeed<'de>,
+    {
+        let Some((key, val)) = self.iter.next() else {
+            return Ok(None);
+        };
+        self.pending = Some((key, val));
+        let key_ptr = append_pointer(&self.base_pointer, key);
+        let key_de = StrictMapKeyDeserializer { key: key.as_str(), pointer: &key_ptr };
+        seed.deserialize(key_de).map(Some).map_err(|err| err.with_fallback_pointer(&key_ptr))
+    }
+
+    fn next_value_seed<V>(&mut self, seed: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        let Some((key, val)) = self.pending.take() else {
+            return Err(StrictDeError::from_serde(self.base_pointer.clone(), "map value requested before key"));
+        };
+        let child_ptr = append_pointer(&self.base_pointer, key);
+        let de = StrictValueDeserializer {
+            value: val,
+            pointer: child_ptr.clone(),
+            field_name: Some(key.clone()),
+            allow_ignored_fields: self.allow_ignored_fields,
+        };
+        seed.deserialize(de).map_err(|err| err.with_fallback_pointer(&child_ptr))
+    }
+}
+
+#[derive(Clone, Copy)]
+struct StrictMapKeyDeserializer<'de, 'p> {
+    key: &'de str,
+    pointer: &'p str,
+}
+
+impl<'de> serde::Deserializer<'de> for StrictMapKeyDeserializer<'de, '_> {
+    type Error = StrictDeError;
+
+    fn deserialize_any<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_borrowed_str(self.key).map_err(|err: StrictDeError| err.with_fallback_pointer(self.pointer))
+    }
+
+    fn deserialize_option<V>(self, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_some(self).map_err(|err| err.with_fallback_pointer(self.pointer))
+    }
+
+    fn deserialize_newtype_struct<V>(self, _name: &'static str, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor.visit_newtype_struct(self).map_err(|err| err.with_fallback_pointer(self.pointer))
+    }
+
+    fn deserialize_enum<V>(self, _name: &'static str, _variants: &'static [&'static str], visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        visitor
+            .visit_enum(serde::de::value::BorrowedStrDeserializer::<StrictDeError>::new(self.key))
+            .map_err(|err| err.with_fallback_pointer(self.pointer))
+    }
+
+    serde::forward_to_deserialize_any! {
+        bool i8 i16 i32 i64 i128 u8 u16 u32 u64 u128 f32 f64 char str string
+        bytes byte_buf unit unit_struct seq tuple tuple_struct map struct
+        identifier ignored_any
+    }
+}
+
+struct StrictEnumAccess<'de> {
+    variant: &'de str,
+    payload: &'de Value,
+    pointer: String,
+    allow_ignored_fields: bool,
+}
+
+impl<'de> StrictEnumAccess<'de> {
+    fn into_deserializer(self) -> StrictValueDeserializer<'de> {
+        StrictValueDeserializer { value: self.payload, pointer: self.pointer, field_name: None, allow_ignored_fields: self.allow_ignored_fields }
+    }
+}
+
+impl<'de> serde::de::EnumAccess<'de> for StrictEnumAccess<'de> {
+    type Error = StrictDeError;
+    type Variant = Self;
+
+    fn variant_seed<V>(self, seed: V) -> Result<(V::Value, Self::Variant), Self::Error>
+    where
+        V: serde::de::DeserializeSeed<'de>,
+    {
+        let variant_de = serde::de::value::BorrowedStrDeserializer::<StrictDeError>::new(self.variant);
+        let val = seed.deserialize(variant_de).map_err(|err| err.with_fallback_pointer(&self.pointer))?;
+        Ok((val, self))
+    }
+}
+
+impl<'de> serde::de::VariantAccess<'de> for StrictEnumAccess<'de> {
+    type Error = StrictDeError;
+
+    fn unit_variant(self) -> Result<(), Self::Error> {
+        if self.payload.is_null() {
+            Ok(())
+        } else {
+            let ptr = self.pointer;
+            serde::Deserialize::deserialize(self.payload).map_err(|err| StrictDeError::from_serde(ptr, err))
+        }
+    }
+
+    fn newtype_variant_seed<T>(self, seed: T) -> Result<T::Value, Self::Error>
+    where
+        T: serde::de::DeserializeSeed<'de>,
+    {
+        let ptr = self.pointer.clone();
+        seed.deserialize(self.into_deserializer()).map_err(|err| err.with_fallback_pointer(&ptr))
+    }
+
+    fn tuple_variant<V>(self, len: usize, visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        serde::Deserializer::deserialize_tuple(self.into_deserializer(), len, visitor)
+    }
+
+    fn struct_variant<V>(self, fields: &'static [&'static str], visitor: V) -> Result<V::Value, Self::Error>
+    where
+        V: serde::de::Visitor<'de>,
+    {
+        serde::Deserializer::deserialize_struct(self.into_deserializer(), "", fields, visitor)
+    }
 }
 
 fn pointer_error(pointer: &str, message: impl Into<String>) -> EngineError {
@@ -436,10 +906,17 @@ fn validate_array_keywords(root: &Value, schema_obj: &Map<String, Value>, arr: &
 }
 
 fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, Value>) {
+    let props = schema_obj.get("properties").and_then(Value::as_object);
+    if props.is_some_and(|p| p.contains_key("merge") && p.contains_key("bytes_base64") && !p.contains_key("sheet_id")) {
+        for legacy_sheet_key in ["sheet_id", "sheetId"] {
+            if obj.get(legacy_sheet_key).is_some_and(|v| v.is_string() || v.is_null()) {
+                obj.remove(legacy_sheet_key);
+            }
+        }
+    }
     let Some(Value::Object(alias_map)) = schema_obj.get("x-aliases") else {
         return;
     };
-    let props = schema_obj.get("properties").and_then(Value::as_object);
     for (canonical, aliases_val) in alias_map {
         let Some(alias_list) = aliases_val.as_array() else {
             continue;
@@ -599,5 +1076,55 @@ mod tests {
         });
         let err = parse_params::<serde_json::Value>(&schema, json!({ "a/b~c": 0 })).expect_err("zero violates minimum 1");
         assert_eq!(err.details.as_ref().and_then(|d| d.get("pointer")).and_then(Value::as_str), Some("/a~1b~0c"));
+    }
+
+    #[test]
+    fn rejects_unknown_fields_on_closed_structs_even_if_schema_was_permissive() {
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct LooseSchemaClosedStruct {
+            #[serde(alias = "label")]
+            title: Option<String>,
+            nested: Option<CellUpdate>,
+        }
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct OpenPatchStruct {
+            sheet_id: String,
+            #[serde(flatten)]
+            extra: Map<String, Value>,
+        }
+
+        #[derive(Debug, Deserialize, PartialEq)]
+        struct EmptyCatchAllStruct {}
+
+        let permissive_schema =
+            obj_schema(vec![("title", nullable_schema(str_schema("Title"))), ("nested", nullable_schema(json!({ "type": "object" })))], &[], true);
+
+        // Declared serde alias still works cleanly.
+        let ok = parse_params::<LooseSchemaClosedStruct>(&permissive_schema, json!({ "label": "Dose" })).expect("serde alias accepted");
+        assert_eq!(ok.title.as_deref(), Some("Dose"));
+
+        // Unknown top-level field is rejected with exact RFC-6901 pointer.
+        let top_err = parse_params::<LooseSchemaClosedStruct>(&permissive_schema, json!({ "title": "Dose", "titel": "Typo" }))
+            .expect_err("unknown top-level field must fail");
+        assert_eq!(top_err.code, ErrorCode::BadInput);
+        assert!(top_err.message.contains("unknown field `titel`"), "got: {}", top_err.message);
+        assert_eq!(top_err.details.as_ref().and_then(|d| d.get("pointer")).and_then(Value::as_str), Some("/titel"));
+
+        // Unknown nested struct field is rejected with exact nested RFC-6901 pointer.
+        let nested_err =
+            parse_params::<LooseSchemaClosedStruct>(&permissive_schema, json!({ "nested": { "row": 0, "col": 1, "value": "5", "bogus": true } }))
+                .expect_err("unknown nested field must fail");
+        assert_eq!(nested_err.code, ErrorCode::BadInput);
+        assert_eq!(nested_err.details.as_ref().and_then(|d| d.get("pointer")).and_then(Value::as_str), Some("/nested/bogus"));
+
+        // Explicit `#[serde(flatten)] Map<String, Value>` patch structs continue to collect extra keys.
+        let patch_schema = obj_schema(vec![("sheet_id", non_empty_str_schema("Sheet"))], &["sheet_id"], true);
+        let patch = parse_params::<OpenPatchStruct>(&patch_schema, json!({ "sheet_id": "g-1", "min": 0.0 })).expect("patch struct collects extra");
+        assert_eq!(patch.extra.get("min"), Some(&json!(0.0)));
+
+        // Explicit empty-properties catch-all schema (`{"properties": {}, "additionalProperties": true}`) stays permissive.
+        let catchall_schema = json!({ "type": "object", "properties": {}, "additionalProperties": true });
+        parse_params::<EmptyCatchAllStruct>(&catchall_schema, json!({ "sheet_id": "res-1" })).expect("catch-all schema allowed");
     }
 }
