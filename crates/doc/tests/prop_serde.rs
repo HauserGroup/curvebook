@@ -469,6 +469,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
             ss_type: SumOfSquaresType::TypeIII,
             repeated_measures: RepeatedMeasuresDesign::RowFactorMatched,
+            residual_covariance: lumencraft_doc::ResidualCovariance::Unstructured,
             ..FactorialAnovaSpec::default()
         }),
         AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),

@@ -13,9 +13,9 @@ use lumencraft_doc::{
     MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec,
     NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
     PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
-    PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, ResultTabKind,
-    RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
-    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
+    PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell, ResultSheet,
+    ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype,
+    TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -628,6 +628,8 @@ pub struct AnalyzeDialogState {
     #[serde(default)]
     pub factorial_repeated_measures: RepeatedMeasuresDesign,
     #[serde(default)]
+    pub factorial_residual_covariance: ResidualCovariance,
+    #[serde(default)]
     pub factorial_ss_type: SumOfSquaresType,
     #[serde(default)]
     pub factorial_multiplicity: MultiplicityMethod,
@@ -768,6 +770,7 @@ impl Default for AnalyzeDialogState {
             contingency_expected_proportions: None,
             factorial_three_way: false,
             factorial_repeated_measures: RepeatedMeasuresDesign::None,
+            factorial_residual_covariance: ResidualCovariance::CompoundSymmetry,
             factorial_ss_type: SumOfSquaresType::TypeIII,
             factorial_multiplicity: MultiplicityMethod::None,
             cluster_distance: ClusterDistance::Euclidean,
@@ -820,6 +823,7 @@ impl AnalyzeDialogState {
         self.contingency_expected_proportions = None;
         self.factorial_three_way = false;
         self.factorial_repeated_measures = RepeatedMeasuresDesign::None;
+        self.factorial_residual_covariance = ResidualCovariance::CompoundSymmetry;
         self.factorial_ss_type = SumOfSquaresType::TypeIII;
         self.factorial_multiplicity = MultiplicityMethod::None;
         self.cluster_distance = ClusterDistance::Euclidean;
@@ -1067,6 +1071,10 @@ impl AnalyzeDialogState {
             "repeated_measures" | "analyze.factorial.repeated_measures" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
                 self.factorial_repeated_measures = parse_rm_design_str(raw)?;
+            }
+            "residual_covariance" | "factorial_residual_covariance" | "analyze.factorial.residual_covariance" => {
+                let raw = val.as_str().ok_or_else(|| String::from("`residual_covariance` must be a string"))?;
+                self.factorial_residual_covariance = parse_residual_covariance_str(raw)?;
             }
             "ss_type" | "sum_of_squares" | "analyze.factorial.ss_type" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`ss_type` must be a string"))?;
@@ -1393,6 +1401,7 @@ impl AnalyzeDialogState {
             AnalysisKind::FactorialAnova(fac) => {
                 fac.three_way = self.factorial_three_way;
                 fac.repeated_measures = self.factorial_repeated_measures;
+                fac.residual_covariance = self.factorial_residual_covariance;
                 fac.ss_type = self.factorial_ss_type;
                 fac.multiplicity.method = self.factorial_multiplicity;
                 if !predictor_cols.is_empty() {
@@ -2199,6 +2208,14 @@ impl EditAnalysisParametersState {
             ("repeated_measures" | "edit.factorial.repeated_measures", AnalysisKind::FactorialAnova(f)) => {
                 let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
                 f.repeated_measures = parse_rm_design_str(raw)?;
+                true
+            }
+            (
+                "residual_covariance" | "factorial_residual_covariance" | "edit.factorial.residual_covariance" | "edit.reml.residual_covariance",
+                AnalysisKind::FactorialAnova(f),
+            ) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`residual_covariance` must be a string"))?;
+                f.residual_covariance = parse_residual_covariance_str(raw)?;
                 true
             }
             ("ss_type" | "sum_of_squares" | "edit.factorial.ss_type", AnalysisKind::FactorialAnova(f)) => {

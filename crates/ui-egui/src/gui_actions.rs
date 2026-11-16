@@ -10,7 +10,7 @@
 
 use lumencraft_doc::{
     AnalysisKind, Cell, CellValue, CldOrdering, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod,
-    SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
+    ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use lumencraft_engine::{EngineError, cmd};
 use lumencraft_render::RenderTargetSpec;
@@ -512,6 +512,14 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
             let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::FactorialAnova(f)) if f.three_way);
             patch.insert(String::from("three_way"), json!(!cur));
         }
+        "edit.factorial.residual_covariance" => {
+            let cur_unstructured = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::FactorialAnova(f)) if f.residual_covariance == ResidualCovariance::Unstructured
+            );
+            let next = if cur_unstructured { "compound_symmetry" } else { "unstructured" };
+            patch.insert(String::from("residual_covariance"), json!(next));
+        }
         "edit.pca.standardize" => {
             let cur = matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, .. })));
             patch.insert(String::from("standardize"), json!(!cur));
@@ -595,6 +603,10 @@ fn try_toggle_analyze_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>,
         "analyze.correlation_all_pairs" => patch.insert(String::from("correlation_all_pairs"), json!(!an.correlation_all_pairs)),
         "analyze.correlation.heatmap" => patch.insert(String::from("correlation_heatmap"), json!(!an.correlation_heatmap)),
         "analyze.factorial.three_way" => patch.insert(String::from("three_way"), json!(!an.factorial_three_way)),
+        "analyze.factorial.residual_covariance" => {
+            let next = if an.factorial_residual_covariance == ResidualCovariance::Unstructured { "compound_symmetry" } else { "unstructured" };
+            patch.insert(String::from("residual_covariance"), json!(next))
+        }
         "analyze.pca.standardize" => patch.insert(String::from("standardize"), json!(!an.pca_standardize)),
         "analyze.correlation.spearman_rank" => patch.insert(String::from("spearman_rank"), json!(!an.corr_spearman_rank)),
         "analyze.glm.compute_vif" => patch.insert(String::from("compute_vif"), json!(!an.glm_compute_vif)),

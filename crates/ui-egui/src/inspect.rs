@@ -5,8 +5,8 @@
 //! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`].
 
 use lumencraft_doc::{
-    AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, SheetId, SizeChannelMapping,
-    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, VariableSource, XColumnMode,
+    AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, RepeatedMeasuresDesign,
+    SheetId, SizeChannelMapping, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, VariableSource, XColumnMode,
 };
 use lumencraft_tools::GridCellCoord;
 use serde::{Deserialize, Serialize};
@@ -1106,6 +1106,13 @@ fn push_r9_analyze_controls(
         ControlEnablement::enabled(),
     );
     push(
+        "analyze.factorial.residual_covariance",
+        "combobox",
+        "Residual covariance",
+        json!(format!("{:?}", st.factorial_residual_covariance)),
+        r1_sphericity_or_reml_control(st.factorial_repeated_measures != RepeatedMeasuresDesign::None),
+    );
+    push(
         "analyze.factorial.multiplicity",
         "combobox",
         "Factorial multiplicity",
@@ -1541,6 +1548,14 @@ fn push_r9_edit_params_controls(
             push("edit.factorial.repeated_measures", "combobox", "Repeated measures design", json!(format!("{:?}", f.repeated_measures)));
             push("edit.factorial.ss_type", "combobox", "Sum of squares", json!(format!("{:?}", f.ss_type)));
             push("edit.factorial.multiplicity", "combobox", "Factorial multiplicity", json!(format!("{:?}", f.multiplicity.method)));
+            controls.push(node(
+                "edit.factorial.residual_covariance",
+                "combobox",
+                "Residual covariance",
+                json!(format!("{:?}", f.residual_covariance)),
+                r1_sphericity_or_reml_control(f.repeated_measures != RepeatedMeasuresDesign::None),
+                pos(row),
+            ));
         }
         AnalysisKind::Multivariate(m) => match m {
             MultivariateSpec::Clustering { distance, linkage, k_means_k, k_sweep_max, .. } => {

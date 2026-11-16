@@ -391,6 +391,16 @@ pub enum RepeatedMeasuresDesign {
     BothFactorsMatched,
 }
 
+/// Residual covariance structure fitted by REML for repeated-measures mixed models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum ResidualCovariance {
+    /// Random-intercept / compound-symmetry covariance with equal variance and correlation across timepoints.
+    #[default]
+    CompoundSymmetry,
+    /// Unstructured positive-definite `t x t` covariance matrix (`t(t + 1) / 2` parameters via Cholesky REML).
+    Unstructured,
+}
+
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FactorialAnovaSpec {
     pub three_way: bool,
@@ -400,6 +410,8 @@ pub struct FactorialAnovaSpec {
     pub max_interaction_order: usize,
     pub ss_type: SumOfSquaresType,
     pub repeated_measures: RepeatedMeasuresDesign,
+    #[serde(default)]
+    pub residual_covariance: ResidualCovariance,
     pub fit_reml_on_missing: bool,
     pub compute_effect_sizes: bool,
     pub multiplicity: MultiplicitySpec,
@@ -414,6 +426,7 @@ impl Default for FactorialAnovaSpec {
             max_interaction_order: 2,
             ss_type: SumOfSquaresType::TypeIII,
             repeated_measures: RepeatedMeasuresDesign::None,
+            residual_covariance: ResidualCovariance::CompoundSymmetry,
             fit_reml_on_missing: true,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec::default(),

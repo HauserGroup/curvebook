@@ -203,6 +203,46 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
     w2.add_file("document.json", f_bytes).unwrap();
     w2.add_file("manifest.json", serde_json::to_vec(&f_manifest).unwrap()).unwrap();
     assert!(matches!(open_project_bytes(&w2.finish().unwrap()), Err(FormatError::UnsupportedSchemaVersion { .. })));
+
+    // V1 document with a legacy FactorialAnova missing `residual_covariance` migrates cleanly to V2 (`CompoundSymmetry`).
+    let mut legacy_src = ProjectDocument::new("V1 RM Study").unwrap();
+    let v1_grouped = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
+    let v1_ds = DataSheet::new("data-1", "Grouped Data", TableArchetype::Grouped(v1_grouped)).unwrap();
+    legacy_src.add_data_sheet(v1_ds).unwrap();
+    let v1_fac = lumencraft_doc::FactorialAnovaSpec {
+        repeated_measures: lumencraft_doc::RepeatedMeasuresDesign::ColumnFactorMatched,
+        ..lumencraft_doc::FactorialAnovaSpec::default()
+    };
+    let v1_analysis = AnalysisSpec::new("res-rm-1", "data-1", AnalysisKind::FactorialAnova(v1_fac)).unwrap();
+    let v1_res = ResultSheet::new(v1_analysis).unwrap();
+    legacy_src.add_result_sheet(v1_res).unwrap();
+    let mut v1_doc = serde_json::to_value(&legacy_src).unwrap();
+    v1_doc["schema_version"] = serde_json::json!(1_u32);
+    v1_doc["result_sheets"][0]["analysis"]["kind"]["FactorialAnova"].as_object_mut().unwrap().remove("residual_covariance");
+
+    let v1_bytes = serde_json::to_vec(&v1_doc).unwrap();
+    let v1_manifest = serde_json::json!({
+        "format": "lumencraft-archive",
+        "schema_version": 1,
+        "kind": "Project",
+        "title": "V1 RM Study",
+        "document_crc32": crc32fast::hash(&v1_bytes),
+        "sheets": []
+    });
+    let mut w3 = ZipWriter::new();
+    w3.add_file("document.json", v1_bytes).unwrap();
+    w3.add_file("manifest.json", serde_json::to_vec(&v1_manifest).unwrap()).unwrap();
+    let migrated_v1 = open_project_bytes(&w3.finish().unwrap()).unwrap();
+    assert_eq!(migrated_v1.schema_version, CURRENT_SCHEMA_VERSION);
+    assert_eq!(migrated_v1.result_sheets.len(), 1);
+    assert!(
+        matches!(
+            &migrated_v1.result_sheets[0].analysis.kind,
+            AnalysisKind::FactorialAnova(spec) if spec.residual_covariance == lumencraft_doc::ResidualCovariance::CompoundSymmetry
+        ),
+        "expected CompoundSymmetry default after v1->v2 migration, got {:?}",
+        migrated_v1.result_sheets[0].analysis.kind
+    );
 }
 
 #[test]

@@ -11,9 +11,10 @@ use lumencraft_doc::{
     ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
     GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod,
     MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultCell,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise, SubcolumnAggregation, SumOfSquaresType,
-    SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, WeightingScheme,
+    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign,
+    ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise,
+    SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 
@@ -368,10 +369,15 @@ fn describe_factorial_anova(s: &FactorialAnovaSpec, source_ds: Option<&DataSheet
         RepeatedMeasuresDesign::ColumnFactorMatched => "repeated measures matched across the column factor",
         RepeatedMeasuresDesign::BothFactorsMatched => "repeated measures matched across both row and column factors",
     };
-    let reml_text = if s.fit_reml_on_missing {
-        " When missing observations create unbalanced repeated-measures cells, a restricted maximum likelihood (REML) mixed-effects model was fitted."
-    } else {
-        ""
+    let reml_text = match (s.repeated_measures, s.residual_covariance, s.fit_reml_on_missing) {
+        (RepeatedMeasuresDesign::None, _, _) => String::new(),
+        (_, ResidualCovariance::Unstructured, _) => String::from(
+            " Repeated-measures correlations were modeled with an unstructured residual covariance matrix estimated by Cholesky restricted maximum likelihood (REML) with Kenward-Roger degrees of freedom.",
+        ),
+        (_, ResidualCovariance::CompoundSymmetry, true) => String::from(
+            " When missing observations create unbalanced repeated-measures cells, a restricted maximum likelihood (REML) mixed-effects model with compound-symmetry covariance and Kenward-Roger degrees of freedom was fitted.",
+        ),
+        (_, ResidualCovariance::CompoundSymmetry, false) => String::new(),
     };
     let mut runs = vec![plain(format!("Factorial comparisons used {design_label} with {ss_label} sums of squares and {rm_label}.{reml_text}"))];
     if let Some(resp) = s.response_column {

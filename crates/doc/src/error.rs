@@ -32,7 +32,7 @@ pub const MAX_SHEET_CELLS: usize = 30_000_000;
 pub const MAX_PROJECT_CELLS: usize = 50_000_000;
 
 /// Current `.lumencraft` document schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 1;
+pub const CURRENT_SCHEMA_VERSION: u32 = 2;
 
 /// Validate a title string against [`MAX_TITLE_BYTES`].
 pub fn validate_title(title: &str) -> Result<(), DocError> {

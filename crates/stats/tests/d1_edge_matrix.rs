@@ -14,8 +14,8 @@ use std::collections::HashMap;
 
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, Cell, ConfidenceLevel, CoxTieMethod, DataSheet, FactorialAnovaSpec, GlmFamily, GlmSpec, GroupedTable,
-    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, RepeatedMeasuresDesign, ResultCell, ResultTabKind, SubcolumnMode, SumOfSquaresType,
-    TableArchetype, VariableRole,
+    MultipleVariablesTable, MultiplicityMethod, RepeatedMeasuresDesign, ResultCell, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
+    VariableRole,
 };
 use lumencraft_math::DenseMatrix;
 use lumencraft_stats::anova::{
@@ -353,15 +353,10 @@ fn edge_02b_grouped_rm_missing_cell_fallback_and_sparse_cluster_reml() {
     sheet.id = ds_id.clone();
 
     let fac_spec = FactorialAnovaSpec {
-        three_way: false,
-        multifactor_columns: Vec::new(),
-        response_column: None,
-        max_interaction_order: 2,
-        ss_type: SumOfSquaresType::TypeIII,
         repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
         fit_reml_on_missing: true,
         compute_effect_sizes: true,
-        multiplicity: MultiplicitySpec::default(),
+        ..FactorialAnovaSpec::default()
     };
     let spec = AnalysisSpec::new("an-rm-miss", ds_id, AnalysisKind::FactorialAnova(fac_spec.clone())).unwrap();
     let res_sheet = run_factorial_anova(&sheet, &spec, &fac_spec).unwrap();

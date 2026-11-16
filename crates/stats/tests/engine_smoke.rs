@@ -300,25 +300,7 @@ fn all_14_multiplicity_procedures_and_anova_family() {
         }
     }
     let gsheet = DataSheet::new(SheetId::new("s-grp"), "Grouped", TableArchetype::Grouped(gt)).unwrap();
-    let f_sheet = run_analysis(
-        &gsheet,
-        &spec_for(
-            "r-fact",
-            "s-grp",
-            AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-                three_way: false,
-                multifactor_columns: Vec::new(),
-                response_column: None,
-                max_interaction_order: 2,
-                ss_type: SumOfSquaresType::TypeIII,
-                repeated_measures: RepeatedMeasuresDesign::None,
-                fit_reml_on_missing: true,
-                compute_effect_sizes: true,
-                multiplicity: MultiplicitySpec::default(),
-            }),
-        ),
-    )
-    .unwrap();
+    let f_sheet = run_analysis(&gsheet, &spec_for("r-fact", "s-grp", AnalysisKind::FactorialAnova(FactorialAnovaSpec::default()))).unwrap();
     assert!(!f_sheet.tabs.is_empty());
 }
 

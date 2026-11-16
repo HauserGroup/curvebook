@@ -5,9 +5,9 @@ use lumencraft_doc::{
     CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
     LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
     NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResultSheet, ResultStatus, RocCiMethod, RocSpec,
-    SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    VariableRole, WeightingScheme,
+    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus,
+    RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
 };
 use lumencraft_fit::get_builtin_model;
 use lumencraft_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -377,6 +377,14 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
     ];
     if include_stats_extras {
         props.push(("multiplicity", nullable_schema(str_schema("Post-hoc multiplicity adjustment method"))));
+        props.push((
+            "repeated_measures",
+            nullable_schema(str_schema("Repeated-measures matching for factorial ANOVA (`none`, `row`, `column`, `both`)")),
+        ));
+        props.push((
+            "residual_covariance",
+            nullable_schema(str_schema("REML residual covariance structure for repeated-measures ANOVA (`compound_symmetry`, `unstructured`)")),
+        ));
     }
     if include_fit_extras {
         props.push(("equation_id", nullable_schema(non_empty_str_schema("Built-in or custom equation identifier"))));
@@ -1429,7 +1437,7 @@ fn apply_shorthand_kind_overrides(kind: &mut AnalysisKind, params: &Value) -> Re
     match kind {
         AnalysisKind::Transform(spec) => apply_transform_overrides(spec, params)?,
         AnalysisKind::OneWayAnova(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
-        AnalysisKind::FactorialAnova(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
+        AnalysisKind::FactorialAnova(spec) => apply_factorial_overrides(spec, params)?,
         AnalysisKind::NestedComparison(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
         AnalysisKind::MultipleRowTTests(spec) => apply_multiple_row_overrides(spec, params)?,
         AnalysisKind::BlandAltman(spec) => apply_bland_altman_overrides(spec, params)?,
@@ -1487,6 +1495,48 @@ fn apply_passing_bablok_overrides(spec: &mut PassingBablokSpec, params: &Value) 
     apply_usize_field(params, &["x_column"], &mut spec.x_column)?;
     apply_usize_field(params, &["y_column"], &mut spec.y_column)?;
     Ok(())
+}
+
+fn parse_rm_design_override(raw: &str) -> Result<RepeatedMeasuresDesign, EngineError> {
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "none" | "no_matching" => Ok(RepeatedMeasuresDesign::None),
+        "row" | "row_factor" | "row_factor_matched" => Ok(RepeatedMeasuresDesign::RowFactorMatched),
+        "column" | "col" | "column_factor" | "column_factor_matched" => Ok(RepeatedMeasuresDesign::ColumnFactorMatched),
+        "both" | "both_factors" | "both_factors_matched" => Ok(RepeatedMeasuresDesign::BothFactorsMatched),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown repeated-measures design `{raw}`"))),
+    }
+}
+
+fn parse_residual_covariance_override(raw: &str) -> Result<ResidualCovariance, EngineError> {
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "compound_symmetry" | "compoundsymmetry" | "cs" | "random_intercept" => Ok(ResidualCovariance::CompoundSymmetry),
+        "unstructured" | "un" | "general" => Ok(ResidualCovariance::Unstructured),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown residual covariance structure `{raw}`"))),
+    }
+}
+
+fn apply_factorial_overrides(spec: &mut FactorialAnovaSpec, params: &Value) -> Result<(), EngineError> {
+    if let Some(rm_val) = params.get("repeated_measures").filter(|v| !v.is_null()) {
+        if let Ok(parsed) = serde_json::from_value::<RepeatedMeasuresDesign>(rm_val.clone()) {
+            spec.repeated_measures = parsed;
+        } else if let Some(raw) = rm_val.as_str() {
+            spec.repeated_measures = parse_rm_design_override(raw)?;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`repeated_measures` must be a valid design string"));
+        }
+    }
+    if let Some(cov_val) = params.get("residual_covariance").filter(|v| !v.is_null()) {
+        if let Ok(parsed) = serde_json::from_value::<ResidualCovariance>(cov_val.clone()) {
+            spec.residual_covariance = parsed;
+        } else if let Some(raw) = cov_val.as_str() {
+            spec.residual_covariance = parse_residual_covariance_override(raw)?;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`residual_covariance` must be `compound_symmetry` or `unstructured`"));
+        }
+    }
+    apply_bool_opt(params, &["fit_reml_on_missing"], &mut spec.fit_reml_on_missing);
+    apply_bool_opt(params, &["compute_effect_sizes"], &mut spec.compute_effect_sizes);
+    apply_multiplicity_override(&mut spec.multiplicity, params)
 }
 
 fn parse_pvalue_stack_method(raw: &str) -> Result<PValueStackMethod, EngineError> {

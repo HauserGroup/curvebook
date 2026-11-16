@@ -7,7 +7,7 @@ use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisScale, AxisSegment, AxisSpec, BreakOrnament, CellCoord, CellValue, DataSheet, ErrorPropagationMode,
     FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, GraphicalDataObject, HookSource, MathTransformPreset, ModelComparisonSpec, MultiplicityMethod,
     MultiplicitySpec, NonlinearFitSpec, NormalizeAnchor, ParameterRule, ParameterScope, ProjectDocument, RepeatedMeasuresDesign, ResultCell,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SumOfSquaresType, TableArchetype, TransformAnalysisSpec, VariableRole,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, TableArchetype, TransformAnalysisSpec, VariableRole,
 };
 use lumencraft_engine::{CommandOutcome, Session};
 use lumencraft_format::ZipWriter;
@@ -717,15 +717,11 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
         "rm-balanced",
         "rm-data",
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
-            three_way: false,
-            multifactor_columns: Vec::new(),
-            response_column: None,
-            max_interaction_order: 2,
-            ss_type: SumOfSquaresType::TypeIII,
             repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
             fit_reml_on_missing: true,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::HolmSidak, ..MultiplicitySpec::default() },
+            ..FactorialAnovaSpec::default()
         }),
     )
     .unwrap();
@@ -747,6 +743,31 @@ fn core_workflow_kruskal_wallis_dunn_and_rm_reml_mixed_anova() {
     assert_eq!(reml_res.status, ResultStatus::UpToDate);
     let reml_tab = find_tab(reml_res, ResultTabKind::AnovaTable);
     assert!(!reml_tab.rows.is_empty(), "REML fallback must populate mixed ANOVA table when replicates are missing");
+
+    // Unstructured residual covariance via shorthand `stats.run` + `methods_report` check.
+    exec_ok(
+        &mut session,
+        "stats.run",
+        json!({
+            "source_sheet_id": "rm-data",
+            "sheet_id": "rm-unstructured",
+            "kind": "two_way_anova",
+            "repeated_measures": "column",
+            "residual_covariance": "unstructured"
+        }),
+    );
+    let un_res = result_sheet(&session, "rm-unstructured");
+    assert_eq!(un_res.status, ResultStatus::UpToDate);
+    let cov_tabs: Vec<&ResultTab> = un_res.tabs.iter().filter(|t| t.kind == ResultTabKind::CovarianceMatrix).collect();
+    assert_eq!(cov_tabs.len(), 2, "expected covariance and correlation tabs, got {}", cov_tabs.len());
+    assert!(un_res.scalars.iter().any(|s| s.key == "REML mean diagonal variance" && s.value.is_finite()));
+    let methods = lumencraft_engine::methods_report::generate_methods_report(
+        session.document(),
+        &SheetId::new("rm-unstructured"),
+        lumencraft_engine::methods_report::ReportFormat::PlainText,
+    )
+    .unwrap();
+    assert!(methods.contains("unstructured residual covariance"), "methods report missing unstructured wording:\n{methods}");
 }
 
 // ---------------------------------------------------------------------------

@@ -1639,6 +1639,60 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "نموذج التأثيرات المختلطة (REML)",
         he: "מודל השפעות מעורבות (REML)",
     ]),
+    entry!("analyze.factorial.residual_covariance" => [
+        en: "Residual covariance structure",
+        de: "Residualkovarianzstruktur",
+        es: "Estructura de covarianza residual",
+        fr: "Structure de covariance résiduelle",
+        ja: "残差共分散構造",
+        ko: "잔차 공분산 구조",
+        pt_br: "Estrutura de covariância residual",
+        zh_cn: "残差协方差结构",
+        zh_tw: "殘差共變異數結構",
+        it: "Struttura di covarianza residua",
+        nl: "Residuele covariantiestructuur",
+        pl: "Struktura kowariancji reszt",
+        ru: "Структура ковариации остатков",
+        tr: "Artık kovaryans yapısı",
+        ar: "بنية التغاير للبواقي",
+        he: "מבנה שונות משותפת של שאריות",
+    ]),
+    entry!("reml.covariance.compound_symmetry" => [
+        en: "Compound symmetry (REML)",
+        de: "Zusammengesetzte Symmetrie (REML)",
+        es: "Simetría compuesta (REML)",
+        fr: "Symétrie composée (REML)",
+        ja: "複合対称性 (REML)",
+        ko: "복합 대칭성 (REML)",
+        pt_br: "Simetria composta (REML)",
+        zh_cn: "复合对称 (REML)",
+        zh_tw: "複合對稱 (REML)",
+        it: "Simmetria composta (REML)",
+        nl: "Samengestelde symmetrie (REML)",
+        pl: "Symetria złożona (REML)",
+        ru: "Составная симметрия (REML)",
+        tr: "Bileşik simetri (REML)",
+        ar: "التناظر المركب (REML)",
+        he: "סימטריה מורכבת (REML)",
+    ]),
+    entry!("reml.covariance.unstructured" => [
+        en: "Unstructured covariance (REML)",
+        de: "Unstrukturierte Kovarianz (REML)",
+        es: "Covarianza no estructurada (REML)",
+        fr: "Covariance non structurée (REML)",
+        ja: "無構造共分散 (REML)",
+        ko: "비구조적 공분산 (REML)",
+        pt_br: "Covariância não estruturada (REML)",
+        zh_cn: "非结构化协方差 (REML)",
+        zh_tw: "非結構化共變異數 (REML)",
+        it: "Covarianza non strutturata (REML)",
+        nl: "Ongestructureerde covariantie (REML)",
+        pl: "Kowariancja nieustrukturyzowana (REML)",
+        ru: "Неструктурированная ковариация (REML)",
+        tr: "Yapılandırılmamış kovaryans (REML)",
+        ar: "التغاير غير المهيكل (REML)",
+        he: "שונות משותפת בלתי מובנית (REML)",
+    ]),
     entry!("analysis.nested_t" => [
         en: "Nested t Test",
         de: "Verschachtelter t-Test",
@@ -5982,8 +6036,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 309);
-        assert_eq!(LOCALES.len() * catalog_len(), 4_944);
+        assert_eq!(catalog_len(), 312);
+        assert_eq!(LOCALES.len() * catalog_len(), 4_992);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();

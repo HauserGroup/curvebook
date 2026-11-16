@@ -773,7 +773,8 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
     Ok(out)
 }
 
-const MIGRATION_STEPS: &[VersionStep] = &[VersionStep { from_version: 0, apply: migrate_v0_to_v1 }];
+const MIGRATION_STEPS: &[VersionStep] =
+    &[VersionStep { from_version: 0, apply: migrate_v0_to_v1 }, VersionStep { from_version: 1, apply: migrate_v1_to_v2 }];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
 
@@ -790,6 +791,19 @@ fn migrate_v0_to_v1(value: &mut serde_json::Value) -> Result<(), FormatError> {
     if let Some(obj) = value.as_object_mut() {
         obj.insert(String::from("schema_version"), serde_json::Value::from(1_u32));
         backfill_top_level_fields(obj);
+    }
+    Ok(())
+}
+
+fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    if let Some(obj) = value.as_object_mut() {
+        obj.insert(String::from("schema_version"), serde_json::Value::from(2_u32));
+        backfill_top_level_fields(obj);
+        if let Some(result_sheets) = obj.get_mut("result_sheets").and_then(serde_json::Value::as_array_mut) {
+            for res in result_sheets {
+                backfill_result_sheet_defaults(res);
+            }
+        }
     }
     Ok(())
 }
@@ -912,6 +926,9 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
         km.entry(String::from("mv_time_column")).or_insert(serde_json::Value::Null);
         km.entry(String::from("mv_status_column")).or_insert(serde_json::Value::Null);
         km.entry(String::from("mv_group_column")).or_insert(serde_json::Value::Null);
+    }
+    if let Some(fac) = kind.get_mut("FactorialAnova").and_then(serde_json::Value::as_object_mut) {
+        fac.entry(String::from("residual_covariance")).or_insert_with(|| serde_json::Value::String(String::from("CompoundSymmetry")));
     }
 }
 

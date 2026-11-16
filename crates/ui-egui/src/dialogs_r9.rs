@@ -8,7 +8,7 @@ use lumencraft_doc::{
     AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, CldOrdering, ClusterDistance, ClusterLinkage,
     CoxTieMethod, EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting,
     PValueStackMethod, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign,
-    SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
+    ResidualCovariance, SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
 };
 use lumencraft_palette::{ColormapId, PaletteId};
 use lumencraft_render::TiffCompression;
@@ -242,6 +242,14 @@ pub(crate) fn parse_rm_design_str(raw: &str) -> Result<RepeatedMeasuresDesign, S
         "columnfactormatched" | "column" | "col" | "columnfactor" => Ok(RepeatedMeasuresDesign::ColumnFactorMatched),
         "bothfactorsmatched" | "both" => Ok(RepeatedMeasuresDesign::BothFactorsMatched),
         _ => Err(format!("unknown repeated measures design `{raw}`")),
+    }
+}
+
+pub(crate) fn parse_residual_covariance_str(raw: &str) -> Result<ResidualCovariance, String> {
+    match norm_key(raw).as_str() {
+        "compoundsymmetry" | "cs" | "randomintercept" => Ok(ResidualCovariance::CompoundSymmetry),
+        "unstructured" | "un" | "general" => Ok(ResidualCovariance::Unstructured),
+        _ => Err(format!("unknown residual covariance structure `{raw}`")),
     }
 }
 

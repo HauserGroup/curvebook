@@ -184,15 +184,10 @@ fn r35_1b_rm_two_way_reml_fallback_4_stratum_and_boundary_oracle() {
     sheet.id = ds_id.clone();
 
     let fac_spec = FactorialAnovaSpec {
-        three_way: false,
-        multifactor_columns: Vec::new(),
-        response_column: None,
-        max_interaction_order: 2,
-        ss_type: SumOfSquaresType::TypeIII,
         repeated_measures: RepeatedMeasuresDesign::BothFactorsMatched,
         fit_reml_on_missing: true,
         compute_effect_sizes: true,
-        multiplicity: MultiplicitySpec::default(),
+        ..FactorialAnovaSpec::default()
     };
     let spec = AnalysisSpec::new("an-r35-reml4", ds_id, AnalysisKind::FactorialAnova(fac_spec.clone())).unwrap();
     let res = run_factorial_anova(&sheet, &spec, &fac_spec).unwrap();

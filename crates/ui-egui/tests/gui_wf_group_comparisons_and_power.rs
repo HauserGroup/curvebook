@@ -11,8 +11,8 @@
 #![forbid(unsafe_code)]
 
 use lumencraft_doc::{
-    AnalysisKind, ChecklistStatus, GraphKind, GroupedArrangement, MultiplicityMethod, OneWayMethod, PValueFormat, ResultCell, ResultSheet,
-    ResultStatus, ResultTab, SheetId, TwoGroupMethod,
+    AnalysisKind, ChecklistStatus, GraphKind, GroupedArrangement, MultiplicityMethod, OneWayMethod, PValueFormat, RepeatedMeasuresDesign,
+    ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, TwoGroupMethod,
 };
 use lumencraft_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
 use lumencraft_ui_egui::power_wizard::PowerWizardStage;
@@ -1274,6 +1274,104 @@ fn verify_created_power_sheets(app: &UiApp, data_id: &str, info_id: &str, res_id
     let has_target_tick = gs.spec.y_axis.additional_ticks.iter().any(|t| (t.value - 0.80).abs() < 1e-6 && t.draw_gridline);
     if !gs.initialized || gs.spec.kind != GraphKind::Xy || !has_target_tick {
         return Err(format!("expected initialized XY Power Curve graph with 0.80 target gridline tick, got {gs:?}"));
+    }
+    Ok(())
+}
+
+// ---------------------------------------------------------------------------
+// R3.4: Unstructured Residual Covariance Control in Analyze & Cmd+T Modals
+// ---------------------------------------------------------------------------
+
+#[test]
+fn r34_unstructured_covariance_dialog_wiring_and_reml_tabs() -> TestRes {
+    let mut app = strict_gui_app()?;
+    let grp_id = create_data_table(
+        &mut app,
+        json!({
+            "title": "Longitudinal RM Unstructured",
+            "kind": "grouped",
+            "cols": 3,
+            "rows": 2,
+            "replicates": 6,
+            "row_factor_title": "Arm",
+            "column_factor_title": "Visit",
+            "auto_family": false
+        }),
+    )?;
+    act(
+        &mut app,
+        "ui.invoke_menu",
+        json!({ "command_id": "table.setTitles", "params": { "sheet_id": grp_id, "titles": ["V1", "V2", "V3"], "row_titles": ["Placebo", "Drug"] } }),
+    )?;
+    // 3 columns * 6 replicates = 18 values per row (Arm x Visit interaction + heteroscedastic visits + missing cell).
+    let tsv = concat!(
+        "10.1\t10.4\t9.8\t10.2\t9.9\t10.5\t11.0\t12.1\t10.7\t11.6\t10.8\t11.9\t12.4\t13.8\t\t12.9\t12.0\t13.1\n",
+        "10.0\t10.3\t10.2\t9.7\t10.4\t10.1\t14.2\t15.8\t14.9\t13.7\t15.4\t14.6\t20.1\t23.4\t19.5\t21.8\t22.0\t20.9"
+    );
+    paste_grid_tsv(&mut app, 0, 0, 0, tsv)?;
+
+    // Open Analyze dialog -> residual_covariance initially disabled when repeated_measures == None.
+    let before_res: Vec<String> = app.document().result_sheets.iter().map(|r| r.id.as_str().to_owned()).collect();
+    act(&mut app, "ui.invoke_menu", json!({ "path": "Analyze/Analyze..." }))?;
+    let snap_init = inspect_all(&mut app)?;
+    assert_widget_enabled(&snap_init, "analyze.factorial.residual_covariance", false)?;
+
+    // Select Factorial ANOVA + ColumnFactorMatched + Unstructured and confirm.
+    act(
+        &mut app,
+        "ui.answer_dialog",
+        json!({
+            "action": "ok",
+            "fields": {
+                "entry_id": "stats.factorial_anova",
+                "repeated_measures": "column_factor_matched",
+                "residual_covariance": "unstructured"
+            }
+        }),
+    )?;
+    let res_id = app
+        .document()
+        .result_sheets
+        .iter()
+        .map(|r| r.id.as_str().to_owned())
+        .find(|id| !before_res.contains(id))
+        .ok_or_else(|| String::from("Analyze factorial unstructured did not create a ResultSheet"))?;
+
+    {
+        let rs = result_sheet(&app, &res_id)?;
+        if !matches!(
+            rs.analysis.kind,
+            AnalysisKind::FactorialAnova(ref f)
+                if f.repeated_measures == RepeatedMeasuresDesign::ColumnFactorMatched
+                    && f.residual_covariance == ResidualCovariance::Unstructured
+        ) {
+            return Err(format!("expected ColumnFactorMatched + Unstructured, got {:?}", rs.analysis.kind));
+        }
+        let cov_tabs: Vec<&ResultTab> = rs.tabs.iter().filter(|t| t.kind == ResultTabKind::CovarianceMatrix).collect();
+        if cov_tabs.len() != 2 {
+            return Err(format!("expected 2 CovarianceMatrix tabs (cov + corr), got {}", cov_tabs.len()));
+        }
+    }
+
+    // Open Cmd+T -> `edit.factorial.residual_covariance` is enabled and toggles cleanly to CompoundSymmetry.
+    let snap_edit = open_cmd_t_dialog(&mut app)?;
+    assert_widget_enabled(&snap_edit, "edit.factorial.residual_covariance", true)?;
+    click_widget(&mut app, "edit.factorial.residual_covariance")?;
+    let snap_toggled = inspect_all(&mut app)?;
+    let toggled_val = find_widget(&snap_toggled, "edit.factorial.residual_covariance")?.get("value").and_then(Value::as_str);
+    if toggled_val != Some("CompoundSymmetry") {
+        return Err(format!("expected toggling edit.factorial.residual_covariance to CompoundSymmetry, got {toggled_val:?}"));
+    }
+    act(&mut app, "ui.answer_dialog", json!({ "action": "ok" }))?;
+    {
+        let rs = result_sheet(&app, &res_id)?;
+        if !matches!(
+            rs.analysis.kind,
+            AnalysisKind::FactorialAnova(ref f) if f.residual_covariance == ResidualCovariance::CompoundSymmetry
+        ) {
+            return Err(format!("expected CompoundSymmetry after Cmd+T toggle, got {:?}", rs.analysis.kind));
+        }
+        let _reml_vc = find_tab(rs, "mixed-reml")?;
     }
     Ok(())
 }
