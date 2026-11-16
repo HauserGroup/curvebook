@@ -106,9 +106,12 @@ pub fn run(root: &Path) -> Result<(), String> {
         duplicates.append(&mut dups);
     }
 
+    let status_text = fs::read_to_string(root.join(STATUS_REL)).map_err(|e| format!("{STATUS_REL}: {e}"))?;
+    let mut violations = check_live_status_metrics(root, &status_text);
+
     let workspace_tests = collect_workspace_tests(root)?;
     let ui_parity_text = fs::read_to_string(root.join(UI_PARITY_REL)).map_err(|e| format!("{UI_PARITY_REL}: {e}"))?;
-    let mut violations = check_ui_parity_evidence(UI_PARITY_REL, &ui_parity_text, Some(&workspace_tests));
+    violations.extend(check_ui_parity_evidence(UI_PARITY_REL, &ui_parity_text, Some(&workspace_tests)));
 
     let workflows_text = fs::read_to_string(root.join(GUI_WORKFLOWS_REL)).map_err(|e| format!("{GUI_WORKFLOWS_REL}: {e}"))?;
     violations.extend(check_gui_workflows_human_path(GUI_WORKFLOWS_REL, &workflows_text, Some(&workspace_tests)));
@@ -116,7 +119,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     if duplicates.is_empty() && violations.is_empty() {
         println!(
             "status: verified {total_tables} Markdown table(s) across {STATUS_REL} and {ROADMAP_REL}, \
-             [x] evidence in {UI_PARITY_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL}"
+             live metrics, [x] evidence in {UI_PARITY_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL}"
         );
         return Ok(());
     }
@@ -889,6 +892,180 @@ fn normalize_key(raw: &str) -> String {
     s.split_whitespace().collect::<Vec<_>>().join(" ").to_ascii_lowercase()
 }
 
+/// Verify `docs/STATUS.md`, `docs/commands.md`, `AGENTS.md`, and `docs/control-protocol.md`
+/// agree with live command, UI-command, and workspace-package counts (`R2-S13-11`).
+#[must_use]
+pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceViolation> {
+    let mut violations = Vec::new();
+    let live_engine = lumencraft_engine::cmd::registry().len();
+    let live_ui = count_live_ui_commands(root);
+    let live_pkgs = crate::layers::TABLE.len();
+
+    check_status_structural_headings(status_md, &mut violations);
+    check_status_headline_table(status_md, live_engine, live_ui, live_pkgs, &mut violations);
+    check_doc_count_parity(root, live_engine, live_ui, &mut violations);
+    violations
+}
+
+fn count_live_ui_commands(root: &Path) -> Option<usize> {
+    let rel = "crates/ui-egui/src/menus/ui_commands.rs";
+    let src = fs::read_to_string(root.join(rel)).ok()?;
+    let slice_start = src.find("pub const UI_COMMANDS:")?;
+    let slice_tail = &src[slice_start..];
+    let slice_end = slice_tail.find("];")?;
+    Some(slice_tail[..slice_end].matches("UiCommandSpec {").count())
+}
+
+fn check_status_structural_headings(status_md: &str, violations: &mut Vec<EvidenceViolation>) {
+    for heading in ["## Verified Capabilities & Headline Numbers", "## Known Limits"] {
+        if !status_md.lines().any(|l| l.trim() == heading) {
+            violations.push(EvidenceViolation {
+                path: String::from(STATUS_REL),
+                line: 1,
+                reason: format!("missing required section heading `{heading}`"),
+            });
+        }
+    }
+}
+
+fn check_status_headline_table(
+    status_md: &str,
+    live_engine: usize,
+    live_ui: Option<usize>,
+    live_pkgs: usize,
+    violations: &mut Vec<EvidenceViolation>,
+) {
+    let engine_needle = live_engine.to_string();
+    let pkg_needle = format!("{live_pkgs}` packages");
+    let pkg_plain = format!("{live_pkgs} packages");
+    let mut saw_engine_row = false;
+    let mut saw_ui_row = false;
+    let mut saw_platform_row = false;
+
+    for (idx, raw) in status_md.lines().enumerate() {
+        let trimmed = raw.trim();
+        if !is_table_row(trimmed) || is_table_separator(trimmed) {
+            continue;
+        }
+        let Some(col1) = parse_first_cell(trimmed) else {
+            continue;
+        };
+        let norm = normalize_key(&col1).replace('`', "");
+        let line_no = idx + 1;
+        if norm == "engine command registry" {
+            saw_engine_row = true;
+            if !cell_contains_number(trimmed, &engine_needle) {
+                violations.push(EvidenceViolation {
+                    path: String::from(STATUS_REL),
+                    line: line_no,
+                    reason: format!("Engine command registry row does not report live count `{live_engine}`"),
+                });
+            }
+        } else if norm == "ui command catalog" {
+            saw_ui_row = true;
+            if let Some(ui_count) = live_ui
+                && !cell_contains_number(trimmed, &ui_count.to_string())
+            {
+                violations.push(EvidenceViolation {
+                    path: String::from(STATUS_REL),
+                    line: line_no,
+                    reason: format!("UI command catalog row does not report live count `{ui_count}`"),
+                });
+            }
+        } else if norm.starts_with("platform, r0 alignment") {
+            saw_platform_row = true;
+            if !trimmed.contains(&pkg_needle) && !trimmed.contains(&pkg_plain) {
+                violations.push(EvidenceViolation {
+                    path: String::from(STATUS_REL),
+                    line: line_no,
+                    reason: format!("Platform/R0 row does not report live `{live_pkgs}` workspace packages"),
+                });
+            }
+        }
+    }
+
+    for (present, label) in [
+        (saw_engine_row, "Engine command registry"),
+        (saw_ui_row, "UI command catalog"),
+        (saw_platform_row, "Platform, `R0` alignment & Zero Telemetry"),
+    ] {
+        if !present {
+            violations.push(EvidenceViolation {
+                path: String::from(STATUS_REL),
+                line: 1,
+                reason: format!("missing `{label}` row in Verified Capabilities table"),
+            });
+        }
+    }
+}
+
+fn cell_contains_number(row: &str, needle: &str) -> bool {
+    let second_cell = row.split('|').nth(2).unwrap_or(row);
+    let bytes = second_cell.as_bytes();
+    let mut start = 0usize;
+    while let Some(rel) = second_cell[start..].find(needle) {
+        let pos = start + rel;
+        let end = pos + needle.len();
+        let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_digit();
+        let right_ok = end == bytes.len() || !bytes[end].is_ascii_digit();
+        if left_ok && right_ok {
+            return true;
+        }
+        start = pos + 1;
+    }
+    false
+}
+
+fn check_doc_count_parity(root: &Path, live_engine: usize, live_ui: Option<usize>, violations: &mut Vec<EvidenceViolation>) {
+    let cmds_rel = "docs/commands.md";
+    if let Ok(cmds_doc) = fs::read_to_string(root.join(cmds_rel)) {
+        let expected = format!("Registered commands: {live_engine}");
+        if !cmds_doc.contains(&expected) {
+            violations.push(EvidenceViolation {
+                path: String::from(cmds_rel),
+                line: 1,
+                reason: format!("expected `{expected}` matching live registry"),
+            });
+        }
+    }
+
+    let agents_rel = "AGENTS.md";
+    if let Ok(agents_doc) = fs::read_to_string(root.join(agents_rel)) {
+        let expected_engine = format!("`{live_engine}` commands");
+        if !agents_doc.contains(&expected_engine) {
+            violations.push(EvidenceViolation {
+                path: String::from(agents_rel),
+                line: 1,
+                reason: format!("expected `{expected_engine}` matching live command registry"),
+            });
+        }
+        if let Some(ui_count) = live_ui {
+            let expected_ui = format!("`{ui_count}` entries");
+            if !agents_doc.contains(&expected_ui) {
+                violations.push(EvidenceViolation {
+                    path: String::from(agents_rel),
+                    line: 1,
+                    reason: format!("expected `{expected_ui}` matching live `UI_COMMANDS` count"),
+                });
+            }
+        }
+    }
+
+    let proto_rel = "docs/control-protocol.md";
+    if let Ok(proto_doc) = fs::read_to_string(root.join(proto_rel))
+        && let Some(ui_count) = live_ui
+    {
+        let exact_ui = format!("`{ui_count}` synced `UI_COMMANDS`");
+        if proto_doc.contains("`32` synced `UI_COMMANDS`") || (!proto_doc.contains("all synced `UI_COMMANDS`") && !proto_doc.contains(&exact_ui)) {
+            violations.push(EvidenceViolation {
+                path: String::from(proto_rel),
+                line: 1,
+                reason: format!("expected `all synced `UI_COMMANDS`` or `{exact_ui}` (found stale count)"),
+            });
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{DuplicateKey, check_markdown_tables};
@@ -928,5 +1105,20 @@ mod tests {
         let (tables, dups) = check_markdown_tables("docs/STATUS.md", fixture);
         assert_eq!(tables, 2);
         assert!(dups.is_empty(), "{dups:?}");
+    }
+
+    #[test]
+    fn r2_s13_11_live_status_metrics_passes_real_repo_and_catches_stale_counts() {
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).parent().unwrap();
+        let status_md = std::fs::read_to_string(root.join("docs/STATUS.md")).unwrap();
+        let live_hits = super::check_live_status_metrics(root, &status_md);
+        assert!(live_hits.is_empty(), "real workspace live metric drift: {live_hits:?}");
+
+        let stale_status = status_md
+            .replace("`97`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
+            .replace("`45`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
+        let stale_hits = super::check_live_status_metrics(root, &stale_status);
+        assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
+        assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
     }
 }

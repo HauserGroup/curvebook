@@ -11,12 +11,32 @@
   Content-Type: application/wasm
   Cache-Control: public, max-age=31536000, immutable
 
+/lumencraft/*.wasm
+  Content-Type: application/wasm
+  Cache-Control: public, max-age=31536000, immutable
+
 /*.js
   Cache-Control: public, max-age=31536000, immutable
+
+/lumencraft/*.js
+  Cache-Control: public, max-age=31536000, immutable
+
+/
+  Cache-Control: no-cache
 
 /index.html
   Cache-Control: no-cache
 
+/lumencraft/
+  Cache-Control: no-cache
+
+/lumencraft/index.html
+  Cache-Control: no-cache
+
 /fonts/*
+  Content-Type: font/ttf
+  Cache-Control: public, max-age=31536000, immutable
+
+/lumencraft/fonts/*
   Content-Type: font/ttf
   Cache-Control: public, max-age=31536000, immutable

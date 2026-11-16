@@ -449,17 +449,28 @@ pub const ALLOWED_RAW_PROCESS_BASELINE: &[&str] = &[];
 /// process bans (`R0.10`). Keep empty once `os_integration.rs` and `control_io.rs` migrate.
 pub const ALLOWED_UI_IO_BASELINE: &[&str] = &[];
 
-const RAW_PROCESS_PATTERNS: &[&str] = &["std::process::Command::new", "std::process::Command", "process::Command::new"];
+const RAW_PROCESS_PATTERNS: &[&str] =
+    &["std::process::Command::new", "std::process::Command", "process::Command::new", "process::Command", "std::process::*"];
 
 const UI_IO_PATTERNS: &[&str] = &[
     "std::fs::write",
     "fs::write",
+    "std::fs::File::create_new",
+    "File::create_new",
     "std::fs::File::create",
     "File::create",
+    "std::fs::remove_file",
+    "fs::remove_file",
+    "std::fs::copy",
+    "fs::copy",
+    "std::fs::rename",
+    "fs::rename",
     "OpenOptions",
     "std::process::Command",
     "process::Command",
     "Command::new",
+    "std::process::*",
+    "std::fs::*",
 ];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -496,12 +507,40 @@ pub fn check_source_hygiene(root: &Path) -> Vec<HygieneViolation> {
         let prod = strip_non_prod_rust(&src);
         if !exempt_process && !ALLOWED_RAW_PROCESS_BASELINE.contains(&rel.as_str()) {
             scan_patterns(&rel, &prod, "raw-process", RAW_PROCESS_PATTERNS, &mut violations);
+            scan_use_statements(&rel, &prod, "raw-process", &["std::process::Command", "process::Command", "std::process::*"], &mut violations);
         }
         if in_ui_src && !ALLOWED_UI_IO_BASELINE.contains(&rel.as_str()) {
             scan_patterns(&rel, &prod, "ui-raw-io", UI_IO_PATTERNS, &mut violations);
+            scan_use_statements(
+                &rel,
+                &prod,
+                "ui-raw-io",
+                &[
+                    "std::fs::write",
+                    "fs::write",
+                    "std::fs::File",
+                    "fs::File",
+                    "std::fs::OpenOptions",
+                    "fs::OpenOptions",
+                    "std::fs::remove_file",
+                    "fs::remove_file",
+                    "std::fs::copy",
+                    "fs::copy",
+                    "std::fs::rename",
+                    "fs::rename",
+                    "std::fs::*",
+                    "std::process::Command",
+                    "process::Command",
+                    "std::process::*",
+                ],
+                &mut violations,
+            );
         }
     }
-    violations.sort_by(|a, b| a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)).then_with(|| a.rule.cmp(b.rule)));
+    violations.sort_by(|a, b| {
+        a.path.cmp(&b.path).then_with(|| a.line.cmp(&b.line)).then_with(|| a.rule.cmp(b.rule)).then_with(|| a.pattern.cmp(b.pattern))
+    });
+    violations.dedup();
     violations
 }
 
@@ -782,7 +821,7 @@ fn strip_cfg_test_items(code: &str) -> String {
     String::from_utf8(out).unwrap_or_else(|e| String::from_utf8_lossy(e.as_bytes()).into_owned())
 }
 
-fn match_cfg_test_attr(bytes: &[u8], start: usize) -> Option<usize> {
+pub(crate) fn match_cfg_test_attr(bytes: &[u8], start: usize) -> Option<usize> {
     if bytes.get(start) != Some(&b'#') || bytes.get(start + 1) != Some(&b'[') {
         return None;
     }
@@ -801,7 +840,227 @@ fn match_cfg_test_attr(bytes: &[u8], start: usize) -> Option<usize> {
     }
     let inner = std::str::from_utf8(&bytes[start + 2..p - 1]).ok()?;
     let compact: String = inner.chars().filter(|c| !c.is_whitespace()).collect();
-    if compact == "cfg(test)" || (compact.starts_with("cfg(all(") && compact.contains("test")) { Some(p) } else { None }
+    is_cfg_test_only(&compact).then_some(p)
+}
+
+/// Returns `true` iff a whitespace-compacted attribute expression like `cfg(all(unix,test))`
+/// can NEVER be active in a non-`test` build (`cfg!(test) == false`).
+pub(crate) fn is_cfg_test_only(compact_attr: &str) -> bool {
+    let Some(pred) = strip_cfg_call(compact_attr, "cfg") else {
+        return false;
+    };
+    !eval_cfg_pred_in_prod(pred).0
+}
+
+/// Returns `(can_be_true_when_not_test, can_be_false_when_not_test)`.
+fn eval_cfg_pred_in_prod(pred: &str) -> (bool, bool) {
+    if let Some(inner) = strip_cfg_call(pred, "not") {
+        let (t, f) = eval_cfg_pred_in_prod(inner);
+        return (f, t);
+    }
+    if let Some(inner) = strip_cfg_call(pred, "all") {
+        let args = split_cfg_args(inner);
+        if args.is_empty() {
+            return (true, false);
+        }
+        let mut all_true = true;
+        let mut any_false = false;
+        for arg in args {
+            let (t, f) = eval_cfg_pred_in_prod(arg);
+            all_true &= t;
+            any_false |= f;
+        }
+        return (all_true, any_false);
+    }
+    if let Some(inner) = strip_cfg_call(pred, "any") {
+        let args = split_cfg_args(inner);
+        if args.is_empty() {
+            return (false, true);
+        }
+        let mut any_true = false;
+        let mut all_false = true;
+        for arg in args {
+            let (t, f) = eval_cfg_pred_in_prod(arg);
+            any_true |= t;
+            all_false &= f;
+        }
+        return (any_true, all_false);
+    }
+    if pred == "test" { (false, true) } else { (true, true) }
+}
+
+fn strip_cfg_call<'a>(s: &'a str, name: &str) -> Option<&'a str> {
+    let rest = s.strip_prefix(name)?.strip_prefix('(')?;
+    let bytes = rest.as_bytes();
+    let mut depth = 1usize;
+    let mut in_quotes = false;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'"' => in_quotes = !in_quotes,
+            b'(' if !in_quotes => depth += 1,
+            b')' if !in_quotes => {
+                depth -= 1;
+                if depth == 0 {
+                    return (i + 1 == bytes.len()).then_some(&rest[..i]);
+                }
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    None
+}
+
+fn split_cfg_args(s: &str) -> Vec<&str> {
+    let mut args = Vec::new();
+    let bytes = s.as_bytes();
+    let mut depth = 0usize;
+    let mut in_quotes = false;
+    let mut start = 0usize;
+    for (i, &b) in bytes.iter().enumerate() {
+        match b {
+            b'"' => in_quotes = !in_quotes,
+            b'(' if !in_quotes => depth += 1,
+            b')' if !in_quotes => depth = depth.saturating_sub(1),
+            b',' if !in_quotes && depth == 0 => {
+                if !s[start..i].is_empty() {
+                    args.push(&s[start..i]);
+                }
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    if !s[start..].is_empty() {
+        args.push(&s[start..]);
+    }
+    args
+}
+
+fn scan_use_statements(rel: &str, prod_src: &str, rule: &'static str, banned_paths: &[&'static str], out: &mut Vec<HygieneViolation>) {
+    for (line, stmt) in collect_use_statements(prod_src) {
+        let mut expanded = Vec::new();
+        expand_use_tree("", &stmt, &mut expanded);
+        for item in expanded {
+            for &pat in banned_paths {
+                if item == pat || item.strip_prefix("::") == Some(pat) {
+                    out.push(HygieneViolation { path: rel.to_owned(), line, rule, pattern: pat });
+                }
+            }
+        }
+    }
+}
+
+fn collect_use_statements(prod_src: &str) -> Vec<(usize, String)> {
+    let bytes = prod_src.as_bytes();
+    let mut stmts = Vec::new();
+    let mut i = 0usize;
+    let mut line = 1usize;
+    while i < bytes.len() {
+        if bytes[i] == b'\n' {
+            line += 1;
+            i += 1;
+            continue;
+        }
+        let is_kw =
+            bytes[i..].starts_with(b"use") && (i == 0 || !is_ident_byte(bytes[i - 1])) && bytes.get(i + 3).is_some_and(|b| b.is_ascii_whitespace());
+        if !is_kw {
+            i += 1;
+            continue;
+        }
+        let stmt_line = line;
+        i += 3;
+        let mut buf = String::new();
+        while i < bytes.len() && bytes[i] != b';' {
+            if bytes[i] == b'\n' {
+                line += 1;
+            }
+            if bytes[i].is_ascii_whitespace() {
+                if !buf.is_empty() && !buf.ends_with(' ') {
+                    buf.push(' ');
+                }
+            } else {
+                buf.push(char::from(bytes[i]));
+            }
+            i += 1;
+        }
+        if bytes.get(i) == Some(&b';') {
+            stmts.push((stmt_line, buf));
+            i += 1;
+        }
+    }
+    stmts
+}
+
+fn expand_use_tree(prefix: &str, tree: &str, out: &mut Vec<String>) {
+    let trimmed = tree.trim();
+    if trimmed.is_empty() {
+        return;
+    }
+    if let Some(open) = trimmed.find('{')
+        && trimmed.ends_with('}')
+    {
+        let sub_prefix: String = trimmed[..open].chars().filter(|c| !c.is_whitespace()).collect();
+        let next_prefix = join_use_path(prefix, sub_prefix.trim_end_matches("::"));
+        let inner = &trimmed[open + 1..trimmed.len() - 1];
+        for part in split_brace_items(inner) {
+            expand_use_tree(&next_prefix, part, out);
+        }
+        return;
+    }
+    let without_alias = strip_use_alias(trimmed);
+    let compact: String = without_alias.chars().filter(|c| !c.is_whitespace()).collect();
+    if compact.is_empty() {
+        return;
+    }
+    let resolved = if compact == "self" { prefix.to_owned() } else { join_use_path(prefix, &compact) };
+    if !resolved.is_empty() {
+        out.push(resolved);
+    }
+}
+
+fn strip_use_alias(item: &str) -> &str {
+    let bytes = item.as_bytes();
+    let mut i = 0usize;
+    while i + 2 <= bytes.len() {
+        if &bytes[i..i + 2] == b"as" {
+            let left_ok = i > 0 && bytes[i - 1].is_ascii_whitespace();
+            let right_ok = bytes.get(i + 2).is_some_and(u8::is_ascii_whitespace);
+            if left_ok && right_ok {
+                return item[..i].trim();
+            }
+        }
+        i += 1;
+    }
+    item.trim()
+}
+
+fn join_use_path(prefix: &str, seg: &str) -> String {
+    match (prefix.is_empty(), seg.is_empty()) {
+        (true, _) => seg.to_owned(),
+        (false, true) => prefix.to_owned(),
+        (false, false) => format!("{prefix}::{seg}"),
+    }
+}
+
+fn split_brace_items(s: &str) -> Vec<&str> {
+    let mut parts = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (i, b) in s.bytes().enumerate() {
+        match b {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b',' if depth == 0 => {
+                parts.push(&s[start..i]);
+                start = i + 1;
+            }
+            _ => {}
+        }
+    }
+    parts.push(&s[start..]);
+    parts
 }
 
 fn skip_following_attrs(bytes: &[u8], mut pos: usize) -> usize {
@@ -1085,5 +1344,44 @@ serde = "1"
                 "crates/ui-egui/src/bad_io.rs:4: [ui-raw-io] forbidden `OpenOptions`",
             ]
         );
+    }
+
+    #[test]
+    fn r2_s13_06_cfg_not_test_not_masked_and_braced_command_imports_caught() {
+        let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let root = std::env::temp_dir().join(format!("lc-xtask-r2-s13-06-{}-{nanos}", std::process::id()));
+        let write_rel = |rel: &str, content: &str| {
+            let p = root.join(rel);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(p, content).unwrap();
+        };
+
+        write_rel(
+            "crates/engine/src/guarded.rs",
+            "#[cfg(all(unix, not(test)))]\npub fn prod_only() { let _ = std::process::Command::new(\"sh\"); }\n\
+             #[cfg(all(feature = \"latest\"))]\npub fn feat() { let _ = std::process::Command::new(\"ls\"); }\n",
+        );
+        write_rel("crates/engine/src/braced.rs", "use std::process::{ Command as Proc };\npub fn run() { let _ = Proc::new(\"sh\"); }\n");
+        write_rel("crates/format/src/glob_proc.rs", "use std::process::*;\npub fn run() {}\n");
+        write_rel(
+            "crates/ui-egui/src/extra_io.rs",
+            "use std::fs::{File, write, OpenOptions};\npub fn ops() { let _ = File::create_new(\"a\"); let _ = std::fs::remove_file(\"b\"); }\n",
+        );
+        write_rel(
+            "crates/engine/src/real_test_only.rs",
+            "#[cfg(all(unix, test))]\nmod t { fn f() { let _ = std::process::Command::new(\"sh\"); } }\n",
+        );
+
+        let hits = check_source_hygiene(&root);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert!(hits.iter().any(|h| h.path == "crates/engine/src/guarded.rs" && h.line == 2 && h.rule == "raw-process"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/engine/src/guarded.rs" && h.line == 4 && h.rule == "raw-process"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/engine/src/braced.rs" && h.rule == "raw-process"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/format/src/glob_proc.rs" && h.rule == "raw-process"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "File::create_new"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::remove_file"), "{hits:?}");
+        assert!(hits.iter().any(|h| h.path == "crates/ui-egui/src/extra_io.rs" && h.pattern == "std::fs::write"), "{hits:?}");
+        assert!(!hits.iter().any(|h| h.path == "crates/engine/src/real_test_only.rs"), "{hits:?}");
     }
 }

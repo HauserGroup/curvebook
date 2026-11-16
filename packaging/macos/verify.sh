@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Verify macOS release artifacts (.app, .dmg, and CLI .zip):
 #   - Strict deep code signature validation (`codesign --verify --strict --deep`)
-#   - Notarization ticket & Gatekeeper checks (`xcrun stapler validate`, `spctl`)
+#   - Notarization & Gatekeeper checks (`xcrun stapler validate`, `spctl`, `codesign --test-requirement="=notarized"`)
 #     when signed with a Developer ID certificate or `--require-notarized` is passed.
 #
 # Usage: packaging/macos/verify.sh [--arch universal|aarch64|x86_64] [--require-notarized] [artifact...]
@@ -109,14 +109,16 @@ verify_dmg() {
   hdiutil attach "$dmg" -mountpoint "$mp" -nobrowse -readonly -quiet
   MOUNT_POINTS+=("$mp")
   app_in_dmg="$mp/LumenCraft.app"
-  if [[ -d "$app_in_dmg" ]]; then
-    verify_app "$app_in_dmg"
+  if [[ ! -d "$app_in_dmg" ]]; then
+    echo "error: LumenCraft.app not found inside $dmg (expected $app_in_dmg)" >&2
+    exit 1
   fi
+  verify_app "$app_in_dmg"
   hdiutil detach "$mp" -quiet
 }
 
 verify_cli_zip() {
-  local zip_path="$1" stage bin
+  local zip_path="$1" stage bin cs_info host_arch bin_archs can_run
   [[ -f "$zip_path" ]] || { echo "error: CLI zip not found: $zip_path" >&2; exit 1; }
   echo "==> verifying CLI zip signature: $zip_path"
   stage="$WORK/cli-$(basename "$zip_path" .zip)"
@@ -125,11 +127,40 @@ verify_cli_zip() {
   bin="$(find "$stage" -type f -name 'lumencraft-cli' | head -n 1)"
   [[ -n "$bin" ]] || { echo "error: lumencraft-cli binary not found inside $zip_path" >&2; exit 1; }
   codesign --verify --strict --deep --verbose=2 "$bin"
-  if is_adhoc_signed "$bin" && [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
-    echo "error: $bin is ad-hoc signed but --require-notarized was requested" >&2
-    exit 1
+  if is_adhoc_signed "$bin"; then
+    if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
+      echo "error: $bin is ad-hoc signed but --require-notarized was requested" >&2
+      exit 1
+    fi
+    warn "$bin is ad-hoc signed; skipping Gatekeeper and hardened-runtime notarization checks"
+  else
+    cs_info="$(codesign -dv --verbose=4 "$bin" 2>&1 || true)"
+    if ! printf '%s\n' "$cs_info" | grep -q 'flags=.*runtime'; then
+      echo "error: $bin lacks Hardened Runtime flag required for notarization" >&2
+      exit 1
+    fi
+    if ! printf '%s\n' "$cs_info" | grep -q '^Timestamp='; then
+      echo "error: $bin lacks a secure signing timestamp required for notarization" >&2
+      exit 1
+    fi
+    codesign --test-requirement="=notarized" --verify --strict --verbose=2 "$bin"
   fi
-  "$bin" --version
+  host_arch="$(uname -m)"
+  bin_archs="$(lipo -archs "$bin" 2>/dev/null || true)"
+  can_run=0
+  case " $bin_archs " in
+    *" $host_arch "*) can_run=1 ;;
+    *" x86_64 "*)
+      if [[ "$host_arch" == "arm64" ]] && arch -x86_64 /usr/bin/true >/dev/null 2>&1; then
+        can_run=1
+      fi
+      ;;
+  esac
+  if [[ "$can_run" -eq 1 ]]; then
+    "$bin" --version
+  else
+    warn "skipping $bin --version: binary architectures ($bin_archs) incompatible with host $host_arch"
+  fi
 }
 
 for target in "${TARGETS[@]}"; do
