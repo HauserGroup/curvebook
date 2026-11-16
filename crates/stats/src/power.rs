@@ -2196,9 +2196,9 @@ pub fn solve_power(req: &PowerAnalysisRequest) -> Result<PowerAnalysisResult, St
     }
     if req.sample_size.is_some() && req.sample_size_group2.is_some() {
         curve_req.allocation_ratio = ctx.allocation_ratio;
-        curve_req.sample_size_group2 = None;
         if req.solve_target == PowerSolveTarget::SampleSize {
             curve_req.sample_size = None;
+            curve_req.sample_size_group2 = None;
         }
     }
 
@@ -2329,14 +2329,19 @@ pub fn compute_sensitivity_table(req: &PowerAnalysisRequest, alphas: &[f64], tar
     if matches!(req.family, PowerTestFamily::TwoSampleUnpairedT | PowerTestFamily::TwoProportions)
         && let (Some(n1_raw), Some(n2_raw)) = (req.sample_size, req.sample_size_group2)
     {
+        let is_welch = matches!(&req.effect, PowerEffectSpec::MeanDiffAndSd { sd_group2: Some(_), .. });
+        let min_n2 = if is_welch { 1.0 + 1e-6 } else { 1.0 };
         if !n1_raw.is_finite() || n1_raw < 1.0 || n1_raw > MAX_CONTINUOUS_N {
             return Err(StatsError::InvalidParameter { name: "sample_size", value: n1_raw });
         }
-        if !n2_raw.is_finite() || n2_raw < 1.0 || n2_raw > MAX_CONTINUOUS_N {
+        if !n2_raw.is_finite() || n2_raw < min_n2 || n2_raw > MAX_CONTINUOUS_N {
             return Err(StatsError::InvalidParameter { name: "sample_size_group2", value: n2_raw });
         }
         base_req.allocation_ratio = validate_allocation_ratio(n2_raw / n1_raw)?;
-        base_req.sample_size_group2 = None;
+        if mode == PowerSolveTarget::SampleSize {
+            base_req.sample_size = None;
+            base_req.sample_size_group2 = None;
+        }
     }
 
     for &alpha in alphas {

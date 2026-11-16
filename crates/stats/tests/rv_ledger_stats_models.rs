@@ -40,7 +40,9 @@ use curvebook_math::{ConfidenceLevel, MathError};
 use curvebook_stats::error::StatsError;
 use curvebook_stats::multiplicity::{adjust_holm_sidak, adjust_sidak};
 use curvebook_stats::multivariate::pca_analysis;
-use curvebook_stats::power::{PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, compute_power_curve, solve_power};
+use curvebook_stats::power::{
+    PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, compute_power_curve, compute_sensitivity_table, solve_power,
+};
 use curvebook_stats::regression::{multiple_logistic_regression, multiple_poisson_regression, passing_bablok_regression, run_glm_analysis};
 use curvebook_stats::roc::{RocCiMethod, compare_roc_delong_paired, roc_curve_analysis};
 use curvebook_stats::run_analysis;
@@ -554,19 +556,49 @@ fn rv_74_power_curve_respects_fixed_and_paired_sample_size_group2() {
     assert_close(center_pt.total_n, solved.total_n as f64, 1e-12, "solved curve center total_n with fixed n2=80");
     assert_close(center_pt.power, solved.achieved_power, 1e-12, "solved curve center power matches achieved_power");
 
-    // 2. Explicit (n1 = 11, n2 = 15) where IEEE-754 11.0 * (15.0 / 11.0) > 15.0 by 1 ULP:
-    // curve at n = 11 must report exact total_n = 26 (not 27) and match achieved_power to machine precision.
+    // 2. Explicit (n1 = 11, n2 = 25) where IEEE-754 11.0 * (25.0 / 11.0) = 25.000000000000004 > 25.0:
+    // BOTH solve_power's internal power_curve AND direct compute_power_curve at n = 11 must report
+    // exact total_n = 36 (not 37) and match achieved_power to machine precision, and DetectableEffect
+    // sensitivity_table must also preserve exact (n1 = 11, total_n = 36).
+    let k_ulp = 25.0_f64 / 11.0_f64;
+    assert!(11.0_f64 * k_ulp > 25.0_f64, "verify IEEE-754 1-ULP overshoot precondition");
+
     let pair_req = PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
         .with_target(PowerSolveTarget::Power)
         .with_sample_size(11.0)
-        .with_sample_size_group2(15.0)
+        .with_sample_size_group2(25.0)
         .with_allocation_ratio(1.0)
         .with_alpha(0.05)
         .with_effect(PowerEffectSpec::Standardized(0.7));
     let pair_res = solve_power(&pair_req).unwrap();
-    assert_eq!((pair_res.n_per_group, pair_res.n_group2, pair_res.total_n), (11, Some(15), 26));
+    assert_eq!((pair_res.n_per_group, pair_res.n_group2, pair_res.total_n), (11, Some(25), 36));
+    let res_pt_11 = pair_res.power_curve.iter().find(|pt| (pt.n - 11.0).abs() < 0.5).unwrap();
+    assert_close(res_pt_11.total_n, 36.0, 1e-12, "solve_power.power_curve at n=11 exact total_n=36");
+    assert_close(res_pt_11.power, pair_res.achieved_power, 1e-14, "solve_power.power_curve at n=11 matches achieved_power");
+
     let pair_curve = compute_power_curve(&pair_req, 11, 22, 12).unwrap();
     assert_close(pair_curve[0].n, 11.0, 1e-12, "curve n=11");
-    assert_close(pair_curve[0].total_n, 26.0, 1e-12, "curve exact total_n=26 without ULP ceiling overshoot");
-    assert_close(pair_curve[0].power, pair_res.achieved_power, 1e-14, "curve power at n=11 matches achieved_power");
+    assert_close(pair_curve[0].total_n, 36.0, 1e-12, "direct compute_power_curve exact total_n=36 without ULP overshoot");
+    assert_close(pair_curve[0].power, pair_res.achieved_power, 1e-14, "direct curve power at n=11 matches achieved_power");
+
+    let mde_pair_req = PowerAnalysisRequest::new(PowerTestFamily::TwoSampleUnpairedT)
+        .with_target(PowerSolveTarget::DetectableEffect)
+        .with_sample_size(11.0)
+        .with_sample_size_group2(25.0)
+        .with_allocation_ratio(1.0)
+        .with_alpha(0.05)
+        .with_target_power(0.80);
+    let mde_pair_res = solve_power(&mde_pair_req).unwrap();
+    assert_eq!((mde_pair_res.n_per_group, mde_pair_res.n_group2, mde_pair_res.total_n), (11, Some(25), 36));
+    let mde_pt_11 = mde_pair_res.power_curve.iter().find(|pt| (pt.n - 11.0).abs() < 0.5).unwrap();
+    assert_close(mde_pt_11.total_n, 36.0, 1e-12, "MDE power_curve at n=11 exact total_n=36");
+    assert_close(mde_pt_11.power, mde_pair_res.achieved_power, 1e-14, "MDE power_curve at n=11 matches achieved_power");
+    assert!(!mde_pair_res.sensitivity_table.is_empty());
+    for cell in &mde_pair_res.sensitivity_table {
+        assert_eq!((cell.sample_size, cell.total_n), (11, 36), "MDE sensitivity_table must preserve exact (11, 25)");
+    }
+    let direct_mde_sens = compute_sensitivity_table(&mde_pair_req, &[0.05, 0.01], &[0.80, 0.90]).unwrap();
+    for cell in &direct_mde_sens {
+        assert_eq!((cell.sample_size, cell.total_n), (11, 36));
+    }
 }
