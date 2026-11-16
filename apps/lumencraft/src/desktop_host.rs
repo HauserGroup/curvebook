@@ -11,19 +11,26 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use lumencraft_doc::{CellCoord, ProjectDocument, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableKind};
-use lumencraft_engine::{CommandOutcome, Session};
+use lumencraft_doc::{
+    CellCoord, CellValue, ProjectDocument, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource,
+};
+use lumencraft_engine::{CommandOutcome, Session, cmd as engine_cmd};
 use lumencraft_format::recovery::is_lease_reclaimable;
 use lumencraft_format::{
     CrashRecoveryJournal, DirectoryJournalBackend, FormatKind, FormatRegistry, ImportOptions, JournalBackend, JournalRecoveryWarning,
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
-use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
-use lumencraft_ui_egui::menus::{MenuSectionTooltips, menu_bar_tooltips};
+use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
+use lumencraft_ui_egui::grid_view::ImportOriginKind;
+use lumencraft_ui_egui::interaction::{
+    InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, WorkspaceHitTarget,
+};
+use lumencraft_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_tooltips};
 use lumencraft_ui_egui::theme::UiThemeMode;
+use lumencraft_ui_egui::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 use lumencraft_ui_egui::{
-    ClipboardBundle, ControlAuth, ControlPostRequestContext, UiApp, dispatch_ui_command, is_http_request_line, read_os_pasteboard,
-    serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
+    CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, UiApp, dispatch_ui_command, is_http_request_line,
+    read_os_pasteboard, serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -1637,6 +1644,50 @@ impl DesktopHostRuntime {
         delta_y: f64,
         modifiers: KeyModifiers,
     ) -> Result<DesktopEventOutcome, String> {
+        let (grid_sheet_id, over_scene_paper) = {
+            let win = self.window(window_id)?;
+            let layout = win.app.layout_map(win.viewport);
+            let hit = layout.hit_test_logical(x_pt, y_pt);
+            let doc = win.app.document();
+            let over_scene = matches!(hit, WorkspaceHitTarget::ScenePaper { .. })
+                || (matches!(hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid)) && layout.scene_paper.is_some());
+            let grid_target = match hit {
+                WorkspaceHitTarget::GridCell { sheet_id, .. } | WorkspaceHitTarget::GridXCell { sheet_id, .. } => Some(sheet_id),
+                WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid) if layout.scene_paper.is_none() => {
+                    doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
+                }
+                _ => None,
+            };
+            (grid_target, over_scene)
+        };
+
+        if let Some(sheet_id) = grid_sheet_id {
+            let win = self.window_mut(window_id)?;
+            if let Some(sheet) = win.app.document().data_sheet(&sheet_id).cloned() {
+                win.app.grid.tool.scroll_for_sheet(&sheet, -delta_x, -delta_y);
+                return Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("grid.scroll"),
+                    window_id: Some(window_id),
+                    command_result: Some(json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "scroll_x_px": win.app.grid.tool.viewport.scroll_x_px,
+                        "scroll_y_px": win.app.grid.tool.viewport.scroll_y_px,
+                    })),
+                    ..Default::default()
+                });
+            }
+        }
+
+        if !over_scene_paper {
+            return Ok(DesktopEventOutcome {
+                handled: false,
+                action: String::from("wheel.non_canvas_ignored"),
+                window_id: Some(window_id),
+                ..Default::default()
+            });
+        }
+
         let ui_event = if !modifiers.ctrl && !modifiers.meta && delta_x.abs() > f64::EPSILON {
             UiInputEvent::InertialPan { delta_x, delta_y, dt_sec: 0.016, step_coast: false }
         } else {
@@ -1700,7 +1751,13 @@ impl DesktopHostRuntime {
 
         let trimmed = key.trim();
         let control_key = matches!(trimmed, "Enter" | "Return" | "Escape" | "Esc" | "Backspace" | "Tab");
-        let inline_active = self.window(window_id)?.app.inline_editor.active;
+        let (inline_active, dialog_active, shortcut_route) = {
+            let win = self.window(window_id)?;
+            let inline = win.app.inline_editor.active;
+            let dialog = win.app.canvas_dialogs.active_dialog != ActiveDialog::None;
+            let routed = if !inline && !dialog { match_routed_desktop_shortcut(&win.app, trimmed, modifiers) } else { None };
+            (inline, dialog, routed)
+        };
         if inline_active
             && !control_key
             && !modifiers.ctrl
@@ -1709,6 +1766,12 @@ impl DesktopHostRuntime {
             && let Some(input_text) = text.as_ref().filter(|t| !t.is_empty())
         {
             return self.dispatch_ui_event_on_window(window_id, UiInputEvent::TextInput { text: input_text.clone() });
+        }
+
+        if let Some(routed_cmd) = shortcut_route
+            && !dialog_active
+        {
+            return self.dispatch_routed_shortcut(window_id, &routed_cmd);
         }
 
         let out = self.dispatch_ui_event_on_window(window_id, UiInputEvent::KeyDown { key: key.clone(), modifiers })?;
@@ -1840,6 +1903,34 @@ impl DesktopHostRuntime {
         }
     }
 
+    fn dispatch_routed_shortcut(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<DesktopEventOutcome, String> {
+        if command_id == "sheet.createData" {
+            let result_sheet_id = {
+                let win = self.window(window_id)?;
+                let doc = win.app.document();
+                doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).cloned()
+            };
+            if let Some(rs_id) = result_sheet_id {
+                let win = self.window_mut(window_id)?;
+                let payload = open_desktop_dialog(&mut win.app, DesktopDialogOpener::EditAnalysisParameters, Some(rs_id.as_str()), None)?;
+                win.app.sync_views();
+                return Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("shortcut:EditAnalysisParameters"),
+                    window_id: Some(window_id),
+                    command_id: Some(String::from("analysis.updateParams")),
+                    command_result: Some(payload),
+                    ..Default::default()
+                });
+            }
+        }
+        let mut out = self.handle_menu_action(window_id, command_id.to_owned())?;
+        if out.action.starts_with("menu.") {
+            out.action = format!("shortcut:{command_id}");
+        }
+        Ok(out)
+    }
+
     fn handle_menu_action(&mut self, window_id: DesktopWindowId, command_id: String) -> Result<DesktopEventOutcome, String> {
         let trimmed = command_id.trim();
         if trimmed.is_empty() {
@@ -1850,66 +1941,84 @@ impl DesktopHostRuntime {
             win.chrome_dispatched_actions.push(trimmed.to_owned());
         }
 
-        match trimmed {
-            "window.new" | "file.newWindow" => {
-                let viewport = self.window(window_id)?.viewport;
-                let new_id = self.open_window(None, viewport)?;
-                return Ok(DesktopEventOutcome {
-                    handled: true,
-                    action: String::from("menu.new_window"),
-                    window_id: Some(window_id),
-                    opened_window_id: Some(new_id),
-                    command_id: Some(trimmed.to_owned()),
-                    ..Default::default()
-                });
-            }
-            "window.close" | "file.close" => {
-                self.persist_window_preferences(window_id);
-                return self.handle_window_close_requested(window_id, false);
-            }
-            "edit.copy" => return self.handle_clipboard_copy(window_id),
-            "edit.paste" => return self.handle_clipboard_paste(window_id, None),
-            _ => {}
-        }
-
-        let has_hook = self.preferences_persist_hook.is_some();
-        let win = self.window_mut(window_id)?;
-        let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
-        if let Some(ui_res) = dispatch_ui_command(&mut win.app, trimmed, &Value::Null)? {
-            win.app.sync_views();
-            let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
-            if changed {
-                self.persist_window_preferences(window_id);
-            }
-            return Ok(DesktopEventOutcome {
-                handled: true,
-                action: String::from("menu.ui_command"),
-                window_id: Some(window_id),
-                command_id: Some(trimmed.to_owned()),
-                command_result: Some(ui_res),
-                ..Default::default()
-            });
-        }
-
-        let params = if trimmed == "project.save"
-            && let Some(path) = win.app.session().file_path()
-        {
-            json!({ "path": path.to_string_lossy() })
-        } else {
-            Value::Null
+        let route = {
+            let win = self.window(window_id)?;
+            resolve_desktop_command_route(&win.app, win.app.session().file_path(), trimmed)?
         };
-        let outcome = win.execute_and_journal(trimmed, params)?;
-        if prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app)) {
-            self.persist_window_preferences(window_id);
+
+        match route {
+            DesktopCommandRoute::HostAction { action } => match action {
+                "window.new" => {
+                    let viewport = self.window(window_id)?.viewport;
+                    let new_id = self.open_window(None, viewport)?;
+                    Ok(DesktopEventOutcome {
+                        handled: true,
+                        action: String::from("menu.new_window"),
+                        window_id: Some(window_id),
+                        opened_window_id: Some(new_id),
+                        command_id: Some(trimmed.to_owned()),
+                        ..Default::default()
+                    })
+                }
+                "window.close" => {
+                    self.persist_window_preferences(window_id);
+                    self.handle_window_close_requested(window_id, false)
+                }
+                "edit.copy" => self.handle_clipboard_copy(window_id),
+                "edit.paste" => self.handle_clipboard_paste(window_id, None),
+                other => Err(format!("unhandled host action `{other}`")),
+            },
+            DesktopCommandRoute::UiCommand { ui_command_id, params } => {
+                let has_hook = self.preferences_persist_hook.is_some();
+                let win = self.window_mut(window_id)?;
+                let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
+                let ui_res = dispatch_ui_command(&mut win.app, &ui_command_id, &params)?
+                    .ok_or_else(|| format!("UI command `{ui_command_id}` is not registered in dispatcher"))?;
+                win.app.sync_views();
+                let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
+                if changed {
+                    self.persist_window_preferences(window_id);
+                }
+                Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("menu.ui_command"),
+                    window_id: Some(window_id),
+                    command_id: Some(trimmed.to_owned()),
+                    command_result: Some(ui_res),
+                    ..Default::default()
+                })
+            }
+            DesktopCommandRoute::UiDialogOpener { kind, target_sheet_id, query } => {
+                let win = self.window_mut(window_id)?;
+                let payload = open_desktop_dialog(&mut win.app, kind, target_sheet_id.as_deref(), query.as_deref())?;
+                win.app.sync_views();
+                Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("menu.dialog_opened"),
+                    window_id: Some(window_id),
+                    command_id: Some(trimmed.to_owned()),
+                    command_result: Some(payload),
+                    ..Default::default()
+                })
+            }
+            DesktopCommandRoute::EngineCommand { engine_command_id, params } => {
+                let has_hook = self.preferences_persist_hook.is_some();
+                let win = self.window_mut(window_id)?;
+                let prev_prefs = has_hook.then(|| Self::capture_pref_fingerprint(&win.app));
+                let outcome = win.execute_and_journal(&engine_command_id, params)?;
+                if prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app)) {
+                    self.persist_window_preferences(window_id);
+                }
+                Ok(DesktopEventOutcome {
+                    handled: true,
+                    action: String::from("menu.engine_command"),
+                    window_id: Some(window_id),
+                    command_id: Some(trimmed.to_owned()),
+                    command_result: Some(outcome.payload),
+                    ..Default::default()
+                })
+            }
         }
-        Ok(DesktopEventOutcome {
-            handled: true,
-            action: String::from("menu.engine_command"),
-            window_id: Some(window_id),
-            command_id: Some(trimmed.to_owned()),
-            command_result: Some(outcome.payload),
-            ..Default::default()
-        })
     }
 
     fn handle_clipboard_copy(&mut self, window_id: DesktopWindowId) -> Result<DesktopEventOutcome, String> {
@@ -2068,4 +2177,894 @@ impl DesktopHostRuntime {
             ..Default::default()
         })
     }
+}
+
+/// Interactive dialog, wizard, or inline editor opened directly on [`UiApp`] when a menu/shortcut
+/// command needs user-supplied parameters rather than executing a headless engine command.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DesktopDialogOpener {
+    WelcomeEmptyTable,
+    WelcomeOpenProject,
+    WelcomeFromTemplate,
+    ImportWizardPaste,
+    ImportWizardPasteLink,
+    ImportWizardExternalFile,
+    VariablesDialog,
+    EditAnalysisParameters,
+    ChangeDataAnalyzed,
+    ApplyStyleFrom,
+    InfoNotesEditor,
+    InfoConstantHookPicker,
+    CommandPalette,
+}
+
+/// Resolved desktop command dispatch plan produced by [`resolve_desktop_command_route`].
+#[derive(Debug, Clone, PartialEq)]
+pub enum DesktopCommandRoute {
+    /// Window lifecycle or host clipboard command handled directly by [`DesktopHostRuntime`].
+    HostAction { action: &'static str },
+    /// UI command executed through [`lumencraft_ui_egui::dispatch_ui_command`].
+    UiCommand { ui_command_id: String, params: Value },
+    /// Interactive UI dialog, wizard, or inline editor opened directly on [`UiApp`].
+    UiDialogOpener { kind: DesktopDialogOpener, target_sheet_id: Option<String>, query: Option<String> },
+    /// Engine command executed with non-null context parameters synthesized from active [`UiApp`] state.
+    EngineCommand { engine_command_id: String, params: Value },
+}
+
+/// Resolve how a menu bar, toolbar, context menu, or shortcut command ID should be dispatched in
+/// the desktop shell without passing `Value::Null` to schema-validated commands.
+///
+/// Supports optional `:variant` suffixes for submenu choices such as `ui.theme.set:dark`,
+/// `ui.locale.set:de`, `ui.previewFilter.set:deuteranopia`, and `ui.canvas.applyPreset:Slide16x9`.
+///
+/// # Errors
+/// Returns a descriptive error string when `command_id` is empty or lacks a required active target
+/// sheet/cell in the current document.
+pub fn resolve_desktop_command_route(app: &UiApp, session_file_path: Option<&Path>, command_id: &str) -> Result<DesktopCommandRoute, String> {
+    let trimmed = command_id.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("command_id must not be empty"));
+    }
+    let (base_cmd, variant) = split_variant_command(trimmed);
+    if let Some(btn) = TOOLBAR_BUTTONS.iter().find(|b| b.id == base_cmd) {
+        return resolve_desktop_command_route(app, session_file_path, btn.command_id);
+    }
+    let doc = app.document();
+
+    if let Some(route) = resolve_host_or_ui_route(app, doc, base_cmd, variant)? {
+        return Ok(route);
+    }
+    if let Some(route) = resolve_project_or_sheet_route(doc, session_file_path, base_cmd)? {
+        return Ok(route);
+    }
+    if let Some(route) = resolve_table_route(app, doc, base_cmd)? {
+        return Ok(route);
+    }
+    if let Some(route) = resolve_analysis_export_graph_layout_info_route(doc, base_cmd, variant)? {
+        return Ok(route);
+    }
+
+    Ok(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) })
+}
+
+fn split_variant_command(command_id: &str) -> (&str, Option<&str>) {
+    let Some((prefix, suffix)) = command_id.split_once(':') else {
+        return (command_id, None);
+    };
+    if matches!(
+        prefix,
+        "ui.theme.set" | "ui.locale.set" | "ui.previewFilter.set" | "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset"
+    ) && !suffix.trim().is_empty()
+    {
+        (prefix, Some(suffix.trim()))
+    } else {
+        (command_id, None)
+    }
+}
+
+fn next_theme_mode_name(current: UiThemeMode) -> &'static str {
+    match current {
+        UiThemeMode::Light => "dark",
+        UiThemeMode::Dark => "high_contrast",
+        UiThemeMode::HighContrast => "light",
+    }
+}
+
+fn next_preview_filter_name(current: CanvasPreviewFilter) -> &'static str {
+    match current {
+        CanvasPreviewFilter::Normal => "deuteranopia",
+        CanvasPreviewFilter::Deuteranopia => "protanopia",
+        CanvasPreviewFilter::Protanopia => "tritanopia",
+        CanvasPreviewFilter::Tritanopia => "grayscale",
+        CanvasPreviewFilter::GrayscalePrint => "normal",
+    }
+}
+
+fn next_locale_code(current: &str) -> &'static str {
+    if LOCALES.is_empty() {
+        return "en";
+    }
+    let idx = LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
+    LOCALES.get((idx + 1) % LOCALES.len()).copied().unwrap_or("en")
+}
+
+fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id
+        .clone()
+        .or_else(|| doc.data_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.result_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
+}
+
+fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        return Some(active.clone());
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref() {
+        if let Some(graph) = doc.graph_sheet(active) {
+            let src = &graph.spec.primary_source_sheet_id;
+            if doc.data_sheet(src).is_some() {
+                return Some(src.clone());
+            }
+        }
+        if let Some(res) = doc.result_sheet(active) {
+            let src = &res.analysis.source_sheet_id;
+            if doc.data_sheet(src).is_some() {
+                return Some(src.clone());
+            }
+        }
+    }
+    doc.data_sheets.first().map(|s| s.id.clone())
+}
+
+fn resolve_xy_or_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref()
+        && let Some(ds) = doc.data_sheet(active)
+        && matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_))
+    {
+        return Some(ds.id.clone());
+    }
+    doc.data_sheets
+        .iter()
+        .find(|ds| matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_)))
+        .map(|ds| ds.id.clone())
+        .or_else(|| resolve_data_sheet_id(doc))
+}
+
+fn resolve_mv_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref()
+        && let Some(ds) = doc.data_sheet(active)
+        && matches!(ds.archetype, TableArchetype::MultipleVariables(_))
+    {
+        return Some(ds.id.clone());
+    }
+    doc.data_sheets.iter().find(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_))).map(|ds| ds.id.clone())
+}
+
+fn resolve_result_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
+}
+
+fn resolve_graph_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+}
+
+fn resolve_uninit_or_graph_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id
+        .as_ref()
+        .filter(|id| doc.graph_sheet(id).is_some())
+        .cloned()
+        .or_else(|| doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.clone()))
+        .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+}
+
+fn resolve_layout_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+}
+
+fn resolve_renderable_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref()
+        && matches!(doc.sheet_section(active), Some(SheetSection::Graphs | SheetSection::Layouts))
+    {
+        return Some(active.clone());
+    }
+    doc.graph_sheets.first().map(|g| g.id.clone()).or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+}
+
+fn resolve_info_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref() {
+        if doc.info_sheet(active).is_some() {
+            return Some(active.clone());
+        }
+        if let Some(ds) = doc.data_sheet(active)
+            && let Some(linked) = &ds.info_sheet_id
+            && doc.info_sheet(linked).is_some()
+        {
+            return Some(linked.clone());
+        }
+    }
+    doc.info_sheets.first().map(|i| i.id.clone())
+}
+
+fn sheet_id_obj_or_empty(sheet_id: Option<SheetId>) -> Value {
+    match sheet_id {
+        Some(id) => json!({ "sheet_id": id.as_str() }),
+        None => json!({}),
+    }
+}
+
+fn resolve_host_or_ui_route(
+    app: &UiApp,
+    doc: &ProjectDocument,
+    base_cmd: &str,
+    variant: Option<&str>,
+) -> Result<Option<DesktopCommandRoute>, String> {
+    match base_cmd {
+        "window.new" | "file.newWindow" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.new" })),
+        "window.close" | "file.close" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
+        "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
+        "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.graph.axes.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "file.print" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.print.open"),
+            params: sheet_id_obj_or_empty(resolve_any_sheet_id(doc)),
+        })),
+        "ui.theme.set" => {
+            let mode = variant.unwrap_or_else(|| next_theme_mode_name(app.theme.mode));
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.theme.set"), params: json!({ "mode": mode }) }))
+        }
+        "ui.previewFilter.set" => {
+            let filter = variant.unwrap_or_else(|| next_preview_filter_name(app.preview_filter));
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.previewFilter.set"), params: json!({ "filter": filter }) }))
+        }
+        "ui.locale.set" => {
+            let locale = variant.unwrap_or_else(|| next_locale_code(&app.locale));
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.locale.set"), params: json!({ "locale": locale }) }))
+        }
+        "ui.canvas.applyPreset" => {
+            let preset = variant.unwrap_or("SingleColumn88mm");
+            let mut params = sheet_id_obj_or_empty(resolve_renderable_sheet_id(doc));
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("preset"), Value::String(preset.to_owned()));
+                obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+            }
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.canvas.applyPreset"), params }))
+        }
+        "ui.shortcut.set" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: None,
+            query: Some(String::from("shortcut")),
+        })),
+        "ui.brush.point" => {
+            let ds_id = resolve_data_sheet_id(doc);
+            let params = match (ds_id, app.grid.tool.active, app.brushed_cell.as_ref()) {
+                (Some(id), Some(coord), _) => {
+                    json!({ "sheet_id": id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol })
+                }
+                (_, None, Some(brushed)) => {
+                    json!({ "sheet_id": brushed.sheet_id.as_str(), "row": brushed.row, "col": brushed.col, "subcol": brushed.subcol })
+                }
+                (Some(id), None, None) => json!({ "sheet_id": id.as_str(), "row": 0, "col": 0, "subcol": 0 }),
+                (None, _, _) => json!({}),
+            };
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.brush.point"), params }))
+        }
+        "ui.result.applyRemediation" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.result.inspectDiagnostics"),
+            params: sheet_id_obj_or_empty(resolve_result_sheet_id(doc)),
+        })),
+        "ui.table.openFormulaBar" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.table.openFormulaBar"),
+            params: sheet_id_obj_or_empty(resolve_mv_sheet_id(doc)),
+        })),
+        "ui.event.dispatch" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.event.dispatch"),
+            params: json!({
+                "event": { "PointerMove": { "x": 0.0, "y": 0.0, "modifiers": { "shift": false, "ctrl": false, "alt": false, "meta": false } } },
+                "metrics": { "logical_width": 1024.0, "logical_height": 640.0, "scale_factor": 1.0 }
+            }),
+        })),
+        cmd if cmd.starts_with("ui.") || cmd == "app.about" => {
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn resolve_project_or_sheet_route(
+    doc: &ProjectDocument,
+    session_file_path: Option<&Path>,
+    base_cmd: &str,
+) -> Result<Option<DesktopCommandRoute>, String> {
+    match base_cmd {
+        "edit.undo"
+        | "edit.redo"
+        | "file.new"
+        | "project.new"
+        | "project.inspect"
+        | "project.recalculate"
+        | "project.listCheckpoints"
+        | "layout.create" => Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) })),
+        "project.open" | "file.open" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeOpenProject, target_sheet_id: None, query: None }))
+        }
+        "project.instantiateTemplate" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeFromTemplate, target_sheet_id: None, query: None }))
+        }
+        "project.save" | "file.save" | "project.saveAs" | "file.save_as" => {
+            let params = match session_file_path {
+                Some(path) => json!({ "path": path.to_string_lossy(), "unpacked": false }),
+                None => json!({ "return_bytes": true }),
+            };
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: String::from("project.save"), params }))
+        }
+        "project.saveTemplate" => Ok(Some(DesktopCommandRoute::EngineCommand {
+            engine_command_id: String::from("project.saveTemplate"),
+            params: json!({ "return_bytes": true }),
+        })),
+        "project.createCheckpoint" => Ok(Some(DesktopCommandRoute::EngineCommand {
+            engine_command_id: String::from("project.createCheckpoint"),
+            params: json!({ "name": format!("Checkpoint {}", doc.checkpoints.len() + 1) }),
+        })),
+        "project.restoreCheckpoint" | "project.deleteCheckpoint" | "sheet.rename" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_any_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(base_cmd.to_owned()),
+        })),
+        "sheet.createData" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeEmptyTable, target_sheet_id: None, query: None }))
+        }
+        "sheet.clonePipeline" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.clonePipeline.open"),
+            params: sheet_id_obj_or_empty(resolve_any_sheet_id(doc)),
+        })),
+        "sheet.extractResultTab" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.analyze.open"),
+            params: sheet_id_obj_or_empty(resolve_result_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        })),
+        "sheet.reorder" => {
+            let params = build_sheet_reorder_params(doc)?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: String::from("sheet.reorder"), params }))
+        }
+        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
+            let id = resolve_any_sheet_id(doc).ok_or_else(|| format!("no active sheet available for `{base_cmd}`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn build_sheet_reorder_params(doc: &ProjectDocument) -> Result<Value, String> {
+    let sheet_id = resolve_any_sheet_id(doc).ok_or_else(|| String::from("no active sheet available for `sheet.reorder`"))?;
+    let (current_idx, len) = match doc.sheet_section(&sheet_id) {
+        Some(SheetSection::Data) => (doc.data_sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0), doc.data_sheets.len()),
+        Some(SheetSection::Info) => (doc.info_sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0), doc.info_sheets.len()),
+        Some(SheetSection::Analyses) => (doc.result_sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0), doc.result_sheets.len()),
+        Some(SheetSection::Graphs) => (doc.graph_sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0), doc.graph_sheets.len()),
+        Some(SheetSection::Layouts) => (doc.layout_sheets.iter().position(|s| s.id == sheet_id).unwrap_or(0), doc.layout_sheets.len()),
+        None => (0, 1),
+    };
+    let next_idx = if len > 1 { (current_idx + 1) % len } else { current_idx };
+    Ok(json!({ "sheet_id": sheet_id.as_str(), "index": next_idx }))
+}
+
+fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Result<Option<DesktopCommandRoute>, String> {
+    match base_cmd {
+        "table.exclusionAuditReport" | "table.simulateXy" => {
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) }))
+        }
+        "table.setCell" | "table.setCells" | "table.setXCells" | "table.clearCells" | "table.excludeCells" => {
+            let params = build_table_context_params(app, doc, base_cmd)?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params }))
+        }
+        "table.excludeCellsWithReason" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.grid.excludeWithReason"),
+            params: sheet_id_obj_or_empty(resolve_data_sheet_id(doc)),
+        })),
+        "table.randomizeGroups" => {
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.table.randomizeGroups"), params: json!({}) }))
+        }
+        "table.randomSampleRows" => {
+            let params = match resolve_data_sheet_id(doc) {
+                Some(id) => json!({ "source_sheet_id": id.as_str() }),
+                None => json!({}),
+            };
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.table.randomSampleRows"), params }))
+        }
+        "table.simulateDistributions" => {
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.table.simulateDistributions"), params: json!({}) }))
+        }
+        "table.convertArchetype" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.table.convertArchetype.open"),
+            params: sheet_id_obj_or_empty(resolve_data_sheet_id(doc)),
+        })),
+        "table.importPlateMap" => {
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.import.reshape.open"), params: json!({ "mode": "Plate96" }) }))
+        }
+        "table.importTidyLong" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.import.reshape.open"),
+            params: json!({ "mode": "TidyLongPivot" }),
+        })),
+        "table.setCalculatedVariable" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.table.openFormulaBar"),
+            params: sheet_id_obj_or_empty(resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        })),
+        "table.setVariableRole" | "table.recodeLevels" | "table.setCategoricalOrder" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::VariablesDialog,
+            target_sheet_id: resolve_mv_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "table.paste" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ImportWizardPaste,
+            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "table.pasteLink" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ImportWizardPasteLink,
+            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "table.importCsv" | "table.importPrism" | "table.importPzfx" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ImportWizardExternalFile,
+            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "table.setRowTitles" | "table.setGroupTitles" | "table.setTitles" | "table.setSubcolumnTitles" => {
+            Ok(Some(DesktopCommandRoute::UiDialogOpener {
+                kind: DesktopDialogOpener::CommandPalette,
+                target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+                query: Some(base_cmd.to_owned()),
+            }))
+        }
+        "table.exportCsv" => {
+            let target = doc
+                .active_sheet_id
+                .as_ref()
+                .filter(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some())
+                .cloned()
+                .or_else(|| resolve_data_sheet_id(doc))
+                .or_else(|| resolve_result_sheet_id(doc))
+                .ok_or_else(|| String::from("no data or result sheet available for `table.exportCsv`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("table.exportCsv"),
+                params: json!({ "sheet_id": target.as_str() }),
+            }))
+        }
+        _ => Ok(None),
+    }
+}
+
+fn cell_value_to_json(val: &CellValue) -> Value {
+    match val {
+        CellValue::Empty => Value::Null,
+        CellValue::Number(n) => json!(n),
+        CellValue::Text(s) => json!(s),
+    }
+}
+
+fn first_editable_col_idx(ds: &lumencraft_doc::DataSheet) -> usize {
+    if let TableArchetype::MultipleVariables(mv) = &ds.archetype
+        && let Some(idx) = mv.variables.iter().position(|v| !matches!(v.source, VariableSource::Calculated { .. }))
+    {
+        return idx;
+    }
+    0
+}
+
+fn build_table_context_params(app: &UiApp, doc: &ProjectDocument, cmd: &str) -> Result<Value, String> {
+    if cmd == "table.setXCells" {
+        let id = resolve_xy_or_data_sheet_id(doc).ok_or_else(|| format!("no data sheet available for `{cmd}`"))?;
+        let ds = doc.data_sheet(&id).ok_or_else(|| format!("data sheet `{id}` not found"))?;
+        let row_limit = ds.archetype.row_count().max(1);
+        let (raw_row, subcol) = app.grid.active_x_cell.unwrap_or((0, 0));
+        let row = raw_row.min(row_limit - 1);
+        let existing = ds.x_or_time_cell(row, subcol).map_or(Value::Null, |c| cell_value_to_json(&c.value));
+        return Ok(json!({ "sheet_id": id.as_str(), "row": row, "subcol": subcol, "value": existing }));
+    }
+
+    let id = resolve_data_sheet_id(doc).ok_or_else(|| format!("no data sheet available for `{cmd}`"))?;
+    let ds = doc.data_sheet(&id).ok_or_else(|| format!("data sheet `{id}` not found"))?;
+    let total_rows = ds.archetype.row_count();
+    let total_cols = ds.archetype.column_count();
+    if total_rows == 0 || total_cols == 0 {
+        return Err(format!("data sheet `{id}` has no data cells for `{cmd}`"));
+    }
+
+    if cmd == "table.excludeCells"
+        && let Some((x_row, x_subcol)) = app.grid.active_x_cell
+        && matches!(ds.archetype, TableArchetype::Xy(_) | TableArchetype::Survival(_))
+    {
+        let row = x_row.min(total_rows - 1);
+        let cur_excl = ds.x_or_time_cell(row, x_subcol).is_some_and(|c| c.excluded);
+        return Ok(json!({ "sheet_id": id.as_str(), "target": "x", "row": row, "subcol": x_subcol, "excluded": !cur_excl }));
+    }
+
+    let bounds = app.grid.tool.selection_bounds();
+    let fallback_col = first_editable_col_idx(ds).min(total_cols - 1);
+    let active = app.grid.tool.active.unwrap_or_default();
+    let row = active.row.min(total_rows - 1);
+    let col = if active.col < total_cols { active.col } else { fallback_col };
+    let subcol = active.subcol;
+
+    match cmd {
+        "table.setCell" => {
+            let existing = ds.cell(CellCoord::new(row, col, subcol)).map_or(Value::Null, |c| cell_value_to_json(&c.value));
+            Ok(json!({ "sheet_id": id.as_str(), "row": row, "col": col, "subcol": subcol, "value": existing }))
+        }
+        "table.setCells" => {
+            let existing = ds.cell(CellCoord::new(row, col, subcol)).map_or(Value::Null, |c| cell_value_to_json(&c.value));
+            Ok(json!({ "sheet_id": id.as_str(), "edits": [{ "row": row, "col": col, "subcol": subcol, "value": existing }] }))
+        }
+        "table.clearCells" => {
+            if let Some((a, b)) = bounds {
+                let start_row = a.row.min(total_rows - 1);
+                let end_row = b.row.min(total_rows - 1);
+                let start_col = a.col.min(total_cols - 1);
+                let end_col = b.col.min(total_cols - 1);
+                Ok(json!({
+                    "sheet_id": id.as_str(),
+                    "range": {
+                        "start": { "row": start_row, "col": start_col, "subcol": a.subcol },
+                        "end": { "row": end_row, "col": end_col, "subcol": b.subcol }
+                    }
+                }))
+            } else {
+                Ok(json!({ "sheet_id": id.as_str(), "row": row, "col": col, "subcol": subcol }))
+            }
+        }
+        "table.excludeCells" => {
+            let probe = bounds.map_or_else(
+                || CellCoord::new(row, col, subcol),
+                |(a, _)| CellCoord::new(a.row.min(total_rows - 1), a.col.min(total_cols - 1), a.subcol),
+            );
+            let next_excl = !ds.cell(probe).is_some_and(|c| c.excluded);
+            if let Some((a, b)) = bounds {
+                let start_row = a.row.min(total_rows - 1);
+                let end_row = b.row.min(total_rows - 1);
+                let start_col = a.col.min(total_cols - 1);
+                let end_col = b.col.min(total_cols - 1);
+                Ok(json!({
+                    "sheet_id": id.as_str(),
+                    "excluded": next_excl,
+                    "range": {
+                        "start": { "row": start_row, "col": start_col, "subcol": a.subcol },
+                        "end": { "row": end_row, "col": end_col, "subcol": b.subcol }
+                    }
+                }))
+            } else {
+                Ok(json!({ "sheet_id": id.as_str(), "row": row, "col": col, "subcol": subcol, "excluded": next_excl }))
+            }
+        }
+        _ => Ok(json!({ "sheet_id": id.as_str() })),
+    }
+}
+
+fn resolve_analysis_export_graph_layout_info_route(
+    doc: &ProjectDocument,
+    base_cmd: &str,
+    variant: Option<&str>,
+) -> Result<Option<DesktopCommandRoute>, String> {
+    match base_cmd {
+        "analyze.run" => Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: String::from("analyze.run"), params: json!({}) })),
+        "analysis.add" | "analysis.run" | "stats.run" | "transform.run" | "fit.run" | "stats.pvalueStack" => {
+            Ok(Some(DesktopCommandRoute::UiCommand {
+                ui_command_id: String::from("ui.analyze.open"),
+                params: sheet_id_obj_or_empty(resolve_data_sheet_id(doc)),
+            }))
+        }
+        "analysis.updateParams" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::EditAnalysisParameters,
+            target_sheet_id: resolve_result_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "analysis.retargetData" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ChangeDataAnalyzed,
+            target_sheet_id: resolve_result_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "analysis.exportJson" | "analysis.exportCsv" => {
+            let id = resolve_result_sheet_id(doc).ok_or_else(|| format!("no result sheet available for `{base_cmd}`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
+        }
+        "result.generateReport" => {
+            let id = resolve_result_sheet_id(doc).ok_or_else(|| String::from("no result sheet available for `result.generateReport`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("result.generateReport"),
+                params: json!({ "result_sheet_id": id.as_str(), "format": "markdown" }),
+            }))
+        }
+        "export.svg" | "file.export_svg" | "export.pdf" | "file.export_pdf" | "export.png" | "file.export_png" | "export.tiff" => {
+            let engine_id = match base_cmd {
+                "file.export_svg" => "export.svg",
+                "file.export_pdf" => "export.pdf",
+                "file.export_png" => "export.png",
+                other => other,
+            };
+            let id = resolve_renderable_sheet_id(doc).ok_or_else(|| format!("no graph or layout sheet available for `{engine_id}`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: engine_id.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
+        }
+        "graph.exportSvg" | "graph.exportPdf" | "graph.exportPng" | "graph.exportEmf" => {
+            let id = resolve_graph_sheet_id(doc).ok_or_else(|| format!("no graph sheet available for `{base_cmd}`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({ "sheet_id": id.as_str() }) }))
+        }
+        "layout.exportEmf" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.exportEmf`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.exportEmf"),
+                params: json!({ "sheet_id": id.as_str() }),
+            }))
+        }
+        _ => resolve_graph_layout_info_only_route(doc, base_cmd, variant),
+    }
+}
+
+fn resolve_graph_layout_info_only_route(doc: &ProjectDocument, base_cmd: &str, variant: Option<&str>) -> Result<Option<DesktopCommandRoute>, String> {
+    match base_cmd {
+        "graph.create" => {
+            let ds_id = resolve_data_sheet_id(doc).ok_or_else(|| String::from("no data sheet available for `graph.create`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("graph.create"),
+                params: json!({ "data_sheet_id": ds_id.as_str() }),
+            }))
+        }
+        "graph.initialize" => {
+            let gid = resolve_uninit_or_graph_sheet_id(doc).ok_or_else(|| String::from("no graph sheet available for `graph.initialize`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("graph.initialize"),
+                params: json!({ "sheet_id": gid.as_str() }),
+            }))
+        }
+        "graph.setKind" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.changeGraphType.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.setSpec" | "graph.setSeries" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.graph.format.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.setAxes" | "graph.setAdditionalTicks" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.graph.axes.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.addComparisonBrackets" | "graph.setCompactLetterDisplay" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.graph.pairwise.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.setRegressionOverlay" | "graph.addAnnotation" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.graph.insertModelEquation"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.formatSelectedPoints" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.formatPoints.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "graph.applyStyleFrom" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::ApplyStyleFrom,
+            target_sheet_id: resolve_graph_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "graph.applyCanvasPreset" => {
+            let preset = variant.unwrap_or("SingleColumn88mm");
+            let mut params = sheet_id_obj_or_empty(resolve_graph_sheet_id(doc));
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("preset"), Value::String(preset.to_owned()));
+                obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+            }
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.canvas.applyPreset"), params }))
+        }
+        "graph.preflightCheck" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.canvas.preflight"),
+            params: sheet_id_obj_or_empty(resolve_renderable_sheet_id(doc)),
+        })),
+        "layout.setSpec" | "layout.addPanel" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.layout.composer.open"),
+            params: sheet_id_obj_or_empty(resolve_layout_sheet_id(doc)),
+        })),
+        "layout.alignOrigins" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.alignOrigins`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.alignOrigins"),
+                params: json!({ "sheet_id": id.as_str(), "align": true, "normalize_bounds": true }),
+            }))
+        }
+        "layout.applyCanvasPreset" => {
+            let preset = variant.unwrap_or("SingleColumn88mm");
+            let mut params = sheet_id_obj_or_empty(resolve_layout_sheet_id(doc));
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("preset"), Value::String(preset.to_owned()));
+                obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+            }
+            Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.canvas.applyPreset"), params }))
+        }
+        "info.setNote" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::InfoNotesEditor,
+            target_sheet_id: resolve_info_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        "info.setConstant" | "info.removeConstant" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::InfoConstantHookPicker,
+            target_sheet_id: resolve_info_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: None,
+        })),
+        _ => Ok(None),
+    }
+}
+
+fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_sheet_id: Option<&str>, query: Option<&str>) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let parsed_target = target_sheet_id.and_then(|raw| SheetId::try_new(raw).ok());
+    match opener {
+        DesktopDialogOpener::WelcomeEmptyTable => {
+            app.nav.welcome.open = true;
+            app.nav.welcome.mode = WelcomeMode::EmptyTypedTable;
+            Ok(json!({ "dialog": "WelcomeWizard", "mode": "EmptyTypedTable" }))
+        }
+        DesktopDialogOpener::WelcomeOpenProject => {
+            app.nav.welcome.open = true;
+            app.nav.welcome.mode = WelcomeMode::TutorialSample;
+            Ok(json!({ "dialog": "WelcomeWizard", "mode": "TutorialSample" }))
+        }
+        DesktopDialogOpener::WelcomeFromTemplate => {
+            app.nav.welcome.open = true;
+            app.nav.welcome.mode = WelcomeMode::FromTemplate;
+            Ok(json!({ "dialog": "WelcomeWizard", "mode": "FromTemplate" }))
+        }
+        DesktopDialogOpener::ImportWizardPaste => {
+            app.grid.import_wizard.open = true;
+            app.grid.import_wizard.is_live_link = false;
+            app.grid.import_wizard.origin_kind = ImportOriginKind::Clipboard;
+            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": false }))
+        }
+        DesktopDialogOpener::ImportWizardPasteLink => {
+            app.grid.import_wizard.open = true;
+            app.grid.import_wizard.is_live_link = true;
+            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": true }))
+        }
+        DesktopDialogOpener::ImportWizardExternalFile => {
+            app.grid.import_wizard.open = true;
+            app.grid.import_wizard.is_live_link = false;
+            app.grid.import_wizard.origin_kind = ImportOriginKind::ExternalDelimitedFile;
+            Ok(json!({ "dialog": "ImportPasteWizard", "origin_kind": "ExternalDelimitedFile" }))
+        }
+        DesktopDialogOpener::VariablesDialog => {
+            let sid = parsed_target
+                .or_else(|| resolve_mv_sheet_id(&doc))
+                .ok_or_else(|| String::from("Variables dialog requires a MultipleVariables table"))?;
+            let ds = doc.data_sheet(&sid).ok_or_else(|| format!("data sheet `{sid}` not found"))?;
+            let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+                return Err(format!("sheet `{sid}` is not a MultipleVariables table"));
+            };
+            let col = app.grid.tool.active.map_or(0, |c| c.col).min(mv.variables.len().saturating_sub(1));
+            app.grid.variables_dialog.open_for_column(ds, col);
+            Ok(json!({ "dialog": "VariablesDialog", "sheet_id": sid.as_str(), "column": col }))
+        }
+        DesktopDialogOpener::EditAnalysisParameters => {
+            let sid = parsed_target
+                .or_else(|| resolve_result_sheet_id(&doc))
+                .ok_or_else(|| String::from("no result sheet available to edit analysis parameters"))?;
+            if !app.canvas_dialogs.open_edit_parameters(&doc, &sid) {
+                return Err(format!("result sheet `{sid}` not found"));
+            }
+            Ok(json!({ "dialog": "EditAnalysisParameters", "result_sheet_id": sid.as_str() }))
+        }
+        DesktopDialogOpener::ChangeDataAnalyzed => {
+            let sid = parsed_target
+                .or_else(|| resolve_result_sheet_id(&doc))
+                .ok_or_else(|| String::from("no result sheet available to retarget analyzed data"))?;
+            if !app.canvas_dialogs.open_change_data_analyzed(&doc, &sid) {
+                return Err(format!("result sheet `{sid}` not found"));
+            }
+            Ok(json!({ "dialog": "ChangeDataAnalyzed", "result_sheet_id": sid.as_str() }))
+        }
+        DesktopDialogOpener::ApplyStyleFrom => {
+            let gid =
+                parsed_target.or_else(|| resolve_graph_sheet_id(&doc)).ok_or_else(|| String::from("no graph sheet available to copy style onto"))?;
+            if !app.canvas_dialogs.open_apply_style_from(&doc, &gid) {
+                return Err(format!("graph sheet `{gid}` not found"));
+            }
+            Ok(json!({ "dialog": "ApplyStyleFrom", "target_graph_id": gid.as_str() }))
+        }
+        DesktopDialogOpener::InfoNotesEditor => {
+            let iid = parsed_target.or_else(|| resolve_info_sheet_id(&doc)).ok_or_else(|| String::from("no info sheet available to edit notes"))?;
+            let notes = doc.info_sheet(&iid).map_or_else(String::new, |i| i.notes_markdown.clone());
+            app.inline_editor.begin(InlineEditorTarget::InfoNotes { sheet_id: iid.clone() }, notes);
+            Ok(json!({ "editor": "InfoNotes", "sheet_id": iid.as_str() }))
+        }
+        DesktopDialogOpener::InfoConstantHookPicker => {
+            let iid = parsed_target
+                .or_else(|| resolve_info_sheet_id(&doc))
+                .or_else(|| resolve_any_sheet_id(&doc))
+                .ok_or_else(|| String::from("no info or target sheet available for constant picker"))?;
+            app.canvas_dialogs.open_hook_picker(&doc, &iid, None);
+            Ok(json!({ "dialog": "ConstantHookPicker", "target_sheet_id": iid.as_str() }))
+        }
+        DesktopDialogOpener::CommandPalette => {
+            app.canvas_dialogs.open_command_palette();
+            if let Some(q) = query {
+                app.canvas_dialogs.command_palette.query = q.to_owned();
+            }
+            Ok(json!({ "dialog": "CommandPalette", "query": app.canvas_dialogs.command_palette.query }))
+        }
+    }
+}
+
+fn build_shortcut_candidates_for(key: &str, modifiers: KeyModifiers) -> Vec<String> {
+    if key.is_empty() {
+        return Vec::new();
+    }
+    let mut out = Vec::with_capacity(2);
+    let build = |use_cmd_for_ctrl: bool| -> String {
+        let mut parts = Vec::with_capacity(5);
+        if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
+            parts.push("Cmd");
+        } else if modifiers.ctrl {
+            parts.push("Ctrl");
+        }
+        if modifiers.alt {
+            parts.push("Alt");
+        }
+        if modifiers.shift {
+            parts.push("Shift");
+        }
+        parts.push(key);
+        parts.join("+")
+    };
+    out.push(build(false));
+    if modifiers.ctrl && !modifiers.meta {
+        out.push(build(true));
+    }
+    out
+}
+
+fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
+    if matches!(
+        command_id,
+        "window.new"
+            | "file.newWindow"
+            | "window.close"
+            | "file.close"
+            | "edit.copy"
+            | "edit.paste"
+            | "project.open"
+            | "file.open"
+            | "project.save"
+            | "file.save"
+            | "project.saveAs"
+            | "file.save_as"
+            | "sheet.createData"
+            | "ui.theme.set"
+            | "ui.locale.set"
+            | "ui.previewFilter.set"
+            | "ui.canvas.applyPreset"
+            | "ui.shortcut.set"
+            | "ui.result.applyRemediation"
+            | "ui.event.dispatch"
+    ) {
+        return true;
+    }
+    engine_cmd::registry()
+        .get(command_id)
+        .is_some_and(|spec| (spec.input_schema)().get("required").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty()))
+}
+
+fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModifiers) -> Option<String> {
+    if (modifiers.meta || modifiers.ctrl) && !modifiers.alt && !modifiers.shift && key.eq_ignore_ascii_case("v") {
+        // Let clipboard paste shortcut use host pasteboard instead of opening Paste Special wizard.
+        return None;
+    }
+    for candidate in build_shortcut_candidates_for(key, modifiers) {
+        if let Some(matched) = app.shortcuts.handle_key_combo(&candidate)
+            && shortcut_uses_desktop_routing(&matched.command_id)
+        {
+            return Some(matched.command_id);
+        }
+    }
+    None
 }

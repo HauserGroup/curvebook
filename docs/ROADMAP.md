@@ -625,10 +625,10 @@ Owner: open · Status: todo · Was: Human-GUI audit 2026-11-15 · Est. note: 28�
 - [ ] Route `Cmd/Ctrl+T` on a result sheet to `EditAnalysisParameters` in the human input path.
 
 ### R10.6 Menu, toolbar & context-menu command routing (`B4` desktop, `B5`)
-Owner: open · Status: todo · Was: Human-GUI audit 2026-11-15 · Est. note: 28–44 h · Depends on: `R10.16`
+Owner: open · Status: in progress · Was: Human-GUI audit 2026-11-15 · Est. note: 28–44 h · Depends on: `R10.16`
 
 - [ ] Replace the static 3-box header strip with a contextual toolbar of grouped icon-and-label buttons that adapt to the active sheet kind: File/Project, Sheet management, Undo/Redo, Clipboard, Analysis (Analyze, Parameters, Data Analyzed, Interpret), Graph/Layout (Change Graph Type, Axes, Pairwise Comparisons, Rulers, Alignment), Text styling, and Export/Print; icons are original vector assets with `ASSETS.md` rows.
-- [ ] Replace `Value::Null` dispatch in `desktop_host.rs`: each menu or toolbar item either opens its parameter dialog or builds params from the active sheet and selection; add a registry sweep test that every engine command reachable from a menu, toolbar, shortcut, or context menu with required schema fields is routed through a dialog or a context-param builder.
+- [x] Replaced `Value::Null` dispatch in `apps/lumencraft/src/{desktop_host.rs,gui_window.rs}` (`resolve_desktop_command_route`, `DesktopCommandRoute`, `DesktopDialogOpener`, `:variant` submenu/shortcut/wheel routing, extended `rfd::FileDialog` import/export/template handling with canonical `.lctemplate`/`NATIVE_OPEN_FILE_EXTENSIONS` filters and foreign-import `file_path` clearing): verified across `lumencraft` **`58 passed`** (`r10_command_routing::{registry_sweep_routes_every_engine_and_ui_command_without_null_params, parameterized_commands_open_expected_dialogs_and_wizards, submenu_variants_and_qol7_diagnostics_route_and_persist_preferences, keyboard_shortcuts_route_context_and_dialogs_correctly, mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming, native_file_dialog_routing_covers_all_import_export_template_commands, native_open_template_filters_and_foreign_import_file_path_clearing}`, `desktop_host_loop` `7`).
 - [ ] Draw and wire right-click context menus for grid cells, column headers, navigator entries, graph objects, and linked regions; make `Cmd/Ctrl+E` and `Exclude With Reason` use the current selection.
 - [ ] Render the `Cmd/Ctrl+K` command palette with typing and keyboard selection.
 

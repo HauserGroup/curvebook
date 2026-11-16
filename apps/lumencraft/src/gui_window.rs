@@ -8,14 +8,24 @@ use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
 use eframe::egui;
+use lumencraft_doc::{ProjectDocument, SheetId, SheetSection};
 use lumencraft_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
+use lumencraft_ui_egui::dialogs_canvas::ActiveDialog;
 use lumencraft_ui_egui::interaction::{KeyModifiers, PointerButton};
-use lumencraft_ui_egui::{ControlAuth, ControlPostRequestContext, UiApp};
+use lumencraft_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp, locale_display_name};
 use serde_json::json;
 
 use crate::desktop_host::{
-    CloseDisposition, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopWindowId, LiveControlFrameOutput,
+    CloseDisposition, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopMenuItem, DesktopWindowId,
+    DesktopWindowSession, LiveControlFrameOutput,
 };
+
+/// Canonical file extensions accepted by native project/data `Open...` dialogs (`classify_and_load_path`).
+pub const NATIVE_OPEN_FILE_EXTENSIONS: &[&str] = &["lumencraft", "lctemplate", "prism", "pzfx", "csv", "tsv"];
+/// Canonical file extensions accepted by native template save and instantiate dialogs.
+pub const NATIVE_TEMPLATE_FILE_EXTENSIONS: &[&str] = &["lctemplate"];
+/// Default filename suggested when saving a reusable `.lctemplate` archive.
+pub const DEFAULT_TEMPLATE_FILE_NAME: &str = "untitled.lctemplate";
 
 const MIN_WINDOW_WIDTH_PT: f32 = 640.0;
 const MIN_WINDOW_HEIGHT_PT: f32 = 420.0;
@@ -385,16 +395,9 @@ impl LumenCraftNativeApp {
                 for section in &chrome.sections {
                     ui.menu_button(&section.title, |ui| {
                         for item in &section.items {
-                            let mut button = egui::Button::new(&item.localized_label);
-                            if !item.shortcut.is_empty() {
-                                button = button.shortcut_text(&item.shortcut);
-                            }
-                            if ui.add_enabled(item.enabled, button).clicked() {
-                                pending_command = Some(item.command_id.clone());
-                                ui.close();
-                            }
+                            render_menu_item(ui, item, &mut pending_command);
                         }
-                        if section.menu_key == "file" {
+                        if matches!(section.menu_key.as_str(), "menu.file" | "file") {
                             render_extra_file_actions(ui, &section.items, &mut pending_command);
                         }
                     });
@@ -413,23 +416,36 @@ impl LumenCraftNativeApp {
 
     fn execute_menu_command(&mut self, window_id: DesktopWindowId, command_id: &str) {
         self.status_banner = None;
-        let result = match command_id {
-            "project.open" | "file.open" => self.handle_native_open(window_id),
-            "project.save" | "file.save" => self.handle_native_save(window_id, false),
-            "project.saveAs" | "file.save_as" => self.handle_native_save(window_id, true),
-            "export.svg" | "file.export_svg" => self.handle_native_export(window_id, "export.svg", "SVG Vector", &["svg"], "figure.svg"),
-            "export.pdf" | "file.export_pdf" => self.handle_native_export(window_id, "export.pdf", "PDF Document", &["pdf"], "figure.pdf"),
-            "export.png" | "file.export_png" => self.handle_native_export(window_id, "export.png", "PNG Image", &["png"], "figure.png"),
-            _ => self.runtime.dispatch(DesktopHostEvent::MenuAction { window_id, command_id: command_id.to_string() }).map(|_| ()),
+        let result = if let Some(native_result) = self.try_handle_native_file_command(window_id, command_id) {
+            native_result
+        } else {
+            self.runtime.dispatch(DesktopHostEvent::MenuAction { window_id, command_id: command_id.to_string() }).map(|_| ())
         };
         if let Err(err) = result {
             self.status_banner = Some(err);
         }
     }
 
+    fn try_handle_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Option<Result<(), String>> {
+        let res = match command_id {
+            "project.open" | "file.open" => self.handle_native_open(window_id),
+            "project.save" | "file.save" => self.handle_native_save(window_id, false),
+            "project.saveAs" | "file.save_as" => self.handle_native_save(window_id, true),
+            "project.saveTemplate" => self.handle_native_save_template(window_id),
+            "project.instantiateTemplate" => self.handle_native_instantiate_template(window_id),
+            "table.importCsv" => self.handle_native_import_file(window_id, "table.importCsv", "Delimited Table", &["csv", "tsv", "txt"]),
+            "table.importPrism" => self.handle_native_import_file(window_id, "table.importPrism", "External Archive", &["prism"]),
+            "table.importPzfx" => self.handle_native_import_file(window_id, "table.importPzfx", "XML Project", &["pzfx"]),
+            _ => {
+                let spec = native_export_spec_for_command(command_id)?;
+                self.handle_native_export(window_id, spec)
+            }
+        };
+        Some(res)
+    }
+
     fn handle_native_open(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter("LumenCraft / Data", &["lumencraft", "json", "csv", "tsv", "xlsx", "pzfx"]).pick_file()
-        else {
+        let Some(path) = rfd::FileDialog::new().add_filter("LumenCraft / Data", NATIVE_OPEN_FILE_EXTENSIONS).pick_file() else {
             return Ok(());
         };
         self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path }).map(|_| ())
@@ -458,25 +474,64 @@ impl LumenCraftNativeApp {
         Ok(())
     }
 
-    fn handle_native_export(
+    fn handle_native_save_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter("LumenCraft Template", NATIVE_TEMPLATE_FILE_EXTENSIONS)
+            .set_file_name(DEFAULT_TEMPLATE_FILE_NAME)
+            .save_file()
+        else {
+            return Ok(());
+        };
+        let win = self.runtime.window_mut(window_id)?;
+        let path_str = path.to_string_lossy().into_owned();
+        win.execute_and_journal("project.saveTemplate", json!({ "path": path_str }))?;
+        Ok(())
+    }
+
+    fn handle_native_instantiate_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
+        let Some(path) = rfd::FileDialog::new().add_filter("LumenCraft Template", NATIVE_TEMPLATE_FILE_EXTENSIONS).pick_file() else {
+            return Ok(());
+        };
+        let win = self.runtime.window_mut(window_id)?;
+        execute_native_import_at_path(win, "project.instantiateTemplate", &path)
+    }
+
+    fn handle_native_import_file(
         &mut self,
         window_id: DesktopWindowId,
         command: &str,
         filter_label: &str,
         extensions: &[&str],
-        default_name: &str,
     ) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter(filter_label, extensions).set_file_name(default_name).save_file() else {
+        let Some(path) = rfd::FileDialog::new().add_filter(filter_label, extensions).pick_file() else {
             return Ok(());
         };
         let win = self.runtime.window_mut(window_id)?;
-        let active_sheet_id = win.app().document().active_sheet_id.as_ref().map(|id| id.as_str().to_owned());
-        let path_str = path.to_string_lossy().into_owned();
-        let params = match active_sheet_id {
-            Some(sheet_id) => json!({ "sheet_id": sheet_id, "path": path_str }),
-            None => json!({ "path": path_str }),
+        execute_native_import_at_path(win, command, &path)
+    }
+
+    fn handle_native_export(&mut self, window_id: DesktopWindowId, spec: NativeExportSpec) -> Result<(), String> {
+        let target_sheet_id = {
+            let win = self.runtime.window(window_id)?;
+            resolve_native_export_sheet_id(win.app().document(), spec.target_kind)
+                .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
         };
-        win.execute_and_journal(command, params)?;
+        let Some(path) = rfd::FileDialog::new().add_filter(spec.filter_label, spec.extensions).set_file_name(spec.default_name).save_file() else {
+            return Ok(());
+        };
+        let win = self.runtime.window_mut(window_id)?;
+        let path_str = path.to_string_lossy().into_owned();
+        let params = if spec.command == "result.generateReport" {
+            let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                Some("tex") => "latex",
+                Some("txt") => "plain",
+                _ => "markdown",
+            };
+            json!({ "result_sheet_id": target_sheet_id.as_str(), "format": report_fmt, "path": path_str })
+        } else {
+            json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
+        };
+        win.execute_and_journal(spec.command, params)?;
         Ok(())
     }
 
@@ -712,6 +767,20 @@ impl LumenCraftNativeApp {
     fn dispatch_key_event(&mut self, window_id: DesktopWindowId, key: egui::Key, pressed: bool, modifiers: egui::Modifiers) -> Option<String> {
         let key_name = egui_key_to_name(key)?;
         let (inline_active_before, inline_text_before) = self.inline_editor_snapshot(window_id);
+        let dialog_inactive =
+            self.runtime.window(window_id).is_ok_and(|w| w.app().canvas_dialogs.active_dialog == ActiveDialog::None && !w.app().nav.welcome.open);
+        let primary_cmd = modifiers.command || modifiers.mac_cmd || modifiers.ctrl;
+        if pressed && !inline_active_before && dialog_inactive && primary_cmd && !modifiers.alt {
+            if key == egui::Key::O && !modifiers.shift {
+                self.execute_menu_command(window_id, "project.open");
+                return None;
+            }
+            if key == egui::Key::S {
+                let cmd = if modifiers.shift { "project.saveAs" } else { "project.save" };
+                self.execute_menu_command(window_id, cmd);
+                return None;
+            }
+        }
         let has_cmd_or_ctrl = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
         let is_single_char_key = key_name.chars().count() == 1;
 
@@ -805,7 +874,262 @@ impl eframe::App for LumenCraftNativeApp {
     }
 }
 
-fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[crate::desktop_host::DesktopMenuItem], pending_command: &mut Option<String>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeExportTargetKind {
+    Renderable,
+    Graph,
+    Layout,
+    TableOrResult,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeExportSpec {
+    command: &'static str,
+    filter_label: &'static str,
+    extensions: &'static [&'static str],
+    default_name: &'static str,
+    target_kind: NativeExportTargetKind,
+}
+
+fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> {
+    let spec = match command_id {
+        "export.svg" | "file.export_svg" => NativeExportSpec {
+            command: "export.svg",
+            filter_label: "SVG Vector",
+            extensions: &["svg"],
+            default_name: "figure.svg",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.pdf" | "file.export_pdf" => NativeExportSpec {
+            command: "export.pdf",
+            filter_label: "PDF Document",
+            extensions: &["pdf"],
+            default_name: "figure.pdf",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.png" | "file.export_png" => NativeExportSpec {
+            command: "export.png",
+            filter_label: "PNG Image",
+            extensions: &["png"],
+            default_name: "figure.png",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.tiff" => NativeExportSpec {
+            command: "export.tiff",
+            filter_label: "TIFF Image",
+            extensions: &["tiff", "tif"],
+            default_name: "figure.tiff",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "graph.exportSvg" => NativeExportSpec {
+            command: "graph.exportSvg",
+            filter_label: "SVG Vector",
+            extensions: &["svg"],
+            default_name: "figure.svg",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportPdf" => NativeExportSpec {
+            command: "graph.exportPdf",
+            filter_label: "PDF Document",
+            extensions: &["pdf"],
+            default_name: "figure.pdf",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportPng" => NativeExportSpec {
+            command: "graph.exportPng",
+            filter_label: "PNG Image",
+            extensions: &["png"],
+            default_name: "figure.png",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportEmf" => NativeExportSpec {
+            command: "graph.exportEmf",
+            filter_label: "EMF Vector",
+            extensions: &["emf"],
+            default_name: "figure.emf",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "layout.exportEmf" => NativeExportSpec {
+            command: "layout.exportEmf",
+            filter_label: "EMF Vector",
+            extensions: &["emf"],
+            default_name: "layout.emf",
+            target_kind: NativeExportTargetKind::Layout,
+        },
+        "table.exportCsv" => NativeExportSpec {
+            command: "table.exportCsv",
+            filter_label: "CSV Table",
+            extensions: &["csv", "tsv"],
+            default_name: "table.csv",
+            target_kind: NativeExportTargetKind::TableOrResult,
+        },
+        "analysis.exportJson" => NativeExportSpec {
+            command: "analysis.exportJson",
+            filter_label: "JSON Results",
+            extensions: &["json"],
+            default_name: "analysis.json",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        "analysis.exportCsv" => NativeExportSpec {
+            command: "analysis.exportCsv",
+            filter_label: "CSV Results",
+            extensions: &["csv"],
+            default_name: "analysis.csv",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        "result.generateReport" => NativeExportSpec {
+            command: "result.generateReport",
+            filter_label: "Methods Report",
+            extensions: &["md", "txt", "tex"],
+            default_name: "methods-report.md",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        _ => return None,
+    };
+    Some(spec)
+}
+
+/// Returns `true` when clicking `command_id` in the native desktop window opens an OS `rfd::FileDialog`.
+#[must_use]
+pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "project.open"
+            | "file.open"
+            | "project.save"
+            | "file.save"
+            | "project.saveAs"
+            | "file.save_as"
+            | "project.saveTemplate"
+            | "project.instantiateTemplate"
+            | "table.importCsv"
+            | "table.importPrism"
+            | "table.importPzfx"
+    ) || native_export_spec_for_command(command_id).is_some()
+}
+
+/// Returns `true` when an import command replaces the full active document and must detach any
+/// previously associated `.lumencraft` archive path so subsequent `Cmd+S` prompts cleanly.
+#[must_use]
+pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
+    matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx")
+}
+
+/// Execute a file-backed import or template instantiation command at `path`, clearing the active
+/// session's archive association when the command replaces the full document.
+///
+/// # Errors
+/// Returns an error string if executing the underlying engine command fails.
+pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path) -> Result<(), String> {
+    let path_str = path.to_string_lossy().into_owned();
+    win.execute_and_journal(command, json!({ "path": path_str }))?;
+    if native_import_replaces_project_file_path(command) {
+        win.app_mut().session_mut().set_file_path(None, false);
+    }
+    Ok(())
+}
+
+fn resolve_native_export_sheet_id(doc: &ProjectDocument, kind: NativeExportTargetKind) -> Option<SheetId> {
+    let active = doc.active_sheet_id.as_ref();
+    match kind {
+        NativeExportTargetKind::Renderable => active
+            .filter(|id| matches!(doc.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)))
+            .cloned()
+            .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+            .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone())),
+        NativeExportTargetKind::Graph => {
+            active.filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+        }
+        NativeExportTargetKind::Layout => {
+            active.filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+        }
+        NativeExportTargetKind::TableOrResult => active
+            .filter(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some())
+            .cloned()
+            .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()))
+            .or_else(|| doc.result_sheets.first().map(|r| r.id.clone())),
+        NativeExportTargetKind::Result => {
+            active.filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
+        }
+    }
+}
+
+fn menu_item_tooltip(item: &DesktopMenuItem) -> String {
+    if item.beginner.is_empty() { item.summary.clone() } else { format!("{}\n{}", item.summary, item.beginner) }
+}
+
+fn render_menu_item(ui: &mut egui::Ui, item: &DesktopMenuItem, pending_command: &mut Option<String>) {
+    if item.command_id == "ui.event.dispatch" {
+        return;
+    }
+    let tooltip = menu_item_tooltip(item);
+    let effective_enabled = item.enabled && item.command_id != "ui.result.applyRemediation";
+
+    if let Some(variants) = submenu_variants_for_command(&item.command_id) {
+        ui.menu_button(&item.localized_label, |ui| {
+            for (label, variant) in variants {
+                let mut btn = egui::Button::new(*label);
+                if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && *variant == "SingleColumn88mm" {
+                    btn = btn.shortcut_text(&item.shortcut);
+                }
+                let resp = ui.add_enabled(effective_enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+                if resp.clicked() {
+                    *pending_command = Some(format!("{}:{variant}", item.command_id));
+                    ui.close();
+                }
+            }
+        });
+        return;
+    }
+
+    if item.command_id == "ui.locale.set" {
+        ui.menu_button(&item.localized_label, |ui| {
+            for &loc in LOCALES {
+                let caption = format!("{} ({loc})", locale_display_name(loc));
+                if ui.button(caption).on_hover_text(&tooltip).clicked() {
+                    *pending_command = Some(format!("ui.locale.set:{loc}"));
+                    ui.close();
+                }
+            }
+        });
+        return;
+    }
+
+    let mut button = egui::Button::new(&item.localized_label);
+    if !item.shortcut.is_empty() {
+        button = button.shortcut_text(&item.shortcut);
+    }
+    let resp = ui.add_enabled(effective_enabled, button).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+    if resp.clicked() {
+        *pending_command = Some(item.command_id.clone());
+        ui.close();
+    }
+}
+
+fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'static str, &'static str)]> {
+    match command_id {
+        "ui.theme.set" => Some(&[("Light", "light"), ("Dark", "dark"), ("High Contrast", "high_contrast")]),
+        "ui.previewFilter.set" => Some(&[
+            ("Normal Vision", "normal"),
+            ("Deuteranopia", "deuteranopia"),
+            ("Protanopia", "protanopia"),
+            ("Tritanopia", "tritanopia"),
+            ("Grayscale Print", "grayscale"),
+        ]),
+        "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => Some(&[
+            ("Single Column (88 mm)", "SingleColumn88mm"),
+            ("1.5 Column (130 mm)", "ColumnAndHalf130mm"),
+            ("Double Column (180 mm)", "DoubleColumn180mm"),
+            ("Full Page Portrait (180 × 240 mm)", "FullPagePortrait"),
+            ("Presentation Slide 16:9", "Slide16x9"),
+            ("Poster Panel (12 × 9 in)", "PosterPanel"),
+        ]),
+        _ => None,
+    }
+}
+
+fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[DesktopMenuItem], pending_command: &mut Option<String>) {
     let extras = [
         ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"][..]),
         ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"][..]),
