@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
-use std::io::{BufReader, Read};
+use std::io::{BufReader, Read, Write};
 use std::net::{Shutdown, SocketAddr, TcpListener, TcpStream};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -15,7 +15,9 @@ use curvebook::desktop_host::{
     dir_has_active_lease, dir_has_unrecovered_crash, open_document_from_files,
 };
 use curvebook::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
-use curvebook::live_control::{LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop};
+use curvebook::live_control::{
+    LiveControlBridge, LiveControlServerGuard, serve_live_control_io, spawn_live_control_accept_loop_with_reject, write_busy_control_error,
+};
 use curvebook_engine::Session;
 use curvebook_format::recovery::{CrashRecoveryJournal, DirectoryJournalBackend, JournalBackend, RecoveryReport};
 use curvebook_format::versioned::{
@@ -41,7 +43,7 @@ usage: curvebook [options] [--] [file...]
 
 options:
   --control <port>         listen on 127.0.0.1:<port> for authenticated JSON-lines automation (or CURVEBOOK_CONTROL_PORT; headless unless --window)
-  --control-token <token>  bearer token for --control authentication (or CURVEBOOK_CONTROL_TOKEN)
+  --control-token <token>  bearer token for --control authentication (prefer CURVEBOOK_CONTROL_TOKEN on multi-user systems; CLI args are visible in ps)
   --window                 attach a visible desktop window to --control <port> or CURVEBOOK_CONTROL_PORT
   --gui-only               restrict automation (--control) to interactive GUI actions only
   --in-window-menus     render the menu bar inside the window on macOS
@@ -113,6 +115,17 @@ fn run_with_process_env(
     env_token: Option<&str>,
     env_get: impl Fn(&str) -> Option<OsString>,
 ) -> Result<(), String> {
+    let mut stderr = std::io::stderr();
+    run_with_process_env_and_stderr(args, env_port, env_token, env_get, &mut stderr)
+}
+
+fn run_with_process_env_and_stderr(
+    args: &[String],
+    env_port: Option<&str>,
+    env_token: Option<&str>,
+    env_get: impl Fn(&str) -> Option<OsString>,
+    stderr: &mut dyn Write,
+) -> Result<(), String> {
     let action = parse_args_with_env(args, env_port, env_token)?;
     match action {
         CliAction::PrintVersion => {
@@ -124,10 +137,29 @@ fn run_with_process_env(
             Ok(())
         }
         CliAction::Launch(cfg) => {
+            if args_contain_cli_control_token(args) {
+                let _ = writeln!(
+                    stderr,
+                    "curvebook warning: --control-token exposes the secret in process arguments (ps); prefer CURVEBOOK_CONTROL_TOKEN on multi-user systems"
+                );
+            }
             warn_or_reject_non_utf8_control_env(&cfg, env_port, env_token, &env_get)?;
             launch_application_with_env(&cfg, env_get)
         }
     }
+}
+
+fn args_contain_cli_control_token(args: &[String]) -> bool {
+    let mut i = 0usize;
+    while let Some(arg) = args.get(i) {
+        match arg.as_str() {
+            "--" => return false,
+            "--control-token" => return true,
+            "--control" | "--portable-dir" | "--ttf-font" | "--event-script" => i += 2,
+            _ => i += 1,
+        }
+    }
+    false
 }
 
 fn warn_or_reject_non_utf8_control_env(
@@ -646,9 +678,21 @@ fn start_live_window_control_on_listener(
     if let Some(hook) = make_control_pref_persist_hook(app_paths, no_prefs) {
         channel = channel.with_post_hook(hook);
     }
-    let server_guard = spawn_live_control_accept_loop(bridge, move || listener.accept().map(|(stream, _)| stream), serve_live_control_tcp_stream)?;
+    let server_guard = spawn_live_control_accept_loop_with_reject(
+        bridge,
+        move || listener.accept().map(|(stream, _)| stream),
+        serve_live_control_tcp_stream,
+        reject_busy_control_tcp_stream,
+    )?;
     let guards = LiveControlServerGuards { _server_guard: server_guard, _token_guard: token_guard };
     Ok((guards, channel))
+}
+
+fn reject_busy_control_tcp_stream(mut stream: TcpStream) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(Duration::from_millis(50)));
+    write_busy_control_error(&mut stream);
+    let _ = stream.shutdown(Shutdown::Both);
 }
 
 fn serve_live_control_tcp_stream(mut stream: TcpStream, bridge: &LiveControlBridge) -> std::io::Result<()> {
@@ -2073,6 +2117,59 @@ mod tests {
         native_app.finish_exit();
         drop(guards);
         assert!(!token_path.exists(), "token file must be removed when live server guards drop");
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn rv51_control_token_help_and_cli_argv_warning_semantics() -> Result<(), Box<dyn std::error::Error>> {
+        assert!(super::USAGE.contains("prefer CURVEBOOK_CONTROL_TOKEN"), "USAGE should recommend CURVEBOOK_CONTROL_TOKEN");
+        assert!(super::USAGE.contains("ps"), "USAGE should mention process list (`ps`) visibility");
+
+        assert!(super::args_contain_cli_control_token(&[
+            String::from("--control"),
+            String::from("9125"),
+            String::from("--control-token"),
+            String::from("secret-tok"),
+        ]));
+        assert!(!super::args_contain_cli_control_token(&[String::from("--control"), String::from("9125")]));
+        assert!(!super::args_contain_cli_control_token(&[String::from("--headless-once"), String::from("--"), String::from("--control-token"),]));
+
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("cb-rv51-tok-warn-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+
+        let mut stderr_buf = Vec::new();
+        super::run_with_process_env_and_stderr(
+            &[
+                String::from("--portable-dir"),
+                dir.display().to_string(),
+                String::from("--headless-once"),
+                String::from("--control-token"),
+                String::from("cli-visible-token-123"),
+            ],
+            None,
+            None,
+            |_| None,
+            &mut stderr_buf,
+        )?;
+        let stderr = String::from_utf8(stderr_buf)?;
+        assert!(
+            stderr.contains("curvebook warning:") && stderr.contains("CURVEBOOK_CONTROL_TOKEN"),
+            "expected stderr warning recommending CURVEBOOK_CONTROL_TOKEN, got: {stderr}"
+        );
+        assert!(!stderr.contains("cli-visible-token-123"), "warning must never echo the secret token value");
+
+        let mut help_stderr = Vec::new();
+        super::run_with_process_env_and_stderr(
+            &[String::from("--control-token"), String::from("cli-visible-token-123"), String::from("--help")],
+            None,
+            None,
+            |_| None,
+            &mut help_stderr,
+        )?;
+        assert!(help_stderr.is_empty(), "--help must keep stderr empty");
+
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
     }

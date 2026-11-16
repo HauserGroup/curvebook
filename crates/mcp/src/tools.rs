@@ -1,11 +1,12 @@
 //! MCP tool schemas, server state management, live desktop `--control` attach client,
 //! command dispatch with `Caller::Mcp` + `run_guarded`, and RFC 4648 base64 encoding.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeSet, HashMap, VecDeque};
 use std::fmt;
 #[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
-use std::sync::atomic::AtomicBool;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, RwLock, RwLockReadGuard, RwLockWriteGuard};
 
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultSheet, SheetId, SheetSection};
 use curvebook_engine::cmd::{Caller, CommandGroup, Effects, registry};
@@ -23,6 +24,118 @@ use crate::toolsets::{self, ToolAnnotations, command_id_to_mcp_tool_name, comman
 use crate::ui_catalog::UI_COMMANDS;
 
 const MAX_BATCH_COMMANDS: usize = 1024;
+const MAX_PRE_CANCELLED_IDS: usize = 256;
+
+#[derive(Default)]
+struct CancellationInner {
+    active: HashMap<String, Arc<AtomicBool>>,
+    pre_cancelled: VecDeque<String>,
+}
+
+/// Thread-safe registry mapping JSON-RPC request IDs to cooperative [`AtomicBool`] cancellation tokens.
+#[derive(Clone, Default)]
+pub struct CancellationRegistry {
+    inner: Arc<RwLock<CancellationInner>>,
+}
+
+impl fmt::Debug for CancellationRegistry {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let guard = self.read_inner();
+        f.debug_struct("CancellationRegistry")
+            .field("active_count", &guard.active.len())
+            .field("pre_cancelled_count", &guard.pre_cancelled.len())
+            .finish()
+    }
+}
+
+pub(crate) struct ActiveRequestCancelGuard {
+    registry: CancellationRegistry,
+    key: String,
+}
+
+impl Drop for ActiveRequestCancelGuard {
+    fn drop(&mut self) {
+        let mut guard = self.registry.write_inner();
+        guard.active.remove(&self.key);
+    }
+}
+
+fn canonical_request_id_key(id: &Value) -> Option<String> {
+    match id {
+        Value::String(s) if !s.is_empty() => Some(format!("s:{s}")),
+        Value::Number(n) => Some(format!("n:{n}")),
+        _ => None,
+    }
+}
+
+impl CancellationRegistry {
+    /// Construct an empty [`CancellationRegistry`].
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    fn read_inner(&self) -> RwLockReadGuard<'_, CancellationInner> {
+        match self.inner.read() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    fn write_inner(&self) -> RwLockWriteGuard<'_, CancellationInner> {
+        match self.inner.write() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        }
+    }
+
+    /// Signal cooperative cancellation for `request_id`.
+    ///
+    /// Returns `true` if an actively executing request matched `request_id` and had its token set.
+    /// If no active request currently matches a valid string/number `request_id`, records a bounded
+    /// pre-cancellation marker so an immediately queued request (e.g. later in a JSON-RPC batch)
+    /// starts pre-cancelled.
+    pub fn cancel(&self, request_id: &Value) -> bool {
+        let Some(key) = canonical_request_id_key(request_id) else {
+            return false;
+        };
+        let mut guard = self.write_inner();
+        if let Some(token) = guard.active.get(&key) {
+            token.store(true, Ordering::Release);
+            return true;
+        }
+        if !guard.pre_cancelled.iter().any(|existing| existing == &key) {
+            if guard.pre_cancelled.len() >= MAX_PRE_CANCELLED_IDS {
+                let _ = guard.pre_cancelled.pop_front();
+            }
+            guard.pre_cancelled.push_back(key);
+        }
+        false
+    }
+
+    /// Number of currently registered in-flight requests.
+    #[must_use]
+    pub fn active_count(&self) -> usize {
+        self.read_inner().active.len()
+    }
+
+    pub(crate) fn begin_request(&self, request_id: &Value) -> (Arc<AtomicBool>, Option<ActiveRequestCancelGuard>) {
+        let Some(key) = canonical_request_id_key(request_id) else {
+            return (Arc::new(AtomicBool::new(false)), None);
+        };
+        let mut guard = self.write_inner();
+        let was_pre_cancelled = if let Some(pos) = guard.pre_cancelled.iter().position(|item| item == &key) {
+            let _ = guard.pre_cancelled.remove(pos);
+            true
+        } else {
+            false
+        };
+        let token = Arc::new(AtomicBool::new(was_pre_cancelled));
+        guard.active.insert(key.clone(), Arc::clone(&token));
+        drop(guard);
+        (token, Some(ActiveRequestCancelGuard { registry: self.clone(), key }))
+    }
+}
 
 /// Host-supplied in-process GUI bridge implemented outside `crates/mcp` (`L6`/`L7`) so the 8
 /// `gui` MCP tools can inspect and drive a live UI without `crates/mcp` depending on `ui-egui`.
@@ -75,6 +188,10 @@ pub struct McpServerState {
     enabled_toolsets: BTreeSet<CommandGroup>,
     pending_notifications: Vec<Value>,
     initialized: bool,
+    require_initialize: bool,
+    shutting_down: bool,
+    cancellation: CancellationRegistry,
+    active_cancel_token: Option<Arc<AtomicBool>>,
 }
 
 impl fmt::Debug for McpServerState {
@@ -94,6 +211,9 @@ impl fmt::Debug for McpServerState {
             .field("enabled_toolsets", &self.enabled_toolsets)
             .field("pending_notifications_len", &self.pending_notifications.len())
             .field("initialized", &self.initialized)
+            .field("require_initialize", &self.require_initialize)
+            .field("shutting_down", &self.shutting_down)
+            .field("cancellation", &self.cancellation)
             .finish()
     }
 }
@@ -108,27 +228,7 @@ impl McpServerState {
     /// Construct a fresh headless MCP server state backed by an empty [`Session`].
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            session: Session::new(),
-            #[cfg(not(target_arch = "wasm32"))]
-            control_port: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_token: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_handler: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_requested_gui_only: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_policy_synced: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            workdir_guard: None,
-            gui_host: None,
-            gui_only: false,
-            gui_toolset_enabled: false,
-            enabled_toolsets: BTreeSet::new(),
-            pending_notifications: Vec::new(),
-            initialized: false,
-        }
+        Self::from_session(Session::new())
     }
 
     /// Wrap an existing headless [`Session`].
@@ -157,6 +257,10 @@ impl McpServerState {
             enabled_toolsets: BTreeSet::new(),
             pending_notifications: Vec::new(),
             initialized: false,
+            require_initialize: false,
+            shutting_down: false,
+            cancellation: CancellationRegistry::new(),
+            active_cancel_token: None,
         }
     }
 
@@ -167,21 +271,9 @@ impl McpServerState {
         if port == 0 {
             return Err(String::from("control port must be in 1..=65535"));
         }
-        Ok(Self {
-            session: Session::new(),
-            control_port: Some(port),
-            control_token: None,
-            control_handler: None,
-            control_requested_gui_only: false,
-            control_policy_synced: false,
-            workdir_guard: None,
-            gui_host: None,
-            gui_only: false,
-            gui_toolset_enabled: false,
-            enabled_toolsets: BTreeSet::new(),
-            pending_notifications: Vec::new(),
-            initialized: false,
-        })
+        let mut state = Self::new();
+        state.control_port = Some(port);
+        Ok(state)
     }
 
     /// Construct an MCP server state attached to a running desktop `--control <port>` with explicit
@@ -210,22 +302,8 @@ impl McpServerState {
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_workdir(workdir: &Path) -> Result<Self, PlatformError> {
         let guard = WorkdirGuard::new(workdir)?;
-        let session = Session::new().with_path_policy(ExternalPathPolicy::from_guard(guard.clone()));
-        Ok(Self {
-            session,
-            control_port: None,
-            control_token: None,
-            control_handler: None,
-            control_requested_gui_only: false,
-            control_policy_synced: false,
-            workdir_guard: Some(guard),
-            gui_host: None,
-            gui_only: false,
-            gui_toolset_enabled: false,
-            enabled_toolsets: BTreeSet::new(),
-            pending_notifications: Vec::new(),
-            initialized: false,
-        })
+        let session = Session::new().with_path_policy(ExternalPathPolicy::from_guard(guard));
+        Ok(Self::from_session(session))
     }
 
     /// Construct an MCP server state backed by an in-process [`GuiSessionHost`].
@@ -234,27 +312,9 @@ impl McpServerState {
         let gui_only = host.is_gui_only();
         let mut session = Session::new();
         session.set_gui_only(if gui_only { GuiOnlyPolicy::Strict } else { GuiOnlyPolicy::Disabled });
-        let mut state = Self {
-            session,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_port: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_token: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_handler: None,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_requested_gui_only: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            control_policy_synced: false,
-            #[cfg(not(target_arch = "wasm32"))]
-            workdir_guard: None,
-            gui_host: Some(host),
-            gui_only,
-            gui_toolset_enabled: false,
-            enabled_toolsets: BTreeSet::new(),
-            pending_notifications: Vec::new(),
-            initialized: false,
-        };
+        let mut state = Self::from_session(session);
+        state.gui_host = Some(host);
+        state.gui_only = gui_only;
         state.sync_policies_to_hosted_session();
         state
     }
@@ -527,6 +587,54 @@ impl McpServerState {
     /// Mark this server session as initialized.
     pub fn mark_initialized(&mut self) {
         self.initialized = true;
+    }
+
+    /// Fluent builder to enforce that `initialize` must precede operational requests on this session.
+    #[must_use]
+    pub const fn with_require_initialize(mut self, require: bool) -> Self {
+        self.require_initialize = require;
+        self
+    }
+
+    /// Configure whether operational requests require an explicit prior `initialize` handshake.
+    pub const fn set_require_initialize(&mut self, require: bool) {
+        self.require_initialize = require;
+    }
+
+    /// Return `true` when operational requests require a prior `initialize` handshake.
+    #[must_use]
+    pub const fn requires_initialize(&self) -> bool {
+        self.require_initialize
+    }
+
+    /// Return `true` after a `shutdown` request has been processed on this connection.
+    #[must_use]
+    pub const fn is_shutting_down(&self) -> bool {
+        self.shutting_down
+    }
+
+    /// Mark this server state as shutting down so subsequent operational requests are rejected.
+    pub fn mark_shutting_down(&mut self) {
+        self.shutting_down = true;
+    }
+
+    /// Return a cloneable handle to this server's thread-safe [`CancellationRegistry`].
+    #[must_use]
+    pub fn cancellation_registry(&self) -> CancellationRegistry {
+        self.cancellation.clone()
+    }
+
+    /// Signal cooperative cancellation for a JSON-RPC `request_id` (as triggered by `notifications/cancelled`).
+    pub fn cancel_request(&mut self, request_id: &Value) -> bool {
+        self.cancellation.cancel(request_id)
+    }
+
+    pub(crate) fn current_cancel_token(&self) -> Arc<AtomicBool> {
+        self.active_cancel_token.clone().unwrap_or_else(|| Arc::new(AtomicBool::new(false)))
+    }
+
+    pub(crate) fn set_active_cancel_token(&mut self, token: Option<Arc<AtomicBool>>) -> Option<Arc<AtomicBool>> {
+        std::mem::replace(&mut self.active_cancel_token, token)
     }
 
     /// Attach or clear an in-process [`GuiSessionHost`].
@@ -804,7 +912,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                             }
                         }
                     },
-                    "atomic": { "type": "boolean", "description": "Roll back all mutations if any command in the batch fails (default: false)." }
+                    "atomic": { "type": "boolean", "description": "Roll back in-memory session mutations if any command in the batch fails (default: false; filesystem writes cannot be unlinked and set filesystem_side_effects_persisted: true with rolled_back: false)." }
                 },
                 "additionalProperties": false
             }),
@@ -914,6 +1022,19 @@ pub fn list_tools_for_state(state: &McpServerState) -> Vec<ToolDefinition> {
 /// Dispatch an MCP `tools/call` invocation onto `state`, isolating every handler inside `run_guarded`.
 pub fn call_tool(state: &mut McpServerState, name: &str, arguments: Value) -> Result<ToolCallResult, ToolCallError> {
     run_guarded_tool(name, || dispatch_tool_inner(state, name, arguments))
+}
+
+/// Dispatch an MCP `tools/call` invocation with an explicit cooperative cancellation token.
+pub fn call_tool_with_cancel(
+    state: &mut McpServerState,
+    name: &str,
+    arguments: Value,
+    cancel: Arc<AtomicBool>,
+) -> Result<ToolCallResult, ToolCallError> {
+    let prev = state.set_active_cancel_token(Some(cancel));
+    let res = run_guarded_tool(name, || dispatch_tool_inner(state, name, arguments));
+    let _ = state.set_active_cancel_token(prev);
+    res
 }
 
 pub(crate) fn run_guarded_tool<F>(op: &str, f: F) -> Result<ToolCallResult, ToolCallError>
@@ -1400,39 +1521,43 @@ fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, 
     let snapshot = if atomic && !is_attached(state) { Some(state.session().clone()) } else { None };
     let mut outcomes = Vec::with_capacity(items.len());
     let mut remote_mutated_steps: usize = 0;
+    let mut persisted_fs_steps: Vec<Value> = Vec::new();
+    let cancel = state.current_cancel_token();
 
     for (idx, (command_id, params)) in items.into_iter().enumerate() {
+        if cancel.load(Ordering::Acquire) {
+            let err = EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled")).with_retryable(true);
+            return Ok(build_batch_failure_result(
+                state,
+                atomic,
+                snapshot,
+                remote_mutated_steps,
+                outcomes,
+                persisted_fs_steps,
+                (idx, command_id, err),
+            ));
+        }
+        let step_writes_fs_hint = command_step_writes_filesystem(&command_id, &params);
         match execute_single_command(state, &command_id, params) {
             Ok(outcome) => {
                 if outcome.get("mutated").and_then(Value::as_bool) == Some(true) && !is_ui_catalog_command(&command_id) && command_id != "ping" {
                     remote_mutated_steps = remote_mutated_steps.saturating_add(1);
                 }
+                if step_writes_fs_hint || outcome_has_written_path(&outcome) {
+                    persisted_fs_steps.push(json!({ "index": idx, "command_id": command_id }));
+                }
                 outcomes.push(json!({ "index": idx, "ok": true, "outcome": outcome }));
             }
             Err(err) => {
-                let err_payload = StructuredErrorPayload::from_engine_error(&err);
-                let mut extra = Map::new();
-                extra.insert(String::from("failed_index"), json!(idx));
-                extra.insert(String::from("failed_command_id"), json!(command_id));
-                extra.insert(String::from("error"), json!(err.message()));
-                if atomic {
-                    let rolled_back = rollback_batch(state, snapshot, remote_mutated_steps);
-                    extra.insert(String::from("atomic"), json!(true));
-                    extra.insert(String::from("rolled_back"), json!(rolled_back));
-                    extra.insert(String::from("completed_before_failure"), Value::Array(outcomes));
-                } else {
-                    outcomes.push(json!({
-                        "index": idx,
-                        "ok": false,
-                        "command_id": command_id,
-                        "error": err.message(),
-                        "code": err.code,
-                    }));
-                    extra.insert(String::from("atomic"), json!(false));
-                    extra.insert(String::from("completed"), json!(idx));
-                    extra.insert(String::from("results"), Value::Array(outcomes));
-                }
-                return Ok(errors::result_from_payload_with_extra(&err_payload, extra));
+                return Ok(build_batch_failure_result(
+                    state,
+                    atomic,
+                    snapshot,
+                    remote_mutated_steps,
+                    outcomes,
+                    persisted_fs_steps,
+                    (idx, command_id, err),
+                ));
             }
         }
     }
@@ -1442,6 +1567,87 @@ fn execute_batch_items(state: &mut McpServerState, items: Vec<(String, Value)>, 
         "count": outcomes.len(),
         "results": outcomes,
     }))
+}
+
+fn build_batch_failure_result(
+    state: &mut McpServerState,
+    atomic: bool,
+    snapshot: Option<Session>,
+    remote_mutated_steps: usize,
+    mut outcomes: Vec<Value>,
+    persisted_fs_steps: Vec<Value>,
+    failure: (usize, String, EngineError),
+) -> ToolCallResult {
+    let (idx, command_id, err) = failure;
+    let err_payload = StructuredErrorPayload::from_engine_error(&err);
+    let mut extra = Map::new();
+    extra.insert(String::from("failed_index"), json!(idx));
+    extra.insert(String::from("failed_command_id"), json!(command_id));
+    extra.insert(String::from("error"), json!(err.message()));
+    if atomic {
+        let session_rolled_back = rollback_batch(state, snapshot, remote_mutated_steps);
+        let fs_persisted = !persisted_fs_steps.is_empty();
+        let rolled_back = session_rolled_back && !fs_persisted;
+        extra.insert(String::from("atomic"), json!(true));
+        extra.insert(String::from("rolled_back"), json!(rolled_back));
+        extra.insert(String::from("session_rolled_back"), json!(session_rolled_back));
+        extra.insert(String::from("filesystem_side_effects_persisted"), json!(fs_persisted));
+        if fs_persisted {
+            extra.insert(String::from("persisted_filesystem_steps"), Value::Array(persisted_fs_steps));
+            extra.insert(
+                String::from("warning"),
+                json!("In-memory session changes were rolled back, but earlier filesystem writes could not be reverted and remain on disk."),
+            );
+        }
+        extra.insert(String::from("completed_before_failure"), Value::Array(outcomes));
+    } else {
+        outcomes.push(json!({
+            "index": idx,
+            "ok": false,
+            "command_id": command_id,
+            "error": err.message(),
+            "code": err.code,
+        }));
+        extra.insert(String::from("atomic"), json!(false));
+        extra.insert(String::from("completed"), json!(idx));
+        extra.insert(String::from("results"), Value::Array(outcomes));
+    }
+    errors::result_from_payload_with_extra(&err_payload, extra)
+}
+
+fn has_non_empty_dest_path_param(params: &Value) -> bool {
+    let Some(obj) = params.as_object() else {
+        return false;
+    };
+    ["path", "output_path", "outputPath", "file_path", "filePath"]
+        .iter()
+        .any(|key| obj.get(*key).and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()))
+}
+
+fn is_optional_path_export_or_save_cmd(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "project.save" | "project.saveTemplate" | "table.exportCsv" | "analysis.exportJson" | "analysis.exportCsv" | "result.generateReport"
+    ) || command_id.starts_with("export.")
+        || command_id.contains(".export")
+}
+
+fn command_step_writes_filesystem(command_id: &str, params: &Value) -> bool {
+    if command_id == "ui.screenshot" {
+        return has_non_empty_dest_path_param(params);
+    }
+    let Some(spec) = registry().get(command_id) else {
+        return false;
+    };
+    if !spec.effects.contains(Effects::WRITES_FILESYSTEM) {
+        return false;
+    }
+    if is_optional_path_export_or_save_cmd(command_id) { has_non_empty_dest_path_param(params) } else { true }
+}
+
+fn outcome_has_written_path(outcome: &Value) -> bool {
+    outcome.pointer("/payload/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
+        || outcome.pointer("/result/path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty())
 }
 
 fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_mutated_steps: usize) -> bool {
@@ -1465,6 +1671,11 @@ fn rollback_batch(state: &mut McpServerState, snapshot: Option<Session>, remote_
 }
 
 fn execute_single_command(state: &mut McpServerState, command_id: &str, mut params: Value) -> Result<Value, EngineError> {
+    let cancel = state.current_cancel_token();
+    if cancel.load(Ordering::Acquire) {
+        return Err(EngineError::with_code(ErrorCode::Cancelled, format!("command `{command_id}` cancelled")).with_retryable(true));
+    }
+
     formats::sanitize_command_params(state, &mut params)?;
 
     #[cfg(not(target_arch = "wasm32"))]
@@ -1480,7 +1691,6 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
         .with_remediation("Attach `--control-port <port>` to a live desktop session or invoke a headless engine command."));
     }
 
-    let cancel = AtomicBool::new(false);
     let (outcome, dirty) = state.mutate_active_session(|session| {
         let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
         Ok::<_, EngineError>((out, session.is_dirty()))
@@ -1946,13 +2156,38 @@ mod live_control {
         let payload = serde_json::to_vec(&Value::Object(envelope))
             .map_err(|err| StructuredErrorPayload::new(ErrorCode::InternalError, format!("failed to encode control request: {err}")))?;
 
+        let mut reader = BufReader::new(reader_io);
+        if payload.len() > 32 * 1024
+            && let Some(tok) = token
+        {
+            let validated = validate_control_token(tok).map_err(|err| StructuredErrorPayload::new(ErrorCode::BadInput, err))?;
+            let auth_env = serde_json::json!({
+                "id": "mcp-auth",
+                "method": "auth",
+                "params": { "token": validated },
+            });
+            let auth_bytes = serde_json::to_vec(&auth_env)
+                .map_err(|err| StructuredErrorPayload::new(ErrorCode::InternalError, format!("failed to encode control auth: {err}")))?;
+            writer_io
+                .write_all(&auth_bytes)
+                .and_then(|()| writer_io.write_all(b"\n"))
+                .and_then(|()| writer_io.flush())
+                .map_err(|err| StructuredErrorPayload::new(ErrorCode::IoError, format!("control auth write failed: {err}")).with_retryable(true))?;
+            let auth_line = read_bounded_line(&mut reader, max_response_bytes)
+                .map_err(|msg| StructuredErrorPayload::new(ErrorCode::IoError, msg).with_retryable(true))?;
+            let auth_resp: ControlResponse = serde_json::from_slice(&auth_line)
+                .map_err(|err| StructuredErrorPayload::new(ErrorCode::CorruptData, format!("invalid control auth response JSON: {err}")))?;
+            if !auth_resp.ok {
+                return Err(parse_control_error(auth_resp.error, auth_resp.error_detail));
+            }
+        }
+
         writer_io
             .write_all(&payload)
             .and_then(|()| writer_io.write_all(b"\n"))
             .and_then(|()| writer_io.flush())
             .map_err(|err| StructuredErrorPayload::new(ErrorCode::IoError, format!("control write failed: {err}")).with_retryable(true))?;
 
-        let mut reader = BufReader::new(reader_io);
         let line_bytes = read_bounded_line(&mut reader, max_response_bytes)
             .map_err(|msg| StructuredErrorPayload::new(ErrorCode::IoError, msg).with_retryable(true))?;
         let resp: ControlResponse = serde_json::from_slice(&line_bytes)
