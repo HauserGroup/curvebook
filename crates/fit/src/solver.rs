@@ -53,18 +53,18 @@
 
 use lumencraft_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use lumencraft_math::ConfidenceLevel;
-use lumencraft_math::dist::{norm_two_sided_isf, student_t_two_sided_isf};
+use lumencraft_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
 use lumencraft_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
 use lumencraft_math::roots::{RootOptions, brent_root};
-use lumencraft_math::special::deviance_bd0;
+use lumencraft_math::special::{deviance_bd0, ln_gamma};
 use lumencraft_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
-    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, LackOfFitResult, LikelihoodRatioResult,
-    NormalityTestResult, RoutDetectionResult, RunsTestResult, anderson_darling_test, compare_models_aicc, compare_models_f_test, compare_models_lrt,
-    compare_models_lrt_deviance, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis, compute_hougaard_skewness_into,
-    compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis, compute_rsdr, dagostino_pearson_test,
-    homoscedasticity_spearman_test, lilliefors_ks_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
+    AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, InformationCriteria, LackOfFitResult,
+    LikelihoodRatioResult, NormalityTestResult, RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, compare_models_aicc,
+    compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis,
+    compute_hougaard_skewness_into, compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis,
+    compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
 use crate::error::{FitError, FitStatus, ParameterNote};
@@ -287,7 +287,12 @@ impl FittedParameterSummary {
     }
 }
 
-/// Interpolated unknown (`X` from `Y` or `Y` from `X`) with confidence interval.
+/// Default [`CiBound::Open`] helper for backwards-compatible deserialization of pre-R4.6 documents.
+const fn default_open_ci_bound() -> CiBound {
+    CiBound::Open
+}
+
+/// Interpolated unknown (`X` from `Y` or `Y` from `X`) with mean-response and calibration/prediction intervals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InterpolatedUnknown {
     pub data_set_index: usize,
@@ -297,16 +302,28 @@ pub struct InterpolatedUnknown {
     pub output_estimate: f64,
     pub ci_lower: CiBound,
     pub ci_upper: CiBound,
+    /// Lower bound of the single-observation calibration / prediction interval (new-observation variance included).
+    #[serde(default = "default_open_ci_bound")]
+    pub pred_lower: CiBound,
+    /// Upper bound of the single-observation calibration / prediction interval (new-observation variance included).
+    #[serde(default = "default_open_ci_bound")]
+    pub pred_upper: CiBound,
     pub note: Option<String>,
     #[serde(default)]
     pub inference_availability: InferenceAvailability,
 }
 
 impl InterpolatedUnknown {
-    /// Typed confidence interval for the interpolated value (`None` in pure Robust Cauchy mode).
+    /// Typed mean-response confidence interval for the interpolated value (`None` in pure Robust Cauchy mode).
     #[must_use]
     pub fn ci_bounds_option(&self) -> Option<(CiBound, CiBound)> {
         self.inference_availability.is_available().then_some((self.ci_lower, self.ci_upper))
+    }
+
+    /// Typed calibration / prediction interval for a single future observation (`None` in pure Robust Cauchy mode).
+    #[must_use]
+    pub fn pred_bounds_option(&self) -> Option<(CiBound, CiBound)> {
+        self.inference_availability.is_available().then_some((self.pred_lower, self.pred_upper))
     }
 }
 
@@ -488,6 +505,7 @@ impl ParameterLayout {
         let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
         let default_init = model.initial_guess(&all_points);
         let default_bounds = model.default_bounds();
+        let default_rules = model.default_parameter_rules(&all_points);
 
         let per_ds_init: Vec<Vec<f64>> = datasets.iter().map(|d| model.initial_guess(&d.points)).collect();
 
@@ -496,7 +514,8 @@ impl ParameterLayout {
         let mut fixed_constants = Vec::new();
 
         for (p_idx, pname) in param_names.iter().enumerate() {
-            let rule = rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname));
+            let explicit_rule = rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname));
+            let rule = explicit_rule.or_else(|| default_rules.iter().find(|r| r.name.eq_ignore_ascii_case(pname)));
             let def_b = default_bounds.get(p_idx).copied().unwrap_or((None, None));
             let lb = rule.and_then(|r| r.lower_bound).or(def_b.0);
             let ub = rule.and_then(|r| r.upper_bound).or(def_b.1);
@@ -1174,7 +1193,6 @@ fn run_trust_region_lm(
             });
         }
 
-        // Inner trust-region radius reduction loop.
         let mut accepted = false;
         let mut lambda = 0.0_f64;
         for _ in 0..40 {
@@ -1183,20 +1201,30 @@ fn run_trust_region_lm(
 
             let mut theta_trial: Vec<f64> = theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
             project_theta(&mut theta_trial, &bounds);
-            let actual_step: Vec<f64> = theta_trial.iter().zip(theta.iter()).map(|(a, b)| a - b).collect();
-            let p_norm = scaled_l2_norm(&diag, &actual_step);
+            let mut actual_step: Vec<f64> = theta_trial.iter().zip(theta.iter()).map(|(a, b)| a - b).collect();
+            let mut p_norm = scaled_l2_norm(&diag, &actual_step);
+            let needs_face_step = has_active_bound_step(&theta, &step, &bounds)
+                && (p_norm <= 1e-14 * delta.max(1.0) || quadratic_pred_num(&j_mat, &w_res, &actual_step) <= 0.0);
+            if needs_face_step
+                && let Some((face_step, face_lam)) = solve_active_face_subproblem(&j_mat, &w_res, &diag, &theta, &step, &bounds, delta, lambda)?
+            {
+                let mut face_trial: Vec<f64> = theta.iter().zip(face_step.iter()).map(|(a, b)| a + b).collect();
+                project_theta(&mut face_trial, &bounds);
+                let face_actual: Vec<f64> = face_trial.iter().zip(theta.iter()).map(|(a, b)| a - b).collect();
+                let face_norm = scaled_l2_norm(&diag, &face_actual);
+                if face_norm > 0.0 {
+                    theta_trial = face_trial;
+                    actual_step = face_actual;
+                    p_norm = face_norm;
+                    lambda = face_lam;
+                }
+            }
             if iter == 0 {
                 delta = delta.min(p_norm.max(1e-12));
             }
 
-            // Predicted reduction: ||J p||^2 + 2 lambda ||D p||^2 (or 2 r^T J p - ||J p||^2 under clamping).
-            let jp = matvec(&j_mat, &actual_step);
-            let jp_ss: f64 = jp.iter().map(|v| v * v).sum();
-            let mut r_dot_jp = 0.0_f64;
-            for i in 0..n {
-                r_dot_jp += w_res[i] * jp[i];
-            }
-            let pred_num = (2.0 * r_dot_jp - jp_ss).max(0.0);
+            // Predicted reduction: 2 r^T (J p) - ||J p||^2 (valid under active-bound projection too).
+            let pred_num = quadratic_pred_num(&j_mat, &w_res, &actual_step).max(0.0);
             let pred_red = if ss_curr > 0.0 { pred_num / ss_curr } else { 0.0 };
 
             let (act_red, trial_eval) = match eval_residuals(model, layout, obs, &theta_trial) {
@@ -1225,14 +1253,21 @@ fn run_trust_region_lm(
                 if let Some((_, _, ss_t)) = &trial_eval
                     && ss_t > &ss_curr
                 {
+                    let jp = matvec(&j_mat, &actual_step);
+                    let r_dot_jp: f64 = w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
                     let dir_deriv = -r_dot_jp;
                     let ratio_t = 0.5 * dir_deriv / (dir_deriv + 0.5 * (ss_curr - ss_t));
                     if ratio_t.is_finite() {
                         temp = ratio_t.clamp(0.1, 0.5);
                     }
                 }
-                delta = temp * delta.min(p_norm * 10.0).max(delta * 0.1);
-                lambda = (lambda / temp.max(0.1)).max(1e-12);
+                let bound_scale = if lambda == 0.0 { p_norm } else { p_norm * 10.0 };
+                delta = temp * delta.min(bound_scale).max(delta * 0.1);
+                if lambda == 0.0 {
+                    // Rejecting an undamped Gauss–Newton step means the trust region must contract
+                    // strictly below ||D p_gn|| / 1.1 so the next trial applies nonzero damping.
+                    delta = delta.min(0.8 * p_norm).max(1e-15 * scaled_l2_norm(&diag, &theta).max(1.0));
+                }
             } else if lambda == 0.0 || rho > 0.75 {
                 delta = delta.max(2.0 * p_norm);
                 lambda *= 0.5;
@@ -1308,14 +1343,16 @@ impl LmDampWorkspace {
 
 /// Solve the Moré trust-region subproblem `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta`
 /// via QR decomposition of the augmented matrix `[J; sqrt(lambda) D]`.
+/// Solve the Moré (1978) / MINPACK-1 `lmpar` trust-region subproblem
+/// `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta` via QR decomposition.
 ///
-/// As in Moré (1978), the Gauss–Newton step (`lambda = 0`) is accepted when
-/// `||D p|| <= 1.1 delta`, `lambda` is bracketed by `[parl, paru]` with
-/// `paru = ||D^{-1} J^T r|| / delta`, and iteration stops when `| ||D p|| - delta | <= 0.1 delta`
-/// or after 10 trials. Deviation: the `lambda` correction is the heuristic
-/// `lambda * (||D p|| - delta) / delta` with bisection toward `parl`, not Moré's Newton
-/// correction derived from the R factor, so convergence to the boundary is slower but each
-/// trial is still a valid damped least-squares step.
+/// Follows Moré (1978, *Numerical Analysis*, Lecture Notes in Math. 630) Algorithm 4.1 /
+/// MINPACK-1 `lmpar`:
+/// 1. Accepts the full-rank Gauss–Newton step (`lambda = 0`) whenever `||D p_gn|| <= 1.1 delta`.
+/// 2. Computes exact upper bound `paru = ||D^{-1} J^T r|| / delta` and lower bound `parl` via
+///    `R_gn^T s = P^T (D^2 p_gn / ||D p_gn||)` when `J` has full column rank (`0` otherwise).
+/// 3. Refines `lambda` using Moré's rational-model Newton update `parc = phi / (delta * ||s||^2)`
+///    where `R^T s = D^2 p / ||D p||` from the QR factor `R` of `[J; sqrt(lambda) D]`.
 fn solve_trust_region_subproblem(
     j_mat: &DenseMatrix,
     r: &[f64],
@@ -1325,14 +1362,26 @@ fn solve_trust_region_subproblem(
     ws: &mut LmDampWorkspace,
 ) -> Result<(Vec<f64>, f64), FitError> {
     let k = j_mat.ncols();
-    if let Ok(p_gn) = solve_damped_qr(j_mat, r, diag, 0.0, ws) {
+    let pqr = qr_col_pivoted(j_mat)?;
+    let mut parl = 0.0_f64;
+    let mut gn_norm_for_init = 0.0_f64;
+    if pqr.rank() == k
+        && let Ok(p_gn) = pqr.solve_basic(r)
+        && p_gn.iter().all(|v| v.is_finite())
+    {
         let p_norm = scaled_l2_norm(diag, &p_gn);
-        if p_norm <= 1.1 * delta && p_gn.iter().all(|v| v.is_finite()) {
+        if p_norm <= 1.1 * delta {
             return Ok((p_gn, 0.0));
+        }
+        gn_norm_for_init = p_norm;
+        if let Ok(r_gn) = pqr.r()
+            && let Some(s_norm_sq) = more_r_inv_t_norm_sq(&r_gn, diag, &p_gn, p_norm, Some(pqr.permutation()))
+        {
+            parl = ((p_norm - delta) / (delta.max(1e-30) * s_norm_sq)).max(0.0);
         }
     }
 
-    // Upper bound on lambda from ||J^T r / D|| / delta.
+    // Scaled gradient norm ||D^{-1} J^T r||_2 and upper bracket paru = ||D^{-1} J^T r|| / delta.
     let mut grad_scaled_ss = 0.0_f64;
     for (j, &dj) in diag.iter().enumerate().take(k) {
         let mut g_j = 0.0_f64;
@@ -1342,46 +1391,60 @@ fn solve_trust_region_subproblem(
         let s = g_j / dj;
         grad_scaled_ss += s * s;
     }
-    let paru = (grad_scaled_ss.sqrt() / delta.max(1e-30)).max(1e-6);
-    let mut parl = 0.0_f64;
-    let mut lam = lambda_hint.clamp(1e-12, paru).max(0.001 * paru);
+    let gnorm = grad_scaled_ss.sqrt();
+    if gnorm == 0.0 || !gnorm.is_finite() {
+        return Ok((vec![0.0_f64; k], 0.0));
+    }
+    let mut paru = (gnorm / delta.max(1e-30)).max(1e-12);
+    // When rank-deficient (parl == 0), keep sqrt(lambda) safely above QR rounding noise in nullspace.
+    let lam_floor = if pqr.rank() < k { (1e-10 * paru).max(1e-12).min(paru) } else { (1e-14 * paru).max(1e-24).min(paru) };
+    let mut lam = lambda_hint.max(parl).min(paru);
+    if lam < lam_floor {
+        let fallback = if gn_norm_for_init > 0.0 { gnorm / gn_norm_for_init } else { 0.001 * paru };
+        lam = fallback.clamp(parl.max(lam_floor), paru);
+    }
 
     let mut best_p = vec![0.0_f64; k];
-    for _ in 0..10 {
-        if lam == 0.0 {
-            lam = (0.001 * paru).max(1e-12);
+    let mut fp_prev = 0.0_f64;
+    for iter in 0..10 {
+        if lam < lam_floor {
+            lam = (0.001 * paru).max(parl).max(lam_floor).min(paru);
         }
-        let p = solve_damped_qr(j_mat, r, diag, lam, ws)?;
+        let (p, r_mat) = solve_damped_qr_with_r(j_mat, r, diag, lam, ws)?;
         let p_norm = scaled_l2_norm(diag, &p);
         let fp = p_norm - delta;
         best_p = p;
-        if fp.abs() <= 0.1 * delta {
+        if fp.abs() <= 0.1 * delta || (parl == 0.0 && fp <= fp_prev && fp_prev < 0.0) || iter == 9 {
             return Ok((best_p, lam));
         }
+        let parc = match more_r_inv_t_norm_sq(&r_mat, diag, &best_p, p_norm, None) {
+            Some(s_norm_sq) => fp / (delta.max(1e-30) * s_norm_sq),
+            None => 0.0,
+        };
         if fp > 0.0 {
             parl = parl.max(lam);
+        } else if fp < 0.0 {
+            paru = paru.min(lam);
         }
-        let corr = lam * (fp / delta);
-        let next_lam = if fp > 0.0 { (lam + corr.abs()).min(paru.max(lam * 4.0)) } else { (0.5 * (lam + parl)).max(0.1 * lam) };
-        if (next_lam - lam).abs() <= 1e-12 * lam.max(1.0) {
+        let next_lam = parl.max(lam + parc).clamp(lam_floor.min(paru), paru);
+        if (next_lam - lam).abs() <= 1e-12 * lam.max(1e-30) || (paru - parl) <= 1e-12 * paru.max(1e-30) {
             return Ok((best_p, next_lam));
         }
         lam = next_lam;
+        fp_prev = fp;
     }
     Ok((best_p, lam))
 }
 
-/// QR solve of `min || [J; sqrt(lambda) D] p - [r; 0] ||_2`.
-fn solve_damped_qr(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], lambda: f64, ws: &mut LmDampWorkspace) -> Result<Vec<f64>, FitError> {
+fn solve_damped_qr_with_r(
+    j_mat: &DenseMatrix,
+    r: &[f64],
+    diag: &[f64],
+    lambda: f64,
+    ws: &mut LmDampWorkspace,
+) -> Result<(Vec<f64>, DenseMatrix), FitError> {
     let n = j_mat.nrows();
     let k = j_mat.ncols();
-    if lambda <= 0.0 {
-        let pqr = qr_col_pivoted(j_mat)?;
-        if pqr.rank() < k {
-            return Err(FitError::InvalidParameter { name: "jacobian", reason: "Rank-deficient Gauss-Newton step".to_owned() });
-        }
-        return Ok(pqr.solve_basic(r)?);
-    }
     let sqrt_lam = lambda.sqrt();
     for i in 0..n {
         for j in 0..k {
@@ -1395,7 +1458,84 @@ fn solve_damped_qr(j_mat: &DenseMatrix, r: &[f64], diag: &[f64], lambda: f64, ws
     ws.rhs[n..(n + k)].fill(0.0);
 
     let qr_res = qr(&ws.aug)?;
-    Ok(qr_res.solve_basic(&ws.rhs)?)
+    let p = qr_res.solve_basic(&ws.rhs)?;
+    let r_mat = qr_res.r()?;
+    Ok((p, r_mat))
+}
+
+fn more_r_inv_t_norm_sq(r_mat: &DenseMatrix, diag: &[f64], p: &[f64], p_norm: f64, perm: Option<&[usize]>) -> Option<f64> {
+    if p_norm <= 0.0 || !p_norm.is_finite() {
+        return None;
+    }
+    let k = diag.len();
+    let mut s = vec![0.0_f64; k];
+    for j in 0..k {
+        let orig_j = perm.map_or(j, |pm| pm[j]);
+        let mut sum = (diag[orig_j] * diag[orig_j] * p[orig_j]) / p_norm;
+        for (i, &si) in s.iter().enumerate().take(j) {
+            sum -= mat_get(r_mat, i, j) * si;
+        }
+        let rjj = mat_get(r_mat, j, j);
+        if !rjj.is_finite() || rjj.abs() <= 1e-300 {
+            return None;
+        }
+        s[j] = sum / rjj;
+    }
+    let norm_sq: f64 = s.iter().map(|v| v * v).sum();
+    (norm_sq.is_finite() && norm_sq > 0.0).then_some(norm_sq)
+}
+
+fn quadratic_pred_num(j_mat: &DenseMatrix, w_res: &[f64], step: &[f64]) -> f64 {
+    let jp = matvec(j_mat, step);
+    let jp_ss: f64 = jp.iter().map(|v| v * v).sum();
+    let r_dot_jp: f64 = w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
+    2.0 * r_dot_jp - jp_ss
+}
+
+fn is_bound_actively_blocked(theta_j: f64, step_j: f64, bound: (Option<f64>, Option<f64>)) -> bool {
+    let tol = 1e-12 * theta_j.abs().max(1.0);
+    let at_lo = bound.0.is_some_and(|lo| theta_j <= lo + tol && step_j < 0.0);
+    let at_hi = bound.1.is_some_and(|hi| theta_j >= hi - tol && step_j > 0.0);
+    at_lo || at_hi
+}
+
+fn has_active_bound_step(theta: &[f64], step: &[f64], bounds: &[(Option<f64>, Option<f64>)]) -> bool {
+    theta.iter().zip(step.iter()).zip(bounds.iter()).any(|((&tj, &sj), &b)| is_bound_actively_blocked(tj, sj, b))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn solve_active_face_subproblem(
+    j_mat: &DenseMatrix,
+    r: &[f64],
+    diag: &[f64],
+    theta: &[f64],
+    unconstrained_step: &[f64],
+    bounds: &[(Option<f64>, Option<f64>)],
+    delta: f64,
+    lambda_hint: f64,
+) -> Result<Option<(Vec<f64>, f64)>, FitError> {
+    let n = j_mat.nrows();
+    let k = j_mat.ncols();
+    let free_cols: Vec<usize> = (0..k).filter(|&j| !is_bound_actively_blocked(theta[j], unconstrained_step[j], bounds[j])).collect();
+    if free_cols.is_empty() || free_cols.len() == k {
+        return Ok(None);
+    }
+    let kf = free_cols.len();
+    let mut j_free = DenseMatrix::zeros(n, kf)?;
+    let mut diag_free = Vec::with_capacity(kf);
+    for (col_idx, &orig_j) in free_cols.iter().enumerate() {
+        diag_free.push(diag[orig_j]);
+        for i in 0..n {
+            mat_set(&mut j_free, i, col_idx, mat_get(j_mat, i, orig_j));
+        }
+    }
+    let mut ws_free = LmDampWorkspace::new(n, kf)?;
+    let (sub_step, sub_lam) = solve_trust_region_subproblem(&j_free, r, &diag_free, delta, lambda_hint, &mut ws_free)?;
+    let mut full_step = vec![0.0_f64; k];
+    for (col_idx, &orig_j) in free_cols.iter().enumerate() {
+        full_step[orig_j] = sub_step[col_idx];
+    }
+    Ok(Some((full_step, sub_lam)))
 }
 
 fn scaled_l2_norm(diag: &[f64], v: &[f64]) -> f64 {
@@ -1662,6 +1802,254 @@ fn compute_studentized_residuals(j_mat: &DenseMatrix, w_res: &[f64], cov_unscale
     out
 }
 
+fn canonical_x_bits(x: &[f64]) -> Vec<u64> {
+    x.iter().map(|&v| if v == 0.0 { 0.0_f64.to_bits() } else { v.to_bits() }).collect()
+}
+
+fn poisson_log_likelihood_from_obs(obs: &[ObsRecord], y_hat: &[f64]) -> Option<f64> {
+    if obs.len() != y_hat.len() || obs.is_empty() {
+        return None;
+    }
+    let mut sum = NeumaierSum::new();
+    for (rec, &mu) in obs.iter().zip(y_hat.iter()) {
+        let y = rec.point.y;
+        if !y.is_finite() || y < 0.0 || !mu.is_finite() || mu <= 0.0 {
+            return None;
+        }
+        let lg = ln_gamma(y + 1.0).ok()?;
+        let y_ln_mu = if y > 0.0 { y * mu.ln() } else { 0.0 };
+        sum.add(y_ln_mu - mu - lg);
+    }
+    let ll = sum.total();
+    ll.is_finite().then_some(ll)
+}
+
+fn information_criteria_from_poisson_ll(ll: f64, n_obs: usize, k_free: usize) -> Option<InformationCriteria> {
+    // Poisson likelihood fixes dispersion phi = 1, so effective K = k_free (no +1 variance parameter).
+    if !ll.is_finite() || n_obs <= k_free + 1 {
+        return None;
+    }
+    let k = k_free as f64;
+    let n = n_obs as f64;
+    let neg2_ll = -2.0 * ll;
+    let aic = neg2_ll + 2.0 * k;
+    let aicc = aic + (2.0 * k * (k + 1.0)) / (n - k - 1.0);
+    let bic = neg2_ll + k * n.ln();
+    Some(InformationCriteria { aicc, bic, n_obs, k_params_plus_sigma: k_free })
+}
+
+fn poisson_information_criteria(obs: &[ObsRecord], y_hat: &[f64], k_free: usize) -> Option<InformationCriteria> {
+    poisson_log_likelihood_from_obs(obs, y_hat).and_then(|ll| information_criteria_from_poisson_ll(ll, obs.len(), k_free))
+}
+
+fn compare_poisson_aicc(aicc_a: f64, aicc_b: f64) -> Result<AiccComparisonResult, FitError> {
+    if !aicc_a.is_finite() || !aicc_b.is_finite() {
+        return Err(FitError::InvalidParameter { name: "comparison", reason: "Poisson AICc values must be finite for model comparison".to_owned() });
+    }
+    let delta_aicc = aicc_b - aicc_a;
+    let min_aicc = aicc_a.min(aicc_b);
+    let exp_a = (-0.5 * (aicc_a - min_aicc)).exp();
+    let exp_b = (-0.5 * (aicc_b - min_aicc)).exp();
+    let denom = exp_a + exp_b;
+    let weight_a = exp_a / denom;
+    let weight_b = exp_b / denom;
+    let preferred_index = usize::from(aicc_b < aicc_a);
+    let evidence_ratio = (0.5 * delta_aicc.abs()).exp();
+    Ok(AiccComparisonResult { aicc_a, aicc_b, delta_aicc, weight_a, weight_b, evidence_ratio, preferred_index })
+}
+
+fn group_pure_error_ss_ls(obs: &[ObsRecord], idxs: &[usize]) -> Option<f64> {
+    let mut sum_within = 0.0_f64;
+    let mut sum_w = 0.0_f64;
+    let mut sum_wy = 0.0_f64;
+    for &i in idxs {
+        let w = obs[i].sqrt_weight * obs[i].sqrt_weight;
+        let y = obs[i].point.y;
+        if !w.is_finite() || w < 0.0 || !y.is_finite() || !obs[i].ss_within.is_finite() || obs[i].ss_within < 0.0 {
+            return None;
+        }
+        sum_within += obs[i].ss_within;
+        sum_w += w;
+        sum_wy += w * y;
+    }
+    if idxs.len() <= 1 {
+        return Some(sum_within);
+    }
+    if !sum_w.is_finite() || sum_w <= 0.0 || !sum_wy.is_finite() {
+        return None;
+    }
+    let y_bar_w = sum_wy / sum_w;
+    let mut ss_between = 0.0_f64;
+    for &i in idxs {
+        let w = obs[i].sqrt_weight * obs[i].sqrt_weight;
+        let diff = obs[i].point.y - y_bar_w;
+        ss_between += w * diff * diff;
+    }
+    let total = sum_within + ss_between;
+    total.is_finite().then_some(total)
+}
+
+fn group_pure_error_deviance_poisson(obs: &[ObsRecord], idxs: &[usize]) -> Option<f64> {
+    if idxs.len() <= 1 {
+        return Some(0.0);
+    }
+    let mut sum_y = 0.0_f64;
+    for &i in idxs {
+        let y = obs[i].point.y;
+        if !y.is_finite() || y < 0.0 {
+            return None;
+        }
+        sum_y += y;
+    }
+    let y_bar = sum_y / (idxs.len() as f64);
+    if !y_bar.is_finite() || y_bar <= 0.0 {
+        return (sum_y == 0.0).then_some(0.0);
+    }
+    let mut acc = NeumaierSum::new();
+    for &i in idxs {
+        acc.add(2.0 * deviance_bd0(obs[i].point.y, y_bar));
+    }
+    let dev = acc.total();
+    dev.is_finite().then_some(dev)
+}
+
+/// Observation-consistent replicates lack-of-fit test honoring replicate summary moments
+/// (`sqrt(n)`, `(n-1)*sd^2`), WLS weights (`1/Y^2`, `1/SD^2`, etc.), and Poisson deviance.
+fn replicates_lack_of_fit_obs(obs: &[ObsRecord], weighted_ss: f64, df: usize, method: FitMethod) -> Option<LackOfFitResult> {
+    if obs.is_empty() || !weighted_ss.is_finite() || weighted_ss < 0.0 || df == 0 {
+        return None;
+    }
+    let mut groups: std::collections::BTreeMap<(usize, Vec<u64>), Vec<usize>> = std::collections::BTreeMap::new();
+    let mut n_total: usize = 0;
+    for (idx, rec) in obs.iter().enumerate() {
+        if rec.point.x.iter().any(|x| !x.is_finite()) {
+            return None;
+        }
+        n_total = n_total.saturating_add(rec.rep_n);
+        groups.entry((rec.ds_local_idx, canonical_x_bits(&rec.point.x))).or_default().push(idx);
+    }
+    let n_groups = groups.len();
+    let df_pure_error = n_total.saturating_sub(n_groups);
+    if df_pure_error == 0 {
+        return None;
+    }
+    let df_lack_of_fit = df.saturating_sub(df_pure_error);
+    if df_lack_of_fit == 0 {
+        return None;
+    }
+
+    let mut pe_acc = NeumaierSum::new();
+    for idxs in groups.values() {
+        let g_pe =
+            if method == FitMethod::PoissonDeviance { group_pure_error_deviance_poisson(obs, idxs)? } else { group_pure_error_ss_ls(obs, idxs)? };
+        pe_acc.add(g_pe);
+    }
+    let ss_pure_error = pe_acc.total();
+    if !ss_pure_error.is_finite() {
+        return None;
+    }
+    let ss_lack_of_fit = (weighted_ss - ss_pure_error).max(0.0);
+    let ms_pe = ss_pure_error / (df_pure_error as f64);
+    let ms_lof = ss_lack_of_fit / (df_lack_of_fit as f64);
+    if !ms_pe.is_finite() || !ms_lof.is_finite() || ms_pe <= 0.0 {
+        return None;
+    }
+    let f_stat = ms_lof / ms_pe;
+    let p_value = f_sf(f_stat, df_lack_of_fit as f64, df_pure_error as f64).ok()?;
+    Some(LackOfFitResult { ss_pure_error, df_pure_error, ss_lack_of_fit, df_lack_of_fit, f_stat, p_value, significant_lack_of_fit: p_value < 0.05 })
+}
+
+/// ROUT outlier detection per Motulsky & Brown (2006, BMC Bioinformatics 7:123): computes RSDR,
+/// two-sided *t*-test *p*-values vs. RSDR, and applies Benjamini–Hochberg step-up FDR **only**
+/// across the top 30% of points furthest from the fitted curve (`start = floor(0.70 * N)`).
+/// Bottom ~70% residuals are left untested (`q_value = 1.0`, `is_outlier = false`).
+fn rout_detect_outliers_mb2006(
+    points: &[DataPoint],
+    raw_residuals: &[f64],
+    k_free: usize,
+    fdr_q_percent: f64,
+) -> Result<RoutDetectionResult, FitError> {
+    let n = points.len();
+    if raw_residuals.len() != n {
+        return Err(FitError::InvalidParameter { name: "raw_residuals", reason: format!("expected {n} residuals, got {}", raw_residuals.len()) });
+    }
+    if n <= k_free {
+        return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
+    }
+    if !fdr_q_percent.is_finite() || !(0.0..=100.0).contains(&fdr_q_percent) {
+        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in [0, 100], got {fdr_q_percent}") });
+    }
+
+    let df = n - k_free;
+    let abs_res: Vec<f64> = raw_residuals.iter().map(|r| r.abs()).collect();
+    let y_scale = points.iter().map(|p| p.y.abs()).fold(0.0_f64, f64::max).max(1e-12);
+    let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * y_scale);
+    let mut p_values = Vec::with_capacity(n);
+    for &r in raw_residuals {
+        if !r.is_finite() {
+            return Err(FitError::InvalidParameter { name: "raw_residuals", reason: "ROUT residuals must all be finite".to_owned() });
+        }
+        let p = if rsdr <= 1e-30 { if r.abs() <= 1e-30 { 1.0 } else { 0.0 } } else { student_t_two_sided_p((r / rsdr).abs(), df as f64)? };
+        p_values.push(p);
+    }
+
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| {
+        p_values[a].total_cmp(&p_values[b]).then_with(|| raw_residuals[b].abs().total_cmp(&raw_residuals[a].abs())).then_with(|| a.cmp(&b))
+    });
+
+    // Motulsky & Brown (2006): test only top ~30% furthest points (ranks 1..=m_test out of N).
+    let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
+    let m_test = n - start;
+    let q_alpha = (fdr_q_percent / 100.0).clamp(1e-6, 0.5);
+
+    let mut q_values = vec![1.0_f64; n];
+    let mut running_min = 1.0_f64;
+    for j in (0..m_test).rev() {
+        let rank = (j + 1) as f64;
+        let raw_q = ((n as f64) / rank * p_values[order[j]]).min(1.0);
+        running_min = running_min.min(raw_q);
+        q_values[order[j]] = running_min;
+    }
+
+    let mut last_rejected: Option<usize> = None;
+    for j in 0..m_test {
+        let rank = (j + 1) as f64;
+        let threshold = q_alpha * rank / (n as f64);
+        if p_values[order[j]] <= threshold {
+            last_rejected = Some(j);
+        }
+    }
+
+    let mut is_outlier = vec![false; n];
+    if let Some(j_max) = last_rejected {
+        for &idx in &order[..=j_max] {
+            is_outlier[idx] = true;
+        }
+    }
+
+    let mut outlier_indices = Vec::new();
+    let mut audit = Vec::with_capacity(n);
+    for (idx, pt) in points.iter().enumerate() {
+        if is_outlier[idx] {
+            outlier_indices.push(idx);
+        }
+        audit.push(RoutPointAudit {
+            index: idx,
+            data_set_index: pt.data_set_index,
+            row: pt.row,
+            x0: pt.x0(),
+            y: pt.y,
+            residual: raw_residuals[idx],
+            p_value: p_values[idx],
+            q_value: q_values[idx],
+            is_outlier: is_outlier[idx],
+        });
+    }
+
+    Ok(RoutDetectionResult { rsdr, df, q_threshold_percent: fdr_q_percent, outlier_indices, audit })
+}
+
 struct ResidualDiagnosticsBundle {
     runs_test: Option<RunsTestResult>,
     lack_of_fit: Option<LackOfFitResult>,
@@ -1672,6 +2060,7 @@ struct ResidualDiagnosticsBundle {
 }
 
 fn compute_residual_diagnostics(
+    obs: &[ObsRecord],
     points: &[DataPoint],
     y_hat_all: &[f64],
     raw_residuals_all: &[f64],
@@ -1688,8 +2077,11 @@ fn compute_residual_diagnostics(
         None
     };
 
-    let lof_res =
-        if config.compute_lack_of_fit && config.method != FitMethod::RobustCauchy { replicates_lack_of_fit(points, weighted_ss, df) } else { None };
+    let lof_res = if config.compute_lack_of_fit && config.method != FitMethod::RobustCauchy {
+        replicates_lack_of_fit_obs(obs, weighted_ss, df, config.method)
+    } else {
+        None
+    };
 
     let (norm_main, norm_ad, norm_ks) = if config.compute_normality {
         (
@@ -1916,7 +2308,7 @@ fn fit_plot_function_only(
 }
 
 /// Dispatch on [`FitMethod`]. ROUT follows the three stages of Motulsky & Brown (2006): robust
-/// Cauchy fit, outlier detection on its residuals ([`rout_detect_outliers`]), then an ordinary
+/// Cauchy fit, outlier detection on its residuals (`rout_detect_outliers_mb2006`), then an ordinary
 /// (optionally weighted) least-squares refit of the remaining points, seeded from the robust fit.
 fn solve_lm_by_method(
     model: &dyn ParametricModel,
@@ -1934,7 +2326,7 @@ fn solve_lm_by_method(
             let cauchy_out = fit_cauchy_irls(model, layout, obs, init_theta, config)?;
             let pts: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
             let raw_res: Vec<f64> = obs.iter().zip(cauchy_out.y_hat.iter()).map(|(o, yh)| o.point.y - yh).collect();
-            let rout = rout_detect_outliers(&pts, &raw_res, k_free, fdr_q_percent)?;
+            let rout = rout_detect_outliers_mb2006(&pts, &raw_res, k_free, fdr_q_percent)?;
             let mut is_out = vec![false; obs.len()];
             for &idx in &rout.outlier_indices {
                 is_out[idx] = true;
@@ -2112,7 +2504,13 @@ fn fit_single_or_shared(
     let r_squared = if tss > 0.0 { 1.0 - raw_rss / tss } else { 1.0 };
     let rsd = if df > 0 && !is_robust { (raw_rss / (df as f64)).sqrt() } else { f64::NAN };
 
-    let ic = if is_robust { None } else { compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok() };
+    let ic = if is_robust {
+        None
+    } else if config.method == FitMethod::PoissonDeviance {
+        poisson_information_criteria(&obs, &lm_out.y_hat, k_free)
+    } else {
+        compute_information_criteria(lm_out.weighted_ss, n_obs, k_free).ok()
+    };
     let cov = unc.cov;
 
     let all_stud = if is_robust {
@@ -2145,7 +2543,7 @@ fn fit_single_or_shared(
         None
     };
     let clean_points: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-    let res_diag = compute_residual_diagnostics(&clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&obs, &clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -2195,7 +2593,8 @@ struct SingleDatasetOutcome {
     derived_scalars: Vec<DerivedScalar>,
     interpolated_x: Vec<InterpolatedUnknown>,
     interpolated_y: Vec<InterpolatedUnknown>,
-    rep_moments: Vec<(usize, f64)>,
+    obs_moments: Vec<(f64, usize, f64)>,
+    poisson_ll: Option<f64>,
 }
 
 fn solve_single_dataset_unit(
@@ -2262,7 +2661,8 @@ fn solve_single_dataset_unit(
 
     let ds_result = assembled.ds_results.into_iter().next().ok_or(FitError::EmptyInput)?;
     let derived = assembled.derived_scalars.into_iter().next().unwrap_or_default();
-    let rep_moments = ds_obs.iter().map(|o| (o.rep_n, o.ss_within)).collect();
+    let poisson_ll = if config.method == FitMethod::PoissonDeviance { poisson_log_likelihood_from_obs(&ds_obs, &lm_out.y_hat) } else { None };
+    let obs_moments = ds_obs.iter().map(|o| (o.sqrt_weight, o.rep_n, o.ss_within)).collect();
 
     Ok(SingleDatasetOutcome {
         layout: ds_layout,
@@ -2277,7 +2677,8 @@ fn solve_single_dataset_unit(
         derived_scalars: derived,
         interpolated_x: assembled.interpolated_x,
         interpolated_y: assembled.interpolated_y,
-        rep_moments,
+        obs_moments,
+        poisson_ll,
     })
 }
 
@@ -2312,7 +2713,7 @@ fn fit_independent_datasets(
             let ds_rules = rules_for_dataset(&config.parameter_rules, ds.data_set_index);
             let sub = solve_single_dataset_unit(model, ds, hooks, &ds_rules, &cauchy_cfg, None)?;
             let p_d = sub.layout.k_free();
-            let rout_d = rout_detect_outliers(&ds.points, &sub.ds_result.residuals, p_d, fdr_q_percent)?;
+            let rout_d = rout_detect_outliers_mb2006(&ds.points, &sub.ds_result.residuals, p_d, fdr_q_percent)?;
 
             let mut is_out = vec![false; ds.points.len()];
             for &local_idx in &rout_d.outlier_indices {
@@ -2388,9 +2789,11 @@ fn fit_independent_datasets(
     let mut interpolated_x = Vec::new();
     let mut interpolated_y = Vec::new();
     let mut all_points = Vec::new();
+    let mut all_obs = Vec::new();
     let mut all_moments = Vec::new();
     let mut all_y_hat = Vec::new();
     let mut all_raw_residuals = Vec::new();
+    let mut all_poisson_ll: Option<f64> = Some(0.0);
 
     for (d_idx, (sub, ds)) in sub_fits.into_iter().zip(active_datasets.iter()).enumerate() {
         let p_d = sub.layout.k_free();
@@ -2423,16 +2826,18 @@ fn fit_independent_datasets(
         max_iterations = max_iterations.max(sub.iterations);
         total_weighted_ss.add(sub.weighted_ss);
         total_raw_rss.add(sub.ds_result.ss_residual);
+        all_poisson_ll = all_poisson_ll.zip(sub.poisson_ll).map(|(a, b)| a + b);
 
-        for (((pt, &yh), &res), &rep_mom) in
-            ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()).zip(sub.rep_moments.iter())
+        for (((pt, &yh), &res), &obs_mom) in
+            ds.points.iter().zip(sub.ds_result.y_hat.iter()).zip(sub.ds_result.residuals.iter()).zip(sub.obs_moments.iter())
         {
+            all_obs.push(ObsRecord { point: pt.clone(), ds_local_idx: d_idx, sqrt_weight: obs_mom.0, rep_n: obs_mom.1, ss_within: obs_mom.2 });
             all_points.push(pt.clone());
             all_y_hat.push(yh);
             all_raw_residuals.push(res);
-            all_moments.push(rep_mom);
-            total_y_sum.add((rep_mom.0 as f64) * pt.y);
-            n_obs += rep_mom.0;
+            all_moments.push((obs_mom.1, obs_mom.2));
+            total_y_sum.add((obs_mom.1 as f64) * pt.y);
+            n_obs += obs_mom.1;
         }
 
         ds_results.push(sub.ds_result);
@@ -2486,9 +2891,15 @@ fn fit_independent_datasets(
     } else {
         None
     };
-    let ic = if is_robust { None } else { compute_information_criteria(weighted_ss, n_obs, k_free).ok() };
+    let ic = if is_robust {
+        None
+    } else if config.method == FitMethod::PoissonDeviance {
+        all_poisson_ll.and_then(|ll| information_criteria_from_poisson_ll(ll, n_obs, k_free))
+    } else {
+        compute_information_criteria(weighted_ss, n_obs, k_free).ok()
+    };
 
-    let res_diag = compute_residual_diagnostics(&all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&all_obs, &all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -2701,6 +3112,7 @@ fn assemble_dataset_results(
                     interp_sigma,
                     interp_t,
                     inference_availability,
+                    cfg.solver,
                 ));
             }
             for &(row, x_val) in &ds.unknowns_x {
@@ -2717,6 +3129,7 @@ fn assemble_dataset_results(
                     interp_sigma,
                     interp_t,
                     inference_availability,
+                    cfg.solver,
                 ));
             }
         }
@@ -2757,9 +3170,11 @@ fn comparison_test_label(spec: &ModelComparisonSpec) -> &'static str {
 /// ratio test (Wilks 1938). Full references are in [`crate::diagnostics`]. The *F* and LRT
 /// paths order the two fits by residual degrees of freedom and assume they are nested.
 ///
-/// Note: all three statistics are computed from `weighted_ss`. Under
-/// `FitMethod::PoissonDeviance` that value is the Poisson deviance, which is the correct input
-/// for the deviance LRT but not for the Gaussian-likelihood *F* test or AICc formula. If **either**
+/// Note: for least-squares fits, all three statistics are computed from `weighted_ss`.
+/// Under `FitMethod::PoissonDeviance`, `weighted_ss` is the Poisson deviance (used for
+/// deviance LRT), `Aicc` uses exact Poisson log-likelihood with `K = k_free` (dispersion = 1),
+/// and `ExtraSumOfSquaresF` is rejected because OLS extra-SS *F* is invalid for Poisson errors.
+/// Mixed error models (`PoissonDeviance` vs Gaussian/OLS/WLS) are likewise rejected. If **either**
 /// the primary or alternative model uses `FitMethod::RobustCauchy`, returns
 /// `FitError::InvalidParameter` carrying `NotApplicableInRobustMode` (use
 /// [`compare_models_checked`] when a typed [`ModelComparisonResult`] is desired).
@@ -2775,6 +3190,20 @@ pub fn compare_models(
         return Err(FitError::InvalidParameter {
             name: "comparison",
             reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
+        });
+    }
+    let primary_is_poisson = primary.fit_method == FitMethod::PoissonDeviance;
+    let config_is_poisson = config.method == FitMethod::PoissonDeviance;
+    if primary_is_poisson != config_is_poisson {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: "Cannot compare models fitted under different error models (PoissonDeviance vs Gaussian/least-squares)".to_owned(),
+        });
+    }
+    if config_is_poisson && matches!(spec, ModelComparisonSpec::ExtraSumOfSquaresF { .. }) {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: "Extra sum-of-squares F test is undefined for PoissonDeviance fits; use LikelihoodRatioTest or Aicc instead".to_owned(),
         });
     }
     let alt = fit_nonlinear(alt_model, datasets, hooks, config)?;
@@ -2800,7 +3229,13 @@ pub fn compare_models(
             )?)
         }
         ModelComparisonSpec::Aicc { .. } => {
-            ModelComparisonOutcome::Aicc(compare_models_aicc(primary.weighted_ss, primary.k_free, alt.weighted_ss, alt.k_free, primary.n_obs)?)
+            if config.method == FitMethod::PoissonDeviance {
+                let aicc_a = primary.aic_c.ok_or_else(|| FitError::InsufficientData { required: primary.k_free + 2, actual: primary.n_obs })?;
+                let aicc_b = alt.aic_c.ok_or_else(|| FitError::InsufficientData { required: alt.k_free + 2, actual: alt.n_obs })?;
+                ModelComparisonOutcome::Aicc(compare_poisson_aicc(aicc_a, aicc_b)?)
+            } else {
+                ModelComparisonOutcome::Aicc(compare_models_aicc(primary.weighted_ss, primary.k_free, alt.weighted_ss, alt.k_free, primary.n_obs)?)
+            }
         }
         ModelComparisonSpec::LikelihoodRatioTest { .. } => {
             let (ss_null, df_null, ss_alt, df_alt) = if primary.df >= alt.df {
@@ -3187,6 +3622,45 @@ struct CurveOverlayContext<'a> {
     solver: &'a SolverConfig,
 }
 
+/// Variance inflation factor `1 / w_new(x, y_hat)` for a single future observation under `scheme`.
+fn new_observation_inv_weight(scheme: WeightingScheme, x: f64, y_hat: f64) -> f64 {
+    match scheme {
+        WeightingScheme::None | WeightingScheme::ObservedSd => 1.0,
+        WeightingScheme::RelativeSquare => {
+            if y_hat.is_finite() {
+                y_hat * y_hat
+            } else {
+                1.0
+            }
+        }
+        WeightingScheme::Relative => {
+            if y_hat.is_finite() {
+                y_hat.abs()
+            } else {
+                1.0
+            }
+        }
+        WeightingScheme::GeneralPowerY(k) => {
+            let inv = y_hat.abs().powf(k);
+            if inv.is_finite() && inv >= 0.0 { inv } else { 1.0 }
+        }
+        WeightingScheme::InverseX => {
+            if x.is_finite() {
+                x.abs()
+            } else {
+                1.0
+            }
+        }
+        WeightingScheme::InverseX2 => {
+            if x.is_finite() {
+                x * x
+            } else {
+                1.0
+            }
+        }
+    }
+}
+
 /// Sample the fitted curve with pointwise delta-method bands (Bates & Watts 1988;
 /// Seber & Wild 1989): with `g = d f(x) / d theta` and `C = (J^T J)^{-1}`,
 /// confidence band `y +/- t_{df} s sqrt(g^T C g)` and prediction band
@@ -3268,7 +3742,12 @@ fn build_curve_overlay(ctx: &CurveOverlayContext<'_>) -> FittedCurveOverlay {
             let b_lo = Some(y - ctx.t_crit * se_f);
             let b_hi = Some(y + ctx.t_crit * se_f);
             let (p_lo, p_hi) = if ctx.solver.compute_prediction_bands {
-                let se_p = ctx.sigma * (1.0 + quad).sqrt();
+                let inv_w = new_observation_inv_weight(ctx.solver.weighting, x, y);
+                let se_p = if ctx.solver.method == FitMethod::PoissonDeviance {
+                    (y.max(0.0) + ctx.sigma * ctx.sigma * quad).sqrt()
+                } else {
+                    ctx.sigma * (inv_w + quad).sqrt()
+                };
                 (Some(y - ctx.t_crit * se_p), Some(y + ctx.t_crit * se_p))
             } else {
                 (None, None)
@@ -3438,16 +3917,38 @@ fn plateau_tag_for_target(
     }
 }
 
+fn band_crossing_interval<F1, F2>(band_lo_fn: F1, band_hi_fn: F2, x_hat: f64, scan_lo: f64, scan_hi: f64) -> (CiBound, CiBound)
+where
+    F1: Fn(f64) -> f64,
+    F2: Fn(f64) -> f64,
+{
+    let r1 = find_nearest_root(band_lo_fn, x_hat, scan_lo, scan_hi);
+    let r2 = find_nearest_root(band_hi_fn, x_hat, scan_lo, scan_hi);
+    match (r1, r2) {
+        (Some(a), Some(b)) => (CiBound::Finite(a.min(b)), CiBound::Finite(a.max(b))),
+        (Some(a), None) => {
+            if a <= x_hat {
+                (CiBound::Finite(a), CiBound::Open)
+            } else {
+                (CiBound::Open, CiBound::Finite(a))
+            }
+        }
+        (None, Some(b)) => {
+            if b <= x_hat {
+                (CiBound::Finite(b), CiBound::Open)
+            } else {
+                (CiBound::Open, CiBound::Finite(b))
+            }
+        }
+        (None, None) => (CiBound::Open, CiBound::Open),
+    }
+}
+
 /// Interpolate unknown `X` from target `Y` along the fitted curve using scan + `brent_root`,
 /// preferring roots within measured `[x_min, x_max]`, flagging out-of-range extrapolation and
-/// plateau violations (`AboveTopPlateau` / `BelowBottomPlateau`), and returning inverse CIs
-/// (`CiBound::Open` when plateauing beyond band limits).
-///
-/// Roots are bracketed by a 200-point scan and refined with Brent (1973). The interval is where
-/// the pointwise mean-response confidence band (see `build_curve_overlay`) crosses `y_target`,
-/// i.e. it treats `y_target` as an exactly known mean response. It does not include the
-/// measurement error of a new observation; a calibration interval for a measured unknown would
-/// invert the prediction band instead (Seber & Wild 1989).
+/// plateau violations (`AboveTopPlateau` / `BelowBottomPlateau`), and returning both:
+/// - `ci_lower..ci_upper`: inverse **mean-response** confidence interval (treats `y_target` as exact)
+/// - `pred_lower..pred_upper`: inverse **calibration / prediction** interval (includes new-observation error variance, Seber & Wild 1989).
 #[allow(clippy::too_many_arguments)]
 fn interpolate_x_from_y(
     model: &dyn ParametricModel,
@@ -3462,6 +3963,7 @@ fn interpolate_x_from_y(
     sigma: f64,
     t_crit: f64,
     inference_availability: InferenceAvailability,
+    solver: &SolverConfig,
 ) -> InterpolatedUnknown {
     let xb = dataset_x_bounds(ds);
     let scan_lo = xb.scan_x_min - 0.5 * xb.span;
@@ -3518,16 +4020,20 @@ fn interpolate_x_from_y(
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
+            pred_lower: CiBound::Open,
+            pred_upper: CiBound::Open,
             note: Some(note),
             inference_availability,
         };
     };
 
-    let (ci_lower, ci_upper) = if inference_availability.is_available()
+    let ((ci_lower, ci_upper), (pred_lower, pred_upper)) = if inference_availability.is_available()
         && let Some(cov_u) = cov_unscaled
         && t_crit.is_finite()
     {
-        let band_lo_fn = |x: f64| -> f64 {
+        let band_lo = scan_lo.min(x_hat - xb.span);
+        let band_hi = scan_hi.max(x_hat + xb.span);
+        let mean_lo_fn = |x: f64| -> f64 {
             let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
                 return f64::NAN;
             };
@@ -3535,7 +4041,7 @@ fn interpolate_x_from_y(
             let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
             (y - t_crit * se) - y_target
         };
-        let band_hi_fn = |x: f64| -> f64 {
+        let mean_hi_fn = |x: f64| -> f64 {
             let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
                 return f64::NAN;
             };
@@ -3543,28 +4049,34 @@ fn interpolate_x_from_y(
             let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
             (y + t_crit * se) - y_target
         };
-        let r1 = find_nearest_root(band_lo_fn, x_hat, scan_lo, scan_hi);
-        let r2 = find_nearest_root(band_hi_fn, x_hat, scan_lo, scan_hi);
-        match (r1, r2) {
-            (Some(a), Some(b)) => (CiBound::Finite(a.min(b)), CiBound::Finite(a.max(b))),
-            (Some(a), None) => {
-                if a <= x_hat {
-                    (CiBound::Finite(a), CiBound::Open)
-                } else {
-                    (CiBound::Open, CiBound::Finite(a))
-                }
-            }
-            (None, Some(b)) => {
-                if b <= x_hat {
-                    (CiBound::Finite(b), CiBound::Open)
-                } else {
-                    (CiBound::Open, CiBound::Finite(b))
-                }
-            }
-            (None, None) => (CiBound::Open, CiBound::Open),
-        }
+        let pred_lo_fn = |x: f64| -> f64 {
+            let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
+                return f64::NAN;
+            };
+            let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
+            let quad = quadratic_form(cov_u, &g).max(0.0);
+            let inv_w = new_observation_inv_weight(solver.weighting, x, y);
+            let se_p =
+                if solver.method == FitMethod::PoissonDeviance { (y.max(0.0) + sigma * sigma * quad).sqrt() } else { sigma * (inv_w + quad).sqrt() };
+            (y - t_crit * se_p) - y_target
+        };
+        let pred_hi_fn = |x: f64| -> f64 {
+            let Some(y) = model.eval(&[x], ds_params, ds.data_set_index) else {
+                return f64::NAN;
+            };
+            let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
+            let quad = quadratic_form(cov_u, &g).max(0.0);
+            let inv_w = new_observation_inv_weight(solver.weighting, x, y);
+            let se_p =
+                if solver.method == FitMethod::PoissonDeviance { (y.max(0.0) + sigma * sigma * quad).sqrt() } else { sigma * (inv_w + quad).sqrt() };
+            (y + t_crit * se_p) - y_target
+        };
+        (
+            band_crossing_interval(mean_lo_fn, mean_hi_fn, x_hat, band_lo, band_hi),
+            band_crossing_interval(pred_lo_fn, pred_hi_fn, x_hat, band_lo, band_hi),
+        )
     } else {
-        (CiBound::Open, CiBound::Open)
+        ((CiBound::Open, CiBound::Open), (CiBound::Open, CiBound::Open))
     };
 
     let plateau_hint = plateau_tag_for_target(model, ds_params, ds.data_set_index, y_target, xb.scan_x_min, xb.scan_x_max);
@@ -3580,13 +4092,15 @@ fn interpolate_x_from_y(
         output_estimate: x_hat,
         ci_lower,
         ci_upper,
+        pred_lower,
+        pred_upper,
         note,
         inference_availability,
     }
 }
 
-/// Predict `Y` at `x_val` with the pointwise delta-method confidence interval for the mean
-/// response (Bates & Watts 1988).
+/// Predict `Y` at `x_val` with both the pointwise delta-method mean-response confidence interval
+/// (Bates & Watts 1988) and the single-observation prediction interval.
 #[allow(clippy::too_many_arguments)]
 fn interpolate_y_from_x(
     model: &dyn ParametricModel,
@@ -3601,6 +4115,7 @@ fn interpolate_y_from_x(
     sigma: f64,
     t_crit: f64,
     inference_availability: InferenceAvailability,
+    solver: &SolverConfig,
 ) -> InterpolatedUnknown {
     let xb = dataset_x_bounds(ds);
     let Some(y_hat) = model.eval(&[x_val], ds_params, ds.data_set_index) else {
@@ -3611,19 +4126,28 @@ fn interpolate_y_from_x(
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
             ci_upper: CiBound::Open,
+            pred_lower: CiBound::Open,
+            pred_upper: CiBound::Open,
             note: Some("X outside fitted model domain".to_owned()),
             inference_availability,
         };
     };
-    let (ci_lower, ci_upper) = if inference_availability.is_available()
+    let ((ci_lower, ci_upper), (pred_lower, pred_upper)) = if inference_availability.is_available()
         && let Some(cov_u) = cov_unscaled
         && t_crit.is_finite()
     {
         let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x_val);
-        let se = sigma * quadratic_form(cov_u, &g).max(0.0).sqrt();
-        (CiBound::Finite(y_hat - t_crit * se), CiBound::Finite(y_hat + t_crit * se))
+        let quad = quadratic_form(cov_u, &g).max(0.0);
+        let se = sigma * quad.sqrt();
+        let inv_w = new_observation_inv_weight(solver.weighting, x_val, y_hat);
+        let se_p =
+            if solver.method == FitMethod::PoissonDeviance { (y_hat.max(0.0) + sigma * sigma * quad).sqrt() } else { sigma * (inv_w + quad).sqrt() };
+        (
+            (CiBound::Finite(y_hat - t_crit * se), CiBound::Finite(y_hat + t_crit * se)),
+            (CiBound::Finite(y_hat - t_crit * se_p), CiBound::Finite(y_hat + t_crit * se_p)),
+        )
     } else {
-        (CiBound::Open, CiBound::Open)
+        ((CiBound::Open, CiBound::Open), (CiBound::Open, CiBound::Open))
     };
     let note = extrapolation_note_for_x(&xb, x_val, None);
     InterpolatedUnknown {
@@ -3633,6 +4157,8 @@ fn interpolate_y_from_x(
         output_estimate: y_hat,
         ci_lower,
         ci_upper,
+        pred_lower,
+        pred_upper,
         note,
         inference_availability,
     }

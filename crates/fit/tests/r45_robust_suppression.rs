@@ -206,7 +206,12 @@ fn r45_robust_cauchy_typed_suppression_r1_s03_06_and_preserved_quantities() {
     assert_robust_fit_suppressed(&fit);
     let log_ec50 = fit.parameters.iter().find(|p| p.name == "LogEC50").unwrap().estimate;
     assert!((log_ec50 - (-6.5)).abs() < 0.05, "Robust fit should resist outlier: LogEC50={log_ec50}");
-    assert!(fit.rsdr.is_some_and(|v| v.is_finite() && v > 0.0));
+    assert!(
+        fit.rsdr.is_some_and(|v| v.is_finite() && (0.0..1e-9).contains(&v)),
+        "exact 10/11 inliers + 1 outlier recovers true curve with RSDR near 0, got {:?}",
+        fit.rsdr
+    );
+    assert!((fit.datasets[0].residuals[5] - 400.0).abs() < 0.05, "outlier residual at spike index 5 must remain ~400");
 
     assert_eq!(fit.interpolated_x.len(), 2);
     assert_eq!(fit.interpolated_y.len(), 2);
@@ -232,6 +237,22 @@ fn r45_robust_cauchy_typed_suppression_r1_s03_06_and_preserved_quantities() {
     let exact_fit = fit_nonlinear(hill.as_ref(), std::slice::from_ref(&exact_ds), &HookContext::default(), &cfg).unwrap();
     assert_robust_fit_suppressed(&exact_fit);
     assert_eq!(exact_fit.rsdr, Some(0.0));
+
+    let mut noisy_ys = exact_ys;
+    for (idx, y) in noisy_ys.iter_mut().enumerate() {
+        *y += if idx % 2 == 0 { 0.5 } else { -0.5 };
+    }
+    noisy_ys[5] += 400.0;
+    let noisy_ds = make_dataset(0, "NoisyWithOutlier", &xs, &noisy_ys);
+    let noisy_fit = fit_nonlinear(hill.as_ref(), std::slice::from_ref(&noisy_ds), &HookContext::default(), &cfg).unwrap();
+    assert_robust_fit_suppressed(&noisy_fit);
+    let noisy_ec50 = noisy_fit.parameters.iter().find(|p| p.name == "LogEC50").unwrap().estimate;
+    assert!((noisy_ec50 - (-6.5)).abs() < 0.1, "noisy robust fit should resist +400 outlier: LogEC50={noisy_ec50}");
+    assert!(
+        noisy_fit.rsdr.is_some_and(|v| v.is_finite() && v > 0.2 && v < 2.0),
+        "noisy robust fit + outlier must yield positive finite RSDR, got {:?}",
+        noisy_fit.rsdr
+    );
 }
 
 #[test]

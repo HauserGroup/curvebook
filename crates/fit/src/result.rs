@@ -204,6 +204,10 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     if lin_spec.interpolate_unknowns {
         let mut interp_rows = Vec::new();
         let mut interp_labels = Vec::new();
+        let to_ci_bound = |v: Option<f64>| match v {
+            Some(x) if x.is_finite() => CiBound::Finite(x),
+            _ => CiBound::Open,
+        };
         for (_, lbl, f) in &fits {
             for item in &f.interpolated_x_from_y {
                 interp_labels.push(format!("{lbl} (X from Y={:.4})", item.input_value));
@@ -211,6 +215,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
                     num_cell(item.input_value),
                     num_cell(item.estimate),
                     ResultCell::ConfidenceInterval { lower: item.ci_lower, upper: item.ci_upper },
+                    ResultCell::ConfidenceInterval { lower: to_ci_bound(item.pred_lower), upper: to_ci_bound(item.pred_upper) },
                 ]);
             }
             for item in &f.interpolated_y_from_x {
@@ -219,6 +224,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
                     num_cell(item.input_value),
                     num_cell(item.estimate),
                     ResultCell::ConfidenceInterval { lower: item.ci_lower, upper: item.ci_upper },
+                    ResultCell::ConfidenceInterval { lower: to_ci_bound(item.pred_lower), upper: to_ci_bound(item.pred_upper) },
                 ]);
             }
         }
@@ -227,7 +233,12 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
                 id: "linear_interpolated".to_owned(),
                 title: "Interpolated unknowns".to_owned(),
                 kind: ResultTabKind::InterpolatedUnknowns,
-                column_headers: vec!["Input".to_owned(), "Interpolated".to_owned(), "Confidence Interval".to_owned()],
+                column_headers: vec![
+                    "Input".to_owned(),
+                    "Interpolated".to_owned(),
+                    "Mean-Response CI".to_owned(),
+                    "Calibration / Prediction Interval".to_owned(),
+                ],
                 row_labels: interp_labels,
                 rows: interp_rows,
                 footnotes: Vec::new(),
@@ -245,6 +256,8 @@ fn build_deming_result_sheet(
     datasets: &[crate::types::DatasetSeries],
     confidence: lumencraft_math::ConfidenceLevel,
 ) -> Result<ResultSheet, FitError> {
+    // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
+    // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
     let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: confidence };
     let mut headers = Vec::with_capacity(datasets.len());
     let row_labels = vec![
@@ -284,7 +297,10 @@ fn build_deming_result_sheet(
         column_headers: headers,
         row_labels,
         rows,
-        footnotes: vec!["Standard errors computed by Leave-One-Out jackknife.".to_owned()],
+        footnotes: vec![
+            "Standard errors computed by Leave-One-Out jackknife.".to_owned(),
+            "Orthogonal Deming regression uses fixed variance ratio lambda = 1.0 (equal X and Y error variances).".to_owned(),
+        ],
     });
     append_auc_scalars_and_tab(&mut result, datasets);
     result.status = ResultStatus::UpToDate;
@@ -869,10 +885,12 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
                 has_robust_ci_suppression = true;
             }
             let ci_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.ci_lower, item.ci_upper) };
+            let pred_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.pred_lower, item.pred_upper) };
             interp_rows.push(vec![
                 num_cell(item.input_value),
                 num_cell(item.output_estimate),
                 ci_rendered,
+                pred_rendered,
                 ResultCell::Text(direction.to_owned()),
                 ResultCell::Text(lbl.clone()),
             ]);
@@ -895,7 +913,8 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
         column_headers: vec![
             "Input".to_owned(),
             "Interpolated".to_owned(),
-            "Confidence Interval".to_owned(),
+            "Mean-Response CI".to_owned(),
+            "Calibration / Prediction Interval".to_owned(),
             "Direction".to_owned(),
             "Dataset".to_owned(),
         ],
@@ -1185,7 +1204,10 @@ mod tests {
         let interp_tab = res.tabs.iter().find(|t| t.kind == ResultTabKind::InterpolatedUnknowns).expect("InterpolatedUnknowns tab");
         assert_eq!(interp_tab.id, "nonlinear_interpolated");
         assert_eq!(interp_tab.title, "Interpolated unknowns");
-        assert_eq!(interp_tab.column_headers, vec!["Input", "Interpolated", "Confidence Interval", "Direction", "Dataset"]);
+        assert_eq!(
+            interp_tab.column_headers,
+            vec!["Input", "Interpolated", "Mean-Response CI", "Calibration / Prediction Interval", "Direction", "Dataset"]
+        );
         assert_eq!(interp_tab.rows.len(), 3);
         assert_eq!(interp_tab.row_labels.len(), 3);
         assert!(interp_tab.footnotes.is_empty());
@@ -1196,8 +1218,8 @@ mod tests {
                 panic!("expected numeric interpolated X in row {idx}");
             };
             assert!((value - expected_x).abs() < 1e-4, "row {idx}: got {value}, expected {expected_x}");
-            assert_eq!(interp_tab.rows[idx][3], ResultCell::Text("X from Y".to_owned()));
-            assert_eq!(interp_tab.rows[idx][4], ResultCell::Text("A".to_owned()));
+            assert_eq!(interp_tab.rows[idx][4], ResultCell::Text("X from Y".to_owned()));
+            assert_eq!(interp_tab.rows[idx][5], ResultCell::Text("A".to_owned()));
         }
 
         assert!(interp_tab.row_labels[2].contains("Y from X="));
@@ -1206,11 +1228,14 @@ mod tests {
         };
         assert!((est_y - 52.5).abs() < 1e-4, "expected Y=52.5 at LogEC50, got {est_y}");
         let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lo), upper: CiBound::Finite(hi) } = interp_tab.rows[2][2] else {
-            panic!("expected finite CI for interpolated Y");
+            panic!("expected finite Mean-Response CI for interpolated Y");
         };
-        assert!(lo <= est_y && est_y <= hi);
-        assert_eq!(interp_tab.rows[2][3], ResultCell::Text("Y from X".to_owned()));
-        assert_eq!(interp_tab.rows[2][4], ResultCell::Text("A".to_owned()));
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(plo), upper: CiBound::Finite(phi) } = interp_tab.rows[2][3] else {
+            panic!("expected finite Calibration / Prediction Interval for interpolated Y");
+        };
+        assert!(plo <= lo && lo <= est_y && est_y <= hi && hi <= phi);
+        assert_eq!(interp_tab.rows[2][4], ResultCell::Text("Y from X".to_owned()));
+        assert_eq!(interp_tab.rows[2][5], ResultCell::Text("A".to_owned()));
     }
 
     #[test]
@@ -1235,6 +1260,7 @@ mod tests {
         assert_eq!(interp_tab.rows.len(), 4);
         assert_eq!(interp_tab.rows[2][1], ResultCell::Empty);
         assert_eq!(interp_tab.rows[2][2], ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open });
+        assert_eq!(interp_tab.rows[2][3], ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Open });
         assert_eq!(interp_tab.footnotes.len(), 1);
         assert!(interp_tab.footnotes[0].contains("outside fitted curve range"));
     }

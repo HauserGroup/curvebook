@@ -249,9 +249,19 @@ fn r46_3_centered_poly_free_xcenter_is_rank_deficient_and_default_rules_fix_samp
     let ds_cubic = series("CenteredCubic", xs.clone(), ys_cubic);
     let cubic = get_builtin_model("centered_poly_3").expect("centered_poly_3");
 
-    // Reproducer: leaving `XCenter` free creates an exact linear dependency in J -> Ambiguous.
+    // Explicit Local rule overrides `CenteredPolynomial::default_parameter_rules` so leaving `XCenter` free creates an exact linear dependency in J -> Ambiguous.
+    let free_xcenter_cfg = SolverConfig {
+        parameter_rules: vec![ParameterRule {
+            name: "XCenter".to_owned(),
+            scope: ParameterScope::Local,
+            initial_override: None,
+            lower_bound: None,
+            upper_bound: None,
+        }],
+        ..SolverConfig::default()
+    };
     let res_free =
-        fit_nonlinear(cubic.as_ref(), std::slice::from_ref(&ds_cubic), &HookContext::default(), &SolverConfig::default()).expect("free XCenter run");
+        fit_nonlinear(cubic.as_ref(), std::slice::from_ref(&ds_cubic), &HookContext::default(), &free_xcenter_cfg).expect("free XCenter run");
     assert_eq!(res_free.status, FitStatus::Ambiguous);
     assert!(res_free.covariance.numerical_rank < res_free.k_free, "free XCenter Jacobian must be rank-deficient");
 
