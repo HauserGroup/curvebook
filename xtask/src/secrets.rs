@@ -576,18 +576,27 @@ fn detect_home_path(line: &str) -> Option<&'static str> {
     None
 }
 
+fn is_placeholder_home_user(name: &str) -> bool {
+    matches!(name, "YOURNAME" | "YOUR_NAME" | "your-name" | "your_name")
+}
+
+fn matches_non_placeholder_home_user(tail: &[u8], sep: u8) -> bool {
+    let name_len = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
+    if name_len == 0 || tail.get(name_len) != Some(&sep) {
+        return false;
+    }
+    let name = std::str::from_utf8(&tail[..name_len]).unwrap_or("");
+    !is_placeholder_home_user(name)
+}
+
 fn has_unix_home_prefix(line: &str, prefix: &str) -> bool {
     let bytes = line.as_bytes();
     let mut start = 0;
     while let Some(rel) = line[start..].find(prefix) {
         let pos = start + rel;
         let left_ok = pos == 0 || !bytes[pos - 1].is_ascii_alphanumeric();
-        if left_ok {
-            let tail = &bytes[pos + prefix.len()..];
-            let name_len = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
-            if name_len > 0 && tail.get(name_len) == Some(&b'/') {
-                return true;
-            }
+        if left_ok && matches_non_placeholder_home_user(&bytes[pos + prefix.len()..], b'/') {
+            return true;
         }
         start = pos + 1;
     }
@@ -605,12 +614,9 @@ fn has_windows_home_prefix(line: &str) -> bool {
             if (sep == b'\\' || sep == b'/')
                 && bytes.get(i + 3..i + 8).is_some_and(|w| w.eq_ignore_ascii_case(b"users"))
                 && bytes.get(i + 8) == Some(&sep)
+                && matches_non_placeholder_home_user(&bytes[i + 9..], sep)
             {
-                let tail = &bytes[i + 9..];
-                let name_len = tail.iter().take_while(|&&b| b.is_ascii_alphanumeric() || matches!(b, b'.' | b'_' | b'-')).count();
-                if name_len > 0 && tail.get(name_len) == Some(&sep) {
-                    return true;
-                }
+                return true;
             }
         }
         i += 1;
@@ -654,6 +660,7 @@ APPLE_CERTIFICATE_PASSWORD=${APPLE_CERTIFICATE_PASSWORD}
 API_KEY=changeme
 API_KEY=<your-api-key>
 path template /Users/<name>/workspace and C:\\Users\\<name>\\
+doc placeholder /Users/YOURNAME/Documents/CurveBook and C:\\Users\\YOURNAME\\Documents\\CurveBook
 let token = raw.trim();
 ";
         let mut hits = Vec::new();
