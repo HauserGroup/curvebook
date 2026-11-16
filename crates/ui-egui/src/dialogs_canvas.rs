@@ -7052,7 +7052,10 @@ impl CanvasDialogState {
     }
 }
 
-pub use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, render_workspace_frame_png, render_workspace_rgba};
+pub use crate::compositor::{
+    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_for_dpi, render_workspace_frame_png,
+    render_workspace_rgba,
+};
 
 #[cfg(test)]
 mod tests {

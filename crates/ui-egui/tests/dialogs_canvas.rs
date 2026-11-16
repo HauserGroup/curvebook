@@ -18,7 +18,7 @@ use curvebook_render::RenderTargetSpec;
 use curvebook_tools::{GridCellCoord, JournalWidthPreset as ToolJournalWidthPreset, PhysicalUnit, SelectionQuickStats};
 use curvebook_ui_egui::dialogs_canvas::{
     ANALYSIS_CATALOG, ActiveDialog, ActiveInspector, AnalyzeDialogState, AnalyzeDuplicateChoice, AxisTarget, CommandOrigin, CommandPaletteState,
-    VariableRoleFilter, compute_workspace_layout, default_analysis_kind_for_id, render_workspace_frame_png, render_workspace_rgba,
+    VariableRoleFilter, compute_workspace_layout_for_dpi, default_analysis_kind_for_id, render_workspace_frame_png, render_workspace_rgba,
     variable_role_badge, variable_role_color,
 };
 use curvebook_ui_egui::theme::{UiThemeSpec, font_diagnostics};
@@ -447,7 +447,7 @@ fn deterministic_workspace_screenshots_png_and_ui_regions() {
     assert_valid_png_with_dimensions(&png_a, 800, 520);
 
     let img = render_workspace_rgba(&app, target).expect("rgba");
-    let layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+    let layout = compute_workspace_layout_for_dpi(&app, target.width_px, target.height_px, target.dpi);
     for region in [layout.toolbar, layout.navigator, layout.canvas, layout.inspector, layout.status_bar, layout.modal_overlay.expect("modal")] {
         assert!(
             region_distinct_colors(&img.rgba, img.width_px, region.x, region.y, region.width, region.height) >= 2,
@@ -485,7 +485,7 @@ fn deterministic_workspace_screenshots_png_and_ui_regions() {
     let hc_png = render_workspace_frame_png(&app, target).expect("high contrast png");
     assert_valid_png_with_dimensions(&hc_png, 800, 520);
     let hc_img = render_workspace_rgba(&app, target).expect("high contrast rgba");
-    let hc_layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+    let hc_layout = compute_workspace_layout_for_dpi(&app, target.width_px, target.height_px, target.dpi);
     for region in [hc_layout.toolbar, hc_layout.navigator, hc_layout.canvas, hc_layout.inspector, hc_layout.status_bar] {
         assert!(region_distinct_colors(&hc_img.rgba, hc_img.width_px, region.x, region.y, region.width, region.height) >= 2);
     }
@@ -848,7 +848,7 @@ fn rtl_workspace_mirroring_and_font_diagnostics_behave_deterministically() {
     ltr_app.nav.navigator_open = true;
     ltr_app.nav.inspector_open = true;
     ltr_app.sync_views();
-    let ltr_layout = compute_workspace_layout(&ltr_app, target.width_px, target.height_px);
+    let ltr_layout = compute_workspace_layout_for_dpi(&ltr_app, target.width_px, target.height_px, target.dpi);
     assert_eq!(ltr_layout.navigator.x, 0);
     assert_eq!(ltr_layout.navigator.right(), ltr_layout.canvas.x);
     assert_eq!(ltr_layout.canvas.right(), ltr_layout.inspector.x);
@@ -862,7 +862,7 @@ fn rtl_workspace_mirroring_and_font_diagnostics_behave_deterministically() {
         rtl_app.nav.inspector_open = true;
         rtl_app.sync_views();
 
-        let rtl_layout = compute_workspace_layout(&rtl_app, target.width_px, target.height_px);
+        let rtl_layout = compute_workspace_layout_for_dpi(&rtl_app, target.width_px, target.height_px, target.dpi);
         assert_eq!(rtl_layout.inspector.x, 0, "inspector should mirror to left for {rtl_locale}");
         assert_eq!(rtl_layout.inspector.width, ltr_layout.inspector.width);
         assert_eq!(rtl_layout.inspector.right(), rtl_layout.canvas.x);
@@ -913,7 +913,7 @@ fn physical_ruler_chrome_toggles_and_renders_tick_bands() {
     app.sync_views();
 
     let target = RenderTargetSpec { width_px: 800, height_px: 520, dpi: 150 };
-    let layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+    let layout = compute_workspace_layout_for_dpi(&app, target.width_px, target.height_px, target.dpi);
 
     assert!(!app.canvas_dialogs.rulers_visible);
     let without_rulers = render_workspace_rgba(&app, target).expect("no rulers");
@@ -952,7 +952,7 @@ fn portfolio_gallery_and_active_pane_focus_indicator_render_distinctly() {
     app.sync_views();
 
     let target = RenderTargetSpec { width_px: 800, height_px: 520, dpi: 150 };
-    let layout = compute_workspace_layout(&app, target.width_px, target.height_px);
+    let layout = compute_workspace_layout_for_dpi(&app, target.width_px, target.height_px, target.dpi);
 
     let closed_img = render_workspace_rgba(&app, target).expect("gallery closed");
     assert!(app.nav.toggle_gallery());
