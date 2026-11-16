@@ -2,38 +2,113 @@
   "$defs": {
     "BatchCommand": {
       "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "cmd": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "cmd"
+          ]
+        },
+        {
+          "properties": {
+            "command": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "command"
+          ]
+        },
+        {
+          "properties": {
+            "method": {
+              "minLength": 1,
+              "pattern": "\\S",
+              "type": "string"
+            }
+          },
+          "required": [
+            "method"
+          ]
+        }
+      ],
       "properties": {
         "cmd": {
           "minLength": 1,
+          "pattern": "\\S",
           "type": "string"
         },
         "command": {
           "minLength": 1,
+          "pattern": "\\S",
           "type": "string"
         },
         "id": {},
         "method": {
           "minLength": 1,
+          "pattern": "\\S",
           "type": "string"
         },
-        "params": {}
+        "params": {
+          "type": [
+            "object",
+            "null"
+          ]
+        }
       },
       "title": "BatchCommand",
       "type": "object"
     },
     "BatchExport": {
       "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "out": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "out"
+          ]
+        },
+        {
+          "properties": {
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        }
+      ],
       "properties": {
         "dpi": {
-          "maximum": 1200.0,
-          "minimum": 72.0,
-          "type": "number"
+          "maximum": 65535,
+          "minimum": 1,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "format": {
           "enum": [
             "lumencraft",
             "lumencraft.d",
-            "lctemplate",
+            "lumencraft-dir",
+            "unpacked",
+            "dir",
             "csv",
             "tsv",
             "json",
@@ -41,35 +116,105 @@
             "pdf",
             "png",
             "tiff",
-            "emf"
+            "tif",
+            "emf",
+            null
           ],
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "out": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "pdfVersion": {
+          "enum": [
+            "1.4",
+            "1.7",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pdf_version": {
-          "type": "string"
+          "enum": [
+            "1.4",
+            "1.7",
+            null
+          ],
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "pretty": {
-          "type": "boolean"
+          "type": [
+            "boolean",
+            "null"
+          ]
         },
         "sheet": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sheetId": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sheet_id": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tabIndex": {
+          "minimum": 0,
+          "type": [
+            "integer",
+            "null"
+          ]
         },
         "tab_index": {
           "minimum": 0,
-          "type": "integer"
+          "type": [
+            "integer",
+            "null"
+          ]
+        },
+        "ttfFont": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "ttf_font": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "BatchExport",
@@ -77,44 +222,157 @@
     },
     "BatchInput": {
       "additionalProperties": false,
+      "anyOf": [
+        {
+          "properties": {
+            "csv": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "csv"
+          ]
+        },
+        {
+          "properties": {
+            "tsv": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "tsv"
+          ]
+        },
+        {
+          "properties": {
+            "path": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "path"
+          ]
+        },
+        {
+          "properties": {
+            "file": {
+              "minLength": 1,
+              "type": "string"
+            }
+          },
+          "required": [
+            "file"
+          ]
+        }
+      ],
       "properties": {
         "csv": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "decimalSeparator": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "decimal_separator": {
-          "maxLength": 1,
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "delimiter": {
-          "maxLength": 1,
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "file": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "kind": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "path": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "sheet": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sheetId": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "sheet_id": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "subcolumnMode": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "subcolumn_mode": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "tableKind": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "table_kind": {
+          "minLength": 1,
+          "type": [
+            "string",
+            "null"
+          ]
         },
         "tsv": {
           "minLength": 1,
-          "type": "string"
+          "type": [
+            "string",
+            "null"
+          ]
         }
       },
       "title": "BatchInput",
@@ -126,6 +384,14 @@
   "additionalProperties": false,
   "description": "Draft 2020-12 schema for lumencraft.batch.v1 headless batch manifests.",
   "not": {
+    "properties": {
+      "project": {
+        "type": "string"
+      },
+      "template": {
+        "type": "string"
+      }
+    },
     "required": [
       "template",
       "project"
@@ -136,23 +402,35 @@
       "items": {
         "$ref": "#/$defs/BatchCommand"
       },
-      "type": "array"
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "exports": {
       "items": {
         "$ref": "#/$defs/BatchExport"
       },
-      "type": "array"
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "inputs": {
       "items": {
         "$ref": "#/$defs/BatchInput"
       },
-      "type": "array"
+      "type": [
+        "array",
+        "null"
+      ]
     },
     "project": {
       "minLength": 1,
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     },
     "schema": {
       "const": "lumencraft.batch.v1",
@@ -160,7 +438,10 @@
     },
     "template": {
       "minLength": 1,
-      "type": "string"
+      "type": [
+        "string",
+        "null"
+      ]
     }
   },
   "required": [

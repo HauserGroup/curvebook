@@ -16,9 +16,7 @@ use serde_json::{Map, Value, json};
 
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
-use super::helpers::{
-    next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_graph_sheet, require_graph_sheet_mut, require_result_sheet,
-};
+use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet};
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
@@ -349,14 +347,34 @@ pub(super) fn parse_canvas_resize_mode(raw: Option<&str>) -> Result<CanvasResize
     })
 }
 
-/// Compute a safe positive scale multiplier between `old_val` and `new_val`.
-pub(super) fn safe_scale_ratio(old_val: f64, new_val: f64) -> f64 {
-    if old_val.is_finite() && old_val > 0.0 && new_val.is_finite() && new_val > 0.0 { new_val / old_val } else { 1.0 }
+/// Compute a safe, finite, positive scale multiplier between `old_val` and `new_val`.
+pub(super) fn safe_scale_ratio(old_val: f64, new_val: f64) -> Result<f64, EngineError> {
+    if !old_val.is_finite() || old_val <= 0.0 || !new_val.is_finite() || new_val <= 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "canvas dimensions must be finite and positive before applying canvas preset"));
+    }
+    let ratio = new_val / old_val;
+    if !ratio.is_finite() || ratio <= 0.0 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "canvas preset resize scale factor overflowed finite floating-point range"));
+    }
+    Ok(ratio)
 }
 
-/// Scale a [`RectPt`] independently along horizontal and vertical axes.
-pub(super) fn scale_rect_pt(rect: RectPt, sx: f64, sy: f64) -> RectPt {
-    RectPt::new(rect.x * sx, rect.y * sy, rect.width * sx, rect.height * sy)
+/// Multiply `value` by `factor`, returning `BadInput` if the product overflows to non-finite.
+pub(super) fn scale_finite(value: f64, factor: f64, field: &str) -> Result<f64, EngineError> {
+    let scaled = value * factor;
+    if !scaled.is_finite() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("canvas resize caused non-finite overflow on `{field}`")));
+    }
+    Ok(scaled)
+}
+
+/// Scale a [`RectPt`] independently along horizontal and vertical axes, rejecting overflow.
+pub(super) fn scale_rect_pt(rect: RectPt, sx: f64, sy: f64) -> Result<RectPt, EngineError> {
+    let x = scale_finite(rect.x, sx, "rect.x")?;
+    let y = scale_finite(rect.y, sy, "rect.y")?;
+    let width = scale_finite(rect.width, sx, "rect.width")?;
+    let height = scale_finite(rect.height, sy, "rect.height")?;
+    Ok(RectPt::new(x, y, width, height))
 }
 
 /// Shared schema for `graph.applyCanvasPreset` and `layout.applyCanvasPreset`.
@@ -775,6 +793,9 @@ fn schema_graph_format_selected_points() -> Value {
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
+            ("subcol", nullable_schema(int_schema("Optional zero-based replicate subcolumn index", Some(0), None))),
+            ("subcolumn", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
+            ("replicate", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
         ],
         &["series_index", "point_index"],
         false,
@@ -783,6 +804,9 @@ fn schema_graph_format_selected_points() -> Value {
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
+            ("subcol", nullable_schema(int_schema("Optional zero-based replicate subcolumn index", Some(0), None))),
+            ("subcolumn", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
+            ("replicate", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
             ("color", nullable_schema(any_json_schema("Override accent/stroke color (hex, color name, [r,g,b], [r,g,b,a], or null to clear)"))),
             (
                 "symbol",
@@ -885,19 +909,61 @@ fn schema_graph_set_compact_letter_display() -> Value {
 // Command Runners
 // ---------------------------------------------------------------------------
 
+fn resolve_graph_create_source_sheet(
+    doc: &ProjectDocument,
+    source_id: &lumencraft_doc::SheetId,
+) -> Result<(lumencraft_doc::DataSheet, Option<String>), EngineError> {
+    if let Some(ds) = doc.data_sheet(source_id) {
+        return Ok((ds.clone(), None));
+    }
+    let Some(initial_res) = doc.result_sheet(source_id) else {
+        return Err(lumencraft_doc::DocError::SheetNotFound { sheet_id: source_id.clone() }.into());
+    };
+    if let Some(ref analyzable) = initial_res.analyzable_data {
+        return Ok((analyzable.clone(), None));
+    }
+    let res_title = initial_res.title().to_owned();
+    let mut cursor = initial_res.analysis.source_sheet_id.clone();
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(source_id.clone());
+    while visited.insert(cursor.clone()) {
+        if let Some(ds) = doc.data_sheet(&cursor) {
+            return Ok((ds.clone(), Some(res_title)));
+        }
+        if let Some(res) = doc.result_sheet(&cursor) {
+            if let Some(ref analyzable) = res.analyzable_data {
+                return Ok((analyzable.clone(), Some(res_title)));
+            }
+            cursor = res.analysis.source_sheet_id.clone();
+        } else {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("result sheet `{source_id}` has no upstream data sheet (source `{cursor}` is not a data or result sheet)"),
+            ));
+        }
+    }
+    Err(EngineError::with_code(ErrorCode::CycleDetected, format!("cyclic dependency detected while resolving upstream data sheet for `{source_id}`")))
+}
+
 fn run_graph_create(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_create();
     let params: GraphCreateParams = parse_params(&schema, raw)?;
     let doc = &mut ctx.session.doc;
 
     let data_id = parse_sheet_id(&params.data_sheet_id)?;
-    let ds = require_analyzable_data_sheet(doc, &data_id)?.clone();
+    let (ds, res_title_opt) = resolve_graph_create_source_sheet(doc, &data_id)?;
     let id = match params.sheet_id.as_deref() {
         Some(raw_id) => parse_sheet_id(raw_id)?,
         None => next_unique_sheet_id(doc, "graph")?,
     };
 
     let mut graph = GraphSheet::new_uninitialized_for_data(id.clone(), &ds)?;
+    if params.title.is_none()
+        && let Some(ref res_title) = res_title_opt
+    {
+        graph.title = res_title.clone();
+        graph.spec.title = res_title.clone();
+    }
     graph.spec.primary_source_sheet_id = data_id.clone();
     for series in &mut graph.spec.series {
         series.source_sheet_id = data_id.clone();
@@ -1032,7 +1098,19 @@ fn parse_point_style_patch(obj: &Map<String, Value>) -> Result<PointStylePatch, 
     })
 }
 
-fn parse_point_coord(obj: &Map<String, Value>) -> Result<(usize, usize), EngineError> {
+fn parse_opt_subcol(obj: &Map<String, Value>) -> Result<Option<usize>, EngineError> {
+    let Some(val) = obj.get("subcol").or_else(|| obj.get("subcolumn")).or_else(|| obj.get("replicate")) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let raw = val.as_u64().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`subcol` must be a non-negative integer or null"))?;
+    let sc = usize::try_from(raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`subcol` out of range"))?;
+    Ok(Some(sc))
+}
+
+fn parse_point_coord(obj: &Map<String, Value>) -> Result<(usize, usize, Option<usize>), EngineError> {
     let s_raw = obj
         .get("series_index")
         .and_then(Value::as_u64)
@@ -1043,7 +1121,8 @@ fn parse_point_coord(obj: &Map<String, Value>) -> Result<(usize, usize), EngineE
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "point entry requires non-negative `point_index`"))?;
     let series_index = usize::try_from(s_raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`series_index` out of range"))?;
     let point_index = usize::try_from(p_raw).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "`point_index` out of range"))?;
-    Ok((series_index, point_index))
+    let subcol = parse_opt_subcol(obj)?;
+    Ok((series_index, point_index, subcol))
 }
 
 fn apply_optional_patch<T>(slot: &mut Option<T>, patch: &OptionalPatch<T>)
@@ -1079,16 +1158,18 @@ fn is_empty_point_override(ov: &PointStyleOverride) -> bool {
         && !ov.hidden
 }
 
-fn parse_override_entries(validated: &Map<String, Value>) -> Result<Vec<(usize, usize, PointStylePatch)>, EngineError> {
+type ParsedOverrideEntry = (usize, usize, Option<usize>, PointStylePatch);
+
+fn parse_override_entries(validated: &Map<String, Value>) -> Result<Vec<ParsedOverrideEntry>, EngineError> {
     let mut entries = Vec::new();
     if let Some(arr) = validated.get("overrides").and_then(Value::as_array) {
         for item in arr {
             let Some(obj) = item.as_object() else {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "each `overrides` entry must be an object"));
             };
-            let (series_index, point_index) = parse_point_coord(obj)?;
+            let (series_index, point_index, subcol) = parse_point_coord(obj)?;
             let patch = parse_point_style_patch(obj)?;
-            entries.push((series_index, point_index, patch));
+            entries.push((series_index, point_index, subcol, patch));
         }
     }
     if let Some(arr) = validated.get("points").and_then(Value::as_array) {
@@ -1097,8 +1178,8 @@ fn parse_override_entries(validated: &Map<String, Value>) -> Result<Vec<(usize, 
             let Some(obj) = item.as_object() else {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "each `points` entry must be an object"));
             };
-            let (series_index, point_index) = parse_point_coord(obj)?;
-            entries.push((series_index, point_index, shared.clone()));
+            let (series_index, point_index, subcol) = parse_point_coord(obj)?;
+            entries.push((series_index, point_index, subcol, shared.clone()));
         }
     }
     Ok(entries)
@@ -1125,7 +1206,7 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
             "graph.formatSelectedPoints requires non-empty `overrides` or `points` unless `mode` is `clear`",
         ));
     }
-    if mode != "clear" && entries.iter().all(|(_, _, p)| !p.has_any_change()) {
+    if mode != "clear" && entries.iter().all(|(_, _, _, p)| !p.has_any_change()) {
         return Err(EngineError::with_code(
             ErrorCode::BadInput,
             "graph.formatSelectedPoints requires at least one style attribute (`color`, `symbol`, `size_pt`, `border_width_pt`, `fill_color`, `fill_mode`, or `hidden`)",
@@ -1137,18 +1218,26 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
         if entries.is_empty() {
             graph.spec.point_overrides.clear();
         } else {
-            graph.spec.point_overrides.retain(|existing| !entries.iter().any(|(s, p, _)| existing.series_index == *s && existing.point_index == *p));
+            graph.spec.point_overrides.retain(|existing| {
+                !entries
+                    .iter()
+                    .any(|(s, p, sc, _)| existing.series_index == *s && existing.point_index == *p && (sc.is_none() || existing.subcol == *sc))
+            });
         }
     } else {
         if mode == "replace" {
             graph.spec.point_overrides.clear();
         }
-        for (series_index, point_index, patch) in entries {
-            if let Some(existing) = graph.spec.point_overrides.iter_mut().find(|ov| ov.series_index == series_index && ov.point_index == point_index)
+        for (series_index, point_index, subcol, patch) in entries {
+            if let Some(existing) = graph
+                .spec
+                .point_overrides
+                .iter_mut()
+                .find(|ov| ov.series_index == series_index && ov.point_index == point_index && ov.subcol == subcol)
             {
                 apply_point_style_patch(existing, &patch);
             } else {
-                let mut ov = PointStyleOverride { series_index, point_index, ..PointStyleOverride::default() };
+                let mut ov = PointStyleOverride { series_index, point_index, subcol, ..PointStyleOverride::default() };
                 apply_point_style_patch(&mut ov, &patch);
                 graph.spec.point_overrides.push(ov);
             }
@@ -1156,7 +1245,7 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
     }
 
     graph.spec.point_overrides.retain(|ov| !is_empty_point_override(ov));
-    graph.spec.point_overrides.sort_by_key(|ov| (ov.series_index, ov.point_index));
+    graph.spec.point_overrides.sort_by_key(|ov| (ov.series_index, ov.point_index, ov.subcol));
     graph.spec.validate()?;
     let override_count = graph.spec.point_overrides.len();
 
@@ -1612,13 +1701,15 @@ fn run_graph_add_annotation(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
 fn run_graph_apply_style_from(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_apply_style_from();
     let params: GraphApplyStyleFromParams = parse_params(&schema, raw)?;
-    let _ = (params.clone_palette, params.clone_frame_and_axes, params.clone_error_bars_and_legend);
+    let clone_palette = params.clone_palette.unwrap_or(true);
+    let clone_frame_and_axes = params.clone_frame_and_axes.unwrap_or(true);
+    let clone_error_bars_and_legend = params.clone_error_bars_and_legend.unwrap_or(true);
     let target_id = parse_sheet_id(&params.sheet_id)?;
     let donor_id = parse_sheet_id(&params.donor_sheet_id)?;
     let donor_spec = require_graph_sheet(ctx.session.document(), &donor_id)?.spec.clone();
 
     let mut updated = require_graph_sheet(ctx.session.document(), &target_id)?.spec.clone();
-    updated.apply_style_from(&donor_spec);
+    updated.apply_style_from_selective(&donor_spec, clone_palette, clone_frame_and_axes, clone_error_bars_and_legend);
     validate_graph_spec_in_doc(ctx.session.document(), &target_id, &updated)?;
     let target = require_graph_sheet_mut(&mut ctx.session.doc, &target_id)?;
     target.spec = updated;
@@ -1631,6 +1722,9 @@ fn run_graph_apply_style_from(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
             "sheet_id": target_id.as_str(),
             "donor_sheet_id": donor_id.as_str(),
             "primary_source_sheet_id": target.spec.primary_source_sheet_id.as_str(),
+            "clone_palette": clone_palette,
+            "clone_frame_and_axes": clone_frame_and_axes,
+            "clone_error_bars_and_legend": clone_error_bars_and_legend,
         }),
     ))
 }
@@ -1643,7 +1737,7 @@ fn run_graph_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comman
     let mode = parse_canvas_resize_mode(params.resize_mode.as_deref())?;
 
     let mut updated_spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
-    resize_graph_spec(&mut updated_spec, preset.dimensions_pt(), mode);
+    resize_graph_spec(&mut updated_spec, preset.dimensions_pt(), mode)?;
     updated_spec.validate()?;
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1695,155 +1789,181 @@ fn clamp_positive_stroke(width_pt: f64) -> f64 {
     if width_pt > 0.0 { width_pt.max(0.25) } else { width_pt }
 }
 
-fn scale_stroke_or_clamp(width_pt: &mut f64, mode: CanvasResizeMode, scale_1d: f64) {
+fn scale_stroke_or_clamp(width_pt: &mut f64, mode: CanvasResizeMode, scale_1d: f64, field: &str) -> Result<(), EngineError> {
     match mode {
-        CanvasResizeMode::KeepTypographyPt => *width_pt = clamp_positive_stroke(*width_pt),
-        CanvasResizeMode::ProportionalScale => *width_pt *= scale_1d,
+        CanvasResizeMode::KeepTypographyPt => {
+            *width_pt = clamp_positive_stroke(*width_pt);
+            Ok(())
+        }
+        CanvasResizeMode::ProportionalScale => {
+            *width_pt = scale_finite(*width_pt, scale_1d, field)?;
+            Ok(())
+        }
     }
 }
 
-fn resize_marker_style(marker: &mut MarkerStyle, mode: CanvasResizeMode, scale_1d: f64) {
+fn resize_marker_style(marker: &mut MarkerStyle, mode: CanvasResizeMode, scale_1d: f64) -> Result<(), EngineError> {
     match mode {
         CanvasResizeMode::KeepTypographyPt => {
             marker.stroke_width_pt = clamp_positive_stroke(marker.stroke_width_pt);
+            Ok(())
         }
         CanvasResizeMode::ProportionalScale => {
-            marker.size_pt *= scale_1d;
-            marker.stroke_width_pt *= scale_1d;
+            marker.size_pt = scale_finite(marker.size_pt, scale_1d, "marker.size_pt")?;
+            marker.stroke_width_pt = scale_finite(marker.stroke_width_pt, scale_1d, "marker.stroke_width_pt")?;
+            Ok(())
         }
     }
 }
 
-fn resize_error_bar_spec(eb: &mut ErrorBarSpec, mode: CanvasResizeMode, scale_1d: f64) {
-    scale_stroke_or_clamp(&mut eb.stroke_width_pt, mode, scale_1d);
+fn resize_error_bar_spec(eb: &mut ErrorBarSpec, mode: CanvasResizeMode, scale_1d: f64) -> Result<(), EngineError> {
+    scale_stroke_or_clamp(&mut eb.stroke_width_pt, mode, scale_1d, "error_bar.stroke_width_pt")?;
     if mode == CanvasResizeMode::ProportionalScale {
-        eb.cap_width_pt *= scale_1d;
+        eb.cap_width_pt = scale_finite(eb.cap_width_pt, scale_1d, "error_bar.cap_width_pt")?;
     }
+    Ok(())
 }
 
-fn resize_axis_spec(axis: &mut AxisSpec, mode: CanvasResizeMode, scale_1d: f64) {
-    scale_stroke_or_clamp(&mut axis.stroke_width_pt, mode, scale_1d);
+fn resize_axis_spec(axis: &mut AxisSpec, mode: CanvasResizeMode, scale_1d: f64) -> Result<(), EngineError> {
+    scale_stroke_or_clamp(&mut axis.stroke_width_pt, mode, scale_1d, "axis.stroke_width_pt")?;
     if mode == CanvasResizeMode::ProportionalScale {
-        axis.gap_width_pt *= scale_1d;
+        axis.gap_width_pt = scale_finite(axis.gap_width_pt, scale_1d, "axis.gap_width_pt")?;
     }
     for threshold in &mut axis.thresholds {
-        scale_stroke_or_clamp(&mut threshold.stroke_width_pt, mode, scale_1d);
+        scale_stroke_or_clamp(&mut threshold.stroke_width_pt, mode, scale_1d, "axis.threshold.stroke_width_pt")?;
     }
+    Ok(())
 }
 
-fn resize_gdo(gdo: &mut GraphicalDataObject, mode: CanvasResizeMode, scale_1d: f64) {
+fn resize_gdo(gdo: &mut GraphicalDataObject, mode: CanvasResizeMode, scale_1d: f64) -> Result<(), EngineError> {
     match gdo {
         GraphicalDataObject::ScatterAndLine { marker, line, .. } => {
             if let Some(m) = marker {
-                resize_marker_style(m, mode, scale_1d);
+                resize_marker_style(m, mode, scale_1d)?;
             }
             if let Some(l) = line {
-                scale_stroke_or_clamp(&mut l.stroke_width_pt, mode, scale_1d);
+                scale_stroke_or_clamp(&mut l.stroke_width_pt, mode, scale_1d, "line.stroke_width_pt")?;
             }
         }
         GraphicalDataObject::BarWithReplicates { border_width_pt, .. } | GraphicalDataObject::FloatingBar { border_width_pt, .. } => {
-            scale_stroke_or_clamp(border_width_pt, mode, scale_1d);
+            scale_stroke_or_clamp(border_width_pt, mode, scale_1d, "bar.border_width_pt")?;
         }
-        GraphicalDataObject::AlignedDotPlot { marker, .. } => resize_marker_style(marker, mode, scale_1d),
+        GraphicalDataObject::AlignedDotPlot { marker, .. } => resize_marker_style(marker, mode, scale_1d)?,
         GraphicalDataObject::BeforeAfterLines { marker, stroke_width_pt, .. } => {
             if let Some(m) = marker {
-                resize_marker_style(m, mode, scale_1d);
+                resize_marker_style(m, mode, scale_1d)?;
             }
-            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d);
+            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d, "before_after.stroke_width_pt")?;
         }
         GraphicalDataObject::KaplanMeierStep { stroke_width_pt, .. } => {
-            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d);
+            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d, "km.stroke_width_pt")?;
         }
         GraphicalDataObject::BoxAndWhisker { .. } | GraphicalDataObject::Violin { .. } | GraphicalDataObject::PartsOfWhole { .. } => {}
     }
+    Ok(())
 }
 
-fn resize_graph_annotation(ann: &mut GraphAnnotation, mode: CanvasResizeMode, sx: f64, sy: f64, scale_1d: f64) {
+fn resize_graph_annotation(ann: &mut GraphAnnotation, mode: CanvasResizeMode, sx: f64, sy: f64, scale_1d: f64) -> Result<(), EngineError> {
     match ann {
         GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
-            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
         }
         GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
-            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
             if mode == CanvasResizeMode::ProportionalScale {
-                *font_size_pt *= scale_1d;
+                *font_size_pt = scale_finite(*font_size_pt, scale_1d, "annotations.model_equation.font_size_pt")?;
             }
         }
         GraphAnnotation::LineOrArrow { start_pt, end_pt, .. } => {
-            start_pt.0 *= sx;
-            start_pt.1 *= sy;
-            end_pt.0 *= sx;
-            end_pt.1 *= sy;
+            start_pt.0 = scale_finite(start_pt.0, sx, "annotations.line.start_x")?;
+            start_pt.1 = scale_finite(start_pt.1, sy, "annotations.line.start_y")?;
+            end_pt.0 = scale_finite(end_pt.0, sx, "annotations.line.end_x")?;
+            end_pt.1 = scale_finite(end_pt.1, sy, "annotations.line.end_y")?;
         }
         GraphAnnotation::Shape { bounds_pt, stroke_width_pt, .. } => {
-            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
-            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d);
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
+            scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d, "annotations.shape.stroke_width_pt")?;
         }
     }
+    Ok(())
 }
 
-fn resize_graph_spec(spec: &mut GraphSpec, new_size: SizePt, mode: CanvasResizeMode) {
-    let sx = safe_scale_ratio(spec.canvas_size_pt.width, new_size.width);
-    let sy = safe_scale_ratio(spec.canvas_size_pt.height, new_size.height);
+fn resize_graph_spec(spec: &mut GraphSpec, new_size: SizePt, mode: CanvasResizeMode) -> Result<(), EngineError> {
+    let sx = safe_scale_ratio(spec.canvas_size_pt.width, new_size.width)?;
+    let sy = safe_scale_ratio(spec.canvas_size_pt.height, new_size.height)?;
     let scale_1d = sx.min(sy);
     spec.canvas_size_pt = new_size;
 
-    resize_axis_spec(&mut spec.x_axis, mode, scale_1d);
-    resize_axis_spec(&mut spec.y_axis, mode, scale_1d);
+    resize_axis_spec(&mut spec.x_axis, mode, scale_1d)?;
+    resize_axis_spec(&mut spec.y_axis, mode, scale_1d)?;
     if let Some(y2) = &mut spec.y2_axis {
-        resize_axis_spec(y2, mode, scale_1d);
+        resize_axis_spec(y2, mode, scale_1d)?;
     }
 
     for series in &mut spec.series {
-        resize_gdo(&mut series.gdo, mode, scale_1d);
+        resize_gdo(&mut series.gdo, mode, scale_1d)?;
         if let Some(eb) = &mut series.y_error_bars {
-            resize_error_bar_spec(eb, mode, scale_1d);
+            resize_error_bar_spec(eb, mode, scale_1d)?;
         }
         if let Some(eb) = &mut series.x_error_bars {
-            resize_error_bar_spec(eb, mode, scale_1d);
+            resize_error_bar_spec(eb, mode, scale_1d)?;
         }
     }
 
     if let Some(mv) = &mut spec.multivariate {
         if let MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } = &mut mv.plot_mode {
-            resize_gdo(gdo, mode, scale_1d);
+            resize_gdo(gdo, mode, scale_1d)?;
             if let Some(eb) = y_error_bars {
-                resize_error_bar_spec(eb, mode, scale_1d);
+                resize_error_bar_spec(eb, mode, scale_1d)?;
             }
         }
         if mode == CanvasResizeMode::ProportionalScale {
             match &mut mv.size {
-                SizeChannelMapping::Constant { radius_pt } => *radius_pt *= scale_1d,
+                SizeChannelMapping::Constant { radius_pt } => {
+                    *radius_pt = scale_finite(*radius_pt, scale_1d, "multivariate.size.radius_pt")?;
+                }
                 SizeChannelMapping::Variable { min_radius_pt, max_radius_pt, .. } => {
-                    *min_radius_pt *= scale_1d;
-                    *max_radius_pt *= scale_1d;
+                    *min_radius_pt = scale_finite(*min_radius_pt, scale_1d, "multivariate.size.min_radius_pt")?;
+                    *max_radius_pt = scale_finite(*max_radius_pt, scale_1d, "multivariate.size.max_radius_pt")?;
                 }
             }
         }
     }
 
     for bracket in &mut spec.comparisons {
-        scale_stroke_or_clamp(&mut bracket.stroke_width_pt, mode, scale_1d);
+        scale_stroke_or_clamp(&mut bracket.stroke_width_pt, mode, scale_1d, "comparisons.stroke_width_pt")?;
         if mode == CanvasResizeMode::ProportionalScale {
-            bracket.font_size_pt *= scale_1d;
-            bracket.bracket_step_pt *= scale_1d;
+            bracket.font_size_pt = scale_finite(bracket.font_size_pt, scale_1d, "comparisons.font_size_pt")?;
+            bracket.bracket_step_pt = scale_finite(bracket.bracket_step_pt, scale_1d, "comparisons.bracket_step_pt")?;
         }
     }
     if let Some(cld) = &mut spec.compact_letter_display
         && mode == CanvasResizeMode::ProportionalScale
     {
-        cld.font_size_pt *= scale_1d;
-        cld.offset_pt *= scale_1d;
+        cld.font_size_pt = scale_finite(cld.font_size_pt, scale_1d, "compact_letter_display.font_size_pt")?;
+        cld.offset_pt = scale_finite(cld.offset_pt, scale_1d, "compact_letter_display.offset_pt")?;
     }
 
     for ann in &mut spec.annotations {
-        resize_graph_annotation(ann, mode, sx, sy, scale_1d);
+        resize_graph_annotation(ann, mode, sx, sy, scale_1d)?;
+    }
+
+    for ov in &mut spec.point_overrides {
+        if let Some(size) = &mut ov.size_pt
+            && mode == CanvasResizeMode::ProportionalScale
+        {
+            *size = scale_finite(*size, scale_1d, "point_overrides.size_pt")?;
+        }
+        if let Some(bw) = &mut ov.border_width_pt {
+            scale_stroke_or_clamp(bw, mode, scale_1d, "point_overrides.border_width_pt")?;
+        }
     }
 
     if let Some((lx, ly)) = &mut spec.legend.position_pt {
-        *lx *= sx;
-        *ly *= sy;
+        *lx = scale_finite(*lx, sx, "legend.position_pt.x")?;
+        *ly = scale_finite(*ly, sy, "legend.position_pt.y")?;
     }
+    Ok(())
 }
 
 fn okabe_swatch(idx: usize) -> Rgba8 {

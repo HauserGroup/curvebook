@@ -802,13 +802,13 @@ fn wave20_contingency_and_two_group_seams() {
     });
     assert_eq!(ak_cohen.derive_auto_title(), "Cohen's kappa");
     assert!(ak_cohen.is_compatible_with(TableKind::Contingency));
-    assert!(ak_cohen.is_compatible_with(TableKind::PartsOfWhole));
+    assert!(!ak_cohen.is_compatible_with(TableKind::PartsOfWhole));
     assert!(!ak_cohen.is_compatible_with(TableKind::Column));
 
     let ak_fleiss = AnalysisKind::Contingency(ContingencySpec { method: ContingencyMethod::FleissKappa, ..ContingencySpec::default() });
     assert_eq!(ak_fleiss.derive_auto_title(), "Fleiss' kappa");
     assert!(ak_fleiss.is_compatible_with(TableKind::Contingency));
-    assert!(ak_fleiss.is_compatible_with(TableKind::PartsOfWhole));
+    assert!(!ak_fleiss.is_compatible_with(TableKind::PartsOfWhole));
     assert!(!ak_fleiss.is_compatible_with(TableKind::Column));
 
     let ak_binom = AnalysisKind::Contingency(custom_cont);
@@ -826,10 +826,7 @@ fn wave20_random_sample_and_clustering_seams() {
     let sample_full = TransformAnalysisSpec::RandomSample { seed: 42, sample_size: 25, stratify_column: Some(1), proportional_allocation: true };
     assert_json_roundtrip(&sample_full);
     let legacy_sample: TransformAnalysisSpec = serde_json::from_str(r#"{"RandomSample":{"seed":7,"sample_size":10}}"#).unwrap();
-    assert_eq!(
-        legacy_sample,
-        TransformAnalysisSpec::RandomSample { seed: 7, sample_size: 10, stratify_column: None, proportional_allocation: false }
-    );
+    assert_eq!(legacy_sample, TransformAnalysisSpec::RandomSample { seed: 7, sample_size: 10, stratify_column: None, proportional_allocation: true });
 
     let ak_sample = AnalysisKind::Transform(sample_full);
     assert_eq!(ak_sample.derive_auto_title(), "Random sample");

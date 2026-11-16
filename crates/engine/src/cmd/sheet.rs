@@ -1887,7 +1887,7 @@ fn extract_result_tab_schema() -> Value {
 }
 
 fn tab_has_non_numeric_cells(tab: &ResultTab) -> bool {
-    tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Text(_) | ResultCell::Boolean(_)))
+    tab.rows.iter().flatten().any(|cell| matches!(cell, ResultCell::Text(_) | ResultCell::Boolean(_) | ResultCell::ConfidenceInterval { .. }))
 }
 
 fn resolve_extracted_table_kind(tab: &ResultTab, raw: Option<&str>) -> Result<TableKind, EngineError> {
@@ -1909,12 +1909,25 @@ fn resolve_extracted_table_kind(tab: &ResultTab, raw: Option<&str>) -> Result<Ta
     }
 }
 
+fn sanitize_title_controls(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            out.push(' ');
+        } else if !ch.is_control() {
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn clip_safe_title(raw: &str) -> String {
-    if validate_title(raw).is_ok() {
-        return raw.to_owned();
+    let cleaned = sanitize_title_controls(raw);
+    if validate_title(&cleaned).is_ok() {
+        return cleaned;
     }
     let mut clipped = String::new();
-    for ch in raw.chars() {
+    for ch in cleaned.chars() {
         if clipped.len() + ch.len_utf8() > 180 {
             break;
         }
@@ -1926,7 +1939,10 @@ fn clip_safe_title(raw: &str) -> String {
 fn apply_row_labels(row_titles: &mut [String], tab: &ResultTab) {
     for (r, slot) in row_titles.iter_mut().enumerate() {
         if let Some(lbl) = tab.row_labels.get(r).filter(|s| !s.is_empty()) {
-            *slot = lbl.clone();
+            let safe = clip_safe_title(lbl);
+            if !safe.is_empty() {
+                *slot = safe;
+            }
         }
     }
 }
@@ -1947,9 +1963,12 @@ fn apply_tab_metadata_to_sheet(sheet: &mut DataSheet, tab: &ResultTab) {
                 if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
                     var.title = clip_safe_title(hdr);
                 }
-                let col_has_text = tab.rows.iter().any(|row| matches!(row.get(idx), Some(ResultCell::Text(_) | ResultCell::Boolean(_))));
+                let col_has_text = tab
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row.get(idx), Some(ResultCell::Text(_) | ResultCell::Boolean(_) | ResultCell::ConfidenceInterval { .. })));
                 if col_has_text {
-                    var.role = VariableRole::Label;
+                    var.lock_role(VariableRole::Label);
                 }
             }
             apply_row_labels(&mut mv.row_titles, tab);
@@ -1981,8 +2000,9 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     let target_id = allocate_new_sheet_id(&ctx.session.doc, parsed.sheet_id.as_deref(), "data")?;
     let title = match parsed.title.as_deref() {
         Some(t) => {
-            validate_title(t)?;
-            t.to_owned()
+            let clean = sanitize_title_controls(t);
+            validate_title(&clean)?;
+            clean
         }
         None => clip_safe_title(&format!("{} - {}", res.title(), tab.title)),
     };
@@ -2023,6 +2043,8 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
         ..ImportPipelineOptions::default()
     };
     let report = apply_import_link_pipeline(&mut sheet, &link_spec, ImportSourcePayload::InternalResult(&res), &opts, None)?;
+    sheet.prune_stale_exclusion_notes();
+    crate::dag::backfill_confidence_interval_cells(&mut sheet, &res, &link_spec, report.target_range);
     apply_tab_metadata_to_sheet(&mut sheet, &tab);
 
     let mut reserved = HashSet::new();

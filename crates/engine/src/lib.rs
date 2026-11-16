@@ -698,16 +698,21 @@ pub const MAX_UNDO_ENTRIES: usize = 64;
 /// The newest snapshot is always retained even if it alone exceeds this budget.
 pub const MAX_UNDO_CELL_BUDGET: usize = 25_000_000;
 
+/// Maximum cumulative checkpoint snapshot JSON bytes retained across undo snapshots.
+pub const MAX_UNDO_CHECKPOINT_BYTES_BUDGET: usize = 16 * 1024 * 1024;
+
 #[derive(Debug, Clone, PartialEq)]
 struct UndoEntry {
     doc: ProjectDocument,
     cell_slots: usize,
+    checkpoint_bytes: usize,
 }
 
 impl UndoEntry {
     fn from_document(doc: ProjectDocument) -> Self {
         let cell_slots = document_allocated_cell_slots(&doc);
-        Self { doc, cell_slots }
+        let checkpoint_bytes = document_checkpoint_bytes(&doc);
+        Self { doc, cell_slots, checkpoint_bytes }
     }
 }
 
@@ -715,10 +720,37 @@ fn document_allocated_cell_slots(doc: &ProjectDocument) -> usize {
     doc.data_sheets.iter().fold(0usize, |acc, sheet| acc.saturating_add(sheet.archetype.allocated_cell_slots()))
 }
 
+fn document_checkpoint_bytes(doc: &ProjectDocument) -> usize {
+    doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()))
+}
+
+const CONVERT_PREVIEW_KEYS: [&str; 5] = ["preview_only", "previewOnly", "preview", "dry_run", "dryRun"];
+
+pub(crate) fn has_conflicting_convert_preview_aliases(params: &serde_json::Value) -> bool {
+    let Some(obj) = params.as_object() else {
+        return false;
+    };
+    let mut seen: Option<bool> = None;
+    for key in CONVERT_PREVIEW_KEYS {
+        if let Some(val) = obj.get(key) {
+            let Some(b) = val.as_bool() else {
+                return true;
+            };
+            match seen {
+                Some(prev) if prev != b => return true,
+                None => seen = Some(b),
+                Some(_) => {}
+            }
+        }
+    }
+    false
+}
+
 fn is_preview_only_convert(params: &serde_json::Value) -> bool {
-    ["preview_only", "previewOnly", "preview", "dry_run", "dryRun"]
-        .iter()
-        .any(|key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+    if has_conflicting_convert_preview_aliases(params) {
+        return false;
+    }
+    CONVERT_PREVIEW_KEYS.iter().any(|key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
 }
 
 /// Execution channel restriction for interactive vs. direct automation callers (`docs/gui-workflows.md` §1).
@@ -1005,12 +1037,20 @@ impl Session {
         self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.cell_slots))
     }
 
+    fn undo_checkpoint_bytes(&self) -> usize {
+        self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.checkpoint_bytes))
+    }
+
     fn push_undo_snapshot(&mut self, doc: ProjectDocument) {
         self.undo_stack.push_back(UndoEntry::from_document(doc));
         let mut total_cells = self.undo_cell_slots();
-        while self.undo_stack.len() > 1 && (self.undo_stack.len() > MAX_UNDO_ENTRIES || total_cells > MAX_UNDO_CELL_BUDGET) {
+        let mut total_cp_bytes = self.undo_checkpoint_bytes();
+        while self.undo_stack.len() > 1
+            && (self.undo_stack.len() > MAX_UNDO_ENTRIES || total_cells > MAX_UNDO_CELL_BUDGET || total_cp_bytes > MAX_UNDO_CHECKPOINT_BYTES_BUDGET)
+        {
             if let Some(evicted) = self.undo_stack.pop_front() {
                 total_cells = total_cells.saturating_sub(evicted.cell_slots);
+                total_cp_bytes = total_cp_bytes.saturating_sub(evicted.checkpoint_bytes);
             }
         }
     }
@@ -1075,6 +1115,13 @@ impl Session {
         }
         if self.path_policy.is_constrained() && spec.effects.intersects(cmd::Effects::READS_FILESYSTEM.with(cmd::Effects::WRITES_FILESYSTEM)) {
             self.path_policy.enforce_command_path_params(&mut params)?;
+        }
+        if spec.id == "table.convertArchetype" && has_conflicting_convert_preview_aliases(&params) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "conflicting or non-boolean `preview_only` alias values supplied for `table.convertArchetype`",
+            )
+            .with_details(json!({ "command_id": spec.id })));
         }
         if spec.id == "edit.undo" || spec.id == "edit.redo" {
             return guard::run_guarded(spec.id, || {

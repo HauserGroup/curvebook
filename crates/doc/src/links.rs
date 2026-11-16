@@ -269,6 +269,9 @@ impl DataSheet {
             return Err(DocError::CellOutOfBounds { row: coord.row, col: coord.col, subcol: coord.subcol });
         };
         *slot = cell;
+        if !slot.excluded {
+            self.exclusion_notes.retain(|entry| entry.coord != coord);
+        }
         if let TableArchetype::MultipleVariables(mv) = &mut self.archetype
             && let Some(var) = mv.variables.get_mut(coord.col)
         {
@@ -320,6 +323,11 @@ impl DataSheet {
     #[must_use]
     pub fn exclusion_note(&self, coord: CellCoord) -> Option<&CellExclusionNote> {
         self.exclusion_notes.iter().find(|n| n.coord == coord)
+    }
+
+    /// Remove any `exclusion_notes` entry whose target cell is missing or no longer excluded.
+    pub fn prune_stale_exclusion_notes(&mut self) {
+        self.exclusion_notes.retain(|entry| self.archetype.data_cell(entry.coord).is_some_and(|c| c.excluded));
     }
 
     /// Read an independent `X` (`Xy`) or elapsed-time (`Survival`, `subcol == 0`) cell.
@@ -416,6 +424,7 @@ impl DataSheet {
         cloned.linked_regions.clear();
         cloned.floating_notes.clear();
         apply_clone_options(&mut cloned.archetype, opts)?;
+        cloned.prune_stale_exclusion_notes();
         Ok(cloned)
     }
 }

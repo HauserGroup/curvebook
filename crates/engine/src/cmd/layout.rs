@@ -11,7 +11,8 @@ use serde_json::{Value, json};
 use super::analysis::{de_present_opt, merge_json_struct};
 use super::export::{compile_scene_for_sheet, de_opt_usize};
 use super::graph::{
-    parse_canvas_resize_mode, parse_figure_canvas_preset, parse_rect_pt, parse_rgba8, safe_scale_ratio, scale_rect_pt, schema_apply_canvas_preset,
+    parse_canvas_resize_mode, parse_figure_canvas_preset, parse_rect_pt, parse_rgba8, safe_scale_ratio, scale_finite, scale_rect_pt,
+    schema_apply_canvas_preset,
 };
 use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_layout_sheet, require_layout_sheet_mut};
 use super::params::{
@@ -539,7 +540,8 @@ fn run_layout_apply_canvas_preset(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comma
 
     let doc = &mut ctx.session.doc;
     let mut updated_spec = require_layout_sheet(doc, &id)?.spec.clone();
-    resize_layout_spec(&mut updated_spec, preset, mode);
+    resize_layout_spec(&mut updated_spec, preset, mode)?;
+    updated_spec.validate()?;
 
     require_layout_sheet_mut(doc, &id)?.spec = updated_spec;
 
@@ -613,12 +615,12 @@ fn align_axis_bands(rects: &mut [(usize, RectPt)], vertical_col: bool) {
     }
 }
 
-fn resize_layout_spec(spec: &mut LayoutSpec, preset: FigureCanvasPreset, mode: CanvasResizeMode) {
+fn resize_layout_spec(spec: &mut LayoutSpec, preset: FigureCanvasPreset, mode: CanvasResizeMode) -> Result<(), EngineError> {
     let old_pt = spec.page_size_pt();
     let (new_w, new_h, unit) = preset.dimensions();
     let new_pt = preset.dimensions_pt();
-    let sx = safe_scale_ratio(old_pt.width, new_pt.width);
-    let sy = safe_scale_ratio(old_pt.height, new_pt.height);
+    let sx = safe_scale_ratio(old_pt.width, new_pt.width)?;
+    let sy = safe_scale_ratio(old_pt.height, new_pt.height)?;
     let scale_1d = sx.min(sy);
 
     spec.width = new_w;
@@ -629,16 +631,17 @@ fn resize_layout_spec(spec: &mut LayoutSpec, preset: FigureCanvasPreset, mode: C
     for item in &mut spec.items {
         match item {
             LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } => {
-                *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
+                *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
             }
             LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
-                *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy);
+                *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
                 if mode == CanvasResizeMode::ProportionalScale {
-                    *font_size_pt *= scale_1d;
+                    *font_size_pt = scale_finite(*font_size_pt, scale_1d, "layout.text_callout.font_size_pt")?;
                 }
             }
         }
     }
+    Ok(())
 }
 
 fn apply_layout_spec_fields(spec: &mut LayoutSpec, fields: &LayoutSpecFieldsParams) -> Result<(), EngineError> {

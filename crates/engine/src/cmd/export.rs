@@ -2,6 +2,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+#[cfg(not(target_arch = "wasm32"))]
 use std::path::Path;
 
 use lumencraft_chart::{ChartScene, compile_graph, compile_layout};

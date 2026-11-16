@@ -419,6 +419,8 @@ pub enum GroupedArrangement {
 pub struct PointStyleOverride {
     pub series_index: usize,
     pub point_index: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub subcol: Option<usize>,
     #[serde(default)]
     pub color: Option<Rgba8>,
     #[serde(default)]
@@ -783,32 +785,65 @@ impl GraphSpec {
     /// Look up the effective per-point override for `(series_index, point_index)`, if present.
     #[must_use]
     pub fn point_override(&self, series_index: usize, point_index: usize) -> Option<&PointStyleOverride> {
-        self.point_overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index)
+        self.point_override_with_subcol(series_index, point_index, None)
+    }
+
+    /// Look up the effective per-point override for `(series_index, point_index)` and optional replicate `subcol`.
+    ///
+    /// When `subcol` is `Some(sc)`, an exact replicate match (`ov.subcol == Some(sc)`) takes precedence
+    /// over a whole-point override (`ov.subcol.is_none()`).
+    #[must_use]
+    pub fn point_override_with_subcol(&self, series_index: usize, point_index: usize, subcol: Option<usize>) -> Option<&PointStyleOverride> {
+        if let Some(sc) = subcol
+            && let Some(exact) =
+                self.point_overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && ov.subcol == Some(sc))
+        {
+            return Some(exact);
+        }
+        self.point_overrides.iter().rfind(|ov| ov.series_index == series_index && ov.point_index == point_index && ov.subcol.is_none())
     }
 
     /// Copy visual styling tokens (`palette`, `frame_preset`, `paper_fill`, axis stroke widths,
     /// legend chrome, and series palette swatches) from `donor` without mutating data bindings
     /// (`graph.applyStyleFrom`; `docs/graphing-and-layouts.md` §5).
     pub fn apply_style_from(&mut self, donor: &Self) {
-        self.palette = donor.palette;
-        self.canvas_size_pt = donor.canvas_size_pt;
-        self.paper_fill = donor.paper_fill;
-        self.frame_preset = donor.frame_preset;
-        self.x_axis.stroke_width_pt = donor.x_axis.stroke_width_pt;
-        self.x_axis.break_ornament = donor.x_axis.break_ornament;
-        self.y_axis.stroke_width_pt = donor.y_axis.stroke_width_pt;
-        self.y_axis.break_ornament = donor.y_axis.break_ornament;
-        self.legend.bordered = donor.legend.bordered;
-        self.legend.visible = donor.legend.visible;
+        self.apply_style_from_selective(donor, true, true, true);
+    }
 
-        let donor_eb = donor.series.first().and_then(|s| s.y_error_bars).or_else(|| match donor.multivariate.as_ref().map(|m| &m.plot_mode) {
-            Some(MultivariatePlotMode::CategoricalSummary { y_error_bars, .. }) => *y_error_bars,
-            _ => None,
-        });
+    /// Selectively copy visual styling groups from `donor` without mutating data bindings
+    /// (`graph.applyStyleFrom` / `ApplyStyleFrom` dialog toggles).
+    pub fn apply_style_from_selective(&mut self, donor: &Self, clone_palette: bool, clone_frame_and_axes: bool, clone_error_bars_and_legend: bool) {
+        if clone_palette {
+            self.palette = donor.palette;
+            self.paper_fill = donor.paper_fill;
+        }
+        if clone_frame_and_axes {
+            self.canvas_size_pt = donor.canvas_size_pt;
+            self.frame_preset = donor.frame_preset;
+            self.x_axis.stroke_width_pt = donor.x_axis.stroke_width_pt;
+            self.x_axis.break_ornament = donor.x_axis.break_ornament;
+            self.y_axis.stroke_width_pt = donor.y_axis.stroke_width_pt;
+            self.y_axis.break_ornament = donor.y_axis.break_ornament;
+        }
+        if clone_error_bars_and_legend {
+            self.legend.bordered = donor.legend.bordered;
+            self.legend.visible = donor.legend.visible;
+        }
+
+        let donor_eb = if clone_error_bars_and_legend {
+            donor.series.first().and_then(|s| s.y_error_bars).or_else(|| match donor.multivariate.as_ref().map(|m| &m.plot_mode) {
+                Some(MultivariatePlotMode::CategoricalSummary { y_error_bars, .. }) => *y_error_bars,
+                _ => None,
+            })
+        } else {
+            None
+        };
 
         for (idx, series) in self.series.iter_mut().enumerate() {
-            let swatch = self.palette.color_at(idx);
-            recolor_gdo(&mut series.gdo, swatch);
+            if clone_palette {
+                let swatch = self.palette.color_at(idx);
+                recolor_gdo(&mut series.gdo, swatch);
+            }
             if let Some(d_eb) = donor_eb
                 && let Some(eb) = &mut series.y_error_bars
             {
@@ -820,13 +855,17 @@ impl GraphSpec {
 
         if let Some(mv) = &mut self.multivariate {
             let primary_swatch = self.palette.color_at(0);
-            match &mut mv.color {
-                ColorChannelMapping::Constant(color) => *color = primary_swatch,
-                ColorChannelMapping::Categorical { palette, .. } => *palette = self.palette,
-                ColorChannelMapping::Continuous { .. } => {}
+            if clone_palette {
+                match &mut mv.color {
+                    ColorChannelMapping::Constant(color) => *color = primary_swatch,
+                    ColorChannelMapping::Categorical { palette, .. } => *palette = self.palette,
+                    ColorChannelMapping::Continuous { .. } => {}
+                }
             }
             if let MultivariatePlotMode::CategoricalSummary { gdo, y_error_bars } = &mut mv.plot_mode {
-                recolor_gdo(gdo, primary_swatch);
+                if clone_palette {
+                    recolor_gdo(gdo, primary_swatch);
+                }
                 if let Some(d_eb) = donor_eb
                     && let Some(eb) = y_error_bars
                 {
@@ -908,6 +947,83 @@ impl GraphSpec {
         }
         if let Some(reason) = self.first_non_finite_float() {
             return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
+        }
+        if self.canvas_size_pt.width <= 0.0 || self.canvas_size_pt.height <= 0.0 {
+            return Err(DocError::InvalidCellValue {
+                archetype: crate::TableKind::Xy,
+                row: 0,
+                col: 0,
+                reason: "spec.canvas_size_pt width and height must be > 0",
+            });
+        }
+        for ann in &self.annotations {
+            match ann {
+                GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
+                    if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.model_equation bounds_pt dimensions must be >= 0",
+                        });
+                    }
+                    if *font_size_pt <= 0.0 || *font_size_pt > 144.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.model_equation font_size_pt must be in (0, 144]",
+                        });
+                    }
+                }
+                GraphAnnotation::TextBox { bounds_pt, .. } | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => {
+                    if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.bounds_pt dimensions must be >= 0",
+                        });
+                    }
+                }
+                GraphAnnotation::Shape { bounds_pt, stroke_width_pt, .. } => {
+                    if bounds_pt.width < 0.0 || bounds_pt.height < 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.shape bounds_pt dimensions must be >= 0",
+                        });
+                    }
+                    if *stroke_width_pt < 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.shape stroke_width_pt must be >= 0",
+                        });
+                    }
+                }
+                GraphAnnotation::LineOrArrow { .. } => {}
+            }
+        }
+        for ov in &self.point_overrides {
+            if ov.size_pt.is_some_and(|v| v <= 0.0) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.point_overrides.size_pt must be finite and > 0",
+                });
+            }
+            if ov.border_width_pt.is_some_and(|v| v < 0.0) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.point_overrides.border_width_pt must be finite and >= 0",
+                });
+            }
         }
         if let Some(cld) = &self.compact_letter_display {
             if cld.font_size_pt <= 0.0 || cld.font_size_pt > 144.0 {
@@ -1217,6 +1333,7 @@ mod tests {
             fill_color: Some(Rgba8::rgb(255, 255, 255)),
             fill_mode: Some(MarkerFillMode::Open),
             hidden: false,
+            ..PointStyleOverride::default()
         });
         spec.point_overrides.push(PointStyleOverride { series_index: 1, point_index: 0, hidden: true, ..PointStyleOverride::default() });
 

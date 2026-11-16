@@ -4,10 +4,10 @@ use std::collections::HashSet;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use lumencraft_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId};
+use lumencraft_doc::{AnalysisKind, AnalysisSpec, ErrorCode, NamedCheckpoint, ParameterScope, ProjectDocument, SheetId, validate_title};
 use lumencraft_format::{
-    MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, open_project_bytes, open_project_file, open_project_unpacked_dir, save_project_bytes,
-    save_project_unpacked_dir, save_template_bytes,
+    MAX_ARCHIVE_FILE_BYTES, instantiate_template_bytes, migrate_document_json, open_project_bytes, open_project_file, open_project_unpacked_dir,
+    sanitize_circular_hooks, save_project_bytes, save_project_unpacked_dir, save_template_bytes, validate_project_document,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -538,12 +538,16 @@ fn next_checkpoint_id(doc: &ProjectDocument) -> String {
     }
 }
 
+const MAX_CHECKPOINTS_PER_PROJECT: usize = 32;
+const MAX_TOTAL_CHECKPOINT_BYTES: usize = MAX_ARCHIVE_FILE_BYTES;
+
 fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: CreateCheckpointParams = parse_params(&create_checkpoint_schema(), params)?;
     let name = parsed.name.trim().to_owned();
     if name.is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "checkpoint `name` must not be empty"));
     }
+    validate_title(&name)?;
 
     let id = match parsed.id {
         Some(raw) => {
@@ -551,23 +555,33 @@ fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
             if trimmed.is_empty() {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "checkpoint `id` must not be empty"));
             }
+            validate_title(&trimmed)?;
             trimmed
         }
         None => next_checkpoint_id(&ctx.session.doc),
     };
 
+    if ctx.session.doc.checkpoints.len() >= MAX_CHECKPOINTS_PER_PROJECT {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("checkpoint limit reached (maximum {MAX_CHECKPOINTS_PER_PROJECT} checkpoints per project)"),
+        )
+        .with_remediation("Delete an older checkpoint with `project.deleteCheckpoint` before creating another."));
+    }
     if ctx.session.doc.checkpoints.iter().any(|cp| cp.id == id) {
         return Err(EngineError::with_code(ErrorCode::AlreadyExists, format!("checkpoint `{id}` already exists"))
             .with_remediation("Choose a distinct `id` or omit it to auto-assign."));
     }
 
     let note = parsed.note.unwrap_or_default();
+    validate_title(&note)?;
     let created_utc = match parsed.timestamp_utc {
         Some(raw) => {
             let trimmed = raw.trim();
             if trimmed.is_empty() {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`timestamp_utc` cannot be empty"));
             }
+            validate_title(trimmed)?;
             trimmed.to_owned()
         }
         None => current_utc_timestamp(),
@@ -577,6 +591,15 @@ fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
     snapshot_doc.checkpoints.clear();
     let snapshot_json = serde_json::to_string(&snapshot_doc)
         .map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed serializing checkpoint snapshot: {err}")))?;
+
+    let retained_bytes: usize = ctx.session.doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()));
+    if retained_bytes.saturating_add(snapshot_json.len()) > MAX_TOTAL_CHECKPOINT_BYTES {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("checkpoint storage exceeds maximum {MAX_TOTAL_CHECKPOINT_BYTES} byte budget"),
+        )
+        .with_remediation("Delete older checkpoints with `project.deleteCheckpoint` to free space."));
+    }
 
     ctx.session.doc.checkpoints.push(NamedCheckpoint {
         id: id.clone(),
@@ -668,9 +691,29 @@ fn run_project_restore_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Co
     let parsed: CheckpointRefParams = parse_params(&checkpoint_ref_schema(), params)?;
     let idx = find_checkpoint_index(&ctx.session.doc, "project.restoreCheckpoint", &parsed)?;
     let cp = ctx.session.doc.checkpoints[idx].clone();
-    let mut restored: ProjectDocument = serde_json::from_str(&cp.snapshot_json)
+    if cp.snapshot_json.len() > MAX_ARCHIVE_FILE_BYTES {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("checkpoint `{}` snapshot exceeds maximum allowed archive size", cp.id),
+        ));
+    }
+    let raw_val: Value = serde_json::from_str(&cp.snapshot_json)
         .map_err(|err| EngineError::with_code(ErrorCode::CorruptData, format!("corrupt checkpoint `{}` snapshot: {err}", cp.id)))?;
+    let from_version = match raw_val.get("schema_version") {
+        Some(v) => u32::try_from(
+            v.as_u64()
+                .ok_or_else(|| EngineError::with_code(ErrorCode::CorruptData, format!("checkpoint `{}` has invalid `schema_version`", cp.id)))?,
+        )
+        .map_err(|_| EngineError::with_code(ErrorCode::UnsupportedVersion, format!("checkpoint `{}` `schema_version` overflow", cp.id)))?,
+        None => 0,
+    };
+    let migrated_val = migrate_document_json(raw_val, from_version)?;
+    let mut restored: ProjectDocument = serde_json::from_value(migrated_val)
+        .map_err(|err| EngineError::with_code(ErrorCode::CorruptData, format!("corrupt checkpoint `{}` snapshot: {err}", cp.id)))?;
+    restored.checkpoints.clear();
+    let sanitized_cycles = sanitize_circular_hooks(&mut restored);
     restored.checkpoints.clone_from(&ctx.session.doc.checkpoints);
+    validate_project_document(&restored)?;
     ctx.session.doc = restored;
 
     Ok(CommandOutcome::mutated(
@@ -683,6 +726,7 @@ fn run_project_restore_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Co
             "title": ctx.session.doc.title,
             "sheet_count": ctx.session.doc.total_sheet_count(),
             "checkpoint_count": ctx.session.doc.checkpoints.len(),
+            "sanitized_cycles": sanitized_cycles.len(),
         }),
     ))
 }

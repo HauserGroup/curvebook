@@ -101,6 +101,8 @@ pub struct SchemaNode {
     #[serde(rename = "maxLength", default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub pattern: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
     #[serde(rename = "oneOf", default, skip_serializing_if = "Vec::is_empty")]
     pub one_of: Vec<SchemaNode>,
@@ -186,6 +188,13 @@ impl SchemaNode {
     #[must_use]
     pub fn with_max_length(mut self, max_length: u64) -> Self {
         self.max_length = Some(max_length);
+        self
+    }
+
+    /// Set string regex `pattern` constraint.
+    #[must_use]
+    pub fn with_pattern(mut self, pattern: impl Into<String>) -> Self {
+        self.pattern = Some(pattern.into());
         self
     }
 
@@ -463,7 +472,11 @@ impl JsonSchema for SheetId {
     }
 
     fn json_schema() -> SchemaNode {
-        string_schema().with_min_length(1).with_title("SheetId")
+        string_schema()
+            .with_min_length(1)
+            .with_pattern(r"\S")
+            .with_title("SheetId")
+            .with_description("Non-whitespace sheet identifier (trimmed non-empty).")
     }
 }
 
@@ -536,8 +549,13 @@ impl JsonSchema for ResultStatus {
     }
 
     fn json_schema() -> SchemaNode {
-        let failed_payload =
-            object_schema(vec![("code", ref_schema(ErrorCode::schema_name())), ("message", string_schema())], &["code", "message"], false);
+        let code_schema = any_of_schema(vec![
+            ref_schema(ErrorCode::schema_name()),
+            string_schema().with_description(
+                "Legacy or historical error code accepted by ErrorCode::from_code_str (normalizes unknown strings to internal_error).",
+            ),
+        ]);
+        let failed_payload = object_schema(vec![("code", code_schema), ("message", string_schema())], &["code", "message"], false);
         let failed_variant = object_schema(vec![("Failed", failed_payload)], &["Failed"], false);
         one_of_schema(vec![const_string_schema("Dirty"), const_string_schema("UpToDate"), failed_variant]).with_title("ResultStatus")
     }
@@ -572,11 +590,17 @@ impl JsonSchema for NamedCheckpoint {
     fn json_schema() -> SchemaNode {
         object_schema(
             vec![
-                ("id", string_schema().with_min_length(1)),
-                ("name", string_schema()),
-                ("note", string_schema()),
-                ("created_utc", string_schema().with_format("date-time")),
-                ("snapshot_json", string_schema()),
+                ("id", string_schema().with_min_length(1).with_pattern(r"\S")),
+                ("name", title_string_schema()),
+                ("note", title_string_schema()),
+                (
+                    "created_utc",
+                    string_schema()
+                        .with_min_length(1)
+                        .with_pattern(r"\S")
+                        .with_description("Creation timestamp string (RFC 3339 UTC or `unix:<seconds>`)."),
+                ),
+                ("snapshot_json", string_schema().with_min_length(1)),
             ],
             &["id", "name", "note", "created_utc", "snapshot_json"],
             false,
@@ -585,11 +609,19 @@ impl JsonSchema for NamedCheckpoint {
     }
 }
 
+fn title_string_schema() -> SchemaNode {
+    string_schema()
+        .with_max_length(MAX_TITLE_BYTES as u64)
+        .with_description(
+            "Title text capped at 4,096 UTF-8 bytes by runtime validate_title (JSON Schema maxLength bounds code points; multi-byte characters also count toward the 4,096 UTF-8 byte ceiling).",
+        )
+}
+
 fn data_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("title", title_string_schema()),
             ("archetype", any_json_schema()),
             ("frozen", bool_schema()),
             ("info_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
@@ -608,7 +640,7 @@ fn info_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("title", title_string_schema()),
             ("linked_data_sheets", array_schema(ref_schema(SheetId::schema_name()))),
             ("constants", array_schema(any_json_schema())),
             ("notes_markdown", string_schema()),
@@ -658,7 +690,7 @@ fn graph_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("title", title_string_schema()),
             ("initialized", bool_schema()),
             ("spec", any_json_schema()),
             ("floating_notes", array_schema(any_json_schema())),
@@ -674,7 +706,7 @@ fn layout_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
             ("id", ref_schema(SheetId::schema_name())),
-            ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("title", title_string_schema()),
             ("spec", any_json_schema()),
             ("floating_notes", array_schema(any_json_schema())),
             ("color_tag", nullable_schema(any_json_schema())),
@@ -705,7 +737,7 @@ pub fn project_document_schema() -> SchemaNode {
     object_schema(
         vec![
             ("schema_version", integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(CURRENT_SCHEMA_VERSION))),
-            ("title", string_schema().with_max_length(MAX_TITLE_BYTES as u64)),
+            ("title", title_string_schema()),
             ("data_sheets", array_schema(ref_schema("DataSheet"))),
             ("info_sheets", array_schema(ref_schema("InfoSheet"))),
             ("result_sheets", array_schema(ref_schema("ResultSheet"))),

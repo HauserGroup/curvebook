@@ -14,7 +14,10 @@
       "additionalProperties": {
         "type": "string"
       },
-      "type": "object"
+      "type": [
+        "object",
+        "null"
+      ]
     },
     "theme": {
       "type": [
@@ -24,13 +27,10 @@
     },
     "version": {
       "maximum": 1,
-      "minimum": 1,
+      "minimum": 0,
       "type": "integer"
     }
   },
-  "required": [
-    "version"
-  ],
   "title": "PreferencesFile",
   "type": "object"
 }

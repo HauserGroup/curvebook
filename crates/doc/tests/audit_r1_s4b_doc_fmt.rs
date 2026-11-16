@@ -209,6 +209,7 @@ fn r1_s06_06_axis_graph_and_layout_validate_reject_nonfinite_floats() -> Result<
         fill_color: None,
         fill_mode: None,
         hidden: false,
+        ..PointStyleOverride::default()
     });
     assert!(g.spec.validate().is_err());
 

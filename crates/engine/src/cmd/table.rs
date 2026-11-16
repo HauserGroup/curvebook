@@ -471,16 +471,16 @@ fn run_import_pipeline(
     opts: &ImportPipelineOptions,
     info_sheet: Option<&mut InfoSheet>,
 ) -> Result<ImportPipelineReport, EngineError> {
-    match payload {
-        OwnedSourcePayload::Data(src) => Ok(apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalData(src), opts, info_sheet)?),
-        OwnedSourcePayload::Result(src) => {
-            Ok(apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalResult(src), opts, info_sheet)?)
-        }
+    let report = match payload {
+        OwnedSourcePayload::Data(src) => apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalData(src), opts, info_sheet)?,
+        OwnedSourcePayload::Result(src) => apply_import_link_pipeline(target_ds, spec, ImportSourcePayload::InternalResult(src), opts, info_sheet)?,
         OwnedSourcePayload::Delimited { text, delimiter, decimal_separator } => {
             let src = ImportSourcePayload::DelimitedText { text, delimiter: *delimiter, decimal_separator: *decimal_separator };
-            Ok(apply_import_link_pipeline(target_ds, spec, src, opts, info_sheet)?)
+            apply_import_link_pipeline(target_ds, spec, src, opts, info_sheet)?
         }
-    }
+    };
+    target_ds.prune_stale_exclusion_notes();
+    Ok(report)
 }
 
 fn apply_pipeline_with_split_info(
@@ -1166,6 +1166,29 @@ fn schema_set_cell() -> Value {
         ],
         true,
     )
+}
+
+fn ensure_mv_edit_preserves_calculated(
+    before: &DataSheet,
+    after: &DataSheet,
+    cols_placed: usize,
+    target_range: lumencraft_doc::SheetCellRange,
+) -> Result<(), EngineError> {
+    let TableArchetype::MultipleVariables(before_mv) = &before.archetype else {
+        return Ok(());
+    };
+    if cols_placed > 0 {
+        ensure_mv_columns_editable(before, target_range.start.col..=target_range.end.col)?;
+    }
+    if let TableArchetype::MultipleVariables(after_mv) = &after.archetype {
+        let max_len = before_mv.variables.len().max(after_mv.variables.len());
+        let touched = (0..max_len).filter(|&col| match (before_mv.variables.get(col), after_mv.variables.get(col)) {
+            (Some(b), Some(a)) => matches!(b.source, VariableSource::Calculated { .. }) && (b.title != a.title || b.cells != a.cells),
+            _ => false,
+        });
+        ensure_mv_columns_editable(before, touched)?;
+    }
+    Ok(())
 }
 
 fn ensure_mv_columns_editable<I>(ds: &DataSheet, cols: I) -> Result<(), EngineError>
@@ -2091,6 +2114,50 @@ fn schema_exclusion_audit_report() -> Value {
 }
 
 fn collect_sheet_exclusions(ds: &DataSheet, entries: &mut Vec<Value>, annotated_count: &mut usize) {
+    match &ds.archetype {
+        TableArchetype::Xy(xy) => {
+            for (row, sub_cells) in xy.x_cells.iter().enumerate() {
+                for (subcol, cell) in sub_cells.iter().enumerate() {
+                    if cell.excluded {
+                        entries.push(json!({
+                            "sheet_id": ds.id.as_str(),
+                            "sheet_title": ds.title,
+                            "target": "x",
+                            "row": row,
+                            "col": Value::Null,
+                            "subcol": subcol,
+                            "coord": { "row": row, "subcol": subcol, "target": "x" },
+                            "has_reason": false,
+                            "reason_tag": Value::Null,
+                            "note": Value::Null,
+                            "timestamp_utc": Value::Null,
+                        }));
+                    }
+                }
+            }
+        }
+        TableArchetype::Survival(surv) => {
+            for (row, cell) in surv.times.iter().enumerate() {
+                if cell.excluded {
+                    entries.push(json!({
+                        "sheet_id": ds.id.as_str(),
+                        "sheet_title": ds.title,
+                        "target": "x",
+                        "row": row,
+                        "col": Value::Null,
+                        "subcol": 0,
+                        "coord": { "row": row, "subcol": 0, "target": "x" },
+                        "has_reason": false,
+                        "reason_tag": Value::Null,
+                        "note": Value::Null,
+                        "timestamp_utc": Value::Null,
+                    }));
+                }
+            }
+        }
+        _ => {}
+    }
+
     let rows = ds.archetype.row_count();
     let cols = ds.archetype.column_count();
     for row in 0..rows {
@@ -2438,14 +2505,17 @@ fn apply_paste_payload(
         TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
     );
     if !has_calc_mv && ds.linked_regions.is_empty() {
-        return Ok(apply_import_link_pipeline(ds, spec, payload, opts, None)?);
+        let report = apply_import_link_pipeline(ds, spec, payload, opts, None)?;
+        ds.prune_stale_exclusion_notes();
+        return Ok(report);
     }
     let mut staged = ds.clone();
     let report = apply_import_link_pipeline(&mut staged, spec, payload, opts, None)?;
+    staged.prune_stale_exclusion_notes();
+    if has_calc_mv {
+        ensure_mv_edit_preserves_calculated(ds, &staged, report.cols_placed, report.target_range)?;
+    }
     if report.rows_placed > 0 && report.cols_placed > 0 {
-        if has_calc_mv {
-            ensure_mv_columns_editable(ds, report.target_range.start.col..=report.target_range.end.col)?;
-        }
         ensure_range_outside_linked_regions(ds, report.target_range, "paste")?;
         if matches!(spec.placement.mode, lumencraft_doc::PlacementMode::InsertRows) {
             let shift_span = lumencraft_doc::SheetCellRange::new(
@@ -2731,6 +2801,14 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
 
     let report = match (|| -> Result<ImportPipelineReport, EngineError> {
         let rep = apply_pipeline_with_split_info(doc, target_idx, info_idx, &spec, &payload, &opts)?;
+        if let OwnedSourcePayload::Result(src_rs) = &payload
+            && let Some(target_ds) = doc.data_sheets.get_mut(target_idx)
+        {
+            dag::backfill_confidence_interval_cells(target_ds, src_rs, &spec, rep.target_range);
+        }
+        if let (Some(old_ds), Some(new_ds)) = (prev_ds.as_ref(), doc.data_sheets.get(target_idx)) {
+            ensure_mv_edit_preserves_calculated(old_ds, new_ds, rep.cols_placed, rep.target_range)?;
+        }
         let _ = dag::topological_order(doc)?;
         Ok(rep)
     })() {
@@ -2907,18 +2985,44 @@ fn import_into_existing_sheet(
         ..ImportPipelineOptions::default()
     };
     let link_before = doc.data_sheets.get(target_idx).map_or(0, |d| d.linked_regions.len());
-    let pre_linked_snapshot = if !keep_link && link_before > 0 { doc.data_sheets.get(target_idx).cloned() } else { None };
+    let has_calc_mv = doc.data_sheets.get(target_idx).is_some_and(|d| {
+        matches!(
+            &d.archetype,
+            TableArchetype::MultipleVariables(mv) if mv.variables.iter().any(|v| matches!(v.source, VariableSource::Calculated { .. }))
+        )
+    });
+    let pre_import_snapshot = if has_calc_mv || (!keep_link && link_before > 0) { doc.data_sheets.get(target_idx).cloned() } else { None };
+    let pre_info_snapshot = info_idx.and_then(|idx| doc.info_sheets.get(idx).cloned());
     let payload = OwnedSourcePayload::Delimited { text, delimiter, decimal_separator };
     let report = apply_pipeline_with_split_info(doc, target_idx, info_idx, &link_spec, &payload, &opts)?;
-    if let Some(prev_ds) = pre_linked_snapshot
-        && report.rows_placed > 0
-        && report.cols_placed > 0
-        && let Err(err) = ensure_range_outside_linked_regions(&prev_ds, report.target_range, "import into")
-    {
-        if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
-            *slot = prev_ds;
+    if let (Some(prev_ds), Some(new_ds)) = (pre_import_snapshot.as_ref(), doc.data_sheets.get(target_idx)) {
+        if has_calc_mv && let Err(err) = ensure_mv_edit_preserves_calculated(prev_ds, new_ds, report.cols_placed, report.target_range) {
+            if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
+                *slot = prev_ds.clone();
+            }
+            if let (Some(idx), Some(prev_info)) = (info_idx, pre_info_snapshot)
+                && let Some(slot) = doc.info_sheets.get_mut(idx)
+            {
+                *slot = prev_info;
+            }
+            return Err(err);
         }
-        return Err(err);
+        if !keep_link
+            && link_before > 0
+            && report.rows_placed > 0
+            && report.cols_placed > 0
+            && let Err(err) = ensure_range_outside_linked_regions(prev_ds, report.target_range, "import into")
+        {
+            if let Some(slot) = doc.data_sheets.get_mut(target_idx) {
+                *slot = prev_ds.clone();
+            }
+            if let (Some(idx), Some(prev_info)) = (info_idx, pre_info_snapshot)
+                && let Some(slot) = doc.info_sheets.get_mut(idx)
+            {
+                *slot = prev_info;
+            }
+            return Err(err);
+        }
     }
     if !keep_link && let Some(target_ds) = doc.data_sheets.get_mut(target_idx) {
         target_ds.linked_regions.truncate(link_before);
@@ -3332,17 +3436,45 @@ fn run_set_variable_role(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     let p: SetVariableRoleParams = parse_params(&schema_set_variable_role(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
     let doc = &mut ctx.session.doc;
+    let col_idx = {
+        let ds = require_data_sheet(doc, &id)?;
+        ensure_sheet_not_frozen(ds)?;
+        let TableArchetype::MultipleVariables(ref mv) = ds.archetype else {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("sheet `{}` is `{}` rather than MultipleVariables", id.as_str(), ds.kind().label()),
+            ));
+        };
+        let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
+        ensure_mv_columns_editable(ds, std::iter::once(col_idx))?;
+        col_idx
+    };
+    let is_auto = p.role.eq_ignore_ascii_case("auto") || p.role.eq_ignore_ascii_case("inferred");
+    let requested_role = if is_auto {
+        None
+    } else {
+        let parsed_role = parse_variable_role(&p.role)?;
+        if parsed_role == VariableRole::Calculated {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "cannot assign role `Calculated` directly on an entered variable; use `table.setCalculatedVariable`",
+            )
+            .with_remediation(
+                "Set a calculated formula via `table.setCalculatedVariable`, or choose `continuous`, `categorical`, `label`, or `auto`.",
+            ));
+        }
+        Some(parsed_role)
+    };
     let mv = require_mv_table_mut(doc, &id)?;
-    let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
     let var = mv
         .variables
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
 
-    if p.role.eq_ignore_ascii_case("auto") || p.role.eq_ignore_ascii_case("inferred") {
-        var.refresh_inferred_role();
+    if let Some(role) = requested_role {
+        var.lock_role(role);
     } else {
-        var.lock_role(parse_variable_role(&p.role)?);
+        var.refresh_inferred_role();
     }
     let final_role = var.role;
     let role_inferred = var.role_inferred;
@@ -3516,6 +3648,7 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
         && let Ok(col_idx) = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())
     {
         ensure_sheet_not_frozen(ds)?;
+        ensure_mv_columns_editable(ds, std::iter::once(col_idx))?;
         let rows = ds.archetype.row_count();
         if rows > 0 {
             let col_range = lumencraft_doc::SheetCellRange::new(CellCoord::new(0, col_idx, 0), CellCoord::new(rows - 1, col_idx, 0));
@@ -3558,6 +3691,7 @@ struct SetCategoricalOrderParams {
     levels: Option<Vec<String>>,
     order: Option<OrderParamValue>,
     reversed: Option<bool>,
+    reference_level: Option<String>,
 }
 
 fn schema_set_categorical_order() -> Value {
@@ -3642,7 +3776,29 @@ fn resolve_level_order_fields(levels: Option<&[String]>, order: Option<&OrderPar
 fn run_set_categorical_order(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetCategoricalOrderParams = parse_params(&schema_set_categorical_order(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
-    let spec = parse_level_order_from_params(&p)?;
+    let ref_level = match p.reference_level.as_deref() {
+        Some(raw_ref) => {
+            let trimmed = raw_ref.trim();
+            if trimmed.is_empty() {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`reference_level` cannot be empty"));
+            }
+            Some(trimmed.to_owned())
+        }
+        None => None,
+    };
+    let explicit_spec = if p.order_spec.is_some() || p.levels.is_some() || p.order.is_some() {
+        Some(parse_level_order_from_params(&p)?)
+    } else {
+        if ref_level.is_none() {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "table.setCategoricalOrder requires `order`, `levels`, `order_spec`, or `reference_level`",
+            )
+            .with_remediation("Provide an explicit `order`, `levels`, `order_spec`, or `reference_level`."));
+        }
+        None
+    };
+
     let doc = &mut ctx.session.doc;
     let mv = require_mv_table_mut(doc, &id)?;
     let col_idx = resolve_mv_variable_index(mv, p.col.as_ref(), p.title.as_deref())?;
@@ -3650,7 +3806,40 @@ fn run_set_categorical_order(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         .variables
         .get_mut(col_idx)
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("variable column {col_idx} out of range")))?;
-    var.level_order = spec;
+
+    let base_spec = match explicit_spec {
+        Some(spec) => spec,
+        None => {
+            let mut spec = var.level_order.clone();
+            if let Some(rev) = p.reversed {
+                spec.reversed = rev;
+            }
+            spec
+        }
+    };
+    var.level_order = if let Some(ref_lvl) = ref_level {
+        let mut levels: Vec<String> = match base_spec.order {
+            LevelOrderKind::Explicit(mut list) => {
+                if base_spec.reversed {
+                    list.reverse();
+                }
+                for seen in var.ordered_levels_with(&LevelOrderSpec::default()) {
+                    if !list.contains(&seen.level) {
+                        list.push(seen.level);
+                    }
+                }
+                list
+            }
+            _ => var.ordered_levels_with(&base_spec).into_iter().map(|s| s.level).collect(),
+        };
+        levels.retain(|lvl| lvl != &ref_lvl);
+        levels.insert(0, ref_lvl);
+        LevelOrderSpec { order: LevelOrderKind::Explicit(levels), reversed: false }
+    } else {
+        base_spec
+    };
+
+    let applied_levels: Vec<String> = var.ordered_levels().into_iter().map(|s| s.level).collect();
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.setCategoricalOrder",
@@ -3658,6 +3847,7 @@ fn run_set_categorical_order(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
         json!({
             "sheet_id": id.as_str(),
             "column": col_idx,
+            "levels": applied_levels,
             "recalculated_sheets": recalc.recalculated_sheets,
         }),
     ))
@@ -3993,6 +4183,12 @@ fn schema_convert_archetype() -> Value {
 }
 
 fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    if crate::has_conflicting_convert_preview_aliases(&raw) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "conflicting or non-boolean `preview_only` alias values supplied for `table.convertArchetype`",
+        ));
+    }
     let p: ConvertArchetypeParams = parse_params(&schema_convert_archetype(), raw)?;
     let sheet_id = parse_sheet_id(&p.sheet_id)?;
     let target_kind = parse_target_archetype_kind(&p.target_kind)?;
@@ -4022,6 +4218,7 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
     ensure_sheet_not_frozen(&doc.data_sheets[idx])?;
     let (mut converted, preview) = convert_datasheet_archetype(&doc.data_sheets[idx], target_kind, allow_lossy)?;
     converted.id = sheet_id.clone();
+    converted.prune_stale_exclusion_notes();
     doc.data_sheets[idx] = converted;
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
     Ok(CommandOutcome::mutated(
@@ -4648,9 +4845,13 @@ fn schema_randomize_groups() -> Value {
                 "type": "object",
                 "properties": {
                     "label": { "type": "string", "minLength": 1 },
+                    "name": { "type": "string", "minLength": 1 },
                     "weight": { "type": "integer", "minimum": 1 }
                 },
-                "required": ["label"],
+                "anyOf": [
+                    { "required": ["label"] },
+                    { "required": ["name"] }
+                ],
                 "additionalProperties": true
             }
         ]

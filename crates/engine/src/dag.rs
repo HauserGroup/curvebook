@@ -726,6 +726,58 @@ fn resolve_refresh_source<'a>(
     }
 }
 
+fn format_ci_bound_text(bound: CiBound, is_lower: bool) -> String {
+    match bound {
+        CiBound::Finite(v) => {
+            let clean = if v == 0.0 { 0.0 } else { v };
+            if clean.fract() == 0.0 && clean.abs() < 1e12 { format!("{clean:.0}") } else { clean.to_string() }
+        }
+        CiBound::Open => String::from(if is_lower { "-inf" } else { "+inf" }),
+    }
+}
+
+/// Format `ResultCell::ConfidenceInterval` cells into readable `[lo, hi]` strings after importing
+/// or refreshing a `ResultTab` (whose L2 transform importer emits empty cells for intervals).
+pub(crate) fn backfill_confidence_interval_cells(target: &mut DataSheet, src_rs: &ResultSheet, spec: &ImportLinkSpec, target_range: SheetCellRange) {
+    let LinkSource::InternalSheet { tab_id, range, .. } = &spec.source else {
+        return;
+    };
+    let Some(tab) = (if let Some(tid) = tab_id { src_rs.tabs.iter().find(|t| &t.id == tid) } else { src_rs.tabs.first() }) else {
+        return;
+    };
+    if tab.rows.is_empty() || spec.placement.transpose {
+        return;
+    }
+    let end_r = range.end.row.min(tab.rows.len().saturating_sub(1));
+    if range.start.row > end_r {
+        return;
+    }
+    let mut grid_row = 0usize;
+    for r in range.start.row..=end_r {
+        let row = &tab.rows[r];
+        let end_c = range.end.col.min(row.len().saturating_sub(1));
+        if row.is_empty() || range.start.col > end_c {
+            continue;
+        }
+        let target_r = target_range.start.row.saturating_add(grid_row);
+        if target_r > target_range.end.row {
+            break;
+        }
+        for (grid_col, c) in (range.start.col..=end_c).enumerate() {
+            if let Some(ResultCell::ConfidenceInterval { lower, upper }) = row.get(c) {
+                let target_c = target_range.start.col.saturating_add(grid_col);
+                if target_c > target_range.end.col {
+                    continue;
+                }
+                let subcol = if grid_col == 0 { target_range.start.subcol } else { 0 };
+                let text = format!("[{}, {}]", format_ci_bound_text(*lower, true), format_ci_bound_text(*upper, false));
+                let _ = target.set_cell(CellCoord::new(target_r, target_c, subcol), Cell::text(text));
+            }
+        }
+        grid_row = grid_row.saturating_add(1);
+    }
+}
+
 fn refresh_single_region(
     working: &ProjectDocument,
     target: &mut DataSheet,
@@ -764,8 +816,11 @@ fn refresh_single_region(
     target.linked_regions = saved_regions;
 
     let report = pipe_res.map_err(|err| EngineError::new(format!("linked region `{}` refresh on sheet `{}` failed: {err}", region.id, target.id)))?;
+    target.prune_stale_exclusion_notes();
     if let ResolvedRefreshSource::InternalData { sheet, propagate_titles: true } = resolved {
         propagate_internal_source_titles(target, &refresh_spec, report.target_range.start.col, sheet);
+    } else if let ResolvedRefreshSource::InternalResult(src_rs) = resolved {
+        backfill_confidence_interval_cells(target, src_rs, &refresh_spec, report.target_range);
     }
     target.linked_regions[reg_idx].target_range = report.target_range;
     target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;
@@ -937,7 +992,18 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                 lumencraft_fit::execute_analysis(&existing.analysis, &source_ds, &hooks).map_err(|err| err.to_string())
             }
         }
-        _ => lumencraft_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string()),
+        _ => {
+            if !existing.analysis.kind.is_compatible_with(source_ds.kind()) {
+                Err(format!(
+                    "analysis `{}` is incompatible with {} table `{}`",
+                    existing.analysis.effective_title(),
+                    source_ds.kind().label(),
+                    source_ds.id
+                ))
+            } else {
+                lumencraft_stats::run_analysis(&source_ds, &existing.analysis).map_err(|err| err.to_string())
+            }
+        }
     };
 
     let target = &mut doc.result_sheets[res_idx];
@@ -951,6 +1017,22 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             computed.analysis = existing.analysis;
             computed.floating_notes = existing.floating_notes;
             computed.color_tag = existing.color_tag;
+            if let AnalysisKind::Survival(lumencraft_doc::SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) = &computed.analysis.kind {
+                let tie_label = match tie_method {
+                    lumencraft_doc::CoxTieMethod::Efron => "Efron",
+                    lumencraft_doc::CoxTieMethod::Breslow => "Breslow",
+                };
+                if let Some(tab) = computed.tabs.iter_mut().find(|t| t.id == "cox-ph") {
+                    tab.footnotes.push(format!("Tie handling method: {tie_label}."));
+                }
+                computed.checklist.push(lumencraft_doc::ChecklistItem {
+                    assumption: String::from("Cox tie handling"),
+                    status: lumencraft_doc::ChecklistStatus::Info,
+                    diagnostic_metric: Some(format!("tie_method = {tie_label}")),
+                    explanation: format!("Partial likelihood ties handled via {tie_label} approximation."),
+                    remediation: None,
+                });
+            }
             computed.status = ResultStatus::UpToDate;
             *target = computed;
             true

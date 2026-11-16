@@ -4,6 +4,7 @@
       "additionalProperties": false,
       "properties": {
         "acquired_epoch_ms": {
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": "integer"
         },
@@ -17,12 +18,12 @@
           "type": "string"
         },
         "ttl_ms": {
+          "maximum": 18446744073709551615,
           "minimum": 0,
           "type": "integer"
         }
       },
       "required": [
-        "format_version",
         "owner_id",
         "acquired_epoch_ms",
         "ttl_ms"
@@ -45,12 +46,12 @@
           "type": "integer"
         },
         "seq": {
+          "maximum": 18446744073709551615,
           "minimum": 1,
           "type": "integer"
         }
       },
       "required": [
-        "format_version",
         "seq",
         "crc32",
         "command_json"

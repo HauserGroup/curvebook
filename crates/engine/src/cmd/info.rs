@@ -185,21 +185,33 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
         let info = require_info_sheet_mut(&mut ctx.session.doc, &info_id)?;
         info.remove_constant(&name)
     };
-    if !removed && !if_exists {
-        return Err(EngineError::with_code(ErrorCode::NotFound, format!("constant `{name}` not found in info sheet `{}`", info_id.as_str()))
-            .with_remediation("Verify the constant name or pass `if_exists: true` to ignore missing constants."));
+    if !removed {
+        if !if_exists {
+            return Err(EngineError::with_code(ErrorCode::NotFound, format!("constant `{name}` not found in info sheet `{}`", info_id.as_str()))
+                .with_remediation("Verify the constant name or pass `if_exists: true` to ignore missing constants."));
+        }
+        return Ok(CommandOutcome {
+            command_id: String::from("info.removeConstant"),
+            mutated: false,
+            message: String::from("info constant was not present"),
+            payload: json!({
+                "sheet_id": info_id.as_str(),
+                "name": name,
+                "removed": false,
+                "recalculated_sheets": 0,
+            }),
+        });
     }
     let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
 
-    let message = if removed { "removed info constant" } else { "info constant was not present" };
     Ok(CommandOutcome {
         command_id: String::from("info.removeConstant"),
-        mutated: removed,
-        message: String::from(message),
+        mutated: true,
+        message: String::from("removed info constant"),
         payload: json!({
             "sheet_id": info_id.as_str(),
             "name": name,
-            "removed": removed,
+            "removed": true,
             "recalculated_sheets": recalc.recalculated_sheets,
         }),
     })

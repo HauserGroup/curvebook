@@ -171,7 +171,7 @@ pub enum TransformAnalysisSpec {
         sample_size: usize,
         #[serde(default)]
         stratify_column: Option<usize>,
-        #[serde(default)]
+        #[serde(default = "default_true")]
         proportional_allocation: bool,
     },
 }
@@ -763,6 +763,551 @@ impl NonlinearFitSpec {
 }
 
 // ============================================================================
+// Power & Sample Size Specifications (`R8.7` / `R2-S07-10`)
+// ============================================================================
+
+/// Supported hypothesis test families for power and sample-size planning.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerTestFamily {
+    #[default]
+    TwoSampleUnpairedT,
+    TwoSamplePairedT,
+    OneSampleT,
+    OneWayAnova,
+    TwoProportions,
+    Correlation,
+    ChiSquare,
+    SimpleLinearRegression,
+}
+
+impl PowerTestFamily {
+    /// All eight supported power-analysis test families.
+    pub const ALL: [Self; 8] = [
+        Self::TwoSampleUnpairedT,
+        Self::TwoSamplePairedT,
+        Self::OneSampleT,
+        Self::OneWayAnova,
+        Self::TwoProportions,
+        Self::Correlation,
+        Self::ChiSquare,
+        Self::SimpleLinearRegression,
+    ];
+
+    /// Neutral display label for titles, inspectors, and methods reports.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::TwoSampleUnpairedT => "Unpaired t test",
+            Self::TwoSamplePairedT => "Paired t test",
+            Self::OneSampleT => "One-sample t test",
+            Self::OneWayAnova => "One-way ANOVA",
+            Self::TwoProportions => "Two proportions",
+            Self::Correlation => "Pearson correlation",
+            Self::ChiSquare => "Chi-square test",
+            Self::SimpleLinearRegression => "Simple linear regression",
+        }
+    }
+
+    /// Canonical standardized effect-size metric label for this family.
+    #[must_use]
+    pub const fn default_effect_label(self) -> &'static str {
+        match self {
+            Self::TwoSampleUnpairedT | Self::OneSampleT => "Cohen's d",
+            Self::TwoSamplePairedT => "Cohen's dz",
+            Self::OneWayAnova => "Cohen's f",
+            Self::TwoProportions => "Cohen's h",
+            Self::Correlation => "Pearson r",
+            Self::ChiSquare => "Cohen's w",
+            Self::SimpleLinearRegression => "Cohen's f^2",
+        }
+    }
+
+    /// Return `true` when one-sided alternatives are meaningful for this family.
+    #[must_use]
+    pub const fn supports_one_sided(self) -> bool {
+        !matches!(self, Self::OneWayAnova | Self::ChiSquare)
+    }
+}
+
+/// Direction for one-sided power hypothesis alternatives (`H1: theta > theta_0` vs `<`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerOneSidedDirection {
+    #[default]
+    Greater,
+    Less,
+}
+
+/// Hypothesis tail mode for power and sample-size calculations.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerTailMode {
+    #[default]
+    TwoSided,
+    OneSided(PowerOneSidedDirection),
+}
+
+/// Target unknown quantity solved by a power analysis specification.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerSolveTarget {
+    #[default]
+    SampleSize,
+    Power,
+    DetectableEffect,
+}
+
+/// Variance / standard-error approximation convention for [`PowerTestFamily::TwoProportions`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum TwoProportionsMethod {
+    #[default]
+    PooledNullUnpooledAlt,
+    Unpooled,
+    CohensH,
+}
+
+/// Power-curve convention for [`PowerTestFamily::Correlation`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum CorrelationPowerMethod {
+    #[default]
+    FisherZ,
+    FisherZWithTCrit,
+    ExactTTransform,
+    ConditionalSlopeT,
+}
+
+/// Effect-size parameterization for [`PowerAnalysisSpec`].
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PowerEffectSpec {
+    #[default]
+    Unspecified,
+    Standardized(f64),
+    MeanDiffAndSd {
+        mean_diff: f64,
+        sd: f64,
+        #[serde(default)]
+        sd_group2: Option<f64>,
+        #[serde(default)]
+        within_pair_correlation: Option<f64>,
+    },
+    PairedDiff {
+        mean_diff: f64,
+        sd_diff: f64,
+    },
+    GroupMeansAndSd {
+        means: Vec<f64>,
+        within_sd: f64,
+    },
+    TwoProportions {
+        p1: f64,
+        p2: f64,
+    },
+    BaselineProportion {
+        p1: f64,
+    },
+    RSquared(f64),
+    RegressionSlope {
+        beta1: f64,
+        sigma_x: f64,
+        sigma_eps: f64,
+    },
+}
+
+/// First-class L1 document specification for statistical power, sample-size, and
+/// minimum-detectable-effect calculations.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct PowerAnalysisSpec {
+    pub family: PowerTestFamily,
+    pub solve_target: PowerSolveTarget,
+    pub tail_mode: PowerTailMode,
+    /// Two-sided or one-sided significance level `alpha` in `(0, 1)`.
+    pub alpha: f64,
+    /// Target statistical power `1 - beta` in `(0, 1)`.
+    #[serde(default)]
+    pub target_power: Option<f64>,
+    /// Primary sample size (`n1` or per-group `n` or total `N`).
+    #[serde(default)]
+    pub sample_size: Option<f64>,
+    /// Optional explicit second-group sample size `n2` for two-sample tests.
+    #[serde(default)]
+    pub sample_size_group2: Option<f64>,
+    /// Allocation ratio `k = n2 / n1 > 0` when `sample_size_group2` is `None`.
+    pub allocation_ratio: f64,
+    /// Effect-size specification.
+    pub effect: PowerEffectSpec,
+    /// Group count `k >= 2` for `OneWayAnova`.
+    #[serde(default)]
+    pub num_groups: Option<usize>,
+    /// Degrees of freedom `df > 0` for `ChiSquare`.
+    pub chi_square_df: f64,
+    /// Variance / SE convention for `TwoProportions`.
+    pub two_proportions_mode: TwoProportionsMethod,
+    /// Yates / Fleiss continuity correction for `TwoProportions`.
+    pub continuity_correction: bool,
+    /// Power-curve convention for `Correlation`.
+    pub correlation_method: CorrelationPowerMethod,
+    /// Optional linked `InfoSheet` supplying parameter hooks.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub info_sheet_id: Option<SheetId>,
+}
+
+impl Default for PowerAnalysisSpec {
+    fn default() -> Self {
+        Self {
+            family: PowerTestFamily::TwoSampleUnpairedT,
+            solve_target: PowerSolveTarget::SampleSize,
+            tail_mode: PowerTailMode::TwoSided,
+            alpha: 0.05,
+            target_power: Some(0.80),
+            sample_size: None,
+            sample_size_group2: None,
+            allocation_ratio: 1.0,
+            effect: PowerEffectSpec::Unspecified,
+            num_groups: None,
+            chi_square_df: 1.0,
+            two_proportions_mode: TwoProportionsMethod::PooledNullUnpooledAlt,
+            continuity_correction: false,
+            correlation_method: CorrelationPowerMethod::FisherZ,
+            info_sheet_id: None,
+        }
+    }
+}
+
+impl PowerAnalysisSpec {
+    /// Derive the default result-sheet title for this power specification.
+    #[must_use]
+    pub fn derive_auto_title(&self) -> String {
+        format!("Power & sample size ({})", self.family.label())
+    }
+
+    /// Return the first non-finite float field path in this power specification, if any.
+    #[must_use]
+    pub fn first_non_finite_float(&self) -> Option<&'static str> {
+        if !self.alpha.is_finite() {
+            return Some("power.alpha");
+        }
+        if self.target_power.is_some_and(|v| !v.is_finite()) {
+            return Some("power.target_power");
+        }
+        if self.sample_size.is_some_and(|v| !v.is_finite()) {
+            return Some("power.sample_size");
+        }
+        if self.sample_size_group2.is_some_and(|v| !v.is_finite()) {
+            return Some("power.sample_size_group2");
+        }
+        if !self.allocation_ratio.is_finite() {
+            return Some("power.allocation_ratio");
+        }
+        if !self.chi_square_df.is_finite() {
+            return Some("power.chi_square_df");
+        }
+        match &self.effect {
+            PowerEffectSpec::Unspecified => None,
+            PowerEffectSpec::Standardized(v) => (!v.is_finite()).then_some("power.effect.standardized"),
+            PowerEffectSpec::MeanDiffAndSd { mean_diff, sd, sd_group2, within_pair_correlation } => {
+                if !mean_diff.is_finite()
+                    || !sd.is_finite()
+                    || sd_group2.is_some_and(|v| !v.is_finite())
+                    || within_pair_correlation.is_some_and(|v| !v.is_finite())
+                {
+                    Some("power.effect.mean_diff_and_sd")
+                } else {
+                    None
+                }
+            }
+            PowerEffectSpec::PairedDiff { mean_diff, sd_diff } => {
+                (!mean_diff.is_finite() || !sd_diff.is_finite()).then_some("power.effect.paired_diff")
+            }
+            PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+                (!within_sd.is_finite() || means.iter().any(|m| !m.is_finite())).then_some("power.effect.group_means_and_sd")
+            }
+            PowerEffectSpec::TwoProportions { p1, p2 } => (!p1.is_finite() || !p2.is_finite()).then_some("power.effect.two_proportions"),
+            PowerEffectSpec::BaselineProportion { p1 } => (!p1.is_finite()).then_some("power.effect.baseline_proportion"),
+            PowerEffectSpec::RSquared(v) => (!v.is_finite()).then_some("power.effect.r_squared"),
+            PowerEffectSpec::RegressionSlope { beta1, sigma_x, sigma_eps } => {
+                (!beta1.is_finite() || !sigma_x.is_finite() || !sigma_eps.is_finite()).then_some("power.effect.regression_slope")
+            }
+        }
+    }
+
+    /// Validate domain constraints on this power specification (`alpha`, `target_power`,
+    /// sample sizes, allocation ratio, tail compatibility, and effect-size fields).
+    pub fn validate(&self) -> Result<(), DocError> {
+        let invalid = |reason: &'static str| DocError::InvalidCellValue { archetype: TableKind::Column, row: 0, col: 0, reason };
+        if let Some(reason) = self.first_non_finite_float() {
+            return Err(invalid(reason));
+        }
+        if self.alpha <= 0.0 || self.alpha >= 1.0 {
+            return Err(invalid("power.alpha must lie strictly in (0, 1)"));
+        }
+        if matches!(self.tail_mode, PowerTailMode::OneSided(_)) && !self.family.supports_one_sided() {
+            return Err(invalid("one-sided tail mode is not supported for F/chi-square power tests"));
+        }
+        if let Some(pw) = self.target_power
+            && (pw <= 0.0 || pw >= 1.0)
+        {
+            return Err(invalid("power.target_power must lie strictly in (0, 1)"));
+        }
+        if self.solve_target != PowerSolveTarget::Power && self.target_power.is_none() {
+            return Err(invalid("power.target_power is required when solving SampleSize or DetectableEffect"));
+        }
+        if let Some(n) = self.sample_size
+            && n <= 0.0
+        {
+            return Err(invalid("power.sample_size must be > 0"));
+        }
+        if let Some(n2) = self.sample_size_group2
+            && n2 <= 0.0
+        {
+            return Err(invalid("power.sample_size_group2 must be > 0"));
+        }
+        if self.solve_target != PowerSolveTarget::SampleSize && self.sample_size.is_none() {
+            return Err(invalid("power.sample_size is required when solving Power or DetectableEffect"));
+        }
+        if self.allocation_ratio <= 0.0 {
+            return Err(invalid("power.allocation_ratio must be > 0"));
+        }
+        if self.chi_square_df <= 0.0 {
+            return Err(invalid("power.chi_square_df must be > 0"));
+        }
+        if let Some(k) = self.num_groups
+            && k < 2
+        {
+            return Err(invalid("power.num_groups must be >= 2"));
+        }
+        if self.solve_target != PowerSolveTarget::DetectableEffect && matches!(self.effect, PowerEffectSpec::Unspecified) {
+            return Err(invalid("power.effect must be specified unless solving DetectableEffect"));
+        }
+        match &self.effect {
+            PowerEffectSpec::MeanDiffAndSd { sd, sd_group2, within_pair_correlation, .. } => {
+                if *sd <= 0.0 || sd_group2.is_some_and(|s| s <= 0.0) {
+                    return Err(invalid("power.effect standard deviation must be > 0"));
+                }
+                if within_pair_correlation.is_some_and(|r| !(-1.0..1.0).contains(&r)) {
+                    return Err(invalid("power.effect within_pair_correlation must lie in [-1, 1)"));
+                }
+            }
+            PowerEffectSpec::PairedDiff { sd_diff, .. } if *sd_diff <= 0.0 => {
+                return Err(invalid("power.effect sd_diff must be > 0"));
+            }
+            PowerEffectSpec::GroupMeansAndSd { means, within_sd } => {
+                if means.len() < 2 {
+                    return Err(invalid("power.effect GroupMeansAndSd requires at least 2 means"));
+                }
+                if *within_sd <= 0.0 {
+                    return Err(invalid("power.effect within_sd must be > 0"));
+                }
+            }
+            PowerEffectSpec::TwoProportions { p1, p2 } if !(0.0..=1.0).contains(p1) || !(0.0..=1.0).contains(p2) => {
+                return Err(invalid("power.effect proportions must lie in [0, 1]"));
+            }
+            PowerEffectSpec::BaselineProportion { p1 } if !(0.0..=1.0).contains(p1) => {
+                return Err(invalid("power.effect baseline proportion must lie in [0, 1]"));
+            }
+            PowerEffectSpec::RSquared(r2) if *r2 < 0.0 || *r2 >= 1.0 => {
+                return Err(invalid("power.effect R^2 must lie in [0, 1)"));
+            }
+            PowerEffectSpec::RegressionSlope { sigma_x, sigma_eps, .. } if *sigma_x <= 0.0 || *sigma_eps <= 0.0 => {
+                return Err(invalid("power.effect regression SDs must be > 0"));
+            }
+            _ => {}
+        }
+        if let Some(ref info_id) = self.info_sheet_id
+            && info_id.as_str().trim().is_empty()
+        {
+            return Err(DocError::EmptyIdentifier);
+        }
+        Ok(())
+    }
+}
+
+impl crate::schema::JsonSchema for PowerTestFamily {
+    fn schema_name() -> &'static str {
+        "PowerTestFamily"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        crate::schema::enum_schema(&[
+            "TwoSampleUnpairedT",
+            "TwoSamplePairedT",
+            "OneSampleT",
+            "OneWayAnova",
+            "TwoProportions",
+            "Correlation",
+            "ChiSquare",
+            "SimpleLinearRegression",
+        ])
+        .with_title("PowerTestFamily")
+    }
+}
+
+impl crate::schema::JsonSchema for PowerSolveTarget {
+    fn schema_name() -> &'static str {
+        "PowerSolveTarget"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        crate::schema::enum_schema(&["SampleSize", "Power", "DetectableEffect"]).with_title("PowerSolveTarget")
+    }
+}
+
+impl crate::schema::JsonSchema for PowerTailMode {
+    fn schema_name() -> &'static str {
+        "PowerTailMode"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        let dir = crate::schema::enum_schema(&["Greater", "Less"]);
+        let one_sided = crate::schema::object_schema(vec![("OneSided", dir)], &["OneSided"], false);
+        crate::schema::one_of_schema(vec![crate::schema::const_string_schema("TwoSided"), one_sided]).with_title("PowerTailMode")
+    }
+}
+
+impl crate::schema::JsonSchema for TwoProportionsMethod {
+    fn schema_name() -> &'static str {
+        "TwoProportionsMethod"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        crate::schema::enum_schema(&["PooledNullUnpooledAlt", "Unpooled", "CohensH"]).with_title("TwoProportionsMethod")
+    }
+}
+
+impl crate::schema::JsonSchema for CorrelationPowerMethod {
+    fn schema_name() -> &'static str {
+        "CorrelationPowerMethod"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        crate::schema::enum_schema(&["FisherZ", "FisherZWithTCrit", "ExactTTransform", "ConditionalSlopeT"]).with_title("CorrelationPowerMethod")
+    }
+}
+
+impl crate::schema::JsonSchema for PowerEffectSpec {
+    fn schema_name() -> &'static str {
+        "PowerEffectSpec"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        use crate::schema::{array_schema, nullable_schema, number_schema, object_schema, one_of_schema};
+        one_of_schema(vec![
+            crate::schema::const_string_schema("Unspecified"),
+            object_schema(vec![("Standardized", number_schema())], &["Standardized"], false),
+            object_schema(
+                vec![(
+                    "MeanDiffAndSd",
+                    object_schema(
+                        vec![
+                            ("mean_diff", number_schema()),
+                            ("sd", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+                            ("sd_group2", nullable_schema(number_schema())),
+                            ("within_pair_correlation", nullable_schema(number_schema().with_minimum_f64(-1.0).with_maximum_f64(1.0))),
+                        ],
+                        &["mean_diff", "sd"],
+                        false,
+                    ),
+                )],
+                &["MeanDiffAndSd"],
+                false,
+            ),
+            object_schema(
+                vec![(
+                    "PairedDiff",
+                    object_schema(vec![("mean_diff", number_schema()), ("sd_diff", number_schema())], &["mean_diff", "sd_diff"], false),
+                )],
+                &["PairedDiff"],
+                false,
+            ),
+            object_schema(
+                vec![(
+                    "GroupMeansAndSd",
+                    object_schema(vec![("means", array_schema(number_schema())), ("within_sd", number_schema())], &["means", "within_sd"], false),
+                )],
+                &["GroupMeansAndSd"],
+                false,
+            ),
+            object_schema(
+                vec![(
+                    "TwoProportions",
+                    object_schema(
+                        vec![
+                            ("p1", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0)),
+                            ("p2", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0)),
+                        ],
+                        &["p1", "p2"],
+                        false,
+                    ),
+                )],
+                &["TwoProportions"],
+                false,
+            ),
+            object_schema(
+                vec![(
+                    "BaselineProportion",
+                    object_schema(vec![("p1", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))], &["p1"], false),
+                )],
+                &["BaselineProportion"],
+                false,
+            ),
+            object_schema(vec![("RSquared", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))], &["RSquared"], false),
+            object_schema(
+                vec![(
+                    "RegressionSlope",
+                    object_schema(
+                        vec![("beta1", number_schema()), ("sigma_x", number_schema()), ("sigma_eps", number_schema())],
+                        &["beta1", "sigma_x", "sigma_eps"],
+                        false,
+                    ),
+                )],
+                &["RegressionSlope"],
+                false,
+            ),
+        ])
+        .with_title("PowerEffectSpec")
+    }
+}
+
+impl crate::schema::JsonSchema for PowerAnalysisSpec {
+    fn schema_name() -> &'static str {
+        "PowerAnalysisSpec"
+    }
+
+    fn json_schema() -> crate::schema::SchemaNode {
+        use crate::schema::{bool_schema, integer_schema, nullable_schema, number_schema, object_schema, ref_schema};
+        object_schema(
+            vec![
+                ("family", PowerTestFamily::json_schema()),
+                ("solve_target", PowerSolveTarget::json_schema()),
+                ("tail_mode", PowerTailMode::json_schema()),
+                ("alpha", number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0)),
+                ("target_power", nullable_schema(number_schema().with_minimum_f64(0.0).with_maximum_f64(1.0))),
+                ("sample_size", nullable_schema(number_schema().with_minimum_f64(0.0))),
+                ("sample_size_group2", nullable_schema(number_schema().with_minimum_f64(0.0))),
+                ("allocation_ratio", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+                ("effect", PowerEffectSpec::json_schema()),
+                ("num_groups", nullable_schema(integer_schema().with_minimum_i64(2))),
+                ("chi_square_df", number_schema().with_minimum_f64(f64::MIN_POSITIVE)),
+                ("two_proportions_mode", TwoProportionsMethod::json_schema()),
+                ("continuity_correction", bool_schema()),
+                ("correlation_method", CorrelationPowerMethod::json_schema()),
+                ("info_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
+            ],
+            &[
+                "family",
+                "solve_target",
+                "tail_mode",
+                "alpha",
+                "allocation_ratio",
+                "effect",
+                "chi_square_df",
+                "two_proportions_mode",
+                "continuity_correction",
+                "correlation_method",
+            ],
+            false,
+        )
+        .with_title("PowerAnalysisSpec")
+    }
+}
+
+// ============================================================================
 // Unified AnalysisKind & AnalysisSpec
 // ============================================================================
 
@@ -903,10 +1448,14 @@ impl AnalysisKind {
             }
             Self::FactorialAnova(_) => matches!(table_kind, TableKind::Grouped | TableKind::MultipleVariables),
             Self::NestedComparison(_) => matches!(table_kind, TableKind::Nested),
-            Self::Contingency(s) => {
-                matches!(table_kind, TableKind::Contingency | TableKind::PartsOfWhole)
-                    || (matches!(s.method, ContingencyMethod::ExactBinomial) && table_kind == TableKind::Column)
-            }
+            Self::Contingency(s) => match table_kind {
+                TableKind::Contingency => true,
+                TableKind::PartsOfWhole => {
+                    matches!(s.method, ContingencyMethod::PearsonChiSquare { .. } | ContingencyMethod::ExactBinomial)
+                }
+                TableKind::Column => matches!(s.method, ContingencyMethod::ExactBinomial),
+                _ => false,
+            },
             Self::Survival(_) => matches!(table_kind, TableKind::Survival | TableKind::MultipleVariables),
             Self::GeneralizedLinearModel(_) | Self::Multivariate(_) => {
                 matches!(table_kind, TableKind::MultipleVariables | TableKind::Xy | TableKind::Column)

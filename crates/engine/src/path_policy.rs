@@ -208,8 +208,7 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let use_unpacked =
-                explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved) || resolved.is_dir();
+            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved);
             if use_unpacked {
                 ensure_unpacked_dir_if_present(&resolved, raw_path)?;
             } else {
@@ -229,10 +228,17 @@ impl ExternalPathPolicy {
         }
         #[cfg(not(target_arch = "wasm32"))]
         {
-            let use_unpacked =
-                explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved) || resolved.is_dir();
+            let use_unpacked = explicit_unpacked || has_unpacked_dir_suffix(&resolved) || lumencraft_format::is_unpacked_project_dir(&resolved);
             if use_unpacked {
                 ensure_unpacked_dir_if_present(&resolved, raw_path)?;
+            } else if resolved.is_dir() {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!(
+                        "output path `{raw_path}` is an existing directory; specify a `.lumencraft` archive file, a `.lumencraft.d` directory, or set `unpacked: true`"
+                    ),
+                )
+                .with_details(json!({ "path": raw_path })));
             }
             Ok((resolved, use_unpacked))
         }

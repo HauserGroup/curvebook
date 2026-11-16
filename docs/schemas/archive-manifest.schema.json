@@ -1,7 +1,9 @@
 {
   "$defs": {
     "SheetId": {
+      "description": "Non-whitespace sheet identifier (trimmed non-empty).",
       "minLength": 1,
+      "pattern": "\\S",
       "title": "SheetId",
       "type": "string"
     },
