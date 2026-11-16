@@ -679,6 +679,22 @@ fn resolve_target_coord(arch: &TableArchetype, base_col: usize, base_sub: usize,
     }
 }
 
+/// Enforce [`MAX_IMPORT_CELLS`] for a rectangular `(rows * cols * subcolumns) + (rows * extra_cols_per_row)`
+/// allocation using overflow-checked arithmetic prior to heap allocation.
+pub(crate) fn validate_cell_budget(
+    rows: usize,
+    cols: usize,
+    subcolumns: usize,
+    extra_cols_per_row: usize,
+    context: &str,
+) -> Result<(), TransformError> {
+    let per_col = rows.checked_mul(subcolumns);
+    let data_cells = per_col.and_then(|v| v.checked_mul(cols));
+    let extra_cells = rows.checked_mul(extra_cols_per_row);
+    let total = data_cells.and_then(|d| extra_cells.and_then(|e| d.checked_add(e)));
+    check_transform_cell_budget(total, context)
+}
+
 fn check_transform_cell_budget(total_cells: Option<usize>, context: &str) -> Result<(), TransformError> {
     let total = total_cells
         .ok_or_else(|| TransformError::InvalidSpec { message: format!("{context} cell allocation overflows budget cap {MAX_IMPORT_CELLS}") })?;

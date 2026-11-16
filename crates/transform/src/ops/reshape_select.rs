@@ -982,9 +982,12 @@ fn retain_columns(arch: &mut TableArchetype, selected: &[usize]) -> Result<(), T
                 .iter()
                 .filter_map(|&c| {
                     let mut var = mv.variables.get(c)?.clone();
-                    if !full_keep && matches!(var.source, VariableSource::Calculated { .. }) {
+                    if !full_keep && (matches!(var.source, VariableSource::Calculated { .. }) || var.role == VariableRole::Calculated) {
                         // Subsetting/reordering variables can drop or re-index formula inputs; snapshot evaluated cells.
                         var.source = VariableSource::Entered;
+                        var.role = VariableRole::Continuous;
+                        var.role_inferred = true;
+                        var.refresh_inferred_role();
                     }
                     Some(var)
                 })

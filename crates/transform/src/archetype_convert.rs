@@ -9,11 +9,12 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use lumencraft_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
-    MAX_DATA_SETS, MultipleVariablesTable, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode,
-    XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns,
+    MAX_DATA_SETS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole,
+    VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::error::TransformError;
+use crate::import::validate_cell_budget;
 
 /// Target table archetype supported by non-destructive table conversion (`QOL-1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
@@ -257,10 +258,10 @@ fn convert_column_to_grouped(col: &ColumnTable) -> Result<BuiltArchetype, Transf
     let mut preserved = 0_usize;
     for (c, src_ds) in col.data_sets.iter().enumerate() {
         grouped.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..subs {
                 if let Some(cell) = row_cells.get(s) {
-                    grouped.data_sets[c].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut grouped.data_sets, c, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, c, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -316,9 +317,9 @@ fn convert_grouped_single_rep_to_column(grp: &GroupedTable, cols: usize, rows: u
     let mut preserved = 0_usize;
     for (c, src_ds) in grp.data_sets.iter().enumerate() {
         out.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             if let Some(cell) = row_cells.first() {
-                out.data_sets[c].cells[r][0] = cell.clone();
+                set_dataset_cell(&mut out.data_sets, c, r, 0, cell.clone());
                 coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
                 if is_occupied(cell) {
                     preserved += 1;
@@ -352,7 +353,7 @@ fn convert_grouped_multi_rep_to_column(grp: &GroupedTable, cols: usize, rows: us
             if let Some(row_cells) = src_ds.cells.first() {
                 for s in 0..n {
                     if let Some(cell) = row_cells.get(s) {
-                        out.data_sets[c].cells[s][0] = cell.clone();
+                        set_dataset_cell(&mut out.data_sets, c, s, 0, cell.clone());
                         coord_map.insert(CellCoord::new(0, c, s), CellCoord::new(s, c, 0));
                         if is_occupied(cell) {
                             preserved += 1;
@@ -375,21 +376,31 @@ fn convert_grouped_multi_rep_to_column(grp: &GroupedTable, cols: usize, rows: us
     if let Some(total_cols) = cols.checked_mul(rows)
         && total_cols <= MAX_DATA_SETS
     {
+        let mut expanded_titles = Vec::with_capacity(total_cols);
+        for src_ds in &grp.data_sets {
+            for r in 0..rows {
+                let row_lbl = grp.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
+                let title = match row_lbl {
+                    Some(lbl) => format!("{} - {lbl}", src_ds.title),
+                    None => format!("{} - Row {}", src_ds.title, r + 1),
+                };
+                validate_title(&title)?;
+                expanded_titles.push(title);
+            }
+        }
         let mut out = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, total_cols, n)?;
         let mut coord_map = BTreeMap::new();
         let mut preserved = 0_usize;
         for (c, src_ds) in grp.data_sets.iter().enumerate() {
             for r in 0..rows {
                 let dst_col = c * rows + r;
-                let row_lbl = grp.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
-                out.data_sets[dst_col].title = match row_lbl {
-                    Some(lbl) => format!("{} - {lbl}", src_ds.title),
-                    None => format!("{} - Row {}", src_ds.title, r + 1),
-                };
+                if let Some(title) = expanded_titles.get(dst_col) {
+                    out.data_sets[dst_col].title = title.clone();
+                }
                 if let Some(row_cells) = src_ds.cells.get(r) {
                     for s in 0..n {
                         if let Some(cell) = row_cells.get(s) {
-                            out.data_sets[dst_col].cells[s][0] = cell.clone();
+                            set_dataset_cell(&mut out.data_sets, dst_col, s, 0, cell.clone());
                             coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(s, dst_col, 0));
                             if is_occupied(cell) {
                                 preserved += 1;
@@ -418,10 +429,10 @@ fn convert_grouped_multi_rep_to_column(grp: &GroupedTable, cols: usize, rows: us
     let mut dropped = 0_usize;
     for (c, src_ds) in grp.data_sets.iter().enumerate() {
         out.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for (s, cell) in row_cells.iter().enumerate() {
                 if s == 0 {
-                    out.data_sets[c].cells[r][0] = cell.clone();
+                    set_dataset_cell(&mut out.data_sets, c, r, 0, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -452,10 +463,10 @@ fn convert_grouped_parametric_to_column(grp: &GroupedTable, cols: usize, rows: u
     let mut preserved = 0_usize;
     for (c, src_ds) in grp.data_sets.iter().enumerate() {
         out.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..subs {
                 if let Some(cell) = row_cells.get(s) {
-                    out.data_sets[c].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut out.data_sets, c, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, c, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -483,10 +494,10 @@ fn convert_grouped_interval_to_column(grp: &GroupedTable, cols: usize, rows: usi
     let mut dropped = 0_usize;
     for (c, src_ds) in grp.data_sets.iter().enumerate() {
         out.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for (s, cell) in row_cells.iter().enumerate() {
                 if s == 0 {
-                    out.data_sets[c].cells[r][0] = cell.clone();
+                    set_dataset_cell(&mut out.data_sets, c, r, 0, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -524,10 +535,10 @@ fn convert_column_to_xy(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
         populate_generated_or_titled_x(&mut xy, &col.row_titles, rows);
         let mut coord_map = BTreeMap::new();
         let mut preserved = 0_usize;
-        for (r, row_cells) in col.data_sets[0].cells.iter().enumerate() {
+        for (r, row_cells) in col.data_sets[0].cells.iter().enumerate().take(rows) {
             for s in 0..subs {
                 if let Some(cell) = row_cells.get(s) {
-                    xy.data_sets[0].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut xy.data_sets, 0, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, 0, s), CellCoord::new(r, 0, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -557,17 +568,17 @@ fn convert_column_to_xy(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
     let mut warnings = Vec::new();
     let mut text_in_x = 0_usize;
 
-    for (r, row_cells) in col.data_sets[0].cells.iter().enumerate() {
+    for (r, row_cells) in col.data_sets[0].cells.iter().enumerate().take(rows) {
         for s in 0..subs {
             if let Some(cell) = row_cells.get(s) {
                 match &cell.value {
                     CellValue::Text(txt) if !txt.trim().is_empty() => {
                         text_in_x += 1;
                         dropped += 1;
-                        xy.x_cells[r][s] = Cell { value: CellValue::Empty, excluded: cell.excluded };
+                        set_x_cell(&mut xy, r, s, Cell { value: CellValue::Empty, excluded: cell.excluded });
                     }
                     _ => {
-                        xy.x_cells[r][s] = cell.clone();
+                        set_x_cell(&mut xy, r, s, cell.clone());
                         if is_occupied(cell) {
                             preserved += 1;
                         }
@@ -584,10 +595,10 @@ fn convert_column_to_xy(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
     for (c, src_ds) in col.data_sets.iter().enumerate().skip(1) {
         let dst_c = c - 1;
         xy.data_sets[dst_c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..subs {
                 if let Some(cell) = row_cells.get(s) {
-                    xy.data_sets[dst_c].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut xy.data_sets, dst_c, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -631,7 +642,7 @@ fn convert_xy_to_column(xy: &XyTable) -> Result<BuiltArchetype, TransformError> 
     if xy.data_sets.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("XY table has no Y data columns") });
     }
-    let rows = xy.row_count();
+    let rows = column_row_count(&xy.data_sets, xy.x_cells.len().max(xy.row_titles.len()));
     let y_cols = xy.data_sets.len();
 
     if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
@@ -669,9 +680,9 @@ fn convert_xy_to_column(xy: &XyTable) -> Result<BuiltArchetype, TransformError> 
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
         let dst_c = c + 1;
         col.data_sets[dst_c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             if let Some(cell) = row_cells.first() {
-                col.data_sets[dst_c].cells[r][0] = cell.clone();
+                set_dataset_cell(&mut col.data_sets, dst_c, r, 0, cell.clone());
                 coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, dst_c, 0));
                 if is_occupied(cell) {
                     preserved += 1;
@@ -696,6 +707,14 @@ fn convert_xy_replicates_to_column(xy: &XyTable, rows: usize, y_cols: usize, n: 
     if needed.is_none_or(|tot| tot > MAX_DATA_SETS) {
         return convert_xy_lossy_single_column(xy, rows, y_cols);
     }
+    let mut expanded_titles = Vec::with_capacity(y_cols * n);
+    for src_ds in &xy.data_sets {
+        for s in 0..n {
+            let title = format!("{} (Y{})", src_ds.title, s + 1);
+            validate_title(&title)?;
+            expanded_titles.push(title);
+        }
+    }
     let total_cols = 1 + y_cols * n;
     let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PairedRepeatedMeasures, SubcolumnMode::Single, total_cols, rows)?;
     col.row_titles = resized_titles(&xy.row_titles, rows);
@@ -711,11 +730,14 @@ fn convert_xy_replicates_to_column(xy: &XyTable, rows: usize, y_cols: usize, n: 
     let mut coord_map = BTreeMap::new();
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
         for s in 0..n {
-            let dst_c = 1 + c * n + s;
-            col.data_sets[dst_c].title = format!("{} (Y{})", src_ds.title, s + 1);
-            for (r, row_cells) in src_ds.cells.iter().enumerate() {
+            let title_idx = c * n + s;
+            let dst_c = 1 + title_idx;
+            if let Some(title) = expanded_titles.get(title_idx) {
+                col.data_sets[dst_c].title = title.clone();
+            }
+            for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
                 if let Some(cell) = row_cells.get(s) {
-                    col.data_sets[dst_c].cells[r][0] = cell.clone();
+                    set_dataset_cell(&mut col.data_sets, dst_c, r, 0, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -737,23 +759,36 @@ fn convert_xy_replicates_to_column(xy: &XyTable, rows: usize, y_cols: usize, n: 
 }
 
 fn convert_xy_parametric_to_column(xy: &XyTable, rows: usize, y_cols: usize) -> Result<BuiltArchetype, TransformError> {
-    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, xy.y_subcolumn_mode, 1 + y_cols, rows)?;
-    col.row_titles = resized_titles(&xy.row_titles, rows);
-    col.row_titles_expanded = xy.row_titles_expanded;
-    col.data_sets[0].title = xy.x_title.clone();
-
-    let mut preserved = 0_usize;
-    let mut dropped = 0_usize;
-    let mut warnings = Vec::new();
-    let mut schema_lossy = false;
-
     let y_subs = xy.y_subcolumn_mode.subcolumn_count();
-    match &xy.x_mode {
-        XColumnMode::Numbers { subcolumn_mode } if *subcolumn_mode == xy.y_subcolumn_mode => {
-            for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
+    if let XColumnMode::Numbers { subcolumn_mode } = &xy.x_mode
+        && *subcolumn_mode == xy.y_subcolumn_mode
+    {
+        let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, xy.y_subcolumn_mode, 1 + y_cols, rows)?;
+        col.row_titles = resized_titles(&xy.row_titles, rows);
+        col.row_titles_expanded = xy.row_titles_expanded;
+        col.data_sets[0].title = xy.x_title.clone();
+
+        let mut preserved = 0_usize;
+        for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
+            for s in 0..y_subs {
+                if let Some(cell) = x_row.get(s) {
+                    set_dataset_cell(&mut col.data_sets, 0, r, s, cell.clone());
+                    if is_occupied(cell) {
+                        preserved += 1;
+                    }
+                }
+            }
+        }
+
+        let mut coord_map = BTreeMap::new();
+        for (c, src_ds) in xy.data_sets.iter().enumerate() {
+            let dst_c = c + 1;
+            col.data_sets[dst_c].title = src_ds.title.clone();
+            for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
                 for s in 0..y_subs {
-                    if let Some(cell) = x_row.get(s) {
-                        col.data_sets[0].cells[r][s] = cell.clone();
+                    if let Some(cell) = row_cells.get(s) {
+                        set_dataset_cell(&mut col.data_sets, dst_c, r, s, cell.clone());
+                        coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, s));
                         if is_occupied(cell) {
                             preserved += 1;
                         }
@@ -761,26 +796,62 @@ fn convert_xy_parametric_to_column(xy: &XyTable, rows: usize, y_cols: usize) -> 
                 }
             }
         }
-        _ => {
-            if xy.x_mode.subcolumn_count() > 1 {
-                schema_lossy = true;
+
+        return Ok(BuiltArchetype {
+            archetype: TableArchetype::Column(col),
+            coord_map,
+            preserved_cells: preserved,
+            dropped_cells: 0,
+            warnings: Vec::new(),
+            schema_lossy: false,
+            keep_links: false,
+        });
+    }
+
+    // X does not carry matching (Mean, Spread, N) subcolumns: place only Y arms in PrecomputedError
+    // columns and promote active X coordinates into row_titles so column analyses never fail with
+    // MissingSpread on a half-populated X column.
+    let mut row_titles = Vec::with_capacity(rows);
+    let mut dropped = 0_usize;
+    for r in 0..rows {
+        let existing = xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
+        let x_occupied_at_row = if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+            0
+        } else {
+            xy.x_cells.get(r).map_or(0, |row| row.iter().filter(|c| is_occupied(c)).count())
+        };
+        if let Some(rt) = existing {
+            validate_title(rt)?;
+            row_titles.push(rt.to_owned());
+            dropped += x_occupied_at_row;
+        } else if let Some(xv) = xy_x_value_at_row(xy, r) {
+            let norm = if xv == 0.0 { 0.0 } else { xv };
+            let lbl = format!("{norm}");
+            validate_title(&lbl)?;
+            row_titles.push(lbl);
+            if !matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+                let extra_subs = xy.x_cells.get(r).map_or(0, |row| row.iter().skip(1).filter(|c| is_occupied(c)).count());
+                dropped += extra_subs;
             }
-            copy_xy_x_into_column0(xy, &mut col, rows, &mut preserved, &mut dropped, &mut warnings);
-            if xy.x_mode.subcolumn_count() <= 1 {
-                warnings.push(String::from("X values placed into Column 0 subcolumn 0 without SD/N entries"));
-            }
+        } else {
+            row_titles.push(String::new());
+            dropped += x_occupied_at_row;
         }
     }
 
+    let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::PrecomputedError, xy.y_subcolumn_mode, y_cols, rows)?;
+    col.row_titles_expanded = row_titles.iter().any(|s| !s.trim().is_empty());
+    col.row_titles = row_titles;
+
+    let mut preserved = 0_usize;
     let mut coord_map = BTreeMap::new();
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
-        let dst_c = c + 1;
-        col.data_sets[dst_c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        col.data_sets[c].title = src_ds.title.clone();
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..y_subs {
                 if let Some(cell) = row_cells.get(s) {
-                    col.data_sets[dst_c].cells[r][s] = cell.clone();
-                    coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, s));
+                    set_dataset_cell(&mut col.data_sets, c, r, s, cell.clone());
+                    coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, c, s));
                     if is_occupied(cell) {
                         preserved += 1;
                     }
@@ -789,13 +860,15 @@ fn convert_xy_parametric_to_column(xy: &XyTable, rows: usize, y_cols: usize) -> 
         }
     }
 
+    let warnings =
+        vec![String::from("XY X values moved to Column row titles (numeric X spacing dropped to preserve valid PrecomputedError Y columns)")];
     Ok(BuiltArchetype {
         archetype: TableArchetype::Column(col),
         coord_map,
         preserved_cells: preserved,
         dropped_cells: dropped,
         warnings,
-        schema_lossy,
+        schema_lossy: true,
         keep_links: false,
     })
 }
@@ -818,10 +891,10 @@ fn convert_xy_lossy_single_column(xy: &XyTable, rows: usize, y_cols: usize) -> R
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
         let dst_c = c + 1;
         col.data_sets[dst_c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for (s, cell) in row_cells.iter().enumerate() {
                 if s == 0 {
-                    col.data_sets[dst_c].cells[r][0] = cell.clone();
+                    set_dataset_cell(&mut col.data_sets, dst_c, r, 0, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, dst_c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -848,7 +921,7 @@ fn copy_xy_x_into_column0(xy: &XyTable, col: &mut ColumnTable, rows: usize, pres
     match &xy.x_mode {
         XColumnMode::GeneratedSequence { .. } => {
             for r in 0..rows {
-                col.data_sets[0].cells[r][0] = xy.x_value_at(r).map_or_else(Cell::empty, Cell::number);
+                set_dataset_cell(&mut col.data_sets, 0, r, 0, xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number));
             }
             warnings.push(String::from("Generated X sequence materialized into static Column 0 values"));
         }
@@ -857,7 +930,7 @@ fn copy_xy_x_into_column0(xy: &XyTable, col: &mut ColumnTable, rows: usize, pres
             for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
                 for (s, cell) in x_row.iter().enumerate() {
                     if s == 0 {
-                        col.data_sets[0].cells[r][0] = cell.clone();
+                        set_dataset_cell(&mut col.data_sets, 0, r, 0, cell.clone());
                         if is_occupied(cell) {
                             *preserved += 1;
                         }
@@ -899,7 +972,7 @@ fn convert_grouped_reps_to_mv(
     for r in 0..rows {
         let row_cell = grouped_row_factor_cell(grp, r);
         for (c, ds) in grp.data_sets.iter().enumerate() {
-            let col_cell = Cell::text(ds.title.clone());
+            let col_cell = Cell::text(non_empty_or(&ds.title, &default_column_label(c)));
             if let Some(row_cells) = ds.cells.get(r) {
                 for s in 0..n {
                     if let Some(cell) = row_cells.get(s)
@@ -923,7 +996,9 @@ fn convert_grouped_reps_to_mv(
     let val_col_idx = var_count - 1;
     let mut mv = MultipleVariablesTable::new(var_count, out_rows)?;
     mv.variables[0].title = row_title;
+    mv.variables[0].lock_role(VariableRole::Categorical);
     mv.variables[1].title = col_title;
+    mv.variables[1].lock_role(VariableRole::Categorical);
     if has_rep {
         mv.variables[2].title = String::from("Replicate");
     }
@@ -931,15 +1006,15 @@ fn convert_grouped_reps_to_mv(
 
     let mut coord_map = BTreeMap::new();
     for (out_r, (rf, cf, rep, val, old_coord)) in records.into_iter().enumerate() {
-        mv.variables[0].cells[out_r] = rf;
-        mv.variables[1].cells[out_r] = cf;
+        set_mv_cell(&mut mv, 0, out_r, rf);
+        set_mv_cell(&mut mv, 1, out_r, cf);
         if let Some(rep_cell) = rep {
-            mv.variables[2].cells[out_r] = rep_cell;
+            set_mv_cell(&mut mv, 2, out_r, rep_cell);
         }
-        mv.variables[val_col_idx].cells[out_r] = val;
+        set_mv_cell(&mut mv, val_col_idx, out_r, val);
         coord_map.insert(old_coord, CellCoord::new(out_r, val_col_idx, 0));
     }
-    for var in &mut mv.variables {
+    for var in mv.variables.iter_mut().skip(2) {
         var.refresh_inferred_role();
     }
 
@@ -968,7 +1043,8 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
                 for s in 0..sub_count {
                     vals.push(row_cells.get(s).cloned().unwrap_or_default());
                 }
-                row_entries.push((row_cell.clone(), Cell::text(ds.title.clone()), vals, r, c));
+                let col_label = non_empty_or(&ds.title, &default_column_label(c));
+                row_entries.push((row_cell.clone(), Cell::text(col_label), vals, r, c));
             }
         }
     }
@@ -977,7 +1053,9 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
     validate_rows(out_rows)?;
     let mut mv = MultipleVariablesTable::new(2 + sub_count, out_rows)?;
     mv.variables[0].title = row_title;
+    mv.variables[0].lock_role(VariableRole::Categorical);
     mv.variables[1].title = col_title;
+    mv.variables[1].lock_role(VariableRole::Categorical);
     for (s, lbl) in sub_labels.into_iter().enumerate() {
         mv.variables[2 + s].title = lbl;
     }
@@ -985,17 +1063,17 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
     let mut coord_map = BTreeMap::new();
     let mut preserved = 0_usize;
     for (out_r, (rf, cf, vals, old_r, old_c)) in row_entries.into_iter().enumerate() {
-        mv.variables[0].cells[out_r] = rf;
-        mv.variables[1].cells[out_r] = cf;
+        set_mv_cell(&mut mv, 0, out_r, rf);
+        set_mv_cell(&mut mv, 1, out_r, cf);
         for (s, val) in vals.into_iter().enumerate() {
             if is_occupied(&val) {
                 preserved += 1;
             }
-            mv.variables[2 + s].cells[out_r] = val;
+            set_mv_cell(&mut mv, 2 + s, out_r, val);
             coord_map.insert(CellCoord::new(old_r, old_c, s), CellCoord::new(out_r, 2 + s, 0));
         }
     }
-    for var in &mut mv.variables {
+    for var in mv.variables.iter_mut().skip(2) {
         var.refresh_inferred_role();
     }
 
@@ -1077,7 +1155,7 @@ fn convert_mv_to_grouped(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, 
             warnings.push(format!("Calculated variable `{}` evaluated/frozen to static cells", var.title));
         }
         for (r, cell) in var.cells.iter().enumerate().take(rows) {
-            grouped.data_sets[c].cells[r][0] = cell.clone();
+            set_dataset_cell(&mut grouped.data_sets, c, r, 0, cell.clone());
             coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
             if is_occupied(cell) {
                 preserved += 1;
@@ -1136,21 +1214,43 @@ fn pivot_mv_two_way_to_grouped(
     let mut row_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut col_index: BTreeMap<String, usize> = BTreeMap::new();
     let mut buckets: RepBucketMap = BTreeMap::new();
+    let mut mapped_fac_cells = 0_usize;
 
     for r in 0..rows {
-        let r_tok = mv_cell_level_token(mv.variables[row_fac_col].cells.get(r));
-        let c_tok = mv_cell_level_token(mv.variables[col_fac_col].cells.get(r));
+        let r_cell = mv.variables[row_fac_col].cells.get(r);
+        let c_cell = mv.variables[col_fac_col].cells.get(r);
+        let r_tok = mv_cell_level_token(r_cell);
+        let c_tok = mv_cell_level_token(c_cell);
         let val_cell = mv.variables[val_col].cells.get(r).cloned().unwrap_or_default();
         let (Some(rk), Some(ck)) = (r_tok, c_tok) else {
+            let mut skipped_occupied = 0_usize;
+            if r_cell.is_some_and(is_occupied) {
+                skipped_occupied += 1;
+            }
+            if c_cell.is_some_and(is_occupied) {
+                skipped_occupied += 1;
+            }
+            if let Some(rc) = rep_col
+                && mv.variables[rc].cells.get(r).is_some_and(is_occupied)
+            {
+                skipped_occupied += 1;
+            }
             if is_occupied(&val_cell) {
-                dropped_cells += 1;
+                skipped_occupied += 1;
+            }
+            if skipped_occupied > 0 {
+                dropped_cells += skipped_occupied;
                 schema_lossy = true;
             }
             continue;
         };
         let ri = intern_level(&mut row_levels, &mut row_index, rk);
         let ci = intern_level(&mut col_levels, &mut col_index, ck);
+        mapped_fac_cells += 2;
         let rep_order = rep_col.and_then(|rc| mv.variables[rc].cells.get(r).and_then(Cell::active_number));
+        if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+            mapped_fac_cells += 1;
+        }
         buckets.entry((ri, ci)).or_default().push((rep_order, r, val_cell));
     }
 
@@ -1163,36 +1263,34 @@ fn pivot_mv_two_way_to_grouped(
     validate_rows(n_rows)?;
     let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
     validate_subcolumns(max_reps)?;
+    validate_title_slice(&row_levels)?;
+    validate_title_slice(&col_levels)?;
+    validate_cell_budget(n_rows, n_cols, max_reps, 0, "MultipleVariables Grouped pivot")?;
 
     let mut grouped = GroupedTable::new(SubcolumnMode::RawReplicates(max_reps), n_cols, n_rows)?;
     grouped.row_factor_title = mv.variables[row_fac_col].title.clone();
     grouped.column_factor_title = mv.variables[col_fac_col].title.clone();
+    grouped.row_numeric_spacing = parse_numeric_row_spacing(&row_levels);
     grouped.row_titles = row_levels;
     for (ci, cl) in col_levels.iter().enumerate() {
         grouped.data_sets[ci].title = cl.clone();
     }
 
     let mut coord_map = BTreeMap::new();
-    let mut preserved = 0_usize;
+    let mut preserved = mapped_fac_cells;
     for ((ri, ci), mut entries) in buckets {
         entries.sort_by(|a, b| match (a.0, b.0) {
             (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.1.cmp(&b.1)),
             _ => a.1.cmp(&b.1),
         });
         for (s, (_, old_r, cell)) in entries.into_iter().enumerate() {
-            grouped.data_sets[ci].cells[ri][s] = cell.clone();
+            set_dataset_cell(&mut grouped.data_sets, ci, ri, s, cell.clone());
             coord_map.insert(CellCoord::new(old_r, val_col, 0), CellCoord::new(ri, ci, s));
             if is_occupied(&cell) {
                 preserved += 1;
             }
         }
     }
-    // Count preserved factor tokens in row_fac_col/col_fac_col/rep_col as represented by the structure.
-    let mut mapped_fac_cells = count_var_occupied(&mv.variables[row_fac_col], rows) + count_var_occupied(&mv.variables[col_fac_col], rows);
-    if let Some(rc) = rep_col {
-        mapped_fac_cells += count_var_occupied(&mv.variables[rc], rows);
-    }
-    preserved += mapped_fac_cells;
 
     Ok(BuiltArchetype {
         archetype: TableArchetype::Grouped(grouped),
@@ -1230,22 +1328,26 @@ fn pivot_mv_summary_to_grouped(
     let mut seen_pairs: BTreeSet<(usize, usize)> = BTreeSet::new();
 
     for r in 0..rows {
-        let r_tok = mv_cell_level_token(mv.variables[row_fac_col].cells.get(r));
-        let c_tok = mv_cell_level_token(mv.variables[col_fac_col].cells.get(r));
+        let r_cell = mv.variables[row_fac_col].cells.get(r);
+        let c_cell = mv.variables[col_fac_col].cells.get(r);
+        let r_tok = mv_cell_level_token(r_cell);
+        let c_tok = mv_cell_level_token(c_cell);
         let triplet = [
             mv.variables[summary_cols[0]].cells.get(r).cloned().unwrap_or_default(),
             mv.variables[summary_cols[1]].cells.get(r).cloned().unwrap_or_default(),
             mv.variables[summary_cols[2]].cells.get(r).cloned().unwrap_or_default(),
         ];
         let (Some(rk), Some(ck)) = (r_tok, c_tok) else {
-            dropped_cells += triplet.iter().filter(|c| is_occupied(c)).count();
+            dropped_cells += usize::from(r_cell.is_some_and(is_occupied))
+                + usize::from(c_cell.is_some_and(is_occupied))
+                + triplet.iter().filter(|c| is_occupied(c)).count();
             schema_lossy = true;
             continue;
         };
         let ri = intern_level(&mut row_levels, &mut row_index, rk);
         let ci = intern_level(&mut col_levels, &mut col_index, ck);
         if !seen_pairs.insert((ri, ci)) {
-            dropped_cells += triplet.iter().filter(|c| is_occupied(c)).count();
+            dropped_cells += 2 + triplet.iter().filter(|c| is_occupied(c)).count();
             schema_lossy = true;
             continue;
         }
@@ -1254,12 +1356,16 @@ fn pivot_mv_summary_to_grouped(
 
     validate_data_sets(col_levels.len().max(1))?;
     validate_rows(row_levels.len())?;
+    validate_title_slice(&row_levels)?;
+    validate_title_slice(&col_levels)?;
+    validate_cell_budget(row_levels.len(), col_levels.len().max(1), mode.subcolumn_count(), 0, "MultipleVariables summary Grouped pivot")?;
     let mut grouped = GroupedTable::new(mode, col_levels.len().max(1), row_levels.len())?;
     if col_levels.is_empty() {
         grouped.data_sets.clear();
     } else {
         grouped.row_factor_title = mv.variables[row_fac_col].title.clone();
         grouped.column_factor_title = mv.variables[col_fac_col].title.clone();
+        grouped.row_numeric_spacing = parse_numeric_row_spacing(&row_levels);
         grouped.row_titles = row_levels;
         for (ci, cl) in col_levels.iter().enumerate() {
             grouped.data_sets[ci].title = cl.clone();
@@ -1267,13 +1373,13 @@ fn pivot_mv_summary_to_grouped(
     }
 
     let mut coord_map = BTreeMap::new();
-    let mut preserved = count_var_occupied(&mv.variables[row_fac_col], rows) + count_var_occupied(&mv.variables[col_fac_col], rows);
+    let mut preserved = entries.len() * 2;
     for (ri, ci, old_r, triplet) in entries {
         for (s, cell) in triplet.into_iter().enumerate() {
             if is_occupied(&cell) {
                 preserved += 1;
             }
-            grouped.data_sets[ci].cells[ri][s] = cell;
+            set_dataset_cell(&mut grouped.data_sets, ci, ri, s, cell);
             coord_map.insert(CellCoord::new(old_r, summary_cols[s], 0), CellCoord::new(ri, ci, s));
         }
     }
@@ -1311,19 +1417,26 @@ fn pivot_mv_one_factor_to_grouped(
     let mut row_levels = Vec::new();
     let mut row_index = BTreeMap::new();
     let mut buckets: BTreeMap<(usize, usize), Vec<(usize, Cell)>> = BTreeMap::new();
+    let mut mapped_fac_cells = 0_usize;
 
     for r in 0..rows {
-        let Some(rk) = mv_cell_level_token(mv.variables[row_fac_col].cells.get(r)) else {
+        let r_cell = mv.variables[row_fac_col].cells.get(r);
+        let Some(rk) = mv_cell_level_token(r_cell) else {
+            let mut skipped_occupied = usize::from(r_cell.is_some_and(is_occupied));
             for &nc in num_cols {
                 if let Some(cell) = mv.variables[nc].cells.get(r)
                     && is_occupied(cell)
                 {
-                    dropped_cells += 1;
-                    schema_lossy = true;
+                    skipped_occupied += 1;
                 }
+            }
+            if skipped_occupied > 0 {
+                dropped_cells += skipped_occupied;
+                schema_lossy = true;
             }
             continue;
         };
+        mapped_fac_cells += 1;
         let ri = intern_level(&mut row_levels, &mut row_index, rk);
         for (ci, &nc) in num_cols.iter().enumerate() {
             if let Some(cell) = mv.variables[nc].cells.get(r)
@@ -1340,20 +1453,23 @@ fn pivot_mv_one_factor_to_grouped(
     validate_rows(n_rows)?;
     let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
     validate_subcolumns(max_reps)?;
+    validate_title_slice(&row_levels)?;
+    validate_cell_budget(n_rows, n_cols, max_reps, 0, "MultipleVariables one-factor Grouped pivot")?;
 
     let mut grouped = GroupedTable::new(SubcolumnMode::RawReplicates(max_reps), n_cols, n_rows)?;
     grouped.row_factor_title = mv.variables[row_fac_col].title.clone();
+    grouped.row_numeric_spacing = parse_numeric_row_spacing(&row_levels);
     grouped.row_titles = row_levels;
     for (ci, &nc) in num_cols.iter().enumerate() {
         grouped.data_sets[ci].title = mv.variables[nc].title.clone();
     }
 
     let mut coord_map = BTreeMap::new();
-    let mut preserved = count_var_occupied(&mv.variables[row_fac_col], rows);
+    let mut preserved = mapped_fac_cells;
     for ((ri, ci), entries) in buckets {
         let old_col = num_cols[ci];
         for (s, (old_r, cell)) in entries.into_iter().enumerate() {
-            grouped.data_sets[ci].cells[ri][s] = cell;
+            set_dataset_cell(&mut grouped.data_sets, ci, ri, s, cell);
             coord_map.insert(CellCoord::new(old_r, old_col, 0), CellCoord::new(ri, ci, s));
             preserved += 1;
         }
@@ -1418,7 +1534,7 @@ fn convert_xy_to_mv(xy: &XyTable) -> Result<BuiltArchetype, TransformError> {
     if xy.data_sets.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("XY table has no Y data columns") });
     }
-    let rows = xy.row_count();
+    let rows = column_row_count(&xy.data_sets, xy.x_cells.len().max(xy.row_titles.len()));
     let x_subs = xy.x_mode.subcolumn_count();
 
     if xy.y_subcolumn_mode == SubcolumnMode::Single && x_subs <= 1 {
@@ -1445,14 +1561,14 @@ fn convert_xy_single_to_mv(xy: &XyTable, rows: usize) -> Result<BuiltArchetype, 
     match &xy.x_mode {
         XColumnMode::GeneratedSequence { .. } => {
             for r in 0..rows {
-                mv.variables[0].cells[r] = xy.x_value_at(r).map_or_else(Cell::empty, Cell::number);
+                set_mv_cell(&mut mv, 0, r, xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number));
             }
             warnings.push(String::from("Generated X sequence materialized into Continuous variable column"));
         }
         XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
             for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
                 if let Some(cell) = x_row.first() {
-                    mv.variables[0].cells[r] = cell.clone();
+                    set_mv_cell(&mut mv, 0, r, cell.clone());
                     if is_occupied(cell) {
                         preserved += 1;
                     }
@@ -1467,7 +1583,7 @@ fn convert_xy_single_to_mv(xy: &XyTable, rows: usize) -> Result<BuiltArchetype, 
         mv.variables[dst_c].title = src_ds.title.clone();
         for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             if let Some(cell) = row_cells.first() {
-                mv.variables[dst_c].cells[r] = cell.clone();
+                set_mv_cell(&mut mv, dst_c, r, cell.clone());
                 coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, dst_c, 0));
                 if is_occupied(cell) {
                     preserved += 1;
@@ -1497,7 +1613,7 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
 
     for r in 0..rows {
         let x_cell = match &xy.x_mode {
-            XColumnMode::GeneratedSequence { .. } => xy.x_value_at(r).map_or_else(Cell::empty, Cell::number),
+            XColumnMode::GeneratedSequence { .. } => xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number),
             XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
                 xy.x_cells.get(r).and_then(|s| s.first()).cloned().unwrap_or_default()
             }
@@ -1544,14 +1660,14 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
     let mut coord_map = BTreeMap::new();
     let mut preserved_y = 0_usize;
     for (out_r, (xc, gc, rc, yc, old_coord)) in records.into_iter().enumerate() {
-        mv.variables[0].cells[out_r] = xc;
-        mv.variables[1].cells[out_r] = gc;
-        mv.variables[2].cells[out_r] = rc;
+        set_mv_cell(&mut mv, 0, out_r, xc);
+        set_mv_cell(&mut mv, 1, out_r, gc);
+        set_mv_cell(&mut mv, 2, out_r, rc);
         if is_occupied(&yc) {
             preserved_y += 1;
             coord_map.insert(old_coord, CellCoord::new(out_r, 3, 0));
         }
-        mv.variables[3].cells[out_r] = yc;
+        set_mv_cell(&mut mv, 3, out_r, yc);
     }
     for var in &mut mv.variables {
         var.refresh_inferred_role();
@@ -1568,50 +1684,87 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
     })
 }
 
-fn convert_xy_wide_to_mv(xy: &XyTable, rows: usize, x_subs: usize) -> Result<BuiltArchetype, TransformError> {
-    let x_var_count = if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) { 1 } else { x_subs };
-    let y_subs = xy.y_subcolumn_mode.subcolumn_count();
-    let total_vars = x_var_count + xy.data_sets.len() * y_subs;
-    validate_data_sets(total_vars)?;
-
-    let mut mv = MultipleVariablesTable::new(total_vars, rows)?;
-    mv.row_titles = resized_titles(&xy.row_titles, rows);
-    mv.row_titles_expanded = xy.row_titles_expanded;
-
-    let mut preserved = 0_usize;
+fn collect_xy_wide_mv_titles(xy: &XyTable, x_subs: usize, y_subs: usize, total_vars: usize) -> Result<Vec<String>, TransformError> {
+    let mut var_titles = Vec::with_capacity(total_vars);
+    let x_base = non_empty_or(&xy.x_title, "X");
     if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
-        mv.variables[0].title = non_empty_or(&xy.x_title, "X");
-        for r in 0..rows {
-            mv.variables[0].cells[r] = xy.x_value_at(r).map_or_else(Cell::empty, Cell::number);
-        }
+        validate_title(&x_base)?;
+        var_titles.push(x_base);
     } else {
         let x_labels = match &xy.x_mode {
             XColumnMode::Numbers { subcolumn_mode } => subcolumn_mode.subcolumn_labels(),
             _ => vec![String::from("X")],
         };
-        let x_base = non_empty_or(&xy.x_title, "X");
-        for (s, x_lbl) in x_labels.iter().enumerate().take(x_subs) {
-            mv.variables[s].title = if x_subs == 1 { x_base.clone() } else { format!("{x_base} ({x_lbl})") };
-            for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
-                if let Some(cell) = x_row.get(s) {
-                    mv.variables[s].cells[r] = cell.clone();
-                    if is_occupied(cell) {
-                        preserved += 1;
-                    }
+        for x_lbl in x_labels.iter().take(x_subs) {
+            let t = if x_subs == 1 { x_base.clone() } else { format!("{x_base} ({x_lbl})") };
+            validate_title(&t)?;
+            var_titles.push(t);
+        }
+    }
+    let y_labels = xy.y_subcolumn_mode.subcolumn_labels();
+    for src_ds in &xy.data_sets {
+        for y_lbl in y_labels.iter().take(y_subs) {
+            let t = if y_subs == 1 { src_ds.title.clone() } else { format!("{} ({y_lbl})", src_ds.title) };
+            validate_title(&t)?;
+            var_titles.push(t);
+        }
+    }
+    Ok(var_titles)
+}
+
+fn populate_xy_wide_mv_x_cells(xy: &XyTable, mv: &mut MultipleVariablesTable, rows: usize, x_subs: usize) -> usize {
+    if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) {
+        for r in 0..rows {
+            set_mv_cell(mv, 0, r, xy_x_value_at_row(xy, r).map_or_else(Cell::empty, Cell::number));
+        }
+        return 0;
+    }
+    let mut preserved = 0_usize;
+    for s in 0..x_subs {
+        for (r, x_row) in xy.x_cells.iter().enumerate().take(rows) {
+            if let Some(cell) = x_row.get(s) {
+                set_mv_cell(mv, s, r, cell.clone());
+                if is_occupied(cell) {
+                    preserved += 1;
                 }
             }
         }
     }
+    preserved
+}
 
-    let y_labels = xy.y_subcolumn_mode.subcolumn_labels();
+fn convert_xy_wide_to_mv(xy: &XyTable, rows: usize, x_subs: usize) -> Result<BuiltArchetype, TransformError> {
+    let x_var_count = if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) { 1 } else { x_subs };
+    let y_subs = xy.y_subcolumn_mode.subcolumn_count();
+    let y_vars = xy
+        .data_sets
+        .len()
+        .checked_mul(y_subs)
+        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("XY-to-MultipleVariables column count overflows") })?;
+    let total_vars = x_var_count
+        .checked_add(y_vars)
+        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("XY-to-MultipleVariables column count overflows") })?;
+    validate_data_sets(total_vars)?;
+
+    let var_titles = collect_xy_wide_mv_titles(xy, x_subs, y_subs, total_vars)?;
+    let mut mv = MultipleVariablesTable::new(total_vars, rows)?;
+    mv.row_titles = resized_titles(&xy.row_titles, rows);
+    mv.row_titles_expanded = xy.row_titles_expanded;
+    for (idx, t) in var_titles.into_iter().enumerate() {
+        if let Some(var) = mv.variables.get_mut(idx) {
+            var.title = t;
+        }
+    }
+
+    let mut preserved = populate_xy_wide_mv_x_cells(xy, &mut mv, rows, x_subs);
+
     let mut coord_map = BTreeMap::new();
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
-        for (s, y_lbl) in y_labels.iter().enumerate().take(y_subs) {
+        for s in 0..y_subs {
             let dst_c = x_var_count + c * y_subs + s;
-            mv.variables[dst_c].title = if y_subs == 1 { src_ds.title.clone() } else { format!("{} ({y_lbl})", src_ds.title) };
             for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
                 if let Some(cell) = row_cells.get(s) {
-                    mv.variables[dst_c].cells[r] = cell.clone();
+                    set_mv_cell(&mut mv, dst_c, r, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -1624,13 +1777,24 @@ fn convert_xy_wide_to_mv(xy: &XyTable, rows: usize, x_subs: usize) -> Result<Bui
         var.refresh_inferred_role();
     }
 
+    let x_sub_lossy = matches!(&xy.x_mode, XColumnMode::Numbers { subcolumn_mode } if *subcolumn_mode != SubcolumnMode::Single);
+    let y_sub_lossy = xy.y_subcolumn_mode.is_pre_summarized() || matches!(xy.y_subcolumn_mode, SubcolumnMode::RawReplicates(n) if n >= 2);
+    let schema_lossy = x_sub_lossy || y_sub_lossy;
+    let mut warnings = Vec::new();
+    if schema_lossy {
+        warnings.push(format!(
+            "XY subcolumn structure ({:?}) flattened into independent Continuous variables; summary/replicate semantics lost",
+            xy.y_subcolumn_mode
+        ));
+    }
+
     Ok(BuiltArchetype {
         archetype: TableArchetype::MultipleVariables(mv),
         coord_map,
         preserved_cells: preserved,
         dropped_cells: 0,
-        warnings: Vec::new(),
-        schema_lossy: false,
+        warnings,
+        schema_lossy,
         keep_links: false,
     })
 }
@@ -1661,10 +1825,19 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
 
     let mut row_titles = resized_titles(&mv.row_titles, rows);
     let mut used_label_col: Option<usize> = None;
+    let mut preserved_label_cells = 0_usize;
     if label_cols.len() == 1 && row_titles.iter().all(|s| s.trim().is_empty()) {
         let lc = label_cols[0];
         for (r, slot) in row_titles.iter_mut().enumerate().take(rows) {
-            *slot = mv_cell_level_token(mv.variables[lc].cells.get(r)).unwrap_or_default();
+            let cell = mv.variables[lc].cells.get(r);
+            if let Some(tok) = mv_cell_level_token(cell) {
+                validate_title(&tok)?;
+                *slot = tok;
+                preserved_label_cells += 1;
+            } else if cell.is_some_and(is_occupied) {
+                dropped_cells += 1;
+                schema_lossy = true;
+            }
         }
         used_label_col = Some(lc);
     } else {
@@ -1688,7 +1861,7 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
     xy.row_titles_expanded = xy.row_titles.iter().any(|s| !s.trim().is_empty());
 
     let mut coord_map = BTreeMap::new();
-    let mut preserved = used_label_col.map_or(0, |lc| count_var_occupied(&mv.variables[lc], rows));
+    let mut preserved = if used_label_col.is_some() { preserved_label_cells } else { 0 };
 
     if num_cols.len() == 1 {
         let yc = num_cols[0];
@@ -1696,7 +1869,9 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
         let row_titles_copy = xy.row_titles.clone();
         populate_generated_or_titled_x(&mut xy, &row_titles_copy, rows);
         for (r, cell) in mv.variables[yc].cells.iter().enumerate().take(rows) {
-            copy_mv_cell_to_xy_numeric(&mut xy.data_sets[0].cells[r][0], cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+            if let Some(slot) = xy.data_sets[0].cells.get_mut(r).and_then(|row| row.first_mut()) {
+                copy_mv_cell_to_xy_numeric(slot, cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+            }
             coord_map.insert(CellCoord::new(r, yc, 0), CellCoord::new(r, 0, 0));
         }
         warnings.push(String::from("Single numeric variable mapped to Y with sequential X coordinates"));
@@ -1704,12 +1879,16 @@ fn convert_mv_to_xy(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, Trans
         let xc = num_cols[0];
         xy.x_title = mv.variables[xc].title.clone();
         for (r, cell) in mv.variables[xc].cells.iter().enumerate().take(rows) {
-            copy_mv_cell_to_xy_numeric(&mut xy.x_cells[r][0], cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+            if let Some(slot) = xy.x_cells.get_mut(r).and_then(|row| row.first_mut()) {
+                copy_mv_cell_to_xy_numeric(slot, cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+            }
         }
         for (yi, &yc) in num_cols.iter().skip(1).enumerate() {
             xy.data_sets[yi].title = mv.variables[yc].title.clone();
             for (r, cell) in mv.variables[yc].cells.iter().enumerate().take(rows) {
-                copy_mv_cell_to_xy_numeric(&mut xy.data_sets[yi].cells[r][0], cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+                if let Some(slot) = xy.data_sets.get_mut(yi).and_then(|d| d.cells.get_mut(r)).and_then(|row| row.first_mut()) {
+                    copy_mv_cell_to_xy_numeric(slot, cell, &mut preserved, &mut dropped_cells, &mut schema_lossy);
+                }
                 coord_map.insert(CellCoord::new(r, yc, 0), CellCoord::new(r, yi, 0));
             }
         }
@@ -1764,28 +1943,47 @@ fn pivot_mv_grouped_xy(
         warnings.push(String::from("Extra numeric/label variables cannot fit in a single grouped XY pivot and will be dropped"));
     }
 
+    struct MvXyEntry {
+        rep: Option<f64>,
+        old_row: usize,
+        cell: Cell,
+        x_excluded: bool,
+    }
+
     let mut x_keys: Vec<f64> = Vec::new();
     let mut x_index: BTreeMap<u64, usize> = BTreeMap::new();
     let mut groups: Vec<String> = Vec::new();
     let mut group_index: BTreeMap<String, usize> = BTreeMap::new();
-    let mut buckets: RepBucketMap = BTreeMap::new();
-    let mut x_excluded_by_row: BTreeMap<usize, bool> = BTreeMap::new();
+    let mut buckets: BTreeMap<(usize, usize), Vec<MvXyEntry>> = BTreeMap::new();
+    let mut x_any_active: BTreeSet<usize> = BTreeSet::new();
+    let mut x_any_excluded: BTreeSet<usize> = BTreeSet::new();
+    let mut mapped_aux_cells = 0_usize;
 
     for r in 0..rows {
         let x_cell = mv.variables[x_col].cells.get(r);
-        let g_tok = mv_cell_level_token(mv.variables[group_col].cells.get(r));
+        let g_cell = mv.variables[group_col].cells.get(r);
+        let g_tok = mv_cell_level_token(g_cell);
         let y_cell = mv.variables[y_col].cells.get(r).cloned().unwrap_or_default();
 
         let x_num = x_cell.and_then(|c| c.value.finite_f64());
         let (Some(xv), Some(gk)) = (x_num, g_tok) else {
-            if let Some(xc) = x_cell
-                && is_occupied(xc)
+            let mut skipped_occupied = 0_usize;
+            if x_cell.is_some_and(is_occupied) {
+                skipped_occupied += 1;
+            }
+            if g_cell.is_some_and(is_occupied) {
+                skipped_occupied += 1;
+            }
+            if let Some(rc) = rep_col
+                && mv.variables[rc].cells.get(r).is_some_and(is_occupied)
             {
-                dropped_cells += 1;
-                schema_lossy = true;
+                skipped_occupied += 1;
             }
             if is_occupied(&y_cell) {
-                dropped_cells += 1;
+                skipped_occupied += 1;
+            }
+            if skipped_occupied > 0 {
+                dropped_cells += skipped_occupied;
                 schema_lossy = true;
             }
             continue;
@@ -1801,12 +1999,19 @@ fn pivot_mv_grouped_xy(
             x_index.insert(x_bits, idx);
             idx
         };
-        if x_cell.is_some_and(|c| c.excluded) {
-            x_excluded_by_row.entry(xi).or_insert(true);
+        let x_excluded = x_cell.is_some_and(|c| c.excluded);
+        if x_excluded {
+            x_any_excluded.insert(xi);
+        } else {
+            x_any_active.insert(xi);
         }
         let gi = intern_level(&mut groups, &mut group_index, gk);
+        mapped_aux_cells += 2;
         let rep_ord = rep_col.and_then(|rc| mv.variables[rc].cells.get(r).and_then(Cell::active_number));
-        buckets.entry((xi, gi)).or_default().push((rep_ord, r, y_cell));
+        if rep_col.is_some_and(|rc| mv.variables[rc].cells.get(r).is_some_and(is_occupied)) {
+            mapped_aux_cells += 1;
+        }
+        buckets.entry((xi, gi)).or_default().push(MvXyEntry { rep: rep_ord, old_row: r, cell: y_cell, x_excluded });
     }
 
     if groups.is_empty() || x_keys.is_empty() {
@@ -1827,34 +2032,41 @@ fn pivot_mv_grouped_xy(
     validate_rows(n_rows)?;
     let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
     validate_subcolumns(max_reps)?;
+    validate_title_slice(&groups)?;
+    validate_cell_budget(n_rows, n_cols, max_reps, 1, "MultipleVariables XY pivot")?;
     let y_mode = if max_reps == 1 { SubcolumnMode::Single } else { SubcolumnMode::RawReplicates(max_reps) };
 
     let mut xy = XyTable::new_with_x_mode(XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, y_mode, n_cols, n_rows)?;
     xy.x_title = mv.variables[x_col].title.clone();
+    let row_x_excluded = |old_x_idx: usize| x_any_excluded.contains(&old_x_idx) && !x_any_active.contains(&old_x_idx);
     for (new_r, &old_x_idx) in order.iter().enumerate() {
-        let excluded = x_excluded_by_row.get(&old_x_idx).copied().unwrap_or(false);
-        xy.x_cells[new_r][0] = Cell { value: CellValue::Number(x_keys[old_x_idx]), excluded };
+        set_x_cell(&mut xy, new_r, 0, Cell { value: CellValue::Number(x_keys[old_x_idx]), excluded: row_x_excluded(old_x_idx) });
     }
     for (gi, g_name) in groups.iter().enumerate() {
         xy.data_sets[gi].title = g_name.clone();
     }
 
     let mut coord_map = BTreeMap::new();
-    let mut preserved = count_var_occupied(&mv.variables[x_col], rows) + count_var_occupied(&mv.variables[group_col], rows);
-    if let Some(rc) = rep_col {
-        preserved += count_var_occupied(&mv.variables[rc], rows);
-    }
+    let mut preserved = mapped_aux_cells;
     for ((old_xi, gi), mut entries) in buckets {
         let dst_r = remap_x[old_xi];
-        entries.sort_by(|a, b| match (a.0, b.0) {
-            (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.1.cmp(&b.1)),
-            _ => a.1.cmp(&b.1),
+        let shared_x_excluded = row_x_excluded(old_xi);
+        entries.sort_by(|a, b| match (a.rep, b.rep) {
+            (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.old_row.cmp(&b.old_row)),
+            _ => a.old_row.cmp(&b.old_row),
         });
-        for (s, (_, old_r, cell)) in entries.into_iter().enumerate() {
+        for (s, MvXyEntry { old_row: old_r, mut cell, x_excluded, .. }) in entries.into_iter().enumerate() {
+            let y_was_excluded = cell.excluded;
+            if x_excluded && !shared_x_excluded {
+                cell.excluded = true;
+                if !y_was_excluded {
+                    coord_map.entry(CellCoord::new(old_r, x_col, 0)).or_insert(CellCoord::new(dst_r, gi, s));
+                }
+            }
             if is_occupied(&cell) {
                 preserved += 1;
             }
-            xy.data_sets[gi].cells[dst_r][s] = cell;
+            set_dataset_cell(&mut xy.data_sets, gi, dst_r, s, cell);
             coord_map.insert(CellCoord::new(old_r, y_col, 0), CellCoord::new(dst_r, gi, s));
         }
     }
@@ -1876,31 +2088,59 @@ fn convert_column_to_mv(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
     }
     let rows = column_row_count(&col.data_sets, col.row_titles.len());
     let subs = col.subcolumn_mode.subcolumn_count();
-    let total_vars = col.data_sets.len() * subs;
+    let total_vars = col
+        .data_sets
+        .len()
+        .checked_mul(subs)
+        .ok_or_else(|| TransformError::InvalidSpec { message: String::from("Column-to-MultipleVariables column count overflows") })?;
     validate_data_sets(total_vars)?;
+
+    let labels = col.subcolumn_mode.subcolumn_labels();
+    let mut var_titles = Vec::with_capacity(total_vars);
+    for src_ds in &col.data_sets {
+        for lbl in labels.iter().take(subs) {
+            let t = if subs == 1 { src_ds.title.clone() } else { format!("{} ({lbl})", src_ds.title) };
+            validate_title(&t)?;
+            var_titles.push(t);
+        }
+    }
 
     let mut mv = MultipleVariablesTable::new(total_vars, rows)?;
     mv.row_titles = resized_titles(&col.row_titles, rows);
     mv.row_titles_expanded = col.row_titles_expanded;
-    let labels = col.subcolumn_mode.subcolumn_labels();
     let mut coord_map = BTreeMap::new();
     let mut preserved = 0_usize;
 
     for (c, src_ds) in col.data_sets.iter().enumerate() {
-        for (s, lbl) in labels.iter().enumerate().take(subs) {
+        for s in 0..subs {
             let dst_c = c * subs + s;
-            mv.variables[dst_c].title = if subs == 1 { src_ds.title.clone() } else { format!("{} ({lbl})", src_ds.title) };
+            if let Some(title) = var_titles.get(dst_c)
+                && let Some(var) = mv.variables.get_mut(dst_c)
+            {
+                var.title = title.clone();
+            }
             for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
                 if let Some(cell) = row_cells.get(s) {
-                    mv.variables[dst_c].cells[r] = cell.clone();
+                    set_mv_cell(&mut mv, dst_c, r, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, dst_c, 0));
                     if is_occupied(cell) {
                         preserved += 1;
                     }
                 }
             }
-            mv.variables[dst_c].refresh_inferred_role();
+            if let Some(var) = mv.variables.get_mut(dst_c) {
+                var.refresh_inferred_role();
+            }
         }
+    }
+
+    let schema_lossy = col.subcolumn_mode.is_pre_summarized();
+    let mut warnings = Vec::new();
+    if schema_lossy {
+        warnings.push(format!(
+            "Pre-summarized {:?} subcolumns flattened into independent Continuous variables; summary moment semantics lost",
+            col.subcolumn_mode
+        ));
     }
 
     Ok(BuiltArchetype {
@@ -1908,8 +2148,8 @@ fn convert_column_to_mv(col: &ColumnTable) -> Result<BuiltArchetype, TransformEr
         coord_map,
         preserved_cells: preserved,
         dropped_cells: 0,
-        warnings: Vec::new(),
-        schema_lossy: false,
+        warnings,
+        schema_lossy,
         keep_links: false,
     })
 }
@@ -1940,7 +2180,7 @@ fn convert_mv_to_column(mv: &MultipleVariablesTable) -> Result<BuiltArchetype, T
             warnings.push(format!("Calculated variable `{}` evaluated/frozen to static cells", var.title));
         }
         for (r, cell) in var.cells.iter().enumerate().take(rows) {
-            col_tbl.data_sets[c].cells[r][0] = cell.clone();
+            set_dataset_cell(&mut col_tbl.data_sets, c, r, 0, cell.clone());
             coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
             if is_occupied(cell) {
                 preserved += 1;
@@ -1965,16 +2205,20 @@ fn unstack_mv_to_column(mv: &MultipleVariablesTable, grp_col: usize, val_col: us
     let mut buckets: Vec<Vec<(usize, Cell)>> = Vec::new();
     let mut dropped = 0_usize;
     let mut schema_lossy = false;
+    let mut mapped_grp_cells = 0_usize;
 
     for r in 0..rows {
+        let g_cell = mv.variables[grp_col].cells.get(r);
         let cell = mv.variables[val_col].cells.get(r).cloned().unwrap_or_default();
-        let Some(gk) = mv_cell_level_token(mv.variables[grp_col].cells.get(r)) else {
-            if is_occupied(&cell) {
-                dropped += 1;
+        let Some(gk) = mv_cell_level_token(g_cell) else {
+            let skipped = usize::from(g_cell.is_some_and(is_occupied)) + usize::from(is_occupied(&cell));
+            if skipped > 0 {
+                dropped += skipped;
                 schema_lossy = true;
             }
             continue;
         };
+        mapped_grp_cells += 1;
         let gi = intern_level(&mut groups, &mut group_index, gk);
         if buckets.len() <= gi {
             buckets.resize_with(gi + 1, Vec::new);
@@ -1988,17 +2232,19 @@ fn unstack_mv_to_column(mv: &MultipleVariablesTable, grp_col: usize, val_col: us
     let max_rows = buckets.iter().map(Vec::len).max().unwrap_or(0);
     validate_data_sets(groups.len())?;
     validate_rows(max_rows)?;
+    validate_title_slice(&groups)?;
+    validate_cell_budget(max_rows, groups.len(), 1, 0, "MultipleVariables Column unstack")?;
 
     let mut col_tbl = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, groups.len(), max_rows)?;
     let mut coord_map = BTreeMap::new();
-    let mut preserved = count_var_occupied(&mv.variables[grp_col], rows);
+    let mut preserved = mapped_grp_cells;
     for (ci, g_name) in groups.into_iter().enumerate() {
         col_tbl.data_sets[ci].title = g_name;
         for (dst_r, (old_r, cell)) in buckets[ci].iter().enumerate() {
             if is_occupied(cell) {
                 preserved += 1;
             }
-            col_tbl.data_sets[ci].cells[dst_r][0] = cell.clone();
+            set_dataset_cell(&mut col_tbl.data_sets, ci, dst_r, 0, cell.clone());
             coord_map.insert(CellCoord::new(*old_r, val_col, 0), CellCoord::new(dst_r, ci, 0));
         }
     }
@@ -2028,7 +2274,7 @@ fn convert_grouped_to_xy(grp: &GroupedTable) -> Result<BuiltArchetype, Transform
     let mut warnings = Vec::new();
     if let Some(spacing) = &grp.row_numeric_spacing {
         for r in 0..rows {
-            xy.x_cells[r][0] = spacing.get(r).and_then(|&v| v).filter(|v| v.is_finite()).map_or_else(Cell::empty, Cell::number);
+            set_x_cell(&mut xy, r, 0, spacing.get(r).and_then(|&v| v).filter(|v| v.is_finite()).map_or_else(Cell::empty, Cell::number));
         }
     } else {
         populate_generated_or_titled_x(&mut xy, &grp.row_titles, rows);
@@ -2040,10 +2286,10 @@ fn convert_grouped_to_xy(grp: &GroupedTable) -> Result<BuiltArchetype, Transform
     let mut preserved = 0_usize;
     for (c, src_ds) in grp.data_sets.iter().enumerate() {
         xy.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..subs {
                 if let Some(cell) = row_cells.get(s) {
-                    xy.data_sets[c].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut xy.data_sets, c, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, c, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -2068,11 +2314,9 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
     if xy.data_sets.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("XY table has no Y data columns") });
     }
-    let rows = xy.row_count();
+    let rows = column_row_count(&xy.data_sets, xy.x_cells.len().max(xy.row_titles.len()));
     let cols = xy.data_sets.len();
     let target_mode = if xy.y_subcolumn_mode == SubcolumnMode::Single { SubcolumnMode::RawReplicates(1) } else { xy.y_subcolumn_mode };
-    let mut grouped = GroupedTable::new(target_mode, cols, rows)?;
-    grouped.row_factor_title = non_empty_or(&xy.x_title, "Row Factor");
 
     let mut spacing = Vec::with_capacity(rows);
     let mut titles = Vec::with_capacity(rows);
@@ -2082,7 +2326,7 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
     let mut schema_lossy = false;
 
     for r in 0..rows {
-        let x_val = xy.x_value_at(r);
+        let x_val = xy_x_value_at_row(xy, r);
         spacing.push(x_val);
         let rt = xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
         let lbl = match (rt, x_val) {
@@ -2090,8 +2334,12 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
             (None, Some(v)) => format!("{v}"),
             (None, None) => String::new(),
         };
+        validate_title(&lbl)?;
         titles.push(lbl);
     }
+
+    let mut grouped = GroupedTable::new(target_mode, cols, rows)?;
+    grouped.row_factor_title = non_empty_or(&xy.x_title, "Row Factor");
     grouped.row_titles = titles;
     grouped.row_numeric_spacing = Some(spacing);
 
@@ -2123,10 +2371,10 @@ fn convert_xy_to_grouped(xy: &XyTable) -> Result<BuiltArchetype, TransformError>
     let mut coord_map = BTreeMap::new();
     for (c, src_ds) in xy.data_sets.iter().enumerate() {
         grouped.data_sets[c].title = src_ds.title.clone();
-        for (r, row_cells) in src_ds.cells.iter().enumerate() {
+        for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             for s in 0..y_subs {
                 if let Some(cell) = row_cells.get(s) {
-                    grouped.data_sets[c].cells[r][s] = cell.clone();
+                    set_dataset_cell(&mut grouped.data_sets, c, r, s, cell.clone());
                     coord_map.insert(CellCoord::new(r, c, s), CellCoord::new(r, c, s));
                     if is_occupied(cell) {
                         preserved += 1;
@@ -2192,7 +2440,7 @@ fn build_contingency_from_datasets(
         cont.data_sets[c].title = src_ds.title.clone();
         for (r, row_cells) in src_ds.cells.iter().enumerate().take(rows) {
             if let Some(cell) = row_cells.first() {
-                cont.data_sets[c].cells[r][0] = cell.clone();
+                set_dataset_cell(&mut cont.data_sets, c, r, 0, cell.clone());
                 coord_map.insert(CellCoord::new(r, c, 0), CellCoord::new(r, c, 0));
                 if is_occupied(cell) {
                     preserved += 1;
@@ -2230,7 +2478,7 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
     if xy.data_sets.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("XY table has no Y data columns") });
     }
-    let rows = xy.row_count();
+    let rows = column_row_count(&xy.data_sets, xy.x_cells.len().max(xy.row_titles.len()));
     let mut row_titles = Vec::with_capacity(rows);
     let mut dropped = 0_usize;
     let mut schema_lossy = false;
@@ -2239,7 +2487,7 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
 
     for r in 0..rows {
         let explicit = xy.row_titles.get(r).map(|s| s.trim()).filter(|s| !s.is_empty());
-        let x_val = xy.x_value_at(r);
+        let x_val = xy_x_value_at_row(xy, r);
         let lbl = match (explicit, x_val) {
             (Some(s), _) => s.to_owned(),
             (None, Some(v)) => {
@@ -2248,6 +2496,7 @@ fn convert_xy_to_contingency(xy: &XyTable) -> Result<BuiltArchetype, TransformEr
             }
             (None, None) => String::new(),
         };
+        validate_title(&lbl)?;
         row_titles.push(lbl);
     }
 
@@ -2318,15 +2567,24 @@ fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchety
 
     let mut cont = ContingencyTable::new(data_indices.len(), rows)?;
     let mut preserved = 0_usize;
+    let mut dropped_cells = 0_usize;
+    let mut schema_lossy = false;
     let mut warnings = Vec::new();
     let mut coord_map = BTreeMap::new();
 
     if let Some(lc) = label_col {
         cont.row_factor_title = non_empty_or(&mv.variables[lc].title, "Outcome / Exposure");
         for (r, slot) in cont.row_titles.iter_mut().enumerate().take(rows) {
-            *slot = mv_cell_level_token(mv.variables[lc].cells.get(r)).unwrap_or_default();
+            let cell = mv.variables[lc].cells.get(r);
+            if let Some(tok) = mv_cell_level_token(cell) {
+                validate_title(&tok)?;
+                *slot = tok;
+                preserved += 1;
+            } else if cell.is_some_and(is_occupied) {
+                dropped_cells += 1;
+                schema_lossy = true;
+            }
         }
-        preserved += count_var_occupied(&mv.variables[lc], rows);
     } else {
         cont.row_titles = resized_titles(&mv.row_titles, rows);
     }
@@ -2338,7 +2596,7 @@ fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchety
             warnings.push(format!("Calculated variable `{}` evaluated/frozen to static cells", var.title));
         }
         for (r, cell) in var.cells.iter().enumerate().take(rows) {
-            cont.data_sets[dst_c].cells[r][0] = cell.clone();
+            set_dataset_cell(&mut cont.data_sets, dst_c, r, 0, cell.clone());
             coord_map.insert(CellCoord::new(r, src_c, 0), CellCoord::new(r, dst_c, 0));
             if is_occupied(cell) {
                 preserved += 1;
@@ -2352,9 +2610,9 @@ fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchety
         archetype: TableArchetype::Contingency(cont),
         coord_map,
         preserved_cells: preserved,
-        dropped_cells: 0,
+        dropped_cells,
         warnings,
-        schema_lossy: false,
+        schema_lossy,
         keep_links: false,
     })
 }
@@ -2443,6 +2701,9 @@ fn crosstab_mv_to_contingency(
     }
     validate_rows(row_levels.len())?;
     validate_data_sets(col_levels.len())?;
+    validate_title_slice(&row_levels)?;
+    validate_title_slice(&col_levels)?;
+    validate_cell_budget(row_levels.len(), col_levels.len(), 1, 0, "MultipleVariables Contingency crosstab")?;
 
     let mut cont = ContingencyTable::new(col_levels.len(), row_levels.len())?;
     cont.row_factor_title = non_empty_or(&mv.variables[row_fac_col].title, "Outcome / Exposure");
@@ -2456,7 +2717,7 @@ fn crosstab_mv_to_contingency(
             let val = counts.get(&(ri, ci)).copied().unwrap_or(0);
             #[allow(clippy::cast_precision_loss)]
             {
-                cont.data_sets[ci].cells[ri][0] = Cell::number(val as f64);
+                set_dataset_cell(&mut cont.data_sets, ci, ri, 0, Cell::number(val as f64));
             }
             preserved += 1;
         }
@@ -2481,13 +2742,19 @@ fn count_var_occupied(var: &VariableColumn, rows: usize) -> usize {
 
 fn mv_cell_level_token(cell: Option<&Cell>) -> Option<String> {
     let cell = cell?;
+    if cell.excluded {
+        return None;
+    }
     match &cell.value {
         CellValue::Empty => None,
         CellValue::Text(s) => {
             let trimmed = s.trim();
             (!trimmed.is_empty()).then(|| trimmed.to_owned())
         }
-        CellValue::Number(v) if v.is_finite() => Some(format!("{v}")),
+        CellValue::Number(v) if v.is_finite() => {
+            let norm = if *v == 0.0 { 0.0 } else { *v };
+            Some(format!("{norm}"))
+        }
         CellValue::Number(_) => None,
     }
 }
@@ -2516,8 +2783,55 @@ fn non_empty_or(text: &str, fallback: &str) -> String {
     if trimmed.is_empty() { fallback.to_owned() } else { trimmed.to_owned() }
 }
 
-// Keep unused-import-free cleanly when default_column_label isn't referenced directly.
-#[allow(dead_code)]
-fn _fallback_label(idx: usize) -> String {
-    default_column_label(idx)
+fn set_dataset_cell(data_sets: &mut [DataSetColumn], col: usize, row: usize, subcol: usize, cell: Cell) {
+    if let Some(slot) = data_sets.get_mut(col).and_then(|ds| ds.cells.get_mut(row)).and_then(|r| r.get_mut(subcol)) {
+        *slot = cell;
+    }
+}
+
+fn set_mv_cell(mv: &mut MultipleVariablesTable, col: usize, row: usize, cell: Cell) {
+    if let Some(slot) = mv.variables.get_mut(col).and_then(|v| v.cells.get_mut(row)) {
+        *slot = cell;
+    }
+}
+
+fn set_x_cell(xy: &mut XyTable, row: usize, subcol: usize, cell: Cell) {
+    if let Some(slot) = xy.x_cells.get_mut(row).and_then(|r| r.get_mut(subcol)) {
+        *slot = cell;
+    }
+}
+
+#[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+fn xy_x_value_at_row(xy: &XyTable, row: usize) -> Option<f64> {
+    match &xy.x_mode {
+        XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
+            xy.x_cells.get(row).and_then(|subs| subs.first()).and_then(Cell::active_number)
+        }
+        XColumnMode::GeneratedSequence { start, step, progression } => {
+            let val = match progression {
+                SequenceProgression::Arithmetic => *start + (row as f64) * *step,
+                SequenceProgression::Geometric => *start * step.powi(row.min(i32::MAX as usize) as i32),
+            };
+            val.is_finite().then_some(val)
+        }
+    }
+}
+
+fn parse_numeric_row_spacing(levels: &[String]) -> Option<Vec<Option<f64>>> {
+    if levels.is_empty() {
+        return None;
+    }
+    let mut parsed = Vec::with_capacity(levels.len());
+    for lbl in levels {
+        let num = lbl.trim().parse::<f64>().ok().filter(|v| v.is_finite())?;
+        parsed.push(Some(if num == 0.0 { 0.0 } else { num }));
+    }
+    Some(parsed)
+}
+
+fn validate_title_slice(titles: &[String]) -> Result<(), TransformError> {
+    for t in titles {
+        validate_title(t)?;
+    }
+    Ok(())
 }

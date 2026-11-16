@@ -1,16 +1,24 @@
 //! Seeded experimental subject randomization, uniform/stratified row sampling, and probability
 //! distribution column simulation (`R9.14` / `QOL-14`, `docs/calculators-and-quick-stats.md` §4).
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 
 use lumencraft_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, DataSheet, DocError, MultipleVariablesTable, SheetId,
     TableArchetype, VariableRole, validate_data_sets, validate_rows, validate_title,
 };
-use lumencraft_math::{DeterministicRng, special::ln_choose};
+use lumencraft_math::{
+    DeterministicRng,
+    special::{deviance_bd0, stirling_err},
+};
 
 use crate::error::TransformError;
+use crate::import::validate_cell_budget;
 use crate::ops::reshape_select::retain_rows;
+
+/// Largest exact-integer `f64` trial count (`2^53`) permitted for [`SimulatedDistribution::Binomial`].
+const MAX_BINOMIAL_TRIALS: u64 = 1_u64 << 53;
+const HALF_LN_2PI: f64 = 0.918_938_533_204_672_7;
 
 const fn default_group_weight() -> usize {
     1
@@ -160,11 +168,11 @@ pub fn randomize_subjects_to_groups(config: &SubjectRandomizationConfig) -> Resu
         let Some(group) = config.groups.get(*group_idx) else {
             continue;
         };
-        set_mv_cell(&mut mv, 0, r, Cell::text(subject_id.clone()));
+        set_mv_cell(&mut mv, 0, r, Cell::text(subject_id.trim()));
         set_mv_cell(&mut mv, 1, r, Cell::number((r + 1) as f64));
         set_mv_cell(&mut mv, 2, r, Cell::number(*block_idx as f64));
         set_mv_cell(&mut mv, 3, r, Cell::number(*block_size as f64));
-        set_mv_cell(&mut mv, 4, r, Cell::text(group.label.clone()));
+        set_mv_cell(&mut mv, 4, r, Cell::text(group.label.trim()));
     }
 
     let data_sheet = DataSheet::new(config.sheet_id.as_str(), config.title.as_str(), TableArchetype::MultipleVariables(mv))?;
@@ -245,20 +253,16 @@ pub fn simulate_distribution_columns(config: &DistributionSimulationConfig) -> R
     validate_simulation_config(config)?;
 
     let mut master_rng = DeterministicRng::from_seed(config.seed);
-    let mut col_values: Vec<Vec<f64>> = Vec::with_capacity(config.columns.len());
-    for col in &config.columns {
-        let col_seed = master_rng.next_u64();
-        let mut col_rng = DeterministicRng::from_seed(col_seed);
-        col_values.push(sample_distribution_column(&mut col_rng, config.n_rows, col.distribution)?);
-    }
-
     let archetype = if config.use_multiple_variables {
         let mut mv = MultipleVariablesTable::new(config.columns.len(), config.n_rows)?;
-        for (c, (spec, vals)) in config.columns.iter().zip(col_values.iter()).enumerate() {
+        for (c, spec) in config.columns.iter().enumerate() {
+            let col_seed = master_rng.next_u64();
+            let mut col_rng = DeterministicRng::from_seed(col_seed);
             if let Some(var) = mv.variables.get_mut(c) {
                 var.title = spec.name.clone();
                 var.lock_role(VariableRole::Continuous);
-                for (r, &v) in vals.iter().enumerate() {
+                for r in 0..config.n_rows {
+                    let v = sample_distribution_value(&mut col_rng, spec.distribution)?;
                     if let Some(cell) = var.cells.get_mut(r) {
                         *cell = Cell::number(v);
                     }
@@ -268,10 +272,13 @@ pub fn simulate_distribution_columns(config: &DistributionSimulationConfig) -> R
         TableArchetype::MultipleVariables(mv)
     } else {
         let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, config.columns.len(), config.n_rows)?;
-        for (c, (spec, vals)) in config.columns.iter().zip(col_values.iter()).enumerate() {
+        for (c, spec) in config.columns.iter().enumerate() {
+            let col_seed = master_rng.next_u64();
+            let mut col_rng = DeterministicRng::from_seed(col_seed);
             if let Some(ds) = table.data_sets.get_mut(c) {
                 ds.title = spec.name.clone();
-                for (r, &v) in vals.iter().enumerate() {
+                for r in 0..config.n_rows {
+                    let v = sample_distribution_value(&mut col_rng, spec.distribution)?;
                     if let Some(cell) = ds.cells.get_mut(r).and_then(|row| row.get_mut(0)) {
                         *cell = Cell::number(v);
                     }
@@ -299,23 +306,33 @@ fn validate_randomization_config(config: &SubjectRandomizationConfig) -> Result<
         return Err(TransformError::InvalidSpec { message: String::from("subject_ids must not be empty") });
     }
     validate_rows(config.subject_ids.len())?;
+    let mut seen_subjects = BTreeSet::new();
     for (idx, sid) in config.subject_ids.iter().enumerate() {
-        if sid.trim().is_empty() {
+        let trimmed = sid.trim();
+        if trimmed.is_empty() {
             return Err(TransformError::InvalidSpec { message: format!("subject_ids[{idx}] must not be blank") });
         }
         validate_title(sid)?;
+        if !seen_subjects.insert(trimmed) {
+            return Err(TransformError::InvalidSpec { message: format!("duplicate subject_id `{trimmed}` at subject_ids[{idx}]") });
+        }
     }
     if config.groups.is_empty() {
         return Err(TransformError::InvalidSpec { message: String::from("groups must not be empty") });
     }
+    let mut seen_groups = BTreeSet::new();
     let mut sum_weights = 0_usize;
     for (idx, g) in config.groups.iter().enumerate() {
-        if g.label.trim().is_empty() {
+        let trimmed = g.label.trim();
+        if trimmed.is_empty() {
             return Err(TransformError::InvalidSpec { message: format!("groups[{idx}].label must not be blank") });
         }
         validate_title(&g.label)?;
+        if !seen_groups.insert(trimmed) {
+            return Err(TransformError::InvalidSpec { message: format!("duplicate group label `{trimmed}` at groups[{idx}].label") });
+        }
         if g.weight == 0 {
-            return Err(TransformError::InvalidSpec { message: format!("groups[{idx}] (`{}`) weight must be >= 1", g.label) });
+            return Err(TransformError::InvalidSpec { message: format!("groups[{idx}] (`{trimmed}`) weight must be >= 1") });
         }
         sum_weights = sum_weights
             .checked_add(g.weight)
@@ -433,40 +450,36 @@ fn hamilton_apportion(total: usize, weights: &[usize]) -> Vec<usize> {
     alloc
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-enum StratumKey {
-    Value(String),
-    Missing,
-}
-
-fn extract_stratum_key(arch: &TableArchetype, row: usize, col: usize) -> StratumKey {
-    let Some(cell) = arch.data_cell(CellCoord::new(row, col, 0)) else {
-        return StratumKey::Missing;
-    };
+fn extract_active_stratum_key(arch: &TableArchetype, row: usize, col: usize) -> Option<String> {
+    let cell = arch.data_cell(CellCoord::new(row, col, 0))?;
     if cell.excluded {
-        return StratumKey::Missing;
+        return None;
     }
     match &cell.value {
-        CellValue::Empty => StratumKey::Missing,
+        CellValue::Empty => None,
         CellValue::Text(s) => {
             let trimmed = s.trim();
-            if trimmed.is_empty() { StratumKey::Missing } else { StratumKey::Value(trimmed.to_owned()) }
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
         }
         CellValue::Number(v) if v.is_finite() => {
             let normalized = if *v == 0.0 { 0.0 } else { *v };
-            StratumKey::Value(format!("{normalized}"))
+            Some(format!("{normalized}"))
         }
-        CellValue::Number(_) => StratumKey::Missing,
+        CellValue::Number(_) => None,
     }
 }
 
 fn sample_stratified_indices(source: &DataSheet, col_idx: usize, config: &RowSampleConfig) -> Result<Vec<usize>, TransformError> {
     let row_count = source.archetype.row_count();
     let mut strata: Vec<Vec<usize>> = Vec::new();
-    let mut key_to_stratum: HashMap<StratumKey, usize> = HashMap::new();
+    let mut key_to_stratum: HashMap<String, usize> = HashMap::new();
+    let mut eligible_rows = 0_usize;
 
     for r in 0..row_count {
-        let key = extract_stratum_key(&source.archetype, r, col_idx);
+        let Some(key) = extract_active_stratum_key(&source.archetype, r, col_idx) else {
+            continue;
+        };
+        eligible_rows += 1;
         if let Some(&s_idx) = key_to_stratum.get(&key) {
             if let Some(bucket) = strata.get_mut(s_idx) {
                 bucket.push(r);
@@ -476,6 +489,20 @@ fn sample_stratified_indices(source: &DataSheet, col_idx: usize, config: &RowSam
             key_to_stratum.insert(key, s_idx);
             strata.push(vec![r]);
         }
+    }
+
+    if eligible_rows == 0 {
+        return Err(TransformError::InvalidSpec {
+            message: format!("stratify_column {col_idx} contains no active non-empty, non-excluded stratum values"),
+        });
+    }
+    if config.sample_size > eligible_rows {
+        return Err(TransformError::InvalidSpec {
+            message: format!(
+                "random sample_size ({}) exceeds active stratified row count ({eligible_rows}) in stratify_column {col_idx}",
+                config.sample_size
+            ),
+        });
     }
 
     let sizes: Vec<usize> = strata.iter().map(Vec::len).collect();
@@ -618,6 +645,7 @@ fn validate_simulation_config(config: &DistributionSimulationConfig) -> Result<(
         return Err(TransformError::InvalidSpec { message: String::from("distribution simulation columns must not be empty") });
     }
     validate_data_sets(config.columns.len())?;
+    validate_cell_budget(config.n_rows, config.columns.len(), 1, 0, "distribution simulation")?;
 
     for (idx, col) in config.columns.iter().enumerate() {
         validate_title(&col.name)?;
@@ -649,7 +677,12 @@ fn validate_distribution(col_idx: usize, dist: SimulatedDistribution) -> Result<
                 });
             }
         }
-        SimulatedDistribution::Binomial { p, .. } => {
+        SimulatedDistribution::Binomial { trials, p } => {
+            if trials > MAX_BINOMIAL_TRIALS {
+                return Err(TransformError::InvalidSpec {
+                    message: format!("column {col_idx} Binomial trials ({trials}) exceeds exact f64 integer bound {MAX_BINOMIAL_TRIALS}"),
+                });
+            }
             if !p.is_finite() || !(0.0..=1.0).contains(&p) {
                 return Err(TransformError::InvalidSpec { message: format!("column {col_idx} Binomial probability p must lie in [0, 1], got {p}") });
             }
@@ -671,40 +704,40 @@ fn validate_distribution(col_idx: usize, dist: SimulatedDistribution) -> Result<
 }
 
 #[allow(clippy::cast_precision_loss)]
-fn sample_distribution_column(rng: &mut DeterministicRng, n_rows: usize, dist: SimulatedDistribution) -> Result<Vec<f64>, TransformError> {
-    let mut out = Vec::with_capacity(n_rows);
-    for _ in 0..n_rows {
-        let val = match dist {
-            SimulatedDistribution::Uniform { min, max } => {
-                let u = rng.next_f64();
-                (1.0 - u) * min + u * max
+fn sample_distribution_value(rng: &mut DeterministicRng, dist: SimulatedDistribution) -> Result<f64, TransformError> {
+    match dist {
+        SimulatedDistribution::Uniform { min, max } => {
+            let u = rng.next_f64();
+            Ok((1.0 - u) * min + u * max)
+        }
+        SimulatedDistribution::Gaussian { mean, sd } => {
+            if sd == 0.0 {
+                Ok(mean)
+            } else {
+                Ok(rng.normal(mean, sd)?)
             }
-            SimulatedDistribution::Gaussian { mean, sd } => {
-                if sd == 0.0 {
-                    mean
-                } else {
-                    rng.normal(mean, sd)?
-                }
+        }
+        SimulatedDistribution::LogNormal { mean_log, sd_log } => {
+            let z = if sd_log == 0.0 { mean_log } else { rng.normal(mean_log, sd_log)? };
+            let exp_z = z.exp();
+            if !exp_z.is_finite() {
+                return Err(TransformError::EvalError { message: format!("LogNormal sample exp({z}) overflowed finite f64 range") });
             }
-            SimulatedDistribution::LogNormal { mean_log, sd_log } => {
-                let z = if sd_log == 0.0 { mean_log } else { rng.normal(mean_log, sd_log)? };
-                let exp_z = z.exp();
-                if !exp_z.is_finite() {
-                    return Err(TransformError::EvalError { message: format!("LogNormal sample exp({z}) overflowed finite f64 range") });
-                }
-                exp_z
-            }
-            SimulatedDistribution::Binomial { trials, p } => sample_binomial(rng, trials, p)? as f64,
-            SimulatedDistribution::Poisson { lambda } => rng.poisson(lambda)? as f64,
-            SimulatedDistribution::Exponential { rate } => -rng.next_open_f64().ln() / rate,
-        };
-        out.push(val);
+            Ok(exp_z)
+        }
+        SimulatedDistribution::Binomial { trials, p } => Ok(sample_binomial(rng, trials, p)? as f64),
+        SimulatedDistribution::Poisson { lambda } => Ok(rng.poisson(lambda)? as f64),
+        SimulatedDistribution::Exponential { rate } => Ok(-rng.next_open_f64().ln() / rate),
     }
-    Ok(out)
 }
 
 #[allow(clippy::cast_precision_loss)]
 fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u64, TransformError> {
+    if trials > MAX_BINOMIAL_TRIALS {
+        return Err(TransformError::InvalidSpec {
+            message: format!("Binomial trials ({trials}) exceeds exact f64 integer bound {MAX_BINOMIAL_TRIALS}"),
+        });
+    }
     if trials == 0 || p == 0.0 {
         return Ok(0);
     }
@@ -728,7 +761,7 @@ fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u6
     } else if (trials as f64) * q < 10.0 {
         sample_binomial_geo(rng, trials, q)
     } else {
-        sample_binomial_btrs(rng, trials, q)?
+        sample_binomial_btrs(rng, trials, q)
     };
 
     Ok(if flip { trials - drawn } else { drawn })
@@ -737,6 +770,9 @@ fn sample_binomial(rng: &mut DeterministicRng, trials: u64, p: f64) -> Result<u6
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn sample_binomial_geo(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
     let ln_1_q = (-q).ln_1p();
+    if !ln_1_q.is_finite() || ln_1_q >= 0.0 {
+        return 0;
+    }
     let mut sum = 0_u64;
     let mut k = 0_u64;
     loop {
@@ -758,15 +794,15 @@ fn sample_binomial_geo(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
 
 // Hörmann (1993) BTRS transformed rejection for binomial with n * q >= 10, q <= 0.5.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-fn sample_binomial_btrs(rng: &mut DeterministicRng, trials: u64, q: f64) -> Result<u64, TransformError> {
+fn sample_binomial_btrs(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
     let n = trials as f64;
     let s = (n * q * (1.0 - q)).sqrt();
     let b = 1.15 + 2.53 * s;
     let a = -0.0873 + 0.0248 * b + 0.01 * q;
     let c = n * q + 0.5;
     let alpha = (2.83 + 5.1 / b) * s;
-    let mode = (((n + 1.0) * q).floor() as u64).min(trials);
-    let ln_pm = ln_binomial_pmf(trials, mode, q)?;
+    let mode = ((n * q + q).floor() as u64).min(trials);
+    let ln_pm = ln_binomial_pmf(trials, mode, q);
 
     for _ in 0..10_000 {
         let u = rng.next_open_f64() - 0.5;
@@ -781,20 +817,31 @@ fn sample_binomial_btrs(rng: &mut DeterministicRng, trials: u64, q: f64) -> Resu
             continue;
         }
         let lhs = (v * alpha / (a / (us * us) + b)).ln();
-        let rhs = ln_binomial_pmf(trials, k, q)? - ln_pm;
+        let rhs = ln_binomial_pmf(trials, k, q) - ln_pm;
         if lhs <= rhs {
-            return Ok(k);
+            return k;
         }
     }
-    Ok(mode)
+    mode
 }
 
+/// Evaluate `ln C(n, k) q^k (1 - q)^(n - k)` via Loader's saddlepoint deviance without
+/// subtracting `O(n)` log-factorial and log-probability terms.
 #[allow(clippy::cast_precision_loss)]
-fn ln_binomial_pmf(trials: u64, k: u64, q: f64) -> Result<f64, TransformError> {
-    let lc = ln_choose(trials, k)?;
-    let term_q = if k == 0 { 0.0 } else { (k as f64) * q.ln() };
-    let term_1_q = if k == trials { 0.0 } else { ((trials - k) as f64) * (-q).ln_1p() };
-    Ok(lc + term_q + term_1_q)
+fn ln_binomial_pmf(trials: u64, k: u64, q: f64) -> f64 {
+    let nf = trials as f64;
+    if k == 0 {
+        return nf * (-q).ln_1p();
+    }
+    if k == trials {
+        return nf * q.ln();
+    }
+    let kf = k as f64;
+    let mf = (trials - k) as f64;
+    let main = -HALF_LN_2PI + 0.5 * (nf / (kf * mf)).ln();
+    let corr = stirling_err(nf) - stirling_err(kf) - stirling_err(mf);
+    let dev = deviance_bd0(kf, nf * q) + deviance_bd0(mf, nf * (1.0 - q));
+    main + corr - dev
 }
 
 #[cfg(test)]

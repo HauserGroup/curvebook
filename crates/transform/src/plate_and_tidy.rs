@@ -17,6 +17,10 @@ use serde::{Deserialize, Serialize};
 
 use crate::archetype_convert::TargetArchetypeKind;
 use crate::error::TransformError;
+use crate::import::validate_cell_budget;
+
+const MAX_PLATE_WELLS: usize = PlateGeometry::Wells384.well_count();
+const MAX_LCTEMPLATE_JSON_BYTES: usize = 4 * 1024 * 1024;
 
 /// Standard SBS microplate grid geometries supported by `QOL-2`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
@@ -99,17 +103,51 @@ pub struct PlateMapTemplate {
     pub name: String,
     pub geometry: PlateGeometry,
     pub x_title: String,
+    #[serde(deserialize_with = "deserialize_bounded_wells")]
     pub wells: Vec<PlateWellRole>,
+}
+
+fn deserialize_bounded_wells<'de, D>(deserializer: D) -> Result<Vec<PlateWellRole>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    struct BoundedWellsVisitor;
+    impl<'de> Visitor<'de> for BoundedWellsVisitor {
+        type Value = Vec<PlateWellRole>;
+
+        fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "a sequence of at most {MAX_PLATE_WELLS} plate well roles")
+        }
+
+        fn visit_seq<A>(self, mut seq: A) -> Result<Self::Value, A::Error>
+        where
+            A: SeqAccess<'de>,
+        {
+            let cap = seq.size_hint().unwrap_or(0).min(MAX_PLATE_WELLS);
+            let mut out = Vec::with_capacity(cap);
+            while let Some(role) = seq.next_element::<PlateWellRole>()? {
+                if out.len() >= MAX_PLATE_WELLS {
+                    return Err(de::Error::custom(format!("plate template `wells` exceeds maximum length {MAX_PLATE_WELLS}")));
+                }
+                out.push(role);
+            }
+            Ok(out)
+        }
+    }
+    deserializer.deserialize_seq(BoundedWellsVisitor)
 }
 
 impl PlateMapTemplate {
     /// Create a plate map template initialized with [`PlateWellRole::Excluded`] in every well.
     pub fn new(name: impl Into<String>, geometry: PlateGeometry, x_title: impl Into<String>) -> Result<Self, TransformError> {
         let name = name.into();
+        let x_title = x_title.into();
         if name.trim().is_empty() {
             return Err(TransformError::InvalidSpec { message: String::from("plate template name cannot be empty") });
         }
-        Ok(Self { name, geometry, x_title: x_title.into(), wells: vec![PlateWellRole::Excluded; geometry.well_count()] })
+        validate_title(&name)?;
+        validate_title(&x_title)?;
+        Ok(Self { name, geometry, x_title, wells: vec![PlateWellRole::Excluded; geometry.well_count()] })
     }
 
     /// Construct a plate template from an explicit row-major list of well roles.
@@ -149,8 +187,13 @@ impl PlateMapTemplate {
         self.wells.get(idx).ok_or_else(|| TransformError::InvalidSpec { message: format!("template well index {idx} missing") })
     }
 
-    /// Validate well count and all finite treatment parameters.
+    /// Validate template titles, well count, and all finite treatment parameters.
     pub fn validate(&self) -> Result<(), TransformError> {
+        if self.name.trim().is_empty() {
+            return Err(TransformError::InvalidSpec { message: String::from("plate template name cannot be empty") });
+        }
+        validate_title(&self.name)?;
+        validate_title(&self.x_title)?;
         let expected = self.geometry.well_count();
         if self.wells.len() != expected {
             return Err(TransformError::InvalidSpec { message: format!("plate template has {} well(s), expected {expected}", self.wells.len()) });
@@ -169,6 +212,11 @@ impl PlateMapTemplate {
 
     /// Parse a `.lctemplate` JSON string back into a validated [`PlateMapTemplate`].
     pub fn from_lctemplate_json(json: &str) -> Result<Self, TransformError> {
+        if json.len() > MAX_LCTEMPLATE_JSON_BYTES {
+            return Err(TransformError::InvalidInput {
+                message: format!("plate template JSON length ({} bytes) exceeds maximum {MAX_LCTEMPLATE_JSON_BYTES} bytes", json.len()),
+            });
+        }
         let parsed: Self = json_codec::from_json_str(json)
             .map_err(|err| TransformError::InvalidInput { message: format!("failed to parse plate template JSON: {err}") })?;
         parsed.validate()?;
@@ -182,6 +230,7 @@ fn validate_well_role(role: &PlateWellRole, geometry: PlateGeometry, idx: usize)
         if group_name.trim().is_empty() {
             return Err(TransformError::InvalidSpec { message: format!("treatment group_name at well {label} cannot be empty") });
         }
+        validate_title(group_name)?;
         if !dilution_x.is_finite() {
             return Err(TransformError::InvalidInput { message: format!("treatment dilution_x at well {label} must be finite") });
         }
@@ -406,6 +455,7 @@ fn build_treatment_grid(treatments: &[TreatmentPoint]) -> Result<TreatmentGrid, 
     validate_data_sets(groups.len())?;
     validate_rows(x_values.len())?;
     validate_subcolumns(subcol_count)?;
+    validate_cell_budget(x_values.len(), groups.len(), subcol_count, 1, "plate treatment grid")?;
 
     Ok(TreatmentGrid { groups, x_values, subcol_count, cells })
 }
@@ -468,19 +518,20 @@ fn build_plate_column_sheet(
 
     for pt in sorted_pts {
         let Some(val) = pt.value else { continue };
+        validate_title(&pt.group_name)?;
         let c = ensure_column_bucket(&pt.group_name, &mut col_names, &mut col_map, &mut col_cells);
         col_cells[c].push(Cell::number(val));
     }
 
-    append_control_column("Positive Control", &collected.positive_controls, &mut col_names, &mut col_map, &mut col_cells);
+    append_control_column("Positive Control", &collected.positive_controls, &mut col_names, &mut col_map, &mut col_cells)?;
     if !subtract_blank_mean {
-        append_control_column("Blank", &collected.blanks, &mut col_names, &mut col_map, &mut col_cells);
+        append_control_column("Blank", &collected.blanks, &mut col_names, &mut col_map, &mut col_cells)?;
     }
 
     let mut notes = Vec::new();
     let excluded_with_values: Vec<&ExcludedWellEntry> = collected.excluded.iter().filter(|e| e.raw_value.is_some()).collect();
     if !excluded_with_values.is_empty() {
-        let c = ensure_column_bucket("Excluded", &mut col_names, &mut col_map, &mut col_cells);
+        let c = allocate_distinct_bucket("Excluded", &mut col_names, &mut col_map, &mut col_cells)?;
         for entry in excluded_with_values {
             if let Some(val) = entry.raw_value {
                 let r = col_cells[c].len();
@@ -502,11 +553,14 @@ fn build_plate_column_sheet(
     let rows = col_cells.iter().map(Vec::len).max().unwrap_or(0).max(1);
     validate_data_sets(col_names.len())?;
     validate_rows(rows)?;
+    validate_cell_budget(rows, col_names.len(), 1, 0, "plate Column sheet")?;
     let mut table = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, col_names.len(), rows)?;
     for (c, name) in col_names.into_iter().enumerate() {
         table.data_sets[c].title = name;
         for (r, cell) in col_cells[c].iter().enumerate() {
-            table.data_sets[c].cells[r][0] = cell.clone();
+            if let Some(slot) = table.data_sets[c].cells.get_mut(r).and_then(|row| row.get_mut(0)) {
+                *slot = cell.clone();
+            }
         }
     }
 
@@ -529,21 +583,53 @@ fn ensure_column_bucket(name: &str, col_names: &mut Vec<String>, col_map: &mut B
     }
 }
 
+fn allocate_distinct_bucket(
+    preferred: &str,
+    col_names: &mut Vec<String>,
+    col_map: &mut BTreeMap<String, usize>,
+    col_cells: &mut Vec<Vec<Cell>>,
+) -> Result<usize, TransformError> {
+    let title = if !col_map.contains_key(preferred) {
+        preferred.to_owned()
+    } else {
+        let plate_prefixed = format!("Plate {preferred}");
+        if !col_map.contains_key(&plate_prefixed) {
+            plate_prefixed
+        } else {
+            let mut n = 2_usize;
+            loop {
+                let candidate = format!("{plate_prefixed} ({n})");
+                if !col_map.contains_key(&candidate) {
+                    break candidate;
+                }
+                n += 1;
+            }
+        }
+    };
+    validate_title(&title)?;
+    let idx = col_names.len();
+    col_names.push(title.clone());
+    col_map.insert(title, idx);
+    col_cells.push(Vec::new());
+    Ok(idx)
+}
+
 fn append_control_column(
     name: &str,
     entries: &[ControlWellEntry],
     col_names: &mut Vec<String>,
     col_map: &mut BTreeMap<String, usize>,
     col_cells: &mut Vec<Vec<Cell>>,
-) {
+) -> Result<(), TransformError> {
     let vals: Vec<f64> = entries.iter().filter_map(|e| e.value).collect();
     if vals.is_empty() {
-        return;
+        return Ok(());
     }
-    let c = ensure_column_bucket(name, col_names, col_map, col_cells);
+    let c = allocate_distinct_bucket(name, col_names, col_map, col_cells)?;
     for v in vals {
         col_cells[c].push(Cell::number(v));
     }
+    Ok(())
 }
 
 fn build_plate_mv_sheet(
@@ -819,16 +905,18 @@ fn parse_tidy_cell(raw: &str, decimal_sep: char) -> Cell {
 
 fn parse_exclusion_flag(flag: &str, row_idx: usize) -> Option<String> {
     let trimmed = flag.trim();
-    if trimmed.is_empty()
+    if is_missing_token(trimmed)
         || trimmed == "-"
-        || trimmed == "0"
         || trimmed.eq_ignore_ascii_case("false")
         || trimmed.eq_ignore_ascii_case("no")
         || trimmed.eq_ignore_ascii_case("n")
         || trimmed.eq_ignore_ascii_case("f")
         || trimmed.eq_ignore_ascii_case("none")
-        || trimmed.eq_ignore_ascii_case("na")
+        || trimmed.eq_ignore_ascii_case("nil")
     {
+        return None;
+    }
+    if trimmed.replace(',', ".").parse::<f64>().is_ok_and(|v| v == 0.0) {
         return None;
     }
     if trimmed == "1"
@@ -856,6 +944,7 @@ fn pivot_tidy_to_column(title: &str, records: &[TidyRecord]) -> Result<DataSheet
     let mut columns: Vec<Vec<PlacedCell>> = Vec::new();
 
     for rec in records {
+        validate_title(&rec.group)?;
         let g = ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
         while columns.len() <= g {
             columns.push(Vec::new());
@@ -866,12 +955,15 @@ fn pivot_tidy_to_column(title: &str, records: &[TidyRecord]) -> Result<DataSheet
     let rows = columns.iter().map(Vec::len).max().unwrap_or(0).max(1);
     validate_data_sets(group_names.len())?;
     validate_rows(rows)?;
+    validate_cell_budget(rows, group_names.len(), 1, 0, "tidy Column pivot")?;
     let mut col = ColumnTable::new_with_subcolumns(ColumnDesignHint::UnpairedReplicates, SubcolumnMode::Single, group_names.len(), rows)?;
     let mut notes = Vec::new();
     for (c, name) in group_names.into_iter().enumerate() {
         col.data_sets[c].title = name;
         for (r, (cell, maybe_note)) in columns[c].iter().enumerate() {
-            col.data_sets[c].cells[r][0] = cell.clone();
+            if let Some(slot) = col.data_sets[c].cells.get_mut(r).and_then(|row| row.get_mut(0)) {
+                *slot = cell.clone();
+            }
             if cell.excluded {
                 let (tag, note) = maybe_note.clone().unwrap_or_else(|| (String::from("excluded"), String::from("Excluded value")));
                 notes.push(CellExclusionNote { coord: CellCoord::new(r, c, 0), reason_tag: tag, note, timestamp_utc: String::new() });
@@ -889,22 +981,27 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
     let mut group_names = Vec::new();
     let mut group_map = BTreeMap::new();
     let mut x_by_bits: BTreeMap<u64, f64> = BTreeMap::new();
-    let mut x_excluded_bits: BTreeSet<u64> = BTreeSet::new();
+    let mut x_any_active_bits: BTreeSet<u64> = BTreeSet::new();
+    let mut x_any_excluded_bits: BTreeSet<u64> = BTreeSet::new();
 
     for rec in records {
+        validate_title(&rec.group)?;
         ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
         if let Some(x) = rec.x_num {
             let nx = normalize_zero(x);
             let bits = nx.to_bits();
             x_by_bits.entry(bits).or_insert(nx);
             if rec.x_excluded {
-                x_excluded_bits.insert(bits);
+                x_any_excluded_bits.insert(bits);
+            } else {
+                x_any_active_bits.insert(bits);
             }
         }
     }
     if x_by_bits.is_empty() {
         return Err(TransformError::InvalidInput { message: String::from("no finite numeric X entries available for Xy pivot") });
     }
+    let x_row_excluded = |bits: u64| x_any_excluded_bits.contains(&bits) && !x_any_active_bits.contains(&bits);
 
     let mut x_vals: Vec<f64> = x_by_bits.into_values().collect();
     x_vals.sort_by(f64::total_cmp);
@@ -918,7 +1015,8 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
     for rec in records {
         let Some(&g) = group_map.get(&rec.group) else { continue };
         let Some(x) = rec.x_num else { continue };
-        let Some(&r) = x_row_by_bits.get(&normalize_zero(x).to_bits()) else { continue };
+        let bits = normalize_zero(x).to_bits();
+        let Some(&r) = x_row_by_bits.get(&bits) else { continue };
 
         let slot = if use_named_reps {
             let mut s = *rep_slots.get(&rec.replicate).unwrap_or(&0);
@@ -932,7 +1030,15 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
             *cursor += 1;
             s
         };
-        placed.insert((r, g, slot), (rec.value.clone(), rec.exclusion_note.clone()));
+        let mut cell = rec.value.clone();
+        let mut note = rec.exclusion_note.clone();
+        if rec.x_excluded && !x_row_excluded(bits) {
+            cell.excluded = true;
+            if note.is_none() {
+                note = Some((String::from("asterisk-excluded"), String::from("X coordinate marked excluded")));
+            }
+        }
+        placed.insert((r, g, slot), (cell, note));
         if slot > max_sub {
             max_sub = slot;
         }
@@ -942,6 +1048,12 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
     validate_data_sets(group_names.len())?;
     validate_rows(x_vals.len())?;
     validate_subcolumns(subcol_count)?;
+    if let Some(xc) = mapping.x_col
+        && let Some(h) = headers.get(xc)
+    {
+        validate_title(h.trim())?;
+    }
+    validate_cell_budget(x_vals.len(), group_names.len(), subcol_count, 1, "tidy XY pivot")?;
 
     let mut xy = XyTable::new_with_x_mode(
         XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single },
@@ -956,7 +1068,7 @@ fn pivot_tidy_to_xy(title: &str, headers: &[String], mapping: &TidyColumnMapping
         xy.x_title = h.trim().to_owned();
     }
     for (r, &x) in x_vals.iter().enumerate() {
-        xy.x_cells[r][0] = Cell { value: CellValue::Number(x), excluded: x_excluded_bits.contains(&normalize_zero(x).to_bits()) };
+        xy.x_cells[r][0] = Cell { value: CellValue::Number(x), excluded: x_row_excluded(normalize_zero(x).to_bits()) };
     }
     for (c, name) in group_names.into_iter().enumerate() {
         xy.data_sets[c].title = name;
@@ -972,6 +1084,7 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
     let mut group_names = Vec::new();
     let mut group_map = BTreeMap::new();
     for rec in records {
+        validate_title(&rec.group)?;
         ensure_group_slot(&rec.group, &mut group_names, &mut group_map);
     }
 
@@ -1024,11 +1137,23 @@ fn pivot_tidy_to_grouped(title: &str, headers: &[String], mapping: &TidyColumnMa
     while final_row_titles.len() < row_count {
         final_row_titles.push(format!("Row {}", final_row_titles.len() + 1));
     }
+    for rt in &final_row_titles {
+        validate_title(rt)?;
+    }
 
     let subcol_count = (max_sub + 1).max(rep_slots.len()).max(1);
     validate_data_sets(group_names.len())?;
     validate_rows(row_count)?;
     validate_subcolumns(subcol_count)?;
+    if let Some(xc) = mapping.x_col
+        && let Some(h) = headers.get(xc)
+    {
+        validate_title(h.trim())?;
+    }
+    if let Some(h) = headers.get(mapping.group_col) {
+        validate_title(h.trim())?;
+    }
+    validate_cell_budget(row_count, group_names.len(), subcol_count, 0, "tidy Grouped pivot")?;
 
     let mut grouped = GroupedTable::new(SubcolumnMode::RawReplicates(subcol_count), group_names.len(), row_count)?;
     grouped.row_titles = final_row_titles;
@@ -1059,26 +1184,36 @@ fn pivot_tidy_to_mv(title: &str, headers: &[String], mapping: &TidyColumnMapping
     let has_x = mapping.x_col.is_some();
     let has_rep = mapping.replicate_col.is_some();
     let var_count = 2 + usize::from(has_x) + usize::from(has_rep);
+    validate_data_sets(var_count)?;
+    let x_title = header_or(headers, mapping.x_col, "X");
+    let grp_title = header_or(headers, Some(mapping.group_col), "Group");
+    let rep_title = header_or(headers, mapping.replicate_col, "Replicate");
+    let val_title = header_or(headers, Some(mapping.value_col), "Value");
+    validate_title(&x_title)?;
+    validate_title(&grp_title)?;
+    validate_title(&rep_title)?;
+    validate_title(&val_title)?;
+    validate_cell_budget(rows, var_count, 1, 0, "tidy MultipleVariables pivot")?;
     let mut mv = MultipleVariablesTable::new(var_count, rows)?;
 
     let mut next_idx = 0_usize;
     let x_var = has_x.then(|| {
         let i = next_idx;
         next_idx += 1;
-        mv.variables[i].title = header_or(headers, mapping.x_col, "X");
+        mv.variables[i].title = x_title;
         i
     });
     let grp_var = next_idx;
     next_idx += 1;
-    mv.variables[grp_var].title = header_or(headers, Some(mapping.group_col), "Group");
+    mv.variables[grp_var].title = grp_title;
     let rep_var = has_rep.then(|| {
         let i = next_idx;
         next_idx += 1;
-        mv.variables[i].title = header_or(headers, mapping.replicate_col, "Replicate");
+        mv.variables[i].title = rep_title;
         i
     });
     let val_var = next_idx;
-    mv.variables[val_var].title = header_or(headers, Some(mapping.value_col), "Value");
+    mv.variables[val_var].title = val_title;
 
     let mut notes = Vec::new();
     for (r, rec) in records.iter().enumerate() {
@@ -1121,7 +1256,9 @@ fn header_or(headers: &[String], col: Option<usize>, fallback: &str) -> String {
 fn fill_y_cells_and_notes(data_sets: &mut [lumencraft_doc::DataSetColumn], placed: PlacedCellGrid) -> Vec<CellExclusionNote> {
     let mut notes = Vec::new();
     for ((r, c, s), (cell, maybe_note)) in placed {
-        data_sets[c].cells[r][s] = cell.clone();
+        if let Some(slot) = data_sets.get_mut(c).and_then(|d| d.cells.get_mut(r)).and_then(|row| row.get_mut(s)) {
+            *slot = cell.clone();
+        }
         if cell.excluded {
             let (tag, note) = maybe_note.unwrap_or_else(|| (String::from("excluded"), String::from("Excluded value")));
             notes.push(CellExclusionNote { coord: CellCoord::new(r, c, s), reason_tag: tag, note, timestamp_utc: String::new() });
