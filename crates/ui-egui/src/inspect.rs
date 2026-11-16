@@ -14,13 +14,15 @@ use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::compositor::{WorkspacePixelRect, compute_workspace_layout_map};
-use crate::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, equation_display_mode_str, format_compact_f64};
+use crate::dialogs_canvas::{
+    ActiveDialog, AssumptionDiagnosticBanner, cld_ordering_str, equation_display_mode_str, format_compact_f64, pairwise_display_mode_str,
+};
 use crate::grid_view::format_cell_display;
 use crate::interaction::{ViewportMetrics, WorkspaceLayoutMap};
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
-    r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
+    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, r1_paired_or_matched_allowed,
+    r1_sphericity_or_reml_control, r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
     r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
     r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
     source_table_shape,
@@ -1780,7 +1782,9 @@ fn build_format_axes_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, in
 
 fn build_pairwise_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
     let st = &app.canvas_dialogs.pairwise;
+    let doc = app.document();
     let pos = |row: usize| dialog_ctrl_bounds(bx, by, row, include_bounds);
+    let gate = |wid: &str| evaluate_dialog_widget(&app.canvas_dialogs, doc, wid);
     let controls = vec![
         node(
             "pairwise.result_sheet_id",
@@ -1802,8 +1806,50 @@ fn build_pairwise_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64,
         ),
         node("pairwise.bracket_count", "readonly", "Comparison brackets", json!(st.brackets.len()), ControlEnablement::enabled(), pos(4)),
         node("pairwise.auto_add", "button", "Auto-add brackets from analysis", json!(st.brackets.len()), ControlEnablement::enabled(), pos(5)),
+        node(
+            "pairwise.display_mode",
+            "combobox",
+            "Pairwise display mode",
+            json!(pairwise_display_mode_str(st.display_mode)),
+            ControlEnablement::enabled(),
+            pos(6),
+        ),
+        node(
+            "pairwise.cld_enabled",
+            "checkbox",
+            "Show Compact Letter Display (Piepho 2004)",
+            json!(st.cld_enabled),
+            ControlEnablement::enabled(),
+            pos(7),
+        ),
+        node(
+            "pairwise.cld_ordering",
+            "combobox",
+            "CLD letter ordering",
+            json!(cld_ordering_str(st.cld_ordering)),
+            gate("pairwise.cld_ordering"),
+            pos(8),
+        ),
+        node("pairwise.cld_uppercase", "checkbox", "Uppercase CLD letters", json!(st.cld_uppercase), gate("pairwise.cld_uppercase"), pos(9)),
+        node(
+            "pairwise.cld_alpha_override",
+            "spinbutton",
+            "CLD alpha override",
+            json!(st.cld_alpha_override),
+            gate("pairwise.cld_alpha_override"),
+            pos(10),
+        ),
+        node("pairwise.cld_font_size_pt", "spinbutton", "CLD font size (pt)", json!(st.cld_font_size_pt), gate("pairwise.cld_font_size_pt"), pos(11)),
+        node("pairwise.cld_offset_pt", "spinbutton", "CLD vertical offset (pt)", json!(st.cld_offset_pt), gate("pairwise.cld_offset_pt"), pos(12)),
     ];
-    ("Pairwise Comparisons", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        "Pairwise Comparisons",
+        Some(graph_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
+    )
 }
 
 fn build_bubble_plot_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {

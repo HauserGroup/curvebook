@@ -5602,6 +5602,24 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "تصدير التخطيط EMF",
         he: "ייצא פריסה EMF",
     ]),
+    entry!("cmd.graph.setCompactLetterDisplay" => [
+        en: "Compact Letter Display",
+        de: "Kompakte Buchstabendarstellung (CLD)",
+        es: "Visualización compacta de letras (CLD)",
+        fr: "Affichage compact des lettres (CLD)",
+        ja: "コンパクト文字表示 (CLD)",
+        ko: "컴팩트 문자 표시 (CLD)",
+        pt_br: "Exibição compacta de letras (CLD)",
+        zh_cn: "紧凑字母标记 (CLD)",
+        zh_tw: "緊湊字母標記 (CLD)",
+        it: "Visualizzazione compatta a lettere (CLD)",
+        nl: "Compacte letterweergave (CLD)",
+        pl: "Zwarte oznaczenie literowe (CLD)",
+        ru: "Компактное буквенное обозначение (CLD)",
+        tr: "Kompakt Harf Gösterimi (CLD)",
+        ar: "العرض المختصر بالحروف (CLD)",
+        he: "תצוגת אותיות קומפקטית (CLD)",
+    ]),
 ];
 /// Return `true` when `code` identifies a right-to-left (RTL) locale (`ar`, `he`, `fa`, `ur`, and
 /// regional variants such as `ar-EG` or `he-IL`, plus legacy `iw`).
@@ -5964,8 +5982,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 308);
-        assert_eq!(LOCALES.len() * catalog_len(), 4_928);
+        assert_eq!(catalog_len(), 309);
+        assert_eq!(LOCALES.len() * catalog_len(), 4_944);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6002,7 +6020,7 @@ mod tests {
 
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = lumencraft_engine::cmd::registry().specs().collect();
-        assert_eq!(engine_specs.len(), 96, "expected 96 engine CommandSpec entries");
+        assert_eq!(engine_specs.len(), 97, "expected 97 engine CommandSpec entries");
         assert_eq!(crate::menus::UI_COMMANDS.len(), 45, "expected 45 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();

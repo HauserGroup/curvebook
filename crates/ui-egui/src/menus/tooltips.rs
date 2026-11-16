@@ -301,7 +301,7 @@ mod tests {
         let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
         assert!(frame.len() > 8);
 
-        // Menu bar covers all 96 engine + 45 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 97 engine + 45 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -313,7 +313,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 141);
+        assert_eq!(seen.len(), 142);
         Ok(())
     }
 }

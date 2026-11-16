@@ -679,13 +679,31 @@ fn engine_command_round_trips_for_graph_and_layout_inspectors() {
     app.execute_command(&kind_intent.command_id, kind_intent.params).expect("execute graph.setKind");
     assert!(app.document().graph_sheet(&"graph-col".into()).expect("g_col").initialized);
 
-    // 2. PairwiseComparisonsState -> `graph.addComparisonBrackets`
+    // 2. PairwiseComparisonsState -> `graph.addComparisonBrackets` + `graph.setCompactLetterDisplay`
     let snap = app.document().clone();
     app.canvas_dialogs.pairwise.sync_from_graph(snap.graph_sheet(&"graph-col".into()).expect("g_col"), &snap);
     assert!(app.canvas_dialogs.pairwise.auto_add_from_analysis(&snap) >= 1);
     let cmp_intent = app.canvas_dialogs.pairwise.commit_intent().expect("comparison intent");
     app.execute_command(&cmp_intent.command_id, cmp_intent.params).expect("execute comparison brackets");
     assert!(!app.document().graph_sheet(&"graph-col".into()).expect("g_col").spec.comparisons.is_empty());
+
+    app.canvas_dialogs.pairwise.toggle_cld_enabled();
+    assert!(app.canvas_dialogs.pairwise.cld_enabled);
+    let cld_intent = app.canvas_dialogs.pairwise.cld_commit_intent().expect("cld intent");
+    assert_eq!(cld_intent.command_id, "graph.setCompactLetterDisplay");
+    app.execute_command(&cld_intent.command_id, cld_intent.params).expect("execute compact letter display");
+    let g_col_after = app.document().graph_sheet(&"graph-col".into()).expect("g_col after cld");
+    assert!(g_col_after.spec.compact_letter_display.is_some());
+    assert_ne!(g_col_after.spec.pairwise_display_mode, lumencraft_doc::PairwiseDisplayMode::BracketsOnly);
+
+    let snap2 = app.document().clone();
+    app.canvas_dialogs.pairwise.sync_from_graph(snap2.graph_sheet(&"graph-col".into()).expect("g_col snap2"), &snap2);
+    assert!(app.canvas_dialogs.pairwise.cld_enabled);
+    app.canvas_dialogs.pairwise.toggle_cld_enabled();
+    assert!(!app.canvas_dialogs.pairwise.cld_enabled);
+    let disable_intent = app.canvas_dialogs.pairwise.cld_commit_intent().expect("disable cld intent");
+    app.execute_command(&disable_intent.command_id, disable_intent.params).expect("disable cld");
+    assert!(app.document().graph_sheet(&"graph-col".into()).expect("g_col disabled").spec.compact_letter_display.is_none());
 
     // 3. FormatGraphState -> `graph.setSpec` + `graph.setSeries`
     let snap = app.document().clone();

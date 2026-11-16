@@ -17,7 +17,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{
-    ActiveDialog, ActiveInspector, AssumptionDiagnosticBanner, ResultSheetViewState, data_column_title, format_compact_f64, variable_role_color,
+    ActiveDialog, ActiveInspector, AssumptionDiagnosticBanner, ResultSheetViewState, cld_ordering_str, data_column_title, format_compact_f64,
+    pairwise_display_mode_str, variable_role_color,
 };
 use crate::grid_view::{format_cell_display, resolve_flat_coord};
 use crate::interaction::{
@@ -1857,13 +1858,15 @@ fn draw_inspector_pane(img: &mut RasterImage, rect: WorkspacePixelRect, app: &Ui
             }
         }
         ActiveInspector::PairwiseComparisons => {
-            let count = app.canvas_dialogs.pairwise.brackets.len();
+            let pw = &app.canvas_dialogs.pairwise;
+            let count = pw.brackets.len();
+            let cld_state = if pw.cld_enabled { cld_ordering_str(pw.cld_ordering) } else { "off" };
             draw_text_clipped_dir(
                 img,
                 DrawTextClipped {
                     x: rect.x + 10,
                     y: rect.y + 30,
-                    text: &format!("Brackets: {count}"),
+                    text: &format!("Brackets: {count} | CLD: {cld_state}"),
                     color: pal.text,
                     max_width_px: text_w,
                     rtl: is_rtl,
@@ -2201,6 +2204,14 @@ fn modal_preview_lines(app: &UiApp) -> Vec<String> {
             vec![
                 format!("Graph: {} | Result: {}", graph_sheet_id.as_str(), eq.result_sheet_id.as_ref().map_or("None", SheetId::as_str)),
                 format!("Mode: {:?} | Dataset: {}", eq.mode, eq.data_set_index),
+            ]
+        }
+        ActiveDialog::PairwiseComparisons { graph_sheet_id } => {
+            let pw = &state.pairwise;
+            vec![
+                format!("Graph: {} | Source: {}", graph_sheet_id.as_str(), pw.selected_result_sheet_id.as_ref().map_or("None", SheetId::as_str)),
+                format!("Mode: {} | Brackets: {}", pairwise_display_mode_str(pw.display_mode), pw.brackets.len()),
+                format!("CLD: {} | Ordering: {} | Upper: {}", pw.cld_enabled, cld_ordering_str(pw.cld_ordering), pw.cld_uppercase),
             ]
         }
         _ => vec![String::from("Active scientific dialog ready")],

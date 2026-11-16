@@ -6,7 +6,7 @@
 use lumencraft_doc::{AnalysisKind, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, TableArchetype, TwoGroupMethod};
 use serde::{Deserialize, Serialize};
 
-use crate::dialogs_canvas::{ActiveDialog, AnalyzeDialogState, CanvasDialogState, EditAnalysisParametersState};
+use crate::dialogs_canvas::{ActiveDialog, AnalyzeDialogState, CanvasDialogState, EditAnalysisParametersState, PairwiseComparisonsState};
 use crate::power_wizard::PowerWizardStage;
 
 /// Conditional enablement result attached to modal controls, tabs, and action buttons.
@@ -358,7 +358,25 @@ pub fn evaluate_dialog_widget(dialogs: &CanvasDialogState, doc: &ProjectDocument
             evaluate_edit_params_widget(&dialogs.edit_params, doc, rows, cols, max_sub, id)
         }
         ActiveDialog::AnalyzeSheet { source_sheet_id } => evaluate_analyze_widget(&dialogs.analyze, doc, Some(source_sheet_id), id),
+        ActiveDialog::PairwiseComparisons { .. } => evaluate_pairwise_widget(&dialogs.pairwise, id),
         ActiveDialog::PowerAndSampleSize => evaluate_power_wizard_widget(&dialogs.power_wizard, id),
+        _ => ControlEnablement::enabled(),
+    }
+}
+
+fn evaluate_pairwise_widget(pw: &PairwiseComparisonsState, widget_id: &str) -> ControlEnablement {
+    match widget_id {
+        "pairwise.cld_ordering"
+        | "pairwise.cld_uppercase"
+        | "pairwise.cld_alpha_override"
+        | "pairwise.cld_font_size_pt"
+        | "pairwise.cld_offset_pt" => {
+            if pw.cld_enabled {
+                ControlEnablement::enabled()
+            } else {
+                ControlEnablement::disabled("Enable Compact Letter Display to configure letter ordering and typography.")
+            }
+        }
         _ => ControlEnablement::enabled(),
     }
 }
@@ -416,10 +434,16 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
                 ControlEnablement::enabled()
             }
         }
+        ActiveDialog::PairwiseComparisons { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.pairwise.cld_enabled && dialogs.pairwise.selected_result_sheet_id.is_none() {
+                ControlEnablement::disabled("Select a source ResultSheet with pairwise comparisons before enabling Compact Letter Display.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
         ActiveDialog::FormatAxes { .. }
         | ActiveDialog::FormatGraph { .. }
         | ActiveDialog::ChangeGraphType { .. }
-        | ActiveDialog::PairwiseComparisons { .. }
         | ActiveDialog::BubblePlotInspector { .. }
         | ActiveDialog::ApplyStyleFrom { .. }
         | ActiveDialog::PageLayoutComposer { .. }

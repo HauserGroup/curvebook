@@ -5,10 +5,10 @@
 //! declarative contract emitting pure [`ToolCommandIntent`] payloads into `lumencraft-engine`.
 
 use lumencraft_doc::{
-    AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, ClusterDistance, ClusterLinkage, CoxTieMethod,
-    EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting, PValueStackMethod,
-    PageOrientation, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign, SheetId, SumOfSquaresType, TwoGroupMethod,
-    WeightingScheme,
+    AnalysisKind, BracketLabelMode, BracketStyle, BreakOrnament, ChecklistItem, ChecklistStatus, CldOrdering, ClusterDistance, ClusterLinkage,
+    CoxTieMethod, EquationDisplayMode, FitMethod, GlmFamily, GraphAnnotation, GraphAxisScale, GraphSheet, JournalWidthPreset, KappaWeighting,
+    PValueStackMethod, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ProjectDocument, RectPt, RepeatedMeasuresDesign,
+    SheetId, SumOfSquaresType, TwoGroupMethod, WeightingScheme,
 };
 use lumencraft_palette::{ColormapId, PaletteId};
 use lumencraft_render::TiffCompression;
@@ -373,6 +373,38 @@ pub(crate) fn parse_bracket_label_mode(val: &Value) -> Result<BracketLabelMode, 
         "summarystars" | "stars" => Ok(BracketLabelMode::SummaryStars),
         "numericporq" | "numeric" | "pvalue" | "porq" => Ok(BracketLabelMode::NumericPOrQ),
         _ => Ok(BracketLabelMode::Custom(raw.trim().to_owned())),
+    }
+}
+
+pub(crate) fn parse_pairwise_display_mode_str(raw: &str) -> Result<PairwiseDisplayMode, String> {
+    match norm_key(raw).as_str() {
+        "bracketsonly" | "brackets" => Ok(PairwiseDisplayMode::BracketsOnly),
+        "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => Ok(PairwiseDisplayMode::CompactLetterDisplayOnly),
+        "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => Ok(PairwiseDisplayMode::BracketsAndCompactLetterDisplay),
+        _ => Err(format!("unknown pairwise display mode `{raw}`")),
+    }
+}
+
+pub(crate) fn pairwise_display_mode_str(mode: PairwiseDisplayMode) -> &'static str {
+    match mode {
+        PairwiseDisplayMode::BracketsOnly => "brackets_only",
+        PairwiseDisplayMode::CompactLetterDisplayOnly => "compact_letter_display_only",
+        PairwiseDisplayMode::BracketsAndCompactLetterDisplay => "brackets_and_compact_letter_display",
+    }
+}
+
+pub(crate) fn parse_cld_ordering_str(raw: &str) -> Result<CldOrdering, String> {
+    match norm_key(raw).as_str() {
+        "descendingmean" | "descending" | "desc" | "highestfirst" => Ok(CldOrdering::DescendingMean),
+        "ascendingmean" | "ascending" | "asc" | "lowestfirst" => Ok(CldOrdering::AscendingMean),
+        _ => Err(format!("unknown CLD ordering `{raw}`")),
+    }
+}
+
+pub(crate) fn cld_ordering_str(ordering: CldOrdering) -> &'static str {
+    match ordering {
+        CldOrdering::DescendingMean => "descending_mean",
+        CldOrdering::AscendingMean => "ascending_mean",
     }
 }
 

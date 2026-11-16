@@ -5,17 +5,17 @@
 use lumencraft_chart::{ChartScene, PreflightIssue};
 use lumencraft_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
-    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
-    ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind, EquationDisplayMode,
-    ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset, GlmFamily, GlmSpec,
-    GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource, JournalWidthPreset,
-    LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec,
-    NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation,
-    PairwiseBracketSpec, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt,
-    RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping,
-    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    VariableRole, WeightingScheme, WhiskerMethod,
+    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
+    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
+    EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
+    GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
+    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
+    PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
+    PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResultCell, ResultSheet, ResultTab, ResultTabKind,
+    RocSpec, SheetId, SizeChannelMapping, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
 use lumencraft_engine::{EngineError, Session, cmd};
 use lumencraft_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -4284,7 +4284,7 @@ fn parse_threshold_dash_style(val: &Value, key: &str) -> Result<LineDashStyle, S
     Err(format!("`{key}` dash_style must be a string"))
 }
 
-/// Live Pairwise Comparison Bracket inspector (`Auto-add from analysis`).
+/// Live Pairwise Comparison Bracket & Compact Letter Display inspector (`Auto-add from analysis`, `R10.11`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairwiseComparisonsState {
     pub graph_sheet_id: Option<SheetId>,
@@ -4294,6 +4294,26 @@ pub struct PairwiseComparisonsState {
     pub label_mode: BracketLabelMode,
     pub hide_non_significant: bool,
     pub brackets: Vec<PairwiseBracketSpec>,
+    #[serde(default)]
+    pub brackets_dirty: bool,
+    #[serde(default)]
+    pub had_cld_on_graph: bool,
+    #[serde(default)]
+    pub display_mode: PairwiseDisplayMode,
+    #[serde(default)]
+    pub cld_enabled: bool,
+    #[serde(default)]
+    pub cld_ordering: CldOrdering,
+    #[serde(default)]
+    pub cld_uppercase: bool,
+    #[serde(default)]
+    pub cld_alpha_override: Option<f64>,
+    #[serde(default)]
+    pub cld_font_size_pt: f64,
+    #[serde(default)]
+    pub cld_offset_pt: f64,
+    #[serde(default)]
+    pub cld_color: Rgba8,
 }
 
 impl Default for PairwiseComparisonsState {
@@ -4306,16 +4326,55 @@ impl Default for PairwiseComparisonsState {
             label_mode: BracketLabelMode::SummaryStars,
             hide_non_significant: true,
             brackets: Vec::new(),
+            brackets_dirty: false,
+            had_cld_on_graph: false,
+            display_mode: PairwiseDisplayMode::BracketsOnly,
+            cld_enabled: false,
+            cld_ordering: CldOrdering::DescendingMean,
+            cld_uppercase: false,
+            cld_alpha_override: None,
+            cld_font_size_pt: 9.5,
+            cld_offset_pt: 6.0,
+            cld_color: Rgba8::BLACK,
         }
     }
 }
 
 impl PairwiseComparisonsState {
-    /// Synchronize brackets and discover upstream [`ResultSheet`]s carrying pairwise comparisons.
+    /// Synchronize brackets, CLD settings, and discover upstream [`ResultSheet`]s carrying pairwise comparisons.
     pub fn sync_from_graph(&mut self, graph: &GraphSheet, doc: &ProjectDocument) {
         self.graph_sheet_id = Some(graph.id.clone());
         self.brackets = graph.spec.comparisons.clone();
+        self.brackets_dirty = false;
         self.available_result_ids = doc.result_sheets.iter().filter(|rs| !rs.pairwise_comparisons.is_empty()).map(|rs| rs.id.clone()).collect();
+        self.display_mode = graph.spec.pairwise_display_mode;
+        if let Some(cld) = &graph.spec.compact_letter_display {
+            self.had_cld_on_graph = true;
+            self.cld_enabled = true;
+            self.cld_ordering = cld.ordering;
+            self.cld_uppercase = cld.uppercase;
+            self.cld_alpha_override = cld.alpha_override;
+            self.cld_font_size_pt = cld.font_size_pt;
+            self.cld_offset_pt = cld.offset_pt;
+            self.cld_color = cld.color;
+            if self.available_result_ids.contains(&cld.result_sheet_id) {
+                self.selected_result_sheet_id = Some(cld.result_sheet_id.clone());
+            }
+        } else {
+            self.had_cld_on_graph = false;
+            self.cld_enabled = false;
+            self.cld_ordering = CldOrdering::DescendingMean;
+            self.cld_uppercase = false;
+            self.cld_alpha_override = None;
+            self.cld_font_size_pt = 9.5;
+            self.cld_offset_pt = 6.0;
+            self.cld_color = Rgba8::BLACK;
+            if let Some(first_bracket_res) = self.brackets.first().map(|b| &b.result_sheet_id)
+                && self.available_result_ids.contains(first_bracket_res)
+            {
+                self.selected_result_sheet_id = Some(first_bracket_res.clone());
+            }
+        }
         if self.selected_result_sheet_id.as_ref().is_none_or(|id| !self.available_result_ids.contains(id)) {
             self.selected_result_sheet_id = self.available_result_ids.first().cloned();
         }
@@ -4354,17 +4413,59 @@ impl PairwiseComparisonsState {
             });
             added += 1;
         }
+        if added > 0 {
+            self.brackets_dirty = true;
+        }
         added
     }
 
-    /// Apply current bracket settings and items back onto `spec`.
-    pub fn apply_to_spec(&self, spec: &mut GraphSpec) {
-        spec.comparisons = self.brackets.clone();
+    /// Toggle `cld_enabled` and synchronize `display_mode` cleanly when still in default mode.
+    pub fn toggle_cld_enabled(&mut self) {
+        self.cld_enabled = !self.cld_enabled;
+        if self.cld_enabled {
+            if self.display_mode == PairwiseDisplayMode::BracketsOnly {
+                self.display_mode = if self.brackets.is_empty() {
+                    PairwiseDisplayMode::CompactLetterDisplayOnly
+                } else {
+                    PairwiseDisplayMode::BracketsAndCompactLetterDisplay
+                };
+            }
+        } else {
+            self.display_mode = PairwiseDisplayMode::BracketsOnly;
+        }
     }
 
-    /// Emit `graph.addComparisonBrackets` intent matching `cmd_graph_add_comparison_brackets`.
+    /// Cycle `pairwise_display_mode` across brackets-only, CLD-only, and both.
+    pub fn cycle_display_mode(&mut self) {
+        self.display_mode = match self.display_mode {
+            PairwiseDisplayMode::BracketsOnly => PairwiseDisplayMode::CompactLetterDisplayOnly,
+            PairwiseDisplayMode::CompactLetterDisplayOnly => PairwiseDisplayMode::BracketsAndCompactLetterDisplay,
+            PairwiseDisplayMode::BracketsAndCompactLetterDisplay => PairwiseDisplayMode::BracketsOnly,
+        };
+        self.cld_enabled = self.display_mode != PairwiseDisplayMode::BracketsOnly;
+    }
+
+    /// Apply current bracket and CLD settings back onto `spec`.
+    pub fn apply_to_spec(&self, spec: &mut GraphSpec) {
+        spec.comparisons = self.brackets.clone();
+        spec.pairwise_display_mode = self.display_mode;
+        spec.compact_letter_display = if self.cld_enabled {
+            self.selected_result_sheet_id.as_ref().map(|res_id| CompactLetterDisplaySpec {
+                result_sheet_id: res_id.clone(),
+                alpha_override: self.cld_alpha_override,
+                ordering: self.cld_ordering,
+                uppercase: self.cld_uppercase,
+                font_size_pt: self.cld_font_size_pt,
+                offset_pt: self.cld_offset_pt,
+                color: self.cld_color,
+            })
+        } else {
+            None
+        };
+    }
+
     #[must_use]
-    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+    fn brackets_commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
         let res_id = self.selected_result_sheet_id.as_ref()?;
         if self.brackets.is_empty() {
@@ -4395,32 +4496,158 @@ impl PairwiseComparisonsState {
         Some(ToolCommandIntent::new("graph.addComparisonBrackets", payload))
     }
 
-    /// Apply field patches for `Pairwise Comparisons` bracket styling & source binding (`WF-46`).
+    /// Emit `graph.setCompactLetterDisplay` intent when CLD or pairwise display mode should be updated.
+    #[must_use]
+    pub fn cld_commit_intent(&self) -> Option<ToolCommandIntent> {
+        let id = self.graph_sheet_id.as_ref()?;
+        if !self.cld_enabled && !self.had_cld_on_graph && self.display_mode == PairwiseDisplayMode::BracketsOnly {
+            return None;
+        }
+        let mode_str = pairwise_display_mode_str(self.display_mode);
+        if !self.cld_enabled {
+            return Some(ToolCommandIntent::new(
+                "graph.setCompactLetterDisplay",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "enabled": false,
+                    "pairwise_display_mode": mode_str,
+                }),
+            ));
+        }
+        let res_id = self.selected_result_sheet_id.as_ref()?;
+        let mut payload = json!({
+            "sheet_id": id.as_str(),
+            "enabled": true,
+            "result_sheet_id": res_id.as_str(),
+            "pairwise_display_mode": mode_str,
+            "ordering": cld_ordering_str(self.cld_ordering),
+            "uppercase": self.cld_uppercase,
+            "alpha_override": self.cld_alpha_override,
+            "font_size_pt": self.cld_font_size_pt,
+            "offset_pt": self.cld_offset_pt,
+        });
+        if self.cld_color != Rgba8::BLACK
+            && let Some(map) = payload.as_object_mut()
+        {
+            map.insert(String::from("color"), json!([self.cld_color.r, self.cld_color.g, self.cld_color.b, self.cld_color.a]));
+        }
+        Some(ToolCommandIntent::new("graph.setCompactLetterDisplay", payload))
+    }
+
+    /// Emit primary intent (`graph.addComparisonBrackets` when brackets exist, else `graph.setCompactLetterDisplay`).
+    #[must_use]
+    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        self.brackets_commit_intent().or_else(|| self.cld_commit_intent())
+    }
+
+    /// Emit all applicable pairwise intents (`graph.addComparisonBrackets` and/or `graph.setCompactLetterDisplay`).
+    #[must_use]
+    pub fn commit_intents(&self) -> Vec<ToolCommandIntent> {
+        let mut intents = Vec::new();
+        if self.brackets_dirty
+            && !self.brackets.is_empty()
+            && let Some(brackets_intent) = self.brackets_commit_intent()
+        {
+            intents.push(brackets_intent);
+        }
+        if let Some(cld_intent) = self.cld_commit_intent() {
+            intents.push(cld_intent);
+        }
+        intents
+    }
+
+    /// Apply field patches for `Pairwise Comparisons` brackets and Compact Letter Display (`WF-46`, `WF-50`).
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>, doc: Option<&ProjectDocument>) -> Result<(), String> {
         let mut auto_add = false;
+        let mut explicit_mode = None;
+        let mut explicit_enabled = None;
         for (key, val) in fields {
             match key.as_str() {
                 "result_sheet_id" | "selected_result_sheet_id" | "pairwise.result_sheet_id" => {
                     let s = val.as_str().ok_or_else(|| String::from("`result_sheet_id` must be a string"))?.trim();
                     if !s.is_empty() {
-                        self.selected_result_sheet_id = Some(SheetId::from(s));
+                        let sid = SheetId::try_new(s).map_err(|e| e.to_string())?;
+                        self.selected_result_sheet_id = Some(sid);
                     }
                 }
-                "bracket_style" | "style" | "pairwise.style" => {
+                "bracket_style" | "style" | "pairwise.bracket_style" | "pairwise.style" => {
                     let raw = val.as_str().ok_or_else(|| String::from("`bracket_style` must be a string"))?;
                     self.bracket_style = parse_bracket_style_str(raw)?;
+                    self.brackets_dirty = true;
                 }
                 "label_mode" | "pairwise.label_mode" => {
                     self.label_mode = parse_bracket_label_mode(val)?;
+                    self.brackets_dirty = true;
                 }
                 "hide_non_significant" | "hide_if_non_significant" | "pairwise.hide_non_significant" => {
                     self.hide_non_significant = val.as_bool().ok_or_else(|| String::from("`hide_non_significant` must be boolean"))?;
+                    self.brackets_dirty = true;
                 }
                 "auto_add" | "pairwise.auto_add" if val.as_bool() == Some(true) => {
                     auto_add = true;
                 }
+                "display_mode" | "pairwise_display_mode" | "pairwise.display_mode" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`display_mode` must be a string"))?;
+                    let mode = parse_pairwise_display_mode_str(raw)?;
+                    self.display_mode = mode;
+                    explicit_mode = Some(mode);
+                }
+                "cld_enabled" | "enabled" | "compact_letter_display" | "pairwise.cld_enabled" => {
+                    let en = val.as_bool().ok_or_else(|| String::from("`cld_enabled` must be boolean"))?;
+                    self.cld_enabled = en;
+                    explicit_enabled = Some(en);
+                }
+                "cld_ordering" | "ordering" | "pairwise.cld_ordering" => {
+                    let raw = val.as_str().ok_or_else(|| String::from("`cld_ordering` must be a string"))?;
+                    self.cld_ordering = parse_cld_ordering_str(raw)?;
+                }
+                "cld_uppercase" | "uppercase" | "pairwise.cld_uppercase" => {
+                    self.cld_uppercase = val.as_bool().ok_or_else(|| String::from("`cld_uppercase` must be boolean"))?;
+                }
+                "cld_alpha_override" | "alpha_override" | "pairwise.cld_alpha_override" => {
+                    let alpha = parse_opt_finite_f64(val, "cld_alpha_override")?;
+                    if let Some(a) = alpha
+                        && (a <= 0.0 || a >= 1.0)
+                    {
+                        return Err(format!("`cld_alpha_override` must lie in (0, 1), got {a}"));
+                    }
+                    self.cld_alpha_override = alpha;
+                }
+                "cld_font_size_pt" | "font_size_pt" | "pairwise.cld_font_size_pt" => {
+                    let fs = parse_finite_f64(val, "cld_font_size_pt")?;
+                    if fs <= 0.0 || fs > 144.0 {
+                        return Err(format!("`cld_font_size_pt` must lie in (0, 144], got {fs}"));
+                    }
+                    self.cld_font_size_pt = fs;
+                }
+                "cld_offset_pt" | "offset_pt" | "pairwise.cld_offset_pt" => {
+                    let off = parse_finite_f64(val, "cld_offset_pt")?;
+                    if !(0.0..=200.0).contains(&off) {
+                        return Err(format!("`cld_offset_pt` must lie in [0, 200], got {off}"));
+                    }
+                    self.cld_offset_pt = off;
+                }
                 _ => {}
             }
+        }
+        if let Some(en) = explicit_enabled
+            && explicit_mode.is_none()
+        {
+            if en {
+                if self.display_mode == PairwiseDisplayMode::BracketsOnly {
+                    self.display_mode = if self.brackets.is_empty() {
+                        PairwiseDisplayMode::CompactLetterDisplayOnly
+                    } else {
+                        PairwiseDisplayMode::BracketsAndCompactLetterDisplay
+                    };
+                }
+            } else {
+                self.display_mode = PairwiseDisplayMode::BracketsOnly;
+            }
+        } else if let Some(mode) = explicit_mode
+            && explicit_enabled.is_none()
+        {
+            self.cld_enabled = mode != PairwiseDisplayMode::BracketsOnly;
         }
         for b in &mut self.brackets {
             b.style = self.bracket_style;
@@ -4429,6 +4656,7 @@ impl PairwiseComparisonsState {
         }
         if auto_add && let Some(d) = doc {
             let _ = self.auto_add_from_analysis(d);
+            self.brackets_dirty = true;
         }
         Ok(())
     }

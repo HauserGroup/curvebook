@@ -3,11 +3,11 @@
 use lumencraft_chart::preflight_check_scene;
 use lumencraft_doc::{
     AdditionalTick, AnnotationShapeKind, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CanvasResizeMode,
-    CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric,
-    ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, LineConnectionKind, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec, PairwiseComparisonRecord,
-    PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping,
-    SizePt, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode,
+    ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, ErrorCode, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind,
+    GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, LineConnectionKind, MultivariateGraphEncoding, MultivariatePlotMode,
+    PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, ProjectDocument, RectPt,
+    RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SizePt, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 use lumencraft_math::LogitDomain;
 use lumencraft_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -217,6 +217,19 @@ static SPECS: &[CommandSpec] = &[
         input_schema: schema_graph_format_selected_points,
         enabled: has_graph_sheet,
         run: run_graph_format_selected_points,
+    },
+    CommandSpec {
+        id: "graph.setCompactLetterDisplay",
+        label: "Compact Letter Display",
+        menu_path: "Draw/Compact Letter Display...",
+        shortcut: "",
+        summary: "Configure or toggle Piepho (2004) compact letter display significance grouping letters and pairwise display mode on a graph.",
+        beginner: "Places shared grouping letters (a, b, ab) above graph groups to summarize all-pairwise statistical comparisons.",
+        group: CommandGroup::Graph,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_graph_set_compact_letter_display,
+        enabled: has_graph_sheet,
+        run: run_graph_set_compact_letter_display,
     },
 ];
 
@@ -824,6 +837,50 @@ fn schema_graph_format_selected_points() -> Value {
     )
 }
 
+#[derive(Debug, Deserialize)]
+struct GraphSetCompactLetterDisplayParams {
+    #[serde(alias = "id")]
+    sheet_id: String,
+    #[serde(default)]
+    enabled: Option<bool>,
+    #[serde(alias = "result_sheet")]
+    result_sheet_id: Option<String>,
+    #[serde(alias = "display_mode")]
+    pairwise_display_mode: Option<String>,
+    ordering: Option<String>,
+    uppercase: Option<bool>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    alpha_override: Option<Option<f64>>,
+    font_size_pt: Option<f64>,
+    offset_pt: Option<f64>,
+    color: Option<Value>,
+}
+
+fn schema_graph_set_compact_letter_display() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("sheet_id", non_empty_str_schema("Graph sheet ID")),
+            ("enabled", nullable_schema(bool_schema("Enable (true) or clear (false) compact letter display annotation"))),
+            ("result_sheet_id", nullable_schema(non_empty_str_schema("Result sheet ID supplying all-pairwise adjusted p/q comparisons"))),
+            (
+                "pairwise_display_mode",
+                nullable_schema(str_schema(
+                    "Pairwise display mode (`brackets_only`, `compact_letter_display_only` / `cld_only`, or `brackets_and_compact_letter_display` / `both`)",
+                )),
+            ),
+            ("ordering", nullable_schema(str_schema("Monotonic letter assignment direction (`descending_mean` or `ascending_mean`)"))),
+            ("uppercase", nullable_schema(bool_schema("Use uppercase letters (A, B, AB) instead of lowercase (a, b, ab)"))),
+            ("alpha_override", nullable_schema(num_schema("Optional explicit significance alpha in (0, 1) overriding result decisions", None, None))),
+            ("font_size_pt", nullable_schema(num_schema("Letter font size in points in (0, 144]", Some(1.0), Some(144.0)))),
+            ("offset_pt", nullable_schema(num_schema("Vertical clearance above plotted elements in points in [0, 200]", Some(0.0), Some(200.0)))),
+            ("color", nullable_schema(any_json_schema("Text color (`#RRGGBB`, `#RRGGBBAA`, color name, or `[r, g, b]` / `[r, g, b, a]`)"))),
+        ],
+        &["sheet_id"],
+        vec![("sheet_id", &["id"]), ("result_sheet_id", &["result_sheet"]), ("pairwise_display_mode", &["display_mode"])],
+        false,
+    )
+}
+
 // ---------------------------------------------------------------------------
 // Command Runners
 // ---------------------------------------------------------------------------
@@ -1168,6 +1225,9 @@ fn validate_graph_spec_in_doc(
     }
     for (idx, cmp) in spec.comparisons.iter().enumerate() {
         validate_result_sheet_ref(doc, graph_id, &cmp.result_sheet_id, &format!("comparisons[{idx}].result_sheet_id"))?;
+    }
+    if let Some(cld) = &spec.compact_letter_display {
+        validate_result_sheet_ref(doc, graph_id, &cld.result_sheet_id, "compact_letter_display.result_sheet_id")?;
     }
     for (idx, ann) in spec.annotations.iter().enumerate() {
         if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann {
@@ -1768,6 +1828,12 @@ fn resize_graph_spec(spec: &mut GraphSpec, new_size: SizePt, mode: CanvasResizeM
             bracket.font_size_pt *= scale_1d;
             bracket.bracket_step_pt *= scale_1d;
         }
+    }
+    if let Some(cld) = &mut spec.compact_letter_display
+        && mode == CanvasResizeMode::ProportionalScale
+    {
+        cld.font_size_pt *= scale_1d;
+        cld.offset_pt *= scale_1d;
     }
 
     for ann in &mut spec.annotations {
@@ -2668,6 +2734,141 @@ fn parse_error_bar_direction(val: &Value) -> Result<ErrorBarDirection, EngineErr
     }
 }
 
+fn parse_pairwise_display_mode(raw: &str) -> Result<PairwiseDisplayMode, EngineError> {
+    let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "bracketsonly" | "brackets" => Ok(PairwiseDisplayMode::BracketsOnly),
+        "compactletterdisplayonly" | "cldonly" | "cld" | "lettersonly" | "letters" => Ok(PairwiseDisplayMode::CompactLetterDisplayOnly),
+        "bracketsandcompactletterdisplay" | "bracketsandcld" | "both" => Ok(PairwiseDisplayMode::BracketsAndCompactLetterDisplay),
+        _ => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("invalid `pairwise_display_mode` `{raw}`; expected `brackets_only`, `compact_letter_display_only`, or `brackets_and_compact_letter_display`"),
+        )
+        .with_details(json!({ "pointer": "/pairwise_display_mode" }))),
+    }
+}
+
+fn parse_cld_ordering(raw: &str) -> Result<CldOrdering, EngineError> {
+    let norm: String = raw.trim().chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
+    match norm.as_str() {
+        "descendingmean" | "descending" | "desc" | "highestfirst" => Ok(CldOrdering::DescendingMean),
+        "ascendingmean" | "ascending" | "asc" | "lowestfirst" => Ok(CldOrdering::AscendingMean),
+        _ => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("invalid CLD `ordering` `{raw}`; expected `descending_mean` or `ascending_mean`"),
+        )
+        .with_details(json!({ "pointer": "/ordering" }))),
+    }
+}
+
+fn apply_cld_field_updates(cld: &mut CompactLetterDisplaySpec, params: &GraphSetCompactLetterDisplayParams) -> Result<(), EngineError> {
+    if let Some(ref raw_ord) = params.ordering {
+        cld.ordering = parse_cld_ordering(raw_ord)?;
+    }
+    if let Some(upper) = params.uppercase {
+        cld.uppercase = upper;
+    }
+    if let Some(alpha_opt) = params.alpha_override {
+        if let Some(a) = alpha_opt
+            && (!a.is_finite() || a <= 0.0 || a >= 1.0)
+        {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("CLD `alpha_override` must be finite in (0, 1), got {a}"))
+                .with_details(json!({ "pointer": "/alpha_override" })));
+        }
+        cld.alpha_override = alpha_opt;
+    }
+    if let Some(fs) = params.font_size_pt {
+        if !fs.is_finite() || fs <= 0.0 || fs > 144.0 {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("CLD `font_size_pt` must be in (0, 144], got {fs}"))
+                .with_details(json!({ "pointer": "/font_size_pt" })));
+        }
+        cld.font_size_pt = fs;
+    }
+    if let Some(off) = params.offset_pt {
+        if !off.is_finite() || !(0.0..=200.0).contains(&off) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("CLD `offset_pt` must be in [0, 200], got {off}"))
+                .with_details(json!({ "pointer": "/offset_pt" })));
+        }
+        cld.offset_pt = off;
+    }
+    if let Some(ref color_val) = params.color
+        && !color_val.is_null()
+    {
+        cld.color = parse_rgba8(color_val)?;
+    }
+    Ok(())
+}
+
+fn run_graph_set_compact_letter_display(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_set_compact_letter_display();
+    let params: GraphSetCompactLetterDisplayParams = parse_params(&schema, raw)?;
+    let id = parse_sheet_id(&params.sheet_id)?;
+    let doc = ctx.session.document();
+    let mut spec = require_graph_sheet(doc, &id)?.spec.clone();
+
+    if params.enabled == Some(false) {
+        spec.compact_letter_display = None;
+        spec.pairwise_display_mode = match params.pairwise_display_mode.as_deref() {
+            Some(m) => parse_pairwise_display_mode(m)?,
+            None => PairwiseDisplayMode::BracketsOnly,
+        };
+    } else {
+        let wants_cld = params.enabled == Some(true)
+            || params.result_sheet_id.is_some()
+            || params.ordering.is_some()
+            || params.uppercase.is_some()
+            || params.alpha_override.is_some()
+            || params.font_size_pt.is_some()
+            || params.offset_pt.is_some()
+            || params.color.as_ref().is_some_and(|v| !v.is_null());
+
+        if wants_cld {
+            let mut cld = match params.result_sheet_id.as_deref() {
+                Some(raw_res) => {
+                    let res_id = parse_sheet_id(raw_res)?;
+                    let _ = require_result_sheet(doc, &res_id)?;
+                    match spec.compact_letter_display.take() {
+                        Some(mut existing) => {
+                            existing.result_sheet_id = res_id;
+                            existing
+                        }
+                        None => CompactLetterDisplaySpec::new(res_id),
+                    }
+                }
+                None => spec.compact_letter_display.take().ok_or_else(|| {
+                    EngineError::with_code(ErrorCode::BadInput, "enabling Compact Letter Display requires `result_sheet_id`")
+                        .with_details(json!({ "pointer": "/result_sheet_id" }))
+                })?,
+            };
+            apply_cld_field_updates(&mut cld, &params)?;
+            spec.compact_letter_display = Some(cld);
+        }
+
+        if let Some(raw_mode) = params.pairwise_display_mode.as_deref() {
+            spec.pairwise_display_mode = parse_pairwise_display_mode(raw_mode)?;
+        } else if spec.compact_letter_display.is_some() && spec.pairwise_display_mode == PairwiseDisplayMode::BracketsOnly {
+            spec.pairwise_display_mode = if spec.comparisons.is_empty() {
+                PairwiseDisplayMode::CompactLetterDisplayOnly
+            } else {
+                PairwiseDisplayMode::BracketsAndCompactLetterDisplay
+            };
+        }
+    }
+
+    validate_graph_spec_in_doc(doc, &id, &spec)?;
+    let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
+    graph.spec = spec;
+    graph.initialized = true;
+
+    let payload = json!({
+        "sheet_id": id.as_str(),
+        "enabled": graph.spec.compact_letter_display.is_some(),
+        "pairwise_display_mode": graph.spec.pairwise_display_mode,
+        "compact_letter_display": graph.spec.compact_letter_display,
+    });
+    Ok(CommandOutcome::mutated("graph.setCompactLetterDisplay", format!("updated compact letter display on `{id}`"), payload))
+}
+
 fn parse_bracket_style(raw: Option<&str>) -> Result<BracketStyle, EngineError> {
     match raw.unwrap_or("square").trim().to_ascii_lowercase().as_str() {
         "square" | "capped" | "ticks" => Ok(BracketStyle::Square),
@@ -2712,13 +2913,90 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_fourteen_graph_commands() {
-        assert_eq!(specs().len(), 14);
+    fn registry_contains_all_fifteen_graph_commands() {
+        assert_eq!(specs().len(), 15);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Graph);
             assert!(!spec.summary.is_empty());
             assert!(!spec.beginner.is_empty());
         }
+    }
+
+    #[test]
+    fn set_compact_letter_display_validates_and_roundtrips_undo_redo() {
+        let mut session = Session::new();
+        session.execute("sheet.createData", json!({ "sheet_id": "col1", "archetype": "column", "cols": 3, "rows": 4 })).unwrap();
+        session
+            .execute(
+                "table.setCells",
+                json!({
+                    "sheet_id": "col1",
+                    "cells": [
+                        { "row": 0, "col": 0, "value": 9.0 }, { "row": 1, "col": 0, "value": 10.0 }, { "row": 2, "col": 0, "value": 11.0 }, { "row": 3, "col": 0, "value": 10.0 },
+                        { "row": 0, "col": 1, "value": 13.0 }, { "row": 1, "col": 1, "value": 14.0 }, { "row": 2, "col": 1, "value": 15.0 }, { "row": 3, "col": 1, "value": 14.0 },
+                        { "row": 0, "col": 2, "value": 21.0 }, { "row": 1, "col": 2, "value": 22.0 }, { "row": 2, "col": 2, "value": 23.0 }, { "row": 3, "col": 2, "value": 22.0 }
+                    ]
+                }),
+            )
+            .unwrap();
+        session.execute("stats.run", json!({ "sheet_id": "res1", "source_sheet": "col1", "kind": "one_way_anova" })).unwrap();
+        session.execute("graph.create", json!({ "sheet_id": "g1", "data_sheet_id": "col1", "kind": "column" })).unwrap();
+
+        let bad_missing = session.execute("graph.setCompactLetterDisplay", json!({ "sheet_id": "g1", "enabled": true })).unwrap_err();
+        assert_eq!(bad_missing.code, ErrorCode::BadInput);
+
+        let out = session
+            .execute(
+                "graph.setCompactLetterDisplay",
+                json!({
+                    "sheet_id": "g1",
+                    "result_sheet_id": "res1",
+                    "ordering": "descending_mean",
+                    "uppercase": false,
+                    "font_size_pt": 10.0,
+                    "offset_pt": 7.0
+                }),
+            )
+            .unwrap();
+        assert_eq!(out.payload["enabled"], json!(true));
+        let gs = session.document().graph_sheet(&SheetId::new("g1")).unwrap();
+        assert_eq!(gs.spec.pairwise_display_mode, PairwiseDisplayMode::CompactLetterDisplayOnly);
+        assert_eq!(gs.spec.compact_letter_display.as_ref().unwrap().font_size_pt, 10.0);
+
+        session
+            .execute(
+                "graph.setCompactLetterDisplay",
+                json!({
+                    "sheet_id": "g1",
+                    "pairwise_display_mode": "brackets_and_compact_letter_display",
+                    "uppercase": true,
+                    "alpha_override": 0.01
+                }),
+            )
+            .unwrap();
+        let gs2 = session.document().graph_sheet(&SheetId::new("g1")).unwrap();
+        assert_eq!(gs2.spec.pairwise_display_mode, PairwiseDisplayMode::BracketsAndCompactLetterDisplay);
+        assert!(gs2.spec.compact_letter_display.as_ref().unwrap().uppercase);
+        assert_eq!(gs2.spec.compact_letter_display.as_ref().unwrap().alpha_override, Some(0.01));
+
+        session.undo().unwrap();
+        let gs_undone = session.document().graph_sheet(&SheetId::new("g1")).unwrap();
+        assert_eq!(gs_undone.spec.pairwise_display_mode, PairwiseDisplayMode::CompactLetterDisplayOnly);
+        assert!(!gs_undone.spec.compact_letter_display.as_ref().unwrap().uppercase);
+
+        session.redo().unwrap();
+        assert!(session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.compact_letter_display.as_ref().unwrap().uppercase);
+
+        session.execute("graph.setCompactLetterDisplay", json!({ "sheet_id": "g1", "alpha_override": null })).unwrap();
+        assert_eq!(session.document().graph_sheet(&SheetId::new("g1")).unwrap().spec.compact_letter_display.as_ref().unwrap().alpha_override, None);
+
+        let bad_alpha = session.execute("graph.setCompactLetterDisplay", json!({ "sheet_id": "g1", "alpha_override": 1.2 })).unwrap_err();
+        assert_eq!(bad_alpha.code, ErrorCode::BadInput);
+
+        session.execute("graph.setCompactLetterDisplay", json!({ "sheet_id": "g1", "enabled": false })).unwrap();
+        let gs_off = session.document().graph_sheet(&SheetId::new("g1")).unwrap();
+        assert!(gs_off.spec.compact_letter_display.is_none());
+        assert_eq!(gs_off.spec.pairwise_display_mode, PairwiseDisplayMode::BracketsOnly);
     }
 
     #[test]

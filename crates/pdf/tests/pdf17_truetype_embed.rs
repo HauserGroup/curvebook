@@ -526,3 +526,119 @@ fn non_winansi_cjk_cyrillic_and_hebrew_never_substitute_question_marks() {
         assert!(bt_count > 0);
     }
 }
+
+#[test]
+fn cld_compiled_graph_exports_deterministic_pdf17_with_selectable_and_outlined_letters() {
+    use lumencraft_chart::compile_graph;
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, DataSheet, GraphSheet, OneWayAnovaSpec,
+        PairwiseComparisonRecord, PairwiseDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId, TableArchetype,
+    };
+
+    let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).expect("column table");
+    table.data_sets[0].title = String::from("Ctrl");
+    table.data_sets[1].title = String::from("Mid");
+    table.data_sets[2].title = String::from("High");
+    for (c, base) in [(0, 10.0), (1, 14.0), (2, 22.0)] {
+        table.data_sets[c].cells =
+            vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
+    }
+    let ds = DataSheet::new(SheetId::new("col-cld"), "Treatment", TableArchetype::Column(table)).expect("ds");
+    let spec =
+        AnalysisSpec::new(SheetId::new("res-cld"), SheetId::new("col-cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).expect("spec");
+    let mut res = ResultSheet::new(spec).expect("res");
+    res.status = ResultStatus::UpToDate;
+    res.pairwise_comparisons = vec![
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("Mid"),
+            estimate_diff: Some(-4.0),
+            raw_p_or_q: 0.14,
+            is_fdr_q: false,
+            significant: false,
+        },
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 2,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-12.0),
+            raw_p_or_q: 0.001,
+            is_fdr_q: false,
+            significant: true,
+        },
+        PairwiseComparisonRecord {
+            group_a: 1,
+            group_b: 2,
+            label_a: String::from("Mid"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-8.0),
+            raw_p_or_q: 0.12,
+            is_fdr_q: false,
+            significant: false,
+        },
+    ];
+
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("graph-cld"), &ds).expect("gs");
+    gs.spec.title = String::from("CLD PDF 1.7 Figure");
+    gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res-cld")));
+    gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+
+    let mut gs_ctl = gs.clone();
+    gs_ctl.spec.pairwise_display_mode = PairwiseDisplayMode::BracketsOnly;
+    gs_ctl.spec.compact_letter_display = None;
+
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds).expect("add ds");
+    doc.add_result_sheet(res).expect("add res");
+    doc.add_graph_sheet(gs.clone()).expect("add gs");
+
+    let scene_cld = compile_graph(&gs, &doc).expect("compile cld scene");
+    let scene_ctl = compile_graph(&gs_ctl, &doc).expect("compile control scene");
+
+    for embedded in [None, Some(build_minimal_truetype_font())] {
+        let sel_opts = PdfExportOptions {
+            version: PdfVersion::Pdf17,
+            compress_streams: true,
+            outline_text: false,
+            embedded_truetype_font: embedded.clone(),
+            ..PdfExportOptions::default()
+        };
+        let pdf_1 = render_pdf(&scene_cld, &sel_opts).expect("first cld pdf");
+        let pdf_2 = render_pdf(&scene_cld, &sel_opts).expect("second cld pdf");
+        assert_eq!(pdf_1, pdf_2, "%PDF-1.7 CLD output must be byte-deterministic");
+
+        let parsed = parse_pdf_strict(&pdf_1, b"%PDF-1.7\n").expect("strict %PDF-1.7 parse");
+        let stream = parsed
+            .streams
+            .iter()
+            .find(|(_, dict, _)| !dict.contains("/Length1 "))
+            .map(|(_, _, decoded)| String::from_utf8(decoded.clone()).expect("UTF-8 stream"))
+            .expect("page stream");
+
+        assert!(stream.contains("(a) Tj\n"), "missing `(a) Tj` in %PDF-1.7 stream");
+        assert!(stream.contains("(ab) Tj\n"), "missing `(ab) Tj` in %PDF-1.7 stream");
+        assert!(stream.contains("(b) Tj\n"), "missing `(b) Tj` in %PDF-1.7 stream");
+
+        let pdf_ctl = render_pdf(&scene_ctl, &sel_opts).expect("control pdf");
+        let parsed_ctl = parse_pdf_strict(&pdf_ctl, b"%PDF-1.7\n").expect("strict control %PDF-1.7 parse");
+        let stream_ctl = parsed_ctl
+            .streams
+            .iter()
+            .find(|(_, dict, _)| !dict.contains("/Length1 "))
+            .map(|(_, _, decoded)| String::from_utf8(decoded.clone()).expect("UTF-8 control stream"))
+            .expect("control page stream");
+        assert!(!stream_ctl.contains("(ab) Tj\n"), "control PDF must not emit CLD `(ab) Tj`");
+    }
+
+    let out_opts = PdfExportOptions { version: PdfVersion::Pdf17, outline_text: true, ..PdfExportOptions::default() };
+    let out_pdf = render_pdf(&scene_cld, &out_opts).expect("outlined cld pdf");
+    let out_parsed = parse_pdf_strict(&out_pdf, b"%PDF-1.7\n").expect("strict outlined %PDF-1.7 parse");
+    let out_stream = String::from_utf8(out_parsed.streams[0].2.clone()).expect("UTF-8 outlined stream");
+    let q_count = out_stream.lines().filter(|l| *l == "q").count();
+    let big_q_count = out_stream.lines().filter(|l| *l == "Q").count();
+    assert_eq!(q_count, big_q_count, "outlined graphics stack q/Q must balance");
+    assert!(!out_stream.contains(" Tj\n"), "outlined PDF must not emit Tj text operators");
+}

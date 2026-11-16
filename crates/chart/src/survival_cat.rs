@@ -30,6 +30,7 @@ const COLORBAR_STEPS: usize = 48;
 /// Margin calculation hints for dynamic `plot_rect_pt` sizing.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct PlotMarginConfig {
+    pub extra_top_pt: f64,
     pub extra_bottom_pt: f64,
     pub extra_left_pt: f64,
     pub has_legend: bool,
@@ -39,7 +40,7 @@ pub(crate) struct PlotMarginConfig {
 
 impl Default for PlotMarginConfig {
     fn default() -> Self {
-        Self { extra_bottom_pt: 0.0, extra_left_pt: 0.0, has_legend: false, has_colorbar: false, suppress_y_axis_labels: false }
+        Self { extra_top_pt: 0.0, extra_bottom_pt: 0.0, extra_left_pt: 0.0, has_legend: false, has_colorbar: false, suppress_y_axis_labels: false }
     }
 }
 
@@ -246,7 +247,7 @@ pub(crate) fn update_plot_rect_for_labels(scene: &mut ChartScene, spec: &GraphSp
     let left_base = if cfg.suppress_y_axis_labels { 20.0 } else { (max_y_w + y_title_space + 16.0).max(38.0) };
     let left = (left_base + cfg.extra_left_pt).min(scene.width_pt * 0.48);
 
-    let top = if spec.title.trim().is_empty() { 20.0 } else { 34.0 };
+    let top = (if spec.title.trim().is_empty() { 20.0 } else { 34.0 } + cfg.extra_top_pt.max(0.0)).min(scene.height_pt * 0.42);
     let right_legend: f64 = if cfg.has_colorbar {
         76.0
     } else if cfg.has_legend && spec.legend.visible && spec.legend.position_pt.is_none() {
@@ -1176,8 +1177,7 @@ fn compile_survival(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Chart
             extra_bottom_pt: extra_bottom,
             extra_left_pt: max_cohort_lbl_w.saturating_sub_nonneg(36.0),
             has_legend: cohorts.len() > 1,
-            has_colorbar: false,
-            suppress_y_axis_labels: false,
+            ..PlotMarginConfig::default()
         },
     );
 

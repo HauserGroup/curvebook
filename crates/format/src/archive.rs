@@ -1464,6 +1464,9 @@ fn collect_graph_deps(gs: &GraphSheet, default_info: Option<&SheetId>) -> Vec<Sh
     for cmp in &gs.spec.comparisons {
         deps.push(cmp.result_sheet_id.clone());
     }
+    if let Some(cld) = &gs.spec.compact_letter_display {
+        deps.push(cld.result_sheet_id.clone());
+    }
     for ann in &gs.spec.annotations {
         match ann {
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {

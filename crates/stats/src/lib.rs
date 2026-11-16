@@ -11,6 +11,7 @@
 
 pub mod anova;
 pub mod categorical;
+pub mod cld;
 pub mod column;
 pub mod common;
 pub mod error;

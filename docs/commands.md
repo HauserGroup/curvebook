@@ -1,6 +1,6 @@
 # LumenCraft Command Reference
 
-Registered commands: 96
+Registered commands: 97
 
 ## Project & Files (`project`)
 
@@ -648,6 +648,14 @@ Registered commands: 96
 - **Summary:** Configure X, Y, and right-hand Y2 axes including log/probit/logit scales, segmented breaks, thresholds, and frame presets.
 - **Beginner note:** Adjusts axis limits, log scales, titles, broken-axis gaps, and frame styling.
 - **Parameters:** `axis` (any), `frame_preset` (any), `sheet_id*` (string), `x_axis` (any), `y2_axis` (any), `y_axis` (any)
+
+### `graph.setCompactLetterDisplay` — Compact Letter Display
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Draw/Compact Letter Display...`
+- **Summary:** Configure or toggle Piepho (2004) compact letter display significance grouping letters and pairwise display mode on a graph.
+- **Beginner note:** Places shared grouping letters (a, b, ab) above graph groups to summarize all-pairwise statistical comparisons.
+- **Parameters:** `alpha_override` (any), `color` (any), `enabled` (any), `font_size_pt` (any), `offset_pt` (any), `ordering` (any), `pairwise_display_mode` (any), `result_sheet_id` (any), `sheet_id*` (string), `uppercase` (any)
 
 ### `graph.setKind` — Change Graph Type
 

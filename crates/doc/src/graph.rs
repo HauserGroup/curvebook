@@ -584,6 +584,79 @@ impl Default for LegendSpec {
     }
 }
 
+/// Monotonic ordering direction for Piepho (2004) Compact Letter Display assignments.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum CldOrdering {
+    /// Highest group mean/rank receives `'a'`; lower groups progress monotonically toward `'b'`, `'c'`, ....
+    #[default]
+    DescendingMean,
+    /// Lowest group mean/rank receives `'a'`; higher groups progress monotonically toward `'b'`, `'c'`, ....
+    AscendingMean,
+}
+
+/// Pairwise significance presentation mode on categorical/column/grouped graphs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum PairwiseDisplayMode {
+    /// Render pairwise significance brackets only (`comparisons`).
+    #[default]
+    BracketsOnly,
+    /// Render Piepho (2004) compact letter display annotations above plotted groups only.
+    CompactLetterDisplayOnly,
+    /// Render both compact letter display letters and non-overlapping significance brackets.
+    BracketsAndCompactLetterDisplay,
+}
+
+fn default_cld_font_size() -> f64 {
+    9.5
+}
+
+fn default_cld_offset_pt() -> f64 {
+    6.0
+}
+
+fn default_cld_color() -> Rgba8 {
+    Rgba8::BLACK
+}
+
+fn is_default_pairwise_display_mode(mode: &PairwiseDisplayMode) -> bool {
+    *mode == PairwiseDisplayMode::BracketsOnly
+}
+
+/// Compact Letter Display (CLD) overlay binding a graph to an all-pairwise [`crate::ResultSheet`].
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+pub struct CompactLetterDisplaySpec {
+    pub result_sheet_id: SheetId,
+    /// Optional explicit alpha threshold overriding precomputed `significant` decisions when adjusted p/q values are present.
+    #[serde(default)]
+    pub alpha_override: Option<f64>,
+    #[serde(default)]
+    pub ordering: CldOrdering,
+    #[serde(default)]
+    pub uppercase: bool,
+    #[serde(default = "default_cld_font_size")]
+    pub font_size_pt: f64,
+    #[serde(default = "default_cld_offset_pt")]
+    pub offset_pt: f64,
+    #[serde(default = "default_cld_color")]
+    pub color: Rgba8,
+}
+
+impl CompactLetterDisplaySpec {
+    /// Default CLD overlay targeting `result_sheet_id`.
+    #[must_use]
+    pub fn new(result_sheet_id: impl Into<SheetId>) -> Self {
+        Self {
+            result_sheet_id: result_sheet_id.into(),
+            alpha_override: None,
+            ordering: CldOrdering::DescendingMean,
+            uppercase: false,
+            font_size_pt: default_cld_font_size(),
+            offset_pt: default_cld_offset_pt(),
+            color: default_cld_color(),
+        }
+    }
+}
+
 /// Resolution-independent figure specification compiled by `lumencraft-chart`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSpec {
@@ -602,6 +675,10 @@ pub struct GraphSpec {
     pub series: Vec<SeriesSpec>,
     pub multivariate: Option<MultivariateGraphEncoding>,
     pub comparisons: Vec<PairwiseBracketSpec>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub compact_letter_display: Option<CompactLetterDisplaySpec>,
+    #[serde(default, skip_serializing_if = "is_default_pairwise_display_mode")]
+    pub pairwise_display_mode: PairwiseDisplayMode,
     pub annotations: Vec<GraphAnnotation>,
     #[serde(default)]
     pub point_overrides: Vec<PointStyleOverride>,
@@ -695,6 +772,8 @@ impl GraphSpec {
             series,
             multivariate,
             comparisons: Vec::new(),
+            compact_letter_display: None,
+            pairwise_display_mode: PairwiseDisplayMode::default(),
             annotations: Vec::new(),
             point_overrides: Vec::new(),
             legend: LegendSpec::default(),
@@ -795,6 +874,14 @@ impl GraphSpec {
                 return Some("spec.comparisons");
             }
         }
+        if let Some(cld) = &self.compact_letter_display {
+            if !cld.font_size_pt.is_finite() || !cld.offset_pt.is_finite() {
+                return Some("spec.compact_letter_display");
+            }
+            if cld.alpha_override.is_some_and(|a| !a.is_finite()) {
+                return Some("spec.compact_letter_display.alpha_override");
+            }
+        }
         for ann in &self.annotations {
             if let Some(field) = annotation_non_finite(ann) {
                 return Some(field);
@@ -821,6 +908,32 @@ impl GraphSpec {
         }
         if let Some(reason) = self.first_non_finite_float() {
             return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Xy, row: 0, col: 0, reason });
+        }
+        if let Some(cld) = &self.compact_letter_display {
+            if cld.font_size_pt <= 0.0 || cld.font_size_pt > 144.0 {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.compact_letter_display.font_size_pt must be in (0, 144]",
+                });
+            }
+            if cld.offset_pt < 0.0 || cld.offset_pt > 200.0 {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.compact_letter_display.offset_pt must be in [0, 200]",
+                });
+            }
+            if cld.alpha_override.is_some_and(|a| a <= 0.0 || a >= 1.0) {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "spec.compact_letter_display.alpha_override must be in (0, 1)",
+                });
+            }
         }
         Ok(())
     }

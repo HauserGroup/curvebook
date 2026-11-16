@@ -1,13 +1,16 @@
 //! Column, grouped bar, replicate scatter, box-and-whisker, violin, floating bar,
 //! before/after paired lines, and auto-stacked collision-free significance brackets.
 
+use std::collections::BTreeMap;
+
 use lumencraft_doc::{
-    BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, ProjectDocument, ReplicateOverlayStyle,
-    ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
+    AnalysisKind, BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode,
+    ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
 };
 use lumencraft_math::sum::SummaryMoments;
 use lumencraft_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
+use lumencraft_stats::cld::{CldOptions, compute_cld_from_result_sheet};
 use lumencraft_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
 use lumencraft_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt};
 
@@ -51,12 +54,27 @@ struct CategorySlotItem {
 }
 
 #[derive(Debug, Clone)]
-struct RenderedSlotBound {
-    group_key: usize,
-    label: String,
-    alt_label: String,
-    x_pt: f64,
-    top_y_pt: f64,
+pub(crate) struct RenderedSlotBound {
+    pub(crate) group_key: usize,
+    pub(crate) label: String,
+    pub(crate) alt_label: String,
+    pub(crate) x_pt: f64,
+    pub(crate) top_y_pt: f64,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedCldSlot {
+    pub(crate) group_key: usize,
+    pub(crate) label: String,
+    pub(crate) letters: String,
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct ResolvedCldLabels {
+    pub(crate) font_size_pt: f64,
+    pub(crate) offset_pt: f64,
+    pub(crate) color: Rgba8,
+    pub(crate) labels: Vec<ResolvedCldSlot>,
 }
 
 #[derive(Debug, Clone)]
@@ -87,9 +105,15 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     let mut tick_positions: Vec<(f64, String)> = Vec::new();
     let mut items = primary_opt.map(|primary| extract_items(graph, primary, &mut tick_positions, &mut scene.warnings)).unwrap_or_default();
 
-    let active_bracket_est = count_active_brackets(graph, doc, &items);
+    let draw_brackets =
+        matches!(graph.spec.pairwise_display_mode, PairwiseDisplayMode::BracketsOnly | PairwiseDisplayMode::BracketsAndCompactLetterDisplay);
+    let active_bracket_est = if draw_brackets { count_active_brackets(graph, doc, &items) } else { 0 };
+    let slot_metas: Vec<(usize, &str, &str, Option<f64>, f64)> =
+        items.iter().map(|it| (it.group_key, it.match_label.as_str(), it.alt_label.as_str(), item_summary_value(it), it.x_pos)).collect();
+    let resolved_cld = resolve_cld_overlay(graph, doc, &slot_metas, &mut scene.warnings);
     let bracket_margin_pt = if active_bracket_est > 0 { ((active_bracket_est.min(4) as f64) * 16.0).min(64.0) } else { 0.0 };
-    configure_plot_rect(graph, scene, has_y2, bracket_margin_pt);
+    let cld_margin_pt = if resolved_cld.is_some() { cld_reserved_top_margin_pt(&graph.spec) } else { 0.0 };
+    configure_plot_rect(graph, scene, has_y2, bracket_margin_pt + cld_margin_pt);
 
     let Some(primary) = primary_opt else {
         render_empty_axes(graph, doc, scene, has_y2);
@@ -102,7 +126,9 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
     }
 
     let include_zero_y = items.iter().any(|it| matches!(it.gdo, GraphicalDataObject::BarWithReplicates { .. }));
-    let headroom = if active_bracket_est > 0 { (0.14 + 0.04 * (active_bracket_est.saturating_sub(1).min(3) as f64)).min(0.26) } else { 0.05 };
+    let bracket_headroom = if active_bracket_est > 0 { (0.14 + 0.04 * (active_bracket_est.saturating_sub(1).min(3) as f64)).min(0.26) } else { 0.05 };
+    let headroom =
+        if resolved_cld.is_some() { if active_bracket_est > 0 { (bracket_headroom + 0.05).min(0.30) } else { 0.12 } } else { bracket_headroom };
     let r = scene.plot_rect_pt;
     let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &x_vals, false, 0.0);
     let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &y_vals, include_zero_y, headroom);
@@ -141,7 +167,12 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
         }
     }
 
-    render_pairwise_brackets(scene, graph, doc, &bounds);
+    if let Some(cld) = &resolved_cld {
+        render_cld_labels(scene, graph, cld, &mut bounds);
+    }
+    if draw_brackets {
+        render_pairwise_brackets(scene, graph, doc, &bounds);
+    }
     let legend_items = build_legend_items(graph, primary);
     render_legend_and_annotations(scene, graph, doc, &legend_items);
     Ok(())
@@ -1539,6 +1570,148 @@ fn deterministic_beeswarm_offsets(ys: &[f64], max_half_w: f64, dot_r: f64) -> Ve
     out
 }
 
+fn item_summary_value(item: &CategorySlotItem) -> Option<f64> {
+    match &item.payload {
+        ExtractedKind::PreSummarized { center, .. } => center.is_finite().then_some(*center),
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let mut unused = Vec::new();
+            compute_central_tendency(&vals, gdo_summary_measure(&item.gdo), &mut unused)
+        }
+    }
+}
+
+pub(crate) fn cld_reserved_top_margin_pt(spec: &GraphSpec) -> f64 {
+    if !matches!(spec.pairwise_display_mode, PairwiseDisplayMode::CompactLetterDisplayOnly | PairwiseDisplayMode::BracketsAndCompactLetterDisplay) {
+        return 0.0;
+    }
+    let Some(cld) = &spec.compact_letter_display else {
+        return 0.0;
+    };
+    let font = if cld.font_size_pt.is_finite() && cld.font_size_pt > 0.0 { cld.font_size_pt } else { 9.5 };
+    let offset = if cld.offset_pt.is_finite() && cld.offset_pt >= 0.0 { cld.offset_pt } else { 6.0 };
+    (font + offset + 6.0).clamp(16.0, 34.0)
+}
+
+fn collect_cld_means_override(res: &lumencraft_doc::ResultSheet, slot_metas: &[(usize, &str, &str, Option<f64>, f64)]) -> Option<Vec<(usize, f64)>> {
+    let needs_override = res.pairwise_comparisons.iter().any(|r| r.estimate_diff.is_none()) || matches!(res.analysis.kind, AnalysisKind::Survival(_));
+    if !needs_override {
+        return None;
+    }
+    let mut seen: BTreeMap<usize, String> = BTreeMap::new();
+    for rec in &res.pairwise_comparisons {
+        seen.entry(rec.group_a).or_insert_with(|| rec.label_a.clone());
+        seen.entry(rec.group_b).or_insert_with(|| rec.label_b.clone());
+    }
+    let mut out = Vec::new();
+    for (idx, lbl) in seen {
+        if let Some(pos) = find_matched_index(slot_metas, idx, Some(lbl.as_str()), |m| (m.0, m.1, m.2))
+            && let Some(mean) = slot_metas[pos].3
+            && mean.is_finite()
+        {
+            out.push((idx, mean));
+        }
+    }
+    (!out.is_empty()).then_some(out)
+}
+
+fn match_cld_assignments_to_slots(
+    assignments: &[lumencraft_stats::cld::CldGroupAssignment],
+    slot_metas: &[(usize, &str, &str, Option<f64>, f64)],
+    grouped_arrangement: GroupedArrangement,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<Vec<ResolvedCldSlot>> {
+    let mut matched_slots: Vec<(usize, f64)> = Vec::new();
+    let mut labels = Vec::new();
+
+    for assign in assignments {
+        let Some(pos) = find_matched_index(slot_metas, assign.group_index, Some(assign.label.as_str()), |m| (m.0, m.1, m.2)) else {
+            continue;
+        };
+        let x_pos = slot_metas[pos].4;
+        if let Some(&(_, prev_x)) = matched_slots.iter().find(|&&(prev_pos, prev_x)| prev_pos == pos || (prev_x - x_pos).abs() < 1e-6) {
+            let reason = if matches!(grouped_arrangement, GroupedArrangement::Stacked | GroupedArrangement::Superimposed) {
+                "stacked_cld_guarded"
+            } else {
+                "overlapping_cld_x_guarded"
+            };
+            warnings.push(ChartWarning::new(reason, format!("skipped compact letter display for overlapping groups at X={prev_x:.2}")));
+            return None;
+        }
+        matched_slots.push((pos, x_pos));
+        labels.push(ResolvedCldSlot { group_key: slot_metas[pos].0, label: assign.label.clone(), letters: assign.letters.clone() });
+    }
+
+    (!labels.is_empty()).then_some(labels)
+}
+
+pub(crate) fn resolve_cld_overlay(
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    slot_metas: &[(usize, &str, &str, Option<f64>, f64)],
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<ResolvedCldLabels> {
+    if !matches!(
+        graph.spec.pairwise_display_mode,
+        PairwiseDisplayMode::CompactLetterDisplayOnly | PairwiseDisplayMode::BracketsAndCompactLetterDisplay
+    ) {
+        return None;
+    }
+    let cld_spec = graph.spec.compact_letter_display.as_ref()?;
+    let Some(res) = doc.result_sheet(&cld_spec.result_sheet_id) else {
+        warnings.push(ChartWarning::new("missing_cld_result", format!("CLD skipped: result sheet '{}' not found", cld_spec.result_sheet_id)));
+        return None;
+    };
+    if let ResultStatus::Failed { message, .. } = &res.status {
+        let detail = if message.trim().is_empty() { "result sheet failed" } else { message.trim() };
+        warnings.push(ChartWarning::new("failed_cld_result", format!("CLD skipped: {detail}")));
+        return None;
+    }
+
+    let options = CldOptions { ordering: cld_spec.ordering, uppercase: cld_spec.uppercase, alpha_override: cld_spec.alpha_override };
+    let means_override = collect_cld_means_override(res, slot_metas);
+    let cld_res = match compute_cld_from_result_sheet(res, means_override.as_deref(), options) {
+        Ok(r) => r,
+        Err(err) => {
+            warnings.push(ChartWarning::new("incompatible_cld_result", format!("CLD skipped: {err}")));
+            return None;
+        }
+    };
+    let labels = match_cld_assignments_to_slots(&cld_res.sorted_assignments, slot_metas, graph.spec.grouped_arrangement, warnings)?;
+    let font_size_pt = if cld_spec.font_size_pt.is_finite() && cld_spec.font_size_pt > 0.0 { cld_spec.font_size_pt } else { 9.5 };
+    let offset_pt = if cld_spec.offset_pt.is_finite() && cld_spec.offset_pt >= 0.0 { cld_spec.offset_pt } else { 6.0 };
+    Some(ResolvedCldLabels { font_size_pt, offset_pt, color: cld_spec.color, labels })
+}
+
+pub(crate) fn render_cld_labels(scene: &mut ChartScene, graph: &GraphSheet, cld: &ResolvedCldLabels, bounds: &mut [RenderedSlotBound]) {
+    let title_floor_y = if graph.spec.title.trim().is_empty() { 4.0 } else { 24.0 };
+    for entry in &cld.labels {
+        let Some(pos) =
+            find_matched_index(bounds, entry.group_key, Some(entry.label.as_str()), |b| (b.group_key, b.label.as_str(), b.alt_label.as_str()))
+        else {
+            continue;
+        };
+        let bound = &mut bounds[pos];
+        let rich = RichText::plain(entry.letters.clone());
+        let metrics = measure_text_pt(&rich, cld.font_size_pt);
+        let label_h = metrics.height_pt().max(cld.font_size_pt);
+        let min_baseline_y = title_floor_y + label_h + 2.0;
+        let max_baseline_y = (scene.plot_rect_pt.bottom() - 6.0).max(min_baseline_y);
+        let desired_y = bound.top_y_pt - cld.offset_pt - 0.15 * cld.font_size_pt;
+        let cld_y = crate::clamp_f64_safe(desired_y, min_baseline_y, max_baseline_y);
+
+        scene.primitives.push(ScenePrimitive::Text(PositionedText {
+            rich,
+            anchor_pt: PointPt::new(bound.x_pt, cld_y),
+            anchor: TextAnchor::Middle,
+            font_size_pt: cld.font_size_pt,
+            rotation_deg: 0.0,
+            color: cld.color,
+        }));
+        bound.top_y_pt = bound.top_y_pt.min(cld_y - label_h - 1.5);
+    }
+}
+
 fn render_pairwise_brackets(scene: &mut ChartScene, graph: &GraphSheet, doc: &ProjectDocument, bounds: &[RenderedSlotBound]) {
     if graph.spec.comparisons.is_empty() {
         return;
@@ -1950,5 +2123,224 @@ mod tests {
             .collect();
         assert_eq!(bar_colors.first().copied(), Some(Rgba8::rgb(213, 94, 0)));
         assert_eq!(bar_colors.last().copied(), Some(Rgba8::rgb(0, 114, 178)));
+    }
+
+    #[test]
+    fn cld_display_modes_avoid_bracket_and_title_collisions_across_bar_and_box() {
+        use lumencraft_doc::{
+            AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, OneWayAnovaSpec, PairwiseComparisonRecord, PairwiseDisplayMode, ResultSheet,
+            ResultStatus,
+        };
+
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).expect("column table");
+        table.data_sets[0].title = String::from("Ctrl");
+        table.data_sets[1].title = String::from("Mid");
+        table.data_sets[2].title = String::from("High");
+        for (c, base) in [(0, 10.0), (1, 14.0), (2, 22.0)] {
+            table.data_sets[c].cells =
+                vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
+        }
+        let ds = DataSheet::new(SheetId::new("col_cld"), "Treatment", TableArchetype::Column(table)).expect("ds");
+
+        let spec = AnalysisSpec::new(SheetId::new("res_anova"), SheetId::new("col_cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
+            .expect("spec");
+        let mut res = ResultSheet::new(spec).expect("res");
+        res.status = ResultStatus::UpToDate;
+        res.pairwise_comparisons = vec![
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 1,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("Mid"),
+                estimate_diff: Some(-4.0),
+                raw_p_or_q: 0.14,
+                is_fdr_q: false,
+                significant: false,
+            },
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 2,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("High"),
+                estimate_diff: Some(-12.0),
+                raw_p_or_q: 0.001,
+                is_fdr_q: false,
+                significant: true,
+            },
+            PairwiseComparisonRecord {
+                group_a: 1,
+                group_b: 2,
+                label_a: String::from("Mid"),
+                label_b: String::from("High"),
+                estimate_diff: Some(-8.0),
+                raw_p_or_q: 0.12,
+                is_fdr_q: false,
+                significant: false,
+            },
+        ];
+
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_cld"), &ds).expect("gs");
+        gs.spec.title = String::from("CLD Height Title");
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_anova")));
+        gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+        gs.spec.comparisons = vec![PairwiseBracketSpec {
+            result_sheet_id: SheetId::new("res_anova"),
+            group_a: 0,
+            group_b: 2,
+            style: BracketStyle::Square,
+            label_mode: BracketLabelMode::Custom(String::from("**sig**")),
+            hide_if_non_significant: false,
+            stroke_width_pt: 1.0,
+            font_size_pt: 8.5,
+            bracket_step_pt: 14.0,
+        }];
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add ds");
+        doc.add_result_sheet(res).expect("add res");
+        doc.add_graph_sheet(gs.clone()).expect("add gs");
+
+        // 1. CompactLetterDisplayOnly: letters appear (`a` for High, `ab` for Mid, `b` for Ctrl), brackets suppressed.
+        let scene_only = compile_graph(&gs, &doc).expect("compile cld only");
+        assert!(scene_only.warnings.is_empty(), "unexpected warnings: {:?}", scene_only.warnings);
+        let texts: Vec<(f64, f64, String)> = scene_only
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                ScenePrimitive::Text(t) => Some((t.anchor_pt.x, t.anchor_pt.y, t.rich.plain_text())),
+                _ => None,
+            })
+            .collect();
+        assert!(!texts.iter().any(|(_, _, s)| s == "sig"), "CompactLetterDisplayOnly must suppress brackets");
+        let a_lbl = texts.iter().find(|(_, _, s)| s == "a").expect("label a");
+        let ab_lbl = texts.iter().find(|(_, _, s)| s == "ab").expect("label ab");
+        let b_lbl = texts.iter().find(|(_, _, s)| s == "b").expect("label b");
+        assert!(b_lbl.0 < ab_lbl.0 && ab_lbl.0 < a_lbl.0, "High should sit rightmost as 'a', Ctrl leftmost as 'b'");
+        assert!(a_lbl.1 >= 24.0 && ab_lbl.1 >= 24.0 && b_lbl.1 >= 24.0, "CLD letters must sit below title");
+
+        // 2. BracketsAndCompactLetterDisplay: brackets render ABOVE CLD letters with zero overlap.
+        let mut gs_both = gs.clone();
+        gs_both.spec.pairwise_display_mode = PairwiseDisplayMode::BracketsAndCompactLetterDisplay;
+        let scene_both = compile_graph(&gs_both, &doc).expect("compile cld + brackets");
+        let cld_top_a = scene_both
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                ScenePrimitive::Text(t) if matches!(t.rich.plain_text().as_str(), "a" | "ab" | "b") => Some(t.anchor_pt.y - t.font_size_pt),
+                _ => None,
+            })
+            .fold(f64::INFINITY, f64::min);
+        let sig_y = scene_both
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                ScenePrimitive::Text(t) if t.rich.plain_text() == "sig" => Some(t.anchor_pt.y),
+                _ => None,
+            })
+            .expect("bracket text rendered");
+        assert!(sig_y + 3.5 < cld_top_a, "bracket baseline+leg ({sig_y}+3.5) must clear top of CLD labels ({cld_top_a})");
+        assert!(sig_y >= 24.0, "bracket text must clear title floor");
+
+        // 3. BoxAndWhisker variant preserves CLD letters cleanly.
+        let mut gs_box = gs;
+        for s in &mut gs_box.spec.series {
+            s.gdo = GraphicalDataObject::BoxAndWhisker {
+                whiskers: lumencraft_doc::WhiskerMethod::MinToMax,
+                fill_color: Rgba8::rgb(86, 180, 233),
+                stroke_color: Rgba8::BLACK,
+                show_outliers: false,
+                show_all_points: false,
+            };
+        }
+        let scene_box = compile_graph(&gs_box, &doc).expect("compile box cld");
+        assert!(scene_box.primitives.iter().any(|p| matches!(p, ScenePrimitive::Text(t) if t.rich.plain_text() == "ab")));
+    }
+
+    #[test]
+    fn cld_handles_missing_failed_incompatible_and_stacked_gracefully() {
+        use lumencraft_doc::{
+            AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, ErrorCode, OneWayAnovaSpec, PairwiseComparisonRecord, PairwiseDisplayMode,
+            ResultSheet, ResultStatus,
+        };
+
+        let mut g = GroupedTable::new(SubcolumnMode::RawReplicates(1), 2, 1).expect("grouped");
+        g.row_titles = vec![String::from("Day 1")];
+        g.data_sets[0].title = String::from("Drug A");
+        g.data_sets[0].cells = vec![vec![Cell::number(10.0)]];
+        g.data_sets[1].title = String::from("Drug B");
+        g.data_sets[1].cells = vec![vec![Cell::number(20.0)]];
+        let ds = DataSheet::new(SheetId::new("grp_cld"), "Grouped", TableArchetype::Grouped(g)).expect("ds");
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g_grp"), &ds).expect("gs");
+        gs.spec.grouped_arrangement = GroupedArrangement::Stacked;
+        gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_missing")));
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add ds");
+        doc.add_graph_sheet(gs.clone()).expect("add gs");
+
+        let s_missing = compile_graph(&gs, &doc).expect("missing result");
+        assert!(s_missing.warnings.iter().any(|w| w.code == "missing_cld_result"));
+
+        let spec_fail = AnalysisSpec::new(SheetId::new("res_fail"), SheetId::new("grp_cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
+            .expect("spec_fail");
+        let mut res_fail = ResultSheet::new(spec_fail).expect("res_fail");
+        res_fail.status = ResultStatus::Failed { code: ErrorCode::BadInput, message: String::from("boom") };
+        doc.add_result_sheet(res_fail).expect("add failed");
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_fail")));
+        let s_failed = compile_graph(&gs, &doc).expect("failed result");
+        assert!(s_failed.warnings.iter().any(|w| w.code == "failed_cld_result"));
+
+        // 3 groups missing pair (0,2) -> incomplete matrix (e.g. Dunnett) -> incompatible_cld_result warning.
+        let spec_inc = AnalysisSpec::new(SheetId::new("res_inc"), SheetId::new("grp_cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
+            .expect("spec_inc");
+        let mut res_inc = ResultSheet::new(spec_inc).expect("res_inc");
+        res_inc.status = ResultStatus::UpToDate;
+        res_inc.pairwise_comparisons = vec![
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 1,
+                label_a: String::from("A"),
+                label_b: String::from("B"),
+                estimate_diff: Some(-5.0),
+                raw_p_or_q: 0.01,
+                is_fdr_q: false,
+                significant: true,
+            },
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 2,
+                label_a: String::from("A"),
+                label_b: String::from("C"),
+                estimate_diff: Some(-8.0),
+                raw_p_or_q: 0.01,
+                is_fdr_q: false,
+                significant: true,
+            },
+        ];
+        doc.add_result_sheet(res_inc).expect("add incomplete");
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_inc")));
+        let s_inc = compile_graph(&gs, &doc).expect("incomplete result");
+        assert!(s_inc.warnings.iter().any(|w| w.code == "incompatible_cld_result"));
+
+        // Stacked coinciding X -> stacked_cld_guarded warning.
+        let spec_stk = AnalysisSpec::new(SheetId::new("res_stk"), SheetId::new("grp_cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
+            .expect("spec_stk");
+        let mut res_stk = ResultSheet::new(spec_stk).expect("res_stk");
+        res_stk.status = ResultStatus::UpToDate;
+        res_stk.pairwise_comparisons = vec![PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("Drug A:Day 1"),
+            label_b: String::from("Drug B:Day 1"),
+            estimate_diff: Some(-10.0),
+            raw_p_or_q: 0.01,
+            is_fdr_q: false,
+            significant: true,
+        }];
+        doc.add_result_sheet(res_stk).expect("add stacked");
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res_stk")));
+        let s_stk = compile_graph(&gs, &doc).expect("stacked cld");
+        assert!(s_stk.warnings.iter().any(|w| w.code == "stacked_cld_guarded"));
     }
 }

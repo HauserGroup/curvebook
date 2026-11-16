@@ -400,3 +400,142 @@ fn render_svg_strips_xml_forbidden_control_and_noncharacter_codepoints() {
     assert!(svg.contains("font-family=\"Helvetica\""));
     validate_svg_structure(&svg).expect("sanitized SVG must validate");
 }
+
+fn cld_sample_document() -> (ProjectDocument, GraphSheet) {
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, BracketLabelMode, BracketStyle, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, OneWayAnovaSpec,
+        PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode, ResultSheet, ResultStatus,
+    };
+
+    let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).expect("column table");
+    table.data_sets[0].title = String::from("Ctrl");
+    table.data_sets[1].title = String::from("Mid");
+    table.data_sets[2].title = String::from("High");
+    for (c, base) in [(0, 10.0), (1, 14.0), (2, 22.0)] {
+        table.data_sets[c].cells =
+            vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
+    }
+    let ds = DataSheet::new(SheetId::new("col-cld"), "Treatment", TableArchetype::Column(table)).expect("data sheet");
+    let spec = AnalysisSpec::new(SheetId::new("res-cld"), SheetId::new("col-cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default()))
+        .expect("anova spec");
+    let mut res = ResultSheet::new(spec).expect("result sheet");
+    res.status = ResultStatus::UpToDate;
+    res.pairwise_comparisons = vec![
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("Mid"),
+            estimate_diff: Some(-4.0),
+            raw_p_or_q: 0.14,
+            is_fdr_q: false,
+            significant: false,
+        },
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 2,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-12.0),
+            raw_p_or_q: 0.001,
+            is_fdr_q: false,
+            significant: true,
+        },
+        PairwiseComparisonRecord {
+            group_a: 1,
+            group_b: 2,
+            label_a: String::from("Mid"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-8.0),
+            raw_p_or_q: 0.12,
+            is_fdr_q: false,
+            significant: false,
+        },
+    ];
+
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("graph-cld"), &ds).expect("graph sheet");
+    gs.spec.title = String::from("CLD Export Title");
+    gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res-cld")));
+    gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+    gs.spec.comparisons = vec![PairwiseBracketSpec {
+        result_sheet_id: SheetId::new("res-cld"),
+        group_a: 0,
+        group_b: 2,
+        style: BracketStyle::Square,
+        label_mode: BracketLabelMode::Custom(String::from("**sig**")),
+        hide_if_non_significant: false,
+        stroke_width_pt: 1.0,
+        font_size_pt: 8.5,
+        bracket_step_pt: 14.0,
+    }];
+
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds).expect("add data");
+    doc.add_result_sheet(res).expect("add result");
+    doc.add_graph_sheet(gs.clone()).expect("add graph");
+    (doc, gs)
+}
+
+fn extract_svg_text_xy(svg: &str, tspan_text: &str) -> (f64, f64) {
+    let needle = format!(">{tspan_text}</tspan>");
+    let line = svg.lines().find(|l| l.contains(&needle)).expect("SVG text line for CLD label");
+    let parse_attr = |attr: &str| -> f64 {
+        let key = format!("{attr}=\"");
+        let start = line.find(&key).expect("SVG coordinate attribute") + key.len();
+        let end = start + line[start..].find('"').expect("closing quote");
+        line[start..end].parse::<f64>().expect("numeric SVG coordinate")
+    };
+    (parse_attr("x"), parse_attr("y"))
+}
+
+#[test]
+fn cld_compiled_graph_exports_deterministic_editable_and_outlined_svg() {
+    use lumencraft_doc::PairwiseDisplayMode;
+
+    let (doc, gs_cld) = cld_sample_document();
+    let mut gs_ctl = gs_cld.clone();
+    gs_ctl.spec.pairwise_display_mode = PairwiseDisplayMode::BracketsOnly;
+    gs_ctl.spec.compact_letter_display = None;
+    gs_ctl.spec.comparisons.clear();
+
+    let mut gs_both = gs_cld.clone();
+    gs_both.spec.pairwise_display_mode = PairwiseDisplayMode::BracketsAndCompactLetterDisplay;
+
+    let scene_cld = compile_graph(&gs_cld, &doc).expect("compile cld scene");
+    let scene_ctl = compile_graph(&gs_ctl, &doc).expect("compile control scene");
+    let scene_both = compile_graph(&gs_both, &doc).expect("compile cld+bracket scene");
+
+    for outline_text in [false, true] {
+        let opts = SvgExportOptions { outline_text, ..SvgExportOptions::default() };
+        let svg_a = render_svg(&scene_cld, &opts).expect("first cld svg");
+        let svg_b = render_svg(&scene_cld, &opts).expect("second cld svg");
+        assert_eq!(svg_a, svg_b, "CLD SVG must be byte-deterministic (outline={outline_text})");
+        validate_svg_structure(&svg_a).expect("valid CLD SVG");
+
+        let svg_ctl = render_svg(&scene_ctl, &opts).expect("control svg");
+        validate_svg_structure(&svg_ctl).expect("valid control SVG");
+        assert_ne!(svg_a, svg_ctl, "CLD letters must change SVG geometry/text (outline={outline_text})");
+
+        if outline_text {
+            assert!(!svg_a.contains("<text"), "outlined SVG must emit glyph paths, not <text>");
+            assert!(svg_a.contains("<path d="));
+        } else {
+            assert!(svg_a.contains(">a</tspan>"), "missing CLD letter `a` in SVG:\n{svg_a}");
+            assert!(svg_a.contains(">ab</tspan>"), "missing CLD letter `ab` in SVG:\n{svg_a}");
+            assert!(svg_a.contains(">b</tspan>"), "missing CLD letter `b` in SVG:\n{svg_a}");
+            assert!(!svg_a.contains(">sig</tspan>"), "CompactLetterDisplayOnly must suppress bracket label");
+            assert!(!svg_ctl.contains(">ab</tspan>"), "control SVG must omit CLD letters");
+
+            let (xb, _) = extract_svg_text_xy(&svg_a, "b");
+            let (xab, _) = extract_svg_text_xy(&svg_a, "ab");
+            let (xa, _) = extract_svg_text_xy(&svg_a, "a");
+            assert!(xb < xab && xab < xa, "expected Ctrl('b') < Mid('ab') < High('a') horizontally: {xb}, {xab}, {xa}");
+
+            let svg_both = render_svg(&scene_both, &opts).expect("cld+bracket svg");
+            validate_svg_structure(&svg_both).expect("valid combined SVG");
+            let (_, y_sig) = extract_svg_text_xy(&svg_both, "sig");
+            let (_, y_ab) = extract_svg_text_xy(&svg_both, "ab");
+            assert!(y_sig + 8.0 < y_ab, "bracket label y={y_sig} must clear CLD label y={y_ab} without overlap");
+        }
+    }
+}

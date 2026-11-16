@@ -472,6 +472,154 @@ fn emit_confidence_ellipse(scene: &mut ChartScene, pts: &[(f64, f64)], color: Rg
 
 // Categorical × Continuous Summary (Gap G7)
 
+fn resolve_categorical_cld_overlay(
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    levels: &[String],
+    groups: &[Vec<f64>],
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<crate::column_grouped::ResolvedCldLabels> {
+    let level_means: Vec<Option<f64>> =
+        groups.iter().map(|vals| (!vals.is_empty()).then(|| vals.iter().sum::<f64>() / (vals.len() as f64))).collect();
+    let cld_slots: Vec<(usize, &str, &str, Option<f64>, f64)> =
+        levels.iter().enumerate().map(|(i, lvl)| (i, lvl.as_str(), lvl.as_str(), level_means[i], i as f64)).collect();
+    crate::column_grouped::resolve_cld_overlay(graph, doc, &cld_slots, warnings)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn draw_categorical_summary_slot(
+    scene: &mut ChartScene,
+    gdo: &GraphicalDataObject,
+    y_error_bars: Option<lumencraft_doc::ErrorBarSpec>,
+    color: Rgba8,
+    r: RectPt,
+    cx: f64,
+    box_w: f64,
+    y_zero: f64,
+    values: &[f64],
+    sorted: &[f64],
+    center_y: f64,
+    y_map: AxisMapping,
+) -> f64 {
+    let mut top_data_val = center_y;
+    match gdo {
+        GraphicalDataObject::BarWithReplicates { border_color, border_width_pt, replicate_overlay, .. } => {
+            if let Some(y_top) = y_map.map_value(center_y, r.bottom(), r.y) {
+                let rect = RectPt::new(cx - box_w * 0.5, y_top.min(y_zero), box_w, (y_zero - y_top).abs().max(0.5));
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::rect(rect),
+                    fill: Some(alpha_fill(color, 185)),
+                    stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
+                    clip: Some(r),
+                });
+            }
+            if replicate_overlay.is_some() {
+                emit_replicate_dots(scene, cx, box_w * 0.6, sorted, y_map, r, Rgba8::rgb(35, 35, 35));
+                if let Some(&max_v) = sorted.last() {
+                    top_data_val = top_data_val.max(max_v);
+                }
+            }
+        }
+        GraphicalDataObject::BoxAndWhisker { whiskers, stroke_color, show_outliers, show_all_points, .. } => {
+            draw_box_and_whisker_slot(
+                scene,
+                sorted,
+                &BoxSlotSpec {
+                    cx,
+                    box_w,
+                    whiskers: *whiskers,
+                    fill_color: color,
+                    stroke_color: *stroke_color,
+                    show_outliers: *show_outliers,
+                    show_all: *show_all_points,
+                    y_map,
+                },
+            );
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = max_v;
+            }
+        }
+        GraphicalDataObject::Violin { stroke_color, show_median_and_quartiles, half_violin_with_points, .. } => {
+            draw_violin_slot(
+                scene,
+                sorted,
+                &ViolinSlotSpec {
+                    cx,
+                    half_w: box_w * 0.9,
+                    fill_color: color,
+                    stroke_color: *stroke_color,
+                    show_med: *show_median_and_quartiles,
+                    half_violin: *half_violin_with_points,
+                    y_map,
+                },
+            );
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = max_v;
+            }
+        }
+        GraphicalDataObject::FloatingBar { border_color, border_width_pt, summary, .. } => {
+            if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last())
+                && let (Some(y_lo_pt), Some(y_hi_pt)) = (y_map.map_value(lo, r.bottom(), r.y), y_map.map_value(hi, r.bottom(), r.y))
+            {
+                top_data_val = hi;
+                let rect = RectPt::new(cx - box_w * 0.5, y_hi_pt.min(y_lo_pt), box_w, (y_lo_pt - y_hi_pt).abs().max(1.0));
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::rect(rect),
+                    fill: Some(alpha_fill(color, 180)),
+                    stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
+                    clip: Some(r),
+                });
+                if let Some(m) = summary
+                    && let Some(ym) = y_map.map_value(summary_center(values, sorted, *m), r.bottom(), r.y)
+                {
+                    scene.primitives.push(ScenePrimitive::Path {
+                        path: Path2D::line(PointPt::new(cx - box_w * 0.5, ym), PointPt::new(cx + box_w * 0.5, ym)),
+                        fill: None,
+                        stroke: Some(solid_stroke(*border_color, 1.5, LineDashStyle::Solid)),
+                        clip: Some(r),
+                    });
+                }
+            }
+        }
+        GraphicalDataObject::AlignedDotPlot { show_crossbar, .. } => {
+            emit_replicate_dots(scene, cx, box_w * 0.65, sorted, y_map, r, color);
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = top_data_val.max(max_v);
+            }
+            if *show_crossbar && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y) {
+                scene.primitives.push(ScenePrimitive::Path {
+                    path: Path2D::line(PointPt::new(cx - box_w * 0.45, ym), PointPt::new(cx + box_w * 0.45, ym)),
+                    fill: None,
+                    stroke: Some(solid_stroke(Rgba8::BLACK, 1.6, LineDashStyle::Solid)),
+                    clip: Some(r),
+                });
+            }
+        }
+        _ => {
+            emit_replicate_dots(scene, cx, box_w * 0.65, sorted, y_map, r, color);
+            if let Some(&max_v) = sorted.last() {
+                top_data_val = top_data_val.max(max_v);
+            }
+        }
+    }
+
+    if let Some(eb) = y_error_bars {
+        emit_error_bar(scene, cx, values, sorted, center_y, eb, y_map);
+        let sd = sample_sd(values).unwrap_or(0.0);
+        let err_top = match eb.metric {
+            lumencraft_doc::ErrorBarMetric::Sd | lumencraft_doc::ErrorBarMetric::ExplicitSubcolumns => center_y + sd,
+            lumencraft_doc::ErrorBarMetric::Sem => center_y + sd / (values.len().max(1) as f64).sqrt(),
+            lumencraft_doc::ErrorBarMetric::ConfidenceInterval95 => center_y + 1.96 * sd / (values.len().max(1) as f64).sqrt(),
+            lumencraft_doc::ErrorBarMetric::InterquartileRange => quartiles_hinge(sorted).map_or(center_y, |(_, _, q3)| q3),
+            lumencraft_doc::ErrorBarMetric::Range => sorted.last().copied().unwrap_or(center_y),
+        };
+        if !matches!(eb.direction, lumencraft_doc::ErrorBarDirection::LowerOnly) {
+            top_data_val = top_data_val.max(err_top);
+        }
+    }
+    top_data_val
+}
+
 fn compile_categorical_summary(
     graph: &GraphSheet,
     mv: &lumencraft_doc::MultipleVariablesTable,
@@ -521,13 +669,17 @@ fn compile_categorical_summary(
         data_hi = data_hi.max(0.0);
     }
     let y_pad = (data_hi - data_lo).max(1.0) * 0.12;
+    let resolved_cld = resolve_categorical_cld_overlay(graph, doc, &levels, &groups, &mut scene.warnings);
+    let cld_top_margin = if resolved_cld.is_some() { crate::column_grouped::cld_reserved_top_margin_pt(&graph.spec) } else { 0.0 };
+    let y_hi_pad = if resolved_cld.is_some() { (data_hi - data_lo).max(1.0) * 0.18 } else { y_pad };
     let (y_lo, y_hi) = resolve_axis_domain(
         &graph.spec.y_axis,
         data_lo - if matches!(gdo, GraphicalDataObject::BarWithReplicates { .. }) && data_lo >= 0.0 { 0.0 } else { y_pad },
-        data_hi + y_pad,
+        data_hi + y_hi_pad,
     );
     let y_ticks = nice_axis_ticks(&graph.spec.y_axis, y_lo, y_hi, 5);
-    let max_y_w = update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig::default());
+    let max_y_w =
+        update_plot_rect_for_labels(scene, &graph.spec, &y_ticks, PlotMarginConfig { extra_top_pt: cld_top_margin, ..PlotMarginConfig::default() });
 
     let r = scene.plot_rect_pt;
     let y_map = AxisMapping { min: y_lo, max: y_hi, scale: graph.spec.y_axis.segments.first().map_or(AxisScale::Linear, |s| s.scale) };
@@ -547,6 +699,7 @@ fn compile_categorical_summary(
 
     let y_zero = crate::clamp_f64_safe(y_map.map_value(0.0, r.bottom(), r.y).unwrap_or(r.bottom()), r.y, r.bottom());
     let mut line_centers = Vec::new();
+    let mut slot_bounds = Vec::with_capacity(groups.len());
     for (idx, values) in groups.iter().enumerate() {
         if values.is_empty() {
             continue;
@@ -557,98 +710,22 @@ fn compile_categorical_summary(
         let mut sorted = values.clone();
         sorted.sort_by(f64::total_cmp);
         let center_y = summary_center(values, &sorted, summary_measure_from_gdo(gdo));
-
-        match gdo {
-            GraphicalDataObject::BarWithReplicates { border_color, border_width_pt, replicate_overlay, .. } => {
-                if let Some(y_top) = y_map.map_value(center_y, r.bottom(), r.y) {
-                    let rect = RectPt::new(cx - box_w * 0.5, y_top.min(y_zero), box_w, (y_zero - y_top).abs().max(0.5));
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::rect(rect),
-                        fill: Some(alpha_fill(color, 185)),
-                        stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
-                        clip: Some(r),
-                    });
-                }
-                if replicate_overlay.is_some() {
-                    emit_replicate_dots(scene, cx, box_w * 0.6, &sorted, y_map, r, Rgba8::rgb(35, 35, 35));
-                }
-            }
-            GraphicalDataObject::BoxAndWhisker { whiskers, stroke_color, show_outliers, show_all_points, .. } => {
-                draw_box_and_whisker_slot(
-                    scene,
-                    &sorted,
-                    &BoxSlotSpec {
-                        cx,
-                        box_w,
-                        whiskers: *whiskers,
-                        fill_color: color,
-                        stroke_color: *stroke_color,
-                        show_outliers: *show_outliers,
-                        show_all: *show_all_points,
-                        y_map,
-                    },
-                );
-            }
-            GraphicalDataObject::Violin { stroke_color, show_median_and_quartiles, half_violin_with_points, .. } => {
-                draw_violin_slot(
-                    scene,
-                    &sorted,
-                    &ViolinSlotSpec {
-                        cx,
-                        half_w: box_w * 0.9,
-                        fill_color: color,
-                        stroke_color: *stroke_color,
-                        show_med: *show_median_and_quartiles,
-                        half_violin: *half_violin_with_points,
-                        y_map,
-                    },
-                );
-            }
-            GraphicalDataObject::FloatingBar { border_color, border_width_pt, summary, .. } => {
-                if let (Some(&lo), Some(&hi)) = (sorted.first(), sorted.last())
-                    && let (Some(y_lo_pt), Some(y_hi_pt)) = (y_map.map_value(lo, r.bottom(), r.y), y_map.map_value(hi, r.bottom(), r.y))
-                {
-                    let rect = RectPt::new(cx - box_w * 0.5, y_hi_pt.min(y_lo_pt), box_w, (y_lo_pt - y_hi_pt).abs().max(1.0));
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::rect(rect),
-                        fill: Some(alpha_fill(color, 180)),
-                        stroke: Some(solid_stroke(*border_color, *border_width_pt, LineDashStyle::Solid)),
-                        clip: Some(r),
-                    });
-                    if let Some(m) = summary
-                        && let Some(ym) = y_map.map_value(summary_center(values, &sorted, *m), r.bottom(), r.y)
-                    {
-                        scene.primitives.push(ScenePrimitive::Path {
-                            path: Path2D::line(PointPt::new(cx - box_w * 0.5, ym), PointPt::new(cx + box_w * 0.5, ym)),
-                            fill: None,
-                            stroke: Some(solid_stroke(*border_color, 1.5, LineDashStyle::Solid)),
-                            clip: Some(r),
-                        });
-                    }
-                }
-            }
-            GraphicalDataObject::AlignedDotPlot { show_crossbar, .. } => {
-                emit_replicate_dots(scene, cx, box_w * 0.65, &sorted, y_map, r, color);
-                if *show_crossbar && let Some(ym) = y_map.map_value(center_y, r.bottom(), r.y) {
-                    scene.primitives.push(ScenePrimitive::Path {
-                        path: Path2D::line(PointPt::new(cx - box_w * 0.45, ym), PointPt::new(cx + box_w * 0.45, ym)),
-                        fill: None,
-                        stroke: Some(solid_stroke(Rgba8::BLACK, 1.6, LineDashStyle::Solid)),
-                        clip: Some(r),
-                    });
-                }
-            }
-            _ => {
-                emit_replicate_dots(scene, cx, box_w * 0.65, &sorted, y_map, r, color);
-            }
-        }
-
-        if let Some(eb) = y_error_bars {
-            emit_error_bar(scene, cx, values, &sorted, center_y, eb, y_map);
-        }
+        let top_data_val = draw_categorical_summary_slot(scene, gdo, y_error_bars, color, r, cx, box_w, y_zero, values, &sorted, center_y, y_map);
+        let top_y_pt = y_map.map_value(top_data_val, r.bottom(), r.y).map_or(r.y, |py| crate::clamp_f64_safe(py, r.y, r.bottom()));
+        slot_bounds.push(crate::column_grouped::RenderedSlotBound {
+            group_key: idx,
+            label: levels[idx].clone(),
+            alt_label: levels[idx].clone(),
+            x_pt: cx,
+            top_y_pt,
+        });
         if let Some(yc) = y_map.map_value(center_y, r.bottom(), r.y) {
             line_centers.push((cx, yc));
         }
+    }
+
+    if let Some(cld) = &resolved_cld {
+        crate::column_grouped::render_cld_labels(scene, graph, cld, &mut slot_bounds);
     }
 
     if matches!(gdo, GraphicalDataObject::ScatterAndLine { line: Some(_), .. } | GraphicalDataObject::BeforeAfterLines { .. })
@@ -3426,6 +3503,104 @@ mod tests {
                 .iter()
                 .any(|p| matches!(p, ScenePrimitive::Path { stroke: Some(st), .. } if st.dash == lumencraft_palette::LineDashStyle::Dashed))
         );
+    }
+
+    #[test]
+    fn categorical_summary_renders_cld_letters_above_error_bars() {
+        use lumencraft_doc::{
+            AnalysisKind, AnalysisSpec, CompactLetterDisplaySpec, ErrorBarSpec, GraphicalDataObject, OneWayAnovaSpec, PairwiseComparisonRecord,
+            PairwiseDisplayMode, ResultSheet, ResultStatus, SummaryMeasure,
+        };
+
+        let mut mv = MultipleVariablesTable::new(2, 6).expect("mv");
+        mv.variables[0].title = String::from("Group");
+        mv.variables[0].lock_role(VariableRole::Categorical);
+        mv.variables[1].title = String::from("Response");
+        for (r, (g, y)) in [("Ctrl", 10.0), ("Ctrl", 12.0), ("Drug", 24.0), ("Drug", 26.0), ("Ref", 18.0), ("Ref", 20.0)].into_iter().enumerate() {
+            mv.variables[0].cells[r] = lumencraft_doc::Cell::text(g);
+            mv.variables[1].cells[r] = lumencraft_doc::Cell::number(y);
+        }
+        let ds = DataSheet::new(SheetId::new("mv-cat"), "Cat Summary", TableArchetype::MultipleVariables(mv)).expect("ds");
+
+        let spec =
+            AnalysisSpec::new(SheetId::new("res-cat"), SheetId::new("mv-cat"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).expect("spec");
+        let mut res = ResultSheet::new(spec).expect("res");
+        res.status = ResultStatus::UpToDate;
+        res.pairwise_comparisons = vec![
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 1,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("Drug"),
+                estimate_diff: Some(-14.0),
+                raw_p_or_q: 0.002,
+                is_fdr_q: false,
+                significant: true,
+            },
+            PairwiseComparisonRecord {
+                group_a: 0,
+                group_b: 2,
+                label_a: String::from("Ctrl"),
+                label_b: String::from("Ref"),
+                estimate_diff: Some(-8.0),
+                raw_p_or_q: 0.14,
+                is_fdr_q: false,
+                significant: false,
+            },
+            PairwiseComparisonRecord {
+                group_a: 1,
+                group_b: 2,
+                label_a: String::from("Drug"),
+                label_b: String::from("Ref"),
+                estimate_diff: Some(6.0),
+                raw_p_or_q: 0.16,
+                is_fdr_q: false,
+                significant: false,
+            },
+        ];
+
+        let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("g-cat"), &ds).expect("gs");
+        gs.spec.title = String::from("Categorical CLD");
+        gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+        gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res-cat")));
+        gs.spec.multivariate = Some(MultivariateGraphEncoding {
+            plot_mode: MultivariatePlotMode::CategoricalSummary {
+                gdo: GraphicalDataObject::BarWithReplicates {
+                    summary: SummaryMeasure::Mean,
+                    fill_color: Rgba8::rgb(0, 114, 178),
+                    border_color: Rgba8::BLACK,
+                    border_width_pt: 0.8,
+                    replicate_overlay: None,
+                },
+                y_error_bars: Some(ErrorBarSpec::default()),
+            },
+            x_column: 0,
+            y_column: 1,
+            color: ColorChannelMapping::Constant(Rgba8::rgb(0, 114, 178)),
+            size: SizeChannelMapping::Constant { radius_pt: 4.0 },
+            label_column: None,
+            x_level_order_override: None,
+            show_convex_hulls: false,
+            show_confidence_ellipses: false,
+        });
+
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(ds).expect("add ds");
+        doc.add_result_sheet(res).expect("add res");
+        let mut scene = ChartScene::new("g-cat", "Categorical CLD", 360.0, 240.0, None);
+        compile_multivariate_or_diagnostic_graph(&gs, &doc, &mut scene).expect("compile");
+        assert!(scene.warnings.is_empty(), "warnings: {:?}", scene.warnings);
+        let texts: Vec<String> = scene
+            .primitives
+            .iter()
+            .filter_map(|p| match p {
+                ScenePrimitive::Text(t) => Some(t.rich.plain_text()),
+                _ => None,
+            })
+            .collect();
+        assert!(texts.contains(&String::from("a")), "missing 'a' in {texts:?}");
+        assert!(texts.contains(&String::from("ab")), "missing 'ab' in {texts:?}");
+        assert!(texts.contains(&String::from("b")), "missing 'b' in {texts:?}");
     }
 
     #[test]

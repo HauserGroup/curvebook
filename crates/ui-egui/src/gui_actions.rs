@@ -9,8 +9,8 @@
 //! wizards, and modal dialogs identically to an interactive desktop user.
 
 use lumencraft_doc::{
-    AnalysisKind, Cell, CellValue, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod, SheetId,
-    SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
+    AnalysisKind, Cell, CellValue, CldOrdering, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod,
+    SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use lumencraft_engine::{EngineError, cmd};
 use lumencraft_render::RenderTargetSpec;
@@ -329,13 +329,39 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
         }
         ActiveDialog::FormatGraph { .. } => try_toggle_format_graph_click(app, wid),
         ActiveDialog::InsertModelEquation { .. } => try_toggle_insert_equation_click(app, wid),
-        ActiveDialog::PairwiseComparisons { .. } if matches!(wid, "pairwise.hide_non_significant" | "pairwise.auto_add") => {
+        ActiveDialog::PairwiseComparisons { .. }
+            if matches!(
+                wid,
+                "pairwise.hide_non_significant"
+                    | "pairwise.auto_add"
+                    | "pairwise.cld_enabled"
+                    | "pairwise.cld_uppercase"
+                    | "pairwise.cld_ordering"
+                    | "pairwise.display_mode"
+            ) =>
+        {
             if wid == "pairwise.auto_add" {
                 let doc = app.document().clone();
                 let added = app.canvas_dialogs.pairwise.auto_add_from_analysis(&doc);
                 return Ok(Some(json!({ "clicked": wid, "added": added, "updated": true })));
             }
-            app.canvas_dialogs.pairwise.hide_non_significant = !app.canvas_dialogs.pairwise.hide_non_significant;
+            let pw = &mut app.canvas_dialogs.pairwise;
+            match wid {
+                "pairwise.hide_non_significant" => {
+                    pw.hide_non_significant = !pw.hide_non_significant;
+                    pw.brackets_dirty = true;
+                }
+                "pairwise.cld_enabled" => pw.toggle_cld_enabled(),
+                "pairwise.cld_uppercase" => pw.cld_uppercase = !pw.cld_uppercase,
+                "pairwise.cld_ordering" => {
+                    pw.cld_ordering = match pw.cld_ordering {
+                        CldOrdering::DescendingMean => CldOrdering::AscendingMean,
+                        CldOrdering::AscendingMean => CldOrdering::DescendingMean,
+                    };
+                }
+                "pairwise.display_mode" => pw.cycle_display_mode(),
+                _ => {}
+            }
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
         ActiveDialog::BubblePlotInspector { .. } if matches!(wid, "bubble.show_convex_hulls" | "bubble.show_confidence_ellipses") => {
@@ -1455,7 +1481,9 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             commit_many_intents_opt_close(app, intents, action != "apply")
         }
         ActiveDialog::FormatAxes { .. } => commit_single_intent(app, app.canvas_dialogs.format_axes.commit_intent(), true),
-        ActiveDialog::PairwiseComparisons { .. } => commit_single_intent(app, app.canvas_dialogs.pairwise.commit_intent(), true),
+        ActiveDialog::PairwiseComparisons { .. } => {
+            commit_many_intents_opt_close(app, app.canvas_dialogs.pairwise.commit_intents(), action != "apply")
+        }
         ActiveDialog::BubblePlotInspector { .. } => commit_single_intent(app, app.canvas_dialogs.bubble_plot.commit_intent(), true),
         ActiveDialog::ApplyStyleFrom { .. } => commit_single_intent(app, app.canvas_dialogs.apply_style.commit_intent(), true),
         ActiveDialog::FormatGraph { .. } => commit_many_intents_opt_close(app, app.canvas_dialogs.format_graph.commit_intents(), action != "apply"),

@@ -53,11 +53,11 @@ pub use error::{
 };
 pub use graph::{
     AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
-    BreakOrnament, CategoricalTickSource, ColorChannelMapping, ConnectingLineStyle, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection,
-    ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject,
-    GroupedArrangement, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode, PairwiseBracketSpec,
-    PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec, SizeChannelMapping, SummaryMeasure,
-    TickLabelFormat, WhiskerMethod,
+    BreakOrnament, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind,
+    EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet,
+    GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode,
+    PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec,
+    SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};

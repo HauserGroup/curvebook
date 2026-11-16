@@ -687,3 +687,112 @@ fn rasterizes_rich_and_rotated_text_and_compiled_chart_scenes() {
         assert!(non_white > 50, "compiled scene '{}' rendered nearly blank ({non_white} pixels)", compiled.title);
     }
 }
+
+#[test]
+fn cld_compiled_graph_rasterizes_deterministically_into_rgba_annotation_band() {
+    use lumencraft_doc::{
+        AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, CompactLetterDisplaySpec, OneWayAnovaSpec, PairwiseComparisonRecord,
+        PairwiseDisplayMode, ResultSheet, ResultStatus,
+    };
+
+    let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).expect("column table");
+    table.data_sets[0].title = String::from("Ctrl");
+    table.data_sets[1].title = String::from("Mid");
+    table.data_sets[2].title = String::from("High");
+    for (c, base) in [(0, 10.0), (1, 14.0), (2, 22.0)] {
+        table.data_sets[c].cells =
+            vec![vec![Cell::number(base - 1.0)], vec![Cell::number(base)], vec![Cell::number(base + 1.0)], vec![Cell::number(base)]];
+    }
+    let ds = DataSheet::new(SheetId::new("col-cld"), "Treatment", TableArchetype::Column(table)).expect("ds");
+    let spec =
+        AnalysisSpec::new(SheetId::new("res-cld"), SheetId::new("col-cld"), AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).expect("spec");
+    let mut res = ResultSheet::new(spec).expect("res");
+    res.status = ResultStatus::UpToDate;
+    res.pairwise_comparisons = vec![
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 1,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("Mid"),
+            estimate_diff: Some(-4.0),
+            raw_p_or_q: 0.14,
+            is_fdr_q: false,
+            significant: false,
+        },
+        PairwiseComparisonRecord {
+            group_a: 0,
+            group_b: 2,
+            label_a: String::from("Ctrl"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-12.0),
+            raw_p_or_q: 0.001,
+            is_fdr_q: false,
+            significant: true,
+        },
+        PairwiseComparisonRecord {
+            group_a: 1,
+            group_b: 2,
+            label_a: String::from("Mid"),
+            label_b: String::from("High"),
+            estimate_diff: Some(-8.0),
+            raw_p_or_q: 0.12,
+            is_fdr_q: false,
+            significant: false,
+        },
+    ];
+
+    let mut gs = GraphSheet::new_uninitialized_for_data(SheetId::new("graph-cld"), &ds).expect("gs");
+    gs.spec.title = String::from("CLD RGBA Figure");
+    gs.spec.compact_letter_display = Some(CompactLetterDisplaySpec::new(SheetId::new("res-cld")));
+    gs.spec.pairwise_display_mode = PairwiseDisplayMode::CompactLetterDisplayOnly;
+
+    let mut gs_ctl = gs.clone();
+    gs_ctl.spec.pairwise_display_mode = PairwiseDisplayMode::BracketsOnly;
+    gs_ctl.spec.compact_letter_display = None;
+
+    let mut doc = ProjectDocument::default();
+    doc.add_data_sheet(ds).expect("add ds");
+    doc.add_result_sheet(res).expect("add res");
+    doc.add_graph_sheet(gs.clone()).expect("add gs");
+
+    let scene_cld = compile_graph(&gs, &doc).expect("compile cld scene");
+    let scene_ctl = compile_graph(&gs_ctl, &doc).expect("compile control scene");
+
+    let target = RenderTargetSpec { width_px: 480, height_px: 340, dpi: 150 };
+    let img_1 = render_scene(&scene_cld, target).expect("render cld 1");
+    let img_2 = render_scene(&scene_cld, target).expect("render cld 2");
+    assert_eq!(img_1, img_2, "CLD RGBA render must be byte-deterministic");
+    assert_ne!(img_1, render_scene(&scene_ctl, target).expect("render control"), "CLD render must differ from non-CLD control");
+
+    let png = encode_png(&img_1).expect("encode cld png");
+    let decoded = decode_and_verify_png(&png);
+    assert_eq!(decoded.width, target.width_px);
+    assert_eq!(decoded.height, target.height_px);
+    assert_eq!(decoded.rgba, img_1.rgba);
+
+    let sx = f64::from(target.width_px) / scene_cld.width_pt;
+    let sy = f64::from(target.height_px) / scene_cld.height_pt;
+    for label in ["b", "ab", "a"] {
+        let pos = scene_cld
+            .primitives
+            .iter()
+            .find_map(|p| match p {
+                ScenePrimitive::Text(t) if t.rich.plain_text() == label => Some(t.anchor_pt),
+                _ => None,
+            })
+            .expect("CLD text primitive");
+        let x0 = ((pos.x - 10.0) * sx).floor().max(0.0) as u32;
+        let x1 = ((pos.x + 10.0) * sx).ceil().min(f64::from(target.width_px - 1)) as u32;
+        let y0 = ((pos.y - 12.0) * sy).floor().max(0.0) as u32;
+        let y1 = ((pos.y + 3.0) * sy).ceil().min(f64::from(target.height_px - 1)) as u32;
+        let mut ink_pixels = 0usize;
+        for py in y0..=y1 {
+            for px in x0..=x1 {
+                if pixel_at(&img_1, px, py) != Rgba8::WHITE {
+                    ink_pixels += 1;
+                }
+            }
+        }
+        assert!(ink_pixels >= 4, "expected rasterized glyph ink around CLD label `{label}` in [{x0}..={x1}, {y0}..={y1}], got {ink_pixels}");
+    }
+}

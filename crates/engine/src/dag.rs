@@ -147,6 +147,14 @@ fn check_explicit_self_cycles(doc: &ProjectDocument) -> Result<(), EngineError> 
                 ));
             }
         }
+        if let Some(cld) = &graph.spec.compact_letter_display
+            && cld.result_sheet_id == graph.id
+        {
+            return Err(EngineError::with_code(
+                crate::ErrorCode::CycleDetected,
+                format!("self-referential compact letter display detected on graph sheet `{}`", graph.id),
+            ));
+        }
         for ann in &graph.spec.annotations {
             if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }
             | lumencraft_doc::GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
@@ -330,6 +338,9 @@ pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &Shee
     }
     for cmp in &spec.comparisons {
         deps.push(cmp.result_sheet_id.clone());
+    }
+    if let Some(cld) = &spec.compact_letter_display {
+        deps.push(cld.result_sheet_id.clone());
     }
     for ann in &spec.annotations {
         if let lumencraft_doc::GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. }

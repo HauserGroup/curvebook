@@ -571,6 +571,18 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
     run_valid(s, covered, "graph.setSeries", json!({ "sheet_id": "gr-1", "series_index": 0, "color": "#1F77B4CC" }))?;
     run_valid(s, covered, "graph.setRegressionOverlay", json!({ "sheet_id": "gr-1", "result_sheet_id": "res-fit", "series_index": 0 }))?;
     run_valid(s, covered, "graph.addComparisonBrackets", json!({ "sheet_id": "gr-col", "result_sheet_id": "res-anova", "significant_only": false }))?;
+    run_valid(
+        s,
+        covered,
+        "graph.setCompactLetterDisplay",
+        json!({
+            "sheet_id": "gr-col",
+            "result_sheet_id": "res-anova",
+            "pairwise_display_mode": "brackets_and_compact_letter_display",
+            "ordering": "descending_mean",
+            "uppercase": false
+        }),
+    )?;
     run_valid(s, covered, "graph.addAnnotation", json!({ "sheet_id": "gr-1", "kind": "text", "text": "Peak", "x_pt": 180.0, "y_pt": 60.0 }))?;
     run_valid(s, covered, "graph.applyStyleFrom", json!({ "sheet_id": "gr-col", "donor_sheet_id": "gr-1" }))?;
     run_valid(
@@ -816,6 +828,12 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
         "graph.initialize" | "graph.addComparisonBrackets" | "graph.applyStyleFrom" => vec![
             json!({ "sheet_id": "gr-seed", "donor_sheet_id": "missing-graph", "result_sheet_id": "missing-res" }),
             json!({ "sheet_id": "missing-graph", "kind": "bad_kind" }),
+        ],
+        "graph.setCompactLetterDisplay" => vec![
+            json!({ "sheet_id": "gr-seed", "enabled": true }),
+            json!({ "sheet_id": "gr-seed", "result_sheet_id": "res-anova-seed", "pairwise_display_mode": "invalid_mode" }),
+            json!({ "sheet_id": "gr-seed", "result_sheet_id": "res-anova-seed", "alpha_override": 1.5 }),
+            json!({ "sheet_id": "gr-seed", "result_sheet_id": "res-anova-seed", "font_size_pt": 0.0 }),
         ],
         "layout.create" | "layout.addPanel" | "layout.alignOrigins" => vec![
             json!({ "sheet_id": "", "preset": "nonexistent" }),

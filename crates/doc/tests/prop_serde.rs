@@ -383,6 +383,16 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         font_size_pt: 9.0,
         bracket_step_pt: 12.0,
     });
+    gsheet.spec.pairwise_display_mode = lumencraft_doc::PairwiseDisplayMode::BracketsAndCompactLetterDisplay;
+    gsheet.spec.compact_letter_display = Some(lumencraft_doc::CompactLetterDisplaySpec {
+        result_sheet_id: SheetId::new("res-sim"),
+        alpha_override: Some(0.05),
+        ordering: lumencraft_doc::CldOrdering::AscendingMean,
+        uppercase: true,
+        font_size_pt: 10.0,
+        offset_pt: 7.0,
+        color: Rgba8::BLACK,
+    });
     gsheet.spec.annotations.push(GraphAnnotation::TextBox {
         bounds_pt: RectPt::new(10.0, 10.0, 90.0, 30.0),
         markdown: String::from("EC50 = {{result:res-sim:EC50}}"),
