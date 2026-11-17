@@ -356,6 +356,7 @@ fn qol6_t_test_and_anova_reports_all_formats_and_preserve_stored_numbers() {
         method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
         compute_effect_sizes: true,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, ..MultiplicitySpec::default() },
+        ..OneWayAnovaSpec::default()
     };
     let anova_spec = AnalysisSpec::new("res-rm-anova", "rm-col", AnalysisKind::OneWayAnova(rm_spec)).unwrap();
     ok_cmd(&mut session, "analysis.run", json!({ "spec": anova_spec }));

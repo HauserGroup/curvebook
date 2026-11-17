@@ -239,10 +239,85 @@ fn schema_migration_v0_to_v1_and_future_version_rejection() {
         matches!(
             &migrated_v1.result_sheets[0].analysis.kind,
             AnalysisKind::FactorialAnova(spec) if spec.residual_covariance == curvebook_doc::ResidualCovariance::CompoundSymmetry
+                && spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
+                && !spec.mixed_effects_reml
         ),
-        "expected CompoundSymmetry default after v1->v2 migration, got {:?}",
+        "expected CompoundSymmetry + KenwardRoger default after v1->v3 migration, got {:?}",
         migrated_v1.result_sheets[0].analysis.kind
     );
+
+    // V2 document missing `df_method` / `mixed_effects_reml` on OneWayAnova, FactorialAnova,
+    // and NestedComparison migrates cleanly to V3 with `KenwardRoger` default.
+    let mut v2_src = ProjectDocument::new("V2 RM Study").unwrap();
+    let v2_col = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap();
+    v2_src.add_data_sheet(DataSheet::new("data-col", "RM Column", TableArchetype::Column(v2_col)).unwrap()).unwrap();
+    let v2_grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).unwrap();
+    v2_src.add_data_sheet(DataSheet::new("data-grp", "RM Grouped", TableArchetype::Grouped(v2_grp)).unwrap()).unwrap();
+    let v2_nst = NestedTable::new(2, 2, 2).unwrap();
+    v2_src.add_data_sheet(DataSheet::new("data-nst", "Nested", TableArchetype::Nested(v2_nst)).unwrap()).unwrap();
+
+    v2_src
+        .add_result_sheet(
+            ResultSheet::new(AnalysisSpec::new("res-ow", "data-col", AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).unwrap()).unwrap(),
+        )
+        .unwrap();
+    v2_src
+        .add_result_sheet(
+            ResultSheet::new(
+                AnalysisSpec::new("res-fac", "data-grp", AnalysisKind::FactorialAnova(curvebook_doc::FactorialAnovaSpec::default())).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+    v2_src
+        .add_result_sheet(
+            ResultSheet::new(
+                AnalysisSpec::new("res-nst", "data-nst", AnalysisKind::NestedComparison(curvebook_doc::NestedAnalysisSpec::default())).unwrap(),
+            )
+            .unwrap(),
+        )
+        .unwrap();
+
+    let mut v2_doc = serde_json::to_value(&v2_src).unwrap();
+    v2_doc["schema_version"] = serde_json::json!(2_u32);
+    for key in ["df_method", "mixed_effects_reml", "residual_covariance"] {
+        v2_doc["result_sheets"][0]["analysis"]["kind"]["OneWayAnova"].as_object_mut().unwrap().remove(key);
+    }
+    for key in ["df_method", "mixed_effects_reml"] {
+        v2_doc["result_sheets"][1]["analysis"]["kind"]["FactorialAnova"].as_object_mut().unwrap().remove(key);
+    }
+    v2_doc["result_sheets"][2]["analysis"]["kind"]["NestedComparison"].as_object_mut().unwrap().remove("df_method");
+
+    let v2_bytes = serde_json::to_vec(&v2_doc).unwrap();
+    let v2_manifest = serde_json::json!({
+        "format": "curvebook-archive",
+        "schema_version": 2,
+        "kind": "Project",
+        "title": "V2 RM Study",
+        "document_crc32": crc32fast::hash(&v2_bytes),
+        "sheets": []
+    });
+    let mut w4 = ZipWriter::new();
+    w4.add_file("document.json", v2_bytes).unwrap();
+    w4.add_file("manifest.json", serde_json::to_vec(&v2_manifest).unwrap()).unwrap();
+    let migrated_v2 = open_project_bytes(&w4.finish().unwrap()).unwrap();
+    assert_eq!(migrated_v2.schema_version, CURRENT_SCHEMA_VERSION);
+    assert!(matches!(
+        &migrated_v2.result_sheets[0].analysis.kind,
+        AnalysisKind::OneWayAnova(spec)
+            if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
+                && !spec.mixed_effects_reml
+                && spec.residual_covariance == curvebook_doc::ResidualCovariance::CompoundSymmetry
+    ));
+    assert!(matches!(
+        &migrated_v2.result_sheets[1].analysis.kind,
+        AnalysisKind::FactorialAnova(spec)
+            if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger && !spec.mixed_effects_reml
+    ));
+    assert!(matches!(
+        &migrated_v2.result_sheets[2].analysis.kind,
+        AnalysisKind::NestedComparison(spec) if spec.df_method == curvebook_doc::MixedModelDfMethod::KenwardRoger
+    ));
 }
 
 #[test]

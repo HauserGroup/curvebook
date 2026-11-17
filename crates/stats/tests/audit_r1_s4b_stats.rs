@@ -238,17 +238,26 @@ fn r1_s02_13_rm_anova_friedman_cox_mv_km_report_listwise_omissions() {
     // Row 5 remains trailing empty -> must not count as skipped!
 
     let col_sheet = DataSheet::new(SheetId::new("rm-listwise"), "RM Listwise", TableArchetype::Column(tab)).unwrap();
-    for method in [OneWayMethod::RepeatedMeasures { geisser_greenhouse: false }, OneWayMethod::Friedman] {
-        let spec = AnalysisSpec::new(
-            SheetId::new("a-rm"),
-            col_sheet.id.clone(),
-            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method, ..Default::default() }),
-        )
-        .unwrap();
-        let res = run_analysis(&col_sheet, &spec).unwrap();
-        assert!(has_info_listwise(&res), "method {method:?} should report Complete-case row alignment");
-        assert!(res.checklist.iter().any(|c| c.diagnostic_metric.as_deref() == Some("2 row(s) omitted; 3 retained")));
-    }
+    let rm_reml_spec = AnalysisSpec::new(
+        SheetId::new("a-rm-reml"),
+        col_sheet.id.clone(),
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::RepeatedMeasures { geisser_greenhouse: false }, ..Default::default() }),
+    )
+    .unwrap();
+    let rm_reml_res = run_analysis(&col_sheet, &rm_reml_spec).unwrap();
+    assert!(!has_info_listwise(&rm_reml_res), "RepeatedMeasures with missing cells must fit mixed-effects REML instead of listwise deletion");
+    assert!(rm_reml_res.checklist.iter().any(|c| c.assumption == "Mixed-effects REML (repeated measures)"
+        && c.diagnostic_metric.as_deref().is_some_and(|m| m.starts_with("5 subjects, 13 observations, 2 incomplete block(s)"))));
+
+    let fr_spec = AnalysisSpec::new(
+        SheetId::new("a-fr"),
+        col_sheet.id.clone(),
+        AnalysisKind::OneWayAnova(OneWayAnovaSpec { method: OneWayMethod::Friedman, ..Default::default() }),
+    )
+    .unwrap();
+    let fr_res = run_analysis(&col_sheet, &fr_spec).unwrap();
+    assert!(has_info_listwise(&fr_res), "Friedman should report Complete-case row alignment");
+    assert!(fr_res.checklist.iter().any(|c| c.diagnostic_metric.as_deref() == Some("2 row(s) omitted; 3 retained")));
 
     // MultipleVariables Cox PH & MV Kaplan-Meier omitting incomplete rows.
     let mut mv = MultipleVariablesTable::new(4, 7).unwrap();
@@ -491,6 +500,7 @@ fn s3_title_finding_1_dunnett_missing_control_column_returns_err() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
             },
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();

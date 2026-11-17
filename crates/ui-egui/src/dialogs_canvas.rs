@@ -10,12 +10,13 @@ use curvebook_doc::{
     EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
     GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset,
-    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
-    PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
-    PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell, ResultSheet,
-    ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
+    MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
+    PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope,
+    PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell,
+    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
+    WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -448,9 +449,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         "stats.outliers" => Some(AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: 1.0 })),
         "stats.two_group" => Some(AnalysisKind::TwoGroupComparison(TwoGroupSpec::default())),
         "stats.one_way_anova" => Some(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())),
-        "stats.nested" => {
-            Some(AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: false, multiplicity: MultiplicitySpec::default() }))
-        }
+        "stats.nested" => Some(AnalysisKind::NestedComparison(NestedAnalysisSpec::default())),
         "stats.roc" => Some(AnalysisKind::RocCurve(RocSpec::default())),
         "stats.factorial_anova" => Some(AnalysisKind::FactorialAnova(FactorialAnovaSpec::default())),
         "fit.linear" => Some(AnalysisKind::LinearRegression(LinearRegressionSpec::default())),
@@ -2232,46 +2231,34 @@ impl EditAnalysisParametersState {
                 if !self.paired_or_matched {
                     return Err(String::from("Geisser-Greenhouse sphericity control is disabled when No matching is selected."));
                 }
-                if let Some(gg) = val.as_bool()
-                    && let Some(spec) = &mut self.draft
+                if let Some(spec) = &mut self.draft
                     && let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone()
                 {
-                    a.method = OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg };
-                    spec.update_kind(AnalysisKind::OneWayAnova(a));
+                    if a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured {
+                        return Err(String::from("Sphericity corrections are disabled when Mixed-Effects REML is active."));
+                    }
+                    if let Some(gg) = val.as_bool() {
+                        a.method = OneWayMethod::RepeatedMeasures { geisser_greenhouse: gg };
+                        spec.update_kind(AnalysisKind::OneWayAnova(a));
+                    }
                 }
             }
             "multiplicity_method" => {
                 if let Some(raw) = val.as_str() {
                     let method = parse_multiplicity_method_name(raw, self.control_column)?;
-                    if !crate::modal_predicates::r2_parametric_post_hoc_method(self.assume_gaussian, method).enabled {
-                        return Err(String::from("Parametric post-hoc test disabled when Assume Gaussian = No."));
+                    let draft_reml = self.draft.as_ref().is_some_and(draft_forces_reml_mode);
+                    let gate = crate::modal_predicates::r1b_post_hoc_option_enabled(self.assume_gaussian, draft_reml, method);
+                    if !gate.enabled {
+                        return Err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method disabled.")));
                     }
                     self.set_anova_multiplicity(method);
                 }
             }
-            "edit.post_hoc.tukey" | "edit.posthoc.tukey" => {
+            key if key.starts_with("edit.post_hoc.") || key.starts_with("edit.posthoc.") => {
+                let method = post_hoc_method_for_widget_key(key, self.control_column)
+                    .ok_or_else(|| format!("unknown parameter field `{key}` in EditAnalysisParameters"))?;
                 if val.as_bool().unwrap_or(true) {
-                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, true).enabled {
-                        return Err(String::from("Parametric Tukey post-hoc test is disabled when Assume Gaussian = No."));
-                    }
-                    self.set_anova_multiplicity(MultiplicityMethod::TukeyHsd);
-                }
-            }
-            "edit.post_hoc.dunnett" | "edit.posthoc.dunnett" => {
-                if val.as_bool().unwrap_or(true) {
-                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, true).enabled {
-                        return Err(String::from("Parametric Dunnett post-hoc test is disabled when Assume Gaussian = No."));
-                    }
-                    let ctrl = self.control_column;
-                    self.set_anova_multiplicity(MultiplicityMethod::Dunnett { control_column: ctrl });
-                }
-            }
-            "edit.post_hoc.dunn" | "edit.posthoc.dunn" => {
-                if val.as_bool().unwrap_or(true) {
-                    if !crate::modal_predicates::r2_post_hoc_option_enabled(self.assume_gaussian, false).enabled {
-                        return Err(String::from("Nonparametric Dunn post-hoc test is disabled when Assume Gaussian = Yes."));
-                    }
-                    self.set_anova_multiplicity(MultiplicityMethod::DunnRankSum);
+                    self.apply_checked_post_hoc_patch(method)?;
                 }
             }
             "anova_method" | "one_way_method" | "edit.anova_method" | "edit.one_way_method" => {
@@ -2647,6 +2634,16 @@ impl EditAnalysisParametersState {
         spec.update_kind(updated);
     }
 
+    fn apply_checked_post_hoc_patch(&mut self, method: MultiplicityMethod) -> Result<(), String> {
+        let draft_reml = self.draft.as_ref().is_some_and(draft_forces_reml_mode);
+        let gate = crate::modal_predicates::r1b_post_hoc_option_enabled(self.assume_gaussian, draft_reml, method);
+        if !gate.enabled {
+            return Err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method is disabled.")));
+        }
+        self.set_anova_multiplicity(method);
+        Ok(())
+    }
+
     fn set_anova_multiplicity(&mut self, method: MultiplicityMethod) {
         let Some(spec) = &mut self.draft else {
             return;
@@ -2718,6 +2715,42 @@ impl EditAnalysisParametersState {
             ("repeated_measures" | "edit.factorial.repeated_measures", AnalysisKind::FactorialAnova(f)) => {
                 let raw = val.as_str().ok_or_else(|| String::from("`repeated_measures` must be a string"))?;
                 f.repeated_measures = parse_rm_design_str(raw)?;
+                true
+            }
+            ("mixed_effects_reml" | "edit.rm.mixed_effects_reml", AnalysisKind::OneWayAnova(a)) => {
+                let b = val.as_bool().ok_or_else(|| String::from("`mixed_effects_reml` must be boolean"))?;
+                a.mixed_effects_reml = b;
+                if b && !crate::modal_predicates::r1b_is_reml_allowed_post_hoc(a.multiplicity.method) {
+                    a.multiplicity.method = MultiplicityMethod::Bonferroni;
+                }
+                true
+            }
+            ("mixed_effects_reml" | "edit.rm.mixed_effects_reml", AnalysisKind::FactorialAnova(f)) => {
+                let b = val.as_bool().ok_or_else(|| String::from("`mixed_effects_reml` must be boolean"))?;
+                f.mixed_effects_reml = b;
+                if b && !crate::modal_predicates::r1b_is_reml_allowed_post_hoc(f.multiplicity.method) {
+                    f.multiplicity.method = MultiplicityMethod::Bonferroni;
+                }
+                true
+            }
+            ("df_method" | "edit.rm.df_method", AnalysisKind::OneWayAnova(a)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`df_method` must be a string"))?;
+                a.df_method = parse_df_method_str(raw)?;
+                true
+            }
+            ("df_method" | "edit.rm.df_method", AnalysisKind::FactorialAnova(f)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`df_method` must be a string"))?;
+                f.df_method = parse_df_method_str(raw)?;
+                true
+            }
+            ("df_method" | "edit.rm.df_method", AnalysisKind::NestedComparison(n)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`df_method` must be a string"))?;
+                n.df_method = parse_df_method_str(raw)?;
+                true
+            }
+            ("residual_covariance" | "edit.rm.residual_covariance" | "edit.reml.residual_covariance", AnalysisKind::OneWayAnova(a)) => {
+                let raw = val.as_str().ok_or_else(|| String::from("`residual_covariance` must be a string"))?;
+                a.residual_covariance = parse_residual_covariance_str(raw)?;
                 true
             }
             (
@@ -3116,6 +3149,29 @@ impl EditAnalysisParametersState {
     }
 }
 
+fn draft_forces_reml_mode(spec: &AnalysisSpec) -> bool {
+    match &spec.kind {
+        AnalysisKind::OneWayAnova(a) => {
+            matches!(a.method, OneWayMethod::RepeatedMeasures { .. })
+                && (a.mixed_effects_reml || a.residual_covariance == ResidualCovariance::Unstructured)
+        }
+        AnalysisKind::FactorialAnova(f) => {
+            f.repeated_measures != RepeatedMeasuresDesign::None
+                && (f.mixed_effects_reml || f.residual_covariance == ResidualCovariance::Unstructured || f.three_way)
+        }
+        _ => false,
+    }
+}
+
+fn parse_df_method_str(raw: &str) -> Result<MixedModelDfMethod, String> {
+    let norm = norm_key(raw);
+    match norm.as_str() {
+        "kenwardroger" | "kr" => Ok(MixedModelDfMethod::KenwardRoger),
+        "satterthwaite" | "sat" | "faicornelius" => Ok(MixedModelDfMethod::Satterthwaite),
+        _ => Err(format!("unknown REML df method `{raw}`; expected `kenward_roger` or `satterthwaite`")),
+    }
+}
+
 fn parse_multiplicity_method_name(raw: &str, control_col: usize) -> Result<MultiplicityMethod, String> {
     let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
     match norm.as_str() {
@@ -3137,6 +3193,11 @@ fn parse_multiplicity_method_name(raw: &str, control_col: usize) -> Result<Multi
         "fisherlsd" | "lsd" => Ok(MultiplicityMethod::FisherLsd),
         _ => Err(format!("unknown multiplicity method `{raw}`")),
     }
+}
+
+fn post_hoc_method_for_widget_key(key: &str, control_col: usize) -> Option<MultiplicityMethod> {
+    let suffix = key.strip_prefix("edit.post_hoc.").or_else(|| key.strip_prefix("edit.posthoc."))?;
+    parse_multiplicity_method_name(suffix, control_col).ok()
 }
 
 fn parse_contingency_method_name(raw: &str) -> Result<ContingencyMethod, String> {

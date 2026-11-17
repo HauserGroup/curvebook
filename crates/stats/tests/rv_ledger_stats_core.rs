@@ -276,11 +276,13 @@ fn rv65_posthoc_ci_tracks_confidence_level_independently_of_significance_thresho
             method: ow_method,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec { method: mult_method, threshold: 0.05, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         };
         let ow_001 = OneWayAnovaSpec {
             method: ow_method,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec { method: mult_method, threshold: 0.001, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         };
         let mut spec_95_t05 = AnalysisSpec::new("an1", "col-rv65", AnalysisKind::OneWayAnova(ow_05.clone())).unwrap();
         spec_95_t05.confidence_level = ConfidenceLevel::DEFAULT_95;

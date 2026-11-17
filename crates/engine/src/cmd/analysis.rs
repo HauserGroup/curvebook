@@ -3,11 +3,11 @@
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
     CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
-    LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
-    PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId,
-    SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
+    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod,
+    PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget,
+    PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec,
+    SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
     VariableRole, WeightingScheme,
 };
 use curvebook_fit::get_builtin_model;
@@ -397,6 +397,7 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
             "residual_covariance",
             nullable_schema(str_schema("REML residual covariance structure for repeated-measures ANOVA (`compound_symmetry`, `unstructured`)")),
         ));
+        props.push(("df_method", nullable_schema(str_schema("REML denominator degrees-of-freedom method (`kenward_roger`, `satterthwaite`)"))));
     }
     if include_fit_extras {
         props.push(("equation_id", nullable_schema(non_empty_str_schema("Built-in or custom equation identifier"))));
@@ -1202,9 +1203,7 @@ fn infer_default_kind(params: &Value, domain: AnalysisDomain, table_kind: TableK
             TableKind::Contingency => Ok(AnalysisKind::Contingency(ContingencySpec::default())),
             TableKind::Survival => Ok(AnalysisKind::Survival(default_km_survival())),
             TableKind::MultipleVariables => Ok(AnalysisKind::Multivariate(default_pca())),
-            TableKind::Nested => {
-                Ok(AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: false, multiplicity: MultiplicitySpec::default() }))
-            }
+            TableKind::Nested => Ok(AnalysisKind::NestedComparison(NestedAnalysisSpec::default())),
             TableKind::PartsOfWhole => Ok(AnalysisKind::DescriptiveStats(DescriptiveSpec::default())),
         },
     }
@@ -1328,7 +1327,7 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
             iterative: params.get("iterative").and_then(Value::as_bool).unwrap_or(false),
         }),
         "nested_t" | "nested_anova" | "nested" => {
-            AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: name == "nested_t", multiplicity: MultiplicitySpec::default() })
+            AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: name == "nested_t", ..NestedAnalysisSpec::default() })
         }
         "multiple_row_t_tests" | "stats.multiple_row_t_tests" | "multiple_row_tests" | "multiple_t_tests" => {
             AnalysisKind::MultipleRowTTests(MultipleRowTestsSpec::default())
@@ -1447,9 +1446,9 @@ fn resolve_fit_shorthand(name: &str, params: &Value) -> Result<AnalysisKind, Eng
 fn apply_shorthand_kind_overrides(kind: &mut AnalysisKind, params: &Value) -> Result<(), EngineError> {
     match kind {
         AnalysisKind::Transform(spec) => apply_transform_overrides(spec, params)?,
-        AnalysisKind::OneWayAnova(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
+        AnalysisKind::OneWayAnova(spec) => apply_one_way_overrides(spec, params)?,
         AnalysisKind::FactorialAnova(spec) => apply_factorial_overrides(spec, params)?,
-        AnalysisKind::NestedComparison(spec) => apply_multiplicity_override(&mut spec.multiplicity, params)?,
+        AnalysisKind::NestedComparison(spec) => apply_nested_overrides(spec, params)?,
         AnalysisKind::MultipleRowTTests(spec) => apply_multiple_row_overrides(spec, params)?,
         AnalysisKind::BlandAltman(spec) => apply_bland_altman_overrides(spec, params)?,
         AnalysisKind::PassingBablok(spec) => apply_passing_bablok_overrides(spec, params)?,
@@ -1527,6 +1526,54 @@ fn parse_residual_covariance_override(raw: &str) -> Result<ResidualCovariance, E
     }
 }
 
+fn parse_df_method_override(raw: &str) -> Result<MixedModelDfMethod, EngineError> {
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "kenward_roger" | "kenwardroger" | "kr" => Ok(MixedModelDfMethod::KenwardRoger),
+        "satterthwaite" | "sat" | "fai_cornelius" => Ok(MixedModelDfMethod::Satterthwaite),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown mixed-model df method `{raw}`"))),
+    }
+}
+
+fn apply_residual_covariance_override(cov: &mut ResidualCovariance, params: &Value) -> Result<(), EngineError> {
+    if let Some(cov_val) = params.get("residual_covariance").filter(|v| !v.is_null()) {
+        if let Ok(parsed) = serde_json::from_value::<ResidualCovariance>(cov_val.clone()) {
+            *cov = parsed;
+        } else if let Some(raw) = cov_val.as_str() {
+            *cov = parse_residual_covariance_override(raw)?;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`residual_covariance` must be `compound_symmetry` or `unstructured`"));
+        }
+    }
+    Ok(())
+}
+
+fn apply_df_method_override(df_method: &mut MixedModelDfMethod, params: &Value) -> Result<(), EngineError> {
+    if let Some(df_val) = params.get("df_method").filter(|v| !v.is_null()) {
+        if let Ok(parsed) = serde_json::from_value::<MixedModelDfMethod>(df_val.clone()) {
+            *df_method = parsed;
+        } else if let Some(raw) = df_val.as_str() {
+            *df_method = parse_df_method_override(raw)?;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`df_method` must be `kenward_roger` or `satterthwaite`"));
+        }
+    }
+    Ok(())
+}
+
+fn apply_one_way_overrides(spec: &mut OneWayAnovaSpec, params: &Value) -> Result<(), EngineError> {
+    apply_bool_opt(params, &["mixed_effects_reml"], &mut spec.mixed_effects_reml);
+    apply_df_method_override(&mut spec.df_method, params)?;
+    apply_residual_covariance_override(&mut spec.residual_covariance, params)?;
+    apply_bool_opt(params, &["compute_effect_sizes"], &mut spec.compute_effect_sizes);
+    apply_multiplicity_override(&mut spec.multiplicity, params)
+}
+
+fn apply_nested_overrides(spec: &mut NestedAnalysisSpec, params: &Value) -> Result<(), EngineError> {
+    apply_bool_opt(params, &["two_group_t_test"], &mut spec.two_group_t_test);
+    apply_df_method_override(&mut spec.df_method, params)?;
+    apply_multiplicity_override(&mut spec.multiplicity, params)
+}
+
 fn apply_factorial_overrides(spec: &mut FactorialAnovaSpec, params: &Value) -> Result<(), EngineError> {
     if let Some(rm_val) = params.get("repeated_measures").filter(|v| !v.is_null()) {
         if let Ok(parsed) = serde_json::from_value::<RepeatedMeasuresDesign>(rm_val.clone()) {
@@ -1537,17 +1584,12 @@ fn apply_factorial_overrides(spec: &mut FactorialAnovaSpec, params: &Value) -> R
             return Err(EngineError::with_code(ErrorCode::BadInput, "`repeated_measures` must be a valid design string"));
         }
     }
-    if let Some(cov_val) = params.get("residual_covariance").filter(|v| !v.is_null()) {
-        if let Ok(parsed) = serde_json::from_value::<ResidualCovariance>(cov_val.clone()) {
-            spec.residual_covariance = parsed;
-        } else if let Some(raw) = cov_val.as_str() {
-            spec.residual_covariance = parse_residual_covariance_override(raw)?;
-        } else {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "`residual_covariance` must be `compound_symmetry` or `unstructured`"));
-        }
-    }
+    apply_bool_opt(params, &["mixed_effects_reml"], &mut spec.mixed_effects_reml);
+    apply_df_method_override(&mut spec.df_method, params)?;
+    apply_residual_covariance_override(&mut spec.residual_covariance, params)?;
     apply_bool_opt(params, &["fit_reml_on_missing"], &mut spec.fit_reml_on_missing);
     apply_bool_opt(params, &["compute_effect_sizes"], &mut spec.compute_effect_sizes);
+    apply_usize_field(params, &["max_interaction_order"], &mut spec.max_interaction_order)?;
     apply_multiplicity_override(&mut spec.multiplicity, params)
 }
 
@@ -2025,6 +2067,7 @@ const SHORTHAND_OVERRIDDEN_PATCH_KEYS: &[&str] = &[
     "weighting",
     "repeated_measures",
     "residual_covariance",
+    "df_method",
     "distance",
     "distance_metric",
     "linkage",
@@ -2097,6 +2140,7 @@ fn default_one_way_anova(method: OneWayMethod) -> OneWayAnovaSpec {
 fn default_factorial_anova(three_way: bool) -> FactorialAnovaSpec {
     FactorialAnovaSpec {
         three_way,
+        max_interaction_order: if three_way { 3 } else { 2 },
         ss_type: SumOfSquaresType::TypeIII,
         repeated_measures: RepeatedMeasuresDesign::None,
         ..FactorialAnovaSpec::default()

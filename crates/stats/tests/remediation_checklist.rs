@@ -108,7 +108,12 @@ fn all_checklists_emit_no_remediation_and_no_test_recommendations() {
         let spec = AnalysisSpec::new(
             SheetId::new("r-aov"),
             anova_sheet.id.clone(),
-            AnalysisKind::OneWayAnova(OneWayAnovaSpec { method, multiplicity: MultiplicitySpec::default(), compute_effect_sizes: true }),
+            AnalysisKind::OneWayAnova(OneWayAnovaSpec {
+                method,
+                multiplicity: MultiplicitySpec::default(),
+                compute_effect_sizes: true,
+                ..OneWayAnovaSpec::default()
+            }),
         )
         .unwrap();
         assert_diagnostics_only_checklist(&anova_sheet, &spec, name);

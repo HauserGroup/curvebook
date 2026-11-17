@@ -2,9 +2,9 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting,
-    MultiplicityMethod, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, RepeatedMeasuresDesign,
-    ResidualCovariance, RocCiMethod, RocSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod,
-    TwoGroupSpec,
+    MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
+    RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
+    TwoGroupMethod, TwoGroupSpec,
 };
 use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
@@ -21,11 +21,11 @@ use crate::layout::widgets::{
 };
 use crate::layout::{LayoutBuilder, LayoutRectPx, NodeSpec, WidgetAction, WidgetId, WidgetVisualState, ZLayer};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_widget, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
-    r2_assume_gaussian_allowed, r2_parametric_post_hoc_method, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
-    r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
-    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
-    source_table_shape,
+    ControlEnablement, evaluate_dialog_widget, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
+    r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r2_parametric_post_hoc_method,
+    r3_control_column_picker, r4_two_group_diagnostics, r4_two_group_graph_differences, r4_two_group_nonparametric_options,
+    r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector,
+    r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape,
 };
 use crate::text_bridge::UiTextStyle;
 
@@ -71,7 +71,9 @@ impl Default for StatParamsViewState {
 }
 
 fn label_i18n(locale: &str, key: &str, fallback: &'static str) -> &'static str {
-    crate::i18n::try_tr(locale, key).unwrap_or(fallback)
+    crate::i18n::try_tr_in_slices(&[crate::i18n::w7_rm_reml::STAGED_ENTRIES], locale, key)
+        .or_else(|| crate::i18n::try_tr(locale, key))
+        .unwrap_or(fallback)
 }
 
 fn custom_action(payload: impl Into<String>) -> WidgetAction {
@@ -94,6 +96,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut StatParamsViewState, pa
         "select_all_datasets" => handle_dataset_select_all(app),
         "schematic:toggle" => handle_schematic_toggle(app, state)?,
         "toggle_geisser_greenhouse" => handle_toggle_gg(app)?,
+        "toggle_mixed_reml" => handle_toggle_mixed_reml(app)?,
         "toggle_effect_sizes" => handle_toggle_effect_sizes(app),
         "toggle_fit_reml_on_missing" => handle_toggle_reml_missing(app)?,
         "toggle_three_way" => handle_toggle_three_way(app),
@@ -134,6 +137,16 @@ fn handle_prefixed_custom_action(app: &mut UiApp, state: &mut StatParamsViewStat
     }
     if let Some(rest) = payload.strip_prefix("set_residual_cov:") {
         return set_factorial_residual_cov(app, rest);
+    }
+    if let Some(rest) = payload.strip_prefix("set_df_method:") {
+        return set_mixed_df_method(app, rest);
+    }
+    if let Some(rest) = payload.strip_prefix("set_interaction_order:") {
+        let order = rest.parse::<usize>().map_err(|_| format!("invalid interaction order `{rest}`"))?;
+        let mut map = serde_json::Map::new();
+        map.insert(String::from("max_interaction_order"), serde_json::json!(order));
+        app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+        return Ok(true);
     }
     if let Some(rest) = payload.strip_prefix("set_ss_type:") {
         return set_factorial_ss_type(app, rest);
@@ -268,7 +281,7 @@ fn handle_prefixed_custom_action(app: &mut UiApp, state: &mut StatParamsViewStat
         return cycle_ba_column(app, rest);
     }
     if let Some(rest) = payload.strip_prefix("toggle_diag:") {
-        return Ok(toggle_diag_flag(app, state, rest));
+        return toggle_diag_flag(app, state, rest);
     }
     if let Some(rest) = payload.strip_prefix("spinner:") {
         return handle_spinner_step(app, rest);
@@ -392,14 +405,55 @@ fn set_one_way_method(app: &mut UiApp, method_name: &str) -> Result<bool, String
 
 fn handle_toggle_gg(app: &mut UiApp) -> Result<bool, String> {
     let ep = &app.canvas_dialogs.edit_params;
-    if !ep.paired_or_matched {
-        return Err(r1_sphericity_or_reml_control(false).disabled_reason.unwrap_or_default());
+    let reml_active = is_reml_mixed_effects_active(ep, app.document());
+    let gate = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
+    if !gate.enabled {
+        return Err(gate.disabled_reason.unwrap_or_default());
     }
     let cur = ep.draft.as_ref().is_none_or(
         |d| !matches!(d.kind, AnalysisKind::OneWayAnova(ref a) if matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false })),
     );
     let mut map = serde_json::Map::new();
     map.insert(String::from("geisser_greenhouse"), serde_json::Value::Bool(!cur));
+    app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+    Ok(true)
+}
+
+fn handle_toggle_mixed_reml(app: &mut UiApp) -> Result<bool, String> {
+    let ep = &app.canvas_dialogs.edit_params;
+    let paired_ok = match ep.draft.as_ref().map(|d| &d.kind) {
+        Some(AnalysisKind::FactorialAnova(f)) => f.repeated_measures != RepeatedMeasuresDesign::None,
+        _ => ep.paired_or_matched,
+    };
+    let gate = r1_sphericity_or_reml_control(paired_ok);
+    if !gate.enabled {
+        return Err(gate.disabled_reason.unwrap_or_default());
+    }
+    let cur = matches!(
+        ep.draft.as_ref().map(|d| &d.kind),
+        Some(AnalysisKind::OneWayAnova(a)) if a.mixed_effects_reml
+    ) || matches!(
+        ep.draft.as_ref().map(|d| &d.kind),
+        Some(AnalysisKind::FactorialAnova(f)) if f.mixed_effects_reml
+    );
+    let mut map = serde_json::Map::new();
+    map.insert(String::from("mixed_effects_reml"), serde_json::Value::Bool(!cur));
+    app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+    Ok(true)
+}
+
+fn set_mixed_df_method(app: &mut UiApp, raw: &str) -> Result<bool, String> {
+    let ep = &app.canvas_dialogs.edit_params;
+    let gated_ok = match ep.draft.as_ref().map(|d| &d.kind) {
+        Some(AnalysisKind::NestedComparison(_)) => true,
+        Some(AnalysisKind::FactorialAnova(f)) => f.repeated_measures != RepeatedMeasuresDesign::None,
+        _ => ep.paired_or_matched,
+    };
+    if !gated_ok {
+        return Err(r1_sphericity_or_reml_control(false).disabled_reason.unwrap_or_default());
+    }
+    let mut map = serde_json::Map::new();
+    map.insert(String::from("df_method"), serde_json::Value::String(raw.to_owned()));
     app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
     Ok(true)
 }
@@ -568,6 +622,12 @@ fn set_multiplicity_method(app: &mut UiApp, raw: &str) -> Result<bool, String> {
             spec.update_kind(AnalysisKind::MultipleRowTTests(mr));
         }
         return Ok(true);
+    }
+    let method = parse_mult_method(raw, ep.control_column)?;
+    let reml_active = is_reml_mixed_effects_active(ep, app.document());
+    let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, method);
+    if !gate.enabled {
+        return Err(gate.disabled_reason.unwrap_or_default());
     }
     let mut map = serde_json::Map::new();
     map.insert(String::from("multiplicity_method"), serde_json::Value::String(raw.to_owned()));
@@ -1083,8 +1143,14 @@ fn handle_toggle_ba_percent(app: &mut UiApp) -> bool {
     false
 }
 
-fn toggle_diag_flag(app: &mut UiApp, state: &mut StatParamsViewState, flag: &str) -> bool {
-    match flag {
+fn toggle_diag_flag(app: &mut UiApp, state: &mut StatParamsViewState, flag: &str) -> Result<bool, String> {
+    if let Some(AnalysisKind::TwoGroupComparison(t)) = app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
+        let gate = r4_two_group_diagnostics(t.method);
+        if !gate.enabled {
+            return Err(gate.disabled_reason.unwrap_or_default());
+        }
+    }
+    let changed = match flag {
         "qq" => {
             state.diag_qq_plot = !state.diag_qq_plot;
             true
@@ -1109,7 +1175,8 @@ fn toggle_diag_flag(app: &mut UiApp, state: &mut StatParamsViewState, flag: &str
             true
         }
         _ => false,
-    }
+    };
+    Ok(changed)
 }
 
 fn handle_spinner_step(app: &mut UiApp, rest: &str) -> Result<bool, String> {
@@ -1138,11 +1205,11 @@ fn handle_spinner_step(app: &mut UiApp, rest: &str) -> Result<bool, String> {
         }
         "edit.mult_threshold" => step_multiplicity_threshold(app, delta),
         "edit.factorial.max_interaction_order" => {
-            let cur = match app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
-                Some(AnalysisKind::FactorialAnova(f)) => f.max_interaction_order,
-                _ => 2,
+            let (cur, max_cap) = match app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::FactorialAnova(f)) => (f.max_interaction_order, f.multifactor_columns.len().max(3)),
+                _ => (2, 3),
             };
-            let next = if delta >= 0.0 { (cur + 1).min(3) } else { cur.saturating_sub(1).max(1) };
+            let next = if delta >= 0.0 { (cur + 1).min(max_cap) } else { cur.saturating_sub(1).max(1) };
             let mut map = serde_json::Map::new();
             map.insert(String::from("max_interaction_order"), serde_json::json!(next));
             app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
@@ -2162,6 +2229,24 @@ fn collect_experimental_design_items(app: &UiApp, spec: &AnalysisSpec, shape: &T
                 enablement: ControlEnablement::enabled(),
                 action: custom_action("set_nested_mode:t_test"),
             });
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.nested.df_kenward_roger"),
+                        label: label_i18n(locale, "stat_params.rm.df_kenward_roger", "Kenward-Roger df").to_owned(),
+                        selected: n.df_method == MixedModelDfMethod::KenwardRoger,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_df_method:kenward_roger"),
+                    },
+                    SegItem {
+                        id: String::from("edit.nested.df_satterthwaite"),
+                        label: label_i18n(locale, "stat_params.rm.df_satterthwaite", "Satterthwaite df").to_owned(),
+                        selected: n.df_method == MixedModelDfMethod::Satterthwaite,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_df_method:satterthwaite"),
+                    },
+                ],
+            });
             push_alpha_spinner(spec, items);
         }
         AnalysisKind::MultipleRowTTests(m) => {
@@ -2451,12 +2536,13 @@ fn collect_one_way_design_items(app: &UiApp, ep: &EditAnalysisParametersState, a
         selected_value: multiplicity_label(a.multiplicity.method),
         enablement: ControlEnablement::enabled(),
     });
+    let reml_active = is_reml_mixed_effects_active(ep, doc);
     items.push(StatItem::Toggle {
         id: String::from("edit.post_hoc.tukey"),
         label: String::from("Tukey HSD (all-pairs)"),
         checked: a.multiplicity.method == MultiplicityMethod::TukeyHsd,
         is_radio: true,
-        enablement: r2_post_hoc_option_enabled(ep.assume_gaussian, true),
+        enablement: r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, MultiplicityMethod::TukeyHsd),
         action: WidgetAction::ClickDialogControl(String::from("edit.post_hoc.tukey")),
     });
     if let Some(spec) = ep.draft.as_ref() {
@@ -3226,16 +3312,19 @@ fn push_alpha_spinner(spec: &AnalysisSpec, items: &mut Vec<StatItem>) {
 fn collect_repeated_measures_items(app: &UiApp, spec: &AnalysisSpec, shape: &TableShapeInfo<'_>, items: &mut Vec<StatItem>) {
     let ep = &app.canvas_dialogs.edit_params;
     let locale = app.locale.as_str();
+    let reml_active = is_reml_mixed_effects_active(ep, app.document());
     match &spec.kind {
         AnalysisKind::OneWayAnova(a) => {
-            items.push(StatItem::Section(String::from("edit.sec.rm_one_way"), String::from("Repeated-Measures Sphericity")));
+            let sph_en = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
+            let reml_en = r1_sphericity_or_reml_control(ep.paired_or_matched);
+            items.push(StatItem::Section(String::from("edit.sec.rm_one_way"), String::from("Repeated-Measures Sphericity & Mixed-Effects REML")));
             let gg_checked = !matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
             items.push(StatItem::Toggle {
                 id: String::from("edit.sphericity.geisser_greenhouse"),
                 label: String::from("Apply Geisser-Greenhouse sphericity correction (epsilon)"),
                 checked: gg_checked,
                 is_radio: false,
-                enablement: r1_sphericity_or_reml_control(ep.paired_or_matched),
+                enablement: sph_en.clone(),
                 action: WidgetAction::ClickDialogControl(String::from("edit.sphericity.geisser_greenhouse")),
             });
             items.push(StatItem::Toggle {
@@ -3243,14 +3332,63 @@ fn collect_repeated_measures_items(app: &UiApp, spec: &AnalysisSpec, shape: &Tab
                 label: String::from("Assume sphericity (unadjusted df)"),
                 checked: !gg_checked,
                 is_radio: true,
-                enablement: r1_sphericity_or_reml_control(ep.paired_or_matched),
+                enablement: sph_en,
                 action: custom_action("toggle_geisser_greenhouse"),
             });
-            items.push(StatItem::Info(
-                String::from("edit.rm.block_info"),
-                format!("Subject blocks: {} matched rows across {} timepoints/treatments", shape.rows, shape.cols),
-                true,
-            ));
+            items.push(StatItem::Toggle {
+                id: String::from("edit.rm.mixed_effects_reml"),
+                label: label_i18n(locale, "stat_params.rm.mixed_effects_reml", "Fit Mixed-Effects REML model (Kenward-Roger / Satterthwaite)")
+                    .to_owned(),
+                checked: a.mixed_effects_reml,
+                is_radio: false,
+                enablement: reml_en.clone(),
+                action: custom_action("toggle_mixed_reml"),
+            });
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.rm.df_kenward_roger"),
+                        label: label_i18n(locale, "stat_params.rm.df_kenward_roger", "Kenward-Roger df").to_owned(),
+                        selected: a.df_method == MixedModelDfMethod::KenwardRoger,
+                        enablement: reml_en.clone(),
+                        action: custom_action("set_df_method:kenward_roger"),
+                    },
+                    SegItem {
+                        id: String::from("edit.rm.df_satterthwaite"),
+                        label: label_i18n(locale, "stat_params.rm.df_satterthwaite", "Satterthwaite df").to_owned(),
+                        selected: a.df_method == MixedModelDfMethod::Satterthwaite,
+                        enablement: reml_en.clone(),
+                        action: custom_action("set_df_method:satterthwaite"),
+                    },
+                ],
+            });
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.reml.cov.cs"),
+                        label: label_i18n(locale, "reml.covariance.compound_symmetry", "Compound symmetry (REML)").to_owned(),
+                        selected: a.residual_covariance == ResidualCovariance::CompoundSymmetry,
+                        enablement: reml_en.clone(),
+                        action: custom_action("set_residual_cov:compound_symmetry"),
+                    },
+                    SegItem {
+                        id: String::from("edit.reml.cov.un"),
+                        label: label_i18n(locale, "reml.covariance.unstructured", "Unstructured covariance (REML)").to_owned(),
+                        selected: a.residual_covariance == ResidualCovariance::Unstructured,
+                        enablement: reml_en,
+                        action: custom_action("set_residual_cov:unstructured"),
+                    },
+                ],
+            });
+            let block_msg = if reml_active {
+                format!(
+                    "Mixed-Effects REML active ({:?}): {} rows x {} groups (sphericity & Tukey/Dunnett/Games-Howell disabled)",
+                    a.df_method, shape.rows, shape.cols
+                )
+            } else {
+                format!("Subject blocks: {} matched rows across {} timepoints/treatments", shape.rows, shape.cols)
+            };
+            items.push(StatItem::Info(String::from("edit.rm.block_info"), block_msg, true));
         }
         AnalysisKind::FactorialAnova(f) => {
             items.push(StatItem::Section(String::from("edit.sec.rm_fac"), String::from("Repeated-Measures Axes & REML")));
@@ -3307,8 +3445,35 @@ fn collect_repeated_measures_items(app: &UiApp, spec: &AnalysisSpec, shape: &Tab
                 label: String::from("Fit Mixed-Effects REML model when missing values occur"),
                 checked: f.fit_reml_on_missing,
                 is_radio: false,
-                enablement: reml_en,
+                enablement: reml_en.clone(),
                 action: custom_action("toggle_fit_reml_on_missing"),
+            });
+            items.push(StatItem::Toggle {
+                id: String::from("edit.rm.mixed_effects_reml"),
+                label: label_i18n(locale, "stat_params.rm.mixed_effects_reml", "Fit Mixed-Effects REML model (Kenward-Roger / Satterthwaite)")
+                    .to_owned(),
+                checked: f.mixed_effects_reml,
+                is_radio: false,
+                enablement: reml_en.clone(),
+                action: custom_action("toggle_mixed_reml"),
+            });
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.rm.df_kenward_roger"),
+                        label: label_i18n(locale, "stat_params.rm.df_kenward_roger", "Kenward-Roger df").to_owned(),
+                        selected: f.df_method == MixedModelDfMethod::KenwardRoger,
+                        enablement: reml_en.clone(),
+                        action: custom_action("set_df_method:kenward_roger"),
+                    },
+                    SegItem {
+                        id: String::from("edit.rm.df_satterthwaite"),
+                        label: label_i18n(locale, "stat_params.rm.df_satterthwaite", "Satterthwaite df").to_owned(),
+                        selected: f.df_method == MixedModelDfMethod::Satterthwaite,
+                        enablement: reml_en,
+                        action: custom_action("set_df_method:satterthwaite"),
+                    },
+                ],
             });
             items.push(StatItem::CustomSpinner {
                 id_prefix: String::from("edit.factorial.max_interaction_order"),
@@ -3316,6 +3481,27 @@ fn collect_repeated_measures_items(app: &UiApp, spec: &AnalysisSpec, shape: &Tab
                 value_text: f.max_interaction_order.to_string(),
                 step: 1.0,
                 enablement: ControlEnablement::enabled(),
+            });
+        }
+        AnalysisKind::NestedComparison(n) => {
+            items.push(StatItem::Section(String::from("edit.sec.rm_nested"), String::from("Mixed-Effects REML Denominator df")));
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.rm.df_kenward_roger"),
+                        label: label_i18n(locale, "stat_params.rm.df_kenward_roger", "Kenward-Roger df").to_owned(),
+                        selected: n.df_method == MixedModelDfMethod::KenwardRoger,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_df_method:kenward_roger"),
+                    },
+                    SegItem {
+                        id: String::from("edit.rm.df_satterthwaite"),
+                        label: label_i18n(locale, "stat_params.rm.df_satterthwaite", "Satterthwaite df").to_owned(),
+                        selected: n.df_method == MixedModelDfMethod::Satterthwaite,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_df_method:satterthwaite"),
+                    },
+                ],
             });
         }
         AnalysisKind::TwoGroupComparison(t) => {
@@ -3415,6 +3601,66 @@ fn collect_factor_settings_items(_app: &UiApp, spec: &AnalysisSpec, shape: &Tabl
         }
         AnalysisKind::FactorialAnova(f) => {
             push_factorial_mv_selectors(f, shape, items);
+            items.push(StatItem::Section(
+                String::from("edit.sec.fac_interactions"),
+                label_i18n(_app.locale.as_str(), "stat_params.fac.interactions", "Configured Interaction Terms").to_owned(),
+            ));
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.fac.order.1"),
+                        label: String::from("Main Only (1)"),
+                        selected: f.max_interaction_order == 1,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_interaction_order:1"),
+                    },
+                    SegItem {
+                        id: String::from("edit.fac.order.2"),
+                        label: String::from("Up to 2-Way"),
+                        selected: f.max_interaction_order == 2,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_interaction_order:2"),
+                    },
+                    SegItem {
+                        id: String::from("edit.fac.order.3"),
+                        label: String::from("Up to 3-Way"),
+                        selected: f.max_interaction_order >= 3,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_interaction_order:3"),
+                    },
+                ],
+            });
+            items.push(StatItem::CustomSpinner {
+                id_prefix: String::from("edit.factorial.max_interaction_order"),
+                label: String::from("Max Interaction Order"),
+                value_text: f.max_interaction_order.to_string(),
+                step: 1.0,
+                enablement: ControlEnablement::enabled(),
+            });
+            let factor_names: Vec<String> = f.multifactor_columns.iter().map(|&c| shape.col_title(c)).collect();
+            let mut terms = Vec::new();
+            if f.max_interaction_order >= 2 {
+                for (i, a) in factor_names.iter().enumerate() {
+                    for b in factor_names.iter().skip(i + 1) {
+                        terms.push(format!("{a} × {b}"));
+                    }
+                }
+            }
+            if f.max_interaction_order >= 3 {
+                for (i, a) in factor_names.iter().enumerate() {
+                    for (j, b) in factor_names.iter().enumerate().skip(i + 1) {
+                        for c in factor_names.iter().skip(j + 1) {
+                            terms.push(format!("{a} × {b} × {c}"));
+                        }
+                    }
+                }
+            }
+            let summary = if terms.is_empty() {
+                format!("Order {}: Main effects only ({} factor(s))", f.max_interaction_order, factor_names.len())
+            } else {
+                format!("Order {}: {}", f.max_interaction_order, terms.join(", "))
+            };
+            items.push(StatItem::Info(String::from("edit.fac.interaction_summary"), summary, true));
         }
         AnalysisKind::Contingency(c) => {
             items.push(StatItem::Section(String::from("edit.sec.cont_factors"), String::from("Kappa Weighting & Null Hypothesis")));
@@ -3603,8 +3849,8 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
         return;
     };
 
-    let param_en = r2_post_hoc_option_enabled(ep.assume_gaussian, true);
-    let nonparam_en = r2_post_hoc_option_enabled(ep.assume_gaussian, false);
+    let reml_active = is_reml_mixed_effects_active(ep, app.document());
+    let gate = |method| r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, method);
     items.push(StatItem::Section(String::from("edit.sec.mc_family"), String::from("Post-Hoc Test Family")));
     items.push(StatItem::Dropdown {
         id: String::from("edit.multiplicity_method"),
@@ -3617,7 +3863,7 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
         label: String::from("Tukey HSD (all-pairwise equal variance)"),
         checked: mult.method == MultiplicityMethod::TukeyHsd,
         is_radio: true,
-        enablement: param_en.clone(),
+        enablement: gate(MultiplicityMethod::TukeyHsd),
         action: custom_action("set_multiplicity:tukey"),
     });
     items.push(StatItem::Toggle {
@@ -3625,7 +3871,7 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
         label: String::from("Dunnett (every group vs. control column)"),
         checked: matches!(mult.method, MultiplicityMethod::Dunnett { .. }),
         is_radio: true,
-        enablement: param_en.clone(),
+        enablement: gate(MultiplicityMethod::Dunnett { control_column: ep.control_column }),
         action: custom_action("set_multiplicity:dunnett"),
     });
     items.push(StatItem::Toggle {
@@ -3633,7 +3879,7 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
         label: String::from("Dunn's rank-sum comparisons (nonparametric)"),
         checked: mult.method == MultiplicityMethod::DunnRankSum,
         is_radio: true,
-        enablement: nonparam_en,
+        enablement: gate(MultiplicityMethod::DunnRankSum),
         action: custom_action("set_multiplicity:dunn"),
     });
     items.push(StatItem::ButtonRow {
@@ -3642,22 +3888,47 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
                 id: String::from("edit.post_hoc.bonferroni"),
                 label: String::from("Bonferroni"),
                 selected: mult.method == MultiplicityMethod::Bonferroni,
-                enablement: param_en.clone(),
+                enablement: gate(MultiplicityMethod::Bonferroni),
                 action: custom_action("set_multiplicity:bonferroni"),
+            },
+            SegItem {
+                id: String::from("edit.post_hoc.sidak"),
+                label: label_i18n(locale, "stat_params.post_hoc.sidak", "Sidak").to_owned(),
+                selected: mult.method == MultiplicityMethod::Sidak,
+                enablement: gate(MultiplicityMethod::Sidak),
+                action: custom_action("set_multiplicity:sidak"),
             },
             SegItem {
                 id: String::from("edit.post_hoc.holm_sidak"),
                 label: String::from("Holm-Sidak"),
                 selected: mult.method == MultiplicityMethod::HolmSidak,
-                enablement: param_en.clone(),
+                enablement: gate(MultiplicityMethod::HolmSidak),
                 action: custom_action("set_multiplicity:holm_sidak"),
+            },
+        ],
+    });
+    items.push(StatItem::ButtonRow {
+        items: vec![
+            SegItem {
+                id: String::from("edit.post_hoc.fisher_lsd"),
+                label: label_i18n(locale, "stat_params.post_hoc.fisher_lsd", "Fisher's LSD").to_owned(),
+                selected: mult.method == MultiplicityMethod::FisherLsd,
+                enablement: gate(MultiplicityMethod::FisherLsd),
+                action: custom_action("set_multiplicity:fisher_lsd"),
             },
             SegItem {
                 id: String::from("edit.post_hoc.games_howell"),
                 label: String::from("Games-Howell"),
                 selected: mult.method == MultiplicityMethod::GamesHowell,
-                enablement: param_en,
+                enablement: gate(MultiplicityMethod::GamesHowell),
                 action: custom_action("set_multiplicity:games_howell"),
+            },
+            SegItem {
+                id: String::from("edit.post_hoc.none"),
+                label: String::from("None"),
+                selected: mult.method == MultiplicityMethod::None,
+                enablement: ControlEnablement::enabled(),
+                action: custom_action("set_multiplicity:none"),
             },
         ],
     });
@@ -3678,11 +3949,11 @@ fn collect_multiple_comparisons_items(app: &UiApp, spec: &AnalysisSpec, shape: &
                 action: custom_action("set_multiplicity:bky"),
             },
             SegItem {
-                id: String::from("edit.post_hoc.none"),
-                label: String::from("None"),
-                selected: mult.method == MultiplicityMethod::None,
+                id: String::from("edit.post_hoc.by"),
+                label: String::from("BY (FDR)"),
+                selected: mult.method == MultiplicityMethod::BenjaminiYekutieliFdr,
                 enablement: ControlEnablement::enabled(),
-                action: custom_action("set_multiplicity:none"),
+                action: custom_action("set_multiplicity:by"),
             },
         ],
     });
@@ -3826,12 +4097,13 @@ fn collect_options_items(app: &UiApp, spec: &AnalysisSpec, shape: &TableShapeInf
                 action: custom_action("toggle_effect_sizes"),
             });
             let gg_checked = !matches!(a.method, OneWayMethod::RepeatedMeasures { geisser_greenhouse: false });
+            let reml_active = is_reml_mixed_effects_active(ep, app.document());
             items.push(StatItem::Toggle {
                 id: String::from("edit.sphericity.geisser_greenhouse"),
                 label: String::from("Geisser-Greenhouse sphericity correction"),
                 checked: gg_checked,
                 is_radio: false,
-                enablement: r1_sphericity_or_reml_control(ep.paired_or_matched),
+                enablement: r1b_sphericity_correction(ep.paired_or_matched, reml_active),
                 action: WidgetAction::ClickDialogControl(String::from("edit.sphericity.geisser_greenhouse")),
             });
         }
@@ -3980,13 +4252,17 @@ fn collect_options_items(app: &UiApp, spec: &AnalysisSpec, shape: &TableShapeInf
 fn collect_diagnostics_items(app: &UiApp, spec: &AnalysisSpec, _shape: &TableShapeInfo<'_>, items: &mut Vec<StatItem>) {
     let st = &app.view_shards.stat_params;
     let locale = app.locale.as_str();
+    let diag_en = match &spec.kind {
+        AnalysisKind::TwoGroupComparison(t) => r4_two_group_diagnostics(t.method),
+        _ => ControlEnablement::enabled(),
+    };
     items.push(StatItem::Section(String::from("edit.sec.diag"), String::from("Residual, Q-Q & Assumption Diagnostics")));
     items.push(StatItem::Toggle {
         id: String::from("edit.diag.qq_plot"),
         label: label_i18n(locale, "stat_params.label.qq_diagnostics", "Normal & Lognormal Q-Q Quantiles").to_owned(),
         checked: st.diag_qq_plot,
         is_radio: false,
-        enablement: ControlEnablement::enabled(),
+        enablement: diag_en.clone(),
         action: custom_action("toggle_diag:qq"),
     });
     items.push(StatItem::Toggle {
@@ -3994,7 +4270,7 @@ fn collect_diagnostics_items(app: &UiApp, spec: &AnalysisSpec, _shape: &TableSha
         label: label_i18n(locale, "stat_params.label.residuals_table", "Emit Residuals & Standardized Residuals").to_owned(),
         checked: st.diag_residuals_plot,
         is_radio: false,
-        enablement: ControlEnablement::enabled(),
+        enablement: diag_en.clone(),
         action: custom_action("toggle_diag:residuals"),
     });
     items.push(StatItem::Toggle {
@@ -4002,7 +4278,7 @@ fn collect_diagnostics_items(app: &UiApp, spec: &AnalysisSpec, _shape: &TableSha
         label: String::from("Test homogeneity of variances (Brown-Forsythe / Bartlett)"),
         checked: st.diag_homoscedasticity,
         is_radio: false,
-        enablement: ControlEnablement::enabled(),
+        enablement: diag_en.clone(),
         action: custom_action("toggle_diag:homoscedasticity"),
     });
     items.push(StatItem::Toggle {
@@ -4010,7 +4286,7 @@ fn collect_diagnostics_items(app: &UiApp, spec: &AnalysisSpec, _shape: &TableSha
         label: String::from("Generate plain-language assumption diagnostic checklist"),
         checked: st.diag_assumption_checklist,
         is_radio: false,
-        enablement: ControlEnablement::enabled(),
+        enablement: diag_en.clone(),
         action: custom_action("toggle_diag:checklist"),
     });
 
@@ -4023,7 +4299,7 @@ fn collect_diagnostics_items(app: &UiApp, spec: &AnalysisSpec, _shape: &TableSha
         label: String::from("Collinearity (VIF) / Leverage & Influence diagnostics"),
         checked: vif_checked,
         is_radio: false,
-        enablement: ControlEnablement::enabled(),
+        enablement: diag_en,
         action: custom_action("toggle_diag:influence"),
     });
 

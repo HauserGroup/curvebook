@@ -368,9 +368,26 @@ pub enum OneWayMethod {
     Friedman,
 }
 
+/// Denominator degrees-of-freedom approximation for REML mixed-effects ANOVA and nested models.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
+pub enum MixedModelDfMethod {
+    /// Small-sample adjusted `Phi_A` covariance and scaled `F*` statistic (Kenward & Roger, 1997).
+    #[default]
+    KenwardRoger,
+    /// Satterthwaite moment-matched denominator *df* using unadjusted Wald covariance `Phi` (Fai & Cornelius, 1996).
+    Satterthwaite,
+}
+
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct OneWayAnovaSpec {
     pub method: OneWayMethod,
+    /// Fit linear mixed-effects REML instead of classical sphericity RM ANOVA even on complete tables.
+    #[serde(default)]
+    pub mixed_effects_reml: bool,
+    #[serde(default)]
+    pub df_method: MixedModelDfMethod,
+    #[serde(default)]
+    pub residual_covariance: ResidualCovariance,
     pub compute_effect_sizes: bool,
     pub multiplicity: MultiplicitySpec,
 }
@@ -410,6 +427,11 @@ pub struct FactorialAnovaSpec {
     pub max_interaction_order: usize,
     pub ss_type: SumOfSquaresType,
     pub repeated_measures: RepeatedMeasuresDesign,
+    /// Fit linear mixed-effects REML instead of classical sphericity RM ANOVA even on complete tables.
+    #[serde(default)]
+    pub mixed_effects_reml: bool,
+    #[serde(default)]
+    pub df_method: MixedModelDfMethod,
     #[serde(default)]
     pub residual_covariance: ResidualCovariance,
     pub fit_reml_on_missing: bool,
@@ -426,6 +448,8 @@ impl Default for FactorialAnovaSpec {
             max_interaction_order: 2,
             ss_type: SumOfSquaresType::TypeIII,
             repeated_measures: RepeatedMeasuresDesign::None,
+            mixed_effects_reml: false,
+            df_method: MixedModelDfMethod::KenwardRoger,
             residual_covariance: ResidualCovariance::CompoundSymmetry,
             fit_reml_on_missing: true,
             compute_effect_sizes: true,
@@ -434,9 +458,11 @@ impl Default for FactorialAnovaSpec {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct NestedAnalysisSpec {
     pub two_group_t_test: bool,
+    #[serde(default)]
+    pub df_method: MixedModelDfMethod,
     pub multiplicity: MultiplicitySpec,
 }
 

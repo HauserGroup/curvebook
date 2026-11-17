@@ -97,6 +97,7 @@ fn multiplicity_newman_keuls_and_fisher_lsd_run_end_to_end() {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: false,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::FisherLsd, threshold: 0.05, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         }),
     );
     let lsd_res = run_analysis(&sheet, &lsd_spec).unwrap();
@@ -118,6 +119,7 @@ fn multiplicity_newman_keuls_and_fisher_lsd_run_end_to_end() {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: false,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::NewmanKeuls, threshold: 0.05, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         }),
     );
     let snk_res = run_analysis(&sheet, &snk_spec).unwrap();
@@ -130,6 +132,7 @@ fn multiplicity_newman_keuls_and_fisher_lsd_run_end_to_end() {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: false,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         }),
     );
     let tukey_res = run_analysis(&sheet, &tukey_spec).unwrap();

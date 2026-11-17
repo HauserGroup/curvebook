@@ -465,6 +465,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
                 threshold: 0.05,
                 report_confidence_intervals: true,
             },
+            ..OneWayAnovaSpec::default()
         }),
         AnalysisKind::FactorialAnova(FactorialAnovaSpec {
             ss_type: SumOfSquaresType::TypeIII,
@@ -472,7 +473,11 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
             residual_covariance: curvebook_doc::ResidualCovariance::Unstructured,
             ..FactorialAnovaSpec::default()
         }),
-        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
+        AnalysisKind::NestedComparison(NestedAnalysisSpec {
+            two_group_t_test: true,
+            multiplicity: MultiplicitySpec::default(),
+            ..NestedAnalysisSpec::default()
+        }),
         AnalysisKind::Contingency(ContingencySpec { method: ContingencyMethod::FisherExact, ..ContingencySpec::default() }),
         AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
             log_rank_mantel_cox: true,

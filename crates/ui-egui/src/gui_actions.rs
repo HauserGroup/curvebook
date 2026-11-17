@@ -10,8 +10,9 @@
 
 use curvebook_doc::{
     AnalysisKind, BaselineOperation, Cell, CellValue, CldOrdering, ColorChannelMapping, ContingencyMethod, EquationDisplayMode, ErrorBarMetric,
-    ErrorCode, ErrorPropagationMode, FramePreset, GroupedArrangement, MathTransformPreset, MultivariatePlotMode, MultivariateSpec, OneWayMethod,
-    ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableSource, XColumnMode,
+    ErrorCode, ErrorPropagationMode, FramePreset, GroupedArrangement, MathTransformPreset, MultiplicityMethod, MultivariatePlotMode,
+    MultivariateSpec, OneWayMethod, ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind,
+    TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use curvebook_engine::{EngineError, cmd};
 use curvebook_render::RenderTargetSpec;
@@ -34,7 +35,8 @@ use crate::interaction::{
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r2_assume_gaussian_allowed,
+    ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
+    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed,
 };
 use crate::power_wizard::PowerWizardStage;
 
@@ -580,17 +582,62 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
             }
             patch.insert(String::from("two_group_method"), json!("paired_sign_test"));
         }
-        "edit.sphericity.geisser_greenhouse" => {
-            if !ep.paired_or_matched {
-                return Err(disabled_err("Geisser-Greenhouse / REML requires Matched or Repeated Measures mode."));
+        "edit.sphericity.geisser_greenhouse" | "edit.rm.assume_sphericity" => {
+            let reml_active = is_reml_mixed_effects_active(ep, app.document());
+            let gate = r1b_sphericity_correction(ep.paired_or_matched, reml_active);
+            if !gate.enabled {
+                return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Sphericity control is disabled."))));
             }
             patch.insert(String::from("edit.sphericity.geisser_greenhouse"), json!(!gg_checked));
         }
-        "edit.post_hoc.tukey" => {
-            patch.insert(String::from("multiplicity_method"), json!("tukey"));
+        "edit.rm.mixed_effects_reml" => {
+            let cur = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::OneWayAnova(a)) if a.mixed_effects_reml
+            ) || matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::FactorialAnova(f)) if f.mixed_effects_reml
+            );
+            patch.insert(String::from("mixed_effects_reml"), json!(!cur));
         }
-        "edit.post_hoc.dunn" => {
-            patch.insert(String::from("multiplicity_method"), json!("dunn"));
+        "edit.rm.df_kenward_roger" => {
+            patch.insert(String::from("df_method"), json!("kenward_roger"));
+        }
+        "edit.rm.df_satterthwaite" => {
+            patch.insert(String::from("df_method"), json!("satterthwaite"));
+        }
+        "edit.post_hoc.tukey"
+        | "edit.post_hoc.dunnett"
+        | "edit.post_hoc.dunn"
+        | "edit.post_hoc.bonferroni"
+        | "edit.post_hoc.sidak"
+        | "edit.post_hoc.holm_sidak"
+        | "edit.post_hoc.fisher_lsd"
+        | "edit.post_hoc.games_howell"
+        | "edit.post_hoc.bh"
+        | "edit.post_hoc.bky"
+        | "edit.post_hoc.by"
+        | "edit.post_hoc.none" => {
+            let (raw_method, method_enum) = match wid {
+                "edit.post_hoc.tukey" => ("tukey", MultiplicityMethod::TukeyHsd),
+                "edit.post_hoc.dunnett" => ("dunnett", MultiplicityMethod::Dunnett { control_column: ep.control_column }),
+                "edit.post_hoc.dunn" => ("dunn", MultiplicityMethod::DunnRankSum),
+                "edit.post_hoc.bonferroni" => ("bonferroni", MultiplicityMethod::Bonferroni),
+                "edit.post_hoc.sidak" => ("sidak", MultiplicityMethod::Sidak),
+                "edit.post_hoc.holm_sidak" => ("holm_sidak", MultiplicityMethod::HolmSidak),
+                "edit.post_hoc.fisher_lsd" => ("fisher_lsd", MultiplicityMethod::FisherLsd),
+                "edit.post_hoc.games_howell" => ("games_howell", MultiplicityMethod::GamesHowell),
+                "edit.post_hoc.bh" => ("bh", MultiplicityMethod::BenjaminiHochbergFdr),
+                "edit.post_hoc.bky" => ("bky", MultiplicityMethod::TwoStageBkyFdr),
+                "edit.post_hoc.by" => ("by", MultiplicityMethod::BenjaminiYekutieliFdr),
+                _ => ("none", MultiplicityMethod::None),
+            };
+            let reml_active = is_reml_mixed_effects_active(ep, app.document());
+            let gate = r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, method_enum);
+            if !gate.enabled {
+                return Err(disabled_err(gate.disabled_reason.unwrap_or_else(|| String::from("Post-hoc method is disabled."))));
+            }
+            patch.insert(String::from("multiplicity_method"), json!(raw_method));
         }
         "edit.two_group.welch" => {
             patch.insert(String::from("welch_correction"), json!(!ep.welch_correction));

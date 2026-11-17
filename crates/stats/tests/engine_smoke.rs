@@ -266,11 +266,7 @@ fn all_14_multiplicity_procedures_and_anova_family() {
     let n_sheet = DataSheet::new(SheetId::new("s-nest"), "Nested", TableArchetype::Nested(nt)).unwrap();
     let nest_res = run_analysis(
         &n_sheet,
-        &spec_for(
-            "r-nest",
-            "s-nest",
-            AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
-        ),
+        &spec_for("r-nest", "s-nest", AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, ..NestedAnalysisSpec::default() })),
     )
     .unwrap();
     assert!(!nest_res.tabs.is_empty());
@@ -285,6 +281,7 @@ fn all_14_multiplicity_procedures_and_anova_family() {
                 method: OneWayMethod::OrdinaryAnova,
                 compute_effect_sizes: true,
                 multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+                ..OneWayAnovaSpec::default()
             }),
         ),
     )
