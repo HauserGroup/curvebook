@@ -1990,14 +1990,35 @@ fn infer_mv_group_column(mv: &MultipleVariablesTable, response_col: Option<usize
     }
 }
 
+fn is_mv_numeric_response_candidate(var: &curvebook_doc::VariableColumn) -> bool {
+    !matches!(var.role, VariableRole::Categorical | VariableRole::Label)
+}
+
+fn select_default_mv_response_column(mv: &MultipleVariablesTable, candidates: &[usize]) -> Option<usize> {
+    if candidates.len() <= 1 {
+        return candidates.first().copied();
+    }
+    let active: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&idx| mv.variables.get(idx).is_some_and(|v| v.cells.iter().any(|c| c.active_number().is_some())))
+        .collect();
+    // On multi-column MV tables (such as qPCR pipelines with derived columns), prefer the last
+    // active calculated response column, then the last active numeric column, then the last candidate.
+    active
+        .iter()
+        .copied()
+        .rfind(|&idx| mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Calculated))
+        .or_else(|| active.last().copied())
+        .or_else(|| candidates.last().copied())
+}
+
 fn infer_mv_response_column(mv: &MultipleVariablesTable, group_col: usize, selected: &[usize]) -> Result<usize, StatsError> {
     let pool = resolve_selected_indices(selected, mv.variables.len());
     let candidates: Vec<usize> =
-        pool.into_iter().filter(|&idx| idx != group_col && mv.variables.get(idx).is_some_and(|v| v.role != VariableRole::Categorical)).collect();
-    match candidates.as_slice() {
-        [only] => Ok(*only),
-        _ => Err(StatsError::InvalidParameter { name: "mv_response_column", value: candidates.len() as f64 }),
-    }
+        pool.into_iter().filter(|&idx| idx != group_col && mv.variables.get(idx).is_some_and(is_mv_numeric_response_candidate)).collect();
+    select_default_mv_response_column(mv, &candidates)
+        .ok_or(StatsError::InvalidParameter { name: "mv_response_column", value: candidates.len() as f64 })
 }
 
 fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoGroupSpec) -> Result<Option<MvTwoGroupExtraction>, StatsError> {
@@ -2018,9 +2039,11 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
     } else {
         let selected = resolve_selected_indices(&spec.selected_data_sets, mv.variables.len());
         let cat_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
-        let num_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role != VariableRole::Categorical).collect();
-        if cat_cols.len() == 1 && num_cols.len() == 1 {
-            (cat_cols[0], num_cols[0])
+        let num_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_response_candidate)).collect();
+        if cat_cols.len() == 1
+            && let Some(r_col) = select_default_mv_response_column(mv, &num_cols)
+        {
+            (cat_cols[0], r_col)
         } else {
             return Ok(None);
         }
@@ -2991,4 +3014,141 @@ fn populate_one_sample_w_sheet(
         Some(format!("n_nonzero = {}", out.n_nonzero)),
         "One-sample Wilcoxon test assumes observations are symmetrically distributed around the population median.",
     ));
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curvebook_doc::{AnalysisKind, Cell, DataSheet, MultipleVariablesTable, SheetId, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole};
+
+    fn run_mv_tg(mv: MultipleVariablesTable, tg: TwoGroupSpec) -> Result<ResultSheet, StatsError> {
+        let sheet = DataSheet::new(SheetId::new("mv-tg"), "MV TwoGroup", TableArchetype::MultipleVariables(mv)).unwrap();
+        let spec = AnalysisSpec::new(SheetId::new("res-tg"), sheet.id.clone(), AnalysisKind::TwoGroupComparison(tg)).unwrap();
+        run_two_group_analysis(&sheet, &spec, &tg)
+    }
+
+    fn scalar_val(res: &ResultSheet, key: &str) -> f64 {
+        res.scalars.iter().find(|s| s.key == key).map(|s| s.value).unwrap()
+    }
+
+    #[test]
+    fn mv_two_group_excludes_label_columns_and_resolves_single_response() {
+        let mut mv = MultipleVariablesTable::new(3, 8).unwrap();
+        mv.variables[0].title = String::from("SampleID");
+        mv.variables[0].lock_role(VariableRole::Label);
+        mv.variables[1].title = String::from("Treatment");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[2].title = String::from("Biomarker");
+        mv.variables[2].lock_role(VariableRole::Continuous);
+
+        let g_a = [18.5, 20.2, 21.0, 22.4];
+        let g_b = [31.0, 34.5, 42.0, 38.2];
+        for (i, &v) in g_a.iter().enumerate() {
+            mv.variables[0].cells[i] = Cell::text(format!("V{}", i + 1));
+            mv.variables[1].cells[i] = Cell::text("Vehicle");
+            mv.variables[2].cells[i] = Cell::number(v);
+        }
+        for (i, &v) in g_b.iter().enumerate() {
+            mv.variables[0].cells[4 + i] = Cell::text(format!("T{}", i + 1));
+            mv.variables[1].cells[4 + i] = Cell::text("Treated");
+            mv.variables[2].cells[4 + i] = Cell::number(v);
+        }
+        let expected = welch_t_test(&g_a, &g_b, true, ConfidenceLevel::DEFAULT_95).unwrap();
+
+        for mv_group_column in [None, Some(1)] {
+            let res = run_mv_tg(
+                mv.clone(),
+                TwoGroupSpec { method: TwoGroupMethod::WelchT, mv_group_column, mv_response_column: None, ..TwoGroupSpec::default() },
+            )
+            .unwrap();
+            assert!((scalar_val(&res, "PValue") - expected.p_value).abs() < 1e-12);
+            assert!((scalar_val(&res, "t") - expected.t_statistic).abs() < 1e-12);
+        }
+
+        // Numeric Label IDs locked to VariableRole::Label must still be excluded.
+        let mut mv_num_lbl = mv;
+        for i in 0..8 {
+            mv_num_lbl.variables[0].cells[i] = Cell::number((101 + i) as f64);
+        }
+        let res_num_lbl = run_mv_tg(
+            mv_num_lbl,
+            TwoGroupSpec { method: TwoGroupMethod::WelchT, mv_group_column: None, mv_response_column: None, ..TwoGroupSpec::default() },
+        )
+        .unwrap();
+        assert!((scalar_val(&res_num_lbl, "PValue") - expected.p_value).abs() < 1e-12);
+    }
+
+    #[test]
+    fn mv_two_group_derived_calculated_response_fallback_picks_last_active_column() {
+        let mut mv = MultipleVariablesTable::new(7, 8).unwrap();
+        mv.variables[0].title = String::from("SampleID");
+        mv.variables[0].lock_role(VariableRole::Label);
+        mv.variables[1].title = String::from("Condition");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[2].title = String::from("TargetCt");
+        mv.variables[2].lock_role(VariableRole::Continuous);
+        mv.variables[3].title = String::from("RefCt");
+        mv.variables[3].lock_role(VariableRole::Continuous);
+        mv.variables[4].title = String::from("DeltaCt");
+        mv.variables[4].set_calculated_formula("[TargetCt] - [RefCt]");
+        mv.variables[5].title = String::from("Log2FC");
+        mv.variables[5].set_calculated_formula("-([DeltaCt] - 4.0)");
+        mv.variables[6].title = String::from("TrailingEmpty");
+        mv.variables[6].lock_role(VariableRole::Continuous);
+
+        let ctrl_log2fc = [0.0, -0.1, 0.0, 0.1];
+        let pert_log2fc = [3.0, 3.1, 3.0, 2.9];
+        for r in 0..8 {
+            let is_ctrl = r < 4;
+            let idx = r % 4;
+            let l2fc = if is_ctrl { ctrl_log2fc[idx] } else { pert_log2fc[idx] };
+            mv.variables[0].cells[r] = Cell::text(format!("S{}", r + 1));
+            mv.variables[1].cells[r] = Cell::text(if is_ctrl { "Control" } else { "Perturbed" });
+            mv.variables[2].cells[r] = Cell::number(if is_ctrl { 22.0 } else { 19.0 });
+            mv.variables[3].cells[r] = Cell::number(18.0);
+            mv.variables[4].cells[r] = Cell::number(4.0 - l2fc);
+            mv.variables[5].cells[r] = Cell::number(l2fc);
+        }
+        let expected = welch_t_test(&ctrl_log2fc, &pert_log2fc, true, ConfidenceLevel::DEFAULT_95).unwrap();
+
+        for mv_group_column in [None, Some(1)] {
+            let res = run_mv_tg(
+                mv.clone(),
+                TwoGroupSpec { method: TwoGroupMethod::WelchT, mv_group_column, mv_response_column: None, ..TwoGroupSpec::default() },
+            )
+            .unwrap();
+            assert!((scalar_val(&res, "PValue") - expected.p_value).abs() < 1e-12);
+            assert!((scalar_val(&res, "t") - expected.t_statistic).abs() < 1e-12);
+        }
+    }
+
+    #[test]
+    fn mv_two_group_continuous_fallback_picks_last_active_non_empty_column() {
+        let mut mv = MultipleVariablesTable::new(5, 6).unwrap();
+        mv.variables[0].title = String::from("SampleID");
+        mv.variables[0].lock_role(VariableRole::Label);
+        mv.variables[1].title = String::from("Arm");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[2].title = String::from("Baseline");
+        mv.variables[3].title = String::from("Outcome");
+        mv.variables[4].title = String::from("EmptyCol");
+
+        let g_a = [10.0, 11.0, 12.0];
+        let g_b = [20.0, 22.0, 24.0];
+        for i in 0..3 {
+            mv.variables[0].cells[i] = Cell::text(format!("A{i}"));
+            mv.variables[1].cells[i] = Cell::text("Placebo");
+            mv.variables[2].cells[i] = Cell::number(1.0);
+            mv.variables[3].cells[i] = Cell::number(g_a[i]);
+
+            mv.variables[0].cells[3 + i] = Cell::text(format!("B{i}"));
+            mv.variables[1].cells[3 + i] = Cell::text("Active");
+            mv.variables[2].cells[3 + i] = Cell::number(1.0);
+            mv.variables[3].cells[3 + i] = Cell::number(g_b[i]);
+        }
+        let expected = unpaired_t_test(&g_a, &g_b, true, ConfidenceLevel::DEFAULT_95).unwrap();
+        let res = run_mv_tg(mv, TwoGroupSpec { method: TwoGroupMethod::UnpairedT, ..TwoGroupSpec::default() }).unwrap();
+        assert!((scalar_val(&res, "PValue") - expected.p_value).abs() < 1e-12);
+        assert!((scalar_val(&res, "t") - expected.t_statistic).abs() < 1e-12);
+    }
 }
