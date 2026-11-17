@@ -1,3 +1,19 @@
 # Minimum cargo-nextest for this repository: GHSA-vc25-qg58-w57c is fixed in 0.9.150 and CI
 # installs at least that version, so an older nextest refuses to run (exit 92 REQUIRED_VERSION_NOT_MET).
 nextest-version = "0.9.150"
+
+# A timeout is a failing test, never a successful partial run. No automatic retries.
+[profile.ci]
+fail-fast = false
+retries = 0
+slow-timeout = { period = "60s", terminate-after = 5, grace-period = "5s" }
+
+[[profile.ci.overrides]]
+filter = 'package(=curvebook) & binary(=control_loopback)'
+slow-timeout = { period = "60s", terminate-after = 1, grace-period = "0s" }
+
+# The live pasteboard is shared by the OS, even between different test binaries.
+# Reserve every test slot for this test; all exact-byte clipboard checks still run.
+[[profile.ci.overrides]]
+filter = 'binary(=macos_clipboard_live)'
+threads-required = "num-test-threads"

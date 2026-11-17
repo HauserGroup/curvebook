@@ -16,6 +16,9 @@
 
 ## Everyday commands
 
+See [CI stages and TCP fixture deadlines](ci.md) for the hosted build/run split,
+cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
+
 | Task | Command |
 |---|---|
 | Run all CI gates locally | `cargo xtask ci` |

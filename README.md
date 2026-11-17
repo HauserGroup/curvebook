@@ -112,9 +112,9 @@ Expected output:
 - **Build fails on older Rust versions:** Run `rustc --version` and `cargo --version` inside the repository to verify both report `1.99.1` (see [`docs/development.md#prerequisites`](docs/development.md#prerequisites)).
 - **`--workdir` startup error:** Ensure the `--workdir` directory exists (`mkdir -p /path/to/your/data-folder`) and is accessible before launching the server.
 - **`path_escape` error on `open_file` / `save_file` / `export`:** With `--workdir` active, paths outside that folder or containing `..` are blocked; place files inside `--workdir` and pass relative paths or paths inside that directory.
-- **Extra text breaks stdio parsing when using `cargo run`:** Pass `-q` (`cargo run -q -p curvebook-cli -- mcp`) or build first and invoke `./target/release/curvebook-cli` directly.
+- **Unexpected text breaks stdio parsing:** Keep wrapper banners and diagnostics off stdout. Cargo normally logs to stderr; `cargo run -q -p curvebook-cli -- mcp` reduces log noise. Building first and invoking `./target/release/curvebook-cli` directly simplifies startup.
 
-For protocol framing details, attaching to a shared desktop window (`curvebook --control <port> --window` + `--control-port`), `--gui-only` mode, advanced configuration, and current limitations, see [`docs/mcp.md`](docs/mcp.md).
+For protocol framing details, attaching to a shared desktop window (`curvebook --control <port> --window` + `--control-port`), `--gui-only` mode, advanced configuration, and current limitations, see [`docs/mcp.md`](docs/mcp.md). For launch failures and empty tool lists, see [MCP connection troubleshooting](docs/mcp.md#troubleshooting-the-connection).
 
 ## Documentation & Support
 

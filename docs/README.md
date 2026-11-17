@@ -20,6 +20,8 @@ Read the [contributor guide](../CONTRIBUTING.md), [agent rules](../AGENTS.md), [
 | Guide | Contents |
 |---|---|
 | [Development](development.md) | Toolchain, builds, tests, coverage, and local configuration |
+| [Continuous integration](ci.md) | Quality stages, shared test binaries, deadlines, and local verification |
+| [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
 | [Data tables and transforms](implementation/data-tables-and-transforms.md) | Table archetypes, formulas, reactive data, and engine contracts |
 | [Statistics](implementation/statistics-implementation.md) | Numerical methods, statistical tests, and oracle requirements |
@@ -45,7 +47,7 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 | Scientific quality of life | [Enhancements](planning/qol-beyond-parity.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
 | Historical progress | [Roadmap history](planning/roadmap-history.md) |
 | Legacy tracking | [Gap mapping and known defects](gaps.md) |
-| Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](audit/progress.md), [work log](audit/work-log.md), and [Round 2 review](audit/round2-post-ebcc622.md) |
+| Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](audit/progress.md), [work log](audit/work-log.md), [Round 2 review](audit/round2-post-ebcc622.md), and [R0–R9 milestone review ledger](audit/review-2026-11-16-ledger.md) |
 
 ## Releases and reference files
 

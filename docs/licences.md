@@ -38,11 +38,11 @@ Every non-code asset (icons, SVGs, cursor bitmaps, sample `.csv`/`.curvebook`/re
 
 | File / Tool | Role |
 | :--- | :--- |
-| `deny.toml` | Configuration for `cargo deny check licenses`, restricting allowed crate SPDX expressions and flagging unapproved or banned licences (`R0.5`). |
+| `deny.toml` | Configuration for the full `cargo deny check` CI gate: licences, security advisories, yanked dependencies, bans, and sources. Optional dependencies are included through the all-features graph; advisory exceptions name their reason and a maintainer review date (`R0.5`, `R0.22`). |
 | `about.toml` | `cargo-about` template configuration (paired with `about.hbs`) used to assemble bundled third-party crate licence disclosures (`R0.5`). |
 | `cargo xtask licenses [--html [out]]` | Runs offline `deny.toml` / `Cargo.toml` / `Cargo.lock` licence checks, plus `cargo deny check licenses` when `cargo-deny` is installed (required when `CI=true`); `--html` writes `THIRD-PARTY-LICENSES.html` via `cargo about generate about.hbs` when `cargo-about` is installed, else a built-in pure-Rust renderer (`R0.5`). |
 | `THIRD-PARTY-LICENSES.html` | Generated third-party Rust dependency licence compendium included in release packages and installers ([docs/release/releasing.md](release/releasing.md)). |
 | [ATTRIBUTION.md](../ATTRIBUTION.md) | Third-party icon, palette, data, and scientific reference credits shipped alongside releases and checked against [ASSETS.md](../ASSETS.md). |
 | [NOTICE](../NOTICE) | Apache-2.0 / ecosystem attribution notice included in source archives and release artefacts. |
 
-Run `cargo xtask assets` on every PR that adds assets, and `cargo xtask licenses` before releasing or changing `Cargo.lock`.
+Run `cargo xtask assets` on every PR that adds assets, and `cargo xtask licenses` before releasing or changing `Cargo.lock`. Also run `cargo deny check` when changing dependencies or the supply-chain policy; `xtask licenses` checks licensing and does not replace the advisory check. The full check updates advisory and registry data and requires network access; it runs in CI, outside the zero-egress application.

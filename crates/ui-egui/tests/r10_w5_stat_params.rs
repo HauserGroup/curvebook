@@ -112,7 +112,7 @@ fn make_mv_sheet(id: &str) -> Result<DataSheet, String> {
         ds.set_cell(CellCoord::new(r, 0, 0), Cell::number(2.0 + rf * 1.3 + bin * 2.5)).map_err(err_str)?;
         ds.set_cell(CellCoord::new(r, 1, 0), Cell::number(bin)).map_err(err_str)?;
         ds.set_cell(CellCoord::new(r, 2, 0), Cell::number(1.0 + rf * 0.5)).map_err(err_str)?;
-        ds.set_cell(CellCoord::new(r, 3, 0), Cell::number(30.0 + rf * 3.0)).map_err(err_str)?;
+        ds.set_cell(CellCoord::new(r, 3, 0), Cell::number(30.0 + rf * 3.0 + if r % 2 == 0 { 2.0 } else { -2.0 })).map_err(err_str)?;
     }
     Ok(ds)
 }
