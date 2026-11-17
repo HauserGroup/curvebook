@@ -200,26 +200,48 @@ pub fn multiple_linear_regression(
         (0.0, 1.0)
     };
 
-    // Fitted values & residuals using compensated dot products.
+    // Fitted values & residuals using FMA-compensated Dot2 evaluation (Ogita, Rump & Oishi 2005)
+    // matching `solve_linear_least_squares` so large-magnitude exact fits (e.g. NIST Wampler1/2)
+    // do not suffer catastrophic cancellation in `y - X * beta`.
     let mut fitted = Vec::with_capacity(n);
     let mut residuals = Vec::with_capacity(n);
+    let mut dw_den_acc = NeumaierSum::new();
+    let mut max_term_scale = 0.0_f64;
     for (r, &yr) in y.iter().enumerate() {
-        let mut dot_acc = NeumaierSum::new();
+        max_term_scale = max_term_scale.max(yr.abs());
+        let mut main = NeumaierSum::new();
+        let mut err = NeumaierSum::new();
+        main.add(yr);
         for (c, &b) in sol.coefficients.iter().enumerate() {
-            dot_acc.add(x.get(r, c).unwrap_or(0.0) * b);
+            let xrc = x.get(r, c).unwrap_or(0.0);
+            let neg_x = -xrc;
+            let prod = neg_x * b;
+            max_term_scale = max_term_scale.max(prod.abs());
+            main.add(prod);
+            err.add(neg_x.mul_add(b, -prod));
         }
-        let yhat = dot_acc.total();
-        fitted.push(yhat);
-        residuals.push(yr - yhat);
+        let res_r = main.total() + err.total();
+        fitted.push(yr - res_r);
+        residuals.push(res_r);
+        dw_den_acc.add(res_r * res_r);
     }
 
-    // Durbin-Watson autocorrelation statistic.
-    let mut dw_num = NeumaierSum::new();
+    // Durbin & Watson (1950, Biometrika 37:409-428) autocorrelation statistic evaluated on the
+    // self-consistent Dot2 residual vector, returning 2.0 on exact fits at the machine noise floor.
+    let mut dw_num_acc = NeumaierSum::new();
     for i in 1..n {
         let d = residuals[i] - residuals[i - 1];
-        dw_num.add(d * d);
+        dw_num_acc.add(d * d);
     }
-    let durbin_watson = if rss > 0.0 { dw_num.total() / rss } else { 2.0 };
+    let dw_num = dw_num_acc.total().max(0.0);
+    let dw_den = dw_den_acc.total().max(0.0);
+    let exact_fit_floor = (n as f64) * (64.0 * f64::EPSILON * max_term_scale).powi(2);
+    let durbin_watson = if dw_den > exact_fit_floor && dw_num > 0.0 {
+        let raw_dw = dw_num / dw_den;
+        if raw_dw > 0.0 && raw_dw < 4.0 { raw_dw } else { 2.0 }
+    } else {
+        2.0
+    };
 
     // Leverage h_i = x_i^T (X^T X)^+ x_i and Cook's distance D_i.
     let mut leverage = Vec::with_capacity(n);
