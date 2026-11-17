@@ -284,6 +284,7 @@ proptest! {
         if matches!(
             method.as_str(),
             "initialize"
+                | "shutdown"
                 | "ping"
                 | "tools/list"
                 | "tools/call"

@@ -109,8 +109,33 @@ pub fn dot(a: &[f64], b: &[f64]) -> Result<f64, MathError> {
     if primary.is_finite() { Ok(primary + err_acc.total()) } else { Ok(primary) }
 }
 
+#[inline]
+fn pow2_scale_for_max_abs(max_abs: f64) -> (f64, f64) {
+    if max_abs == 0.0 || !max_abs.is_finite() || (max_abs > 1e-140 && max_abs < 1e130) {
+        return (1.0, 1.0);
+    }
+    let exp2_shift = (max_abs.log2().floor() as i32).clamp(-1000, 1000);
+    (2.0_f64.powi(exp2_shift), 2.0_f64.powi(-exp2_shift))
+}
+
+fn max_deviation_and_scale(values: &[f64], mean: f64, max_abs: f64) -> (f64, f64, bool) {
+    let mut max_dev = 0.0_f64;
+    let mut dev_overflow = false;
+    for &x in values {
+        let d = (x - mean).abs();
+        if d.is_finite() {
+            max_dev = max_dev.max(d);
+        } else {
+            dev_overflow = true;
+        }
+    }
+    let ref_mag = if dev_overflow { max_abs } else { max_dev };
+    let (scale, inv_scale) = pow2_scale_for_max_abs(ref_mag);
+    (scale, inv_scale, dev_overflow)
+}
+
 /// Compensated univariate location and dispersion summary computed via Chan-Golub-LeVeque's
-/// shifted two-pass algorithm with Neumaier compensation.
+/// shifted two-pass algorithm with Neumaier compensation and exact power-of-two overflow scaling.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummaryMoments {
     /// Number of finite observations `n`.
@@ -121,6 +146,11 @@ pub struct SummaryMoments {
     pub mean: f64,
     /// Centered sum of squared deviations `sum_i (x_i - mean)^2 >= 0`.
     pub css: f64,
+    /// Exact power-of-two rescaled `(scale, css_scaled)` when `|x_i - mean|` lies in the extreme
+    /// exponent tails, preserving full FMA compensation and finite `sample_sd` / `sem` when
+    /// `css = scale^2 * css_scaled` overflows `f64::MAX`.
+    #[serde(skip)]
+    scaled_css: Option<(f64, f64)>,
 }
 
 impl SummaryMoments {
@@ -134,24 +164,36 @@ impl SummaryMoments {
             return Err(MathError::EmptyInput);
         }
         let mut sum_acc = NeumaierSum::new();
+        let mut max_abs = 0.0_f64;
         for &x in values {
             if !x.is_finite() {
                 return Err(MathError::DomainError { name: "x", value: x });
             }
+            max_abs = max_abs.max(x.abs());
             sum_acc.add(x);
         }
         let count = values.len();
         let n_f = count as f64;
         let total = sum_acc.total();
-        let mean = total / n_f;
+        let mean = if total.is_finite() {
+            total / n_f
+        } else {
+            let (s_m, inv_m) = pow2_scale_for_max_abs(max_abs);
+            let mut scaled_sum = NeumaierSum::new();
+            for &x in values {
+                scaled_sum.add(x * inv_m);
+            }
+            s_m * (scaled_sum.total() / n_f)
+        };
         if !mean.is_finite() {
             return Err(MathError::DomainError { name: "mean", value: mean });
         }
 
+        let (scale, inv_scale, dev_overflow) = max_deviation_and_scale(values, mean, max_abs);
         let mut dev_acc = NeumaierSum::new();
         let mut sq_acc = NeumaierSum::new();
         for &x in values {
-            let d = x - mean;
+            let d = if dev_overflow { x * inv_scale - mean * inv_scale } else { (x - mean) * inv_scale };
             dev_acc.add(d);
             let sq = d * d;
             let sq_err = d.mul_add(d, -sq);
@@ -161,8 +203,14 @@ impl SummaryMoments {
             }
         }
         let residual = dev_acc.total();
-        let css = (sq_acc.total() - (residual * residual) / n_f).max(0.0);
-        Ok(Self { count, sum: total, mean, css })
+        let css_s = (sq_acc.total() - (residual * residual) / n_f).max(0.0);
+        let (css, scaled_css) = if scale == 1.0 { (css_s, None) } else { (((css_s * scale) * scale).max(0.0), Some((scale, css_s))) };
+        Ok(Self { count, sum: total, mean, css, scaled_css })
+    }
+
+    #[inline]
+    fn scaled_m2(&self) -> (f64, f64) {
+        self.scaled_css.unwrap_or((1.0, self.css))
     }
 
     /// Unbiased sample variance `css / (n - 1)`.
@@ -173,7 +221,8 @@ impl SummaryMoments {
         if self.count < 2 {
             return Err(MathError::InvalidParameter { name: "n", value: self.count as f64 });
         }
-        Ok(self.css / ((self.count - 1) as f64))
+        let (scale, css_s) = self.scaled_m2();
+        Ok(((css_s / ((self.count - 1) as f64)) * scale) * scale)
     }
 
     /// Sample standard deviation `sqrt(css / (n - 1))`.
@@ -181,7 +230,11 @@ impl SummaryMoments {
     /// # Errors
     /// Returns [`MathError::InvalidParameter`] when `count < 2`.
     pub fn sample_sd(&self) -> Result<f64, MathError> {
-        Ok(self.sample_variance()?.sqrt())
+        if self.count < 2 {
+            return Err(MathError::InvalidParameter { name: "n", value: self.count as f64 });
+        }
+        let (scale, css_s) = self.scaled_m2();
+        Ok(scale * (css_s / ((self.count - 1) as f64)).sqrt())
     }
 
     /// Standard error of the mean `sample_sd / sqrt(n)`.
@@ -195,13 +248,15 @@ impl SummaryMoments {
     /// Population variance `css / n`.
     #[must_use]
     pub fn population_variance(&self) -> f64 {
-        self.css / (self.count as f64)
+        let (scale, css_s) = self.scaled_m2();
+        ((css_s / (self.count as f64)) * scale) * scale
     }
 
     /// Population standard deviation `sqrt(css / n)`.
     #[must_use]
     pub fn population_sd(&self) -> f64 {
-        self.population_variance().sqrt()
+        let (scale, css_s) = self.scaled_m2();
+        scale * (css_s / (self.count as f64)).sqrt()
     }
 }
 
@@ -237,6 +292,32 @@ pub fn sample_sd(values: &[f64]) -> Result<f64, MathError> {
     SummaryMoments::from_slice(values)?.sample_sd()
 }
 
+fn scaled_cross_sum(x: &[f64], mx_mean: f64, y: &[f64], my_mean: f64) -> (f64, f64, f64) {
+    let max_x = x.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let max_y = y.iter().fold(0.0_f64, |m, &v| m.max(v.abs()));
+    let (sx, inv_sx, ovf_x) = max_deviation_and_scale(x, mx_mean, max_x);
+    let (sy, inv_sy, ovf_y) = max_deviation_and_scale(y, my_mean, max_y);
+    let n_f = x.len() as f64;
+
+    let mut dx_acc = NeumaierSum::new();
+    let mut dy_acc = NeumaierSum::new();
+    let mut cross_acc = NeumaierSum::new();
+    for (&xi, &yi) in x.iter().zip(y.iter()) {
+        let dx = if ovf_x { xi * inv_sx - mx_mean * inv_sx } else { (xi - mx_mean) * inv_sx };
+        let dy = if ovf_y { yi * inv_sy - my_mean * inv_sy } else { (yi - my_mean) * inv_sy };
+        dx_acc.add(dx);
+        dy_acc.add(dy);
+        let p = dx * dy;
+        let err = dx.mul_add(dy, -p);
+        cross_acc.add(p);
+        if err.is_finite() {
+            cross_acc.add(err);
+        }
+    }
+    let cross_centered = cross_acc.total() - (dx_acc.total() * dy_acc.total()) / n_f;
+    (sx, sy, cross_centered)
+}
+
 /// Shifted two-pass compensated sample covariance (`n - 1` denominator).
 ///
 /// # Errors
@@ -250,34 +331,14 @@ pub fn covariance(x: &[f64], y: &[f64]) -> Result<f64, MathError> {
     }
     let mx = mean(x)?;
     let my = mean(y)?;
-    let n_f = x.len() as f64;
-
-    let mut dx_acc = NeumaierSum::new();
-    let mut dy_acc = NeumaierSum::new();
-    let mut cross_acc = NeumaierSum::new();
-    for (&xi, &yi) in x.iter().zip(y.iter()) {
-        if !yi.is_finite() {
-            return Err(MathError::DomainError { name: "y", value: yi });
-        }
-        let dx = xi - mx;
-        let dy = yi - my;
-        dx_acc.add(dx);
-        dy_acc.add(dy);
-        let p = dx * dy;
-        let err = dx.mul_add(dy, -p);
-        cross_acc.add(p);
-        if err.is_finite() {
-            cross_acc.add(err);
-        }
-    }
-    let cross_centered = cross_acc.total() - (dx_acc.total() * dy_acc.total()) / n_f;
-    Ok(cross_centered / ((x.len() - 1) as f64))
+    let (sx, sy, cross_s) = scaled_cross_sum(x, mx, y, my);
+    Ok(((cross_s / ((x.len() - 1) as f64)) * sx) * sy)
 }
 
 /// Compensated Pearson product-moment correlation coefficient `r` in `[-1, 1]`.
 ///
 /// # Errors
-/// Returns [`MathError::SingularMatrix`] if either series has zero variance, or a dimension/domain error.
+/// Returns [`MathError::DomainError`] if either series has zero variance, or a dimension/domain error.
 pub fn pearson_r(x: &[f64], y: &[f64]) -> Result<f64, MathError> {
     if x.len() != y.len() {
         return Err(MathError::DimensionMismatch { expected: x.len(), actual: y.len() });
@@ -287,12 +348,15 @@ pub fn pearson_r(x: &[f64], y: &[f64]) -> Result<f64, MathError> {
     }
     let mx = SummaryMoments::from_slice(x)?;
     let my = SummaryMoments::from_slice(y)?;
-    if mx.css == 0.0 || my.css == 0.0 {
+    let (smx, css_x) = mx.scaled_m2();
+    let (smy, css_y) = my.scaled_m2();
+    if css_x == 0.0 || css_y == 0.0 {
         return Err(MathError::DomainError { name: "variance", value: 0.0 });
     }
-    let cov = covariance(x, y)?;
-    let denom = (mx.sample_variance()? * my.sample_variance()?).sqrt();
-    Ok((cov / denom).clamp(-1.0, 1.0))
+    let (sx, sy, cross_s) = scaled_cross_sum(x, mx.mean, y, my.mean);
+    let scale_ratio = (sx / smx) * (sy / smy);
+    let denom = (css_x * css_y).sqrt();
+    Ok(((cross_s * scale_ratio) / denom).clamp(-1.0, 1.0))
 }
 
 /// Sample lag-1 autocorrelation coefficient matching the NIST StRD univariate definition:
@@ -305,13 +369,18 @@ pub fn lag1_autocorrelation(values: &[f64]) -> Result<f64, MathError> {
         return Err(MathError::InvalidParameter { name: "n", value: values.len() as f64 });
     }
     let moments = SummaryMoments::from_slice(values)?;
-    if moments.css == 0.0 {
+    let (scale, css_s) = moments.scaled_m2();
+    if css_s == 0.0 {
         return Err(MathError::DomainError { name: "variance", value: 0.0 });
     }
     let m = moments.mean;
+    let inv_scale = 1.0 / scale;
+    let dev_overflow = values.iter().any(|&x| !(x - m).is_finite());
+    let scaled_dev = |v: f64| if dev_overflow { v * inv_scale - m * inv_scale } else { (v - m) * inv_scale };
+
     let mut dev_all = NeumaierSum::new();
     for &x in values {
-        dev_all.add(x - m);
+        dev_all.add(scaled_dev(x));
     }
     let delta = dev_all.total() / (values.len() as f64);
 
@@ -319,8 +388,8 @@ pub fn lag1_autocorrelation(values: &[f64]) -> Result<f64, MathError> {
     let mut pair_dev_acc = NeumaierSum::new();
     for pair in values.windows(2) {
         if let [a, b] = *pair {
-            let da = a - m;
-            let db = b - m;
+            let da = scaled_dev(a);
+            let db = scaled_dev(b);
             pair_dev_acc.add(da);
             pair_dev_acc.add(db);
             let p = da * db;
@@ -333,7 +402,7 @@ pub fn lag1_autocorrelation(values: &[f64]) -> Result<f64, MathError> {
     }
     acc.add(-delta * pair_dev_acc.total());
     acc.add(((values.len() - 1) as f64) * delta * delta);
-    Ok((acc.total() / moments.css).clamp(-1.0, 1.0))
+    Ok((acc.total() / css_s).clamp(-1.0, 1.0))
 }
 
 #[cfg(test)]

@@ -80,7 +80,8 @@ pub fn norm_ln_sf(z: f64) -> f64 {
         let w = z * std::f64::consts::FRAC_1_SQRT_2;
         -std::f64::consts::LN_2 - 0.5 * z * z + erfcx(w).ln()
     } else {
-        (-norm_cdf(-z)).ln_1p().min(0.0).max((1.0 - norm_sf(-z)).ln())
+        let s = norm_sf(-z);
+        if s == 0.0 { 0.0 } else { (-s).ln_1p() }
     }
 }
 

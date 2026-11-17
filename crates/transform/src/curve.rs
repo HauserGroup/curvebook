@@ -311,10 +311,22 @@ fn is_uniform_grid(xs: &[f64]) -> bool {
     xs.windows(2).all(|w| ((w[1] - w[0]) - h0).abs() <= 1e-7 * h0.abs().max(1.0))
 }
 
+/// Polynomial order (`d = 3`, quadratic/cubic family) for Savitzky–Golay smoothing.
+///
+/// At the midpoint (`t = 0`) of a symmetric uniform stencil of width `2m + 1` (`5`, `7`, `9`),
+/// odd monomials (`t`, `t^3`) are orthogonal to even monomials (`1`, `t^2`) because
+/// `sum_{k=-m}^{m} k^{2p+1} = 0`, so quadratic (`d = 2`) and cubic (`d = 3`) least-squares fits
+/// share identical central convolution weights (Savitzky & Golay, *Anal. Chem.*, 1964, 36(8),
+/// 1627–1639, Table I). Evaluating local degree-3 (`SAVITZKY_GOLAY_DEGREE`) least-squares
+/// polynomials at boundary offsets, short series (`n < width`), and non-uniform abscissas
+/// matches the interior filter's exact cubic reproduction order across the entire domain
+/// (Gorry, *Anal. Chem.*, 1990, 62(6), 570–573).
+const SAVITZKY_GOLAY_DEGREE: usize = 3;
+
 fn savitzky_golay(xs: &[f64], ys: &[f64], width: usize) -> Result<Vec<f64>, TransformError> {
     let n = ys.len();
     if n < width {
-        let deg = n.saturating_sub(1).min(2);
+        let deg = n.saturating_sub(1).min(SAVITZKY_GOLAY_DEGREE);
         return Ok((0..n).map(|i| local_poly_eval(xs, ys, 0..n, xs[i], deg).unwrap_or(ys[i])).collect());
     }
 
@@ -344,7 +356,7 @@ fn savitzky_golay(xs: &[f64], ys: &[f64], width: usize) -> Result<Vec<f64>, Tran
                 i - half
             };
             let end = start + width;
-            let val = local_poly_eval(xs, ys, start..end, xs[i], 3).unwrap_or(ys[i]);
+            let val = local_poly_eval(xs, ys, start..end, xs[i], SAVITZKY_GOLAY_DEGREE).unwrap_or(ys[i]);
             out.push(val);
         }
     }
@@ -356,11 +368,23 @@ fn local_poly_eval(xs: &[f64], ys: &[f64], range: std::ops::Range<usize>, x_targ
     if m == 0 {
         return None;
     }
+    let max_dt = range.clone().map(|idx| (xs[idx] - x_target).abs()).fold(0.0_f64, f64::max);
+    if !max_dt.is_finite() {
+        return None;
+    }
+    if max_dt == 0.0 {
+        return sum::mean(ys.get(range)?).ok().filter(|v| v.is_finite());
+    }
     let p = degree.min(m - 1) + 1;
     let mut data = Vec::with_capacity(m * p);
     let mut b = Vec::with_capacity(m);
     for idx in range {
-        let dt = xs[idx] - x_target;
+        // Normalize offsets to [-1, 1] so the intercept c_0 = P(x_target) is invariant while the
+        // local Vandermonde columns stay O(1)-conditioned across tiny or huge X scales.
+        let dt = (xs[idx] - x_target) / max_dt;
+        if !dt.is_finite() {
+            return None;
+        }
         let mut pow = 1.0_f64;
         for _ in 0..p {
             data.push(pow);

@@ -28,10 +28,30 @@ pub const CURRENT_JOURNAL_VERSION: u32 = 1;
 /// Current persisted format version of [`JournalLockLease`] files (`curvebook.lock`).
 pub const CURRENT_LOCK_VERSION: u32 = 1;
 
-/// Check whether `lease` may be reclaimed because its TTL expired or its local PID died.
+/// Check whether `lease` may be reclaimed because its TTL expired or its same-host local PID died.
 #[must_use]
 pub fn is_lease_reclaimable(lease: &JournalLockLease, now_epoch_ms: u64) -> bool {
-    lease.is_stale(now_epoch_ms) || is_dead_local_owner(&lease.owner_id)
+    lease.is_stale(now_epoch_ms) || is_dead_same_host_owner(&lease.owner_id, lease.host_id.as_deref())
+}
+
+/// Return `true` only when `lease_host_id` is present, matches the current machine's
+/// [`curvebook_platform::local_host_fingerprint`], and `owner_id` encodes a dead local
+/// `curvebook-pid-<N>` process.
+///
+/// Whenever `lease_host_id` is `None` (unknown/legacy lockfile) or differs from the current host
+/// (such as a shared network directory), returns `false` so callers rely strictly on TTL expiry.
+#[must_use]
+pub fn is_dead_same_host_owner(owner_id: &str, lease_host_id: Option<&str>) -> bool {
+    let Some(lease_host) = lease_host_id.map(str::trim).filter(|h| !h.is_empty()) else {
+        return false;
+    };
+    let Some(current_host) = curvebook_platform::local_host_fingerprint() else {
+        return false;
+    };
+    if lease_host != current_host {
+        return false;
+    }
+    is_dead_local_owner(owner_id)
 }
 
 /// Return `true` only when `owner_id` encodes a local `curvebook-pid-<N>` owner whose OS
@@ -84,7 +104,7 @@ fn parse_local_curvebook_pid(owner_id: &str) -> Option<u32> {
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 fn is_unix_pid_absent(pid: u32) -> bool {
     let pid_arg = pid.to_string();
-    let Ok(output) = curvebook_platform::ProcessCommand::new("/bin/kill").args(["-0", &pid_arg]).run() else {
+    let Ok(output) = curvebook_platform::ProcessCommand::new("/bin/kill").args(["-0", &pid_arg]).env("LC_ALL", "C").run() else {
         return false;
     };
     if output.success {
@@ -162,16 +182,30 @@ pub struct JournalLockLease {
     pub acquired_epoch_ms: u64,
     /// Lease validity duration in milliseconds after `acquired_epoch_ms`.
     pub ttl_ms: u64,
+    /// Optional host/machine fingerprint recorded when the lease was created, restricting local
+    /// PID dead-owner reclamation to leases created on the same host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_id: Option<String>,
 }
 
 impl JournalLockLease {
-    /// Construct a validated lease for `owner_id`.
+    /// Construct a validated lease for `owner_id`, tagging `host_id` with the local host fingerprint when available.
     pub fn new(owner_id: impl Into<String>, acquired_epoch_ms: u64, ttl_ms: u64) -> Result<Self, FormatError> {
         let owner_id = owner_id.into();
         if owner_id.trim().is_empty() {
             return Err(FormatError::Io(String::from("journal lock owner_id must not be empty")));
         }
-        Ok(Self { format_version: CURRENT_LOCK_VERSION, owner_id, acquired_epoch_ms, ttl_ms })
+        Ok(Self { format_version: CURRENT_LOCK_VERSION, owner_id, acquired_epoch_ms, ttl_ms, host_id: curvebook_platform::local_host_fingerprint() })
+    }
+
+    /// Override or clear the optional `host_id` machine fingerprint on this lease.
+    #[must_use]
+    pub fn with_host_id(mut self, host_id: Option<String>) -> Self {
+        self.host_id = host_id.and_then(|raw| {
+            let trimmed = raw.trim();
+            (!trimmed.is_empty()).then(|| trimmed.to_owned())
+        });
+        self
     }
 
     /// Reject leases with unsupported `format_version` (`0` or `> CURRENT_LOCK_VERSION`).
@@ -185,10 +219,13 @@ impl JournalLockLease {
     /// Deserialize a lock lease from JSON bytes and validate its `format_version`.
     pub fn from_json_bytes(bytes: &[u8]) -> Result<Self, FormatError> {
         match serde_json::from_slice::<Self>(bytes) {
-            Ok(lease) => {
+            Ok(mut lease) => {
                 lease.validate_version()?;
                 if lease.owner_id.trim().is_empty() {
                     return Err(FormatError::Json(String::from("journal lock owner_id must not be empty")));
+                }
+                if lease.host_id.as_deref().is_some_and(|h| h.trim().is_empty()) {
+                    lease.host_id = None;
                 }
                 Ok(lease)
             }
@@ -855,6 +892,8 @@ struct EvictionLockRecord {
     acquired_wall_ms: u64,
     ttl_ms: u64,
     nonce: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    host_id: Option<String>,
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -991,7 +1030,7 @@ impl DirectoryJournalBackend {
             Ok(()) => {
                 drop(tmp_guard);
                 if durable {
-                    sync_directory_best_effort(&self.dir);
+                    curvebook_platform::fs::sync_dir(&self.dir)?;
                 }
                 Ok(true)
             }
@@ -1012,7 +1051,7 @@ impl DirectoryJournalBackend {
                             return Err(FormatError::from(write_err));
                         }
                         if durable {
-                            sync_directory_best_effort(&self.dir);
+                            curvebook_platform::fs::sync_dir(&self.dir)?;
                         }
                         match read_bounded_lock_bytes(target_path, MAX_LOCKFILE_BYTES)? {
                             BoundedLockRead::Bytes(actual) if actual == bytes => Ok(true),
@@ -1071,8 +1110,13 @@ impl DirectoryJournalBackend {
     fn try_acquire_eviction_guard(&self, owner_id: &str) -> Result<Option<EvictionLockGuard>, FormatError> {
         let evict_path = self.eviction_lock_path();
         let nonce = LOCK_TMP_SEQ.fetch_add(1, Ordering::Relaxed);
-        let record =
-            EvictionLockRecord { owner_id: owner_id.to_owned(), acquired_wall_ms: current_wall_epoch_ms(), ttl_ms: EVICTION_LOCK_TTL_MS, nonce };
+        let record = EvictionLockRecord {
+            owner_id: owner_id.to_owned(),
+            acquired_wall_ms: current_wall_epoch_ms(),
+            ttl_ms: EVICTION_LOCK_TTL_MS,
+            nonce,
+            host_id: curvebook_platform::local_host_fingerprint(),
+        };
         let guard_bytes = serde_json::to_vec(&record)?;
 
         if self.try_create_file_exclusively(&evict_path, "curvebook.lock.evict", &guard_bytes, false)? {
@@ -1091,7 +1135,8 @@ impl DirectoryJournalBackend {
 
         let is_reclaimable_guard = match serde_json::from_slice::<EvictionLockRecord>(&observed_bytes) {
             Ok(existing) => {
-                is_dead_local_owner(&existing.owner_id) || current_wall_epoch_ms() >= existing.acquired_wall_ms.saturating_add(existing.ttl_ms)
+                is_dead_same_host_owner(&existing.owner_id, existing.host_id.as_deref())
+                    || current_wall_epoch_ms() >= existing.acquired_wall_ms.saturating_add(existing.ttl_ms)
             }
             Err(_) => true,
         };
@@ -1143,13 +1188,6 @@ impl DirectoryJournalBackend {
                 Ok(Some(None))
             }
         }
-    }
-}
-
-#[cfg(not(target_arch = "wasm32"))]
-fn sync_directory_best_effort(dir: &Path) {
-    if let Ok(handle) = File::open(dir) {
-        let _ = handle.sync_all();
     }
 }
 
@@ -1243,7 +1281,7 @@ impl JournalBackend for DirectoryJournalBackend {
         }
         match std::fs::remove_file(self.lock_path()) {
             Ok(()) => {
-                sync_directory_best_effort(&self.dir);
+                curvebook_platform::fs::sync_dir(&self.dir)?;
                 Ok(())
             }
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
@@ -1276,7 +1314,7 @@ impl JournalBackend for DirectoryJournalBackend {
         curvebook_platform::fs::write_atomic(&pending_path, &meta_bytes)?;
         curvebook_platform::fs::write_atomic(&self.snapshot_path(), bytes)?;
         std::fs::rename(&pending_path, &meta_path)?;
-        sync_directory_best_effort(&self.dir);
+        curvebook_platform::fs::sync_dir(&self.dir)?;
         Ok(())
     }
 
@@ -1301,14 +1339,17 @@ impl JournalBackend for DirectoryJournalBackend {
     }
 
     fn clear_snapshot_covered_seq(&mut self) -> Result<(), FormatError> {
+        let mut removed_any = false;
         for path in [self.snapshot_meta_path(), self.pending_snapshot_meta_path()] {
             match std::fs::remove_file(path) {
-                Ok(()) => {}
+                Ok(()) => removed_any = true,
                 Err(err) if err.kind() == ErrorKind::NotFound => {}
                 Err(err) => return Err(FormatError::from(err)),
             }
         }
-        sync_directory_best_effort(&self.dir);
+        if removed_any {
+            curvebook_platform::fs::sync_dir(&self.dir)?;
+        }
         Ok(())
     }
 
@@ -1358,7 +1399,7 @@ impl JournalBackend for DirectoryJournalBackend {
     fn clear_journal(&mut self) -> Result<(), FormatError> {
         match std::fs::remove_file(self.journal_path()) {
             Ok(()) => {
-                sync_directory_best_effort(&self.dir);
+                curvebook_platform::fs::sync_dir(&self.dir)?;
                 Ok(())
             }
             Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
@@ -1528,6 +1569,11 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         self.backend.renew_lease(&self.lease, now_epoch_ms)?;
         self.lease.acquired_epoch_ms = now_epoch_ms;
         Ok(())
+    }
+
+    /// Release the active writer lease without altering `snapshot.curvebook` or `ops.journal`.
+    pub fn release_lease(&mut self) -> Result<(), FormatError> {
+        self.backend.release_lease(&self.lease.owner_id)
     }
 
     /// Write the final atomic snapshot, clear `ops.journal`, release `curvebook.lock`, and return

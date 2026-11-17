@@ -40,9 +40,17 @@ fn check_tex_text_escapes(tex: &str) -> Result<(), String> {
             while i < bytes.len() && depth >= text_depth {
                 match bytes[i] {
                     b'\\' => {
+                        let tail = &tex[i..];
+                        if let Some(cmd) = ["\\textbackslash{}", "\\textless{}", "\\textgreater{}"].into_iter().find(|p| tail.starts_with(p)) {
+                            i += cmd.len();
+                            continue;
+                        }
                         i += 1;
                         if i >= bytes.len() {
                             return Err(format!("dangling backslash inside \\text{{...}} in `{tex}`"));
+                        }
+                        if matches!(bytes[i], b'\\' | b'<' | b'>') {
+                            return Err(format!("invalid TeX text escape `\\{}` inside \\text{{...}} in `{tex}`", bytes[i] as char));
                         }
                         i += 1;
                     }

@@ -224,6 +224,12 @@ impl PivotedQr {
         self.rank
     }
 
+    /// Default diagonal rank tolerance `eps * max(nrows, ncols) * |R_{00}|` (or `max_k |R_{kk}|` when unpivoted).
+    #[must_use]
+    pub const fn default_tol(&self) -> f64 {
+        self.default_tol
+    }
+
     /// Re-evaluate numerical rank with a caller-supplied diagonal tolerance `tol >= 0`.
     #[must_use]
     pub fn rank_with_tol(&self, tol: f64) -> usize {
@@ -563,36 +569,78 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
         let norm_j = x.col_norm2(j);
         if norm_j > 0.0 {
             *scale_slot = norm_j;
-            let inv = 1.0 / norm_j;
             for i in 0..n {
-                x_scaled.set_in_bounds(i, j, x.entry(i, j) * inv);
+                x_scaled.set_in_bounds(i, j, x.entry(i, j) / norm_j);
             }
         }
     }
 
     let pqr = qr_col_pivoted(&x_scaled)?;
-    let rank = pqr.rank();
-    let aliased = pqr.aliased_columns();
-
-    let (beta, cov_unscaled, rss) = if rank == p && n >= p {
-        let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
+    if pqr.rank() == p && n >= p {
         let cov_s = pqr.xtx_inverse()?;
-        let cov_u = unscale_covariance(&cov_s, &scales)?;
-        (beta_refined, cov_u, rss_refined)
-    } else {
-        // Rank-deficient design matrix: fall back cleanly to SVD pseudoinverse (per §1.3).
+        if !is_borderline_singular_cov(&cov_s, pqr.default_tol, p) {
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
+            let cov_u = unscale_covariance(&cov_s, &scales)?;
+            return Ok((
+                LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
+                cov_u,
+            ));
+        }
+        // Borderline near-singular R: verify via SVD so hidden Kahan-like collinearity cannot
+        // slip through as full rank with an inflated covariance or mismatched df_residual.
         let svd_s = svd(&x_scaled)?;
-        let z = svd_s.solve_least_squares(y, None)?;
-        let cov_s = svd_s.ata_pseudoinverse(None)?;
-        let beta_svd: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| if sj > 0.0 { zj / sj } else { 0.0 }).collect();
-        let cov_u = unscale_covariance(&cov_s, &scales)?;
-        let rss_svd = compensated_rss(x, y, &beta_svd);
-        (beta_svd, cov_u, rss_svd)
-    };
+        let svd_tol = svd_s.default_tol().max(pqr.default_tol);
+        if svd_s.rank_with_tol(svd_tol) == p {
+            let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
+            let cov_u = unscale_covariance(&cov_s, &scales)?;
+            return Ok((
+                LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
+                cov_u,
+            ));
+        }
+        return finish_svd_least_squares(x, y, &scales, &svd_s, svd_tol, pqr.permutation());
+    }
 
+    // Rank-deficient or underdetermined design matrix: solve via SVD pseudoinverse (per §1.3) and
+    // derive `rank`, `df_residual`, and `aliased_columns` from the exact SVD truncation threshold.
+    let svd_s = svd(&x_scaled)?;
+    let svd_tol = svd_s.default_tol().max(pqr.default_tol);
+    finish_svd_least_squares(x, y, &scales, &svd_s, svd_tol, pqr.permutation())
+}
+
+fn is_borderline_singular_cov(cov_scaled: &DenseMatrix, qr_tol: f64, p: usize) -> bool {
+    let mut max_diag = 0.0_f64;
+    for j in 0..p {
+        let v = cov_scaled.entry(j, j);
+        if !v.is_finite() || v < 0.0 {
+            return true;
+        }
+        max_diag = max_diag.max(v);
+    }
+    // Since max_j sqrt(cov_scaled[j, j]) >= 1 / (sqrt(p) * sigma_min(X_scaled)) and sigma_0 <= sqrt(p),
+    // sigma_min <= eps * max(n, p) * sigma_0 implies sqrt(max_diag) * qr_tol * p >= 1.
+    max_diag.sqrt() * qr_tol * (p as f64) >= 0.5
+}
+
+fn finish_svd_least_squares(
+    x: &DenseMatrix,
+    y: &[f64],
+    scales: &[f64],
+    svd_s: &crate::linalg::svd::Svd,
+    svd_tol: f64,
+    qr_perm: &[usize],
+) -> Result<(LeastSquaresSolution, DenseMatrix), MathError> {
+    let n = x.nrows();
+    let rank = svd_s.rank_with_tol(svd_tol);
+    let z = svd_s.solve_least_squares(y, Some(svd_tol))?;
+    let cov_s = svd_s.ata_pseudoinverse(Some(svd_tol))?;
+    let beta_svd: Vec<f64> = z.iter().zip(scales.iter()).map(|(&zj, &sj)| if sj > 0.0 { zj / sj } else { 0.0 }).collect();
+    let cov_u = unscale_covariance(&cov_s, scales)?;
+    let rss_svd = compensated_rss(x, y, &beta_svd);
+    let mut aliased: Vec<usize> = qr_perm.get(rank..).unwrap_or(&[]).to_vec();
+    aliased.sort_unstable();
     let df_residual = n.saturating_sub(rank);
-
-    Ok((LeastSquaresSolution { coefficients: beta, rank, aliased_columns: aliased, rss, df_residual }, cov_unscaled))
+    Ok((LeastSquaresSolution { coefficients: beta_svd, rank, aliased_columns: aliased, rss: rss_svd, df_residual }, cov_u))
 }
 
 fn unscale_covariance(cov_scaled: &DenseMatrix, scales: &[f64]) -> Result<DenseMatrix, MathError> {

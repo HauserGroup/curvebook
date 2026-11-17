@@ -9,7 +9,7 @@ use curvebook_doc::{
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, f_sf, norm_two_sided_isf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p};
-use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
+use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, svd};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
@@ -200,26 +200,48 @@ pub fn multiple_linear_regression(
         (0.0, 1.0)
     };
 
-    // Fitted values & residuals using compensated dot products.
+    // Fitted values & residuals using FMA-compensated Dot2 evaluation (Ogita, Rump & Oishi 2005)
+    // matching `solve_linear_least_squares` so large-magnitude exact fits (e.g. NIST Wampler1/2)
+    // do not suffer catastrophic cancellation in `y - X * beta`.
     let mut fitted = Vec::with_capacity(n);
     let mut residuals = Vec::with_capacity(n);
+    let mut dw_den_acc = NeumaierSum::new();
+    let mut max_term_scale = 0.0_f64;
     for (r, &yr) in y.iter().enumerate() {
-        let mut dot_acc = NeumaierSum::new();
+        max_term_scale = max_term_scale.max(yr.abs());
+        let mut main = NeumaierSum::new();
+        let mut err = NeumaierSum::new();
+        main.add(yr);
         for (c, &b) in sol.coefficients.iter().enumerate() {
-            dot_acc.add(x.get(r, c).unwrap_or(0.0) * b);
+            let xrc = x.get(r, c).unwrap_or(0.0);
+            let neg_x = -xrc;
+            let prod = neg_x * b;
+            max_term_scale = max_term_scale.max(prod.abs());
+            main.add(prod);
+            err.add(neg_x.mul_add(b, -prod));
         }
-        let yhat = dot_acc.total();
-        fitted.push(yhat);
-        residuals.push(yr - yhat);
+        let res_r = main.total() + err.total();
+        fitted.push(yr - res_r);
+        residuals.push(res_r);
+        dw_den_acc.add(res_r * res_r);
     }
 
-    // Durbin-Watson autocorrelation statistic.
-    let mut dw_num = NeumaierSum::new();
+    // Durbin & Watson (1950, Biometrika 37:409-428) autocorrelation statistic evaluated on the
+    // self-consistent Dot2 residual vector, returning 2.0 on exact fits at the machine noise floor.
+    let mut dw_num_acc = NeumaierSum::new();
     for i in 1..n {
         let d = residuals[i] - residuals[i - 1];
-        dw_num.add(d * d);
+        dw_num_acc.add(d * d);
     }
-    let durbin_watson = if rss > 0.0 { dw_num.total() / rss } else { 2.0 };
+    let dw_num = dw_num_acc.total().max(0.0);
+    let dw_den = dw_den_acc.total().max(0.0);
+    let exact_fit_floor = (n as f64) * (64.0 * f64::EPSILON * max_term_scale).powi(2);
+    let durbin_watson = if dw_den > exact_fit_floor && dw_num > 0.0 {
+        let raw_dw = dw_num / dw_den;
+        if raw_dw > 0.0 && raw_dw < 4.0 { raw_dw } else { 2.0 }
+    } else {
+        2.0
+    };
 
     // Leverage h_i = x_i^T (X^T X)^+ x_i and Cook's distance D_i.
     let mut leverage = Vec::with_capacity(n);
@@ -512,20 +534,29 @@ pub fn multiple_logistic_regression(
     if n_events == 0 || n_events == n {
         return Err(StatsError::InvalidParameter { name: "logistic_events", value: n_events as f64 });
     }
+    let x_rank = svd(x)?.rank();
+    if x_rank < p {
+        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: x_rank, expected_rank: p }));
+    }
 
     let nf = n as f64;
     let p_bar = (n_events as f64) / nf;
     let ll_null = (n_events as f64) * p_bar.ln() + ((n - n_events) as f64) * (1.0 - p_bar).ln();
     let dev_null = -2.0 * ll_null;
+    let w_null = p_bar * (1.0 - p_bar);
+    let diag_null = fisher_null_diagonal(x, w_null);
 
     let mut beta = vec![0.0_f64; p];
     beta[0] = (p_bar / (1.0 - p_bar)).ln();
     let (converged, separation_detected) = logistic_irls_loop(x, y_binary, &mut beta)?;
 
-    // Recompute unpenalized log-likelihood & covariance matrix.
-    let (ll_unpen, probs_final, weights_final) = eval_logistic_ll(x, y_binary, &beta, 0.0);
+    // Recompute unpenalized log-likelihood & Fisher information covariance matrix I(beta)^{-1}
+    // (McCullagh & Nelder 1989, §2.5 & §4.3; Albert & Anderson 1984). Never substitute an
+    // identity covariance when I(beta) is singular or separated beyond identifiability.
+    let (ll_unpen, probs_final, _weights_final) = eval_logistic_ll(x, y_binary, &beta, 0.0);
     let mut info_final = vec![0.0_f64; p * p];
-    for (r, &wr) in weights_final.iter().enumerate() {
+    for (r, &pr) in probs_final.iter().enumerate() {
+        let wr = (pr * (1.0 - pr)).max(0.0);
         for j in 0..p {
             let xrj = x.get(r, j).unwrap_or(0.0);
             for k in j..p {
@@ -539,10 +570,7 @@ pub fn multiple_logistic_regression(
         }
     }
     let info_mat = DenseMatrix::from_row_major(p, p, info_final)?;
-    let cov_beta = match cholesky(&info_mat).and_then(|c| c.inverse()) {
-        Ok(inv) => inv,
-        Err(_) => DenseMatrix::identity(p)?,
-    };
+    let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
     let vifs = if compute_vif { compute_vifs_from_matrix(x, true) } else { vec![None; p] };
@@ -647,6 +675,42 @@ fn hosmer_lemeshow_test(y: &[f64], probs: &[f64], g_groups: usize) -> Result<(f6
     Ok((chi2, df, p_val))
 }
 
+fn fisher_null_diagonal(x: &DenseMatrix, w_null: f64) -> Vec<f64> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut diag = vec![0.0_f64; p];
+    for (j, slot) in diag.iter_mut().enumerate() {
+        let mut ss = NeumaierSum::new();
+        for r in 0..n {
+            let xrj = x.get(r, j).unwrap_or(0.0);
+            ss.add(xrj * xrj);
+        }
+        *slot = w_null * ss.total();
+    }
+    diag
+}
+
+/// Invert the observed/expected GLM Fisher information matrix `I(beta) = X^T W X` (McCullagh &
+/// Nelder 1989, §2.5), returning [`curvebook_math::MathError::SingularMatrix`] whenever `I(beta)`
+/// is rank-deficient or suffers Fisher-weight collapse relative to the intercept-only baseline.
+fn invert_glm_fisher_information(info_mat: &DenseMatrix, diag_null: &[f64], diag_floor_ratio: f64) -> Result<DenseMatrix, StatsError> {
+    let p = info_mat.nrows();
+    if let Ok(chol) = cholesky(info_mat) {
+        let well_conditioned = (0..p).all(|j| {
+            let dn = diag_null.get(j).copied().unwrap_or(0.0);
+            let dc = info_mat.get(j, j).unwrap_or(0.0);
+            let piv = chol.l().get(j, j).unwrap_or(0.0);
+            let piv_sq = piv * piv;
+            dn.is_finite() && dn > 0.0 && dc.is_finite() && dc > diag_floor_ratio * dn && piv.is_finite() && piv_sq > 1e-10 * dc
+        });
+        if well_conditioned && let Ok(inv) = chol.inverse() {
+            return Ok(inv);
+        }
+    }
+    let eff_rank = svd(info_mat).map(|s| s.rank().min(p.saturating_sub(1))).unwrap_or(0);
+    Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: eff_rank, expected_rank: p }))
+}
+
 // ============================================================================
 // Multiple Poisson Regression (Log-Link IRLS)
 // ============================================================================
@@ -673,9 +737,18 @@ pub fn multiple_poisson_regression(
             return Err(StatsError::InvalidParameter { name: "poisson_y", value: yc });
         }
     }
+    let x_rank = svd(x)?.rank();
+    if x_rank < p {
+        return Err(StatsError::Math(curvebook_math::MathError::SingularMatrix { rank: x_rank, expected_rank: p }));
+    }
 
     let nf = n as f64;
-    let y_mean = (y_counts.iter().sum::<f64>() / nf).max(1e-6);
+    let y_mean_raw = y_counts.iter().sum::<f64>() / nf;
+    if y_mean_raw <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "poisson_events", value: 0.0 });
+    }
+    let y_mean = y_mean_raw.max(1e-6);
+    let diag_null = fisher_null_diagonal(x, y_mean);
     let mut beta = vec![0.0_f64; p];
     beta[0] = y_mean.ln();
 
@@ -756,21 +829,22 @@ pub fn multiple_poisson_regression(
     let mut dev_resid = 0.0_f64;
     let mut pearson_chi2 = 0.0_f64;
     for (r, (&yr, &mur)) in y_counts.iter().zip(mus.iter()).enumerate() {
-        let wr = mur.max(1e-12);
+        let wr_info = mur.max(0.0);
+        let wr_dev = mur.max(1e-12);
         for j in 0..p {
             let xrj = x.get(r, j).unwrap_or(0.0);
             for k in j..p {
-                info_final[j * p + k] += wr * xrj * x.get(r, k).unwrap_or(0.0);
+                info_final[j * p + k] += wr_info * xrj * x.get(r, k).unwrap_or(0.0);
             }
         }
         if yr > 0.0 {
             dev_null += 2.0 * (yr * (yr / y_mean).ln() - (yr - y_mean));
-            dev_resid += 2.0 * (yr * (yr / wr).ln() - (yr - wr));
+            dev_resid += 2.0 * (yr * (yr / wr_dev).ln() - (yr - wr_dev));
         } else {
             dev_null += 2.0 * y_mean;
-            dev_resid += 2.0 * wr;
+            dev_resid += 2.0 * wr_dev;
         }
-        pearson_chi2 += (yr - wr).powi(2) / wr;
+        pearson_chi2 += (yr - wr_dev).powi(2) / wr_dev;
     }
     for j in 0..p {
         for k in 0..j {
@@ -778,10 +852,7 @@ pub fn multiple_poisson_regression(
         }
     }
     let info_mat = DenseMatrix::from_row_major(p, p, info_final)?;
-    let cov_beta = match cholesky(&info_mat).and_then(|c| c.inverse()) {
-        Ok(inv) => inv,
-        Err(_) => DenseMatrix::identity(p)?,
-    };
+    let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
     let vifs = if compute_vif { compute_vifs_from_matrix(x, true) } else { vec![None; p] };
@@ -1148,15 +1219,24 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
         return Err(StatsError::InvalidParameter { name: "passing_bablok_max_n", value: n as f64 });
     }
 
+    // Passing & Bablok (1983, J. Clin. Chem. Clin. Biochem. 21:709-720, eq. 2):
+    // Identical pairs (dx == 0 && dy == 0) and exact -1 slopes are omitted, whereas vertical
+    // pairs (dx == 0 && dy != 0) carry slope +inf (dy > 0) or -inf (dy < 0, counted in K as
+    // < -1) and remain in N and K.
     let mut slopes = Vec::with_capacity(n * (n - 1) / 2);
     for i in 0..n {
         for j in (i + 1)..n {
             let dx = x[j] - x[i];
+            let dy = y[j] - y[i];
             if dx == 0.0 {
+                if dy == 0.0 {
+                    continue;
+                }
+                slopes.push(if dy > 0.0 { f64::INFINITY } else { f64::NEG_INFINITY });
                 continue;
             }
-            let s = (y[j] - y[i]) / dx;
-            if !s.is_finite() || (s + 1.0).abs() <= 1e-12 {
+            let s = dy / dx;
+            if (s + 1.0).abs() <= 1e-12 {
                 continue;
             }
             slopes.push(s);
@@ -1173,7 +1253,19 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
     angular.extend_from_slice(&slopes[k_offset..]);
     angular.extend_from_slice(&slopes[..k_offset]);
 
-    let slope = if n_slopes % 2 == 1 { angular[n_slopes / 2] } else { 0.5 * (angular[n_slopes / 2 - 1] + angular[n_slopes / 2]) };
+    let slope = if n_slopes % 2 == 1 {
+        angular[n_slopes / 2]
+    } else {
+        let left = angular[n_slopes / 2 - 1];
+        let right = angular[n_slopes / 2];
+        if !left.is_finite() || !right.is_finite() {
+            return Err(StatsError::ZeroVariance { context: "Passing-Bablok vertical median slope" });
+        }
+        0.5 * (left + right)
+    };
+    if !slope.is_finite() {
+        return Err(StatsError::ZeroVariance { context: "Passing-Bablok vertical median slope" });
+    }
 
     let z_crit = norm_two_sided_isf(conf.alpha())?;
     let nf = n as f64;
@@ -1191,7 +1283,7 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
     }
     let intercept = median_unsorted(&mut tmp);
 
-    let (slope_ci, intercept_ci) = if raw_lo <= slope && slope <= raw_hi {
+    let (slope_ci, intercept_ci) = if raw_lo.is_finite() && raw_hi.is_finite() && raw_lo <= slope && slope <= raw_hi {
         tmp.clear();
         for (&xi, &yi) in x.iter().zip(y.iter()) {
             tmp.push(yi - raw_hi * xi);

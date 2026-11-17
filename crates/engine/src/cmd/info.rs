@@ -32,7 +32,7 @@ fn set_note_schema() -> Value {
         ],
         &["sheet_id", "text"],
         vec![("sheet_id", &["sheetId", "id"]), ("text", &["note", "notes", "notes_markdown", "notesMarkdown", "markdown"])],
-        true,
+        false,
     )
 }
 
@@ -81,7 +81,7 @@ fn set_constant_schema() -> Value {
         ],
         &["sheet_id", "name", "value"],
         vec![("sheet_id", &["sheetId", "id"]), ("name", &["key"])],
-        true,
+        false,
     )
 }
 
@@ -168,7 +168,7 @@ fn remove_constant_schema() -> Value {
         ],
         &["sheet_id", "name"],
         vec![("sheet_id", &["sheetId", "id"]), ("name", &["key", "constant"]), ("if_exists", &["ifExists"])],
-        true,
+        false,
     )
 }
 

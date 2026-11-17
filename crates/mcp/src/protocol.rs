@@ -125,7 +125,7 @@ impl JsonRpcResponse {
 enum ReadLineOutcome {
     Line(Vec<u8>),
     Eof(Vec<u8>),
-    TooLong { id: Value },
+    TooLong { id: Value, looks_like_header: bool },
     DrainLimitExceeded,
 }
 
@@ -180,10 +180,11 @@ pub fn serve<R: BufRead, W: Write>(reader: &mut R, writer: &mut W, state: &mut M
     serve_with_max_bytes(reader, writer, state, MAX_REQUEST_BYTES)
 }
 
-/// Serve MCP JSON-RPC 2.0 requests until EOF with an explicit per-request byte ceiling.
+/// Serve MCP JSON-RPC 2.0 requests until EOF with an explicit per-request byte ceiling
+/// clamped to `1..=MAX_REQUEST_BYTES`.
 pub fn serve_with_max_bytes<R: BufRead, W: Write>(reader: &mut R, writer: &mut W, state: &mut McpServerState, max_bytes: usize) -> io::Result<()> {
     let mut last_mode = FramingMode::Newline;
-    let effective_max = max_bytes.max(1);
+    let effective_max = max_bytes.clamp(1, MAX_REQUEST_BYTES);
     loop {
         match read_next_frame(reader, effective_max, last_mode)? {
             NextFrame::Eof => return Ok(()),
@@ -301,21 +302,57 @@ fn dispatch_method(req_id: Option<Value>, method: &str, params: Value, state: &m
     if is_notification_method(method, req_id.is_none()) {
         if method == "notifications/initialized" || method == "initialized" {
             state.mark_initialized();
+        } else if method == "notifications/cancelled"
+            && let Some(target_id) = extract_cancelled_request_id(&params)
+        {
+            let _ = state.cancel_request(target_id);
         }
         return req_id.map(|id| JsonRpcResponse::ok(id, json!({})));
     }
 
     let id = req_id?;
-    match method {
-        "initialize" => Some(handle_initialize(id, &params, state)),
-        "ping" => Some(JsonRpcResponse::ok(id, json!({}))),
-        "tools/list" => Some(handle_tools_list(id, &params, state)),
-        "tools/call" => Some(handle_tools_call(id, params, state)),
-        "resources/list" => Some(handle_resources_list(id, &params, state)),
-        "resources/read" => Some(handle_resources_read(id, &params, state)),
-        "prompts/list" => Some(handle_prompts_list(id, &params, state)),
-        "prompts/get" => Some(handle_prompts_get(id, &params, state)),
-        _ => Some(JsonRpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("method not found: {method}"), None)),
+    if method == "ping" {
+        return Some(JsonRpcResponse::ok(id, json!({})));
+    }
+    if state.is_shutting_down() {
+        return Some(JsonRpcResponse::err(id, ERR_INVALID_REQUEST, "server is shutting down", None));
+    }
+    if method == "initialize" {
+        if state.is_initialized() {
+            return Some(JsonRpcResponse::err(id, ERR_INVALID_REQUEST, "session is already initialized", None));
+        }
+        return Some(handle_initialize(id, &params, state));
+    }
+    if method == "shutdown" {
+        state.mark_shutting_down();
+        return Some(JsonRpcResponse::ok(id, json!({})));
+    }
+    if state.requires_initialize() && !state.is_initialized() {
+        return Some(JsonRpcResponse::err(id, ERR_INVALID_REQUEST, "server is not initialized; call initialize first", None));
+    }
+
+    let (cancel_token, _active_guard) = state.cancellation_registry().begin_request(&id);
+    let prev_token = state.set_active_cancel_token(Some(cancel_token));
+    let response = match method {
+        "tools/list" => handle_tools_list(id, &params, state),
+        "tools/call" => handle_tools_call(id, params, state),
+        "resources/list" => handle_resources_list(id, &params, state),
+        "resources/read" => handle_resources_read(id, &params, state),
+        "prompts/list" => handle_prompts_list(id, &params, state),
+        "prompts/get" => handle_prompts_get(id, &params, state),
+        _ => JsonRpcResponse::err(id, ERR_METHOD_NOT_FOUND, format!("method not found: {method}"), None),
+    };
+    let _ = state.set_active_cancel_token(prev_token);
+    Some(response)
+}
+
+fn extract_cancelled_request_id(params: &Value) -> Option<&Value> {
+    let map = params.as_object()?;
+    let candidate = map.get("requestId").or_else(|| map.get("id"))?;
+    match candidate {
+        Value::String(s) if !s.is_empty() => Some(candidate),
+        Value::Number(_) => Some(candidate),
+        _ => None,
     }
 }
 
@@ -661,25 +698,50 @@ fn handle_prompts_get(id: Value, params: &Value, state: &mut McpServerState) -> 
 }
 
 fn read_next_frame<R: BufRead>(reader: &mut R, max_bytes: usize, fallback_mode: FramingMode) -> io::Result<NextFrame> {
-    let line_cap = max_bytes.min(MAX_REQUEST_BYTES);
-    let Some(first_line) = read_next_non_empty_line(reader, line_cap)? else {
+    let effective_max = max_bytes.clamp(1, MAX_REQUEST_BYTES);
+    let Some(first_byte) = skip_leading_ascii_whitespace(reader)? else {
         return Ok(NextFrame::Eof);
     };
 
-    let first_line = match first_line {
-        Ok(bytes) => bytes,
-        Err(err_frame) => return Ok(err_frame),
-    };
-
-    if starts_json_payload(&first_line) {
-        return Ok(NextFrame::Payload { bytes: first_line, mode: FramingMode::Newline });
+    if first_byte == b'{' || first_byte == b'[' {
+        return read_json_newline_frame(reader, effective_max);
     }
 
-    if looks_like_header_line(&first_line) {
-        return read_content_length_frame(reader, first_line, max_bytes);
+    match read_line_bytes(reader, MAX_HEADER_LINE_BYTES)? {
+        ReadLineOutcome::Eof(first_line) if is_ascii_blank(&first_line) => Ok(NextFrame::Eof),
+        ReadLineOutcome::Line(first_line) | ReadLineOutcome::Eof(first_line) => {
+            if looks_like_header_line(&first_line) {
+                return read_content_length_frame(reader, first_line, effective_max);
+            }
+            if first_line.len() > effective_max {
+                return Ok(NextFrame::RecoverableError {
+                    id: Value::Null,
+                    mode: FramingMode::Newline,
+                    code: ERR_INVALID_REQUEST,
+                    message: format!("line exceeds maximum request size of {effective_max} bytes"),
+                });
+            }
+            Ok(NextFrame::Payload { bytes: first_line, mode: fallback_or_newline(fallback_mode) })
+        }
+        ReadLineOutcome::TooLong { looks_like_header: true, .. } => Ok(NextFrame::FatalError {
+            id: Value::Null,
+            mode: FramingMode::ContentLength,
+            code: ERR_INVALID_REQUEST,
+            message: format!("header line exceeds maximum {MAX_HEADER_LINE_BYTES} bytes"),
+        }),
+        ReadLineOutcome::TooLong { id, looks_like_header: false } => Ok(NextFrame::RecoverableError {
+            id,
+            mode: FramingMode::Newline,
+            code: ERR_INVALID_REQUEST,
+            message: format!("line exceeds maximum request size of {} bytes", effective_max.min(MAX_HEADER_LINE_BYTES)),
+        }),
+        ReadLineOutcome::DrainLimitExceeded => Ok(NextFrame::FatalError {
+            id: Value::Null,
+            mode: FramingMode::ContentLength,
+            code: ERR_INVALID_REQUEST,
+            message: format!("oversized header/newline frame exceeds maximum drain ceiling of {MAX_DRAIN_BYTES} bytes"),
+        }),
     }
-
-    Ok(NextFrame::Payload { bytes: first_line, mode: fallback_or_newline(fallback_mode) })
 }
 
 fn fallback_or_newline(last_mode: FramingMode) -> FramingMode {
@@ -687,37 +749,37 @@ fn fallback_or_newline(last_mode: FramingMode) -> FramingMode {
     FramingMode::Newline
 }
 
-fn read_next_non_empty_line<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<Option<Result<Vec<u8>, NextFrame>>> {
+fn skip_leading_ascii_whitespace<R: BufRead>(reader: &mut R) -> io::Result<Option<u8>> {
     loop {
-        match read_line_bytes(reader, max_bytes)? {
-            ReadLineOutcome::Eof(bytes) => {
-                if is_ascii_blank(&bytes) {
-                    return Ok(None);
-                }
-                return Ok(Some(Ok(bytes)));
-            }
-            ReadLineOutcome::TooLong { id } => {
-                return Ok(Some(Err(NextFrame::RecoverableError {
-                    id,
-                    mode: FramingMode::Newline,
-                    code: ERR_INVALID_REQUEST,
-                    message: format!("line exceeds maximum request size of {max_bytes} bytes"),
-                })));
-            }
-            ReadLineOutcome::DrainLimitExceeded => {
-                return Ok(Some(Err(NextFrame::FatalError {
-                    id: Value::Null,
-                    mode: FramingMode::Newline,
-                    code: ERR_INVALID_REQUEST,
-                    message: format!("oversized newline frame exceeds maximum drain ceiling of {MAX_DRAIN_BYTES} bytes"),
-                })));
-            }
-            ReadLineOutcome::Line(bytes) => {
-                if !is_ascii_blank(&bytes) {
-                    return Ok(Some(Ok(bytes)));
-                }
-            }
+        let avail = reader.fill_buf()?;
+        if avail.is_empty() {
+            return Ok(None);
         }
+        if let Some(pos) = avail.iter().position(|b| !b.is_ascii_whitespace()) {
+            let first = avail[pos];
+            reader.consume(pos);
+            return Ok(Some(first));
+        }
+        let n = avail.len();
+        reader.consume(n);
+    }
+}
+
+fn read_json_newline_frame<R: BufRead>(reader: &mut R, effective_max: usize) -> io::Result<NextFrame> {
+    match read_line_bytes(reader, effective_max)? {
+        ReadLineOutcome::Line(bytes) | ReadLineOutcome::Eof(bytes) => Ok(NextFrame::Payload { bytes, mode: FramingMode::Newline }),
+        ReadLineOutcome::TooLong { id, .. } => Ok(NextFrame::RecoverableError {
+            id,
+            mode: FramingMode::Newline,
+            code: ERR_INVALID_REQUEST,
+            message: format!("line exceeds maximum request size of {effective_max} bytes"),
+        }),
+        ReadLineOutcome::DrainLimitExceeded => Ok(NextFrame::FatalError {
+            id: Value::Null,
+            mode: FramingMode::Newline,
+            code: ERR_INVALID_REQUEST,
+            message: format!("oversized newline frame exceeds maximum drain ceiling of {MAX_DRAIN_BYTES} bytes"),
+        }),
     }
 }
 
@@ -896,7 +958,7 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
                     buf.extend_from_slice(&avail[..keep]);
                 }
                 reader.consume(take);
-                return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf) });
+                return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf), looks_like_header: has_header_name_prefix(&buf) });
             }
             buf.extend_from_slice(&avail[..take]);
             reader.consume(take);
@@ -913,7 +975,7 @@ fn read_line_bytes<R: BufRead>(reader: &mut R, max_bytes: usize) -> io::Result<R
             if !drain_until_newline_bounded(reader, MAX_DRAIN_BYTES)? {
                 return Ok(ReadLineOutcome::DrainLimitExceeded);
             }
-            return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf) });
+            return Ok(ReadLineOutcome::TooLong { id: extract_jsonrpc_id_prefix(&buf), looks_like_header: has_header_name_prefix(&buf) });
         }
 
         let take = avail.len();
@@ -1084,8 +1146,12 @@ fn skip_json_value(bytes: &[u8], start: usize) -> Option<usize> {
     }
 }
 
-fn starts_json_payload(bytes: &[u8]) -> bool {
-    bytes.iter().copied().find(|b| !b.is_ascii_whitespace()).is_some_and(|b| b == b'{' || b == b'[')
+fn has_header_name_prefix(bytes: &[u8]) -> bool {
+    let trimmed = trim_ascii_whitespace(bytes);
+    let Some(colon_pos) = trimmed.iter().position(|&b| b == b':') else {
+        return false;
+    };
+    colon_pos > 0 && trimmed[..colon_pos].iter().copied().all(is_http_token_byte)
 }
 
 fn looks_like_header_line(bytes: &[u8]) -> bool {
@@ -1339,5 +1405,85 @@ mod tests {
         assert_eq!(lines[0]["error"]["code"], json!(ERR_INVALID_REQUEST));
         assert_eq!(lines[1]["id"], json!(7));
         assert_eq!(lines[1]["result"], json!({}));
+    }
+
+    #[test]
+    fn rv15_serve_with_max_bytes_clamps_both_framings_and_enforces_first_header_cap() {
+        // 1. Oversized FIRST header line (> 8 KiB) must be rejected at MAX_HEADER_LINE_BYTES without buffering 16 MiB.
+        for huge_first_hdr in [
+            format!("X-First-Huge: {}\r\nContent-Length: 2\r\n\r\n{{}}", "a".repeat(super::MAX_HEADER_LINE_BYTES + 512)),
+            format!("Content-Length: {:0>9000}\r\n\r\n{{}}", 2),
+        ] {
+            let mut reader = Cursor::new(huge_first_hdr.into_bytes());
+            let mut output = Vec::new();
+            let mut state = McpServerState::new();
+            serve(&mut reader, &mut output, &mut state).expect("serve oversized first header");
+            let replies = decode_content_length_frames(&output);
+            assert_eq!(replies.len(), 1);
+            assert_eq!(replies[0]["error"]["code"], json!(ERR_INVALID_REQUEST));
+            assert!(replies[0]["error"]["message"].as_str().is_some_and(|m| m.contains(&super::MAX_HEADER_LINE_BYTES.to_string())));
+        }
+
+        // 2. Single-line JSON-RPC requests starting with `{` or `[` larger than 8 KiB still succeed up to effective_max.
+        let pad_12k = "p".repeat(12 * 1024);
+        let jsonl_12k = format!("  {{\"jsonrpc\":\"2.0\",\"id\":\"ok-12k\",\"method\":\"ping\",\"params\":{{\"pad\":\"{pad_12k}\"}}}}\n");
+        let mut reader = Cursor::new(jsonl_12k.into_bytes());
+        let mut output = Vec::new();
+        let mut state = McpServerState::new();
+        serve_with_max_bytes(&mut reader, &mut output, &mut state, 32 * 1024).expect("serve 12k jsonl");
+        let reply: Value = serde_json::from_slice(&output).expect("valid jsonl reply");
+        assert_eq!(reply["id"], json!("ok-12k"));
+        assert_eq!(reply["result"], json!({}));
+
+        // 3. Passing max_bytes > MAX_REQUEST_BYTES clamps Content-Length body limit to MAX_REQUEST_BYTES (16 MiB).
+        let over_16m_pad = "b".repeat(MAX_REQUEST_BYTES + 2048);
+        let over_16m_body = format!(r#"{{"jsonrpc":"2.0","id":"cl-clamp","method":"ping","params":{{"x":"{over_16m_pad}"}}}}"#);
+        let mut cl_input = frame_content_length(&over_16m_body);
+        cl_input.extend(frame_content_length(r#"{"jsonrpc":"2.0","id":"cl-next","method":"ping"}"#));
+        let mut reader = Cursor::new(cl_input);
+        let mut output = Vec::new();
+        let mut state = McpServerState::new();
+        serve_with_max_bytes(&mut reader, &mut output, &mut state, MAX_REQUEST_BYTES * 4).expect("serve clamped CL");
+        let cl_replies = decode_content_length_frames(&output);
+        assert_eq!(cl_replies.len(), 2);
+        assert_eq!(cl_replies[0]["id"], json!("cl-clamp"));
+        assert_eq!(cl_replies[0]["error"]["code"], json!(ERR_INVALID_REQUEST));
+        assert!(cl_replies[0]["error"]["message"].as_str().is_some_and(|m| m.contains(&MAX_REQUEST_BYTES.to_string())));
+        assert_eq!(cl_replies[1]["id"], json!("cl-next"));
+        assert_eq!(cl_replies[1]["result"], json!({}));
+
+        // 4. Passing max_bytes = 0 clamps to 1 cleanly for both framings without panicking.
+        let mut zero_out = Vec::new();
+        let mut state = McpServerState::new();
+        serve_with_max_bytes(&mut Cursor::new(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"ping\"}\n".to_vec()), &mut zero_out, &mut state, 0)
+            .expect("zero max_bytes");
+        let zero_reply: Value = serde_json::from_slice(&zero_out).expect("zero jsonl reply");
+        assert_eq!(zero_reply["error"]["code"], json!(ERR_INVALID_REQUEST));
+    }
+
+    #[test]
+    fn rv18_initialize_and_shutdown_lifecycle_guards_preserve_stateless_default() {
+        // Strict require_initialize rejects operational calls before initialize, allows ping, then succeeds after initialize.
+        let mut strict = McpServerState::new().with_require_initialize(true);
+        let mut out = Vec::new();
+        let pre_init = concat!(
+            "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"ping\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":3,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"initialize\",\"params\":{\"protocolVersion\":\"2024-11-05\"}}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":5,\"method\":\"tools/list\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":6,\"method\":\"shutdown\"}\n",
+            "{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/list\"}\n",
+        );
+        serve(&mut Cursor::new(pre_init.as_bytes()), &mut out, &mut strict).expect("serve lifecycle");
+        let replies: Vec<Value> = String::from_utf8(out).expect("utf8").lines().map(|l| serde_json::from_str(l).expect("json")).collect();
+        assert_eq!(replies.len(), 7);
+        assert_eq!(replies[0]["error"]["code"], json!(ERR_INVALID_REQUEST), "pre-init tools/list must fail when require_initialize is set");
+        assert_eq!(replies[1]["result"], json!({}), "ping remains available before initialize");
+        assert_eq!(replies[2]["result"]["protocolVersion"], json!("2024-11-05"));
+        assert_eq!(replies[3]["error"]["code"], json!(ERR_INVALID_REQUEST), "duplicate initialize must fail");
+        assert!(replies[4]["result"]["tools"].is_array(), "tools/list succeeds once initialized");
+        assert_eq!(replies[5]["result"], json!({}), "shutdown succeeds");
+        assert_eq!(replies[6]["error"]["code"], json!(ERR_INVALID_REQUEST), "post-shutdown tools/list must fail");
     }
 }

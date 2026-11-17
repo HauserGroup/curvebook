@@ -180,23 +180,55 @@ fn ensure_schema_version_supported(version: u32) -> Result<(), FormatError> {
     Ok(())
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn inspect_archive_entries_not_newer<'a, I>(entries: I) -> Result<(), FormatError>
+where
+    I: IntoIterator<Item = (&'a str, Option<&'a [u8]>)>,
+{
+    let mut saw_metadata_entry = false;
+    for (entry_path, maybe_bytes) in entries {
+        let Some(entry_bytes) = maybe_bytes else {
+            continue;
+        };
+        saw_metadata_entry = true;
+        let peek: DocumentSchemaPeek = serde_json::from_slice(entry_bytes)
+            .map_err(|err| FormatError::Json(format!("existing archive `{entry_path}` could not be parsed while checking schema version: {err}")))?;
+        if let Some(version) = peek.schema_version {
+            ensure_schema_version_supported(version)?;
+        }
+    }
+    if !saw_metadata_entry {
+        return Err(FormatError::MissingArchiveEntry { path: String::from(MANIFEST_PATH) });
+    }
+    Ok(())
+}
+
 fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let Some(bytes) = curvebook_platform::fs::read_regular_file_bytes_if_exists(path, MAX_ARCHIVE_FILE_BYTES)? else {
             return Ok(());
         };
-        let Ok(archive) = ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()) else {
+        if bytes.is_empty() {
             return Ok(());
-        };
-        for entry_path in [MANIFEST_PATH, DOCUMENT_PATH] {
-            if let Some(entry_bytes) = archive.get(entry_path)
-                && let Some(version) = peek_json_schema_version(entry_bytes)
-            {
-                ensure_schema_version_supported(version)?;
+        }
+        match ZipArchive::from_bytes_with_limits(&bytes, ZipLimits::default()) {
+            Ok(archive) => {
+                inspect_archive_entries_not_newer([(MANIFEST_PATH, archive.get(MANIFEST_PATH)), (DOCUMENT_PATH, archive.get(DOCUMENT_PATH))])
+            }
+            Err(zip_err) => {
+                if let Ok(peeked) = ZipArchive::peek_named_entries_bounded(&bytes, &[MANIFEST_PATH, DOCUMENT_PATH], crate::zip::MAX_ZIP_ENTRY_BYTES) {
+                    for entry_path in [MANIFEST_PATH, DOCUMENT_PATH] {
+                        if let Some(entry_bytes) = peeked.get(entry_path)
+                            && let Some(version) = peek_json_schema_version(entry_bytes)
+                        {
+                            ensure_schema_version_supported(version)?;
+                        }
+                    }
+                }
+                Err(zip_err)
             }
         }
-        Ok(())
     }
     #[cfg(target_arch = "wasm32")]
     {
@@ -773,12 +805,13 @@ fn ensure_existing_unpacked_not_newer(canon_root: &Path) -> Result<(), FormatErr
             Err(FormatError::MissingArchiveEntry { .. }) => continue,
             Err(err) => return Err(err),
         };
-        let bytes = match platform_read_regular_file(&resolved, cap) {
-            Ok(bytes) => bytes,
-            Err(err @ FormatError::UnsafePath { .. }) => return Err(err),
-            Err(_) => continue,
-        };
-        if let Some(version) = peek_json_schema_version(&bytes) {
+        let bytes = platform_read_regular_file(&resolved, cap)?;
+        if bytes.is_empty() {
+            continue;
+        }
+        let peek: DocumentSchemaPeek = serde_json::from_slice(&bytes)
+            .map_err(|err| FormatError::Json(format!("existing unpacked `{rel}` could not be parsed while checking schema version: {err}")))?;
+        if let Some(version) = peek.schema_version {
             ensure_schema_version_supported(version)?;
         }
     }

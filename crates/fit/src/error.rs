@@ -18,7 +18,7 @@ pub enum FitStatus {
     BadInitialValues,
     /// Selected weighting scheme encountered invalid zero/negative domain values (e.g. `1/Y^2` with `Y = 0`).
     ImpossibleWeights,
-    /// Objective diverged or could not evaluate finite residuals.
+    /// Objective diverged, stalled away from a stationary point, or could not evaluate finite residuals.
     Diverged,
 }
 

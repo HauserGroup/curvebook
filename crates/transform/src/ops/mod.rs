@@ -102,12 +102,16 @@ impl<'a> TransformContext<'a> {
         if self.selected_data_sets.is_empty() {
             return Ok((0..total_cols).collect());
         }
+        let mut out = Vec::with_capacity(self.selected_data_sets.len().min(total_cols));
         for &idx in &self.selected_data_sets {
             if idx >= total_cols {
                 return Err(TransformError::InvalidSpec { message: format!("selected dataset index {idx} exceeds column count {total_cols}") });
             }
+            if !out.contains(&idx) {
+                out.push(idx);
+            }
         }
-        Ok(self.selected_data_sets.clone())
+        Ok(out)
     }
 }
 

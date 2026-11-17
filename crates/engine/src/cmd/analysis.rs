@@ -1801,9 +1801,23 @@ fn apply_contingency_overrides(spec: &mut ContingencySpec, params: &Value) -> Re
 }
 
 fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> Result<(), EngineError> {
-    if let Some(name) = opt_str(params, &["multiplicity", "post_hoc"]) {
-        *mult = parse_multiplicity_method(name)?;
+    if let Some(m_val) = params.get("multiplicity").or_else(|| params.get("post_hoc"))
+        && !m_val.is_null()
+    {
+        if let Ok(parsed) = serde_json::from_value::<MultiplicitySpec>(m_val.clone()) {
+            *mult = parsed;
+        } else if let Ok(parsed_method) = serde_json::from_value::<MultiplicityMethod>(m_val.clone()) {
+            mult.method = parsed_method;
+        } else if let Some(name) = m_val.as_str() {
+            mult.method = parse_multiplicity_method(name)?.method;
+        } else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`multiplicity` must be a method name or MultiplicitySpec object"));
+        }
     }
+    if let MultiplicityMethod::Dunnett { ref mut control_column } = mult.method {
+        apply_usize_field(params, &["control_column"], control_column)?;
+    }
+    apply_bool_opt(params, &["report_confidence_intervals"], &mut mult.report_confidence_intervals);
     if let Some(t) = params.get("alpha").or_else(|| params.get("threshold")).and_then(Value::as_f64) {
         mult.threshold = t;
     }
@@ -2711,5 +2725,62 @@ mod tests {
 
         let empty_analyze = Session::new().execute("analyze.run", json!({})).expect("analyze.run works on empty session");
         assert_eq!(empty_analyze.payload["recalculated_sheets"], json!(0));
+    }
+
+    #[test]
+    fn update_params_multiplicity_preserves_threshold_and_aligns_ci_with_confidence() {
+        let mut doc = ProjectDocument::new("RV-65 Engine Post-Hoc").unwrap();
+        let mut table = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).unwrap();
+        for (idx, (title, vals)) in
+            [("Ctrl", [10.0, 11.0, 10.5, 9.5]), ("Low", [13.0, 14.0, 13.5, 12.5]), ("High", [18.0, 19.0, 18.5, 17.5])].into_iter().enumerate()
+        {
+            table.data_sets[idx].title = String::from(title);
+            for (r, v) in vals.into_iter().enumerate() {
+                table.data_sets[idx].cells[r][0] = Cell::number(v);
+            }
+        }
+        doc.add_data_sheet(DataSheet::new("col3", "Three Groups", TableArchetype::Column(table)).unwrap()).unwrap();
+        let mut session = Session::from_document(doc);
+
+        session
+            .execute(
+                "stats.run",
+                json!({
+                    "source_sheet": "col3",
+                    "sheet_id": "anova1",
+                    "kind": "one_way_anova",
+                    "confidence_level": 95.0,
+                    "multiplicity": "tukey",
+                    "threshold": 0.01,
+                    "report_confidence_intervals": false
+                }),
+            )
+            .expect("initial one-way ANOVA must succeed");
+
+        // Updating `multiplicity` by string name must preserve existing `threshold = 0.01` and `report_confidence_intervals = false`.
+        session
+            .execute("analysis.updateParams", json!({ "sheet_id": "anova1", "params": { "multiplicity": "bonferroni" } }))
+            .expect("multiplicity method update must succeed");
+
+        let anova_id = SheetId::from("anova1");
+        let spec = session.document().result_sheet(&anova_id).expect("result sheet exists").analysis.clone();
+        assert!(matches!(spec.kind, AnalysisKind::OneWayAnova(_)));
+        if let AnalysisKind::OneWayAnova(ref ow) = spec.kind {
+            assert_eq!(ow.multiplicity.method, MultiplicityMethod::Bonferroni);
+            assert!((ow.multiplicity.threshold - 0.01).abs() < 1e-12);
+            assert!(!ow.multiplicity.report_confidence_intervals);
+        }
+
+        // Re-enable CIs and verify 95% vs 99% confidence updates CI width while keeping threshold = 0.01 intact.
+        session
+            .execute(
+                "analysis.updateParams",
+                json!({ "sheet_id": "anova1", "confidence_percent": 99.0, "params": { "report_confidence_intervals": true } }),
+            )
+            .expect("confidence update must succeed");
+
+        let res99 = session.document().result_sheet(&anova_id).expect("result sheet exists");
+        let mc_tab = res99.tabs.iter().find(|t| t.id == "multiple-comparisons").expect("post-hoc tab present");
+        assert!(mc_tab.column_headers.iter().any(|h| h.contains("99% CI")), "headers must advertise 99% CI: {:?}", mc_tab.column_headers);
     }
 }

@@ -642,6 +642,17 @@ pub struct CompiledDslModel {
 impl CompiledDslModel {
     /// Compile a user equation string (explicit `Y=...`, conditional `IF`, `<A>` dataset lines,
     /// implicit `LHS=RHS`, or 1st-order ODE `dY/dX=...` / `D(Y, X)=...`).
+    ///
+    /// # Operator Precedence (highest to lowest)
+    /// 1. Parentheses `( ... )`, literals, variables, and function calls `f(...)`
+    /// 2. Exponentiation `^` (right-associative; binds tighter than prefix unary `+`/`-`/`!`,
+    ///    so `-X^2` parses as `-(X^2)` and `-2^2 == -4`, while prefix unary operators are
+    ///    permitted in the right-hand exponent as in `X^-2` = `X^(-2)`)
+    /// 3. Prefix unary `+`, `-`, `!`
+    /// 4. Multiplicative `*`, `/`, `%` (left-associative)
+    /// 5. Additive `+`, `-` (left-associative)
+    /// 6. Relational/equality `==`, `=`, `!=`, `<`, `<=`, `>`, `>=`
+    /// 7. Logical `&&` (`AND`), then `||` (`OR`)
     pub fn compile(id: impl Into<String>, source: &str) -> Result<Self, FitError> {
         if source.len() > MAX_DSL_SOURCE_BYTES {
             return Err(FitError::DslCompileError {
@@ -855,6 +866,54 @@ impl CompiledDslModel {
     fn eval_implicit(&self, x: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         let prog = self.select_program(ds_idx)?;
         let f = |y: f64| -> f64 { eval_bytecode(prog, x, y, params, ds_idx).unwrap_or(f64::NAN) };
+        let verify_implicit_root = |root: f64, lo: f64, hi: f64, abs_tol: f64| -> bool {
+            if !root.is_finite() {
+                return false;
+            }
+            let f_root = f(root);
+            if !f_root.is_finite() {
+                return false;
+            }
+            if f_root == 0.0 {
+                return true;
+            }
+            let f_lo = f(lo);
+            let f_hi = f(hi);
+            if !f_lo.is_finite() || !f_hi.is_finite() {
+                return false;
+            }
+            let end_min = f_lo.abs().min(f_hi.abs());
+            let end_max = f_lo.abs().max(f_hi.abs());
+            if end_min > 0.0 && f_root.abs() >= end_min && f_root.abs() > 1e-12 * end_max {
+                return false;
+            }
+            let delta = (root.abs() * 1e-7).max(abs_tol * 16.0).max(f64::MIN_POSITIVE * 1e8);
+            let f_p = f(root + delta);
+            let f_m = f(root - delta);
+            let local_var = match (f_p.is_finite(), f_m.is_finite()) {
+                (true, true) => {
+                    if f_root.abs() > 2.0 * f_p.abs().max(f_m.abs()) {
+                        return false;
+                    }
+                    (f_p - f_m).abs()
+                }
+                (true, false) => {
+                    if f_root.abs() > 2.0 * f_p.abs() {
+                        return false;
+                    }
+                    (f_p - f_root).abs()
+                }
+                (false, true) => {
+                    if f_root.abs() > 2.0 * f_m.abs() {
+                        return false;
+                    }
+                    (f_root - f_m).abs()
+                }
+                (false, false) => return false,
+            };
+            let allowed = (1e-2 * local_var).max(1e-3 * end_min).max(1e-12 * end_max);
+            f_root.abs() <= allowed
+        };
         let brent_scaled = |lo: f64, hi: f64| -> Option<f64> {
             let bracket_scale = lo.abs().max(hi.abs());
             let abs_tol = if bracket_scale > 0.0 { (bracket_scale * 1e-14).max(f64::MIN_POSITIVE * 1e6) } else { 1e-300 };
@@ -869,13 +928,13 @@ impl CompiledDslModel {
                 if f_tlo.is_finite() && f_thi.is_finite() && (f_tlo == 0.0 || f_thi == 0.0 || (f_tlo > 0.0) != (f_thi > 0.0)) {
                     let tight_tol = (root.abs() * 1e-14).max(f64::MIN_POSITIVE * 1e6);
                     if let Ok(refined) = brent_root(&f, tight_lo, tight_hi, RootOptions { abs_tol: tight_tol, rel_tol: 1e-13, max_iters: 120 })
-                        && refined.is_finite()
+                        && verify_implicit_root(refined, tight_lo, tight_hi, tight_tol)
                     {
                         return Some(refined);
                     }
                 }
             }
-            Some(root)
+            verify_implicit_root(root, lo, hi, abs_tol).then_some(root)
         };
 
         let f0 = f(0.0);
@@ -1258,8 +1317,9 @@ enum Rk45Outcome {
 /// to `[0.2, 5]` on accept and `[0.1, 0.5]` on rejection.
 ///
 /// Design notes: the first-same-as-last stage is recomputed rather than reused (cost only), and
-/// the initial step is `0.05 * span`. Non-finite stages shrink the step by 4; integration fails
-/// (`None`) below `1e-13 * max(span, 1)` or after `MAX_ODE_STEPS` steps.
+/// the initial step is `0.05 * span`. Domain (`None`) or non-finite trial stages `k2..k7` reject
+/// the step and shrink `h` by 4 (Hairer, Nørsett & Wanner 1993, §II.4); integration fails (`None`)
+/// if `k1` at the current accepted state fails, below `1e-13 * max(span, 1)`, or after `MAX_ODE_STEPS` steps.
 pub fn integrate_rk45<F>(t0: f64, t_end: f64, y0: f64, rhs: F) -> Option<f64>
 where
     F: FnMut(f64, f64) -> Option<f64>,
@@ -1360,35 +1420,28 @@ where
             h = rem;
         }
         let dt = dir * h;
-        let Some(k1) = rhs(t, y) else {
+        let Some(k1) = rhs(t, y).filter(|v| v.is_finite()) else {
             return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
         };
-        let Some(k2) = rhs(t + 0.2 * dt, y + dt * A21 * k1) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
-        };
-        let Some(k3) = rhs(t + 0.3 * dt, y + dt * (A31 * k1 + A32 * k2)) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
-        };
-        let Some(k4) = rhs(t + 0.8 * dt, y + dt * (A41 * k1 + A42 * k2 + A43 * k3)) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
-        };
-        let Some(k5) = rhs(t + (8.0 / 9.0) * dt, y + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4)) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
-        };
-        let Some(k6) = rhs(t + dt, y + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5)) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
-        };
-
-        let y_next = y + dt * (B1 * k1 + B3 * k3 + B4 * k4 + B5 * k5 + B6 * k6);
-        if !y_next.is_finite() {
+        let trial_stages = (|| -> Option<(f64, f64, f64, f64, f64, f64)> {
+            let k2 = rhs(t + 0.2 * dt, y + dt * A21 * k1)?;
+            let k3 = rhs(t + 0.3 * dt, y + dt * (A31 * k1 + A32 * k2))?;
+            let k4 = rhs(t + 0.8 * dt, y + dt * (A41 * k1 + A42 * k2 + A43 * k3))?;
+            let k5 = rhs(t + (8.0 / 9.0) * dt, y + dt * (A51 * k1 + A52 * k2 + A53 * k3 + A54 * k4))?;
+            let k6 = rhs(t + dt, y + dt * (A61 * k1 + A62 * k2 + A63 * k3 + A64 * k4 + A65 * k5))?;
+            let y_next = y + dt * (B1 * k1 + B3 * k3 + B4 * k4 + B5 * k5 + B6 * k6);
+            if !y_next.is_finite() {
+                return None;
+            }
+            let k7 = rhs(t + dt, y_next)?;
+            Some((k3, k4, k5, k6, y_next, k7))
+        })();
+        let Some((k3, k4, k5, k6, y_next, k7)) = trial_stages else {
             h *= 0.25;
             if h < min_h {
                 return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
             }
             continue;
-        }
-        let Some(k7) = rhs(t + dt, y_next) else {
-            return Rk45Outcome::IntrinsicFailed { last_t: t, steps_taken };
         };
         let err = (dt * (E1 * k1 + E3 * k3 + E4 * k4 + E5 * k5 + E6 * k6 + E7 * k7)).abs();
         let tol = atol + rtol * y.abs().max(y_next.abs());
@@ -2387,7 +2440,7 @@ impl<'a> Parser<'a> {
         Ok(lhs)
     }
     fn parse_mul(&mut self) -> Result<Expr, FitError> {
-        let mut lhs = self.parse_pow()?;
+        let mut lhs = self.parse_unary()?;
         while let Some(tok) = self.peek() {
             let (tok_line, tok_col) = (tok.line, tok.col);
             let op = match tok.kind {
@@ -2398,20 +2451,63 @@ impl<'a> Parser<'a> {
             };
             self.bump();
             self.track_node(tok_line, tok_col)?;
-            let rhs = self.parse_pow()?;
+            let rhs = self.parse_unary()?;
             lhs = Expr::Binary { op, lhs: Box::new(lhs), rhs: Box::new(rhs) };
         }
         Ok(lhs)
     }
-    fn parse_pow(&mut self) -> Result<Expr, FitError> {
-        let mut factors = vec![self.parse_unary()?];
-        while let Some(tok) = self.peek() {
+    /// Parse prefix unary (`+`, `-`, `!`) and right-associative exponentiation (`^`), with `^`
+    /// binding tighter than prefix unary operators (`-X^2` -> `-(X^2)`) while permitting prefix
+    /// unary operators in the right-hand exponent (`X^-2` -> `X^(-2)`).
+    fn parse_unary(&mut self) -> Result<Expr, FitError> {
+        let mut segments: Vec<(Vec<UnaryOp>, Expr)> = Vec::new();
+        let mut total_chain_depth = 0_usize;
+        loop {
+            let mut ops: Vec<UnaryOp> = Vec::new();
+            while let Some(tok) = self.peek() {
+                let (tok_line, tok_col, kind) = (tok.line, tok.col, tok.kind);
+                match kind {
+                    TokenKind::Plus => {
+                        self.bump();
+                    }
+                    TokenKind::Minus => {
+                        self.bump();
+                        self.track_node(tok_line, tok_col)?;
+                        ops.push(UnaryOp::Neg);
+                    }
+                    TokenKind::Bang => {
+                        self.bump();
+                        self.track_node(tok_line, tok_col)?;
+                        ops.push(UnaryOp::Not);
+                    }
+                    _ => break,
+                }
+                total_chain_depth += 1;
+                if self.depth + total_chain_depth > MAX_PARSE_DEPTH {
+                    return Err(FitError::DslCompileError {
+                        message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
+                        line: tok_line,
+                        column: tok_col,
+                    });
+                }
+            }
+            let saved_depth = self.depth;
+            self.depth = saved_depth + total_chain_depth;
+            let primary_res = self.parse_primary();
+            self.depth = saved_depth;
+            let primary = primary_res?;
+            segments.push((ops, primary));
+
+            let Some(tok) = self.peek() else {
+                break;
+            };
             if tok.kind != TokenKind::Caret {
                 break;
             }
             let (tok_line, tok_col) = (tok.line, tok.col);
             self.bump();
-            if self.depth + factors.len() > MAX_PARSE_DEPTH {
+            total_chain_depth += 1;
+            if self.depth + total_chain_depth > MAX_PARSE_DEPTH {
                 return Err(FitError::DslCompileError {
                     message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
                     line: tok_line,
@@ -2419,53 +2515,23 @@ impl<'a> Parser<'a> {
                 });
             }
             self.track_node(tok_line, tok_col)?;
-            factors.push(self.parse_unary()?);
         }
-        let mut acc = factors.pop().ok_or_else(|| FitError::DslCompileError {
+
+        let (mut last_ops, mut acc) = segments.pop().ok_or_else(|| FitError::DslCompileError {
             message: "Unexpected end of expression".to_owned(),
             line: self.line,
             column: 1,
         })?;
-        while let Some(base) = factors.pop() {
+        while let Some(op) = last_ops.pop() {
+            acc = Expr::Unary { op, rhs: Box::new(acc) };
+        }
+        while let Some((mut ops, base)) = segments.pop() {
             acc = Expr::Binary { op: BinaryOp::Pow, lhs: Box::new(base), rhs: Box::new(acc) };
+            while let Some(op) = ops.pop() {
+                acc = Expr::Unary { op, rhs: Box::new(acc) };
+            }
         }
         Ok(acc)
-    }
-    fn parse_unary(&mut self) -> Result<Expr, FitError> {
-        let mut ops: Vec<UnaryOp> = Vec::new();
-        let mut chain_len = 0_usize;
-        while let Some(tok) = self.peek() {
-            let (tok_line, tok_col, kind) = (tok.line, tok.col, tok.kind);
-            match kind {
-                TokenKind::Plus => {
-                    self.bump();
-                }
-                TokenKind::Minus => {
-                    self.bump();
-                    self.track_node(tok_line, tok_col)?;
-                    ops.push(UnaryOp::Neg);
-                }
-                TokenKind::Bang => {
-                    self.bump();
-                    self.track_node(tok_line, tok_col)?;
-                    ops.push(UnaryOp::Not);
-                }
-                _ => break,
-            }
-            chain_len += 1;
-            if self.depth + chain_len > MAX_PARSE_DEPTH {
-                return Err(FitError::DslCompileError {
-                    message: format!("Expression nesting exceeds maximum depth ({MAX_PARSE_DEPTH})"),
-                    line: tok_line,
-                    column: tok_col,
-                });
-            }
-        }
-        let mut expr = self.parse_primary()?;
-        while let Some(op) = ops.pop() {
-            expr = Expr::Unary { op, rhs: Box::new(expr) };
-        }
-        Ok(expr)
     }
     fn parse_call_args(&mut self, tok: &Token) -> Result<Vec<Expr>, FitError> {
         self.bump();
@@ -2975,7 +3041,12 @@ fn eval_bytecode_with_bufs(
                         }
                         a / b
                     }
-                    BinaryKind::Rem => a % b,
+                    BinaryKind::Rem => {
+                        if b == 0.0 {
+                            return None;
+                        }
+                        a % b
+                    }
                     BinaryKind::Pow => a.powf(b),
                     BinaryKind::Eq => f64::from((a - b).abs() == 0.0),
                     BinaryKind::Ne => f64::from(a != b),
@@ -3075,6 +3146,9 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Round => a[0].round(),
         BuiltinFn::Trunc => a[0].trunc(),
         BuiltinFn::Sign => {
+            if a[0].is_nan() {
+                return None;
+            }
             if a[0] > 0.0 {
                 1.0
             } else if a[0] < 0.0 {
@@ -3083,8 +3157,18 @@ fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
                 0.0
             }
         }
-        BuiltinFn::Min => a[0].min(a[1]),
-        BuiltinFn::Max => a[0].max(a[1]),
+        BuiltinFn::Min => {
+            if a[0].is_nan() || a[1].is_nan() {
+                return None;
+            }
+            a[0].min(a[1])
+        }
+        BuiltinFn::Max => {
+            if a[0].is_nan() || a[1].is_nan() {
+                return None;
+            }
+            a[0].max(a[1])
+        }
         BuiltinFn::Clamp => {
             if a[0].is_nan() || a[1].is_nan() || a[2].is_nan() {
                 f64::NAN

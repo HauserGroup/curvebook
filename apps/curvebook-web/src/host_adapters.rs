@@ -971,10 +971,10 @@ pub struct WebExportArtifact {
     pub bytes: Vec<u8>,
 }
 
-fn sanitize_download_stem(raw: &str) -> String {
-    let cleaned: String = raw.trim().chars().map(|ch| if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') { ch } else { '_' }).collect();
-    let collapsed = cleaned.trim_matches('_');
-    if collapsed.is_empty() { String::from("curvebook-project") } else { collapsed.to_owned() }
+/// Sanitize a project or sheet title into a safe download filename stem (`RV-53`).
+#[must_use]
+pub fn sanitize_download_stem(raw: &str) -> String {
+    curvebook_ui_egui::os_integration::sanitize_filename_stem(raw, '_', 64, "curvebook-project")
 }
 
 fn export_csv_artifact(host: &WebWorkspaceHost, sheet_id: Option<&str>, project_stem: &str) -> Result<WebExportArtifact, WebAdapterError> {

@@ -199,30 +199,70 @@ pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMetho
     Ok(RocResult { n_controls: n0, n_cases: n1, auc, se, ci, p_value_vs_05, optimal_cutoff, points, delong_v10: v10, delong_v01: v01 })
 }
 
-/// Compare two correlated ROC curves evaluated on the **same** controls and cases (DeLong 1988).
+/// Compare two correlated ROC curves evaluated on the **same** controls and cases (DeLong, DeLong
+/// & Clarke-Pearson 1988, *Biometrics* 44:837-845).
 pub fn compare_roc_delong_paired(roc_a: &RocResult, roc_b: &RocResult) -> Result<RocComparisonResult, StatsError> {
-    if roc_a.n_cases != roc_b.n_cases || roc_a.n_controls != roc_b.n_controls || roc_a.n_cases < 2 || roc_a.n_controls < 2 {
+    if roc_a.n_cases < 2 || roc_a.n_controls < 2 || roc_b.n_cases < 2 || roc_b.n_controls < 2 {
         return Err(StatsError::InsufficientSampleSize {
             context: "DeLong paired ROC comparison",
             required: 2,
-            actual: roc_a.n_cases.min(roc_a.n_controls),
+            actual: roc_a.n_cases.min(roc_a.n_controls).min(roc_b.n_cases).min(roc_b.n_controls),
         });
     }
+    if roc_a.n_cases != roc_b.n_cases {
+        return Err(StatsError::DimensionMismatch { expected: roc_a.n_cases, actual: roc_b.n_cases });
+    }
+    if roc_a.n_controls != roc_b.n_controls {
+        return Err(StatsError::DimensionMismatch { expected: roc_a.n_controls, actual: roc_b.n_controls });
+    }
+    if roc_a.delong_v10.len() != roc_a.n_cases {
+        return Err(StatsError::DimensionMismatch { expected: roc_a.n_cases, actual: roc_a.delong_v10.len() });
+    }
+    if roc_b.delong_v10.len() != roc_b.n_cases {
+        return Err(StatsError::DimensionMismatch { expected: roc_b.n_cases, actual: roc_b.delong_v10.len() });
+    }
+    if roc_a.delong_v01.len() != roc_a.n_controls {
+        return Err(StatsError::DimensionMismatch { expected: roc_a.n_controls, actual: roc_a.delong_v01.len() });
+    }
+    if roc_b.delong_v01.len() != roc_b.n_controls {
+        return Err(StatsError::DimensionMismatch { expected: roc_b.n_controls, actual: roc_b.delong_v01.len() });
+    }
+    if !roc_a.auc.is_finite() || !roc_b.auc.is_finite() {
+        let bad = if !roc_a.auc.is_finite() { roc_a.auc } else { roc_b.auc };
+        return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "roc_auc", value: bad }));
+    }
+
     let n1 = roc_a.n_cases as f64;
     let n0 = roc_a.n_controls as f64;
 
     let mut cov10 = 0.0_f64;
     for i in 0..roc_a.n_cases {
-        let da = roc_a.delong_v10[i] - roc_a.auc;
-        let db = roc_b.delong_v10[i] - roc_b.auc;
+        let va = *roc_a.delong_v10.get(i).ok_or(StatsError::DimensionMismatch { expected: roc_a.n_cases, actual: roc_a.delong_v10.len() })?;
+        let vb = *roc_b.delong_v10.get(i).ok_or(StatsError::DimensionMismatch { expected: roc_b.n_cases, actual: roc_b.delong_v10.len() })?;
+        if !va.is_finite() || !vb.is_finite() {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError {
+                name: "delong_v10",
+                value: if !va.is_finite() { va } else { vb },
+            }));
+        }
+        let da = va - roc_a.auc;
+        let db = vb - roc_b.auc;
         cov10 += (da - db) * (da - db);
     }
     cov10 /= n1 - 1.0;
 
     let mut cov01 = 0.0_f64;
     for j in 0..roc_a.n_controls {
-        let da = roc_a.delong_v01[j] - roc_a.auc;
-        let db = roc_b.delong_v01[j] - roc_b.auc;
+        let va = *roc_a.delong_v01.get(j).ok_or(StatsError::DimensionMismatch { expected: roc_a.n_controls, actual: roc_a.delong_v01.len() })?;
+        let vb = *roc_b.delong_v01.get(j).ok_or(StatsError::DimensionMismatch { expected: roc_b.n_controls, actual: roc_b.delong_v01.len() })?;
+        if !va.is_finite() || !vb.is_finite() {
+            return Err(StatsError::Math(curvebook_math::MathError::DomainError {
+                name: "delong_v01",
+                value: if !va.is_finite() { va } else { vb },
+            }));
+        }
+        let da = va - roc_a.auc;
+        let db = vb - roc_b.auc;
         cov01 += (da - db) * (da - db);
     }
     cov01 /= n0 - 1.0;

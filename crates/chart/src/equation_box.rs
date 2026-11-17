@@ -935,12 +935,14 @@ fn parse_named_command(name: &str, tail: &str, depth: usize) -> Option<(ParsedSt
     }
 
     if let Some(sym) = lookup_greek_escape(name).or_else(|| lookup_math_escape(name)) {
+        let empty_group =
+            if matches!(name, "textbackslash" | "textless" | "textgreater" | "textdegree" | "percent") && tail.starts_with("{}") { 2 } else { 0 };
         return Some((
             ParsedStep::Atom {
                 node: MathNode::Text { text: sym.to_owned(), weight: SpanWeight::Regular, slope: SpanSlope::Upright, is_single_char: true },
                 is_roman_op: false,
             },
-            0,
+            empty_group,
         ));
     }
 
@@ -1508,6 +1510,9 @@ fn lookup_math_escape(name: &str) -> Option<&'static str> {
         "ndash" => Some("\u{2013}"),
         "mdash" => Some("\u{2014}"),
         "percent" => Some("%"),
+        "textbackslash" => Some("\\"),
+        "textless" => Some("<"),
+        "textgreater" => Some(">"),
         _ => None,
     }
 }
@@ -2666,5 +2671,17 @@ mod tests {
         );
         let failed_texts = collect_text_strings(&failed_scene).join(" ");
         assert!(failed_texts.contains("failed"), "failed_texts={failed_texts}");
+    }
+
+    #[test]
+    fn tex_text_escapes_backslash_less_greater_and_star_render_cleanly() {
+        let tex = format_model_equation_tex("a<b\\c>d*e", None, &[], false, 4);
+        assert!(tex.contains("\\textless{}") && tex.contains("\\textbackslash{}") && tex.contains("\\textgreater{}"), "tex={tex}");
+
+        let mut scene = empty_scene();
+        render_tex_equation_box(&mut scene, DocRectPt::new(10.0, 10.0, 0.0, 0.0), &tex, 10.0, false);
+        let joined = collect_text_strings(&scene).join("");
+        assert!(!joined.contains("textless") && !joined.contains("textgreater") && !joined.contains("textbackslash"), "joined={joined}");
+        assert!(joined.contains('<') && joined.contains('>') && joined.contains('\\') && joined.contains('*'), "joined={joined}");
     }
 }

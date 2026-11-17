@@ -466,50 +466,292 @@ where
 }
 
 #[cfg(not(target_arch = "wasm32"))]
+const MAX_HEADLESS_CONTROL_CLIENTS: usize = 32;
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_PRE_AUTH_HEADLESS_LINE_BYTES: usize = 64 * 1024;
+
+#[cfg(not(target_arch = "wasm32"))]
+struct HeadlessClientRequest {
+    line: String,
+    conn_authenticated: bool,
+    reply_tx: std::sync::mpsc::Sender<HeadlessClientReply>,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct HeadlessClientReply {
+    response_json: String,
+    conn_authenticated: bool,
+    quit: bool,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct HeadlessActiveGuard(std::sync::Arc<std::sync::atomic::AtomicUsize>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for HeadlessActiveGuard {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, std::sync::atomic::Ordering::AcqRel);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+struct ListenerBlockingGuard<'a>(&'a TcpListener);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Drop for ListenerBlockingGuard<'_> {
+    fn drop(&mut self) {
+        let _ = self.0.set_nonblocking(false);
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
 fn serve_control_listener_with_handler<F>(app: &mut UiApp, listener: &TcpListener, auth: &ControlAuth, mut handler: F) -> io::Result<()>
 where
     F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
 {
-    for incoming in listener.incoming() {
-        let stream = incoming?;
-        let guarded = catch_unwind(AssertUnwindSafe(|| serve_control_connection_with_handler(app, stream, auth, &mut handler)));
-        match guarded {
-            Ok(Ok(true)) => break,
-            Ok(Ok(false)) => {}
-            Ok(Err(err)) => eprintln!("control connection closed after error: {err}"),
-            Err(payload) => {
-                let panic_msg = extract_panic_message(&*payload);
-                eprintln!("control connection closed after internal panic: {panic_msg}");
+    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+    use std::sync::{Arc, mpsc};
+    use std::time::Duration;
+
+    listener.set_nonblocking(true)?;
+    let _restore_blocking = ListenerBlockingGuard(listener);
+    let shutdown = Arc::new(AtomicBool::new(false));
+    let active_clients = Arc::new(AtomicUsize::new(0));
+    let (req_tx, req_rx) = mpsc::channel::<HeadlessClientRequest>();
+
+    std::thread::scope(|scope| {
+        let accept_shutdown = Arc::clone(&shutdown);
+        let accept_active = Arc::clone(&active_clients);
+        scope.spawn(move || run_headless_accept_loop(scope, listener, req_tx, accept_shutdown, accept_active));
+
+        while !shutdown.load(Ordering::Acquire) {
+            match req_rx.recv_timeout(Duration::from_millis(25)) {
+                Ok(req) => {
+                    let mut conn_auth = req.conn_authenticated;
+                    let (response_json, action) = handle_authenticated_control_line(app, &req.line, auth, &mut conn_auth, &mut handler);
+                    let quit = action == ControlLoopAction::Quit;
+                    let _ = req.reply_tx.send(HeadlessClientReply { response_json, conn_authenticated: conn_auth, quit });
+                    if quit {
+                        shutdown.store(true, Ordering::Release);
+                        break;
+                    }
+                }
+                Err(mpsc::RecvTimeoutError::Timeout) => {}
+                Err(mpsc::RecvTimeoutError::Disconnected) => break,
             }
         }
-    }
+        drop(req_rx);
+    });
     Ok(())
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn serve_control_connection_with_handler<F>(app: &mut UiApp, stream: std::net::TcpStream, auth: &ControlAuth, handler: &mut F) -> io::Result<bool>
-where
-    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
-{
-    serve_control_connection_with_timeout(app, stream, auth, Some(CONTROL_CLIENT_IDLE_TIMEOUT), handler)
+fn run_headless_accept_loop<'scope>(
+    scope: &'scope std::thread::Scope<'scope, '_>,
+    listener: &'scope TcpListener,
+    req_tx: std::sync::mpsc::Sender<HeadlessClientRequest>,
+    shutdown: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    active_clients: std::sync::Arc<std::sync::atomic::AtomicUsize>,
+) {
+    use std::sync::atomic::Ordering;
+    use std::time::{Duration, Instant};
+
+    let mut last_err_log: Option<Instant> = None;
+    while !shutdown.load(Ordering::Acquire) {
+        match listener.accept() {
+            Ok((stream, _)) => {
+                let reserved =
+                    active_clients.try_update(Ordering::AcqRel, Ordering::Acquire, |c| (c < MAX_HEADLESS_CONTROL_CLIENTS).then_some(c + 1)).is_ok();
+                if reserved {
+                    let guard = HeadlessActiveGuard(std::sync::Arc::clone(&active_clients));
+                    let client_tx = req_tx.clone();
+                    let client_shutdown = std::sync::Arc::clone(&shutdown);
+                    scope.spawn(move || {
+                        let _guard = guard;
+                        if let Err(err) = serve_headless_tcp_client(stream, &client_tx, &client_shutdown) {
+                            eprintln!("control connection closed after error: {err}");
+                        }
+                    });
+                } else {
+                    reject_busy_headless_tcp_client(stream);
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::WouldBlock => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err(err)
+                if matches!(
+                    err.kind(),
+                    io::ErrorKind::Interrupted | io::ErrorKind::ConnectionAborted | io::ErrorKind::ConnectionReset | io::ErrorKind::TimedOut
+                ) => {}
+            Err(err) => {
+                if !shutdown.load(Ordering::Acquire) {
+                    if last_err_log.is_none_or(|prev| prev.elapsed() >= Duration::from_secs(1)) {
+                        eprintln!("control listener transient accept error: {err}");
+                        last_err_log = Some(Instant::now());
+                    }
+                    std::thread::sleep(Duration::from_millis(25));
+                }
+            }
+        }
+    }
 }
 
 #[cfg(not(target_arch = "wasm32"))]
-fn serve_control_connection_with_timeout<F>(
-    app: &mut UiApp,
+fn reject_busy_headless_tcp_client(mut stream: std::net::TcpStream) {
+    let _ = stream.set_nonblocking(false);
+    let _ = stream.set_write_timeout(Some(std::time::Duration::from_millis(50)));
+    let resp = ControlResponse::err(
+        Value::String(String::new()),
+        format!("control server busy: maximum concurrent clients ({MAX_HEADLESS_CONTROL_CLIENTS}) reached"),
+    );
+    let _ = stream.write_all(serialize_response(&resp).as_bytes());
+    let _ = stream.write_all(b"\n");
+    let _ = stream.flush();
+    let _ = stream.shutdown(std::net::Shutdown::Both);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn serve_headless_tcp_client(
     mut stream: std::net::TcpStream,
-    auth: &ControlAuth,
-    idle_timeout: Option<std::time::Duration>,
-    handler: &mut F,
-) -> io::Result<bool>
-where
-    F: FnMut(&mut UiApp, ControlRequest) -> (ControlResponse, ControlLoopAction),
-{
-    stream.set_read_timeout(idle_timeout)?;
-    stream.set_write_timeout(idle_timeout)?;
+    req_tx: &std::sync::mpsc::Sender<HeadlessClientRequest>,
+    shutdown: &std::sync::atomic::AtomicBool,
+) -> io::Result<()> {
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    stream.set_nonblocking(false)?;
+    stream.set_read_timeout(Some(Duration::from_millis(100)))?;
+    stream.set_write_timeout(Some(CONTROL_CLIENT_IDLE_TIMEOUT))?;
     let reader_stream = stream.try_clone()?;
     let mut reader = io::BufReader::new(reader_stream);
-    serve_control_stream_with_handler(app, &mut reader, &mut stream, auth, handler)
+    let mut conn_authenticated = false;
+
+    loop {
+        let line_cap = if conn_authenticated { MAX_CONTROL_LINE_BYTES } else { MAX_PRE_AUTH_HEADLESS_LINE_BYTES };
+        let raw_bytes = match read_headless_tcp_line(&mut reader, line_cap, shutdown)? {
+            HeadlessLineRead::Line(bytes) => bytes,
+            HeadlessLineRead::Done => return Ok(()),
+            HeadlessLineRead::Oversized => {
+                let resp = ControlResponse::err(Value::String(String::new()), format!("control line exceeds {line_cap} bytes"));
+                let _ = stream.write_all(serialize_response(&resp).as_bytes());
+                let _ = stream.write_all(b"\n");
+                let _ = stream.flush();
+                let _ = stream.shutdown(std::net::Shutdown::Write);
+                drain_headless_reader_briefly(&mut reader);
+                return Ok(());
+            }
+        };
+        let line = match std::str::from_utf8(&raw_bytes) {
+            Ok(text) => text,
+            Err(err) => {
+                let resp = ControlResponse::err(Value::String(String::new()), format!("control line is not valid UTF-8: {err}"));
+                stream.write_all(serialize_response(&resp).as_bytes())?;
+                stream.write_all(b"\n")?;
+                stream.flush()?;
+                continue;
+            }
+        };
+        let trimmed = line.trim();
+        if trimmed.is_empty() {
+            continue;
+        }
+        if is_http_request_line(trimmed) {
+            stream.write_all(CONTROL_HTTP_FORBIDDEN_RESPONSE.as_bytes())?;
+            stream.flush()?;
+            return Ok(());
+        }
+        let (reply_tx, reply_rx) = mpsc::channel();
+        let msg = HeadlessClientRequest { line: trimmed.to_owned(), conn_authenticated, reply_tx };
+        if req_tx.send(msg).is_err() {
+            return Ok(());
+        }
+        let Ok(reply) = reply_rx.recv() else {
+            return Ok(());
+        };
+        conn_authenticated = reply.conn_authenticated;
+        if reply.quit {
+            let _ = stream.write_all(reply.response_json.as_bytes());
+            let _ = stream.write_all(b"\n");
+            let _ = stream.flush();
+            return Ok(());
+        }
+        stream.write_all(reply.response_json.as_bytes())?;
+        stream.write_all(b"\n")?;
+        stream.flush()?;
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+enum HeadlessLineRead {
+    Line(Vec<u8>),
+    Oversized,
+    Done,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn read_headless_tcp_line<R: BufRead>(reader: &mut R, max_bytes: usize, shutdown: &std::sync::atomic::AtomicBool) -> io::Result<HeadlessLineRead> {
+    use std::sync::atomic::Ordering;
+    use std::time::Instant;
+
+    let mut line = Vec::new();
+    let idle_start = Instant::now();
+    let mut line_start: Option<Instant> = None;
+    loop {
+        if shutdown.load(Ordering::Acquire) {
+            return Ok(HeadlessLineRead::Done);
+        }
+        let expired = line_start.map_or_else(|| idle_start.elapsed() >= CONTROL_CLIENT_IDLE_TIMEOUT, |s| s.elapsed() >= CONTROL_CLIENT_IDLE_TIMEOUT);
+        if expired {
+            return Ok(HeadlessLineRead::Done);
+        }
+        match reader.fill_buf() {
+            Ok([]) => return Ok(if line.is_empty() { HeadlessLineRead::Done } else { HeadlessLineRead::Line(line) }),
+            Ok(avail) => {
+                let started = *line_start.get_or_insert_with(Instant::now);
+                if let Some(nl_pos) = avail.iter().position(|&b| b == b'\n') {
+                    let take = nl_pos + 1;
+                    if line.len().saturating_add(take) > max_bytes {
+                        return Ok(HeadlessLineRead::Oversized);
+                    }
+                    line.extend_from_slice(&avail[..take]);
+                    reader.consume(take);
+                    return Ok(HeadlessLineRead::Line(line));
+                }
+                if line.len().saturating_add(avail.len()) > max_bytes {
+                    return Ok(HeadlessLineRead::Oversized);
+                }
+                line.extend_from_slice(avail);
+                let consumed = avail.len();
+                reader.consume(consumed);
+                if started.elapsed() >= CONTROL_CLIENT_IDLE_TIMEOUT {
+                    return Ok(HeadlessLineRead::Done);
+                }
+            }
+            Err(err) if matches!(err.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut | io::ErrorKind::Interrupted) => {}
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn drain_headless_reader_briefly<R: BufRead>(reader: &mut R) {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
+    let mut drained = 0usize;
+    while drained <= MAX_CONTROL_LINE_BYTES && std::time::Instant::now() < deadline {
+        match reader.fill_buf() {
+            Ok([]) | Err(_) => break,
+            Ok(avail) => {
+                if let Some(nl_pos) = avail.iter().position(|&b| b == b'\n') {
+                    reader.consume(nl_pos + 1);
+                    break;
+                }
+                let n = avail.len();
+                drained = drained.saturating_add(n);
+                reader.consume(n);
+            }
+        }
+    }
 }
 
 /// Bind `addr` (loopback-only) and run the authenticated JSON-lines TCP control server until `app.quit`.

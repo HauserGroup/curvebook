@@ -294,6 +294,56 @@ impl ZipArchive {
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()
     }
+
+    /// Best-effort bounded read of only `names` from `bytes` without enforcing archive-wide entry
+    /// counts or cumulative uncompressed budgets on unrelated entries.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn peek_named_entries_bounded(bytes: &[u8], names: &[&str], max_entry_bytes: u64) -> Result<BTreeMap<String, Vec<u8>>, FormatError> {
+        let eocd = locate_eocd(bytes)?;
+        let mut cursor = eocd.cd_offset;
+        let cd_end = eocd.cd_offset + eocd.cd_size;
+        let mut out = BTreeMap::new();
+
+        for _ in 0..eocd.total_entries {
+            if cursor + 46 > cd_end || read_u32_le(bytes, cursor)? != CENTRAL_DIR_HEADER_SIG {
+                return Err(FormatError::InvalidZip { reason: String::from("invalid central directory while peeking entries") });
+            }
+            let flags = read_u16_le(bytes, cursor + 8)?;
+            if (flags & FLAG_ENCRYPTED) != 0 {
+                return Err(FormatError::UnsupportedFormat { reason: String::from("encrypted ZIP entries are not supported") });
+            }
+            let method = read_u16_le(bytes, cursor + 10)?;
+            let crc = read_u32_le(bytes, cursor + 16)?;
+            let compressed_size = u64::from(read_u32_le(bytes, cursor + 20)?);
+            let uncompressed_size = u64::from(read_u32_le(bytes, cursor + 24)?);
+            let name_len = usize::from(read_u16_le(bytes, cursor + 28)?);
+            let extra_len = usize::from(read_u16_le(bytes, cursor + 30)?);
+            let comment_len = usize::from(read_u16_le(bytes, cursor + 32)?);
+            let local_offset = usize::try_from(read_u32_le(bytes, cursor + 42)?)
+                .map_err(|_| FormatError::InvalidZip { reason: String::from("local header offset overflow") })?;
+            let name_start = cursor + 46;
+            let record_end = name_start
+                .checked_add(name_len)
+                .and_then(|v| v.checked_add(extra_len))
+                .and_then(|v| v.checked_add(comment_len))
+                .ok_or_else(|| FormatError::InvalidZip { reason: String::from("central directory record overflow") })?;
+            if record_end > cd_end {
+                return Err(FormatError::InvalidZip { reason: String::from("central directory record extends past directory end") });
+            }
+            if let Ok(raw_name) = std::str::from_utf8(&bytes[name_start..name_start + name_len])
+                && let Ok(clean) = sanitize_zip_path(raw_name)
+                && names.contains(&clean.as_str())
+                && uncompressed_size <= max_entry_bytes
+            {
+                let cd = ParsedCdEntry { path: clean.clone(), is_dir: false, flags, method, crc, compressed_size, uncompressed_size, local_offset };
+                if let Ok(payload) = read_and_verify_entry(bytes, &cd, max_entry_bytes, max_entry_bytes) {
+                    out.insert(clean, payload);
+                }
+            }
+            cursor = record_end;
+        }
+        Ok(out)
+    }
 }
 
 struct EocdInfo {

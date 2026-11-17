@@ -1,5 +1,25 @@
 //! Unified `FormatRegistry` adapters, `WorkdirGuard` path containment, atomic disk persistence,
 //! figure rasterization/vector export, and `open_file`/`save_file`/`export`/`render_preview` handlers.
+//!
+//! # Filesystem Trust Boundary (`--workdir` vs. Unconstrained Mode)
+//!
+//! MCP file operations (`open_file`, `save_file`, `export`, engine command path parameters via
+//! [`sanitize_command_params`], and stored external data-link refreshes) operate in one of two
+//! explicit path-policy modes configured on [`McpServerState`]:
+//!
+//! 1. **Unconstrained local-user mode (default when `--workdir` is omitted):** Intended for trusted
+//!    local automation running with the invoking OS user's full privileges. Relative and absolute
+//!    host paths anywhere readable/writable by that OS user are accepted (still enforcing non-empty
+//!    paths, NUL-byte rejection, regular-file checks, input size caps, refuse-newer archive guards,
+//!    and crash-safe atomic writes via `curvebook_platform::fs::write_atomic`). Because an MCP
+//!    client in unconstrained mode can atomically overwrite any user-writable file via `save_file`
+//!    or `export`, **only attach unconstrained MCP servers to trusted local agents**.
+//! 2. **Sandboxed workdir mode (`--workdir <dir>` / [`McpServerState::with_workdir`]):** Enforces a
+//!    hard containment boundary via `curvebook_platform::WorkdirGuard`. Every input, output,
+//!    command parameter, and linked-file path must canonicalize strictly within `<dir>`; absolute
+//!    paths outside `<dir>`, `..` parent-directory traversals, and symlinks resolving outside
+//!    `<dir>` are rejected with `ErrorCode::PathEscape`. Untrusted or semi-trusted MCP clients
+//!    must always be launched with `--workdir <dir>` (or `--gui-only`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
@@ -47,7 +67,14 @@ const DESC_CSV: FormatDescriptor =
     FormatDescriptor { id: "csv", label: "Comma-Separated Values", extensions: &["csv"], kind: FormatKind::DelimitedText };
 const DESC_JSON: FormatDescriptor = FormatDescriptor { id: "json", label: "JSON Result Table", extensions: &["json"], kind: FormatKind::ResultTable };
 
-/// Resolve `raw_path` using the configured [`WorkdirGuard`] when present.
+/// Resolve `raw_path` against the active filesystem trust boundary on `state`.
+///
+/// - When [`McpServerState::workdir_guard`] is configured (`--workdir <dir>`), `raw_path` is
+///   confined strictly inside that canonical root via `WorkdirGuard::resolve`, returning
+///   [`ErrorCode::PathEscape`] if `raw_path`, `..` components, or symlinks escape `<dir>`.
+/// - When no `WorkdirGuard` is configured, `raw_path` may be any non-empty, NUL-free relative or
+///   absolute path accessible to the current OS user; callers writing to the returned path (such as
+///   `save_file` and `export`) can atomically overwrite any user-writable destination file.
 pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result<PathBuf, EngineError> {
     if raw_path.trim().is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "path must not be empty"));
@@ -70,6 +97,9 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
 }
 
 /// Sanitize recursive path keys inside engine command JSON payloads when a `WorkdirGuard` is active.
+///
+/// Without `--workdir`, command path parameters remain unconstrained and execute with the local
+/// user's filesystem permissions.
 pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value) -> Result<(), EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(guard) = state.workdir_guard() {
@@ -442,7 +472,7 @@ fn apply_report_import(
     });
 
     let mut next_session = Session::new();
-    let cancel = std::sync::atomic::AtomicBool::new(false);
+    let cancel = state.current_cancel_token();
     if let Err(err) = next_session.execute_with_caller(command_id, params, curvebook_engine::Caller::Mcp, &cancel) {
         return Ok(errors::result_from_engine_error(&err));
     }
@@ -479,9 +509,11 @@ fn apply_csv_import(
         Err(err_res) => return Ok(err_res),
     };
 
+    let cancel = state.current_cancel_token();
     if append {
-        return state
-            .mutate_active_session(|session| execute_csv_import_on_session(session, format_id, resolved_path, &import_opts.sheet_id, params));
+        return state.mutate_active_session(|session| {
+            execute_csv_import_on_session(session, format_id, resolved_path, &import_opts.sheet_id, params, &cancel)
+        });
     }
 
     let doc = match ProjectDocument::new(import_opts.title.clone()) {
@@ -489,7 +521,7 @@ fn apply_csv_import(
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
     };
     let mut next_session = Session::from_document(doc);
-    let result = execute_csv_import_on_session(&mut next_session, format_id, resolved_path, &import_opts.sheet_id, params)?;
+    let result = execute_csv_import_on_session(&mut next_session, format_id, resolved_path, &import_opts.sheet_id, params, &cancel)?;
     if !result.is_error {
         state.install_session(next_session);
     }
@@ -502,9 +534,9 @@ fn execute_csv_import_on_session(
     resolved_path: &Path,
     sheet_id: &SheetId,
     params: Value,
+    cancel: &std::sync::atomic::AtomicBool,
 ) -> Result<ToolCallResult, ToolCallError> {
-    let cancel = std::sync::atomic::AtomicBool::new(false);
-    if let Err(err) = session.execute_with_caller("table.importCsv", params, curvebook_engine::Caller::Mcp, &cancel) {
+    if let Err(err) = session.execute_with_caller("table.importCsv", params, curvebook_engine::Caller::Mcp, cancel) {
         return Ok(errors::result_from_engine_error(&err));
     }
     let Some(ds) = session.document().data_sheet(sheet_id) else {

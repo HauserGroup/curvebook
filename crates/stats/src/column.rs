@@ -1113,7 +1113,7 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
         return Err(StatsError::InsufficientSampleSize { context: "ROUT outlier detection", required: 3, actual: n });
     }
     let sorted = sorted_finite(values);
-    let mut center = quantile_type6_sorted(&sorted, 0.5).unwrap_or(sorted[0]);
+    let mut center = quantile_type6_sorted(&sorted, 0.5).or_else(|| sorted.first().copied()).ok_or(StatsError::EmptyInput)?;
     let init_abs: Vec<f64> = sorted_finite(&values.iter().map(|v| (v - center).abs()).collect::<Vec<_>>());
     let init_scale = quantile_sorted(&init_abs, 0.6827).unwrap_or(0.0) * (n as f64) / ((n - 1) as f64);
 
@@ -1317,7 +1317,7 @@ pub fn one_sample_wilcoxon(
         return Err(StatsError::InvalidParameter { name: "hypothetical_median", value: hypothetical_median });
     }
     let sorted = sorted_finite(values);
-    let sample_median = quantile_type6_sorted(&sorted, 0.5).unwrap_or(sorted[0]);
+    let sample_median = quantile_type6_sorted(&sorted, 0.5).or_else(|| sorted.first().copied()).ok_or(StatsError::EmptyInput)?;
     let diffs: Vec<f64> = values.iter().map(|&v| v - hypothetical_median).filter(|&d| d != 0.0).collect();
     let n_nz = diffs.len();
     if n_nz == 0 {
@@ -1439,7 +1439,7 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
             }
         }
         walsh.sort_by(f64::total_cmp);
-        let hl = quantile_type6_sorted(&walsh, 0.5).unwrap_or(walsh[0]);
+        let hl = quantile_type6_sorted(&walsh, 0.5).or_else(|| walsh.first().copied()).ok_or(StatsError::EmptyInput)?;
         if n < 4 {
             return Ok((hl, None));
         }

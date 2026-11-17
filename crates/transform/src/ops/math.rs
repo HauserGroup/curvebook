@@ -260,7 +260,7 @@ pub fn execute_math_transform(
     let mut transformed_cells = 0_usize;
 
     let x_values_before: Vec<Option<f64>> = match &source.archetype {
-        TableArchetype::Xy(xy) => (0..xy.row_count()).map(|r| xy.x_value_at(r)).collect(),
+        TableArchetype::Xy(xy) => (0..xy.row_count()).map(|r| xy.raw_x_value_at(r)).collect(),
         _ => Vec::new(),
     };
 
@@ -311,8 +311,7 @@ fn transform_xy_x_axis(
         XColumnMode::DateOrElapsedTime { .. } | XColumnMode::GeneratedSequence { .. } => {
             let mut materialized = Vec::with_capacity(rows);
             for r in 0..rows {
-                let cell = xy.x_value_at(r).map_or_else(Cell::empty, Cell::number);
-                materialized.push(vec![cell]);
+                materialized.push(vec![xy.materialized_x_cell_at(r)]);
             }
             xy.x_cells = materialized;
             xy.x_mode = XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single };

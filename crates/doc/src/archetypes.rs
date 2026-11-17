@@ -316,6 +316,47 @@ impl XyTable {
         }
     }
 
+    /// Read or evaluate the finite `X` value at `row` regardless of cell exclusion status.
+    #[must_use]
+    #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
+    pub fn raw_x_value_at(&self, row: usize) -> Option<f64> {
+        if row >= self.row_count() {
+            return None;
+        }
+        match &self.x_mode {
+            XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
+                self.x_cells.get(row).and_then(|subs| subs.first()).and_then(|c| c.value.finite_f64())
+            }
+            XColumnMode::GeneratedSequence { start, step, progression } => {
+                let val = match progression {
+                    SequenceProgression::Arithmetic => *start + (row as f64) * *step,
+                    SequenceProgression::Geometric => *start * step.powi(row.min(i32::MAX as usize) as i32),
+                };
+                val.is_finite().then_some(val)
+            }
+        }
+    }
+
+    /// Materialize the primary `X` cell at `row`, preserving both raw value and `excluded` mask.
+    #[must_use]
+    pub fn materialized_x_cell_at(&self, row: usize) -> Cell {
+        if row >= self.row_count() {
+            return Cell::empty();
+        }
+        match &self.x_mode {
+            XColumnMode::Numbers { .. } | XColumnMode::DateOrElapsedTime { .. } => {
+                self.x_cells.get(row).and_then(|subs| subs.first()).cloned().unwrap_or_else(Cell::empty)
+            }
+            XColumnMode::GeneratedSequence { .. } => {
+                let excluded = self.x_cells.get(row).and_then(|subs| subs.first()).is_some_and(|c| c.excluded);
+                match self.raw_x_value_at(row) {
+                    Some(v) => Cell { value: CellValue::Number(v), excluded },
+                    None => Cell { value: CellValue::Empty, excluded: false },
+                }
+            }
+        }
+    }
+
     /// Set the primary `X` cell at `row` (subcolumn `0`).
     pub fn set_x_cell(&mut self, row: usize, cell: Cell) -> Result<(), DocError> {
         self.set_x_subcell(row, 0, cell)
@@ -1194,6 +1235,35 @@ pub struct LevelOrderSpec {
     pub reversed: bool,
 }
 
+impl LevelOrderSpec {
+    /// Rewrite explicit level-order tokens using `(from, to)` recode rules, deduplicating while
+    /// preserving first-occurrence order when multiple old levels map to the same token.
+    pub fn recode_levels(&mut self, mappings: &[(String, String)]) {
+        if mappings.is_empty() {
+            return;
+        }
+        let LevelOrderKind::Explicit(order_list) = &mut self.order else {
+            return;
+        };
+        let mut updated = Vec::with_capacity(order_list.len());
+        let mut seen = std::collections::HashSet::with_capacity(order_list.len());
+        for level in order_list.drain(..) {
+            let mut target = level;
+            for (from, to) in mappings {
+                if (target == *from || target.trim() == from.trim()) && from != to {
+                    target = to.trim().to_owned();
+                    break;
+                }
+            }
+            let canonical = target.trim();
+            if !canonical.is_empty() && seen.insert(canonical.to_owned()) {
+                updated.push(if target.len() == canonical.len() { target } else { canonical.to_owned() });
+            }
+        }
+        *order_list = updated;
+    }
+}
+
 /// Frequency summary for a single categorical level in a [`VariableColumn`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CategoricalLevelSummary {
@@ -1275,6 +1345,7 @@ impl VariableColumn {
             return 0;
         }
         let mut changed = 0;
+        self.level_order.recode_levels(mappings);
         for cell in &mut self.cells {
             let Some(current) = cell_categorical_token(&cell.value) else {
                 continue;
@@ -1287,6 +1358,7 @@ impl VariableColumn {
                 }
             }
         }
+        self.refresh_inferred_role();
         changed
     }
 

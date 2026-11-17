@@ -116,6 +116,8 @@ pub fn simulate_xy_sheet(
     xy.data_sets[0].title = String::from("Simulated");
 
     let mut rng = DeterministicRng::from_seed(seed);
+    let mut any_finite = false;
+    let mut first_eval_err: Option<TransformError> = None;
     for row in 0..row_count {
         let x = if row_count == 1 {
             x_min
@@ -124,11 +126,37 @@ pub fn simulate_xy_sheet(
             x_min + frac * (x_max - x_min)
         };
         xy.set_x_cell(row, Cell::number(x))?;
-        let y_true = evaluate_equation(equation_id, x, parameters)?;
+        let y_true = match evaluate_equation(equation_id, x, parameters) {
+            Ok(v) => v,
+            Err(err @ TransformError::EvalError { .. }) => {
+                first_eval_err.get_or_insert(err);
+                continue;
+            }
+            Err(other) => return Err(other),
+        };
         for rep in 0..replicates {
-            let y_obs = sample_noisy_observation(&mut rng, y_true, noise)?;
-            xy.data_sets[0].cells[row][rep] = Cell::number(y_obs);
+            match sample_noisy_observation(&mut rng, y_true, noise) {
+                Ok(y_obs) if y_obs.is_finite() => {
+                    xy.data_sets[0].cells[row][rep] = Cell::number(y_obs);
+                    any_finite = true;
+                }
+                Ok(_) => {
+                    first_eval_err.get_or_insert_with(|| TransformError::EvalError {
+                        message: format!("simulated observation overflowed finite f64 range at x={x}"),
+                    });
+                }
+                Err(err @ TransformError::EvalError { .. }) => {
+                    first_eval_err.get_or_insert(err);
+                }
+                Err(other) => return Err(other),
+            }
         }
+    }
+
+    if !any_finite {
+        return Err(first_eval_err.unwrap_or_else(|| TransformError::EvalError {
+            message: format!("equation `{equation_id}` produced no finite simulated values across [{x_min}, {x_max}]"),
+        }));
     }
 
     let sheet = DataSheet::new(sheet_id, title, TableArchetype::Xy(xy))?;
@@ -192,8 +220,19 @@ fn sample_noisy_observation(rng: &mut DeterministicRng, y_true: f64, noise: Simu
             if sd == 0.0 { y_true } else { rng.normal(y_true, sd)? }
         }
         SimulationNoise::Poisson => {
+            // Exact PTRS Poisson count generation applies up to lambda = 1e15 (Atkinson, *Appl. Stat.* 1979,
+            // 28(1), 29–35). Above 1e15 (where relative SD 1/sqrt(lambda) < 3.2e-8 and counts approach the
+            // 2^53 IEEE-754 exact-integer limit), transition smoothly to the asymptotic normal count
+            // approximation N(lambda, lambda) clamped at 0 (Johnson, Kotz & Kemp, *Univariate Discrete
+            // Distributions*, 3rd ed., 2005, Ch. 4).
+            const PTRS_MAX_LAMBDA: f64 = 1e15;
             let lambda = y_true.max(0.0);
-            rng.poisson(lambda)? as f64
+            if lambda <= PTRS_MAX_LAMBDA {
+                rng.poisson(lambda)? as f64
+            } else {
+                let z = rng.standard_normal();
+                (lambda + lambda.sqrt() * z).max(0.0).round()
+            }
         }
     };
     Ok(val)

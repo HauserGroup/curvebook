@@ -365,6 +365,7 @@ pub fn pca_analysis(
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: p, actual: variable_labels.len() }));
     }
 
+    let mut col_sds = Vec::with_capacity(p);
     let mut scaled_cols = Vec::with_capacity(p);
     for c in 0..p {
         let mut col = Vec::with_capacity(n);
@@ -376,9 +377,16 @@ pub fn pca_analysis(
             col.push(v);
         }
         let m = SummaryMoments::from_slice(&col)?;
-        let sd = m.sample_sd().unwrap_or(1.0);
-        let denom = if standardize && sd > 0.0 { sd } else { 1.0 };
+        let sd = m.sample_sd().unwrap_or(0.0);
+        if standardize && (!sd.is_finite() || sd <= 0.0) {
+            return Err(StatsError::ZeroVariance { context: "standardized PCA constant column" });
+        }
+        col_sds.push(sd);
+        let denom = if standardize { sd } else { 1.0 };
         scaled_cols.push(col.into_iter().map(|v| (v - m.mean) / denom).collect::<Vec<_>>());
+    }
+    if !standardize && col_sds.iter().all(|&sd| sd <= 0.0) {
+        return Err(StatsError::ZeroVariance { context: "PCA covariance matrix" });
     }
 
     // Build X_norm = X_centered / sqrt(n - 1) so singular_values^2 == eigenvalues of Cov/Corr.
@@ -413,12 +421,31 @@ pub fn pca_analysis(
     let kaiser_thresh = if standardize { 1.0 } else { total_var / (p as f64) };
     let kaiser_components = eigenvalues.iter().filter(|&&ev| ev > kaiser_thresh).count();
 
-    // Loadings V (p x k_comp) and Scores = X_scaled * V (n x k_comp).
+    // Loadings V (p x k_comp) with deterministic sign convention (Jolliffe 2002): orient each
+    // component j so its largest-magnitude loading (breaking near-ties within relative 1e-12 by
+    // smallest variable index) is non-negative, then compute Scores = X_scaled * V.
     let mut loadings = vec![vec![0.0_f64; k_comp]; p];
     let mut contributions = vec![vec![0.0_f64; k_comp]; p];
-    for i in 0..p {
-        for j in 0..k_comp {
-            let v_ij = dec.v.get(i, j).unwrap_or(0.0);
+    for j in 0..k_comp {
+        let mut max_abs = 0.0_f64;
+        for i in 0..p {
+            max_abs = max_abs.max(dec.v.get(i, j).unwrap_or(0.0).abs());
+        }
+        let mut sign = 1.0_f64;
+        if max_abs > 0.0 {
+            let tie_thresh = max_abs * (1.0 - 1e-12);
+            for i in 0..p {
+                let vij = dec.v.get(i, j).unwrap_or(0.0);
+                if vij.abs() >= tie_thresh {
+                    if vij < 0.0 {
+                        sign = -1.0;
+                    }
+                    break;
+                }
+            }
+        }
+        for i in 0..p {
+            let v_ij = sign * dec.v.get(i, j).unwrap_or(0.0);
             loadings[i][j] = v_ij;
             contributions[i][j] = 100.0 * v_ij * v_ij;
         }
@@ -435,7 +462,7 @@ pub fn pca_analysis(
     }
 
     let (pa_thresholds, pa_count) = if let Some(seed) = parallel_analysis_seed {
-        let thresh = horn_parallel_analysis(n, p, k_comp, standardize, seed)?;
+        let thresh = horn_parallel_analysis(n, p, k_comp, standardize, &col_sds, seed)?;
         let cnt = eigenvalues.iter().zip(thresh.iter()).take_while(|(ev, th)| **ev > **th).count();
         (Some(thresh), Some(cnt))
     } else {
@@ -459,7 +486,11 @@ pub fn pca_analysis(
     })
 }
 
-fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, seed: u64) -> Result<Vec<f64>, StatsError> {
+/// Horn (1965, *Psychometrika* 30:179-185) parallel analysis with Glorfeld (1995) 95th-percentile
+/// threshold: simulate independent Gaussian columns matched to the empirical variance scale
+/// (standardized to unit variance when `standardize = true`; centered and scaled by each observed
+/// variable's sample SD `col_sds[c]` when `standardize = false`).
+fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, col_sds: &[f64], seed: u64) -> Result<Vec<f64>, StatsError> {
     let n_iter = 40_usize;
     let mut rng = DeterministicRng::from_seed(seed);
     let mut sim_eigs = vec![Vec::with_capacity(n_iter); k_comp];
@@ -469,10 +500,17 @@ fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, 
         let mut mat_data = vec![0.0_f64; n * p];
         for c in 0..p {
             let mut col: Vec<f64> = (0..n).map(|_| rng.standard_normal()).collect();
-            if standardize && let Ok(m) = SummaryMoments::from_slice(&col) {
-                let sd = m.sample_sd().unwrap_or(1.0).max(1e-12);
-                for v in &mut col {
-                    *v = (*v - m.mean) / sd;
+            if let Ok(m) = SummaryMoments::from_slice(&col) {
+                if standardize {
+                    let sd = m.sample_sd().unwrap_or(1.0).max(1e-12);
+                    for v in &mut col {
+                        *v = (*v - m.mean) / sd;
+                    }
+                } else {
+                    let target_sd = col_sds.get(c).copied().unwrap_or(0.0).max(0.0);
+                    for v in &mut col {
+                        *v = (*v - m.mean) * target_sd;
+                    }
                 }
             }
             for (r, &val) in col.iter().enumerate() {
@@ -485,10 +523,11 @@ fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, 
             sim_eigs[j].push(s * s);
         }
     }
+    let fallback = if standardize { 1.0 } else { 0.0 };
     let mut out = Vec::with_capacity(k_comp);
     for mut v in sim_eigs {
         v.sort_by(f64::total_cmp);
-        out.push(quantile_sorted(&v, 0.95).unwrap_or(1.0));
+        out.push(quantile_sorted(&v, 0.95).unwrap_or(fallback));
     }
     Ok(out)
 }

@@ -191,19 +191,40 @@ fn build_dependency_graph(
 
 fn resolve_col_deps(table: &MultipleVariablesTable, expr: &Expr) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
-    for target in extract_dependencies(expr) {
-        match target {
-            DependencyTarget::ColumnName(name) => {
-                if let Some(idx) = resolve_mv_column(table, &name) {
-                    out.insert(idx);
+    let mut stack = vec![expr];
+    while let Some(node) = stack.pop() {
+        match node {
+            Expr::Number(_) | Expr::Text(_) => {}
+            Expr::Var(vref) => match vref {
+                VarRef::Ident(name) => {
+                    if !is_builtin_constant(name)
+                        && let Some(idx) = crate::formula::eval::resolve_ident_mv_column(table, name)
+                    {
+                        out.insert(idx);
+                    }
+                }
+                VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
+                    if let Some(idx) = resolve_mv_column(table, name) {
+                        out.insert(idx);
+                    }
+                }
+                VarRef::ColumnByIndex(idx) => {
+                    if *idx < table.variables.len() {
+                        out.insert(*idx);
+                    }
+                }
+                VarRef::InfoConstant(_) | VarRef::RowOneBased | VarRef::IndexZeroBased => {}
+            },
+            Expr::Unary { expr: inner, .. } => stack.push(inner),
+            Expr::Binary { left, right, .. } => {
+                stack.push(left);
+                stack.push(right);
+            }
+            Expr::Call { args, .. } => {
+                for arg in args {
+                    stack.push(arg);
                 }
             }
-            DependencyTarget::ColumnIndex(idx) => {
-                if idx < table.variables.len() {
-                    out.insert(idx);
-                }
-            }
-            DependencyTarget::InfoConstant(_) => {}
         }
     }
     out

@@ -240,7 +240,11 @@ pub fn format_model_equation_tex_for_dataset(
 fn format_unknown_fallback(equation_id: &str, params: &[(String, f64)], substituted: bool, sig_figs: usize) -> String {
     if params.is_empty() {
         let id = normalize_id(equation_id);
-        return if id.is_empty() { "Y = f(X)".to_string() } else { format!("Y = f_{{{id}}}(X)") };
+        if id.is_empty() {
+            return "Y = f(X)".to_string();
+        }
+        let sub = if contains_tex_meta(&id) { format!("\\text{{{}}}", escape_tex_text(&id)) } else { id };
+        return format!("Y = f_{{{sub}}}(X)");
     }
     let mut parts = Vec::with_capacity(params.len());
     for (name, val) in params {
@@ -2276,10 +2280,16 @@ fn greek_tex_escape(ident: &str) -> Option<&'static str> {
 fn escape_tex_text(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     for ch in s.chars() {
-        if matches!(ch, '\\' | '{' | '}' | '^' | '_' | '*' | '$' | '&' | '%' | '#' | '<' | '>') {
-            out.push('\\');
+        match ch {
+            '\\' => out.push_str("\\textbackslash{}"),
+            '<' => out.push_str("\\textless{}"),
+            '>' => out.push_str("\\textgreater{}"),
+            '{' | '}' | '^' | '_' | '*' | '$' | '&' | '%' | '#' => {
+                out.push('\\');
+                out.push(ch);
+            }
+            _ => out.push(ch),
         }
-        out.push(ch);
     }
     out
 }
@@ -2360,11 +2370,12 @@ fn normalize_tex_signs(input: &str) -> String {
             }
             let had_trailing_space = chars.get(j) == Some(&' ');
             let prev_char = out.chars().next_back();
-            let is_unary = is_unary_prev(prev_char);
+            let after_mul_op = ends_with_tex_mul_op(&out);
+            let is_unary = after_mul_op || is_unary_prev(prev_char);
             let is_negative = neg_count % 2 == 1;
 
             if is_unary {
-                if matches!(prev_char, Some('=' | ',' | ';')) {
+                if after_mul_op || matches!(prev_char, Some('=' | ',' | ';')) {
                     out.push(' ');
                 }
                 if is_negative {
@@ -2392,6 +2403,18 @@ fn normalize_tex_signs(input: &str) -> String {
     }
 
     out.trim().to_string()
+}
+
+fn ends_with_tex_mul_op(out: &str) -> bool {
+    for kw in ["\\cdot", "\\times"] {
+        if let Some(prefix) = out.strip_suffix(kw) {
+            let backslashes = prefix.chars().rev().take_while(|&c| c == '\\').count();
+            if backslashes % 2 == 0 {
+                return true;
+            }
+        }
+    }
+    false
 }
 
 fn is_unary_prev(prev: Option<char>) -> bool {
@@ -2619,5 +2642,16 @@ mod tests {
         assert_eq!(rat43, "Y = \\frac{b_1}{(1 + \\exp(b_2 - b_3 \\cdot X))^{\\frac{1}{b_4}}}");
         let roszman = format_model_equation_tex("nist_roszman1", None, &[], false, 4);
         assert_eq!(roszman, "Y = b_1 - b_2 \\cdot X - \\frac{\\arctan(\\frac{b_3}{X - b_4})}{\\pi}");
+    }
+
+    #[test]
+    fn rv23_and_rv24_tex_text_escapes_and_mul_unary_signs() {
+        assert_eq!(escape_tex_text(r"a<b\c>d*e"), r"a\textless{}b\textbackslash{}c\textgreater{}d\*e");
+        assert_eq!(normalize_tex_signs(r"a \cdot -3"), r"a \cdot -3");
+        assert_eq!(normalize_tex_signs(r"a \cdot - 3"), r"a \cdot -3");
+        assert_eq!(normalize_tex_signs(r"a \times -3"), r"a \times -3");
+        assert_eq!(normalize_tex_signs(r"a \cdot +X"), r"a \cdot X");
+        assert_eq!(normalize_tex_signs(r"t - 3"), r"t - 3");
+        assert_eq!(normalize_tex_signs(r"s - 3"), r"s - 3");
     }
 }
