@@ -145,12 +145,14 @@ jobs:
       - name: Install locked cargo-deny and cargo-about
         run: |
           set -euo pipefail
-          if ! command -v cargo-deny >/dev/null 2>&1; then
+          if ! cargo deny --version 2>/dev/null | grep -Fx 'cargo-deny 0.20.2'; then
             cargo install --locked cargo-deny --version 0.20.2
           fi
-          if ! command -v cargo-about >/dev/null 2>&1; then
-            cargo install --locked cargo-about --version 0.9.3
+          if ! cargo about --version 2>/dev/null | grep -Fx 'cargo-about 0.9.3'; then
+            cargo install --locked cargo-about --version 0.9.3 --features cli
           fi
+          cargo deny --version
+          cargo about --version
       - name: Verify licenses and generate THIRD-PARTY-LICENSES.html
         env:
           CI: "true"

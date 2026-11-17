@@ -53,7 +53,7 @@ fn r2_s13_01_release_workflow_pins_license_tools_and_html_includes_full_texts() 
     let root = workspace_root().unwrap();
     let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     assert!(release.contains("cargo install --locked cargo-deny --version 0.20.2"));
-    assert!(release.contains("cargo install --locked cargo-about --version 0.9.3"));
+    assert!(release.contains("cargo install --locked cargo-about --version 0.9.3 --features cli"));
     assert!(release.contains("cargo deny check licenses"));
     assert!(release.contains("cargo about generate about.hbs -o licenses/THIRD-PARTY-LICENSES.html"));
     assert!(release.contains("CI: \"true\""));
