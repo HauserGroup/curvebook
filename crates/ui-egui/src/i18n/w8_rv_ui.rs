@@ -1,7 +1,6 @@
-//! Staged Wave 8 third-pass review i18n entries (`RV-75..RV-81`).
+//! Wave 8 third-pass review i18n entries (`RV-75..RV-81`).
 //!
-//! Staged as [`STAGED_ENTRIES`] with all 16 locales populated while keeping [`ENTRIES`] empty so
-//! `i18n::catalog_len()` remains at `774` until `w8-rv-integ` mounts them in `EXTRA_SHARD_CATALOGS`.
+//! Registered into `crates/ui-egui/src/i18n.rs` (`EXTRA_SHARD_CATALOGS`) by `w8-rv-integ`.
 
 use super::CatalogEntry;
 
@@ -48,18 +47,18 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
         de: "ROUT (FDR Q%)",
         es: "ROUT (FDR Q%)",
         fr: "ROUT (FDR Q%)",
-        ja: "ROUT (FDR Q%)",
-        ko: "ROUT (FDR Q%)",
+        ja: "ROUT法 (FDR Q%)",
+        ko: "ROUT 방법 (FDR Q%)",
         pt_br: "ROUT (FDR Q%)",
-        zh_cn: "ROUT (FDR Q%)",
-        zh_tw: "ROUT (FDR Q%)",
+        zh_cn: "ROUT 法 (FDR Q%)",
+        zh_tw: "ROUT 法 (FDR Q%)",
         it: "ROUT (FDR Q%)",
         nl: "ROUT (FDR Q%)",
         pl: "ROUT (FDR Q%)",
-        ru: "ROUT (FDR Q%)",
+        ru: "Метод ROUT (FDR Q%)",
         tr: "ROUT (FDR Q%)",
         ar: "ROUT (نسبة Q%)",
-        he: "ROUT (FDR Q%)",
+        he: "שיטת ROUT (FDR Q%)",
     ]),
     entry!("analyze_picker.outlier.grubbs" => [
         en: "Grubbs' ESD (alpha)",
@@ -69,8 +68,8 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
         ja: "Grubbs ESD法 (α)",
         ko: "Grubbs ESD (알파)",
         pt_br: "ESD de Grubbs (alfa)",
-        zh_cn: "Grubbs ESD (alpha)",
-        zh_tw: "Grubbs ESD (alpha)",
+        zh_cn: "Grubbs ESD 检验 (alpha)",
+        zh_tw: "Grubbs ESD 檢定 (alpha)",
         it: "Test ESD di Grubbs (alfa)",
         nl: "Grubbs' ESD (alfa)",
         pl: "Test ESD Grubbsa (alfa)",
@@ -99,5 +98,5 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
     ]),
 ];
 
-/// Empty placeholder until `w8-rv-integ` mounts [`STAGED_ENTRIES`] in `EXTRA_SHARD_CATALOGS`.
-pub const ENTRIES: &[CatalogEntry] = &[];
+/// Mounted catalog slice alias for [`super::EXTRA_SHARD_CATALOGS`].
+pub const ENTRIES: &[CatalogEntry] = STAGED_ENTRIES;

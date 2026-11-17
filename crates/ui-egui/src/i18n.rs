@@ -94,6 +94,7 @@ pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
     w5_inspector::ENTRIES,
     w7_rm_reml::ENTRIES,
     w7_mv_ui::ENTRIES,
+    w8_rv_ui::ENTRIES,
 ];
 
 /// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
@@ -6129,8 +6130,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 774);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_384);
+        assert_eq!(catalog_len(), 779);
+        assert_eq!(LOCALES.len() * catalog_len(), 12_464);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6168,7 +6169,7 @@ mod tests {
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
         assert_eq!(engine_specs.len(), 97, "expected 97 engine CommandSpec entries");
-        assert_eq!(crate::menus::UI_COMMANDS.len(), 46, "expected 46 UiCommandSpec entries");
+        assert_eq!(crate::menus::UI_COMMANDS.len(), 47, "expected 47 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();
         for spec in &engine_specs {
@@ -6483,7 +6484,7 @@ mod tests {
 
     #[test]
     fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
+        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 19);
         let eu_slice = &[entry!("shard.test.key" => [
             en: "Test Key",
             de: "Testschlüssel",

@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 pub use crate::dialogs_r9::*;
 use crate::i18n::LocalePreset;
 use crate::menus::shortcuts::ShortcutRegistry;
-use crate::menus::ui_commands::{STAGED_UI_COMMANDS, UI_COMMANDS};
+use crate::menus::ui_commands::UI_COMMANDS;
 use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeSpec;
 
@@ -6666,7 +6666,7 @@ impl CommandPaletteState {
                 results.push(entry);
             }
         }
-        for spec in UI_COMMANDS.iter().chain(STAGED_UI_COMMANDS.iter()) {
+        for spec in UI_COMMANDS {
             let candidate = PaletteCandidate {
                 id: spec.id,
                 label: spec.label,

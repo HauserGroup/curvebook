@@ -9,4 +9,4 @@ pub use tooltips::{
     CommandTooltip, MenuSectionTooltips, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, command_tooltip, menu_bar_tooltips,
     toolbar_caption_command_id, toolbar_tooltips,
 };
-pub use ui_commands::{STAGED_UI_COMMANDS, UI_COMMANDS, UiCommandSpec};
+pub use ui_commands::{UI_COMMANDS, UiCommandSpec};

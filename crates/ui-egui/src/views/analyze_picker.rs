@@ -1293,9 +1293,7 @@ fn localized_category_label(locale: &str, cat: AnalysisCategory) -> &'static str
 
 fn picker_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
     let canonical = crate::i18n::normalize_locale(locale);
-    crate::i18n::try_tr(canonical, key)
-        .or_else(|| crate::i18n::try_tr_in_slices(&[crate::i18n::w8_rv_ui::STAGED_ENTRIES], canonical, key))
-        .unwrap_or(fallback)
+    crate::i18n::try_tr(canonical, key).unwrap_or(fallback)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

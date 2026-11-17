@@ -7,7 +7,7 @@ use curvebook_doc::{
 use curvebook_ui_egui::control_io::{dispatch_gui_action, dispatch_ui_command};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::i18n::{LOCALES, catalog_len, w8_rv_ui};
-use curvebook_ui_egui::menus::{STAGED_UI_COMMANDS, ShortcutRegistry, ShortcutScope, UI_COMMANDS, normalize_shortcut_combo};
+use curvebook_ui_egui::menus::{ShortcutRegistry, ShortcutScope, UI_COMMANDS, normalize_shortcut_combo};
 use curvebook_ui_egui::modal_predicates::apply_r2_gaussian_toggle;
 use curvebook_ui_egui::{HumanPathDriver, KeyModifiers, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_event, inspect_ui_tree};
 use serde_json::json;
@@ -36,10 +36,10 @@ fn build_column_app(cols: usize, rows: usize) -> Result<(UiApp, SheetId), String
 
 #[test]
 fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
-    // Zero-collision integration invariants kept intact while UI command is staged:
-    assert_eq!(UI_COMMANDS.len(), 46, "UI_COMMANDS length must remain 46 until w8-rv-integ");
-    assert_eq!(catalog_len(), 774, "i18n::catalog_len() must remain 774 until w8-rv-integ");
-    assert!(STAGED_UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
+    // Integrated UI command & i18n invariants:
+    assert_eq!(UI_COMMANDS.len(), 47, "UI_COMMANDS length should be 47 after integrating ui.editParams.open");
+    assert_eq!(catalog_len(), 779, "i18n::catalog_len() should be 779 after mounting w8_rv_ui");
+    assert!(UI_COMMANDS.iter().any(|c| c.id == "ui.editParams.open" && c.shortcut == "Cmd+T"));
     for entry in w8_rv_ui::STAGED_ENTRIES {
         assert_eq!(entry.translations.len(), LOCALES.len());
         assert!(entry.translations.iter().all(|s| !s.trim().is_empty()), "empty locale in {}", entry.key);

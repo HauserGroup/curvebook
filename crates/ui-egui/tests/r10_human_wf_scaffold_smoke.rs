@@ -73,7 +73,7 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     let valid_meta = curvebook_ui_egui::views::a11y::labeled_meta(WidgetRole::Button, "Run", FocusScope::Workspace, "Enter");
     validate_interactive_a11y(&valid_meta)?;
 
-    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
+    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 19);
     assert!(all_keys().count() >= 653);
     assert!(missing_translations().is_empty());
     for &locale in LOCALES {

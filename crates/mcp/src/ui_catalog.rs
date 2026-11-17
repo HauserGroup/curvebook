@@ -56,6 +56,14 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         beginner: "Choose a statistical test, curve fit, or data transform matched to the active table archetype.",
     },
     UiCommandSpec {
+        id: "ui.editParams.open",
+        label: "Change Analysis Parameters...",
+        shortcut: "Cmd+T",
+        params_doc: "{\"sheet_id\":\"optional ResultSheetId\"}",
+        summary: "Open the Change Analysis Parameters dialog for the active or specified result sheet.",
+        beginner: "Reopen and edit statistical or curve-fitting parameters for the active result sheet.",
+    },
+    UiCommandSpec {
         id: "ui.changeGraphType.open",
         label: "Open Change Graph Type Dialog",
         shortcut: "Cmd+Shift+G",

@@ -120,6 +120,7 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "app.about" => ("menu.help", "Help"),
         "ui.powerWizard.open" => ("menu.analyze", "Analyze/Power and Sample Size..."),
         "ui.analyze.open" => ("menu.analyze", "Analyze/Analyze..."),
+        "ui.editParams.open" => ("menu.analyze", "Analyze/Change Analysis Parameters..."),
         "ui.result.copyMethodsReport" => ("menu.analyze", "Analyze/Copy Methods Report"),
         "ui.result.applyRemediation" => ("menu.analyze", "Analyze/Apply Assumption Remediation"),
         "ui.result.inspectDiagnostics" => ("menu.analyze", "Analyze/Inspect Result Diagnostic Tabs"),
@@ -170,7 +171,9 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
         | "ui.graph.format.open"
         | "ui.graph.pairwise.open"
         | "ui.applyStyleFrom.open" => !doc.graph_sheets.is_empty(),
-        "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => !doc.result_sheets.is_empty(),
+        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => {
+            !doc.result_sheets.is_empty()
+        }
         "ui.result.appendClusterColumn" => doc
             .result_sheets
             .iter()
@@ -312,7 +315,7 @@ mod tests {
         let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
         assert!(frame.len() > 8);
 
-        // Menu bar covers all 97 engine + 46 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 97 engine + 47 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -324,7 +327,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 143);
+        assert_eq!(seen.len(), 144);
         Ok(())
     }
 }

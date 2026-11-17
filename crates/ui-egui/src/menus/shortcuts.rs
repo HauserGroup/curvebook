@@ -6,7 +6,7 @@ use curvebook_engine::cmd::registry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::menus::ui_commands::{STAGED_UI_COMMANDS, UI_COMMANDS};
+use crate::menus::ui_commands::UI_COMMANDS;
 
 /// Context scope within which a [`ShortcutBinding`] applies (`RV-75`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
@@ -113,7 +113,7 @@ impl ShortcutRegistry {
                 },
             );
         }
-        for spec in UI_COMMANDS.iter().chain(STAGED_UI_COMMANDS.iter()) {
+        for spec in UI_COMMANDS {
             let normalized = normalize_shortcut_combo(spec.shortcut).unwrap_or_else(|_| spec.shortcut.trim().to_owned());
             bindings.insert(
                 spec.id.to_owned(),

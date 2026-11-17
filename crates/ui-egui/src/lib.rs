@@ -68,9 +68,9 @@ pub use layout::{
     verify_click_action_parity, verify_pixel_to_hit_box_parity,
 };
 pub use menus::{
-    CommandTooltip, MenuSectionTooltips, STAGED_UI_COMMANDS, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope,
-    TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips,
-    normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
+    CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS,
+    ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo,
+    toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
@@ -759,13 +759,14 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 46);
+        assert_eq!(UI_COMMANDS.len(), 47);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
             "ui.family.toggle",
             "ui.palette.open",
             "ui.analyze.open",
+            "ui.editParams.open",
             "ui.changeGraphType.open",
             "ui.clonePipeline.open",
             "ui.applyStyleFrom.open",
