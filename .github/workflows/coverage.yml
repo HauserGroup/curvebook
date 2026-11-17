@@ -24,6 +24,10 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Reclaim unused runner SDK disk space
+        run: |
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet /opt/ghc
+          df -h /
       - name: Install system libraries
         run: |
           sudo apt-get update
@@ -37,12 +41,23 @@ jobs:
           toolchain: "1.99.1"
           components: llvm-tools-preview
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install cargo-llvm-cov
+      - name: Install pinned cargo-nextest and cargo-llvm-cov
         run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/ci-tools"
+          tarball="$RUNNER_TEMP/ci-tools/nextest.tar.gz"
+          curl -fsSL 'https://github.com/nextest-rs/nextest/releases/download/cargo-nextest-0.9.152/cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz' -o "$tarball"
+          printf '%s  %s\n' 'd039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a' "$tarball" | sha256sum --check
+          tar -xzf "$tarball" -C "$RUNNER_TEMP/ci-tools" cargo-nextest
+          rm -f "$tarball"
+          echo "$RUNNER_TEMP/ci-tools" >> "$GITHUB_PATH"
           if ! command -v cargo-llvm-cov >/dev/null 2>&1; then
             cargo install --locked cargo-llvm-cov
           fi
       - name: Run cargo xtask coverage
+        env:
+          NEXTEST_TEST_THREADS: '1'
+          RUST_TEST_THREADS: '1'
         run: cargo run --locked -p xtask -- coverage
       - name: Keep coverage report
         if: always()

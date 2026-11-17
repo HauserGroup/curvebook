@@ -136,6 +136,10 @@ impl AccessibilityMeta {
     }
 }
 
+fn focus_sort_key(n: &WidgetNode) -> (u32, ZLayer, u32) {
+    (n.a11y.tab_order.unwrap_or(u32::MAX), n.z_layer, n.paint_order)
+}
+
 /// Ordered list of enabled, focusable widget nodes within `scope` (trapping `Tab` inside active modal/popup scopes).
 #[must_use]
 pub fn ordered_focus_targets(nodes: &[WidgetNode], scope: FocusScope) -> Vec<&WidgetNode> {
@@ -151,7 +155,7 @@ pub fn ordered_focus_targets(nodes: &[WidgetNode], scope: FocusScope) -> Vec<&Wi
                 && (n.a11y.tab_order.is_some() || n.action != WidgetAction::NoOp)
         })
         .collect();
-    focusable.sort_by_key(|n| (n.a11y.tab_order.unwrap_or(u32::MAX), n.z_layer, n.paint_order));
+    focusable.sort_by_key(|n| focus_sort_key(n));
     focusable
 }
 
@@ -167,8 +171,22 @@ pub fn cycle_focus_in_scope(nodes: &[WidgetNode], scope: FocusScope, current_id:
         (Some(i), false) => (i + 1) % targets.len(),
         (Some(0), true) => targets.len() - 1,
         (Some(i), true) => i - 1,
-        (None, false) => 0,
-        (None, true) => targets.len() - 1,
+        (None, _) => {
+            if let Some(cur_key) =
+                current_id.and_then(|id| nodes.iter().find(|n| n.id.as_str() == id && n.a11y.focus_scope == scope)).map(focus_sort_key)
+            {
+                if reverse {
+                    let pos = targets.partition_point(|t| focus_sort_key(t) < cur_key);
+                    if pos == 0 { targets.len() - 1 } else { pos - 1 }
+                } else {
+                    targets.partition_point(|t| focus_sort_key(t) <= cur_key) % targets.len()
+                }
+            } else if reverse {
+                targets.len() - 1
+            } else {
+                0
+            }
+        }
     };
     targets.get(next_idx).map(|n| n.id.0.clone())
 }
@@ -1002,5 +1020,58 @@ fn check_active_scope_reachability(tree: &LayoutTree, active_target_ids: &BTreeS
             check: String::from("empty_active_focus_scope"),
             detail: format!("active focus scope {:?} has zero reachable keyboard focus targets", tree.active_focus_scope),
         });
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{AccessibilityMeta, FocusScope, WidgetRole, cycle_focus_in_scope};
+    use crate::layout::{LayoutRectPx, NodeBounds, WidgetAction, WidgetId, WidgetNode, WidgetVisualState, ZLayer};
+    use crate::modal_predicates::ControlEnablement;
+
+    fn make_node(id: &str, role: WidgetRole, tab_order: u32, enabled: bool) -> WidgetNode {
+        let rect = LayoutRectPx::new(10, 10, 60, 24);
+        let enablement = if enabled { ControlEnablement::enabled() } else { ControlEnablement::disabled("At boundary") };
+        WidgetNode {
+            id: WidgetId::from(id),
+            parent: None,
+            z_layer: ZLayer::Workspace,
+            paint_order: tab_order,
+            bounds: NodeBounds::from_physical(rect, None, 1.0),
+            clip: None,
+            a11y: AccessibilityMeta::new(role, id, FocusScope::Workspace).with_keyboard_path(id).with_tab_order(tab_order),
+            state: WidgetVisualState { enablement, ..Default::default() },
+            action: WidgetAction::SelectResultTab(id.to_owned()),
+            scroll: None,
+            drawn_in_frame: true,
+        }
+    }
+
+    #[test]
+    fn cycle_focus_in_scope_steps_from_disabled_widget_sort_position() {
+        let nodes = vec![
+            make_node("menu.file", WidgetRole::Button, 10, true),
+            make_node("toolbar.run", WidgetRole::Button, 200, true),
+            make_node("result.tabs.prev", WidgetRole::Button, 509, false),
+            make_node("result.tab.main-summary", WidgetRole::Tab, 510, true),
+            make_node("result.tab.residuals", WidgetRole::Tab, 511, true),
+            make_node("result.tabs.next", WidgetRole::Button, 590, false),
+        ];
+
+        assert_eq!(
+            cycle_focus_in_scope(&nodes, FocusScope::Workspace, Some("result.tabs.prev"), false).as_deref(),
+            Some("result.tab.main-summary"),
+            "Tab from a newly disabled control must advance to the next ordered target rather than wrapping to index 0"
+        );
+        assert_eq!(
+            cycle_focus_in_scope(&nodes, FocusScope::Workspace, Some("result.tabs.prev"), true).as_deref(),
+            Some("toolbar.run"),
+            "Shift+Tab from a newly disabled control must step to the preceding ordered target"
+        );
+        assert_eq!(
+            cycle_focus_in_scope(&nodes, FocusScope::Workspace, Some("result.tabs.next"), false).as_deref(),
+            Some("menu.file"),
+            "Tab past the trailing disabled control wraps cleanly to the first target"
+        );
     }
 }

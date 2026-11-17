@@ -844,7 +844,8 @@ pub fn emit_active_tooltip(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
     }
     let size_px = (11.5 * builder.scale()).clamp(9.0, 22.0);
     let style = UiTextStyle::ui_sans(size_px);
-    let max_w = full_rect.width.saturating_sub(24).min(360);
+    let cap_w = (560.0 * builder.scale()).round() as u32;
+    let max_w = full_rect.width.saturating_sub(24).min(cap_w.max(360));
     let (display, ellipsized) = ellipsize_text(builder.measurer, &text, &style, &builder.tree.locale, f64::from(max_w.saturating_sub(12)));
     let tw = (builder.measurer.measure(&display, &style, &builder.tree.locale).width_px.ceil() as u32 + 14).clamp(60, max_w);
     let th = (size_px * 1.6).ceil() as u32;
@@ -854,7 +855,7 @@ pub fn emit_active_tooltip(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
         parent: None,
         z_layer: ZLayer::Tooltip,
         rect_px: rect,
-        a11y: AccessibilityMeta::new(WidgetRole::Tooltip, display.clone(), builder.tree.active_focus_scope),
+        a11y: AccessibilityMeta::new(WidgetRole::Tooltip, text, builder.tree.active_focus_scope),
         state: WidgetVisualState { ellipsized, ..Default::default() },
         action: WidgetAction::NoOp,
     });
@@ -902,15 +903,16 @@ pub type TextFieldBufferMap = BTreeMap<String, TextFieldEditState>;
 mod tests {
     use curvebook_palette::Rgba8;
 
-    use super::{FittedTextSpec, emit_scrollbars_for_meta, paint_text_fitted};
+    use super::{FittedTextSpec, emit_active_tooltip, emit_scrollbars_for_meta, paint_text_fitted};
     use crate::UiApp;
     use crate::compositor::FramePalette;
     use crate::interaction::ViewportMetrics;
     use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
     use crate::layout::scroll::{ScrollAxes, ScrollMeta};
     use crate::layout::{LayoutBuilder, LayoutRectPx, NodeSpec, WidgetAction, WidgetId, WidgetVisualState, ZLayer};
+    use crate::modal_predicates::ControlEnablement;
     use crate::text_bridge::{DesktopTextMeasurer, UiTextStyle};
-    use crate::theme::UiThemeMode;
+    use crate::theme::{FontBook, UiThemeMode};
 
     #[test]
     fn paint_text_fitted_clamps_bounds_and_skips_short_clipped_runs() {
@@ -1002,6 +1004,55 @@ mod tests {
         assert!(vscroll_ltr.is_some());
         if let Some(node) = vscroll_ltr {
             assert_eq!(node.bounds.rect_px.right(), vp.right(), "LTR vertical scrollbar must flush right");
+        }
+    }
+
+    #[test]
+    fn emit_active_tooltip_preserves_full_a11y_label_and_fits_fallback_font_reason() {
+        let mut app = UiApp::new();
+        app.interaction.hovered_widget_id = Some(String::from("print.submit_to_os"));
+        let reason = "Submitting print jobs to the OS queue is blocked under --gui-only.";
+        let fallback_measurer = DesktopTextMeasurer::with_font_book(FontBook::with_embedded_fallback());
+        let palette = FramePalette::from_theme(&app.theme);
+
+        // 1. Desktop viewport with widest embedded fallback font fits the full reason without truncation.
+        let mut desktop_builder = LayoutBuilder::new(&app, ViewportMetrics::new(1280.0, 800.0, 1.0), &fallback_measurer, &palette);
+        let _ = desktop_builder.push_node(NodeSpec {
+            id: WidgetId::from("print.submit_to_os"),
+            parent: None,
+            z_layer: ZLayer::ModalDialog,
+            rect_px: LayoutRectPx::new(100, 200, 240, 22),
+            a11y: AccessibilityMeta::new(WidgetRole::CheckBox, "Submit", FocusScope::ModalDialog),
+            state: WidgetVisualState { enablement: ControlEnablement::disabled(reason), ..Default::default() },
+            action: WidgetAction::NoOp,
+        });
+        emit_active_tooltip(&mut desktop_builder, LayoutRectPx::new(0, 0, 1280, 800));
+        let desktop_tree = desktop_builder.finish();
+        let desktop_tip = desktop_tree.node("overlay.tooltip");
+        assert!(desktop_tip.is_some());
+        if let Some(tip) = desktop_tip {
+            assert_eq!(tip.a11y.label, reason);
+            assert!(!tip.state.ellipsized, "desktop tooltip should fit disabled reason without clipping under fallback font");
+        }
+
+        // 2. Narrow viewport visually ellipsizes painted text while retaining the full accessible label.
+        let mut narrow_builder = LayoutBuilder::new(&app, ViewportMetrics::new(260.0, 200.0, 1.0), &fallback_measurer, &palette);
+        let _ = narrow_builder.push_node(NodeSpec {
+            id: WidgetId::from("print.submit_to_os"),
+            parent: None,
+            z_layer: ZLayer::ModalDialog,
+            rect_px: LayoutRectPx::new(20, 60, 180, 22),
+            a11y: AccessibilityMeta::new(WidgetRole::CheckBox, "Submit", FocusScope::ModalDialog),
+            state: WidgetVisualState { enablement: ControlEnablement::disabled(reason), ..Default::default() },
+            action: WidgetAction::NoOp,
+        });
+        emit_active_tooltip(&mut narrow_builder, LayoutRectPx::new(0, 0, 260, 200));
+        let narrow_tree = narrow_builder.finish();
+        let narrow_tip = narrow_tree.node("overlay.tooltip");
+        assert!(narrow_tip.is_some());
+        if let Some(tip) = narrow_tip {
+            assert_eq!(tip.a11y.label, reason, "accessible tooltip label must never lose trailing context when visually ellipsized");
+            assert!(tip.state.ellipsized);
         }
     }
 }

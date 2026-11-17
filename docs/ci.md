@@ -31,11 +31,15 @@ build cache. Only the build job writes that shared cache. Native correctness and
 performance jobs download the exact archive produced for their revision, rather
 than compiling their test binaries again. Other stages reuse the build cache and
 compile any different metadata, feature, doctest, or target configuration they
-need. Uploaded archives are removed before the build cache is saved, avoiding a
-second cached copy. Artifacts are retained for two days.
+need. Jobs that build or unpack full test archives reclaim unused preinstalled
+runner SDK directories beforehand so cold-cache compilations and multi-gigabyte
+archive extractions do not exhaust runner disk space. Uploaded archives are
+removed before the build cache is saved, avoiding a second cached copy.
+Artifacts are retained for two days.
 
-Hosted jobs use the pinned nextest binary and SHA-256 checksum in
-`.github/actions/ci-setup/action.yml`. `.config/nextest.toml` keeps the existing
+Hosted jobs use the pinned nextest and actionlint binaries and SHA-256 checksums
+in `.github/actions/ci-setup/action.yml`, and only install `cargo-deny` in the
+shared-cache writer and `policy` stage. `.config/nextest.toml` keeps the existing
 minimum-version requirement and adds a `ci` profile: no retries, failing
 five-minute per-test deadlines, and a one-minute deadline for `control_loopback`.
 The live macOS clipboard test reserves all test slots while it runs, preventing

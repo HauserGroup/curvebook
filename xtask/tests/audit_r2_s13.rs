@@ -134,6 +134,10 @@ fn r2_s13_04_all_workflows_pin_40_char_shas_and_verify_tool_checksums() {
     assert!(setup.contains("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"));
     assert!(setup.contains("cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz"));
     assert!(setup.contains("d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"));
+    assert!(setup.contains("rm -f \"$tarball\""));
+    assert!(setup.contains("reclaim-disk"));
+    let coverage = fs::read_to_string(root.join(".github/workflows/coverage.yml")).unwrap();
+    assert!(coverage.contains("d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"));
     let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     assert!(release.contains("17350a838c8e2c422c6e573ed379b18424565d2de8a2b1cb1b20211976124eb5"));
     assert!(release.contains("b3cf95aa6dabed836d09ad7f0c190a13c74c5b1304db60846f0f702ee407f430"));
@@ -250,6 +254,7 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     write_exe("lipo", "#!/usr/bin/env bash\necho 'x86_64 arm64'\n");
     write_exe("arch", "#!/usr/bin/env bash\nshift\nexec \"$@\"\n");
     write_exe("ditto", &format!("#!/usr/bin/env bash\ncp \"{}/curvebook-cli\" \"$4/curvebook-cli\"\n", cli_bin_dir.display()));
+    write_exe("uname", "#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -m) echo 'arm64' ;;\n  *) echo \"${MOCK_UNAME_S:-Darwin}\" ;;\nesac\n");
 
     let mock_cli = cli_bin_dir.join("curvebook-cli");
     fs::write(&mock_cli, "#!/usr/bin/env bash\necho 'curvebook-cli 0.1.0'\n").unwrap();
@@ -263,6 +268,17 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     fs::write(&zip, b"zip").unwrap();
 
     let path_env = format!("{}:/usr/bin:/bin", bin_dir.display());
+    // 0. Non-macOS host (`uname -s != Darwin`) must fail cleanly.
+    let non_macos = Command::new("bash")
+        .arg(&verify_sh)
+        .args(["--arch", "universal", dmg.to_str().unwrap(), zip.to_str().unwrap()])
+        .env("PATH", &path_env)
+        .env("MOCK_UNAME_S", "Linux")
+        .output()
+        .unwrap();
+    assert!(!non_macos.status.success());
+    assert!(String::from_utf8_lossy(&non_macos.stderr).contains("must run on macOS"), "{}", String::from_utf8_lossy(&non_macos.stderr));
+
     // 1. Missing CurveBook.app inside mounted DMG must fail.
     let missing_app = Command::new("bash")
         .arg(&verify_sh)

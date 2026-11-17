@@ -29,6 +29,8 @@ jobs:
       - uses: ./.github/actions/ci-setup
         with:
           save-cache: 'true'
+          install-deny: 'true'
+          reclaim-disk: 'true'
       - name: Check formatting and workflows before compilation
         run: |
           cargo fmt --all -- --check
@@ -60,6 +62,9 @@ jobs:
         with:
           persist-credentials: false
       - uses: ./.github/actions/ci-setup
+        with:
+          install-deny: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
+          reclaim-disk: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
       - name: Restore the test binaries built for this revision
         if: matrix.stage == 'tests' || matrix.stage == 'performance'
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2

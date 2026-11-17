@@ -275,10 +275,24 @@ fn r10_5_sub_sheet_tabs_overflow_controls_and_keyboard_switching() -> TestRes {
         return Err(format!("expected Classification table (index 6), got {}", driver.app().canvas_dialogs.result_view.active_tab_index));
     }
 
-    // Prev overflow button scrolls back toward first tabs.
+    // Scroll to the final tab (`Model Comparison`, index 10) so overflow buttons are exercised
+    // regardless of proportional system font widths.
+    for _ in 0..8 {
+        if driver.find_widget("result.tab.model-comparison").is_some_and(|n| n.drawn_in_frame) {
+            break;
+        }
+        let _ = human_wf_common::click_widget_center(&mut driver, &next_btn)?;
+    }
+    if !driver.find_widget("result.tab.model-comparison").is_some_and(|n| n.drawn_in_frame) {
+        return Err(String::from("expected result.tabs.next to reveal final tab `Model Comparison`"));
+    }
+
+    // Prev overflow button scrolls back toward first tabs (disabling `result.tabs.prev` at offset 0).
     let prev_btn = WidgetId::from("result.tabs.prev");
     for _ in 0..8 {
-        if driver.find_widget("result.tab.multiple-comparisons").is_some_and(|n| n.drawn_in_frame) {
+        if driver.find_widget("result.tab.main-summary").is_some_and(|n| n.drawn_in_frame)
+            && driver.find_widget("result.tab.multiple-comparisons").is_some_and(|n| n.drawn_in_frame)
+        {
             break;
         }
         let _ = human_wf_common::click_widget_center(&mut driver, &prev_btn)?;
