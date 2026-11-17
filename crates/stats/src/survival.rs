@@ -1,14 +1,14 @@
 //! Survival analysis: Kaplan–Meier curves, Greenwood / log-log confidence bands,
 //! Brookmeyer–Crowley median survival CI, Log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon,
-//! log-rank trend, Hazard Ratios, and Cox Proportional Hazards regression (Efron & Breslow ties)
-//! with Schoenfeld residual proportional-hazards diagnostics.
+//! log-rank trend, Hazard Ratios, and Cox Proportional Hazards regression (Breslow, Efron, & Exact
+//! ties) with Schoenfeld residual proportional-hazards diagnostics.
 //!
 //! Methods follow Kaplan & Meier (1958), Greenwood (1926), Kalbfleisch & Prentice (2002),
 //! Brookmeyer & Crowley (1982), Mantel (1966), Peto & Peto (1972), Gehan (1965), Breslow (1970),
 //! Tarone (1975), Berry, Kitchin & Mock (1991), Cox (1972), Breslow (1974), Efron (1977),
-//! Schoenfeld (1982), Therneau, Grambsch & Fleming (1990), Grambsch & Therneau (1994),
-//! Harrell et al. (1982), with textbook treatments in Klein & Moeschberger (2003) and
-//! Therneau & Grambsch (2000).
+//! Gail, Lubin & Rubinstein (1981), Schoenfeld (1982), Therneau, Grambsch & Fleming (1990),
+//! Grambsch & Therneau (1994), Harrell et al. (1982), with textbook treatments in Klein &
+//! Moeschberger (2003) and Therneau & Grambsch (2000).
 //!
 //! References:
 //! - Kaplan, E. L., & Meier, P. (1958). Nonparametric estimation from incomplete observations.
@@ -665,21 +665,22 @@ pub struct CoxSubject {
 }
 
 /// Fit Cox Proportional Hazards model via Newton–Raphson with backtracking step-halving,
-/// supporting Breslow and Efron tie handling, omnibus LR/Wald/Score tests, Harrell's C-index,
-/// and Schoenfeld residual proportional-hazards checks.
+/// supporting Breslow, Efron, and Exact discrete tie handling, omnibus LR/Wald/Score tests,
+/// Harrell's C-index, and Schoenfeld residual proportional-hazards checks.
 ///
 /// - Model and estimation: maximizes the Cox (1972) partial likelihood (covariates are centred at
-///   their sample means first; `beta` is invariant to the shift). Linear predictors are clamped to
-///   `[-50, 50]` before exponentiation as an overflow guard.
-/// - Ties: Breslow (1974) approximation (every tied event sees the full risk set) or Efron (1977)
-///   approximation (the `m`-th of `d` tied events sees the risk set minus `m / d` of the tied
-///   events' weight), with the matching score and observed information (Therneau & Grambsch 2000).
+///   their sample means first; `beta` is invariant to the shift) with per-risk-set log-sum-exp
+///   stabilization so cohorts with large predicted-risk differences across follow-up time avoid
+///   risk-set underflow or overflow.
+/// - Ties: Breslow (1974) approximation, Efron (1977) approximation, or Exact discrete partial
+///   likelihood (Kalbfleisch & Prentice 2002; Gail, Lubin & Rubinstein 1981 log-space symmetric
+///   polynomial dynamic programming over tied event sets).
 /// - Inference: `Cov(beta)` is the inverse observed information at convergence; Wald `z` and HR CIs
 ///   `exp(beta +/- z * SE)`; omnibus likelihood-ratio, Wald, and score (at `beta = 0`) chi-square
 ///   tests on `p` degrees of freedom.
 /// - Residuals and baseline hazard: martingale and deviance residuals (Therneau, Grambsch & Fleming
-///   1990) and the Breslow-type cumulative baseline hazard (Breslow 1974), Efron-adjusted when
-///   Efron ties are selected (Therneau & Grambsch 2000).
+///   1990) and the cumulative baseline hazard (Breslow 1974, Efron-adjusted when Efron ties are
+///   selected; Therneau & Grambsch 2000).
 /// - Discrimination: Harrell et al. (1982) concordance index.
 /// - Proportional hazards: Schoenfeld (1982) residuals and the Grambsch & Therneau (1994) test.
 ///
@@ -721,19 +722,21 @@ pub fn cox_ph_regression(
         })
         .collect();
     ordered.sort_by(|a, b| a.0.total_cmp(&b.0).then_with(|| b.1.cmp(&a.1)));
+    let clusters = build_cox_clusters(&ordered);
 
     let zero_beta = vec![0.0_f64; p];
-    let (ll_null, grad_null, info_null) = cox_eval(&ordered, &zero_beta, tie_method, p)?;
+    let (ll_null, grad_null, info_null) = cox_eval(&ordered, &clusters, &zero_beta, tie_method, p)?;
     let score_chi2 = solve_quad_form(&info_null, &grad_null, p).unwrap_or(0.0);
 
     let mut beta = vec![0.0_f64; p];
     let mut ll_curr = ll_null;
     let mut grad = grad_null;
     let mut info = info_null.clone();
+    let mut last_step = vec![0.0_f64; p];
     let mut converged = false;
     let mut iterations = 0_usize;
 
-    for iter in 1..=50 {
+    for iter in 1..=80 {
         iterations = iter;
         let info_mat = DenseMatrix::from_row_major(p, p, info.clone())?;
         let step = if let Ok(chol) = cholesky(&info_mat) {
@@ -748,13 +751,13 @@ pub fn cox_ph_regression(
             let (ls, _) = solve_linear_least_squares(&dm, &grad)?;
             ls.coefficients
         };
-        let max_step = step.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let mut scale = if max_step > 2.0 { 2.0 / max_step } else { 1.0 };
+        let max_lp_step = max_abs_linear_predictor(&ordered, &step);
+        let mut scale = if max_lp_step > 1e6 { 1e6 / max_lp_step } else { 1.0 };
 
         let mut accepted = false;
-        for _ in 0..20 {
+        for _ in 0..32 {
             let cand: Vec<f64> = (0..p).map(|j| beta[j] + scale * step[j]).collect();
-            if let Ok((ll_cand, g_cand, i_cand)) = cox_eval(&ordered, &cand, tie_method, p)
+            if let Ok((ll_cand, g_cand, i_cand)) = cox_eval(&ordered, &clusters, &cand, tie_method, p)
                 && ll_cand.is_finite()
                 && ll_cand >= ll_curr - 1e-12
             {
@@ -763,8 +766,9 @@ pub fn cox_ph_regression(
                 ll_curr = ll_cand;
                 grad = g_cand;
                 info = i_cand;
+                last_step = step;
                 accepted = true;
-                if delta < 1e-10 && max_step * scale < 1e-8 {
+                if delta < 1e-10 && max_lp_step * scale < 1e-8 {
                     converged = true;
                 }
                 break;
@@ -776,32 +780,17 @@ pub fn cox_ph_regression(
         }
     }
 
-    let (lp_min, lp_max) = ordered.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(mn, mx), s| {
-        let lp: f64 = s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
-        (mn.min(lp), mx.max(lp))
-    });
-    let lp_span = lp_max - lp_min;
-    let separation_or_diverged = !converged || !lp_span.is_finite() || lp_span > 35.0 || beta.iter().any(|b| !b.is_finite());
-
+    let info_null_mat = DenseMatrix::from_row_major(p, p, info_null.clone())?;
+    let null_well_conditioned = cholesky(&info_null_mat).ok().is_some_and(|chol| matrix_pivots_well_conditioned(&chol, &info_null, p));
     let info_mat = DenseMatrix::from_row_major(p, p, info.clone())?;
     let chol_opt = cholesky(&info_mat).ok();
-    let well_conditioned = chol_opt.as_ref().is_some_and(|chol| {
-        (0..p).all(|j| {
-            let diag_null = info_null[j * p + j];
-            let diag_curr = info[j * p + j];
-            let piv = chol.l().get(j, j).unwrap_or(0.0);
-            let piv_sq = piv * piv;
-            diag_null.is_finite()
-                && diag_null > 0.0
-                && diag_curr.is_finite()
-                && diag_curr > 1e-8 * diag_null
-                && piv.is_finite()
-                && piv_sq > 1e-10 * diag_curr
-        })
-    });
+    let curr_well_conditioned = chol_opt.as_ref().is_some_and(|chol| matrix_pivots_well_conditioned(chol, &info, p));
+
+    let separated = detect_cox_separation(&ordered, &clusters, &beta, &last_step, &info_null, &info, p);
+    let diverged = !converged || !ll_curr.is_finite() || beta.iter().any(|b| !b.is_finite());
 
     // Never regularize (info + 1e-6*I) or substitute I when covariance is singular/separated.
-    if separation_or_diverged || !well_conditioned {
+    if diverged || separated || !null_well_conditioned || !curr_well_conditioned {
         converged = false;
     }
     let cov_beta = if converged { chol_opt.and_then(|chol| chol.inverse().ok()) } else { None };
@@ -827,7 +816,7 @@ pub fn cox_ph_regression(
     let score_p = chi2_sf(score_chi2, df)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &beta, cov_beta.as_ref(), tie_method, p)?;
+    let (schoenfeld_rhos, schoenfeld_ps, global_sch_chi2) = schoenfeld_diagnostics(&ordered, &clusters, &beta, cov_beta.as_ref(), tie_method, p)?;
     let global_sch_p = if global_sch_chi2.is_finite() { chi2_sf(global_sch_chi2, df)? } else { f64::NAN };
 
     let mut covariates = Vec::with_capacity(p);
@@ -854,7 +843,7 @@ pub fn cox_ph_regression(
         });
     }
 
-    let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &beta, tie_method, n);
+    let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &clusters, &beta, tie_method, n);
     let concordance = harrell_c_index(&ordered, &beta);
     let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_beta.as_ref(), p);
 
@@ -907,124 +896,509 @@ fn cox_cov_and_corr_matrices(cov_beta: Option<&DenseMatrix>, p: usize) -> (Vec<V
     (cov_rows, corr_rows)
 }
 
-/// Log partial likelihood, score vector, and observed information of the Cox (1972) model at
-/// `beta`, with Breslow (1974) or Efron (1977) tie handling (Therneau & Grambsch 2000).
-fn cox_eval(
-    ordered: &[(f64, bool, Vec<f64>, usize)],
-    beta: &[f64],
-    tie_method: CoxTieMethod,
-    p: usize,
-) -> Result<(f64, Vec<f64>, Vec<f64>), StatsError> {
+#[derive(Debug, Clone, Copy)]
+struct CoxTimeCluster {
+    time: f64,
+    risk_start: usize,
+    event_end: usize,
+    cluster_end: usize,
+}
+
+fn build_cox_clusters(ordered: &[(f64, bool, Vec<f64>, usize)]) -> Vec<CoxTimeCluster> {
     let n = ordered.len();
-    let mut raw_lp = vec![0.0_f64; n];
-    let mut lp_max = f64::NEG_INFINITY;
-    for i in 0..n {
-        let lp: f64 = ordered[i].2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
-        if !lp.is_finite() {
-            return Err(StatsError::NotConverged { algorithm: "cox_eval_non_finite_lp" });
-        }
-        raw_lp[i] = lp;
-        if lp > lp_max {
-            lp_max = lp;
-        }
-    }
-    let mut eta = vec![0.0_f64; n];
-    let mut w = vec![0.0_f64; n];
-    for i in 0..n {
-        eta[i] = raw_lp[i] - lp_max;
-        w[i] = eta[i].exp();
-    }
-
-    // Cumulative risk-set sums from largest time down to smallest.
-    let mut s0_rev = vec![0.0_f64; n + 1];
-    let mut s1_rev = vec![vec![0.0_f64; p]; n + 1];
-    let mut s2_rev = vec![vec![0.0_f64; p * p]; n + 1];
-
-    for i in (0..n).rev() {
-        let wi = w[i];
-        s0_rev[i] = s0_rev[i + 1] + wi;
-        for j in 0..p {
-            s1_rev[i][j] = s1_rev[i + 1][j] + wi * ordered[i].2[j];
-            for k in j..p {
-                let val = s2_rev[i + 1][j * p + k] + wi * ordered[i].2[j] * ordered[i].2[k];
-                s2_rev[i][j * p + k] = val;
-                s2_rev[i][k * p + j] = val;
-            }
-        }
-    }
-
-    let mut ll = 0.0_f64;
-    let mut grad = vec![0.0_f64; p];
-    let mut info = vec![0.0_f64; p * p];
-
+    let mut clusters = Vec::new();
     let mut idx = 0_usize;
     while idx < n {
         let t = ordered[idx].0;
         let risk_start = idx;
-        let mut event_indices = Vec::new();
-        while idx < n && ordered[idx].0 == t {
-            if ordered[idx].1 {
-                event_indices.push(idx);
-            }
+        while idx < n && ordered[idx].0 == t && ordered[idx].1 {
             idx += 1;
         }
-        let d = event_indices.len();
-        if d == 0 {
+        let event_end = idx;
+        while idx < n && ordered[idx].0 == t {
+            idx += 1;
+        }
+        clusters.push(CoxTimeCluster { time: t, risk_start, event_end, cluster_end: idx });
+    }
+    clusters
+}
+
+#[inline]
+fn log_add_exp(a: f64, b: f64) -> f64 {
+    if !a.is_finite() {
+        return b;
+    }
+    if !b.is_finite() {
+        return a;
+    }
+    let (hi, lo) = if a >= b { (a, b) } else { (b, a) };
+    let diff = lo - hi;
+    if diff < -750.0 { hi } else { hi + diff.exp().ln_1p() }
+}
+
+fn compute_linear_predictors(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> Result<Vec<f64>, StatsError> {
+    let mut lps = Vec::with_capacity(ordered.len());
+    for s in ordered {
+        let lp: f64 = s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum();
+        if !lp.is_finite() {
+            return Err(StatsError::NotConverged { algorithm: "cox_eval_non_finite_lp" });
+        }
+        lps.push(lp);
+    }
+    Ok(lps)
+}
+
+fn max_abs_linear_predictor(ordered: &[(f64, bool, Vec<f64>, usize)], vec: &[f64]) -> f64 {
+    ordered.iter().map(|s| s.2.iter().zip(vec.iter()).map(|(x, b)| x * b).sum::<f64>().abs()).fold(0.0_f64, f64::max)
+}
+
+fn matrix_pivots_well_conditioned(chol: &curvebook_math::linalg::Cholesky, mat: &[f64], p: usize) -> bool {
+    (0..p).all(|j| {
+        let diag = mat[j * p + j];
+        let piv = chol.l().get(j, j).unwrap_or(0.0);
+        let piv_sq = piv * piv;
+        diag.is_finite() && diag > 0.0 && piv.is_finite() && piv_sq > 1e-10 * diag
+    })
+}
+
+fn has_monotone_separation(ordered: &[(f64, bool, Vec<f64>, usize)], clusters: &[CoxTimeCluster], dir: &[f64]) -> bool {
+    let dir_norm = dir.iter().map(|v| v * v).sum::<f64>().sqrt();
+    if !dir_norm.is_finite() || dir_norm <= 0.0 {
+        return false;
+    }
+    let lps: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(dir.iter()).map(|(x, d)| x * d).sum::<f64>()).collect();
+    let max_abs = lps.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
+    if !max_abs.is_finite() || max_abs == 0.0 {
+        return false;
+    }
+    let tol = 1e-12 * max_abs;
+    let n = ordered.len();
+    let mut has_strict = false;
+    for cl in clusters {
+        if cl.event_end == cl.risk_start || cl.event_end == n {
             continue;
         }
-        let s0_risk = s0_rev[risk_start];
-        let s1_risk = &s1_rev[risk_start];
-        let s2_risk = &s2_rev[risk_start];
+        let min_evt = lps[cl.risk_start..cl.event_end].iter().copied().fold(f64::INFINITY, f64::min);
+        let mut max_surv = f64::NEG_INFINITY;
+        let mut min_surv = f64::INFINITY;
+        for &lp in &lps[cl.event_end..n] {
+            max_surv = max_surv.max(lp);
+            min_surv = min_surv.min(lp);
+        }
+        if min_evt < max_surv - tol {
+            return false;
+        }
+        // Strict or quasi-complete separation: all events >= all survivors, and some survivor is strictly lower.
+        if min_evt > min_surv + tol {
+            has_strict = true;
+        }
+    }
+    has_strict
+}
 
-        // Sum over tied event subjects.
-        let mut s0_evt = 0.0_f64;
-        let mut s1_evt = vec![0.0_f64; p];
-        let mut s2_evt = vec![0.0_f64; p * p];
-        for &ei in &event_indices {
-            let wei = w[ei];
-            s0_evt += wei;
-            ll += eta[ei];
-            for j in 0..p {
-                grad[j] += ordered[ei].2[j];
-                s1_evt[j] += wei * ordered[ei].2[j];
-                for k in j..p {
-                    let v = s2_evt[j * p + k] + wei * ordered[ei].2[j] * ordered[ei].2[k];
-                    s2_evt[j * p + k] = v;
-                    s2_evt[k * p + j] = v;
+fn detect_cox_separation(
+    ordered: &[(f64, bool, Vec<f64>, usize)],
+    clusters: &[CoxTimeCluster],
+    beta: &[f64],
+    last_step: &[f64],
+    info_null: &[f64],
+    info_curr: &[f64],
+    p: usize,
+) -> bool {
+    let neg_beta: Vec<f64> = beta.iter().map(|b| -b).collect();
+    if has_monotone_separation(ordered, clusters, beta) || has_monotone_separation(ordered, clusters, &neg_beta) {
+        return true;
+    }
+    let neg_step: Vec<f64> = last_step.iter().map(|v| -v).collect();
+    if has_monotone_separation(ordered, clusters, last_step) || has_monotone_separation(ordered, clusters, &neg_step) {
+        return true;
+    }
+    for j in 0..p {
+        let dn = info_null[j * p + j];
+        let dc = info_curr[j * p + j];
+        if dn.is_finite() && dn > 0.0 && (!dc.is_finite() || dc <= 1e-8 * dn) {
+            let mut pos_e = vec![0.0_f64; p];
+            let mut neg_e = vec![0.0_f64; p];
+            pos_e[j] = 1.0;
+            neg_e[j] = -1.0;
+            if has_monotone_separation(ordered, clusters, &pos_e) || has_monotone_separation(ordered, clusters, &neg_e) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+struct WeightedRiskMoments {
+    p: usize,
+    shift: f64,
+    weight_sum: f64,
+    mean: Vec<f64>,
+    m2: Vec<f64>,
+    delta: Vec<f64>,
+}
+
+impl WeightedRiskMoments {
+    fn new(p: usize) -> Self {
+        Self { p, shift: f64::NEG_INFINITY, weight_sum: 0.0, mean: vec![0.0_f64; p], m2: vec![0.0_f64; p * p], delta: vec![0.0_f64; p] }
+    }
+
+    fn reset(&mut self, shift: f64) {
+        self.shift = shift;
+        self.weight_sum = 0.0;
+        self.mean.fill(0.0);
+        self.m2.fill(0.0);
+    }
+
+    fn rescale_to(&mut self, new_shift: f64, need_info: bool) {
+        if !self.shift.is_finite() {
+            self.shift = new_shift;
+            return;
+        }
+        if new_shift > self.shift {
+            let scale = (self.shift - new_shift).exp();
+            if scale == 0.0 {
+                self.weight_sum = 0.0;
+                if need_info {
+                    self.m2.fill(0.0);
+                }
+            } else {
+                self.weight_sum *= scale;
+                if need_info {
+                    for j in 0..self.p {
+                        for k in j..self.p {
+                            self.m2[j * self.p + k] *= scale;
+                        }
+                    }
+                }
+            }
+            self.shift = new_shift;
+        }
+    }
+
+    fn add_subject(&mut self, lp: f64, x: &[f64], need_info: bool) {
+        let w = (lp - self.shift).exp();
+        if w == 0.0 || !w.is_finite() {
+            return;
+        }
+        if self.weight_sum == 0.0 {
+            self.weight_sum = w;
+            self.mean.copy_from_slice(x);
+            return;
+        }
+        let w_new = self.weight_sum + w;
+        let inv_w_new = 1.0 / w_new;
+        for j in 0..self.p {
+            let d = x[j] - self.mean[j];
+            self.delta[j] = d;
+            self.mean[j] += (w * inv_w_new) * d;
+        }
+        if need_info {
+            let factor = w * (self.weight_sum * inv_w_new);
+            for j in 0..self.p {
+                for k in j..self.p {
+                    self.m2[j * self.p + k] += factor * self.delta[j] * self.delta[k];
                 }
             }
         }
+        self.weight_sum = w_new;
+    }
 
-        let df_f = d as f64;
-        for m in 0..d {
-            let frac = match tie_method {
-                CoxTieMethod::Breslow => 0.0,
-                CoxTieMethod::Efron => (m as f64) / df_f,
-            };
-            let raw_denom = s0_risk - frac * s0_evt;
-            if !raw_denom.is_finite() || raw_denom <= 0.0 {
-                return Err(StatsError::NotConverged { algorithm: "cox_eval_risk_underflow" });
+    fn merge_same_shift(&mut self, other: &Self, need_info: bool) {
+        if other.weight_sum == 0.0 {
+            return;
+        }
+        if self.weight_sum == 0.0 {
+            self.weight_sum = other.weight_sum;
+            self.mean.copy_from_slice(&other.mean);
+            if need_info {
+                self.m2.copy_from_slice(&other.m2);
             }
-            let denom = raw_denom;
-            ll -= denom.ln();
-            for j in 0..p {
-                let s1_eff = s1_risk[j] - frac * s1_evt[j];
-                let mean_j = s1_eff / denom;
-                grad[j] -= mean_j;
+            return;
+        }
+        let ws = self.weight_sum;
+        let we = other.weight_sum;
+        let w_tot = ws + we;
+        for j in 0..self.p {
+            let d = other.mean[j] - self.mean[j];
+            self.delta[j] = d;
+            if ws >= we {
+                self.mean[j] += (we / w_tot) * d;
+            } else {
+                self.mean[j] = other.mean[j] - (ws / w_tot) * d;
             }
-            for j in 0..p {
-                let mean_j = (s1_risk[j] - frac * s1_evt[j]) / denom;
-                for k in j..p {
-                    let mean_k = (s1_risk[k] - frac * s1_evt[k]) / denom;
-                    let s2_eff = s2_risk[j * p + k] - frac * s2_evt[j * p + k];
-                    let v = s2_eff / denom - mean_j * mean_k;
-                    info[j * p + k] += v;
+        }
+        if need_info {
+            let bridge = (ws * we) / w_tot;
+            for j in 0..self.p {
+                for k in j..self.p {
+                    self.m2[j * self.p + k] += other.m2[j * self.p + k] + bridge * self.delta[j] * self.delta[k];
+                }
+            }
+        }
+        self.weight_sum = w_tot;
+    }
+
+    fn combine_mean_and_cov(&self, other: &Self, other_scale: f64, mean_out: &mut [f64], mut info_acc: Option<&mut [f64]>) -> f64 {
+        let ws = self.weight_sum;
+        let we = other_scale * other.weight_sum;
+        let denom = ws + we;
+        if denom <= 0.0 {
+            return 0.0;
+        }
+        if ws == 0.0 {
+            mean_out.copy_from_slice(&other.mean);
+            if let Some(info) = info_acc {
+                let scale = other_scale / denom;
+                for j in 0..self.p {
+                    for k in j..self.p {
+                        let v = scale * other.m2[j * self.p + k];
+                        info[j * self.p + k] += v;
+                        if j != k {
+                            info[k * self.p + j] += v;
+                        }
+                    }
+                }
+            }
+            return denom;
+        }
+        if we == 0.0 {
+            mean_out.copy_from_slice(&self.mean);
+            if let Some(info) = info_acc {
+                let scale = 1.0 / denom;
+                for j in 0..self.p {
+                    for k in j..self.p {
+                        let v = scale * self.m2[j * self.p + k];
+                        info[j * self.p + k] += v;
+                        if j != k {
+                            info[k * self.p + j] += v;
+                        }
+                    }
+                }
+            }
+            return denom;
+        }
+        let bridge = (ws * we) / denom;
+        for j in 0..self.p {
+            let d = other.mean[j] - self.mean[j];
+            mean_out[j] = if ws >= we { self.mean[j] + (we / denom) * d } else { other.mean[j] - (ws / denom) * d };
+        }
+        if let Some(ref mut info) = info_acc {
+            for j in 0..self.p {
+                let dj = other.mean[j] - self.mean[j];
+                for k in j..self.p {
+                    let dk = other.mean[k] - self.mean[k];
+                    let v = (self.m2[j * self.p + k] + other_scale * other.m2[j * self.p + k] + bridge * dj * dk) / denom;
+                    info[j * self.p + k] += v;
                     if j != k {
-                        info[k * p + j] += v;
+                        info[k * self.p + j] += v;
                     }
                 }
             }
         }
+        denom
+    }
+}
+
+/// Log-space Gail–Lubin–Rubinstein (1981) symmetric-polynomial dynamic programming for a tied
+/// event cluster `(risk_start, event_end)` with `d >= 2` events out of `m = n - risk_start` at-risk
+/// subjects.
+///
+/// Returns `(ll_contrib, mu_d, cov_d_upper)` where `mu_d = E[sum_{S} x]` and
+/// `cov_d = Cov(sum_{S} x)` over all `d`-subsets `S` of the risk set with probability proportional
+/// to `exp(sum_{i in S} lp[i])`. Uses complement symmetry `d_eff = d.min(m - d)` when `d > m / 2`.
+fn glr_exact_cluster_dp(
+    ordered: &[(f64, bool, Vec<f64>, usize)],
+    raw_lp: &[f64],
+    risk_start: usize,
+    event_end: usize,
+    p: usize,
+    need_info: bool,
+) -> (f64, Vec<f64>, Vec<f64>) {
+    let n = ordered.len();
+    let d = event_end - risk_start;
+    let m = n - risk_start;
+    let p2 = p * p;
+    if d == m {
+        let mut mu_tot = vec![0.0_f64; p];
+        for row in &ordered[risk_start..n] {
+            for j in 0..p {
+                mu_tot[j] += row.2[j];
+            }
+        }
+        return (0.0, mu_tot, vec![0.0_f64; p2]);
+    }
+
+    let complement = d > m / 2;
+    let k_target = if complement { m - d } else { d };
+    let sign = if complement { -1.0_f64 } else { 1.0_f64 };
+    let lp_ref = if complement {
+        raw_lp[risk_start..n].iter().copied().fold(f64::INFINITY, f64::min)
+    } else {
+        raw_lp[risk_start..n].iter().copied().fold(f64::NEG_INFINITY, f64::max)
+    };
+
+    let mut dp_l = vec![f64::NEG_INFINITY; k_target + 1];
+    dp_l[0] = 0.0;
+    let mut dp_mu = vec![0.0_f64; (k_target + 1) * p];
+    let mut dp_c = if need_info { vec![0.0_f64; (k_target + 1) * p2] } else { Vec::new() };
+    let mut delta = vec![0.0_f64; p];
+
+    for (step_idx, i) in (risk_start..n).enumerate() {
+        let eta_item = sign * (raw_lp[i] - lp_ref);
+        let x_item = &ordered[i].2;
+        let k_max = (step_idx + 1).min(k_target);
+        for k in (1..=k_max).rev() {
+            let l_prev = dp_l[k - 1];
+            if !l_prev.is_finite() {
+                continue;
+            }
+            let l_term = eta_item + l_prev;
+            let l_old = dp_l[k];
+            if !l_old.is_finite() {
+                dp_l[k] = l_term;
+                for j in 0..p {
+                    dp_mu[k * p + j] = dp_mu[(k - 1) * p + j] + x_item[j];
+                }
+                if need_info {
+                    let src = (k - 1) * p2;
+                    let dst = k * p2;
+                    dp_c.copy_within(src..src + p2, dst);
+                }
+            } else {
+                let l_new = log_add_exp(l_old, l_term);
+                let alpha = (l_old - l_new).exp();
+                let gamma = (l_term - l_new).exp();
+                dp_l[k] = l_new;
+                for j in 0..p {
+                    delta[j] = (dp_mu[(k - 1) * p + j] + x_item[j]) - dp_mu[k * p + j];
+                }
+                if need_info {
+                    let bridge = alpha * gamma;
+                    let cur_off = k * p2;
+                    let prv_off = (k - 1) * p2;
+                    for j in 0..p {
+                        for col in j..p {
+                            let idx_mat = j * p + col;
+                            dp_c[cur_off + idx_mat] =
+                                alpha * dp_c[cur_off + idx_mat] + gamma * dp_c[prv_off + idx_mat] + bridge * delta[j] * delta[col];
+                        }
+                    }
+                }
+                for j in 0..p {
+                    if alpha >= gamma {
+                        dp_mu[k * p + j] += gamma * delta[j];
+                    } else {
+                        dp_mu[k * p + j] = (dp_mu[(k - 1) * p + j] + x_item[j]) - alpha * delta[j];
+                    }
+                }
+            }
+        }
+    }
+
+    let c_out = if need_info { dp_c[k_target * p2..(k_target + 1) * p2].to_vec() } else { Vec::new() };
+    let mu_res = &dp_mu[k_target * p..(k_target + 1) * p];
+    if complement {
+        let mut surv_eta = 0.0_f64;
+        for &lp in &raw_lp[event_end..n] {
+            surv_eta += -(lp - lp_ref);
+        }
+        let ll_contrib = surv_eta - dp_l[k_target];
+        let mut mu_d = vec![0.0_f64; p];
+        for row in &ordered[risk_start..n] {
+            for j in 0..p {
+                mu_d[j] += row.2[j];
+            }
+        }
+        for j in 0..p {
+            mu_d[j] -= mu_res[j];
+        }
+        (ll_contrib, mu_d, c_out)
+    } else {
+        let mut evt_eta = 0.0_f64;
+        for &lp in &raw_lp[risk_start..event_end] {
+            evt_eta += lp - lp_ref;
+        }
+        let ll_contrib = evt_eta - dp_l[k_target];
+        (ll_contrib, mu_res.to_vec(), c_out)
+    }
+}
+
+/// Log partial likelihood, score vector, and observed information of the Cox (1972) model at
+/// `beta`, with Breslow (1974), Efron (1977), or Exact discrete (Kalbfleisch & Prentice 2002;
+/// Gail, Lubin & Rubinstein 1981) tie handling, stabilized via per-risk-set log-sum-exp.
+fn cox_eval(
+    ordered: &[(f64, bool, Vec<f64>, usize)],
+    clusters: &[CoxTimeCluster],
+    beta: &[f64],
+    tie_method: CoxTieMethod,
+    p: usize,
+) -> Result<(f64, Vec<f64>, Vec<f64>), StatsError> {
+    let raw_lp = compute_linear_predictors(ordered, beta)?;
+    let mut ll = 0.0_f64;
+    let mut grad = vec![0.0_f64; p];
+    let mut info = vec![0.0_f64; p * p];
+
+    let mut after = WeightedRiskMoments::new(p);
+    let mut evt_moments = WeightedRiskMoments::new(p);
+    let mut mean_buf = vec![0.0_f64; p];
+
+    for cl in clusters.iter().rev() {
+        let lp_cluster_max = raw_lp[cl.risk_start..cl.cluster_end].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lp_risk_max = if after.shift.is_finite() { after.shift.max(lp_cluster_max) } else { lp_cluster_max };
+        after.rescale_to(lp_risk_max, true);
+        for i in cl.event_end..cl.cluster_end {
+            after.add_subject(raw_lp[i], &ordered[i].2, true);
+        }
+
+        evt_moments.reset(lp_risk_max);
+        for i in cl.risk_start..cl.event_end {
+            evt_moments.add_subject(raw_lp[i], &ordered[i].2, true);
+        }
+
+        let d = cl.event_end - cl.risk_start;
+        if d > 0 {
+            if tie_method == CoxTieMethod::Exact && d >= 2 {
+                let (ll_cl, mu_d, c_d) = glr_exact_cluster_dp(ordered, &raw_lp, cl.risk_start, cl.event_end, p, true);
+                ll += ll_cl;
+                for i in cl.risk_start..cl.event_end {
+                    for j in 0..p {
+                        grad[j] += ordered[i].2[j];
+                    }
+                }
+                for j in 0..p {
+                    grad[j] -= mu_d[j];
+                    for k in j..p {
+                        let v = c_d[j * p + k];
+                        info[j * p + k] += v;
+                        if j != k {
+                            info[k * p + j] += v;
+                        }
+                    }
+                }
+            } else {
+                for i in cl.risk_start..cl.event_end {
+                    ll += raw_lp[i] - lp_risk_max;
+                    for j in 0..p {
+                        grad[j] += ordered[i].2[j];
+                    }
+                }
+                let df_f = d as f64;
+                for m in 0..d {
+                    let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / df_f } else { 0.0 };
+                    let denom = after.combine_mean_and_cov(&evt_moments, 1.0 - frac, &mut mean_buf, Some(&mut info));
+                    if !denom.is_finite() || denom <= 0.0 {
+                        return Err(StatsError::NotConverged { algorithm: "cox_eval_risk_underflow" });
+                    }
+                    ll -= denom.ln();
+                    for j in 0..p {
+                        grad[j] -= mean_buf[j];
+                    }
+                }
+            }
+        }
+
+        after.merge_same_shift(&evt_moments, true);
     }
 
     Ok((ll, grad, info))
@@ -1041,19 +1415,13 @@ fn solve_quad_form(mat_data: &[f64], vec: &[f64], p: usize) -> Result<f64, Stats
     Ok(vec.iter().zip(sol.iter()).map(|(a, b)| a * b).sum::<f64>().max(0.0))
 }
 
-/// Schoenfeld (1982) residuals `r_k = x_k - xbar(beta, t_k)` at each event (with the Efron-weighted
-/// risk-set mean when Efron ties are used) and the Grambsch & Therneau (1994) proportional-hazards
-/// tests based on scaled residuals `r*_k = d * Cov(beta) * r_k`.
-///
-/// The time transform is the event rank divided by `d + 1` (tied event times share their average
-/// rank). Per covariate, `rho` is the Pearson correlation of `r*_kj` with the transformed time, and
-/// the test statistic is the approximate form
-/// `(sum_k (g_k - gbar) r*_kj)^2 / (d * Cov(beta)_jj * sum_k (g_k - gbar)^2)` on 1 df. The global
-/// statistic is the matching approximate form using the full `Cov(beta)` on `p` df. The `+ beta`
-/// offset of the scaled residuals is omitted because it does not affect either statistic.
-/// Full references are listed in the module header.
+/// Schoenfeld (1982) residuals `r_k = x_k - xbar(beta, t_k)` at each event (Breslow risk-set mean,
+/// Efron-weighted mean, or Exact conditional mean `mu_d / d`) and Grambsch & Therneau (1994)
+/// proportional-hazards tests based on scaled residuals `r*_k = d * Cov(beta) * r_k`, stabilized
+/// per risk set without linear-predictor clamping.
 fn schoenfeld_diagnostics(
     ordered: &[(f64, bool, Vec<f64>, usize)],
+    clusters: &[CoxTimeCluster],
     beta: &[f64],
     cov_beta: Option<&DenseMatrix>,
     tie_method: CoxTieMethod,
@@ -1062,53 +1430,57 @@ fn schoenfeld_diagnostics(
     let Some(cov_beta) = cov_beta else {
         return Ok((vec![f64::NAN; p], vec![f64::NAN; p], f64::NAN));
     };
-    let n = ordered.len();
-    let w: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum::<f64>().clamp(-50.0, 50.0).exp()).collect();
-    let mut s0_rev = vec![0.0_f64; n + 1];
-    let mut s1_rev = vec![vec![0.0_f64; p]; n + 1];
-    for i in (0..n).rev() {
-        s0_rev[i] = s0_rev[i + 1] + w[i];
-        let next_s1 = s1_rev[i + 1].clone();
-        for ((dst, &nxt), &xv) in s1_rev[i].iter_mut().zip(&next_s1).zip(&ordered[i].2) {
-            *dst = nxt + w[i] * xv;
+    let raw_lp = compute_linear_predictors(ordered, beta)?;
+
+    let mut cluster_e_bars: Vec<Option<Vec<f64>>> = vec![None; clusters.len()];
+    let mut after = WeightedRiskMoments::new(p);
+    let mut evt_moments = WeightedRiskMoments::new(p);
+    let mut mean_buf = vec![0.0_f64; p];
+
+    for (c_idx, cl) in clusters.iter().enumerate().rev() {
+        let lp_cluster_max = raw_lp[cl.risk_start..cl.cluster_end].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lp_risk_max = if after.shift.is_finite() { after.shift.max(lp_cluster_max) } else { lp_cluster_max };
+        after.rescale_to(lp_risk_max, false);
+        for i in cl.event_end..cl.cluster_end {
+            after.add_subject(raw_lp[i], &ordered[i].2, false);
         }
+        evt_moments.reset(lp_risk_max);
+        for i in cl.risk_start..cl.event_end {
+            evt_moments.add_subject(raw_lp[i], &ordered[i].2, false);
+        }
+
+        let d = cl.event_end - cl.risk_start;
+        if d > 0 {
+            let mut e_bar = vec![0.0_f64; p];
+            let df_f = d as f64;
+            if tie_method == CoxTieMethod::Exact && d >= 2 {
+                let (_, mu_d, _) = glr_exact_cluster_dp(ordered, &raw_lp, cl.risk_start, cl.event_end, p, false);
+                for j in 0..p {
+                    e_bar[j] = mu_d[j] / df_f;
+                }
+            } else {
+                for m in 0..d {
+                    let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / df_f } else { 0.0 };
+                    let _ = after.combine_mean_and_cov(&evt_moments, 1.0 - frac, &mut mean_buf, None);
+                    for j in 0..p {
+                        e_bar[j] += mean_buf[j] / df_f;
+                    }
+                }
+            }
+            cluster_e_bars[c_idx] = Some(e_bar);
+        }
+
+        after.merge_same_shift(&evt_moments, false);
     }
 
     let mut resid_rows: Vec<(f64, Vec<f64>)> = Vec::new();
-    let mut idx = 0_usize;
-    while idx < n {
-        let t = ordered[idx].0;
-        let r_start = idx;
-        let mut evts = Vec::new();
-        while idx < n && ordered[idx].0 == t {
-            if ordered[idx].1 {
-                evts.push(idx);
-            }
-            idx += 1;
-        }
-        if evts.is_empty() {
+    for (c_idx, cl) in clusters.iter().enumerate() {
+        let Some(e_bar) = &cluster_e_bars[c_idx] else {
             continue;
-        }
-        let d = evts.len() as f64;
-        let mut s0_e = 0.0_f64;
-        let mut s1_e = vec![0.0_f64; p];
-        for &ei in &evts {
-            s0_e += w[ei];
-            for (dst, &xv) in s1_e.iter_mut().zip(&ordered[ei].2) {
-                *dst += w[ei] * xv;
-            }
-        }
-        let mut e_bar = vec![0.0_f64; p];
-        for m in 0..evts.len() {
-            let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / d } else { 0.0 };
-            let denom = (s0_rev[r_start] - frac * s0_e).max(1e-18);
-            for j in 0..p {
-                e_bar[j] += (s1_rev[r_start][j] - frac * s1_e[j]) / (denom * d);
-            }
-        }
-        for &ei in &evts {
-            let r_vec: Vec<f64> = (0..p).map(|j| ordered[ei].2[j] - e_bar[j]).collect();
-            resid_rows.push((t, r_vec));
+        };
+        for i in cl.risk_start..cl.event_end {
+            let r_vec: Vec<f64> = (0..p).map(|j| ordered[i].2[j] - e_bar[j]).collect();
+            resid_rows.push((cl.time, r_vec));
         }
     }
 
@@ -1184,61 +1556,69 @@ fn schoenfeld_diagnostics(
 
 /// Martingale residuals `M_i = delta_i - exp(x_i' beta) H0(t_i)` and deviance residuals
 /// `sign(M_i) sqrt(-2 (M_i + delta_i ln(delta_i - M_i)))` (Therneau, Grambsch & Fleming 1990), and
-/// the cumulative baseline hazard at the mean covariates.
-///
-/// The baseline hazard increment at each event time is the Breslow (1974) estimator
-/// `d_j / sum_{risk set} exp(x' beta)`, or with Efron ties the Efron-adjusted increment
-/// `sum_m 1 / (S0 - (m / d) S0_events)`; a subject dying at a tied time is charged the
-/// `(1 - m / d)`-weighted share of that increment (Therneau & Grambsch 2000).
+/// the cumulative baseline hazard at the mean covariates, stabilized in log-space per risk set.
 fn cox_residuals_and_baseline(
     ordered: &[(f64, bool, Vec<f64>, usize)],
+    clusters: &[CoxTimeCluster],
     beta: &[f64],
     tie_method: CoxTieMethod,
     n: usize,
 ) -> (Vec<f64>, Vec<f64>, Vec<CoxBaselinePoint>) {
-    let w: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum::<f64>().clamp(-50.0, 50.0).exp()).collect();
-    let mut s0_rev = vec![0.0_f64; n + 1];
-    for i in (0..n).rev() {
-        s0_rev[i] = s0_rev[i + 1] + w[i];
+    let raw_lp: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum()).collect();
+    let mut cluster_risk: Vec<(f64, f64, f64)> = vec![(0.0, 0.0, 0.0); clusters.len()];
+    let mut shift = f64::NEG_INFINITY;
+    let mut w_after = 0.0_f64;
+
+    for (c_idx, cl) in clusters.iter().enumerate().rev() {
+        let lp_cluster_max = raw_lp[cl.risk_start..cl.cluster_end].iter().copied().fold(f64::NEG_INFINITY, f64::max);
+        let lp_risk_max = if shift.is_finite() { shift.max(lp_cluster_max) } else { lp_cluster_max };
+        if shift.is_finite() && lp_risk_max > shift {
+            w_after *= (shift - lp_risk_max).exp();
+        }
+        shift = lp_risk_max;
+        for &lp in &raw_lp[cl.event_end..cl.cluster_end] {
+            w_after += (lp - shift).exp();
+        }
+        let mut w_evt = 0.0_f64;
+        for &lp in &raw_lp[cl.risk_start..cl.event_end] {
+            w_evt += (lp - shift).exp();
+        }
+        cluster_risk[c_idx] = (lp_risk_max, w_after, w_evt);
+        w_after += w_evt;
     }
 
-    let mut cum_h0 = 0.0_f64;
+    let mut log_h0 = f64::NEG_INFINITY;
     let mut mart = vec![0.0_f64; n];
     let mut dev = vec![0.0_f64; n];
     let mut baseline = Vec::new();
 
-    let mut idx = 0_usize;
-    while idx < n {
-        let t = ordered[idx].0;
-        let r_start = idx;
-        let mut evts = Vec::new();
-        let mut grp = Vec::new();
-        while idx < n && ordered[idx].0 == t {
-            grp.push(idx);
-            if ordered[idx].1 {
-                evts.push(idx);
+    for (c_idx, cl) in clusters.iter().enumerate() {
+        let d = cl.event_end - cl.risk_start;
+        let mut log_h0_evt = log_h0;
+        if d > 0 {
+            let (lp_risk_max, ws, we) = cluster_risk[c_idx];
+            let df_f = d as f64;
+            let mut dh_shifted = 0.0_f64;
+            let mut dh_evt_shifted = 0.0_f64;
+            for m in 0..d {
+                let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / df_f } else { 0.0 };
+                let step = 1.0 / (ws + (1.0 - frac) * we).max(1e-300);
+                dh_shifted += step;
+                dh_evt_shifted += (1.0 - frac) * step;
             }
-            idx += 1;
+            let log_dh = -lp_risk_max + dh_shifted.ln();
+            let log_dh_evt = if dh_evt_shifted > 0.0 { -lp_risk_max + dh_evt_shifted.ln() } else { f64::NEG_INFINITY };
+            log_h0_evt = log_add_exp(log_h0, log_dh_evt);
+            log_h0 = log_add_exp(log_h0, log_dh);
+            let cum_h0 = log_h0.exp();
+            let survival = if cum_h0.is_finite() { (-cum_h0).exp().clamp(0.0, 1.0) } else { 0.0 };
+            baseline.push(CoxBaselinePoint { time: cl.time, cum_hazard: cum_h0, survival });
         }
-        let mut cum_h0_evt = cum_h0;
-        if !evts.is_empty() {
-            let cum_h0_before = cum_h0;
-            let s0_e: f64 = evts.iter().map(|&ei| w[ei]).sum();
-            let d = evts.len() as f64;
-            let mut dh_evt = 0.0_f64;
-            for m in 0..evts.len() {
-                let frac = if tie_method == CoxTieMethod::Efron { (m as f64) / d } else { 0.0 };
-                let step = 1.0 / (s0_rev[r_start] - frac * s0_e).max(1e-18);
-                cum_h0 += step;
-                dh_evt += (1.0 - frac) * step;
-            }
-            cum_h0_evt = cum_h0_before + dh_evt;
-            baseline.push(CoxBaselinePoint { time: t, cum_hazard: cum_h0, survival: (-cum_h0).exp().clamp(0.0, 1.0) });
-        }
-        for &i in &grp {
+        for i in cl.risk_start..cl.cluster_end {
             let delta = if ordered[i].1 { 1.0 } else { 0.0 };
-            let h_subj = if ordered[i].1 { cum_h0_evt } else { cum_h0 };
-            let m = delta - w[i] * h_subj;
+            let log_h_subj = if ordered[i].1 { log_h0_evt } else { log_h0 };
+            let expected = if log_h_subj.is_finite() { (raw_lp[i] + log_h_subj).exp() } else { 0.0 };
+            let m = delta - expected;
             let orig = ordered[i].3;
             mart[orig] = m;
             let sign = if m >= 0.0 { 1.0 } else { -1.0 };
@@ -1613,7 +1993,7 @@ fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]
         base_labels,
         base_rows,
     );
-    base_tab.footnotes.push(String::from("Evaluated at sample covariate means using the fitted Breslow/Efron cumulative hazard step function."));
+    base_tab.footnotes.push(String::from("Evaluated at sample covariate means using the fitted cumulative hazard step function."));
     out.tabs.push(base_tab);
 
     let mut lml_labels = Vec::with_capacity(baseline.len());
@@ -2266,9 +2646,10 @@ fn append_survival_pairwise(
 
 #[cfg(test)]
 mod tests {
-    use curvebook_doc::{SurvivalObservation, SurvivalStatus};
+    use curvebook_doc::{CoxTieMethod, SurvivalObservation, SurvivalStatus};
+    use curvebook_math::ConfidenceLevel;
 
-    use super::{SurvivalWeight, compare_survival_curves, weighted_log_rank_stats};
+    use super::{CoxSubject, SurvivalWeight, compare_survival_curves, cox_ph_regression, glr_exact_cluster_dp, log_add_exp, weighted_log_rank_stats};
 
     #[test]
     fn weighted_log_rank_exact_hypergeometric_covariance() {
@@ -2307,5 +2688,90 @@ mod tests {
                 assert!((cov3[r * 3 + c] - cov3[c * 3 + r]).abs() < 1e-12);
             }
         }
+    }
+
+    #[test]
+    fn glr_exact_dp_matches_bruteforce_enumeration_and_complement_symmetry() {
+        // Check d = 3 (d <= m/2) and d = 6 (d > m/2 complement branch) on m = 8 risk set
+        // with extreme linear-predictor differences spanning [-900, +900].
+        let raw_lp = [900.0, 2.5, -1.2, 0.4, -50.0, -900.0, 1.1, 0.0];
+        let x_rows =
+            [vec![1.5, -0.4], vec![-0.7, 1.2], vec![0.3, 0.8], vec![2.1, -1.5], vec![-1.1, 0.5], vec![0.8, 2.0], vec![-0.2, -0.9], vec![0.9, 0.1]];
+        for d in [2_usize, 3, 5, 6, 8] {
+            let ordered: Vec<(f64, bool, Vec<f64>, usize)> = (0..8).map(|i| (1.0, i < d, x_rows[i].clone(), i)).collect();
+            let (dp_ll, dp_mu, dp_c) = glr_exact_cluster_dp(&ordered, &raw_lp, 0, d, 2, true);
+
+            let mut subset_logs = Vec::new();
+            let mut subset_xs = Vec::new();
+            let mut log_denom = f64::NEG_INFINITY;
+            for mask in 0_u32..256 {
+                if mask.count_ones() as usize != d {
+                    continue;
+                }
+                let mut lp_s = 0.0_f64;
+                let mut sx = [0.0_f64; 2];
+                for i in 0..8 {
+                    if (mask >> i) & 1 == 1 {
+                        lp_s += raw_lp[i];
+                        sx[0] += x_rows[i][0];
+                        sx[1] += x_rows[i][1];
+                    }
+                }
+                log_denom = log_add_exp(log_denom, lp_s);
+                subset_logs.push(lp_s);
+                subset_xs.push(sx);
+            }
+            let evt_lp: f64 = raw_lp[..d].iter().sum();
+            let bf_ll = evt_lp - log_denom;
+            let mut bf_mu = [0.0_f64; 2];
+            for (&ls, sx) in subset_logs.iter().zip(&subset_xs) {
+                let pr = (ls - log_denom).exp();
+                bf_mu[0] += pr * sx[0];
+                bf_mu[1] += pr * sx[1];
+            }
+            let mut bf_c = [[0.0_f64; 2]; 2];
+            for (&ls, sx) in subset_logs.iter().zip(&subset_xs) {
+                let pr = (ls - log_denom).exp();
+                let d0 = sx[0] - bf_mu[0];
+                let d1 = sx[1] - bf_mu[1];
+                bf_c[0][0] += pr * d0 * d0;
+                bf_c[0][1] += pr * d0 * d1;
+                bf_c[1][1] += pr * d1 * d1;
+            }
+            assert!((dp_ll - bf_ll).abs() < 1e-11, "d={d} ll dp={dp_ll} bf={bf_ll}");
+            assert!((dp_mu[0] - bf_mu[0]).abs() < 1e-11, "d={d} mu0");
+            assert!((dp_mu[1] - bf_mu[1]).abs() < 1e-11, "d={d} mu1");
+            assert!((dp_c[0] - bf_c[0][0]).abs() < 1e-11, "d={d} c00");
+            assert!((dp_c[1] - bf_c[0][1]).abs() < 1e-11, "d={d} c01");
+            assert!((dp_c[3] - bf_c[1][1]).abs() < 1e-11, "d={d} c11");
+        }
+    }
+
+    #[test]
+    fn cox_ph_separates_genuine_partial_and_combo_separation_from_large_span_convergence() {
+        // 1. Two-covariate partial separation: x1 separates early vs late events, x2 varies freely.
+        let partial_sep = vec![
+            CoxSubject { time: 1.0, event: true, x: vec![1.0, 0.0] },
+            CoxSubject { time: 2.0, event: true, x: vec![1.0, -10.0] },
+            CoxSubject { time: 3.0, event: true, x: vec![0.0, 1.0] },
+            CoxSubject { time: 4.0, event: false, x: vec![0.0, 5.0] },
+            CoxSubject { time: 5.0, event: false, x: vec![0.0, 2.0] },
+        ];
+        let res_part = cox_ph_regression(&partial_sep, &["x1".into(), "x2".into()], CoxTieMethod::Efron, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(!res_part.converged, "partial covariate separation must report converged=false");
+        assert!(res_part.covariates[0].se.is_nan());
+
+        // 2. Linear-combination separation along v = (1, 1).
+        let combo_sep = vec![
+            CoxSubject { time: 1.0, event: true, x: vec![1.0, 0.0] },
+            CoxSubject { time: 2.0, event: true, x: vec![0.0, 1.0] },
+            CoxSubject { time: 3.0, event: true, x: vec![1.0, -1.0] },
+            CoxSubject { time: 4.0, event: false, x: vec![0.0, 0.0] },
+            CoxSubject { time: 5.0, event: false, x: vec![-1.0, 1.0] },
+            CoxSubject { time: 6.0, event: false, x: vec![-1.0, -1.0] },
+        ];
+        let res_combo = cox_ph_regression(&combo_sep, &["x1".into(), "x2".into()], CoxTieMethod::Exact, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(!res_combo.converged, "linear-combination separation must report converged=false");
+        assert!(res_combo.covariates[0].se.is_nan() && res_combo.covariates[1].se.is_nan());
     }
 }

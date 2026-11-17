@@ -385,6 +385,23 @@ fn r2_s07_04_stats_run_and_update_params_forward_cox_ties_ref_levels_and_inner_v
     }
     assert!(res1.tabs.iter().any(|t| t.footnotes.iter().any(|f| f.contains("Efron"))));
 
+    ok_cmd(
+        &mut session,
+        "analysis.updateParams",
+        json!({
+            "sheet_id": "res-cox",
+            "tie_method": "Exact"
+        }),
+    );
+    let res2 = session.document().result_sheet(&SheetId::new("res-cox")).unwrap();
+    match &res2.analysis.kind {
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) => {
+            assert_eq!(*tie_method, CoxTieMethod::Exact);
+        }
+        other => panic!("expected CoxProportionalHazards, got {other:?}"),
+    }
+    assert!(res2.tabs.iter().any(|t| t.footnotes.iter().any(|f| f.contains("Exact"))));
+
     // Inner-variant patching works for OutlierDetection (changing fdr_q_percent inside nested enum) and rejects malformed inner patch.
     ok_cmd(&mut session, "stats.run", json!({ "source_sheet": "xy-1", "sheet_id": "res-out", "kind": "outliers" }));
     let before_out = session.document().result_sheet(&SheetId::new("res-out")).unwrap().clone();

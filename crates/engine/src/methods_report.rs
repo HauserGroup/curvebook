@@ -653,6 +653,7 @@ fn describe_survival(s: &SurvivalAnalysisSpec, source_ds: Option<&DataSheet>) ->
             let tie_lbl = match tie_method {
                 CoxTieMethod::Breslow => "Breslow",
                 CoxTieMethod::Efron => "Efron",
+                CoxTieMethod::Exact => "Exact",
             };
             let time_lbl = column_title_at(source_ds, *time_column);
             let status_lbl = column_title_at(source_ds, *status_column);

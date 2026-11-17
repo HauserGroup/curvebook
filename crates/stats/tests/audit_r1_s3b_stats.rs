@@ -176,12 +176,15 @@ fn analyze_contingency_and_run_analysis_huge_counts() {
 
 #[test]
 fn proportion_kappa_and_ratio_overflow_guards() {
-    // Baptista-Pike OR CI skips cleanly (returns None) on overflow or huge tables without OOM.
+    // Baptista-Pike OR CI skips cleanly (returns None) on u64 overflow while computing large-count
+    // tables accurately via mode-windowed noncentral hypergeometric summation without OOM/timeout.
     assert_eq!(baptista_pike_or_ci(u64::MAX, 1, 1, 1, ConfidenceLevel::DEFAULT_95), None);
     let bp_huge = run_with_timeout(Duration::from_secs(2), || {
         baptista_pike_or_ci(1_000_000_000_000, 1_000_000_000_000, 1_000_000_000_000, 1_000_000_000_000, ConfidenceLevel::DEFAULT_95)
     });
-    assert_eq!(bp_huge, None);
+    let (bp_huge_lo, bp_huge_hi) = bp_huge.expect("mode-windowed Baptista-Pike CI must succeed on 1e12 tables");
+    assert!(bp_huge_lo > 0.999_99 && bp_huge_lo < 1.0 && bp_huge_hi > 1.0 && bp_huge_hi < 1.000_01);
+    assert!((bp_huge_lo * bp_huge_hi - 1.0).abs() < 1e-11);
     let (bp_lo, bp_hi) = baptista_pike_or_ci(14, 6, 5, 15, ConfidenceLevel::DEFAULT_95).unwrap();
     assert!(bp_lo > 1.0 && bp_hi > bp_lo && bp_hi.is_finite());
 
@@ -191,7 +194,9 @@ fn proportion_kappa_and_ratio_overflow_guards() {
     let ratios_huge = run_with_timeout(Duration::from_secs(2), || {
         analyze_2x2_ratios(1_000_000_000, 1_000_000_000, 1_000_000_000, 1_000_000_000, ConfidenceLevel::DEFAULT_95).unwrap()
     });
-    assert_eq!(ratios_huge.or_baptista_pike_ci, None);
+    let (r_bp_lo, r_bp_hi) = ratios_huge.or_baptista_pike_ci.expect("large-table Baptista-Pike CI in analyze_2x2_ratios");
+    assert!(r_bp_lo > 0.999_8 && r_bp_lo < 1.0 && r_bp_hi > 1.0 && r_bp_hi < 1.000_2);
+    assert!((r_bp_lo * r_bp_hi - 1.0).abs() < 1e-10);
     assert!((ratios_huge.odds_ratio - 1.0).abs() < 1e-12);
 
     // Clopper-Pearson k > n and Exact Binomial total cap.

@@ -516,6 +516,7 @@ pub enum CoxTieMethod {
     Breslow,
     #[default]
     Efron,
+    Exact,
 }
 
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
