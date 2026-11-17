@@ -49,6 +49,7 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 
 ## Releases and reference files
 
+- [MCP Alpha site](index.html): prepared static GitHub Pages entry point for onboarding, status, and downloads; [preview and publication checklist](release/github-pages.md). Hosting remains a separate Alpha launch step.
 - [Release guide](release/releasing.md): packaging, verification, and release gates.
 - [Windows signing](release/windows-signing.md): test signing and distribution.
 - [Contributor credits](contributors.md), [asset inventory](../ASSETS.md), and [attribution](../ATTRIBUTION.md).

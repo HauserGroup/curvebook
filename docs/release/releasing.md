@@ -24,6 +24,8 @@ macOS testers may need **Privacy & Security → Open Anyway**; Windows testers m
 
 GitHub documents [manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow), [draft/prerelease creation with attached assets](https://cli.github.com/manual/gh_release_create), and [asset uploads](https://cli.github.com/manual/gh_release_upload).
 
+The [prepared GitHub Pages site](../index.html) covers MCP onboarding, current status, and downloads. Follow its [publication checklist](github-pages.md) alongside the reviewed public Alpha; update its pending-launch wording only after the prerelease is published. GUI onboarding follows `R10` human acceptance, and a live browser demo requires browser QA separately.
+
 ---
 
 ## 1. Pre-Publish Package Verification
