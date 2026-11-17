@@ -1,6 +1,6 @@
 # Desktop & Web UI Parity (`curvebook-ui-egui`)
 
-> Related specifications: [`gui-workflows.md`](gui-workflows.md), [`data-tables-and-transforms.md`](data-tables-and-transforms.md), [`graphing-and-layouts.md`](graphing-and-layouts.md), [`development.md`](development.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r8-desktop--webassembly-live-shell-localization--10-hardening) (`R8`) and [`ROADMAP.md`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) (`R10`) ([`G6`/`G7`/`QOL` mapping](gaps.md))
+> Related specifications: [`gui-workflows.md`](gui-workflows.md), [`data-tables-and-transforms.md`](implementation/data-tables-and-transforms.md), [`graphing-and-layouts.md`](implementation/graphing-and-layouts.md), [`development.md`](development.md) · Roadmap: [`ROADMAP.md`](ROADMAP.md#r8-desktop--webassembly-live-shell-localization--10-hardening) (`R8`) and [`ROADMAP.md`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) (`R10`) ([`G6`/`G7`/`QOL` mapping](gaps.md))
 >
 > **How to read this checklist (revised 2026-11-15).** Earlier revisions ticked `[x]` when a `UiApp` state machine existed and the semantic `gui_only` agent harness (`dispatch_gui_action`, `ui.inspect`, `ui.invoke_menu` with structured params, `ui.answer_dialog` field patches) could drive it. A human-GUI audit found that most of those surfaces are not drawn as interactive widgets in the desktop window or web canvas. From this revision:
 >

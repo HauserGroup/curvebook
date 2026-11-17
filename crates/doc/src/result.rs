@@ -1,7 +1,7 @@
 //! `ResultSheet` model: multi-tab statistical/regression outputs, unrounded *p*-values, profile-likelihood
 //! `CiBound` endpoints (`Finite` | `Open`), hookable scalar outputs, live pairwise comparison
 //! records, fitted curve overlays, and plain-language `ChecklistItem` diagnostics
-//! (`docs/architecture.md`, `docs/statistics-implementation.md` §6, `docs/curve-fitting-implementation.md` §2).
+//! (`docs/architecture.md`, `docs/implementation/statistics-implementation.md` §6, `docs/implementation/curve-fitting-implementation.md` §2).
 
 use std::fmt;
 
@@ -205,7 +205,7 @@ pub enum ResultStatus {
 }
 
 /// Confidence-interval endpoint supporting unbounded profile-likelihood plateaus (`CiBound::Open`;
-/// `docs/curve-fitting-implementation.md` §2.2).
+/// `docs/implementation/curve-fitting-implementation.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum CiBound {
     Finite(f64),
@@ -280,7 +280,7 @@ pub struct ResultScalarEntry {
 }
 
 /// Pairwise group comparison record consumed by live significance brackets on [`crate::GraphSpec`]
-/// (`docs/graphing-and-layouts.md` §4).
+/// (`docs/implementation/graphing-and-layouts.md` §4).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PairwiseComparisonRecord {
     pub group_a: usize,
@@ -361,7 +361,7 @@ impl RemediationKind {
     }
 }
 
-/// Severity status of an assumption check in [`ChecklistItem`] (`docs/statistics-implementation.md` §6).
+/// Severity status of an assumption check in [`ChecklistItem`] (`docs/implementation/statistics-implementation.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ChecklistStatus {
     Pass,

@@ -1,7 +1,7 @@
 //! Declarative `GraphSpec` and `GraphSheet` schemas: graphical data objects (GDOs), nonlinear and
 //! discontinuous 1–3 segment axes, dashed/solid error bars, five-channel `MultipleVariables`
 //! bubble/categorical encodings, live pairwise significance brackets, and style cloning
-//! (`docs/graphing-and-layouts.md` §1–§5).
+//! (`docs/implementation/graphing-and-layouts.md` §1–§5).
 
 pub use curvebook_math::{AxisScale, LogitDomain};
 use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -11,7 +11,7 @@ use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
 use crate::links::DataSheet;
 
-/// Specialized diagnostic plot subtypes (`docs/graphing-and-layouts.md` §2.5).
+/// Specialized diagnostic plot subtypes (`docs/implementation/graphing-and-layouts.md` §2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticPlotKind {
     Heatmap,
@@ -36,7 +36,7 @@ pub enum GraphKind {
     Diagnostic(DiagnosticPlotKind),
 }
 
-/// Axis frame geometry preset (`docs/graphing-and-layouts.md` §3.3).
+/// Axis frame geometry preset (`docs/implementation/graphing-and-layouts.md` §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum FramePreset {
     #[default]
@@ -47,10 +47,10 @@ pub enum FramePreset {
     OriginCrossing,
 }
 
-/// Guarded axis scale bijection (`docs/graphing-and-layouts.md` §3.1), unified with [`curvebook_math::AxisScale`].
+/// Guarded axis scale bijection (`docs/implementation/graphing-and-layouts.md` §3.1), unified with [`curvebook_math::AxisScale`].
 pub type GraphAxisScale = AxisScale;
 
-/// Break-mark ornament between discontinuous axis segments (`docs/graphing-and-layouts.md` §3.2).
+/// Break-mark ornament between discontinuous axis segments (`docs/implementation/graphing-and-layouts.md` §3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BreakOrnament {
     #[default]
@@ -59,7 +59,7 @@ pub enum BreakOrnament {
     BlankGap,
 }
 
-/// Source for categorical tick labels on `Column` and `Grouped` X axes (`docs/graphing-and-layouts.md` §2.2).
+/// Source for categorical tick labels on `Column` and `Grouped` X axes (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CategoricalTickSource {
     #[default]
@@ -68,7 +68,7 @@ pub enum CategoricalTickSource {
     RowNumbers,
 }
 
-/// Numeric or categorical tick formatting mode (`docs/graphing-and-layouts.md` §3.3).
+/// Numeric or categorical tick formatting mode (`docs/implementation/graphing-and-layouts.md` §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum TickLabelFormat {
     #[default]
@@ -101,7 +101,7 @@ pub struct AdditionalTick {
     pub draw_gridline: bool,
 }
 
-/// One continuous segment (`1..=3` per axis) of a standard or discontinuous axis (`docs/graphing-and-layouts.md` §3.2).
+/// One continuous segment (`1..=3` per axis) of a standard or discontinuous axis (`docs/implementation/graphing-and-layouts.md` §3.2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSegment {
     /// `None` selects automatic data-driven lower bound.
@@ -197,7 +197,7 @@ impl AxisSpec {
         None
     }
 
-    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/graphing-and-layouts.md` §3.2)
+    /// Enforce that discontinuous axes carry `1`, `2`, or `3` segments (`docs/implementation/graphing-and-layouts.md` §3.2)
     /// and validate axis labels, custom tick labels, and float finiteness.
     pub fn validate(&self) -> Result<(), DocError> {
         validate_title(&self.title)?;
@@ -225,7 +225,7 @@ pub enum SummaryMeasure {
     GeometricMean,
 }
 
-/// Whisker extent convention for box-and-whisker plots (`docs/graphing-and-layouts.md` §2.2).
+/// Whisker extent convention for box-and-whisker plots (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum WhiskerMethod {
     #[default]
@@ -245,7 +245,7 @@ pub enum ReplicateOverlayStyle {
     AlignedColumn,
 }
 
-/// Curve interpolation rule for XY connecting lines (`docs/graphing-and-layouts.md` §2.1).
+/// Curve interpolation rule for XY connecting lines (`docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineConnectionKind {
     #[default]
@@ -278,7 +278,7 @@ pub enum PartsOfWholeLayout {
     Waffle10x10,
 }
 
-/// Composable Graphical Data Object (GDO) describing how a series renders (`docs/graphing-and-layouts.md` §2).
+/// Composable Graphical Data Object (GDO) describing how a series renders (`docs/implementation/graphing-and-layouts.md` §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphicalDataObject {
     ScatterAndLine {
@@ -336,7 +336,7 @@ pub enum GraphicalDataObject {
     },
 }
 
-/// Dispersion statistic encoded by error bars (`docs/graphing-and-layouts.md` §2.1).
+/// Dispersion statistic encoded by error bars (`docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorBarMetric {
     #[default]
@@ -404,7 +404,7 @@ pub struct SeriesSpec {
     pub regression_overlay: Option<RegressionOverlaySpec>,
 }
 
-/// Horizontal cluster arrangement for `Grouped` and `Contingency` graphs (`docs/graphing-and-layouts.md` §2.2).
+/// Horizontal cluster arrangement for `Grouped` and `Contingency` graphs (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum GroupedArrangement {
     #[default]
@@ -437,7 +437,7 @@ pub struct PointStyleOverride {
     pub hidden: bool,
 }
 
-/// Fill-colour visual channel in a five-channel `MultipleVariables` plot (`docs/graphing-and-layouts.md` §2.5).
+/// Fill-colour visual channel in a five-channel `MultipleVariables` plot (`docs/implementation/graphing-and-layouts.md` §2.5).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColorChannelMapping {
     Constant(Rgba8),
@@ -452,7 +452,7 @@ pub enum SizeChannelMapping {
     Variable { column: usize, min_radius_pt: f64, max_radius_pt: f64 },
 }
 
-/// Rendering mode for a `MultipleVariables` graph (`docs/graphing-and-layouts.md` §2.5).
+/// Rendering mode for a `MultipleVariables` graph (`docs/implementation/graphing-and-layouts.md` §2.5).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum MultivariatePlotMode {
     /// Five-channel continuous/categorical scatter and bubble plot.
@@ -477,7 +477,7 @@ pub struct MultivariateGraphEncoding {
     pub show_confidence_ellipses: bool,
 }
 
-/// Geometry style of pairwise significance brackets (`docs/graphing-and-layouts.md` §4).
+/// Geometry style of pairwise significance brackets (`docs/implementation/graphing-and-layouts.md` §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BracketStyle {
     #[default]
@@ -689,8 +689,8 @@ pub struct GraphSpec {
 
 impl GraphSpec {
     /// Synthesize the canonical default [`GraphSpec`] for a newly created [`DataSheet`], honoring
-    /// `TableArchetype` and `ColumnDesignHint` (`docs/data-tables-and-transforms.md` §2.2 &
-    /// `docs/graphing-and-layouts.md` §2).
+    /// `TableArchetype` and `ColumnDesignHint` (`docs/implementation/data-tables-and-transforms.md` §2.2 &
+    /// `docs/implementation/graphing-and-layouts.md` §2).
     #[must_use]
     pub fn default_for_data_sheet(sheet: &DataSheet) -> Self {
         let palette = PaletteId::OkabeIto;
@@ -805,7 +805,7 @@ impl GraphSpec {
 
     /// Copy visual styling tokens (`palette`, `frame_preset`, `paper_fill`, axis stroke widths,
     /// legend chrome, and series palette swatches) from `donor` without mutating data bindings
-    /// (`graph.applyStyleFrom`; `docs/graphing-and-layouts.md` §5).
+    /// (`graph.applyStyleFrom`; `docs/implementation/graphing-and-layouts.md` §5).
     pub fn apply_style_from(&mut self, donor: &Self) {
         self.apply_style_from_selective(donor, true, true, true);
     }
@@ -1260,7 +1260,7 @@ pub struct GraphSheet {
     pub id: SheetId,
     pub title: String,
     /// Starts `false` when auto-provisioned alongside a new `DataSheet` so the first visit presents
-    /// the visual family schematic chooser (`docs/graphing-and-layouts.md` §2).
+    /// the visual family schematic chooser (`docs/implementation/graphing-and-layouts.md` §2).
     pub initialized: bool,
     pub spec: GraphSpec,
     pub floating_notes: Vec<FloatingNote>,

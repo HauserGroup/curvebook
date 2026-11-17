@@ -2,7 +2,7 @@
 //! `MultipleVariables` role header strip & `Variables...` recoding/ordering model, `=` Calculated
 //! Variable formula bar with autocomplete, 4-stage `Import & Paste Special` / `Paste Link`
 //! pipeline model, and selection quick-stats footer (`docs/ui-parity.md`,
-//! `docs/data-tables-and-transforms.md`).
+//! `docs/implementation/data-tables-and-transforms.md`).
 
 use std::borrow::Borrow;
 use std::collections::HashSet;
@@ -479,7 +479,7 @@ const FORMULA_BUILTINS: &[(&str, &str, FormulaAutocompleteKind, &str)] = &[
 ];
 
 /// In-table `=` Calculated Variable formula bar with live syntax validation and column/function
-/// autocomplete (`docs/data-tables-and-transforms.md` §4).
+/// autocomplete (`docs/implementation/data-tables-and-transforms.md` §4).
 #[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
 pub struct FormulaBarState {
     pub active: bool,
@@ -983,7 +983,7 @@ fn target_kind_wire_name(kind: TableKind) -> &'static str {
 }
 
 /// Complete 4-stage `Import & Paste Special` / `Paste Link` UI state model
-/// (`docs/data-tables-and-transforms.md` §6).
+/// (`docs/implementation/data-tables-and-transforms.md` §6).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ImportPasteWizardState {
     pub open: bool,
@@ -1597,7 +1597,7 @@ impl GridViewState {
     }
 
     /// Emit batched rectangular `"table.excludeCells"` range intents (`Cmd+E` / `Ctrl+E`) toggling
-    /// exclusion across the current selection (`docs/data-tables-and-transforms.md` §1.2).
+    /// exclusion across the current selection (`docs/implementation/data-tables-and-transforms.md` §1.2).
     /// Returns the number of `"range"` command intents queued into `tool.pending_intents`.
     pub fn emit_toggle_exclude_intents(&mut self, sheet: &DataSheet, excluded: bool) -> usize {
         let total_rows = sheet.archetype.row_count();
@@ -1659,7 +1659,7 @@ impl GridViewState {
     }
 }
 
-/// Map a [`LinkBorderColor`] to its canonical UI border RGB color (`docs/data-tables-and-transforms.md` §6.2).
+/// Map a [`LinkBorderColor`] to its canonical UI border RGB color (`docs/implementation/data-tables-and-transforms.md` §6.2).
 #[must_use]
 pub const fn provenance_border_rgba(color: LinkBorderColor) -> Rgba8 {
     match color {

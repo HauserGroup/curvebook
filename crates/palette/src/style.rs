@@ -3,7 +3,7 @@
 
 use crate::space::Rgba8;
 
-/// Geometric shape of scatter / summary data-point symbols (`docs/graphing-and-layouts.md` §2.1).
+/// Geometric shape of scatter / summary data-point symbols (`docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum MarkerShape {
     #[default]
@@ -57,7 +57,7 @@ impl Default for MarkerStyle {
 }
 
 /// Stroke dash cadence for connecting lines, regression curves, thresholds, and error bars
-/// (including dashed/dotted error bars per `docs/graphing-and-layouts.md` §2.1).
+/// (including dashed/dotted error bars per `docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineDashStyle {
     #[default]

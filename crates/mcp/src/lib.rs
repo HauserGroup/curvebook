@@ -4,7 +4,7 @@
 //!
 //! Layer L6 crate: never depends on `curvebook-ui-egui`; UI command discovery uses the generated
 //! `ui_catalog` mirror checked by `cargo xtask ui-commands --check`.
-//! Governing spec: `docs/mcp.md` and `docs/scripting-and-automation.md`.
+//! Governing spec: `docs/mcp.md` and `docs/implementation/scripting-and-automation.md`.
 #![forbid(unsafe_code)]
 
 pub mod errors;

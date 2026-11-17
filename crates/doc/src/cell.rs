@@ -1,10 +1,10 @@
 //! Typed cell values, non-destructive cell exclusions (`excluded: bool`), inline `*` exclusion
 //! token parsing, replicate subcolumn modes, and pre-summarized `(Mean, SD/SEM/%CV, N)` moment
-//! reconstruction (`docs/data-tables-and-transforms.md` §1.2, §2, §2.1, §6.1).
+//! reconstruction (`docs/implementation/data-tables-and-transforms.md` §1.2, §2, §2.1, §6.1).
 
 use crate::error::{DocError, SummaryPointError, validate_subcolumns};
 
-/// Typed content of a single grid cell (`docs/data-tables-and-transforms.md` §1.2).
+/// Typed content of a single grid cell (`docs/implementation/data-tables-and-transforms.md` §1.2).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CellValue {
     #[default]
@@ -15,7 +15,7 @@ pub enum CellValue {
 
 impl CellValue {
     /// Construct a finite numeric cell value, mapping `NaN` or `±Inf` cleanly to [`Self::Empty`]
-    /// (`docs/data-tables-and-transforms.md` §4.1).
+    /// (`docs/implementation/data-tables-and-transforms.md` §4.1).
     #[must_use]
     pub fn from_finite_or_empty(value: f64) -> Self {
         if value.is_finite() { Self::Number(value) } else { Self::Empty }
@@ -45,7 +45,7 @@ impl CellValue {
 ///
 /// Excluded cells remain visible in the spreadsheet (rendered in blue italics with an `*` badge)
 /// and persist in `.curvebook` archives while downstream statistical tests, fits, transforms, and
-/// graphs mask them out without mutating raw observations (`docs/data-tables-and-transforms.md` §1.2).
+/// graphs mask them out without mutating raw observations (`docs/implementation/data-tables-and-transforms.md` §1.2).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
     pub value: CellValue,
@@ -109,7 +109,7 @@ impl Cell {
 
     /// Parse an imported CSV/TSV/clipboard token, honoring inline asterisk exclusion syntax
     /// (`45.6*` or `*45.6` -> `CellValue::Number(45.6)` with `excluded = true`) and regional
-    /// decimal separators (`.` vs `,`) (`docs/data-tables-and-transforms.md` §6.1).
+    /// decimal separators (`.` vs `,`) (`docs/implementation/data-tables-and-transforms.md` §6.1).
     #[must_use]
     pub fn parse_import_token(raw: &str, decimal_separator: char, parse_asterisk_exclusion: bool) -> Self {
         let trimmed = raw.trim();
@@ -144,7 +144,7 @@ impl Cell {
     }
 }
 
-/// Subcolumn structure within each data-set column (`docs/data-tables-and-transforms.md` §2).
+/// Subcolumn structure within each data-set column (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SubcolumnMode {
     /// Single value per row (`1` subcolumn).
@@ -188,7 +188,7 @@ impl SubcolumnMode {
     /// True if values represent pre-computed summary statistics rather than raw observations.
     ///
     /// Nonparametric rank tests, normality tests, outlier tests, and robust regression refuse
-    /// pre-summarized tables with `RequiresRawReplicates` (`docs/data-tables-and-transforms.md` §2.1).
+    /// pre-summarized tables with `RequiresRawReplicates` (`docs/implementation/data-tables-and-transforms.md` §2.1).
     #[must_use]
     pub const fn is_pre_summarized(self) -> bool {
         matches!(self, Self::MeanSdN | Self::MeanSemN | Self::MeanCvN | Self::MeanLowHigh | Self::UpperLowerLimits | Self::MedianIqr)
@@ -276,7 +276,7 @@ pub struct ExplicitErrorBounds {
     pub upper: f64,
 }
 
-/// Visual layout of replicate subcolumns in a `Grouped` table (`docs/data-tables-and-transforms.md` §2).
+/// Visual layout of replicate subcolumns in a `Grouped` table (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ReplicateStacking {
     #[default]
@@ -285,7 +285,7 @@ pub enum ReplicateStacking {
 }
 
 /// Rigorously reconstructed parametric summary observation from `MeanSdN`, `MeanSemN`, or
-/// `MeanCvN` subcolumns (`docs/data-tables-and-transforms.md` §2.1):
+/// `MeanCvN` subcolumns (`docs/implementation/data-tables-and-transforms.md` §2.1):
 ///
 /// `SS_within = (n - 1) * SD^2`, where `SD = SEM * sqrt(n)` or `(%CV / 100) * |Mean|`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]

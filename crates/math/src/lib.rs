@@ -3,7 +3,7 @@
 //!
 //! Layer L0 foundation crate: depends on no higher workspace crates; uses `serde` for schema
 //! serialization alongside pure-std numerical kernels.
-//! Governing spec: `docs/statistics-implementation.md` (§1), `docs/graphing-and-layouts.md` (§3.1),
+//! Governing spec: `docs/implementation/statistics-implementation.md` (§1), `docs/implementation/graphing-and-layouts.md` (§3.1),
 //! and `docs/architecture.md`.
 //!
 //! # Example
@@ -45,7 +45,7 @@ pub use linalg::{
 pub use pvalue::{ConfidenceLevel, PValueFormat};
 pub use rng::DeterministicRng;
 
-/// Percentage vs unit-proportion domain for [`AxisScale::Logit`] (`docs/graphing-and-layouts.md` §3.1).
+/// Percentage vs unit-proportion domain for [`AxisScale::Logit`] (`docs/implementation/graphing-and-layouts.md` §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LogitDomain {
     /// Percentages `u in (0, 100)`.
@@ -55,7 +55,7 @@ pub enum LogitDomain {
     Proportion,
 }
 
-/// Scale transformations supported on scientific graph axes (`docs/graphing-and-layouts.md` §3.1).
+/// Scale transformations supported on scientific graph axes (`docs/implementation/graphing-and-layouts.md` §3.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum AxisScale {
     #[default]

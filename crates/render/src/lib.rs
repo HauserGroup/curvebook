@@ -1,7 +1,7 @@
 //! Deterministic CPU rasterizer and compositor for CurveBook graphs and multi-figure publication
 //! layouts.
 //!
-//! Layer L3 rendering crate. Governing spec: `docs/graphing-and-layouts.md` (§1, §6).
+//! Layer L3 rendering crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§1, §6).
 #![forbid(unsafe_code)]
 
 pub mod emf;

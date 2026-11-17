@@ -1,6 +1,6 @@
 # Windows signing without Azure
 
-CurveBook currently builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../packaging/windows/package.ps1). MSIX packaging is **planned**, not implemented; see [`R8.9`](ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). The MSIX instructions below apply once a package and its manifest are available.
+CurveBook currently builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../../packaging/windows/package.ps1). MSIX packaging is **planned**, not implemented; see [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). The MSIX instructions below apply once a package and its manifest are available.
 
 | Distribution | Signing approach |
 |---|---|
@@ -17,7 +17,7 @@ Run the Windows commands below in a GitHub Actions Windows job. You can edit the
 
 The dedicated self-signing/MSIX test workflow is **planned in `R8.9`**, not present yet. To prepare that workflow:
 
-1. Reuse the Rust toolchain and WiX setup from the `windows` job in [`.github/workflows/release.yml`](../.github/workflows/release.yml). Start with x64, a bounded job timeout, `workflow_dispatch`, and `permissions: contents: read`; keep this test job separate from release publication.
+1. Reuse the Rust toolchain and WiX setup from the `windows` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml). Start with x64, a bounded job timeout, `workflow_dispatch`, and `permissions: contents: read`; keep this test job separate from release publication.
 2. Build with `./packaging/windows/package.ps1 -Arch x64`. Without configured signing credentials this produces unsigned MSI/ZIP files today. MSIX needs the future builder.
 3. Run the certificate creation and signing commands below in the Windows job. Use `$env:RUNNER_TEMP` for certificate exports instead of `$env:LOCALAPPDATA`. Keep creation and signing in the same PowerShell step, or pass only the public thumbprint/path between steps and reload the private certificate from `Cert:\CurrentUser\My`.
 4. For an MSIX test, explicitly import the public certificate into the disposable runner's `LocalMachine\TrustedPeople` store, verify the package, and attempt installation and CLI smoke tests there. Report runner limitations rather than treating an unavailable interactive GUI as passing human QA.
@@ -149,6 +149,6 @@ When the signing identity is no longer needed, the signing user can also delete 
 
 ## 7. Publish through Microsoft Store
 
-For the planned MSIX route, create the Store developer account, reserve the product name, and supply the exact Partner Center identity to the package manifest. Test and submit through Partner Center; Microsoft provides the package signature after certification. A self-signed test certificate is not a prerequisite for Store publishing. The implementation and submission checklist is in [`R8.9`](ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
+For the planned MSIX route, create the Store developer account, reserve the product name, and supply the exact Partner Center identity to the package manifest. Test and submit through Partner Center; Microsoft provides the package signature after certification. A self-signed test certificate is not a prerequisite for Store publishing. The implementation and submission checklist is in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
 These instructions were checked against Microsoft documentation on 2026-11-16. They have not been executed on Windows in this documentation change.

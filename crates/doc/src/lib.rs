@@ -4,7 +4,7 @@
 //! and reactive dependency links between tables, analyses, and figures.
 //!
 //! Layer L1 crate: pure data structures and structural validation, free of statistical solvers or
-//! rendering backends. Governing spec: `docs/data-tables-and-transforms.md`.
+//! rendering backends. Governing spec: `docs/implementation/data-tables-and-transforms.md`.
 //!
 //! ```
 //! use curvebook_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, TableKind, XyTable};
@@ -114,7 +114,7 @@ impl TableKind {
     }
 
     /// Check whether `mode` is permitted as a primary subcolumn layout on this table family
-    /// (`docs/data-tables-and-transforms.md` §2).
+    /// (`docs/implementation/data-tables-and-transforms.md` §2).
     #[must_use]
     pub const fn allows_subcolumn_mode(self, mode: SubcolumnMode) -> bool {
         match self {

@@ -8,7 +8,7 @@ Running overview of the Round 1 code audit run from one machine. It follows the 
 - **Failing tests** written by verifiers are committed only to temporary local branches `audit/r1/<slice>` during verification (never merged; pruned after Stages 2–5 permanent regression suites merged into `main` in `833e98d`).
 - **No source changes in audit commits; Stage 1 re-check merged `main` (`fda1cc0`):** confirmed surviving findings (`156` unique) are recorded in [Known defects](../gaps.md#known-defects).
 
-Order follows the build order in [`docs/ROADMAP.md`](../ROADMAP.md) and [`roadmap-history.md`](../roadmap-history.md): numerical foundations, document model, statistics/fitting/transforms/formats, visual stack, tools and engine, shells (UI, CLI, MCP), build guards, then the cross-cutting slices.
+Order follows the build order in [`docs/ROADMAP.md`](../ROADMAP.md) and [`roadmap-history.md`](../planning/roadmap-history.md): numerical foundations, document model, statistics/fitting/transforms/formats, visual stack, tools and engine, shells (UI, CLI, MCP), build guards, then the cross-cutting slices.
 
 ## Summary
 
@@ -131,7 +131,7 @@ Every Round 1 finding (`157` total = `156` unique + `1` duplicate `R1-S07-02`) w
 | [R1-S12-09](findings/r1/S12.md) | S3 | `461ad33` | `lumencraft-cli mcp [--control-port <port>] [--gui-only]` (`apps/lumencraft-cli/src/main.rs:38, 154-199`) + `handle_doc_inspect` (no `sheet_id`, `tools.rs:745-757`) enable live attach | Headless `command_list` (`crates/mcp/src/tools.rs:1040-1055`) still lists all `UI_COMMANDS`; in live-attach mode `doc_inspect {sheet_id}` (`:759-767`) and `open_file`/`save_file`/`render_preview`/`export` (`crates/mcp/src/formats.rs:245-402`) ignore `control_port()` and hit empty local `state.session` |
 | [R1-X1-04](findings/r1/X1.md) | S3 | `7b5bafa` + `3cd144d` | `WorkdirGuard` (`crates/platform/src/path_guard.rs`) + `McpServerState::with_workdir`/`set_workdir` (`crates/mcp/src/tools.rs:145, 190, 1175`) + `formats.rs:47-100` + `docs/mcp.md:22` | `lumencraft-cli mcp` (`apps/lumencraft-cli/src/main.rs:38, 154-199`) exposes no `--workdir` flag so shipped MCP runs unsandboxed; engine `project.recalculate` still reads `ExternalDelimitedFile.path` without path policy (`cmd/project.rs:106-124`) |
 | [R1-S11-13](findings/r1/S11.md) | S4 | `461ad33` / `9db2f2b` | `--new-instance` is now wired (`apps/lumencraft/src/main.rs:124-126, 212-238`) | Malformed `LUMENCRAFT_CONTROL_PORT` still aborts uncontrolled launches (`main.rs:170-174`; `r1_s11_13` fails), and `:160-162` still rejects unknown `-` flags and `-`-prefixed filenames without `--` |
-| [R1-S12-10](findings/r1/S12.md) | S4 | `3cd144d` | `export` CLI subcommand added (`apps/lumencraft-cli/src/main.rs:32-33, 80`) | `docs/scripting-and-automation.md:20, 34-43, 49` still cites unimplemented `import`/`analyze`/`verify` subcommands, unread `inputs[].mode` (`cmd_run_batch.rs:270-281`), `exports[].kind` (`format` at `:322-326`), and `CliError::PathOutsideWorkdir` (`PathEscape` at `error.rs:36`) |
+| [R1-S12-10](findings/r1/S12.md) | S4 | `3cd144d` | `export` CLI subcommand added (`apps/lumencraft-cli/src/main.rs:32-33, 80`) | `docs/implementation/scripting-and-automation.md:20, 34-43, 49` still cites unimplemented `import`/`analyze`/`verify` subcommands, unread `inputs[].mode` (`cmd_run_batch.rs:270-281`), `exports[].kind` (`format` at `:322-326`), and `CliError::PathOutsideWorkdir` (`PathEscape` at `error.rs:36`) |
 
 #### 2 `LIVE_ON_MAIN` findings with partial pre-existing `main` mitigations
 

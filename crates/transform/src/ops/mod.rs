@@ -1,4 +1,4 @@
-//! Execution engine for all eight [`TransformAnalysisSpec`] operations (`docs/data-tables-and-transforms.md` §5, `docs/calculators-and-quick-stats.md` §4).
+//! Execution engine for all eight [`TransformAnalysisSpec`] operations (`docs/implementation/data-tables-and-transforms.md` §5, `docs/planning/calculators-and-quick-stats.md` §4).
 
 pub mod math;
 pub mod normalize_baseline;

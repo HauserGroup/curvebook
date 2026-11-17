@@ -3,7 +3,7 @@
 //! clean-room `.pzfx` / `.prism` adapters.
 //!
 //! Layer L3 file-format crate. Governing spec: `docs/file-format-parity.md` and
-//! `docs/data-tables-and-transforms.md`.
+//! `docs/implementation/data-tables-and-transforms.md`.
 #![forbid(unsafe_code)]
 
 pub mod archive;

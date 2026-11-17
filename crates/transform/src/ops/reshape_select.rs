@@ -1,6 +1,6 @@
 //! Table transposition, row pruning/decimation, and subset/archetype projection
 //! (`TransformAnalysisSpec::Transpose`, `PruneRows`, `SelectAndTransform`,
-//! `docs/data-tables-and-transforms.md` §5.4).
+//! `docs/implementation/data-tables-and-transforms.md` §5.4).
 
 use curvebook_doc::{
     Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedTable,

@@ -1,5 +1,5 @@
 //! Two-pane `InfoSheet` model: structured hookable laboratory constants on the left pane and
-//! freeform Markdown experimental notes on the right pane (`docs/data-tables-and-transforms.md` §3).
+//! freeform Markdown experimental notes on the right pane (`docs/implementation/data-tables-and-transforms.md` §3).
 
 use curvebook_palette::Rgba8;
 
@@ -7,7 +7,7 @@ use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, SheetId};
 
 /// Standard laboratory metadata keys pre-seeded on new `InfoSheet` instances
-/// (`docs/data-tables-and-transforms.md` §3).
+/// (`docs/implementation/data-tables-and-transforms.md` §3).
 pub const STANDARD_INFO_KEYS: [&str; 6] = ["Experiment Date", "Experiment ID", "Notebook ID", "Project", "Experimenter", "Protocol"];
 
 /// Typed value stored in an [`InfoConstant`] row.
@@ -45,7 +45,7 @@ impl ConstantValue {
     }
 }
 
-/// Structured key–value constant on an [`InfoSheet`] (`docs/data-tables-and-transforms.md` §3).
+/// Structured key–value constant on an [`InfoSheet`] (`docs/implementation/data-tables-and-transforms.md` §3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InfoConstant {
     pub name: String,
