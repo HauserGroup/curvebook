@@ -43,7 +43,9 @@ use curvebook_stats::multivariate::pca_analysis;
 use curvebook_stats::power::{
     PowerAnalysisRequest, PowerEffectSpec, PowerSolveTarget, PowerTestFamily, compute_power_curve, compute_sensitivity_table, solve_power,
 };
-use curvebook_stats::regression::{multiple_logistic_regression, multiple_poisson_regression, passing_bablok_regression, run_glm_analysis};
+use curvebook_stats::regression::{
+    multiple_linear_regression, multiple_logistic_regression, multiple_poisson_regression, passing_bablok_regression, run_glm_analysis,
+};
 use curvebook_stats::roc::{RocCiMethod, compare_roc_delong_paired, roc_curve_analysis};
 use curvebook_stats::run_analysis;
 use curvebook_stats::survival::{CoxSubject, compare_survival_curves, cox_ph_regression, kaplan_meier_curve};
@@ -600,5 +602,40 @@ fn rv_74_power_curve_respects_fixed_and_paired_sample_size_group2() {
     let direct_mde_sens = compute_sensitivity_table(&mde_pair_req, &[0.05, 0.01], &[0.80, 0.90]).unwrap();
     for cell in &direct_mde_sens {
         assert_eq!((cell.sample_size, cell.total_n), (11, 36));
+    }
+}
+
+// ============================================================================
+// Cross-Slice Regression: Dot2 FMA Residuals & Self-Consistent Durbin-Watson
+// ============================================================================
+
+#[test]
+fn linear_regression_dot2_residuals_and_durbin_watson_bounds_on_wampler_exact_fits() {
+    let conf = ConfidenceLevel::DEFAULT_95;
+    let names: Vec<String> = (0..6).map(|j| format!("B{j}")).collect();
+
+    // NIST StRD Wampler1 (y = sum_{j=0}^5 x^j, y_20 = 3,368,421) and Wampler2 (y = sum_{j=0}^5 (x/10)^j),
+    // plus sub-ULP scaled variants where column norm rescaling leaves tiny non-zero Dot2 RSS.
+    for scale in [1.0_f64, 1.0 + f64::EPSILON, 3.0, 1.0e-12] {
+        let mut design = Vec::with_capacity(21 * 6);
+        let mut y_w1 = Vec::with_capacity(21);
+        let mut y_w2 = Vec::with_capacity(21);
+        for i in 0..=20 {
+            let x = (i as f64) * scale;
+            let row = [1.0, x, x.powi(2), x.powi(3), x.powi(4), x.powi(5)];
+            design.extend_from_slice(&row);
+            y_w1.push(row.iter().sum());
+            y_w2.push(1.0 + 0.1 * x + 0.01 * x.powi(2) + 0.001 * x.powi(3) + 0.0001 * x.powi(4) + 0.00001 * x.powi(5));
+        }
+        let x_mat = DenseMatrix::from_row_major(21, 6, design).unwrap();
+        for y in [&y_w1, &y_w2] {
+            let res = multiple_linear_regression(&x_mat, y, &names, true, true, conf).unwrap();
+            assert!(res.durbin_watson > 0.0 && res.durbin_watson < 4.0, "scale={scale}: Durbin-Watson {} violated (0, 4) bounds", res.durbin_watson);
+            assert_close(res.durbin_watson, 2.0, 1e-12, "exact polynomial fit Durbin-Watson == 2.0");
+            for (&yi, (&yhat, &ri)) in y.iter().zip(res.fitted.iter().zip(res.residuals.iter())) {
+                assert!(ri.abs() <= 1e-8 * yi.abs().max(1.0), "scale={scale}: uncompensated residual {ri} at y={yi}");
+                assert_close(yhat + ri, yi, 1e-9 * yi.abs().max(1.0), "fitted + residual == y");
+            }
+        }
     }
 }
