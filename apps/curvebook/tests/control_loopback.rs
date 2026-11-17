@@ -1,6 +1,9 @@
 //! Integration tests for CurveBook `--control` JSON-lines protocol, UI parity commands,
 //! hardware clipboard/print adapters, loopback TCP enforcement, and binary CLI semantics.
 
+#[path = "support/control_fixture.rs"]
+mod control_fixture;
+
 use std::io::{BufReader, BufWriter, Cursor, ErrorKind, Write};
 use std::net::{SocketAddr, TcpStream};
 use std::process::Command;
@@ -224,6 +227,10 @@ fn clipboard_bundle_and_print_spool_hardware_adapters() -> Result<(), Box<dyn st
 
 #[test]
 fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::error::Error>> {
+    control_fixture::run("loopback_validation_and_ephemeral_tcp_check", loopback_validation_and_ephemeral_tcp_check_body)
+}
+
+fn loopback_validation_and_ephemeral_tcp_check_body() -> Result<(), Box<dyn std::error::Error>> {
     assert!(parse_control_port("0").is_err());
     assert!(parse_control_port("65536").is_err());
     assert!(parse_control_port("-1").is_err());
@@ -261,7 +268,9 @@ fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::erro
 
             let auth = ControlAuth::generate()?;
             let token_owned = auth.as_str().to_owned();
+            let mut app = UiApp::new();
             let client = std::thread::spawn(move || -> Result<Vec<Value>, String> {
+                let mut cleanup = control_fixture::QuitOnFailure::new(local_addr, &token_owned);
                 let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
                 let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
                 let _ = stream.set_write_timeout(Some(Duration::from_secs(2)));
@@ -286,10 +295,10 @@ fn loopback_validation_and_ephemeral_tcp_check() -> Result<(), Box<dyn std::erro
                     let parsed: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
                     responses.push(parsed);
                 }
+                cleanup.disarm();
                 Ok(responses)
             });
 
-            let mut app = UiApp::new();
             serve_control_listener(&mut app, &listener, &auth)?;
             let responses = client.join().map_err(|_| "client thread panicked")??;
             assert_eq!(responses.len(), 4);
@@ -339,6 +348,10 @@ fn cli_binary_options_and_headless_startup_smoke() -> Result<(), Box<dyn std::er
 
 #[test]
 fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::error::Error>> {
+    control_fixture::run("bad_control_connection_does_not_stop_the_server", bad_control_connection_does_not_stop_the_server_body)
+}
+
+fn bad_control_connection_does_not_stop_the_server_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
         other => other?,
@@ -357,7 +370,9 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
 
     let auth = ControlAuth::generate()?;
     let token_owned = auth.as_str().to_owned();
+    let mut app = UiApp::new();
     let client = std::thread::spawn(move || -> Result<Value, String> {
+        let mut cleanup = control_fixture::QuitOnFailure::new(local_addr, &token_owned);
         // First connection sends a line that is not valid UTF-8, which fails that connection.
         {
             let mut bad = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
@@ -376,10 +391,17 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
         std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
         writer.write_all(format!("{{\"id\":\"q\",\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n").as_bytes()).map_err(|e| e.to_string())?;
         writer.flush().map_err(|e| e.to_string())?;
-        serde_json::from_str(&line).map_err(|e| e.to_string())
+        let ping = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        line.clear();
+        std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+        let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+        if quit["result"]["quit"] != json!(true) {
+            return Err(format!("app.quit was not acknowledged: {quit}"));
+        }
+        cleanup.disarm();
+        Ok(ping)
     });
 
-    let mut app = UiApp::new();
     serve_control_listener(&mut app, &listener, &auth)?;
     let ping = client.join().map_err(|_| "client thread panicked")??;
     assert_eq!(ping["ok"], json!(true));
@@ -388,6 +410,13 @@ fn bad_control_connection_does_not_stop_the_server() -> Result<(), Box<dyn std::
 
 #[test]
 fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispatch() -> Result<(), Box<dyn std::error::Error>> {
+    control_fixture::run(
+        "tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispatch",
+        tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispatch_body,
+    )
+}
+
+fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispatch_body() -> Result<(), Box<dyn std::error::Error>> {
     use std::io::Read;
 
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
@@ -415,7 +444,9 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
     let auth = ControlAuth::generate()?;
     let token_owned = auth.as_str().to_owned();
 
+    let mut app = UiApp::new();
     let client = std::thread::spawn(move || -> Result<(Value, Value, String, Value), String> {
+        let mut cleanup = control_fixture::QuitOnFailure::new(local_addr, &token_owned);
         // 1. Raw TCP unauthenticated command must be rejected with "unauthorized".
         let unauth_resp: Value = {
             let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
@@ -462,7 +493,13 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
             stream.write_all(http_req.as_bytes()).map_err(|e| e.to_string())?;
             stream.flush().map_err(|e| e.to_string())?;
             let mut raw = String::new();
-            stream.read_to_string(&mut raw).map_err(|e| e.to_string())?;
+            match stream.read_to_string(&mut raw) {
+                Ok(_) => {}
+                // Linux may reset a rejected HTTP connection with unread request bytes.
+                // Accept that close only after the complete, exact 403 response arrived.
+                Err(err) if err.kind() == ErrorKind::ConnectionReset && raw == CONTROL_HTTP_FORBIDDEN_RESPONSE => {}
+                Err(err) => return Err(err.to_string()),
+            }
             raw
         };
 
@@ -485,13 +522,20 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
                 .write_all(format!("{{\"id\":\"quit-1\",\"method\":\"app.quit\",\"token\":\"{token_owned}\"}}\n").as_bytes())
                 .map_err(|e| e.to_string())?;
             writer.flush().map_err(|e| e.to_string())?;
-            serde_json::from_str(&line).map_err(|e| e.to_string())?
+            let response = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            line.clear();
+            std::io::BufRead::read_line(&mut reader, &mut line).map_err(|e| e.to_string())?;
+            let quit: Value = serde_json::from_str(&line).map_err(|e| e.to_string())?;
+            if quit["result"]["quit"] != json!(true) {
+                return Err(format!("app.quit was not acknowledged: {quit}"));
+            }
+            response
         };
 
+        cleanup.disarm();
         Ok((unauth_resp, wrong_resp, http_reply, ok_resp))
     });
 
-    let mut app = UiApp::new();
     serve_control_listener(&mut app, &listener, &auth)?;
     let (unauth_resp, wrong_resp, http_reply, ok_resp) = client.join().map_err(|_| "client thread panicked")??;
 
@@ -516,6 +560,13 @@ fn tcp_control_socket_rejects_unauthenticated_and_browser_http_post_before_dispa
 
 #[test]
 fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> Result<(), Box<dyn std::error::Error>> {
+    control_fixture::run(
+        "control_server_survives_small_viewport_dialog_screenshot_and_continues",
+        control_server_survives_small_viewport_dialog_screenshot_and_continues_body,
+    )
+}
+
+fn control_server_survives_small_viewport_dialog_screenshot_and_continues_body() -> Result<(), Box<dyn std::error::Error>> {
     let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
         Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
         other => other?,
@@ -534,7 +585,9 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> R
 
     let auth = ControlAuth::generate()?;
     let token_owned = auth.as_str().to_owned();
+    let mut app = UiApp::new();
     let client = std::thread::spawn(move || -> Result<(Value, Value, Value), String> {
+        let mut cleanup = control_fixture::QuitOnFailure::new(local_addr, &token_owned);
         let stream = TcpStream::connect_timeout(&local_addr, Duration::from_secs(2)).map_err(|e| e.to_string())?;
         let _ = stream.set_read_timeout(Some(Duration::from_secs(5)));
         let mut reader = BufReader::new(stream.try_clone().map_err(|e| e.to_string())?);
@@ -554,10 +607,10 @@ fn control_server_survives_small_viewport_dialog_screenshot_and_continues() -> R
         let small_shot = send(&mut writer, &mut reader, r#"{"id":2,"method":"ui.screenshot","params":{"width_px":64,"height_px":64}}"#)?;
         let next_ping = send(&mut writer, &mut reader, r#"{"id":3,"method":"ping"}"#)?;
         let quit_resp = send(&mut writer, &mut reader, r#"{"id":4,"method":"app.quit"}"#)?;
+        cleanup.disarm();
         Ok((small_shot, next_ping, quit_resp))
     });
 
-    let mut app = UiApp::new();
     serve_control_listener(&mut app, &listener, &auth)?;
     let (small_shot, next_ping, quit_resp) = client.join().map_err(|_| "client thread panicked")??;
     if small_shot["ok"] == json!(false) {
@@ -668,4 +721,44 @@ fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Resu
 
     let _ = std::fs::remove_dir_all(&temp_dir);
     Ok(())
+}
+
+#[test]
+fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixture::TestResult {
+    control_fixture::run("tcp_fixture_client_error_and_panic_both_stop_the_listener", || {
+        for panic_client in [false, true] {
+            let listener = bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+            let address = listener.local_addr()?;
+            let auth = ControlAuth::generate()?;
+            let token = auth.as_str().to_owned();
+            let mut app = UiApp::new();
+            let client = std::thread::spawn(move || -> Result<(), String> {
+                let _cleanup = control_fixture::QuitOnFailure::new(address, &token);
+                if panic_client {
+                    panic!("injected TCP fixture client panic");
+                }
+                Err(String::from("injected TCP fixture client error"))
+            });
+            serve_control_listener(&mut app, &listener, &auth)?;
+            let outcome = client.join();
+            if panic_client {
+                assert!(outcome.is_err(), "the original client panic must remain observable");
+            } else {
+                assert_eq!(outcome.unwrap(), Err(String::from("injected TCP fixture client error")));
+            }
+        }
+        Ok(())
+    })
+}
+
+#[test]
+fn tcp_fixture_deadline_kills_a_stalled_child() {
+    const NAME: &str = "tcp_fixture_deadline_kills_a_stalled_child";
+    if control_fixture::is_child(NAME) {
+        loop {
+            std::thread::park();
+        }
+    }
+    let error = control_fixture::run_child(NAME, Duration::from_millis(250)).expect_err("a stalled child must time out");
+    assert!(matches!(error.downcast_ref::<curvebook_platform::PlatformError>(), Some(curvebook_platform::PlatformError::TimedOut { .. })));
 }

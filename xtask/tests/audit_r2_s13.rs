@@ -96,11 +96,13 @@ fn r2_s13_04_all_workflows_pin_40_char_shas_and_verify_tool_checksums() {
     let root = workspace_root().unwrap();
     let wf_dir = root.join(".github/workflows");
     let mut checked = 0usize;
-    for entry in fs::read_dir(wf_dir).unwrap() {
-        let path = entry.unwrap().path();
-        if path.extension().and_then(|e| e.to_str()) != Some("yml") {
-            continue;
-        }
+    let mut files = fs::read_dir(wf_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .filter(|path| path.extension().and_then(|e| e.to_str()) == Some("yml"))
+        .collect::<Vec<_>>();
+    files.push(root.join(".github/actions/ci-setup/action.yml"));
+    for path in files {
         checked += 1;
         let text = fs::read_to_string(&path).unwrap();
         for (idx, line) in text.lines().enumerate() {
@@ -108,6 +110,13 @@ fn r2_s13_04_all_workflows_pin_40_char_shas_and_verify_tool_checksums() {
             let after_dash = trimmed.strip_prefix('-').map_or(trimmed, str::trim_start);
             if let Some(uses_rhs) = after_dash.strip_prefix("uses:") {
                 let spec = uses_rhs.trim();
+                if spec.starts_with("./") {
+                    // This action is pinned by the checkout revision; audit its external
+                    // actions and tool checksums in the same loop, rather than bypassing it.
+                    assert_eq!(spec, "./.github/actions/ci-setup", "unexpected local action in {}", path.display());
+                    assert!(root.join(spec).join("action.yml").is_file());
+                    continue;
+                }
                 let split = spec.split_once('@');
                 assert!(split.is_some(), "{}:{}: missing `@sha` in `{spec}`", path.display(), idx + 1);
                 let sha = split.unwrap().1;
@@ -119,8 +128,12 @@ fn r2_s13_04_all_workflows_pin_40_char_shas_and_verify_tool_checksums() {
     assert!(checked >= 6);
 
     let ci = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
-    assert!(!ci.contains("download-actionlint.bash"));
-    assert!(ci.contains("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"));
+    let setup = fs::read_to_string(root.join(".github/actions/ci-setup/action.yml")).unwrap();
+    assert!(ci.contains("uses: ./.github/actions/ci-setup"));
+    assert!(!ci.contains("download-actionlint.bash") && !setup.contains("download-actionlint.bash"));
+    assert!(setup.contains("8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8"));
+    assert!(setup.contains("cargo-nextest-0.9.152-x86_64-unknown-linux-gnu.tar.gz"));
+    assert!(setup.contains("d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"));
     let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
     assert!(release.contains("17350a838c8e2c422c6e573ed379b18424565d2de8a2b1cb1b20211976124eb5"));
     assert!(release.contains("b3cf95aa6dabed836d09ad7f0c190a13c74c5b1304db60846f0f702ee407f430"));
@@ -183,8 +196,12 @@ fn r2_s13_08_09_10_11_xtask_cli_gates_and_ci_falsiness() {
     assert!(agents.contains("cargo xtask workflows"));
 
     let main_rs = fs::read_to_string(root.join("xtask/src/main.rs")).unwrap();
-    assert!(main_rs.contains("workflows::is_ci_env()"), "R2-S13-09: cmd_ci must use workflows::is_ci_env()");
-    assert!(!main_rs.contains("var_os(\"CI\")"), "R2-S13-09: raw var_os(\"CI\") check must not remain in xtask/src/main.rs");
+    let ci_rs = fs::read_to_string(root.join("xtask/src/ci.rs")).unwrap();
+    assert!(main_rs.contains("ci::run(&root, rest)"), "the dispatcher must execute the staged CI module");
+    assert!(ci_rs.contains("workflows::is_ci_env()"), "R2-S13-09: CI must use workflows::is_ci_env()");
+    for source in [&main_rs, &ci_rs] {
+        assert!(!source.contains("var_os(\"CI\")"), "R2-S13-09: raw var_os(\"CI\") checks must not replace strict truthiness parsing");
+    }
 }
 
 #[cfg(unix)]

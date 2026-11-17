@@ -4,6 +4,7 @@
 mod assets;
 mod brands;
 mod bundle;
+mod ci;
 mod cleanroom;
 mod commands;
 mod contributors;
@@ -34,7 +35,7 @@ const HELP: &str = "\
 usage: cargo xtask <command> [args...]
 
 commands:
-  ci                    run full local/CI gate (fmt, clippy, tests, doctests, feature checks, policy gates, wasm)
+  ci [stage]            run all gates or build/policy/lint/tests/doctests/features/wasm/performance
   r10-gate              run R10.2 anti-phantom parity gate & R10.22 frame/latency budgets
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
@@ -86,7 +87,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
             print!("{HELP}");
             Ok(())
         }
-        "ci" => cmd_ci(&root),
+        "ci" => ci::run(&root, rest),
         "r10-gate" => cmd_r10_gate(&root),
         "test" => cmd_test(&root, rest),
         "layers" => cmd_layers(&root),
@@ -195,11 +196,12 @@ fn cmd_layers(root: &Path) -> Result<(), String> {
 
 fn cmd_test(root: &Path, extra: &[String]) -> Result<(), String> {
     if has_cargo_nextest() {
-        let mut args = vec![String::from("nextest"), String::from("run"), String::from("--workspace")];
+        let mut args =
+            vec![String::from("nextest"), String::from("run"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
         args.extend_from_slice(extra);
         run_cargo(root, &args)
     } else {
-        let mut args = vec![String::from("test"), String::from("--workspace"), String::from("--all-targets")];
+        let mut args = vec![String::from("test"), String::from("--locked"), String::from("--workspace"), String::from("--all-targets")];
         args.extend_from_slice(extra);
         run_cargo(root, &args)
     }
@@ -260,45 +262,6 @@ fn cmd_wasm(root: &Path) -> Result<(), String> {
 
 fn cmd_r10_gate(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_core_and_spike"])
-}
-
-fn cmd_ci(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["fmt", "--all", "--", "--check"])?;
-    run_cargo_strs(root, &["clippy", "--workspace", "--all-targets", "--", "-D", "warnings"])?;
-    cmd_test(root, &[])?;
-    cmd_r10_gate(root)?;
-    run_cargo_strs(root, &["test", "--workspace", "--doc"])?;
-
-    // Verify embedders can build and test text/ui/mcp without bundled fonts.
-    run_cargo_strs(root, &["test", "-p", "curvebook-text", "--no-default-features"])?;
-    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--no-default-features"])?;
-    run_cargo_strs(root, &["check", "-p", "curvebook-mcp", "--no-default-features"])?;
-
-    assets::run(root)?;
-    brands::run(root)?;
-    cleanroom::run(root)?;
-    cursors::run(root)?;
-    cmd_i18n_report(root)?;
-    ui_commands::run(root, true)?;
-    commands::run(root, true)?;
-    schemas::run(root, true)?;
-    cmd_layers(root)?;
-    secrets::run(root)?;
-    licenses::run(root, &[])?;
-    telemetry::run(root, &[])?;
-    workflows::run(root, &[])?;
-    screenshots::run(root, &[String::from("--check")])?;
-    pending::run_count(root)?;
-    status::run(root)?;
-
-    let in_ci = workflows::is_ci_env();
-    if in_ci || wasm_target_installed() {
-        cmd_wasm(root)?;
-    } else {
-        println!("wasm: wasm32-unknown-unknown target sysroot not installed locally; skipping (enforced when CI=true)");
-    }
-    println!("ci: all checks passed");
-    Ok(())
 }
 
 fn run_cargo_strs(root: &Path, args: &[&str]) -> Result<(), String> {

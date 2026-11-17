@@ -1,6 +1,5 @@
 name: CI
 
-# Standalone quality gates for every push to main and every pull request (`cargo xtask ci`).
 on:
   push:
     branches: [main]
@@ -14,48 +13,83 @@ concurrency:
   group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
+env:
+  CI: 'true'
+  CARGO_INCREMENTAL: '0'
+
 jobs:
-  gate:
-    name: Workspace CI gate
+  build:
+    name: Build native test archive
     runs-on: ubuntu-latest
-    timeout-minutes: 90
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Install system libraries
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
-            libgl1-mesa-dev shellcheck
-      - name: Lint GitHub Actions workflows (actionlint)
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/actionlint-bin"
-          tarball="$RUNNER_TEMP/actionlint_1.7.12_linux_amd64.tar.gz"
-          curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v1.7.12/actionlint_1.7.12_linux_amd64.tar.gz" -o "$tarball"
-          printf '%s  %s\n' "8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8" "$tarball" | sha256sum --check
-          tar -xzf "$tarball" -C "$RUNNER_TEMP/actionlint-bin" actionlint
-          echo "$RUNNER_TEMP/actionlint-bin" >> "$GITHUB_PATH"
-          "$RUNNER_TEMP/actionlint-bin/actionlint" -config-file .github/actionlint.yaml
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+      - uses: ./.github/actions/ci-setup
         with:
-          toolchain: "1.99.1"
-          components: rustfmt, clippy
-          targets: wasm32-unknown-unknown
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Install cargo-deny
+          save-cache: 'true'
+      - name: Check formatting and workflows before compilation
         run: |
-          if ! command -v cargo-deny >/dev/null 2>&1; then
-            cargo install --locked cargo-deny --version 0.20.2
-          fi
-      - name: Check licences, advisories, yanked crates, bans and sources (cargo-deny)
+          cargo fmt --all -- --check
+          actionlint -config-file .github/actionlint.yaml
+      - name: Build all native test targets without executing tests
+        run: cargo run --locked -p xtask -- ci build
+      - name: Share the exact compiled test binaries
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: native-tests
+          path: target/ci-tests.tar.zst
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 2
+      - name: Avoid duplicating the uploaded archive in the build cache
+        run: rm -- target/ci-tests.tar.zst
+
+  checks:
+    name: CI / ${{ matrix.stage }}
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [policy, lint, tests, doctests, features, wasm, performance]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: ./.github/actions/ci-setup
+      - name: Restore the test binaries built for this revision
+        if: matrix.stage == 'tests' || matrix.stage == 'performance'
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: native-tests
+          path: target
+      - name: Check licences, advisories, yanked crates, bans and sources
+        if: matrix.stage == 'policy'
         run: cargo deny check
-      - name: Run cargo xtask ci
+      - name: Run quality stage
         env:
-          CI: "true"
-        run: cargo run --locked -p xtask -- ci
+          CI_STAGE: ${{ matrix.stage }}
+          CURVEBOOK_CI_TEST_ARCHIVE: target/ci-tests.tar.zst
+        run: |
+          cargo build --locked -p xtask
+          cp target/debug/xtask "$RUNNER_TEMP/curvebook-ci"
+          "$RUNNER_TEMP/curvebook-ci" ci "$CI_STAGE"
+
+  gate:
+    # Keep the existing required-check name while requiring every stage to succeed.
+    name: Workspace CI gate
+    needs: [build, checks]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require all quality stages
+        env:
+          BUILD_RESULT: ${{ needs.build.result }}
+          CHECKS_RESULT: ${{ needs.checks.result }}
+        run: |
+          test "$BUILD_RESULT" = success
+          test "$CHECKS_RESULT" = success
