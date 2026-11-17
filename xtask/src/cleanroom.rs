@@ -13,7 +13,7 @@ const MAX_ADJACENT_LINE_GAP: usize = 80;
 const MAX_ARCHIVE_DEPTH: usize = 2;
 
 const CLEANROOM_ZIP_LIMITS: ZipLimits =
-    ZipLimits { max_entries: 1_024, max_total_uncompressed_bytes: 32 * 1024 * 1024, max_entry_uncompressed_bytes: 16 * 1024 * 1024 };
+    ZipLimits { max_entries: 4_096, max_total_uncompressed_bytes: 128 * 1024 * 1024, max_entry_uncompressed_bytes: 64 * 1024 * 1024 };
 
 const VENDOR_SIGNATURES: &[(&str, &str)] = &[
     ("graphpad", "vendor copyright notice (graphpad)"),
@@ -75,11 +75,22 @@ pub fn run(root: &Path) -> Result<(), String> {
         hits.extend(scan_dist_artefacts(&web_pkg)?);
     }
     let dist_dir = root.join("dist");
-    if dist_dir.exists() {
-        hits.extend(scan_dist_artefacts(&dist_dir)?);
-    }
+    let dist_counts = if dist_dir.exists() {
+        let (dist_files, dist_entries, dist_hits) = scan_dist_artefacts_with_stats(&dist_dir)?;
+        hits.extend(dist_hits);
+        Some((dist_files, dist_entries))
+    } else {
+        None
+    };
     if hits.is_empty() {
-        println!("cleanroom: no vendor copyright notices or vendor-created fixtures found");
+        if let Some((dist_files, dist_entries)) = dist_counts {
+            println!(
+                "cleanroom: no vendor copyright notices or vendor-created fixtures found across {} tracked files and {dist_files} dist/ files ({dist_entries} archive entries)",
+                files.len()
+            );
+        } else {
+            println!("cleanroom: no vendor copyright notices or vendor-created fixtures found across {} tracked files", files.len());
+        }
         return Ok(());
     }
     let formatted: Vec<String> = hits.iter().map(|h| format!("{}:{}: matched `{}`", h.path, h.line, h.signature)).collect();
@@ -89,6 +100,7 @@ pub fn run(root: &Path) -> Result<(), String> {
 #[must_use]
 pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
     let mut hits = Vec::new();
+    let mut archive_entries = 0usize;
     for path in files {
         if should_skip(path) {
             continue;
@@ -102,7 +114,7 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
             hits.push(CleanroomHit { path: path.clone(), line: 1, signature: "unreadable file" });
             continue;
         };
-        scan_bytes_recursive(path, &bytes, 0, &mut hits);
+        scan_bytes_recursive(path, &bytes, 0, &mut archive_entries, &mut hits);
     }
     hits
 }
@@ -110,12 +122,20 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
 /// Recursively scan all assembled artefacts under `dist_dir` (including nested ZIP/`.curvebook`/`.prism`/`.pzf`
 /// archives, HTML, manifests, UTF-16 payloads, and even mistakenly bundled audit files), never following symlinks.
 pub fn scan_dist_artefacts(dist_dir: &Path) -> Result<Vec<CleanroomHit>, String> {
+    let (_, _, hits) = scan_dist_artefacts_with_stats(dist_dir)?;
+    Ok(hits)
+}
+
+/// Recursively scan all assembled artefacts under `dist_dir`, returning `(file_count, archive_entry_count, hits)`.
+pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, Vec<CleanroomHit>), String> {
     if !dist_dir.exists() {
         return Err(format!("dist directory `{}` does not exist", dist_dir.display()));
     }
     let mut rel_files = Vec::new();
     collect_dist_files(dist_dir, dist_dir, &mut rel_files)?;
     rel_files.sort();
+    let file_count = rel_files.len();
+    let mut archive_entries = 0usize;
     let mut hits = Vec::new();
     for rel in rel_files {
         let norm = rel.replace('\\', "/");
@@ -127,9 +147,9 @@ pub fn scan_dist_artefacts(dist_dir: &Path) -> Result<Vec<CleanroomHit>, String>
             hits.push(CleanroomHit { path: rel, line: 1, signature: "unreadable file" });
             continue;
         };
-        scan_bytes_recursive(&rel, &bytes, 0, &mut hits);
+        scan_bytes_recursive(&rel, &bytes, 0, &mut archive_entries, &mut hits);
     }
-    Ok(hits)
+    Ok((file_count, archive_entries, hits))
 }
 
 fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
@@ -168,7 +188,7 @@ fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
     exts.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate))
 }
 
-fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, hits: &mut Vec<CleanroomHit>) {
+fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, archive_entries: &mut usize, hits: &mut Vec<CleanroomHit>) {
     let is_vendor_archive = has_extension_ci(display_path, &["prism", "pzf"]);
     let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
 
@@ -181,10 +201,11 @@ fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, hits: &m
         }
         if let Ok(archive) = ZipArchive::from_bytes_with_limits(bytes, CLEANROOM_ZIP_LIMITS) {
             for (entry_name, entry_bytes) in archive.iter() {
+                *archive_entries += 1;
                 let entry_path = format!("{display_path}!{entry_name}");
                 let mut name_seen = HashSet::new();
                 scan_text(&entry_path, entry_name, hits, &mut name_seen);
-                scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, hits);
+                scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, archive_entries, hits);
             }
             return;
         }

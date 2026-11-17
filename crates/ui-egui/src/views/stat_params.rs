@@ -1431,9 +1431,10 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
 fn supports_repeated_measures(kind: &AnalysisKind, source_is_mv: bool) -> bool {
     match kind {
         AnalysisKind::FactorialAnova(_) => !source_is_mv,
-        AnalysisKind::OneWayAnova(_) | AnalysisKind::TwoGroupComparison(_) | AnalysisKind::MultipleRowTTests(_) | AnalysisKind::NestedComparison(_) => {
-            true
-        }
+        AnalysisKind::OneWayAnova(_)
+        | AnalysisKind::TwoGroupComparison(_)
+        | AnalysisKind::MultipleRowTTests(_)
+        | AnalysisKind::NestedComparison(_) => true,
         _ => false,
     }
 }

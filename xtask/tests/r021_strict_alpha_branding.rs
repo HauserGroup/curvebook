@@ -10,6 +10,7 @@ use curvebook_chart::compile_graph;
 use curvebook_doc::{AnalysisKind, AnalysisSpec, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, ResultSheet, SheetId};
 use curvebook_engine::{Session, cmd::registry as engine_cmd_registry};
 use curvebook_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_bytes};
+use curvebook_mcp::{GuiSessionHost, McpServerState, dispatch_json_value};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_ui_egui::compositor::FramePalette;
@@ -518,5 +519,429 @@ fn verify_png_chunks(path: &Path, bytes: &[u8], png_sig: &[u8; 8], pre_rename: &
             break;
         }
     }
+    Ok(())
+}
+
+struct TestGuiHost {
+    app: UiApp,
+}
+
+impl GuiSessionHost for TestGuiHost {
+    fn call_gui(&mut self, method: &str, mut params: serde_json::Value) -> Result<serde_json::Value, curvebook_engine::EngineError> {
+        if method == "ui.screenshot"
+            && let Some(obj) = params.as_object_mut()
+            && matches!(obj.get("target").and_then(serde_json::Value::as_str), Some("workspace" | "viewport"))
+        {
+            obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
+        }
+        curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, params)
+    }
+
+    fn set_gui_only(&mut self, gui_only: bool) {
+        self.app.set_gui_only(gui_only);
+    }
+
+    fn is_gui_only(&self) -> bool {
+        self.app.is_gui_only()
+    }
+
+    fn hosted_session(&self) -> Option<&Session> {
+        Some(self.app.session())
+    }
+
+    fn hosted_session_mut(&mut self) -> Option<&mut Session> {
+        Some(self.app.session_mut())
+    }
+
+    fn sync_after_session_mutation(&mut self) {
+        self.app.sync_views();
+    }
+}
+
+fn check_mcp_json_strict(ctx: &str, method: &str, called_tool: Option<&str>, resp: &serde_json::Value) -> Result<(), String> {
+    let pre_rename = join(&["lum", "encraft"]);
+    let raw_ext = join(&["pr", "ism"]);
+    let dot_ext = join(&[".pr", "ism"]);
+    let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
+    let mcp_tool_id = join(&["table_im", "port_pr", "ism"]);
+    let serialized = serde_json::to_string(resp).map_err(|e| e.to_string())?;
+
+    let mut masked = serialized;
+    if method == "tools/list" {
+        if let Some(tools) = resp.pointer("/result/tools").and_then(serde_json::Value::as_array) {
+            for tool in tools {
+                let name = tool.get("name").and_then(serde_json::Value::as_str).unwrap_or("");
+                if name == "open_file" {
+                    let desc = tool.get("description").and_then(serde_json::Value::as_str).unwrap_or("");
+                    if desc.contains(&dot_ext) {
+                        let clean_desc = desc.replace(&dot_ext, ".ext");
+                        masked = masked.replace(desc, &clean_desc);
+                    }
+                    let fmt_enum_pat = format!("\"enum\":[\"curvebook\",\"curvebook.d\",\"cbtemplate\",\"{}\",\"pzfx\",\"csv\",\"tsv\"]", raw_ext);
+                    masked = masked.replace(&fmt_enum_pat, "\"enum\":[\"curvebook\",\"pzfx\"]");
+                } else if name == mcp_tool_id {
+                    masked = masked.replace(&mcp_tool_id, "table_import_ext");
+                    masked = masked.replace(&format!("[{cmd_id}]"), "[table.import_ext]");
+                }
+            }
+        }
+    } else if method == "tools/call" && matches!(called_tool, Some("list_toolsets" | "command_list" | "ui_inspect")) {
+        masked = masked.replace(&mcp_tool_id, "table_import_ext");
+        masked = masked.replace(&cmd_id, "table.import_ext");
+    }
+
+    // Strip base64 PNG image data blocks after verifying their binary PNG chunks cleanly.
+    if method == "tools/call"
+        && let Some(blocks) = resp.pointer("/result/content").and_then(serde_json::Value::as_array)
+    {
+        for block in blocks {
+            if block.get("type").and_then(serde_json::Value::as_str) == Some("image")
+                && let Some(b64) = block.get("data").and_then(serde_json::Value::as_str)
+            {
+                let png = decode_b64(b64).ok_or_else(|| format!("{ctx}: invalid base64 PNG"))?;
+                verify_png_chunks(Path::new(ctx), &png, b"\x89PNG\r\n\x1a\n", &pre_rename)?;
+                masked = masked.replace(b64, "CLEAN_PNG_DATA");
+            }
+        }
+    }
+
+    if contains_ascii_word(&masked, &pre_rename) {
+        return Err(format!("{ctx}: MCP response leaked pre-rename token"));
+    }
+    for probe in banned_probe_tokens() {
+        if contains_ascii_word(&masked, &probe) {
+            return Err(format!("{ctx}: MCP response leaked prohibited token `{probe}`"));
+        }
+    }
+    Ok(())
+}
+
+fn decode_b64(b64: &str) -> Option<Vec<u8>> {
+    let mut vals = Vec::with_capacity(b64.len());
+    for &b in b64.as_bytes() {
+        let v = match b {
+            b'A'..=b'Z' => b - b'A',
+            b'a'..=b'z' => b - b'a' + 26,
+            b'0'..=b'9' => b - b'0' + 52,
+            b'+' => 62,
+            b'/' => 63,
+            b'=' => 255,
+            b' ' | b'\t' | b'\r' | b'\n' => continue,
+            _ => return None,
+        };
+        vals.push(v);
+    }
+    if !vals.len().is_multiple_of(4) {
+        return None;
+    }
+    let mut out = Vec::with_capacity((vals.len() / 4) * 3);
+    let (pairs, _) = vals.as_chunks::<4>();
+    for &[a, b, c, d] in pairs {
+        if a > 63 || b > 63 {
+            return None;
+        }
+        out.push((a << 2) | (b >> 4));
+        if c <= 63 {
+            out.push((b << 4) | (c >> 2));
+            if d <= 63 {
+                out.push((c << 6) | d);
+            }
+        }
+    }
+    Some(out)
+}
+
+#[test]
+fn r021_mcp_jsonrpc_headless_and_gui_only_positive_and_negative_regression() -> Result<(), String> {
+    let mut doc = ProjectDocument::new("R021 MCP Sweep").map_err(|e| e.to_string())?;
+    for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
+        let ds = instantiate_sample_fixture(fixture.id, format!("data-{}", idx + 1)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+    }
+    doc.add_info_sheet(InfoSheet::new_preseeded("info-1", "Study Info").map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let spec =
+        AnalysisSpec::new("res-1", "data-2", AnalysisKind::OneWayAnova(curvebook_doc::OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
+    doc.add_result_sheet(ResultSheet::new(spec).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    if let Some(ds_xy) = doc.data_sheet(&SheetId::new("data-1")).cloned() {
+        let mut g1 = GraphSheet::new_uninitialized_for_data("graph-1", &ds_xy).map_err(|e| e.to_string())?;
+        g1.initialized = true;
+        doc.add_graph_sheet(g1).map_err(|e| e.to_string())?;
+    }
+    let mut lspec = LayoutSpec::default();
+    lspec.items.push(LayoutItem::LiveGraph {
+        id: String::from("p1"),
+        graph_sheet_id: SheetId::new("graph-1"),
+        bounds_pt: curvebook_doc::RectPt::new(16.0, 16.0, 200.0, 140.0),
+        scale_percent: 100.0,
+        badge_override: Some(String::from("A")),
+    });
+    doc.add_layout_sheet(LayoutSheet::new("layout-1", "Figure 1", lspec).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+
+    let mut session = Session::from_document(doc);
+    session.recalculate_all().map_err(|e| e.to_string())?;
+
+    // 1. Positive headless MCP JSON-RPC verification across initialize, tools, resources, prompts, doc_inspect, render_preview, and export.
+    let mut headless = McpServerState::from_session(session.clone());
+    let rpc = |st: &mut McpServerState, method: &str, params: serde_json::Value| -> Result<serde_json::Value, String> {
+        dispatch_json_value(serde_json::json!({ "jsonrpc": "2.0", "id": 1, "method": method, "params": params }), st)
+            .ok_or_else(|| format!("no reply for {method}"))
+    };
+
+    let init = rpc(&mut headless, "initialize", serde_json::json!({ "protocolVersion": "2024-11-05" }))?;
+    if init.pointer("/result/serverInfo/name").and_then(serde_json::Value::as_str) != Some("curvebook") {
+        return Err(String::from("unexpected MCP serverInfo.name"));
+    }
+    check_mcp_json_strict("headless:initialize", "initialize", None, &init)?;
+
+    let core_tools = rpc(&mut headless, "tools/list", serde_json::json!({}))?;
+    check_mcp_json_strict("headless:tools/list:core", "tools/list", None, &core_tools)?;
+
+    let tsets = rpc(&mut headless, "tools/call", serde_json::json!({ "name": "list_toolsets", "arguments": {} }))?;
+    check_mcp_json_strict("headless:list_toolsets", "tools/call", Some("list_toolsets"), &tsets)?;
+
+    let _ = rpc(
+        &mut headless,
+        "tools/call",
+        serde_json::json!({ "name": "enable_toolset", "arguments": { "group": "all", "groups": ["gui"], "enabled": true } }),
+    )?;
+    let all_tools = rpc(&mut headless, "tools/list", serde_json::json!({}))?;
+    check_mcp_json_strict("headless:tools/list:all", "tools/list", None, &all_tools)?;
+
+    let res_list = rpc(&mut headless, "resources/list", serde_json::json!({}))?;
+    check_mcp_json_strict("headless:resources/list", "resources/list", None, &res_list)?;
+    let uris: Vec<String> = res_list
+        .pointer("/result/resources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|r| r.get("uri").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    if uris.len() < 6 {
+        return Err(format!("expected >= 6 MCP resources, got {}", uris.len()));
+    }
+    for uri in &uris {
+        let rread = rpc(&mut headless, "resources/read", serde_json::json!({ "uri": uri }))?;
+        check_mcp_json_strict(&format!("headless:resources/read:{uri}"), "resources/read", None, &rread)?;
+    }
+
+    let plist = rpc(&mut headless, "prompts/list", serde_json::json!({}))?;
+    check_mcp_json_strict("headless:prompts/list", "prompts/list", None, &plist)?;
+    let pnames: Vec<String> = plist
+        .pointer("/result/prompts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|p| p.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    for pname in &pnames {
+        let pget = rpc(&mut headless, "prompts/get", serde_json::json!({ "name": pname, "arguments": {} }))?;
+        check_mcp_json_strict(&format!("headless:prompts/get:{pname}"), "prompts/get", None, &pget)?;
+    }
+
+    let doc_ins = rpc(&mut headless, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
+    check_mcp_json_strict("headless:doc_inspect", "tools/call", Some("doc_inspect"), &doc_ins)?;
+
+    let preview = rpc(
+        &mut headless,
+        "tools/call",
+        serde_json::json!({ "name": "render_preview", "arguments": { "sheet_id": "graph-1", "width_px": 240, "height_px": 180, "dpi": 144 } }),
+    )?;
+    check_mcp_json_strict("headless:render_preview", "tools/call", Some("render_preview"), &preview)?;
+
+    let svg_exp = rpc(&mut headless, "tools/call", serde_json::json!({ "name": "export", "arguments": { "format": "svg", "sheet_id": "graph-1" } }))?;
+    check_mcp_json_strict("headless:export:svg", "tools/call", Some("export"), &svg_exp)?;
+
+    // 2. Positive strict --gui-only MCP JSON-RPC verification.
+    let mut app = UiApp::from_session(session);
+    app.sync_views();
+    app.set_gui_only(true);
+    let mut gui_mcp = McpServerState::with_gui_host(Box::new(TestGuiHost { app }));
+    let g_init = rpc(&mut gui_mcp, "initialize", serde_json::json!({ "protocolVersion": "2024-11-05" }))?;
+    check_mcp_json_strict("gui_only:initialize", "initialize", None, &g_init)?;
+    let g_tools = rpc(&mut gui_mcp, "tools/list", serde_json::json!({}))?;
+    check_mcp_json_strict("gui_only:tools/list", "tools/list", None, &g_tools)?;
+    let g_prompts = rpc(&mut gui_mcp, "prompts/list", serde_json::json!({}))?;
+    check_mcp_json_strict("gui_only:prompts/list", "prompts/list", None, &g_prompts)?;
+    for pname in &pnames {
+        let gpget = rpc(&mut gui_mcp, "prompts/get", serde_json::json!({ "name": pname, "arguments": {} }))?;
+        check_mcp_json_strict(&format!("gui_only:prompts/get:{pname}"), "prompts/get", None, &gpget)?;
+    }
+    let g_ins = rpc(&mut gui_mcp, "tools/call", serde_json::json!({ "name": "ui_inspect", "arguments": { "scope": "all" } }))?;
+    check_mcp_json_strict("gui_only:ui_inspect", "tools/call", Some("ui_inspect"), &g_ins)?;
+    let g_shot = rpc(
+        &mut gui_mcp,
+        "tools/call",
+        serde_json::json!({ "name": "ui_screenshot", "arguments": { "target": "workspace", "width_px": 240, "height_px": 180, "dpi": 144 } }),
+    )?;
+    check_mcp_json_strict("gui_only:ui_screenshot", "tools/call", Some("ui_screenshot"), &g_shot)?;
+
+    // 3. Negative regression probes proving contaminated MCP instructions, prompts, resources, and tool descriptions fail.
+    let vendor_gp = join(&["Gr", "aph", "Pad"]);
+    let prod_pr = join(&["Pr", "ism"]);
+    let vendor_op = join(&["Ori", "gin", "Pro"]);
+    let suite_ac = join(&["Art", "Cr", "aft"]);
+    let old_lc = join(&["Lum", "en", "Craft"]);
+
+    let bad_init = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "result": { "serverInfo": { "name": "curvebook" }, "instructions": format!("MCP helper for {vendor_gp} workflows") }
+    });
+    if check_mcp_json_strict("neg:init", "initialize", None, &bad_init).is_ok() {
+        return Err(String::from("contaminated MCP instructions failed to trigger rejection"));
+    }
+
+    let bad_prompt = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 2,
+        "result": { "description": "fit", "messages": [{ "role": "user", "content": { "type": "text", "text": format!("Compare with {vendor_op}") } }] }
+    });
+    if check_mcp_json_strict("neg:prompt", "prompts/get", None, &bad_prompt).is_ok() {
+        return Err(String::from("contaminated MCP prompt failed to trigger rejection"));
+    }
+
+    let bad_res = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 3,
+        "result": { "contents": [{ "uri": "sheet://data-1", "mimeType": "application/json", "text": format!("{{\"title\":\"{suite_ac} Study\"}}") }] }
+    });
+    if check_mcp_json_strict("neg:resource", "resources/read", None, &bad_res).is_ok() {
+        return Err(String::from("contaminated MCP resource failed to trigger rejection"));
+    }
+
+    let bad_tool_desc = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 4,
+        "result": { "tools": [{ "name": "open_file", "description": format!("Open {prod_pr} (.prism) or {old_lc} files.") }] }
+    });
+    if check_mcp_json_strict("neg:tool", "tools/list", None, &bad_tool_desc).is_ok() {
+        return Err(String::from("contaminated MCP open_file product description failed to trigger rejection"));
+    }
+
+    Ok(())
+}
+
+#[test]
+fn r021_icns_gif_svg_docs_images_and_windows_ico_geometry_intact() -> Result<(), String> {
+    let root = workspace_root()?;
+    let png_sig = b"\x89PNG\r\n\x1a\n";
+    let pre_rename = join(&["lum", "encraft"]);
+
+    // 1. Verify docs/images/curvebook.png and assets/app-icon/slack/curvebook.png chunks + CRCs.
+    for rel in ["docs/images/curvebook.png", "assets/app-icon/slack/curvebook.png"] {
+        let bytes = fs::read(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+        verify_png_chunks(&root.join(rel), &bytes, png_sig, &pre_rename)?;
+    }
+
+    // 2. Verify curvebook.icns header, embedded PNG frames, and non-PNG `info` plist chunk.
+    let icns = fs::read(root.join("assets/app-icon/curvebook.icns")).map_err(|e| e.to_string())?;
+    if !icns.starts_with(b"icns") || icns.len() < 8 {
+        return Err(String::from("curvebook.icns missing `icns` magic"));
+    }
+    let icns_total = u32::from_be_bytes([icns[4], icns[5], icns[6], icns[7]]) as usize;
+    if icns_total != icns.len() {
+        return Err(format!("curvebook.icns length mismatch: header={icns_total}, actual={}", icns.len()));
+    }
+    let mut pos = 8usize;
+    let mut png_subicons = 0usize;
+    while pos + 8 <= icns.len() {
+        let tag = &icns[pos..pos + 4];
+        let elen = u32::from_be_bytes([icns[pos + 4], icns[pos + 5], icns[pos + 6], icns[pos + 7]]) as usize;
+        if elen < 8 || pos + elen > icns.len() {
+            return Err(String::from("curvebook.icns malformed sub-chunk bounds"));
+        }
+        let payload = &icns[pos + 8..pos + elen];
+        if payload.starts_with(png_sig) {
+            verify_png_chunks(Path::new("curvebook.icns"), payload, png_sig, &pre_rename)?;
+            png_subicons += 1;
+        } else if tag == b"info" {
+            let lossy = String::from_utf8_lossy(payload);
+            if contains_ascii_word(&lossy, &pre_rename) {
+                return Err(String::from("curvebook.icns `info` chunk contains pre-rename token"));
+            }
+            for probe in banned_probe_tokens() {
+                if contains_ascii_word(&lossy, &probe) {
+                    return Err(format!("curvebook.icns `info` chunk leaked `{probe}`"));
+                }
+            }
+        }
+        pos += elen;
+    }
+    if png_subicons < 8 {
+        return Err(format!("expected >= 8 PNG sub-icons inside curvebook.icns, found {png_subicons}"));
+    }
+
+    // 3. Verify curvebook.svg, curvebook-small.svg, and org.curvebook.CurveBook.svg (outer XML + base64 PNG).
+    for rel in
+        ["assets/app-icon/curvebook.svg", "assets/app-icon/curvebook-small.svg", "assets/app-icon/hicolor/scalable/apps/org.curvebook.CurveBook.svg"]
+    {
+        let svg = fs::read_to_string(root.join(rel)).map_err(|e| format!("read {rel}: {e}"))?;
+        let marker = "data:image/png;base64,";
+        let Some(idx) = svg.find(marker) else {
+            return Err(format!("{rel} missing embedded base64 PNG"));
+        };
+        let after = &svg[idx + marker.len()..];
+        let end = after.find('"').ok_or_else(|| format!("{rel} unterminated data URI"))?;
+        let decoded = decode_b64(&after[..end]).ok_or_else(|| format!("{rel} invalid base64 PNG"))?;
+        verify_png_chunks(Path::new(rel), &decoded, png_sig, &pre_rename)?;
+        let outer = format!("{}{}", &svg[..idx], &svg[idx + marker.len() + end..]);
+        if contains_ascii_word(&outer, &pre_rename) {
+            return Err(format!("{rel} outer XML contains pre-rename token"));
+        }
+        for probe in banned_probe_tokens() {
+            if contains_ascii_word(&outer, &probe) {
+                return Err(format!("{rel} outer XML leaked `{probe}`"));
+            }
+        }
+    }
+
+    // 4. Verify curvebook-subtle.gif header & absence of legacy/vendor strings, plus github-pages.md.
+    let gif = fs::read(root.join("assets/app-icon/slack/curvebook-subtle.gif")).map_err(|e| e.to_string())?;
+    if !gif.starts_with(b"GIF89a") {
+        return Err(String::from("curvebook-subtle.gif missing GIF89a header"));
+    }
+    let gif_lossy = String::from_utf8_lossy(&gif).to_ascii_lowercase();
+    if gif_lossy.contains(&pre_rename) {
+        return Err(String::from("curvebook-subtle.gif contains pre-rename token"));
+    }
+    let pages_doc = fs::read_to_string(root.join("docs/release/github-pages.md")).map_err(|e| e.to_string())?;
+    for probe in banned_probe_tokens() {
+        if contains_ascii_word(&pages_doc, &probe) {
+            return Err(format!("docs/release/github-pages.md leaked `{probe}`"));
+        }
+    }
+
+    // 5. Verify curvebook.ico directory invariants matching packaging/windows/check-icons.ps1.
+    let ico = fs::read(root.join("assets/app-icon/curvebook.ico")).map_err(|e| e.to_string())?;
+    let reserved = u16::from_le_bytes([ico[0], ico[1]]);
+    let icon_type = u16::from_le_bytes([ico[2], ico[3]]);
+    let count = u16::from_le_bytes([ico[4], ico[5]]) as usize;
+    if reserved != 0 || icon_type != 1 || count != 7 {
+        return Err(format!("invalid ICONDIR header: reserved={reserved}, type={icon_type}, count={count}"));
+    }
+    let dir_end = 6 + 16 * count;
+    for i in 0..count {
+        let entry = 6 + 16 * i;
+        let entry_w = if ico[entry] == 0 { 256u32 } else { u32::from(ico[entry]) };
+        let entry_h = if ico[entry + 1] == 0 { 256u32 } else { u32::from(ico[entry + 1]) };
+        if ico[entry + 3] != 0 {
+            return Err(format!("ICO frame {i} reserved byte non-zero"));
+        }
+        let sz = u32::from_le_bytes([ico[entry + 8], ico[entry + 9], ico[entry + 10], ico[entry + 11]]) as usize;
+        let off = u32::from_le_bytes([ico[entry + 12], ico[entry + 13], ico[entry + 14], ico[entry + 15]]) as usize;
+        if off < dir_end || off + sz > ico.len() {
+            return Err(format!("ICO frame {i} out of bounds"));
+        }
+        let frame = &ico[off..off + sz];
+        if !frame.starts_with(png_sig) || &frame[12..16] != b"IHDR" {
+            return Err(format!("ICO frame {i} missing PNG/IHDR"));
+        }
+        let png_w = u32::from_be_bytes([frame[16], frame[17], frame[18], frame[19]]);
+        let png_h = u32::from_be_bytes([frame[20], frame[21], frame[22], frame[23]]);
+        if png_w != entry_w || png_h != entry_h {
+            return Err(format!("ICO frame {i} dimension mismatch: dir={entry_w}x{entry_h}, ihdr={png_w}x{png_h}"));
+        }
+    }
+
     Ok(())
 }

@@ -82,7 +82,7 @@ EOF
 ```
 
 Expected output (three JSON lines on stdout; `notifications/initialized` produces no reply):
-1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"0.1.0"}`.
+1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.1"}`.
 2. Line 2 (`"id":2`): exact pong `{"id":2,"jsonrpc":"2.0","result":{}}`.
 3. Line 3 (`"id":3`): `"tools"` array containing the default core tools: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`.
 
@@ -99,7 +99,7 @@ EOF
 ```
 
 Expected output:
-1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"0.1.0"}`).
+1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.1"}`).
 2. Line 2 (`"id":2`): `tools/call` response with `"isError":false` whose final `stats.run` step (`"index":3`) reports `"message":"ran Welch's t test"`, `"status":"UpToDate"`, and these exact scalar results:
    - `"t"`: `-8.520563361656317`
    - `"PValue"`: `0.0036599555836826485`

@@ -21,11 +21,11 @@ use crate::interaction::{ViewportMetrics, WorkspaceLayoutMap};
 use crate::layout::LayoutTree;
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, r1_paired_or_matched_allowed,
+    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, r_km_trend_test, r1_paired_or_matched_allowed,
     r1_sphericity_or_reml_control, r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
     r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
     r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
-    r_km_trend_test, source_table_shape, survival_group_count,
+    source_table_shape, survival_group_count,
 };
 use crate::power_wizard::PowerWizardStage;
 use curvebook_tools::SelectionQuickStats;
@@ -1513,12 +1513,7 @@ fn build_edit_params_dialog_nodes(
     )
 }
 
-fn push_r9_edit_params_controls(
-    app: &UiApp,
-    doc: &ProjectDocument,
-    controls: &mut Vec<UiWidgetNode>,
-    pos: &impl Fn(usize) -> Option<[f64; 4]>,
-) {
+fn push_r9_edit_params_controls(app: &UiApp, doc: &ProjectDocument, controls: &mut Vec<UiWidgetNode>, pos: &impl Fn(usize) -> Option<[f64; 4]>) {
     let ep = &app.canvas_dialogs.edit_params;
     let Some(spec) = ep.draft.as_ref() else {
         return;

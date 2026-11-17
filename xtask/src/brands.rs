@@ -11,6 +11,7 @@ use curvebook_doc::{
 };
 use curvebook_engine::{Session, cmd::registry as engine_cmd_registry};
 use curvebook_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_bytes};
+use curvebook_mcp::{GuiSessionHost, McpServerState, dispatch_json_value};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, AnalysisCategory, CommandPaletteState};
@@ -136,6 +137,12 @@ pub struct BrandHit {
     pub brand: &'static str,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct DistScanStats {
+    pub files: usize,
+    pub archive_entries: usize,
+}
+
 enum DecodedFile {
     Text(String),
     BinaryAsset,
@@ -150,15 +157,28 @@ pub fn run(root: &Path) -> Result<(), String> {
         hits.extend(scan_dist_artefacts(&web_pkg)?);
     }
     let dist_dir = root.join("dist");
-    if dist_dir.exists() {
-        hits.extend(scan_dist_artefacts(&dist_dir)?);
-    }
+    let dist_stats = if dist_dir.exists() {
+        let (stats, dist_hits) = scan_dist_artefacts_with_stats(&dist_dir)?;
+        hits.extend(dist_hits);
+        Some(stats)
+    } else {
+        None
+    };
     if hits.is_empty() {
         let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
-        println!(
-            "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live LayoutTree, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
-            files.len()
-        );
+        if let Some(stats) = dist_stats {
+            println!(
+                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                files.len(),
+                stats.files,
+                stats.archive_entries
+            );
+        } else {
+            println!(
+                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                files.len()
+            );
+        }
         return Ok(());
     }
     let lines: Vec<String> = hits.iter().map(|h| format!("{}:{}: `{}`", h.path, h.line, h.brand)).collect();
@@ -191,6 +211,10 @@ pub fn scan_repo_checked(root: &Path, files: &[String]) -> Result<Vec<BrandHit>,
         }
         if matches!(ext_lower.as_str(), "ico" | "icns") {
             hits.extend(check_icon_container_metadata(path, &bytes));
+            continue;
+        }
+        if ext_lower == "gif" {
+            hits.extend(check_gif_metadata(path, &bytes));
             continue;
         }
         match decode_text_file(path, &bytes) {
@@ -652,7 +676,7 @@ fn decode_base64_ascii(b64: &str) -> Option<Vec<u8>> {
         if c <= 63 {
             out.push((b << 4) | (c >> 2));
             if d <= 63 {
-                out.push((c << 2) | d);
+                out.push((c << 6) | d);
             }
         }
     }
@@ -3028,7 +3052,8 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
 
 /// Sweep in-process UI strings across 16-locale `i18n`, tooltips, all 8 table archetypes,
 /// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `LayoutTree` renders,
-/// `CommandPalette`, engine/UI command catalogs, and SVG/PDF/HTML/manifest/window export metadata.
+/// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
+/// and SVG/PDF/HTML/manifest/window export metadata.
 pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = check_i18n_catalog();
 
@@ -3046,8 +3071,437 @@ pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut app = UiApp::from_session(session);
     check_all_dialogs_and_inspectors(&mut app, &mut hits);
     hits.extend(check_live_layout_tree_surfaces()?);
+    hits.extend(check_mcp_surfaces()?);
 
     Ok(hits)
+}
+
+struct BrandsGuiSessionHost {
+    app: UiApp,
+}
+
+impl BrandsGuiSessionHost {
+    fn new(mut app: UiApp, gui_only: bool) -> Self {
+        app.set_gui_only(gui_only);
+        Self { app }
+    }
+}
+
+impl GuiSessionHost for BrandsGuiSessionHost {
+    fn call_gui(&mut self, method: &str, mut params: serde_json::Value) -> Result<serde_json::Value, curvebook_engine::EngineError> {
+        if method == "ui.screenshot"
+            && let Some(obj) = params.as_object_mut()
+            && matches!(obj.get("target").and_then(serde_json::Value::as_str), Some("workspace" | "viewport"))
+        {
+            obj.insert(String::from("target"), serde_json::Value::String(String::from("full_window")));
+        }
+        curvebook_ui_egui::dispatch_gui_action(&mut self.app, method, params)
+    }
+
+    fn set_gui_only(&mut self, gui_only: bool) {
+        self.app.set_gui_only(gui_only);
+    }
+
+    fn is_gui_only(&self) -> bool {
+        self.app.is_gui_only()
+    }
+
+    fn hosted_session(&self) -> Option<&Session> {
+        Some(self.app.session())
+    }
+
+    fn hosted_session_mut(&mut self) -> Option<&mut Session> {
+        Some(self.app.session_mut())
+    }
+
+    fn sync_after_session_mutation(&mut self) {
+        self.app.sync_views();
+    }
+}
+
+#[derive(Clone, Copy)]
+struct McpScanCtx<'a> {
+    source: &'a str,
+    method: &'a str,
+    called_tool: Option<&'a str>,
+    entry_tool_name: Option<&'a str>,
+}
+
+/// Inspect a serialized MCP JSON-RPC response (`initialize`, `tools/list`, `tools/call`,
+/// `resources/list`, `resources/read`, `prompts/list`, `prompts/get`) for prohibited vendor,
+/// product, retired-suite, or pre-rename tokens while preserving the narrow `.prism`/`.pzfx`
+/// file-format boundary on `open_file` and `table_import_prism` / `table.importPrism`.
+#[must_use]
+pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&str>, response: &serde_json::Value) -> Vec<BrandHit> {
+    let mut out = Vec::new();
+    let ctx = McpScanCtx { source, method, called_tool, entry_tool_name: None };
+    scan_mcp_json_value(ctx, "", response, &mut out);
+    out
+}
+
+fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, out: &mut Vec<BrandHit>) {
+    match val {
+        serde_json::Value::Object(map) => scan_mcp_json_object(ctx, ptr, map, out),
+        serde_json::Value::Array(items) => {
+            for (idx, item) in items.iter().enumerate() {
+                scan_mcp_json_value(ctx, &format!("{ptr}/{idx}"), item, out);
+            }
+        }
+        serde_json::Value::String(s) => scan_mcp_leaf_string(ctx, ptr, s, out),
+        serde_json::Value::Null | serde_json::Value::Bool(_) | serde_json::Value::Number(_) => {}
+    }
+}
+
+fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
+    if ctx.method == "tools/call"
+        && map.get("type").and_then(serde_json::Value::as_str) == Some("image")
+        && map.get("mimeType").and_then(serde_json::Value::as_str) == Some("image/png")
+    {
+        scan_mcp_inline_png_block(ctx.source, ptr, map, out);
+        return;
+    }
+    let next_tool = if ctx.method == "tools/list" && ptr.starts_with("/result/tools/") && ctx.entry_tool_name.is_none() {
+        map.get("name").and_then(serde_json::Value::as_str)
+    } else {
+        ctx.entry_tool_name
+    };
+    let child_ctx = McpScanCtx { entry_tool_name: next_tool, ..ctx };
+    let key_source = format!("{}:{ptr}", ctx.source);
+    for (idx, (k, v)) in map.iter().enumerate() {
+        check_single_string_with_extra(&key_source, idx + 1, k, PrismPolicy::Strict, true, out);
+        scan_mcp_json_value(child_ctx, &format!("{ptr}/{k}"), v, out);
+    }
+}
+
+fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
+    let block_src = format!("{source}:{ptr}");
+    for (idx, k) in map.keys().enumerate() {
+        check_single_string_with_extra(&block_src, idx + 1, k, PrismPolicy::Strict, true, out);
+    }
+    if let Some(b64) = map.get("data").and_then(serde_json::Value::as_str)
+        && let Some(decoded) = decode_base64_ascii(b64)
+    {
+        out.extend(check_png_metadata(&format!("{block_src}/data#png"), &decoded));
+    }
+}
+
+fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
+    let Some(rest) = ptr.strip_prefix("/result/tools/") else {
+        return false;
+    };
+    let Some((idx_seg, tail)) = rest.split_once('/') else {
+        return false;
+    };
+    !idx_seg.is_empty() && idx_seg.bytes().all(|b| b.is_ascii_digit()) && tail == field
+}
+
+fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Vec<BrandHit>) {
+    if (ctx.method == "tools/call" || ctx.method == "resources/read") && ptr.ends_with("/text") {
+        let trimmed = text.trim_start();
+        if (trimmed.starts_with('{') || trimmed.starts_with('['))
+            && let Ok(inner) = serde_json::from_str::<serde_json::Value>(text)
+        {
+            scan_mcp_json_value(ctx, &format!("{ptr}#json"), &inner, out);
+            return;
+        }
+        if ctx.called_tool == Some("export") && text.contains("<svg") {
+            let svg_src = format!("{}:{ptr}#svg", ctx.source);
+            scan_svg(&svg_src, text, out);
+            out.extend(check_svg_metadata(&svg_src, text));
+            return;
+        }
+    }
+
+    let full_source = format!("{}:{ptr}", ctx.source);
+    if is_exact_canonical_mcp_import_name(ctx, ptr, text) {
+        let lower = text.to_ascii_lowercase();
+        for &brand in SUITE_BRANDS.iter().chain(PRE_RENAME_ASSET_BRANDS) {
+            if has_word_match(text, &lower, brand, PrismPolicy::Strict) {
+                out.push(BrandHit { path: full_source.clone(), line: 1, brand });
+            }
+        }
+        return;
+    }
+
+    let policy = mcp_leaf_prism_policy(ctx, ptr, text);
+    check_single_string_with_extra(&full_source, 1, text, policy, true, out);
+}
+
+fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> bool {
+    if text != "table_import_prism" {
+        return false;
+    }
+    if ctx.method == "tools/list" && ctx.entry_tool_name == Some("table_import_prism") && is_top_tool_field_ptr(ptr, "name") {
+        return true;
+    }
+    ctx.method == "tools/call"
+        && matches!(ctx.called_tool, Some("list_toolsets" | "command_list"))
+        && (ptr.ends_with("/name") || ptr.ends_with("/mcp_tool"))
+}
+
+fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> PrismPolicy<'a> {
+    if ctx.method == "tools/list" {
+        if ctx.entry_tool_name == Some("open_file") {
+            if is_top_tool_field_ptr(ptr, "description") {
+                return PrismPolicy::UiTextRun {
+                    allow_dot_prism: is_dot_prism_extension_description(text),
+                    allow_it_statistica: false,
+                    allow_palette_cmd_id: false,
+                };
+            }
+            if ptr.contains("/inputSchema/properties/format/enum/") && text == "prism" {
+                return PrismPolicy::AllowExactBarePrism;
+            }
+            return PrismPolicy::Strict;
+        }
+        if ctx.entry_tool_name == Some("table_import_prism") && is_top_tool_field_ptr(ptr, "description") {
+            return PrismPolicy::UiTextRun {
+                allow_dot_prism: is_dot_prism_extension_description(text),
+                allow_it_statistica: false,
+                allow_palette_cmd_id: true,
+            };
+        }
+        return PrismPolicy::Strict;
+    }
+
+    if ctx.method == "tools/call" && matches!(ctx.called_tool, Some("list_toolsets" | "command_list" | "ui_inspect")) {
+        if (ptr.ends_with("/command_id") || ptr.ends_with("/id") || ptr.ends_with("/widget_id"))
+            && (text == "table.importPrism" || text.ends_with(".table.importPrism"))
+        {
+            return PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: false, allow_palette_cmd_id: true };
+        }
+        if ptr.ends_with("/summary") || ptr.ends_with("/beginner") || ptr.ends_with("/params_doc") || ptr.ends_with("/label") {
+            return PrismPolicy::UiTextRun {
+                allow_dot_prism: is_dot_prism_extension_description(text),
+                allow_it_statistica: false,
+                allow_palette_cmd_id: false,
+            };
+        }
+    }
+
+    PrismPolicy::Strict
+}
+
+fn send_mcp_rpc(state: &mut McpServerState, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
+    let req = serde_json::json!({
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": method,
+        "params": params,
+    });
+    dispatch_json_value(req, state).ok_or_else(|| format!("MCP `{method}` produced no JSON-RPC response"))
+}
+
+fn ensure_mcp_ok<'a>(label: &str, resp: &'a serde_json::Value) -> Result<&'a serde_json::Value, String> {
+    if let Some(err) = resp.get("error") {
+        return Err(format!("MCP `{label}` returned unexpected JSON-RPC error: {err}"));
+    }
+    let result = resp.get("result").ok_or_else(|| format!("MCP `{label}` missing `result` field"))?;
+    if result.get("isError").and_then(serde_json::Value::as_bool) == Some(true) {
+        return Err(format!("MCP `{label}` returned tool execution error: {result}"));
+    }
+    Ok(result)
+}
+
+/// Drive actual in-memory `curvebook-mcp` JSON-RPC 2.0 sessions (both default headless mode and
+/// strict `--gui-only` mode) over a populated 5-sheet `ProjectDocument`, scanning `initialize`,
+/// `tools/list` (core + all progressive `CommandGroup`s + `gui`), `resources/list` + `resources/read`,
+/// `prompts/list` + `prompts/get`, and `tools/call` (`doc_inspect`, `render_preview`, `export`,
+/// `ui_inspect`, `ui_screenshot`).
+pub fn check_mcp_surfaces() -> Result<Vec<BrandHit>, String> {
+    let mut hits = Vec::new();
+    let doc = build_brands_sweep_document()?;
+    let mut session = Session::from_document(doc);
+    session.recalculate_all().map_err(|e| format!("MCP sweep recalculate: {e}"))?;
+
+    check_mcp_headless_mode(session.clone(), &mut hits)?;
+    check_mcp_gui_only_mode(session, &mut hits)?;
+    Ok(hits)
+}
+
+fn check_mcp_headless_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+    let mut state = McpServerState::from_session(session);
+
+    let init = send_mcp_rpc(
+        &mut state,
+        "initialize",
+        serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "xtask-brands", "version": "0.1.0" } }),
+    )?;
+    ensure_mcp_ok("headless:initialize", &init)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:initialize", "initialize", None, &init));
+
+    let core_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
+    ensure_mcp_ok("headless:tools/list:core", &core_tools)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:tools/list:core", "tools/list", None, &core_tools));
+
+    let toolsets = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "list_toolsets", "arguments": {} }))?;
+    ensure_mcp_ok("headless:list_toolsets", &toolsets)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:list_toolsets", "tools/call", Some("list_toolsets"), &toolsets));
+
+    let enable = send_mcp_rpc(
+        &mut state,
+        "tools/call",
+        serde_json::json!({ "name": "enable_toolset", "arguments": { "group": "all", "groups": ["gui"], "enabled": true } }),
+    )?;
+    ensure_mcp_ok("headless:enable_toolset", &enable)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:enable_toolset", "tools/call", Some("enable_toolset"), &enable));
+    for notif in state.take_pending_notifications() {
+        hits.extend(check_mcp_rpc_response("mcp:headless:notif", "notification", None, &notif));
+    }
+
+    let all_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
+    let all_res = ensure_mcp_ok("headless:tools/list:all", &all_tools)?;
+    let tool_count = all_res.get("tools").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+    if tool_count < 110 {
+        return Err(format!("expected >= 110 enabled MCP tools in sweep, got {tool_count}"));
+    }
+    hits.extend(check_mcp_rpc_response("mcp:headless:tools/list:all", "tools/list", None, &all_tools));
+
+    let cmd_list = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "command_list", "arguments": { "include_ui": true } }))?;
+    ensure_mcp_ok("headless:command_list", &cmd_list)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:command_list", "tools/call", Some("command_list"), &cmd_list));
+
+    check_mcp_resources_and_prompts(&mut state, "mcp:headless", false, hits)?;
+    check_mcp_headless_previews_and_inspect(&mut state, hits)?;
+    Ok(())
+}
+
+fn check_mcp_headless_previews_and_inspect(state: &mut McpServerState, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+    let overview = send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
+    ensure_mcp_ok("headless:doc_inspect", &overview)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:doc_inspect:root", "tools/call", Some("doc_inspect"), &overview));
+
+    for sid in ["data-1", "info-1", "res-1", "graph-1", "layout-1"] {
+        let sheet_ins =
+            send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": { "sheet_id": sid, "include_cells": true } }))?;
+        ensure_mcp_ok("headless:doc_inspect:sheet", &sheet_ins)?;
+        hits.extend(check_mcp_rpc_response(&format!("mcp:headless:doc_inspect:{sid}"), "tools/call", Some("doc_inspect"), &sheet_ins));
+    }
+
+    for sid in ["graph-1", "layout-1"] {
+        let preview = send_mcp_rpc(
+            state,
+            "tools/call",
+            serde_json::json!({ "name": "render_preview", "arguments": { "sheet_id": sid, "width_px": 320, "height_px": 220, "dpi": 144 } }),
+        )?;
+        ensure_mcp_ok("headless:render_preview", &preview)?;
+        hits.extend(check_mcp_rpc_response(&format!("mcp:headless:render_preview:{sid}"), "tools/call", Some("render_preview"), &preview));
+    }
+
+    let svg_export =
+        send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "export", "arguments": { "format": "svg", "sheet_id": "graph-1" } }))?;
+    ensure_mcp_ok("headless:export:svg", &svg_export)?;
+    hits.extend(check_mcp_rpc_response("mcp:headless:export:svg", "tools/call", Some("export"), &svg_export));
+    Ok(())
+}
+
+fn check_mcp_gui_only_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+    let mut app = UiApp::from_session(session);
+    app.sync_views();
+    let mut state = McpServerState::with_gui_host(Box::new(BrandsGuiSessionHost::new(app, true)));
+
+    let init = send_mcp_rpc(
+        &mut state,
+        "initialize",
+        serde_json::json!({ "protocolVersion": "2024-11-05", "capabilities": {}, "clientInfo": { "name": "xtask-brands-gui", "version": "0.1.0" } }),
+    )?;
+    ensure_mcp_ok("gui_only:initialize", &init)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_only:initialize", "initialize", None, &init));
+
+    let gui_tools = send_mcp_rpc(&mut state, "tools/list", serde_json::json!({}))?;
+    let gui_res = ensure_mcp_ok("gui_only:tools/list", &gui_tools)?;
+    let gui_count = gui_res.get("tools").and_then(serde_json::Value::as_array).map_or(0, Vec::len);
+    if gui_count != 8 {
+        return Err(format!("expected 8 --gui-only MCP tools, got {gui_count}"));
+    }
+    hits.extend(check_mcp_rpc_response("mcp:gui_only:tools/list", "tools/list", None, &gui_tools));
+
+    check_mcp_resources_and_prompts(&mut state, "mcp:gui_only", true, hits)?;
+
+    let ui_ins = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "ui_inspect", "arguments": { "scope": "all" } }))?;
+    ensure_mcp_ok("gui_only:ui_inspect", &ui_ins)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_inspect", "tools/call", Some("ui_inspect"), &ui_ins));
+
+    let ui_shot = send_mcp_rpc(
+        &mut state,
+        "tools/call",
+        serde_json::json!({ "name": "ui_screenshot", "arguments": { "target": "workspace", "width_px": 320, "height_px": 200, "dpi": 144 } }),
+    )?;
+    ensure_mcp_ok("gui_only:ui_screenshot", &ui_shot)?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_only:ui_screenshot", "tools/call", Some("ui_screenshot"), &ui_shot));
+
+    let blocked = send_mcp_rpc(&mut state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
+    hits.extend(check_mcp_rpc_response("mcp:gui_only:blocked_doc_inspect", "tools/call", Some("doc_inspect"), &blocked));
+    Ok(())
+}
+
+fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui_only: bool, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+    let res_list = send_mcp_rpc(state, "resources/list", serde_json::json!({}))?;
+    let res_ok = ensure_mcp_ok(&format!("{prefix}:resources/list"), &res_list)?;
+    hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/list"), "resources/list", None, &res_list));
+
+    let uris: Vec<String> = res_ok
+        .get("resources")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("uri").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    if !gui_only && (!uris.iter().any(|u| u.starts_with("sheet://")) || !uris.iter().any(|u| u.starts_with("result://"))) {
+        return Err(String::from("expected both sheet:// and result:// resources in headless MCP sweep"));
+    }
+    if gui_only {
+        let blocked_read = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": "sheet://data-1" }))?;
+        hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:blocked"), "resources/read", None, &blocked_read));
+    } else {
+        for uri in &uris {
+            let read_resp = send_mcp_rpc(state, "resources/read", serde_json::json!({ "uri": uri }))?;
+            ensure_mcp_ok(&format!("{prefix}:resources/read:{uri}"), &read_resp)?;
+            hits.extend(check_mcp_rpc_response(&format!("{prefix}:resources/read:{uri}"), "resources/read", None, &read_resp));
+        }
+    }
+
+    let prompts_list = send_mcp_rpc(state, "prompts/list", serde_json::json!({}))?;
+    let prompts_ok = ensure_mcp_ok(&format!("{prefix}:prompts/list"), &prompts_list)?;
+    hits.extend(check_mcp_rpc_response(&format!("{prefix}:prompts/list"), "prompts/list", None, &prompts_list));
+
+    let names: Vec<String> = prompts_ok
+        .get("prompts")
+        .and_then(serde_json::Value::as_array)
+        .into_iter()
+        .flatten()
+        .filter_map(|item| item.get("name").and_then(serde_json::Value::as_str).map(str::to_owned))
+        .collect();
+    if names.is_empty() {
+        return Err(format!("{prefix}: expected non-empty prompts/list"));
+    }
+    for name in &names {
+        for (variant, args) in prompt_arg_variants(name) {
+            let prompt_resp = send_mcp_rpc(state, "prompts/get", serde_json::json!({ "name": name, "arguments": args }))?;
+            ensure_mcp_ok(&format!("{prefix}:prompts/get:{name}:{variant}"), &prompt_resp)?;
+            hits.extend(check_mcp_rpc_response(&format!("{prefix}:prompts/get:{name}:{variant}"), "prompts/get", None, &prompt_resp));
+        }
+    }
+    Ok(())
+}
+
+fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
+    match name {
+        "dose_response_curve_fit" => {
+            vec![("default", serde_json::json!({})), ("antagonist", serde_json::json!({ "sheet_id": "data-1", "response_type": "antagonist" }))]
+        }
+        "choose_two_group_test" => vec![
+            ("default", serde_json::json!({})),
+            ("paired_param", serde_json::json!({ "paired": "true", "parametric": "true" })),
+            ("paired_nonparam", serde_json::json!({ "paired": "true", "parametric": "false" })),
+            ("unpaired_param", serde_json::json!({ "paired": "false", "parametric": "true" })),
+            ("unpaired_nonparam", serde_json::json!({ "paired": "false", "parametric": "false" })),
+        ],
+        "publication_figure_checklist" => {
+            vec![("default", serde_json::json!({})), ("svg", serde_json::json!({ "graph_sheet_id": "graph-1", "target_format": "svg" }))]
+        }
+        _ => vec![("default", serde_json::json!({}))],
+    }
 }
 
 fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
@@ -3350,7 +3804,8 @@ fn scan_itxt_chunk(source: &str, chunk_idx: usize, cdata: &[u8], out: &mut Vec<B
     }
 }
 
-/// Inspect `.ico` / `.icns` icon containers (including every embedded PNG frame).
+/// Inspect `.ico` / `.icns` icon containers (including every embedded PNG frame and non-PNG `.icns`
+/// metadata chunks such as `info` / `name`).
 #[must_use]
 pub fn check_icon_container_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
     const PNG_SIG: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
@@ -3364,7 +3819,103 @@ pub fn check_icon_container_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit
         out.extend(check_png_metadata(&frame_source, &bytes[abs..]));
         offset = abs + PNG_SIG.len();
     }
+    if bytes.starts_with(b"icns") && bytes.len() >= 8 {
+        let mut pos = 8usize;
+        let mut chunk_idx = 0usize;
+        while let Some(hdr) = bytes.get(pos..pos + 8) {
+            chunk_idx += 1;
+            let len = u32::from_be_bytes([hdr[4], hdr[5], hdr[6], hdr[7]]) as usize;
+            if len < 8 || pos.checked_add(len).is_none_or(|end| end > bytes.len()) {
+                break;
+            }
+            let payload = &bytes[pos + 8..pos + len];
+            if !payload.starts_with(PNG_SIG) && matches!(&hdr[..4], b"info" | b"name" | b"icnV") {
+                let tag = String::from_utf8_lossy(&hdr[..4]);
+                scan_binary_ascii_runs(&format!("{source}#icns_{tag}"), chunk_idx, payload, &mut out);
+            }
+            pos += len;
+        }
+    }
     out
+}
+
+/// Inspect `.gif` Comment Extension (`0x21 0xFE`) and Application Extension (`0x21 0xFF`) blocks.
+#[must_use]
+pub fn check_gif_metadata(source: &str, bytes: &[u8]) -> Vec<BrandHit> {
+    let mut out = Vec::new();
+    if !(bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a")) || bytes.len() < 13 {
+        return out;
+    }
+    let packed = bytes[10];
+    let gct_len = if (packed & 0x80) != 0 { 3usize * (1usize << ((packed & 0x07) + 1)) } else { 0 };
+    let mut pos = 13usize.saturating_add(gct_len);
+    let mut ext_idx = 0usize;
+    while let Some(&intro) = bytes.get(pos) {
+        pos += 1;
+        match intro {
+            0x3B => break,
+            0x21 => {
+                let Some(&label) = bytes.get(pos) else { break };
+                pos += 1;
+                let data = read_gif_subblocks(bytes, &mut pos);
+                if matches!(label, 0xFE | 0xFF) {
+                    ext_idx += 1;
+                    let text = String::from_utf8_lossy(&data);
+                    check_single_string_with_extra(&format!("{source}#gif_ext{ext_idx}"), ext_idx, &text, PrismPolicy::Strict, true, &mut out);
+                }
+            }
+            0x2C => {
+                let Some(desc) = bytes.get(pos..pos + 9) else { break };
+                let lct_packed = desc[8];
+                let lct_len = if (lct_packed & 0x80) != 0 { 3usize * (1usize << ((lct_packed & 0x07) + 1)) } else { 0 };
+                pos = pos.saturating_add(9).saturating_add(lct_len);
+                if pos >= bytes.len() {
+                    break;
+                }
+                pos += 1; // LZW minimum code size
+                let _ = read_gif_subblocks(bytes, &mut pos);
+            }
+            _ => break,
+        }
+    }
+    out
+}
+
+fn read_gif_subblocks(bytes: &[u8], pos: &mut usize) -> Vec<u8> {
+    let mut buf = Vec::new();
+    while let Some(&sub_len) = bytes.get(*pos) {
+        *pos += 1;
+        if sub_len == 0 {
+            break;
+        }
+        let n = usize::from(sub_len);
+        let Some(chunk) = bytes.get(*pos..*pos + n) else {
+            *pos = bytes.len();
+            break;
+        };
+        buf.extend_from_slice(chunk);
+        *pos += n;
+    }
+    buf
+}
+
+fn scan_binary_ascii_runs(source: &str, line: usize, bytes: &[u8], out: &mut Vec<BrandHit>) {
+    let mut idx = 0usize;
+    while idx < bytes.len() {
+        if !(bytes[idx].is_ascii_graphic() || bytes[idx] == b' ') {
+            idx += 1;
+            continue;
+        }
+        let start = idx;
+        while idx < bytes.len() && (bytes[idx].is_ascii_graphic() || bytes[idx] == b' ') {
+            idx += 1;
+        }
+        if idx - start >= 4
+            && let Ok(run) = std::str::from_utf8(&bytes[start..idx])
+        {
+            check_single_string_with_extra(source, line, run, PrismPolicy::Strict, true, out);
+        }
+    }
 }
 
 fn latin1_to_string(bytes: &[u8]) -> String {
@@ -3606,20 +4157,28 @@ fn inflate_huffman_block(reader: &mut BitReader<'_>, lit_tbl: &HuffTable, dist_t
 
 /// Recursively scan all assembled release/launch artefacts under `dist_dir` (`.app`, web root,
 /// `.zip`, `.curvebook`, `.cbtemplate`, HTML/CSS/JS, `Info.plist`, `.desktop`, `.mime.xml`, SVG,
-/// PNG/ICO/ICNS, PDF, manifests) — scanning file/directory paths as well as nested contents and
+/// PNG/ICO/ICNS/GIF, PDF, manifests) — scanning file/directory paths as well as nested contents and
 /// failing if `docs/audit/` or `plan/prism/` were mistakenly bundled.
 pub fn scan_dist_artefacts(dist_dir: &Path) -> Result<Vec<BrandHit>, String> {
+    let (_, hits) = scan_dist_artefacts_with_stats(dist_dir)?;
+    Ok(hits)
+}
+
+/// Recursively scan all assembled artefacts under `dist_dir`, returning explicit file & archive
+/// entry counts alongside any brand violations.
+pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(DistScanStats, Vec<BrandHit>), String> {
     if !dist_dir.exists() {
         return Err(format!("dist directory `{}` does not exist", dist_dir.display()));
     }
     let mut files = Vec::new();
     collect_dist_files(dist_dir, dist_dir, &mut files)?;
     files.sort();
+    let mut stats = DistScanStats { files: files.len(), archive_entries: 0 };
     let mut hits = Vec::new();
     for rel in files {
-        scan_dist_path_and_file(dist_dir, &rel, &mut hits)?;
+        scan_dist_path_and_file(dist_dir, &rel, &mut stats, &mut hits)?;
     }
-    Ok(hits)
+    Ok((stats, hits))
 }
 
 fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
@@ -3644,7 +4203,7 @@ fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
     Ok(())
 }
 
-fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, hits: &mut Vec<BrandHit>) -> Result<(), String> {
+fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     if rel.starts_with(AUDIT_PREFIX)
         || rel.contains("/docs/audit/")
         || rel == PLAN_PRISM_SCOPE
@@ -3658,39 +4217,43 @@ fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, hits: &mut Vec<BrandHit>)
     collect_line_words(rel, 1, rel, BRANDS, PrismPolicy::Strict, hits);
     collect_line_words(rel, 1, rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
     let bytes = std::fs::read(dist_dir.join(rel)).map_err(|e| format!("read dist file {rel}: {e}"))?;
-    scan_dist_bytes(rel, &bytes, 0, hits);
-    Ok(())
+    scan_dist_bytes(rel, &bytes, 0, stats, hits)
 }
 
-fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, hits: &mut Vec<BrandHit>) {
+fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
     if is_zip && depth < 2 {
-        if let Ok(zip) = ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()) {
-            for (name, entry_bytes) in zip.iter() {
-                let entry_path = format!("{display_path}!{name}");
-                collect_line_words(&entry_path, 1, name, SUITE_BRANDS, PrismPolicy::Strict, hits);
-                collect_line_words(&entry_path, 1, name, BRANDS, PrismPolicy::Strict, hits);
-                collect_line_words(&entry_path, 1, name, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
-                scan_dist_bytes(&entry_path, entry_bytes, depth + 1, hits);
-            }
+        let zip =
+            ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()).map_err(|e| format!("cannot inspect archive `{display_path}`: {e}"))?;
+        for (name, entry_bytes) in zip.iter() {
+            stats.archive_entries += 1;
+            let entry_path = format!("{display_path}!{name}");
+            collect_line_words(&entry_path, 1, name, SUITE_BRANDS, PrismPolicy::Strict, hits);
+            collect_line_words(&entry_path, 1, name, BRANDS, PrismPolicy::Strict, hits);
+            collect_line_words(&entry_path, 1, name, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, hits);
+            scan_dist_bytes(&entry_path, entry_bytes, depth + 1, stats, hits)?;
         }
-        return;
+        return Ok(());
     }
     if ext == "png" || bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
         hits.extend(check_png_metadata(display_path, bytes));
-        return;
+        return Ok(());
     }
     if matches!(ext.as_str(), "ico" | "icns") {
         hits.extend(check_icon_container_metadata(display_path, bytes));
-        return;
+        return Ok(());
+    }
+    if ext == "gif" || bytes.starts_with(b"GIF87a") || bytes.starts_with(b"GIF89a") {
+        hits.extend(check_gif_metadata(display_path, bytes));
+        return Ok(());
     }
     if ext == "pdf" || bytes.starts_with(b"%PDF-") {
         hits.extend(check_pdf_metadata(display_path, bytes));
-        return;
+        return Ok(());
     }
     let Ok(DecodedFile::Text(text)) = decode_text_file(display_path, bytes) else {
-        return;
+        return Ok(());
     };
     if ext == "json" {
         hits.extend(check_manifest_metadata(display_path, &text));
@@ -3710,6 +4273,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, hits: &mut Ve
         scan_suite_lines(display_path, &text, hits);
         scan_plain_lines_no_waiver(display_path, &text, hits);
     }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -4503,5 +5067,205 @@ it: "Copia Statistica report",
             let _ = std::fs::remove_dir_all(&neg);
             assert!(!hits.is_empty(), "negative probe `{name}` (`{rel}`) returned 0 brand hits");
         }
+    }
+
+    #[test]
+    fn checks_live_mcp_headless_and_gui_only_surfaces_clean() {
+        assert_eq!(super::check_mcp_surfaces(), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn mcp_rpc_validator_enforces_narrow_open_file_boundary_and_rejects_contaminated_surfaces() {
+        let clean_init = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "protocolVersion": "2024-11-05",
+                "serverInfo": { "name": "curvebook", "version": "0.1.0" },
+                "instructions": "CurveBook MCP server for scientific tables, statistical analysis, and publication figures."
+            }
+        });
+        assert_eq!(super::check_mcp_rpc_response("init", "initialize", None, &clean_init), Vec::new());
+
+        let dirty_init = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 1,
+            "result": {
+                "serverInfo": { "name": "lumencraft-mcp", "version": "0.1.0" },
+                "instructions": "Compatible with GraphPad Prism workflows."
+            }
+        });
+        let init_hits = super::check_mcp_rpc_response("init", "initialize", None, &dirty_init);
+        assert!(init_hits.iter().any(|h| h.brand == "lumencraft"), "{init_hits:?}");
+        assert!(init_hits.iter().any(|h| h.brand == "graphpad"), "{init_hits:?}");
+        assert!(init_hits.iter().any(|h| h.brand == "prism"), "{init_hits:?}");
+
+        let clean_tools = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {
+                        "name": "open_file",
+                        "description": "Open or import a .curvebook, .cbtemplate, .prism, .pzfx, or .csv file.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "format": { "type": "string", "enum": ["curvebook", "prism", "pzfx", "csv"] },
+                                "title": { "type": "string", "description": "Optional sheet title." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "table_import_prism",
+                        "description": "[table.importPrism] Import External Archive — Import an external ZIP-based project archive.",
+                        "inputSchema": { "type": "object" }
+                    }
+                ]
+            }
+        });
+        assert_eq!(super::check_mcp_rpc_response("tools", "tools/list", None, &clean_tools), Vec::new());
+
+        let dirty_tools = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 2,
+            "result": {
+                "tools": [
+                    {
+                        "name": "open_file",
+                        "description": "Open a GraphPad Prism (.prism) project.",
+                        "inputSchema": {
+                            "type": "object",
+                            "properties": {
+                                "title": { "type": "string", "description": "Optional .prism project title." }
+                            }
+                        }
+                    },
+                    {
+                        "name": "doc_inspect",
+                        "description": "Inspect .prism or OriginPro sheets.",
+                        "inputSchema": { "type": "object" }
+                    }
+                ]
+            }
+        });
+        let tool_hits = super::check_mcp_rpc_response("tools", "tools/list", None, &dirty_tools);
+        assert!(tool_hits.iter().any(|h| h.brand == "graphpad"), "{tool_hits:?}");
+        assert!(tool_hits.iter().any(|h| h.brand == "originpro"), "{tool_hits:?}");
+        assert!(tool_hits.iter().filter(|h| h.brand == "prism").count() >= 2, "{tool_hits:?}");
+
+        let dirty_prompt = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 3,
+            "result": {
+                "description": "ArtCraft workflow",
+                "messages": [{ "role": "user", "content": { "type": "text", "text": "Run ANOVA like Minitab or Prism." } }]
+            }
+        });
+        let prompt_hits = super::check_mcp_rpc_response("prompt", "prompts/get", None, &dirty_prompt);
+        assert!(prompt_hits.iter().any(|h| h.brand == "artcraft"), "{prompt_hits:?}");
+        assert!(prompt_hits.iter().any(|h| h.brand == "minitab"), "{prompt_hits:?}");
+        assert!(prompt_hits.iter().any(|h| h.brand == "prism"), "{prompt_hits:?}");
+
+        let dirty_resource = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 4,
+            "result": {
+                "contents": [{ "uri": "sheet://data-1", "mimeType": "application/json", "text": "{\"title\":\"SPSS Cohort\",\"legacy\":\"LumenCraft\"}" }]
+            }
+        });
+        let res_hits = super::check_mcp_rpc_response("res", "resources/read", None, &dirty_resource);
+        assert!(res_hits.iter().any(|h| h.brand == "spss"), "{res_hits:?}");
+        assert!(res_hits.iter().any(|h| h.brand == "lumencraft"), "{res_hits:?}");
+
+        let dirty_png = build_test_png_with_chunk(b"tEXt", b"svg:title\x00LumenCraft preview");
+        let b64_png = encode_b64_test(&dirty_png);
+        let dirty_preview = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 5,
+            "result": {
+                "content": [
+                    { "type": "image", "mimeType": "image/png", "data": b64_png },
+                    { "type": "text", "text": "{\"title\":\"Clean\"}" }
+                ],
+                "isError": false
+            }
+        });
+        let prev_hits = super::check_mcp_rpc_response("preview", "tools/call", Some("render_preview"), &dirty_preview);
+        assert_eq!(prev_hits, vec![BrandHit { path: String::from("preview:/result/content/0/data#png"), line: 2, brand: "lumencraft" }]);
+
+        let dirty_svg_export = serde_json::json!({
+            "jsonrpc": "2.0",
+            "id": 6,
+            "result": {
+                "content": [{ "type": "text", "text": "<svg xmlns=\"http://www.w3.org/2000/svg\"><title>Prism Plot</title></svg>" }],
+                "isError": false
+            }
+        });
+        let svg_hits = super::check_mcp_rpc_response("export", "tools/call", Some("export"), &dirty_svg_export);
+        assert!(svg_hits.iter().any(|h| h.brand == "prism"), "{svg_hits:?}");
+    }
+
+    #[test]
+    fn scans_icns_info_plist_and_gif_comment_extensions() {
+        let mut clean_icns = Vec::from(&b"icns"[..]);
+        let info_body = b"bplist00icon_assetcatalog";
+        let info_len = (8 + info_body.len()) as u32;
+        clean_icns.extend_from_slice(&(8 + info_len).to_be_bytes());
+        clean_icns.extend_from_slice(b"info");
+        clean_icns.extend_from_slice(&info_len.to_be_bytes());
+        clean_icns.extend_from_slice(info_body);
+        assert_eq!(super::check_icon_container_metadata("clean.icns", &clean_icns), Vec::new());
+
+        let mut dirty_icns = Vec::from(&b"icns"[..]);
+        let bad_body = b"bplist00 LumenCraft OriginPro icon";
+        let bad_len = (8 + bad_body.len()) as u32;
+        dirty_icns.extend_from_slice(&(8 + bad_len).to_be_bytes());
+        dirty_icns.extend_from_slice(b"info");
+        dirty_icns.extend_from_slice(&bad_len.to_be_bytes());
+        dirty_icns.extend_from_slice(bad_body);
+        let icns_hits = super::check_icon_container_metadata("dirty.icns", &dirty_icns);
+        assert!(icns_hits.iter().any(|h| h.brand == "lumencraft"), "{icns_hits:?}");
+        assert!(icns_hits.iter().any(|h| h.brand == "originpro"), "{icns_hits:?}");
+
+        // Minimal GIF89a (1x1, no GCT) with clean NETSCAPE2.0 vs dirty Comment Extension (0x21 0xFE).
+        let mut clean_gif = Vec::from(&b"GIF89a\x01\x00\x01\x00\x00\x00\x00"[..]);
+        clean_gif.extend_from_slice(b"\x21\xff\x0bNETSCAPE2.0\x03\x01\x00\x00\x00\x3b");
+        assert_eq!(super::check_gif_metadata("clean.gif", &clean_gif), Vec::new());
+
+        let mut dirty_gif = Vec::from(&b"GIF89a\x01\x00\x01\x00\x00\x00\x00"[..]);
+        let comment = b"Created in GraphPad";
+        dirty_gif.extend_from_slice(&[0x21, 0xfe, comment.len() as u8]);
+        dirty_gif.extend_from_slice(comment);
+        dirty_gif.extend_from_slice(&[0x00, 0x3b]);
+        assert_eq!(
+            super::check_gif_metadata("dirty.gif", &dirty_gif),
+            vec![BrandHit { path: String::from("dirty.gif#gif_ext1"), line: 1, brand: "graphpad" }]
+        );
+    }
+
+    fn encode_b64_test(bytes: &[u8]) -> String {
+        const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+        let mut idx = 0usize;
+        while idx < bytes.len() {
+            let b0 = bytes[idx];
+            let b1 = bytes.get(idx + 1).copied().unwrap_or(0);
+            let b2 = bytes.get(idx + 2).copied().unwrap_or(0);
+            out.push(char::from(TABLE[usize::from(b0 >> 2)]));
+            out.push(char::from(TABLE[usize::from(((b0 & 0x03) << 4) | (b1 >> 4))]));
+            if idx + 1 < bytes.len() {
+                out.push(char::from(TABLE[usize::from(((b1 & 0x0f) << 2) | (b2 >> 6))]));
+            } else {
+                out.push('=');
+            }
+            if idx + 2 < bytes.len() {
+                out.push(char::from(TABLE[usize::from(b2 & 0x3f)]));
+            } else {
+                out.push('=');
+            }
+            idx += 3;
+        }
+        out
     }
 }

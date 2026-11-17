@@ -68,6 +68,12 @@ fn assemble_validate_and_sign(root: &Path, app_dir: &Path, version: &str, sha: &
 
     let icns = root.join(ICON_ICNS);
     std::fs::copy(&icns, res_dir.join("curvebook.icns")).map_err(|e| format!("copy {ICON_ICNS}: {e}"))?;
+    for doc in ["README.md", "LICENSE-MIT", "LICENSE-APACHE", "NOTICE", "ASSETS.md"] {
+        let src = root.join(doc);
+        if src.is_file() {
+            std::fs::copy(&src, res_dir.join(doc)).map_err(|e| format!("copy {doc}: {e}"))?;
+        }
+    }
 
     adhoc_codesign_and_verify(app_dir)?;
     Ok(())

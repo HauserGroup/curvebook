@@ -11,6 +11,7 @@ curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true }
 curvebook-format = { workspace = true }
+curvebook-mcp = { workspace = true, default-features = false }
 curvebook-pdf = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-testkit = { workspace = true }

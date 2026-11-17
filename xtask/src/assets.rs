@@ -502,7 +502,7 @@ fn check_document_prose(doc_name: &str, text: &str) -> Result<(), String> {
 fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>) {
     for path in files {
         let ext = lower_ext(path);
-        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg") {
+        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "gif") {
             continue;
         }
         let Ok(bytes) = std::fs::read(root.join(path)) else {
@@ -512,6 +512,7 @@ fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>
         let hits = match ext.as_str() {
             "png" => crate::brands::check_png_metadata(path, &bytes),
             "ico" | "icns" => crate::brands::check_icon_container_metadata(path, &bytes),
+            "gif" => crate::brands::check_gif_metadata(path, &bytes),
             "svg" => match std::str::from_utf8(&bytes) {
                 Ok(svg) => crate::brands::check_svg_metadata(path, svg),
                 Err(e) => {
