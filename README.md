@@ -4,6 +4,8 @@
 >
 > Follow the step-by-step setup, try your first analysis, and learn how to save your work.
 >
+> **Download the Alpha:** get installers for macOS, Windows, Linux, and FreeBSD from the [latest release](https://github.com/HauserGroup/curvebook/releases), or visit the [CurveBook website](https://hausergroup.github.io/curvebook/).
+>
 > **Technical babble ahead (temporarily):** below this section, the README gets technical. We are working on making it friendlier; the guide above is the plain-language starting point.
 
 [![CI](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml/badge.svg)](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml)
@@ -16,7 +18,7 @@
 
 **CurveBook** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust.
 
-> **Status (pre-alpha):** The headless statistical, curve-fitting, and graphing engine, the command-line runner (`curvebook-cli`), and the stdio MCP server (`curvebook-cli mcp`) are implemented and working. The rendered desktop and WebAssembly GUI chrome is pre-alpha (`0/50` human-operable GUI workflows until [`R10`](docs/ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) lands); see [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+> **Status (Alpha):** The headless statistical, curve-fitting, and graphing engine, the command-line runner (`curvebook-cli`), and the stdio MCP server (`curvebook-cli mcp`) are implemented and released as an Alpha prerelease; known issues are listed in [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md). The rendered desktop and WebAssembly GUI is still in development until the [`R10`](docs/ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) manual walkthrough is accepted, and installers are not yet signed; see [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
 
 ## Quick Start
 
@@ -82,7 +84,7 @@ EOF
 ```
 
 Expected output (three JSON lines on stdout; `notifications/initialized` produces no reply):
-1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.1"}`.
+1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.2"}`.
 2. Line 2 (`"id":2`): exact pong `{"id":2,"jsonrpc":"2.0","result":{}}`.
 3. Line 3 (`"id":3`): `"tools"` array containing the default core tools: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`.
 
@@ -99,7 +101,7 @@ EOF
 ```
 
 Expected output:
-1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.1"}`).
+1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.2"}`).
 2. Line 2 (`"id":2`): `tools/call` response with `"isError":false` whose final `stats.run` step (`"index":3`) reports `"message":"ran Welch's t test"`, `"status":"UpToDate"`, and these exact scalar results:
    - `"t"`: `-8.520563361656317`
    - `"PValue"`: `0.0036599555836826485`

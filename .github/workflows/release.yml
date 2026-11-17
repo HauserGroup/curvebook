@@ -1,6 +1,8 @@
 # Standalone release pipeline: every push to `release` builds installers for every platform and
 # creates or updates a draft GitHub Release. Manual runs default to Alpha prereleases
-# with ad-hoc macOS signing and unsigned Windows packages. See docs/release/releasing.md.
+# with ad-hoc macOS signing and unsigned Windows packages. SemVer pre-release versions
+# (for example tag v0.1.0-rc.1) are always drafted as prereleases (packaging/release-channel.sh).
+# See docs/release/releasing.md.
 name: Release
 
 on:
@@ -494,6 +496,7 @@ jobs:
         id: release_meta
         env:
           INPUT_VERSION: ${{ inputs.version }}
+          ALPHA_RELEASE: ${{ inputs.alpha }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
         run: |
@@ -522,6 +525,8 @@ jobs:
             sha256sum --check SHA256SUMS.txt
           )
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
+          # SemVer pre-release versions (-alpha.N, -beta.N, -rc.N) are always GitHub prereleases.
+          ./packaging/release-channel.sh "$ver" "${ALPHA_RELEASE:-}" >> "$GITHUB_OUTPUT"
       - name: Attest release artifacts and SHA256SUMS.txt
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
@@ -529,17 +534,23 @@ jobs:
       - name: Create or update draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-          ALPHA_RELEASE: ${{ inputs.alpha }}
           RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+          RELEASE_TITLE: ${{ steps.release_meta.outputs.title }}
+          RELEASE_PRERELEASE: ${{ steps.release_meta.outputs.prerelease }}
         run: |
           set -euo pipefail
           tag="$RELEASE_TAG"
-          title="CurveBook $tag"
-          prerelease=false
+          title="$RELEASE_TITLE"
+          prerelease="$RELEASE_PRERELEASE"
+          case "$prerelease" in
+            true | false) ;;
+            *)
+              echo "error: release channel did not classify $tag (prerelease='$prerelease')" >&2
+              exit 1
+              ;;
+          esac
           release_flags=(--draft)
-          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
-            title="CurveBook Alpha $tag"
-            prerelease=true
+          if [ "$prerelease" = "true" ]; then
             release_flags+=(--latest=false)
           fi
           release_flags+=("--prerelease=$prerelease" --title "$title")
