@@ -109,7 +109,7 @@ impl FitTab {
 
     fn id(self) -> &'static str {
         match self {
-            Self::Equation => "equation",
+            Self::Equation => "model",
             Self::Constraints => "constraints",
             Self::InitialValues => "initial_values",
             Self::Confidence => "confidence",
@@ -131,7 +131,7 @@ impl FitTab {
 
     fn fallback_label(self) -> &'static str {
         match self {
-            Self::Equation => "Equation",
+            Self::Equation => "Model",
             Self::Constraints => "Constraints",
             Self::InitialValues => "Initial Values",
             Self::Confidence => "Confidence",
@@ -633,6 +633,29 @@ fn handle_equation_action(app: &mut UiApp, state: &mut FitParamsViewState, nl: &
             state.expanded_categories.remove(pos);
         } else {
             state.expanded_categories.push(cat_key.to_owned());
+        }
+        return true;
+    }
+    if let Some(col_raw) = payload.strip_prefix("mv_x:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        nl.mv_x_columns = vec![col];
+        return true;
+    }
+    if let Some(col_raw) = payload.strip_prefix("mv_y:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        nl.mv_y_column = Some(col);
+        return true;
+    }
+    if let Some(col_raw) = payload.strip_prefix("mv_group:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        if let Some(pos) = nl.mv_group_columns.iter().position(|&c| c == col) {
+            nl.mv_group_columns.remove(pos);
+        } else {
+            nl.mv_group_columns.push(col);
+            nl.mv_group_columns.sort_unstable();
         }
         return true;
     }
@@ -1657,6 +1680,67 @@ fn build_equation_tree_rows(state: &FitParamsViewState, nl: &NonlinearFitSpec, s
     rows
 }
 
+struct MvSelectorRow<'a> {
+    prefix: &'a str,
+    row_lbl: &'a str,
+    action_prefix: &'a str,
+    titles: &'a [String],
+}
+
+fn emit_mv_column_selector_row(
+    builder: &mut LayoutBuilder<'_>,
+    parent: &WidgetId,
+    rect: LayoutRectPx,
+    row: MvSelectorRow<'_>,
+    is_selected: impl Fn(usize) -> bool,
+) -> u32 {
+    if row.titles.is_empty() || rect.width < 120 {
+        return 0;
+    }
+    let lbl_w = 50_u32;
+    let max_per_row = ((rect.width.saturating_sub(lbl_w)) / 72).max(1) as usize;
+    let per_row = row.titles.len().clamp(1, max_per_row.min(6));
+    let avail_w = rect.width.saturating_sub(lbl_w);
+    let btn_w = (avail_w.saturating_sub((per_row as u32 - 1) * 4) / per_row as u32).max(40);
+    paint_label_line(
+        builder,
+        parent,
+        LabelLine {
+            rect: LayoutRectPx::new(rect.x, rect.y, lbl_w, 20),
+            text: row.row_lbl,
+            size_px: 11.5,
+            bold: true,
+            color: builder.palette.text,
+            scroll_container: None,
+        },
+    );
+    let mut rows = 0_u32;
+    for (row_idx, chunk) in row.titles.chunks(per_row).enumerate() {
+        let ry = rect.y + row_idx as i32 * 22;
+        for (i, title) in chunk.iter().enumerate() {
+            let col = row_idx * per_row + i;
+            let bx = rect.x + lbl_w as i32 + i as i32 * (btn_w as i32 + 4);
+            let id = format!("{}.{col}", row.prefix);
+            emit_fit_btn(
+                builder,
+                parent,
+                FitBtn {
+                    id: &id,
+                    rect: LayoutRectPx::new(bx, ry, btn_w, 20),
+                    label: title,
+                    kb_path: "dialog.fit.mv_col",
+                    selected: is_selected(col),
+                    primary: false,
+                    enablement: ControlEnablement::enabled(),
+                    payload: &format!("{}:{col}", row.action_prefix),
+                },
+            );
+        }
+        rows += 1;
+    }
+    rows.saturating_mul(22)
+}
+
 fn build_equation_tab(
     builder: &mut LayoutBuilder<'_>,
     parent: &WidgetId,
@@ -1666,10 +1750,50 @@ fn build_equation_tab(
     state: &FitParamsViewState,
     locale: &str,
 ) {
-    let left_w = ((body.width * 50) / 100).max(240);
+    let mv_titles: Vec<String> = builder
+        .app
+        .document()
+        .data_sheet(&spec.source_sheet_id)
+        .and_then(|ds| match &ds.archetype {
+            curvebook_doc::TableArchetype::MultipleVariables(mv) => Some(mv.variables.iter().map(|v| v.title.clone()).collect()),
+            _ => None,
+        })
+        .unwrap_or_default();
+
+    let mut eq_y = body.y;
+    if !mv_titles.is_empty() && body.height >= 160 {
+        let h_x = emit_mv_column_selector_row(
+            builder,
+            parent,
+            LayoutRectPx::new(body.x, eq_y, body.width, 44),
+            MvSelectorRow { prefix: "fit.mv.x", row_lbl: "X col:", action_prefix: "mv_x", titles: &mv_titles },
+            |c| nl.mv_x_columns.contains(&c),
+        );
+        eq_y += h_x as i32 + 2;
+        let h_y = emit_mv_column_selector_row(
+            builder,
+            parent,
+            LayoutRectPx::new(body.x, eq_y, body.width, 44),
+            MvSelectorRow { prefix: "fit.mv.y", row_lbl: "Y col:", action_prefix: "mv_y", titles: &mv_titles },
+            |c| nl.mv_y_column == Some(c),
+        );
+        eq_y += h_y as i32 + 2;
+        let h_g = emit_mv_column_selector_row(
+            builder,
+            parent,
+            LayoutRectPx::new(body.x, eq_y, body.width, 44),
+            MvSelectorRow { prefix: "fit.mv.group", row_lbl: "Group:", action_prefix: "mv_group", titles: &mv_titles },
+            |c| nl.mv_group_columns.contains(&c),
+        );
+        eq_y += h_g as i32 + 6;
+    }
+    let used_h = u32::try_from((eq_y - body.y).max(0)).unwrap_or(0);
+    let eq_body = LayoutRectPx::new(body.x, eq_y, body.width, body.height.saturating_sub(used_h));
+
+    let left_w = ((eq_body.width * 50) / 100).max(240);
     let gap = 8_u32;
-    let right_x = body.x + left_w as i32 + gap as i32;
-    let right_w = body.width.saturating_sub(left_w + gap);
+    let right_x = eq_body.x + left_w as i32 + gap as i32;
+    let right_w = eq_body.width.saturating_sub(left_w + gap);
 
     let btn_w = 40_u32;
     let search_w = left_w.saturating_sub(btn_w * 3 + 12);
@@ -1679,7 +1803,7 @@ fn build_equation_tab(
         parent,
         FitInput {
             id: "fit.eq.search",
-            rect: LayoutRectPx::new(body.x, body.y, search_w, 24),
+            rect: LayoutRectPx::new(eq_body.x, eq_body.y, search_w, 24),
             label: search_ph,
             fallback_text: &state.model_search,
             kb_path: "dialog.fit.eq.search",
@@ -1687,7 +1811,7 @@ fn build_equation_tab(
             enablement: ControlEnablement::enabled(),
         },
     );
-    let bx = body.x + search_w as i32 + 4;
+    let bx = eq_body.x + search_w as i32 + 4;
     for (i, (id, lbl, payload)) in [
         ("fit.eq.search_clear", "Clear", "eq_clear_search"),
         ("fit.eq.expand_all", "All", "eq_expand_all"),
@@ -1701,7 +1825,7 @@ fn build_equation_tab(
             parent,
             FitBtn {
                 id,
-                rect: LayoutRectPx::new(bx + i as i32 * (btn_w as i32 + 4), body.y, btn_w, 24),
+                rect: LayoutRectPx::new(bx + i as i32 * (btn_w as i32 + 4), eq_body.y, btn_w, 24),
                 label: lbl,
                 kb_path: "dialog.fit.eq.toolbar",
                 selected: false,
@@ -1714,7 +1838,7 @@ fn build_equation_tab(
 
     let search_query = builder.app.interaction.text_field_buffers.get("fit.eq.search").map_or(state.model_search.as_str(), |b| b.text.as_str());
     let rows = build_equation_tree_rows(state, nl, search_query);
-    let tree_rect = LayoutRectPx::new(body.x, body.y + 28, left_w, body.height.saturating_sub(28));
+    let tree_rect = LayoutRectPx::new(eq_body.x, eq_body.y + 28, left_w, eq_body.height.saturating_sub(28));
     let total_h = (rows.len() as u32).saturating_mul(ROW_H_PX as u32);
     let (scroll_wid, list_clip, scroll_y) =
         emit_scroll_container_start(builder, parent, "fit.eq.tree.scroll", tree_rect, total_h, "Equation catalog tree");
@@ -1737,7 +1861,7 @@ fn build_equation_tab(
     }
     builder.pop_clip();
 
-    build_equation_right_pane(builder, parent, LayoutRectPx::new(right_x, body.y, right_w, body.height), spec, nl, state, locale);
+    build_equation_right_pane(builder, parent, LayoutRectPx::new(right_x, eq_body.y, right_w, eq_body.height), spec, nl, state, locale);
 }
 
 fn emit_equation_tree_rows(

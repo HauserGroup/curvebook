@@ -1740,13 +1740,22 @@ pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, Str
             })
         }
         ActiveDialog::EditAnalysisParameters { .. } => {
-            let intent = app.canvas_dialogs.edit_params.commit_intent().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
-            let out = app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+            curvebook_ui_egui::interaction::sync_edit_params_text_buffers(app);
+            let doc = app.document().clone();
+            let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
+            let mut iter = intents.into_iter();
+            let primary = iter.next().ok_or_else(|| String::from("no draft parameters ready to commit"))?;
+            let primary_cmd = primary.command_id.clone();
+            let out = app.execute_command(&primary.command_id, primary.params).map_err(|e| e.to_string())?;
+            for extra in iter {
+                let _ = app.execute_command(&extra.command_id, extra.params).map_err(|e| e.to_string())?;
+            }
             app.canvas_dialogs.close_dialog();
+            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
             Ok(UiEventOutcome {
                 handled: true,
                 action: String::from("dialog.edit_params_committed"),
-                command_id: Some(intent.command_id),
+                command_id: Some(primary_cmd),
                 command_result: Some(out.payload),
             })
         }
@@ -1865,11 +1874,98 @@ pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, Str
                 command_result: Some(out.payload),
             })
         }
+        ActiveDialog::ChangeGraphType { .. } => {
+            let intents = app.canvas_dialogs.change_graph_type.commit_intents(app.document());
+            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.change_graph_type_committed")
+        }
+        ActiveDialog::FormatAxes { .. } => {
+            curvebook_ui_egui::interaction::sync_format_axes_text_buffers(app);
+            let intent = app.canvas_dialogs.format_axes.commit_intent().ok_or_else(|| String::from("invalid Format Axes settings"))?;
+            let res = commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_axes_committed")?;
+            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
+            Ok(res)
+        }
+        ActiveDialog::FormatGraph { .. } => {
+            let intents = app.canvas_dialogs.format_graph.commit_intents();
+            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.format_graph_committed")
+        }
+        ActiveDialog::PairwiseComparisons { .. } => {
+            let intents = app.canvas_dialogs.pairwise.commit_intents();
+            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.pairwise_committed")
+        }
+        ActiveDialog::BubblePlotInspector { .. } => {
+            let intent = app.canvas_dialogs.bubble_plot.commit_intent().ok_or_else(|| String::from("no bubble plot graph target selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.bubble_plot_committed")
+        }
+        ActiveDialog::InsertModelEquation { .. } => {
+            let doc = app.document().clone();
+            let intent = app
+                .canvas_dialogs
+                .insert_model_equation
+                .commit_intent(Some(&doc))
+                .ok_or_else(|| String::from("no model equation result sheet selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.insert_model_equation_committed")
+        }
+        ActiveDialog::ApplyStyleFrom { .. } => {
+            let intent =
+                app.canvas_dialogs.apply_style.commit_intent().ok_or_else(|| String::from("no donor graph selected for Apply Style From"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.apply_style_committed")
+        }
+        ActiveDialog::ChangeDataAnalyzed { .. } => {
+            let intent =
+                app.canvas_dialogs.change_data.commit_intent().ok_or_else(|| String::from("no compatible replacement data sheet selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.change_data_committed")
+        }
+        ActiveDialog::FormatSelectedPoints { .. } => {
+            if app.canvas_dialogs.format_points.selected_points.is_empty()
+                && let Some(active_ds_id) = app.brushed_points.first().map(|p| p.sheet_id.clone())
+                && let Some(ds) = app.document().data_sheet(&active_ds_id).cloned()
+            {
+                let targets = app.grid.selected_graph_point_targets(&ds, usize::MAX);
+                app.canvas_dialogs.format_points.set_selected_targets(targets);
+            }
+            let mut pairs: Vec<(String, Value)> = Vec::new();
+            if let Some(intent) = app.canvas_dialogs.format_points.build_commit_intent() {
+                pairs.push((intent.command_id, intent.params));
+            }
+            let scene = app.canvas_dialogs.format_points.graph_sheet_id.as_ref().and_then(|gid| app.session().render_sheet_scene(gid).ok());
+            let doc = app.document().clone();
+            for intent in app.canvas_dialogs.format_points.build_row_label_intents_for_scene(&doc, scene.as_ref()) {
+                pairs.push((intent.command_id, intent.params));
+            }
+            commit_web_intent_batch(app, pairs, "dialog.format_points_committed")
+        }
+        ActiveDialog::PageLayoutComposer { .. } => {
+            let intents = app.canvas_dialogs.page_layout.commit_intents();
+            commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.page_layout_committed")
+        }
         _ => {
             app.canvas_dialogs.close_dialog();
+            curvebook_ui_egui::interaction::clear_modal_text_buffers(app);
             Ok(UiEventOutcome { handled: true, action: String::from("dialog.closed"), ..Default::default() })
         }
     }
+}
+
+fn commit_web_intent_single(app: &mut UiApp, command_id: &str, params: Value, action: &str) -> Result<UiEventOutcome, String> {
+    let out = app.execute_command(command_id, params).map_err(|e| e.to_string())?;
+    app.canvas_dialogs.close_dialog();
+    Ok(UiEventOutcome { handled: true, action: action.to_owned(), command_id: Some(command_id.to_owned()), command_result: Some(out.payload) })
+}
+
+fn commit_web_intent_batch<I>(app: &mut UiApp, intents: I, action: &str) -> Result<UiEventOutcome, String>
+where
+    I: IntoIterator<Item = (String, Value)>,
+{
+    let mut last_cmd = None;
+    let mut last_payload = None;
+    for (command_id, params) in intents {
+        let out = app.execute_command(&command_id, params).map_err(|e| e.to_string())?;
+        last_cmd = Some(command_id);
+        last_payload = Some(out.payload);
+    }
+    app.canvas_dialogs.close_dialog();
+    Ok(UiEventOutcome { handled: true, action: action.to_owned(), command_id: last_cmd, command_result: last_payload })
 }
 
 #[derive(Clone, Copy)]
@@ -2511,5 +2607,136 @@ mod tests {
         assert_eq!(hit_corner, WebChromeDispatch::BlockedByModalBackdrop);
         let modal_report = verify_tree_invariants(&layout2.tree);
         assert!(modal_report.is_clean(), "modal LayoutTree parity issues: {modal_report:?}");
+    }
+
+    #[test]
+    fn w6_web_commit_active_modal_dialog_commits_all_supported_modals() -> Result<(), String> {
+        let mut app = UiApp::new();
+        let ds_g = app
+            .execute_command(
+                "sheet.createData",
+                json!({ "sheet_id": "ds-grp", "kind": "grouped", "rows": 3, "cols": 2, "subcolumns": 2, "auto_family": false }),
+            )
+            .map_err(|e| e.to_string())?;
+        let grp_id = curvebook_ui_egui::serde_json::Value::as_str(&ds_g.payload["sheet_id"]).ok_or("missing grp id")?.to_owned();
+        let mut grp_edits = Vec::new();
+        for (r, vals) in [[[10.0, 11.0], [20.0, 21.0]], [[15.0, 16.0], [25.0, 26.0]], [[12.0, 13.0], [22.0, 23.0]]].iter().enumerate() {
+            for (c, subs) in vals.iter().enumerate() {
+                for (s, v) in subs.iter().enumerate() {
+                    grp_edits.push(json!({ "row": r, "col": c, "subcol": s, "value": v }));
+                }
+            }
+        }
+        app.execute_command("table.setCells", json!({ "sheet_id": grp_id, "edits": grp_edits })).map_err(|e| e.to_string())?;
+        let g1 = app.execute_command("graph.create", json!({ "data_sheet_id": grp_id, "kind": "grouped" })).map_err(|e| e.to_string())?;
+        let g1_str = g1.payload["sheet_id"].as_str().ok_or("missing g1")?.to_owned();
+        let g1_id = app.document().graph_sheets.iter().find(|g| g.id.as_str() == g1_str).ok_or("missing g1 sheet")?.id.clone();
+        let g2 = app.execute_command("graph.create", json!({ "data_sheet_id": grp_id, "kind": "grouped" })).map_err(|e| e.to_string())?;
+        let g2_str = g2.payload["sheet_id"].as_str().ok_or("missing g2")?.to_owned();
+        let g2_id = app.document().graph_sheets.iter().find(|g| g.id.as_str() == g2_str).ok_or("missing g2 sheet")?.id.clone();
+
+        // 1. ChangeGraphType -> grouped.superimposed
+        let g1_ref = app.document().graph_sheet(&g1_id).ok_or("missing g1")?.clone();
+        let doc = app.document().clone();
+        app.canvas_dialogs.change_graph_type.open_for_graph(&g1_ref, &doc);
+        app.canvas_dialogs.active_dialog = ActiveDialog::ChangeGraphType { graph_sheet_id: g1_id.clone() };
+        app.canvas_dialogs.change_graph_type.selected_option_id = String::from("grouped.superimposed");
+        let out = commit_active_modal_dialog(&mut app)?;
+        assert_eq!(out.action, "dialog.change_graph_type_committed");
+        assert_eq!(app.document().graph_sheet(&g1_id).map(|g| format!("{:?}", g.spec.grouped_arrangement)), Some(String::from("Superimposed")));
+
+        // 2. FormatAxes -> sync axes.title & axes.y_thresholds buffers and commit
+        let _ = dispatch_ui_command(&mut app, "ui.graph.axes.open", &json!({ "sheet_id": g1_str })).map_err(|e| e.to_string())?;
+        app.focus_widget_id = Some(String::from("axes.title"));
+        let _ = curvebook_ui_egui::interaction::dispatch_ui_event(
+            &mut app,
+            UiInputEvent::TextInput { text: String::from("Web Intensity") },
+            ViewportMetrics::default(),
+        );
+        app.focus_widget_id = Some(String::from("axes.y_thresholds"));
+        let _ = curvebook_ui_egui::interaction::dispatch_ui_event(
+            &mut app,
+            UiInputEvent::TextInput { text: String::from("15") },
+            ViewportMetrics::default(),
+        );
+        let out = commit_active_modal_dialog(&mut app)?;
+        assert_eq!(out.action, "dialog.format_axes_committed");
+        let gs1 = app.document().graph_sheet(&g1_id).ok_or("missing g1")?;
+        assert_eq!(gs1.spec.y_axis.title, "Web Intensity");
+        assert!(gs1.spec.y_axis.thresholds.iter().any(|t| (t.value - 15.0).abs() < 1e-6));
+
+        // 3. FormatGraph & ApplyStyleFrom & PairwiseComparisons & FormatSelectedPoints
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_format_graph(&doc, &g1_id));
+        app.canvas_dialogs.format_graph.show_legend = false;
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.format_graph_committed");
+        assert_eq!(app.document().graph_sheet(&g1_id).map(|g| g.spec.legend.visible), Some(false));
+
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_apply_style_from(&doc, &g2_id));
+        app.canvas_dialogs.apply_style.donor_graph_id = Some(g1_id.clone());
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.apply_style_committed");
+
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_pairwise_comparisons(&doc, &g1_id));
+        app.canvas_dialogs.pairwise.hide_non_significant = true;
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.pairwise_committed");
+
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_format_selected_points(&doc, &g1_id, vec![(0, 0)]));
+        app.canvas_dialogs.format_points.color = Some(String::from("#D55E00"));
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.format_points_committed");
+        assert!(!app.document().graph_sheet(&g1_id).ok_or("missing g1")?.spec.point_overrides.is_empty());
+
+        // 4. PageLayoutComposer & ChangeDataAnalyzed & BubblePlotInspector & InsertModelEquation
+        let lay = app.execute_command("layout.create", json!({ "title": "Pub Fig" })).map_err(|e| e.to_string())?;
+        let lay_id = lay.payload["sheet_id"].as_str().ok_or("missing layout")?.into();
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_page_layout_composer(&doc, &lay_id));
+        app.canvas_dialogs.page_layout.rows = 2;
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.page_layout_committed");
+
+        let an = app.execute_command("analysis.run", json!({ "source_sheet_id": "ds-grp", "kind": "two_way_anova" })).map_err(|e| e.to_string())?;
+        let an_id = an.payload["sheet_id"].as_str().ok_or("missing an")?.into();
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_change_data_analyzed(&doc, &an_id));
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.change_data_committed");
+
+        // 5. MV sheet -> BubblePlotInspector & XY sheet -> InsertModelEquation
+        let ds_mv = app
+            .execute_command(
+                "sheet.createData",
+                json!({ "sheet_id": "ds-mv", "kind": "multiple_variables", "rows": 4, "cols": 2, "auto_family": false }),
+            )
+            .map_err(|e| e.to_string())?;
+        let mv_id = ds_mv.payload["sheet_id"].as_str().ok_or("missing mv")?.to_owned();
+        app.execute_command(
+            "table.setCells",
+            json!({
+                "sheet_id": mv_id,
+                "edits": [
+                    { "row": 0, "col": 0, "value": 1.0 }, { "row": 0, "col": 1, "value": 2.0 },
+                    { "row": 1, "col": 0, "value": 2.0 }, { "row": 1, "col": 1, "value": 4.0 },
+                    { "row": 2, "col": 0, "value": 3.0 }, { "row": 2, "col": 1, "value": 6.0 },
+                    { "row": 3, "col": 0, "value": 4.0 }, { "row": 3, "col": 1, "value": 8.0 }
+                ]
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        let gm = app.execute_command("graph.create", json!({ "data_sheet_id": mv_id, "kind": "multiple_variables" })).map_err(|e| e.to_string())?;
+        let gm_str = gm.payload["sheet_id"].as_str().ok_or("missing gm")?.to_owned();
+        let gm_id = app.document().graph_sheets.iter().find(|g| g.id.as_str() == gm_str).ok_or("missing gm sheet")?.id.clone();
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_bubble_plot(&doc, &gm_id));
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.bubble_plot_committed");
+
+        let fit = app.execute_command("analysis.run", json!({ "source_sheet_id": mv_id, "kind": "linear_regression" })).map_err(|e| e.to_string())?;
+        let fit_str = fit.payload["sheet_id"].as_str().ok_or("missing fit")?.to_owned();
+        let fit_id = app.document().result_sheets.iter().find(|r| r.id.as_str() == fit_str).ok_or("missing fit sheet")?.id.clone();
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_insert_model_equation(&doc, &gm_id));
+        app.canvas_dialogs.insert_model_equation.result_sheet_id = Some(fit_id);
+        assert_eq!(commit_active_modal_dialog(&mut app)?.action, "dialog.insert_model_equation_committed");
+        Ok(())
     }
 }

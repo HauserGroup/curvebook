@@ -18,7 +18,7 @@ use crate::layout::widgets::{
     maybe_paint_focus_ring, paint_text_fitted, widget_state,
 };
 use crate::layout::{LayoutBuilder, LayoutRectPx, NodeSpec, WidgetAction, WidgetId, WidgetVisualState, ZLayer};
-use crate::modal_predicates::ControlEnablement;
+use crate::modal_predicates::{ControlEnablement, r10_pcr_outcome_column};
 use crate::text_bridge::{TextMeasurer, UiTextStyle};
 
 use super::a11y::{disclosure_meta, labeled_meta, selectable_meta};
@@ -98,6 +98,18 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut AnalyzePickerViewState,
     if payload == "dup_confirm" {
         return execute_duplicate_confirm(app, state);
     }
+    if let Some(col_raw) = payload.strip_prefix("toggle_pca_pred:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        app.canvas_dialogs.analyze.toggle_pca_predictor(col);
+        return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.toggle_pca_pred:{col}"), ..Default::default() });
+    }
+    if let Some(col_raw) = payload.strip_prefix("set_pcr_outcome:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        app.canvas_dialogs.analyze.select_pcr_outcome(col)?;
+        return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.set_pcr_outcome:{col}"), ..Default::default() });
+    }
     Ok(UiEventOutcome::default())
 }
 
@@ -159,7 +171,11 @@ pub fn build_analyze_modal_body(builder: &mut LayoutBuilder<'_>, parent: WidgetI
         return;
     }
 
-    let summary_h = if remaining_h >= scaled_u32(220.0, scale, 160, 440) {
+    let show_pcr_panel = matches!(builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("stats.pcr" | "stats.pca"))
+        && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty();
+    let summary_h = if show_pcr_panel && remaining_h >= scaled_u32(220.0, scale, 160, 440) {
+        scaled_u32(118.0, scale, 92, 220)
+    } else if remaining_h >= scaled_u32(220.0, scale, 160, 440) {
         scaled_u32(72.0, scale, 54, 140)
     } else if remaining_h >= scaled_u32(140.0, scale, 110, 280) {
         scaled_u32(48.0, scale, 36, 96)
@@ -823,21 +839,32 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
     builder.paint_fill(ZLayer::ModalDialog, Some(&sum_wid), sum_rect, builder.palette.panel);
     builder.paint_stroke(ZLayer::ModalDialog, Some(&sum_wid), sum_rect, builder.palette.border, 1);
 
-    builder.push_clip(sum_rect);
+    let show_pcr_panel = matches!(builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("stats.pcr" | "stats.pca"))
+        && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty()
+        && sum_rect.width >= 320
+        && sum_rect.height >= 72;
+    let text_rect = if show_pcr_panel {
+        let left_w = (sum_rect.width * 42) / 100;
+        LayoutRectPx::new(sum_rect.x, sum_rect.y, left_w, sum_rect.height)
+    } else {
+        sum_rect
+    };
+
+    builder.push_clip(text_rect);
     let line_h = scaled_u32(20.0, scale, 15, 40);
     let line_gap = scaled_u32(2.0, scale, 1, 6);
     let pad_top = i32::try_from(scaled_u32(4.0, scale, 2, 10)).unwrap_or(4);
-    let y0 = sum_rect.y + pad_top;
+    let y0 = text_rect.y + pad_top;
     let bold_style = UiTextStyle::ui_bold((12.0 * scale).clamp(9.0, 24.0));
     let body_style = UiTextStyle::ui_sans((12.0 * scale).clamp(9.0, 24.0));
 
-    if y0 + i32::try_from(line_h).unwrap_or(20) <= sum_rect.bottom() {
+    if y0 + i32::try_from(line_h).unwrap_or(20) <= text_rect.bottom() {
         paint_text_fitted(
             builder,
             &sum_wid,
             FittedTextSpec {
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(sum_rect.x + 2, y0, sum_rect.width.saturating_sub(4), line_h),
+                rect: LayoutRectPx::new(text_rect.x + 2, y0, text_rect.width.saturating_sub(4), line_h),
                 pad_x: 6,
                 text: &title_str,
                 style: &bold_style,
@@ -851,17 +878,17 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
         || picker_tr(locale, "analyze_picker.no_selection", "Select an analysis from the list to view its summary and run it."),
         |item| item.summary,
     );
-    let avail_w = f64::from(sum_rect.width.saturating_sub(16));
+    let avail_w = f64::from(text_rect.width.saturating_sub(16));
     let wrapped = wrap_two_lines(builder, body_text, &body_style, locale, avail_w);
 
     let y1 = y0 + i32::try_from(line_h + line_gap).unwrap_or(22);
-    if !wrapped.0.is_empty() && y1 + i32::try_from(line_h).unwrap_or(20) <= sum_rect.bottom() {
+    if !wrapped.0.is_empty() && y1 + i32::try_from(line_h).unwrap_or(20) <= text_rect.bottom() {
         paint_text_fitted(
             builder,
             &sum_wid,
             FittedTextSpec {
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(sum_rect.x + 2, y1, sum_rect.width.saturating_sub(4), line_h),
+                rect: LayoutRectPx::new(text_rect.x + 2, y1, text_rect.width.saturating_sub(4), line_h),
                 pad_x: 6,
                 text: &wrapped.0,
                 style: &body_style,
@@ -872,7 +899,7 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
     }
 
     let y2 = y1 + i32::try_from(line_h + line_gap).unwrap_or(22);
-    if y2 + i32::try_from(line_h).unwrap_or(20) <= sum_rect.bottom() {
+    if y2 + i32::try_from(line_h).unwrap_or(20) <= text_rect.bottom() {
         let line3 = if !wrapped.1.is_empty() {
             wrapped.1
         } else if let Some(item) = selected_item {
@@ -886,7 +913,7 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
                 &sum_wid,
                 FittedTextSpec {
                     z_layer: ZLayer::ModalDialog,
-                    rect: LayoutRectPx::new(sum_rect.x + 2, y2, sum_rect.width.saturating_sub(4), line_h),
+                    rect: LayoutRectPx::new(text_rect.x + 2, y2, text_rect.width.saturating_sub(4), line_h),
                     pad_x: 6,
                     text: &line3,
                     style: &body_style,
@@ -898,6 +925,101 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
     }
 
     builder.pop_clip();
+
+    if show_pcr_panel {
+        let pcr_x = text_rect.right() + i32::try_from(scaled_u32(6.0, scale, 4, 12)).unwrap_or(6);
+        let pcr_w = sum_rect.width.saturating_sub(text_rect.width.saturating_add(10));
+        let pcr_rect = LayoutRectPx::new(pcr_x, sum_rect.y + 4, pcr_w, sum_rect.height.saturating_sub(8));
+        build_pcr_predictor_outcome_panel(builder, &sum_wid, pcr_rect);
+    }
+}
+
+fn build_pcr_predictor_outcome_panel(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, panel_rect: LayoutRectPx) {
+    if panel_rect.width < 120 || panel_rect.height < 36 {
+        return;
+    }
+    let scale = builder.scale();
+    let analyze = builder.app.canvas_dialogs.analyze.clone();
+    let scroll_id = String::from("scroll.analyze.pcr");
+    let scroll_off = builder.scroll_offset(&scroll_id);
+    let row_h = scaled_u32(22.0, scale, 18, 38);
+    let content_h = (analyze.variable_candidates.len() as u32).saturating_mul(row_h).saturating_add(8);
+    let scroll_meta = ScrollMeta::new(scroll_id.clone(), panel_rect, [panel_rect.width, content_h], scroll_off, ScrollAxes::Vertical);
+
+    let sb_w = if scroll_meta.has_vertical_overflow() { scrollbar_thickness_px(scale) } else { 0 };
+    let inner_w = panel_rect.width.saturating_sub(sb_w.saturating_add(4));
+    let pcr_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("analyze.pcr_panel"),
+        parent: Some(parent.clone()),
+        z_layer: ZLayer::ModalDialog,
+        rect_px: panel_rect,
+        a11y: labeled_meta(WidgetRole::Dialog, "PCA predictors and PCR outcome", FocusScope::ModalDialog, "dialog.analyze.pcr"),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.attach_scroll(&pcr_wid, scroll_meta.clone());
+    builder.paint_fill(ZLayer::ModalDialog, Some(&pcr_wid), panel_rect, builder.palette.surface);
+    builder.paint_stroke(ZLayer::ModalDialog, Some(&pcr_wid), panel_rect, builder.palette.border, 1);
+
+    let inner_rect = LayoutRectPx::new(panel_rect.x + 2, panel_rect.y + 2, inner_w, panel_rect.height.saturating_sub(4));
+    let half_w = inner_w.saturating_sub(6) / 2;
+    let off_y = scroll_meta.scroll_offset_px[1].round() as i32;
+
+    builder.push_clip(inner_rect);
+    for (idx, cand) in analyze.variable_candidates.iter().enumerate() {
+        let ry = inner_rect.y + 2 + i32::try_from(idx as u32 * row_h).unwrap_or(0) - off_y;
+        let row_r = LayoutRectPx::new(inner_rect.x + 2, ry, inner_w.saturating_sub(4), row_h.saturating_sub(2));
+        if row_r.y < inner_rect.y || row_r.bottom() > inner_rect.bottom() {
+            continue;
+        }
+        let col = cand.col_index;
+        let pred_id = format!("analyze.pca.pred.{col}");
+        let pred_label = format!("Pred: {}", cand.title);
+        let pred_rect = LayoutRectPx::new(row_r.x, row_r.y, half_w, row_r.height);
+        emit_toggle(
+            builder,
+            ToggleWidgetSpec {
+                id: &pred_id,
+                parent: Some(pcr_wid.clone()),
+                z_layer: ZLayer::ModalDialog,
+                rect: pred_rect,
+                label: &pred_label,
+                keyboard_path: "dialog.analyze.pca_pred",
+                focus_scope: FocusScope::ModalDialog,
+                tab_order: Some(400 + idx as u32 * 2),
+                checked: analyze.selected_data_sets.contains(&col),
+                is_radio: false,
+                enablement: ControlEnablement::enabled(),
+                scroll_container: Some(&scroll_id),
+                action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: format!("toggle_pca_pred:{col}") },
+            },
+        );
+
+        let out_id = format!("analyze.pcr.outcome.{col}");
+        let out_label = format!("Out: {}", cand.title);
+        let out_rect = LayoutRectPx::new(pred_rect.right() + 4, row_r.y, half_w, row_r.height);
+        let out_enable = r10_pcr_outcome_column(col, &analyze.selected_data_sets);
+        emit_toggle(
+            builder,
+            ToggleWidgetSpec {
+                id: &out_id,
+                parent: Some(pcr_wid.clone()),
+                z_layer: ZLayer::ModalDialog,
+                rect: out_rect,
+                label: &out_label,
+                keyboard_path: "dialog.analyze.pcr_outcome",
+                focus_scope: FocusScope::ModalDialog,
+                tab_order: Some(401 + idx as u32 * 2),
+                checked: analyze.pcr_outcome_column == Some(col),
+                is_radio: true,
+                enablement: out_enable,
+                scroll_container: Some(&scroll_id),
+                action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: format!("set_pcr_outcome:{col}") },
+            },
+        );
+    }
+    builder.pop_clip();
+    emit_scrollbars_for_meta(builder, ZLayer::ModalDialog, &scroll_meta, Some(pcr_wid));
 }
 
 fn wrap_two_lines(builder: &LayoutBuilder<'_>, text: &str, style: &UiTextStyle, locale: &str, max_w: f64) -> (String, String) {

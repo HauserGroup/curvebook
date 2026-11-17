@@ -342,6 +342,13 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         summary: "Standardized PCA with scores, loadings, and Horn parallel-analysis thresholds.",
     },
     AnalysisCatalogItem {
+        id: "stats.pcr",
+        label: "Principal Component Regression (PCR)",
+        category: AnalysisCategory::Multivariate,
+        keywords: "pcr principal component regression pca predictors outcome response",
+        summary: "Principal component regression with strict predictor/outcome separation.",
+    },
+    AnalysisCatalogItem {
         id: "stats.corr_matrix",
         label: "Correlation Matrix (Pearson / Spearman)",
         category: AnalysisCategory::Multivariate,
@@ -473,7 +480,7 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
             reference_levels: Vec::new(),
             compute_vif: true,
         })),
-        "stats.pca" => Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7) })),
+        "stats.pca" | "stats.pcr" => Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { standardize: true, parallel_analysis_seed: Some(7) })),
         "stats.corr_matrix" => Some(AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false })),
         "stats.clustering" => Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering {
             k_means_k: Some(3),
@@ -709,6 +716,8 @@ pub struct AnalyzeDialogState {
     pub pvalue_stack_column: Option<usize>,
     #[serde(default)]
     pub compute_effect_sizes: Option<bool>,
+    #[serde(skip)]
+    pub explicit_response_column: Option<usize>,
 }
 
 const fn default_pvalue_stack_threshold() -> f64 {
@@ -816,6 +825,7 @@ impl Default for AnalyzeDialogState {
             pvalue_stack_threshold: default_pvalue_stack_threshold(),
             pvalue_stack_column: None,
             compute_effect_sizes: None,
+            explicit_response_column: None,
         }
     }
 }
@@ -874,6 +884,7 @@ impl AnalyzeDialogState {
         self.pvalue_stack_threshold = default_pvalue_stack_threshold();
         self.pvalue_stack_column = None;
         self.compute_effect_sizes = None;
+        self.explicit_response_column = None;
     }
 
     /// Populate defaults and variable candidates for `sheet`.
@@ -933,6 +944,54 @@ impl AnalyzeDialogState {
         self.selected_entry_id = first_id;
     }
 
+    /// Switch the selected catalog entry (`analyze.entry.<id>`), resetting PCR selection cleanly when entering `stats.pcr`.
+    pub fn select_catalog_entry(&mut self, entry_id: &str) {
+        let entering_pcr = entry_id == "stats.pcr" && self.selected_entry_id.as_deref() != Some("stats.pcr");
+        self.selected_entry_id = Some(entry_id.to_owned());
+        if entering_pcr {
+            self.selected_data_sets.clear();
+            self.pca_predictors.clear();
+            self.pcr_outcome_column = None;
+            for cand in &mut self.variable_candidates {
+                cand.selected = false;
+            }
+        }
+    }
+
+    /// Toggle a MV predictor column for PCA/PCR while preserving disjoint PCR outcome selection.
+    pub fn toggle_pca_predictor(&mut self, col: usize) {
+        if let Some(pos) = self.pca_predictors.iter().position(|&c| c == col) {
+            self.pca_predictors.remove(pos);
+        } else {
+            self.pca_predictors.push(col);
+            self.pca_predictors.sort_unstable();
+        }
+        if let Some(pos) = self.selected_data_sets.iter().position(|&c| c == col) {
+            self.selected_data_sets.remove(pos);
+        } else {
+            self.selected_data_sets.push(col);
+            self.selected_data_sets.sort_unstable();
+            if self.pcr_outcome_column == Some(col) {
+                self.pcr_outcome_column = None;
+            }
+        }
+        for cand in &mut self.variable_candidates {
+            cand.selected = self.selected_data_sets.contains(&cand.col_index);
+        }
+    }
+
+    /// Select (or toggle off) the disjoint PCR outcome column with R10 predictor leakage guard.
+    pub fn select_pcr_outcome(&mut self, col: usize) -> Result<(), String> {
+        if self.pca_predictors.contains(&col) || self.selected_data_sets.contains(&col) {
+            return Err(format!("Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."));
+        }
+        self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
+        if let Some(outcome) = self.pcr_outcome_column {
+            self.set_response_column(outcome);
+        }
+        Ok(())
+    }
+
     /// Apply modal field updates from `ui.answer_dialog` / interactive controls.
     pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
         self.apply_field_patch_localized(fields, &LocalePreset::period_comma("en-US"))
@@ -940,9 +999,15 @@ impl AnalyzeDialogState {
 
     /// Apply modal field updates using regional numeric parsing (`preset`).
     pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
+        let has_explicit_predictors =
+            ["selected_data_sets", "analyze.selected_data_sets", "pca_predictors", "analyze.pca_predictors"].iter().any(|k| fields.contains_key(*k));
         for key in ["entry_id", "selected_entry_id", "analysis", "analyze.entry", "analyze.entries_list"] {
             if let Some(s) = fields.get(key).and_then(Value::as_str) {
-                self.selected_entry_id = Some(s.to_owned());
+                if s == "stats.pcr" && !has_explicit_predictors {
+                    self.select_catalog_entry(s);
+                } else {
+                    self.selected_entry_id = Some(s.to_owned());
+                }
             }
         }
         for (key, val) in fields {
@@ -1041,6 +1106,15 @@ impl AnalyzeDialogState {
     }
 
     fn apply_r9_analyze_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
+        if let Some(col_raw) = key.strip_prefix("analyze.pca.pred.")
+            && let Ok(col) = col_raw.parse::<usize>()
+        {
+            let want_on = val.as_bool().unwrap_or_else(|| !self.selected_data_sets.contains(&col));
+            if want_on != self.selected_data_sets.contains(&col) {
+                self.toggle_pca_predictor(col);
+            }
+            return Ok(());
+        }
         if let Some(col_raw) = key.strip_prefix("analyze.pcr.outcome.")
             && let Ok(col) = col_raw.parse::<usize>()
         {
@@ -1356,6 +1430,7 @@ impl AnalyzeDialogState {
 
     /// Assign a primary response column (for GLM / Cox / Factorial modeling on MV tables).
     pub fn set_response_column(&mut self, col_index: usize) {
+        self.explicit_response_column = Some(col_index);
         for var in &mut self.variable_candidates {
             var.is_response = var.col_index == col_index;
         }
@@ -1388,9 +1463,19 @@ impl AnalyzeDialogState {
                 }
                 if self.mv_group_column.is_some() {
                     tg.mv_group_column = self.mv_group_column;
+                } else if self.source_table_kind == Some(TableKind::MultipleVariables) {
+                    tg.mv_group_column = self.variable_candidates.iter().find(|v| v.role == VariableRole::Categorical).map(|v| v.col_index);
                 }
                 if self.mv_response_column.is_some() {
                     tg.mv_response_column = self.mv_response_column;
+                } else if self.source_table_kind == Some(TableKind::MultipleVariables) {
+                    tg.mv_response_column = response_col.or_else(|| {
+                        self.variable_candidates
+                            .iter()
+                            .rev()
+                            .find(|v| !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+                            .map(|v| v.col_index)
+                    });
                 }
             }
             AnalysisKind::OneWayAnova(anova) => {
@@ -1409,84 +1494,9 @@ impl AnalyzeDialogState {
                     cont.expected_proportions.clone_from(&self.contingency_expected_proportions);
                 }
             }
-            AnalysisKind::NonlinearRegression(fit) => {
-                if !self.equation_id.trim().is_empty() {
-                    fit.equation_id = self.equation_id.trim().to_owned();
-                }
-                if self.custom_dsl.is_some() {
-                    fit.custom_dsl.clone_from(&self.custom_dsl);
-                }
-                fit.method = self.fit_method;
-                fit.weighting = self.fit_weighting;
-                if !self.parameter_rules.is_empty() {
-                    fit.parameter_rules.clone_from(&self.parameter_rules);
-                }
-                if !self.mv_x_columns.is_empty() {
-                    fit.mv_x_columns.clone_from(&self.mv_x_columns);
-                }
-                if self.mv_y_column.is_some() {
-                    fit.mv_y_column = self.mv_y_column;
-                }
-                if !self.mv_group_columns.is_empty() {
-                    fit.mv_group_columns.clone_from(&self.mv_group_columns);
-                }
-            }
-            AnalysisKind::GeneralizedLinearModel(glm) => {
-                glm.family = self.glm_family;
-                glm.compute_vif = self.glm_compute_vif;
-                if !self.glm_reference_levels.is_empty() {
-                    glm.reference_levels.clone_from(&self.glm_reference_levels);
-                }
-                if let Some(resp) = response_col {
-                    glm.response_column = resp;
-                }
-                if !predictor_cols.is_empty() {
-                    glm.predictor_columns = predictor_cols;
-                }
-            }
-            AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
-                time_column,
-                status_column,
-                predictor_columns,
-                reference_levels,
-                tie_method,
-            }) => {
-                if let Some(tc) = self.cox_time_column.or(response_col) {
-                    *time_column = tc;
-                }
-                if let Some(sc) = self.cox_status_column.or_else(|| predictor_cols.first().copied()) {
-                    *status_column = sc;
-                }
-                if !self.cox_predictor_columns.is_empty() {
-                    predictor_columns.clone_from(&self.cox_predictor_columns);
-                } else if predictor_cols.len() > 1 {
-                    *predictor_columns = predictor_cols.get(1..).map_or_else(Vec::new, |s| s.to_vec());
-                }
-                if !self.cox_reference_levels.is_empty() {
-                    reference_levels.clone_from(&self.cox_reference_levels);
-                }
-                *tie_method = self.cox_tie_method;
-            }
-            AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier {
-                log_rank_mantel_cox,
-                gehan_breslow_wilcoxon,
-                trend_test,
-                multiplicity,
-                mv_time_column,
-                mv_status_column,
-                mv_group_column,
-                ..
-            }) => {
-                *log_rank_mantel_cox = self.km_log_rank_mantel_cox;
-                *gehan_breslow_wilcoxon = self.km_gehan_breslow_wilcoxon;
-                *trend_test = self.km_trend_test;
-                multiplicity.method = self.km_multiplicity_method;
-                *mv_time_column = self.km_mv_time_column;
-                *mv_status_column = self.km_mv_status_column;
-                if self.mv_group_column.is_some() {
-                    *mv_group_column = self.mv_group_column;
-                }
-            }
+            AnalysisKind::NonlinearRegression(fit) => self.populate_nonlinear_kind(fit),
+            AnalysisKind::GeneralizedLinearModel(glm) => self.populate_glm_kind(glm, response_col, &predictor_cols),
+            AnalysisKind::Survival(surv) => self.populate_survival_kind(surv, response_col, &predictor_cols),
             AnalysisKind::FactorialAnova(fac) => {
                 fac.three_way = self.factorial_three_way;
                 fac.repeated_measures = self.factorial_repeated_measures;
@@ -1496,7 +1506,17 @@ impl AnalyzeDialogState {
                 if let Some(ces) = self.compute_effect_sizes {
                     fac.compute_effect_sizes = ces;
                 }
-                if !predictor_cols.is_empty() {
+                if self.source_table_kind == Some(TableKind::MultipleVariables) {
+                    let cat_cols: Vec<usize> =
+                        self.variable_candidates.iter().filter(|v| v.role == VariableRole::Categorical).map(|v| v.col_index).collect();
+                    let factor_limit = if fac.three_way { 3 } else { 2 };
+                    if !cat_cols.is_empty() {
+                        fac.multifactor_columns = cat_cols.into_iter().take(factor_limit).collect();
+                    } else if !predictor_cols.is_empty() {
+                        fac.multifactor_columns = predictor_cols;
+                    }
+                    fac.response_column = response_col;
+                } else if !predictor_cols.is_empty() {
                     fac.multifactor_columns = predictor_cols;
                     fac.response_column = response_col;
                 }
@@ -1547,6 +1567,130 @@ impl AnalyzeDialogState {
             _ => {}
         }
         Some(kind)
+    }
+
+    fn populate_nonlinear_kind(&self, fit: &mut NonlinearFitSpec) {
+        if !self.equation_id.trim().is_empty() {
+            fit.equation_id = self.equation_id.trim().to_owned();
+        }
+        if self.custom_dsl.is_some() {
+            fit.custom_dsl.clone_from(&self.custom_dsl);
+        }
+        fit.method = self.fit_method;
+        fit.weighting = self.fit_weighting;
+        if !self.parameter_rules.is_empty() {
+            fit.parameter_rules.clone_from(&self.parameter_rules);
+        }
+        if !self.mv_x_columns.is_empty() {
+            fit.mv_x_columns.clone_from(&self.mv_x_columns);
+        }
+        if self.mv_y_column.is_some() {
+            fit.mv_y_column = self.mv_y_column;
+        }
+        if !self.mv_group_columns.is_empty() {
+            fit.mv_group_columns.clone_from(&self.mv_group_columns);
+        }
+        if self.source_table_kind == Some(TableKind::MultipleVariables) && fit.mv_x_columns.is_empty() && fit.mv_y_column.is_none() {
+            let numeric_cols: Vec<usize> = self
+                .variable_candidates
+                .iter()
+                .filter(|v| !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+                .map(|v| v.col_index)
+                .collect();
+            if numeric_cols.len() >= 2 {
+                fit.mv_x_columns = vec![numeric_cols[0]];
+                fit.mv_y_column = numeric_cols.last().copied();
+            }
+        }
+    }
+
+    fn populate_glm_kind(&self, glm: &mut curvebook_doc::GlmSpec, response_col: Option<usize>, predictor_cols: &[usize]) {
+        glm.family = self.glm_family;
+        glm.compute_vif = self.glm_compute_vif;
+        if !self.glm_reference_levels.is_empty() {
+            glm.reference_levels.clone_from(&self.glm_reference_levels);
+        }
+        let first_numeric = self
+            .variable_candidates
+            .iter()
+            .find(|v| v.selected && !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+            .map(|v| v.col_index);
+        if let Some(resp) = self.explicit_response_column.or(first_numeric).or(response_col) {
+            glm.response_column = resp;
+            let preds: Vec<usize> = self
+                .variable_candidates
+                .iter()
+                .filter(|v| v.selected && v.col_index != resp && !matches!(v.role, VariableRole::Label))
+                .map(|v| v.col_index)
+                .collect();
+            if !preds.is_empty() {
+                glm.predictor_columns = preds;
+            }
+        } else if !predictor_cols.is_empty() {
+            glm.predictor_columns = predictor_cols.to_vec();
+        }
+    }
+
+    fn populate_survival_kind(&self, surv: &mut SurvivalAnalysisSpec, response_col: Option<usize>, predictor_cols: &[usize]) {
+        match surv {
+            SurvivalAnalysisSpec::CoxProportionalHazards { time_column, status_column, predictor_columns, reference_levels, tie_method } => {
+                let numeric_cols: Vec<usize> = self
+                    .variable_candidates
+                    .iter()
+                    .filter(|v| v.selected && !matches!(v.role, VariableRole::Label | VariableRole::Categorical))
+                    .map(|v| v.col_index)
+                    .collect();
+                if let Some(tc) = self.cox_time_column.or_else(|| numeric_cols.first().copied()).or(response_col) {
+                    *time_column = tc;
+                }
+                if let Some(sc) = self
+                    .cox_status_column
+                    .or_else(|| numeric_cols.iter().copied().find(|&c| c != *time_column))
+                    .or_else(|| predictor_cols.first().copied())
+                {
+                    *status_column = sc;
+                }
+                if !self.cox_predictor_columns.is_empty() {
+                    predictor_columns.clone_from(&self.cox_predictor_columns);
+                } else {
+                    let covs: Vec<usize> = self
+                        .variable_candidates
+                        .iter()
+                        .filter(|v| {
+                            v.selected && !matches!(v.role, VariableRole::Label) && v.col_index != *time_column && v.col_index != *status_column
+                        })
+                        .map(|v| v.col_index)
+                        .collect();
+                    if !covs.is_empty() {
+                        *predictor_columns = covs;
+                    }
+                }
+                if !self.cox_reference_levels.is_empty() {
+                    reference_levels.clone_from(&self.cox_reference_levels);
+                }
+                *tie_method = self.cox_tie_method;
+            }
+            SurvivalAnalysisSpec::KaplanMeier {
+                log_rank_mantel_cox,
+                gehan_breslow_wilcoxon,
+                trend_test,
+                multiplicity,
+                mv_time_column,
+                mv_status_column,
+                mv_group_column,
+                ..
+            } => {
+                *log_rank_mantel_cox = self.km_log_rank_mantel_cox;
+                *gehan_breslow_wilcoxon = self.km_gehan_breslow_wilcoxon;
+                *trend_test = self.km_trend_test;
+                multiplicity.method = self.km_multiplicity_method;
+                *mv_time_column = self.km_mv_time_column;
+                *mv_status_column = self.km_mv_status_column;
+                if self.mv_group_column.is_some() {
+                    *mv_group_column = self.mv_group_column;
+                }
+            }
+        }
     }
 
     /// Find existing result sheets on `doc` that already analyze the same source table using the
@@ -1612,19 +1756,30 @@ impl AnalyzeDialogState {
 
 fn collect_variable_candidates(sheet: &DataSheet) -> Vec<VariableCandidate> {
     match &sheet.archetype {
-        TableArchetype::MultipleVariables(mv) => mv
-            .variables
-            .iter()
-            .enumerate()
-            .map(|(col_index, var)| VariableCandidate {
-                col_index,
-                title: var.title.clone(),
-                role: var.role,
-                role_inferred: var.role_inferred,
-                selected: true,
-                is_response: col_index == 0,
-            })
-            .collect(),
+        TableArchetype::MultipleVariables(mv) => {
+            let is_numeric_var = |v: &curvebook_doc::VariableColumn| !matches!(v.role, VariableRole::Label | VariableRole::Categorical);
+            let default_resp_col = mv
+                .variables
+                .iter()
+                .enumerate()
+                .rev()
+                .find(|(_, v)| is_numeric_var(v) && v.cells.iter().any(|c| c.active_number().is_some()))
+                .map(|(i, _)| i)
+                .or_else(|| mv.variables.iter().enumerate().rev().find(|(_, v)| is_numeric_var(v)).map(|(i, _)| i))
+                .unwrap_or(0);
+            mv.variables
+                .iter()
+                .enumerate()
+                .map(|(col_index, var)| VariableCandidate {
+                    col_index,
+                    title: var.title.clone(),
+                    role: var.role,
+                    role_inferred: var.role_inferred,
+                    selected: true,
+                    is_response: col_index == default_resp_col,
+                })
+                .collect()
+        }
         _ => (0..sheet.archetype.column_count())
             .map(|col_index| VariableCandidate {
                 col_index,
@@ -1706,6 +1861,10 @@ pub struct EditAnalysisParametersState {
     pub hodges_lehmann_ci: bool,
     #[serde(default)]
     pub welch_correction: bool,
+    #[serde(default)]
+    pub pca_predictors: Vec<usize>,
+    #[serde(default)]
+    pub pcr_outcome_column: Option<usize>,
 }
 
 impl Default for EditAnalysisParametersState {
@@ -1732,17 +1891,52 @@ impl Default for EditAnalysisParametersState {
             graph_ranks: false,
             hodges_lehmann_ci: false,
             welch_correction: false,
+            pca_predictors: Vec::new(),
+            pcr_outcome_column: None,
         }
     }
 }
 
 impl EditAnalysisParametersState {
+    /// Toggle a MV predictor column for PCA/PCR while maintaining disjoint PCR outcome selection.
+    pub fn toggle_pca_predictor(&mut self, col: usize) {
+        if let Some(pos) = self.pca_predictors.iter().position(|&c| c == col) {
+            self.pca_predictors.remove(pos);
+        } else {
+            self.pca_predictors.push(col);
+            self.pca_predictors.sort_unstable();
+            if self.pcr_outcome_column == Some(col) {
+                self.pcr_outcome_column = None;
+            }
+        }
+        if let Some(spec) = &mut self.draft {
+            spec.selected_data_sets.clone_from(&self.pca_predictors);
+        }
+    }
+
+    /// Select (or toggle off) the disjoint PCR outcome column with R10 predictor leakage guard.
+    pub fn select_pcr_outcome(&mut self, col: usize) -> Result<(), String> {
+        if self.pca_predictors.contains(&col) {
+            return Err(format!("Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."));
+        }
+        self.pcr_outcome_column = if self.pcr_outcome_column == Some(col) { None } else { Some(col) };
+        if let Some(spec) = &mut self.draft {
+            spec.selected_data_sets.retain(|&c| Some(c) != self.pcr_outcome_column);
+        }
+        Ok(())
+    }
     /// Load an existing [`ResultSheet`] for parameter re-entry (`Cmd+T`).
     pub fn open_for_result(&mut self, result: &ResultSheet) {
         self.result_sheet_id = Some(result.id.clone());
         self.title_was_custom = result.analysis.custom_title.is_some();
         self.active_tab = default_edit_tab();
         self.draft = Some(result.analysis.clone());
+        self.pca_predictors = if matches!(result.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
+            result.analysis.selected_data_sets.clone()
+        } else {
+            Vec::new()
+        };
+        self.pcr_outcome_column = None;
         self.sync_rule_flags_from_kind();
     }
 
@@ -2002,7 +2196,33 @@ impl EditAnalysisParametersState {
             "selected_data_sets" | "edit.selected_data_sets" | "edit.transform.selected_data_sets" => {
                 let cols = parse_usize_list(val, key)?;
                 if let Some(spec) = &mut self.draft {
+                    if matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::Pca { .. })) {
+                        self.pca_predictors.clone_from(&cols);
+                    }
                     spec.selected_data_sets = cols;
+                }
+            }
+            "pca_predictors" | "edit.pca.predictors" => {
+                let cols = parse_usize_list(val, key)?;
+                self.pca_predictors.clone_from(&cols);
+                if let Some(spec) = &mut self.draft {
+                    spec.selected_data_sets = cols;
+                }
+            }
+            "pcr_outcome_column" | "edit.pcr.outcome_column" => {
+                if val.is_null() {
+                    self.pcr_outcome_column = None;
+                } else {
+                    let col = parse_usize_min(val, key, 0)?;
+                    if self.pca_predictors.contains(&col) {
+                        return Err(format!(
+                            "Column {col} is checked as a PCA input predictor and cannot be selected as PCR outcome (target leakage guard)."
+                        ));
+                    }
+                    self.pcr_outcome_column = Some(col);
+                    if let Some(spec) = &mut self.draft {
+                        spec.selected_data_sets.retain(|&c| c != col);
+                    }
                 }
             }
             "geisser_greenhouse" | "edit.geisser_greenhouse" | "edit.sphericity.geisser_greenhouse" => {
@@ -2543,6 +2763,11 @@ impl EditAnalysisParametersState {
                 *k_means_k = if val.is_null() { None } else { Some(parse_usize_min(val, key, 1)?) };
                 true
             }
+            ("k_means_auto" | "edit.cluster.k_means_auto", AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, .. })) => {
+                let auto = val.as_bool().ok_or_else(|| String::from("`k_means_auto` must be boolean"))?;
+                *k_means_k = if auto { None } else { Some(k_means_k.unwrap_or(3)) };
+                true
+            }
             ("k_sweep_max" | "edit.cluster.k_sweep_max", AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_sweep_max, .. })) => {
                 *k_sweep_max = if val.is_null() { None } else { Some(parse_usize_min(val, key, 2)?) };
                 true
@@ -2774,7 +2999,43 @@ impl EditAnalysisParametersState {
                 *proportional_allocation = val.as_bool().ok_or_else(|| String::from("`proportional_allocation` must be boolean"))?;
                 true
             }
-            _ => false,
+            _ => {
+                if let Some(col_raw) = key.strip_prefix("edit.two_group.group.")
+                    && let Ok(col) = col_raw.parse::<usize>()
+                    && let AnalysisKind::TwoGroupComparison(t) = &mut updated
+                {
+                    t.mv_group_column = Some(col);
+                    true
+                } else if let Some(col_raw) = key.strip_prefix("edit.two_group.resp.")
+                    && let Ok(col) = col_raw.parse::<usize>()
+                    && let AnalysisKind::TwoGroupComparison(t) = &mut updated
+                {
+                    t.mv_response_column = Some(col);
+                    true
+                } else if let Some(col_raw) = key.strip_prefix("edit.fac.resp.")
+                    && let Ok(col) = col_raw.parse::<usize>()
+                    && let AnalysisKind::FactorialAnova(f) = &mut updated
+                {
+                    f.response_column = Some(col);
+                    true
+                } else if let Some(col_raw) = key.strip_prefix("edit.fac.col.")
+                    && let Ok(col) = col_raw.parse::<usize>()
+                    && let AnalysisKind::FactorialAnova(f) = &mut updated
+                {
+                    let want_on = val.as_bool().unwrap_or_else(|| !f.multifactor_columns.contains(&col));
+                    if want_on {
+                        if !f.multifactor_columns.contains(&col) {
+                            f.multifactor_columns.push(col);
+                            f.multifactor_columns.sort_unstable();
+                        }
+                    } else {
+                        f.multifactor_columns.retain(|&c| c != col);
+                    }
+                    true
+                } else {
+                    false
+                }
+            }
         };
         if handled {
             spec.update_kind(updated);
@@ -2794,17 +3055,56 @@ impl EditAnalysisParametersState {
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.result_sheet_id.as_ref()?;
         let spec = self.draft.as_ref()?;
-        Some(ToolCommandIntent::new(
-            "analysis.updateParams",
-            json!({
-                "sheet_id": id.as_str(),
-                "kind": spec.kind,
-                "confidence_percent": spec.confidence_level.percent(),
-                "selected_data_sets": spec.selected_data_sets,
-                "p_value_format": spec.p_value_format,
-                "custom_title": spec.custom_title,
-            }),
-        ))
+        let mut payload = json!({
+            "sheet_id": id.as_str(),
+            "kind": spec.kind,
+            "confidence_percent": spec.confidence_level.percent(),
+            "selected_data_sets": spec.selected_data_sets,
+            "p_value_format": spec.p_value_format,
+            "custom_title": spec.custom_title,
+        });
+        if let Some(map) = payload.as_object_mut() {
+            if matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })) {
+                map.insert(String::from("correlation_all_pairs"), json!(self.correlation_all_pairs));
+                map.insert(String::from("correlation_heatmap"), json!(self.correlation_heatmap));
+            }
+            if let Some(outcome_col) = self.pcr_outcome_column {
+                map.insert(String::from("pcr_outcome_column"), json!(outcome_col));
+            }
+        }
+        Some(ToolCommandIntent::new("analysis.updateParams", payload))
+    }
+
+    /// Emit `analysis.updateParams` and, when `correlation_heatmap` is toggled on for a correlation matrix,
+    /// spawn a linked `DiagnosticPlotKind::Heatmap` `GraphSheet` if none already points to `result_sheet_id`.
+    #[must_use]
+    pub fn commit_intents(&self, doc: Option<&ProjectDocument>) -> Vec<ToolCommandIntent> {
+        let Some(primary) = self.commit_intent() else {
+            return Vec::new();
+        };
+        let mut intents = vec![primary];
+        if let (Some(id), Some(spec)) = (&self.result_sheet_id, &self.draft)
+            && self.correlation_heatmap
+            && self.correlation_all_pairs
+            && matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. }))
+        {
+            let already_has_heatmap = doc.is_some_and(|d| {
+                d.graph_sheets
+                    .iter()
+                    .any(|g| g.spec.primary_source_sheet_id == *id && g.spec.kind == GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap))
+            });
+            if !already_has_heatmap {
+                intents.push(ToolCommandIntent::new(
+                    "graph.create",
+                    json!({
+                        "data_sheet_id": id.as_str(),
+                        "kind": GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap),
+                        "initialized": true,
+                    }),
+                ));
+            }
+        }
+        intents
     }
 }
 
@@ -3571,6 +3871,14 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
         compatible_tables: &[TableKind::Grouped, TableKind::Contingency],
     },
     GraphTypeOption {
+        id: "grouped.superimposed",
+        label: "Grouped Superimposed",
+        subtitle: "Overlaid series across Row Factor levels for direct comparison",
+        graph_kind: GraphKind::Grouped,
+        thumbnail: ThumbnailGlyphKind::GroupedInterleaved,
+        compatible_tables: &[TableKind::Grouped],
+    },
+    GraphTypeOption {
         id: "survival.km",
         label: "Kaplan-Meier Survival Curve",
         subtitle: "Step survival function with censoring ticks & Greenwood CIs",
@@ -3729,6 +4037,8 @@ impl ChangeGraphTypeState {
         spec.kind = self.resolved_graph_kind(opt, None);
         if opt.id == "grouped.stacked" {
             spec.grouped_arrangement = GroupedArrangement::Stacked;
+        } else if opt.id == "grouped.superimposed" {
+            spec.grouped_arrangement = GroupedArrangement::Superimposed;
         } else if opt.id == "grouped.interleaved" {
             spec.grouped_arrangement = GroupedArrangement::Interleaved;
         }
@@ -3796,6 +4106,15 @@ impl ChangeGraphTypeState {
                 "reset_series_style": true,
             }),
         )];
+        if spec.kind == GraphKind::Grouped {
+            intents.push(ToolCommandIntent::new(
+                "graph.setSpec",
+                json!({
+                    "sheet_id": id.as_str(),
+                    "grouped_arrangement": spec.grouped_arrangement,
+                }),
+            ));
+        }
         if !matches!(spec.kind, GraphKind::Diagnostic(_)) && !spec.series.is_empty() {
             let series_patches: Vec<Value> = spec
                 .series
@@ -3849,7 +4168,7 @@ fn build_gdo_for_option(option_id: &str, color: Rgba8, marker: MarkerStyle, summ
             half_violin_with_points: true,
         },
         "col.aligned_dot" => GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar: true },
-        "col.bar_replicates" | "grouped.interleaved" | "grouped.stacked" => GraphicalDataObject::BarWithReplicates {
+        "col.bar_replicates" | "grouped.interleaved" | "grouped.stacked" | "grouped.superimposed" => GraphicalDataObject::BarWithReplicates {
             summary,
             fill_color: color.with_alpha(210),
             border_color: color,
@@ -7284,5 +7603,74 @@ mod tests {
         };
         assert!(!axes_disabled.first().expect("graph.setAxes entry").enabled);
         assert!(axes_disabled.first().expect("graph.setAxes entry").format_palette_row().contains("[disabled]"));
+    }
+
+    #[test]
+    fn w6_pcr_catalog_r10_leakage_and_mv_response_default() -> Result<(), String> {
+        use super::{ANALYSIS_CATALOG, AnalyzeDialogState, collect_variable_candidates, default_analysis_kind_for_id};
+        use curvebook_doc::{MultivariateSpec, VariableRole};
+
+        let pcr = ANALYSIS_CATALOG.iter().find(|c| c.id == "stats.pcr").ok_or("missing stats.pcr in ANALYSIS_CATALOG")?;
+        assert!(pcr.label.contains("Principal Component Regression"));
+        assert!(matches!(default_analysis_kind_for_id("stats.pcr"), Some(AnalysisKind::Multivariate(MultivariateSpec::Pca { .. }))));
+
+        let mut mv = curvebook_doc::MultipleVariablesTable::new(5, 4).map_err(|e| e.to_string())?;
+        mv.variables[0].role = VariableRole::Label;
+        mv.variables[1].role = VariableRole::Categorical;
+        mv.variables[2].role = VariableRole::Continuous;
+        mv.variables[3].role = VariableRole::Continuous;
+        mv.variables[4].role = VariableRole::Categorical;
+        for r in 0..4 {
+            mv.variables[2].cells[r] = curvebook_doc::Cell::number((r + 1) as f64);
+            mv.variables[3].cells[r] = curvebook_doc::Cell::number((r + 1) as f64 * 2.0);
+        }
+        let ds = DataSheet::new("mv-pcr", "MV Cohort", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())?;
+        let cands = collect_variable_candidates(&ds);
+        assert_eq!(cands.iter().find(|c| c.is_response).map(|c| c.col_index), Some(3));
+
+        let mut an = AnalyzeDialogState::default();
+        an.open_for_data_sheet(&ds);
+        an.select_catalog_entry("stats.pcr");
+        assert!(an.selected_data_sets.is_empty());
+        an.toggle_pca_predictor(2);
+        assert!(an.select_pcr_outcome(2).is_err());
+        an.select_pcr_outcome(3)?;
+        assert_eq!(an.pcr_outcome_column, Some(3));
+        Ok(())
+    }
+
+    #[test]
+    fn w6_heatmap_commit_intents_and_grouped_superimposed() -> Result<(), String> {
+        use super::{ChangeGraphTypeState, DiagnosticPlotKind, EditAnalysisParametersState, GRAPH_TYPE_OPTIONS, GraphKind};
+        use curvebook_doc::{GraphSpec, GroupedArrangement, GroupedTable, MultivariateSpec, SheetId};
+        use serde_json::json;
+
+        assert!(GRAPH_TYPE_OPTIONS.iter().any(|o| o.id == "grouped.superimposed"));
+        let mut cgt = ChangeGraphTypeState { selected_option_id: String::from("grouped.superimposed"), ..ChangeGraphTypeState::default() };
+        cgt.graph_sheet_id = Some(SheetId::from("g-1"));
+        let grp = GroupedTable::new(curvebook_doc::SubcolumnMode::RawReplicates(2), 2, 3).map_err(|e| e.to_string())?;
+        let ds_g = DataSheet::new("ds-g", "Grouped", TableArchetype::Grouped(grp)).map_err(|e| e.to_string())?;
+        let mut spec = GraphSpec::default_for_data_sheet(&ds_g);
+        assert!(cgt.apply_to_spec(&mut spec));
+        assert_eq!(spec.grouped_arrangement, GroupedArrangement::Superimposed);
+
+        let mut ep = EditAnalysisParametersState::default();
+        let analysis =
+            AnalysisSpec::new("res-corr", "mv-1", AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { spearman_rank: false }))
+                .map_err(|e| e.to_string())?;
+        ep.result_sheet_id = Some(SheetId::from("res-corr"));
+        ep.draft = Some(analysis);
+        ep.correlation_all_pairs = true;
+        ep.correlation_heatmap = true;
+
+        let primary = ep.commit_intent().ok_or("missing commit_intent")?;
+        assert_eq!(primary.params["correlation_all_pairs"], json!(true));
+        assert_eq!(primary.params["correlation_heatmap"], json!(true));
+
+        let intents = ep.commit_intents(None);
+        assert_eq!(intents.len(), 2);
+        assert_eq!(intents[1].command_id, "graph.create");
+        assert_eq!(intents[1].params["kind"], json!(GraphKind::Diagnostic(DiagnosticPlotKind::Heatmap)));
+        Ok(())
     }
 }

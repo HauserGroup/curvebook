@@ -24,7 +24,8 @@ use crate::modal_predicates::{
     ControlEnablement, evaluate_dialog_widget, evaluate_edit_params_tab, r1_paired_or_matched_allowed, r1_sphericity_or_reml_control,
     r2_assume_gaussian_allowed, r2_parametric_post_hoc_method, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
     r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
-    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, source_table_shape,
+    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
+    source_table_shape,
 };
 use crate::text_bridge::UiTextStyle;
 
@@ -221,6 +222,40 @@ fn handle_prefixed_custom_action(app: &mut UiApp, state: &mut StatParamsViewStat
     }
     if let Some(rest) = payload.strip_prefix("set_cluster_link:") {
         return set_cluster_linkage(app, rest);
+    }
+    if payload == "toggle_kmeans_auto" {
+        let cur_auto = matches!(
+            app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind),
+            Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: None, .. }))
+        );
+        let mut map = serde_json::Map::new();
+        map.insert(String::from("k_means_auto"), serde_json::json!(!cur_auto));
+        app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+        return Ok(true);
+    }
+    if let Some(rest) = payload.strip_prefix("toggle_pca_pred:") {
+        let col = rest.parse::<usize>().map_err(|_| format!("invalid PCA predictor index `{rest}`"))?;
+        app.canvas_dialogs.edit_params.toggle_pca_predictor(col);
+        return Ok(true);
+    }
+    if let Some(rest) = payload.strip_prefix("set_pcr_outcome:") {
+        let col = rest.parse::<usize>().map_err(|_| format!("invalid PCR outcome index `{rest}`"))?;
+        app.canvas_dialogs.edit_params.select_pcr_outcome(col)?;
+        return Ok(true);
+    }
+    if let Some(rest) = payload.strip_prefix("set_tg_group:") {
+        let col = rest.parse::<usize>().map_err(|_| format!("invalid two-group group column `{rest}`"))?;
+        let mut map = serde_json::Map::new();
+        map.insert(String::from("mv_group_column"), serde_json::json!(col));
+        app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+        return Ok(true);
+    }
+    if let Some(rest) = payload.strip_prefix("set_tg_resp:") {
+        let col = rest.parse::<usize>().map_err(|_| format!("invalid two-group response column `{rest}`"))?;
+        let mut map = serde_json::Map::new();
+        map.insert(String::from("mv_response_column"), serde_json::json!(col));
+        app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+        return Ok(true);
     }
     if let Some(rest) = payload.strip_prefix("set_pstack_method:") {
         return set_pvalue_stack_method(app, rest);
@@ -1135,6 +1170,21 @@ fn handle_spinner_step(app: &mut UiApp, rest: &str) -> Result<bool, String> {
             app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
             Ok(true)
         }
+        "edit.cluster.k_sweep_max" => {
+            let cur_opt = match app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_sweep_max, .. })) => *k_sweep_max,
+                _ => None,
+            };
+            let next: Option<usize> = if delta >= 0.0 {
+                Some(cur_opt.map_or(4, |c| (c + 1).min(12)))
+            } else {
+                cur_opt.and_then(|c| if c <= 2 { None } else { Some(c - 1) })
+            };
+            let mut map = serde_json::Map::new();
+            map.insert(String::from("k_sweep_max"), next.map_or(serde_json::Value::Null, |k| serde_json::json!(k)));
+            app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+            Ok(true)
+        }
         "edit.imputation.m" => {
             let cur = match app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
                 Some(AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, .. })) => *imputations_m,
@@ -1527,10 +1577,18 @@ fn render_single_column_tab(
     let scroll_off = builder.scroll_offset(&scroll_id);
 
     if extra_descriptors_for.is_some()
-        && rect.height > items_h + scaled_u32(44.0, scale, 36, 96)
-        && let Some((_, _, _, _, controls, _)) = crate::inspect::dialog_widget_descriptors(builder.app)
+        && rect.height >= scaled_u32(96.0, scale, 72, 180)
+        && let Some((_, _, _, _, mut controls, _)) = crate::inspect::dialog_widget_descriptors(builder.app)
+        && !controls.is_empty()
     {
-        let top_rect = LayoutRectPx::new(rect.x, rect.y, rect.width, items_h.min(rect.height / 2));
+        // Place Transform/Sample/Power controls first so they stay visible above the fold.
+        controls.sort_by_key(|c| {
+            u8::from(
+                !(c.widget_id.starts_with("edit.transform.") || c.widget_id.starts_with("edit.sample.") || c.widget_id.starts_with("edit.power.")),
+            )
+        });
+        let top_cap = (rect.height / 2).max(scaled_u32(48.0, scale, 36, 96));
+        let top_rect = LayoutRectPx::new(rect.x, rect.y, rect.width, items_h.min(top_cap));
         emit_scrolled_item_list(builder, parent, top_rect, &scroll_id, scroll_off, &items, 30);
         let desc_y = top_rect.bottom() + i32::try_from(row_gap).unwrap_or(4);
         let desc_h = (rect.bottom() - desc_y).max(0) as u32;
@@ -2050,10 +2108,10 @@ fn append_dataset_items(app: &UiApp, shape: &TableShapeInfo<'_>, items: &mut Vec
         enablement: ControlEnablement::enabled(),
         action: custom_action("select_all_datasets"),
     }];
-    for (idx, title) in titles.iter().enumerate().take(6) {
+    for (idx, title) in titles.iter().enumerate() {
         let included = spec.selected_data_sets.is_empty() || spec.selected_data_sets.contains(&idx);
-        let short = if title.chars().count() > 11 {
-            let prefix: String = title.chars().take(10).collect();
+        let short = if title.chars().count() > 8 {
+            let prefix: String = title.chars().take(7).collect();
             format!("{prefix}…")
         } else {
             title.clone()
@@ -2065,7 +2123,7 @@ fn append_dataset_items(app: &UiApp, shape: &TableShapeInfo<'_>, items: &mut Vec
             enablement: ControlEnablement::enabled(),
             action: custom_action(format!("toggle_dataset:{idx}")),
         });
-        if row.len() == 4 {
+        if row.len() == 5 {
             items.push(StatItem::ButtonRow { items: std::mem::take(&mut row) });
         }
     }
@@ -2083,7 +2141,7 @@ fn collect_experimental_design_items(app: &UiApp, spec: &AnalysisSpec, shape: &T
     match &spec.kind {
         AnalysisKind::OneWayAnova(a) => collect_one_way_design_items(app, ep, a, locale, items),
         AnalysisKind::FactorialAnova(f) => collect_factorial_design_items(ep, f, shape, locale, items),
-        AnalysisKind::TwoGroupComparison(t) => collect_two_group_design_items(app, ep, t, locale, items),
+        AnalysisKind::TwoGroupComparison(t) => collect_two_group_design_items(app, ep, t, shape, locale, items),
         AnalysisKind::NestedComparison(n) => {
             items.push(StatItem::Section(String::from("edit.sec.nested"), String::from("Nested Design")));
             items.push(StatItem::Toggle {
@@ -2155,7 +2213,7 @@ fn collect_experimental_design_items(app: &UiApp, spec: &AnalysisSpec, shape: &T
             push_alpha_spinner(spec, items);
         }
         AnalysisKind::GeneralizedLinearModel(g) => collect_glm_design_items(g, shape, spec, items),
-        AnalysisKind::Multivariate(m) => collect_multivariate_design_items(ep, m, spec, items),
+        AnalysisKind::Multivariate(m) => collect_multivariate_design_items(ep, m, shape, spec, items),
         AnalysisKind::DescriptiveStats(d) => {
             items.push(StatItem::Section(String::from("edit.sec.desc"), String::from("Descriptive & Normality")));
             let sub_en = r8_subcolumn_aggregation(shape.max_sub);
@@ -2404,6 +2462,32 @@ fn collect_one_way_design_items(app: &UiApp, ep: &EditAnalysisParametersState, a
     }
 }
 
+fn push_factorial_mv_selectors(f: &FactorialAnovaSpec, shape: &TableShapeInfo<'_>, items: &mut Vec<StatItem>) {
+    items.push(StatItem::Section(String::from("edit.sec.fac_roles"), String::from("Factorial Response (Y) & Factor Columns")));
+    let col_indices: Vec<usize> = (0..shape.cols).collect();
+    let push_chunks = |items: &mut Vec<StatItem>, prefix: &str, id_prefix: &str, action_prefix: &str, is_selected: &dyn Fn(usize) -> bool| {
+        for chunk in col_indices.chunks(5) {
+            items.push(StatItem::ButtonRow {
+                items: chunk
+                    .iter()
+                    .map(|&c| {
+                        let short: String = shape.col_title(c).chars().take(8).collect();
+                        SegItem {
+                            id: format!("{id_prefix}.{c}"),
+                            label: format!("{prefix}:{short}"),
+                            selected: is_selected(c),
+                            enablement: ControlEnablement::enabled(),
+                            action: custom_action(format!("{action_prefix}:{c}")),
+                        }
+                    })
+                    .collect(),
+            });
+        }
+    };
+    push_chunks(items, "Y", "edit.fac.resp", "set_fac_resp", &|c| f.response_column == Some(c));
+    push_chunks(items, "F", "edit.fac.col", "toggle_fac_col", &|c| f.multifactor_columns.contains(&c));
+}
+
 fn collect_factorial_design_items(
     ep: &EditAnalysisParametersState,
     f: &FactorialAnovaSpec,
@@ -2411,6 +2495,9 @@ fn collect_factorial_design_items(
     locale: &str,
     items: &mut Vec<StatItem>,
 ) {
+    if shape.is_multiple_variables() && shape.cols > 0 {
+        push_factorial_mv_selectors(f, shape, items);
+    }
     items.push(StatItem::Section(String::from("edit.sec.factorial"), String::from("Factorial & RM / REML Design")));
     items.push(StatItem::Toggle {
         id: String::from("edit.factorial.three_way"),
@@ -2512,27 +2599,67 @@ fn collect_factorial_design_items(
     }
 }
 
-fn collect_two_group_design_items(app: &UiApp, ep: &EditAnalysisParametersState, t: &TwoGroupSpec, locale: &str, items: &mut Vec<StatItem>) {
+fn collect_two_group_design_items(
+    app: &UiApp,
+    ep: &EditAnalysisParametersState,
+    t: &TwoGroupSpec,
+    shape: &TableShapeInfo<'_>,
+    locale: &str,
+    items: &mut Vec<StatItem>,
+) {
     let doc = app.document();
     let assume_en = evaluate_dialog_widget(&app.canvas_dialogs, doc, "edit.assume_gaussian");
     let paired_en = evaluate_dialog_widget(&app.canvas_dialogs, doc, "edit.paired_or_matched");
+    let is_mv = ep
+        .draft
+        .as_ref()
+        .and_then(|s| app.document().data_sheet(&s.source_sheet_id))
+        .is_some_and(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_)));
+    if is_mv && shape.cols > 0 {
+        items.push(StatItem::Section(String::from("edit.sec.two_group_mv"), String::from("MV Group & Response Columns")));
+        let short_col = |c: usize| -> String {
+            let title = shape.col_title(c);
+            if title.chars().count() > 7 {
+                let p: String = title.chars().take(6).collect();
+                format!("{p}…")
+            } else {
+                title
+            }
+        };
+        let mut grp_row = Vec::new();
+        for c in 0..shape.cols {
+            grp_row.push(SegItem {
+                id: format!("edit.two_group.group.{c}"),
+                label: format!("G:{}", short_col(c)),
+                selected: t.mv_group_column == Some(c),
+                enablement: ControlEnablement::enabled(),
+                action: custom_action(format!("set_tg_group:{c}")),
+            });
+            if grp_row.len() == 5 {
+                items.push(StatItem::ButtonRow { items: std::mem::take(&mut grp_row) });
+            }
+        }
+        if !grp_row.is_empty() {
+            items.push(StatItem::ButtonRow { items: grp_row });
+        }
+        let mut resp_row = Vec::new();
+        for c in 0..shape.cols {
+            resp_row.push(SegItem {
+                id: format!("edit.two_group.resp.{c}"),
+                label: format!("Y:{}", short_col(c)),
+                selected: t.mv_response_column == Some(c),
+                enablement: ControlEnablement::enabled(),
+                action: custom_action(format!("set_tg_resp:{c}")),
+            });
+            if resp_row.len() == 5 {
+                items.push(StatItem::ButtonRow { items: std::mem::take(&mut resp_row) });
+            }
+        }
+        if !resp_row.is_empty() {
+            items.push(StatItem::ButtonRow { items: resp_row });
+        }
+    }
     items.push(StatItem::Section(String::from("edit.sec.two_group"), String::from("Two-Group Design")));
-    items.push(StatItem::Toggle {
-        id: String::from("edit.assume_gaussian"),
-        label: label_i18n(locale, "stat_params.label.assume_gaussian", "Assume Gaussian (Parametric)").to_owned(),
-        checked: ep.assume_gaussian,
-        is_radio: false,
-        enablement: assume_en.clone(),
-        action: WidgetAction::ToggleDialogCheckbox(String::from("assume_gaussian")),
-    });
-    items.push(StatItem::Toggle {
-        id: String::from("edit.paired_or_matched"),
-        label: label_i18n(locale, "stat_params.label.paired_matched", "Paired / Matched Subjects").to_owned(),
-        checked: ep.paired_or_matched,
-        is_radio: false,
-        enablement: paired_en.clone(),
-        action: WidgetAction::ToggleDialogCheckbox(String::from("paired_or_matched")),
-    });
     items.push(StatItem::ButtonRow {
         items: vec![
             SegItem {
@@ -2543,7 +2670,7 @@ fn collect_two_group_design_items(app: &UiApp, ep: &EditAnalysisParametersState,
                 action: custom_action("set_two_group_method:unpaired"),
             },
             SegItem {
-                id: String::from("edit.tg.welch"),
+                id: if is_mv { String::from("edit.two_group.welch") } else { String::from("edit.tg.welch") },
                 label: String::from("Welch t"),
                 selected: t.method == TwoGroupMethod::WelchT,
                 enablement: ControlEnablement::enabled(),
@@ -2578,10 +2705,26 @@ fn collect_two_group_design_items(app: &UiApp, ep: &EditAnalysisParametersState,
                 id: String::from("edit.tg.ks"),
                 label: String::from("K-S Test"),
                 selected: t.method == TwoGroupMethod::KolmogorovSmirnov,
-                enablement: assume_en,
+                enablement: assume_en.clone(),
                 action: custom_action("set_two_group_method:ks"),
             },
         ],
+    });
+    items.push(StatItem::Toggle {
+        id: String::from("edit.assume_gaussian"),
+        label: label_i18n(locale, "stat_params.label.assume_gaussian", "Assume Gaussian (Parametric)").to_owned(),
+        checked: ep.assume_gaussian,
+        is_radio: false,
+        enablement: assume_en,
+        action: WidgetAction::ToggleDialogCheckbox(String::from("assume_gaussian")),
+    });
+    items.push(StatItem::Toggle {
+        id: String::from("edit.paired_or_matched"),
+        label: label_i18n(locale, "stat_params.label.paired_matched", "Paired / Matched Subjects").to_owned(),
+        checked: ep.paired_or_matched,
+        is_radio: false,
+        enablement: paired_en,
+        action: WidgetAction::ToggleDialogCheckbox(String::from("paired_or_matched")),
     });
     if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = t.method {
         items.push(StatItem::CustomSpinner {
@@ -2839,7 +2982,7 @@ fn collect_glm_design_items(g: &GlmSpec, shape: &TableShapeInfo<'_>, spec: &Anal
         true,
     ));
     let mut pred_row = Vec::new();
-    for c in 0..shape.cols.min(6) {
+    for c in 0..shape.cols {
         if c == g.response_column {
             continue;
         }
@@ -2868,7 +3011,13 @@ fn collect_glm_design_items(g: &GlmSpec, shape: &TableShapeInfo<'_>, spec: &Anal
     push_alpha_spinner(spec, items);
 }
 
-fn collect_multivariate_design_items(ep: &EditAnalysisParametersState, m: &MultivariateSpec, spec: &AnalysisSpec, items: &mut Vec<StatItem>) {
+fn collect_multivariate_design_items(
+    ep: &EditAnalysisParametersState,
+    m: &MultivariateSpec,
+    shape: &TableShapeInfo<'_>,
+    spec: &AnalysisSpec,
+    items: &mut Vec<StatItem>,
+) {
     match m {
         MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
             items.push(StatItem::Section(String::from("edit.sec.pca"), String::from("Principal Component Analysis")));
@@ -2883,6 +3032,29 @@ fn collect_multivariate_design_items(ep: &EditAnalysisParametersState, m: &Multi
             let pa_text =
                 parallel_analysis_seed.map_or_else(|| String::from("Parallel analysis: disabled"), |s| format!("Parallel analysis seed: {s}"));
             items.push(StatItem::Info(String::from("edit.pca.pa_info"), pa_text, false));
+            if shape.cols > 0 {
+                items.push(StatItem::Section(String::from("edit.sec.pca_pcr"), String::from("PCA Predictors & PCR Outcome (R10)")));
+                for c in 0..shape.cols {
+                    items.push(StatItem::Toggle {
+                        id: format!("edit.pca.pred.{c}"),
+                        label: format!("Predictor: {}", shape.col_title(c)),
+                        checked: ep.pca_predictors.contains(&c),
+                        is_radio: false,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action(format!("toggle_pca_pred:{c}")),
+                    });
+                }
+                for c in 0..shape.cols {
+                    items.push(StatItem::Toggle {
+                        id: format!("edit.pcr.outcome.{c}"),
+                        label: format!("PCR Outcome: {}", shape.col_title(c)),
+                        checked: ep.pcr_outcome_column == Some(c),
+                        is_radio: true,
+                        enablement: r10_pcr_outcome_column(c, &ep.pca_predictors),
+                        action: custom_action(format!("set_pcr_outcome:{c}")),
+                    });
+                }
+            }
         }
         MultivariateSpec::CorrelationMatrix { spearman_rank } => {
             items.push(StatItem::Section(String::from("edit.sec.corr"), String::from("Correlation Matrix Design")));
@@ -2911,7 +3083,7 @@ fn collect_multivariate_design_items(ep: &EditAnalysisParametersState, m: &Multi
                 action: custom_action("toggle_corr_heatmap"),
             });
         }
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, .. } => {
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
             items.push(StatItem::Section(String::from("edit.sec.cluster"), String::from("Clustering & Distance Metric")));
             items.push(StatItem::ButtonRow {
                 items: vec![
@@ -2936,6 +3108,13 @@ fn collect_multivariate_design_items(ep: &EditAnalysisParametersState, m: &Multi
                         enablement: ControlEnablement::enabled(),
                         action: custom_action("set_cluster_dist:pearson"),
                     },
+                    SegItem {
+                        id: String::from("edit.cluster.dist.cosine"),
+                        label: String::from("Cosine"),
+                        selected: *distance == curvebook_doc::ClusterDistance::Cosine,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cluster_dist:cosine"),
+                    },
                 ],
             });
             items.push(StatItem::ButtonRow {
@@ -2956,17 +3135,64 @@ fn collect_multivariate_design_items(ep: &EditAnalysisParametersState, m: &Multi
                     },
                     SegItem {
                         id: String::from("edit.cluster.link.upgma"),
-                        label: String::from("Average"),
+                        label: String::from("UPGMA"),
                         selected: *linkage == curvebook_doc::ClusterLinkage::Upgma,
                         enablement: ControlEnablement::enabled(),
                         action: custom_action("set_cluster_link:upgma"),
                     },
+                    SegItem {
+                        id: String::from("edit.cluster.link.single"),
+                        label: String::from("Single"),
+                        selected: *linkage == curvebook_doc::ClusterLinkage::Single,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cluster_link:single"),
+                    },
                 ],
+            });
+            items.push(StatItem::ButtonRow {
+                items: vec![
+                    SegItem {
+                        id: String::from("edit.cluster.link.wpgma"),
+                        label: String::from("WPGMA"),
+                        selected: *linkage == curvebook_doc::ClusterLinkage::Wpgma,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cluster_link:wpgma"),
+                    },
+                    SegItem {
+                        id: String::from("edit.cluster.link.centroid"),
+                        label: String::from("Centroid"),
+                        selected: *linkage == curvebook_doc::ClusterLinkage::Centroid,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cluster_link:centroid"),
+                    },
+                    SegItem {
+                        id: String::from("edit.cluster.link.median"),
+                        label: String::from("Median"),
+                        selected: *linkage == curvebook_doc::ClusterLinkage::Median,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cluster_link:median"),
+                    },
+                ],
+            });
+            items.push(StatItem::Toggle {
+                id: String::from("edit.cluster.k_means_auto"),
+                label: String::from("Automatic K-Means k via silhouette sweep"),
+                checked: k_means_k.is_none(),
+                is_radio: false,
+                enablement: ControlEnablement::enabled(),
+                action: custom_action("toggle_kmeans_auto"),
             });
             items.push(StatItem::CustomSpinner {
                 id_prefix: String::from("edit.cluster.k_means_k"),
                 label: String::from("K-Means Clusters (k)"),
-                value_text: k_means_k.map_or_else(|| String::from("3"), |k| k.to_string()),
+                value_text: k_means_k.map_or_else(|| String::from("Auto"), |k| k.to_string()),
+                step: 1.0,
+                enablement: ControlEnablement::enabled(),
+            });
+            items.push(StatItem::CustomSpinner {
+                id_prefix: String::from("edit.cluster.k_sweep_max"),
+                label: String::from("Silhouette Sweep Max k"),
+                value_text: k_sweep_max.map_or_else(|| String::from("Off"), |k| k.to_string()),
                 step: 1.0,
                 enablement: ControlEnablement::enabled(),
             });
@@ -3151,7 +3377,7 @@ fn collect_factor_settings_items(_app: &UiApp, spec: &AnalysisSpec, shape: &Tabl
         AnalysisKind::GeneralizedLinearModel(g) => {
             items.push(StatItem::Section(String::from("edit.sec.glm_factors"), String::from("GLM Outcome & Predictor Roles")));
             let mut resp_row = Vec::new();
-            for c in 0..shape.cols.min(6) {
+            for c in 0..shape.cols {
                 resp_row.push(SegItem {
                     id: format!("edit.glm.resp.{c}"),
                     label: format!("Y: {}", shape.col_title(c)),
@@ -3167,7 +3393,7 @@ fn collect_factor_settings_items(_app: &UiApp, spec: &AnalysisSpec, shape: &Tabl
                 items.push(StatItem::ButtonRow { items: resp_row });
             }
             items.push(StatItem::Section(String::from("edit.sec.glm_preds"), String::from("Predictor Inclusion")));
-            for c in 0..shape.cols.min(8) {
+            for c in 0..shape.cols {
                 if c == g.response_column {
                     continue;
                 }
@@ -3186,27 +3412,7 @@ fn collect_factor_settings_items(_app: &UiApp, spec: &AnalysisSpec, shape: &Tabl
             }
         }
         AnalysisKind::FactorialAnova(f) => {
-            items.push(StatItem::Section(String::from("edit.sec.fac_roles"), String::from("Factorial Factor & Response Roles")));
-            for c in 0..shape.cols.min(6) {
-                items.push(StatItem::ButtonRow {
-                    items: vec![
-                        SegItem {
-                            id: format!("edit.fac.resp.{c}"),
-                            label: format!("Set Y: {}", shape.col_title(c)),
-                            selected: f.response_column == Some(c),
-                            enablement: ControlEnablement::enabled(),
-                            action: custom_action(format!("set_fac_resp:{c}")),
-                        },
-                        SegItem {
-                            id: format!("edit.fac.col.{c}"),
-                            label: format!("Factor: {}", shape.col_title(c)),
-                            selected: f.multifactor_columns.contains(&c),
-                            enablement: ControlEnablement::enabled(),
-                            action: custom_action(format!("toggle_fac_col:{c}")),
-                        },
-                    ],
-                });
-            }
+            push_factorial_mv_selectors(f, shape, items);
         }
         AnalysisKind::Contingency(c) => {
             items.push(StatItem::Section(String::from("edit.sec.cont_factors"), String::from("Kappa Weighting & Null Hypothesis")));
