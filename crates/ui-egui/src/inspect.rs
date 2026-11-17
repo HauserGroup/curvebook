@@ -1767,11 +1767,7 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
     let mv_cat_gate = if !st.mv_levels.is_empty() {
         ControlEnablement::enabled()
     } else {
-        ControlEnablement::disabled(crate::views::mv_formula::w7_mv_ui::tr_staged(
-            &app.locale,
-            "w7.mv.format_graph_no_cat_levels",
-            "No categorical X or colour levels on this graph.",
-        ))
+        ControlEnablement::disabled(crate::i18n::tr(&app.locale, "w7.mv.format_graph_no_cat_levels"))
     };
     let sel_idx = crate::views::mv_formula::resolve_selected_level_idx(&st.mv_levels, st.mv_selected_level.as_deref());
     let sel_lvl = sel_idx.and_then(|i| st.mv_levels.get(i)).cloned().unwrap_or_default();
@@ -1831,38 +1827,10 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
         ),
         node("format_graph.level_order", "readonly", "Explicit level order", json!(st.mv_levels), mv_cat_gate.clone(), pos(11)),
         node("format_graph.selected_level", "combobox", "Selected categorical level", json!(sel_lvl), mv_cat_gate, pos(12)),
-        node(
-            "format_graph.move_to_top",
-            "button",
-            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_to_top", "Move to top"),
-            json!(sel_lvl),
-            up_gate.clone(),
-            pos(13),
-        ),
-        node(
-            "format_graph.move_up",
-            "button",
-            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_up", "Move up"),
-            json!(sel_lvl),
-            up_gate,
-            pos(14),
-        ),
-        node(
-            "format_graph.move_down",
-            "button",
-            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_down", "Move down"),
-            json!(sel_lvl),
-            down_gate.clone(),
-            pos(15),
-        ),
-        node(
-            "format_graph.move_to_end",
-            "button",
-            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_to_end", "Move to end"),
-            json!(sel_lvl),
-            down_gate,
-            pos(16),
-        ),
+        node("format_graph.move_to_top", "button", crate::i18n::tr(&app.locale, "w7.mv.move_to_top"), json!(sel_lvl), up_gate.clone(), pos(13)),
+        node("format_graph.move_up", "button", crate::i18n::tr(&app.locale, "w7.mv.move_up"), json!(sel_lvl), up_gate, pos(14)),
+        node("format_graph.move_down", "button", crate::i18n::tr(&app.locale, "w7.mv.move_down"), json!(sel_lvl), down_gate.clone(), pos(15)),
+        node("format_graph.move_to_end", "button", crate::i18n::tr(&app.locale, "w7.mv.move_to_end"), json!(sel_lvl), down_gate, pos(16)),
     ];
     (
         insp_tr(app, "inspector.format_graph", "Format Graph"),

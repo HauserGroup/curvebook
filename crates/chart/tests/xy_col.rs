@@ -569,6 +569,7 @@ fn live_pairwise_brackets_auto_stacked_and_formatted_from_anova_results() {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();

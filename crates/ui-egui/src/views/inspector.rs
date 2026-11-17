@@ -4,7 +4,7 @@
 //! `Pairwise & CLD`, `Page Layout`) and interactive `Point & Drill-Back` controls,
 //! dispatching instant undoable engine commands and reflecting live state on undo/redo.
 
-use super::mv_formula::{LevelMoveOp, apply_explicit_level_move, resolve_selected_level_idx, w7_mv_ui};
+use super::mv_formula::{LevelMoveOp, apply_explicit_level_move, resolve_selected_level_idx};
 use crate::i18n::w5_inspector as w5_i18n;
 
 use serde::{Deserialize, Serialize};
@@ -771,9 +771,9 @@ fn mv_column_role_info(doc: &ProjectDocument, gs: &GraphSheet, col_idx: usize) -
 
 fn role_display_name(loc: &str, role: VariableRole) -> &'static str {
     match role {
-        VariableRole::Continuous => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_continuous", "Continuous"),
-        VariableRole::Categorical => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_categorical", "Categorical"),
-        VariableRole::Label => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_label", "Label"),
+        VariableRole::Continuous => crate::i18n::tr(loc, "w7.mv.var_role_continuous"),
+        VariableRole::Categorical => crate::i18n::tr(loc, "w7.mv.var_role_categorical"),
+        VariableRole::Label => crate::i18n::tr(loc, "w7.mv.var_role_label"),
         VariableRole::Calculated => "Calculated",
     }
 }
@@ -2671,9 +2671,9 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
         let sel_name = ctx.builder.app.view_shards.inspector.selected_fg_level_name.clone();
         let sel_idx = resolve_selected_level_idx(&lvl_target.levels, sel_name.as_deref());
         let heading = if lvl_target.is_x {
-            w7_mv_ui::tr_staged(&loc, "w7.mv.level_ordering_section", "X Level Ordering (Explicit)")
+            crate::i18n::tr(&loc, "w7.mv.level_ordering_section")
         } else {
-            w7_mv_ui::tr_staged(&loc, "w7.mv.color_ordering_section", "Colour Level Ordering")
+            crate::i18n::tr(&loc, "w7.mv.color_ordering_section")
         };
         ctx.paint_label(heading, ctx.cursor_y, 16, 10.5, muted, false);
         ctx.cursor_y += ctx.si(18);
@@ -2683,10 +2683,10 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
         let row_h = ctx.su(22);
         let can_up = sel_idx.is_some_and(|i| i > 0);
         let can_dn = sel_idx.is_some_and(|i| i + 1 < lvl_target.levels.len());
-        let top_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_to_top", "Move to top");
-        let up_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_up", "Move up");
-        let dn_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_down", "Move down");
-        let end_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_to_end", "Move to end");
+        let top_lbl = crate::i18n::tr(&loc, "w7.mv.move_to_top");
+        let up_lbl = crate::i18n::tr(&loc, "w7.mv.move_up");
+        let dn_lbl = crate::i18n::tr(&loc, "w7.mv.move_down");
+        let end_lbl = crate::i18n::tr(&loc, "w7.mv.move_to_end");
         ctx.emit_action_btn(
             "inspector.fg.level_top",
             LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, row_h),
@@ -3266,7 +3266,7 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
         payload: format!("mv.group:{c}"),
         active: active_group_col == Some(*c),
     }));
-    let group_lbl = w7_mv_ui::tr_staged(&ctx.builder.tree.locale, "w7.mv.grouping_label", "Grouping / Label");
+    let group_lbl = crate::i18n::tr(&ctx.builder.tree.locale, "w7.mv.grouping_label");
     ctx.cursor_y = ctx.emit_dropdown_trigger(DropdownArgs {
         id: "inspector.mv.group_btn",
         y: ctx.cursor_y,
@@ -3298,7 +3298,7 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
 
     let loc = ctx.builder.tree.locale.clone();
     let muted = ctx.builder.app.theme.text_muted;
-    ctx.paint_label(w7_mv_ui::tr_staged(&loc, "w7.mv.var_definitions", "Channel Variable Definitions"), ctx.cursor_y, 16, 10.5, muted, false);
+    ctx.paint_label(crate::i18n::tr(&loc, "w7.mv.var_definitions"), ctx.cursor_y, 16, 10.5, muted, false);
     ctx.cursor_y += ctx.si(18);
     let channel_defs: [(&str, &str, &str, Option<usize>); 5] = [
         ("inspector.mv.def_x_btn", "mv_def_x", "X", Some(enc.x_column)),
@@ -3314,17 +3314,17 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
             Some((c, (role, locked_or_frozen))) => {
                 let role_opts = vec![
                     PopupOptionSpec {
-                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_continuous", "Continuous").to_owned(),
+                        label: crate::i18n::tr(&loc, "w7.mv.var_role_continuous").to_owned(),
                         payload: format!("mv.role:{c}:continuous"),
                         active: role == VariableRole::Continuous,
                     },
                     PopupOptionSpec {
-                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_categorical", "Categorical").to_owned(),
+                        label: crate::i18n::tr(&loc, "w7.mv.var_role_categorical").to_owned(),
                         payload: format!("mv.role:{c}:categorical"),
                         active: role == VariableRole::Categorical,
                     },
                     PopupOptionSpec {
-                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_label", "Label").to_owned(),
+                        label: crate::i18n::tr(&loc, "w7.mv.var_role_label").to_owned(),
                         payload: format!("mv.role:{c}:label"),
                         active: role == VariableRole::Label,
                     },

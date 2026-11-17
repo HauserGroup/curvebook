@@ -70,6 +70,7 @@ pub mod w5_results;
 pub mod w5_stat_params;
 pub mod w5_toolbar_menus;
 pub mod w5_welcome;
+pub mod w7_mv_ui;
 pub mod w7_rm_reml;
 
 /// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
@@ -90,6 +91,8 @@ pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
     w5_dialogs_graph_misc::ENTRIES,
     w5_import_paste::ENTRIES,
     w5_inspector::ENTRIES,
+    w7_rm_reml::ENTRIES,
+    w7_mv_ui::ENTRIES,
 ];
 
 /// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
@@ -6125,8 +6128,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 751);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_016);
+        assert_eq!(catalog_len(), 774);
+        assert_eq!(LOCALES.len() * catalog_len(), 12_384);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6479,7 +6482,7 @@ mod tests {
 
     #[test]
     fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 16);
+        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 18);
         let eu_slice = &[entry!("shard.test.key" => [
             en: "Test Key",
             de: "Testschlüssel",

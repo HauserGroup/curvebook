@@ -1,9 +1,8 @@
-//! Wave 7 `mv_ui` staged localization catalog shard (`R10.8` b3–5 & `R10.18` b1).
+//! Wave 7 `mv_ui` localization catalog shard (`R10.8` b3–5 & `R10.18` b1).
 //!
-//! Staged outside `crates/ui-egui/src/i18n.rs` until integration (`r10-w7-integ`) mounts
-//! `STAGED_ENTRIES` into the central catalog without bumping `catalog_len()` in shard branches.
+//! Registered into `crates/ui-egui/src/i18n.rs` (`EXTRA_SHARD_CATALOGS`) by `r10-w7-integ`.
 
-use crate::i18n::{CatalogEntry, LOCALES, normalize_locale, try_tr};
+use crate::i18n::CatalogEntry;
 
 /// Staged 16-locale catalog entries for Wave 7 MV/grid/inspector/FormatGraph controls.
 pub const STAGED_ENTRIES: &[CatalogEntry] = &[
@@ -345,20 +344,5 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
     },
 ];
 
-/// Alias matching the central integration hook convention.
-#[allow(dead_code)]
+/// Mounted catalog slice alias for [`crate::i18n::EXTRA_SHARD_CATALOGS`].
 pub const ENTRIES: &[CatalogEntry] = STAGED_ENTRIES;
-
-/// Lookup `key` in central `i18n` first, then `STAGED_ENTRIES` for `locale`, falling back to `fallback`.
-#[must_use]
-pub fn tr_staged(locale: &str, key: &str, fallback: &'static str) -> &'static str {
-    if let Some(found) = try_tr(locale, key) {
-        return found;
-    }
-    let norm = normalize_locale(locale);
-    let idx = LOCALES.iter().position(|&l| l == norm).unwrap_or(0);
-    STAGED_ENTRIES
-        .iter()
-        .find(|entry| entry.key == key)
-        .map_or(fallback, |entry| entry.translations.get(idx).copied().unwrap_or(entry.translations[0]))
-}

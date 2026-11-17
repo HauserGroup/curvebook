@@ -478,6 +478,17 @@ fn w5f2_contingency_2x2_vs_3x2_survival_and_roc() -> Result<(), String> {
         ),
         "Expected Breslow tie method persisted",
     )?;
+    press_cmd_shortcut(&mut dc, "t")?;
+    click_in_content_scroll(&mut dc, "edit.cox.tie.exact")?;
+    click_widget_center(&mut dc, &WidgetId::from("modal.ok"))?;
+    let rs_cox_exact = dc.app().document().result_sheets.first().ok_or_else(|| fail("Missing Cox ResultSheet"))?;
+    check(
+        matches!(
+            rs_cox_exact.analysis.kind,
+            AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { tie_method: CoxTieMethod::Exact, .. })
+        ),
+        "Expected Exact tie method persisted",
+    )?;
 
     // ROC Curve
     let roc_col = make_column_sheet(

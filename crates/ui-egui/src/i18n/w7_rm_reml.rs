@@ -66,11 +66,11 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
         de: "Šídák",
         es: "Šídák",
         fr: "Šídák",
-        ja: "Šídák",
-        ko: "Šídák",
+        ja: "Šídák 補正",
+        ko: "Šídák 보정",
         pt_br: "Šídák",
-        zh_cn: "Šídák",
-        zh_tw: "Šídák",
+        zh_cn: "Šídák 校正",
+        zh_tw: "Šídák 校正",
         it: "Šídák",
         nl: "Šídák",
         pl: "Šídák",
@@ -116,3 +116,6 @@ pub const STAGED_ENTRIES: &[CatalogEntry] = &[
         he: "סדר אינטראקציה ומונחים מוגדרים",
     ]),
 ];
+
+/// Mounted catalog slice alias for [`super::EXTRA_SHARD_CATALOGS`].
+pub const ENTRIES: &[CatalogEntry] = STAGED_ENTRIES;

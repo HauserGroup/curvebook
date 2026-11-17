@@ -22,9 +22,6 @@ use crate::text_bridge::UiTextStyle;
 use super::a11y::{labeled_meta, selectable_meta};
 use super::analyze_picker::scaled_u32;
 
-#[path = "../i18n/w7_mv_ui.rs"]
-pub mod w7_mv_ui;
-
 const DOMAIN_MV_FORMULA: &str = "mv_formula";
 const WID_FORMULA_INPUT: &str = "formula_bar.input";
 const WID_NAME_INPUT: &str = "mv_formula.name.input";
@@ -1915,12 +1912,7 @@ pub fn build_calculated_variable_panel(
             builder.palette.muted,
         )
     } else {
-        (
-            w7_mv_ui::tr_staged(&loc, "w7.mv.formula_confirm_hint", "Validation runs on Apply or Enter.").to_owned(),
-            builder.palette.surface,
-            builder.palette.border,
-            builder.palette.muted,
-        )
+        (crate::i18n::tr(&loc, "w7.mv.formula_confirm_hint").to_owned(), builder.palette.surface, builder.palette.border, builder.palette.muted)
     };
     let val_rect = LayoutRectPx::new(inner.x, cy, inner.width, row_h);
     let val_wid = builder.push_node(NodeSpec {
@@ -2689,7 +2681,7 @@ pub fn build_variables_drawer(
         ("alpha", mv_tr(&loc, "mv.vars.order_alpha", "A-Z"), matches!(ord_spec.order, LevelOrderKind::Alphabetical)),
         ("freq_desc", mv_tr(&loc, "mv.vars.order_freq_desc", "Freq-"), matches!(ord_spec.order, LevelOrderKind::FrequencyDescending)),
         ("freq_asc", mv_tr(&loc, "mv.vars.order_freq_asc", "Freq+"), matches!(ord_spec.order, LevelOrderKind::FrequencyAscending)),
-        ("explicit", w7_mv_ui::tr_staged(&loc, "w7.mv.level_order_explicit", "Explicit"), matches!(ord_spec.order, LevelOrderKind::Explicit(_))),
+        ("explicit", crate::i18n::tr(&loc, "w7.mv.level_order_explicit"), matches!(ord_spec.order, LevelOrderKind::Explicit(_))),
     ];
     let ord_w = ((inner.width.saturating_sub(12)) / 5).max(scaled_u32(30.0, scale, 26, 68));
     for (idx, (key, lbl, selected)) in ord_modes.into_iter().enumerate() {
@@ -2937,10 +2929,10 @@ fn build_vars_stepwise_bar(
     let can_move_up = !frozen && sel_lvl_idx.is_some_and(|i| i > 0);
     let can_move_down = !frozen && sel_lvl_idx.is_some_and(|i| i + 1 < level_count);
     let step_btn_specs: [(&str, &str, &str, bool); 4] = [
-        ("mv_formula.vars.move_top", w7_mv_ui::tr_staged(loc, "w7.mv.move_to_top", "Move to top"), "vars_move_top", can_move_up),
-        ("mv_formula.vars.move_up", w7_mv_ui::tr_staged(loc, "w7.mv.move_up", "Move up"), "vars_move_up", can_move_up),
-        ("mv_formula.vars.move_down", w7_mv_ui::tr_staged(loc, "w7.mv.move_down", "Move down"), "vars_move_down", can_move_down),
-        ("mv_formula.vars.move_end", w7_mv_ui::tr_staged(loc, "w7.mv.move_to_end", "Move to end"), "vars_move_end", can_move_down),
+        ("mv_formula.vars.move_top", crate::i18n::tr(loc, "w7.mv.move_to_top"), "vars_move_top", can_move_up),
+        ("mv_formula.vars.move_up", crate::i18n::tr(loc, "w7.mv.move_up"), "vars_move_up", can_move_up),
+        ("mv_formula.vars.move_down", crate::i18n::tr(loc, "w7.mv.move_down"), "vars_move_down", can_move_down),
+        ("mv_formula.vars.move_end", crate::i18n::tr(loc, "w7.mv.move_to_end"), "vars_move_end", can_move_down),
     ];
     let step_w = ((inner.width.saturating_sub(9)) / 4).max(scaled_u32(40.0, scale, 34, 80));
     for (idx, (wid_str, lbl, act, enabled)) in step_btn_specs.into_iter().enumerate() {

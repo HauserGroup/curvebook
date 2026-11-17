@@ -11,13 +11,12 @@ use curvebook_doc::{
     GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec,
     MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding,
-    MultivariatePlotMode,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
-    PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope,
-    PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell,
-    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure,
-    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
-    WhiskerMethod,
+    MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule,
+    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle,
+    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation,
+    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableRole, WeightingScheme, WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -319,7 +318,7 @@ pub const ANALYSIS_CATALOG: &[AnalysisCatalogItem] = &[
         id: "stats.survival_cox",
         label: "Cox Proportional Hazards Regression",
         category: AnalysisCategory::Survival,
-        keywords: "cox proportional hazards hazard ratio survival efron breslow",
+        keywords: "cox proportional hazards hazard ratio survival efron breslow exact",
         summary: "Multivariable time-to-event hazard ratios from survival or MV tables.",
     },
     AnalysisCatalogItem {

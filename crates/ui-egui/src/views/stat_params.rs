@@ -71,9 +71,8 @@ impl Default for StatParamsViewState {
 }
 
 fn label_i18n(locale: &str, key: &str, fallback: &'static str) -> &'static str {
-    crate::i18n::try_tr_in_slices(&[crate::i18n::w7_rm_reml::STAGED_ENTRIES], locale, key)
-        .or_else(|| crate::i18n::try_tr(locale, key))
-        .unwrap_or(fallback)
+    let resolved = crate::i18n::tr(locale, key);
+    if resolved.is_empty() { fallback } else { resolved }
 }
 
 fn custom_action(payload: impl Into<String>) -> WidgetAction {
@@ -3014,6 +3013,13 @@ fn collect_survival_design_items(app: &UiApp, s: &SurvivalAnalysisSpec, shape: &
                         selected: *tie_method == CoxTieMethod::Breslow,
                         enablement: ControlEnablement::enabled(),
                         action: custom_action("set_cox_tie:breslow"),
+                    },
+                    SegItem {
+                        id: String::from("edit.cox.tie.exact"),
+                        label: String::from(crate::i18n::tr(&app.locale, "stat_params.cox.tie_exact")),
+                        selected: *tie_method == CoxTieMethod::Exact,
+                        enablement: ControlEnablement::enabled(),
+                        action: custom_action("set_cox_tie:exact"),
                     },
                 ],
             });

@@ -9,10 +9,9 @@ use curvebook_doc::{
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::i18n::LOCALES;
+use curvebook_ui_egui::i18n::{LOCALES, w7_mv_ui};
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::layout::WidgetId;
-use curvebook_ui_egui::views::mv_formula::w7_mv_ui;
 use serde_json::json;
 
 fn wid(s: &str) -> WidgetId {

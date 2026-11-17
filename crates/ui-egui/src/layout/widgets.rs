@@ -505,7 +505,7 @@ pub fn emit_open_dropdown_popup(builder: &mut LayoutBuilder<'_>, open: &OpenDrop
     let size_px = (12.0 * builder.scale()).clamp(9.0, 24.0);
     for (idx, opt) in open.options.iter().enumerate() {
         let ry = inner_clip.y + i32::try_from(idx).unwrap_or(0) * i32::try_from(row_h).unwrap_or(22) - y_scroll;
-        if ry + i32::try_from(row_h).unwrap_or(22) < inner_clip.y || ry > inner_clip.bottom() {
+        if ry + i32::try_from(row_h).unwrap_or(22) <= inner_clip.y || ry >= inner_clip.bottom() {
             continue;
         }
         let item_rect = LayoutRectPx::new(inner_clip.x, ry, inner_clip.width, row_h);

@@ -125,6 +125,7 @@ fn build_three_group_bracket_doc(status: ResultStatus) -> TestRes<(ProjectDocume
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: false,
             multiplicity: MultiplicitySpec::default(),
+            ..OneWayAnovaSpec::default()
         }),
     )?;
     let mut res = ResultSheet::new(anova_spec)?;

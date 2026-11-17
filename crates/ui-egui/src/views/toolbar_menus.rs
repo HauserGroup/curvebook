@@ -589,11 +589,7 @@ fn handle_context_menu_custom_action(app: &mut UiApp, state: &mut ToolbarMenusVi
             let doc = app.document().clone();
             let ds = active_data_sheet(&doc).ok_or_else(|| String::from("no active data sheet"))?;
             if ds.frozen {
-                state.last_toolbar_notice = Some(String::from(super::mv_formula::w7_mv_ui::tr_staged(
-                    &app.locale,
-                    "w7.mv.frozen_clear_blocked",
-                    "Table is frozen; clear blocked.",
-                )));
+                state.last_toolbar_notice = Some(String::from(crate::i18n::tr(&app.locale, "w7.mv.frozen_clear_blocked")));
                 return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..Default::default() });
             }
             let coords = active_selection_coords_for(app, ds);

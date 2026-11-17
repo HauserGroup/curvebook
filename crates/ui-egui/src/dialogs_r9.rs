@@ -228,6 +228,7 @@ pub(crate) fn parse_cox_tie_method_str(raw: &str) -> Result<CoxTieMethod, String
     match norm_key(raw).as_str() {
         "breslow" => Ok(CoxTieMethod::Breslow),
         "efron" => Ok(CoxTieMethod::Efron),
+        "exact" => Ok(CoxTieMethod::Exact),
         _ => Err(format!("unknown Cox tie method `{raw}`")),
     }
 }
