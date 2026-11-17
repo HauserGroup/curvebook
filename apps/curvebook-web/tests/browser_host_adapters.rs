@@ -491,3 +491,166 @@ fn r2_s11_web_edge_gaps_paste_storage_locks_print_and_schema() {
     assert!(html.contains("scheduleAutosave"));
     assert!(html.contains("section.style.zoom = scaleFactor.toFixed(4)"));
 }
+
+struct QuotaRecordingBackend {
+    items: BTreeMap<String, String>,
+    ops: Vec<String>,
+    fail_key_prefix: Option<String>,
+    max_total_bytes: Option<usize>,
+}
+
+impl QuotaRecordingBackend {
+    fn new(max_total_bytes: Option<usize>, fail_key_prefix: Option<&str>) -> Self {
+        Self { items: BTreeMap::new(), ops: Vec::new(), fail_key_prefix: fail_key_prefix.map(str::to_owned), max_total_bytes }
+    }
+}
+
+impl WebStorageBackend for QuotaRecordingBackend {
+    fn get_item(&self, key: &str) -> Option<String> {
+        self.items.get(key).cloned()
+    }
+
+    fn set_item(&mut self, key: &str, value: &str) -> Result<(), WebAdapterError> {
+        self.ops.push(format!("set:{key}"));
+        if self.fail_key_prefix.as_deref().is_some_and(|pfx| key.starts_with(pfx)) {
+            return Err(WebAdapterError::QuotaExceeded { required_bytes: key.len() + value.len(), budget_bytes: 1024 });
+        }
+        let prev = self.items.get(key).map_or(0, |v| key.len() + v.len());
+        let next = self.used_bytes().saturating_sub(prev).saturating_add(key.len() + value.len());
+        if let Some(limit) = self.max_total_bytes
+            && next > limit
+        {
+            return Err(WebAdapterError::QuotaExceeded { required_bytes: next, budget_bytes: limit });
+        }
+        self.items.insert(key.to_owned(), value.to_owned());
+        Ok(())
+    }
+
+    fn remove_item(&mut self, key: &str) -> Option<String> {
+        self.ops.push(format!("remove:{key}"));
+        self.items.remove(key)
+    }
+
+    fn keys(&self) -> Vec<String> {
+        self.items.keys().cloned().collect()
+    }
+
+    fn used_bytes(&self) -> usize {
+        self.items.iter().map(|(k, v)| k.len() + v.len()).sum()
+    }
+}
+
+#[test]
+fn rv80_autosave_writes_before_eviction_and_rolls_back_on_quota_failure() {
+    // 1. When backend accepts the new write, set_item runs BEFORE any remove_item eviction.
+    let backend = QuotaRecordingBackend::new(None, None);
+    let mut mgr = WebStorageManager::with_budget(backend, 150);
+    let _ = mgr.save_autosave_snapshot("doc-1", &"A".repeat(40), 100).expect("save doc-1");
+    let _ = mgr.save_autosave_snapshot("doc-2", &"B".repeat(40), 200).expect("save doc-2");
+    mgr.backend_mut().ops.clear();
+
+    let out = mgr.save_autosave_snapshot("doc-3", &"C".repeat(40), 300).expect("save doc-3 evicts doc-1");
+    assert_eq!(out.evicted_keys, vec![format!("{AUTOSAVE_KEY_PREFIX}doc-1")]);
+    let set_pos = mgr.backend().ops.iter().position(|op| op == &format!("set:{AUTOSAVE_KEY_PREFIX}doc-3")).expect("set doc-3 logged");
+    let rm_pos = mgr.backend().ops.iter().position(|op| op == &format!("remove:{AUTOSAVE_KEY_PREFIX}doc-1")).expect("remove doc-1 logged");
+    assert!(set_pos < rm_pos, "new autosave must be written BEFORE older snapshot eviction; ops={:?}", mgr.backend().ops);
+
+    // 2. When backend storage rejects the new write after evicting older entries (e.g. external origin
+    // usage leaves less physical room than the manager's logical budget), all previously stored
+    // recovery snapshots MUST be rolled back intact (`RV-80`).
+    let mut failing_mgr = WebStorageManager::with_budget(QuotaRecordingBackend::new(Some(100), None), 1024);
+    let _ = failing_mgr.save_autosave_snapshot("doc-keep-1", "recovery-one", 100).expect("seed keep-1");
+    let _ = failing_mgr.save_autosave_snapshot("doc-keep-2", "recovery-two", 200).expect("seed keep-2");
+    let err = failing_mgr.save_autosave_snapshot("doc-fail", &"D".repeat(90), 300).expect_err("storage failure must surface QuotaExceeded");
+    assert!(matches!(err, WebAdapterError::QuotaExceeded { .. }), "unexpected error: {err}");
+    assert_eq!(failing_mgr.load_autosave_snapshot("doc-keep-1", 400).expect("read keep-1").as_deref(), Some("recovery-one"));
+    assert_eq!(failing_mgr.load_autosave_snapshot("doc-keep-2", 400).expect("read keep-2").as_deref(), Some("recovery-two"));
+
+    // 2b. Also verify explicit backend key write errors preserve existing entries.
+    let mut prefix_fail_mgr = WebStorageManager::with_budget(QuotaRecordingBackend::new(None, Some(&format!("{AUTOSAVE_KEY_PREFIX}doc-err"))), 1024);
+    let _ = prefix_fail_mgr.save_autosave_snapshot("doc-safe", "safe-recovery", 100).expect("seed safe");
+    assert!(prefix_fail_mgr.save_autosave_snapshot("doc-err", "payload", 200).is_err());
+    assert_eq!(prefix_fail_mgr.load_autosave_snapshot("doc-safe", 300).expect("read safe").as_deref(), Some("safe-recovery"));
+
+    // 3. index.html `applyLocalStorageCommand` executes writes BEFORE removals and restores backups on failure.
+    let html = include_str!("../index.html");
+    let fn_start = html.find("function applyLocalStorageCommand(cmd)").expect("applyLocalStorageCommand exists");
+    let fn_slice = &html[fn_start..(fn_start + 2600).min(html.len())];
+    assert!(fn_slice.contains("writeAll()"));
+    assert!(fn_slice.contains("rollbackStorage()"));
+    assert!(fn_slice.contains("removedDuringRetry"));
+}
+
+#[test]
+fn rv81_web_flushes_autosave_on_visibility_pagehide_and_prompts_beforeunload_when_dirty() {
+    let (mut session, data_id, _graph_id) = build_populated_xy_session("web-rv81-doc", "tab-rv81").expect("populated session");
+    let clean_or_dirty = session
+        .handle_event(WebBridgeEvent::ExecuteCommand {
+            command_id: String::from("table.setCell"),
+            params: json!({ "sheet_id": data_id, "row": 0, "col": 0, "value": 99.5 }),
+        })
+        .expect("mutate cell");
+    let dirty_flag = clean_or_dirty.iter().find_map(|cmd| match cmd {
+        WebBridgeCommand::RenderRgbaFrame { chrome, .. } => Some(chrome.dirty),
+        _ => None,
+    });
+    assert_eq!(dirty_flag, Some(true), "RenderRgbaFrame.chrome.dirty must reflect dirty session");
+
+    let html = include_str!("../index.html");
+    assert!(html.contains("function flushPendingAutosave()"));
+    assert!(html.contains("document.addEventListener(\"visibilitychange\""));
+    assert!(html.contains("document.visibilityState === \"hidden\""));
+    assert!(html.contains("window.addEventListener(\"pagehide\""));
+    assert!(html.contains("window.addEventListener(\"beforeunload\""));
+    assert!(html.contains("if (documentDirty || hasUnflushedAutosave)"));
+    assert!(html.contains("ev.preventDefault()"));
+    assert!(html.contains("ev.returnValue = \"\""));
+}
+
+#[test]
+fn r8_web_duplicate_normalized_import_path_and_dpi_validation() {
+    // 1. Duplicate normalized paths inside ImportDirectoryEntries must error cleanly instead of silent overwrite.
+    let mut session = WebBridgeSession::with_ids("web-r8-dir", "tab-r8");
+    let dup_err = session
+        .handle_event(WebBridgeEvent::ImportDirectoryEntries {
+            root_name: String::from("study.curvebook.d"),
+            entries: BTreeMap::from([
+                (String::from("./sub/data.csv"), b"x,y\n1,2\n".to_vec()),
+                (String::from("sub/data.csv"), b"x,y\n3,4\n".to_vec()),
+            ]),
+        })
+        .expect_err("duplicate normalized directory entry path must return error");
+    assert!(matches!(dup_err, WebAdapterError::Validation(ref msg) if msg.contains("duplicate normalized directory")), "got {dup_err}");
+
+    let dup_root_err = session
+        .handle_event(WebBridgeEvent::ImportDirectoryEntries {
+            root_name: String::from("root"),
+            entries: BTreeMap::from([(String::from("root/manifest.json"), b"{}".to_vec()), (String::from("manifest.json"), b"{}".to_vec())]),
+        })
+        .expect_err("root-prefixed duplicate path must fail");
+    assert!(matches!(dup_root_err, WebAdapterError::Validation(_)));
+
+    // 2. Out-of-range / invalid `dpi` must return explicit validation error instead of defaulting/clamping.
+    for bad_ev in [
+        r#"{"kind":"render_frame","dpi":0}"#,
+        r#"{"kind":"render_frame","dpi":71}"#,
+        r#"{"kind":"render_frame","dpi":1201}"#,
+        r#"{"kind":"render_frame","dpi":"300"}"#,
+        r#"{"kind":"copy_clipboard","dpi":99999}"#,
+        r#"{"kind":"export_file","format":"png","dpi":-10}"#,
+        r#"{"kind":"export_file","format":"tiff","dpi":5000}"#,
+    ] {
+        let err = WebBridgeEvent::from_json_str(bad_ev).expect_err("out-of-range/invalid dpi JSON must fail");
+        assert!(matches!(err, WebAdapterError::Validation(_)), "expected Validation for {bad_ev}, got {err}");
+    }
+    let direct_err = session.handle_event(WebBridgeEvent::RenderFrame { dpi: 5000 }).expect_err("direct out-of-range RenderFrame dpi must fail");
+    assert!(matches!(direct_err, WebAdapterError::Validation(_)));
+
+    let export_err = session
+        .handle_event(WebBridgeEvent::ExportFile { format: curvebook_web::WebExportFormat::Png, sheet_id: None, dpi: 2400 })
+        .expect_err("out-of-range ExportFile dpi must fail");
+    assert!(matches!(export_err, WebAdapterError::Validation(_)));
+
+    let clip_err = curvebook_web::WebClipboardPayload::from_json_value(&json!({ "dpi": 15 })).expect_err("out-of-range clipboard dpi must fail");
+    assert!(matches!(clip_err, WebAdapterError::Validation(_)));
+}

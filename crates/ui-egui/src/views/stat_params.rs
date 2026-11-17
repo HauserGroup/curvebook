@@ -752,24 +752,37 @@ fn handle_toggle_desc_normality(app: &mut UiApp) -> bool {
 }
 
 fn set_outlier_mode(app: &mut UiApp, mode: &str) -> Result<bool, String> {
-    let Some(spec) = &mut app.canvas_dialogs.edit_params.draft else {
+    let ep = &mut app.canvas_dialogs.edit_params;
+    let Some(spec) = &mut ep.draft else {
         return Ok(false);
     };
+    match spec.kind {
+        AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent }) => ep.saved_outlier_rout_q = fdr_q_percent,
+        AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative }) => {
+            ep.saved_outlier_grubbs_alpha = alpha;
+            ep.saved_outlier_grubbs_iterative = iterative;
+        }
+        _ => {}
+    }
     let next = match mode {
-        "rout" => OutlierSpec::Rout { fdr_q_percent: 1.0 },
-        "grubbs" => OutlierSpec::Grubbs { alpha: 0.05, iterative: true },
+        "rout" => OutlierSpec::Rout { fdr_q_percent: ep.saved_outlier_rout_q },
+        "grubbs" => OutlierSpec::Grubbs { alpha: ep.saved_outlier_grubbs_alpha, iterative: ep.saved_outlier_grubbs_iterative },
         _ => return Ok(false),
     };
     spec.update_kind(AnalysisKind::OutlierDetection(next));
+    ep.sync_rule_flags_from_kind();
     Ok(true)
 }
 
 fn handle_toggle_grubbs_iterative(app: &mut UiApp) -> bool {
-    let Some(spec) = &mut app.canvas_dialogs.edit_params.draft else {
+    let ep = &mut app.canvas_dialogs.edit_params;
+    let Some(spec) = &mut ep.draft else {
         return false;
     };
     if let AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative }) = spec.kind {
-        spec.update_kind(AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: !iterative }));
+        let next_iter = !iterative;
+        ep.saved_outlier_grubbs_iterative = next_iter;
+        spec.update_kind(AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: next_iter }));
         return true;
     }
     false
@@ -1333,15 +1346,20 @@ fn step_hypothetical_value(app: &mut UiApp, delta: f64) -> Result<bool, String> 
 }
 
 fn step_outlier_param(app: &mut UiApp, delta: f64) -> Result<bool, String> {
-    let Some(spec) = &mut app.canvas_dialogs.edit_params.draft else {
+    let ep = &mut app.canvas_dialogs.edit_params;
+    let Some(spec) = &mut ep.draft else {
         return Ok(false);
     };
     let updated = match spec.kind {
         AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent }) => {
-            AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: (fdr_q_percent + delta).clamp(0.1, 20.0) })
+            let next_q = (fdr_q_percent + delta).clamp(0.1, 20.0);
+            ep.saved_outlier_rout_q = next_q;
+            AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: next_q })
         }
         AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative }) => {
-            AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: (alpha + delta).clamp(0.001, 0.25), iterative })
+            let next_a = (alpha + delta).clamp(0.001, 0.25);
+            ep.saved_outlier_grubbs_alpha = next_a;
+            AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha: next_a, iterative })
         }
         _ => return Ok(false),
     };

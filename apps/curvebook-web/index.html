@@ -260,6 +260,8 @@
       let fallbackLockTimerId = null;
       let autosaveTimerId = null;
       let holdsCurrentWebLock = false;
+      let documentDirty = false;
+      let hasUnflushedAutosave = false;
       let lastRenderedFrameCmd = null;
       let toastTimerId = null;
       let dispatchFn = null;
@@ -672,25 +674,79 @@
         if (!window.localStorage) {
           return;
         }
+        const isManagedKey = (key) => typeof key === "string" && (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX));
+        const allowedWrites = Array.isArray(cmd.writes)
+          ? cmd.writes.filter((entry) => entry && isManagedKey(entry.key) && typeof entry.value === "string")
+          : [];
+        const allowedRemovals = Array.isArray(cmd.removals)
+          ? cmd.removals.filter((key) => isManagedKey(key))
+          : [];
+        const prevWrites = allowedWrites.map((entry) => [entry.key, window.localStorage.getItem(entry.key)]);
+        const removalBackups = allowedRemovals.map((key) => [key, window.localStorage.getItem(key)]);
+        const removedDuringRetry = [];
+
+        const rollbackStorage = () => {
+          for (let i = removedDuringRetry.length - 1; i >= 0; i -= 1) {
+            const [k, v] = removedDuringRetry[i];
+            try {
+              if (v !== null) {
+                window.localStorage.setItem(k, v);
+              }
+            } catch (_restoreErr) {}
+          }
+          for (let i = prevWrites.length - 1; i >= 0; i -= 1) {
+            const [k, v] = prevWrites[i];
+            try {
+              if (v === null) {
+                window.localStorage.removeItem(k);
+              } else {
+                window.localStorage.setItem(k, v);
+              }
+            } catch (_restoreErr) {}
+          }
+        };
+
+        const writeAll = () => {
+          for (const entry of allowedWrites) {
+            window.localStorage.setItem(entry.key, entry.value);
+          }
+        };
+
+        // Write new snapshot(s) BEFORE evicting older entries; only evict & retry if quota rejects,
+        // rolling back evicted recovery snapshots if writes still fail (`RV-80`).
+        let writesSucceeded = false;
         try {
-          if (Array.isArray(cmd.removals)) {
-            for (const key of cmd.removals) {
-              if (key === PREFERENCES_KEY || key.startsWith(AUTOSAVE_PREFIX)) {
-                window.localStorage.removeItem(key);
+          writeAll();
+          writesSucceeded = true;
+        } catch (_firstErr) {
+          for (const backup of removalBackups) {
+            try {
+              if (backup[1] !== null) {
+                window.localStorage.removeItem(backup[0]);
+                removedDuringRetry.push(backup);
               }
-            }
+              writeAll();
+              writesSucceeded = true;
+              break;
+            } catch (_retryErr) {}
           }
-          if (Array.isArray(cmd.writes)) {
-            for (const entry of cmd.writes) {
-              if (entry && typeof entry.key === "string" && typeof entry.value === "string") {
-                if (entry.key === PREFERENCES_KEY || entry.key.startsWith(AUTOSAVE_PREFIX)) {
-                  window.localStorage.setItem(entry.key, entry.value);
-                }
-              }
-            }
-          }
-        } catch (_err) {
+        }
+
+        if (!writesSucceeded) {
+          rollbackStorage();
           showNotice("warning", "Local browser storage quota exceeded or restricted; state stays in memory.");
+          return;
+        }
+
+        for (const key of allowedRemovals) {
+          if (!allowedWrites.some((entry) => entry.key === key)) {
+            try {
+              window.localStorage.removeItem(key);
+            } catch (_rmErr) {}
+          }
+        }
+        if (allowedWrites.some((entry) => entry.key.startsWith(AUTOSAVE_PREFIX))) {
+          hasUnflushedAutosave = false;
         }
       }
 
@@ -895,6 +951,7 @@
         if (autosaveTimerId !== null) {
           clearTimeout(autosaveTimerId);
         }
+        hasUnflushedAutosave = true;
         autosaveTimerId = setTimeout(() => {
           autosaveTimerId = null;
           if (holdsCurrentWebLock && dispatchFn) {
@@ -903,14 +960,55 @@
         }, 400);
       }
 
+      function flushPendingAutosave() {
+        const pending = autosaveTimerId !== null || hasUnflushedAutosave;
+        if (!pending) {
+          return false;
+        }
+        if (autosaveTimerId !== null) {
+          clearTimeout(autosaveTimerId);
+          autosaveTimerId = null;
+        }
+        if (holdsCurrentWebLock && dispatchFn) {
+          emitEvent({ kind: "save_autosave", now_ms: Date.now() });
+          return true;
+        }
+        return false;
+      }
+
+      function releaseLockOnExit() {
+        if (holdsCurrentWebLock) {
+          releaseFallbackLockEntry(activeLockDocId);
+          if (lockChannel) {
+            lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
+          }
+        }
+        holdsCurrentWebLock = false;
+        if (typeof releaseCurrentWebLock === "function") {
+          releaseCurrentWebLock();
+          releaseCurrentWebLock = null;
+        }
+      }
+
       async function applyBridgeCommand(cmd) {
         if (!cmd || !cmd.kind) {
           return;
         }
         switch (cmd.kind) {
           case "render_rgba_frame":
+            if (cmd.chrome && typeof cmd.chrome.dirty === "boolean") {
+              documentDirty = cmd.chrome.dirty;
+              if (!documentDirty && autosaveTimerId === null) {
+                hasUnflushedAutosave = false;
+              }
+            }
             renderRgbaCommand(cmd);
             scheduleAutosave(cmd.action);
+            break;
+          case "update_summary":
+            if (typeof cmd.dirty === "boolean") {
+              documentDirty = cmd.dirty;
+            }
             break;
           case "persist_local_storage":
             applyLocalStorageCommand(cmd);
@@ -1509,18 +1607,26 @@
         }
       });
 
-      window.addEventListener("beforeunload", () => {
-        if (holdsCurrentWebLock) {
-          releaseFallbackLockEntry(activeLockDocId);
-          if (lockChannel) {
-            lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
-          }
+      document.addEventListener("visibilitychange", () => {
+        if (document.visibilityState === "hidden") {
+          flushPendingAutosave();
         }
-        holdsCurrentWebLock = false;
-        if (typeof releaseCurrentWebLock === "function") {
-          releaseCurrentWebLock();
-          releaseCurrentWebLock = null;
+      });
+
+      window.addEventListener("pagehide", () => {
+        flushPendingAutosave();
+        releaseLockOnExit();
+      });
+
+      window.addEventListener("beforeunload", (ev) => {
+        flushPendingAutosave();
+        if (documentDirty || hasUnflushedAutosave) {
+          ev.preventDefault();
+          ev.returnValue = "";
+          return "";
         }
+        releaseLockOnExit();
+        return undefined;
       });
 
       function collectLocalStorageSnapshot() {

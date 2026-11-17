@@ -323,9 +323,17 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
         }
         self.ensure_stored_preferences_not_forward()?;
         let encoded = serde_json::to_string_pretty(prefs).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-        let needed_delta = self.projected_delta_for_key(PREFERENCES_STORAGE_KEY, &encoded);
-        let _evicted = self.evict_autosaves_to_fit(PREFERENCES_STORAGE_KEY, needed_delta)?;
-        self.backend.set_item(PREFERENCES_STORAGE_KEY, &encoded)?;
+        let non_autosave_other = self
+            .non_autosave_used_bytes()
+            .saturating_sub(self.backend.get_item(PREFERENCES_STORAGE_KEY).map_or(0, |v| PREFERENCES_STORAGE_KEY.len().saturating_add(v.len())));
+        let entry_bytes = PREFERENCES_STORAGE_KEY.len().saturating_add(encoded.len());
+        if non_autosave_other.saturating_add(entry_bytes) > self.quota_budget_bytes {
+            return Err(WebAdapterError::QuotaExceeded {
+                required_bytes: non_autosave_other.saturating_add(entry_bytes),
+                budget_bytes: self.quota_budget_bytes,
+            });
+        }
+        let _evicted = self.write_with_safe_eviction(PREFERENCES_STORAGE_KEY, &encoded)?;
         Ok(encoded)
     }
 
@@ -341,7 +349,8 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
         Ok(prefs)
     }
 
-    /// Save a document autosave snapshot, evicting oldest/LRU autosave entries to stay within quota.
+    /// Save a document autosave snapshot, writing it BEFORE evicting older autosave entries (`RV-80`)
+    /// and rolling back evicted recovery snapshots if quota still fails.
     ///
     /// # Errors
     /// Returns [`WebAdapterError::Validation`] for invalid `doc_id` or [`WebAdapterError::QuotaExceeded`]
@@ -357,9 +366,7 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
             });
         }
 
-        let delta = self.projected_delta_for_key(&key, snapshot);
-        let evicted_keys = self.evict_autosaves_to_fit(&key, delta)?;
-        self.backend.set_item(&key, snapshot)?;
+        let evicted_keys = self.write_with_safe_eviction(&key, snapshot)?;
         self.touch_autosave_recency(&key, timestamp_ms);
 
         Ok(AutosaveSaveOutcome {
@@ -416,14 +423,6 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
             .sum()
     }
 
-    fn projected_delta_for_key(&self, key: &str, next_value: &str) -> isize {
-        let prev = self.backend.get_item(key).map_or(0usize, |v| key.len().saturating_add(v.len()));
-        let next = key.len().saturating_add(next_value.len());
-        let prev_i = isize::try_from(prev).unwrap_or(isize::MAX);
-        let next_i = isize::try_from(next).unwrap_or(isize::MAX);
-        next_i.saturating_sub(prev_i)
-    }
-
     fn touch_autosave_recency(&mut self, key: &str, now_ms: u64) {
         self.access_seq = self.access_seq.saturating_add(1);
         self.autosave_recency.insert(key.to_owned(), (now_ms, self.access_seq));
@@ -447,6 +446,62 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
             self.autosave_recency.remove(&victim_key);
             evicted.push(victim_key);
         }
+    }
+
+    /// Write `value` under `target_key` BEFORE evicting older autosave snapshots (`RV-80`),
+    /// rolling back any victims removed during quota retry if writing still fails.
+    fn write_with_safe_eviction(&mut self, target_key: &str, value: &str) -> Result<Vec<String>, WebAdapterError> {
+        struct EvictedBackup {
+            key: String,
+            value: String,
+            recency: Option<(u64, u64)>,
+        }
+
+        let prev_value = self.backend.get_item(target_key);
+        let mut evicted_backups: Vec<EvictedBackup> = Vec::new();
+        let mut evicted_keys: Vec<String> = Vec::new();
+        let restore_all = |mgr: &mut Self, backups: Vec<EvictedBackup>, prev: Option<String>| {
+            for backup in backups.into_iter().rev() {
+                let _ = mgr.backend.set_item(&backup.key, &backup.value);
+                if let Some(rec) = backup.recency {
+                    mgr.autosave_recency.insert(backup.key, rec);
+                }
+            }
+            if let Some(prev_val) = prev {
+                let _ = mgr.backend.set_item(target_key, &prev_val);
+            } else {
+                let _ = mgr.backend.remove_item(target_key);
+            }
+        };
+
+        if let Err(first_err) = self.backend.set_item(target_key, value) {
+            let mut write_err = first_err;
+            loop {
+                let Some(victim_key) = self.oldest_autosave_key(target_key) else {
+                    restore_all(self, evicted_backups, prev_value);
+                    return Err(write_err);
+                };
+                let backup_val = self.backend.get_item(&victim_key).unwrap_or_default();
+                let backup_recency = self.autosave_recency.remove(&victim_key);
+                let _ = self.backend.remove_item(&victim_key);
+                evicted_backups.push(EvictedBackup { key: victim_key.clone(), value: backup_val, recency: backup_recency });
+                evicted_keys.push(victim_key);
+                match self.backend.set_item(target_key, value) {
+                    Ok(()) => break,
+                    Err(err) => write_err = err,
+                }
+            }
+        }
+
+        let trimmed = match self.evict_autosaves_to_fit(target_key, 0) {
+            Ok(keys) => keys,
+            Err(err) => {
+                restore_all(self, evicted_backups, prev_value);
+                return Err(err);
+            }
+        };
+        evicted_keys.extend(trimmed);
+        Ok(evicted_keys)
     }
 
     fn oldest_autosave_key(&self, protected_key: &str) -> Option<String> {
@@ -924,7 +979,7 @@ impl FileSystemAccessBridge {
         dpi: u16,
     ) -> Result<WebExportArtifact, WebAdapterError> {
         let stem = sanitize_download_stem(&host.app().document().title);
-        let clamped_dpi = dpi.clamp(MIN_CLIPBOARD_DPI, MAX_CLIPBOARD_DPI);
+        let validated_dpi = validate_web_dpi(dpi, "export_bytes")?;
 
         match format {
             WebExportFormat::CurveBookArchive => {
@@ -955,7 +1010,7 @@ impl FileSystemAccessBridge {
             }
             WebExportFormat::Csv => export_csv_artifact(host, sheet_id, &stem),
             WebExportFormat::Svg | WebExportFormat::Pdf | WebExportFormat::Png | WebExportFormat::Tiff => {
-                export_figure_artifact(host, format, sheet_id, clamped_dpi, &stem)
+                export_figure_artifact(host, format, sheet_id, validated_dpi, &stem)
             }
         }
     }
@@ -1083,6 +1138,9 @@ fn normalize_directory_entries(root_name: &str, entries: BTreeMap<String, Vec<u8
     let mut normalized = BTreeMap::new();
     for (path, bytes) in entries {
         let rel = normalize_relative_entry_path(&path, Some(root_name))?;
+        if normalized.contains_key(&rel) {
+            return Err(WebAdapterError::Validation(format!("duplicate normalized directory entry path `{rel}`")));
+        }
         normalized.insert(rel, bytes);
     }
     Ok(normalized)
@@ -1340,7 +1398,7 @@ impl WebClipboardPayload {
         let height_pt = require_f64_or_default(obj, "height_pt", 0.0)?;
         let width_px = u32::try_from(obj.get("width_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
         let height_px = u32::try_from(obj.get("height_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
-        let dpi = u16::try_from(obj.get("dpi").and_then(Value::as_u64).unwrap_or(300)).unwrap_or(300);
+        let dpi = parse_optional_validated_dpi(obj, "dpi", 300)?;
         let flavors = obj
             .get("flavors")
             .and_then(Value::as_array)
@@ -1553,9 +1611,9 @@ impl WebBridgeEvent {
                 params: obj.get("params").cloned().unwrap_or_else(|| Value::Object(Map::new())),
             }),
             "dispatch_control_line" => Ok(Self::DispatchControlLine { line: require_str_field(obj, "line")?.to_owned() }),
-            "render_frame" => Ok(Self::RenderFrame { dpi: require_u16_or_default(obj, "dpi", 96) }),
+            "render_frame" => Ok(Self::RenderFrame { dpi: parse_optional_validated_dpi(obj, "dpi", 96)? }),
             "copy_clipboard" => {
-                Ok(Self::CopyClipboard { sheet_id: optional_str_field(obj, "sheet_id"), dpi: require_u16_or_default(obj, "dpi", 300) })
+                Ok(Self::CopyClipboard { sheet_id: optional_str_field(obj, "sheet_id"), dpi: parse_optional_validated_dpi(obj, "dpi", 300)? })
             }
             "print_current_sheet" => Ok(Self::PrintCurrentSheet {
                 sheet_id: optional_str_field(obj, "sheet_id"),
@@ -1634,7 +1692,11 @@ fn decode_extended_bridge_event(kind: &str, obj: &Map<String, Value>) -> Result<
             let fmt_raw = require_str_field(obj, "format")?;
             let format =
                 WebExportFormat::from_name(fmt_raw).ok_or_else(|| WebAdapterError::Serialization(format!("unknown export format `{fmt_raw}`")))?;
-            Ok(WebBridgeEvent::ExportFile { format, sheet_id: optional_str_field(obj, "sheet_id"), dpi: require_u16_or_default(obj, "dpi", 300) })
+            Ok(WebBridgeEvent::ExportFile {
+                format,
+                sheet_id: optional_str_field(obj, "sheet_id"),
+                dpi: parse_optional_validated_dpi(obj, "dpi", 300)?,
+            })
         }
         "hydrate_local_storage" => Ok(WebBridgeEvent::HydrateLocalStorage { entries: parse_string_pairs(obj, "entries")? }),
         "click_chrome_node" => Ok(WebBridgeEvent::ClickChromeNode {
@@ -1791,7 +1853,7 @@ impl WebBridgeCommand {
             "render_rgba_frame" => {
                 let width_px = u32::try_from(obj.get("width_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
                 let height_px = u32::try_from(obj.get("height_px").and_then(Value::as_u64).unwrap_or(0)).unwrap_or(0);
-                let dpi = require_u16_or_default(obj, "dpi", 96);
+                let dpi = parse_optional_validated_dpi(obj, "dpi", 96)?;
                 let rgba_bytes = decode_base64_field(obj, "rgba_base64", "rgba_bytes")?;
                 let rgba_layers = decode_rgba_layers_json(obj)?;
                 let text_ops = decode_text_ops_json(obj)?;
@@ -2217,8 +2279,9 @@ impl WebBridgeSession {
             WebBridgeEvent::ExecuteCommand { command_id, params } => self.handle_execute_command(&command_id, params),
             WebBridgeEvent::DispatchControlLine { line } => self.handle_control_line(&line),
             WebBridgeEvent::RenderFrame { dpi } => {
-                self.render_dpi = dpi;
-                Ok(vec![self.render_frame_command(dpi, Some(String::from("render.frame")), None)?])
+                let valid_dpi = validate_web_dpi(dpi, "render_frame")?;
+                self.render_dpi = valid_dpi;
+                Ok(vec![self.render_frame_command(valid_dpi, Some(String::from("render.frame")), None)?])
             }
             WebBridgeEvent::CopyClipboard { sheet_id, dpi } => {
                 let payload = self.build_clipboard_payload(sheet_id.as_deref(), dpi)?;
@@ -3281,8 +3344,26 @@ fn require_f64_or_default(obj: &Map<String, Value>, key: &str, default: f64) -> 
     }
 }
 
-fn require_u16_or_default(obj: &Map<String, Value>, key: &str, default: u16) -> u16 {
-    obj.get(key).and_then(Value::as_u64).and_then(|v| u16::try_from(v).ok()).unwrap_or(default)
+fn validate_web_dpi(dpi: u16, context: &str) -> Result<u16, WebAdapterError> {
+    if !(MIN_CLIPBOARD_DPI..=MAX_CLIPBOARD_DPI).contains(&dpi) {
+        return Err(WebAdapterError::Validation(format!("{context} DPI {dpi} out of supported range {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
+    }
+    Ok(dpi)
+}
+
+fn parse_optional_validated_dpi(obj: &Map<String, Value>, key: &str, default: u16) -> Result<u16, WebAdapterError> {
+    let Some(raw) = obj.get(key) else {
+        return Ok(default);
+    };
+    if raw.is_null() {
+        return Ok(default);
+    }
+    let Some(val) = raw.as_u64() else {
+        return Err(WebAdapterError::Validation(format!("`{key}` must be an integer in {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
+    };
+    let dpi = u16::try_from(val)
+        .map_err(|_| WebAdapterError::Validation(format!("`{key}` value {val} out of supported range {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")))?;
+    validate_web_dpi(dpi, key)
 }
 
 fn require_u64_or_default(obj: &Map<String, Value>, key: &str, default: u64) -> u64 {

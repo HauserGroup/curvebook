@@ -2605,7 +2605,14 @@ fn resolve_target_result_sheet_id(doc: &ProjectDocument, params: &Value) -> Resu
 
 fn dispatch_ui_edit_params_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let rs_id = resolve_target_result_sheet_id(&doc, params)?;
+    let has_explicit = params.get("result_sheet_id").and_then(Value::as_str).is_some() || resolve_sheet_id_param(params)?.is_some();
+    let rs_id = if has_explicit {
+        resolve_target_result_sheet_id(&doc, params)?
+    } else if let Some(focused_or_active) = crate::interaction::resolve_result_sheet_for_shortcut(app, true) {
+        focused_or_active
+    } else {
+        resolve_target_result_sheet_id(&doc, params)?
+    };
     if !app.canvas_dialogs.open_edit_parameters(&doc, &rs_id) {
         return Err(format!("result sheet `{}` not found", rs_id.as_str()));
     }
