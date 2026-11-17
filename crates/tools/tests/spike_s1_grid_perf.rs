@@ -124,6 +124,8 @@ fn spike_s1_million_cell_virtualized_60fps_scroll_and_selection_benchmark() {
         "SPIKE_S1_GRID_PERF profile={profile} grid=1000x1000(1_000_000_cells) frames={frames} min_ms={min_ms:.4} p50_ms={p50_ms:.4} p95_ms={p95_ms:.4} max_ms={max_ms:.4} mean_ms={mean_ms:.4}"
     );
 
+    let median_budget_ms = if cfg!(debug_assertions) { 2.0 } else { 1.0 };
+    assert!(p50_ms < median_budget_ms, "expected <{median_budget_ms:.2}ms median frame time in {profile}, measured p50={p50_ms:.4} ms");
     assert!(max_ms < 16.67, "60fps budget exceeded in {profile}: max={max_ms:.4} ms (p95={p95_ms:.4} ms)");
     assert!(p95_ms < 2.0, "expected sub-2ms p95 frame time in {profile}, measured p95={p95_ms:.4} ms");
 }

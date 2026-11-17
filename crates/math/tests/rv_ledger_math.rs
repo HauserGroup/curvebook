@@ -3,9 +3,10 @@
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
 use curvebook_math::dist::{
-    chi2_cdf, chi2_ln_sf, chi2_sf, f_ln_pdf, f_ln_sf, f_pdf, lilliefors_d_from_sorted, norm_isf, norm_ln_sf, norm_sf, studentized_range_ln_sf,
-    studentized_range_sf,
+    chi2_cdf, chi2_ln_sf, chi2_sf, f_ln_pdf, f_ln_sf, f_pdf, lilliefors_d_from_sorted, nct_cdf, nct_sf, norm_isf, norm_ln_sf, norm_sf,
+    studentized_range_ln_sf, studentized_range_sf,
 };
+use curvebook_math::noncentral_t_ci;
 use curvebook_math::special::{erfcx, gamma, ln_beta, ln_choose, ln_factorial, ln_reg_beta_xy, reg_beta, reg_beta_inv, reg_beta_inv_pair};
 use curvebook_math::sum::{SummaryMoments, covariance, lag1_autocorrelation, pearson_r, sample_sd};
 use curvebook_math::{DenseMatrix, MathError, qr_col_pivoted, solve_linear_least_squares, svd};
@@ -283,4 +284,25 @@ fn s4_notes_halley_log_normal_isf_and_integer_gamma_accuracy() {
     let g171 = gamma(171.0).unwrap();
     let expected_170_fact = 7.257_415_615_307_999e306_f64; // round-to-nearest IEEE-754 f64 of 170!
     assert!((g171 - expected_170_fact).abs() <= 2.0 * f64::EPSILON * expected_170_fact, "g171 = {g171:.17e}");
+}
+
+#[test]
+fn section13_s4_noncentral_t_large_df_large_delta_gaussian_bound_and_seam() {
+    // Verify complementarity, df = 1e6 seam continuity, and CI inversion roundtrip for df > 1e6 and |delta| > 447.
+    for &(df, delta) in &[(1.01e6_f64, 500.0), (1e7, 1_000.0), (1e8, 50_000.0)] {
+        let sd = (1.0 + delta * delta / (2.0 * df)).sqrt();
+        for &z in &[-4.0_f64, -1.5, 0.0, 1.5, 4.0] {
+            let t = delta + z * sd;
+            let c = nct_cdf(t, df, delta).unwrap();
+            let s = nct_sf(t, df, delta).unwrap();
+            assert!(((c + s) - 1.0).abs() < 1e-13, "c+s!=1 at df={df}, delta={delta}, t={t}");
+        }
+        let (lo, hi) = noncentral_t_ci(delta, df, 95.0).unwrap();
+        assert!(lo < delta && delta < hi);
+        assert!((nct_sf(delta, df, lo).unwrap() - 0.025).abs() < 1e-8);
+        assert!((nct_cdf(delta, df, hi).unwrap() - 0.025).abs() < 1e-8);
+    }
+    let seam_left = nct_cdf(500.0, 999_999.0, 500.0).unwrap();
+    let seam_right = nct_cdf(500.0, 1_000_001.0, 500.0).unwrap();
+    assert!((seam_left - seam_right).abs() < 5e-5, "seam jump {seam_left} vs {seam_right}");
 }

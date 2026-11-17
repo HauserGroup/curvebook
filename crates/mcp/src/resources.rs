@@ -1,9 +1,15 @@
 //! MCP `resources/list` and `resources/read` handlers exposing active `Session` sheets and results.
 
-use curvebook_doc::{ProjectDocument, SheetId, SheetSection};
+use curvebook_doc::{
+    ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable,
+    ProjectDocument, SheetId, SheetSection, SurvivalTable, TableArchetype, VariableColumn, XyTable,
+};
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+const MAX_CSV_PREVIEW_ROWS: usize = 100;
+const MAX_CSV_PREVIEW_BYTES: usize = 65_536;
 
 /// Resource entry returned inside MCP `resources/list`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -108,6 +114,123 @@ pub fn read_resource(doc: &ProjectDocument, uri: &str) -> Result<Vec<ResourceCon
     Err(ResourceError::InvalidUri(format!("unsupported resource URI scheme '{trimmed}'; expected sheet://<id> or result://<id>")))
 }
 
+fn slice_dataset_columns(cols: &[DataSetColumn], max_rows: usize) -> Vec<DataSetColumn> {
+    cols.iter().map(|c| DataSetColumn { title: c.title.clone(), cells: c.cells.iter().take(max_rows).cloned().collect() }).collect()
+}
+
+fn slice_archetype_rows(archetype: &TableArchetype, max_rows: usize) -> TableArchetype {
+    match archetype {
+        TableArchetype::Xy(t) => TableArchetype::Xy(XyTable {
+            x_title: t.x_title.clone(),
+            x_mode: t.x_mode.clone(),
+            x_cells: t.x_cells.iter().take(max_rows).cloned().collect(),
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_titles_expanded: t.row_titles_expanded,
+            y_subcolumn_mode: t.y_subcolumn_mode,
+            data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+        }),
+        TableArchetype::Column(t) => TableArchetype::Column(ColumnTable {
+            design_hint: t.design_hint,
+            subcolumn_mode: t.subcolumn_mode,
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_titles_expanded: t.row_titles_expanded,
+            data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+        }),
+        TableArchetype::Grouped(t) => TableArchetype::Grouped(GroupedTable {
+            row_factor_title: t.row_factor_title.clone(),
+            column_factor_title: t.column_factor_title.clone(),
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_numeric_spacing: t.row_numeric_spacing.as_ref().map(|v| v.iter().take(max_rows).copied().collect()),
+            subcolumn_mode: t.subcolumn_mode,
+            replicate_stacking: t.replicate_stacking,
+            three_way_grouping: t.three_way_grouping.clone(),
+            data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+        }),
+        TableArchetype::Contingency(t) => TableArchetype::Contingency(ContingencyTable {
+            row_factor_title: t.row_factor_title.clone(),
+            column_factor_title: t.column_factor_title.clone(),
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+        }),
+        TableArchetype::Survival(t) => TableArchetype::Survival(SurvivalTable {
+            time_title: t.time_title.clone(),
+            times: t.times.iter().take(max_rows).cloned().collect(),
+            event_code: t.event_code,
+            censored_code: t.censored_code,
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_titles_expanded: t.row_titles_expanded,
+            cohorts: slice_dataset_columns(&t.cohorts, max_rows),
+        }),
+        TableArchetype::PartsOfWhole(t) => TableArchetype::PartsOfWhole(PartsOfWholeTable {
+            slice_labels: t.slice_labels.iter().take(max_rows).cloned().collect(),
+            data_sets: slice_dataset_columns(&t.data_sets, max_rows),
+        }),
+        TableArchetype::MultipleVariables(t) => TableArchetype::MultipleVariables(MultipleVariablesTable {
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_titles_expanded: t.row_titles_expanded,
+            variables: t
+                .variables
+                .iter()
+                .map(|v| VariableColumn {
+                    title: v.title.clone(),
+                    role: v.role,
+                    role_inferred: v.role_inferred,
+                    source: v.source.clone(),
+                    level_order: v.level_order.clone(),
+                    cells: v.cells.iter().take(max_rows).cloned().collect(),
+                })
+                .collect(),
+        }),
+        TableArchetype::Nested(t) => TableArchetype::Nested(NestedTable {
+            row_titles: t.row_titles.iter().take(max_rows).cloned().collect(),
+            row_titles_expanded: t.row_titles_expanded,
+            groups: t
+                .groups
+                .iter()
+                .map(|g| NestedGroupColumn {
+                    title: g.title.clone(),
+                    subcolumn_titles: g.subcolumn_titles.clone(),
+                    cells: g.cells.iter().take(max_rows).cloned().collect(),
+                })
+                .collect(),
+        }),
+    }
+}
+
+fn truncate_csv_bytes(mut csv: String, max_bytes: usize) -> (String, bool) {
+    if csv.len() <= max_bytes {
+        return (csv, false);
+    }
+    let mut end = max_bytes;
+    while end > 0 && !csv.is_char_boundary(end) {
+        end -= 1;
+    }
+    if let Some(nl) = csv[..end].rfind('\n')
+        && nl > 0
+    {
+        end = nl + 1;
+    }
+    csv.truncate(end);
+    (csv, true)
+}
+
+fn build_csv_preview(ds: &DataSheet) -> Result<(String, bool), ResourceError> {
+    ds.archetype.validate().map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
+    let row_count = ds.archetype.row_count();
+    let row_truncated = row_count > MAX_CSV_PREVIEW_ROWS;
+    let raw_csv = if row_truncated {
+        let sliced = slice_archetype_rows(&ds.archetype, MAX_CSV_PREVIEW_ROWS);
+        let preview_ds = DataSheet::new(ds.id.clone(), ds.title.clone(), sliced)
+            .map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
+        export_datasheet_to_csv(&preview_ds, &CsvOptions::csv())
+    } else {
+        export_datasheet_to_csv(ds, &CsvOptions::csv())
+    }
+    .map_err(|err| ResourceError::Internal(format!("CSV preview export failed: {err}")))?;
+    let (capped, byte_truncated) = truncate_csv_bytes(raw_csv, MAX_CSV_PREVIEW_BYTES);
+    Ok((capped, row_truncated || byte_truncated))
+}
+
 fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result<Vec<ResourceContent>, ResourceError> {
     let target = SheetId::new(id_str);
     let deps = doc.upstream_dependencies(&target);
@@ -116,23 +239,27 @@ fn read_sheet_resource(doc: &ProjectDocument, uri: &str, id_str: &str) -> Result
     };
 
     let payload: Option<Value> = match section {
-        SheetSection::Data => doc.data_sheet(&target).map(|ds| {
-            let csv_preview = export_datasheet_to_csv(ds, &CsvOptions::csv()).unwrap_or_default();
-            json!({
-                "uri": uri,
-                "section": "data",
-                "id": ds.id,
-                "title": ds.title,
-                "kind": ds.kind().label(),
-                "frozen": ds.frozen,
-                "info_sheet_id": ds.info_sheet_id,
-                "rows": ds.archetype.row_count(),
-                "columns": ds.archetype.column_count(),
-                "csv_preview": csv_preview,
-                "linked_regions": ds.linked_regions,
-                "upstream_dependencies": deps,
-            })
-        }),
+        SheetSection::Data => match doc.data_sheet(&target) {
+            Some(ds) => {
+                let (csv_preview, csv_preview_truncated) = build_csv_preview(ds)?;
+                Some(json!({
+                    "uri": uri,
+                    "section": "data",
+                    "id": ds.id,
+                    "title": ds.title,
+                    "kind": ds.kind().label(),
+                    "frozen": ds.frozen,
+                    "info_sheet_id": ds.info_sheet_id,
+                    "rows": ds.archetype.row_count(),
+                    "columns": ds.archetype.column_count(),
+                    "csv_preview": csv_preview,
+                    "csv_preview_truncated": csv_preview_truncated,
+                    "linked_regions": ds.linked_regions,
+                    "upstream_dependencies": deps,
+                }))
+            }
+            None => None,
+        },
         SheetSection::Info => doc.info_sheet(&target).map(|info| {
             json!({
                 "uri": uri,

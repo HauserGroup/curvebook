@@ -233,8 +233,21 @@ pub fn nct_sf(t: f64, df: f64, delta: f64) -> Result<f64, MathError> {
 /// Evaluate `P(T <= t)` (`upper = false`) or `P(T > t)` (`upper = true`) for `t > 0`.
 fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> Result<f64, MathError> {
     if df > 1e6 || delta.abs() > 1e9 {
-        // For df > 1e6, U = sqrt(chi2_df / df) is within O(1/df) of Gaussian and Stirling expansion
-        // avoids catastrophic cancellation in ln_gamma differences and 1 - E[U]^2.
+        // Two-moment Gaussian approximation for U = sqrt(chi2_df / df):
+        //   E[U] = 1 - 1/(4*df) + 1/(32*df^2) + O(df^-3)
+        //   Var(U) = 1/(2*df) - 1/(8*df^2) + O(df^-3)
+        //   skew(U) = 1/sqrt(2*df) + O(df^-3/2).
+        // Stirling expansion avoids catastrophic cancellation in ln_gamma differences and 1 - E[U]^2.
+        //
+        // Accuracy bound (verified numerically against adaptive 1D chi-square quadrature over
+        // df in [1.01e6, 1e8], |delta| in [448, 1e8], z in [-5, +5]):
+        // - Worst-case absolute CDF/SF error across all (t, delta) is governed by the leading
+        //   Edgeworth skewness term |(z^2 - 1) * phi(z)| * skew(U) / 6 <= 1 / (12 * sqrt(pi * df)),
+        //   which is <= 4.70e-5 for df > 1e6 (observed max 4.68e-5 at df = 1.01e6, delta = 1e8, z = 0)
+        //   and <= 4.70e-6 for df >= 1e8.
+        // - For |delta| <= 1e3 and df > 1e6, |t*sigma_U| / sigma_W < 0.58 dampens skewness by ~0.2,
+        //   giving max |abs_err| < 9.0e-6; at |z| <= 5 tails, relative error stays <= 1.5e-2 (df ~ 1e6)
+        //   and <= 1.5e-3 (df >= 1e8).
         let (eu, var_u) = if df > 1e5 {
             let inv_df = 1.0 / df;
             let inv_df2 = inv_df * inv_df;
@@ -269,7 +282,8 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     let mut lo_b = (4.0 * tau.sqrt()).min(tau + 1.0);
     for _ in 0..32 {
         let mid = 0.5 * (lo_a + lo_b);
-        if (-mid).exp() - 1.0 + mid >= tau {
+        let f_lo = if mid < 1e-3 { mid * mid * (0.5 - mid * (1.0 / 6.0 - mid * (1.0 / 24.0 - mid / 120.0))) } else { (-mid).exp_m1() + mid };
+        if f_lo >= tau {
             lo_b = mid;
         } else {
             lo_a = mid;
@@ -281,7 +295,8 @@ fn nct_positive_t_large_delta_quad(t: f64, df: f64, delta: f64, upper: bool) -> 
     let mut hi_b = (2.0 * tau).sqrt().min(tau.ln_1p() + 3.0);
     for _ in 0..32 {
         let mid = 0.5 * (hi_a + hi_b);
-        if mid.exp_m1() - mid >= tau {
+        let f_hi = if mid < 1e-3 { mid * mid * (0.5 + mid * (1.0 / 6.0 + mid * (1.0 / 24.0 + mid / 120.0))) } else { mid.exp_m1() - mid };
+        if f_hi >= tau {
             hi_b = mid;
         } else {
             hi_a = mid;
@@ -845,5 +860,117 @@ mod tests {
         assert!((ncchi2_sf(14.0, 3.0, cl).unwrap() - 0.025).abs() < 1e-11);
         assert!((ncchi2_cdf(14.0, 3.0, cu).unwrap() - 0.025).abs() < 1e-11);
         assert!(((ncchi2_cdf(9.0, 4.0, 6.0).unwrap() + ncchi2_sf(9.0, 4.0, 6.0).unwrap()) - 1.0).abs() < 1e-13);
+    }
+
+    fn exact_nct_quad_reference(t: f64, df: f64, delta: f64, upper: bool) -> f64 {
+        let half_df = 0.5 * df;
+        let ln_norm = 0.5 * (df / std::f64::consts::PI).ln() - crate::special::gamma::stirling_err(half_df);
+        let log_factor = |s: f64| -> f64 {
+            let y = 2.0 * s;
+            if y.abs() < 1e-4 { -y * y * (0.5 + y * (1.0 / 6.0 + y * (1.0 / 24.0 + y * (1.0 / 120.0 + y / 720.0)))) } else { y - y.exp_m1() }
+        };
+        let lo_fn = |m: f64| -> f64 { if m < 1e-3 { m * m * (0.5 - m * (1.0 / 6.0 - m * (1.0 / 24.0 - m / 120.0))) } else { (-m).exp_m1() + m } };
+        let hi_fn = |m: f64| -> f64 { if m < 1e-3 { m * m * (0.5 + m * (1.0 / 6.0 + m * (1.0 / 24.0 + m / 120.0))) } else { m.exp_m1() - m } };
+        let tau = 45.0 / half_df;
+        let (mut lo_a, mut lo_b) = (0.0_f64, (4.0 * tau.sqrt()).min(tau + 1.0));
+        for _ in 0..48 {
+            let mid = 0.5 * (lo_a + lo_b);
+            if lo_fn(mid) >= tau {
+                lo_b = mid;
+            } else {
+                lo_a = mid;
+            }
+        }
+        let s_lo = -0.5 * lo_b;
+        let (mut hi_a, mut hi_b) = (0.0_f64, (2.0 * tau).sqrt().min(tau.ln_1p() + 3.0));
+        for _ in 0..48 {
+            let mid = 0.5 * (hi_a + hi_b);
+            if hi_fn(mid) >= tau {
+                hi_b = mid;
+            } else {
+                hi_a = mid;
+            }
+        }
+        let s_hi = 0.5 * hi_b;
+        let mut pts = vec![s_lo];
+        if delta > 0.0 {
+            let s0 = (delta / t).ln();
+            let w = (14.0 / delta).max(1e-7);
+            let a = s0 - w;
+            let b = s0 + w;
+            if a > s_lo && a < s_hi {
+                pts.push(a);
+            }
+            if b > s_lo && b < s_hi {
+                pts.push(b);
+            }
+        }
+        pts.push(s_hi);
+        let opts = crate::quad::QuadOptions { abs_tol: 1e-13, rel_tol: 1e-12, max_subdivisions: 256 };
+        let mut total = 0.0_f64;
+        for win in pts.windows(2) {
+            if win[1] <= win[0] {
+                continue;
+            }
+            total += crate::quad::integrate_adaptive(
+                |s| {
+                    let u = s.exp();
+                    let dens = (ln_norm + half_df * log_factor(s)).exp();
+                    let prob = if upper { super::norm_sf(t * u - delta) } else { super::norm_cdf(t * u - delta) };
+                    dens * prob
+                },
+                win[0],
+                win[1],
+                opts,
+            )
+            .unwrap();
+        }
+        total.clamp(0.0, 1.0)
+    }
+
+    #[test]
+    fn s4_nct_large_df_gaussian_approx_numerical_bound() {
+        let mut max_abs_err = 0.0_f64;
+        for &df in &[1.01e6_f64, 1e7, 1e8] {
+            // Analytical leading Edgeworth bound: 1 / (12 * sqrt(pi * df))
+            let bound = 1.0 / (12.0 * (std::f64::consts::PI * df).sqrt());
+            for &delta in &[448.0_f64, 1000.0, 1e4, 1e5, 1e6, 1e8] {
+                let sd_approx = (1.0 + delta * delta / (2.0 * df)).sqrt();
+                for &z in &[-5.0_f64, -3.0, -1.0, 0.0, 1.0, 3.0, 5.0] {
+                    let t = delta + z * sd_approx;
+                    if t <= 0.0 {
+                        continue;
+                    }
+                    let approx_cdf = nct_cdf(t, df, delta).unwrap();
+                    let approx_sf = nct_sf(t, df, delta).unwrap();
+                    let exact_cdf = exact_nct_quad_reference(t, df, delta, false);
+                    let exact_sf = exact_nct_quad_reference(t, df, delta, true);
+                    let err_cdf = (approx_cdf - exact_cdf).abs();
+                    let err_sf = (approx_sf - exact_sf).abs();
+                    max_abs_err = max_abs_err.max(err_cdf).max(err_sf);
+                    assert!(
+                        err_cdf <= bound * 1.05 && err_sf <= bound * 1.05,
+                        "df={df:.2e} delta={delta:.2e} z={z:+.1}: err_cdf={err_cdf:.3e}, err_sf={err_sf:.3e}, bound={bound:.3e}"
+                    );
+                    if z.abs() <= 5.0 {
+                        let tail_exact = if z <= 0.0 { exact_cdf } else { exact_sf };
+                        let tail_err = if z <= 0.0 { err_cdf } else { err_sf };
+                        if tail_exact > 1e-10 {
+                            let rel = tail_err / tail_exact;
+                            let rel_cap = 0.02 * (1.01e6 / df).sqrt();
+                            assert!(rel <= rel_cap, "df={df:.2e} delta={delta:.2e} z={z:+.1}: rel={rel:.3e} > {rel_cap:.3e}");
+                        }
+                    }
+                }
+            }
+        }
+        assert!(max_abs_err < 5.0e-5, "max_abs_err={max_abs_err}");
+
+        // Seam continuity across df = 1e6 (quadrature vs two-moment Gaussian approximation).
+        for &(t, delta) in &[(500.0_f64, 500.0), (1_000.0, 1_000.0), (998.0, 1_000.0)] {
+            let left = nct_cdf(t, 999_999.0, delta).unwrap();
+            let right = nct_cdf(t, 1_000_001.0, delta).unwrap();
+            assert!((left - right).abs() < 5.0e-5, "seam jump at df=1e6 ({t}, {delta}): {left} vs {right}");
+        }
     }
 }

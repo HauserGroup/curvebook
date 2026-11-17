@@ -26,7 +26,7 @@ use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::linear::{DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, simple_linear_regression};
-use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear};
+use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles};
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
     filter_datasets_by_range,
@@ -403,6 +403,12 @@ fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: 
     }
 }
 
+fn nonlinear_uses_weighted_objective(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) -> bool {
+    nl_spec.weighting != curvebook_doc::WeightingScheme::None
+        || fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance
+        || (fit.weighted_ss - fit.rss).abs() > 1e-12 * fit.rss.abs().max(1.0)
+}
+
 fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) {
     let mut param_rows = Vec::with_capacity(fit.parameters.len() + fit.fixed_constants.len());
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
@@ -463,6 +469,15 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         "N/A (DF = 0)".to_owned()
     };
 
+    let mut param_footnote = format!(
+        "Status: {:?}, Iterations: {}, DF: {}, R2 = {:.6}, Sy.x = {}, RSS = {:.6}",
+        fit.status, fit.iterations, fit.df, fit.r_squared, sy_x_str, fit.rss
+    );
+    if nonlinear_uses_weighted_objective(fit, nl_spec) {
+        let obj_lbl = if fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance { "Poisson Deviance" } else { "Weighted SS" };
+        param_footnote.push_str(&format!(", {obj_lbl} = {:.6}", fit.weighted_ss));
+    }
+
     result.tabs.push(ResultTab {
         id: "nonlinear_parameters".to_owned(),
         title: "Best-fit values & confidence intervals".to_owned(),
@@ -476,10 +491,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
         ],
         row_labels: param_labels,
         rows: param_rows,
-        footnotes: vec![format!(
-            "Status: {:?}, Iterations: {}, DF: {}, R2 = {:.6}, Sy.x = {}, RSS = {:.6}",
-            fit.status, fit.iterations, fit.df, fit.r_squared, sy_x_str, fit.rss
-        )],
+        footnotes: vec![param_footnote],
     });
 }
 
@@ -490,6 +502,8 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
 fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec, p_fmt: PValueFormat) {
     append_nonlinear_parameter_tab(result, fit, nl_spec);
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
+    let weighted_obj = nonlinear_uses_weighted_objective(fit, nl_spec);
+    let is_poisson = fit.fit_method == curvebook_doc::FitMethod::PoissonDeviance;
 
     // Goodness-of-fit summary tab.
     let mut gof_labels = vec![
@@ -514,6 +528,14 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
         gof_labels.insert(4, "RSDR (Robust SD of residuals)".to_owned());
         gof_vals.insert(4, vec![num_cell(rsdr)]);
+    }
+    let mut gof_footnotes = Vec::new();
+    if weighted_obj {
+        gof_labels.push(if is_poisson { "Poisson Deviance".to_owned() } else { "Weighted Sum of Squares".to_owned() });
+        gof_vals.push(vec![num_cell(fit.weighted_ss)]);
+        gof_footnotes.push(String::from(
+            "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective.",
+        ));
     }
     if let Some(r) = &fit.runs_test {
         gof_labels.push("Runs test P value".to_owned());
@@ -540,7 +562,7 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         column_headers: vec![fit.equation_name.clone()],
         row_labels: gof_labels,
         rows: gof_vals,
-        footnotes: Vec::new(),
+        footnotes: gof_footnotes,
     });
 
     if nl_spec.emit_residuals_tab {
@@ -569,6 +591,9 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
     result.scalars.push(ResultScalarEntry { key: "R2".to_owned(), data_set_index: None, value: fit.r_squared, units: None });
     result.scalars.push(ResultScalarEntry { key: "RSS".to_owned(), data_set_index: None, value: fit.rss, units: None });
+    if weighted_obj {
+        result.scalars.push(ResultScalarEntry { key: "Weighted SS".to_owned(), data_set_index: None, value: fit.weighted_ss, units: None });
+    }
     if is_robust && let Some(rsdr) = fit.rsdr.filter(|v| v.is_finite()) {
         result.scalars.push(ResultScalarEntry { key: "RSDR".to_owned(), data_set_index: None, value: rsdr, units: None });
     }
@@ -706,6 +731,15 @@ fn append_comparison_tab(
 ) {
     match outcome {
         ModelComparisonOutcome::ExtraSumOfSquaresF(f) => {
+            let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let footnotes = if swapped {
+                vec![format!(
+                    "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
+                    primary.equation_name, primary.df, alt.equation_name, alt.df
+                )]
+            } else {
+                Vec::new()
+            };
             result.tabs.push(ResultTab {
                 id: "model_comparison_f".to_owned(),
                 title: "Comparison of Models (Extra sum-of-squares F test)".to_owned(),
@@ -719,13 +753,17 @@ fn append_comparison_tab(
                     "Preferred model".to_owned(),
                 ],
                 rows: vec![
-                    vec![ResultCell::Text(primary.equation_name.clone())],
-                    vec![ResultCell::Text(alt.equation_name.clone())],
+                    vec![ResultCell::Text(null_fit.equation_name.clone())],
+                    vec![ResultCell::Text(complex_fit.equation_name.clone())],
                     vec![ResultCell::Text(format!("{:.4} ({}, {})", f.f_stat, f.df_num, f.df_den))],
                     vec![p_cell(p_fmt, f.p_value)],
-                    vec![ResultCell::Text(if f.preferred_complex_model { "More complex model".to_owned() } else { "Simpler model".to_owned() })],
+                    vec![ResultCell::Text(if f.preferred_complex_model {
+                        format!("{} (More complex model)", complex_fit.equation_name)
+                    } else {
+                        format!("{} (Simpler model)", null_fit.equation_name)
+                    })],
                 ],
-                footnotes: Vec::new(),
+                footnotes,
             });
         }
         ModelComparisonOutcome::Aicc(a) => {
@@ -745,6 +783,15 @@ fn append_comparison_tab(
             });
         }
         ModelComparisonOutcome::LikelihoodRatioTest(lrt) => {
+            let (null_fit, complex_fit, swapped) = ordered_nested_roles(primary, alt);
+            let footnotes = if swapped {
+                vec![format!(
+                    "Primary fit ({}) has fewer residual degrees of freedom ({}) than {} ({}); the simpler model serves as the null hypothesis and the primary model serves as the alternative.",
+                    primary.equation_name, primary.df, alt.equation_name, alt.df
+                )]
+            } else {
+                Vec::new()
+            };
             result.tabs.push(ResultTab {
                 id: "model_comparison_lrt".to_owned(),
                 title: "Comparison of Models (Likelihood Ratio Test)".to_owned(),
@@ -759,14 +806,18 @@ fn append_comparison_tab(
                     "Preferred model".to_owned(),
                 ],
                 rows: vec![
-                    vec![ResultCell::Text(primary.equation_name.clone())],
-                    vec![ResultCell::Text(alt.equation_name.clone())],
+                    vec![ResultCell::Text(null_fit.equation_name.clone())],
+                    vec![ResultCell::Text(complex_fit.equation_name.clone())],
                     vec![num_cell(lrt.lr_statistic)],
                     vec![num_cell(lrt.df_diff as f64)],
                     vec![p_cell(p_fmt, lrt.p_value)],
-                    vec![ResultCell::Text(if lrt.preferred_complex_model { "More complex model".to_owned() } else { "Simpler model".to_owned() })],
+                    vec![ResultCell::Text(if lrt.preferred_complex_model {
+                        format!("{} (More complex model)", complex_fit.equation_name)
+                    } else {
+                        format!("{} (Simpler model)", null_fit.equation_name)
+                    })],
                 ],
-                footnotes: Vec::new(),
+                footnotes,
             });
         }
         ModelComparisonOutcome::NotApplicableInRobustMode { requested_test, reason } => {

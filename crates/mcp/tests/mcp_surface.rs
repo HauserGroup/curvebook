@@ -12,10 +12,11 @@ use std::io::Cursor;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
+use curvebook_doc::{Cell, DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_engine::cmd::{CommandGroup, Effects, registry};
 use curvebook_mcp::{
-    ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, McpServerState, ToolAnnotations, call_tool, command_id_to_mcp_tool_name, list_tools,
-    list_tools_for_group, list_tools_for_state, serve,
+    ERR_INVALID_PARAMS, ERR_RESOURCE_NOT_FOUND, McpServerState, ResourceError, ToolAnnotations, call_tool, command_id_to_mcp_tool_name, list_tools,
+    list_tools_for_group, list_tools_for_state, read_resource, serve,
 };
 use serde_json::{Value, json};
 
@@ -601,4 +602,71 @@ fn r10_10_analysis_toolset_exposes_and_executes_stats_pvalue_stack() {
     assert_eq!(payload["sheet_id"], json!("mcp-res-pstack"));
     assert_eq!(payload["scalars"]["TotalInputCount"]["value"], json!(4.0));
     assert_eq!(payload["scalars"]["TotalDiscoveries"]["value"], json!(2.0));
+}
+
+#[test]
+fn rv94_two_group_prompt_interpolates_sheet_id_when_unpaired_unknown() {
+    let mut state = McpServerState::new();
+    let resp = rpc_roundtrip(
+        &mut state,
+        101,
+        "prompts/get",
+        json!({
+            "name": "choose_two_group_test",
+            "arguments": { "sheet_id": "col-cohort-94", "paired": "false", "parametric": "unknown" }
+        }),
+    )
+    .expect("prompts/get");
+    let text = resp["result"]["messages"][0]["content"]["text"].as_str().expect("prompt text");
+    assert!(text.contains("sheet://col-cohort-94"), "expected interpolated sheet://col-cohort-94, got:\n{text}");
+    assert!(!text.contains("{sheet_id}"), "unsubstituted literal {{sheet_id}} leaked into prompt:\n{text}");
+}
+
+#[test]
+fn rv95_resources_read_caps_csv_preview_rows_and_bytes_and_surfaces_export_errors() {
+    // 1. Row-capped preview (> 100 rows): returns header + 100 rows and sets csv_preview_truncated = true.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 250).unwrap();
+    for r in 0..250 {
+        xy.x_cells[r][0] = Cell::number(r as f64);
+        xy.data_sets[0].cells[r][0] = Cell::number((r * 2) as f64);
+    }
+    let ds_rows = DataSheet::new("xy-many-rows", "Many Rows", TableArchetype::Xy(xy)).unwrap();
+    let mut doc = ProjectDocument::new("RV-95 Preview Caps").unwrap();
+    doc.add_data_sheet(ds_rows).unwrap();
+
+    let contents = read_resource(&doc, "sheet://xy-many-rows").expect("read row-capped sheet");
+    let val: Value = serde_json::from_str(&contents[0].text).unwrap();
+    let preview = val["csv_preview"].as_str().unwrap();
+    assert_eq!(val["rows"], json!(250));
+    assert_eq!(val["csv_preview_truncated"], json!(true));
+    assert_eq!(preview.lines().count(), 101, "expected 1 header + 100 preview rows, got {}", preview.lines().count());
+    assert!(!preview.contains("249,498"), "tail rows must not be serialized in preview");
+
+    // 2. Byte-capped preview (wide rows exceeding 64 KiB within <= 100 rows).
+    let mut wide_xy = XyTable::new(SubcolumnMode::Single, 200, 80).unwrap();
+    for c in 0..200 {
+        wide_xy.data_sets[c].title = format!("Col_{c:03}_LongTitleHeader");
+        for r in 0..80 {
+            wide_xy.data_sets[c].cells[r][0] = Cell::number(1000.123456 + (r as f64) + (c as f64) * 0.01);
+        }
+    }
+    let ds_wide = DataSheet::new("xy-wide", "Wide Sheet", TableArchetype::Xy(wide_xy)).unwrap();
+    doc.add_data_sheet(ds_wide).unwrap();
+
+    let wide_contents = read_resource(&doc, "sheet://xy-wide").expect("read byte-capped sheet");
+    let wide_val: Value = serde_json::from_str(&wide_contents[0].text).unwrap();
+    let wide_preview = wide_val["csv_preview"].as_str().unwrap();
+    assert_eq!(wide_val["csv_preview_truncated"], json!(true));
+    assert!(wide_preview.len() <= 65_536, "byte cap exceeded: {} bytes", wide_preview.len());
+
+    // 3. Invalid sheet archetype must return ResourceError::Internal rather than silent "".
+    let mut bad_xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
+    bad_xy.x_cells.pop(); // break rectangular invariant
+    let mut bad_doc = ProjectDocument::new("Invalid Preview").unwrap();
+    let mut ok_ds = DataSheet::new("xy-bad", "Bad Sheet", TableArchetype::Xy(XyTable::new(SubcolumnMode::Single, 1, 3).unwrap())).unwrap();
+    ok_ds.archetype = TableArchetype::Xy(bad_xy);
+    bad_doc.data_sheets.push(ok_ds);
+
+    let err = read_resource(&bad_doc, "sheet://xy-bad").expect_err("corrupt sheet export must surface error instead of empty csv_preview");
+    assert!(matches!(err, ResourceError::Internal(msg) if msg.contains("CSV preview export failed")));
 }

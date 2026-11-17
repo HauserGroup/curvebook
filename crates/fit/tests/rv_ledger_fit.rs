@@ -19,12 +19,16 @@
 //!   2nd rev. ed. Springer.
 //! - Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
 
-use curvebook_doc::{CiBound, ConfidenceLevel, FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_doc::{
+    AnalysisKind, AnalysisSpec, Cell, CiBound, ConfidenceLevel, DataSheet, FitMethod, ModelComparisonSpec, NonlinearFitSpec, ParameterRule,
+    ParameterScope, ResultCell, ResultStatus, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
+};
 use curvebook_fit::diagnostics::compute_covariance_diagnostics;
 use curvebook_fit::dsl::CompiledDslModel;
 use curvebook_fit::error::{FitError, FitStatus};
 use curvebook_fit::library::{ParametricModel, get_builtin_model};
-use curvebook_fit::solver::{FittedParameterSummary, NonlinearFitResult, SolverConfig, fit_nonlinear};
+use curvebook_fit::result::execute_analysis;
+use curvebook_fit::solver::{FittedParameterSummary, NonlinearFitResult, SolverConfig, compare_models, fit_nonlinear};
 use curvebook_fit::tex_format::format_model_equation_tex;
 use curvebook_fit::types::{DataPoint, DatasetSeries, EquationCategory, HookContext};
 use curvebook_math::dist::student_t_two_sided_isf;
@@ -423,4 +427,170 @@ fn rv_section2_s3_notes_three_phase_bounds_and_covariance_t_critical() {
     let expected_t = student_t_two_sided_isf(conf99.alpha(), 1.0).unwrap();
     let expected_half = expected_t * cov_df1.standard_errors[0];
     assert!((cov_df1.symmetric_ci_upper[0] - (5.0 + expected_half)).abs() < 1e-10);
+}
+
+#[test]
+fn rv93_global_fit_per_dataset_sy_x_uses_effective_dataset_df_not_total_k_free() {
+    // Three datasets with 3 local parameters (Top, Bottom, LogEC50) + 1 SharedGlobal (HillSlope) -> k_free = 10,
+    // effective parameters per dataset k_eff_d = 3 + 1/3 = 10/3.
+    let model = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let xs_10: Vec<f64> = (-9..=0).map(|i| -9.0 + (i as f64) * 0.55).collect();
+    let scales = [0.2_f64, 1.0, 4.0];
+    let ds_10: Vec<DatasetSeries> = scales
+        .iter()
+        .enumerate()
+        .map(|(d, &amp)| {
+            let ys: Vec<f64> = xs_10
+                .iter()
+                .enumerate()
+                .map(|(r, &x)| {
+                    let clean = model.eval(&[x], &[10.0 + (d as f64) * 2.0, 100.0, -6.5 + (d as f64) * 0.2, 1.2], d).unwrap();
+                    let jitter = if r % 2 == 0 { amp } else { -amp };
+                    clean + jitter
+                })
+                .collect();
+            series_xy(d, &format!("DS{d}"), &xs_10, &ys)
+        })
+        .collect();
+
+    let cfg = SolverConfig {
+        parameter_rules: vec![ParameterRule {
+            name: String::from("HillSlope"),
+            scope: ParameterScope::SharedGlobal,
+            initial_override: Some(1.2),
+            lower_bound: Some(0.2),
+            upper_bound: Some(5.0),
+        }],
+        compute_profile_ci: false,
+        compute_hougaard: false,
+        ..SolverConfig::default()
+    };
+    let fit_10 = fit_nonlinear(model.as_ref(), &ds_10, &HookContext::default(), &cfg).unwrap();
+    assert_eq!(fit_10.k_free, 10);
+
+    // Previously n_d = 10 <= k_free = 10 fell back to global `fit_10.rsd` for all 3 datasets!
+    // Now each dataset uses df_d = 10 - (3 + 1/3) = 20/3, reflecting its own residual scale.
+    let expected_df_d = 10.0 - (3.0 + 1.0 / 3.0);
+    for (d, ds_res) in fit_10.datasets.iter().enumerate() {
+        let expected_sy_x = (ds_res.ss_residual / expected_df_d).sqrt();
+        assert!((ds_res.sy_x - expected_sy_x).abs() < 1e-12, "ds[{d}] sy_x={} vs expected={expected_sy_x}", ds_res.sy_x);
+    }
+    assert!(fit_10.datasets[0].sy_x < fit_10.datasets[1].sy_x && fit_10.datasets[1].sy_x < fit_10.datasets[2].sy_x);
+    assert!((fit_10.datasets[0].sy_x - fit_10.rsd).abs() > 0.1);
+}
+
+#[test]
+fn rv96_weighted_and_poisson_result_sheets_label_unweighted_vs_weighted_objective() {
+    let xs = [0.5_f64, 1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 64.0];
+    let ys: Vec<f64> = xs.iter().enumerate().map(|(i, &x)| 200.0 * x / (5.0 + x) * (1.0 + if i % 2 == 0 { 0.04 } else { -0.04 })).collect();
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
+    for (r, (&x, &y)) in xs.iter().zip(ys.iter()).enumerate() {
+        xy.x_cells[r][0] = Cell::number(x);
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let sheet = DataSheet::new("xy-w", "Weighted Binding", TableArchetype::Xy(xy)).unwrap();
+    let mut nl = NonlinearFitSpec::new("one_site_specific_binding");
+    nl.weighting = WeightingScheme::RelativeSquare;
+    let spec = AnalysisSpec::new("fit-w", "xy-w", AnalysisKind::NonlinearRegression(nl)).unwrap();
+    let res = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+    assert_eq!(res.status, ResultStatus::UpToDate);
+
+    let gof = res.tabs.iter().find(|t| t.id == "nonlinear_gof").expect("nonlinear_gof tab");
+    let wss_row = gof.row_labels.iter().position(|l| l == "Weighted Sum of Squares").expect("Weighted Sum of Squares row");
+    let wss_val = match gof.rows[wss_row][0] {
+        ResultCell::Number { value, .. } => value,
+        ref other => panic!("expected numeric Weighted SS, got {other:?}"),
+    };
+    let rss_val = res.lookup_scalar("RSS", None).unwrap();
+    let wss_scalar = res.lookup_scalar("Weighted SS", None).unwrap();
+    assert!((wss_val - wss_scalar).abs() < 1e-12);
+    assert!(rss_val > wss_val * 100.0, "unweighted RSS ({rss_val}) vs 1/Y^2 Weighted SS ({wss_val}) must differ clearly");
+    assert!(
+        gof.footnotes.iter().any(|f| f.contains("unweighted residuals in original Y units") && f.contains("weighted / deviance objective")),
+        "missing unweighted-vs-weighted footnote: {:?}",
+        gof.footnotes
+    );
+}
+
+#[test]
+fn rv99_compare_models_guards_mismatched_rout_subsets_and_surfaces_null_alt_roles() {
+    let model_4pl = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let model_3pl = get_builtin_model("log_agonist_vs_response_3pl").unwrap();
+
+    // 1. Construct a steep Hill=2.5 curve with one spike outlier near the inflection where 3PL
+    // (fixed HillSlope=1.0) vs 4PL (variable HillSlope) exclude different observation sets under ROUT.
+    let xs = [-9.0, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.5, -4.0];
+    let mut ys: Vec<f64> = xs.iter().map(|&x| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 2.5))).collect();
+    // Plant a spike at index 3 (X=-7.5) and verify 4PL vs 3PL differ in excluded points (or test explicit mismatch).
+    ys[3] += 45.0;
+    let ds = vec![series_xy(0, "SteepRout", &xs, &ys)];
+    let rout_cfg = SolverConfig {
+        method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+        compute_profile_ci: false,
+        compute_hougaard: false,
+        ..SolverConfig::default()
+    };
+    let fit_4pl = fit_nonlinear(model_4pl.as_ref(), &ds, &HookContext::default(), &rout_cfg).unwrap();
+    let fit_3pl = fit_nonlinear(model_3pl.as_ref(), &ds, &HookContext::default(), &rout_cfg).unwrap();
+
+    // If these two fits excluded different subsets, compare_models must reject directly;
+    // otherwise construct a primary fit from a subset-altered ROUT result to verify the guard unconditionally.
+    let mismatched_primary =
+        if fit_4pl.n_obs != fit_3pl.n_obs || fit_4pl.rout.as_ref().map(|r| &r.outlier_indices) != fit_3pl.rout.as_ref().map(|r| &r.outlier_indices) {
+            fit_4pl.clone()
+        } else {
+            let mut tampered = fit_4pl.clone();
+            tampered.n_obs = fit_3pl.n_obs.saturating_sub(1);
+            tampered.n_outliers_excluded = fit_3pl.n_outliers_excluded + 1;
+            tampered
+        };
+    for spec in [
+        ModelComparisonSpec::Aicc { alternative_equation_id: String::from("log_agonist_vs_response_3pl") },
+        ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: String::from("log_agonist_vs_response_3pl") },
+        ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: String::from("log_agonist_vs_response_3pl") },
+    ] {
+        let err = compare_models(&mismatched_primary, model_3pl.as_ref(), &ds, &HookContext::default(), &rout_cfg, &spec)
+            .expect_err("compare_models must reject mismatched observation/ROUT outlier subsets");
+        assert!(matches!(err, FitError::InvalidParameter { name: "comparison", .. }), "unexpected err: {err:?}");
+    }
+
+    // Also verify identical n_obs + different excluded outlier index set is rejected!
+    if let Some(ref r3) = fit_3pl.rout {
+        let mut diff_idx_primary = fit_3pl.clone();
+        if let Some(ref mut r_mod) = diff_idx_primary.rout {
+            r_mod.outlier_indices = if r3.outlier_indices == vec![3] { vec![4] } else { vec![3] };
+        }
+        let err = compare_models(
+            &diff_idx_primary,
+            model_3pl.as_ref(),
+            &ds,
+            &HookContext::default(),
+            &rout_cfg,
+            &ModelComparisonSpec::Aicc { alternative_equation_id: String::from("log_agonist_vs_response_3pl") },
+        )
+        .expect_err("different ROUT outlier_indices with same count must be rejected");
+        assert!(matches!(err, FitError::InvalidParameter { name: "comparison", .. }));
+    }
+
+    // 2. When primary is 4PL (complex, fewer df) and alt is 3PL (simpler, more df) on identical points,
+    // `execute_analysis` must label Null=3PL, Alt=4PL, and emit an explicit role-assignment footnote.
+    let ys_clean: Vec<f64> =
+        xs.iter().enumerate().map(|(i, &x)| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 2.5)) + if i % 2 == 0 { 0.2 } else { -0.2 }).collect();
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
+    for (r, (&x, &y)) in xs.iter().zip(ys_clean.iter()).enumerate() {
+        xy.x_cells[r][0] = Cell::number(x);
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let sheet = DataSheet::new("xy-cmp", "4PL vs 3PL", TableArchetype::Xy(xy)).unwrap();
+    let mut nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+    nl.comparison = Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: String::from("log_agonist_vs_response_3pl") });
+    let res =
+        execute_analysis(&AnalysisSpec::new("fit-cmp", "xy-cmp", AnalysisKind::NonlinearRegression(nl)).unwrap(), &sheet, &HookContext::default())
+            .unwrap();
+    let cmp_tab = res.tabs.iter().find(|t| t.id == "model_comparison_f").expect("model_comparison_f tab");
+    let null_row = cmp_tab.row_labels.iter().position(|l| l == "Null hypothesis model").unwrap();
+    let alt_row = cmp_tab.row_labels.iter().position(|l| l == "Alternative model").unwrap();
+    assert_eq!(cmp_tab.rows[null_row][0], ResultCell::Text(model_3pl.name().to_owned()));
+    assert_eq!(cmp_tab.rows[alt_row][0], ResultCell::Text(model_4pl.name().to_owned()));
+    assert!(cmp_tab.footnotes.iter().any(|f| f.contains("fewer residual degrees of freedom")));
 }

@@ -328,6 +328,11 @@ impl InterpolatedUnknown {
 }
 
 /// Per-dataset fitted curve summary.
+///
+/// Note (`RV-96`): per Motulsky & Christopoulos (2004), `ss_residual`, `r_squared`, and `sy_x`
+/// are reported in unweighted original $Y$ units even when differential weighting is active,
+/// while global covariance, parameter SEs, AICc/BIC, lack-of-fit, and model comparisons use
+/// `weighted_ss` (or Poisson deviance).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedDatasetResult {
     pub data_set_index: usize,
@@ -339,10 +344,16 @@ pub struct FittedDatasetResult {
     pub weighted_residuals: Vec<f64>,
     #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
     pub studentized_residuals: Vec<f64>,
+    /// Unweighted residual sum of squares $\sum (y_i - \hat{y}_i)^2$ for this dataset in original $Y$ units.
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub ss_residual: f64,
+    /// Unweighted coefficient of determination $1 - \text{SS}_{\text{res}, d} / \text{SS}_{\text{tot}, d}$ in original $Y$ units.
+    /// Unweighted coefficient of determination $R^2 = 1 - \text{rss} / \text{TSS}$ in original $Y$ units
+    /// even when weighted least squares or Poisson deviance is active (Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
+    /// Unweighted per-dataset residual SD $\sqrt{\text{SS}_{\text{res}, d} / (n_d - k_{\text{eff}, d})}$ in original $Y$ units,
+    /// using the dataset's effective parameter count $k_{\text{eff}, d}$ (`NaN` in Robust Cauchy mode).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub sy_x: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -424,6 +435,8 @@ pub struct NonlinearFitResult {
     pub rsd: f64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
+    /// Unweighted coefficient of determination $R^2 = 1 - \text{rss} / \text{TSS}$ in original $Y$ units
+    /// even when weighted least squares or Poisson deviance is active (Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
     pub aic_c: Option<f64>,
@@ -3096,6 +3109,28 @@ fn assemble_dataset_results(
     cfg: &DatasetAssemblyConfig<'_>,
 ) -> AssembledDatasets {
     let k_free = layout.k_free();
+    let mut active_ds = vec![false; datasets.len()];
+    for rec in obs {
+        if let Some(flag) = active_ds.get_mut(rec.ds_local_idx) {
+            *flag = true;
+        }
+    }
+    let mut slot_ds_count = vec![0_usize; k_free];
+    for (d_idx, row) in layout.bindings.iter().enumerate() {
+        if !active_ds.get(d_idx).copied().unwrap_or(false) {
+            continue;
+        }
+        let mut seen = vec![false; k_free];
+        for b in row {
+            if let ParamBinding::Free(slot) = *b
+                && let Some(flag) = seen.get_mut(slot)
+                && !*flag
+            {
+                *flag = true;
+                slot_ds_count[slot] += 1;
+            }
+        }
+    }
     let mut ds_results = Vec::with_capacity(datasets.len());
     let mut derived_scalars = Vec::with_capacity(datasets.len());
     let mut interpolated_x = Vec::new();
@@ -3149,10 +3184,25 @@ fn assemble_dataset_results(
         };
         let is_robust = cfg.solver.method == FitMethod::RobustCauchy;
         let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
+        let mut k_eff_d = 0.0_f64;
+        let mut seen_d = vec![false; k_free];
+        if let Some(row) = layout.bindings.get(ds_local_idx) {
+            for b in row {
+                if let ParamBinding::Free(slot) = *b
+                    && let Some(flag) = seen_d.get_mut(slot)
+                    && !*flag
+                {
+                    *flag = true;
+                    let share_count = slot_ds_count.get(slot).copied().unwrap_or(1).max(1) as f64;
+                    k_eff_d += 1.0 / share_count;
+                }
+            }
+        }
+        let ds_df = (ds_n as f64) - k_eff_d;
         let ds_sy_x = if is_robust {
             f64::NAN
-        } else if ds_n > k_free {
-            (ds_ss / ((ds_n - k_free) as f64)).sqrt()
+        } else if ds_df > 1e-9 {
+            (ds_ss / ds_df).sqrt()
         } else {
             cfg.rsd
         };
@@ -3249,20 +3299,34 @@ fn comparison_test_label(spec: &ModelComparisonSpec) -> &'static str {
     }
 }
 
+/// Resolve the `(simpler_null_fit, complex_alt_fit, swapped)` role assignment for nested
+/// model comparisons (`ExtraSumOfSquaresF` / `LikelihoodRatioTest`), where the model with more
+/// residual degrees of freedom serves as the simpler null hypothesis.
+#[must_use]
+pub fn ordered_nested_roles<'a>(
+    primary: &'a NonlinearFitResult,
+    alt: &'a NonlinearFitResult,
+) -> (&'a NonlinearFitResult, &'a NonlinearFitResult, bool) {
+    if primary.df >= alt.df { (primary, alt, false) } else { (alt, primary, true) }
+}
+
 /// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*,
 /// $\text{AIC}_c$, or Likelihood Ratio Test (`ModelComparisonSpec`).
 ///
 /// Extra-sum-of-squares *F* (Seber & Wild 1989; Motulsky & Christopoulos 2004), AICc
 /// (Hurvich & Tsai 1989; Burnham & Anderson 2002), and the Gaussian or deviance likelihood
 /// ratio test (Wilks 1938). Full references are in [`crate::diagnostics`]. The *F* and LRT
-/// paths order the two fits by residual degrees of freedom and assume they are nested.
+/// paths order the two fits by residual degrees of freedom (`ordered_nested_roles`) and assume
+/// they are nested on identical observations (`primary.n_obs == alt.n_obs`, identical ROUT
+/// excluded-point sets).
 ///
 /// Note: for least-squares fits, all three statistics are computed from `weighted_ss`.
 /// Under `FitMethod::PoissonDeviance`, `weighted_ss` is the Poisson deviance (used for
 /// deviance LRT), `Aicc` uses exact Poisson log-likelihood with `K = k_free` (dispersion = 1),
 /// and `ExtraSumOfSquaresF` is rejected because OLS extra-SS *F* is invalid for Poisson errors.
-/// Mixed error models (`PoissonDeviance` vs Gaussian/OLS/WLS) are likewise rejected. If **either**
-/// the primary or alternative model uses `FitMethod::RobustCauchy`, returns
+/// Mixed error models (`PoissonDeviance` vs Gaussian/OLS/WLS) and mismatched observation/outlier
+/// subsets (for example two ROUT fits that excluded different points) are likewise rejected. If
+/// **either** the primary or alternative model uses `FitMethod::RobustCauchy`, returns
 /// `FitError::InvalidParameter` carrying `NotApplicableInRobustMode` (use
 /// [`compare_models_checked`] when a typed [`ModelComparisonResult`] is desired).
 pub fn compare_models(
@@ -3300,18 +3364,41 @@ pub fn compare_models(
             reason: "NotApplicableInRobustMode: F, AICc, and LRT model comparisons are not applicable under Robust (Cauchy) regression".to_owned(),
         });
     }
+    if primary.fit_method != alt.fit_method {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: format!("Cannot compare models fitted under different methods ({:?} vs {:?})", primary.fit_method, alt.fit_method),
+        });
+    }
+    if primary.n_obs != alt.n_obs || primary.n_outliers_excluded != alt.n_outliers_excluded {
+        return Err(FitError::InvalidParameter {
+            name: "comparison",
+            reason: format!(
+                "Cannot compare models fitted to different observation counts ({} vs {}) or excluded outlier counts ({} vs {})",
+                primary.n_obs, alt.n_obs, primary.n_outliers_excluded, alt.n_outliers_excluded
+            ),
+        });
+    }
+    if let (Some(rout_a), Some(rout_b)) = (&primary.rout, &alt.rout) {
+        let mut idx_a = rout_a.outlier_indices.clone();
+        let mut idx_b = rout_b.outlier_indices.clone();
+        idx_a.sort_unstable();
+        idx_b.sort_unstable();
+        if idx_a != idx_b {
+            return Err(FitError::InvalidParameter {
+                name: "comparison",
+                reason: String::from("Cannot compare ROUT models that excluded different outlier points"),
+            });
+        }
+    }
     let outcome = match spec {
         ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
-            let (ss_simple, df_simple, ss_complex, df_complex) = if primary.df >= alt.df {
-                (primary.weighted_ss, primary.df, alt.weighted_ss, alt.df)
-            } else {
-                (alt.weighted_ss, alt.df, primary.weighted_ss, primary.df)
-            };
+            let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
             ModelComparisonOutcome::ExtraSumOfSquaresF(compare_models_f_test(
-                ss_simple,
-                df_simple,
-                ss_complex,
-                df_complex,
+                null_fit.weighted_ss,
+                null_fit.df,
+                complex_fit.weighted_ss,
+                complex_fit.df,
                 config.confidence.alpha(),
             )?)
         }
@@ -3325,15 +3412,18 @@ pub fn compare_models(
             }
         }
         ModelComparisonSpec::LikelihoodRatioTest { .. } => {
-            let (ss_null, df_null, ss_alt, df_alt) = if primary.df >= alt.df {
-                (primary.weighted_ss, primary.df, alt.weighted_ss, alt.df)
-            } else {
-                (alt.weighted_ss, alt.df, primary.weighted_ss, primary.df)
-            };
+            let (null_fit, complex_fit, _) = ordered_nested_roles(primary, &alt);
             let res = if config.method == FitMethod::PoissonDeviance {
-                compare_models_lrt_deviance(ss_null, df_null, ss_alt, df_alt, config.confidence.alpha())?
+                compare_models_lrt_deviance(null_fit.weighted_ss, null_fit.df, complex_fit.weighted_ss, complex_fit.df, config.confidence.alpha())?
             } else {
-                compare_models_lrt(ss_null, df_null, ss_alt, df_alt, primary.n_obs, config.confidence.alpha())?
+                compare_models_lrt(
+                    null_fit.weighted_ss,
+                    null_fit.df,
+                    complex_fit.weighted_ss,
+                    complex_fit.df,
+                    primary.n_obs,
+                    config.confidence.alpha(),
+                )?
             };
             ModelComparisonOutcome::LikelihoodRatioTest(res)
         }
