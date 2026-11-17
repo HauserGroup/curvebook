@@ -15,8 +15,8 @@ use curvebook_palette::Rgba8;
 use curvebook_render::RasterImage;
 use curvebook_text::glyph_paths::outline_ttf_glyph;
 use curvebook_text::{
-    GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, is_rtl_locale, measure_text_pt, outline_rich_text,
-    reorder_visual_bidi,
+    GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, TextDirection, contains_rtl_script, is_rtl_locale, measure_text_pt,
+    outline_rich_text, reorder_visual_bidi,
 };
 use serde::{Deserialize, Serialize};
 
@@ -226,7 +226,7 @@ impl DesktopTextMeasurer {
         style: &UiTextStyle,
         eff_size: f64,
     ) -> GlyphResolution {
-        if ch.is_control() {
+        if ch.is_control() || is_bidi_format_char(ch) {
             return GlyphResolution { advance_px: 0.0, glyph_id: None, face_index: None, used_vector_fallback: false, missing_glyph: false };
         }
         if ch == ' ' {
@@ -281,7 +281,7 @@ impl DesktopTextMeasurer {
 }
 
 fn compute_cached_glyph_entry(parsed: &[(&str, curvebook_text::TrueTypeFont<'_>)], face_tabular_em: &[f64], ch: char) -> CachedGlyphEntry {
-    if ch.is_control() || ch == ' ' {
+    if ch.is_control() || ch == ' ' || is_bidi_format_char(ch) {
         return CachedGlyphEntry {
             glyph_id: None,
             face_index: None,
@@ -410,7 +410,7 @@ impl TextMeasurer for DesktopTextMeasurer {
             }
         } else {
             let dir = if is_rtl_locale(locale) { TextDirection::Rtl } else { TextDirection::Ltr };
-            let visual = reorder_visual_bidi(text, dir);
+            let visual = shape_visual_text(text, dir);
             for ch in visual.chars() {
                 width_px += self.resolve_glyph_fast(&mut parsed, ch, style, size).advance_px;
             }
@@ -439,7 +439,7 @@ impl TextMeasurer for DesktopTextMeasurer {
                 };
                 let eff = size * scale;
                 let span_style = UiTextStyle { weight: span.weight, slope: span.slope, ..style.clone() };
-                let reordered = if span.text.is_ascii() { span.text.clone() } else { reorder_visual_bidi(&span.text, direction) };
+                let reordered = shape_visual_text(&span.text, direction);
                 for ch in reordered.chars() {
                     visual_text.push(ch);
                     let res = self.resolve_glyph_fast(&mut parsed, ch, &span_style, eff);
@@ -464,7 +464,7 @@ impl TextMeasurer for DesktopTextMeasurer {
                 }
             }
         } else {
-            visual_text = if text.is_ascii() { text.to_owned() } else { reorder_visual_bidi(text, direction) };
+            visual_text = shape_visual_text(text, direction);
             glyphs.reserve(visual_text.len());
             for ch in visual_text.chars() {
                 let res = self.resolve_glyph_fast(&mut parsed, ch, style, size);
@@ -497,6 +497,220 @@ impl TextMeasurer for DesktopTextMeasurer {
             missing_glyph_count,
         }
     }
+}
+
+fn is_bidi_format_char(ch: char) -> bool {
+    matches!(ch as u32, 0x200E..=0x200F | 0x202A..=0x202E | 0x2066..=0x2069)
+}
+
+fn is_rtl_codepoint(ch: char) -> bool {
+    let mut buf = [0u8; 4];
+    contains_rtl_script(ch.encode_utf8(&mut buf))
+}
+
+fn shape_visual_text(text: &str, direction: TextDirection) -> String {
+    if text.is_empty() || text.is_ascii() {
+        return text.to_owned();
+    }
+    if direction == TextDirection::Ltr {
+        return reorder_visual_bidi(text, TextDirection::Ltr);
+    }
+    if !contains_rtl_script(text) && !text.chars().any(is_bidi_format_char) {
+        return text.to_owned();
+    }
+    let (prepared, added_isolates) = isolate_rtl_scientific_spans(text);
+    let reordered = reorder_visual_bidi(&prepared, TextDirection::Rtl);
+    if added_isolates { reordered.chars().filter(|&ch| !matches!(ch, '\u{2066}' | '\u{2069}')).collect() } else { reordered }
+}
+
+fn isolate_rtl_scientific_spans(text: &str) -> (String, bool) {
+    let mut out = String::with_capacity(text.len() + 16);
+    let mut added = false;
+    let mut i = 0usize;
+    let mut lri_depth = 0usize;
+
+    while i < text.len() {
+        let Some(ch) = text[i..].chars().next() else {
+            break;
+        };
+        if ch == '\u{2066}' {
+            lri_depth += 1;
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if ch == '\u{2069}' {
+            lri_depth = lri_depth.saturating_sub(1);
+            out.push(ch);
+            i += ch.len_utf8();
+            continue;
+        }
+        if lri_depth == 0
+            && let Some(end) = match_bracketed_interval(text, i).or_else(|| match_formula_span(text, i)).or_else(|| match_signed_number_span(text, i))
+        {
+            out.push('\u{2066}');
+            out.push_str(&text[i..end]);
+            out.push('\u{2069}');
+            added = true;
+            i = end;
+            continue;
+        }
+        out.push(ch);
+        i += ch.len_utf8();
+    }
+    (out, added)
+}
+
+fn has_sign_before_digit(s: &str) -> bool {
+    let mut chars = s.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if matches!(ch, '+' | '-' | '\u{2212}' | '\u{00B1}') {
+            let Some(&(_, next)) = chars.peek() else {
+                continue;
+            };
+            if next.is_ascii_digit() {
+                return true;
+            }
+            if next == '.' {
+                let mut look = chars.clone();
+                let _ = look.next();
+                if look.next().is_some_and(|(_, d)| d.is_ascii_digit()) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
+}
+
+fn match_bracketed_interval(text: &str, start: usize) -> Option<usize> {
+    let open = text[start..].chars().next()?;
+    let close = match open {
+        '[' => ']',
+        '(' => ')',
+        _ => return None,
+    };
+    let mut depth = 0usize;
+    let mut end_idx = None;
+    for (rel, ch) in text[start..].char_indices() {
+        if matches!(ch, '\n' | '\r') || is_rtl_codepoint(ch) || is_bidi_format_char(ch) {
+            return None;
+        }
+        if ch == open {
+            depth += 1;
+        } else if ch == close {
+            depth = depth.saturating_sub(1);
+            if depth == 0 {
+                end_idx = Some(start + rel + ch.len_utf8());
+                break;
+            }
+        }
+    }
+    let end = end_idx?;
+    let inner = &text[start + open.len_utf8()..end - close.len_utf8()];
+    let has_digit = inner.bytes().any(|b| b.is_ascii_digit());
+    let has_sep = inner.contains(',') || inner.contains(';');
+    if has_digit && (has_sep || has_sign_before_digit(inner)) { Some(end) } else { None }
+}
+
+fn match_formula_span(text: &str, start: usize) -> Option<usize> {
+    if !text[start..].starts_with('=') {
+        return None;
+    }
+    let prev = text[..start].chars().next_back();
+    if let Some(p) = prev
+        && !p.is_whitespace()
+        && !matches!(p, ':' | '(' | '[' | '"' | '\'')
+    {
+        return None;
+    }
+    let first = text[start + 1..].chars().next()?;
+    if !(first.is_ascii_alphanumeric() || matches!(first, '_' | '(' | '-' | '+' | '\u{2212}' | '.' | '$')) {
+        return None;
+    }
+    let mut depth = 0usize;
+    let mut end = start + 1;
+    let mut has_alnum = false;
+    for (rel, ch) in text[start + 1..].char_indices() {
+        if ch.is_control() || is_rtl_codepoint(ch) || is_bidi_format_char(ch) {
+            break;
+        }
+        if ch.is_whitespace() && depth == 0 {
+            break;
+        }
+        if matches!(ch, '(' | '[') {
+            depth += 1;
+        } else if matches!(ch, ')' | ']') {
+            if depth == 0 {
+                break;
+            }
+            depth -= 1;
+        }
+        if ch.is_ascii_alphanumeric() {
+            has_alnum = true;
+        }
+        end = start + 1 + rel + ch.len_utf8();
+    }
+    while end > start + 1 {
+        let last = text[start + 1..end].chars().next_back()?;
+        if matches!(last, ',' | ';' | ':' | '.' | '!' | '?') {
+            end -= last.len_utf8();
+        } else {
+            break;
+        }
+    }
+    if has_alnum && end > start + 1 { Some(end) } else { None }
+}
+
+fn match_signed_number_span(text: &str, start: usize) -> Option<usize> {
+    let sign = text[start..].chars().next()?;
+    if !matches!(sign, '-' | '+' | '\u{2212}' | '\u{00B1}') {
+        return None;
+    }
+    if let Some(prev) = text[..start].chars().next_back()
+        && prev.is_alphanumeric()
+    {
+        return None;
+    }
+    let mut p = start + sign.len_utf8();
+    let mut saw_digit = false;
+    if text[p..].starts_with('.') {
+        p += 1;
+    }
+    while let Some(ch) = text[p..].chars().next() {
+        if ch.is_ascii_digit() {
+            saw_digit = true;
+            p += 1;
+        } else if matches!(ch, '.' | ',') && text[p + 1..].chars().next().is_some_and(|d| d.is_ascii_digit()) {
+            p += 1;
+        } else {
+            break;
+        }
+    }
+    if !saw_digit {
+        return None;
+    }
+    if text[p..].starts_with(['e', 'E']) {
+        let mut exp_p = p + 1;
+        if let Some(es) = text[exp_p..].chars().next()
+            && matches!(es, '+' | '-' | '\u{2212}')
+        {
+            exp_p += es.len_utf8();
+        }
+        let mut exp_digits = false;
+        while let Some(d) = text[exp_p..].chars().next() {
+            if d.is_ascii_digit() {
+                exp_digits = true;
+                exp_p += 1;
+            } else {
+                break;
+            }
+        }
+        if exp_digits {
+            p = exp_p;
+        }
+    }
+    Some(p)
 }
 
 /// Measure `text` and append `'…'` if it exceeds `max_width_px`, returning `(display_text, ellipsized)`.
@@ -627,7 +841,7 @@ impl SoftwareTextPainter {
         THREAD_GLYPH_ATLAS.with(|cell| {
             let mut atlas = cell.borrow_mut();
             for glyph in &shaped.glyphs {
-                if glyph.ch.is_whitespace() || glyph.ch.is_control() {
+                if glyph.ch.is_whitespace() || glyph.ch.is_control() || is_bidi_format_char(glyph.ch) {
                     continue;
                 }
                 let eff_size = (base_size * glyph.font_scale).clamp(5.0, 96.0);
@@ -1013,5 +1227,48 @@ mod tests {
             [6.0, 10.0],
         );
         assert_ne!(img_a.rgba, img_b.rgba, "mixed-case upright must differ visually from uppercase/italic");
+    }
+
+    #[test]
+    fn rtl_bidi_preserves_unicode_minus_formulas_and_signed_intervals() {
+        let measurer = DesktopTextMeasurer::new();
+        let style = UiTextStyle::ui_sans(13.0);
+        let mono = UiTextStyle::ui_mono(13.0);
+
+        for locale in ["ar", "he"] {
+            let pub_neg = measurer.shape_line("\u{2212}2.5", &style, locale);
+            assert_eq!(pub_neg.visual_text, "\u{2212}2.5");
+            assert_eq!(pub_neg.missing_glyph_count, 0);
+
+            let formula = measurer.shape_line("=A1*2", &mono, locale);
+            assert_eq!(formula.visual_text, "=A1*2");
+            assert_eq!(formula.missing_glyph_count, 0);
+
+            let uni_formula = measurer.shape_line("=A1*\u{2212}2", &mono, locale);
+            assert_eq!(uni_formula.visual_text, "=A1*\u{2212}2");
+            assert_eq!(uni_formula.missing_glyph_count, 0);
+
+            let embedded_formula = measurer.shape_line("الصيغة: =A1*\u{2212}2", &style, locale);
+            assert!(embedded_formula.visual_text.contains("=A1*\u{2212}2"), "got {:?}", embedded_formula.visual_text);
+            assert_eq!(embedded_formula.missing_glyph_count, 0);
+
+            let embedded_neg = measurer.shape_line("النتيجة: \u{2212}2.5", &style, locale);
+            assert!(embedded_neg.visual_text.contains("\u{2212}2.5"), "got {:?}", embedded_neg.visual_text);
+            assert_eq!(embedded_neg.missing_glyph_count, 0);
+        }
+
+        let ar_ci = measurer.shape_line("فترة الثقة 95%: [-1.24, +3.85]", &style, "ar");
+        assert!(ar_ci.visual_text.contains("[-1.24, +3.85]"), "ar CI visual: {:?}", ar_ci.visual_text);
+        assert_eq!(ar_ci.missing_glyph_count, 0);
+        assert!((measurer.measure("فترة الثقة 95%: [-1.24, +3.85]", &style, "ar").width_px - ar_ci.metrics.width_px).abs() < 1e-6);
+
+        let he_ci = measurer.shape_line("רווח סמך 95%: [\u{2212}1.24, +3.85]", &style, "he");
+        assert!(he_ci.visual_text.contains("[\u{2212}1.24, +3.85]"), "he CI visual: {:?}", he_ci.visual_text);
+        assert_eq!(he_ci.missing_glyph_count, 0);
+
+        // Existing mixed BiDi prose ordering remains intact.
+        assert_eq!(measurer.shape_line("التركيز [IC50] = 5.2", &style, "ar").visual_text, "5.2 = [IC50] زيكرتلا");
+        assert_eq!(measurer.shape_line("שלום (123)", &style, "he").visual_text, "(123) םולש");
+        assert!(measurer.shape_line("احتمال p < 0.0001", &style, "ar").visual_text.contains("p < 0.0001"));
     }
 }
