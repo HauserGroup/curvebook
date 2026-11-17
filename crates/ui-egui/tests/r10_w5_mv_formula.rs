@@ -200,6 +200,36 @@ fn r10_8_variables_drawer_level_recoding_and_ordering() -> Result<(), String> {
     Ok(())
 }
 
+fn validation_banner_label(driver: &mut curvebook_ui_egui::HumanPathDriver) -> Result<String, String> {
+    let node = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing validation banner"))?;
+    Ok(node.a11y.label)
+}
+
+fn verify_circularity_confirmation_on_col4(driver: &mut curvebook_ui_egui::HumanPathDriver) -> Result<(), String> {
+    let active_sid = driver.app().document().active_sheet_id.as_ref().ok_or_else(|| String::from("missing active sheet"))?.as_str().to_owned();
+    let grid_scroll_wid = WidgetId::from(format!("grid.sheet.{active_sid}"));
+    for _ in 0..8 {
+        if driver.find_widget("formula_bar.open_col.4").is_some_and(|n| n.drawn_in_frame && n.bounds.visible_rect_px.width > 0) {
+            break;
+        }
+        let _ = human_wf_common::scroll_widget_wheel(driver, &grid_scroll_wid, 180.0, 0.0)?;
+    }
+    let _ = human_wf_common::click_widget_center(driver, &WidgetId::from("formula_bar.open_col.4"))?;
+    assert!(driver.find_widget("mv_formula.panel").is_some());
+    assert_eq!(driver.app().grid.formula_bar.target_column, Some(4));
+    let _ = replace_textbox_text(driver, "formula_bar.input", "= DoubleLog + 1")?;
+    let mid_cycle_label = validation_banner_label(driver)?;
+    assert!(
+        !mid_cycle_label.to_ascii_lowercase().contains("circul"),
+        "circularity feedback must wait for Apply/Enter confirmation, got `{mid_cycle_label}`"
+    );
+    let _ = human_wf_common::click_widget_center(driver, &WidgetId::from("formula_bar.commit"))?;
+    let cycle_label = validation_banner_label(driver)?;
+    assert!(cycle_label.to_ascii_lowercase().contains("circul"), "expected circular dependency feedback on Apply confirmation, got `{cycle_label}`");
+    assert_eq!(current_mv(driver.app())?.variables.len(), 6, "circular formula must not mutate variable columns");
+    Ok(())
+}
+
 #[test]
 fn r10_8_right_panel_new_calc_r2_s10_13_funcs_refs_validation_and_defs() -> Result<(), String> {
     let app = build_mv_app(None, false, true)?;
@@ -228,17 +258,18 @@ fn r10_8_right_panel_new_calc_r2_s10_13_funcs_refs_validation_and_defs() -> Resu
     let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("formula_bar.input"))?;
     let _ = human_wf_common::type_into_focused(&mut driver, ")")?;
 
-    let val_node_ok = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing validation banner"))?;
-    assert_eq!(val_node_ok.a11y.label, "Formula valid");
+    assert_eq!(validation_banner_label(&mut driver)?, "Validation runs on Apply or Enter.");
     let commit_ready = driver.find_widget("formula_bar.commit").ok_or_else(|| String::from("missing commit button"))?;
-    assert!(commit_ready.state.enablement.enabled, "Apply must enable once named target and valid formula are present");
+    assert!(commit_ready.state.enablement.enabled, "Apply must enable once named target and non-empty formula are present");
 
-    // Test invalid syntax disables Apply and updates live feedback banner.
+    // Syntax validation must stay silent mid-typing and surface only upon confirmation (`Apply`/`Enter`).
     let _ = human_wf_common::type_into_focused(&mut driver, " +")?;
+    assert_eq!(validation_banner_label(&mut driver)?, "Validation runs on Apply or Enter.", "syntax error must not surface mid-typing");
     let commit_bad = driver.find_widget("formula_bar.commit").ok_or_else(|| String::from("missing commit button"))?;
-    assert!(!commit_bad.state.enablement.enabled, "syntax error must disable Apply");
-    let val_node_err = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing validation banner"))?;
-    assert_ne!(val_node_err.a11y.label, "Formula valid");
+    assert!(commit_bad.state.enablement.enabled, "Apply remains clickable so confirmation runs validation");
+    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("formula_bar.commit"))?;
+    assert_ne!(validation_banner_label(&mut driver)?, "Validation runs on Apply or Enter.", "Apply confirmation must surface syntax error");
+    assert_eq!(current_mv(driver.app())?.variables.len(), 4, "failed syntax confirmation must not add a column");
 
     // Clear function search and scroll function list to `zscore` (`scroll_until_widget_visible`), proving real scrollable reference.
     let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("mv_formula.func.clear"))?;
@@ -267,27 +298,9 @@ fn r10_8_right_panel_new_calc_r2_s10_13_funcs_refs_validation_and_defs() -> Resu
     let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("formula_bar.commit"))?;
     assert_eq!(current_mv(driver.app())?.variables.len(), 6);
 
-    // Re-open column 4 via column `fx` button and introduce a 2-hop cycle (`= DoubleLog + 1`): live circularity check must disable Apply.
-    let active_sid = driver.app().document().active_sheet_id.as_ref().ok_or_else(|| String::from("missing active sheet"))?.as_str().to_owned();
-    let grid_scroll_wid = WidgetId::from(format!("grid.sheet.{active_sid}"));
-    for _ in 0..8 {
-        if driver.find_widget("formula_bar.open_col.4").is_some_and(|n| n.drawn_in_frame && n.bounds.visible_rect_px.width > 0) {
-            break;
-        }
-        let _ = human_wf_common::scroll_widget_wheel(&mut driver, &grid_scroll_wid, 180.0, 0.0)?;
-    }
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("formula_bar.open_col.4"))?;
-    assert!(driver.find_widget("mv_formula.panel").is_some());
-    assert_eq!(driver.app().grid.formula_bar.target_column, Some(4));
-    let _ = replace_textbox_text(&mut driver, "formula_bar.input", "= DoubleLog + 1")?;
-    let cycle_status = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing validation status"))?;
-    assert!(
-        cycle_status.a11y.label.to_ascii_lowercase().contains("circul"),
-        "expected circular dependency feedback, got `{}`",
-        cycle_status.a11y.label
-    );
-    let commit_cycle = driver.find_widget("formula_bar.commit").ok_or_else(|| String::from("missing commit button"))?;
-    assert!(!commit_cycle.state.enablement.enabled, "circular dependency must disable Apply");
+    // Re-open column 4 via column `fx` button and introduce a 2-hop cycle (`= DoubleLog + 1`):
+    // circularity check stays silent mid-typing and surfaces on confirmation (`Apply`/`Enter`).
+    verify_circularity_confirmation_on_col4(&mut driver)?;
 
     // Toggle Formula Definitions list inside the open panel, then Cancel closes active edit & panel.
     let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("mv_formula.panel_defs_toggle"))?;

@@ -4,6 +4,7 @@
 //! `Pairwise & CLD`, `Page Layout`) and interactive `Point & Drill-Back` controls,
 //! dispatching instant undoable engine commands and reflecting live state on undo/redo.
 
+use super::mv_formula::{LevelMoveOp, apply_explicit_level_move, resolve_selected_level_idx, w7_mv_ui};
 use crate::i18n::w5_inspector as w5_i18n;
 
 use serde::{Deserialize, Serialize};
@@ -13,9 +14,9 @@ use curvebook_chart::{RectPt, SourceCellId};
 use curvebook_doc::{
     AnalysisKind, AxisScale, AxisSegment, AxisSpec, BracketLabelMode, BreakOrnament, CanvasResizeMode, CldOrdering, ColorChannelMapping,
     CompactLetterDisplaySpec, ConnectingLineStyle, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FigureCanvasPreset, GraphKind, GraphSheet,
-    GraphicalDataObject, GroupedArrangement, LayoutItem, LayoutSheet, LayoutSpec, LineConnectionKind, MultivariateGraphEncoding,
-    MultivariatePlotMode, PairwiseDisplayMode, PhysicalUnit, ProjectDocument, ReplicateOverlayStyle, SeriesSpec, SheetId, SizeChannelMapping,
-    SummaryMeasure, WhiskerMethod,
+    GraphicalDataObject, GroupedArrangement, LayoutItem, LayoutSheet, LayoutSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind,
+    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseDisplayMode, PhysicalUnit, ProjectDocument, ReplicateOverlayStyle, SeriesSpec, SheetId,
+    SizeChannelMapping, SummaryMeasure, TableArchetype, VariableRole, VariableSource, WhiskerMethod,
 };
 use curvebook_math::LogitDomain;
 use curvebook_palette::{CanvasPreviewFilter, ColorRamp, ColormapId, LineDashStyle, MarkerShape, MarkerStyle, PaletteId, Rgba8};
@@ -87,6 +88,8 @@ pub struct InspectorViewState {
     pub regression_shaded_ribbon: bool,
     #[serde(default)]
     pub last_canvas_preset: Option<String>,
+    #[serde(default)]
+    pub selected_fg_level_name: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -723,6 +726,58 @@ fn resolve_selected_series_index(app: &UiApp, gs: &GraphSheet) -> usize {
     app.canvas_dialogs.format_graph.selected_series_index.min(max_idx)
 }
 
+struct MvLevelTarget {
+    is_x: bool,
+    levels: Vec<String>,
+}
+
+fn resolve_mv_level_target(doc: &ProjectDocument, gs: &GraphSheet) -> Option<MvLevelTarget> {
+    let enc = gs.spec.multivariate.as_ref()?;
+    let ds = doc.data_sheet(&gs.spec.primary_source_sheet_id)?;
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return None;
+    };
+    if let Some(col) = mv
+        .variables
+        .get(enc.x_column)
+        .filter(|col| col.role == VariableRole::Categorical || matches!(enc.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }))
+    {
+        let spec = enc.x_level_order_override.as_ref().unwrap_or(&col.level_order);
+        let levels: Vec<String> = col.ordered_levels_with(spec).into_iter().map(|l| l.level).collect();
+        if !levels.is_empty() {
+            return Some(MvLevelTarget { is_x: true, levels });
+        }
+    }
+    if let ColorChannelMapping::Categorical { column, level_order_override, .. } = &enc.color
+        && let Some(col) = mv.variables.get(*column)
+    {
+        let spec = level_order_override.as_ref().unwrap_or(&col.level_order);
+        let levels: Vec<String> = col.ordered_levels_with(spec).into_iter().map(|l| l.level).collect();
+        if !levels.is_empty() {
+            return Some(MvLevelTarget { is_x: false, levels });
+        }
+    }
+    None
+}
+
+fn mv_column_role_info(doc: &ProjectDocument, gs: &GraphSheet, col_idx: usize) -> Option<(VariableRole, bool)> {
+    let ds = doc.data_sheet(&gs.spec.primary_source_sheet_id)?;
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return None;
+    };
+    let var = mv.variables.get(col_idx)?;
+    Some((var.role, matches!(var.source, VariableSource::Calculated { .. }) || ds.frozen))
+}
+
+fn role_display_name(loc: &str, role: VariableRole) -> &'static str {
+    match role {
+        VariableRole::Continuous => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_continuous", "Continuous"),
+        VariableRole::Categorical => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_categorical", "Categorical"),
+        VariableRole::Label => w7_mv_ui::tr_staged(loc, "w7.mv.var_role_label", "Label"),
+        VariableRole::Calculated => "Calculated",
+    }
+}
+
 fn dispatch_format_graph_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &str) -> Result<UiEventOutcome, String> {
     let Some(gs) = resolve_graph_sheet(app.document(), state).cloned() else {
         return Ok(UiEventOutcome::default());
@@ -913,6 +968,57 @@ fn dispatch_format_graph_action(app: &mut UiApp, state: &mut InspectorViewState,
         app.canvas_dialogs.open_apply_style_from(&doc, &gs.id);
         state.open_popup = None;
         return Ok(outcome_ok(sub, Some("ui.applyStyleFrom.open")));
+    }
+
+    if let Some(raw_idx) = sub.strip_prefix("level:select:")
+        && let Ok(idx) = raw_idx.parse::<usize>()
+    {
+        if let Some(target) = resolve_mv_level_target(app.document(), &gs)
+            && let Some(lvl) = target.levels.get(idx)
+        {
+            state.selected_fg_level_name = Some(lvl.clone());
+        }
+        return Ok(outcome_ok(sub, None));
+    }
+
+    if let Some(move_raw) = sub.strip_prefix("level:move:") {
+        let op = match move_raw {
+            "top" => LevelMoveOp::Top,
+            "up" => LevelMoveOp::Up,
+            "down" => LevelMoveOp::Down,
+            "end" => LevelMoveOp::End,
+            _ => return Ok(UiEventOutcome::default()),
+        };
+        let Some(mut target) = resolve_mv_level_target(app.document(), &gs) else {
+            return Ok(UiEventOutcome::default());
+        };
+        let mut enc = current_mv_encoding(app.document(), &gs);
+        let len = target.levels.len();
+        if apply_explicit_level_move(&mut target.levels, &mut state.selected_fg_level_name, op) {
+            let new_idx = resolve_selected_level_idx(&target.levels, state.selected_fg_level_name.as_deref());
+            let explicit_spec = LevelOrderSpec { order: LevelOrderKind::Explicit(target.levels), reversed: false };
+            if target.is_x {
+                enc.x_level_order_override = Some(explicit_spec);
+            } else if let ColorChannelMapping::Categorical { level_order_override, .. } = &mut enc.color {
+                *level_order_override = Some(explicit_spec);
+            }
+            app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "multivariate": enc })).map_err(|e| e.to_string())?;
+            let doc_snap = app.document().clone();
+            if let Some(live_gs) = doc_snap.graph_sheet(&gs.id) {
+                app.canvas_dialogs.format_graph.sync_from_graph_with_doc(live_gs, Some(&doc_snap));
+            }
+            if len > 1 {
+                match (app.focus_widget_id.as_deref(), new_idx) {
+                    (Some("inspector.fg.level_top"), Some(0)) => app.focus_widget_id = Some(String::from("inspector.fg.level_end")),
+                    (Some("inspector.fg.level_up"), Some(0)) => app.focus_widget_id = Some(String::from("inspector.fg.level_dn")),
+                    (Some("inspector.fg.level_dn"), Some(i)) if i + 1 >= len => app.focus_widget_id = Some(String::from("inspector.fg.level_up")),
+                    (Some("inspector.fg.level_end"), Some(i)) if i + 1 >= len => app.focus_widget_id = Some(String::from("inspector.fg.level_top")),
+                    _ => {}
+                }
+            }
+            return Ok(outcome_ok(sub, Some("graph.setSpec")));
+        }
+        return Ok(outcome_ok(sub, None));
     }
 
     Ok(UiEventOutcome::default())
@@ -1363,6 +1469,23 @@ fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState
             "cat_summary" => {
                 if matches!(enc.plot_mode, MultivariatePlotMode::BubbleScatter) {
                     enc.plot_mode = default_mv_categorical_summary(&gs, SummaryMeasure::Mean);
+                    if let Some(TableArchetype::MultipleVariables(mv)) =
+                        app.document().data_sheet(&gs.spec.primary_source_sheet_id).map(|ds| &ds.archetype)
+                    {
+                        let x_is_cat = mv.variables.get(enc.x_column).is_some_and(|v| v.role == VariableRole::Categorical);
+                        if !x_is_cat
+                            && let (Some(cat_col), Some(cont_col)) = (
+                                mv.variables.iter().position(|v| v.role == VariableRole::Categorical),
+                                mv.variables
+                                    .iter()
+                                    .position(|v| v.role == VariableRole::Continuous)
+                                    .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Calculated)),
+                            )
+                        {
+                            enc.x_column = cat_col;
+                            enc.y_column = cont_col;
+                        }
+                    }
                 }
             }
             _ => return Ok(UiEventOutcome::default()),
@@ -1457,6 +1580,26 @@ fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState
         } else if let Ok(col) = raw.parse::<usize>() {
             enc.size = SizeChannelMapping::Variable { column: col, min_radius_pt: 2.5, max_radius_pt: 9.5 };
         }
+    } else if let Some(raw) = sub.strip_prefix("group:") {
+        if raw == "none" {
+            enc.label_column = None;
+        } else if let Ok(col) = raw.parse::<usize>() {
+            enc.label_column = Some(col);
+        }
+    } else if let Some(rest) = sub.strip_prefix("role:")
+        && let Some((raw_col, role)) = rest.split_once(':')
+        && let Ok(col) = raw_col.parse::<usize>()
+    {
+        let src_id = gs.spec.primary_source_sheet_id.clone();
+        app.execute_command("table.setVariableRole", json!({ "sheet_id": src_id.as_str(), "column": col, "role": role }))
+            .map_err(|e| e.to_string())?;
+        if let Some(ds) = app.document().data_sheet(&src_id).cloned()
+            && app.grid.variables_dialog.open
+        {
+            app.grid.variables_dialog.sync_from_sheet(&ds);
+        }
+        state.open_popup = None;
+        return Ok(outcome_ok(sub, Some("table.setVariableRole")));
     } else if sub == "ellipse:toggle" {
         enc.show_confidence_ellipses = !enc.show_confidence_ellipses;
     } else if sub == "hull:toggle" {
@@ -2017,10 +2160,11 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut InspectorViewState, pay
         app.interaction.scroll_offsets.offsets.remove(SCROLL_ID);
         match next_insp {
             ActiveInspector::FormatGraph | ActiveInspector::FormatAxes => {
-                if let Some(gs) = resolve_graph_sheet(app.document(), state).cloned() {
+                let doc_snap = app.document().clone();
+                if let Some(gs) = resolve_graph_sheet(&doc_snap, state).cloned() {
                     state.target_graph_id = Some(gs.id.as_str().to_string());
                     if next_insp == ActiveInspector::FormatGraph {
-                        app.canvas_dialogs.format_graph.sync_from_graph(&gs);
+                        app.canvas_dialogs.format_graph.sync_from_graph_with_doc(&gs, Some(&doc_snap));
                     } else {
                         let target = app.canvas_dialogs.format_axes.target_axis;
                         app.canvas_dialogs.format_axes.sync_from_graph(&gs, target);
@@ -2520,6 +2664,72 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
         5,
         true,
     );
+
+    if let Some(lvl_target) = resolve_mv_level_target(ctx.builder.app.document(), gs) {
+        let loc = ctx.builder.tree.locale.clone();
+        let muted = ctx.builder.app.theme.text_muted;
+        let sel_name = ctx.builder.app.view_shards.inspector.selected_fg_level_name.clone();
+        let sel_idx = resolve_selected_level_idx(&lvl_target.levels, sel_name.as_deref());
+        let heading = if lvl_target.is_x {
+            w7_mv_ui::tr_staged(&loc, "w7.mv.level_ordering_section", "X Level Ordering (Explicit)")
+        } else {
+            w7_mv_ui::tr_staged(&loc, "w7.mv.color_ordering_section", "Colour Level Ordering")
+        };
+        ctx.paint_label(heading, ctx.cursor_y, 16, 10.5, muted, false);
+        ctx.cursor_y += ctx.si(18);
+
+        let gap = ctx.su(4);
+        let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(44));
+        let row_h = ctx.su(22);
+        let can_up = sel_idx.is_some_and(|i| i > 0);
+        let can_dn = sel_idx.is_some_and(|i| i + 1 < lvl_target.levels.len());
+        let top_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_to_top", "Move to top");
+        let up_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_up", "Move up");
+        let dn_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_down", "Move down");
+        let end_lbl = w7_mv_ui::tr_staged(&loc, "w7.mv.move_to_end", "Move to end");
+        ctx.emit_action_btn(
+            "inspector.fg.level_top",
+            LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, row_h),
+            (top_lbl, top_lbl),
+            "fg.level:move:top",
+            false,
+            can_up,
+        );
+        ctx.emit_action_btn(
+            "inspector.fg.level_up",
+            LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, row_h),
+            (up_lbl, up_lbl),
+            "fg.level:move:up",
+            false,
+            can_up,
+        );
+        ctx.cursor_y += ctx.si(24);
+        ctx.emit_action_btn(
+            "inspector.fg.level_dn",
+            LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, row_h),
+            (dn_lbl, dn_lbl),
+            "fg.level:move:down",
+            false,
+            can_dn,
+        );
+        ctx.emit_action_btn(
+            "inspector.fg.level_end",
+            LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, row_h),
+            (end_lbl, end_lbl),
+            "fg.level:move:end",
+            false,
+            can_dn,
+        );
+        ctx.cursor_y += ctx.si(26);
+
+        for (idx, lvl) in lvl_target.levels.iter().enumerate() {
+            let wid = format!("inspector.fg.level.{idx}");
+            let payload = format!("fg.level:select:{idx}");
+            let r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, row_h);
+            ctx.emit_action_btn(&wid, r, (lvl, lvl), &payload, sel_idx == Some(idx), true);
+            ctx.cursor_y += ctx.si(24);
+        }
+    }
 }
 
 struct AxisInputArgs<'a> {
@@ -3047,6 +3257,28 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
         enabled: has_cols,
     });
 
+    let active_group_col = enc.label_column;
+    let group_val = active_group_col.map_or_else(|| String::from("None"), col_name);
+    let mut g_opts =
+        vec![PopupOptionSpec { label: String::from("None"), payload: String::from("mv.group:none"), active: active_group_col.is_none() }];
+    g_opts.extend(cols.iter().map(|(c, t)| PopupOptionSpec {
+        label: t.clone(),
+        payload: format!("mv.group:{c}"),
+        active: active_group_col == Some(*c),
+    }));
+    let group_lbl = w7_mv_ui::tr_staged(&ctx.builder.tree.locale, "w7.mv.grouping_label", "Grouping / Label");
+    ctx.cursor_y = ctx.emit_dropdown_trigger(DropdownArgs {
+        id: "inspector.mv.group_btn",
+        y: ctx.cursor_y,
+        title: group_lbl,
+        current_val: &group_val,
+        popup_kind: "mv_group",
+        open_popup: state.open_popup.as_deref(),
+        options: g_opts,
+        enabled: has_cols,
+    });
+
+    let app = ctx.builder.app;
     ctx.cursor_y = ctx.emit_checkbox_row(
         "inspector.mv.ellipse_toggle",
         ctx.cursor_y,
@@ -3063,6 +3295,56 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
         "mv.hull:toggle",
         true,
     );
+
+    let loc = ctx.builder.tree.locale.clone();
+    let muted = ctx.builder.app.theme.text_muted;
+    ctx.paint_label(w7_mv_ui::tr_staged(&loc, "w7.mv.var_definitions", "Channel Variable Definitions"), ctx.cursor_y, 16, 10.5, muted, false);
+    ctx.cursor_y += ctx.si(18);
+    let channel_defs: [(&str, &str, &str, Option<usize>); 5] = [
+        ("inspector.mv.def_x_btn", "mv_def_x", "X", Some(enc.x_column)),
+        ("inspector.mv.def_y_btn", "mv_def_y", "Y", Some(enc.y_column)),
+        ("inspector.mv.def_color_btn", "mv_def_color", "Colour", active_color_col),
+        ("inspector.mv.def_size_btn", "mv_def_size", "Size", active_size_col),
+        ("inspector.mv.def_group_btn", "mv_def_group", "Group", active_group_col),
+    ];
+    for (btn_id, popup_kind, ch_tag, col_opt) in channel_defs {
+        let app_ref = ctx.builder.app;
+        let open_popup = app_ref.view_shards.inspector.open_popup.as_deref();
+        let (title, val, opts, en) = match col_opt.and_then(|c| mv_column_role_info(app_ref.document(), gs, c).map(|info| (c, info))) {
+            Some((c, (role, locked_or_frozen))) => {
+                let role_opts = vec![
+                    PopupOptionSpec {
+                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_continuous", "Continuous").to_owned(),
+                        payload: format!("mv.role:{c}:continuous"),
+                        active: role == VariableRole::Continuous,
+                    },
+                    PopupOptionSpec {
+                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_categorical", "Categorical").to_owned(),
+                        payload: format!("mv.role:{c}:categorical"),
+                        active: role == VariableRole::Categorical,
+                    },
+                    PopupOptionSpec {
+                        label: w7_mv_ui::tr_staged(&loc, "w7.mv.var_role_label", "Label").to_owned(),
+                        payload: format!("mv.role:{c}:label"),
+                        active: role == VariableRole::Label,
+                    },
+                    PopupOptionSpec { label: String::from("Auto"), payload: format!("mv.role:{c}:auto"), active: false },
+                ];
+                (format!("{ch_tag}: {}", col_name(c)), String::from(role_display_name(&loc, role)), role_opts, !locked_or_frozen)
+            }
+            None => (format!("{ch_tag}: None"), String::from("Unbound"), Vec::new(), false),
+        };
+        ctx.cursor_y = ctx.emit_dropdown_trigger(DropdownArgs {
+            id: btn_id,
+            y: ctx.cursor_y,
+            title: &title,
+            current_val: &val,
+            popup_kind,
+            open_popup,
+            options: opts,
+            enabled: en,
+        });
+    }
 }
 
 fn cld_mode_label(app: &UiApp, mode: PairwiseDisplayMode) -> &'static str {

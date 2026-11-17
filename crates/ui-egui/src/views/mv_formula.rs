@@ -22,6 +22,9 @@ use crate::text_bridge::UiTextStyle;
 use super::a11y::{labeled_meta, selectable_meta};
 use super::analyze_picker::scaled_u32;
 
+#[path = "../i18n/w7_mv_ui.rs"]
+pub mod w7_mv_ui;
+
 const DOMAIN_MV_FORMULA: &str = "mv_formula";
 const WID_FORMULA_INPUT: &str = "formula_bar.input";
 const WID_NAME_INPUT: &str = "mv_formula.name.input";
@@ -48,6 +51,8 @@ pub struct MvFormulaViewState {
     pub function_category: String,
     #[serde(default)]
     pub validation_feedback: Option<String>,
+    #[serde(default)]
+    pub selected_level_name: Option<String>,
     #[serde(default)]
     pub status_notice: Option<String>,
     #[serde(default)]
@@ -530,28 +535,50 @@ fn sync_buffers_into_formula_bar(app: &mut UiApp) {
     }
 }
 
+fn commit_validation_error(state: &mut MvFormulaViewState, msg: String) -> Result<UiEventOutcome, String> {
+    state.validation_feedback = Some(msg.clone());
+    if state.right_panel_open {
+        Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("mv_formula.validation_error"),
+            command_result: Some(json!({ "committed": false, "validation_error": msg })),
+            ..Default::default()
+        })
+    } else {
+        Err(msg)
+    }
+}
+
+pub(crate) fn commit_from_textbox_enter(app: &mut UiApp) -> Result<UiEventOutcome, String> {
+    let mut state = std::mem::take(&mut app.view_shards.mv_formula);
+    let res = commit_formula_from_action(app, &mut state);
+    app.view_shards.mv_formula = state;
+    res
+}
+
 fn commit_formula_from_action(app: &mut UiApp, state: &mut MvFormulaViewState) -> Result<UiEventOutcome, String> {
     sync_buffers_into_formula_bar(app);
     let fb = &app.grid.formula_bar;
     if !fb.active {
-        let msg = String::from("Formula bar is not active.");
-        state.validation_feedback = Some(msg.clone());
-        return Err(msg);
+        return commit_validation_error(state, String::from("Formula bar is not active."));
     }
     if let Some(err) = fb.parse_error.clone() {
-        state.validation_feedback = Some(err.clone());
-        return Err(err);
+        return commit_validation_error(state, err);
     }
     if !fb.is_valid {
-        let msg = String::from("Calculated variable formula cannot be empty or invalid.");
-        state.validation_feedback = Some(msg.clone());
-        return Err(msg);
+        return commit_validation_error(state, String::from("Calculated variable formula cannot be empty or invalid."));
     }
     let Some(sheet_id) = active_any_sheet_id(app) else {
-        return Err(String::from("No active data sheet for formula bar."));
+        return commit_validation_error(state, String::from("No active data sheet for formula bar."));
     };
-    let intent = app.grid.formula_bar.commit_intent(&sheet_id)?;
-    let outcome = app.execute_command(&intent.command_id, intent.params).map_err(|err| err.to_string())?;
+    let intent = match app.grid.formula_bar.commit_intent(&sheet_id) {
+        Ok(intent) => intent,
+        Err(err) => return commit_validation_error(state, err),
+    };
+    let outcome = match app.execute_command(&intent.command_id, intent.params) {
+        Ok(out) => out,
+        Err(err) => return commit_validation_error(state, err.to_string()),
+    };
     app.grid.formula_bar.cancel();
     clear_formula_text_buffers(app);
     if matches!(app.focus_widget_id.as_deref(), Some(WID_FORMULA_INPUT | WID_NAME_INPUT)) {
@@ -600,7 +627,7 @@ fn open_editor_for_column(app: &mut UiApp, state: &mut MvFormulaViewState, col: 
     sync_text_buffer(app, WID_NAME_INPUT, &app.grid.formula_bar.target_title.clone());
     state.right_panel_open = true;
     state.open_role_dropdown_col = None;
-    state.validation_feedback = app.grid.formula_bar.parse_error.clone();
+    state.validation_feedback = None;
     app.focus_widget_id = Some(String::from(WID_FORMULA_INPUT));
     Ok(UiEventOutcome {
         handled: true,
@@ -732,6 +759,94 @@ fn stage_recode_inputs(app: &mut UiApp, state: &mut MvFormulaViewState) -> bool 
     true
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum LevelMoveOp {
+    Top,
+    Up,
+    Down,
+    End,
+}
+
+/// Resolve the selected index in `levels` matching `selected`, defaulting to `0` when non-empty.
+pub(crate) fn resolve_selected_level_idx(levels: &[String], selected: Option<&str>) -> Option<usize> {
+    if levels.is_empty() {
+        return None;
+    }
+    selected.and_then(|name| levels.iter().position(|lvl| lvl == name)).or(Some(0))
+}
+
+/// Stepwise reorder the selected level in `levels`, updating `selected` to follow the moved item.
+pub(crate) fn apply_explicit_level_move(levels: &mut Vec<String>, selected: &mut Option<String>, op: LevelMoveOp) -> bool {
+    let Some(idx) = resolve_selected_level_idx(levels, selected.as_deref()) else {
+        return false;
+    };
+    let moved_name = levels[idx].clone();
+    let changed = match op {
+        LevelMoveOp::Top => {
+            if idx == 0 {
+                false
+            } else {
+                let item = levels.remove(idx);
+                levels.insert(0, item);
+                true
+            }
+        }
+        LevelMoveOp::Up => {
+            if idx == 0 {
+                false
+            } else {
+                levels.swap(idx, idx - 1);
+                true
+            }
+        }
+        LevelMoveOp::Down => {
+            if idx + 1 >= levels.len() {
+                false
+            } else {
+                levels.swap(idx, idx + 1);
+                true
+            }
+        }
+        LevelMoveOp::End => {
+            if idx + 1 >= levels.len() {
+                false
+            } else {
+                let item = levels.remove(idx);
+                levels.push(item);
+                true
+            }
+        }
+    };
+    *selected = Some(moved_name);
+    changed
+}
+
+fn move_selected_level_in_drawer(app: &mut UiApp, state: &mut MvFormulaViewState, op: LevelMoveOp) -> Result<UiEventOutcome, String> {
+    let (_, ds) = ensure_variables_dialog_synced(app).ok_or_else(|| String::from("No active MultipleVariables sheet."))?;
+    let mut levels: Vec<String> = app.grid.variables_dialog.ordered_levels.iter().map(|l| l.level.clone()).collect();
+    let len = levels.len();
+    if apply_explicit_level_move(&mut levels, &mut state.selected_level_name, op) {
+        let new_idx = resolve_selected_level_idx(&levels, state.selected_level_name.as_deref());
+        app.grid.variables_dialog.set_level_order(LevelOrderSpec { order: LevelOrderKind::Explicit(levels), reversed: false }, Some(&ds));
+        let out = apply_categorical_order(app, state)?;
+        if len > 1 {
+            match (app.focus_widget_id.as_deref(), new_idx) {
+                (Some("mv_formula.vars.move_top"), Some(0)) => app.focus_widget_id = Some(String::from("mv_formula.vars.move_end")),
+                (Some("mv_formula.vars.move_up"), Some(0)) => app.focus_widget_id = Some(String::from("mv_formula.vars.move_down")),
+                (Some("mv_formula.vars.move_down"), Some(i)) if i + 1 >= len => {
+                    app.focus_widget_id = Some(String::from("mv_formula.vars.move_up"));
+                }
+                (Some("mv_formula.vars.move_end"), Some(i)) if i + 1 >= len => {
+                    app.focus_widget_id = Some(String::from("mv_formula.vars.move_top"));
+                }
+                _ => {}
+            }
+        }
+        return Ok(out);
+    }
+    Ok(UiEventOutcome { handled: true, action: String::from("mv_formula.vars_level_move_noop"), ..Default::default() })
+}
+
 fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub: &str) -> Result<Option<UiEventOutcome>, String> {
     if sub == "toggle_vars_drawer" {
         state.open_role_dropdown_col = None;
@@ -756,18 +871,24 @@ fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub:
         app.interaction.text_field_buffers.remove(WID_RECODE_TO);
         state.recode_from.clear();
         state.recode_to.clear();
+        state.selected_level_name = None;
         return Ok(Some(UiEventOutcome { handled: true, action: format!("mv_formula.vars_select_col:{col}"), ..Default::default() }));
     }
     if let Some(kind_str) = sub.strip_prefix("vars_order_kind:") {
+        let (_, ds) = ensure_variables_dialog_synced(app).ok_or_else(|| String::from("No active MultipleVariables sheet."))?;
         let kind = match kind_str {
             "entry" => LevelOrderKind::EntryOrder,
             "alpha" => LevelOrderKind::Alphabetical,
             "freq_desc" => LevelOrderKind::FrequencyDescending,
             "freq_asc" => LevelOrderKind::FrequencyAscending,
+            "explicit" => {
+                let levels: Vec<String> = app.grid.variables_dialog.ordered_levels.iter().map(|l| l.level.clone()).collect();
+                LevelOrderKind::Explicit(levels)
+            }
             _ => return Ok(None),
         };
-        let (_, ds) = ensure_variables_dialog_synced(app).ok_or_else(|| String::from("No active MultipleVariables sheet."))?;
-        let spec = LevelOrderSpec { order: kind, reversed: app.grid.variables_dialog.level_order.reversed };
+        let reversed = if matches!(kind, LevelOrderKind::Explicit(_)) { false } else { app.grid.variables_dialog.level_order.reversed };
+        let spec = LevelOrderSpec { order: kind, reversed };
         app.grid.variables_dialog.set_level_order(spec, Some(&ds));
         return apply_categorical_order(app, state).map(Some);
     }
@@ -787,10 +908,23 @@ fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub:
     {
         let _ = ensure_variables_dialog_synced(app);
         if let Some(level) = app.grid.variables_dialog.ordered_levels.get(idx).map(|l| l.level.clone()) {
+            state.selected_level_name = Some(level.clone());
             state.recode_from.clone_from(&level);
             sync_text_buffer(app, WID_RECODE_FROM, &level);
         }
         return Ok(Some(UiEventOutcome { handled: true, action: format!("mv_formula.vars_pick_level:{idx}"), ..Default::default() }));
+    }
+    if sub == "vars_move_top" {
+        return move_selected_level_in_drawer(app, state, LevelMoveOp::Top).map(Some);
+    }
+    if sub == "vars_move_up" {
+        return move_selected_level_in_drawer(app, state, LevelMoveOp::Up).map(Some);
+    }
+    if sub == "vars_move_down" {
+        return move_selected_level_in_drawer(app, state, LevelMoveOp::Down).map(Some);
+    }
+    if sub == "vars_move_end" {
+        return move_selected_level_in_drawer(app, state, LevelMoveOp::End).map(Some);
     }
     if let Some(raw) = sub.strip_prefix("vars_level_up:")
         && let Ok(idx) = raw.parse::<usize>()
@@ -798,6 +932,7 @@ fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub:
         let (_, ds) = ensure_variables_dialog_synced(app).ok_or_else(|| String::from("No active MultipleVariables sheet."))?;
         let mut levels: Vec<String> = app.grid.variables_dialog.ordered_levels.iter().map(|l| l.level.clone()).collect();
         if idx > 0 && idx < levels.len() {
+            state.selected_level_name = Some(levels[idx].clone());
             levels.swap(idx, idx - 1);
             app.grid.variables_dialog.set_level_order(LevelOrderSpec { order: LevelOrderKind::Explicit(levels), reversed: false }, Some(&ds));
             return apply_categorical_order(app, state).map(Some);
@@ -810,6 +945,7 @@ fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub:
         let (_, ds) = ensure_variables_dialog_synced(app).ok_or_else(|| String::from("No active MultipleVariables sheet."))?;
         let mut levels: Vec<String> = app.grid.variables_dialog.ordered_levels.iter().map(|l| l.level.clone()).collect();
         if idx + 1 < levels.len() {
+            state.selected_level_name = Some(levels[idx].clone());
             levels.swap(idx, idx + 1);
             app.grid.variables_dialog.set_level_order(LevelOrderSpec { order: LevelOrderKind::Explicit(levels), reversed: false }, Some(&ds));
             return apply_categorical_order(app, state).map(Some);
@@ -958,6 +1094,7 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut MvFormulaViewState, pay
         {
             let token = format_column_ref(&var.title);
             insert_snippet_into_formula(app, &token);
+            state.validation_feedback = None;
             return Ok(UiEventOutcome { handled: true, action: format!("mv_formula.insert_col:{col}"), ..Default::default() });
         }
         return Ok(UiEventOutcome { handled: false, action: String::from("mv_formula.insert_col_missing"), ..Default::default() });
@@ -965,12 +1102,14 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut MvFormulaViewState, pay
     if let Some(name) = payload.strip_prefix("insert_info:") {
         let token = format!("Info(\"{name}\")");
         insert_snippet_into_formula(app, &token);
+        state.validation_feedback = None;
         return Ok(UiEventOutcome { handled: true, action: format!("mv_formula.insert_info:{name}"), ..Default::default() });
     }
     if let Some(fn_name) = payload.strip_prefix("insert_fn:") {
         if let Some(spec) = FORMULA_FUNCTIONS.iter().find(|f| f.name == fn_name) {
             state.selected_function_name = Some(spec.name.to_owned());
             insert_snippet_into_formula(app, spec.insert_text);
+            state.validation_feedback = None;
             return Ok(UiEventOutcome { handled: true, action: format!("mv_formula.insert_fn:{fn_name}"), ..Default::default() });
         }
         return Ok(UiEventOutcome { handled: false, action: String::from("mv_formula.insert_fn_unknown"), ..Default::default() });
@@ -1044,6 +1183,28 @@ fn effective_commit_ok(builder: &LayoutBuilder<'_>, ds: &DataSheet) -> (bool, Op
         None
     };
     (commit_ok, reason)
+}
+
+fn panel_commit_ready(builder: &LayoutBuilder<'_>, ds: &DataSheet) -> (bool, Option<String>) {
+    let fb = &builder.app.grid.formula_bar;
+    let typed_name = builder.app.interaction.text_field_buffers.get(WID_NAME_INPUT).map(|b| b.text.trim());
+    let has_target = fb.target_column.is_some() || typed_name.unwrap_or(fb.target_title.trim()).is_empty().eq(&false);
+    let typed_formula = builder.app.interaction.text_field_buffers.get(WID_FORMULA_INPUT).map(|b| b.text.as_str());
+    let raw_formula = typed_formula.unwrap_or(fb.input.as_str());
+    let non_empty_formula = !raw_formula.trim().strip_prefix('=').unwrap_or(raw_formula.trim()).trim().is_empty();
+    let ready = !ds.frozen && fb.active && has_target && non_empty_formula;
+    let reason = if ds.frozen {
+        Some(String::from("Data sheet is frozen (read-only)."))
+    } else if !fb.active {
+        Some(String::from("Formula bar is inactive."))
+    } else if !has_target {
+        Some(String::from("Specify a variable name or target column."))
+    } else if !non_empty_formula {
+        Some(String::from("Enter a formula expression."))
+    } else {
+        None
+    };
+    (ready, reason)
 }
 
 /// Emit the calculated-variable formula bar strip when active or on a `MultipleVariables` sheet,
@@ -1741,28 +1902,21 @@ pub fn build_calculated_variable_panel(
     );
     cy += row_step;
 
-    // 4. Live syntax / circularity validation banner
+    // 4. Confirmation-only syntax / circularity validation banner (`R10.8` b5: surfaces on Apply/Enter)
     let fb = &builder.app.grid.formula_bar;
-    let (commit_ok, reason) = effective_commit_ok(builder, ds);
-    let (val_msg, val_bg, val_border, val_fg) = if let Some(err) = &fb.parse_error {
+    let (commit_ok, reason) = panel_commit_ready(builder, ds);
+    let (val_msg, val_bg, val_border, val_fg) = if let Some(err) = &state.validation_feedback {
         (err.clone(), Rgba8::rgba(220, 38, 38, 28), builder.palette.link_red, builder.palette.link_red)
-    } else if fb.is_valid && commit_ok {
+    } else if !commit_ok {
         (
-            mv_tr(&loc, "mv.panel.valid_formula", "Formula valid").to_owned(),
-            Rgba8::rgba(22, 163, 74, 28),
-            builder.palette.link_green,
-            builder.palette.link_green,
-        )
-    } else if fb.is_valid {
-        (
-            reason.clone().unwrap_or_else(|| String::from("Enter variable name")),
+            reason.clone().unwrap_or_else(|| String::from("Type = expression or pick a column/function")),
             builder.palette.surface,
             builder.palette.border,
             builder.palette.muted,
         )
     } else {
         (
-            state.validation_feedback.clone().unwrap_or_else(|| String::from("Type = expression or pick a column/function")),
+            w7_mv_ui::tr_staged(&loc, "w7.mv.formula_confirm_hint", "Validation runs on Apply or Enter.").to_owned(),
             builder.palette.surface,
             builder.palette.border,
             builder.palette.muted,
@@ -2530,13 +2684,14 @@ pub fn build_variables_drawer(
     );
     cy += step_18;
     let ord_spec = if vd.selected_column == Some(sel_col) { &vd.level_order } else { &var.level_order };
-    let ord_modes: [(&str, &str, bool); 4] = [
+    let ord_modes: [(&str, &str, bool); 5] = [
         ("entry", mv_tr(&loc, "mv.vars.order_entry", "Entry"), matches!(ord_spec.order, LevelOrderKind::EntryOrder)),
         ("alpha", mv_tr(&loc, "mv.vars.order_alpha", "A-Z"), matches!(ord_spec.order, LevelOrderKind::Alphabetical)),
         ("freq_desc", mv_tr(&loc, "mv.vars.order_freq_desc", "Freq-"), matches!(ord_spec.order, LevelOrderKind::FrequencyDescending)),
         ("freq_asc", mv_tr(&loc, "mv.vars.order_freq_asc", "Freq+"), matches!(ord_spec.order, LevelOrderKind::FrequencyAscending)),
+        ("explicit", w7_mv_ui::tr_staged(&loc, "w7.mv.level_order_explicit", "Explicit"), matches!(ord_spec.order, LevelOrderKind::Explicit(_))),
     ];
-    let ord_w = ((inner.width.saturating_sub(9)) / 4).max(scaled_u32(36.0, scale, 32, 72));
+    let ord_w = ((inner.width.saturating_sub(12)) / 5).max(scaled_u32(30.0, scale, 26, 68));
     for (idx, (key, lbl, selected)) in ord_modes.into_iter().enumerate() {
         emit_button(
             builder,
@@ -2548,7 +2703,7 @@ pub fn build_variables_drawer(
                 label: lbl,
                 keyboard_path: &format!("mv_formula.vars.order.{key}"),
                 focus_scope: FocusScope::Workspace,
-                tab_order: None,
+                tab_order: Some(410 + idx as u32),
                 primary: false,
                 selected,
                 shortcut: None,
@@ -2570,7 +2725,7 @@ pub fn build_variables_drawer(
             label: mv_tr(&loc, "mv.vars.reverse_order", "Reverse Order"),
             keyboard_path: "mv_formula.vars.order.reversed",
             focus_scope: FocusScope::Workspace,
-            tab_order: None,
+            tab_order: Some(415),
             checked: ord_spec.reversed,
             is_radio: false,
             enablement: if ds.frozen { ControlEnablement::disabled("Data sheet is frozen (read-only).") } else { ControlEnablement::enabled() },
@@ -2588,7 +2743,7 @@ pub fn build_variables_drawer(
             label: mv_tr(&loc, "mv.vars.apply_order", "Apply Order"),
             keyboard_path: "mv_formula.vars.order.apply",
             focus_scope: FocusScope::Workspace,
-            tab_order: None,
+            tab_order: Some(416),
             primary: false,
             selected: false,
             shortcut: None,
@@ -2598,17 +2753,32 @@ pub fn build_variables_drawer(
     );
     cy += step_24;
 
+    let levels = if vd.selected_column == Some(sel_col) {
+        vd.preview_recode(ds).map_or_else(|| var.ordered_levels_with(ord_spec), |(_, lvls)| lvls)
+    } else {
+        var.ordered_levels()
+    };
+    let level_names: Vec<String> = levels.iter().map(|l| l.level.clone()).collect();
+    let sel_lvl_idx = resolve_selected_level_idx(&level_names, state.selected_level_name.as_deref());
+    build_vars_stepwise_bar(builder, &drawer_wid, inner, cy, hdr_h, ds.frozen, sel_lvl_idx, levels.len(), &loc);
+    cy += step_24;
+
     // Distinct levels list + Up/Down/Ref controls + Recode block
     let recode_block_h = scaled_u32(136.0, scale, 110, 272);
     let levels_h = u32::try_from((inner.bottom() - cy).max(0)).unwrap_or(0).saturating_sub(recode_block_h);
     if levels_h >= scaled_u32(44.0, scale, 36, 88) {
-        let levels = if vd.selected_column == Some(sel_col) {
-            vd.preview_recode(ds).map_or_else(|| var.ordered_levels_with(ord_spec), |(_, lvls)| lvls)
-        } else {
-            var.ordered_levels()
-        };
         let levels_rect = LayoutRectPx::new(inner.x, cy, inner.width, levels_h);
-        build_vars_levels_list(builder, &drawer_wid, ds, is_calc, &levels, levels_rect, &text_style, mv_tr(&loc, "mv.vars.set_ref", "Ref"));
+        build_vars_levels_list(
+            builder,
+            &drawer_wid,
+            ds,
+            is_calc,
+            &levels,
+            sel_lvl_idx,
+            levels_rect,
+            &text_style,
+            mv_tr(&loc, "mv.vars.set_ref", "Ref"),
+        );
         cy += i32::try_from(levels_h + gap_h).unwrap_or(48);
     }
 
@@ -2752,12 +2922,65 @@ pub fn build_variables_drawer(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn build_vars_stepwise_bar(
+    builder: &mut LayoutBuilder<'_>,
+    parent: &WidgetId,
+    inner: LayoutRectPx,
+    cy: i32,
+    hdr_h: u32,
+    frozen: bool,
+    sel_lvl_idx: Option<usize>,
+    level_count: usize,
+    loc: &str,
+) {
+    let scale = builder.scale();
+    let can_move_up = !frozen && sel_lvl_idx.is_some_and(|i| i > 0);
+    let can_move_down = !frozen && sel_lvl_idx.is_some_and(|i| i + 1 < level_count);
+    let step_btn_specs: [(&str, &str, &str, bool); 4] = [
+        ("mv_formula.vars.move_top", w7_mv_ui::tr_staged(loc, "w7.mv.move_to_top", "Move to top"), "vars_move_top", can_move_up),
+        ("mv_formula.vars.move_up", w7_mv_ui::tr_staged(loc, "w7.mv.move_up", "Move up"), "vars_move_up", can_move_up),
+        ("mv_formula.vars.move_down", w7_mv_ui::tr_staged(loc, "w7.mv.move_down", "Move down"), "vars_move_down", can_move_down),
+        ("mv_formula.vars.move_end", w7_mv_ui::tr_staged(loc, "w7.mv.move_to_end", "Move to end"), "vars_move_end", can_move_down),
+    ];
+    let step_w = ((inner.width.saturating_sub(9)) / 4).max(scaled_u32(40.0, scale, 34, 80));
+    for (idx, (wid_str, lbl, act, enabled)) in step_btn_specs.into_iter().enumerate() {
+        let bx = inner.x + i32::try_from((idx as u32) * (step_w + 3)).unwrap_or(0);
+        let bw = if idx == 3 { inner.width.saturating_sub(3 * (step_w + 3)).max(step_w) } else { step_w };
+        emit_button(
+            builder,
+            ButtonWidgetSpec {
+                id: wid_str,
+                parent: Some(parent.clone()),
+                z_layer: ZLayer::FloatingOverlay,
+                rect: LayoutRectPx::new(bx, cy, bw, hdr_h),
+                label: lbl,
+                keyboard_path: wid_str,
+                focus_scope: FocusScope::Workspace,
+                tab_order: Some(417 + idx as u32),
+                primary: false,
+                selected: false,
+                shortcut: None,
+                enablement: if enabled {
+                    ControlEnablement::enabled()
+                } else if frozen {
+                    ControlEnablement::disabled("Data sheet is frozen (read-only).")
+                } else {
+                    ControlEnablement::disabled("Select a movable categorical level.")
+                },
+                action: custom_action(act),
+            },
+        );
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn build_vars_levels_list(
     builder: &mut LayoutBuilder<'_>,
     parent: &WidgetId,
     ds: &DataSheet,
     is_calc: bool,
     levels: &[curvebook_doc::CategoricalLevelSummary],
+    selected_idx: Option<usize>,
     rect: LayoutRectPx,
     style: &UiTextStyle,
     ref_label: &str,
@@ -2821,12 +3044,15 @@ fn build_vars_levels_list(
             let lvl_id = format!("mv_formula.vars.level.{idx}");
             let lvl_en = if is_calc { ControlEnablement::disabled("Calculated column cannot be recoded.") } else { ControlEnablement::enabled() };
             let st = widget_state(builder, &lvl_id, lvl_en.clone());
+            let is_selected = selected_idx == Some(idx);
+            let mut lvl_meta = selectable_meta(WidgetRole::Button, lbl_text.clone(), FocusScope::Workspace, &lvl_id, is_selected);
+            lvl_meta.tab_order = Some(430 + (idx as u32) * 4);
             let lvl_wid = builder.push_node(NodeSpec {
                 id: WidgetId::from(lvl_id.as_str()),
                 parent: Some(list_wid.clone()),
                 z_layer: ZLayer::FloatingOverlay,
                 rect_px: lbl_rect,
-                a11y: labeled_meta(WidgetRole::Button, lbl_text.clone(), FocusScope::Workspace, &lvl_id),
+                a11y: lvl_meta,
                 state: st.clone(),
                 action: if lvl_en.enabled { custom_action(format!("vars_pick_level:{idx}")) } else { WidgetAction::NoOp },
             });
@@ -2834,7 +3060,13 @@ fn build_vars_levels_list(
                 ZLayer::FloatingOverlay,
                 Some(&lvl_wid),
                 lbl_rect,
-                if st.hovered { builder.palette.header } else { builder.palette.surface },
+                if is_selected {
+                    builder.palette.accent.with_alpha(44)
+                } else if st.hovered {
+                    builder.palette.header
+                } else {
+                    builder.palette.surface
+                },
             );
             paint_text_fitted(
                 builder,
@@ -2867,6 +3099,7 @@ fn build_vars_levels_list(
                 "^",
                 up_en,
                 format!("vars_level_up:{idx}"),
+                Some(430 + (idx as u32) * 4 + 1),
                 style,
             );
 
@@ -2887,6 +3120,7 @@ fn build_vars_levels_list(
                 "v",
                 dn_en,
                 format!("vars_level_dn:{idx}"),
+                Some(430 + (idx as u32) * 4 + 2),
                 style,
             );
 
@@ -2900,6 +3134,7 @@ fn build_vars_levels_list(
                 ref_label,
                 ord_en.clone(),
                 format!("vars_level_ref:{idx}"),
+                Some(430 + (idx as u32) * 4 + 3),
                 style,
             );
         }
@@ -2918,15 +3153,18 @@ fn emit_scrolled_mini_btn(
     label: &str,
     en: ControlEnablement,
     payload: String,
+    tab_order: Option<u32>,
     style: &UiTextStyle,
 ) {
     let st = widget_state(builder, id, en.clone());
+    let mut meta = labeled_meta(WidgetRole::Button, label, FocusScope::Workspace, id);
+    meta.tab_order = tab_order;
     let wid = builder.push_node(NodeSpec {
         id: WidgetId::from(id),
         parent: Some(parent.clone()),
         z_layer: ZLayer::FloatingOverlay,
         rect_px: rect,
-        a11y: labeled_meta(WidgetRole::Button, label, FocusScope::Workspace, id),
+        a11y: meta,
         state: st.clone(),
         action: if en.enabled { custom_action(payload) } else { WidgetAction::NoOp },
     });

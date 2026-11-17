@@ -1753,6 +1753,31 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
     } else {
         ControlEnablement::disabled("Graph has no ModelEquation annotation.")
     };
+    let mv_cat_gate = if !st.mv_levels.is_empty() {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled(crate::views::mv_formula::w7_mv_ui::tr_staged(
+            &app.locale,
+            "w7.mv.format_graph_no_cat_levels",
+            "No categorical X or colour levels on this graph.",
+        ))
+    };
+    let sel_idx = crate::views::mv_formula::resolve_selected_level_idx(&st.mv_levels, st.mv_selected_level.as_deref());
+    let sel_lvl = sel_idx.and_then(|i| st.mv_levels.get(i)).cloned().unwrap_or_default();
+    let up_gate = if sel_idx.is_some_and(|i| i > 0) {
+        ControlEnablement::enabled()
+    } else if st.mv_levels.is_empty() {
+        mv_cat_gate.clone()
+    } else {
+        ControlEnablement::disabled("Selected level is already at the top.")
+    };
+    let down_gate = if sel_idx.is_some_and(|i| i + 1 < st.mv_levels.len()) {
+        ControlEnablement::enabled()
+    } else if st.mv_levels.is_empty() {
+        mv_cat_gate.clone()
+    } else {
+        ControlEnablement::disabled("Selected level is already at the end.")
+    };
     let controls = vec![
         node("format_graph.graph_kind", "combobox", "Graph kind", json!(st.graph_kind), ControlEnablement::enabled(), pos(0)),
         node(
@@ -1792,6 +1817,40 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
             json!(st.model_equation_mode.map(equation_display_mode_str)),
             eq_gate,
             pos(10),
+        ),
+        node("format_graph.level_order", "readonly", "Explicit level order", json!(st.mv_levels), mv_cat_gate.clone(), pos(11)),
+        node("format_graph.selected_level", "combobox", "Selected categorical level", json!(sel_lvl), mv_cat_gate, pos(12)),
+        node(
+            "format_graph.move_to_top",
+            "button",
+            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_to_top", "Move to top"),
+            json!(sel_lvl),
+            up_gate.clone(),
+            pos(13),
+        ),
+        node(
+            "format_graph.move_up",
+            "button",
+            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_up", "Move up"),
+            json!(sel_lvl),
+            up_gate,
+            pos(14),
+        ),
+        node(
+            "format_graph.move_down",
+            "button",
+            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_down", "Move down"),
+            json!(sel_lvl),
+            down_gate.clone(),
+            pos(15),
+        ),
+        node(
+            "format_graph.move_to_end",
+            "button",
+            crate::views::mv_formula::w7_mv_ui::tr_staged(&app.locale, "w7.mv.move_to_end", "Move to end"),
+            json!(sel_lvl),
+            down_gate,
+            pos(16),
         ),
     ];
     (

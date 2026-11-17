@@ -785,6 +785,27 @@ fn try_toggle_format_graph_click(app: &mut UiApp, wid: &str) -> Result<Option<Va
             app.canvas_dialogs.format_graph.set_model_equation_mode(next);
             return Ok(Some(json!({ "clicked": wid, "mode": equation_display_mode_str(next), "updated": true })));
         }
+        "format_graph.selected_level" => app.canvas_dialogs.format_graph.cycle_selected_mv_level(),
+        "format_graph.move_to_top" | "format_graph.move_up" | "format_graph.move_down" | "format_graph.move_to_end" => {
+            let op = wid.strip_prefix("format_graph.").unwrap_or(wid);
+            let _ = app.canvas_dialogs.format_graph.reorder_mv_level(op).map_err(disabled_err)?;
+            let fg = &app.canvas_dialogs.format_graph;
+            let len = fg.mv_levels.len();
+            let new_idx = crate::views::mv_formula::resolve_selected_level_idx(&fg.mv_levels, fg.mv_selected_level.as_deref());
+            if len > 1 {
+                match (app.focus_widget_id.as_deref(), new_idx) {
+                    (Some("format_graph.move_to_top"), Some(0)) => app.focus_widget_id = Some(String::from("format_graph.move_to_end")),
+                    (Some("format_graph.move_up"), Some(0)) => app.focus_widget_id = Some(String::from("format_graph.move_down")),
+                    (Some("format_graph.move_down"), Some(i)) if i + 1 >= len => {
+                        app.focus_widget_id = Some(String::from("format_graph.move_up"));
+                    }
+                    (Some("format_graph.move_to_end"), Some(i)) if i + 1 >= len => {
+                        app.focus_widget_id = Some(String::from("format_graph.move_to_top"));
+                    }
+                    _ => {}
+                }
+            }
+        }
         _ => return Ok(None),
     }
     Ok(Some(json!({ "clicked": wid, "updated": true })))

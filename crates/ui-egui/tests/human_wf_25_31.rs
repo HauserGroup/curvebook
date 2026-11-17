@@ -893,13 +893,18 @@ fn wf30_human_calculated_variables_formula_bar_and_guards() -> Result<(), String
     }
     let _ = click_widget_center(&mut driver, &wid("formula_bar.open_col.3"))?;
     replace_text_widget(&mut driver, "formula_bar.input", "= DoubleLog + 1")?;
-    let cycle_status = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing mv_formula.validation_status"))?;
-    if !cycle_status.a11y.label.to_ascii_lowercase().contains("circul") {
-        return Err(format!("expected circular dependency feedback, got `{}`", cycle_status.a11y.label));
+    let mid_cycle_status = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing mv_formula.validation_status"))?;
+    if mid_cycle_status.a11y.label.to_ascii_lowercase().contains("circul") {
+        return Err(format!("circularity message must not surface mid-typing: `{}`", mid_cycle_status.a11y.label));
     }
     let commit_cycle = driver.find_widget("formula_bar.commit").ok_or_else(|| String::from("missing formula_bar.commit"))?;
-    if commit_cycle.state.enablement.enabled {
-        return Err(String::from("expected circular formula to disable formula_bar.commit"));
+    if !commit_cycle.state.enablement.enabled {
+        return Err(String::from("expected formula_bar.commit enabled so Enter/Apply can trigger validation"));
+    }
+    let _ = click_widget_center(&mut driver, &wid("formula_bar.commit"))?;
+    let cycle_status = driver.find_widget("mv_formula.validation_status").ok_or_else(|| String::from("missing mv_formula.validation_status"))?;
+    if !cycle_status.a11y.label.to_ascii_lowercase().contains("circul") {
+        return Err(format!("expected circular dependency feedback after Apply, got `{}`", cycle_status.a11y.label));
     }
     let _ = click_widget_center(&mut driver, &wid("formula_bar.cancel"))?;
     let _ = click_widget_center(&mut driver, &wid("mv_formula.panel_toggle"))?;
