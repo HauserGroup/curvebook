@@ -542,13 +542,70 @@
         if (!chrome) {
           return;
         }
-        if (a11yChromeEl && chrome.status_summary) {
-          a11yChromeEl.textContent = chrome.status_summary;
+        const tree = chrome.a11y_tree;
+        if (a11yChromeEl) {
+          if (tree && Array.isArray(tree.nodes)) {
+            a11yChromeEl.setAttribute("dir", tree.dir === "rtl" ? "rtl" : "ltr");
+            if (typeof tree.locale === "string" && tree.locale.length > 0) {
+              a11yChromeEl.setAttribute("lang", tree.locale);
+            }
+            const allowedTags = new Set(["div", "button", "input", "textarea", "span"]);
+            const frag = document.createDocumentFragment();
+            const domById = new Map();
+            for (const node of tree.nodes) {
+              if (!node || !node.dom_id) {
+                continue;
+              }
+              const tag = allowedTags.has(node.tag_name) ? node.tag_name : "div";
+              const el = document.createElement(tag);
+              el.id = String(node.dom_id);
+              if (node.attributes && typeof node.attributes === "object") {
+                for (const [k, v] of Object.entries(node.attributes)) {
+                  if (v !== null && v !== undefined) {
+                    el.setAttribute(k, String(v));
+                  }
+                }
+              }
+              if (tag === "input" || tag === "textarea") {
+                el.value = node.value_text ? String(node.value_text) : "";
+              } else if (typeof node.label === "string") {
+                el.textContent = node.label;
+              }
+              domById.set(node.dom_id, { el, node });
+            }
+            for (const entry of domById.values()) {
+              const parentEntry = entry.node.parent_dom_id ? domById.get(entry.node.parent_dom_id) : null;
+              if (parentEntry && parentEntry.el !== entry.el) {
+                parentEntry.el.appendChild(entry.el);
+              } else {
+                frag.appendChild(entry.el);
+              }
+            }
+            const liveText = (typeof tree.live_announcement === "string" && tree.live_announcement.length > 0)
+              ? tree.live_announcement
+              : (chrome.status_summary || "");
+            const liveEl = document.createElement("div");
+            liveEl.id = "cb-a11y-live";
+            liveEl.setAttribute("role", "status");
+            liveEl.setAttribute("aria-live", typeof tree.live_politeness === "string" ? tree.live_politeness : "polite");
+            liveEl.textContent = liveText;
+            frag.appendChild(liveEl);
+            a11yChromeEl.replaceChildren(frag);
+          } else if (chrome.status_summary) {
+            a11yChromeEl.textContent = chrome.status_summary;
+          }
         }
-        if (canvas && chrome.active_dialog && chrome.active_dialog !== "None") {
-          canvas.setAttribute("aria-label", "CurveBook workspace dialog " + chrome.active_dialog);
-        } else if (canvas) {
-          canvas.setAttribute("aria-label", "CurveBook workspace canvas");
+        if (canvas) {
+          if (chrome.active_dialog && chrome.active_dialog !== "None") {
+            canvas.setAttribute("aria-label", "CurveBook workspace dialog " + chrome.active_dialog);
+          } else {
+            canvas.setAttribute("aria-label", "CurveBook workspace canvas");
+          }
+          if (tree && typeof tree.focused_dom_id === "string" && tree.focused_dom_id.length > 0) {
+            canvas.setAttribute("aria-activedescendant", tree.focused_dom_id);
+          } else {
+            canvas.removeAttribute("aria-activedescendant");
+          }
         }
       }
 

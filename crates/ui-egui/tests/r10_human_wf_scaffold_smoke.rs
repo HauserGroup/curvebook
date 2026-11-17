@@ -73,8 +73,8 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     let valid_meta = curvebook_ui_egui::views::a11y::labeled_meta(WidgetRole::Button, "Run", FocusScope::Workspace, "Enter");
     validate_interactive_a11y(&valid_meta)?;
 
-    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 3);
-    assert!(all_keys().count() >= 312);
+    assert_eq!(EXTRA_SHARD_CATALOGS.len(), 16);
+    assert!(all_keys().count() >= 653);
     assert!(missing_translations().is_empty());
     for &locale in LOCALES {
         assert!(try_tr(locale, "menu.file").is_some(), "missing menu.file for `{locale}`");

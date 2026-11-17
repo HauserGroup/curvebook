@@ -1,5 +1,5 @@
 //! Bounded dimension limits, confidence-level validation, and structured error types for
-//! `curvebook-doc` (`docs/data-tables-and-transforms.md` §1.3 & §2.1).
+//! `curvebook-doc` (`docs/implementation/data-tables-and-transforms.md` §1.3 & §2.1).
 
 use std::fmt;
 
@@ -10,13 +10,13 @@ use crate::layout::LayoutItemLimitError;
 use crate::project::SheetFolderKind;
 use crate::{SubcolumnMode, TableKind};
 
-/// Hard ceiling on rows per data table (`docs/data-tables-and-transforms.md` §1.3).
+/// Hard ceiling on rows per data table (`docs/implementation/data-tables-and-transforms.md` §1.3).
 pub const MAX_ROWS: usize = 1_000_000;
 
-/// Hard ceiling on data-set / variable columns per table (`docs/data-tables-and-transforms.md` §1.3).
+/// Hard ceiling on data-set / variable columns per table (`docs/implementation/data-tables-and-transforms.md` §1.3).
 pub const MAX_DATA_SETS: usize = 1_024;
 
-/// Hard ceiling on replicate subcolumns per data set (`docs/data-tables-and-transforms.md` §1.3).
+/// Hard ceiling on replicate subcolumns per data set (`docs/implementation/data-tables-and-transforms.md` §1.3).
 pub const MAX_SUBCOLUMNS: usize = 512;
 
 /// Hard ceiling on UTF-8 byte length of sheet, axis, row, and column titles.
@@ -106,7 +106,7 @@ pub fn validate_confidence_level(percent: f64) -> Result<ConfidenceLevel, DocErr
 }
 
 /// Validation failure when reconstructing within-point parametric moments from pre-summarized
-/// subcolumns (`MeanSdN`, `MeanSemN`, `MeanCvN`; `docs/data-tables-and-transforms.md` §2.1).
+/// subcolumns (`MeanSdN`, `MeanSemN`, `MeanCvN`; `docs/implementation/data-tables-and-transforms.md` §2.1).
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryPointError {
     /// Subcolumn mode does not encode parametric `(Mean, SD/SEM/%CV, N)` moments.

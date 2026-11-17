@@ -155,7 +155,7 @@ fn verify_non_latin_scripts(keys: &[&'static str]) {
     assert!(has_arabic(locale_display_name("ar")));
     assert!(has_hebrew(locale_display_name("he")));
     for &key in keys {
-        if key == "table.xy" {
+        if matches!(key, "table.xy" | "w5.grid_core.n_col" | "w5.grid_core.x_col" | "w5.grid_core.row_number_header") {
             continue;
         }
         assert!(has_cyrillic(tr("ru", key)), "expected Cyrillic in ru translation for `{key}`");
@@ -189,7 +189,7 @@ fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     let expected_locales = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected_locales);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 312);
+    assert_eq!(catalog_len(), 653);
     assert!(missing_translations().is_empty());
 
     let keys: Vec<&'static str> = all_keys().collect();

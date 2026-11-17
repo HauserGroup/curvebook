@@ -1,5 +1,5 @@
 //! Topological dependency DAG, cycle detection, and deterministic evaluation of calculated
-//! variables in `MultipleVariablesTable` (`docs/data-tables-and-transforms.md` §4).
+//! variables in `MultipleVariablesTable` (`docs/implementation/data-tables-and-transforms.md` §4).
 
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, BinaryHeap};

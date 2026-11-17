@@ -1,6 +1,6 @@
 //! Calculated-variable formula parser, AST, vectorized evaluator, and topological DAG solver.
 //!
-//! Governing spec: `docs/data-tables-and-transforms.md` (§4).
+//! Governing spec: `docs/implementation/data-tables-and-transforms.md` (§4).
 
 pub mod dag;
 pub mod eval;

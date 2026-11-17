@@ -3652,7 +3652,7 @@ pub const GRAPH_TYPE_OPTIONS: &[GraphTypeOption] = &[
     },
 ];
 
-/// First-visit `Change Graph Type` chooser state (`docs/graphing-and-layouts.md` §2).
+/// First-visit `Change Graph Type` chooser state (`docs/implementation/graphing-and-layouts.md` §2).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ChangeGraphTypeState {
     pub graph_sheet_id: Option<SheetId>,
@@ -6172,7 +6172,7 @@ impl SplitWorkspaceState {
             })
             .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
 
-        let secondary = self.secondary_sheet_id.clone().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).or_else(|| {
+        let secondary = self.secondary_sheet_id.clone().filter(|id| doc.sheet_section(id).is_some()).or_else(|| {
             if let Some(act) = &active
                 && (doc.graph_sheet(act).is_some() || doc.layout_sheet(act).is_some())
             {
@@ -7052,7 +7052,10 @@ impl CanvasDialogState {
     }
 }
 
-pub use crate::compositor::{WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, render_workspace_frame_png, render_workspace_rgba};
+pub use crate::compositor::{
+    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_for_dpi, render_workspace_frame_png,
+    render_workspace_rgba,
+};
 
 #[cfg(test)]
 mod tests {

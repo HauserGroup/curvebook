@@ -1,5 +1,5 @@
 //! Normalization (`0%..100%` / `0..1`) and baseline removal (`TransformAnalysisSpec::Normalize`,
-//! `TransformAnalysisSpec::RemoveBaseline`, `docs/data-tables-and-transforms.md` §5.2–§5.3).
+//! `TransformAnalysisSpec::RemoveBaseline`, `docs/implementation/data-tables-and-transforms.md` §5.2–§5.3).
 
 use curvebook_doc::{
     BaselineOperation, Cell, CellValue, DataSetColumn, DataSheet, NormalizeAnchor, ResultCell, ResultScalarEntry, SheetId, SubcolumnMode,

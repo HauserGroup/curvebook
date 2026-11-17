@@ -1,6 +1,6 @@
 //! NIST Statistical Reference Datasets (StRD) parser, data structures, and offline certified
 //! reference benchmarks (`docs/development.md` §Verified NIST StRD corpus;
-//! `docs/statistics-implementation.md` §1.3, §6).
+//! `docs/implementation/statistics-implementation.md` §1.3, §6).
 
 pub mod corpus;
 pub mod datasets;

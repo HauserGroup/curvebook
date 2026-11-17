@@ -1,5 +1,5 @@
 //! Mathematical transforms on X and/or Y series with analytical and endpoint error
-//! propagation (`TransformAnalysisSpec::Math`, `docs/data-tables-and-transforms.md` §5.1).
+//! propagation (`TransformAnalysisSpec::Math`, `docs/implementation/data-tables-and-transforms.md` §5.1).
 
 use curvebook_doc::{
     Cell, CellValue, DataSetColumn, DataSheet, ErrorPropagationMode, InfoSheet, MathTransformPreset, ResultCell, SubcolumnMode, TableArchetype,

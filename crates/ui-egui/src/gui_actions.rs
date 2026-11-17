@@ -24,7 +24,7 @@ use crate::control_io::{
     dispatch_ui_command_as_ui, encode_base64, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
     require_params_object_or_null, write_host_file,
 };
-use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, equation_display_mode_str};
+use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, ExportFigureFormat, equation_display_mode_str};
 use crate::inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
 use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event, sync_dialogs_on_sheet_switch};
 use crate::menus::tooltips::menu_bar_tooltips;
@@ -644,8 +644,13 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
         "scroll" | "wheel" => {
-            let dy = opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input)?.unwrap_or(-120.0);
-            let out = dispatch_ui_event(app, UiInputEvent::WheelZoom { x, y, delta_y: dy, modifiers }, metrics).map_err(map_err)?;
+            let dx = opt_finite_f64_param(params, &["delta_x"]).map_err(bad_input)?;
+            let dy = opt_finite_f64_param(params, &["delta_y"]).map_err(bad_input)?;
+            let (delta_x, delta_y) = match (dx, dy) {
+                (None, None) => (0.0, -120.0),
+                _ => (dx.unwrap_or(0.0), dy.unwrap_or(0.0)),
+            };
+            let out = crate::interaction::dispatch_mouse_wheel(app, metrics, x, y, delta_x, delta_y, modifiers).map_err(map_err)?;
             serde_json::to_value(out).unwrap_or(Value::Null)
         }
         "double_click" => {
@@ -1648,12 +1653,20 @@ fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(
                 }
             }
         }
-        ActiveDialog::DuplicateAnalysisPrompt { .. } => {
+        ActiveDialog::DuplicateAnalysisPrompt { existing_result_ids, .. } => {
+            let first_existing = existing_result_ids.first().map(|id| id.as_str().to_owned());
             for (key, val) in fields {
                 match key.as_str() {
                     "choice" | "duplicate.choice" => {
                         let s = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
-                        if !s.eq_ignore_ascii_case("create_new") && !s.eq_ignore_ascii_case("modify_existing") {
+                        if s.eq_ignore_ascii_case("create_new") {
+                            app.view_shards.analyze_picker.duplicate_choice = crate::views::analyze_picker::DuplicateChoice::CreateNew;
+                        } else if s.eq_ignore_ascii_case("modify_existing") {
+                            app.view_shards.analyze_picker.duplicate_choice = crate::views::analyze_picker::DuplicateChoice::ModifyExisting;
+                            if app.view_shards.analyze_picker.duplicate_target_id.is_none() {
+                                app.view_shards.analyze_picker.duplicate_target_id.clone_from(&first_existing);
+                            }
+                        } else {
                             return Err(bad_input(format!("unsupported duplicate analysis choice `{s}`; expected create_new or modify_existing")));
                         }
                     }
@@ -1793,8 +1806,24 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
         ActiveDialog::FormatGraph { .. } => commit_many_intents_opt_close(app, app.canvas_dialogs.format_graph.commit_intents(), action != "apply"),
         ActiveDialog::PageLayoutComposer { .. } => commit_many_intents_opt_close(app, app.canvas_dialogs.page_layout.commit_intents(), true),
         ActiveDialog::ExportFigure { sheet_id } => {
-            let intent = app.canvas_dialogs.export_figure.commit_intent(&sheet_id);
-            commit_single_intent(app, Some(intent), true)
+            let mut intent = app.canvas_dialogs.export_figure.commit_intent(&sheet_id);
+            let export_opts = &app.view_shards.dialogs_graph_misc;
+            if matches!(app.canvas_dialogs.export_figure.format, ExportFigureFormat::Pdf)
+                && let Some(obj) = intent.params.as_object_mut()
+            {
+                let pdf_cs = if export_opts.export_color_space == "CMYK-Proof" { "cmyk" } else { "srgb" };
+                obj.insert(String::from("color_space"), json!(pdf_cs));
+            }
+            let opts_snapshot = json!({
+                "transparent_bg": export_opts.export_transparent_bg,
+                "color_space": export_opts.export_color_space,
+                "unit": export_opts.export_unit,
+            });
+            let mut res = commit_single_intent(app, Some(intent), true)?;
+            if let Some(obj) = res.as_object_mut() {
+                obj.insert(String::from("export_options"), opts_snapshot);
+            }
+            Ok(res)
         }
         ActiveDialog::ConvertArchetype { .. } => {
             if action == "preview" || app.canvas_dialogs.convert_archetype.preview_only {
@@ -1814,8 +1843,9 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             }
         }
         ActiveDialog::ImportReshape => {
-            let intent = app.grid.import_reshape.build_import_intent().map_err(bad_input)?;
-            commit_single_intent(app, Some(intent), true)
+            let payload = crate::views::import_paste::commit_import_paste_dialog(app).map_err(bad_input)?;
+            app.canvas_dialogs.close_dialog();
+            Ok(json!({ "action": action, "mutated": true, "payload": payload }))
         }
         ActiveDialog::ExcludeWithReason { .. } => {
             let intent = app.canvas_dialogs.exclude_with_reason.commit_intent().map_err(bad_input)?;
@@ -1960,24 +1990,34 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
         Some(v) => Some(v),
         None => params.get("fields").and_then(Value::as_object).and_then(|f| f.get("choice")),
     };
-    let choice_str = match raw_choice {
-        None | Some(Value::Null) => "create_new",
+    let intent = match raw_choice {
+        None | Some(Value::Null) => {
+            let shard_snapshot = app.view_shards.analyze_picker.clone();
+            crate::views::analyze_picker::resolve_duplicate_intent(app, &shard_snapshot, existing_ids)
+                .ok_or_else(|| bad_input("failed to resolve duplicate analysis choice"))?
+        }
         Some(other) => {
-            other.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_input("duplicate prompt `choice` must be a string"))?
+            let choice_str =
+                other.as_str().map(str::trim).filter(|s| !s.is_empty()).ok_or_else(|| bad_input("duplicate prompt `choice` must be a string"))?;
+            let choice = if choice_str.eq_ignore_ascii_case("modify_existing")
+                && let Some(first) = existing_ids.first()
+            {
+                AnalyzeDuplicateChoice::ModifyExisting(first.clone())
+            } else if choice_str.eq_ignore_ascii_case("create_new") || choice_str.eq_ignore_ascii_case("modify_existing") {
+                AnalyzeDuplicateChoice::CreateNew
+            } else {
+                return Err(bad_input(format!("unsupported duplicate analysis choice `{choice_str}`; expected create_new or modify_existing")));
+            };
+            app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice).ok_or_else(|| bad_input("failed to resolve duplicate analysis choice"))?
         }
     };
-    let choice = if choice_str.eq_ignore_ascii_case("modify_existing")
-        && let Some(first) = existing_ids.first()
-    {
-        AnalyzeDuplicateChoice::ModifyExisting(first.clone())
-    } else if choice_str.eq_ignore_ascii_case("create_new") || choice_str.eq_ignore_ascii_case("modify_existing") {
-        AnalyzeDuplicateChoice::CreateNew
-    } else {
-        return Err(bad_input(format!("unsupported duplicate analysis choice `{choice_str}`; expected create_new or modify_existing")));
-    };
-    let intent =
-        app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice).ok_or_else(|| bad_input("failed to resolve duplicate analysis choice"))?;
-    commit_single_intent(app, Some(intent), true)
+    let out = commit_single_intent(app, Some(intent), true)?;
+    if let Some(new_id) = out.get("payload").and_then(|p| p.get("sheet_id")).and_then(Value::as_str) {
+        let _ = app.execute_command("sheet.select", json!({ "sheet_id": new_id }));
+    }
+    app.view_shards.analyze_picker.duplicate_choice = crate::views::analyze_picker::DuplicateChoice::CreateNew;
+    app.view_shards.analyze_picker.duplicate_target_id = None;
+    Ok(out)
 }
 
 fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {

@@ -294,12 +294,18 @@ fn node_bounds_from_tree(tree: &LayoutTree, widget_id: &str, include_bounds: boo
         "dialog.button.cancel" => "modal.cancel",
         "dialog.button.close" => "modal.close",
         "analyze.entry" => "analyze.entries_list",
+        "edit.two_group.welch" => "edit.tg.welch",
+        "edit.factorial.residual_covariance" => "edit.factorial.cov.cs",
         other => other,
     };
-    tree.node(lookup_id)
-        .or_else(|| tree.node(widget_id))
+    tree.node(widget_id)
+        .or_else(|| tree.node(lookup_id))
         .filter(|n| n.drawn_in_frame && n.bounds.visible_rect_px.width > 0 && n.bounds.visible_rect_px.height > 0)
-        .map(|n| n.bounds.rect_logical)
+        .map(|n| {
+            let s = tree.metrics.clamped_scale_factor();
+            let v = n.bounds.visible_rect_px;
+            [f64::from(v.x) / s, f64::from(v.y) / s, f64::from(v.width) / s, f64::from(v.height) / s]
+        })
 }
 
 fn build_grid_selection_snapshot(app: &UiApp, doc: &ProjectDocument) -> GridSelectionSnapshot {

@@ -1,7 +1,7 @@
 //! Scientific typography, axis tick formatting, superscripts/subscripts, Greek symbols and p-value
 //! label layout for CurveBook.
 //!
-//! Layer L2 crate. Governing spec: `docs/graphing-and-layouts.md` (§3.3) and `docs/development.md` (§Fonts).
+//! Layer L2 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§3.3) and `docs/development.md` (§Fonts).
 #![forbid(unsafe_code)]
 
 pub mod glyph_paths;

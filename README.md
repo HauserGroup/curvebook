@@ -118,10 +118,11 @@ For protocol framing details, attaching to a shared desktop window (`curvebook -
 
 ## Documentation & Support
 
+- **Documentation index:** [`docs/README.md`](docs/README.md)
 - **Status & Roadmap:** [`docs/STATUS.md`](docs/STATUS.md) · [`docs/ROADMAP.md`](docs/ROADMAP.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md)
-- **MCP, CLI & Formats:** [`docs/mcp.md`](docs/mcp.md) · [`docs/commands.md`](docs/commands.md) · [`docs/scripting-and-automation.md`](docs/scripting-and-automation.md) · [`docs/control-protocol.md`](docs/control-protocol.md) · [`docs/file-formats.md`](docs/file-formats.md)
+- **MCP, CLI & Formats:** [`docs/mcp.md`](docs/mcp.md) · [`docs/commands.md`](docs/commands.md) · [`docs/implementation/scripting-and-automation.md`](docs/implementation/scripting-and-automation.md) · [`docs/control-protocol.md`](docs/control-protocol.md) · [`docs/file-formats.md`](docs/file-formats.md)
 - **Architecture & Development:** [`docs/architecture.md`](docs/architecture.md) · [`docs/development.md`](docs/development.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`AGENTS.md`](AGENTS.md) · [`docs/pitfalls.md`](docs/pitfalls.md)
-- **Scientific & UI Specifications:** [`docs/data-tables-and-transforms.md`](docs/data-tables-and-transforms.md) · [`docs/statistics-implementation.md`](docs/statistics-implementation.md) · [`docs/curve-fitting-implementation.md`](docs/curve-fitting-implementation.md) · [`docs/graphing-and-layouts.md`](docs/graphing-and-layouts.md) · [`docs/gui-workflows.md`](docs/gui-workflows.md)
+- **Scientific & UI Specifications:** [`docs/implementation/data-tables-and-transforms.md`](docs/implementation/data-tables-and-transforms.md) · [`docs/implementation/statistics-implementation.md`](docs/implementation/statistics-implementation.md) · [`docs/implementation/curve-fitting-implementation.md`](docs/implementation/curve-fitting-implementation.md) · [`docs/implementation/graphing-and-layouts.md`](docs/implementation/graphing-and-layouts.md) · [`docs/gui-workflows.md`](docs/gui-workflows.md)
 - **Support & Security:** Open [bug](.github/ISSUE_TEMPLATE/bug_report.yml), [numerical result](.github/ISSUE_TEMPLATE/numerical_result.yml), or [feature](.github/ISSUE_TEMPLATE/feature_request.yml) reports via GitHub Issues; report security issues privately following [`SECURITY.md`](SECURITY.md).
 
 ## License & Privacy

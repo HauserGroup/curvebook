@@ -14,7 +14,9 @@ use curvebook_text::{
     shape_bidi_runs,
 };
 use curvebook_ui_egui::RasterImage;
+use curvebook_ui_egui::layout::{ClipId, LayoutRectPx as TreeLayoutRectPx, LayoutTree, PaintOp, PaintOpKind, ZLayer as TreeZLayer};
 use curvebook_ui_egui::serde_json::{Map, Value, json};
+use curvebook_ui_egui::text_bridge::{FontFamilyKind as TreeFontFamilyKind, UiTextStyle as TreeUiTextStyle};
 
 use crate::host_adapters::{WebAdapterError, decode_base64_str, encode_base64_slice};
 
@@ -116,6 +118,20 @@ impl UiTextStyle {
     #[must_use]
     pub const fn ui_mono(size_px: f32) -> Self {
         Self { family: FontFamilyKind::UiMono, size_px, weight: SpanWeight::Regular, slope: SpanSlope::Upright, tabular_nums: true, rich: false }
+    }
+
+    /// Convert a shared [`curvebook_ui_egui::text_bridge::UiTextStyle`] into its browser-canvas equivalent.
+    #[must_use]
+    pub fn from_tree_style(style: &TreeUiTextStyle) -> Self {
+        let family = match style.family {
+            TreeFontFamilyKind::UiSans => FontFamilyKind::UiSans,
+            TreeFontFamilyKind::UiMono => FontFamilyKind::UiMono,
+            TreeFontFamilyKind::GridTabular => FontFamilyKind::GridTabular,
+            TreeFontFamilyKind::ScientificSerif => FontFamilyKind::ScientificSerif,
+        };
+        #[allow(clippy::cast_possible_truncation)]
+        let size_px = if style.size_px.is_finite() && style.size_px > 0.0 { style.size_px as f32 } else { 13.0 };
+        Self { family, size_px, weight: style.weight, slope: style.slope, tabular_nums: style.tabular_nums, rich: style.rich.is_some() }
     }
 
     /// Encode this style descriptor into JSON.
@@ -691,6 +707,22 @@ impl ZLayer {
     }
 }
 
+impl From<TreeZLayer> for ZLayer {
+    fn from(value: TreeZLayer) -> Self {
+        match value {
+            TreeZLayer::Workspace => Self::Workspace,
+            TreeZLayer::FloatingOverlay => Self::FloatingOverlay,
+            TreeZLayer::SplitHandle => Self::SplitHandle,
+            TreeZLayer::DropdownMenu => Self::DropdownMenu,
+            TreeZLayer::ModalBackdrop => Self::ModalBackdrop,
+            TreeZLayer::ModalDialog => Self::ModalDialog,
+            TreeZLayer::ModalDropdown => Self::ModalDropdown,
+            TreeZLayer::ContextMenu => Self::ContextMenu,
+            TreeZLayer::Tooltip => Self::Tooltip,
+        }
+    }
+}
+
 /// Coarse Z-ordered compositing band interleaved between RGBA layers and `ctx.fillText` runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default)]
 #[repr(u8)]
@@ -822,6 +854,12 @@ impl LayoutRectPx {
         let h = if b > y0 { b - y0 } else { 0 };
         #[allow(clippy::cast_sign_loss)]
         Self { x: x0, y: y0, width: w as u32, height: h as u32 }
+    }
+}
+
+impl From<TreeLayoutRectPx> for LayoutRectPx {
+    fn from(value: TreeLayoutRectPx) -> Self {
+        Self { x: value.x, y: value.y, width: value.width, height: value.height }
     }
 }
 
@@ -1119,6 +1157,56 @@ impl WebTextBridge {
         WebLayeredFrame { width_px, height_px, base_rgba_bytes: base_img.rgba, rgba_layers, text_ops }
     }
 
+    /// Render a shared [`LayoutTree`] into Z-banded RGBA layers and browser-measured [`WebTextDrawOp`] runs.
+    #[must_use]
+    pub fn compose_layout_tree_frame(tree: &LayoutTree, measurer: &dyn WebTextMeasurer, dpi: u16, surface_bg: [u8; 4]) -> WebLayeredFrame {
+        let width_px = tree.metrics.physical_width_px().max(1);
+        let height_px = tree.metrics.physical_height_px().max(1);
+        let viewport_rect = LayoutRectPx::new(0, 0, width_px, height_px);
+        let mut base_img = solid_raster_image(width_px, height_px, dpi.max(72), [surface_bg[0], surface_bg[1], surface_bg[2], 255]);
+
+        let mut sorted_ops: Vec<&PaintOp> = tree.paint_ops.iter().collect();
+        sorted_ops.sort_by_key(|op| (op.z_layer, op.paint_order));
+
+        let mut band_ops: [Vec<(&PaintOp, LayoutRectPx)>; 4] = [Vec::new(), Vec::new(), Vec::new(), Vec::new()];
+        let mut text_ops = Vec::new();
+        for op in sorted_ops {
+            let Some(clip_rect) = resolve_tree_clip(op.clip, &tree.clips, viewport_rect) else {
+                continue;
+            };
+            if matches!(op.kind, PaintOpKind::TextRun { .. }) {
+                if let Some(text_op) = tree_op_to_text_draw_op(op, clip_rect, measurer) {
+                    text_ops.push(text_op);
+                }
+                continue;
+            }
+            let z_band = ZLayer::from(op.z_layer).band();
+            if let Some(bucket) = band_ops.get_mut(usize::from(z_band as u8)) {
+                bucket.push((op, clip_rect));
+            }
+        }
+
+        for (op, clip_rect) in &band_ops[ZLayerBand::Workspace as usize] {
+            paint_tree_op_into_image(&mut base_img, viewport_rect, op, *clip_rect);
+        }
+
+        let mut rgba_layers = Vec::with_capacity(4);
+        rgba_layers.push(WebRgbaLayer {
+            z_band: ZLayerBand::Workspace,
+            rect_px: viewport_rect,
+            uses_base_frame: true,
+            opaque: true,
+            rgba_bytes: Vec::new(),
+        });
+        for band in [ZLayerBand::PopupDropdown, ZLayerBand::ModalOverlay, ZLayerBand::TopOverlay] {
+            if let Some(layer) = rasterize_tree_band_layer(band, &band_ops[band as usize], dpi.max(72)) {
+                rgba_layers.push(layer);
+            }
+        }
+
+        WebLayeredFrame { width_px, height_px, base_rgba_bytes: base_img.rgba, rgba_layers, text_ops }
+    }
+
     /// Validate Z-order invariants, RGBA layer byte lengths, and text clip bounds on `frame`.
     ///
     /// # Errors
@@ -1169,6 +1257,284 @@ impl WebTextBridge {
     }
 }
 
+fn solid_raster_image(width_px: u32, height_px: u32, dpi: u16, rgba: [u8; 4]) -> RasterImage {
+    let pixel_count = (width_px as usize).saturating_mul(height_px as usize);
+    let mut bytes = Vec::with_capacity(pixel_count.saturating_mul(4));
+    for _ in 0..pixel_count {
+        bytes.extend_from_slice(&rgba);
+    }
+    RasterImage { width_px, height_px, dpi, rgba: bytes }
+}
+
+fn resolve_tree_clip(clip: Option<ClipId>, clips: &[TreeLayoutRectPx], viewport: LayoutRectPx) -> Option<LayoutRectPx> {
+    let raw = clip.and_then(|id| clips.get(id.0).copied()).map(LayoutRectPx::from).unwrap_or(viewport);
+    raw.intersect(viewport)
+}
+
+fn tree_op_to_text_draw_op(op: &PaintOp, clip_rect: LayoutRectPx, measurer: &dyn WebTextMeasurer) -> Option<WebTextDrawOp> {
+    let PaintOpKind::TextRun { text, style, origin_px, color, shaped, .. } = &op.kind else {
+        return None;
+    };
+    if color.a == 0 || text.is_empty() {
+        return None;
+    }
+    let web_style = UiTextStyle::from_tree_style(style);
+    let metrics = measurer.measure(&web_style, text, CSS_REFERENCE_DPI);
+    let font_css = canvas_font_css(&web_style, CSS_REFERENCE_DPI);
+    let z_layer = ZLayer::from(op.z_layer);
+    let avail = f64::from(clip_rect.right()) - origin_px[0];
+    let direction = if shaped.direction == TextDirection::Rtl || contains_rtl_script(text) { WebTextDirection::Rtl } else { WebTextDirection::Ltr };
+    Some(WebTextDrawOp {
+        z_layer,
+        z_band: z_layer.band(),
+        paint_order: op.paint_order,
+        clip_px: Some(clip_rect),
+        x_px: origin_px[0],
+        y_px: origin_px[1] - metrics.ascent_px,
+        baseline_y_px: origin_px[1],
+        max_width_px: (avail > 1.0).then_some(avail),
+        text: text.clone(),
+        style: web_style,
+        font_css,
+        color_rgba: [color.r, color.g, color.b, color.a],
+        align: WebTextAlign::Left,
+        direction,
+        ellipsized: text.ends_with('\u{2026}'),
+        node_id: op.owner_widget_id.as_ref().map(|id| id.as_str().to_owned()),
+    })
+}
+
+fn paint_op_bounds_px(op: &PaintOp, clip: LayoutRectPx) -> Option<LayoutRectPx> {
+    let target = match &op.kind {
+        PaintOpKind::FillRect { rect, color } | PaintOpKind::StrokeRect { rect, color, .. } | PaintOpKind::DimRect { rect, color } => {
+            if color.a == 0 {
+                return None;
+            }
+            LayoutRectPx::from(*rect)
+        }
+        PaintOpKind::LineSegment { p0, p1, color, thickness } => {
+            if color.a == 0 {
+                return None;
+            }
+            let r = i32::try_from(*thickness / 2).unwrap_or(0);
+            let stamp = (*thickness).max(1);
+            let min_x = p0[0].min(p1[0]) - r;
+            let min_y = p0[1].min(p1[1]) - r;
+            let w = u32::try_from(p0[0].max(p1[0]).saturating_sub(p0[0].min(p1[0]))).unwrap_or(0).saturating_add(stamp);
+            let h = u32::try_from(p0[1].max(p1[1]).saturating_sub(p0[1].min(p1[1]))).unwrap_or(0).saturating_add(stamp);
+            LayoutRectPx::new(min_x, min_y, w, h)
+        }
+        PaintOpKind::CircleIndicator { center, radius, fill, stroke } => {
+            if fill.a == 0 && stroke.is_none_or(|c| c.a == 0) {
+                return None;
+            }
+            let r = i32::try_from(*radius).unwrap_or(0);
+            let d = radius.saturating_mul(2).saturating_add(1);
+            LayoutRectPx::new(center[0] - r, center[1] - r, d, d)
+        }
+        PaintOpKind::BlitImage { dst, .. } => LayoutRectPx::from(*dst),
+        PaintOpKind::TextRun { .. } => return None,
+    };
+    target.intersect(clip)
+}
+
+fn rasterize_tree_band_layer(band: ZLayerBand, ops: &[(&PaintOp, LayoutRectPx)], dpi: u16) -> Option<WebRgbaLayer> {
+    if ops.is_empty() {
+        return None;
+    }
+    let mut bounds = LayoutRectPx::default();
+    for (op, clip) in ops {
+        if let Some(vis) = paint_op_bounds_px(op, *clip) {
+            bounds = bounds.union(vis);
+        }
+    }
+    if bounds.width == 0 || bounds.height == 0 {
+        return None;
+    }
+    let byte_len = (bounds.width as usize).saturating_mul(bounds.height as usize).saturating_mul(4);
+    let mut img = RasterImage { width_px: bounds.width, height_px: bounds.height, dpi, rgba: vec![0; byte_len] };
+    for (op, clip) in ops {
+        paint_tree_op_into_image(&mut img, bounds, op, *clip);
+    }
+    Some(WebRgbaLayer { z_band: band, rect_px: bounds, uses_base_frame: false, opaque: false, rgba_bytes: img.rgba })
+}
+
+fn paint_tree_op_into_image(img: &mut RasterImage, origin: LayoutRectPx, op: &PaintOp, clip: LayoutRectPx) {
+    match &op.kind {
+        PaintOpKind::FillRect { rect, color } | PaintOpKind::DimRect { rect, color } => {
+            fill_clipped_rect_px(img, origin, LayoutRectPx::from(*rect), clip, [color.r, color.g, color.b, color.a]);
+        }
+        PaintOpKind::StrokeRect { rect, color, thickness } => {
+            stroke_clipped_rect_px(img, origin, LayoutRectPx::from(*rect), clip, [color.r, color.g, color.b, color.a], *thickness);
+        }
+        PaintOpKind::LineSegment { p0, p1, color, thickness } => {
+            draw_clipped_line_px(img, origin, *p0, *p1, clip, [color.r, color.g, color.b, color.a], *thickness);
+        }
+        PaintOpKind::CircleIndicator { center, radius, fill, stroke } => {
+            let stroke_rgba = stroke.map(|c| [c.r, c.g, c.b, c.a]);
+            draw_clipped_circle_px(img, origin, *center, *radius, clip, [fill.r, fill.g, fill.b, fill.a], stroke_rgba);
+        }
+        PaintOpKind::BlitImage { dst, image } => {
+            blit_clipped_image_px(img, origin, LayoutRectPx::from(*dst), image, clip);
+        }
+        PaintOpKind::TextRun { .. } => {}
+    }
+}
+
+fn fill_clipped_rect_px(img: &mut RasterImage, origin: LayoutRectPx, rect: LayoutRectPx, clip: LayoutRectPx, color: [u8; 4]) {
+    if color[3] == 0 {
+        return;
+    }
+    let Some(vis) = rect.intersect(origin).and_then(|r| r.intersect(clip)) else {
+        return;
+    };
+    #[allow(clippy::cast_sign_loss)]
+    let local_x = (vis.x - origin.x).max(0) as u32;
+    #[allow(clippy::cast_sign_loss)]
+    let local_y = (vis.y - origin.y).max(0) as u32;
+    let x_end = local_x.saturating_add(vis.width).min(img.width_px);
+    let y_end = local_y.saturating_add(vis.height).min(img.height_px);
+    for py in local_y..y_end {
+        for px in local_x..x_end {
+            blend_pixel_rgba(img, px, py, color);
+        }
+    }
+}
+
+fn stroke_clipped_rect_px(img: &mut RasterImage, origin: LayoutRectPx, rect: LayoutRectPx, clip: LayoutRectPx, color: [u8; 4], thickness: u32) {
+    if color[3] == 0 || rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    let Some(vis) = rect.intersect(origin).and_then(|r| r.intersect(clip)) else {
+        return;
+    };
+    let sw = i32::try_from(thickness.max(1)).unwrap_or(1);
+    let rect_r = rect.right();
+    let rect_b = rect.bottom();
+    for sy in vis.y..vis.bottom() {
+        #[allow(clippy::cast_sign_loss)]
+        let py = (sy - origin.y) as u32;
+        if py >= img.height_px {
+            continue;
+        }
+        for sx in vis.x..vis.right() {
+            let on_edge = sx < rect.x.saturating_add(sw)
+                || sx >= rect_r.saturating_sub(sw)
+                || sy < rect.y.saturating_add(sw)
+                || sy >= rect_b.saturating_sub(sw);
+            if on_edge {
+                #[allow(clippy::cast_sign_loss)]
+                let px = (sx - origin.x) as u32;
+                blend_pixel_rgba(img, px, py, color);
+            }
+        }
+    }
+}
+
+fn draw_clipped_line_px(img: &mut RasterImage, origin: LayoutRectPx, p0: [i32; 2], p1: [i32; 2], clip: LayoutRectPx, color: [u8; 4], thickness: u32) {
+    if color[3] == 0 {
+        return;
+    }
+    let r = i32::try_from(thickness / 2).unwrap_or(0);
+    let stamp = thickness.max(1);
+    if p0[0] == p1[0] || p0[1] == p1[1] {
+        let min_x = p0[0].min(p1[0]);
+        let min_y = p0[1].min(p1[1]);
+        let w = u32::try_from(p0[0].max(p1[0]).saturating_sub(min_x)).unwrap_or(0).saturating_add(stamp);
+        let h = u32::try_from(p0[1].max(p1[1]).saturating_sub(min_y)).unwrap_or(0).saturating_add(stamp);
+        fill_clipped_rect_px(img, origin, LayoutRectPx::new(min_x - r, min_y - r, w, h), clip, color);
+        return;
+    }
+    let dx = (p1[0] - p0[0]).abs();
+    let dy = (p1[1] - p0[1]).abs();
+    let steps = dx.max(dy).max(1);
+    for step in 0..=steps {
+        let fx = p0[0] + (p1[0] - p0[0]) * step / steps;
+        let fy = p0[1] + (p1[1] - p0[1]) * step / steps;
+        fill_clipped_rect_px(img, origin, LayoutRectPx::new(fx - r, fy - r, stamp, stamp), clip, color);
+    }
+}
+
+fn draw_clipped_circle_px(
+    img: &mut RasterImage,
+    origin: LayoutRectPx,
+    center: [i32; 2],
+    radius: u32,
+    clip: LayoutRectPx,
+    fill: [u8; 4],
+    stroke: Option<[u8; 4]>,
+) {
+    let r = i32::try_from(radius).unwrap_or(0);
+    if r <= 0 {
+        return;
+    }
+    let Some(bounds) = clip.intersect(origin) else {
+        return;
+    };
+    let r_sq = r.saturating_mul(r);
+    let inner_sq = (r - 1).max(0).saturating_mul((r - 1).max(0));
+    for dy in -r..=r {
+        let sy = center[1].saturating_add(dy);
+        if sy < bounds.y || sy >= bounds.bottom() {
+            continue;
+        }
+        #[allow(clippy::cast_sign_loss)]
+        let py = (sy - origin.y) as u32;
+        for dx in -r..=r {
+            let sx = center[0].saturating_add(dx);
+            if sx < bounds.x || sx >= bounds.right() {
+                continue;
+            }
+            let d2 = dx.saturating_mul(dx).saturating_add(dy.saturating_mul(dy));
+            if d2 <= r_sq {
+                let c = if let Some(sc) = stroke
+                    && d2 >= inner_sq
+                {
+                    sc
+                } else {
+                    fill
+                };
+                #[allow(clippy::cast_sign_loss)]
+                let px = (sx - origin.x) as u32;
+                blend_pixel_rgba(img, px, py, c);
+            }
+        }
+    }
+}
+
+fn blit_clipped_image_px(dst_img: &mut RasterImage, origin: LayoutRectPx, dst_rect: LayoutRectPx, src_img: &RasterImage, clip: LayoutRectPx) {
+    let Some(vis) = dst_rect.intersect(origin).and_then(|r| r.intersect(clip)) else {
+        return;
+    };
+    if src_img.width_px == 0 || src_img.height_px == 0 {
+        return;
+    }
+    let dw = dst_rect.width.max(1) as usize;
+    let dh = dst_rect.height.max(1) as usize;
+    let sw = src_img.width_px as usize;
+    let sh = src_img.height_px as usize;
+    for sy_screen in vis.y..vis.bottom() {
+        #[allow(clippy::cast_sign_loss)]
+        let local_y = (sy_screen - dst_rect.y).max(0) as usize;
+        let src_y = (local_y.saturating_mul(sh) / dh).min(sh - 1);
+        let src_row = src_y.saturating_mul(sw);
+        #[allow(clippy::cast_sign_loss)]
+        let dst_y = (sy_screen - origin.y) as u32;
+        for sx_screen in vis.x..vis.right() {
+            #[allow(clippy::cast_sign_loss)]
+            let local_x = (sx_screen - dst_rect.x).max(0) as usize;
+            let src_x = (local_x.saturating_mul(sw) / dw).min(sw - 1);
+            let sidx = src_row.saturating_add(src_x).saturating_mul(4);
+            let Some(src) = src_img.rgba.get(sidx..sidx + 4) else {
+                continue;
+            };
+            #[allow(clippy::cast_sign_loss)]
+            let dst_x = (sx_screen - origin.x) as u32;
+            blend_pixel_rgba(dst_img, dst_x, dst_y, [src[0], src[1], src[2], src[3]]);
+        }
+    }
+}
+
 fn rasterize_band_layer(band: ZLayerBand, viewport_rect: LayoutRectPx, prims: &[WebRectPrimitive]) -> Option<WebRgbaLayer> {
     if prims.is_empty() || viewport_rect.width == 0 || viewport_rect.height == 0 {
         return None;
@@ -1193,43 +1559,12 @@ fn rasterize_band_layer(band: ZLayerBand, viewport_rect: LayoutRectPx, prims: &[
 }
 
 fn paint_rect_primitive(img: &mut RasterImage, origin: LayoutRectPx, prim: &WebRectPrimitive) {
-    let Some(mut clipped) = prim.rect_px.intersect(origin) else {
-        return;
-    };
-    if let Some(clip) = prim.clip_px {
-        let Some(next) = clipped.intersect(clip) else {
-            return;
-        };
-        clipped = next;
-    }
-
-    #[allow(clippy::cast_sign_loss)]
-    let local_x = (clipped.x - origin.x).max(0) as u32;
-    #[allow(clippy::cast_sign_loss)]
-    let local_y = (clipped.y - origin.y).max(0) as u32;
-    let x_end = local_x.saturating_add(clipped.width).min(img.width_px);
-    let y_end = local_y.saturating_add(clipped.height).min(img.height_px);
-
+    let clip = prim.clip_px.unwrap_or(origin);
     if let Some(fill) = prim.fill {
-        for py in local_y..y_end {
-            for px in local_x..x_end {
-                blend_pixel_rgba(img, px, py, fill);
-            }
-        }
+        fill_clipped_rect_px(img, origin, prim.rect_px, clip, fill);
     }
     if let Some(stroke) = prim.stroke {
-        let sw = prim.stroke_width_px.max(1);
-        for py in local_y..y_end {
-            for px in local_x..x_end {
-                let on_edge = px < local_x.saturating_add(sw)
-                    || px.saturating_add(sw) >= x_end
-                    || py < local_y.saturating_add(sw)
-                    || py.saturating_add(sw) >= y_end;
-                if on_edge {
-                    blend_pixel_rgba(img, px, py, stroke);
-                }
-            }
-        }
+        stroke_clipped_rect_px(img, origin, prim.rect_px, clip, stroke, prim.stroke_width_px.max(1));
     }
 }
 
@@ -1241,18 +1576,28 @@ fn blend_pixel_rgba(img: &mut RasterImage, x: u32, y: u32, src: [u8; 4]) {
     let Some(dst) = img.rgba.get_mut(idx..idx + 4) else {
         return;
     };
-    let alpha = u16::from(src[3]);
-    if alpha == 255 {
+    if src[3] == 255 || dst[3] == 0 {
         dst.copy_from_slice(&src);
         return;
     }
-    let inv = 255 - alpha;
+    let src_a = u32::from(src[3]);
+    let dst_a = u32::from(dst[3]);
+    let inv = 255 - src_a;
     #[allow(clippy::cast_possible_truncation)]
-    {
-        dst[0] = ((u16::from(src[0]) * alpha + u16::from(dst[0]) * inv) / 255) as u8;
-        dst[1] = ((u16::from(src[1]) * alpha + u16::from(dst[1]) * inv) / 255) as u8;
-        dst[2] = ((u16::from(src[2]) * alpha + u16::from(dst[2]) * inv) / 255) as u8;
-        dst[3] = ((alpha * 255 + u16::from(dst[3]) * inv) / 255).min(255) as u8;
+    if dst_a == 255 {
+        dst[0] = ((u32::from(src[0]) * src_a + u32::from(dst[0]) * inv + 127) / 255) as u8;
+        dst[1] = ((u32::from(src[1]) * src_a + u32::from(dst[1]) * inv + 127) / 255) as u8;
+        dst[2] = ((u32::from(src[2]) * src_a + u32::from(dst[2]) * inv + 127) / 255) as u8;
+        dst[3] = 255;
+    } else {
+        let out_a_num = src_a * 255 + dst_a * inv;
+        if out_a_num == 0 {
+            return;
+        }
+        dst[0] = ((u32::from(src[0]) * src_a * 255 + u32::from(dst[0]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        dst[1] = ((u32::from(src[1]) * src_a * 255 + u32::from(dst[1]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        dst[2] = ((u32::from(src[2]) * src_a * 255 + u32::from(dst[2]) * dst_a * inv + out_a_num / 2) / out_a_num).min(255) as u8;
+        dst[3] = ((out_a_num + 127) / 255).min(255) as u8;
     }
 }
 
@@ -1456,5 +1801,32 @@ mod tests {
         assert!(frame.rgba_layers[0].uses_base_frame);
         assert!(!frame.rgba_layers[1].uses_base_frame);
         assert_eq!(frame.text_ops.iter().map(|op| op.z_layer).collect::<Vec<_>>(), vec![ZLayer::Workspace, ZLayer::ModalDialog, ZLayer::Tooltip]);
+    }
+
+    #[test]
+    fn compose_layout_tree_frame_separates_bands_and_defers_text_without_double_baking() {
+        let mut app = curvebook_ui_egui::UiApp::new();
+        app.canvas_dialogs.open_command_palette();
+        app.canvas_dialogs.command_palette.query = String::from("undo");
+        app.interaction.hovered_widget_id = Some(String::from("toolbar.export_svg"));
+        let viewport = curvebook_ui_egui::ViewportMetrics::new(960.0, 600.0, 1.0);
+        let palette = curvebook_ui_egui::compositor::FramePalette::from_theme(&app.theme);
+        let tree = curvebook_ui_egui::views::build_workspace_layout_tree(
+            &app,
+            viewport,
+            curvebook_ui_egui::text_bridge::DesktopTextMeasurer::global(),
+            &palette,
+        );
+        let measurer = BrowserCanvasTextMeasurer::new();
+        let bg = app.theme.surface_bg;
+        let frame = WebTextBridge::compose_layout_tree_frame(&tree, &measurer, CSS_REFERENCE_DPI, [bg.r, bg.g, bg.b, bg.a]);
+        WebTextBridge::validate_layered_frame(&frame).expect("composed LayoutTree frame validates cleanly");
+        assert_eq!(frame.width_px, 960);
+        assert_eq!(frame.height_px, 600);
+        assert!(frame.rgba_layers.iter().any(|l| l.z_band == ZLayerBand::ModalOverlay && !l.uses_base_frame));
+        assert!(frame.text_ops.iter().any(|op| op.z_layer == ZLayer::Workspace && op.node_id.as_deref() == Some("menu.file")));
+        assert!(frame.text_ops.iter().any(|op| op.z_layer == ZLayer::ModalDialog && op.node_id.as_deref() == Some("modal.dialog")));
+        assert!(frame.text_ops.iter().any(|op| op.z_layer == ZLayer::ModalDialog && op.node_id.as_deref() == Some("palette.query")));
+        assert!(frame.text_ops.iter().any(|op| op.z_layer == ZLayer::Tooltip && op.node_id.as_deref() == Some("overlay.tooltip")));
     }
 }

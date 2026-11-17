@@ -104,6 +104,33 @@ fn edit_cell_at(app: &mut UiApp, row: usize, col: usize, value: &str) -> TestRes
     Ok(())
 }
 
+fn ensure_grid_widget_visible(app: &mut UiApp, target_id: &str) -> TestRes {
+    for _ in 0..8 {
+        let grid_insp = inspect(app, "grid")?;
+        let Some(cells) = grid_insp["grid_cells"].as_array() else {
+            return Err(format!("missing grid_cells in inspect while scrolling to `{target_id}`"));
+        };
+        let target_vis = cells.iter().any(|w| {
+            w["widget_id"].as_str() == Some(target_id)
+                && w["bounds"].as_array().is_some_and(|b| b.get(2).and_then(Value::as_f64).is_some_and(|bw| bw >= 8.0))
+        });
+        if target_vis {
+            return Ok(());
+        }
+        let anchor = cells
+            .iter()
+            .find(|w| {
+                w["widget_id"].as_str().is_some_and(|id| id.starts_with("grid.cell."))
+                    && w["bounds"].as_array().is_some_and(|b| b.get(2).and_then(Value::as_f64).is_some_and(|bw| bw >= 8.0))
+            })
+            .and_then(|w| w["widget_id"].as_str())
+            .ok_or_else(|| format!("no visible grid cell anchor to wheel while scrolling to `{target_id}`"))?
+            .to_owned();
+        gui(app, "ui.pointer_gesture", json!({ "widget_id": anchor, "gesture": "wheel", "delta_x": 180.0, "delta_y": 0.0 }))?;
+    }
+    Err(format!("grid widget `{target_id}` did not scroll into view"))
+}
+
 fn exclude_cell_with_reason(app: &mut UiApp, row: usize, col: usize, reason_tag: &str, note: &str) -> TestRes {
     let widget_id = format!("grid.cell.{row}.{col}.0");
     click(app, &widget_id)?;
@@ -445,6 +472,7 @@ S8\tB\tTreated\t10.0\t100.0\t180.0\t270.0";
     assert_screenshot_png(&mut app, "canvas")?;
 
     switch_tab(&mut app, "mv_wf29")?;
+    ensure_grid_widget_visible(&mut app, "grid.cell.7.6.0")?;
     edit_cell_at(&mut app, 7, 6, "300.0")?;
     let rs_sel_after = result_sheet(&app, &sel_id)?;
     let sel_ds_after = rs_sel_after.analyzable_data.as_ref().ok_or("missing filtered analyzable_data after edit")?;
@@ -493,6 +521,7 @@ D3\tDrug\t5.0\t10.0";
     assert_approx(mv_num_cell(&app, "mv_wf30", 4, 3)?, -4.0, 1e-6, "Delta D1")?;
 
     // Open Fold formula bar by clicking header button and verify invalid syntax + self-cycle rejection.
+    ensure_grid_widget_visible(&mut app, "formula_bar.open_col.5")?;
     click(&mut app, "formula_bar.open_col.5")?;
     let bad_syntax = type_widget(&mut app, "formula_bar.input", "= [RawSignal +", true, false)?;
     if formula_bar_is_valid(&bad_syntax) {

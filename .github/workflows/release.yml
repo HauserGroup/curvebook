@@ -1,6 +1,6 @@
 # Standalone release pipeline: every push to `release` builds installers for every platform and
 # creates or updates a draft GitHub Release. Manual runs default to Alpha prereleases
-# with ad-hoc macOS signing and unsigned Windows packages. See docs/releasing.md.
+# with ad-hoc macOS signing and unsigned Windows packages. See docs/release/releasing.md.
 name: Release
 
 on:

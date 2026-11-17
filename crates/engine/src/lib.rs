@@ -3,7 +3,7 @@
 //!
 //! Layer L5 crate: shared identically by the desktop app, browser WASM build, headless CLI and MCP
 //! server. Nothing in or below this crate depends on a UI toolkit.
-//! Governing spec: `docs/architecture.md`, `docs/data-tables-and-transforms.md` (§6), and `docs/development.md`.
+//! Governing spec: `docs/architecture.md`, `docs/implementation/data-tables-and-transforms.md` (§6), and `docs/development.md`.
 #![forbid(unsafe_code)]
 
 pub mod cmd;

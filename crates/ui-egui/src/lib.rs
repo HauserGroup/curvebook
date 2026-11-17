@@ -35,8 +35,8 @@ use curvebook_tools::{Cursor, GridCellCoord, GridVisibleWindow};
 pub use serde_json;
 
 pub use compositor::{
-    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_map, render_workspace_frame_png,
-    render_workspace_rgba,
+    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_for_dpi, compute_workspace_layout_map,
+    render_workspace_frame_png, render_workspace_rgba,
 };
 pub use control_io::{
     CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlPostRequestContext, ControlRecordedStep,

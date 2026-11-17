@@ -1,5 +1,5 @@
 //! Deterministic curve and distribution simulation (`TransformAnalysisSpec::Simulate`,
-//! `docs/data-tables-and-transforms.md` §5.5).
+//! `docs/implementation/data-tables-and-transforms.md` §5.5).
 
 use curvebook_doc::{
     Cell, DataSheet, MAX_ROWS, MAX_SUBCOLUMNS, SimulationNoise, SubcolumnMode, TableArchetype, XColumnMode, XyTable, validate_rows,

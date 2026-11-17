@@ -3,18 +3,24 @@
 #![forbid(unsafe_code)]
 
 use curvebook_engine::cmd;
-use curvebook_ui_egui::compositor::WorkspaceFrameLayout;
+use curvebook_ui_egui::compositor::FramePalette;
+use curvebook_ui_egui::layout::a11y::project_accessible_tree_with_announcement;
+use curvebook_ui_egui::layout::{
+    AccessibilityMeta, ClipId, FocusScope, LayoutRectPx as TreeLayoutRectPx, LayoutTextRun, LayoutTree, NodeBounds, PaintOp, PaintOpKind,
+    WidgetAction, WidgetId, WidgetNode, WidgetRole, WidgetVisualState, ZLayer as TreeZLayer, cycle_focus_in_scope, find_scroll_container_at,
+    hit_test_logical, hit_test_physical,
+};
 use curvebook_ui_egui::menus::normalize_shortcut_combo;
 use curvebook_ui_egui::serde_json::{Value, json};
+use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, TextMeasurer, UiTextStyle as TreeUiTextStyle, ellipsize_text};
+use curvebook_ui_egui::views::a11y::resolve_live_announcement;
+use curvebook_ui_egui::views::build_workspace_layout_tree;
 use curvebook_ui_egui::{
-    ActiveDialog, ControlEnablement, KeyModifiers, PointerButton, UiApp, UiEventOutcome, UiInputEvent, UiThemeSpec, ViewportMetrics, command_tooltip,
-    dispatch_gui_action, dispatch_ui_command, menu_bar_tooltips, toolbar_tooltips,
+    ActiveDialog, ControlEnablement, KeyModifiers, PointerButton, UiApp, UiEventOutcome, UiInputEvent, ViewportMetrics, command_tooltip,
+    dispatch_gui_action, dispatch_ui_command,
 };
 
-use crate::text_bridge::{
-    CSS_REFERENCE_DPI, LayoutRectPx, UiTextStyle, WebRectPrimitive, WebTextAlign, WebTextDirection, WebTextDrawOp, WebTextMeasurer, ZLayer,
-    canvas_font_css,
-};
+use crate::text_bridge::{LayoutRectPx, ZLayer};
 
 /// Result of exporting a file from the web workspace for FS Access or Blob download fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -638,6 +644,7 @@ pub struct WebChromeSnapshot {
     pub menu_titles: Vec<String>,
     pub toolbar_ids: Vec<String>,
     pub status_summary: String,
+    pub a11y_tree: Option<Box<Value>>,
 }
 
 impl WebChromeSnapshot {
@@ -657,6 +664,7 @@ impl WebChromeSnapshot {
             "menu_titles": self.menu_titles,
             "toolbar_ids": self.toolbar_ids,
             "status_summary": self.status_summary,
+            "a11y_tree": self.a11y_tree,
         })
     }
 
@@ -682,6 +690,7 @@ impl WebChromeSnapshot {
             menu_titles: str_list("menu_titles"),
             toolbar_ids: str_list("toolbar_ids"),
             status_summary: obj.get("status_summary").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            a11y_tree: obj.get("a11y_tree").filter(|v| !v.is_null()).cloned().map(Box::new),
         }
     }
 }
@@ -693,25 +702,25 @@ pub struct WebContextMenuState {
     pub anchor_px: [i32; 2],
 }
 
-/// Full computed chrome layout for one rendered web frame.
+/// Full computed chrome layout backed directly by shared [`LayoutTree`].
 #[derive(Debug, Clone)]
 pub struct WebChromeLayout {
+    pub tree: LayoutTree,
     pub nodes: Vec<WebChromeNode>,
-    pub rects: Vec<WebRectPrimitive>,
-    pub text_ops: Vec<WebTextDrawOp>,
     pub snapshot: WebChromeSnapshot,
 }
 
 impl WebChromeLayout {
-    /// Shared single-source hit test walking `nodes` in reverse `(z_layer, paint_order)`.
+    /// Shared single-source hit test consulting [`LayoutTree`] in reverse `(z_layer, paint_order)`.
     ///
     /// An open [`ZLayer::ModalBackdrop`] blocks click-through to workspace and dropdown nodes below it.
     #[must_use]
     pub fn hit_test_physical(&self, px: i32, py: i32) -> Option<&WebChromeNode> {
-        self.nodes.iter().rev().find(|n| n.clip_px.contains(px, py) && n.rect_px.contains(px, py))
+        let hit = hit_test_physical(&self.tree, px, py)?;
+        self.find_node(hit.id.as_str())
     }
 
-    /// Look up a node by stable `id`.
+    /// Look up a projected node by stable `id`.
     #[must_use]
     pub fn find_node(&self, id: &str) -> Option<&WebChromeNode> {
         self.nodes.iter().find(|n| n.id == id)
@@ -726,11 +735,12 @@ pub enum WebChromeDispatch {
     HandledRedraw { action: String, command_result: Option<Value> },
     ShortcutTriggered(WebShortcutAction),
     InvokeChromeAction(WebChromeAction),
+    ExecuteWidget { widget_id: String, action: WidgetAction },
     BlockedByModalBackdrop,
     Ignored,
 }
 
-/// Stateful browser chrome controller owning open menu, hover/focus, context menu, and IME state.
+/// Stateful browser chrome controller synchronized with [`UiApp`] and shared [`LayoutTree`].
 #[derive(Debug, Clone, Default)]
 pub struct WebChromeBridge {
     pub open_menu_key: Option<String>,
@@ -756,31 +766,77 @@ impl WebChromeBridge {
         self.context_menu = None;
     }
 
-    /// Build the unified chrome [`WebChromeLayout`] using `measurer` for every string (`R10.1`, `R10.7`).
-    #[must_use]
-    pub fn build_layout(
-        &self,
-        app: &UiApp,
-        viewport: ViewportMetrics,
-        frame: &WorkspaceFrameLayout,
-        measurer: &dyn WebTextMeasurer,
-        dpi: u16,
-    ) -> WebChromeLayout {
-        let mut builder = ChromeLayoutBuilder::new(app, viewport, frame, measurer, dpi, self);
-        builder.build()
-    }
-
-    /// Handle pointer movement across chrome layers and update hover tooltip state.
-    pub fn handle_pointer_move(&mut self, layout: &WebChromeLayout, phys_x: i32, phys_y: i32) -> bool {
-        let next_hover = layout.hit_test_physical(phys_x, phys_y).map(|n| n.id.clone());
-        if next_hover != self.hovered_node_id {
-            self.hovered_node_id = next_hover;
-            return true;
+    /// Synchronize mirrored chrome state fields from [`UiApp`] after unified interaction dispatch.
+    pub fn sync_from_app(&mut self, app: &UiApp) {
+        self.open_menu_key = app.interaction.open_menu.clone();
+        self.hovered_node_id = app.interaction.hovered_widget_id.clone();
+        self.focused_node_id = app.focus_widget_id.clone();
+        if app.canvas_dialogs.active_dialog != ActiveDialog::None || app.interaction.context_menu_target.is_none() {
+            self.context_menu = None;
         }
-        false
     }
 
-    /// Route a physical pointer press through Z-ordered chrome layers before workspace hit testing.
+    /// Build and augment the canonical shared [`LayoutTree`] for browser chrome, dialogs, and context menus.
+    #[must_use]
+    pub fn build_layout_tree(&self, app: &UiApp, viewport: ViewportMetrics) -> LayoutTree {
+        let palette = FramePalette::from_theme(&app.theme);
+        let mut tree = build_workspace_layout_tree(app, viewport, DesktopTextMeasurer::global(), &palette);
+        apply_web_tree_rules(&mut tree, app, self, &palette);
+        let _ = tree.finalize();
+        tree
+    }
+
+    /// Build the unified chrome [`WebChromeLayout`] directly from the shared [`LayoutTree`] (`R10.1`, `R10.7`).
+    #[must_use]
+    pub fn build_layout(&self, app: &UiApp, viewport: ViewportMetrics) -> WebChromeLayout {
+        let tree = self.build_layout_tree(app, viewport);
+        let nodes = project_chrome_nodes(&tree, app);
+        let mut menu_titles = Vec::new();
+        let mut toolbar_ids = Vec::new();
+        for node in &tree.nodes {
+            if matches!(node.action, WidgetAction::MenuOpen(_)) {
+                menu_titles.push(node.a11y.label.clone());
+            } else if node.id.as_str().starts_with("toolbar.") {
+                toolbar_ids.push(node.id.0.clone());
+            }
+        }
+        let status_summary = build_status_summary(app, self);
+        let focused_id = app.focus_widget_id.clone().or_else(|| self.focused_node_id.clone());
+        let (announcement, politeness) = resolve_live_announcement(app, &tree);
+        let a11y_update = project_accessible_tree_with_announcement(&tree, focused_id.as_deref(), announcement.as_deref(), politeness);
+        let snapshot = WebChromeSnapshot {
+            menu_bar_visible: !menu_titles.is_empty(),
+            open_menu_key: self.open_menu_key.clone().or_else(|| app.interaction.open_menu.clone()),
+            context_menu_open: self.context_menu.is_some(),
+            active_dialog: format!("{:?}", app.canvas_dialogs.active_dialog),
+            hovered_node_id: app.interaction.hovered_widget_id.clone().or_else(|| self.hovered_node_id.clone()),
+            focused_node_id: focused_id,
+            ime_preedit: self.ime_preedit.clone(),
+            drag_active: self.drag_active,
+            node_count: nodes.len(),
+            menu_titles,
+            toolbar_ids,
+            status_summary,
+            a11y_tree: Some(Box::new(a11y_update.to_aria_json_value())),
+        };
+        WebChromeLayout { tree, nodes, snapshot }
+    }
+
+    /// Update hover state against shared [`LayoutTree`] nodes and return whether visual hover changed,
+    /// plus whether workspace pointer-move should be suppressed (popup/modal/context-menu occlusion).
+    pub fn handle_pointer_move(&mut self, app: &mut UiApp, layout: &WebChromeLayout, logical_pos: [f64; 2]) -> (bool, bool) {
+        let hit = hit_test_logical(&layout.tree, logical_pos[0], logical_pos[1]);
+        let next_hover = hit.map(|n| n.id.0.clone());
+        let next_cmd = hit.and_then(command_id_for_hover);
+        let changed = next_hover != app.interaction.hovered_widget_id || next_cmd != app.hover_command_id || next_hover != self.hovered_node_id;
+        app.interaction.hovered_widget_id = next_hover.clone();
+        app.hover_command_id = next_cmd;
+        self.hovered_node_id = next_hover;
+        let occluded_above_workspace = hit.is_some_and(|n| n.z_layer >= TreeZLayer::DropdownMenu);
+        (changed, occluded_above_workspace)
+    }
+
+    /// Route a pointer press through Z-ordered [`LayoutTree`] layers before workspace hit testing.
     pub fn handle_pointer_down(
         &mut self,
         app: &mut UiApp,
@@ -791,64 +847,59 @@ impl WebChromeBridge {
     ) -> WebChromeDispatch {
         let [px, py] = phys_pos;
 
-        if button == PointerButton::Primary
-            && let Some(node) = layout.hit_test_physical(px, py)
-        {
-            match node.role {
-                WebChromeRole::ModalBackdrop => {
-                    self.open_menu_key = None;
-                    self.context_menu = None;
-                    return WebChromeDispatch::BlockedByModalBackdrop;
-                }
-                WebChromeRole::MenuSection
-                | WebChromeRole::MenuItem
-                | WebChromeRole::ToolbarButton
-                | WebChromeRole::ModalCloseButton
-                | WebChromeRole::ModalInput
-                | WebChromeRole::ModalItem
-                | WebChromeRole::ModalButton => {
-                    self.focused_node_id = Some(node.id.clone());
-                    if !node.enabled {
-                        if let Some(reason) = &node.disabled_reason {
-                            self.last_notice = Some((WebNoticeLevel::Warning, reason.clone()));
-                        }
-                        return WebChromeDispatch::HandledRedraw {
-                            action: format!("chrome.disabled:{}", node.id),
-                            command_result: Some(json!({ "disabled_reason": node.disabled_reason })),
-                        };
-                    }
-                    return self.activate_node_action(app, node.action.clone());
-                }
-                WebChromeRole::MenuBar => {}
-                WebChromeRole::StatusBar
-                | WebChromeRole::DropdownMenu
-                | WebChromeRole::ModalDialog
-                | WebChromeRole::ContextMenu
-                | WebChromeRole::Tooltip => {
-                    return WebChromeDispatch::HandledRedraw { action: format!("chrome.surface:{}", node.id), command_result: None };
-                }
-            }
-        }
-
-        // Clicking workspace dismisses open dropdown or context menu without click-through.
-        if button == PointerButton::Primary && (self.open_menu_key.is_some() || self.context_menu.is_some()) {
-            self.close_popups();
-            return WebChromeDispatch::HandledRedraw { action: String::from("chrome.popup_dismissed"), command_result: None };
-        }
-
         if button == PointerButton::Secondary {
             if app.canvas_dialogs.active_dialog != ActiveDialog::None {
                 return WebChromeDispatch::BlockedByModalBackdrop;
             }
+            app.interaction.open_menu = None;
+            app.interaction.open_dropdown = None;
             self.open_menu_key = None;
-            let target = classify_context_target(app, frame_rect_hit(app, logical_pos));
-            self.context_menu = Some(WebContextMenuState { target: target.to_owned(), anchor_px: [px, py] });
-            return WebChromeDispatch::PassToWorkspace(UiInputEvent::PointerDown {
-                x: logical_pos[0],
-                y: logical_pos[1],
-                button: PointerButton::Secondary,
-                modifiers: KeyModifiers::default(),
-            });
+            let target = classify_tree_context_target(app, &layout.tree, logical_pos);
+            app.interaction.context_menu_target = Some(target.clone());
+            app.view_shards.toolbar_menus.active_context_menu_id = Some(target.clone());
+            app.view_shards.toolbar_menus.context_menu_anchor_px = Some([px, py]);
+            self.context_menu = Some(WebContextMenuState { target: target.clone(), anchor_px: [px, py] });
+            return WebChromeDispatch::HandledRedraw { action: format!("context_menu.open:{target}"), command_result: None };
+        }
+
+        if button != PointerButton::Primary {
+            return WebChromeDispatch::Ignored;
+        }
+
+        let hit = hit_test_logical(&layout.tree, logical_pos[0], logical_pos[1]);
+
+        if self.context_menu.is_some() {
+            if let Some(node) = hit.filter(|n| n.z_layer == TreeZLayer::ContextMenu) {
+                return self.arm_pressed_chrome_node(app, node);
+            }
+            self.context_menu = None;
+            app.interaction.context_menu_target = None;
+            app.view_shards.toolbar_menus.active_context_menu_id = None;
+            app.view_shards.toolbar_menus.context_menu_anchor_px = None;
+            app.interaction.pressed_widget_id = None;
+            return WebChromeDispatch::HandledRedraw { action: String::from("context_menu.dismissed"), command_result: None };
+        }
+
+        if hit.is_some_and(|n| n.id.as_str() == "modal.backdrop") {
+            app.interaction.open_menu = None;
+            app.interaction.open_dropdown = None;
+            app.interaction.pressed_widget_id = None;
+            self.open_menu_key = None;
+            return WebChromeDispatch::BlockedByModalBackdrop;
+        }
+
+        let popup_open = self.open_menu_key.is_some() || app.interaction.open_menu.is_some() || app.interaction.open_dropdown.is_some();
+        let on_menu_header = hit.is_some_and(|n| matches!(n.action, WidgetAction::MenuOpen(_)));
+        if popup_open && hit.is_none_or(|n| n.z_layer < TreeZLayer::DropdownMenu && !on_menu_header) {
+            self.close_popups();
+            app.interaction.open_menu = None;
+            app.interaction.open_dropdown = None;
+            app.interaction.pressed_widget_id = None;
+            return WebChromeDispatch::HandledRedraw { action: String::from("chrome.popup_dismissed"), command_result: None };
+        }
+
+        if let Some(node) = hit.filter(|n| is_web_chrome_widget(n)) {
+            return self.arm_pressed_chrome_node(app, node);
         }
 
         WebChromeDispatch::PassToWorkspace(UiInputEvent::PointerDown {
@@ -859,70 +910,171 @@ impl WebChromeBridge {
         })
     }
 
-    fn activate_node_action(&mut self, app: &mut UiApp, action: WebChromeAction) -> WebChromeDispatch {
-        match action {
-            WebChromeAction::ToggleMenuSection(ref key) => {
-                self.context_menu = None;
-                if self.open_menu_key.as_deref() == Some(key.as_str()) {
-                    self.open_menu_key = None;
-                } else {
-                    self.open_menu_key = Some(key.clone());
-                }
-                WebChromeDispatch::HandledRedraw { action: format!("menu.toggle:{key}"), command_result: None }
-            }
-            WebChromeAction::InvokeCommand(ref cmd_id) => {
-                self.close_popups();
-                WebChromeDispatch::InvokeChromeAction(WebChromeAction::InvokeCommand(cmd_id.clone()))
-            }
-            WebChromeAction::ExportFormat(fmt) => {
-                self.close_popups();
-                WebChromeDispatch::InvokeChromeAction(WebChromeAction::ExportFormat(fmt))
-            }
-            WebChromeAction::OpenFilePicker => {
-                self.close_popups();
-                WebChromeDispatch::ShortcutTriggered(WebShortcutAction::OpenFilePicker)
-            }
-            WebChromeAction::OpenDirectoryPicker => {
-                self.close_popups();
-                WebChromeDispatch::InvokeChromeAction(WebChromeAction::OpenDirectoryPicker)
-            }
-            WebChromeAction::SelectDialogItem(idx) => apply_dialog_item_selection(app, idx),
-            WebChromeAction::DialogCancel | WebChromeAction::CloseModalBackdrop => {
-                app.canvas_dialogs.close_dialog();
-                WebChromeDispatch::HandledRedraw { action: String::from("dialog.cancelled"), command_result: None }
-            }
-            WebChromeAction::DialogStepBack => {
-                let _ = app.canvas_dialogs.power_wizard.go_back();
-                WebChromeDispatch::HandledRedraw { action: String::from("dialog.back"), command_result: None }
-            }
-            WebChromeAction::DialogStepNext => {
-                let _ = app.canvas_dialogs.power_wizard.advance();
-                WebChromeDispatch::HandledRedraw { action: String::from("dialog.next"), command_result: None }
-            }
-            WebChromeAction::DialogConfirm => WebChromeDispatch::InvokeChromeAction(WebChromeAction::DialogConfirm),
-            WebChromeAction::FocusModalInput => WebChromeDispatch::HandledRedraw { action: String::from("dialog.focus_input"), command_result: None },
-            WebChromeAction::DismissContextMenu => {
-                self.context_menu = None;
-                WebChromeDispatch::HandledRedraw { action: String::from("context_menu.dismissed"), command_result: None }
-            }
-            WebChromeAction::None => WebChromeDispatch::Ignored,
+    fn arm_pressed_chrome_node(&mut self, app: &mut UiApp, node: &WidgetNode) -> WebChromeDispatch {
+        let nid = node.id.as_str();
+        if nid == "formula_bar.input" {
+            app.grid.formula_bar.active = true;
         }
+        if node.state.enablement.enabled && (node.a11y.tab_order.is_some() || node.a11y.role == WidgetRole::TextBox) {
+            app.focus_widget_id = Some(node.id.0.clone());
+            self.focused_node_id = app.focus_widget_id.clone();
+            if node.a11y.role == WidgetRole::TextBox {
+                let initial = node.a11y.value_text.as_deref().unwrap_or("");
+                let multiline = nid == "info.notes";
+                app.interaction
+                    .text_field_buffers
+                    .entry(node.id.0.clone())
+                    .or_insert_with(|| curvebook_ui_egui::layout::widgets::TextFieldEditState::new(initial, multiline));
+            }
+        }
+        if !node.state.enablement.enabled {
+            let reason = node.state.enablement.disabled_reason.clone();
+            if let Some(ref msg) = reason {
+                self.last_notice = Some((WebNoticeLevel::Warning, msg.clone()));
+            }
+            return WebChromeDispatch::HandledRedraw {
+                action: format!("chrome.disabled:{nid}"),
+                command_result: Some(json!({ "disabled_reason": reason })),
+            };
+        }
+        if node.action != WidgetAction::NoOp {
+            app.interaction.pressed_widget_id = Some(node.id.0.clone());
+            return WebChromeDispatch::HandledRedraw { action: format!("chrome.pressed:{nid}"), command_result: None };
+        }
+        WebChromeDispatch::HandledRedraw { action: format!("chrome.surface:{nid}"), command_result: None }
     }
 
-    /// Route mouse-wheel / trackpad scroll over DataSheet/ResultSheet grids vs Graph/Layout canvases.
-    #[must_use]
+    /// Complete a pointer release against pressed [`LayoutTree`] chrome widgets or workspace drags.
+    pub fn handle_pointer_up(
+        &mut self,
+        app: &mut UiApp,
+        layout: &WebChromeLayout,
+        logical_pos: [f64; 2],
+        button: PointerButton,
+    ) -> WebChromeDispatch {
+        if button != PointerButton::Primary {
+            return WebChromeDispatch::PassToWorkspace(UiInputEvent::PointerUp {
+                x: logical_pos[0],
+                y: logical_pos[1],
+                button,
+                modifiers: KeyModifiers::default(),
+            });
+        }
+        let hit = hit_test_logical(&layout.tree, logical_pos[0], logical_pos[1]);
+        if let Some(pressed_id) = app.interaction.pressed_widget_id.take() {
+            let Some(node) = hit.filter(|n| n.id.as_str() == pressed_id) else {
+                return WebChromeDispatch::HandledRedraw { action: String::from("chrome.release_cancelled"), command_result: None };
+            };
+            if node.z_layer == TreeZLayer::ContextMenu {
+                self.context_menu = None;
+                app.interaction.context_menu_target = None;
+                app.view_shards.toolbar_menus.active_context_menu_id = None;
+                app.view_shards.toolbar_menus.context_menu_anchor_px = None;
+            }
+            if !node.state.enablement.enabled {
+                let reason = node.state.enablement.disabled_reason.clone();
+                if let Some(ref msg) = reason {
+                    self.last_notice = Some((WebNoticeLevel::Warning, msg.clone()));
+                }
+                return WebChromeDispatch::HandledRedraw {
+                    action: format!("chrome.disabled:{}", node.id.as_str()),
+                    command_result: Some(json!({ "disabled_reason": reason })),
+                };
+            }
+            return WebChromeDispatch::ExecuteWidget { widget_id: node.id.0.clone(), action: node.action.clone() };
+        }
+
+        let workspace_drag_active = app.interaction.dragging_split_divider
+            || app.interaction.dragging_navigator_sheet.is_some()
+            || app.interaction.dragging_grid_sheet.is_some()
+            || app.interaction.canvas_drag.is_some();
+        if !workspace_drag_active {
+            if let Some(node) = hit {
+                if !node.state.enablement.enabled && (node.z_layer >= TreeZLayer::DropdownMenu || is_web_chrome_widget(node)) {
+                    let reason = node.state.enablement.disabled_reason.clone();
+                    return WebChromeDispatch::HandledRedraw {
+                        action: format!("chrome.disabled:{}", node.id.as_str()),
+                        command_result: Some(json!({ "disabled_reason": reason })),
+                    };
+                }
+                if node.z_layer >= TreeZLayer::DropdownMenu {
+                    return WebChromeDispatch::HandledRedraw { action: format!("chrome.surface_release:{}", node.id.as_str()), command_result: None };
+                }
+            }
+            if self.context_menu.is_some() {
+                return WebChromeDispatch::BlockedByModalBackdrop;
+            }
+        }
+
+        WebChromeDispatch::PassToWorkspace(UiInputEvent::PointerUp {
+            x: logical_pos[0],
+            y: logical_pos[1],
+            button,
+            modifiers: KeyModifiers::default(),
+        })
+    }
+
+    /// Route mouse-wheel / trackpad scroll through [`LayoutTree`] scrollable containers first,
+    /// falling back to grid scroll or canvas pan/zoom only when not occluded by popups/modals.
     pub fn route_wheel(
         &self,
-        app: &UiApp,
-        viewport: ViewportMetrics,
+        app: &mut UiApp,
+        layout: &WebChromeLayout,
         pos_logical: [f64; 2],
         delta_px: [f64; 2],
         modifiers: KeyModifiers,
     ) -> WebChromeDispatch {
         let [x_logical, y_logical] = pos_logical;
         let [delta_x, delta_y] = delta_px;
-        if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+        let [px_f, py_f] = layout.tree.metrics.logical_to_physical_px([x_logical, y_logical]);
+        let modal_open = app.canvas_dialogs.active_dialog != ActiveDialog::None;
+
+        let min_layer = if self.context_menu.is_some() {
+            TreeZLayer::ContextMenu
+        } else if modal_open {
+            TreeZLayer::ModalDialog
+        } else if self.open_menu_key.is_some() || app.interaction.open_menu.is_some() || app.interaction.open_dropdown.is_some() {
+            TreeZLayer::DropdownMenu
+        } else {
+            TreeZLayer::Workspace
+        };
+
+        #[allow(clippy::cast_possible_truncation)]
+        let (px_i, py_i) = (px_f.round() as i32, py_f.round() as i32);
+        if let Some(scroll_meta) = find_scroll_container_at(&layout.tree, px_i, py_i)
+            && (scroll_meta.has_vertical_overflow() || scroll_meta.has_horizontal_overflow())
+        {
+            let owner_layer = layout.tree.node(scroll_meta.container_id.as_str()).map_or_else(
+                || {
+                    layout
+                        .tree
+                        .nodes
+                        .iter()
+                        .find(|n| n.scroll.as_ref().is_some_and(|s| s.container_id == scroll_meta.container_id))
+                        .map_or(TreeZLayer::Workspace, |n| n.z_layer)
+                },
+                |n| n.z_layer,
+            );
+            if owner_layer >= min_layer {
+                app.interaction.scroll_offsets.apply_wheel(scroll_meta, delta_x, delta_y);
+                if owner_layer == TreeZLayer::Workspace
+                    && !(modifiers.ctrl || modifiers.meta)
+                    && scroll_meta.container_id.as_str().contains("grid.sheet.")
+                {
+                    return WebChromeDispatch::WheelScrollGrid { dx_px: delta_x, dy_px: delta_y };
+                }
+                return WebChromeDispatch::HandledRedraw {
+                    action: format!("scroll.wheel:{}", scroll_meta.container_id.as_str()),
+                    command_result: None,
+                };
+            }
+        }
+
+        if modal_open {
             return WebChromeDispatch::BlockedByModalBackdrop;
+        }
+        if min_layer > TreeZLayer::Workspace {
+            return WebChromeDispatch::HandledRedraw { action: String::from("popup.wheel_ignored"), command_result: None };
         }
         if modifiers.ctrl || modifiers.meta {
             return WebChromeDispatch::PassToWorkspace(UiInputEvent::WheelZoom { x: x_logical, y: y_logical, delta_y, modifiers });
@@ -930,38 +1082,95 @@ impl WebChromeBridge {
         let doc = app.document();
         let active_is_grid = doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some());
         if active_is_grid {
-            let layout = app.layout_map(viewport);
-            let [px, py] = viewport.logical_to_physical_px([x_logical, y_logical]);
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let (px_u, py_u) = (px.max(0.0).round() as u32, py.max(0.0).round() as u32);
-            if layout.frame.canvas.contains(px_u, py_u) {
+            let (px_u, py_u) = (px_f.max(0.0).round() as u32, py_f.max(0.0).round() as u32);
+            if layout.tree.frame.canvas.contains(px_u, py_u) {
                 return WebChromeDispatch::WheelScrollGrid { dx_px: delta_x, dy_px: delta_y };
             }
         }
         WebChromeDispatch::PassToWorkspace(UiInputEvent::InertialPan { delta_x: -delta_x, delta_y: -delta_y, dt_sec: 1.0 / 60.0, step_coast: false })
     }
 
-    /// Route keyboard `KeyDown` events through popups, modals, inline edit, and Web shortcuts.
-    pub fn handle_key_down(&mut self, app: &mut UiApp, key: &str, modifiers: KeyModifiers) -> WebChromeDispatch {
+    /// Route keyboard `KeyDown` events through popups, modals, focus traversal, inline edit, and Web shortcuts.
+    pub fn handle_key_down(&mut self, app: &mut UiApp, layout: &WebChromeLayout, key: &str, modifiers: KeyModifiers) -> WebChromeDispatch {
         let trimmed = key.trim();
 
         if matches!(trimmed, "Escape" | "Esc") {
-            if self.context_menu.is_some() || self.open_menu_key.is_some() {
+            if self.context_menu.is_some()
+                || self.open_menu_key.is_some()
+                || app.interaction.open_menu.is_some()
+                || app.interaction.open_dropdown.is_some()
+            {
                 self.close_popups();
+                app.interaction.open_menu = None;
+                app.interaction.open_dropdown = None;
+                app.interaction.context_menu_target = None;
+                app.view_shards.toolbar_menus.active_context_menu_id = None;
+                app.view_shards.toolbar_menus.context_menu_anchor_px = None;
                 return WebChromeDispatch::HandledRedraw { action: String::from("chrome.escape_popup"), command_result: None };
             }
             if app.canvas_dialogs.active_dialog != ActiveDialog::None && !app.inline_editor.active {
                 app.canvas_dialogs.close_dialog();
+                app.focus_widget_id = None;
+                self.focused_node_id = None;
                 return WebChromeDispatch::HandledRedraw { action: String::from("dialog.escape_close"), command_result: None };
             }
         }
 
-        if app.canvas_dialogs.active_dialog != ActiveDialog::None {
-            return self.handle_modal_key_down(app, trimmed, modifiers);
-        }
-
         if app.inline_editor.active {
             return WebChromeDispatch::PassToWorkspace(UiInputEvent::KeyDown { key: key.to_owned(), modifiers });
+        }
+
+        if trimmed.eq_ignore_ascii_case("tab") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
+            if app.canvas_dialogs.active_dialog == ActiveDialog::None && app.grid.formula_bar.active {
+                return WebChromeDispatch::PassToWorkspace(UiInputEvent::KeyDown { key: key.to_owned(), modifiers });
+            }
+            let trap_or_focused = app.canvas_dialogs.active_dialog != ActiveDialog::None
+                || self.context_menu.is_some()
+                || self.open_menu_key.is_some()
+                || app.interaction.open_menu.is_some()
+                || app.interaction.open_dropdown.is_some()
+                || app.focus_widget_id.is_some()
+                || !is_active_data_sheet(app);
+            if trap_or_focused
+                && let Some(next_id) =
+                    cycle_focus_in_scope(&layout.tree.nodes, layout.tree.active_focus_scope, app.focus_widget_id.as_deref(), modifiers.shift)
+            {
+                app.focus_widget_id = Some(next_id.clone());
+                self.focused_node_id = Some(next_id.clone());
+                if let Some(node) = layout.tree.node(&next_id)
+                    && node.a11y.role == WidgetRole::TextBox
+                {
+                    let initial = node.a11y.value_text.as_deref().unwrap_or("");
+                    app.interaction
+                        .text_field_buffers
+                        .entry(next_id.clone())
+                        .or_insert_with(|| curvebook_ui_egui::layout::widgets::TextFieldEditState::new(initial, next_id == "info.notes"));
+                }
+                return WebChromeDispatch::HandledRedraw { action: format!("focus.cycle:{next_id}"), command_result: None };
+            }
+        }
+
+        if app.canvas_dialogs.active_dialog != ActiveDialog::None {
+            return self.handle_modal_key_down(app, layout, trimmed, modifiers);
+        }
+
+        if let Some(fid) = app.focus_widget_id.as_deref()
+            && is_text_input_widget_id(fid)
+            && !modifiers.ctrl
+            && !modifiers.meta
+            && !modifiers.alt
+        {
+            return WebChromeDispatch::PassToWorkspace(UiInputEvent::KeyDown { key: key.to_owned(), modifiers });
+        }
+
+        if (trimmed == " " || trimmed.eq_ignore_ascii_case("space"))
+            && let Some(fid) = app.focus_widget_id.clone()
+            && let Some(node) = layout.tree.node(&fid)
+            && node.state.enablement.enabled
+            && node.action != WidgetAction::NoOp
+        {
+            return WebChromeDispatch::ExecuteWidget { widget_id: fid, action: node.action.clone() };
         }
 
         let routed = WebShortcutRouter::route_key_down(app, trimmed, modifiers);
@@ -981,9 +1190,18 @@ impl WebChromeBridge {
         WebChromeDispatch::PassToWorkspace(UiInputEvent::KeyDown { key: key.to_owned(), modifiers })
     }
 
-    fn handle_modal_key_down(&mut self, app: &mut UiApp, key: &str, modifiers: KeyModifiers) -> WebChromeDispatch {
+    fn handle_modal_key_down(&mut self, app: &mut UiApp, layout: &WebChromeLayout, key: &str, modifiers: KeyModifiers) -> WebChromeDispatch {
         if matches!(key, "Enter" | "Return") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
             return WebChromeDispatch::InvokeChromeAction(WebChromeAction::DialogConfirm);
+        }
+        if (key == " " || key.eq_ignore_ascii_case("space"))
+            && let Some(fid) = app.focus_widget_id.clone()
+            && let Some(node) = layout.tree.node(&fid)
+            && node.a11y.role != WidgetRole::TextBox
+            && node.state.enablement.enabled
+            && node.action != WidgetAction::NoOp
+        {
+            return WebChromeDispatch::ExecuteWidget { widget_id: fid, action: node.action.clone() };
         }
         match &app.canvas_dialogs.active_dialog {
             ActiveDialog::CommandPalette => {
@@ -992,6 +1210,7 @@ impl WebChromeBridge {
                     "Backspace" => {
                         app.canvas_dialogs.command_palette.query.pop();
                         app.canvas_dialogs.command_palette.selected_index = 0;
+                        sync_palette_query_buffer(app);
                         WebChromeDispatch::HandledRedraw { action: String::from("palette.backspace"), command_result: None }
                     }
                     "ArrowDown" | "Down" if hits_len > 0 => {
@@ -1006,6 +1225,7 @@ impl WebChromeBridge {
                     _ if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && key.chars().count() == 1 => {
                         app.canvas_dialogs.command_palette.query.push_str(key);
                         app.canvas_dialogs.command_palette.selected_index = 0;
+                        sync_palette_query_buffer(app);
                         WebChromeDispatch::HandledRedraw { action: String::from("palette.type"), command_result: None }
                     }
                     _ => WebChromeDispatch::BlockedByModalBackdrop,
@@ -1053,11 +1273,17 @@ impl WebChromeBridge {
                 }
                 _ => WebChromeDispatch::BlockedByModalBackdrop,
             },
-            _ => WebChromeDispatch::BlockedByModalBackdrop,
+            _ => {
+                if app.focus_widget_id.as_deref().is_some_and(is_text_input_widget_id) {
+                    WebChromeDispatch::PassToWorkspace(UiInputEvent::KeyDown { key: key.to_owned(), modifiers })
+                } else {
+                    WebChromeDispatch::BlockedByModalBackdrop
+                }
+            }
         }
     }
 
-    /// Route IME committed text into active modal search fields or workspace inline editor.
+    /// Route committed text or IME composition into active modal inputs or workspace inline/text editors.
     pub fn handle_ime_commit(&mut self, app: &mut UiApp, text: &str) -> WebChromeDispatch {
         self.ime_preedit = None;
         if text.is_empty() {
@@ -1067,10 +1293,14 @@ impl WebChromeBridge {
             ActiveDialog::CommandPalette => {
                 app.canvas_dialogs.command_palette.query.push_str(text);
                 app.canvas_dialogs.command_palette.selected_index = 0;
+                sync_palette_query_buffer(app);
                 WebChromeDispatch::HandledRedraw { action: String::from("palette.ime_commit"), command_result: None }
             }
             ActiveDialog::AnalyzeSheet { .. } => {
                 app.canvas_dialogs.analyze.search_query.push_str(text);
+                if let Some(first) = app.canvas_dialogs.analyze.compatible_entries().first() {
+                    app.canvas_dialogs.analyze.selected_entry_id = Some(first.id.to_owned());
+                }
                 WebChromeDispatch::HandledRedraw { action: String::from("analyze.ime_commit"), command_result: None }
             }
             ActiveDialog::ExcludeWithReason { .. } => {
@@ -1080,6 +1310,54 @@ impl WebChromeBridge {
             _ => WebChromeDispatch::PassToWorkspace(UiInputEvent::TextInput { text: text.to_owned() }),
         }
     }
+}
+
+fn sync_palette_query_buffer(app: &mut UiApp) {
+    app.interaction.text_field_buffers.insert(
+        String::from("palette.query"),
+        curvebook_ui_egui::layout::widgets::TextFieldEditState::new(&app.canvas_dialogs.command_palette.query, false),
+    );
+}
+
+fn is_text_input_widget_id(wid: &str) -> bool {
+    matches!(wid, "palette.query" | "formula_bar.input" | "info.notes") || wid.contains("search") || wid.contains("input")
+}
+
+fn is_web_chrome_widget(node: &WidgetNode) -> bool {
+    if node.z_layer >= TreeZLayer::DropdownMenu {
+        return true;
+    }
+    let id = node.id.as_str();
+    if id == "result.diagnostic_banner"
+        || id.starts_with("canvas.surface.")
+        || matches!(node.action, WidgetAction::SwitchSheet { .. } | WidgetAction::SelectGridCell { .. } | WidgetAction::SwapSplitPanes)
+    {
+        return false;
+    }
+    id == "menu.bar"
+        || id == "status.bar"
+        || id.starts_with("menu.")
+        || id.starts_with("toolbar.")
+        || id.starts_with("nav.folder.")
+        || id == "navigator.family_toggle"
+        || id.starts_with("result.")
+        || id.starts_with("inspector.")
+        || id.starts_with("scrollbar.")
+        || id == "formula_bar.input"
+        || id.starts_with("info.")
+        || (id.starts_with("canvas.") && node.action != WidgetAction::NoOp)
+        || node.action != WidgetAction::NoOp
+}
+
+fn command_id_for_hover(node: &WidgetNode) -> Option<String> {
+    if matches!(node.action, WidgetAction::MenuOpen(_)) {
+        return None;
+    }
+    if let WidgetAction::InvokeCommand { command_id, .. } = &node.action {
+        return Some(command_id.clone());
+    }
+    let id = node.id.as_str();
+    id.strip_prefix("menu.").or_else(|| id.strip_prefix("ctx.")).filter(|s| !s.is_empty() && *s != "bar").map(str::to_owned)
 }
 
 fn is_active_data_sheet(app: &UiApp) -> bool {
@@ -1132,60 +1410,34 @@ fn handle_grid_navigation_key(app: &mut UiApp, key: &str, shift: bool) -> Option
     }
 }
 
-fn frame_rect_hit(app: &UiApp, logical_pos: [f64; 2]) -> String {
-    let layout = app.layout_map(ViewportMetrics::new(1280.0, 800.0, 1.0));
+fn classify_tree_context_target(app: &UiApp, tree: &LayoutTree, logical_pos: [f64; 2]) -> String {
+    if let Some(hit) = hit_test_logical(tree, logical_pos[0], logical_pos[1]) {
+        let id = hit.id.as_str();
+        if let Some(sid) = id.strip_prefix("nav.sheet.") {
+            return format!("navigator:{sid}");
+        }
+        if id.starts_with("nav.") || id == "navigator.pane" || id == "navigator.family_toggle" {
+            return String::from("navigator");
+        }
+        if id.starts_with("grid.header.") || id.starts_with("grid.col_hdr.") || id.starts_with("grid.x_hdr.") {
+            return String::from("column_header");
+        }
+        if id.starts_with("grid.") {
+            return String::from("grid");
+        }
+    }
+    let layout = app.layout_map(tree.metrics);
     match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        curvebook_ui_egui::WorkspaceHitTarget::NavigatorEntry { sheet_id, .. } => format!("navigator:{}", sheet_id.as_str()),
         curvebook_ui_egui::WorkspaceHitTarget::GridCell { .. } | curvebook_ui_egui::WorkspaceHitTarget::GridXCell { .. } => String::from("grid"),
-        curvebook_ui_egui::WorkspaceHitTarget::NavigatorEntry { .. } => String::from("navigator"),
-        _ => String::from("canvas"),
-    }
-}
-
-fn classify_context_target(app: &UiApp, guessed: String) -> &'static str {
-    let doc = app.document();
-    if let Some(active) = doc.active_sheet_id.as_ref() {
-        if doc.data_sheet(active).is_some() && guessed != "navigator" {
-            return "grid";
-        }
-        if doc.graph_sheet(active).is_some() || doc.layout_sheet(active).is_some() {
-            return if guessed == "navigator" { "navigator" } else { "canvas" };
-        }
-    }
-    "canvas"
-}
-
-fn apply_dialog_item_selection(app: &mut UiApp, idx: usize) -> WebChromeDispatch {
-    match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::AnalyzeSheet { .. } => {
-            let entries = app.canvas_dialogs.analyze.compatible_entries();
-            if let Some(item) = entries.get(idx) {
-                app.canvas_dialogs.analyze.selected_entry_id = Some(item.id.to_owned());
+        _ => {
+            let doc = app.document();
+            if doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) {
+                String::from("grid")
+            } else {
+                String::from("graph_object")
             }
-            WebChromeDispatch::HandledRedraw { action: format!("dialog.select_analyze:{idx}"), command_result: None }
         }
-        ActiveDialog::CommandPalette => {
-            app.canvas_dialogs.command_palette.selected_index = idx;
-            WebChromeDispatch::InvokeChromeAction(WebChromeAction::DialogConfirm)
-        }
-        ActiveDialog::ExportFigure { .. } => {
-            let fmt = match idx {
-                0 => curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Svg,
-                1 => curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Pdf,
-                2 => curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Png,
-                _ => curvebook_ui_egui::serde_json::from_value(json!({ "Tiff": "Deflate" }))
-                    .unwrap_or(curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Png),
-            };
-            app.canvas_dialogs.export_figure.format = fmt;
-            WebChromeDispatch::HandledRedraw { action: format!("dialog.select_export_fmt:{idx}"), command_result: None }
-        }
-        ActiveDialog::ChangeGraphType { .. } => {
-            let opts = app.canvas_dialogs.change_graph_type.recommended_options();
-            if let Some(opt) = opts.get(idx) {
-                app.canvas_dialogs.change_graph_type.selected_option_id = opt.id.to_owned();
-            }
-            WebChromeDispatch::HandledRedraw { action: format!("dialog.select_graph_type:{idx}"), command_result: None }
-        }
-        _ => WebChromeDispatch::HandledRedraw { action: format!("dialog.select_item:{idx}"), command_result: None },
     }
 }
 
@@ -1620,717 +1872,499 @@ pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, Str
     }
 }
 
-struct ChromeColors {
-    panel: [u8; 4],
-    surface: [u8; 4],
-    header: [u8; 4],
-    border: [u8; 4],
-    text: [u8; 4],
-    muted: [u8; 4],
-    accent: [u8; 4],
-    hover_bg: [u8; 4],
+#[derive(Clone, Copy)]
+enum PatchBrush {
+    Surface,
+    Panel,
+    Header,
+    Accent,
+    Text,
+    Muted,
 }
 
-impl ChromeColors {
-    fn from_theme(theme: &UiThemeSpec) -> Self {
-        let dark = theme.surface_bg.relative_luminance() < 0.25;
-        let to_arr = |c: (u8, u8, u8, u8)| -> [u8; 4] { [c.0, c.1, c.2, c.3] };
-        let shift = |base: [u8; 4], delta: i16| -> [u8; 4] {
-            let ch = |c: u8| -> u8 {
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                let v = i16::from(c).saturating_add(delta).clamp(0, 255) as u8;
-                v
-            };
-            [ch(base[0]), ch(base[1]), ch(base[2]), base[3]]
-        };
-        let panel = to_arr((theme.panel_bg.r, theme.panel_bg.g, theme.panel_bg.b, theme.panel_bg.a));
-        Self {
-            panel,
-            surface: to_arr((theme.surface_bg.r, theme.surface_bg.g, theme.surface_bg.b, theme.surface_bg.a)),
-            header: shift(panel, if dark { 12 } else { -10 }),
-            border: to_arr((theme.border.r, theme.border.g, theme.border.b, theme.border.a)),
-            text: to_arr((theme.text_primary.r, theme.text_primary.g, theme.text_primary.b, theme.text_primary.a)),
-            muted: to_arr((theme.text_muted.r, theme.text_muted.g, theme.text_muted.b, theme.text_muted.a)),
-            accent: to_arr((theme.accent.r, theme.accent.g, theme.accent.b, theme.accent.a)),
-            hover_bg: shift(panel, if dark { 24 } else { -20 }),
-        }
-    }
+struct TreePatchWriter<'a> {
+    tree: &'a mut LayoutTree,
+    palette: &'a FramePalette,
+    next_paint_order: u32,
 }
 
-struct ChromeLayoutBuilder<'a> {
-    app: &'a UiApp,
-    viewport: ViewportMetrics,
-    frame: &'a WorkspaceFrameLayout,
-    measurer: &'a dyn WebTextMeasurer,
-    dpi: u16,
-    bridge: &'a WebChromeBridge,
-    colors: ChromeColors,
-    is_rtl: bool,
-    dir: WebTextDirection,
-    nodes: Vec<WebChromeNode>,
-    rects: Vec<WebRectPrimitive>,
-    text_ops: Vec<WebTextDrawOp>,
-    paint_seq: u32,
-}
-
-impl<'a> ChromeLayoutBuilder<'a> {
-    fn new(
-        app: &'a UiApp,
-        viewport: ViewportMetrics,
-        frame: &'a WorkspaceFrameLayout,
-        measurer: &'a dyn WebTextMeasurer,
-        dpi: u16,
-        bridge: &'a WebChromeBridge,
-    ) -> Self {
-        let is_rtl = curvebook_ui_egui::i18n::is_rtl_locale(&app.locale);
-        Self {
-            app,
-            viewport,
-            frame,
-            measurer,
-            dpi: dpi.max(72),
-            bridge,
-            colors: ChromeColors::from_theme(&app.theme),
-            is_rtl,
-            dir: if is_rtl { WebTextDirection::Rtl } else { WebTextDirection::Ltr },
-            nodes: Vec::new(),
-            rects: Vec::new(),
-            text_ops: Vec::new(),
-            paint_seq: 0,
-        }
+impl<'a> TreePatchWriter<'a> {
+    fn new(tree: &'a mut LayoutTree, palette: &'a FramePalette) -> Self {
+        let next_paint_order = tree.paint_ops.iter().map(|op| op.paint_order).max().unwrap_or(0).saturating_add(1);
+        Self { tree, palette, next_paint_order }
     }
 
     fn next_order(&mut self) -> u32 {
-        let cur = self.paint_seq;
-        self.paint_seq = self.paint_seq.saturating_add(1);
-        cur
+        let order = self.next_paint_order;
+        self.next_paint_order = self.next_paint_order.saturating_add(1);
+        order
     }
 
-    fn push_rect(&mut self, z_layer: ZLayer, rect_px: LayoutRectPx, fill: Option<[u8; 4]>, stroke: Option<[u8; 4]>) {
-        self.rects.push(WebRectPrimitive { z_layer, rect_px, clip_px: None, fill, stroke, stroke_width_px: 1 });
+    fn push_clip(&mut self, rect: TreeLayoutRectPx) -> ClipId {
+        let idx = self.tree.clips.len();
+        self.tree.clips.push(rect);
+        ClipId(idx)
     }
 
-    fn push_text(&mut self, z_layer: ZLayer, rect_px: LayoutRectPx, text: String, style: UiTextStyle, color: [u8; 4], node_id: Option<&str>) {
-        self.push_text_with_dpi(z_layer, rect_px, text, style, (color, CSS_REFERENCE_DPI), node_id);
+    fn push_node(&mut self, node: WidgetNode) {
+        self.tree.nodes.push(node);
     }
 
-    fn push_text_scaled(&mut self, z_layer: ZLayer, rect_px: LayoutRectPx, text: String, style: UiTextStyle, color: [u8; 4], node_id: Option<&str>) {
-        self.push_text_with_dpi(z_layer, rect_px, text, style, (color, self.dpi), node_id);
+    fn paint_fill(&mut self, z_layer: TreeZLayer, clip: ClipId, owner: &WidgetId, rect: TreeLayoutRectPx, brush: PatchBrush) {
+        self.push_rect_op(z_layer, clip, owner, rect, brush, None);
     }
 
-    fn push_text_with_dpi(
+    fn paint_stroke(&mut self, z_layer: TreeZLayer, clip: ClipId, owner: &WidgetId, rect: TreeLayoutRectPx, brush: PatchBrush, thickness: u32) {
+        self.push_rect_op(z_layer, clip, owner, rect, brush, Some(thickness));
+    }
+
+    fn push_rect_op(
         &mut self,
-        z_layer: ZLayer,
-        rect_px: LayoutRectPx,
-        text: String,
-        style: UiTextStyle,
-        color_and_dpi: ([u8; 4], u16),
-        node_id: Option<&str>,
+        z_layer: TreeZLayer,
+        clip: ClipId,
+        owner: &WidgetId,
+        rect: TreeLayoutRectPx,
+        brush: PatchBrush,
+        thickness: Option<u32>,
     ) {
-        let (color, font_dpi) = color_and_dpi;
-        if text.is_empty() || rect_px.width == 0 || rect_px.height == 0 {
-            return;
-        }
-        let metrics = self.measurer.measure(&style, &text, font_dpi);
-        let pad_x = 4.0;
-        let x_px = if self.is_rtl { f64::from(rect_px.right()) - pad_x } else { f64::from(rect_px.x) + pad_x };
-        let baseline_y_px = f64::from(rect_px.y) + ((f64::from(rect_px.height) + metrics.ascent_px - metrics.descent_px) * 0.5);
-        let paint_order = self.next_order();
-        self.text_ops.push(WebTextDrawOp {
-            z_layer,
-            z_band: z_layer.band(),
-            paint_order,
-            clip_px: Some(rect_px),
-            x_px,
-            y_px: f64::from(rect_px.y),
-            baseline_y_px,
-            max_width_px: Some((f64::from(rect_px.width) - 8.0).max(4.0)),
-            text,
-            font_css: canvas_font_css(&style, font_dpi),
-            style,
-            color_rgba: color,
-            align: if self.is_rtl { WebTextAlign::Right } else { WebTextAlign::Left },
-            direction: self.dir,
-            ellipsized: metrics.width_px > f64::from(rect_px.width),
-            node_id: node_id.map(str::to_owned),
-        });
-    }
-
-    fn build(&mut self) -> WebChromeLayout {
-        let menu_sections = menu_bar_tooltips(self.app);
-        let menu_titles: Vec<String> = menu_sections.iter().map(|s| s.title.to_owned()).collect();
-        let mut toolbar_ids = Vec::new();
-
-        if !self.app.presentation_mode && self.frame.toolbar.width > 0 && self.frame.toolbar.height > 0 {
-            self.build_top_bar(&menu_sections, &mut toolbar_ids);
-            self.build_status_bar();
-            self.build_open_dropdown(&menu_sections);
-        }
-
-        if self.app.canvas_dialogs.active_dialog != ActiveDialog::None {
-            self.build_modal_dialog();
-        } else if let Some(ref ctx) = self.bridge.context_menu {
-            self.build_context_menu(ctx);
-        }
-
-        self.build_hover_tooltip();
-
-        let status_summary = build_status_summary(self.app, self.bridge);
-        let snapshot = WebChromeSnapshot {
-            menu_bar_visible: !self.app.presentation_mode,
-            open_menu_key: self.bridge.open_menu_key.clone(),
-            context_menu_open: self.bridge.context_menu.is_some() && self.app.canvas_dialogs.active_dialog == ActiveDialog::None,
-            active_dialog: format!("{:?}", self.app.canvas_dialogs.active_dialog),
-            hovered_node_id: self.bridge.hovered_node_id.clone(),
-            focused_node_id: self.bridge.focused_node_id.clone(),
-            ime_preedit: self.bridge.ime_preedit.clone(),
-            drag_active: self.bridge.drag_active,
-            node_count: self.nodes.len(),
-            menu_titles,
-            toolbar_ids,
-            status_summary,
-        };
-
-        self.nodes.sort_by(|a, b| a.z_layer.cmp(&b.z_layer).then_with(|| a.paint_order.cmp(&b.paint_order)));
-        WebChromeLayout {
-            nodes: std::mem::take(&mut self.nodes),
-            rects: std::mem::take(&mut self.rects),
-            text_ops: std::mem::take(&mut self.text_ops),
-            snapshot,
-        }
-    }
-
-    fn build_top_bar(&mut self, menu_sections: &[curvebook_ui_egui::MenuSectionTooltips], toolbar_ids: &mut Vec<String>) {
-        let tb = self.frame.toolbar;
-        #[allow(clippy::cast_possible_wrap)]
-        let bar_rect = LayoutRectPx::new(tb.x as i32, tb.y as i32, tb.width, tb.height);
-        self.push_rect(ZLayer::Workspace, bar_rect, Some(self.colors.panel), Some(self.colors.border));
-
-        let split_rows = tb.height >= 34;
-        let menu_h = if split_rows { tb.height / 2 } else { tb.height };
-        let tool_h = if split_rows { tb.height.saturating_sub(menu_h) } else { tb.height };
-        #[allow(clippy::cast_possible_truncation)]
-        let menu_font_px = (f64::from(menu_h) * 0.62).clamp(9.0, 13.0) as f32;
-        #[allow(clippy::cast_possible_truncation)]
-        let tool_font_px = (f64::from(tool_h) * 0.58).clamp(9.0, 12.5) as f32;
-        let menu_style = UiTextStyle::ui_sans(menu_font_px);
-        let tool_style = UiTextStyle::ui_sans(tool_font_px);
-
-        let mut cursor_x = bar_rect.x + 6;
-        for sec in menu_sections {
-            let label_w = self.measurer.measure(&menu_style, sec.title, CSS_REFERENCE_DPI).width_px.ceil();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let btn_w = (label_w as u32).saturating_add(14).min(tb.width / 3);
-            if cursor_x + btn_w as i32 > bar_rect.right() - 4 {
-                break;
-            }
-            let r = LayoutRectPx::new(cursor_x, bar_rect.y + 1, btn_w, menu_h.saturating_sub(2));
-            let active = self.bridge.open_menu_key.as_deref() == Some(sec.menu_key) || self.bridge.hovered_node_id.as_deref() == Some(sec.menu_key);
-            if active {
-                self.push_rect(ZLayer::Workspace, r, Some(self.colors.hover_bg), Some(self.colors.border));
-            }
-            self.push_text(ZLayer::Workspace, r, sec.title.to_owned(), menu_style.clone(), self.colors.text, Some(sec.menu_key));
-            let order = self.next_order();
-            self.nodes.push(WebChromeNode {
-                id: sec.menu_key.to_owned(),
-                role: WebChromeRole::MenuSection,
-                z_layer: ZLayer::Workspace,
-                paint_order: order,
-                rect_px: r,
-                clip_px: bar_rect,
-                label: sec.title.to_owned(),
-                shortcut: None,
-                enabled: true,
-                disabled_reason: None,
-                tooltip: Some(format!("{} menu ({} items)", sec.title, sec.items.len())),
-                action: WebChromeAction::ToggleMenuSection(sec.menu_key.to_owned()),
-            });
-            cursor_x = r.right() + 4;
-        }
-
-        let tool_y = if split_rows { bar_rect.y + menu_h as i32 } else { bar_rect.y };
-        let mut tx = if split_rows { bar_rect.x + 6 } else { cursor_x + 12 };
-        let buttons = build_contextual_toolbar_specs(self.app);
-        for spec in buttons {
-            let measured = self.measurer.measure(&tool_style, &spec.caption, CSS_REFERENCE_DPI).width_px.ceil();
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let btn_w = (measured as u32).saturating_add(14);
-            if tx + btn_w as i32 > bar_rect.right() - 4 {
-                break;
-            }
-            let r = LayoutRectPx::new(tx, tool_y + 1, btn_w, tool_h.saturating_sub(2));
-            let hovered = self.bridge.hovered_node_id.as_deref() == Some(&spec.id);
-            let fill = if !spec.enabled {
-                Some(self.colors.panel)
-            } else if hovered {
-                Some(self.colors.hover_bg)
-            } else {
-                Some(self.colors.surface)
-            };
-            self.push_rect(ZLayer::Workspace, r, fill, Some(self.colors.border));
-            let text_col = if spec.enabled { self.colors.text } else { self.colors.muted };
-            self.push_text(ZLayer::Workspace, r, spec.caption.clone(), tool_style.clone(), text_col, Some(&spec.id));
-            let order = self.next_order();
-            toolbar_ids.push(spec.id.clone());
-            self.nodes.push(WebChromeNode {
-                id: spec.id,
-                role: WebChromeRole::ToolbarButton,
-                z_layer: ZLayer::Workspace,
-                paint_order: order,
-                rect_px: r,
-                clip_px: bar_rect,
-                label: spec.caption,
-                shortcut: spec.shortcut,
-                enabled: spec.enabled,
-                disabled_reason: spec.disabled_reason,
-                tooltip: spec.tooltip,
-                action: spec.action,
-            });
-            tx = r.right() + 4;
-        }
-    }
-
-    fn build_status_bar(&mut self) {
-        let sb = self.frame.status_bar;
-        if sb.width == 0 || sb.height == 0 {
-            return;
-        }
-        #[allow(clippy::cast_possible_wrap)]
-        let rect = LayoutRectPx::new(sb.x as i32, sb.y as i32, sb.width, sb.height);
-        self.push_rect(ZLayer::Workspace, rect, Some(self.colors.header), Some(self.colors.border));
-        #[allow(clippy::cast_possible_truncation)]
-        let font_px = (f64::from(sb.height) * 0.58).clamp(9.0, 12.0) as f32;
-        let summary = build_status_summary(self.app, self.bridge);
-        self.push_text(ZLayer::Workspace, rect, summary.clone(), UiTextStyle::ui_sans(font_px), self.colors.muted, Some("status_bar"));
         let order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("status_bar"),
-            role: WebChromeRole::StatusBar,
-            z_layer: ZLayer::Workspace,
-            paint_order: order,
-            rect_px: rect,
-            clip_px: rect,
-            label: summary,
-            shortcut: None,
-            enabled: true,
-            disabled_reason: None,
-            tooltip: None,
-            action: WebChromeAction::None,
-        });
+        let color = match brush {
+            PatchBrush::Surface => self.palette.surface,
+            PatchBrush::Panel => self.palette.panel,
+            PatchBrush::Header => self.palette.header,
+            PatchBrush::Accent => self.palette.accent,
+            PatchBrush::Text => self.palette.text,
+            PatchBrush::Muted => self.palette.muted,
+        };
+        let kind = match thickness {
+            Some(t) => PaintOpKind::StrokeRect { rect, color, thickness: t },
+            None => PaintOpKind::FillRect { rect, color },
+        };
+        self.tree.paint_ops.push(PaintOp { z_layer, paint_order: order, clip: Some(clip), owner_widget_id: Some(owner.clone()), kind });
     }
 
-    fn build_open_dropdown(&mut self, sections: &[curvebook_ui_egui::MenuSectionTooltips]) {
-        let Some(open_key) = self.bridge.open_menu_key.as_deref() else {
-            return;
-        };
-        let Some(section) = sections.iter().find(|s| s.menu_key == open_key) else {
-            return;
-        };
-        let anchor_x = self.nodes.iter().find(|n| n.id == open_key).map_or(8, |n| n.rect_px.x);
-        let anchor_y = self.nodes.iter().find(|n| n.id == open_key).map_or(24, |n| n.rect_px.bottom());
-
-        let style = UiTextStyle::ui_sans(12.0);
-        let row_h = ((22.0 * self.viewport.clamped_scale_factor()).round() as u32).max(20);
-        let max_items = ((self.frame.total_height.saturating_sub(anchor_y.max(0) as u32 + 12)) / row_h).max(1) as usize;
-        let visible_items = build_dropdown_entries_for_section(open_key, section, max_items.min(28));
-
-        let mut max_w = 220u32;
-        for item in &visible_items {
-            let web_sc = WebShortcutRouter::display_shortcut(&item.command_id, &item.shortcut);
-            let full = if web_sc.is_empty() { item.label.clone() } else { format!("{}  ({web_sc})", item.label) };
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let w = (self.measurer.measure(&style, &full, self.dpi).width_px.ceil() as u32).saturating_add(24);
-            max_w = max_w.max(w);
-        }
-        let panel_w = max_w.min(self.frame.total_width.saturating_sub(16).max(160));
+    fn paint_text_line(&mut self, spec: WebTreeTextSpec<'_>) {
+        let shaped = DesktopTextMeasurer::global().shape_line(spec.text, spec.style, &self.tree.locale);
+        let baseline_y = spec.pos_px[1] + shaped.metrics.ascent_px;
         #[allow(clippy::cast_possible_truncation)]
-        let panel_h = (visible_items.len() as u32).saturating_mul(row_h).saturating_add(8).max(row_h);
-        let clamped_x = anchor_x.min((self.frame.total_width.saturating_sub(panel_w)) as i32).max(4);
-        let panel_rect = LayoutRectPx::new(clamped_x, anchor_y + 2, panel_w, panel_h);
-        self.push_rect(ZLayer::DropdownMenu, panel_rect, Some(self.colors.surface), Some(self.colors.border));
-
-        for (idx, item) in visible_items.iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let iy = panel_rect.y + 4 + (idx as i32) * (row_h as i32);
-            let item_rect = LayoutRectPx::new(panel_rect.x + 4, iy, panel_w.saturating_sub(8), row_h.saturating_sub(2));
-            let node_id = format!("menu.item.{}", item.command_id);
-            let hovered = self.bridge.hovered_node_id.as_deref() == Some(&node_id);
-            if hovered {
-                self.push_rect(ZLayer::DropdownMenu, item_rect, Some(self.colors.hover_bg), None);
-            }
-            let web_sc = WebShortcutRouter::display_shortcut(&item.command_id, &item.shortcut);
-            let text = if web_sc.is_empty() { item.label.clone() } else { format!("{}  [{}]", item.label, web_sc) };
-            let col = if item.enabled { self.colors.text } else { self.colors.muted };
-            self.push_text_scaled(ZLayer::DropdownMenu, item_rect, text, style.clone(), col, Some(&node_id));
-
-            let action = match item.command_id.as_str() {
-                "project.open" | "file.open" => WebChromeAction::OpenFilePicker,
-                "export.svg" | "graph.exportSvg" => WebChromeAction::ExportFormat(WebExportFormat::Svg),
-                "export.pdf" | "graph.exportPdf" => WebChromeAction::ExportFormat(WebExportFormat::Pdf),
-                "export.png" | "graph.exportPng" => WebChromeAction::ExportFormat(WebExportFormat::Png),
-                "export.tiff" => WebChromeAction::ExportFormat(WebExportFormat::Tiff),
-                "table.exportCsv" => WebChromeAction::ExportFormat(WebExportFormat::Csv),
-                "project.save" => WebChromeAction::ExportFormat(WebExportFormat::CurveBookArchive),
-                _ => WebChromeAction::InvokeCommand(item.command_id.clone()),
-            };
-            let order = self.next_order();
-            self.nodes.push(WebChromeNode {
-                id: node_id,
-                role: WebChromeRole::MenuItem,
-                z_layer: ZLayer::DropdownMenu,
-                paint_order: order,
-                rect_px: item_rect,
-                clip_px: panel_rect,
-                label: item.label.clone(),
-                shortcut: (!web_sc.is_empty()).then(|| web_sc.to_owned()),
-                enabled: item.enabled,
-                disabled_reason: item.disabled_reason.clone(),
-                tooltip: Some(item.tooltip.clone()),
-                action,
+        let bx = spec.pos_px[0].floor() as i32;
+        #[allow(clippy::cast_possible_truncation)]
+        let by = spec.pos_px[1].floor() as i32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bw = shaped.metrics.width_px.ceil().max(1.0) as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bh = shaped.metrics.line_height_px.ceil().max(1.0) as u32;
+        if !spec.text.is_empty() {
+            self.tree.text_runs.push(LayoutTextRun {
+                owner_widget_id: spec.owner.clone(),
+                text: spec.text.to_owned(),
+                style: spec.style.clone(),
+                z_layer: spec.z_layer,
+                clip: Some(spec.clip),
+                scroll_container_id: None,
+                origin_px: [spec.pos_px[0], baseline_y],
+                baseline_y_px: baseline_y,
+                bounds_px: TreeLayoutRectPx::new(bx, by, bw, bh),
+                shaped: shaped.clone(),
+                ellipsized: spec.ellipsized,
             });
         }
-    }
-
-    fn build_modal_dialog(&mut self) {
-        let full = LayoutRectPx::new(0, 0, self.frame.total_width, self.frame.total_height);
-        self.push_rect(ZLayer::ModalBackdrop, full, Some([14, 18, 26, 130]), None);
-        let backdrop_order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("modal.backdrop"),
-            role: WebChromeRole::ModalBackdrop,
-            z_layer: ZLayer::ModalBackdrop,
-            paint_order: backdrop_order,
-            rect_px: full,
-            clip_px: full,
-            label: String::from("Modal Backdrop"),
-            shortcut: None,
-            enabled: true,
-            disabled_reason: None,
-            tooltip: None,
-            action: WebChromeAction::CloseModalBackdrop,
+        let order = self.next_order();
+        let color = match spec.brush {
+            PatchBrush::Surface => self.palette.surface,
+            PatchBrush::Panel => self.palette.panel,
+            PatchBrush::Header => self.palette.header,
+            PatchBrush::Accent => self.palette.accent,
+            PatchBrush::Text => self.palette.text,
+            PatchBrush::Muted => self.palette.muted,
+        };
+        self.tree.paint_ops.push(PaintOp {
+            z_layer: spec.z_layer,
+            paint_order: order,
+            clip: Some(spec.clip),
+            owner_widget_id: Some(spec.owner.clone()),
+            kind: PaintOpKind::TextRun {
+                text: spec.text.to_owned(),
+                style: spec.style.clone(),
+                locale: self.tree.locale.clone(),
+                origin_px: [spec.pos_px[0], baseline_y],
+                color,
+                shaped,
+            },
         });
-
-        let mw = (self.frame.total_width * 3 / 5).max(280).min(self.frame.total_width.saturating_sub(24).max(160));
-        let mh = (self.frame.total_height * 3 / 5).max(200).min(self.frame.total_height.saturating_sub(24).max(120));
-        let mx = ((self.frame.total_width.saturating_sub(mw)) / 2) as i32;
-        let my = ((self.frame.total_height.saturating_sub(mh)) / 2) as i32;
-        let modal = LayoutRectPx::new(mx, my, mw, mh);
-
-        self.push_rect(ZLayer::ModalDialog, modal, Some(self.colors.surface), Some(self.colors.accent));
-        let header_h = 30u32.min(mh);
-        let header_rect = LayoutRectPx::new(modal.x, modal.y, modal.width, header_h);
-        self.push_rect(ZLayer::ModalDialog, header_rect, Some(self.colors.accent), None);
-        self.push_text_scaled(
-            ZLayer::ModalDialog,
-            LayoutRectPx::new(modal.x + 8, modal.y + 2, modal.width.saturating_sub(40), header_h.saturating_sub(4)),
-            modal_title(&self.app.canvas_dialogs.active_dialog).to_owned(),
-            UiTextStyle::ui_sans_bold(13.0),
-            [255, 255, 255, 255],
-            Some("modal.title"),
-        );
-
-        let close_rect = LayoutRectPx::new(modal.right() - 28, modal.y + 4, 22, header_h.saturating_sub(8));
-        self.push_rect(ZLayer::ModalDialog, close_rect, Some([0, 0, 0, 45]), None);
-        self.push_text_scaled(
-            ZLayer::ModalDialog,
-            close_rect,
-            String::from("X"),
-            UiTextStyle::ui_sans_bold(11.0),
-            [255, 255, 255, 255],
-            Some("modal.close"),
-        );
-        let close_order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("modal.close"),
-            role: WebChromeRole::ModalCloseButton,
-            z_layer: ZLayer::ModalDialog,
-            paint_order: close_order,
-            rect_px: close_rect,
-            clip_px: modal,
-            label: String::from("Close"),
-            shortcut: Some(String::from("Escape")),
-            enabled: true,
-            disabled_reason: None,
-            tooltip: Some(String::from("Close dialog (Escape)")),
-            action: WebChromeAction::DialogCancel,
-        });
-
-        self.build_modal_body(modal, header_h);
-        self.build_modal_footer(modal);
     }
+}
 
-    fn build_modal_body(&mut self, modal: LayoutRectPx, header_h: u32) {
-        let mut cy = modal.y + header_h as i32 + 10;
-        let body_bottom = modal.bottom() - 42;
-        let body_w = modal.width.saturating_sub(24);
-        let item_style = UiTextStyle::ui_sans(12.5);
-        let row_h = 24i32;
+struct WebTreeTextSpec<'a> {
+    z_layer: TreeZLayer,
+    clip: ClipId,
+    owner: &'a WidgetId,
+    pos_px: [f64; 2],
+    text: &'a str,
+    style: &'a TreeUiTextStyle,
+    brush: PatchBrush,
+    ellipsized: bool,
+}
 
-        if let Some((input_label, input_val)) = active_modal_input_text(self.app)
-            && cy + 28 < body_bottom
+fn apply_web_tree_rules(tree: &mut LayoutTree, app: &UiApp, bridge: &WebChromeBridge, palette: &FramePalette) {
+    remove_menu_item_and_compact(tree, "menu.ui.event.dispatch");
+    enforce_qol7_remediation(tree, palette);
+    append_context_menu_to_tree(tree, app, bridge, palette);
+    emit_web_tooltip_if_needed(tree, app, palette);
+}
+
+fn remove_menu_item_and_compact(tree: &mut LayoutTree, target_id: &str) {
+    let Some(removed) = tree.nodes.iter().find(|n| n.id.as_str() == target_id).cloned() else {
+        return;
+    };
+    let dy = i32::try_from(removed.bounds.rect_px.height).unwrap_or(0);
+    let scale = tree.metrics.scale_factor;
+    tree.nodes.retain(|n| n.id.as_str() != target_id);
+    tree.paint_ops.retain(|op| op.owner_widget_id.as_ref().is_none_or(|id| id.as_str() != target_id));
+    tree.text_runs.retain(|run| run.owner_widget_id.as_str() != target_id);
+
+    let Some(parent_id) = removed.parent else {
+        return;
+    };
+    let mut shifted_ids = Vec::new();
+    for node in &mut tree.nodes {
+        if node.parent.as_ref() == Some(&parent_id) && node.bounds.rect_px.y > removed.bounds.rect_px.y && dy > 0 {
+            let mut r = node.bounds.rect_px;
+            r.y = r.y.saturating_sub(dy);
+            let clip_r = node.clip.and_then(|c| tree.clips.get(c.0).copied());
+            node.bounds = NodeBounds::from_physical(r, clip_r, scale);
+            shifted_ids.push(node.id.0.clone());
+        } else if node.id == parent_id
+            && let Some(scroll) = &mut node.scroll
         {
-            let input_rect = LayoutRectPx::new(modal.x + 12, cy, body_w, 26);
-            self.push_rect(ZLayer::ModalDialog, input_rect, Some(self.colors.panel), Some(self.colors.accent));
-            self.push_text_scaled(
-                ZLayer::ModalDialog,
-                input_rect,
-                format!("{input_label}: {input_val}"),
-                item_style.clone(),
-                self.colors.text,
-                Some("modal.input"),
-            );
-            let order = self.next_order();
-            self.nodes.push(WebChromeNode {
-                id: String::from("modal.input"),
-                role: WebChromeRole::ModalInput,
-                z_layer: ZLayer::ModalDialog,
-                paint_order: order,
-                rect_px: input_rect,
-                clip_px: modal,
-                label: input_label.to_owned(),
-                shortcut: None,
-                enabled: true,
-                disabled_reason: None,
-                tooltip: None,
-                action: WebChromeAction::FocusModalInput,
-            });
-            cy += 34;
+            scroll.content_size_px[1] = scroll.content_size_px[1].saturating_sub(removed.bounds.rect_px.height);
         }
+    }
+    if dy <= 0 || shifted_ids.is_empty() {
+        return;
+    }
+    for op in &mut tree.paint_ops {
+        if op.owner_widget_id.as_ref().is_some_and(|id| shifted_ids.iter().any(|s| s == id.as_str())) {
+            shift_paint_op_y(&mut op.kind, -dy);
+        }
+    }
+    for run in &mut tree.text_runs {
+        if shifted_ids.iter().any(|s| s == run.owner_widget_id.as_str()) {
+            run.origin_px[1] -= f64::from(dy);
+            run.baseline_y_px -= f64::from(dy);
+            run.bounds_px.y = run.bounds_px.y.saturating_sub(dy);
+        }
+    }
+}
 
-        let items = active_modal_items(self.app);
-        for (idx, (label, selected)) in items.into_iter().enumerate() {
-            if cy + row_h > body_bottom {
-                break;
-            }
-            let r = LayoutRectPx::new(modal.x + 12, cy, body_w, 22);
-            let id = format!("modal.item.{idx}");
-            let hovered = self.bridge.hovered_node_id.as_deref() == Some(&id);
-            let fill = if selected {
-                Some([self.colors.accent[0], self.colors.accent[1], self.colors.accent[2], 42])
-            } else if hovered {
-                Some(self.colors.hover_bg)
+fn shift_paint_op_y(kind: &mut PaintOpKind, dy: i32) {
+    match kind {
+        PaintOpKind::FillRect { rect, .. }
+        | PaintOpKind::StrokeRect { rect, .. }
+        | PaintOpKind::DimRect { rect, .. }
+        | PaintOpKind::BlitImage { dst: rect, .. } => {
+            rect.y = rect.y.saturating_add(dy);
+        }
+        PaintOpKind::LineSegment { p0, p1, .. } => {
+            p0[1] = p0[1].saturating_add(dy);
+            p1[1] = p1[1].saturating_add(dy);
+        }
+        PaintOpKind::CircleIndicator { center, .. } => {
+            center[1] = center[1].saturating_add(dy);
+        }
+        PaintOpKind::TextRun { origin_px, .. } => {
+            origin_px[1] += f64::from(dy);
+        }
+    }
+}
+
+fn enforce_qol7_remediation(tree: &mut LayoutTree, palette: &FramePalette) {
+    let target_id = "menu.ui.result.applyRemediation";
+    let Some(node) = tree.nodes.iter_mut().find(|n| n.id.as_str() == target_id) else {
+        return;
+    };
+    node.state.enablement = ControlEnablement::disabled(String::from("Diagnostic-only (QOL-7): inspect Result Diagnostic Tabs instead"));
+    node.action = WidgetAction::NoOp;
+    for op in &mut tree.paint_ops {
+        if op.owner_widget_id.as_ref().is_some_and(|id| id.as_str() == target_id)
+            && let PaintOpKind::TextRun { color, .. } = &mut op.kind
+        {
+            *color = palette.muted;
+        }
+    }
+}
+
+fn append_context_menu_to_tree(tree: &mut LayoutTree, app: &UiApp, bridge: &WebChromeBridge, palette: &FramePalette) {
+    if app.canvas_dialogs.active_dialog != ActiveDialog::None || tree.node("popup.context_menu").is_some() {
+        return;
+    }
+    let ctx_state = if let Some(ctx) = &bridge.context_menu {
+        Some(ctx.clone())
+    } else {
+        app.interaction.context_menu_target.as_ref().map(|target| WebContextMenuState {
+            target: target.clone(),
+            anchor_px: [tree.frame.canvas.x as i32 + 24, tree.frame.canvas.y as i32 + 24],
+        })
+    };
+    let Some(ctx) = ctx_state else {
+        return;
+    };
+    let items = context_menu_items_for_target(&ctx.target, app);
+    if items.is_empty() {
+        return;
+    }
+    let scale = tree.metrics.scale_factor;
+    let vw = i32::try_from(tree.metrics.physical_width_px()).unwrap_or(1024);
+    let vh = i32::try_from(tree.metrics.physical_height_px()).unwrap_or(640);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let row_h = (22.0 * scale).round().clamp(18.0, 44.0) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let pop_w = (224.0 * scale).round().max(120.0).min(f64::from(vw.saturating_sub(8)).max(120.0)) as u32;
+    let pad = 4u32;
+    let pop_h = (u32::try_from(items.len()).unwrap_or(1).saturating_mul(row_h).saturating_add(pad.saturating_mul(2)))
+        .min(tree.metrics.physical_height_px().saturating_sub(8).max(row_h));
+    let max_x = vw.saturating_sub(i32::try_from(pop_w).unwrap_or(0)).saturating_sub(4).max(4);
+    let max_y = vh.saturating_sub(i32::try_from(pop_h).unwrap_or(0)).saturating_sub(4).max(4);
+    let pop_rect = TreeLayoutRectPx::new(ctx.anchor_px[0].clamp(4, max_x), ctx.anchor_px[1].clamp(4, max_y), pop_w, pop_h);
+
+    tree.active_focus_scope = FocusScope::PopupMenu;
+    let hovered_id = app.interaction.hovered_widget_id.clone();
+    let focused_id = app.focus_widget_id.clone();
+    let pressed_id = app.interaction.pressed_widget_id.clone();
+    let locale = tree.locale.clone();
+    #[allow(clippy::cast_possible_truncation)]
+    let size_px = (12.0 * scale).clamp(9.0, 22.0);
+    let style = TreeUiTextStyle::ui_sans(size_px);
+
+    let mut writer = TreePatchWriter::new(tree, palette);
+    let pop_clip = writer.push_clip(pop_rect);
+    let pop_wid = WidgetId::from("popup.context_menu");
+    writer.paint_fill(TreeZLayer::ContextMenu, pop_clip, &pop_wid, pop_rect, PatchBrush::Surface);
+    writer.paint_stroke(TreeZLayer::ContextMenu, pop_clip, &pop_wid, pop_rect, PatchBrush::Accent, 1);
+    let pop_order = writer.next_order();
+    let mut pop_a11y = AccessibilityMeta::new(WidgetRole::ContextMenu, format!("Context Menu ({})", ctx.target), FocusScope::PopupMenu);
+    pop_a11y.keyboard_path = Some(String::from("context_menu"));
+    writer.push_node(WidgetNode {
+        id: pop_wid.clone(),
+        parent: None,
+        z_layer: TreeZLayer::ContextMenu,
+        paint_order: pop_order,
+        clip: Some(pop_clip),
+        scroll: None,
+        bounds: NodeBounds::from_physical(pop_rect, Some(pop_rect), scale),
+        a11y: pop_a11y,
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+        drawn_in_frame: true,
+    });
+
+    for (idx, (label, cmd_id, enabled)) in items.iter().enumerate() {
+        let ry = pop_rect.y.saturating_add(i32::try_from(pad).unwrap_or(4)).saturating_add(i32::try_from(idx as u32 * row_h).unwrap_or(0));
+        if ry + i32::try_from(row_h).unwrap_or(22) > pop_rect.bottom() {
+            break;
+        }
+        let item_rect = TreeLayoutRectPx::new(pop_rect.x + 2, ry, pop_rect.width.saturating_sub(4), row_h);
+        let item_id = WidgetId::from(format!("ctx.{cmd_id}"));
+        let is_hovered = hovered_id.as_deref() == Some(item_id.as_str());
+        let is_focused = focused_id.as_deref() == Some(item_id.as_str());
+        let is_active = pressed_id.as_deref() == Some(item_id.as_str());
+        let enablement =
+            if *enabled { ControlEnablement::enabled() } else { ControlEnablement::disabled(format!("{label} is unavailable for current sheet")) };
+        if *enabled && (is_hovered || is_active) {
+            writer.paint_fill(TreeZLayer::ContextMenu, pop_clip, &item_id, item_rect, PatchBrush::Header);
+        }
+        if is_focused {
+            writer.paint_stroke(TreeZLayer::ContextMenu, pop_clip, &item_id, item_rect, PatchBrush::Accent, 1);
+        }
+        let max_text_w = f64::from(item_rect.width.saturating_sub(12));
+        let (display, ellipsized) = ellipsize_text(DesktopTextMeasurer::global(), label, &style, &locale, max_text_w);
+        let metrics = DesktopTextMeasurer::global().measure(&display, &style, &locale);
+        let ty = f64::from(item_rect.y) + ((f64::from(item_rect.height) - metrics.line_height_px) * 0.5).max(1.0);
+        let brush = if *enabled { PatchBrush::Text } else { PatchBrush::Muted };
+        writer.paint_text_line(WebTreeTextSpec {
+            z_layer: TreeZLayer::ContextMenu,
+            clip: pop_clip,
+            owner: &item_id,
+            pos_px: [f64::from(item_rect.x + 6), ty],
+            text: &display,
+            style: &style,
+            brush,
+            ellipsized,
+        });
+        let mut a11y = AccessibilityMeta::new(WidgetRole::MenuItem, label.clone(), FocusScope::PopupMenu);
+        a11y.keyboard_path = Some(format!("ctx.{cmd_id}"));
+        a11y.tab_order = Some(900 + u32::try_from(idx).unwrap_or(0));
+        let item_order = writer.next_order();
+        let params = contextual_command_params(app, cmd_id);
+        writer.push_node(WidgetNode {
+            id: item_id,
+            parent: Some(pop_wid.clone()),
+            z_layer: TreeZLayer::ContextMenu,
+            paint_order: item_order,
+            clip: Some(pop_clip),
+            scroll: None,
+            bounds: NodeBounds::from_physical(item_rect, Some(pop_rect), scale),
+            a11y,
+            state: WidgetVisualState { hovered: is_hovered, active: is_active, focused: is_focused, enablement, ellipsized },
+            action: if *enabled { WidgetAction::InvokeCommand { command_id: cmd_id.clone(), params } } else { WidgetAction::NoOp },
+            drawn_in_frame: true,
+        });
+    }
+}
+
+fn emit_web_tooltip_if_needed(tree: &mut LayoutTree, app: &UiApp, palette: &FramePalette) {
+    if tree.nodes.iter().any(|n| n.id.as_str() == "overlay.tooltip") {
+        return;
+    }
+    let Some(hovered_id) = &app.interaction.hovered_widget_id else {
+        return;
+    };
+    let hovered_node = tree.nodes.iter().find(|n| n.id.as_str() == hovered_id).cloned();
+    let tip_text = hovered_node
+        .as_ref()
+        .and_then(|n| n.state.enablement.disabled_reason.clone())
+        .or_else(|| app.hover_command_id.as_deref().and_then(|c| command_tooltip(app, c)).map(|t| t.format_inline_tooltip()));
+    let Some(text) = tip_text.filter(|s| !s.is_empty()) else {
+        return;
+    };
+    let vw = tree.metrics.physical_width_px();
+    let vh = tree.metrics.physical_height_px();
+    if vw < 120 || vh < 60 {
+        return;
+    }
+    let scale = tree.metrics.scale_factor;
+    let size_px = (11.5 * scale).clamp(9.0, 22.0);
+    let style = TreeUiTextStyle::ui_sans(size_px);
+    let max_w = vw.saturating_sub(24).min(360);
+    let locale = tree.locale.clone();
+    let (display, ellipsized) = ellipsize_text(DesktopTextMeasurer::global(), &text, &style, &locale, f64::from(max_w.saturating_sub(12)));
+    let measured = DesktopTextMeasurer::global().measure(&display, &style, &locale);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let tw = ((measured.width_px.ceil() as u32) + 14).clamp(60, max_w);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let th = (size_px * 1.6).ceil() as u32;
+    let rect = TreeLayoutRectPx::new(12, i32::try_from(vh).unwrap_or(640) - i32::try_from(th + 8).unwrap_or(28), tw, th);
+    let focus_scope = tree.active_focus_scope;
+    let mut writer = TreePatchWriter::new(tree, palette);
+    let clip = writer.push_clip(rect);
+    let wid = WidgetId::from("overlay.tooltip");
+    writer.paint_fill(TreeZLayer::Tooltip, clip, &wid, rect, PatchBrush::Panel);
+    writer.paint_stroke(TreeZLayer::Tooltip, clip, &wid, rect, PatchBrush::Accent, 1);
+    let ty = f64::from(rect.y) + ((f64::from(rect.height) - measured.line_height_px) * 0.5).max(1.0);
+    writer.paint_text_line(WebTreeTextSpec {
+        z_layer: TreeZLayer::Tooltip,
+        clip,
+        owner: &wid,
+        pos_px: [f64::from(rect.x + 6), ty],
+        text: &display,
+        style: &style,
+        brush: PatchBrush::Text,
+        ellipsized,
+    });
+    let order = writer.next_order();
+    writer.push_node(WidgetNode {
+        id: wid,
+        parent: None,
+        z_layer: TreeZLayer::Tooltip,
+        paint_order: order,
+        clip: Some(clip),
+        scroll: None,
+        bounds: NodeBounds::from_physical(rect, Some(rect), scale),
+        a11y: AccessibilityMeta::new(WidgetRole::Tooltip, display, focus_scope),
+        state: WidgetVisualState { ellipsized, ..Default::default() },
+        action: WidgetAction::NoOp,
+        drawn_in_frame: true,
+    });
+}
+
+fn project_chrome_nodes(tree: &LayoutTree, app: &UiApp) -> Vec<WebChromeNode> {
+    let mut nodes: Vec<WebChromeNode> = tree
+        .nodes
+        .iter()
+        .map(|node| {
+            let role = project_chrome_role(node);
+            let tooltip = if !node.state.enablement.enabled {
+                node.state.enablement.disabled_reason.clone()
+            } else if let Some(cmd_id) = command_id_for_hover(node) {
+                command_tooltip(app, &cmd_id).map(|t| t.format_inline_tooltip())
+            } else if node.a11y.role == WidgetRole::Tooltip {
+                Some(node.a11y.label.clone())
             } else {
                 None
             };
-            if fill.is_some() || selected {
-                self.push_rect(ZLayer::ModalDialog, r, fill, selected.then_some(self.colors.accent));
+            WebChromeNode {
+                id: node.id.0.clone(),
+                role,
+                z_layer: ZLayer::from(node.z_layer),
+                paint_order: node.paint_order,
+                rect_px: LayoutRectPx::from(node.bounds.rect_px),
+                clip_px: LayoutRectPx::from(node.bounds.visible_rect_px),
+                label: node.a11y.label.clone(),
+                shortcut: node.a11y.shortcut.clone(),
+                enabled: node.state.enablement.enabled,
+                disabled_reason: node.state.enablement.disabled_reason.clone(),
+                tooltip,
+                action: project_chrome_action(&node.action),
             }
-            self.push_text_scaled(ZLayer::ModalDialog, r, label.clone(), item_style.clone(), self.colors.text, Some(&id));
-            let order = self.next_order();
-            self.nodes.push(WebChromeNode {
-                id,
-                role: WebChromeRole::ModalItem,
-                z_layer: ZLayer::ModalDialog,
-                paint_order: order,
-                rect_px: r,
-                clip_px: modal,
-                label,
-                shortcut: None,
-                enabled: true,
-                disabled_reason: None,
-                tooltip: None,
-                action: WebChromeAction::SelectDialogItem(idx),
-            });
-            cy += row_h + 2;
-        }
+        })
+        .collect();
+    nodes.sort_by(|a, b| a.z_layer.cmp(&b.z_layer).then_with(|| a.paint_order.cmp(&b.paint_order)));
+    nodes
+}
+
+fn project_chrome_role(node: &WidgetNode) -> WebChromeRole {
+    if node.id.as_str() == "modal.backdrop" {
+        return WebChromeRole::ModalBackdrop;
     }
-
-    fn build_modal_footer(&mut self, modal: LayoutRectPx) {
-        let cancel_rect = LayoutRectPx::new(modal.right() - 180, modal.bottom() - 34, 78, 24);
-        let ok_rect = LayoutRectPx::new(modal.right() - 94, modal.bottom() - 34, 82, 24);
-        let btn_style = UiTextStyle::ui_sans_bold(12.0);
-
-        self.push_rect(ZLayer::ModalDialog, cancel_rect, Some(self.colors.panel), Some(self.colors.border));
-        self.push_text_scaled(ZLayer::ModalDialog, cancel_rect, String::from("Cancel"), btn_style.clone(), self.colors.text, Some("modal.cancel"));
-        let cancel_order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("modal.cancel"),
-            role: WebChromeRole::ModalButton,
-            z_layer: ZLayer::ModalDialog,
-            paint_order: cancel_order,
-            rect_px: cancel_rect,
-            clip_px: modal,
-            label: String::from("Cancel"),
-            shortcut: Some(String::from("Escape")),
-            enabled: true,
-            disabled_reason: None,
-            tooltip: None,
-            action: WebChromeAction::DialogCancel,
-        });
-
-        let ok_enable = curvebook_ui_egui::modal_predicates::evaluate_dialog_button(&self.app.canvas_dialogs, self.app.document(), "ok")
-            .unwrap_or_else(ControlEnablement::enabled);
-        let ok_bg = if ok_enable.enabled { self.colors.accent } else { self.colors.panel };
-        let ok_fg = if ok_enable.enabled { [255, 255, 255, 255] } else { self.colors.muted };
-        self.push_rect(ZLayer::ModalDialog, ok_rect, Some(ok_bg), Some(self.colors.border));
-        self.push_text_scaled(ZLayer::ModalDialog, ok_rect, String::from("OK"), btn_style, ok_fg, Some("modal.ok"));
-        let ok_order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("modal.ok"),
-            role: WebChromeRole::ModalButton,
-            z_layer: ZLayer::ModalDialog,
-            paint_order: ok_order,
-            rect_px: ok_rect,
-            clip_px: modal,
-            label: String::from("OK"),
-            shortcut: Some(String::from("Enter")),
-            enabled: ok_enable.enabled,
-            disabled_reason: ok_enable.disabled_reason.clone(),
-            tooltip: ok_enable.disabled_reason,
-            action: WebChromeAction::DialogConfirm,
-        });
+    if node.id.as_str() == "modal.close" {
+        return WebChromeRole::ModalCloseButton;
     }
-
-    fn build_context_menu(&mut self, ctx: &WebContextMenuState) {
-        let items = context_menu_items_for_target(&ctx.target, self.app);
-        if items.is_empty() {
-            return;
-        }
-        let row_h = 24u32;
-        let menu_w = 210u32.min(self.frame.total_width.saturating_sub(16).max(140));
-        #[allow(clippy::cast_possible_truncation)]
-        let menu_h = (items.len() as u32).saturating_mul(row_h).saturating_add(8);
-        let x = ctx.anchor_px[0].min((self.frame.total_width.saturating_sub(menu_w)) as i32).max(4);
-        let y = ctx.anchor_px[1].min((self.frame.total_height.saturating_sub(menu_h)) as i32).max(4);
-        let menu_rect = LayoutRectPx::new(x, y, menu_w, menu_h);
-        self.push_rect(ZLayer::ContextMenu, menu_rect, Some(self.colors.surface), Some(self.colors.border));
-
-        let style = UiTextStyle::ui_sans(12.0);
-        for (idx, (label, cmd_id, enabled)) in items.into_iter().enumerate() {
-            #[allow(clippy::cast_possible_truncation)]
-            let r = LayoutRectPx::new(menu_rect.x + 4, menu_rect.y + 4 + (idx as i32) * (row_h as i32), menu_w.saturating_sub(8), row_h - 2);
-            let node_id = format!("ctx.{}", cmd_id);
-            if self.bridge.hovered_node_id.as_deref() == Some(&node_id) {
-                self.push_rect(ZLayer::ContextMenu, r, Some(self.colors.hover_bg), None);
+    if matches!(node.action, WidgetAction::MenuOpen(_)) {
+        return WebChromeRole::MenuSection;
+    }
+    match node.a11y.role {
+        WidgetRole::MenuBar => WebChromeRole::MenuBar,
+        WidgetRole::MenuItem => WebChromeRole::MenuItem,
+        WidgetRole::ContextMenu => {
+            if node.z_layer == TreeZLayer::DropdownMenu || node.z_layer == TreeZLayer::ModalDropdown {
+                WebChromeRole::DropdownMenu
+            } else {
+                WebChromeRole::ContextMenu
             }
-            let fg = if enabled { self.colors.text } else { self.colors.muted };
-            self.push_text_scaled(ZLayer::ContextMenu, r, label.clone(), style.clone(), fg, Some(&node_id));
-            let action = match cmd_id.as_str() {
-                "export.svg" => WebChromeAction::ExportFormat(WebExportFormat::Svg),
-                "export.pdf" => WebChromeAction::ExportFormat(WebExportFormat::Pdf),
-                "export.png" => WebChromeAction::ExportFormat(WebExportFormat::Png),
-                _ => WebChromeAction::InvokeCommand(cmd_id),
-            };
-            let order = self.next_order();
-            self.nodes.push(WebChromeNode {
-                id: node_id,
-                role: WebChromeRole::MenuItem,
-                z_layer: ZLayer::ContextMenu,
-                paint_order: order,
-                rect_px: r,
-                clip_px: menu_rect,
-                label,
-                shortcut: None,
-                enabled,
-                disabled_reason: (!enabled).then(|| String::from("Unavailable in current sheet")),
-                tooltip: None,
-                action,
-            });
         }
-    }
-
-    fn build_hover_tooltip(&mut self) {
-        let Some(hovered_id) = self.bridge.hovered_node_id.as_deref() else {
-            return;
-        };
-        let Some(hovered_node) = self.nodes.iter().find(|n| n.id == hovered_id).cloned() else {
-            return;
-        };
-        let Some(tip_text) = hovered_node.disabled_reason.as_ref().or(hovered_node.tooltip.as_ref()) else {
-            return;
-        };
-        let first_line = tip_text.lines().next().unwrap_or(tip_text.as_str()).to_owned();
-        if first_line.is_empty() {
-            return;
-        }
-        let style = UiTextStyle::ui_sans(11.5);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let tw = (self.measurer.measure(&style, &first_line, self.dpi).width_px.ceil() as u32)
-            .saturating_add(16)
-            .min(self.frame.total_width.saturating_sub(16).max(80));
-        let th = 22u32;
-        let tx = hovered_node.rect_px.x.min((self.frame.total_width.saturating_sub(tw)) as i32).max(4);
-        let ty = (hovered_node.rect_px.bottom() + 4).min((self.frame.total_height.saturating_sub(th)) as i32).max(4);
-        let tip_rect = LayoutRectPx::new(tx, ty, tw, th);
-        self.push_rect(ZLayer::Tooltip, tip_rect, Some([20, 24, 34, 242]), Some(self.colors.accent));
-        self.push_text_scaled(ZLayer::Tooltip, tip_rect, first_line.clone(), style, [255, 255, 255, 255], Some("tooltip.active"));
-        let order = self.next_order();
-        self.nodes.push(WebChromeNode {
-            id: String::from("tooltip.active"),
-            role: WebChromeRole::Tooltip,
-            z_layer: ZLayer::Tooltip,
-            paint_order: order,
-            rect_px: tip_rect,
-            clip_px: tip_rect,
-            label: first_line,
-            shortcut: None,
-            enabled: true,
-            disabled_reason: None,
-            tooltip: None,
-            action: WebChromeAction::None,
-        });
+        WidgetRole::Dialog => WebChromeRole::ModalDialog,
+        WidgetRole::Tooltip => WebChromeRole::Tooltip,
+        WidgetRole::Banner => WebChromeRole::StatusBar,
+        WidgetRole::TextBox if node.z_layer >= TreeZLayer::ModalDialog => WebChromeRole::ModalInput,
+        WidgetRole::RadioButton if node.z_layer >= TreeZLayer::ModalDialog => WebChromeRole::ModalItem,
+        _ if node.z_layer >= TreeZLayer::ModalDialog => WebChromeRole::ModalButton,
+        _ => WebChromeRole::ToolbarButton,
     }
 }
 
-struct ToolbarItemSpec {
-    id: String,
-    caption: String,
-    shortcut: Option<String>,
-    enabled: bool,
-    disabled_reason: Option<String>,
-    tooltip: Option<String>,
-    action: WebChromeAction,
-}
-
-fn build_contextual_toolbar_specs(app: &UiApp) -> Vec<ToolbarItemSpec> {
-    let mut out = Vec::new();
-    let doc = app.document();
-    let active_is_result = doc.active_sheet_id.as_ref().is_some_and(|id| doc.result_sheet(id).is_some());
-    let active_is_graph = doc.active_sheet_id.as_ref().is_some_and(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some());
-
-    for entry in toolbar_tooltips(app) {
-        let web_sc = WebShortcutRouter::display_shortcut(entry.button.command_id, &entry.tooltip.shortcut);
-        let action = match entry.button.command_id {
-            "project.open" => WebChromeAction::OpenFilePicker,
+fn project_chrome_action(action: &WidgetAction) -> WebChromeAction {
+    match action {
+        WidgetAction::MenuOpen(key) => WebChromeAction::ToggleMenuSection(key.clone()),
+        WidgetAction::InvokeCommand { command_id, .. } => match command_id.as_str() {
+            "project.open" | "file.open" => WebChromeAction::OpenFilePicker,
+            "export.svg" | "graph.exportSvg" => WebChromeAction::ExportFormat(WebExportFormat::Svg),
+            "export.pdf" | "graph.exportPdf" => WebChromeAction::ExportFormat(WebExportFormat::Pdf),
+            "export.png" | "graph.exportPng" => WebChromeAction::ExportFormat(WebExportFormat::Png),
+            "export.tiff" => WebChromeAction::ExportFormat(WebExportFormat::Tiff),
+            "table.exportCsv" => WebChromeAction::ExportFormat(WebExportFormat::Csv),
             "project.save" => WebChromeAction::ExportFormat(WebExportFormat::CurveBookArchive),
-            "export.svg" => WebChromeAction::ExportFormat(WebExportFormat::Svg),
-            "graph.setAxes" => WebChromeAction::InvokeCommand(String::from("ui.graph.axes.open")),
-            other => WebChromeAction::InvokeCommand(other.to_owned()),
-        };
-        out.push(ToolbarItemSpec {
-            id: entry.button.id.to_owned(),
-            caption: entry.caption.to_owned(),
-            shortcut: (!web_sc.is_empty()).then(|| web_sc.to_owned()),
-            enabled: entry.tooltip.enabled,
-            disabled_reason: (!entry.tooltip.enabled).then(|| format!("{} is unavailable in the current workspace state", entry.caption)),
-            tooltip: Some(entry.tooltip.format_tooltip()),
-            action,
-        });
+            _ => WebChromeAction::InvokeCommand(command_id.clone()),
+        },
+        WidgetAction::DialogConfirm => WebChromeAction::DialogConfirm,
+        WidgetAction::DialogCancel => WebChromeAction::DialogCancel,
+        WidgetAction::InvokeDialogButton(btn) if btn == "back" => WebChromeAction::DialogStepBack,
+        WidgetAction::InvokeDialogButton(btn) if btn == "next" => WebChromeAction::DialogStepNext,
+        WidgetAction::SelectAnalyzeCategory(_) | WidgetAction::SelectAnalyzeEntry(_) | WidgetAction::SelectDropdownOption { .. } => {
+            WebChromeAction::SelectDialogItem(0)
+        }
+        WidgetAction::FocusWidget(_) => WebChromeAction::FocusModalInput,
+        _ => WebChromeAction::None,
     }
-
-    if active_is_result {
-        out.push(ToolbarItemSpec {
-            id: String::from("toolbar.edit_params"),
-            caption: String::from("Params (Alt+T)"),
-            shortcut: Some(String::from("Alt+T")),
-            enabled: true,
-            disabled_reason: None,
-            tooltip: Some(String::from("Edit Analysis Parameters for active ResultSheet (Alt+T)")),
-            action: WebChromeAction::InvokeCommand(String::from("ui.editParams.open")),
-        });
-    }
-    if active_is_graph && let Some(tip) = command_tooltip(app, "export.png") {
-        out.push(ToolbarItemSpec {
-            id: String::from("toolbar.export_png"),
-            caption: String::from("PNG"),
-            shortcut: None,
-            enabled: tip.enabled,
-            disabled_reason: (!tip.enabled).then(|| String::from("No graph or layout sheet to export")),
-            tooltip: Some(tip.format_tooltip()),
-            action: WebChromeAction::ExportFormat(WebExportFormat::Png),
-        });
-    }
-    out
 }
 
 fn build_status_summary(app: &UiApp, bridge: &WebChromeBridge) -> String {
@@ -2356,110 +2390,9 @@ fn build_status_summary(app: &UiApp, bridge: &WebChromeBridge) -> String {
     }
 }
 
-fn modal_title(dialog: &ActiveDialog) -> &'static str {
-    match dialog {
-        ActiveDialog::None => "",
-        ActiveDialog::AnalyzeSheet { .. } => "Analyze...",
-        ActiveDialog::DuplicateAnalysisPrompt { .. } => "Analysis Already Exists",
-        ActiveDialog::EditAnalysisParameters { .. } => "Edit Analysis Parameters (Alt+T)",
-        ActiveDialog::ChangeDataAnalyzed { .. } => "Change Data Analyzed",
-        ActiveDialog::ResultViewer { .. } => "Result Sheet Viewer",
-        ActiveDialog::ConstantHookPicker { .. } => "Insert Hooked Constant",
-        ActiveDialog::ChangeGraphType { .. } => "Change Graph Type",
-        ActiveDialog::FormatGraph { .. } => "Format Graph",
-        ActiveDialog::FormatAxes { .. } => "Format Axes",
-        ActiveDialog::PairwiseComparisons { .. } => "Pairwise Comparisons",
-        ActiveDialog::BubblePlotInspector { .. } => "Bubble Plot Channels",
-        ActiveDialog::ApplyStyleFrom { .. } => "Apply Style From...",
-        ActiveDialog::PageLayoutComposer { .. } => "Page Layout Composer",
-        ActiveDialog::ExportFigure { .. } => "Export Publication Figure",
-        ActiveDialog::ConvertArchetype { .. } => "Convert Table Archetype...",
-        ActiveDialog::ImportReshape => "Import Reshape",
-        ActiveDialog::ExcludeWithReason { .. } => "Exclude Selection with Reason",
-        ActiveDialog::FormatSelectedPoints { .. } => "Format Selected Points...",
-        ActiveDialog::PowerAndSampleSize => "Power and Sample Size",
-        ActiveDialog::Print { .. } => "Print...",
-        ActiveDialog::RandomizeGroups => "Randomize Subjects to Groups...",
-        ActiveDialog::RandomSampleRows { .. } => "Random Sample Rows...",
-        ActiveDialog::SimulateDistributions => "Simulate Distributions...",
-        ActiveDialog::InsertModelEquation { .. } => "Insert Model Equation...",
-        ActiveDialog::CommandPalette => "Command Palette (Alt+K / Cmd+K)",
-        ActiveDialog::About => "About CurveBook",
-    }
-}
-
-fn active_modal_input_text(app: &UiApp) -> Option<(&'static str, String)> {
-    match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::CommandPalette => Some(("Filter", app.canvas_dialogs.command_palette.query.clone())),
-        ActiveDialog::AnalyzeSheet { .. } => Some(("Search", app.canvas_dialogs.analyze.search_query.clone())),
-        ActiveDialog::ExcludeWithReason { .. } => Some(("Reason Note", app.canvas_dialogs.exclude_with_reason.note.clone())),
-        _ => None,
-    }
-}
-
-fn active_modal_items(app: &UiApp) -> Vec<(String, bool)> {
-    match &app.canvas_dialogs.active_dialog {
-        ActiveDialog::CommandPalette => app
-            .canvas_dialogs
-            .command_palette
-            .matches_for_session(app.session())
-            .into_iter()
-            .take(10)
-            .enumerate()
-            .map(|(i, e)| {
-                let sc = WebShortcutRouter::display_shortcut(e.id, &e.shortcut);
-                let label = if sc.is_empty() { e.label.to_owned() } else { format!("{} ({sc})", e.label) };
-                (label, i == app.canvas_dialogs.command_palette.selected_index)
-            })
-            .collect(),
-        ActiveDialog::AnalyzeSheet { .. } => app
-            .canvas_dialogs
-            .analyze
-            .compatible_entries()
-            .into_iter()
-            .take(10)
-            .map(|item| {
-                let sel = app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some(item.id);
-                (item.label.to_owned(), sel)
-            })
-            .collect(),
-        ActiveDialog::EditAnalysisParameters { .. } => {
-            if let Some(draft) = &app.canvas_dialogs.edit_params.draft {
-                vec![
-                    (format!("Analysis: {}", draft.effective_title()), true),
-                    (format!("Confidence: {:.1}%", draft.confidence_level.percent()), false),
-                    (format!("Source: {}", draft.source_sheet_id.as_str()), false),
-                ]
-            } else {
-                vec![(String::from("Edit Analysis Parameters ready"), true)]
-            }
-        }
-        ActiveDialog::ExportFigure { .. } => {
-            let cur = app.canvas_dialogs.export_figure.format;
-            vec![
-                (String::from("SVG Vector"), matches!(cur, curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Svg)),
-                (String::from("PDF 1.7 Vector"), matches!(cur, curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Pdf)),
-                (String::from("PNG Raster (300 DPI)"), matches!(cur, curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Png)),
-                (String::from("TIFF Raster (Deflate)"), matches!(cur, curvebook_ui_egui::dialogs_canvas::ExportFigureFormat::Tiff(_))),
-            ]
-        }
-        ActiveDialog::ChangeGraphType { .. } => app
-            .canvas_dialogs
-            .change_graph_type
-            .recommended_options()
-            .into_iter()
-            .take(8)
-            .map(|opt| {
-                let sel = opt.id == app.canvas_dialogs.change_graph_type.selected_option_id;
-                (opt.label.to_owned(), sel)
-            })
-            .collect(),
-        ActiveDialog::About => vec![(String::from("CurveBook Scientific Graphing & Biostatistics (WebAssembly)"), true)],
-        _ => vec![(format!("{} ready", modal_title(&app.canvas_dialogs.active_dialog)), true)],
-    }
-}
-
-fn context_menu_items_for_target(target: &str, app: &UiApp) -> Vec<(String, String, bool)> {
+/// Build contextual right-click menu entries `(label, command_id, enabled)` for `"grid"`, `"navigator"`, or `"canvas"`.
+#[must_use]
+pub fn context_menu_items_for_target(target: &str, app: &UiApp) -> Vec<(String, String, bool)> {
     let has_data = !app.document().data_sheets.is_empty();
     let has_graph = !app.document().graph_sheets.is_empty() || !app.document().layout_sheets.is_empty();
     match target {
@@ -2485,72 +2418,6 @@ fn context_menu_items_for_target(target: &str, app: &UiApp) -> Vec<(String, Stri
     }
 }
 
-struct DropdownEntrySpec {
-    command_id: String,
-    label: String,
-    shortcut: String,
-    enabled: bool,
-    disabled_reason: Option<String>,
-    tooltip: String,
-}
-
-fn append_inline_variants(out: &mut Vec<DropdownEntrySpec>, base_id: &str, limit: usize) {
-    let variants: &[(&str, &str, &str)] = match base_id {
-        "ui.theme.set" => &[
-            ("ui.theme.set:dark", "  Theme: Dark", "Switch interface to Dark theme"),
-            ("ui.theme.set:light", "  Theme: Light", "Switch interface to Light theme"),
-        ],
-        "ui.previewFilter.set" => &[("ui.previewFilter.set:grayscale", "  Preview: Grayscale", "Toggle print grayscale canvas preview")],
-        "ui.locale.set" => &[("ui.locale.set:de", "  Locale: Deutsch (de)", "Switch UI and decimal formatting to German")],
-        _ => return,
-    };
-    for &(cmd_id, label, tip) in variants {
-        if out.len() >= limit {
-            break;
-        }
-        out.push(DropdownEntrySpec {
-            command_id: String::from(cmd_id),
-            label: String::from(label),
-            shortcut: String::new(),
-            enabled: true,
-            disabled_reason: None,
-            tooltip: String::from(tip),
-        });
-    }
-}
-
-fn build_dropdown_entries_for_section(_open_key: &str, section: &curvebook_ui_egui::MenuSectionTooltips, limit: usize) -> Vec<DropdownEntrySpec> {
-    let mut out = Vec::new();
-    for item in &section.items {
-        // Automation-only hook must never surface in interactive user menus (`R10.6` / `R10.7`).
-        if item.command_id == "ui.event.dispatch" {
-            continue;
-        }
-        let is_remediation = item.command_id == "ui.result.applyRemediation";
-        let enabled = if is_remediation { false } else { item.enabled };
-        let disabled_reason = if is_remediation {
-            Some(String::from("Diagnostic-only (QOL-7): inspect Result Diagnostic Tabs instead"))
-        } else if !item.enabled {
-            Some(format!("{} is disabled in current context", item.localized_label))
-        } else {
-            None
-        };
-        out.push(DropdownEntrySpec {
-            command_id: item.command_id.to_owned(),
-            label: item.localized_label.to_owned(),
-            shortcut: item.shortcut.clone(),
-            enabled,
-            disabled_reason,
-            tooltip: item.format_tooltip(),
-        });
-        append_inline_variants(&mut out, item.command_id, limit);
-        if out.len() >= limit {
-            break;
-        }
-    }
-    out
-}
-
 /// Inspect active table archetype label for diagnostics.
 #[must_use]
 pub fn active_table_archetype_label(app: &UiApp) -> Option<String> {
@@ -2572,10 +2439,20 @@ pub fn all_shortcuts_have_web_policy() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use curvebook_ui_egui::{KeyModifiers, PointerButton, UiApp, ViewportMetrics};
+    use curvebook_ui_egui::layout::verify::verify_tree_invariants;
+    use curvebook_ui_egui::{KeyModifiers, PointerButton, UiApp, ViewportMetrics, execute_widget_action};
 
     use super::*;
-    use crate::text_bridge::BrowserCanvasTextMeasurer;
+
+    fn click_node_press_release(bridge: &mut WebChromeBridge, app: &mut UiApp, viewport: ViewportMetrics, node_id: &str) -> WebChromeDispatch {
+        let layout = bridge.build_layout(app, viewport);
+        let rect = layout.find_node(node_id).unwrap_or_else(|| panic!("node `{node_id}` must exist")).rect_px;
+        let lx = f64::from(rect.x + 4) / viewport.scale_factor;
+        let ly = f64::from(rect.y + 4) / viewport.scale_factor;
+        let down = bridge.handle_pointer_down(app, &layout, [lx, ly], [rect.x + 4, rect.y + 4], PointerButton::Primary);
+        assert!(matches!(down, WebChromeDispatch::HandledRedraw { .. }));
+        bridge.handle_pointer_up(app, &layout, [lx, ly], PointerButton::Primary)
+    }
 
     #[test]
     fn browser_reserved_shortcuts_map_cleanly_without_clashes() {
@@ -2587,20 +2464,16 @@ mod tests {
         }
         app.execute_command("analysis.run", json!({ "source_sheet_id": "d1", "kind": "descriptive_stats" })).unwrap();
 
-        // `Alt+W` maps browser-reserved `Cmd/Ctrl+W` cleanly.
         let close_route = WebShortcutRouter::route_key_down(&app, "w", KeyModifiers { alt: true, ..Default::default() });
         assert!(close_route.handled && close_route.prevent_default && close_route.used_web_alias);
         assert_eq!(close_route.action, WebShortcutAction::CloseWorkspacePrompt);
 
-        // `Alt+Shift+N` maps browser-reserved `Cmd/Ctrl+N`.
         let new_route = WebShortcutRouter::route_key_down(&app, "n", KeyModifiers { alt: true, shift: true, ..Default::default() });
         assert!(new_route.handled && new_route.used_web_alias);
 
-        // `Alt+K` maps Command Palette cleanly without browser search-bar clash.
         let pal_route = WebShortcutRouter::route_key_down(&app, "k", KeyModifiers { alt: true, ..Default::default() });
         assert_eq!(pal_route.action, WebShortcutAction::ExecuteCommand { command_id: String::from("ui.palette.open"), params: json!({}) });
 
-        // On an active ResultSheet, `Alt+T` (and canvas `Cmd+T`) opens EditAnalysisParameters (`R10.5`).
         let rs_id = app.document().result_sheets[0].id.clone();
         app.execute_command("sheet.select", json!({ "sheet_id": rs_id.as_str() })).unwrap();
         let t_route = WebShortcutRouter::route_key_down(&app, "t", KeyModifiers { alt: true, ..Default::default() });
@@ -2610,31 +2483,33 @@ mod tests {
     }
 
     #[test]
-    fn modal_backdrop_blocks_workspace_click_through_and_dropdown_routes_commands() {
+    fn modal_backdrop_blocks_workspace_click_through_and_dropdown_routes_shared_tree() {
         let mut app = UiApp::new();
         let mut bridge = WebChromeBridge::new();
-        let measurer = BrowserCanvasTextMeasurer::new();
         let viewport = ViewportMetrics::new(1024.0, 640.0, 1.0);
 
-        let frame1 = curvebook_ui_egui::compute_workspace_layout(&app, 1024, 640);
-        let layout1 = bridge.build_layout(&app, viewport, &frame1, &measurer, 96);
-        let file_btn = layout1.find_node("menu.file").expect("File menu node exists").rect_px;
-        let disp = bridge.handle_pointer_down(
-            &mut app,
-            &layout1,
-            [f64::from(file_btn.x + 4), f64::from(file_btn.y + 4)],
-            [file_btn.x + 4, file_btn.y + 4],
-            PointerButton::Primary,
-        );
-        assert!(matches!(disp, WebChromeDispatch::HandledRedraw { .. }));
+        let disp = click_node_press_release(&mut bridge, &mut app, viewport, "menu.file");
+        let WebChromeDispatch::ExecuteWidget { action, .. } = disp else {
+            panic!("expected ExecuteWidget on menu.file release, got {disp:?}");
+        };
+        execute_widget_action(&mut app, &action, viewport).unwrap();
+        bridge.sync_from_app(&app);
         assert_eq!(bridge.open_menu_key.as_deref(), Some("menu.file"));
 
-        // Open Command Palette modal; clicking outside modal dialog hits `ModalBackdrop` and blocks workspace.
+        let open_layout = bridge.build_layout(&app, viewport);
+        assert!(open_layout.find_node("popup.menu.file").is_some());
+        let report = verify_tree_invariants(&open_layout.tree);
+        assert!(report.is_clean(), "open menu LayoutTree parity issues: {report:?}");
+
         app.canvas_dialogs.open_command_palette();
         bridge.close_popups();
-        let frame2 = curvebook_ui_egui::compute_workspace_layout(&app, 1024, 640);
-        let layout2 = bridge.build_layout(&app, viewport, &frame2, &measurer, 96);
+        app.interaction.open_menu = None;
+        let layout2 = bridge.build_layout(&app, viewport);
+        assert!(layout2.find_node("modal.backdrop").is_some());
+        assert!(layout2.find_node("palette.query").is_some());
         let hit_corner = bridge.handle_pointer_down(&mut app, &layout2, [5.0, 5.0], [5, 5], PointerButton::Primary);
         assert_eq!(hit_corner, WebChromeDispatch::BlockedByModalBackdrop);
+        let modal_report = verify_tree_invariants(&layout2.tree);
+        assert!(modal_report.is_clean(), "modal LayoutTree parity issues: {modal_report:?}");
     }
 }

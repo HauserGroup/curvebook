@@ -2,6 +2,8 @@
 
 //! Interactive `eframe` + `egui` + `wgpu` native desktop window host for CurveBook.
 
+#[cfg(feature = "accessibility")]
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
@@ -184,6 +186,8 @@ pub struct CurveBookNativeApp {
     status_banner: Option<String>,
     on_exit_cleanup: Option<CleanupHook>,
     live_control: Option<LiveControlChannel>,
+    #[cfg(feature = "accessibility")]
+    a11y_id_map: BTreeMap<egui::accesskit::NodeId, String>,
 }
 
 impl CurveBookNativeApp {
@@ -207,6 +211,8 @@ impl CurveBookNativeApp {
             status_banner: None,
             on_exit_cleanup,
             live_control: None,
+            #[cfg(feature = "accessibility")]
+            a11y_id_map: BTreeMap::new(),
         }
     }
 
@@ -328,8 +334,13 @@ impl CurveBookNativeApp {
             self.process_canvas_input(ui, input_window_id, canvas_rect);
 
             let paint_window_id = self.active_window_id();
-            if let Some(frame) = self.tick_animations_and_redraw(&ctx, paint_window_id) {
-                self.upload_and_paint_frame(ui, canvas_rect, &frame);
+            if let Some(frame) = self.tick_animations_and_redraw(&ctx, paint_window_id)
+                && let Some(canvas_resp) = self.upload_and_paint_frame(ui, canvas_rect, &frame)
+            {
+                #[cfg(feature = "accessibility")]
+                self.sync_accesskit_tree(ui, paint_window_id, canvas_rect, canvas_resp.id);
+                #[cfg(not(feature = "accessibility"))]
+                let _ = canvas_resp;
             }
         });
 
@@ -818,6 +829,10 @@ impl CurveBookNativeApp {
                         self.status_banner = Some(err);
                     }
                 }
+                #[cfg(feature = "accessibility")]
+                egui::Event::AccessKitActionRequest(req) => {
+                    self.handle_accesskit_action_request(ctx, window_id, req);
+                }
                 _ => {}
             }
         }
@@ -892,7 +907,7 @@ impl CurveBookNativeApp {
         } else if self.pointer_captured {
             self.pointer_captured = false;
             let (x_pt, y_pt) = to_canvas_pt(args.pos, args.canvas_rect.min);
-            let _ = self.runtime.dispatch(DesktopHostEvent::PointerButton {
+            if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::PointerButton {
                 window_id: args.window_id,
                 x_pt,
                 y_pt,
@@ -900,7 +915,11 @@ impl CurveBookNativeApp {
                 pressed: false,
                 click_count: self.click_count,
                 modifiers: to_key_modifiers(args.modifiers),
-            });
+            }) && outcome.action == "welcome.open_file_requested"
+                && let Err(err) = self.handle_native_open(args.window_id)
+            {
+                self.status_banner = Some(err);
+            }
         }
     }
 
@@ -966,13 +985,17 @@ impl CurveBookNativeApp {
             return None;
         }
 
-        let _ = self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
+        if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
             window_id,
             key: key_name,
             pressed,
             modifiers: to_key_modifiers(modifiers),
             text: None,
-        });
+        }) && outcome.action == "welcome.open_file_requested"
+            && let Err(err) = self.handle_native_open(window_id)
+        {
+            self.status_banner = Some(err);
+        }
 
         if pressed && is_single_char_key && !has_cmd_or_ctrl {
             let (inline_active_after, inline_text_after) = self.inline_editor_snapshot(window_id);
@@ -1012,10 +1035,10 @@ impl CurveBookNativeApp {
         self.runtime.dispatch(DesktopHostEvent::RedrawRequested { window_id }).ok().and_then(|outcome| outcome.frame)
     }
 
-    fn upload_and_paint_frame(&mut self, ui: &mut egui::Ui, canvas_rect: egui::Rect, frame: &DesktopFrameOutput) {
+    fn upload_and_paint_frame(&mut self, ui: &mut egui::Ui, canvas_rect: egui::Rect, frame: &DesktopFrameOutput) -> Option<egui::Response> {
         let size = [frame.width_px as usize, frame.height_px as usize];
         if size[0] == 0 || size[1] == 0 || frame.rgba_bytes.len() < size[0] * size[1] * 4 {
-            return;
+            return None;
         }
         let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &frame.rgba_bytes);
         let tex_id = match &mut self.texture {
@@ -1030,8 +1053,309 @@ impl CurveBookNativeApp {
                 id
             }
         };
-        let _response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
+        let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
         ui.painter().image(tex_id, canvas_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
+        Some(response)
+    }
+
+    #[cfg(feature = "accessibility")]
+    fn sync_accesskit_tree(&mut self, ui: &mut egui::Ui, window_id: DesktopWindowId, canvas_rect: egui::Rect, canvas_id: egui::Id) {
+        if ui.ctx().accesskit_node_builder(canvas_id, |_| {}).is_none() {
+            return;
+        }
+        let tree_update = {
+            let Ok(win) = self.runtime.window(window_id) else {
+                return;
+            };
+            curvebook_ui_egui::views::a11y::sync_app_accessibility_tree(win.app(), win.viewport())
+        };
+
+        let a11y_id = |num: u64| egui::Id::unique(("curvebook_a11y", num));
+        let focus_eid = (tree_update.focus_numeric_id != 0)
+            .then(|| tree_update.node_by_numeric_id(tree_update.focus_numeric_id))
+            .flatten()
+            .map(|n| (a11y_id(n.numeric_id), n));
+        if let Some((fe, fnode)) = focus_eid {
+            #[allow(clippy::cast_possible_truncation)]
+            let frect = egui::Rect::from_min_size(
+                egui::pos2(canvas_rect.min.x + fnode.bounds_logical.x as f32, canvas_rect.min.y + fnode.bounds_logical.y as f32),
+                egui::vec2((fnode.bounds_logical.w as f32).max(1.0), (fnode.bounds_logical.h as f32).max(1.0)),
+            );
+            let _ = ui.interact(frect, fe, egui::Sense::focusable_noninteractive());
+            ui.ctx().memory_mut(|m| m.request_focus(fe));
+        }
+
+        let mut by_num: BTreeMap<u64, usize> = BTreeMap::new();
+        for (idx, node) in tree_update.nodes.iter().enumerate() {
+            by_num.insert(node.numeric_id, idx);
+        }
+        let mut emitted: BTreeSet<u64> = BTreeSet::new();
+        let mut queue: VecDeque<u64> = tree_update.root_children_numeric_ids.iter().copied().collect();
+        for node in &tree_update.nodes {
+            if node.parent_numeric_id.is_none() {
+                queue.push_back(node.numeric_id);
+            }
+        }
+
+        self.a11y_id_map.clear();
+        let mut owned_ak_ids: BTreeSet<egui::accesskit::NodeId> = BTreeSet::new();
+        let mut root_ak_ids: Vec<egui::accesskit::NodeId> = Vec::new();
+        let mut emit_node = |node: &curvebook_ui_egui::layout::a11y::AccessibleNodeUpdate| {
+            let eid = a11y_id(node.numeric_id);
+            let ak_id = eid.accesskit_id();
+            owned_ak_ids.insert(ak_id);
+            self.a11y_id_map.insert(ak_id, node.widget_id.clone());
+            if node.parent_numeric_id.is_none() {
+                root_ak_ids.push(ak_id);
+            }
+            let origin = canvas_rect.min;
+            let _ = ui.ctx().accesskit_node_builder(eid, |ak| {
+                populate_accesskit_node(ak, node, origin);
+                let child_ak_ids: Vec<egui::accesskit::NodeId> = node.children_numeric_ids.iter().map(|c| a11y_id(*c).accesskit_id()).collect();
+                ak.set_children(child_ak_ids);
+            });
+        };
+
+        while let Some(num_id) = queue.pop_front() {
+            if !emitted.insert(num_id) {
+                continue;
+            }
+            let Some(&idx) = by_num.get(&num_id) else {
+                continue;
+            };
+            let node = &tree_update.nodes[idx];
+            emit_node(node);
+            for &child_num in &node.children_numeric_ids {
+                if !emitted.contains(&child_num) {
+                    queue.push_back(child_num);
+                }
+            }
+        }
+        for node in &tree_update.nodes {
+            if !emitted.insert(node.numeric_id) {
+                continue;
+            }
+            emit_node(node);
+        }
+
+        if let Some(msg) = tree_update.live_announcement.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
+            let politeness = map_accesskit_live(tree_update.live_politeness);
+            if politeness != egui::accesskit::Live::Off {
+                let live_id = egui::Id::unique("curvebook_a11y_live_region");
+                let live_ak = live_id.accesskit_id();
+                owned_ak_ids.insert(live_ak);
+                root_ak_ids.push(live_ak);
+                let _ = ui.ctx().accesskit_node_builder(live_id, |ak| {
+                    ak.set_role(egui::accesskit::Role::Status);
+                    ak.set_live(politeness);
+                    ak.set_label(msg.to_owned());
+                    ak.set_bounds(egui::accesskit::Rect {
+                        x0: f64::from(canvas_rect.min.x),
+                        y0: f64::from(canvas_rect.min.y),
+                        x1: f64::from(canvas_rect.min.x) + 1.0,
+                        y1: f64::from(canvas_rect.min.y) + 1.0,
+                    });
+                });
+            }
+        }
+
+        // Remove any auto-parented edges from egui root/panel containers so every node has a single parent (`canvas_id` or its declared parent).
+        for container_id in [egui::accesskit_root_id(), ui.unique_id()] {
+            let _ = ui.ctx().accesskit_node_builder(container_id, |ak| {
+                let kept: Vec<egui::accesskit::NodeId> = ak.children().iter().copied().filter(|id| !owned_ak_ids.contains(id)).collect();
+                ak.set_children(kept);
+            });
+        }
+        let _ = ui.ctx().accesskit_node_builder(canvas_id, |ak| {
+            ak.set_role(egui::accesskit::Role::Canvas);
+            ak.set_label(tree_update.root_label.clone());
+            ak.set_bounds(egui::accesskit::Rect {
+                x0: f64::from(canvas_rect.min.x),
+                y0: f64::from(canvas_rect.min.y),
+                x1: f64::from(canvas_rect.max.x),
+                y1: f64::from(canvas_rect.max.y),
+            });
+            let mut kids: Vec<egui::accesskit::NodeId> = ak.children().iter().copied().filter(|id| !owned_ak_ids.contains(id)).collect();
+            kids.extend(root_ak_ids);
+            ak.set_children(kids);
+        });
+    }
+
+    #[cfg(feature = "accessibility")]
+    fn handle_accesskit_action_request(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, req: &egui::accesskit::ActionRequest) {
+        use egui::accesskit::{Action, ActionData};
+
+        let Some(widget_id) = self.a11y_id_map.get(&req.target_node).cloned() else {
+            return;
+        };
+        let (center_pt, viewport) = {
+            let Ok(win) = self.runtime.window(window_id) else {
+                return;
+            };
+            let vp = win.viewport();
+            let scale = vp.clamped_scale_factor();
+            let tree = win.app().layout_tree_cow(vp);
+            let pt = tree.node(&widget_id).map(|n| {
+                let r = n.bounds.rect_px;
+                ((f64::from(r.x) + f64::from(r.width) * 0.5) / scale, (f64::from(r.y) + f64::from(r.height) * 0.5) / scale)
+            });
+            (pt, vp)
+        };
+
+        match req.action {
+            Action::Focus => {
+                if let Ok(win) = self.runtime.window_mut(window_id) {
+                    win.app_mut().focus_widget_id = Some(widget_id);
+                    let _ = win.app_mut().build_and_cache_layout_tree(viewport);
+                }
+                ctx.request_repaint();
+            }
+            Action::Click | Action::Expand | Action::Collapse => {
+                if let Some((x_pt, y_pt)) = center_pt {
+                    let mods = KeyModifiers::default();
+                    let _ = self.runtime.dispatch(DesktopHostEvent::PointerButton {
+                        window_id,
+                        x_pt,
+                        y_pt,
+                        button: PointerButton::Primary,
+                        pressed: true,
+                        click_count: 1,
+                        modifiers: mods,
+                    });
+                    if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::PointerButton {
+                        window_id,
+                        x_pt,
+                        y_pt,
+                        button: PointerButton::Primary,
+                        pressed: false,
+                        click_count: 1,
+                        modifiers: mods,
+                    }) && outcome.action == "welcome.open_file_requested"
+                        && let Err(err) = self.handle_native_open(window_id)
+                    {
+                        self.status_banner = Some(err);
+                    }
+                    ctx.request_repaint();
+                }
+            }
+            Action::SetValue => {
+                let next_text = match &req.data {
+                    Some(ActionData::Value(val)) => Some(val.to_string()),
+                    Some(ActionData::NumericValue(num)) => Some(format!("{num}")),
+                    _ => None,
+                };
+                if let Some(text) = next_text {
+                    if let Ok(win) = self.runtime.window_mut(window_id) {
+                        let app = win.app_mut();
+                        app.focus_widget_id = Some(widget_id.clone());
+                        app.interaction.text_field_buffers.remove(&widget_id);
+                    }
+                    if !text.is_empty() {
+                        let _ = self.runtime.dispatch(DesktopHostEvent::ImeCommit { window_id, text });
+                    }
+                    ctx.request_repaint();
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[cfg(feature = "accessibility")]
+fn map_accesskit_role(mapping: &curvebook_ui_egui::layout::a11y::AriaRoleMapping) -> egui::accesskit::Role {
+    use egui::accesskit::Role;
+    match mapping.accesskit_role {
+        "MenuBar" => Role::MenuBar,
+        "MenuItem" => Role::MenuItem,
+        "Button" => Role::Button,
+        "Tab" => Role::Tab,
+        "TreeItem" => Role::TreeItem,
+        "GridCell" => Role::GridCell,
+        "TextInput" => Role::TextInput,
+        "MultilineTextInput" => Role::MultilineTextInput,
+        "ComboBox" => Role::ComboBox,
+        "CheckBox" => Role::CheckBox,
+        "RadioButton" => Role::RadioButton,
+        "SpinButton" => Role::SpinButton,
+        "Slider" => Role::Slider,
+        "ScrollBar" => Role::ScrollBar,
+        "Splitter" => Role::Splitter,
+        "Canvas" => Role::Canvas,
+        "GraphicsSymbol" => Role::GraphicsSymbol,
+        "Dialog" => Role::Dialog,
+        "Banner" => Role::Banner,
+        "Tooltip" => Role::Tooltip,
+        "Menu" => Role::Menu,
+        "DisclosureTriangle" => Role::DisclosureTriangle,
+        _ => Role::Label,
+    }
+}
+
+#[cfg(feature = "accessibility")]
+fn map_accesskit_live(politeness: curvebook_ui_egui::layout::a11y::AriaLivePoliteness) -> egui::accesskit::Live {
+    use curvebook_ui_egui::layout::a11y::AriaLivePoliteness;
+    use egui::accesskit::Live;
+    match politeness {
+        AriaLivePoliteness::Off => Live::Off,
+        AriaLivePoliteness::Polite => Live::Polite,
+        AriaLivePoliteness::Assertive => Live::Assertive,
+    }
+}
+
+#[cfg(feature = "accessibility")]
+fn populate_accesskit_node(ak: &mut egui::accesskit::Node, node: &curvebook_ui_egui::layout::a11y::AccessibleNodeUpdate, origin: egui::Pos2) {
+    use curvebook_ui_egui::layout::a11y::AccessibleActionTag;
+    use egui::accesskit::{Action, Toggled};
+
+    ak.set_role(map_accesskit_role(&node.role_mapping));
+    let x0 = f64::from(origin.x) + node.bounds_logical.x;
+    let y0 = f64::from(origin.y) + node.bounds_logical.y;
+    ak.set_bounds(egui::accesskit::Rect { x0, y0, x1: x0 + node.bounds_logical.w, y1: y0 + node.bounds_logical.h });
+    ak.set_label(node.label.clone());
+    if let Some(val) = &node.value_text {
+        ak.set_value(val.clone());
+    }
+    if node.enabled {
+        ak.clear_disabled();
+    } else {
+        ak.set_disabled();
+        if let Some(reason) = &node.disabled_reason {
+            ak.set_description(reason.clone());
+        }
+    }
+    if let Some(sel) = node.selected {
+        ak.set_selected(sel);
+    }
+    if let Some(exp) = node.expanded {
+        ak.set_expanded(exp);
+    }
+    if let Some(chk) = node.checked {
+        ak.set_toggled(if chk { Toggled::True } else { Toggled::False });
+    }
+    if node.hidden {
+        ak.set_hidden();
+    }
+    if node.modal {
+        ak.set_modal();
+    }
+    if let Some(live) = node.live_region {
+        ak.set_live(map_accesskit_live(live));
+    }
+    if let Some(shortcut) = node.shortcut.as_deref().or(node.keyboard_path.as_deref()) {
+        ak.set_keyboard_shortcut(shortcut.to_owned());
+    }
+    for act in &node.actions {
+        let ak_act = match act {
+            AccessibleActionTag::Focus => Action::Focus,
+            AccessibleActionTag::Click => Action::Click,
+            AccessibleActionTag::Expand => Action::Expand,
+            AccessibleActionTag::Collapse => Action::Collapse,
+            AccessibleActionTag::Increment => Action::Increment,
+            AccessibleActionTag::Decrement => Action::Decrement,
+            AccessibleActionTag::SetValue => Action::SetValue,
+            AccessibleActionTag::Scroll => Action::ScrollIntoView,
+        };
+        ak.add_action(ak_act);
     }
 }
 
@@ -1778,6 +2102,68 @@ mod tests {
         );
 
         let _ = std::fs::remove_dir_all(&base_dir);
+        Ok(())
+    }
+
+    #[cfg(feature = "accessibility")]
+    #[test]
+    fn r10_w5_accesskit_tree_sync_preserves_single_parent_and_focus() -> Result<(), String> {
+        let (mut runtime, id) = test_runtime(ViewportMetrics::new(1024.0, 640.0, 1.0))?;
+        {
+            let win = runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ak-1", "kind": "column", "cols": 2, "rows": 3 }))?;
+            win.app_mut().focus_widget_id = Some(String::from("toolbar.analyze"));
+        }
+        let mut app = CurveBookNativeApp::new(runtime, id, None);
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        let raw_input =
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0))), ..Default::default() };
+
+        let mut last_update = None;
+        for _ in 0..3 {
+            let mut output = ctx.run_ui(raw_input.clone(), |ui| {
+                app.step_ui(ui);
+            });
+            output.textures_delta.clear();
+            last_update = output.platform_output.accesskit_update;
+        }
+        let update = last_update.ok_or_else(|| String::from("expected accesskit_update when accesskit is enabled"))?;
+        assert!(!update.nodes.is_empty(), "expected non-empty accesskit nodes");
+        assert!(!app.a11y_id_map.is_empty(), "expected populated a11y_id_map, frame_size={:?}", app.last_frame_size);
+
+        let mut parent_counts: std::collections::BTreeMap<egui::accesskit::NodeId, usize> = std::collections::BTreeMap::new();
+        for (_, node) in &update.nodes {
+            for &child_id in node.children() {
+                *parent_counts.entry(child_id).or_default() += 1;
+            }
+        }
+        for (nid, count) in &parent_counts {
+            assert_eq!(*count, 1, "accesskit node {nid:?} has {count} parents (expected 1)");
+        }
+        let focused_ak = app.a11y_id_map.iter().find_map(|(k, v)| (v == "toolbar.analyze").then_some(*k));
+        assert!(
+            focused_ak.is_some(),
+            "missing toolbar.analyze in a11y_id_map (focus={:?}, nodes={:?})",
+            app.runtime.window(id)?.app().focus_widget_id,
+            app.a11y_id_map.values().collect::<Vec<_>>()
+        );
+        assert_eq!(Some(update.focus), focused_ak, "expected AccessKit focus on toolbar.analyze across multi-frame pass");
+
+        // Dispatch AccessKit Click action on `toolbar.analyze` -> opens AnalyzeSheet dialog.
+        let target_node = focused_ak.ok_or_else(|| String::from("missing toolbar.analyze ak id"))?;
+        let req = egui::accesskit::ActionRequest {
+            action: egui::accesskit::Action::Click,
+            target_tree: egui::accesskit::TreeId::ROOT,
+            target_node,
+            data: None,
+        };
+        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(1024.0, 616.0));
+        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::AccessKitActionRequest(req)]);
+        assert!(
+            matches!(app.runtime.window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }),
+            "expected AccessKit Click on toolbar.analyze to open AnalyzeSheet"
+        );
         Ok(())
     }
 }

@@ -107,10 +107,20 @@ fn shift_luma(color: Rgba8, delta: i16) -> Rgba8 {
     Rgba8::rgba(shift(color.r), shift(color.g), shift(color.b), color.a)
 }
 
-/// Compute deterministic UI region bounds for a frame of `(width_px, height_px)`.
+fn scale_for_dpi(dpi: u16) -> f64 {
+    (f64::from(dpi.max(48)) / 96.0).clamp(0.75, 4.0)
+}
+
+/// Compute deterministic UI region bounds for a frame of `(width_px, height_px)` at `96` DPI.
 #[must_use]
 pub fn compute_workspace_layout(app: &UiApp, width_px: u32, height_px: u32) -> WorkspaceFrameLayout {
     crate::views::compute_frame_geometry(app, width_px, height_px)
+}
+
+/// Compute deterministic UI region bounds for a frame of `(width_px, height_px)` at `dpi`.
+#[must_use]
+pub fn compute_workspace_layout_for_dpi(app: &UiApp, width_px: u32, height_px: u32, dpi: u16) -> WorkspaceFrameLayout {
+    crate::views::compute_frame_geometry_for_scale(app, width_px, height_px, scale_for_dpi(dpi))
 }
 
 /// Compute the full physical-pixel layout & hit-testing map for `app` under `metrics` (`G6`, `M7`).
@@ -122,7 +132,7 @@ pub fn compute_workspace_layout_map(app: &UiApp, metrics: ViewportMetrics) -> Wo
 /// Render the full application frame deterministically into an RGBA [`RasterImage`] via [`crate::layout::LayoutTree`].
 pub fn render_workspace_rgba(app: &UiApp, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
     let mut img = RasterImage::new(target.width_px, target.height_px, target.dpi, app.theme.surface_bg)?;
-    let scale = (f64::from(target.dpi.max(48)) / 96.0).clamp(0.75, 4.0);
+    let scale = scale_for_dpi(target.dpi);
     let metrics = ViewportMetrics::new((f64::from(target.width_px) / scale).max(1.0), (f64::from(target.height_px) / scale).max(1.0), scale);
     let tree = app.layout_tree_cow(metrics);
     paint_layout_tree(&tree, DesktopTextMeasurer::global(), &mut img);
@@ -154,7 +164,7 @@ pub fn render_workspace_region_png(
     region: ScreenshotRegionTarget,
 ) -> Result<(Vec<u8>, u32, u32), RenderError> {
     let image = render_workspace_rgba(app, target)?;
-    let layout = compute_workspace_layout(app, image.width_px, image.height_px);
+    let layout = compute_workspace_layout_for_dpi(app, image.width_px, image.height_px, target.dpi);
     let crop = match region {
         ScreenshotRegionTarget::FullWindow => WorkspacePixelRect::new(0, 0, image.width_px, image.height_px),
         ScreenshotRegionTarget::Canvas => layout.canvas,

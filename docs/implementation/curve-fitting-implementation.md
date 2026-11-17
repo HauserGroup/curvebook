@@ -1,6 +1,6 @@
 # Curve Fitting & Nonlinear Regression — Implementation Guidelines
 
-Governing specification for `crates/fit` (`L2`). Parity checklist: [`fitting-parity.md`](fitting-parity.md).
+Governing specification for `crates/fit` (`L2`). Parity checklist: [`fitting-parity.md`](../fitting-parity.md).
 
 Public behavioural & mathematical references:
 - [Principles of nonlinear regression & solver details](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_how_nonlinear_regression_works.htm)
@@ -35,7 +35,7 @@ Given observations $(x_i, y_i)$ for $i = 1, \dots, N$ across $D \ge 1$ data sets
 3. **Robust Nonlinear Regression (Lorentzian / Cauchy $t_1$ distribution):**
    Targets the heavy-tailed Cauchy objective (Motulsky & Brown 2006), implemented as iteratively reweighted least squares (`fit_cauchy_irls` in `crates/fit/src/solver.rs`, Cauchy weights $1/(1 + z_i^2)$ with $z_i = |r_i| / \text{RSDR}$, up to 15 reweighting passes):
    $$\mathcal{L}_{\text{Cauchy}}(\theta, s) = \sum_{i=1}^N \ln\!\left(1 + \frac{w_i (y_i - f(x_i; \theta))^2}{s^2}\right)$$
-   where scale $s$ is updated iteratively from the $68.27\text{th}$ percentile of weighted absolute residuals ($\text{RSDR}$). Pure Robust mode (`FitMethod::RobustCauchy`) requires raw replicates (`FitError::RequiresRawReplicates` on pre-summarized data). *Planned ([`R4.5`](ROADMAP.md#r45-suppress-least-squares-inference-in-pure-robust-fit-mode), todo):* suppress asymptotic SEs, CIs, covariance matrices, confidence bands, and *F*/AICc comparisons in pure Robust mode — `fit_nonlinear` currently reports them as for least squares and there is no `NotApplicableInRobustMode` status. Robust mode serves both for outlier-resistant interpolation and as Stage 1 of **ROUT** automatic outlier elimination ($Q$ default $1\%$).
+   where scale $s$ is updated iteratively from the $68.27\text{th}$ percentile of weighted absolute residuals ($\text{RSDR}$). Pure Robust mode (`FitMethod::RobustCauchy`) requires raw replicates (`FitError::RequiresRawReplicates` on pre-summarized data). *Planned ([`R4.5`](../ROADMAP.md#r45-suppress-least-squares-inference-in-pure-robust-fit-mode), todo):* suppress asymptotic SEs, CIs, covariance matrices, confidence bands, and *F*/AICc comparisons in pure Robust mode — `fit_nonlinear` currently reports them as for least squares and there is no `NotApplicableInRobustMode` status. Robust mode serves both for outlier-resistant interpolation and as Stage 1 of **ROUT** automatic outlier elimination ($Q$ default $1\%$).
 
 ### 1.2 Damped Levenberg–Marquardt with Trust-Region Scaling & Simplex Warm-Start
 
@@ -95,7 +95,7 @@ $$\text{SS}_{\text{crit}} = \text{SS}(\hat{\theta}) \left(1 + \frac{F_{1, \text{
 
 ## 3. Canonical Built-In Equation Library (`crates/fit/src/library/`)
 
-Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.rs`) with an immutable string ID (`id()`, listed in `PHARMA_EQUATION_IDS` / `CURVE_EQUATION_IDS` / `NIST_EQUATION_IDS`; the live model count is in [docs/STATUS.md](STATUS.md)), human title, default bounds, initial-guess rules, reported derived transforms (`derived_transforms`, e.g. $\text{EC}_{50} = 10^{\log \text{EC}_{50}}$, half-life $\ln(2)/K$, $\tau = 1/K$, span, inflection point), and optional analytical partial derivatives (`grad`):
+Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.rs`) with an immutable string ID (`id()`, listed in `PHARMA_EQUATION_IDS` / `CURVE_EQUATION_IDS` / `NIST_EQUATION_IDS`; the live model count is in [docs/STATUS.md](../STATUS.md)), human title, default bounds, initial-guess rules, reported derived transforms (`derived_transforms`, e.g. $\text{EC}_{50} = 10^{\log \text{EC}_{50}}$, half-life $\ln(2)/K$, $\tau = 1/K$, span, inflection point), and optional analytical partial derivatives (`grad`):
 
 ### 3.1 Dose–Response (Stimulation, Inhibition & Special)
 - **Stimulation / Inhibition (`X = log10[C]` and linear `X = [C]` variants, unnormalized & `[0, 100]` normalized):**

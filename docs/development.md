@@ -41,11 +41,11 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 Before adding or modifying behaviour in any domain crate, read its governing specification:
 
 - [`architecture.md`](architecture.md) — `L0`–`L7` crate graph and dependency boundaries
-- [`data-tables-and-transforms.md`](data-tables-and-transforms.md) — 8 data-table archetypes, subcolumns, exclusions, Info constants, Calculated Variables (`=`), and derived transforms (`crates/doc`, `crates/transform`, `crates/engine`)
-- [`statistics-implementation.md`](statistics-implementation.md) — tail-safe special functions, *p*-value formatting, *t*-tests, 1/2/3-way & Multifactor ANOVA, REML mixed models, multiplicity/FDR, contingency, survival, ROC, GLMs & PCA (`crates/math`, `crates/stats`)
-- [`curve-fitting-implementation.md`](curve-fitting-implementation.md) — Moré Levenberg–Marquardt, weighting, Cauchy robust & ROUT fitting, shared global parameters, Venzon–Moolgavkar profile-likelihood CIs, AICc/*F*-tests, built-in equations & custom equation VM (`crates/fit`)
-- [`graphing-and-layouts.md`](graphing-and-layouts.md) — `GraphSpec -> ChartScene` compiler, nonlinear/discontinuous axes, live pairwise *p*-value brackets, style cloning, Page Layouts & SVG/PDF/PNG/TIFF export (`crates/chart`, `crates/text`, `crates/palette`, `crates/render`, `crates/svg`, `crates/pdf`)
-- [`scripting-and-automation.md`](scripting-and-automation.md), [`control-protocol.md`](control-protocol.md), [`mcp.md`](mcp.md) — `.cbtemplate` batch workflows, `curvebook-cli`, `--control` TCP JSONL, and `curvebook-cli mcp`
+- [`data-tables-and-transforms.md`](implementation/data-tables-and-transforms.md) — 8 data-table archetypes, subcolumns, exclusions, Info constants, Calculated Variables (`=`), and derived transforms (`crates/doc`, `crates/transform`, `crates/engine`)
+- [`statistics-implementation.md`](implementation/statistics-implementation.md) — tail-safe special functions, *p*-value formatting, *t*-tests, 1/2/3-way & Multifactor ANOVA, REML mixed models, multiplicity/FDR, contingency, survival, ROC, GLMs & PCA (`crates/math`, `crates/stats`)
+- [`curve-fitting-implementation.md`](implementation/curve-fitting-implementation.md) — Moré Levenberg–Marquardt, weighting, Cauchy robust & ROUT fitting, shared global parameters, Venzon–Moolgavkar profile-likelihood CIs, AICc/*F*-tests, built-in equations & custom equation VM (`crates/fit`)
+- [`graphing-and-layouts.md`](implementation/graphing-and-layouts.md) — `GraphSpec -> ChartScene` compiler, nonlinear/discontinuous axes, live pairwise *p*-value brackets, style cloning, Page Layouts & SVG/PDF/PNG/TIFF export (`crates/chart`, `crates/text`, `crates/palette`, `crates/render`, `crates/svg`, `crates/pdf`)
+- [`scripting-and-automation.md`](implementation/scripting-and-automation.md), [`control-protocol.md`](control-protocol.md), [`mcp.md`](mcp.md) — `.cbtemplate` batch workflows, `curvebook-cli`, `--control` TCP JSONL, and `curvebook-cli mcp`
 
 ## Fonts
 

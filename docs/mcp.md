@@ -2,7 +2,7 @@
 
 `curvebook-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory headless `curvebook-engine` session by default, or attached over loopback TCP (`127.0.0.1:<port>`) to a running `curvebook --control <port>` instance via `curvebook-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). By default `curvebook --control <port>` runs headless; pass the opt-in `--window` flag (`curvebook --control <port> --window`) to attach a visible desktop window sharing the same live `UiApp` / `Session` ([`R7.3`](ROADMAP.md#r73-mcp-workflow-parity-proof--shared-live-window)).
 
-> Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md), [`scripting-and-automation.md`](scripting-and-automation.md) · Beginner quick start: [`README.md`](../README.md#model-context-protocol-mcp) · Live test & command counts: [`STATUS.md`](STATUS.md)
+> Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md), [`scripting-and-automation.md`](implementation/scripting-and-automation.md) · Beginner quick start: [`README.md`](../README.md#model-context-protocol-mcp) · Live test & command counts: [`STATUS.md`](STATUS.md)
 
 ## Protocol & Wire Framing
 
@@ -26,7 +26,7 @@ MCP is currently the most complete way to drive CurveBook end to end; the render
 - **Human-operable GUI (`R10`):** Even with `curvebook --control <port> --window`, the rendered `eframe`/`egui` desktop window draws a non-interactive RGBA chrome below the native menu bar (`0/50` human-operable workflows until [`R10`](ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) lands). The `8` `gui` MCP tools drive the live `UiApp` state machine through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`).
 - **Headless UI commands:** In default headless `curvebook-cli mcp`, desktop `ui.*` commands report `"available": false` and require `--control-port <port>` attached to a running `curvebook --control <port>` process.
 - **Live-attach `command_batch` rollback:** In headless mode, `command_batch` with `"atomic": true` restores an exact session snapshot on failure; in `--control-port` live-attach mode, rollback replays `edit.undo` for completed mutating steps (`ping` and read-only `ui.*` commands excluded), so remote rollback follows the desktop session's undo stack.
-- **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-beyond-parity.md`](qol-beyond-parity.md)).
+- **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-beyond-parity.md`](planning/qol-beyond-parity.md)).
 
 ## CLI Flags & Advanced Configuration
 

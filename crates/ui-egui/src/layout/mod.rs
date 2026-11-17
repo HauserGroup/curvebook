@@ -764,5 +764,30 @@ pub fn compute_ui_state_fingerprint(app: &UiApp, metrics: ViewportMetrics) -> u6
     )) {
         feed_bytes(&s3);
     }
+    if let Ok(s4) = serde_json::to_vec(&(
+        &app.nav.welcome,
+        &app.nav.floating_notes_collapsed,
+        &app.nav.search_query,
+        &app.nav.navigator_drag,
+        &app.power_wizards_by_sheet,
+        &app.grid.import_reshape,
+    )) {
+        feed_bytes(&s4);
+    }
+    if let Ok(s5) = serde_json::to_vec(&(
+        &app.canvas_dialogs.convert_archetype,
+        &app.canvas_dialogs.export_figure,
+        &app.canvas_dialogs.change_graph_type,
+        &app.canvas_dialogs.hook_picker,
+        &app.canvas_dialogs.format_graph,
+        &app.canvas_dialogs.format_axes,
+        &app.canvas_dialogs.bubble_plot,
+        &app.canvas_dialogs.pairwise,
+        &app.canvas_dialogs.page_layout,
+        &app.canvas_dialogs.format_points,
+        &app.canvas_dialogs.print,
+    )) {
+        feed_bytes(&s5);
+    }
     h
 }

@@ -1,5 +1,5 @@
 //! Stable sheet/note identifiers, physical point geometry, collapsible `FloatingNote` callouts,
-//! and `HookSource` constant-hooking descriptors (`docs/data-tables-and-transforms.md` §3).
+//! and `HookSource` constant-hooking descriptors (`docs/implementation/data-tables-and-transforms.md` §3).
 
 use std::fmt;
 
@@ -119,7 +119,7 @@ impl RectPt {
 }
 
 /// Collapsible rich-text sticky note attachable to any sheet in a project
-/// (`docs/data-tables-and-transforms.md` §3).
+/// (`docs/implementation/data-tables-and-transforms.md` §3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FloatingNote {
     pub id: NoteId,

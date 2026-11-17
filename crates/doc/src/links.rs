@@ -1,5 +1,5 @@
 //! Provenance-tracked `LinkedDataRegion` live links, four-stage `ImportLinkSpec` pipeline, and
-//! [`DataSheet`] (with `frozen: bool` mutation guards) (`docs/data-tables-and-transforms.md` §1.4 & §6).
+//! [`DataSheet`] (with `frozen: bool` mutation guards) (`docs/implementation/data-tables-and-transforms.md` §1.4 & §6).
 
 use curvebook_palette::Rgba8;
 
@@ -35,7 +35,7 @@ pub enum InternalLinkKind {
 }
 
 /// Provenance border colour rendered around a [`LinkedDataRegion`] in the spreadsheet grid
-/// (`docs/data-tables-and-transforms.md` §6.2).
+/// (`docs/implementation/data-tables-and-transforms.md` §6.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum LinkBorderColor {
     /// Live link to an internal `DataSheet` cell range.
@@ -48,7 +48,7 @@ pub enum LinkBorderColor {
     Charcoal,
 }
 
-/// Stage 1 of [`ImportLinkSpec`]: data origin (`docs/data-tables-and-transforms.md` §6.1).
+/// Stage 1 of [`ImportLinkSpec`]: data origin (`docs/implementation/data-tables-and-transforms.md` §6.1).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LinkSource {
     Clipboard,
@@ -106,7 +106,7 @@ pub enum PlacementMode {
 }
 
 /// Stage 3 of [`ImportLinkSpec`]: placement anchor, blank-skipping, header promotion, and reactive
-/// transposition (`Grouped` <-> `Column`; `docs/data-tables-and-transforms.md` §6.3).
+/// transposition (`Grouped` <-> `Column`; `docs/implementation/data-tables-and-transforms.md` §6.3).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportPlacementSpec {
     pub mode: PlacementMode,
@@ -151,7 +151,7 @@ pub struct CellExclusionNote {
 }
 
 /// Project data-table sheet pairing metadata, freeze state, live linked regions, and floating notes
-/// with one of the eight [`TableArchetype`] schemas (`docs/data-tables-and-transforms.md` §1).
+/// with one of the eight [`TableArchetype`] schemas (`docs/implementation/data-tables-and-transforms.md` §1).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DataSheet {
     pub id: SheetId,
@@ -406,7 +406,7 @@ impl DataSheet {
     }
 
     /// Clone this sheet's archetype structure for `sheet.clonePipeline` ("Clone Family"), optionally
-    /// clearing Y values, titles, or overriding raw replicate count (`docs/data-tables-and-transforms.md` §7).
+    /// clearing Y values, titles, or overriding raw replicate count (`docs/implementation/data-tables-and-transforms.md` §7).
     pub fn clone_structure(&self, new_id: impl Into<SheetId>, opts: &CloneDataSheetOptions) -> Result<Self, DocError> {
         let new_id = new_id.into();
         if new_id.as_str().trim().is_empty() {

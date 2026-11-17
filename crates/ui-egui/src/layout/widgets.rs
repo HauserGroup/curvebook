@@ -183,17 +183,21 @@ pub struct FittedTextSpec<'b> {
 
 /// Paint text clipped inside `spec.rect` with horizontal `pad_x`, automatically ellipsizing overflow.
 pub fn paint_text_fitted(builder: &mut LayoutBuilder<'_>, owner: &WidgetId, spec: FittedTextSpec<'_>) -> bool {
-    if spec.rect.width <= spec.pad_x.saturating_mul(2) || spec.rect.height < 6 || spec.text.is_empty() {
+    let vis_rect = spec.rect.intersect(builder.active_clip_rect());
+    if vis_rect.width <= spec.pad_x.saturating_mul(2) || vis_rect.height < 6 || spec.text.is_empty() {
         return false;
     }
-    let avail_w = f64::from(spec.rect.width.saturating_sub(spec.pad_x.saturating_mul(2)));
+    let avail_w = f64::from(vis_rect.width.saturating_sub(spec.pad_x.saturating_mul(2)));
     let (display, ellipsized) = ellipsize_text(builder.measurer, spec.text, spec.style, &builder.tree.locale, avail_w);
+    let metrics = builder.measurer.measure(&display, spec.style, &builder.tree.locale);
+    if display == "…" && metrics.width_px > f64::from(vis_rect.width.saturating_sub(spec.pad_x)) {
+        return false;
+    }
     if let Some(node) = builder.tree.nodes.iter_mut().rev().find(|n| n.id == *owner) {
         node.state.ellipsized = node.state.ellipsized || ellipsized;
     }
-    let metrics = builder.measurer.measure(&display, spec.style, &builder.tree.locale);
     let top_y = f64::from(spec.rect.y) + ((f64::from(spec.rect.height) - metrics.line_height_px) * 0.5).max(0.0);
-    let x_px = f64::from(spec.rect.x + i32::try_from(spec.pad_x).unwrap_or(0));
+    let x_px = f64::from(vis_rect.x + i32::try_from(spec.pad_x).unwrap_or(0));
     builder.paint_text(TextRunSpec {
         z_layer: spec.z_layer,
         owner,
@@ -555,7 +559,7 @@ pub struct SpinnerSpec<'b> {
 }
 
 pub fn emit_numeric_spinner(builder: &mut LayoutBuilder<'_>, spec: SpinnerSpec<'_>) {
-    let btn_w = (spec.rect.height).clamp(18, 28);
+    let btn_w = (spec.rect.height).clamp(18, 52);
     let dec_rect = LayoutRectPx::new(spec.rect.x, spec.rect.y, btn_w, spec.rect.height);
     let inc_rect = LayoutRectPx::new(spec.rect.right() - i32::try_from(btn_w).unwrap_or(20), spec.rect.y, btn_w, spec.rect.height);
     let val_w = spec.rect.width.saturating_sub(btn_w.saturating_mul(2)).max(24);

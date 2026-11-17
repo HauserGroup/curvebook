@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use curvebook_chart::PointPt;
 use curvebook_doc::{
-    CellCoord, CellValue, ConstantValue, DataSheet, GraphAnnotation, LayoutItem, LayoutSpec, ProjectDocument, RectPt, SheetFolderKind, SheetId,
-    TableArchetype, XColumnMode,
+    CellCoord, CellValue, ConstantValue, DataSheet, GraphAnnotation, LayoutItem, LayoutSpec, ProjectDocument, RectPt, SheetCellRange,
+    SheetFolderKind, SheetId, TableArchetype, XColumnMode,
 };
 use curvebook_format::{export_datasheet_to_csv, migrate_document_json, open_project_bytes, save_project_bytes, validate_project_document};
 use curvebook_render::RenderTargetSpec;
@@ -524,6 +524,10 @@ pub struct GridHitGeometry {
     pub end_row: usize,
     pub start_col: usize,
     pub visible_cols: Vec<(usize, GridCellCoord)>,
+    #[serde(default)]
+    pub x_col_spans: Vec<(u32, u32)>,
+    #[serde(default)]
+    pub col_spans: Vec<(u32, u32)>,
     pub is_rtl: bool,
 }
 
@@ -568,13 +572,19 @@ impl GridHitGeometry {
             return None;
         }
         let r_off = u32::try_from(row - self.start_row).ok()?;
-        let s_off = u32::try_from(subcol).ok()?;
         let cy = self.body_y.saturating_add(r_off.saturating_mul(self.row_h));
         if cy >= self.sheet_rect.bottom() {
             return None;
         }
-        let cw = self.x_col_w.saturating_sub(1);
         let ch = self.row_h.saturating_sub(1);
+        if let Some(&(cx, span_w)) = self.x_col_spans.get(subcol)
+            && span_w > 1
+            && cx < self.sheet_rect.right()
+        {
+            return Some(WorkspacePixelRect::new(cx, cy, span_w.saturating_sub(1), ch));
+        }
+        let s_off = u32::try_from(subcol).ok()?;
+        let cw = self.x_col_w.saturating_sub(1);
         let local_raw = self.gutter_w.saturating_add(s_off.saturating_mul(self.x_col_w));
         let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
         let cx = self.sheet_rect.x.saturating_add(local_x);
@@ -628,16 +638,25 @@ impl GridHitGeometry {
             return None;
         }
         let r_off = u32::try_from(row - self.start_row).ok()?;
-        let c_off = u32::try_from(flat_col - self.start_col).ok()?;
-        if usize::try_from(c_off).ok().is_none_or(|idx| idx >= self.visible_cols.len()) {
-            return None;
-        }
         let cy = self.body_y.saturating_add(r_off.saturating_mul(self.row_h));
         if cy >= self.sheet_rect.bottom() {
             return None;
         }
-        let cw = self.col_w.saturating_sub(1);
         let ch = self.row_h.saturating_sub(1);
+        if self.col_spans.len() == self.visible_cols.len()
+            && let Some(c_idx) = self.visible_cols.iter().position(|(fc, _)| *fc == flat_col)
+            && let Some(&(cx, span_w)) = self.col_spans.get(c_idx)
+        {
+            if span_w <= 1 || cx >= self.sheet_rect.right() {
+                return None;
+            }
+            return Some(WorkspacePixelRect::new(cx, cy, span_w.saturating_sub(1), ch));
+        }
+        let c_off = u32::try_from(flat_col - self.start_col).ok()?;
+        if usize::try_from(c_off).ok().is_none_or(|idx| idx >= self.visible_cols.len()) {
+            return None;
+        }
+        let cw = self.col_w.saturating_sub(1);
         let local_raw = self.data_x_origin().saturating_add(c_off.saturating_mul(self.col_w));
         let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
         let cx = self.sheet_rect.x.saturating_add(local_x);
@@ -666,12 +685,18 @@ impl GridHitGeometry {
         }
 
         let origin = self.data_x_origin();
+        let use_spans = self.col_spans.len() == self.visible_cols.len();
         for (c_off, (flat_col, base_coord)) in self.visible_cols.iter().enumerate() {
-            let cw = self.col_w.saturating_sub(1);
-            let local_raw = origin.saturating_add((c_off as u32).saturating_mul(self.col_w));
-            let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
-            let cx = self.sheet_rect.x.saturating_add(local_x);
-            if phys_x >= cx && phys_x < cx.saturating_add(cw) {
+            let (cx, cw) = if use_spans {
+                let (sx, sw) = self.col_spans[c_off];
+                (sx, sw.saturating_sub(1))
+            } else {
+                let cw = self.col_w.saturating_sub(1);
+                let local_raw = origin.saturating_add((c_off as u32).saturating_mul(self.col_w));
+                let local_x = crate::i18n::mirror_x_for_rtl(local_raw, cw, self.sheet_rect.width, self.is_rtl);
+                (self.sheet_rect.x.saturating_add(local_x), cw)
+            };
+            if cw > 0 && phys_x >= cx && phys_x < cx.saturating_add(cw) {
                 return Some((GridCellCoord::new(row, base_coord.col, base_coord.subcol), *flat_col));
             }
         }
@@ -920,6 +945,21 @@ pub enum CanvasDragTarget {
     },
 }
 
+/// Sub-target for active spreadsheet header divider drags.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub enum GridDividerDragKind {
+    RowTitles,
+    XCol(usize),
+    DataCol(usize, usize),
+}
+
+/// Active chrome widget drag (floating note card header or grid column divider).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub enum ActiveDragHandle {
+    FloatingNote { sheet_id: String, note_id: String, start_logical: [f64; 2], orig_pos_pt: [f64; 2], moved: bool },
+    GridDivider { slot_tag: String, kind: GridDividerDragKind, last_logical_x: f64, is_rtl: bool, moved: bool },
+}
+
 /// Ephemeral pointer drag, hover, scroll, and overlay tracking across frames (`G6`, `R10.16`).
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct InteractionControllerState {
@@ -929,6 +969,8 @@ pub struct InteractionControllerState {
     pub dragging_split_divider: bool,
     pub dragging_navigator_sheet: Option<SheetId>,
     pub canvas_drag: Option<CanvasDragTarget>,
+    #[serde(default)]
+    pub active_drag_handle: Option<ActiveDragHandle>,
     #[serde(default)]
     pub context_menu_target: Option<String>,
     #[serde(default)]
@@ -991,11 +1033,35 @@ pub fn dispatch_ui_event(app: &mut UiApp, event: UiInputEvent, metrics: Viewport
     Ok(outcome)
 }
 
+pub(crate) fn clear_inspector_axis_buffers(app: &mut UiApp) {
+    app.interaction.text_field_buffers.remove("inspector.axes.min.input");
+    app.interaction.text_field_buffers.remove("inspector.axes.max.input");
+    app.interaction.text_field_buffers.remove("inspector.axes.interval.input");
+}
+
+fn clear_context_menu_state(app: &mut UiApp) {
+    app.interaction.context_menu_target = None;
+    app.view_shards.toolbar_menus.active_context_menu_id = None;
+    app.view_shards.toolbar_menus.context_menu_anchor_px = None;
+    app.view_shards.toolbar_menus.context_sheet_id = None;
+}
+
+fn set_context_menu_state(app: &mut UiApp, target: String, sheet_id: Option<String>, anchor_px: [i32; 2]) {
+    app.interaction.context_menu_target = Some(target.clone());
+    app.view_shards.toolbar_menus.active_context_menu_id = Some(target);
+    app.view_shards.toolbar_menus.context_menu_anchor_px = Some(anchor_px);
+    app.view_shards.toolbar_menus.context_sheet_id = sheet_id;
+    app.view_shards.toolbar_menus.overflow_open = false;
+    app.interaction.open_menu = None;
+    app.interaction.open_dropdown = None;
+}
+
 /// Dismiss any stale sheet-bound modal (such as `ChangeGraphType` for a different graph) and synchronize dialog/inspector state for `sheet_id`.
 pub(crate) fn sync_dialogs_on_sheet_switch(app: &mut UiApp, sheet_id: &SheetId) {
     if matches!(&app.canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { graph_sheet_id } if graph_sheet_id != sheet_id) {
         app.canvas_dialogs.close_dialog();
     }
+    clear_inspector_axis_buffers(app);
     let doc = app.document().clone();
     app.canvas_dialogs.on_sheet_selected(&doc, sheet_id);
 }
@@ -1051,6 +1117,50 @@ pub fn dispatch_mouse_wheel(
     Ok(UiEventOutcome { handled: false, action: String::from("mouse_wheel_ignored"), ..Default::default() })
 }
 
+fn try_begin_drag_handle(app: &UiApp, wid: &str, logical_pos: [f64; 2], is_rtl: bool) -> Option<ActiveDragHandle> {
+    if let Some(rest) = wid.strip_prefix("floating_note.")
+        && let Some(core) = rest.strip_suffix(".drag_handle")
+        && let Some((sheet_id, note_id)) = core.split_once('.')
+    {
+        let key = format!("{sheet_id}::{note_id}");
+        let sid = SheetId::new(sheet_id);
+        let orig_pos_pt = app
+            .view_shards
+            .nav_notes
+            .note_positions_pt
+            .get(&key)
+            .copied()
+            .or_else(|| {
+                crate::views::nav_notes::sheet_floating_notes(app.document(), &sid)
+                    .iter()
+                    .find(|n| n.id.as_str() == note_id)
+                    .map(|n| [n.bounds_pt.x, n.bounds_pt.y])
+            })
+            .unwrap_or([12.0, 12.0]);
+        return Some(ActiveDragHandle::FloatingNote {
+            sheet_id: sheet_id.to_owned(),
+            note_id: note_id.to_owned(),
+            start_logical: logical_pos,
+            orig_pos_pt,
+            moved: false,
+        });
+    }
+    let (slot_tag, base) = if let Some(rest) = wid.strip_prefix("secondary.") { ("secondary", rest) } else { ("main", wid) };
+    let kind = if base == "grid.row_titles.resize" {
+        Some(GridDividerDragKind::RowTitles)
+    } else if let Some(raw_sub) = base.strip_prefix("grid.col_resize.x.") {
+        raw_sub.parse::<usize>().ok().map(GridDividerDragKind::XCol)
+    } else if let Some(rest) = base.strip_prefix("grid.col_resize.")
+        && let Some((c, s)) = rest.split_once('.')
+        && let (Ok(col), Ok(sub)) = (c.parse::<usize>(), s.parse::<usize>())
+    {
+        Some(GridDividerDragKind::DataCol(col, sub))
+    } else {
+        None
+    }?;
+    Some(ActiveDragHandle::GridDivider { slot_tag: slot_tag.to_owned(), kind, last_logical_x: logical_pos[0], is_rtl, moved: false })
+}
+
 fn handle_pointer_down(
     app: &mut UiApp,
     metrics: ViewportMetrics,
@@ -1060,18 +1170,26 @@ fn handle_pointer_down(
 ) -> Result<UiEventOutcome, String> {
     let layout = compute_workspace_layout_map(app, metrics);
     if button == PointerButton::Secondary {
-        return Ok(handle_secondary_pointer_down(app, &layout, logical_pos));
+        return Ok(handle_secondary_pointer_down(app, metrics, &layout, logical_pos));
     }
     if button != PointerButton::Primary {
         return Ok(UiEventOutcome { handled: false, action: String::from("pointer_down_ignored"), ..Default::default() });
     }
-    app.interaction.context_menu_target = None;
     app.interaction.pointer_down = true;
     app.interaction.last_logical_pos = Some(logical_pos);
     app.interaction.pressed_widget_id = None;
+    app.interaction.active_drag_handle = None;
 
     let tree = app.build_and_cache_layout_tree(metrics);
     if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]).cloned() {
+        if (app.interaction.context_menu_target.is_some() || app.view_shards.toolbar_menus.active_context_menu_id.is_some())
+            && node.z_layer < ZLayer::ContextMenu
+        {
+            clear_context_menu_state(app);
+        }
+        if app.view_shards.toolbar_menus.overflow_open && node.z_layer < ZLayer::DropdownMenu && node.id.as_str() != "toolbar.overflow" {
+            app.view_shards.toolbar_menus.overflow_open = false;
+        }
         if node.id.as_str() == "modal.backdrop" {
             app.interaction.open_dropdown = None;
             app.interaction.open_menu = None;
@@ -1101,6 +1219,7 @@ fn handle_pointer_down(
             }
             if node.state.enablement.enabled && node.action != WidgetAction::NoOp {
                 app.interaction.pressed_widget_id = Some(node.id.0.clone());
+                app.interaction.active_drag_handle = try_begin_drag_handle(app, node.id.as_str(), logical_pos, tree.is_rtl);
             }
             return Ok(UiEventOutcome {
                 handled: true,
@@ -1115,6 +1234,8 @@ fn handle_pointer_down(
         if node.z_layer >= ZLayer::ModalBackdrop {
             return Ok(UiEventOutcome { handled: true, action: format!("modal.surface:{}", node.id.as_str()), ..Default::default() });
         }
+    } else if app.interaction.context_menu_target.is_some() || app.view_shards.toolbar_menus.active_context_menu_id.is_some() {
+        clear_context_menu_state(app);
     }
 
     let target = layout.hit_test_logical(logical_pos[0], logical_pos[1]);
@@ -1244,12 +1365,65 @@ fn handle_pointer_down(
     }
 }
 
-fn handle_secondary_pointer_down(app: &mut UiApp, layout: &WorkspaceLayoutMap, logical_pos: [f64; 2]) -> UiEventOutcome {
+fn is_grid_column_header_widget(wid: &str) -> bool {
+    let base = wid.strip_prefix("secondary.").unwrap_or(wid);
+    base.starts_with("grid.col_hdr.")
+        || base.starts_with("grid.x_hdr.")
+        || base.starts_with("grid.col_super.")
+        || base.starts_with("grid.subcol_hdr.")
+        || base.starts_with("grid.col_title.")
+        || base.starts_with("grid.x_title.")
+        || base.starts_with("grid.subcol_title.")
+}
+
+fn handle_secondary_pointer_down(app: &mut UiApp, metrics: ViewportMetrics, layout: &WorkspaceLayoutMap, logical_pos: [f64; 2]) -> UiEventOutcome {
+    let [px, py] = metrics.logical_to_physical_px(logical_pos);
+    #[allow(clippy::cast_possible_truncation)]
+    let anchor = [px.round() as i32, py.round() as i32];
+
+    let tree = app.build_and_cache_layout_tree(metrics);
+    if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]) {
+        if node.z_layer >= ZLayer::ModalBackdrop {
+            clear_context_menu_state(app);
+            return UiEventOutcome { handled: false, action: String::from("secondary_click_ignored"), ..Default::default() };
+        }
+        let wid = node.id.as_str();
+        if let Some(sid_str) = wid.strip_prefix("nav.sheet.") {
+            let target = format!("navigator:{sid_str}");
+            set_context_menu_state(app, target.clone(), Some(sid_str.to_owned()), anchor);
+            return UiEventOutcome {
+                handled: true,
+                action: String::from("navigator.context_menu"),
+                command_result: Some(json!({ "target": target, "sheet_id": sid_str })),
+                ..Default::default()
+            };
+        }
+        if is_grid_column_header_widget(wid) {
+            set_context_menu_state(app, String::from("column_header"), None, anchor);
+            return UiEventOutcome {
+                handled: true,
+                action: String::from("column_header.context_menu"),
+                command_result: Some(json!({ "target": "column_header", "widget_id": wid })),
+                ..Default::default()
+            };
+        }
+    }
+
     match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        WorkspaceHitTarget::NavigatorEntry { sheet_id, .. } => {
+            let target = format!("navigator:{}", sheet_id.as_str());
+            set_context_menu_state(app, target.clone(), Some(sheet_id.as_str().to_owned()), anchor);
+            UiEventOutcome {
+                handled: true,
+                action: String::from("navigator.context_menu"),
+                command_result: Some(json!({ "target": target, "sheet_id": sheet_id.as_str() })),
+                ..Default::default()
+            }
+        }
         WorkspaceHitTarget::GridXCell { row, subcol, .. } => {
             app.grid.select_x_cell_sync(row, subcol);
             app.grid.refresh_selection_stats(app.session.document());
-            app.interaction.context_menu_target = Some(String::from("grid"));
+            set_context_menu_state(app, String::from("grid"), None, anchor);
             UiEventOutcome {
                 handled: true,
                 action: String::from("grid.context_menu"),
@@ -1266,25 +1440,40 @@ fn handle_secondary_pointer_down(app: &mut UiApp, layout: &WorkspaceLayoutMap, l
                     app.sync_brush_from_grid_selection(&sheet_id);
                 }
             }
-            app.interaction.context_menu_target = Some(String::from("grid"));
-            UiEventOutcome {
-                handled: true,
-                action: String::from("grid.context_menu"),
-                command_result: Some(json!({ "target": "grid", "selected_rows": app.grid.selected_rows })),
-                ..Default::default()
+            let is_linked = app
+                .session
+                .document()
+                .data_sheet(&sheet_id)
+                .is_some_and(|ds| crate::views::grid_core::linked_region_for_cell(ds, coord.row, coord.col).is_some());
+            if is_linked {
+                set_context_menu_state(app, String::from("linked_region"), Some(sheet_id.as_str().to_owned()), anchor);
+                UiEventOutcome {
+                    handled: true,
+                    action: String::from("linked_region.context_menu"),
+                    command_result: Some(json!({ "target": "linked_region", "row": coord.row, "col": coord.col })),
+                    ..Default::default()
+                }
+            } else {
+                set_context_menu_state(app, String::from("grid"), Some(sheet_id.as_str().to_owned()), anchor);
+                UiEventOutcome {
+                    handled: true,
+                    action: String::from("grid.context_menu"),
+                    command_result: Some(json!({ "target": "grid", "selected_rows": app.grid.selected_rows })),
+                    ..Default::default()
+                }
             }
         }
         WorkspaceHitTarget::ScenePaper { .. } => {
-            app.interaction.context_menu_target = Some(String::from("canvas"));
+            set_context_menu_state(app, String::from("graph_object"), None, anchor);
             UiEventOutcome {
                 handled: true,
-                action: String::from("canvas.context_menu"),
-                command_result: Some(json!({ "target": "canvas", "brushed_count": app.brushed_points.len() })),
+                action: String::from("graph_object.context_menu"),
+                command_result: Some(json!({ "target": "graph_object", "brushed_count": app.brushed_points.len() })),
                 ..Default::default()
             }
         }
         _ => {
-            app.interaction.context_menu_target = None;
+            clear_context_menu_state(app);
             UiEventOutcome { handled: false, action: String::from("secondary_click_ignored"), ..Default::default() }
         }
     }
@@ -1319,12 +1508,17 @@ fn handle_scene_pointer_down(app: &mut UiApp, sheet_id: &SheetId, scene_pt: Poin
     }
 
     let mut brushed = None;
+    let mut brushed_summary = None;
     if let Ok(scene) = app.session().render_sheet_scene(sheet_id)
         && let Some(hit) = scene.hit_test_point(scene_pt, POINT_BRUSH_TOLERANCE_PT)
     {
         brushed = Some(hit.source_cell.clone());
+        brushed_summary = Some(format!("{} ({})", hit.series_label, hit.value_summary));
     }
     if let Some(cell) = brushed {
+        if let Some(summary) = brushed_summary {
+            app.view_shards.inspector.selected_point_summary = summary;
+        }
         app.brushed_cell = Some(cell.clone());
         if modifiers.shift || modifiers.ctrl || modifiers.meta {
             if let Some(pos) = app.brushed_points.iter().position(|c| c == &cell) {
@@ -1416,6 +1610,55 @@ fn handle_pointer_move(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
         return UiEventOutcome { handled: true, action: String::from("canvas.object_drag_snap"), ..Default::default() };
     }
 
+    if let Some(mut handle) = app.interaction.active_drag_handle.take() {
+        let mut outcome: Option<UiEventOutcome> = None;
+        match &mut handle {
+            ActiveDragHandle::FloatingNote { sheet_id, note_id, start_logical, orig_pos_pt, moved } => {
+                let dx = logical_pos[0] - start_logical[0];
+                let dy = logical_pos[1] - start_logical[1];
+                if *moved || dx.hypot(dy) > 1.0 {
+                    *moved = true;
+                    app.interaction.pressed_widget_id = None;
+                    let pt_per_logical = 72.0 / 96.0;
+                    let nx = (orig_pos_pt[0] + dx * pt_per_logical).clamp(0.0, 2400.0);
+                    let ny = (orig_pos_pt[1] + dy * pt_per_logical).clamp(0.0, 2400.0);
+                    let payload = format!("note.set_pos|{sheet_id}|{note_id}|{nx:.2}|{ny:.2}");
+                    let mut nav_notes = std::mem::take(&mut app.view_shards.nav_notes);
+                    if let Ok(out) = crate::views::nav_notes::handle_custom_action(app, &mut nav_notes, &payload) {
+                        outcome = Some(out);
+                    }
+                    app.view_shards.nav_notes = nav_notes;
+                }
+            }
+            ActiveDragHandle::GridDivider { slot_tag, kind, last_logical_x, is_rtl, moved } => {
+                let raw_dx = logical_pos[0] - *last_logical_x;
+                if raw_dx.abs() >= 1.0 {
+                    *moved = true;
+                    #[allow(clippy::cast_possible_truncation)]
+                    let step_i = raw_dx.trunc() as i32;
+                    *last_logical_x += f64::from(step_i);
+                    app.interaction.pressed_widget_id = None;
+                    let dx = if *is_rtl { -step_i } else { step_i };
+                    let core = match kind {
+                        GridDividerDragKind::RowTitles => format!("row_titles:resize_delta:{dx}"),
+                        GridDividerDragKind::XCol(sub) => format!("xcol:resize_delta:{sub}:{dx}"),
+                        GridDividerDragKind::DataCol(col, sub) => format!("col:resize_delta:{col}:{sub}:{dx}"),
+                    };
+                    let payload = if slot_tag == "secondary" { format!("secondary.{core}") } else { core };
+                    let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+                    if let Ok(out) = crate::views::grid_core::handle_custom_action(app, &mut grid_core, &payload) {
+                        outcome = Some(out);
+                    }
+                    app.view_shards.grid_core = grid_core;
+                }
+            }
+        }
+        app.interaction.active_drag_handle = Some(handle);
+        if let Some(out) = outcome {
+            return out;
+        }
+    }
+
     let tree = app.build_and_cache_layout_tree(metrics);
     if let Some(node) = hit_test_logical(&tree, logical_pos[0], logical_pos[1]) {
         app.interaction.hovered_widget_id = Some(node.id.0.clone());
@@ -1430,10 +1673,17 @@ fn handle_pointer_move(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
 
     if app.canvas_dialogs.active_dialog == ActiveDialog::None
         && let WorkspaceHitTarget::GridCell { sheet_id, coord, .. } = layout.hit_test_physical(phys_x, phys_y)
-        && let Some(ds) = app.session.document().data_sheet(&sheet_id)
+        && app.session.document().active_sheet_id.as_ref() == Some(&sheet_id)
     {
-        app.grid.update_hover_exclusion_tooltip(ds, Some(coord));
+        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+        crate::views::grid_core::handle_grid_pointer_hover(app, &mut grid_core, Some(coord));
+        app.view_shards.grid_core = grid_core;
         return UiEventOutcome { handled: true, action: String::from("grid.hover"), ..Default::default() };
+    }
+    if app.view_shards.grid_core.hovered_cell.is_some() || app.grid.hover_exclusion_tooltip.is_some() {
+        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+        crate::views::grid_core::handle_grid_pointer_hover(app, &mut grid_core, None);
+        app.view_shards.grid_core = grid_core;
     }
 
     UiEventOutcome { handled: app.interaction.hovered_widget_id.is_some(), action: String::from("pointer_move"), ..Default::default() }
@@ -1535,6 +1785,18 @@ fn handle_pointer_up(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [f6
 
     if app.interaction.dragging_grid_sheet.take().is_some() {
         return Ok(UiEventOutcome { handled: true, action: String::from("grid.drag_select_end"), ..Default::default() });
+    }
+
+    if let Some(drag_handle) = app.interaction.active_drag_handle.take() {
+        let moved_action = match drag_handle {
+            ActiveDragHandle::FloatingNote { moved: true, note_id, .. } => Some(format!("floating_note.drag_end:{note_id}")),
+            ActiveDragHandle::GridDivider { moved: true, .. } => Some(String::from("grid_core.divider_drag_end")),
+            _ => None,
+        };
+        if let Some(action) = moved_action {
+            app.interaction.pressed_widget_id = None;
+            return Ok(UiEventOutcome { handled: true, action, ..Default::default() });
+        }
     }
 
     if let Some(drag_target) = app.interaction.canvas_drag.take() {
@@ -1705,6 +1967,12 @@ fn handle_double_click(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
         }
         WorkspaceHitTarget::GridCell { sheet_id, coord, .. } => {
             app.grid.select_single_sync(coord);
+            let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+            let link_out = crate::views::grid_core::handle_grid_double_click(app, &mut grid_core, coord);
+            app.view_shards.grid_core = grid_core;
+            if link_out.handled {
+                return link_out;
+            }
             let initial_text = initial_for(app.document().data_sheet(&sheet_id).and_then(|ds| ds.cell(CellCoord::from(coord))));
             app.inline_editor.begin(InlineEditorTarget::GridCell { sheet_id, coord }, initial_text);
             UiEventOutcome { handled: true, action: String::from("grid.inline_edit_begin"), ..Default::default() }
@@ -1824,17 +2092,68 @@ fn should_handle_chrome_widget_click(node: &crate::layout::WidgetNode) -> bool {
 }
 
 fn ensure_text_field_buffer(app: &mut UiApp, wid: &str, initial: &str) {
-    let multiline = wid == "info.notes";
+    let multiline = matches!(
+        wid,
+        "info.notes" | "info.secondary.notes" | "import_paste.input.csv" | "import_paste.input.notes" | "import_paste.input.plate_values"
+    );
     app.interaction.text_field_buffers.entry(wid.to_owned()).or_insert_with(|| TextFieldEditState::new(initial, multiline));
+}
+
+fn sync_power_pilot_text_field(app: &mut UiApp, fid: &str, text: &str) {
+    let Some(val) = parse_localized_number_input(text.trim(), &app.locale_preset).filter(|v| v.is_finite()) else {
+        return;
+    };
+    match fid {
+        "power.pilot.mean1.input" => app.view_shards.power_wizard.pilot_mean1 = val,
+        "power.pilot.mean2.input" => app.view_shards.power_wizard.pilot_mean2 = val,
+        "power.pilot.sd.input" if val > 0.0 => app.canvas_dialogs.power_wizard.sd = val,
+        "power.pilot.corr.input" => app.canvas_dialogs.power_wizard.within_pair_correlation = val.clamp(-0.99, 0.99),
+        "power.pilot.p1.input" => app.canvas_dialogs.power_wizard.p1 = val.clamp(0.01, 0.99),
+        "power.pilot.p2.input" => app.canvas_dialogs.power_wizard.p2 = val.clamp(0.01, 0.99),
+        "power.pilot.hr.input" => app.view_shards.power_wizard.survival_hazard_ratio = val.max(0.05),
+        "power.pilot.evprob.input" => app.view_shards.power_wizard.survival_event_prob = val.clamp(0.01, 0.99),
+        "power.pilot.r2.input" => app.canvas_dialogs.power_wizard.r_squared = val.clamp(0.001, 0.999),
+        "power.pilot.std.input" => app.canvas_dialogs.power_wizard.standardized_effect = val,
+        _ => {}
+    }
 }
 
 fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
     let text = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()).unwrap_or_default();
-    if fid == "palette.query" {
-        app.canvas_dialogs.command_palette.query = text;
-    } else if fid == "formula_bar.input" {
-        let doc = app.document().clone();
-        app.grid.formula_bar.set_input(&text, None, &doc);
+    if fid.starts_with("import_paste.input.") {
+        crate::views::import_paste::on_text_field_changed(app, fid, &text);
+        return;
+    }
+    if fid.starts_with("power.pilot.") && fid.ends_with(".input") {
+        sync_power_pilot_text_field(app, fid, &text);
+        return;
+    }
+    match fid {
+        "palette.query" => app.canvas_dialogs.command_palette.query = text,
+        "formula_bar.input" => {
+            let doc = app.document().clone();
+            app.grid.formula_bar.set_input(&text, None, &doc);
+        }
+        "analyze.search" => {
+            app.view_shards.analyze_picker.search_query = text.clone();
+            app.canvas_dialogs.analyze.search_query = text;
+        }
+        "navigator.search_input" => app.nav.search_query = text,
+        "welcome.title.input" => app.nav.welcome.table_draft.title = text,
+        "welcome.clone.title.input" => app.nav.welcome.clone_draft.options.title = text,
+        "hook.search_input" => app.canvas_dialogs.hook_picker.search_query = text,
+        "exclude.note_input" => app.canvas_dialogs.exclude_with_reason.note = text,
+        "page_layout.callout_input" => app.canvas_dialogs.page_layout.new_callout_markdown = text,
+        "rand_groups.arms_input" => {
+            let _ = app.canvas_dialogs.randomize_groups.set_groups_from_str(&text);
+        }
+        "rand_groups.title_input" => app.canvas_dialogs.randomize_groups.title = text,
+        "mv_formula.func.search" => app.view_shards.mv_formula.function_search = text,
+        "mv_formula.name.input" => app.grid.formula_bar.target_title = text,
+        "mv_formula.vars.recode_from.input" => app.view_shards.mv_formula.recode_from = text,
+        "mv_formula.vars.recode_to.input" => app.view_shards.mv_formula.recode_to = text,
+        "fit.eq.search" => app.view_shards.fit_params.model_search = text,
+        _ => {}
     }
 }
 
@@ -1853,21 +2172,37 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
         WidgetAction::InvokeCommand { command_id, params } => {
             app.interaction.open_menu = None;
             app.interaction.open_dropdown = None;
-            if let Some(ui_val) = crate::control_io::dispatch_ui_command(app, command_id, params).map_err(|e| e.to_string())? {
+            clear_context_menu_state(app);
+            if matches!(command_id.as_str(), "project.open" | "file.open")
+                && params.get("path").and_then(Value::as_str).is_none_or(|p| p.trim().is_empty())
+            {
                 return Ok(UiEventOutcome {
+                    handled: true,
+                    action: String::from("welcome.open_file_requested"),
+                    command_id: Some(String::from("project.open")),
+                    command_result: None,
+                });
+            }
+            let res = if let Some(ui_val) = crate::control_io::dispatch_ui_command(app, command_id, params).map_err(|e| e.to_string())? {
+                UiEventOutcome {
                     handled: true,
                     action: format!("command.ui:{command_id}"),
                     command_id: Some(command_id.clone()),
                     command_result: Some(ui_val),
-                });
+                }
+            } else {
+                let res = execute_engine_value(app, command_id, params.clone())?;
+                UiEventOutcome {
+                    handled: true,
+                    action: format!("command.engine:{command_id}"),
+                    command_id: Some(command_id.clone()),
+                    command_result: Some(res),
+                }
+            };
+            if matches!(command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
+                clear_inspector_axis_buffers(app);
             }
-            let res = execute_engine_value(app, command_id, params.clone())?;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: format!("command.engine:{command_id}"),
-                command_id: Some(command_id.clone()),
-                command_result: Some(res),
-            })
+            Ok(res)
         }
         WidgetAction::SwitchSheet { sheet_id, .. } => {
             commit_inline_edit_if_active(app)?;
@@ -2168,15 +2503,120 @@ fn handle_text_input(app: &mut UiApp, metrics: ViewportMetrics, text: &str) -> U
         sync_focused_text_field(app, &fid);
         return UiEventOutcome { handled: true, action: format!("textbox.text_input:{fid}"), ..Default::default() };
     }
+    if !modal_open
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && app.nav.active_pane == ActiveWorkspacePane::MainCanvasOrGrid
+        && app.document().active_sheet_id.as_ref().is_some_and(|sid| app.document().data_sheet(sid).is_some())
+    {
+        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+        let grid_out = crate::views::grid_core::handle_grid_text_input(app, &mut grid_core, text);
+        app.view_shards.grid_core = grid_core;
+        if grid_out.handled {
+            return grid_out;
+        }
+    }
     UiEventOutcome { handled: false, action: String::from("text_input_ignored"), ..Default::default() }
 }
 
 fn is_text_widget_id(wid: &str) -> bool {
-    matches!(wid, "palette.query" | "formula_bar.input" | "info.notes") || wid.contains("search") || wid.contains("input")
+    matches!(wid, "palette.query" | "formula_bar.input" | "info.notes" | "info.secondary.notes") || wid.contains("search") || wid.contains("input")
+}
+
+fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fallback: bool) -> Option<SheetId> {
+    let doc = app.document();
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+        return Some(active.clone());
+    }
+    if !app.split.enabled {
+        return None;
+    }
+    let (prim, sec) = app.split.resolve_sheets(doc);
+    let focused = app.focus_widget_id.as_deref().unwrap_or("");
+    let sec_focused = focused.starts_with("secondary.") || focused.starts_with("result.sec.");
+    let result_focused = focused.starts_with("result.") || sec_focused;
+    if sec_focused {
+        if let Some(id) = sec.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+            return Some(id.clone());
+        }
+    } else if result_focused {
+        if let Some(id) = prim.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+            return Some(id.clone());
+        }
+        if let Some(id) = sec.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
+            return Some(id.clone());
+        }
+    }
+    if allow_any_split_fallback {
+        return sec.filter(|id| doc.result_sheet(id).is_some()).or_else(|| prim.filter(|id| doc.result_sheet(id).is_some()));
+    }
+    None
+}
+
+fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOutcome>, String> {
+    let doc = app.document().clone();
+    let Some(sid) = doc.active_sheet_id.as_ref() else {
+        return Ok(None);
+    };
+    let Some(ds) = doc.data_sheet(sid).cloned() else {
+        return Ok(None);
+    };
+    if ds.frozen {
+        return Ok(None);
+    }
+    let coords = app.grid.all_selected_coords(&ds);
+    if !coords.is_empty() {
+        let all_excluded = coords.iter().all(|c| ds.cell(CellCoord::from(*c)).is_some_and(|cell| cell.excluded));
+        let target_excluded = !all_excluded;
+        app.grid.tool.pending_intents.clear();
+        let _ = app.grid.emit_toggle_exclude_intents(&ds, target_excluded);
+        let intents = std::mem::take(&mut app.grid.tool.pending_intents);
+        for intent in intents {
+            app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+        }
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(Some(UiEventOutcome {
+            handled: true,
+            action: String::from("shortcut:grid.toggle_exclude"),
+            command_id: Some(String::from("table.excludeCells")),
+            command_result: Some(json!({ "sheet_id": ds.id.as_str(), "excluded": target_excluded, "count": coords.len() })),
+        }));
+    }
+    if let Some((row, subcol)) = app.grid.active_x_cell {
+        let cur_excl = ds.x_or_time_cell(row, subcol).is_some_and(|c| c.excluded);
+        let next_excl = !cur_excl;
+        app.execute_command(
+            "table.excludeCells",
+            json!({ "sheet_id": ds.id.as_str(), "target": "x", "excluded": next_excl, "row": row, "subcol": subcol }),
+        )
+        .map_err(|e| e.to_string())?;
+        return Ok(Some(UiEventOutcome {
+            handled: true,
+            action: String::from("shortcut:grid.toggle_exclude_x"),
+            command_id: Some(String::from("table.excludeCells")),
+            command_result: Some(json!({ "sheet_id": ds.id.as_str(), "excluded": next_excl, "row": row, "subcol": subcol })),
+        }));
+    }
+    if let Some(c) = app.grid.tool.active {
+        let cur_excl = ds.cell(CellCoord::from(c)).is_some_and(|cell| cell.excluded);
+        let next_excl = !cur_excl;
+        let single = SheetCellRange::new(CellCoord::from(c), CellCoord::from(c));
+        app.execute_command("table.excludeCells", json!({ "sheet_id": ds.id.as_str(), "excluded": next_excl, "range": single }))
+            .map_err(|e| e.to_string())?;
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(Some(UiEventOutcome {
+            handled: true,
+            action: String::from("shortcut:grid.toggle_exclude"),
+            command_id: Some(String::from("table.excludeCells")),
+            command_result: Some(json!({ "sheet_id": ds.id.as_str(), "excluded": next_excl })),
+        }));
+    }
+    Ok(None)
 }
 
 fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
     let trimmed = key.trim();
+    let is_space = key == " " || trimmed.eq_ignore_ascii_case("space");
     let modal_open = app.canvas_dialogs.active_dialog != ActiveDialog::None;
 
     if !modal_open && app.inline_editor.active && !modifiers.meta && !modifiers.ctrl {
@@ -2200,13 +2640,13 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
                 ..Default::default()
             });
         }
-        if let Some(out) = handle_textbox_key(app, metrics, "formula_bar.input", trimmed, modifiers)? {
+        if let Some(out) = handle_textbox_key(app, metrics, "formula_bar.input", key, modifiers)? {
             return Ok(out);
         }
     }
 
     if modal_open {
-        return handle_modal_key_down(app, metrics, trimmed, modifiers);
+        return handle_modal_key_down(app, metrics, key, trimmed, is_space, modifiers);
     }
 
     if trimmed.eq_ignore_ascii_case("tab") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
@@ -2234,8 +2674,8 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
 
     if (modifiers.meta || modifiers.ctrl) && !modifiers.shift && !modifiers.alt && trimmed.eq_ignore_ascii_case("t") {
         let doc = app.document().clone();
-        if let Some(rs_id) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
-            app.canvas_dialogs.open_edit_parameters(&doc, rs_id);
+        if let Some(rs_id) = resolve_result_sheet_for_shortcut(app, true) {
+            app.canvas_dialogs.open_edit_parameters(&doc, &rs_id);
             return Ok(UiEventOutcome {
                 handled: true,
                 action: String::from("shortcut:ui.editParams.open"),
@@ -2245,21 +2685,54 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         }
     }
 
+    let text_focused = app.focus_widget_id.as_deref().is_some_and(is_text_widget_id);
+    if !text_focused
+        && (modifiers.meta || modifiers.ctrl)
+        && !modifiers.shift
+        && !modifiers.alt
+        && trimmed.eq_ignore_ascii_case("e")
+        && let Some(out) = toggle_exclude_active_grid_cells(app)?
+    {
+        return Ok(out);
+    }
+
+    if !text_focused
+        && (modifiers.meta || modifiers.ctrl)
+        && !modifiers.shift
+        && !modifiers.alt
+        && trimmed.eq_ignore_ascii_case("c")
+        && let Some(rs_id) = resolve_result_sheet_for_shortcut(app, false)
+    {
+        let mut results_state = std::mem::take(&mut app.view_shards.results);
+        let out = crate::views::results::handle_custom_action(app, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
+        app.view_shards.results = results_state;
+        if let Ok(outcome) = out
+            && outcome.handled
+        {
+            return Ok(outcome);
+        }
+    }
+
     if let Some(fid) = app.focus_widget_id.clone()
         && is_text_widget_id(&fid)
-        && let Some(out) = handle_textbox_key(app, metrics, &fid, trimmed, modifiers)?
+        && let Some(out) = handle_textbox_key(app, metrics, &fid, key, modifiers)?
     {
         return Ok(out);
     }
 
     if matches!(trimmed, "Escape" | "Esc") {
-        app.interaction.context_menu_target = None;
+        clear_context_menu_state(app);
+        app.view_shards.toolbar_menus.overflow_open = false;
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
         }
+        if app.nav.welcome.open {
+            app.nav.welcome.open = false;
+            return Ok(UiEventOutcome { handled: true, action: String::from("welcome.dismissed"), ..Default::default() });
+        }
     }
 
-    if (trimmed == " " || trimmed.eq_ignore_ascii_case("space"))
+    if is_space
         && let Some(fid) = app.focus_widget_id.clone()
         && let Some(node) = app.build_and_cache_layout_tree(metrics).node(&fid).cloned()
         && node.state.enablement.enabled
@@ -2268,8 +2741,36 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         return execute_widget_action(app, &node.action, metrics);
     }
 
+    let editing_grid_title = app.view_shards.grid_core.editing_title.is_some();
+    let grid_nav_key =
+        matches!(trimmed, "ArrowUp" | "Up" | "ArrowDown" | "Down" | "ArrowLeft" | "Left" | "ArrowRight" | "Right" | "Delete" | "Backspace")
+            || (matches!(trimmed, "Enter" | "Return")
+                && (editing_grid_title
+                    || (app.nav.active_pane == ActiveWorkspacePane::MainCanvasOrGrid
+                        && app.focus_widget_id.as_deref().is_none_or(|f| f.starts_with("grid.") || f.starts_with("secondary.grid.")))));
+    if grid_nav_key
+        && !modifiers.alt
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && app.interaction.open_menu.is_none()
+        && app.interaction.open_dropdown.is_none()
+        && (editing_grid_title
+            || (!text_focused && app.document().active_sheet_id.as_ref().is_some_and(|sid| app.document().data_sheet(sid).is_some())))
+    {
+        let mut grid_core = std::mem::take(&mut app.view_shards.grid_core);
+        let grid_out = crate::views::grid_core::handle_grid_key_down(app, &mut grid_core, trimmed, modifiers);
+        app.view_shards.grid_core = grid_core;
+        let outcome = grid_out?;
+        if outcome.handled {
+            return Ok(outcome);
+        }
+    }
+
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
         if let Ok(Some(exec)) = app.handle_key_combo(&candidate) {
+            if matches!(exec.command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
+                clear_inspector_axis_buffers(app);
+            }
             return Ok(UiEventOutcome {
                 handled: true,
                 action: format!("shortcut:{}", exec.command_id),
@@ -2282,9 +2783,16 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
     Ok(UiEventOutcome { handled: false, action: String::from("key_down_unhandled"), ..Default::default() })
 }
 
-fn handle_modal_key_down(app: &mut UiApp, metrics: ViewportMetrics, trimmed: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
+fn handle_modal_key_down(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+    raw_key: &str,
+    trimmed: &str,
+    is_space: bool,
+    modifiers: KeyModifiers,
+) -> Result<UiEventOutcome, String> {
     if matches!(trimmed, "Escape" | "Esc") {
-        app.interaction.context_menu_target = None;
+        clear_context_menu_state(app);
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
         }
@@ -2306,13 +2814,28 @@ fn handle_modal_key_down(app: &mut UiApp, metrics: ViewportMetrics, trimmed: &st
         return Ok(UiEventOutcome { handled: true, action: String::from("modal.tab_contained"), ..Default::default() });
     }
 
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette)
+        && !modifiers.ctrl
+        && !modifiers.meta
+        && !modifiers.alt
+        && matches!(trimmed, "ArrowUp" | "Up" | "ArrowDown" | "Down")
+    {
+        let count = app.canvas_dialogs.command_palette.matches_for_session(app.session()).len();
+        if count > 0 {
+            let cur = app.canvas_dialogs.command_palette.selected_index.min(count - 1);
+            app.canvas_dialogs.command_palette.selected_index =
+                if matches!(trimmed, "ArrowUp" | "Up") { if cur == 0 { count - 1 } else { cur - 1 } } else { (cur + 1) % count };
+        }
+        return Ok(UiEventOutcome { handled: true, action: String::from("palette.navigate"), ..Default::default() });
+    }
+
     if let Some(fid) = app.focus_widget_id.clone()
         && is_text_widget_id(&fid)
     {
         let tree = app.build_and_cache_layout_tree(metrics);
         let modal_textbox_focused =
             tree.node(&fid).is_some_and(|n| n.z_layer >= ZLayer::ModalDialog && n.a11y.role == WidgetRole::TextBox && n.state.enablement.enabled);
-        if modal_textbox_focused && let Some(out) = handle_textbox_key(app, metrics, &fid, trimmed, modifiers)? {
+        if modal_textbox_focused && let Some(out) = handle_textbox_key(app, metrics, &fid, raw_key, modifiers)? {
             return Ok(out);
         }
     }
@@ -2320,12 +2843,12 @@ fn handle_modal_key_down(app: &mut UiApp, metrics: ViewportMetrics, trimmed: &st
     if !modifiers.ctrl && !modifiers.meta && !modifiers.alt && matches!(trimmed, "Enter" | "Return") {
         let res = crate::gui_actions::submit_active_dialog_ok(app).map_err(|e| e.to_string())?;
         if app.canvas_dialogs.active_dialog == ActiveDialog::None {
-            app.interaction.context_menu_target = None;
+            clear_context_menu_state(app);
         }
         return Ok(UiEventOutcome { handled: true, action: String::from("dialog.confirmed"), command_result: Some(res), ..Default::default() });
     }
 
-    if (trimmed == " " || trimmed.eq_ignore_ascii_case("space"))
+    if is_space
         && !modifiers.ctrl
         && !modifiers.meta
         && !modifiers.alt
