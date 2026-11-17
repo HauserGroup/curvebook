@@ -1036,9 +1036,18 @@ fn describe_transform(s: &TransformAnalysisSpec) -> Vec<ReportBlock> {
         TransformAnalysisSpec::PruneRows { every_k_rows, average_window } => {
             format!("Periodic row pruning every {every_k_rows} row(s) (average_window = {average_window}).")
         }
-        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype } => {
+        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns } => {
             let flt = filter_formula.as_deref().unwrap_or("none");
-            format!("Subset selection and archetype reshape into {} (filter: {flt}).", target_archetype.label())
+            if derived_columns.is_empty() {
+                format!("Subset selection and archetype reshape into {} (filter: {flt}).", target_archetype.label())
+            } else {
+                let names: Vec<&str> = derived_columns.iter().map(|d| d.title.as_str()).collect();
+                format!(
+                    "Subset selection, derived column transforms ({}), and archetype reshape into {} (filter: {flt}).",
+                    names.join(", "),
+                    target_archetype.label()
+                )
+            }
         }
         TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, noise, .. } => {
             let noise_str = match noise {

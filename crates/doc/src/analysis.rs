@@ -127,6 +127,23 @@ pub enum SimulationNoise {
     Poisson,
 }
 
+/// Derived column definition evaluated by [`TransformAnalysisSpec::SelectAndTransform`].
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct DerivedColumnFormula {
+    #[serde(alias = "name")]
+    pub title: String,
+    #[serde(alias = "expr")]
+    pub formula: String,
+}
+
+impl DerivedColumnFormula {
+    /// Construct a named derived column formula.
+    #[must_use]
+    pub fn new(title: impl Into<String>, formula: impl Into<String>) -> Self {
+        Self { title: title.into(), formula: formula.into() }
+    }
+}
+
 /// Derived data-table transformation (`crates/transform`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TransformAnalysisSpec {
@@ -155,6 +172,8 @@ pub enum TransformAnalysisSpec {
     SelectAndTransform {
         filter_formula: Option<String>,
         target_archetype: TableKind,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        derived_columns: Vec<DerivedColumnFormula>,
     },
     Simulate {
         seed: u64,

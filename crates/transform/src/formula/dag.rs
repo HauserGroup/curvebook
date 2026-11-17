@@ -8,7 +8,7 @@ use curvebook_doc::{DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype
 
 use crate::error::TransformError;
 use crate::formula::eval::{MultipleVariablesContext, eval_column_expr, is_builtin_constant, resolve_mv_column};
-use crate::formula::parser::{Expr, VarRef, parse_formula};
+use crate::formula::parser::{Expr, FrameBound, VarRef, parse_formula};
 
 /// Referenced dependency target extracted statically from a formula AST.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -26,28 +26,19 @@ pub fn extract_dependencies(expr: &Expr) -> Vec<DependencyTarget> {
     targets.into_iter().collect()
 }
 
-fn collect_deps(expr: &Expr, out: &mut BTreeSet<DependencyTarget>) {
+fn push_frame_bound_refs<'a>(bound: &'a FrameBound, stack: &mut Vec<&'a Expr>) {
+    match bound {
+        FrameBound::Preceding(e) | FrameBound::Following(e) => stack.push(e),
+        FrameBound::UnboundedPreceding | FrameBound::CurrentRow | FrameBound::UnboundedFollowing => {}
+    }
+}
+
+fn walk_expr_vars<'a>(expr: &'a Expr, mut visit_var: impl FnMut(&'a VarRef)) {
     let mut stack = vec![expr];
     while let Some(node) = stack.pop() {
         match node {
             Expr::Number(_) | Expr::Text(_) => {}
-            Expr::Var(vref) => match vref {
-                VarRef::Ident(name) => {
-                    if !is_builtin_constant(name) {
-                        out.insert(DependencyTarget::ColumnName(name.clone()));
-                    }
-                }
-                VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
-                    out.insert(DependencyTarget::ColumnName(name.clone()));
-                }
-                VarRef::ColumnByIndex(idx) => {
-                    out.insert(DependencyTarget::ColumnIndex(*idx));
-                }
-                VarRef::InfoConstant(key) => {
-                    out.insert(DependencyTarget::InfoConstant(key.clone()));
-                }
-                VarRef::RowOneBased | VarRef::IndexZeroBased => {}
-            },
+            Expr::Var(vref) => visit_var(vref),
             Expr::Unary { expr: inner, .. } => stack.push(inner),
             Expr::Binary { left, right, .. } => {
                 stack.push(left);
@@ -58,8 +49,48 @@ fn collect_deps(expr: &Expr, out: &mut BTreeSet<DependencyTarget>) {
                     stack.push(arg);
                 }
             }
+            Expr::WindowCall { args, filter, window, .. } => {
+                for arg in args {
+                    stack.push(arg);
+                }
+                if let Some(f) = filter {
+                    stack.push(f);
+                }
+                if let Some(w) = window {
+                    for p in &w.partition_by {
+                        stack.push(p);
+                    }
+                    for o in &w.order_by {
+                        stack.push(&o.expr);
+                    }
+                    if let Some(frame) = &w.frame {
+                        push_frame_bound_refs(&frame.start, &mut stack);
+                        push_frame_bound_refs(&frame.end, &mut stack);
+                    }
+                }
+            }
         }
     }
+}
+
+fn collect_deps(expr: &Expr, out: &mut BTreeSet<DependencyTarget>) {
+    walk_expr_vars(expr, |vref| match vref {
+        VarRef::Ident(name) => {
+            if !is_builtin_constant(name) {
+                out.insert(DependencyTarget::ColumnName(name.clone()));
+            }
+        }
+        VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
+            out.insert(DependencyTarget::ColumnName(name.clone()));
+        }
+        VarRef::ColumnByIndex(idx) => {
+            out.insert(DependencyTarget::ColumnIndex(*idx));
+        }
+        VarRef::InfoConstant(key) => {
+            out.insert(DependencyTarget::InfoConstant(key.clone()));
+        }
+        VarRef::RowOneBased | VarRef::IndexZeroBased => {}
+    });
 }
 
 /// Validate that assigning `formula` to column `target_col` in `mv` introduces neither
@@ -191,42 +222,26 @@ fn build_dependency_graph(
 
 fn resolve_col_deps(table: &MultipleVariablesTable, expr: &Expr) -> BTreeSet<usize> {
     let mut out = BTreeSet::new();
-    let mut stack = vec![expr];
-    while let Some(node) = stack.pop() {
-        match node {
-            Expr::Number(_) | Expr::Text(_) => {}
-            Expr::Var(vref) => match vref {
-                VarRef::Ident(name) => {
-                    if !is_builtin_constant(name)
-                        && let Some(idx) = crate::formula::eval::resolve_ident_mv_column(table, name)
-                    {
-                        out.insert(idx);
-                    }
-                }
-                VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
-                    if let Some(idx) = resolve_mv_column(table, name) {
-                        out.insert(idx);
-                    }
-                }
-                VarRef::ColumnByIndex(idx) => {
-                    if *idx < table.variables.len() {
-                        out.insert(*idx);
-                    }
-                }
-                VarRef::InfoConstant(_) | VarRef::RowOneBased | VarRef::IndexZeroBased => {}
-            },
-            Expr::Unary { expr: inner, .. } => stack.push(inner),
-            Expr::Binary { left, right, .. } => {
-                stack.push(left);
-                stack.push(right);
-            }
-            Expr::Call { args, .. } => {
-                for arg in args {
-                    stack.push(arg);
-                }
+    walk_expr_vars(expr, |vref| match vref {
+        VarRef::Ident(name) => {
+            if !is_builtin_constant(name)
+                && let Some(idx) = crate::formula::eval::resolve_ident_mv_column(table, name)
+            {
+                out.insert(idx);
             }
         }
-    }
+        VarRef::Bracketed(name) | VarRef::ColumnByName(name) => {
+            if let Some(idx) = resolve_mv_column(table, name) {
+                out.insert(idx);
+            }
+        }
+        VarRef::ColumnByIndex(idx) => {
+            if *idx < table.variables.len() {
+                out.insert(*idx);
+            }
+        }
+        VarRef::InfoConstant(_) | VarRef::RowOneBased | VarRef::IndexZeroBased => {}
+    });
     out
 }
 

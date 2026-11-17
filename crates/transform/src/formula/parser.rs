@@ -51,6 +51,53 @@ pub enum BinaryOp {
     Or,
 }
 
+/// Sort direction inside a window `ORDER BY` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum SortDirection {
+    Asc,
+    Desc,
+}
+
+/// Missing/null placement inside a window `ORDER BY` clause.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum NullsOrder {
+    First,
+    Last,
+}
+
+/// One ordering key expression inside `OVER (... ORDER BY ...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct OrderByExpr {
+    pub expr: Expr,
+    pub direction: SortDirection,
+    pub nulls: NullsOrder,
+}
+
+/// Frame endpoint inside `OVER (... ROWS ...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub enum FrameBound {
+    UnboundedPreceding,
+    Preceding(Box<Expr>),
+    CurrentRow,
+    Following(Box<Expr>),
+    UnboundedFollowing,
+}
+
+/// Inclusive row-frame bounds inside `OVER (... ROWS ...)`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct WindowFrame {
+    pub start: FrameBound,
+    pub end: FrameBound,
+}
+
+/// Window specification parsed from `OVER (...)`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct WindowSpec {
+    pub partition_by: Vec<Expr>,
+    pub order_by: Vec<OrderByExpr>,
+    pub frame: Option<WindowFrame>,
+}
+
 /// Formula abstract syntax tree node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
@@ -60,6 +107,14 @@ pub enum Expr {
     Unary { op: UnaryOp, expr: Box<Expr> },
     Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
     Call { name: String, args: Vec<Expr> },
+    WindowCall { name: String, args: Vec<Expr>, filter: Option<Box<Expr>>, window: Option<WindowSpec> },
+}
+
+fn push_frame_bound_expr(bound: FrameBound, stack: &mut Vec<Expr>) {
+    match bound {
+        FrameBound::Preceding(e) | FrameBound::Following(e) => stack.push(*e),
+        FrameBound::UnboundedPreceding | FrameBound::CurrentRow | FrameBound::UnboundedFollowing => {}
+    }
 }
 
 impl Drop for Expr {
@@ -76,6 +131,22 @@ impl Drop for Expr {
                 }
                 Expr::Call { args, .. } => {
                     stack.append(args);
+                }
+                Expr::WindowCall { args, filter, window, .. } => {
+                    stack.append(args);
+                    if let Some(f) = filter.take() {
+                        stack.push(*f);
+                    }
+                    if let Some(mut w) = window.take() {
+                        stack.append(&mut w.partition_by);
+                        for o in std::mem::take(&mut w.order_by) {
+                            stack.push(o.expr);
+                        }
+                        if let Some(frame) = w.frame.take() {
+                            push_frame_bound_expr(frame.start, stack);
+                            push_frame_bound_expr(frame.end, stack);
+                        }
+                    }
                 }
             }
         }
@@ -507,7 +578,344 @@ impl Parser {
             }
         }
         let _ = self.advance();
-        normalize_special_call(pos, name, args)
+        let expr = normalize_special_call(pos, name, args)?;
+        self.parse_call_postfix_clauses(expr)
+    }
+
+    fn peek_ident_eq(&self, kw: &str) -> bool {
+        matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Ident(s)) if s.eq_ignore_ascii_case(kw))
+    }
+
+    fn eat_ident_eq(&mut self, kw: &str) -> bool {
+        if self.peek_ident_eq(kw) {
+            let _ = self.advance();
+            true
+        } else {
+            false
+        }
+    }
+
+    fn expect_ident_eq(&mut self, kw: &str, msg: &str) -> Result<(), TransformError> {
+        if self.eat_ident_eq(kw) { Ok(()) } else { Err(TransformError::ParseError { position: self.current_pos(), message: String::from(msg) }) }
+    }
+
+    fn expect_lparen(&mut self, msg: &str) -> Result<usize, TransformError> {
+        match self.peek().cloned() {
+            Some(Token { kind: TokenKind::LParen, pos }) => {
+                let _ = self.advance();
+                Ok(pos)
+            }
+            _ => Err(TransformError::ParseError { position: self.current_pos(), message: String::from(msg) }),
+        }
+    }
+
+    fn expect_rparen(&mut self, open_pos: usize, ctx_label: &str) -> Result<(), TransformError> {
+        match self.advance() {
+            Some(Token { kind: TokenKind::RParen, .. }) => Ok(()),
+            Some(other) => Err(TransformError::ParseError { position: other.pos, message: format!("expected closing `)` in {ctx_label}") }),
+            None => Err(TransformError::ParseError { position: open_pos, message: format!("unclosed `(` in {ctx_label}") }),
+        }
+    }
+
+    fn parse_call_postfix_clauses(&mut self, mut expr: Expr) -> Result<Expr, TransformError> {
+        let has_modifier = self.peek_ident_eq("over") || self.peek_ident_eq("where") || self.peek_ident_eq("filter");
+        if !has_modifier {
+            return Ok(expr);
+        }
+        let (name, args) = match &mut expr {
+            Expr::Call { name, args } => (std::mem::take(name), std::mem::take(args)),
+            _ => {
+                return Err(TransformError::ParseError {
+                    position: self.current_pos(),
+                    message: String::from("window or filter clause cannot be attached to `col(...)` or `Info(...)`"),
+                });
+            }
+        };
+
+        let mut filter: Option<Box<Expr>> = None;
+        let mut window: Option<WindowSpec> = None;
+
+        loop {
+            if self.peek_ident_eq("filter") {
+                if filter.is_some() {
+                    return Err(TransformError::ParseError {
+                        position: self.current_pos(),
+                        message: String::from("duplicate `FILTER` / `WHERE` clause on function call"),
+                    });
+                }
+                let _ = self.advance();
+                let open_pos = self.expect_lparen("expected `(` after `FILTER`")?;
+                self.expect_ident_eq("where", "expected `WHERE` inside `FILTER (...)`")?;
+                let cond = self.parse_expr(0)?;
+                self.expect_rparen(open_pos, "`FILTER (...)` clause")?;
+                filter = Some(Box::new(cond));
+            } else if self.peek_ident_eq("where") {
+                if filter.is_some() {
+                    return Err(TransformError::ParseError {
+                        position: self.current_pos(),
+                        message: String::from("duplicate `WHERE` / `FILTER` clause on function call"),
+                    });
+                }
+                let _ = self.advance();
+                let cond = self.parse_expr(0)?;
+                filter = Some(Box::new(cond));
+            } else if self.peek_ident_eq("over") {
+                if window.is_some() {
+                    return Err(TransformError::ParseError {
+                        position: self.current_pos(),
+                        message: String::from("duplicate `OVER` clause on function call"),
+                    });
+                }
+                let _ = self.advance();
+                let open_pos = self.expect_lparen("expected `(` after `OVER`")?;
+                let (spec, inline_filter) = self.parse_over_body(open_pos)?;
+                if let Some(cond) = inline_filter {
+                    if filter.is_some() {
+                        return Err(TransformError::ParseError {
+                            position: open_pos,
+                            message: String::from("duplicate `WHERE` / `FILTER` clause on windowed call"),
+                        });
+                    }
+                    filter = Some(cond);
+                }
+                window = Some(spec);
+            } else {
+                break;
+            }
+        }
+
+        if filter.is_none() && window.is_none() { Ok(Expr::Call { name, args }) } else { Ok(Expr::WindowCall { name, args, filter, window }) }
+    }
+
+    fn parse_over_body(&mut self, open_pos: usize) -> Result<(WindowSpec, Option<Box<Expr>>), TransformError> {
+        if self.depth >= MAX_PARSE_DEPTH {
+            return Err(TransformError::ParseError { position: open_pos, message: String::from("formula nesting exceeds maximum depth") });
+        }
+        self.depth += 1;
+        let res = self.parse_over_body_inner(open_pos);
+        self.depth -= 1;
+        res
+    }
+
+    fn parse_over_body_inner(&mut self, open_pos: usize) -> Result<(WindowSpec, Option<Box<Expr>>), TransformError> {
+        let mut spec = WindowSpec::default();
+        let mut inline_filter: Option<Box<Expr>> = None;
+        let mut seen_partition = false;
+        let mut seen_order = false;
+        let mut seen_frame = false;
+
+        loop {
+            let Some(tok) = self.peek().cloned() else {
+                return Err(TransformError::ParseError { position: open_pos, message: String::from("unclosed `(` in `OVER` clause") });
+            };
+            match tok.kind {
+                TokenKind::RParen => {
+                    let _ = self.advance();
+                    return Ok((spec, inline_filter));
+                }
+                TokenKind::Ident(kw) => {
+                    if kw.eq_ignore_ascii_case("partition") {
+                        if seen_partition {
+                            return Err(TransformError::ParseError {
+                                position: tok.pos,
+                                message: String::from("duplicate `PARTITION BY` in `OVER` clause"),
+                            });
+                        }
+                        let _ = self.advance();
+                        self.expect_ident_eq("by", "expected `BY` after `PARTITION` in `OVER` clause")?;
+                        loop {
+                            spec.partition_by.push(self.parse_expr(0)?);
+                            if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Comma)) {
+                                let _ = self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        seen_partition = true;
+                    } else if kw.eq_ignore_ascii_case("where") {
+                        if inline_filter.is_some() {
+                            return Err(TransformError::ParseError {
+                                position: tok.pos,
+                                message: String::from("duplicate `WHERE` in `OVER` clause"),
+                            });
+                        }
+                        let _ = self.advance();
+                        inline_filter = Some(Box::new(self.parse_expr(0)?));
+                    } else if kw.eq_ignore_ascii_case("filter") {
+                        if inline_filter.is_some() {
+                            return Err(TransformError::ParseError {
+                                position: tok.pos,
+                                message: String::from("duplicate `FILTER` in `OVER` clause"),
+                            });
+                        }
+                        let _ = self.advance();
+                        let filter_open = self.expect_lparen("expected `(` after `FILTER`")?;
+                        self.expect_ident_eq("where", "expected `WHERE` inside `FILTER (...)`")?;
+                        inline_filter = Some(Box::new(self.parse_expr(0)?));
+                        self.expect_rparen(filter_open, "`FILTER (...)` clause")?;
+                    } else if kw.eq_ignore_ascii_case("order") {
+                        if seen_order {
+                            return Err(TransformError::ParseError {
+                                position: tok.pos,
+                                message: String::from("duplicate `ORDER BY` in `OVER` clause"),
+                            });
+                        }
+                        let _ = self.advance();
+                        self.expect_ident_eq("by", "expected `BY` after `ORDER` in `OVER` clause")?;
+                        loop {
+                            let expr = self.parse_expr(0)?;
+                            let direction = if self.eat_ident_eq("desc") {
+                                SortDirection::Desc
+                            } else {
+                                let _ = self.eat_ident_eq("asc");
+                                SortDirection::Asc
+                            };
+                            let nulls = if self.eat_ident_eq("nulls") {
+                                if self.eat_ident_eq("first") {
+                                    NullsOrder::First
+                                } else {
+                                    self.expect_ident_eq("last", "expected `FIRST` or `LAST` after `NULLS`")?;
+                                    NullsOrder::Last
+                                }
+                            } else {
+                                NullsOrder::Last
+                            };
+                            spec.order_by.push(OrderByExpr { expr, direction, nulls });
+                            if matches!(self.peek().map(|t| &t.kind), Some(TokenKind::Comma)) {
+                                let _ = self.advance();
+                            } else {
+                                break;
+                            }
+                        }
+                        seen_order = true;
+                    } else if kw.eq_ignore_ascii_case("rows") {
+                        if seen_frame {
+                            return Err(TransformError::ParseError {
+                                position: tok.pos,
+                                message: String::from("duplicate `ROWS` frame in `OVER` clause"),
+                            });
+                        }
+                        let _ = self.advance();
+                        spec.frame = Some(self.parse_window_frame(tok.pos)?);
+                        seen_frame = true;
+                    } else {
+                        return Err(TransformError::ParseError { position: tok.pos, message: format!("unexpected keyword `{kw}` in `OVER` clause") });
+                    }
+                }
+                other => {
+                    return Err(TransformError::ParseError { position: tok.pos, message: format!("unexpected token `{other:?}` in `OVER` clause") });
+                }
+            }
+        }
+    }
+
+    fn parse_window_frame(&mut self, rows_pos: usize) -> Result<WindowFrame, TransformError> {
+        if self.eat_ident_eq("between") {
+            let start = self.parse_frame_bound()?;
+            self.expect_ident_eq("and", "expected `AND` in `ROWS BETWEEN ... AND ...`")?;
+            let end = self.parse_frame_bound()?;
+            validate_frame_bounds(&start, &end, rows_pos)?;
+            Ok(WindowFrame { start, end })
+        } else {
+            let start = self.parse_frame_bound()?;
+            let end = FrameBound::CurrentRow;
+            if matches!(start, FrameBound::Following(_) | FrameBound::UnboundedFollowing) {
+                return Err(TransformError::ParseError {
+                    position: rows_pos,
+                    message: String::from("`ROWS` single frame bound cannot be `FOLLOWING`; use `ROWS BETWEEN ... AND ...`"),
+                });
+            }
+            validate_frame_bounds(&start, &end, rows_pos)?;
+            Ok(WindowFrame { start, end })
+        }
+    }
+
+    fn parse_frame_bound(&mut self) -> Result<FrameBound, TransformError> {
+        let pos = self.current_pos();
+        if self.eat_ident_eq("unbounded") {
+            if self.eat_ident_eq("preceding") {
+                Ok(FrameBound::UnboundedPreceding)
+            } else if self.eat_ident_eq("following") {
+                Ok(FrameBound::UnboundedFollowing)
+            } else {
+                Err(TransformError::ParseError { position: pos, message: String::from("expected `PRECEDING` or `FOLLOWING` after `UNBOUNDED`") })
+            }
+        } else if self.eat_ident_eq("current") {
+            self.expect_ident_eq("row", "expected `ROW` after `CURRENT` in `ROWS` frame")?;
+            Ok(FrameBound::CurrentRow)
+        } else {
+            let offset = self.parse_expr(5)?;
+            validate_static_frame_offset(&offset, pos)?;
+            if self.eat_ident_eq("preceding") {
+                Ok(FrameBound::Preceding(Box::new(offset)))
+            } else if self.eat_ident_eq("following") {
+                Ok(FrameBound::Following(Box::new(offset)))
+            } else {
+                Err(TransformError::ParseError {
+                    position: self.current_pos(),
+                    message: String::from("expected `PRECEDING` or `FOLLOWING` after frame offset"),
+                })
+            }
+        }
+    }
+}
+
+fn static_literal_offset(expr: &Expr) -> Option<f64> {
+    match expr {
+        Expr::Number(v) => Some(*v),
+        Expr::Unary { op: UnaryOp::Neg, expr } => static_literal_offset(expr).map(|v| -v),
+        Expr::Unary { op: UnaryOp::Pos, expr } => static_literal_offset(expr),
+        _ => None,
+    }
+}
+
+fn validate_static_frame_offset(expr: &Expr, pos: usize) -> Result<(), TransformError> {
+    if let Some(v) = static_literal_offset(expr)
+        && (v < 0.0 || v.fract() != 0.0 || !v.is_finite())
+    {
+        return Err(TransformError::ParseError { position: pos, message: format!("`ROWS` frame offset must be a non-negative integer, got {v}") });
+    }
+    Ok(())
+}
+
+fn validate_frame_bounds(start: &FrameBound, end: &FrameBound, pos: usize) -> Result<(), TransformError> {
+    match (start, end) {
+        (FrameBound::UnboundedFollowing, _) => {
+            Err(TransformError::ParseError { position: pos, message: String::from("`UNBOUNDED FOLLOWING` cannot be used as frame start") })
+        }
+        (_, FrameBound::UnboundedPreceding) => {
+            Err(TransformError::ParseError { position: pos, message: String::from("`UNBOUNDED PRECEDING` cannot be used as frame end") })
+        }
+        (FrameBound::CurrentRow, FrameBound::Preceding(_)) => {
+            Err(TransformError::ParseError { position: pos, message: String::from("frame start `CURRENT ROW` cannot follow frame end `PRECEDING`") })
+        }
+        (FrameBound::Following(_), FrameBound::Preceding(_) | FrameBound::CurrentRow) => Err(TransformError::ParseError {
+            position: pos,
+            message: String::from("frame start `FOLLOWING` cannot precede `PRECEDING` or `CURRENT ROW`"),
+        }),
+        (FrameBound::Preceding(a), FrameBound::Preceding(b)) => {
+            if let (Some(va), Some(vb)) = (static_literal_offset(a), static_literal_offset(b))
+                && va < vb
+            {
+                return Err(TransformError::ParseError {
+                    position: pos,
+                    message: format!("invalid `ROWS` frame: `{va} PRECEDING` cannot follow `{vb} PRECEDING`"),
+                });
+            }
+            Ok(())
+        }
+        (FrameBound::Following(a), FrameBound::Following(b)) => {
+            if let (Some(va), Some(vb)) = (static_literal_offset(a), static_literal_offset(b))
+                && va > vb
+            {
+                return Err(TransformError::ParseError {
+                    position: pos,
+                    message: format!("invalid `ROWS` frame: `{va} FOLLOWING` cannot precede `{vb} FOLLOWING`"),
+                });
+            }
+            Ok(())
+        }
+        _ => Ok(()),
     }
 }
 

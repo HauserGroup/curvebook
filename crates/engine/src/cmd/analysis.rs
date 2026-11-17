@@ -2,13 +2,13 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CoxTieMethod, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting,
-    LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec,
-    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode,
-    PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId,
-    SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    VariableRole, WeightingScheme,
+    CoxTieMethod, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec,
+    HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod,
+    MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
+    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
+    PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus,
+    RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
 };
 use curvebook_fit::get_builtin_model;
 use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -1253,6 +1253,7 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
         "select_and_transform" | "select" | "transform.select_and_transform" => TransformAnalysisSpec::SelectAndTransform {
             filter_formula: opt_str(params, &["filter_formula"]).map(str::to_owned),
             target_archetype: TableKind::Xy,
+            derived_columns: Vec::new(),
         },
         "simulate" | "simulate_xy" | "transform.simulate" => TransformAnalysisSpec::Simulate {
             seed: parse_opt_u64_field(params, "seed", 42)?,
@@ -1729,7 +1730,7 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             }
             apply_bool_opt(params, &["average_window", "average_dropped"], average_window);
         }
-        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype } => {
+        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns } => {
             if let Some(fv) = params.get("filter_formula") {
                 *filter_formula = if fv.is_null() {
                     None
@@ -1744,6 +1745,14 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             {
                 *target_archetype = serde_json::from_value(tv.clone())
                     .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `target_archetype`: {err}")))?;
+            }
+            if let Some(dv) = params
+                .get("derived_columns")
+                .or_else(|| params.get("derived"))
+                .or_else(|| params.get("column_formulas"))
+                .or_else(|| params.get("formulas"))
+            {
+                *derived_columns = parse_derived_columns_value(dv)?;
             }
         }
         TransformAnalysisSpec::RandomSample { seed, sample_size, stratify_column, proportional_allocation } => {
@@ -2046,7 +2055,90 @@ const SHORTHAND_OVERRIDDEN_PATCH_KEYS: &[&str] = &[
     "operation",
     "filter_formula",
     "target_archetype",
+    "derived_columns",
+    "derived",
+    "column_formulas",
+    "formulas",
 ];
+
+fn parse_derived_column_assignment(raw: &str) -> Result<DerivedColumnFormula, EngineError> {
+    let Some((lhs, rhs)) = raw.split_once('=') else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("derived column string `{raw}` must have `Title = formula` format")));
+    };
+    let title = lhs.trim();
+    let formula = rhs.trim();
+    if title.is_empty() || formula.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("derived column `{raw}` must specify non-empty title and formula")));
+    }
+    Ok(DerivedColumnFormula::new(title, formula))
+}
+
+fn parse_derived_column_object(map: &Map<String, Value>) -> Result<DerivedColumnFormula, EngineError> {
+    let title = map
+        .get("title")
+        .or_else(|| map.get("name"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "derived column entry requires non-empty string `title` (or `name`)"))?;
+    let formula = map
+        .get("formula")
+        .or_else(|| map.get("expr"))
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "derived column entry requires non-empty string `formula` (or `expr`)"))?;
+    Ok(DerivedColumnFormula::new(title, formula))
+}
+
+fn parse_derived_columns_value(val: &Value) -> Result<Vec<DerivedColumnFormula>, EngineError> {
+    match val {
+        Value::Null => Ok(Vec::new()),
+        Value::String(s) => {
+            if s.trim().is_empty() {
+                Ok(Vec::new())
+            } else {
+                Ok(vec![parse_derived_column_assignment(s)?])
+            }
+        }
+        Value::Array(items) => {
+            let mut out = Vec::with_capacity(items.len());
+            for item in items {
+                match item {
+                    Value::String(s) => out.push(parse_derived_column_assignment(s)?),
+                    Value::Object(map) => out.push(parse_derived_column_object(map)?),
+                    _ => {
+                        return Err(EngineError::with_code(
+                            ErrorCode::BadInput,
+                            "`derived_columns` array entries must be `Title = formula` strings or `{title, formula}` objects",
+                        ));
+                    }
+                }
+            }
+            Ok(out)
+        }
+        Value::Object(map) => {
+            if (map.contains_key("title") || map.contains_key("name")) && (map.contains_key("formula") || map.contains_key("expr")) {
+                return Ok(vec![parse_derived_column_object(map)?]);
+            }
+            let mut out = Vec::with_capacity(map.len());
+            for (k, v) in map {
+                let title = k.trim();
+                let formula = v
+                    .as_str()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty())
+                    .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "derived column map values must be non-empty formula strings"))?;
+                if title.is_empty() {
+                    return Err(EngineError::with_code(ErrorCode::BadInput, "derived column title cannot be empty"));
+                }
+                out.push(DerivedColumnFormula::new(title, formula));
+            }
+            Ok(out)
+        }
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, "`derived_columns` must be an array, object, string, or null")),
+    }
+}
 
 fn patch_analysis_kind_fields(kind: &mut AnalysisKind, patch: &Value) -> Result<(), EngineError> {
     let Value::Object(patch_map) = patch else {

@@ -90,12 +90,17 @@ In `MultipleVariables` sheets, a column may declare `VariableSource::Calculated 
 - Variable references resolve column names (`[Body Mass] / ([Height_m]^2)` or bare identifiers when unambiguous). Self-references and multi-column cycles are rejected during DAG compilation.
 - Missing (`Empty`), excluded, or non-numeric cells propagate `Empty` (`NaN` internally mapped back to `CellValue::Empty` with a diagnostic badge, never panicking on `0.0 / 0.0` or `ln(-1.0)`).
 - Arithmetic & scalar functions are evaluated by the `curvebook-transform` formula engine (`crates/transform/src/formula/`; the curve-fit equation DSL in `crates/fit/src/dsl.rs` is a separate compiler with an overlapping function set) (`abs`, `sqrt`, `sqr`, `ln`, `log`/`log10`, `log2`, `exp`, `sin`, `cos`, `tan`, `arcsin`, `arccos`, `arctan`, `arctan2(x, y)`, `logit`, `probit` [$5 + \Phi^{-1}(p)$], `round`, `floor`, `ceil`, `int`, `sgn`, `min`, `max`, `if`, `and`, `or`, `not`, `is_defined`).
-- **Aggregate & conditional column functions** (available in Calculated Variables and Select-and-Transform, disallowed inside nonlinear regression models):
-  - `count(var)`, `sum(var)`, `mean(var)`, `sd(var)`, `sem(var)`, `median(var)`, `iqr(var)`, `min_col(var)`, `max_col(var)`, `percentile(var, p)`
-  - `countif`, `sumif`, `meanif`
-  - `zscore(var)` $= (x_i - \bar{x}) / s_x$
-- **Window functions** (partitioned optionally by a grouping column and ordered by a sort column):
-  - `row_number()`, `rank()`, `dense_rank()`, `lag(var, k)`, `lead(var, k)`, `cumsum(var)`, `cummean(var)`, `diff(var, k)`, `moving_avg(var, window)`.
+- **Aggregate & conditional column functions** (available in Calculated Variables and `SelectAndTransform`, disallowed inside nonlinear regression models):
+  - `count(var)` / `counta(var)`, `sum(var)`, `mean(var)`, `sd(var)` / `stdev(var)`, `sem(var)` / `stderr(var)`, `var(var)`, `median(var)`, `iqr(var)`, `min_col(var)`, `max_col(var)`, `geo_mean(var)`, `percentile(var, p)` / `quantile(var, q)`
+  - Conditional aggregations: `countif(condition_expr)` or `countif(value_expr, condition_expr)`, `countaif(value_expr, condition_expr)`, `sumif(value_expr, condition_expr)`, `meanif(value_expr, condition_expr)`, `minif(value_expr, condition_expr)`, `maxif(value_expr, condition_expr)`, `stdevif(value_expr, condition_expr)` / `sdif(value_expr, condition_expr)`, `stderrif(value_expr, condition_expr)` / `semif(value_expr, condition_expr)` (backwards-compatible `(condition_expr, value_expr)` argument ordering is also accepted when unambiguous)
+- **Row-wise standardization, rank & window functions:**
+  - `center(var)` ($x_i - \bar{x}$), `standardize(var)` / `zscore(var)` ($(x_i - \bar{x}) / s_x$)
+  - `row_number()`, `rank([var])`, `dense_rank([var])`, `lag(var [, k])`, `lead(var [, k])`, `cumsum(var)`, `cummean(var)`, `cumprod(var)`, `diff(var [, k])`, `moving_avg(var, window)` / `rolling_mean(var, window)`, `rolling_sum(var, window)`
+- **Window clauses (`OVER`, `WHERE`, `ORDER BY`, `ROWS`):**
+  - Any aggregate, conditional aggregate, or row-wise window/standardization/rank function accepts optional non-destructive row filtering (`FILTER (WHERE cond)` or `WHERE cond`) and/or `OVER ([PARTITION BY expr, ...] [WHERE cond] [ORDER BY expr [ASC|DESC] [NULLS FIRST|LAST], ...] [ROWS frame])`.
+  - `ROWS` supports `ROWS <bound>` and `ROWS BETWEEN <start> AND <end>` with bounds `UNBOUNDED PRECEDING`, `<n> PRECEDING`, `CURRENT ROW`, `<n> FOLLOWING`, and `UNBOUNDED FOLLOWING`. For aggregates, `ORDER BY` without an explicit `ROWS` clause defaults to SQL cumulative peer framing (`RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW`), while omitting both `ORDER BY` and `ROWS` evaluates over the full partition.
+  - Non-destructive `WHERE` filtering restricts which rows contribute to aggregates (preserving output at all rows in the partition for expressions such as `Y / mean(Y) WHERE Role == "Ctrl" OVER (PARTITION BY Batch)`) and masks filtered-out rows to `Empty` in row-wise window functions (`center`, `standardize`, `zscore`, `rank`, `dense_rank`, `row_number`, `cumsum`, `cummean`, `lag`, `lead`, `diff`, `moving_avg`).
+  - `crates/transform/src/formula/dag.rs` tracks all column and `InfoSheet` dependencies across `PARTITION BY`, `ORDER BY`, `WHERE`/`FILTER`, and `ROWS` offset expressions for topological ordering and cycle detection.
 
 ---
 
@@ -111,7 +116,7 @@ Transforms never overwrite a `DataSheet` in place; they execute as pure function
 3. **Remove Baseline and Column Math (`TransformAnalysisSpec::RemoveBaseline`):**
    - Subtract or divide by baseline column(s), linear baseline interpolated between first/last $k$ rows, or mean of replicate subcolumns (`A - B`, `A / B`, `% change from baseline`).
 4. **Transpose, Prune Rows & Binning (`Transpose`, `PruneRows`, `SelectAndTransform`):**
-   - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform subsetting (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`).
+   - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform row filtering (`filter_formula`), custom derived column-transform formulas (`derived_columns` using the shared windowed/conditional formula engine), and archetype subsetting/projection (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`, etc.).
 5. **Simulate XY / Column / Contingency Data (`TransformAnalysisSpec::Simulate`):**
    - Deterministic seeded PRNG (`curvebook_math::rng::DeterministicRng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
 

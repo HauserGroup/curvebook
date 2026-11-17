@@ -1064,3 +1064,36 @@ fn pvalue_stack_spec_defaults_compatibility_and_serde_roundtrip() {
         assert_json_roundtrip(&full);
     }
 }
+
+#[test]
+fn r63_select_and_transform_derived_columns_serde_and_legacy() {
+    use curvebook_doc::DerivedColumnFormula;
+
+    let legacy_json = r#"{"SelectAndTransform":{"filter_formula":"X > 0","target_archetype":"Column"}}"#;
+    let legacy: TransformAnalysisSpec = serde_json::from_str(legacy_json).unwrap();
+    assert_eq!(
+        legacy,
+        TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: Some(String::from("X > 0")),
+            target_archetype: TableKind::Column,
+            derived_columns: Vec::new(),
+        }
+    );
+    let reserialized = serde_json::to_value(&legacy).unwrap();
+    assert!(reserialized["SelectAndTransform"].get("derived_columns").is_none());
+
+    let with_derived = TransformAnalysisSpec::SelectAndTransform {
+        filter_formula: Some(String::from("Flag == 1")),
+        target_archetype: TableKind::Xy,
+        derived_columns: vec![
+            DerivedColumnFormula::new("Norm", "Response / mean(Response) OVER (PARTITION BY Batch)"),
+            DerivedColumnFormula::new("Z", "zscore(Norm)"),
+        ],
+    };
+    assert_json_roundtrip(&with_derived);
+
+    let alias_json = r#"{"name":"Delta","expr":"Response - minif(Response, Role == \"Ctrl\")"}"#;
+    let alias_dc: DerivedColumnFormula = serde_json::from_str(alias_json).unwrap();
+    assert_eq!(alias_dc.title, "Delta");
+    assert_eq!(alias_dc.formula, "Response - minif(Response, Role == \"Ctrl\")");
+}

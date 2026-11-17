@@ -3,14 +3,15 @@
 //! `docs/implementation/data-tables-and-transforms.md` §5.4).
 
 use curvebook_doc::{
-    Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, MultipleVariablesTable, NestedTable,
-    PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype, TableKind, VariableColumn, VariableRole,
-    VariableSource, XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows,
+    Cell, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DerivedColumnFormula, GroupedTable, InfoSheet,
+    MultipleVariablesTable, NestedTable, PartsOfWholeTable, ResultCell, SheetId, SubcolumnMode, SummarizedPoint, SurvivalTable, TableArchetype,
+    TableKind, VariableColumn, VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, transpose_cell_grid, validate_data_sets,
+    validate_rows, validate_title,
 };
 use curvebook_math::sum;
 
 use crate::error::TransformError;
-use crate::formula::{TableEvalContext, eval_column_expr, parse_formula};
+use crate::formula::{DependencyTarget, Expr, FormulaValue, TableEvalContext, eval_column_expr, extract_dependencies, parse_formula};
 use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
 
 /// Decimation strategy for [`execute_prune`].
@@ -825,33 +826,92 @@ pub fn execute_select(
     target_archetype: TableKind,
     ctx: &TransformContext<'_>,
 ) -> Result<TransformOutput, TransformError> {
+    execute_select_with_derived(source, rules, &[], target_archetype, ctx)
+}
+
+/// Filter rows according to [`SelectRule`]s, evaluate custom derived column-transform formulas
+/// (`derived_columns`), and optionally project into `target_archetype`.
+pub fn execute_select_with_derived(
+    source: &DataSheet,
+    rules: &[SelectRule],
+    derived_columns: &[DerivedColumnFormula],
+    target_archetype: TableKind,
+    ctx: &TransformContext<'_>,
+) -> Result<TransformOutput, TransformError> {
     source.archetype.validate()?;
     let row_count = source.archetype.row_count();
-    let mut keep_mask = vec![true; row_count];
+    let base_selected_cols = ctx.active_columns(source.archetype.column_count())?;
 
-    for rule in rules {
-        apply_select_rule(source, rule, &mut keep_mask, ctx)?;
+    let mut parsed_derived: Vec<(String, Expr)> = Vec::with_capacity(derived_columns.len());
+    for dc in derived_columns {
+        let title = dc.title.trim();
+        if title.is_empty() {
+            return Err(TransformError::InvalidSpec { message: String::from("derived column title cannot be empty") });
+        }
+        validate_title(title)?;
+        let expr = parse_formula(&dc.formula)?;
+        parsed_derived.push((title.to_owned(), expr));
     }
 
-    let kept_indices: Vec<usize> = keep_mask.iter().enumerate().filter_map(|(r, &k)| k.then_some(r)).collect();
-    let mut filtered = source.clone();
-    retain_rows(&mut filtered.archetype, &kept_indices);
+    let predicate_needs_derived = !parsed_derived.is_empty()
+        && rules.iter().any(|rule| {
+            let SelectRule::Predicate(formula) = rule else {
+                return false;
+            };
+            parse_formula(formula).is_ok_and(|expr| {
+                extract_dependencies(&expr).iter().any(|dep| match dep {
+                    DependencyTarget::ColumnName(name) => parsed_derived.iter().any(|(d_title, _)| d_title.eq_ignore_ascii_case(name.trim())),
+                    _ => false,
+                })
+            })
+        });
+
+    let mut working = source.clone();
+    let mut output_cols = base_selected_cols;
+    let kept_indices: Vec<usize>;
+
+    if predicate_needs_derived {
+        for (title, expr) in &parsed_derived {
+            let col_idx = apply_derived_column(&mut working, title, expr, ctx.info_sheet)?;
+            if !output_cols.contains(&col_idx) {
+                output_cols.push(col_idx);
+            }
+        }
+        let mut keep_mask = vec![true; row_count];
+        for rule in rules {
+            apply_select_rule(&working, rule, &mut keep_mask, ctx)?;
+        }
+        kept_indices = keep_mask.iter().enumerate().filter_map(|(r, &k)| k.then_some(r)).collect();
+        retain_rows(&mut working.archetype, &kept_indices);
+    } else {
+        let mut keep_mask = vec![true; row_count];
+        for rule in rules {
+            apply_select_rule(source, rule, &mut keep_mask, ctx)?;
+        }
+        kept_indices = keep_mask.iter().enumerate().filter_map(|(r, &k)| k.then_some(r)).collect();
+        retain_rows(&mut working.archetype, &kept_indices);
+        for (title, expr) in &parsed_derived {
+            let col_idx = apply_derived_column(&mut working, title, expr, ctx.info_sheet)?;
+            if !output_cols.contains(&col_idx) {
+                output_cols.push(col_idx);
+            }
+        }
+    }
 
     let (id, title) = ctx.derived_ids(source, "select", "Selected");
-    let selected_cols = ctx.active_columns(filtered.archetype.column_count())?;
     let mut warnings = Vec::new();
-    let projected = if filtered.kind() == target_archetype {
-        if !ctx.selected_data_sets.is_empty() {
-            retain_columns(&mut filtered.archetype, &selected_cols)?;
+    let projected = if working.kind() == target_archetype {
+        if !ctx.selected_data_sets.is_empty() || !parsed_derived.is_empty() {
+            retain_columns(&mut working.archetype, &output_cols)?;
         }
-        filtered.archetype
+        working.archetype
     } else {
-        let max_subs = match &filtered.archetype {
+        let max_subs = match &working.archetype {
             TableArchetype::Xy(t) => t.y_subcolumn_mode.subcolumn_count(),
             TableArchetype::Column(t) => t.subcolumn_mode.subcolumn_count(),
             TableArchetype::Grouped(t) => t.subcolumn_mode.subcolumn_count(),
             TableArchetype::Nested(t) => {
-                selected_cols.iter().filter_map(|&c| t.groups.get(c).map(curvebook_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
+                output_cols.iter().filter_map(|&c| t.groups.get(c).map(curvebook_doc::NestedGroupColumn::biological_unit_count)).max().unwrap_or(1)
             }
             _ => 1,
         };
@@ -861,20 +921,129 @@ pub fn execute_select(
                 target_archetype.label()
             ));
         }
-        project_archetype(&filtered.archetype, target_archetype, &selected_cols)?
+        project_archetype(&working.archetype, target_archetype, &output_cols)?
     };
     let out = DataSheet::new(id, title, projected)?;
 
-    let summary_tab = build_summary_tab(
-        "Select and transform summary",
-        vec![
-            ("Original rows", ResultCell::Number { value: row_count as f64, prefix: None, units: None }),
-            ("Selected rows", ResultCell::Number { value: kept_indices.len() as f64, prefix: None, units: None }),
-            ("Target archetype", ResultCell::Text(String::from(target_archetype.label()))),
-        ],
-        Vec::new(),
-    );
+    let mut summary_rows = vec![
+        ("Original rows", ResultCell::Number { value: row_count as f64, prefix: None, units: None }),
+        ("Selected rows", ResultCell::Number { value: kept_indices.len() as f64, prefix: None, units: None }),
+        ("Target archetype", ResultCell::Text(String::from(target_archetype.label()))),
+    ];
+    if !parsed_derived.is_empty() {
+        summary_rows.push(("Derived columns", ResultCell::Number { value: parsed_derived.len() as f64, prefix: None, units: None }));
+    }
+    let summary_tab = build_summary_tab("Select and transform summary", summary_rows, Vec::new());
     Ok(TransformOutput { data_sheet: out, summary_tab, scalars: Vec::new(), warnings })
+}
+
+fn find_matching_column_title(titles: &[&str], target: &str) -> Option<usize> {
+    titles.iter().position(|t| t.trim() == target).or_else(|| titles.iter().position(|t| t.trim().eq_ignore_ascii_case(target)))
+}
+
+fn apply_derived_column(working: &mut DataSheet, title: &str, expr: &Expr, info_sheet: Option<&InfoSheet>) -> Result<usize, TransformError> {
+    let vals = eval_column_expr(expr, &TableEvalContext::new(working, info_sheet))?;
+    let rows = working.archetype.row_count();
+    let mut cells: Vec<Cell> = vals.into_iter().map(FormulaValue::into_cell).collect();
+    cells.resize_with(rows, Cell::empty);
+
+    match &mut working.archetype {
+        TableArchetype::MultipleVariables(mv) => {
+            let titles: Vec<&str> = mv.variables.iter().map(|v| v.title.as_str()).collect();
+            if let Some(idx) = find_matching_column_title(&titles, title) {
+                if let Some(var) = mv.variables.get_mut(idx) {
+                    var.source = VariableSource::Entered;
+                    var.cells = cells;
+                    var.role = VariableRole::Continuous;
+                    var.role_inferred = true;
+                    var.refresh_inferred_role();
+                }
+                Ok(idx)
+            } else {
+                validate_data_sets(mv.variables.len() + 1)?;
+                let mut var = VariableColumn::new(title.to_owned(), rows)?;
+                var.cells = cells;
+                var.refresh_inferred_role();
+                mv.variables.push(var);
+                Ok(mv.variables.len() - 1)
+            }
+        }
+        TableArchetype::Xy(t) => apply_derived_to_datasets(&mut t.data_sets, t.y_subcolumn_mode.subcolumn_count(), title, &cells, rows),
+        TableArchetype::Column(t) => apply_derived_to_datasets(&mut t.data_sets, t.subcolumn_mode.subcolumn_count(), title, &cells, rows),
+        TableArchetype::Grouped(t) => apply_derived_to_datasets(&mut t.data_sets, t.subcolumn_mode.subcolumn_count(), title, &cells, rows),
+        TableArchetype::Contingency(t) => {
+            let idx = apply_derived_to_datasets(&mut t.data_sets, 1, title, &cells, rows)?;
+            t.validate_counts()?;
+            Ok(idx)
+        }
+        TableArchetype::Survival(t) => apply_derived_to_datasets(&mut t.cohorts, 1, title, &cells, rows),
+        TableArchetype::PartsOfWhole(t) => apply_derived_to_datasets(&mut t.data_sets, 1, title, &cells, rows),
+        TableArchetype::Nested(t) => {
+            let titles: Vec<&str> = t.groups.iter().map(|g| g.title.as_str()).collect();
+            if let Some(idx) = find_matching_column_title(&titles, title) {
+                if let Some(grp) = t.groups.get_mut(idx) {
+                    for (r, cell) in cells.iter().enumerate() {
+                        if let Some(row_cells) = grp.cells.get_mut(r) {
+                            for sub in row_cells.iter_mut() {
+                                *sub = Cell::empty();
+                            }
+                            if let Some(first) = row_cells.first_mut() {
+                                *first = cell.clone();
+                            }
+                        }
+                    }
+                }
+                Ok(idx)
+            } else {
+                validate_data_sets(t.groups.len() + 1)?;
+                let bio = t.groups.first().map_or(1, curvebook_doc::NestedGroupColumn::biological_unit_count).max(1);
+                let mut grp = curvebook_doc::NestedGroupColumn::new(title.to_owned(), bio, rows)?;
+                for (r, cell) in cells.iter().enumerate() {
+                    if let Some(slot) = grp.cells.get_mut(r).and_then(|row_cells| row_cells.first_mut()) {
+                        *slot = cell.clone();
+                    }
+                }
+                t.groups.push(grp);
+                Ok(t.groups.len() - 1)
+            }
+        }
+    }
+}
+
+fn apply_derived_to_datasets(
+    data_sets: &mut Vec<DataSetColumn>,
+    subcols: usize,
+    title: &str,
+    cells: &[Cell],
+    rows: usize,
+) -> Result<usize, TransformError> {
+    let subs = subcols.max(1);
+    let titles: Vec<&str> = data_sets.iter().map(|d| d.title.as_str()).collect();
+    if let Some(idx) = find_matching_column_title(&titles, title) {
+        if let Some(ds) = data_sets.get_mut(idx) {
+            for (r, cell) in cells.iter().enumerate() {
+                if let Some(row_cells) = ds.cells.get_mut(r) {
+                    for sub in row_cells.iter_mut() {
+                        *sub = Cell::empty();
+                    }
+                    if let Some(first) = row_cells.first_mut() {
+                        *first = cell.clone();
+                    }
+                }
+            }
+        }
+        Ok(idx)
+    } else {
+        validate_data_sets(data_sets.len() + 1)?;
+        let mut ds = DataSetColumn::new(title.to_owned(), rows, subs)?;
+        for (r, cell) in cells.iter().enumerate() {
+            if let Some(slot) = ds.cells.get_mut(r).and_then(|row_cells| row_cells.first_mut()) {
+                *slot = cell.clone();
+            }
+        }
+        data_sets.push(ds);
+        Ok(data_sets.len() - 1)
+    }
 }
 
 fn apply_select_rule(source: &DataSheet, rule: &SelectRule, mask: &mut [bool], ctx: &TransformContext<'_>) -> Result<(), TransformError> {

@@ -2555,6 +2555,7 @@ mod tests {
             d.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
                 filter_formula: None,
                 target_archetype: TableKind::Column,
+                derived_columns: Vec::new(),
             }));
         }
         try_toggle_edit_params_click(&mut app, "edit.transform.target_archetype").map_err(|e| e.to_string())?;
@@ -2574,6 +2575,7 @@ mod tests {
                 AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
                     target_archetype: TableKind::Grouped,
                     filter_formula: Some(f),
+                    ..
                 }) if f == &filter_expr
             ),
             "unexpected select_and_transform kind after commit: {:?}",

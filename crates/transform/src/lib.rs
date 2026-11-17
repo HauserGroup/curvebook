@@ -30,7 +30,7 @@ pub use import::{ImportPipelineOptions, ImportPipelineReport, ImportSourcePayloa
 pub use ops::{
     BaselineKind, MathTransformOp, PruneMethod, SelectRule, TransformContext, TransformOutput, execute_analysis_transform, execute_math_op,
     execute_math_transform, execute_normalize, execute_prune, execute_remove_baseline, execute_remove_baseline_kind, execute_select,
-    execute_transform, execute_transpose,
+    execute_select_with_derived, execute_transform, execute_transpose,
 };
 pub use plate_and_tidy::{PlateGeometry, PlateMapTemplate, PlateWellRole, TidyColumnMapping, map_plate_to_datasheet, pivot_tidy_long_to_datasheet};
 pub use randomize::{

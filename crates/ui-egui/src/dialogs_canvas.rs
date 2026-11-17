@@ -420,9 +420,11 @@ pub fn default_analysis_kind_for_id(id: &str) -> Option<AnalysisKind> {
         })),
         "transform.transpose" => Some(AnalysisKind::Transform(TransformAnalysisSpec::Transpose { swap_row_and_column_titles: true })),
         "transform.prune" => Some(AnalysisKind::Transform(TransformAnalysisSpec::PruneRows { every_k_rows: 2, average_window: false })),
-        "transform.select" => {
-            Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula: None, target_archetype: TableKind::Column }))
-        }
+        "transform.select" => Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: None,
+            target_archetype: TableKind::Column,
+            derived_columns: Vec::new(),
+        })),
         "transform.simulate" => Some(AnalysisKind::Transform(TransformAnalysisSpec::Simulate {
             seed: 42,
             row_count: 24,
@@ -1552,7 +1554,7 @@ impl AnalyzeDialogState {
                 *baseline_columns = self.baseline_columns.clone();
                 *operation = self.baseline_operation;
             }
-            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype }) => {
+            AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, .. }) => {
                 *filter_formula = self.transform_formula.clone();
                 *target_archetype = self.transform_target_archetype;
             }
@@ -2573,14 +2575,18 @@ impl EditAnalysisParametersState {
                                 }));
                             }
                         }
-                        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. }) => {
+                        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, derived_columns, .. }) => {
                             let filter_formula = if val.is_null() {
                                 None
                             } else {
                                 let s = val.as_str().ok_or_else(|| String::from("`filter_formula` must be a string or null"))?.trim();
                                 (!s.is_empty()).then(|| s.to_owned())
                             };
-                            spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype }));
+                            spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                                filter_formula,
+                                target_archetype,
+                                derived_columns,
+                            }));
                         }
                         _ => {}
                     }
@@ -2590,9 +2596,14 @@ impl EditAnalysisParametersState {
                 let raw = val.as_str().ok_or_else(|| String::from("`target_archetype` must be a string"))?;
                 let parsed = parse_table_kind_str(raw)?;
                 if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) = spec.kind.clone()
+                    && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, derived_columns, .. }) =
+                        spec.kind.clone()
                 {
-                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype: parsed }));
+                    spec.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                        filter_formula,
+                        target_archetype: parsed,
+                        derived_columns,
+                    }));
                 }
             }
             "baseline_columns" | "edit.transform.baseline_columns" => {

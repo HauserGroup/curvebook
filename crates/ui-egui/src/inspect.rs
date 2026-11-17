@@ -1438,7 +1438,7 @@ fn build_edit_params_dialog_nodes(
                     pos(26),
                 ));
             }
-            TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype } => {
+            TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, .. } => {
                 controls.push(node(
                     "edit.transform.formula",
                     "textbox",
