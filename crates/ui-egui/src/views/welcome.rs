@@ -981,7 +981,12 @@ pub fn build_welcome_launcher(builder: &mut LayoutBuilder<'_>, rect: LayoutRectP
         parent: None,
         z_layer: ZLayer::Workspace,
         rect_px: rect,
-        a11y: labeled_meta(WidgetRole::Dialog, "Welcome & New Data Table", FocusScope::Workspace, "F1"),
+        a11y: labeled_meta(
+            WidgetRole::Dialog,
+            welcome_tr(&builder.tree.locale, "welcome.title", "Welcome & New Data Table"),
+            FocusScope::Workspace,
+            "F1",
+        ),
         state: WidgetVisualState::default(),
         action: WidgetAction::NoOp,
     });

@@ -41,7 +41,7 @@ use a11y::labeled_meta;
 use analyze_picker::{AnalyzePickerViewState, build_analyze_modal_body, build_duplicate_analysis_modal_body};
 use dialogs_graph_misc::{
     DialogsGraphMiscViewState, build_canvas_or_layout_view, build_command_palette_body, build_descriptor_modal_body, draw_rulers_if_visible,
-    modal_title,
+    modal_title_for_locale,
 };
 use fit_params::FitParamsViewState;
 use grid_core::{GridCoreViewState, build_data_grid_view};
@@ -373,7 +373,7 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
     });
     builder.paint_fill(ZLayer::ModalBackdrop, Some(&scrim_wid), full_rect, Rgba8::rgba(15, 23, 42, 128));
 
-    let title = modal_title(&builder.app.canvas_dialogs.active_dialog);
+    let title = modal_title_for_locale(&builder.app.canvas_dialogs.active_dialog, &builder.tree.locale);
     let modal_wid = builder.push_node(NodeSpec {
         id: WidgetId::from("modal.dialog"),
         parent: None,
@@ -387,11 +387,13 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
     builder.paint_stroke(ZLayer::ModalDialog, Some(&modal_wid), modal_rect, builder.palette.accent, 2);
 
     builder.push_clip(modal_rect);
+    let is_rtl = builder.tree.is_rtl;
     let hdr_h = 28u32.min(modal_rect.height);
     let hdr_rect = LayoutRectPx::new(modal_rect.x, modal_rect.y, modal_rect.width, hdr_h);
     builder.paint_fill(ZLayer::ModalDialog, Some(&modal_wid), hdr_rect, builder.palette.header);
     let size_px = (13.0 * builder.scale()).clamp(10.0, 24.0);
-    let title_area = LayoutRectPx::new(hdr_rect.x + 8, hdr_rect.y, hdr_rect.width.saturating_sub(38), hdr_h);
+    let title_x = if is_rtl && modal_rect.width >= 60 && hdr_h >= 16 { hdr_rect.x + 32 } else { hdr_rect.x + 8 };
+    let title_area = LayoutRectPx::new(title_x, hdr_rect.y, hdr_rect.width.saturating_sub(38), hdr_h);
     paint_text_fitted(
         builder,
         &modal_wid,
@@ -407,13 +409,14 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
     );
 
     if modal_rect.width >= 60 && hdr_h >= 16 {
+        let close_x = if is_rtl { modal_rect.x + 4 } else { modal_rect.right() - 28 };
         emit_button(
             builder,
             ButtonWidgetSpec {
                 id: "modal.close",
                 parent: Some(modal_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
-                rect: LayoutRectPx::new(modal_rect.right() - 28, modal_rect.y + 3, 24, hdr_h.saturating_sub(6).max(12)),
+                rect: LayoutRectPx::new(close_x, modal_rect.y + 3, 24, hdr_h.saturating_sub(6).max(12)),
                 label: "X",
                 keyboard_path: "Escape",
                 focus_scope: FocusScope::ModalDialog,
@@ -445,16 +448,23 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
         let ok_enable = evaluate_dialog_button(&builder.app.canvas_dialogs, builder.app.document(), "ok").unwrap_or_else(ControlEnablement::enabled);
         let btn_h = footer_h.saturating_sub(8).max(14);
         let btn_w = (modal_rect.width / 5).clamp(58, 96);
-        let cancel_rect = LayoutRectPx::new(modal_rect.right() - i32::try_from(btn_w * 2 + 16).unwrap_or(140), fy + 4, btn_w, btn_h);
-        let ok_rect = LayoutRectPx::new(modal_rect.right() - i32::try_from(btn_w + 8).unwrap_or(72), fy + 4, btn_w, btn_h);
+        let (cancel_rect, ok_rect) = if is_rtl {
+            let ok_r = LayoutRectPx::new(modal_rect.x + 8, fy + 4, btn_w, btn_h);
+            let cancel_r = LayoutRectPx::new(modal_rect.x + i32::try_from(btn_w + 16).unwrap_or(80), fy + 4, btn_w, btn_h);
+            (cancel_r, ok_r)
+        } else {
+            let cancel_r = LayoutRectPx::new(modal_rect.right() - i32::try_from(btn_w * 2 + 16).unwrap_or(140), fy + 4, btn_w, btn_h);
+            let ok_r = LayoutRectPx::new(modal_rect.right() - i32::try_from(btn_w + 8).unwrap_or(72), fy + 4, btn_w, btn_h);
+            (cancel_r, ok_r)
+        };
 
         if let Some((_, _, _, _, _, buttons_list)) = crate::inspect::dialog_widget_descriptors(builder.app) {
-            let mut ex = modal_rect.x + 8;
+            let mut ex = if is_rtl { modal_rect.right() - 8 - i32::try_from(btn_w).unwrap_or(64) } else { modal_rect.x + 8 };
             for (idx, (id, lbl)) in buttons_list.iter().enumerate() {
                 if matches!(*id, "ok" | "create" | "cancel" | "close") {
                     continue;
                 }
-                if ex + i32::try_from(btn_w).unwrap_or(64) >= cancel_rect.x - 4 {
+                if if is_rtl { ex <= cancel_rect.right() + 4 } else { ex + i32::try_from(btn_w).unwrap_or(64) >= cancel_rect.x - 4 } {
                     break;
                 }
                 let en = evaluate_dialog_button(&builder.app.canvas_dialogs, builder.app.document(), id).unwrap_or_else(ControlEnablement::enabled);
@@ -476,10 +486,21 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
                         action: WidgetAction::InvokeDialogButton((*id).to_owned()),
                     },
                 );
-                ex += i32::try_from(btn_w + 6).unwrap_or(70);
+                if is_rtl {
+                    ex -= i32::try_from(btn_w + 6).unwrap_or(70);
+                } else {
+                    ex += i32::try_from(btn_w + 6).unwrap_or(70);
+                }
             }
         }
 
+        let norm_loc = crate::i18n::normalize_locale(&builder.tree.locale);
+        let cancel_lbl = crate::i18n::try_tr(norm_loc, "btn.cancel").unwrap_or("Cancel");
+        let ok_lbl = if matches!(builder.app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize) {
+            "Create"
+        } else {
+            crate::i18n::try_tr(norm_loc, "btn.ok").unwrap_or("OK")
+        };
         emit_button(
             builder,
             ButtonWidgetSpec {
@@ -487,7 +508,7 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
                 parent: Some(modal_wid.clone()),
                 z_layer: ZLayer::ModalDialog,
                 rect: cancel_rect,
-                label: "Cancel",
+                label: cancel_lbl,
                 keyboard_path: "Escape",
                 focus_scope: FocusScope::ModalDialog,
                 tab_order: Some(800),
@@ -505,7 +526,7 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
                 parent: Some(modal_wid),
                 z_layer: ZLayer::ModalDialog,
                 rect: ok_rect,
-                label: if matches!(builder.app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize) { "Create" } else { "OK" },
+                label: ok_lbl,
                 keyboard_path: "Enter",
                 focus_scope: FocusScope::ModalDialog,
                 tab_order: Some(801),

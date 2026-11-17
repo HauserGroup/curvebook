@@ -1571,22 +1571,24 @@ fn emit_stepper_row(
     st: &UiTextStyle,
     scroll_id: &str,
 ) {
+    let is_rtl = builder.tree.is_rtl;
     let scale = builder.scale();
     let controls_w = mi(136, scale).min((rect.width as i32) / 2).max(mi(96, scale));
     let lbl_gap = mpx(6, scale);
     let label_w = (rect.width as i32 - controls_w - lbl_gap as i32).max(mi(60, scale)) as u32;
+    let lbl_x = if is_rtl { rect.right() - i32::try_from(label_w).unwrap_or(60) } else { rect.x };
     emit_modal_label(
         builder,
         parent,
         &format!("{id_prefix}.lbl"),
-        LayoutRectPx::new(rect.x, rect.y, label_w, rect.height),
+        LayoutRectPx::new(lbl_x, rect.y, label_w, rect.height),
         label,
         builder.palette.text,
         st,
         en.clone(),
         Some(scroll_id),
     );
-    let cx = rect.x + i32::try_from(label_w + lbl_gap).unwrap_or(86);
+    let cx = if is_rtl { rect.x } else { rect.x + i32::try_from(label_w + lbl_gap).unwrap_or(86) };
     let btn_w = mpx(24, scale);
     let btn_gap = mpx(4, scale);
     let val_w = (controls_w as u32).saturating_sub(btn_w * 2 + btn_gap * 2).max(mpx(40, scale));
@@ -1650,6 +1652,7 @@ struct PillItem<'a> {
 }
 
 fn emit_pill_row(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: LayoutRectPx, items: &[PillItem<'_>], base_tab: u32) {
+    let is_rtl = builder.tree.is_rtl;
     let scale = builder.scale();
     if items.is_empty() || rect.width < mpx(40, scale) {
         return;
@@ -1657,17 +1660,23 @@ fn emit_pill_row(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: Layou
     let gap = mpx(4, scale);
     let count = u32::try_from(items.len()).unwrap_or(1).max(1);
     let pill_w = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(mpx(40, scale));
-    let mut x = rect.x;
+    let mut x = if is_rtl { rect.right() } else { rect.x };
     for (idx, item) in items.iter().enumerate() {
-        let w = if idx + 1 == items.len() { (rect.right() - x).max(mi(32, scale)) as u32 } else { pill_w.min((rect.right() - x).max(0) as u32) };
-        if w < mpx(24, scale) || x >= rect.right() {
+        let (bx, w) = if is_rtl {
+            let w = if idx + 1 == items.len() { (x - rect.x).max(mi(32, scale)) as u32 } else { pill_w.min((x - rect.x).max(0) as u32) };
+            (x - i32::try_from(w).unwrap_or(40), w)
+        } else {
+            let w = if idx + 1 == items.len() { (rect.right() - x).max(mi(32, scale)) as u32 } else { pill_w.min((rect.right() - x).max(0) as u32) };
+            (x, w)
+        };
+        if w < mpx(24, scale) || (is_rtl && bx < rect.x) || (!is_rtl && x >= rect.right()) {
             break;
         }
         emit_cbtn(
             builder,
             parent,
             &item.id,
-            LayoutRectPx::new(x, rect.y, w, rect.height),
+            LayoutRectPx::new(bx, rect.y, w, rect.height),
             item.label,
             item.selected,
             false,
@@ -1675,7 +1684,11 @@ fn emit_pill_row(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: Layou
             item.en.clone(),
             custom_action(item.payload.clone()),
         );
-        x += i32::try_from(w + gap).unwrap_or(44);
+        if is_rtl {
+            x -= i32::try_from(w + gap).unwrap_or(44);
+        } else {
+            x += i32::try_from(w + gap).unwrap_or(44);
+        }
     }
 }
 
@@ -1753,15 +1766,20 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
     let empty_reason = ControlEnablement::disabled("No matching commands for the active filter.");
     let nav_en = if has_matches { ControlEnablement::enabled() } else { empty_reason };
 
+    let is_rtl = builder.tree.is_rtl;
     let btn_w = mpx(56, scale);
     let run_w = mpx(64, scale);
     let gap = mpx(4, scale);
     if body_rect.height >= mpx(58, scale) {
+        let prev_x = if is_rtl { body_rect.right() - i32::try_from(btn_w).unwrap_or(56) } else { body_rect.x };
+        let next_x = if is_rtl { prev_x - i32::try_from(btn_w + gap).unwrap_or(60) } else { body_rect.x + i32::try_from(btn_w + gap).unwrap_or(60) };
+        let run_x =
+            if is_rtl { next_x - i32::try_from(run_w + gap).unwrap_or(68) } else { body_rect.x + i32::try_from((btn_w + gap) * 2).unwrap_or(120) };
         emit_cbtn(
             builder,
             &parent,
             "palette.prev",
-            LayoutRectPx::new(body_rect.x, bar_y, btn_w, bar_h),
+            LayoutRectPx::new(prev_x, bar_y, btn_w, bar_h),
             prev_lbl,
             false,
             false,
@@ -1773,7 +1791,7 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
             builder,
             &parent,
             "palette.next",
-            LayoutRectPx::new(body_rect.x + i32::try_from(btn_w + gap).unwrap_or(60), bar_y, btn_w, bar_h),
+            LayoutRectPx::new(next_x, bar_y, btn_w, bar_h),
             next_lbl,
             false,
             false,
@@ -1785,20 +1803,13 @@ pub fn build_command_palette_body(builder: &mut LayoutBuilder<'_>, parent: Widge
             || custom_action(String::from("palette:run")),
             |item| WidgetAction::InvokeCommand { command_id: item.id.to_owned(), params: json!({}) },
         );
-        emit_cbtn(
-            builder,
-            &parent,
-            "palette.run",
-            LayoutRectPx::new(body_rect.x + i32::try_from((btn_w + gap) * 2).unwrap_or(120), bar_y, run_w, bar_h),
-            run_lbl,
-            false,
-            true,
-            14,
-            nav_en,
-            run_action,
-        );
-        let status_x = body_rect.x + mi(190, scale);
-        let status_w = (body_rect.right() - status_x).max(0) as u32;
+        emit_cbtn(builder, &parent, "palette.run", LayoutRectPx::new(run_x, bar_y, run_w, bar_h), run_lbl, false, true, 14, nav_en, run_action);
+        let (status_x, status_w) = if is_rtl {
+            (body_rect.x, (run_x - i32::try_from(gap).unwrap_or(4) - body_rect.x).max(0) as u32)
+        } else {
+            let sx = body_rect.x + mi(190, scale);
+            (sx, (body_rect.right() - sx).max(0) as u32)
+        };
         if status_w >= mpx(48, scale) {
             let status = if matches.is_empty() {
                 String::from(w5_tr(&locale, "w5.palette.empty", "No matching commands"))
@@ -2082,11 +2093,13 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
     let show_all = builder.app.view_shards.dialogs_graph_misc.graph_type_show_all;
     let cgt = &builder.app.canvas_dialogs.change_graph_type;
 
+    let is_rtl = builder.tree.is_rtl;
     let options: Vec<&GraphTypeOption> = if show_all { GRAPH_TYPE_OPTIONS.iter().collect() } else { cgt.recommended_options() };
     let two_pane = body_rect.width >= mpx(420, scale) && body_rect.height >= mpx(160, scale);
     let left_w = if two_pane { (body_rect.width * 58) / 100 } else { body_rect.width };
     let right_w = body_rect.width.saturating_sub(left_w + mpx(8, scale));
-    let left_rect = LayoutRectPx::new(body_rect.x, body_rect.y, left_w, body_rect.height);
+    let left_x = if two_pane && is_rtl { body_rect.x + i32::try_from(right_w + mpx(8, scale)).unwrap_or(0) } else { body_rect.x };
+    let left_rect = LayoutRectPx::new(left_x, body_rect.y, left_w, body_rect.height);
 
     let cols = if left_w >= mpx(340, scale) { 2u32 } else { 1u32 };
     let card_h_logical = 54u32;
@@ -2184,7 +2197,7 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
     end_modal_scroll(builder, panel_wid, &meta);
 
     if two_pane && right_w >= mpx(140, scale) {
-        let rx = body_rect.x + i32::try_from(left_w + mpx(8, scale)).unwrap_or(0);
+        let rx = if is_rtl { body_rect.x } else { body_rect.x + i32::try_from(left_w + mpx(8, scale)).unwrap_or(0) };
         let right_rect = LayoutRectPx::new(rx, body_rect.y, right_w, body_rect.height);
         let r_wid = builder.push_node(NodeSpec {
             id: WidgetId::from("graph_type.preview_pane"),
@@ -2270,14 +2283,14 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
                 &[
                     PillItem {
                         id: String::from("graph_type.sum.mean"),
-                        label: "Mean",
+                        label: w5_tr(&locale, "inspector.mean", "Mean"),
                         selected: cgt.summary_measure == SummaryMeasure::Mean,
                         payload: String::from("graph_type:summary:mean"),
                         en: ControlEnablement::enabled(),
                     },
                     PillItem {
                         id: String::from("graph_type.sum.median"),
-                        label: "Median",
+                        label: w5_tr(&locale, "inspector.median", "Median"),
                         selected: cgt.summary_measure == SummaryMeasure::Median,
                         payload: String::from("graph_type:summary:median"),
                         en: ControlEnablement::enabled(),
@@ -2316,14 +2329,14 @@ fn build_change_graph_type_body(builder: &mut LayoutBuilder<'_>, parent: &Widget
                 &[
                     PillItem {
                         id: String::from("graph_type.eb.sd"),
-                        label: "SD",
+                        label: w5_tr(&locale, "inspector.sd", "SD"),
                         selected: cgt.error_bar_metric == ErrorBarMetric::Sd,
                         payload: String::from("graph_type:errorbar:sd"),
                         en: ControlEnablement::enabled(),
                     },
                     PillItem {
                         id: String::from("graph_type.eb.sem"),
-                        label: "SEM",
+                        label: w5_tr(&locale, "inspector.sem", "SEM"),
                         selected: cgt.error_bar_metric == ErrorBarMetric::Sem,
                         payload: String::from("graph_type:errorbar:sem"),
                         en: ControlEnablement::enabled(),
@@ -2381,7 +2394,7 @@ fn build_hook_constant_body(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, 
         parent,
         "hook.clear",
         LayoutRectPx::new(body_rect.x + i32::try_from(search_w + 4).unwrap_or(124), body_rect.y, clear_w, search_h),
-        "Clear",
+        w5_tr(&locale, "analyze_picker.clear", "Clear"),
         false,
         false,
         11,
@@ -4466,6 +4479,7 @@ pub fn emit_descriptor_controls_grid(
     let st = UiTextStyle::ui_sans(size_px);
     let row_pad = scaled_u32(2.0, scale, 2, 6);
 
+    let is_rtl = builder.tree.is_rtl;
     for (idx, ctrl) in remaining.iter().enumerate() {
         let r_idx = (idx as u32) / cols;
         let c_idx = (idx as u32) % cols;
@@ -4473,7 +4487,11 @@ pub fn emit_descriptor_controls_grid(
         if !row_visible(cy, row_h - row_pad, clip) {
             continue;
         }
-        let cx = clip.x + i32::try_from(c_idx * (col_w + col_gap)).unwrap_or(0);
+        let cx = if is_rtl {
+            clip.right() - i32::try_from(col_w).unwrap_or(60) - i32::try_from(c_idx * (col_w + col_gap)).unwrap_or(0)
+        } else {
+            clip.x + i32::try_from(c_idx * (col_w + col_gap)).unwrap_or(0)
+        };
         let item_rect = LayoutRectPx::new(cx, cy, col_w, row_h - row_pad);
         let en = ControlEnablement { enabled: ctrl.enabled, disabled_reason: ctrl.disabled_reason.clone() };
         emit_single_descriptor_control(builder, &panel_wid, item_rect, ctrl, en, base_tab_order + idx as u32, &st, &scroll_id);
@@ -4562,36 +4580,43 @@ pub fn emit_single_descriptor_control(
     }
 }
 
-/// Return the canonical window title string for an [`ActiveDialog`].
+/// Return the canonical window title string for an [`ActiveDialog`] in English.
 #[must_use]
 pub fn modal_title(dialog: &ActiveDialog) -> String {
-    match dialog {
-        ActiveDialog::None => String::new(),
-        ActiveDialog::AnalyzeSheet { .. } => String::from("Analyze Data"),
-        ActiveDialog::EditAnalysisParameters { .. } => String::from("Edit Analysis Parameters"),
-        ActiveDialog::DuplicateAnalysisPrompt { .. } => String::from("Analysis Already Exists"),
-        ActiveDialog::ChangeDataAnalyzed { .. } => String::from("Change Data Analyzed"),
-        ActiveDialog::FormatAxes { .. } => String::from("Format Axes"),
-        ActiveDialog::FormatGraph { .. } => String::from("Format Graph"),
-        ActiveDialog::ChangeGraphType { .. } => String::from("Change Graph Type"),
-        ActiveDialog::PairwiseComparisons { .. } => String::from("Pairwise Comparisons"),
-        ActiveDialog::BubblePlotInspector { .. } => String::from("Bubble Plot Channels"),
-        ActiveDialog::ApplyStyleFrom { .. } => String::from("Apply Style From"),
-        ActiveDialog::PageLayoutComposer { .. } => String::from("Page Layout Composer"),
-        ActiveDialog::ExportFigure { .. } => String::from("Export Figure"),
-        ActiveDialog::Print { .. } => String::from("Print"),
-        ActiveDialog::PowerAndSampleSize => String::from("Power & Sample Size"),
-        ActiveDialog::CommandPalette => String::from("Command Palette"),
-        ActiveDialog::ConvertArchetype { .. } => String::from("Convert Table Archetype"),
-        ActiveDialog::ImportReshape => String::from("Import Reshape"),
-        ActiveDialog::ExcludeWithReason { .. } => String::from("Exclude with Reason"),
-        ActiveDialog::FormatSelectedPoints { .. } => String::from("Format Selected Points"),
-        ActiveDialog::RandomizeGroups => String::from("Randomize Groups"),
-        ActiveDialog::RandomSampleRows { .. } => String::from("Random Sample Rows"),
-        ActiveDialog::SimulateDistributions => String::from("Simulate Distributions"),
-        ActiveDialog::InsertModelEquation { .. } => String::from("Insert Model Equation"),
-        ActiveDialog::ConstantHookPicker { .. } => String::from("Hook Constant"),
-        ActiveDialog::ResultViewer { .. } => String::from("Result Viewer"),
-        ActiveDialog::About => String::from("About CurveBook"),
-    }
+    modal_title_for_locale(dialog, "en")
+}
+
+/// Return the localized window title string for an [`ActiveDialog`].
+#[must_use]
+pub fn modal_title_for_locale(dialog: &ActiveDialog, locale: &str) -> String {
+    let title = match dialog {
+        ActiveDialog::None => return String::new(),
+        ActiveDialog::AnalyzeSheet { .. } => "Analyze Data",
+        ActiveDialog::EditAnalysisParameters { .. } => "Edit Analysis Parameters",
+        ActiveDialog::DuplicateAnalysisPrompt { .. } => "Analysis Already Exists",
+        ActiveDialog::ChangeDataAnalyzed { .. } => w5_tr(locale, "btn.change_data_analyzed", "Change Data Analyzed"),
+        ActiveDialog::FormatAxes { .. } => w5_tr(locale, "inspector.format_axes", "Format Axes"),
+        ActiveDialog::FormatGraph { .. } => w5_tr(locale, "inspector.format_graph", "Format Graph"),
+        ActiveDialog::ChangeGraphType { .. } => "Change Graph Type",
+        ActiveDialog::PairwiseComparisons { .. } => w5_tr(locale, "inspector.pairwise_comparisons", "Pairwise Comparisons"),
+        ActiveDialog::BubblePlotInspector { .. } => "Bubble Plot Channels",
+        ActiveDialog::ApplyStyleFrom { .. } => w5_tr(locale, "btn.apply_style_from", "Apply Style From"),
+        ActiveDialog::PageLayoutComposer { .. } => "Page Layout Composer",
+        ActiveDialog::ExportFigure { .. } => "Export Figure",
+        ActiveDialog::Print { .. } => w5_tr(locale, "toolbar.print", "Print"),
+        ActiveDialog::PowerAndSampleSize => "Power & Sample Size",
+        ActiveDialog::CommandPalette => w5_tr(locale, "inspector.command_palette", "Command Palette"),
+        ActiveDialog::ConvertArchetype { .. } => "Convert Table Archetype",
+        ActiveDialog::ImportReshape => "Import Reshape",
+        ActiveDialog::ExcludeWithReason { .. } => "Exclude with Reason",
+        ActiveDialog::FormatSelectedPoints { .. } => "Format Selected Points",
+        ActiveDialog::RandomizeGroups => "Randomize Groups",
+        ActiveDialog::RandomSampleRows { .. } => "Random Sample Rows",
+        ActiveDialog::SimulateDistributions => "Simulate Distributions",
+        ActiveDialog::InsertModelEquation { .. } => "Insert Model Equation",
+        ActiveDialog::ConstantHookPicker { .. } => "Hook Constant",
+        ActiveDialog::ResultViewer { .. } => "Result Viewer",
+        ActiveDialog::About => w5_tr(locale, "menu.help.about", "About CurveBook"),
+    };
+    String::from(title)
 }

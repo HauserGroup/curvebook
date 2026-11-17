@@ -1182,8 +1182,8 @@ pub const CATALOG: &[CatalogEntry] = &[
         de: "Spalte",
         es: "Columna",
         fr: "Colonne",
-        ja: "列 (Column)",
-        ko: "열 (Column)",
+        ja: "列",
+        ko: "열",
         pt_br: "Coluna",
         zh_cn: "列",
         zh_tw: "欄",
@@ -1924,7 +1924,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         ja: "多変量ロジスティック回帰",
         ko: "다중 로지스틱 회귀",
         pt_br: "Regressão logística múltipla",
-        zh_cn: "多元 Logistic 回归",
+        zh_cn: "多元逻辑回归",
         zh_tw: "多元羅吉斯迴歸",
         it: "Regressione logistica multipla",
         nl: "Meervoudige logistische regressie",
@@ -2376,7 +2376,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         ko: "새로 만들기",
         pt_br: "Criar novo",
         zh_cn: "新建",
-        zh_tw: "新建",
+        zh_tw: "新增",
         it: "Crea nuovo",
         nl: "Nieuwe maken",
         pl: "Utwórz nową",
@@ -2481,7 +2481,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         de: "Linear",
         es: "Lineal",
         fr: "Linéaire",
-        ja: "線形 (Linear)",
+        ja: "線形",
         ko: "선형",
         pt_br: "Linear",
         zh_cn: "线性",
@@ -3280,7 +3280,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         zh_cn: "打开克隆分析流程向导",
         zh_tw: "開啟複製分析流程精靈",
         it: "Apri procedura guidata clona pipeline",
-        nl: "Wizard analysepijplijn klonen openen",
+        nl: "Assistent analysepijplijn klonen openen",
         pl: "Otwórz kreator klonowania potoku analizy",
         ru: "Открыть мастер клонирования конвейера анализа",
         tr: "Analiz Hattı Klonlama Sihirbazını Aç",
@@ -3526,7 +3526,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         de: "Diagnose-Korrektur deaktiviert (QOL-7 nur Diagnose)",
         es: "Remediación diagnóstica deshabilitada (QOL-7 solo diagnóstico)",
         fr: "Remédiation diagnostique désactivée (QOL-7 diagnostic uniquement)",
-        ja: "診断補救無効（QOL-7 診断専用）",
+        ja: "診断補正無効（QOL-7 診断専用）",
         ko: "진단 보정 비활성화(QOL-7 진단 전용)",
         pt_br: "Remediação diagnóstica desativada (QOL-7 apenas diagnóstico)",
         zh_cn: "已禁用诊断修复（QOL-7 仅限诊断）",
@@ -3856,10 +3856,10 @@ pub const CATALOG: &[CatalogEntry] = &[
         zh_cn: "插入拟合模型方程...",
         zh_tw: "插入擬合模型方程式...",
         it: "Inserisci equazione del modello adattato...",
-        nl: "Ingestelde modelvergelijking invoegen...",
+        nl: "Gefitte modelvergelijking invoegen...",
         pl: "Wstaw równanie dopasowanego modelu...",
         ru: "Вставить уравнение подогнанной модели...",
-        tr: "Uydurulmuş Model Denklemini Ekle...",
+        tr: "Uydurulan Model Denklemini Ekle...",
         ar: "إدراج معادلة النموذج الموائم...",
         he: "הוסף משוואת מודל מותאם...",
     ]),
@@ -3917,19 +3917,37 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "أقواس المقارنة الزوجية...",
         he: "סוגרי השוואה זוגית...",
     ]),
+    entry!("cmd.ui.applyStyleFrom.open" => [
+        en: "Apply Style From...",
+        de: "Stil übernehmen von...",
+        es: "Aplicar estilo desde...",
+        fr: "Appliquer le style depuis...",
+        ja: "スタイルを適用...",
+        ko: "스타일 가져오기...",
+        pt_br: "Aplicar estilo de...",
+        zh_cn: "套用样式自...",
+        zh_tw: "套用樣式自...",
+        it: "Applica stile da...",
+        nl: "Stijl toepassen van...",
+        pl: "Zastosuj styl z...",
+        ru: "Применить стиль из...",
+        tr: "Stili Şuradan Uygula...",
+        ar: "تطبيق النمط من...",
+        he: "החלת סגנון מתוך...",
+    ]),
     entry!("cmd.ui.layout.composer.open" => [
         en: "Page Layout Composer...",
         de: "Seitenlayout-Komposer...",
-        es: "Compositor de diseño de página...",
-        fr: "Compositeur de mise en page...",
+        es: "Editor de diseño de página...",
+        fr: "Éditeur de mise en page...",
         ja: "ページレイアウトコンポーザ...",
         ko: "페이지 레이아웃 작성기...",
-        pt_br: "Compositor de layout de página...",
+        pt_br: "Editor de layout de página...",
         zh_cn: "页面布局编辑器...",
         zh_tw: "頁面配置編輯器...",
-        it: "Compositore layout pagina...",
-        nl: "Paginalay-outcomponist...",
-        pl: "Kompozytor układu strony...",
+        it: "Editor layout pagina...",
+        nl: "Paginalay-outeditor...",
+        pl: "Edytor układu strony...",
         ru: "Редактор макета страницы...",
         tr: "Sayfa Düzeni Oluşturucu...",
         ar: "منشئ تخطيط الصفحة...",
@@ -5708,7 +5726,7 @@ pub const CATALOG: &[CatalogEntry] = &[
         ko: "컴팩트 문자 표시 (CLD)",
         pt_br: "Exibição compacta de letras (CLD)",
         zh_cn: "紧凑字母标记 (CLD)",
-        zh_tw: "緊湊字母標記 (CLD)",
+        zh_tw: "精簡字母顯示 (CLD)",
         it: "Visualizzazione compatta a lettere (CLD)",
         nl: "Compacte letterweergave (CLD)",
         pl: "Zwarte oznaczenie literowe (CLD)",
@@ -6106,8 +6124,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 653);
-        assert_eq!(LOCALES.len() * catalog_len(), 10_448);
+        assert_eq!(catalog_len(), 654);
+        assert_eq!(LOCALES.len() * catalog_len(), 10_464);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6145,7 +6163,7 @@ mod tests {
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
         assert_eq!(engine_specs.len(), 97, "expected 97 engine CommandSpec entries");
-        assert_eq!(crate::menus::UI_COMMANDS.len(), 45, "expected 45 UiCommandSpec entries");
+        assert_eq!(crate::menus::UI_COMMANDS.len(), 46, "expected 46 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();
         for spec in &engine_specs {

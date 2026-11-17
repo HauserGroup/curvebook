@@ -438,11 +438,18 @@ fn build_header_strip(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, box_rec
     let interp_w = measure_btn(&interp_lbl, scaled_px(scale, 68.0), scaled_px(scale, 150.0));
     let copy_w = measure_btn(copy_lbl, scaled_px(scale, 48.0), scaled_px(scale, 110.0));
 
+    let is_rtl = builder.tree.is_rtl;
     let mut right_edge = box_rect.right() - 8;
+    let mut left_edge = box_rect.x + 8;
     let min_title_right = box_rect.x + i32::try_from(scaled_px(scale, 84.0)).unwrap_or(84);
+    let max_title_left = box_rect.right() - i32::try_from(scaled_px(scale, 84.0)).unwrap_or(84);
 
-    if right_edge - i32::try_from(params_w).unwrap_or(64) > min_title_right {
-        let rx = right_edge - i32::try_from(params_w).unwrap_or(64);
+    if if is_rtl {
+        left_edge + i32::try_from(params_w).unwrap_or(64) < max_title_left
+    } else {
+        right_edge - i32::try_from(params_w).unwrap_or(64) > min_title_right
+    } {
+        let rx = if is_rtl { left_edge } else { right_edge - i32::try_from(params_w).unwrap_or(64) };
         emit_button(
             builder,
             ButtonWidgetSpec {
@@ -461,11 +468,19 @@ fn build_header_strip(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, box_rec
                 action: WidgetAction::Custom { domain: String::from("results"), payload: format!("edit_params:{}", rs.id.as_str()) },
             },
         );
-        right_edge = rx - 4;
+        if is_rtl {
+            left_edge = rx + i32::try_from(params_w).unwrap_or(64) + 4;
+        } else {
+            right_edge = rx - 4;
+        }
     }
 
-    if right_edge - i32::try_from(interp_w).unwrap_or(68) > min_title_right {
-        let ix = right_edge - i32::try_from(interp_w).unwrap_or(68);
+    if if is_rtl {
+        left_edge + i32::try_from(interp_w).unwrap_or(68) < max_title_left
+    } else {
+        right_edge - i32::try_from(interp_w).unwrap_or(68) > min_title_right
+    } {
+        let ix = if is_rtl { left_edge } else { right_edge - i32::try_from(interp_w).unwrap_or(68) };
         emit_button(
             builder,
             ButtonWidgetSpec {
@@ -484,11 +499,19 @@ fn build_header_strip(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, box_rec
                 action: WidgetAction::Custom { domain: String::from("results"), payload: format!("toggle_interpret:{}", rs.id.as_str()) },
             },
         );
-        right_edge = ix - 4;
+        if is_rtl {
+            left_edge = ix + i32::try_from(interp_w).unwrap_or(68) + 4;
+        } else {
+            right_edge = ix - 4;
+        }
     }
 
-    if right_edge - i32::try_from(copy_w).unwrap_or(48) > min_title_right {
-        let cx = right_edge - i32::try_from(copy_w).unwrap_or(48);
+    if if is_rtl {
+        left_edge + i32::try_from(copy_w).unwrap_or(48) < max_title_left
+    } else {
+        right_edge - i32::try_from(copy_w).unwrap_or(48) > min_title_right
+    } {
+        let cx = if is_rtl { left_edge } else { right_edge - i32::try_from(copy_w).unwrap_or(48) };
         let can_copy = !rs.tabs.is_empty() || rs.analyzable_data.is_some();
         emit_button(
             builder,
@@ -508,11 +531,19 @@ fn build_header_strip(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, box_rec
                 action: WidgetAction::Custom { domain: String::from("results"), payload: format!("copy_selection:{}", rs.id.as_str()) },
             },
         );
-        right_edge = cx - 6;
+        if is_rtl {
+            left_edge = cx + i32::try_from(copy_w).unwrap_or(48) + 6;
+        } else {
+            right_edge = cx - 6;
+        }
     }
 
-    let title_w = u32::try_from((right_edge - (box_rect.x + 8)).max(24)).unwrap_or(24);
-    let hdr_rect = LayoutRectPx::new(box_rect.x + 8, y, title_w, hdr_h);
+    let (hdr_x, title_w) = if is_rtl {
+        (left_edge, u32::try_from((box_rect.right() - 8 - left_edge).max(24)).unwrap_or(24))
+    } else {
+        (box_rect.x + 8, u32::try_from((right_edge - (box_rect.x + 8)).max(24)).unwrap_or(24))
+    };
+    let hdr_rect = LayoutRectPx::new(hdr_x, y, title_w, hdr_h);
     let title_wid = builder.push_node(NodeSpec {
         id: WidgetId::from(format!("{pfx}.title.{}", rs.id.as_str())),
         parent: None,
@@ -593,11 +624,12 @@ fn build_sub_tab_strip(
     builder.attach_scroll(&strip_wid, scroll_meta.clone());
     builder.paint_fill(ZLayer::Workspace, Some(&strip_wid), strip_rect, builder.palette.panel);
 
+    let is_rtl = builder.tree.is_rtl;
     builder.push_clip(strip_rect);
     let x_scroll = scroll_meta.scroll_offset_px[0].round() as i32;
     let mut cum_x = 0i32;
     for (idx, (tab, &tw)) in rs.tabs.iter().zip(tab_widths.iter()).enumerate() {
-        let tx = strip_rect.x + cum_x - x_scroll;
+        let tx = if is_rtl { strip_rect.right() - cum_x - i32::try_from(tw).unwrap_or(58) + x_scroll } else { strip_rect.x + cum_x - x_scroll };
         cum_x += i32::try_from(tw + 4).unwrap_or(62);
         let tab_rect = LayoutRectPx::new(tx, strip_rect.y + 1, tw, inner_h);
         let vis = tab_rect.intersect(strip_rect);
@@ -614,14 +646,19 @@ fn build_sub_tab_strip(
         let step = (f64::from(strip_rect.width) * 0.55).max(120.0);
         let prev_x = (cur_x_f - step).max(0.0);
         let next_x = (cur_x_f + step).min(max_x);
+        let (prev_btn_x, next_btn_x) = if is_rtl {
+            (tab_row_rect.right() - i32::try_from(arrow_w).unwrap_or(20), tab_row_rect.x)
+        } else {
+            (tab_row_rect.x, tab_row_rect.right() - i32::try_from(arrow_w).unwrap_or(20))
+        };
         emit_button(
             builder,
             ButtonWidgetSpec {
                 id: &format!("{pfx}.tabs.prev"),
                 parent: None,
                 z_layer: ZLayer::Workspace,
-                rect: LayoutRectPx::new(tab_row_rect.x, tab_row_rect.y + 1, arrow_w, inner_h),
-                label: "<",
+                rect: LayoutRectPx::new(prev_btn_x, tab_row_rect.y + 1, arrow_w, inner_h),
+                label: if is_rtl { ">" } else { "<" },
                 keyboard_path: "result.tabs.prev",
                 focus_scope: FocusScope::Workspace,
                 tab_order: if is_secondary { None } else { Some(509) },
@@ -638,8 +675,8 @@ fn build_sub_tab_strip(
                 id: &format!("{pfx}.tabs.next"),
                 parent: None,
                 z_layer: ZLayer::Workspace,
-                rect: LayoutRectPx::new(tab_row_rect.right() - i32::try_from(arrow_w).unwrap_or(20), tab_row_rect.y + 1, arrow_w, inner_h),
-                label: ">",
+                rect: LayoutRectPx::new(next_btn_x, tab_row_rect.y + 1, arrow_w, inner_h),
+                label: if is_rtl { "<" } else { ">" },
                 keyboard_path: "result.tabs.next",
                 focus_scope: FocusScope::Workspace,
                 tab_order: if is_secondary { None } else { Some(590) },
@@ -743,8 +780,10 @@ fn build_diagnostic_banner(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, bo
         link_specs.push((tab_id.as_str(), lbl, w));
     }
 
+    let is_rtl = builder.tree.is_rtl;
     let banner_w = box_rect.width.saturating_sub(16 + links_w).max(scaled_px(scale, 60.0));
-    let banner_rect = LayoutRectPx::new(box_rect.x + 8, body_y, banner_w, banner_h);
+    let banner_x = if is_rtl { box_rect.x + 8 + i32::try_from(links_w).unwrap_or(0) } else { box_rect.x + 8 };
+    let banner_rect = LayoutRectPx::new(banner_x, body_y, banner_w, banner_h);
     let banner_lbl = banner.format_banner_line();
 
     let banner_wid = emit_button(
@@ -775,9 +814,10 @@ fn build_diagnostic_banner(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, bo
     };
     builder.paint_stroke(ZLayer::Workspace, Some(&banner_wid), banner_rect, sev_color, 1);
 
-    let mut lx = banner_rect.right() + 4;
+    let mut lx = if is_rtl { banner_rect.x - 4 } else { banner_rect.right() + 4 };
     for (idx, (tab_id, lbl, w)) in link_specs.into_iter().enumerate() {
-        let r = LayoutRectPx::new(lx, body_y, w, banner_h);
+        let btn_x = if is_rtl { lx - i32::try_from(w).unwrap_or(60) } else { lx };
+        let r = LayoutRectPx::new(btn_x, body_y, w, banner_h);
         emit_button(
             builder,
             ButtonWidgetSpec {
@@ -799,7 +839,11 @@ fn build_diagnostic_banner(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, bo
                 },
             },
         );
-        lx += i32::try_from(w + 4).unwrap_or(64);
+        if is_rtl {
+            lx -= i32::try_from(w + 4).unwrap_or(64);
+        } else {
+            lx += i32::try_from(w + 4).unwrap_or(64);
+        }
     }
 
     if slot_tag != "secondary" || builder.tree.result_banner_rect.is_none() {
@@ -861,9 +905,14 @@ fn build_table_section_bar(
         if r0 == r1 && c0 == c1 { format!("Sel R{}C{}", r0 + 1, c0 + 1) } else { format!("Sel R{}-{} C{}-{}", r0 + 1, r1 + 1, c0 + 1, c1 + 1) }
     });
 
+    let is_rtl = builder.tree.is_rtl;
     let size_px = (11.0 * builder.scale()).clamp(8.5, 19.0);
     let sel_w = if sel_info.is_some() && sec_rect.width >= 260 { 112u32 } else { 0 };
-    let left_rect = LayoutRectPx::new(sec_rect.x, sec_rect.y, sec_rect.width.saturating_sub(sel_w + 4), sec_rect.height);
+    let left_rect = if is_rtl && sel_w > 0 {
+        LayoutRectPx::new(sec_rect.x + i32::try_from(sel_w + 4).unwrap_or(116), sec_rect.y, sec_rect.width.saturating_sub(sel_w + 4), sec_rect.height)
+    } else {
+        LayoutRectPx::new(sec_rect.x, sec_rect.y, sec_rect.width.saturating_sub(sel_w + 4), sec_rect.height)
+    };
 
     let sec_wid = builder.push_node(NodeSpec {
         id: WidgetId::from(format!("{pfx}.section_header")),
@@ -893,7 +942,12 @@ fn build_table_section_bar(
     if let Some(sel_txt) = sel_info
         && sel_w > 0
     {
-        let right_rect = LayoutRectPx::new(sec_rect.right() - i32::try_from(sel_w).unwrap_or(112), sec_rect.y, sel_w, sec_rect.height);
+        let right_rect = LayoutRectPx::new(
+            if is_rtl { sec_rect.x } else { sec_rect.right() - i32::try_from(sel_w).unwrap_or(112) },
+            sec_rect.y,
+            sel_w,
+            sec_rect.height,
+        );
         paint_text_fitted(
             builder,
             &sec_wid,
@@ -1040,9 +1094,15 @@ fn emit_table_corner_and_col_headers(
     active_tab_idx: usize,
     sel: Option<(usize, usize, usize, usize)>,
 ) {
+    let is_rtl = builder.tree.is_rtl;
     let size_px = (11.5 * builder.scale()).clamp(9.0, 20.0);
     let hdr_style = UiTextStyle::ui_bold(size_px);
-    let corner_rect = LayoutRectPx::new(table_rect.x, table_rect.y, geom.row_label_w, geom.hdr_h);
+    let (row_col_x, data_col_x) = if is_rtl {
+        (table_rect.x + i32::try_from(geom.data_vp_w).unwrap_or(0), table_rect.x)
+    } else {
+        (table_rect.x, table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0))
+    };
+    let corner_rect = LayoutRectPx::new(row_col_x, table_rect.y, geom.row_label_w, geom.hdr_h);
     let row_hdr_lbl = tr_res(&builder.tree.locale, "results.row_metric", "Row / Metric");
 
     let corner_wid = builder.push_node(NodeSpec {
@@ -1070,7 +1130,7 @@ fn emit_table_corner_and_col_headers(
         },
     );
 
-    let col_hdr_clip = LayoutRectPx::new(table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0), table_rect.y, geom.data_vp_w, geom.hdr_h);
+    let col_hdr_clip = LayoutRectPx::new(data_col_x, table_rect.y, geom.data_vp_w, geom.hdr_h);
     if col_hdr_clip.width < 8 {
         return;
     }
@@ -1080,7 +1140,7 @@ fn emit_table_corner_and_col_headers(
     let mut cum_x = 0i32;
 
     for (c_idx, &cw) in geom.col_widths.iter().enumerate() {
-        let cx = col_hdr_clip.x + cum_x - x_scroll;
+        let cx = if is_rtl { col_hdr_clip.right() - cum_x - i32::try_from(cw).unwrap_or(82) + x_scroll } else { col_hdr_clip.x + cum_x - x_scroll };
         cum_x += i32::try_from(cw).unwrap_or(82);
         let h_rect = LayoutRectPx::new(cx, col_hdr_clip.y, cw, geom.hdr_h);
         let vis = h_rect.intersect(col_hdr_clip);
@@ -1144,7 +1204,9 @@ fn emit_table_row_labels(
     active_tab_idx: usize,
     sel: Option<(usize, usize, usize, usize)>,
 ) {
-    let row_hdr_clip = LayoutRectPx::new(table_rect.x, table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24), geom.row_label_w, geom.data_vp_h);
+    let is_rtl = builder.tree.is_rtl;
+    let row_hdr_x = if is_rtl { table_rect.x + i32::try_from(geom.data_vp_w).unwrap_or(0) } else { table_rect.x };
+    let row_hdr_clip = LayoutRectPx::new(row_hdr_x, table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24), geom.row_label_w, geom.data_vp_h);
     if row_hdr_clip.width < 8 || row_hdr_clip.height < 8 {
         return;
     }
@@ -1220,12 +1282,9 @@ fn emit_table_cells_and_footnotes(
     active_tab_idx: usize,
     sel: Option<(usize, usize, usize, usize)>,
 ) {
-    let data_clip = LayoutRectPx::new(
-        table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0),
-        table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24),
-        geom.data_vp_w,
-        geom.data_vp_h,
-    );
+    let is_rtl = builder.tree.is_rtl;
+    let data_x = if is_rtl { table_rect.x } else { table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0) };
+    let data_clip = LayoutRectPx::new(data_x, table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24), geom.data_vp_w, geom.data_vp_h);
     if data_clip.width < 8 || data_clip.height < 8 {
         return;
     }
@@ -1246,7 +1305,7 @@ fn emit_table_cells_and_footnotes(
         let mut cum_x = 0i32;
 
         for (c_idx, &cw) in geom.col_widths.iter().enumerate() {
-            let cx = data_clip.x + cum_x - x_scroll;
+            let cx = if is_rtl { data_clip.right() - cum_x - i32::try_from(cw).unwrap_or(82) + x_scroll } else { data_clip.x + cum_x - x_scroll };
             cum_x += i32::try_from(cw).unwrap_or(82);
             let cell_rect = LayoutRectPx::new(cx, ry, cw, geom.row_h);
             let vis = cell_rect.intersect(data_clip);
@@ -1400,12 +1459,18 @@ fn build_interpret_drawer(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, dra
     builder.paint_stroke(ZLayer::Workspace, Some(&drawer_wid), drawer_rect, builder.palette.border, 1);
     builder.push_clip(drawer_rect);
 
+    let is_rtl = builder.tree.is_rtl;
     let scale = builder.scale();
     let locale = &builder.app.locale;
     let size_px = (11.5 * scale).clamp(9.0, 20.0);
     let row_h = scaled_px(scale, 22.0);
     let close_sz = scaled_px(scale, 20.0);
-    let hdr_rect = LayoutRectPx::new(drawer_rect.x + 6, drawer_rect.y + 4, drawer_rect.width.saturating_sub(close_sz + 16), row_h);
+    let (hdr_x, close_x) = if is_rtl {
+        (drawer_rect.x + i32::try_from(close_sz + 10).unwrap_or(30), drawer_rect.x + 6)
+    } else {
+        (drawer_rect.x + 6, drawer_rect.right() - i32::try_from(close_sz + 6).unwrap_or(26))
+    };
+    let hdr_rect = LayoutRectPx::new(hdr_x, drawer_rect.y + 4, drawer_rect.width.saturating_sub(close_sz + 16), row_h);
     paint_text_fitted(
         builder,
         &drawer_wid,
@@ -1425,7 +1490,7 @@ fn build_interpret_drawer(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, dra
             id: &format!("{pfx}.interpret.close_btn"),
             parent: Some(drawer_wid.clone()),
             z_layer: ZLayer::Workspace,
-            rect: LayoutRectPx::new(drawer_rect.right() - i32::try_from(close_sz + 6).unwrap_or(26), drawer_rect.y + 4, close_sz, close_sz),
+            rect: LayoutRectPx::new(close_x, drawer_rect.y + 4, close_sz, close_sz),
             label: "x",
             keyboard_path: "result.interpret.close",
             focus_scope: FocusScope::Workspace,
@@ -1447,7 +1512,11 @@ fn build_interpret_drawer(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, dra
     let dtab_y = drawer_rect.y + 4 + i32::try_from(row_h).unwrap_or(22) + 2;
     let dtab_w = (drawer_rect.width.saturating_sub(20) / 3).max(scaled_px(scale, 48.0));
     for (idx, (variant, slug, lbl)) in d_tabs.into_iter().enumerate() {
-        let tx = drawer_rect.x + 6 + i32::try_from(idx as u32 * (dtab_w + 4)).unwrap_or(0);
+        let tx = if is_rtl {
+            drawer_rect.right() - 6 - i32::try_from(dtab_w).unwrap_or(48) - i32::try_from(idx as u32 * (dtab_w + 4)).unwrap_or(0)
+        } else {
+            drawer_rect.x + 6 + i32::try_from(idx as u32 * (dtab_w + 4)).unwrap_or(0)
+        };
         emit_tab(
             builder,
             ButtonWidgetSpec {
@@ -1493,6 +1562,7 @@ fn emit_drawer_controls_row(
     pfx: &str,
     is_secondary: bool,
 ) {
+    let is_rtl = builder.tree.is_rtl;
     let scale = builder.scale();
     let locale = &builder.app.locale;
     let avail_w = drawer_rect.width.saturating_sub(12);
@@ -1500,13 +1570,18 @@ fn emit_drawer_controls_row(
         InterpretDrawerTab::Assumptions => {
             let bw = (avail_w.saturating_sub(6) / 2).max(scaled_px(scale, 48.0));
             let filter = builder.app.canvas_dialogs.result_view.checklist_filter;
+            let (all_x, flag_x) = if is_rtl {
+                (drawer_rect.x + 10 + i32::try_from(bw).unwrap_or(48), drawer_rect.x + 6)
+            } else {
+                (drawer_rect.x + 6, drawer_rect.x + 10 + i32::try_from(bw).unwrap_or(48))
+            };
             emit_button(
                 builder,
                 ButtonWidgetSpec {
                     id: &format!("{pfx}.interpret.filter_all"),
                     parent: Some(parent.clone()),
                     z_layer: ZLayer::Workspace,
-                    rect: LayoutRectPx::new(drawer_rect.x + 6, ctrl_y, bw, ctrl_h),
+                    rect: LayoutRectPx::new(all_x, ctrl_y, bw, ctrl_h),
                     label: tr_res(locale, "results.filter_all", "All"),
                     keyboard_path: "result.interpret.filter_all",
                     focus_scope: FocusScope::Workspace,
@@ -1524,7 +1599,7 @@ fn emit_drawer_controls_row(
                     id: &format!("{pfx}.interpret.filter_flagged"),
                     parent: Some(parent.clone()),
                     z_layer: ZLayer::Workspace,
-                    rect: LayoutRectPx::new(drawer_rect.x + 10 + i32::try_from(bw).unwrap_or(48), ctrl_y, bw, ctrl_h),
+                    rect: LayoutRectPx::new(flag_x, ctrl_y, bw, ctrl_h),
                     label: tr_res(locale, "results.filter_flagged", "Flagged"),
                     keyboard_path: "result.interpret.filter_flagged",
                     focus_scope: FocusScope::Workspace,
@@ -1558,9 +1633,14 @@ fn emit_drawer_controls_row(
             let cur_fmt = if raw_fmt.is_empty() { "markdown" } else { raw_fmt };
             let fmt_w = scaled_px(scale, 38.0);
             let copy_reserve = i32::try_from(scaled_px(scale, 72.0)).unwrap_or(72);
-            let mut fx = drawer_rect.x + 6;
+            let mut fx = if is_rtl { drawer_rect.right() - 6 } else { drawer_rect.x + 6 };
             for (idx, (slug, lbl)) in [("plain", "Txt"), ("markdown", "MD"), ("latex", "TeX")].into_iter().enumerate() {
-                if fx + i32::try_from(fmt_w).unwrap_or(38) > drawer_rect.right() - copy_reserve {
+                let bx = if is_rtl { fx - i32::try_from(fmt_w).unwrap_or(38) } else { fx };
+                if if is_rtl {
+                    bx < drawer_rect.x + copy_reserve
+                } else {
+                    fx + i32::try_from(fmt_w).unwrap_or(38) > drawer_rect.right() - copy_reserve
+                } {
                     break;
                 }
                 emit_button(
@@ -1569,7 +1649,7 @@ fn emit_drawer_controls_row(
                         id: &format!("{pfx}.interpret.fmt.{slug}"),
                         parent: Some(parent.clone()),
                         z_layer: ZLayer::Workspace,
-                        rect: LayoutRectPx::new(fx, ctrl_y, fmt_w, ctrl_h),
+                        rect: LayoutRectPx::new(bx, ctrl_y, fmt_w, ctrl_h),
                         label: lbl,
                         keyboard_path: &format!("result.interpret.fmt.{slug}"),
                         focus_scope: FocusScope::Workspace,
@@ -1581,16 +1661,24 @@ fn emit_drawer_controls_row(
                         action: WidgetAction::Custom { domain: String::from("results"), payload: format!("report_format:{slug}") },
                     },
                 );
-                fx += i32::try_from(fmt_w + 3).unwrap_or(41);
+                if is_rtl {
+                    fx -= i32::try_from(fmt_w + 3).unwrap_or(41);
+                } else {
+                    fx += i32::try_from(fmt_w + 3).unwrap_or(41);
+                }
             }
-            let copy_w = u32::try_from((drawer_rect.right() - 6 - fx).max(48)).unwrap_or(48);
+            let (copy_x, copy_w) = if is_rtl {
+                (drawer_rect.x + 6, u32::try_from((fx - (drawer_rect.x + 6)).max(48)).unwrap_or(48))
+            } else {
+                (fx, u32::try_from((drawer_rect.right() - 6 - fx).max(48)).unwrap_or(48))
+            };
             emit_button(
                 builder,
                 ButtonWidgetSpec {
                     id: &format!("{pfx}.interpret.copy_methods_btn"),
                     parent: Some(parent.clone()),
                     z_layer: ZLayer::Workspace,
-                    rect: LayoutRectPx::new(fx, ctrl_y, copy_w, ctrl_h),
+                    rect: LayoutRectPx::new(copy_x, ctrl_y, copy_w, ctrl_h),
                     label: tr_res(locale, "results.copy_methods", "Copy Methods Report"),
                     keyboard_path: "ui.result.copyMethodsReport",
                     focus_scope: FocusScope::Workspace,
