@@ -352,7 +352,7 @@ const DESC_PROJECT_DIR: FormatDescriptor =
 const DESC_TEMPLATE: FormatDescriptor =
     FormatDescriptor { id: "cbtemplate", label: "CurveBook Template", extensions: &["cbtemplate"], kind: FormatKind::Template };
 const DESC_PRISM: FormatDescriptor =
-    FormatDescriptor { id: "prism", label: "Prism Archive", extensions: &["prism"], kind: FormatKind::ForeignProject }; // brand-ok
+    FormatDescriptor { id: "prism", label: "External Project Archive (.prism)", extensions: &["prism"], kind: FormatKind::ForeignProject };
 const DESC_PZFX: FormatDescriptor =
     FormatDescriptor { id: "pzfx", label: "PZFX XML Document", extensions: &["pzfx"], kind: FormatKind::ForeignProject };
 const DESC_CSV: FormatDescriptor =

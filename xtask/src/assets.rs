@@ -39,6 +39,12 @@ const FORBIDDEN_PROVENANCE_PHRASES: &[&str] = &[
     "derived from vendor",
     "derived from reference",
     "stock icon",
+    "proprietary software",
+    "competitor screenshot",
+    "vendor screenshot",
+    "vendor sample",
+    "vendor guide",
+    "plan/prism",
 ];
 
 const FORBIDDEN_PROVENANCE_BRANDS: &[&str] = &[
@@ -54,9 +60,12 @@ const FORBIDDEN_PROVENANCE_BRANDS: &[&str] = &[
     "spss",
     "jmp",
     "systat",
+    "statistica",
+    "xlstat",
     "artcraft",
     "storytold",
     "storyteller",
+    "lumencraft",
 ];
 
 const ASSET_EXT: &[&str] = &[
@@ -472,12 +481,104 @@ pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) ->
     if errors.is_empty() { Ok(asset_count) } else { Err(format!("{} asset attribution error(s):\n  {}", errors.len(), errors.join("\n  "))) }
 }
 
+fn check_document_prose(doc_name: &str, text: &str) -> Result<(), String> {
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        let lower = line.to_ascii_lowercase();
+        for phrase in FORBIDDEN_PROVENANCE_PHRASES {
+            if lower.contains(phrase) {
+                return Err(format!("{doc_name}:{line_no}: contains forbidden provenance phrase `{phrase}`"));
+            }
+        }
+        for brand in FORBIDDEN_PROVENANCE_BRANDS {
+            if has_ascii_word(&lower, brand) {
+                return Err(format!("{doc_name}:{line_no}: references forbidden vendor or suite `{brand}`"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn verify_asset_binaries(root: &Path, files: &[String], errors: &mut Vec<String>) {
+    for path in files {
+        let ext = lower_ext(path);
+        if !matches!(ext.as_str(), "png" | "ico" | "icns" | "svg" | "gif") {
+            continue;
+        }
+        let Ok(bytes) = std::fs::read(root.join(path)) else {
+            errors.push(format!("{path}: unreadable asset file"));
+            continue;
+        };
+        let hits = match ext.as_str() {
+            "png" => crate::brands::check_png_metadata(path, &bytes),
+            "ico" | "icns" => crate::brands::check_icon_container_metadata(path, &bytes),
+            "gif" => crate::brands::check_gif_metadata(path, &bytes),
+            "svg" => match std::str::from_utf8(&bytes) {
+                Ok(svg) => crate::brands::check_svg_metadata(path, svg),
+                Err(e) => {
+                    errors.push(format!("{path}: invalid UTF-8 in SVG: {e}"));
+                    Vec::new()
+                }
+            },
+            _ => Vec::new(),
+        };
+        for hit in hits {
+            errors.push(format!("{}:{}: embedded metadata mentions `{}`", hit.path, hit.line, hit.brand));
+        }
+    }
+}
+
+/// Full repository asset-provenance verification: checks zero bundled fonts, `ASSETS.md` /
+/// `ATTRIBUTION.md` / `NOTICE` prose, orphan rows, forbidden `plan/prism` paths, original
+/// CurveBook visual asset provenance, and PNG/ICO/ICNS/SVG embedded metadata chunks.
+pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, attribution_md: &str, notice: &str) -> Result<usize, String> {
+    let count = verify_assets(files, assets_md, attribution_md)?;
+    let mut errors = Vec::new();
+
+    for path in files {
+        let norm = path.replace('\\', "/");
+        if norm == "plan/prism" || norm.starts_with("plan/prism/") {
+            errors.push(format!("{path}: committed `plan/prism` reference directory is forbidden"));
+        }
+    }
+
+    let tracked: BTreeSet<&str> = files.iter().map(String::as_str).collect();
+    let asset_rows = parse_attribution_table(assets_md, "ASSETS.md")?;
+    let attr_rows = parse_attribution_table(attribution_md, "ATTRIBUTION.md")?;
+    for path in asset_rows.keys() {
+        if !tracked.contains(path.as_str()) {
+            errors.push(format!("ASSETS.md: orphan entry `{path}` does not match any tracked file"));
+        }
+    }
+    for path in attr_rows.keys() {
+        if !tracked.contains(path.as_str()) {
+            errors.push(format!("ATTRIBUTION.md: orphan entry `{path}` does not match any tracked file"));
+        }
+        if !asset_rows.contains_key(path.as_str()) {
+            errors.push(format!("ATTRIBUTION.md: entry `{path}` missing corresponding ASSETS.md row"));
+        }
+    }
+
+    for (name, body) in [("ASSETS.md", assets_md), ("ATTRIBUTION.md", attribution_md), ("NOTICE", notice)] {
+        if let Err(err) = check_document_prose(name, body) {
+            errors.push(err);
+        }
+    }
+
+    verify_asset_binaries(root, files, &mut errors);
+
+    errors.sort();
+    errors.dedup();
+    if errors.is_empty() { Ok(count) } else { Err(format!("{} asset provenance error(s):\n  {}", errors.len(), errors.join("\n  "))) }
+}
+
 pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
     let md = std::fs::read_to_string(root.join("ASSETS.md")).map_err(|e| format!("ASSETS.md: {e}"))?;
     let attr_md = std::fs::read_to_string(root.join("ATTRIBUTION.md")).map_err(|e| format!("ATTRIBUTION.md: {e}"))?;
-    let count = verify_assets(&files, &md, &attr_md)?;
-    println!("assets: all {count} asset files attributed in ASSETS.md with allowlisted licences");
+    let notice = std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("NOTICE: {e}"))?;
+    let count = verify_repo_provenance(root, &files, &md, &attr_md, &notice)?;
+    println!("assets: all {count} asset files attributed in ASSETS.md with clean provenance and allowlisted licences");
     Ok(())
 }
 
@@ -640,5 +741,39 @@ See also `assets/prose.png` in prose.
             String::from("docs/images/workspace-layout-dark.png"),
         ];
         assert_eq!(verify_assets(&files, &assets_md, &attr_md).unwrap(), 7);
+    }
+
+    #[test]
+    fn repo_provenance_rejects_orphan_rows_contaminated_notice_and_plan_prism_paths() {
+        let root = std::env::temp_dir().join(format!("cb-assets-prov-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(root.join("assets/ui")).unwrap();
+        std::fs::write(root.join("assets/ui/icon.svg"), "<svg><title>CurveBook icon</title></svg>").unwrap();
+
+        let files = vec![String::from("assets/ui/icon.svg")];
+        let assets_ok = "\
+| Asset | Author | Source | Licence | Notes |
+|---|---|---|---|---|
+| `assets/ui/icon.svg` | CurveBook contributors | Original SVG icon drawn for CurveBook | MIT OR Apache-2.0 | UI icon |
+";
+        assert_eq!(super::verify_repo_provenance(&root, &files, assets_ok, "", "CurveBook contributors").unwrap(), 1);
+
+        let err_notice = super::verify_repo_provenance(&root, &files, assets_ok, "", "Derived from GraphPad artwork").unwrap_err();
+        assert!(err_notice.contains("NOTICE") && err_notice.contains("graphpad"), "{err_notice}");
+
+        let assets_orphan = format!("{assets_ok}| `assets/ui/ghost.svg` | CurveBook contributors | Original SVG | MIT | orphan |\n");
+        let err_orphan = super::verify_repo_provenance(&root, &files, &assets_orphan, "", "CurveBook contributors").unwrap_err();
+        assert!(err_orphan.contains("orphan"), "{err_orphan}");
+
+        let mut files_plan = files.clone();
+        files_plan.push(String::from("plan/prism/frame01.jpg"));
+        let err_plan = super::verify_repo_provenance(&root, &files_plan, assets_ok, "", "CurveBook contributors").unwrap_err();
+        assert!(err_plan.contains("plan/prism"), "{err_plan}");
+
+        std::fs::write(root.join("assets/ui/icon.svg"), "<svg><title>OriginPro icon</title></svg>").unwrap();
+        let err_svg = super::verify_repo_provenance(&root, &files, assets_ok, "", "CurveBook contributors").unwrap_err();
+        assert!(err_svg.contains("originpro"), "{err_svg}");
+
+        let _ = std::fs::remove_dir_all(&root);
     }
 }

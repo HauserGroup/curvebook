@@ -4221,6 +4221,7 @@ dependencies = [
  "curvebook-doc",
  "curvebook-engine",
  "curvebook-format",
+ "curvebook-mcp",
  "curvebook-pdf",
  "curvebook-svg",
  "curvebook-testkit",

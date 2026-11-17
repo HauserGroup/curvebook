@@ -2,16 +2,11 @@
 
 Governing specification for `crates/fit` (`L2`). Parity checklist: [`fitting-parity.md`](../fitting-parity.md).
 
-Public behavioural & mathematical references:
-- [Principles of nonlinear regression & solver details](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_how_nonlinear_regression_works.htm)
-- [Asymmetrical profile-likelihood confidence intervals](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_how_confidence_intervals_are_c.htm)
-- [Robust nonlinear regression & ROUT outlier elimination](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_fit_tab_2.htm)
-- [Comparing nonlinear models: Extra-sum-of-squares F-test vs. AICc](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_comparing_models_overview.htm)
-- [User-defined equation syntax & function catalog](https://www.graphpad.com/guides/prism/latest/curve-fitting/reg_available_functions.htm)
-- Primary literature (exact optimization, profile CIs, outliers & mechanistic kinetics):
-  - **Solver & profile-likelihood CIs:** Moré (1978) *Lect. Notes Math.* 630:105–116 (`10.1007/BFb0067700`); Venzon & Moolgavkar (1988) *Appl. Stat.* 37:87–94 (`10.2307/2347496`); Bates & Watts (1988) *Nonlinear Regression Analysis and Its Applications*; Motulsky & Christopoulos (2004) *Fitting Models to Biological Data using Linear and Nonlinear Regression*.
-  - **Robust regression & ROUT:** Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
-  - **Tight-binding & competitive inhibition:** Morrison (1969) *Biochim. Biophys. Acta* 185:269–286 (`10.1016/0005-2744(69)90420-3`); Cheng & Prusoff (1973) *Biochem. Pharmacol.* 22:3099–3108 (`10.1016/0006-2952(73)90196-2`).
+Primary literature & numerical references (exact optimization, profile CIs, outliers & mechanistic kinetics):
+- **Oracle benchmarks:** NIST Statistical Reference Datasets (StRD), Nonlinear Regression ([`crates/fit/tests/d1_nist_and_pharma_oracles.rs`](../../crates/fit/tests/d1_nist_and_pharma_oracles.rs)).
+- **Solver, model comparison & profile-likelihood CIs:** Moré (1978) *Lect. Notes Math.* 630:105–116 (`10.1007/BFb0067700`); Venzon & Moolgavkar (1988) *Appl. Stat.* 37:87–94 (`10.2307/2347496`); Bates & Watts (1988) *Nonlinear Regression Analysis and Its Applications*; Burnham & Anderson (2002) *Model Selection and Multimodel Inference*; Motulsky & Christopoulos (2004) *Fitting Models to Biological Data using Linear and Nonlinear Regression*.
+- **Robust regression & ROUT:** Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
+- **Tight-binding & competitive inhibition:** Morrison (1969) *Biochim. Biophys. Acta* 185:269–286 (`10.1016/0005-2744(69)90420-3`); Cheng & Prusoff (1973) *Biochem. Pharmacol.* 22:3099–3108 (`10.1016/0006-2952(73)90196-2`).
 
 ---
 

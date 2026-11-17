@@ -2566,7 +2566,7 @@ mod tests {
 
         let boundary = format_model_equation_tex(
             "custom_dsl",
-            Some("<A> Y = sqrt(Km^2 + K * X) + log10(K) - ln(X) ; prism comment"),
+            Some("<A> Y = sqrt(Km^2 + K * X) + log10(K) - ln(X) ; inline comment"),
             &[("K".into(), 2.0), ("Km".into(), 5.0)],
             true,
             4,

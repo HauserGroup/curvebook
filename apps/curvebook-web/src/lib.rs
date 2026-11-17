@@ -558,7 +558,7 @@ mod tests {
         writer
             .add_file(
                 "manifest.json",
-                br#"{"title":"Synthetic Prism Study","sheets":[{"id":"tbl-1","title":"Group Comparison","kind":"column","csv_path":"sheets/tbl-1.csv"}]}"#
+                br#"{"title":"Synthetic External Study","sheets":[{"id":"tbl-1","title":"Group Comparison","kind":"column","csv_path":"sheets/tbl-1.csv"}]}"#
                     .to_vec(),
             )
             .expect("add manifest.json");
@@ -610,7 +610,7 @@ mod tests {
         let mut prism_host = WebWorkspaceHost::new();
         let prism_sum = prism_host.open_bytes_for_name("experiment.prism", &prism_bytes).expect("open .prism bytes");
         assert_eq!(prism_sum.format_tag, "prism");
-        assert_eq!(prism_sum.title, "Synthetic Prism Study");
+        assert_eq!(prism_sum.title, "Synthetic External Study");
         assert_eq!(prism_sum.data_sheet_count, 1);
 
         let mut sniff_host = WebWorkspaceHost::new();

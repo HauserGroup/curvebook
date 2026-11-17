@@ -9,10 +9,8 @@ Exec=curvebook %F
 TryExec=curvebook
 Terminal=false
 Categories=Science;Math;DataVisualization;NumericalAnalysis;
-# Compatibility MIME types for .prism/.pzfx import: brand-ok
 MimeType=application/vnd.curvebook.project;application/vnd.curvebook.template;application/x-prism-project;application/x-prism-xml;text/csv;text/tab-separated-values;
-# Compatibility search keyword for .prism import: brand-ok
-Keywords=biostatistics;regression;curve-fitting;anova;survival;graphing;plotting;prism;
+Keywords=biostatistics;regression;curve-fitting;anova;survival;graphing;plotting;
 StartupNotify=true
 StartupWMClass=curvebook
 Actions=NewWindow;

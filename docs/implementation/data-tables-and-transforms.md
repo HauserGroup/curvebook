@@ -2,11 +2,10 @@
 
 Governing specification for `crates/doc` (`L1`), `crates/transform` (`L2`), and data-sheet commands in `crates/engine` (`L5`). Parity checklist: [`file-format-parity.md`](../file-format-parity.md) and [`ui-parity.md`](../ui-parity.md).
 
-Public behavioural references:
-- [Data tables overview](https://www.graphpad.com/guides/prism/latest/user-guide/using_prism_tables.htm)
-- [Eight kinds of data tables](https://www.graphpad.com/guides/prism/latest/user-guide/eight_kinds_of_data_tables.htm)
-- [Multiple variables tables & calculated variables](https://www.graphpad.com/guides/prism/latest/user-guide/multiple_variables_data_tables.htm)
-- [Prism 11.0 & 11.1 release notes](https://www.graphpad.com/updates/prism-11-0-0-release-notes)
+Clean-room data-model & interchange specifications:
+- [`crates/doc`](../../crates/doc): Eight typed table archetypes (`TableArchetype`), `SubcolumnMode`, non-destructive cell exclusions, and freeze state.
+- [`crates/transform`](../../crates/transform): Calculated variable formula engine, baseline/normalization transforms, and plate/long-wide reshaping.
+- [`docs/file-formats.md`](../file-formats.md): Native `.curvebook` / `.curvebook.d/` containers, CSV/TSV, and bounded `.pzfx` / `.prism` interchange rules.
 
 ---
 
@@ -15,7 +14,7 @@ Public behavioural references:
 1. **Typed experimental semantics, never untyped A1 spreadsheets.** Every `DataSheet` in `curvebook-doc` carries an explicit `TableArchetype` variant that governs valid subcolumn layouts, compatible analyses, and default graph types.
 2. **Non-destructive exclusions and missingness.** Every cell is an explicit enum (`CellValue::Number(f64)`, `CellValue::Text(String)`, `CellValue::Empty`) paired with an `excluded: bool` mask. Excluded cells remain visible in the grid (styled in blue italics with an `*` badge) and remain stored in `.curvebook` files, while downstream transforms, statistical tests, curve fits, and graphs treat them as masked observations without mutating raw values.
 3. **Bounded untrusted dimensions.** Project loaders, CSV importers, clipboard paste handlers, and command parameters enforce explicit caps (`MAX_ROWS = 1_000_000`, `MAX_DATA_SETS = 1_024`, `MAX_SUBCOLUMNS = 512`, `MAX_TITLE_BYTES = 4_096`) and return `DocError` / `EngineError` rather than panicking or exhausting memory.
-4. **Freeze state.** A `DataSheet` exposes `frozen: bool` (matching the Prism 11.0 Freeze/Unfreeze table workflow). When `frozen` is `true`, cell-edit, paste, row/column insertion, and formula-edit commands return `DocError::SheetFrozen` (surfaced as `ErrorCode::FrozenSheet`, `"frozen_sheet"`) while read-only inspection, downstream analyses, and graph styling remain active.
+4. **Freeze state.** A `DataSheet` exposes `frozen: bool` (the Freeze/Unfreeze table workflow). When `frozen` is `true`, cell-edit, paste, row/column insertion, and formula-edit commands return `DocError::SheetFrozen` (surfaced as `ErrorCode::FrozenSheet`, `"frozen_sheet"`) while read-only inspection, downstream analyses, and graph styling remain active.
 
 ---
 
@@ -29,7 +28,7 @@ Public behavioural references:
 | **`Contingency`** | Categorical outcome / exposure row | Row category title | Categorical outcome / exposure column | `Single` non-negative integer counts (`u64` / integral `f64 >= 0`) | Pearson $\chi^2$, Fisher's exact test, McNemar's test, Cochran–Armitage trend, RR/OR/sensitivity/specificity CIs |
 | **`Survival`** | Individual subject / event time | Elapsed time $t \ge 0$ | One cohort column per group (`1` = event/death, `0` = censored; configurable codes) | `Single` status code per cohort column | Kaplan–Meier product-limit survival, log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon, trend log-rank |
 | **`PartsOfWhole`** | Mutually exclusive slice / category | Slice label | Total / fractional series | `Single` non-negative values | Fraction of total, binomial / $\chi^2$ goodness-of-fit, pie / donut / waffle / stacked-bar graphs |
-| **`MultipleVariables`** | One observational unit (tidy row) | None (all columns are named variables) | Typed variables (`Continuous`, `Categorical`, `Label`, or `Calculated`) | `Single` per variable; explicit categorical level-ordering metadata | Multiple linear/logistic/Poisson regression, Cox PH, PCA, correlation matrix,clustering, plus Prism 11 unified *t*-tests, Multifactor ($N$-way) ANOVA, nonlinear regression, and simple survival |
+| **`MultipleVariables`** | One observational unit (tidy row) | None (all columns are named variables) | Typed variables (`Continuous`, `Categorical`, `Label`, or `Calculated`) | `Single` per variable; explicit categorical level-ordering metadata | Multiple linear/logistic/Poisson regression, Cox PH, PCA, correlation matrix, clustering, plus unified *t*-tests, Multifactor ($N$-way) ANOVA, nonlinear regression, and simple survival |
 | **`Nested`** | Replicate within subcolumn (technical replicate) | Optional row label | Experimental group (`A`, `B`, …) | Biological units (`A:1`, `A:2`, …; e.g. animals/donors) containing technical replicates down rows | Nested *t*-test, nested one-way ANOVA, variance-component partitioning (mixed model) |
 
 ### 2.1 Pre-Summarized Error Subcolumn Rules
@@ -53,7 +52,7 @@ When a user enters pre-averaged data (`MeanSdN`, `MeanSemN`, `MeanCvN`) instead 
 
 Each column in a `MultipleVariables` sheet stores a `VariableRole` (`Continuous`, `Categorical`, `Label`, or `Calculated`) paired with `role_inferred: bool` (displaying a muted badge when auto-inferred on paste/import vs. an accented badge once explicitly confirmed by the user):
 - **Bulk categorical level recoding (`table.recodeLevels`):** Renaming a category token in the Variables inspector (for instance correcting `"Hzel"` to `"Hazel"`) rewrites matching non-excluded and excluded cells across the column atomically and merges the two levels' frequency counts in a single undoable transaction.
-- **Categorical ordering (`LevelOrderSpec`, Prism 11.1 parity):** Each `Categorical` column stores a `LevelOrderSpec { order: LevelOrderKind, reversed }` (`crates/doc/src/archetypes.rs`) where `LevelOrderKind` is one of:
+- **Categorical ordering (`LevelOrderSpec`):** Each `Categorical` column stores a `LevelOrderSpec { order: LevelOrderKind, reversed }` (`crates/doc/src/archetypes.rs`) where `LevelOrderKind` is one of:
   - `EntryOrder` (order of first appearance in the column),
   - `Alphabetical` (natural case-insensitive UTF-8 sort),
   - `FrequencyDescending` / `FrequencyAscending` (count of non-excluded rows),
