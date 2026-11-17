@@ -266,6 +266,9 @@ pub fn handle_grid_text_input(app: &UiApp, state: &mut GridCoreViewState, text: 
     let Some(ds) = active_data_sheet(app) else {
         return UiEventOutcome::default();
     };
+    if ds.frozen {
+        return UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..UiEventOutcome::default() };
+    }
     let Some(active) = app.grid.tool.active else {
         return UiEventOutcome::default();
     };
@@ -275,11 +278,14 @@ pub fn handle_grid_text_input(app: &UiApp, state: &mut GridCoreViewState, text: 
     UiEventOutcome::default()
 }
 
-/// Block inline cell double-click editing when `coord` sits inside a [`LinkedDataRegion`].
+/// Block inline cell double-click editing when `coord` sits inside a [`LinkedDataRegion`] or a frozen sheet.
 pub fn handle_grid_double_click(app: &UiApp, state: &mut GridCoreViewState, coord: GridCellCoord) -> UiEventOutcome {
     let Some(ds) = active_data_sheet(app) else {
         return UiEventOutcome::default();
     };
+    if ds.frozen {
+        return UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..UiEventOutcome::default() };
+    }
     if check_edit_blocked_by_link(ds, state, coord.row, coord.col, coord.subcol) {
         return UiEventOutcome { handled: true, action: String::from("grid_core.link_read_only_prompt"), ..UiEventOutcome::default() };
     }
@@ -341,14 +347,18 @@ fn apply_grid_nav_event(app: &mut UiApp, state: &mut GridCoreViewState, event: G
             state.last_nav_summary = Some(summary);
         }
         GridNavEvent::ClearSelection => {
-            if let Some((cmd_id, val)) = clear_selected_cells(app, &ds, state)? {
+            if ds.frozen {
+                outcome.action = String::from("grid_core.frozen_read_only");
+                state.last_nav_summary = Some(String::from("edit:clear_blocked_frozen"));
+            } else if let Some((cmd_id, val)) = clear_selected_cells(app, &ds, state)? {
                 outcome.action = String::from("grid_core.clear_selection");
                 outcome.command_id = Some(cmd_id);
                 outcome.command_result = Some(val);
+                state.last_nav_summary = Some(String::from("edit:clear"));
             } else {
                 outcome.action = String::from("grid_core.link_read_only_prompt");
+                state.last_nav_summary = Some(String::from("edit:clear"));
             }
-            state.last_nav_summary = Some(String::from("edit:clear"));
         }
     }
 

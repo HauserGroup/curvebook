@@ -588,6 +588,14 @@ fn handle_context_menu_custom_action(app: &mut UiApp, state: &mut ToolbarMenusVi
         "ctx.clear_cells" => {
             let doc = app.document().clone();
             let ds = active_data_sheet(&doc).ok_or_else(|| String::from("no active data sheet"))?;
+            if ds.frozen {
+                state.last_toolbar_notice = Some(String::from(super::mv_formula::w7_mv_ui::tr_staged(
+                    &app.locale,
+                    "w7.mv.frozen_clear_blocked",
+                    "Table is frozen; clear blocked.",
+                )));
+                return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..Default::default() });
+            }
             let coords = active_selection_coords_for(app, ds);
             if let Some(range) = selection_bounding_range(&coords) {
                 app.execute_command("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "range": range_to_json(range) }))

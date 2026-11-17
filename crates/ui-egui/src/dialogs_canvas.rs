@@ -9,8 +9,9 @@ use curvebook_doc::{
     CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
     EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
     GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
-    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset,
-    MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode,
+    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec,
+    MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding,
+    MultivariatePlotMode,
     MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
     PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope,
     PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell,
@@ -4295,6 +4296,16 @@ pub struct FormatGraphState {
     pub model_equation_annotations: Vec<GraphAnnotation>,
     #[serde(default)]
     pub annotations_dirty: bool,
+    #[serde(default)]
+    pub mv_encoding: Option<MultivariateGraphEncoding>,
+    #[serde(default)]
+    pub mv_levels: Vec<String>,
+    #[serde(default)]
+    pub mv_level_is_x: bool,
+    #[serde(default)]
+    pub mv_selected_level: Option<String>,
+    #[serde(default)]
+    pub mv_levels_dirty: bool,
 }
 
 impl Default for FormatGraphState {
@@ -4319,12 +4330,17 @@ impl Default for FormatGraphState {
             model_equation_mode: None,
             model_equation_annotations: Vec::new(),
             annotations_dirty: false,
+            mv_encoding: None,
+            mv_levels: Vec::new(),
+            mv_level_is_x: true,
+            mv_selected_level: None,
+            mv_levels_dirty: false,
         }
     }
 }
 
 impl FormatGraphState {
-    /// Populate draft controls from an existing [`GraphSheet`].
+    /// Populate draft controls from an existing [`GraphSheet`], clearing MV level state unless populated by [`Self::sync_from_graph_with_doc`].
     pub fn sync_from_graph(&mut self, graph: &GraphSheet) {
         self.graph_sheet_id = Some(graph.id.clone());
         self.palette = graph.spec.palette;
@@ -4339,6 +4355,10 @@ impl FormatGraphState {
             _ => None,
         });
         self.annotations_dirty = false;
+        self.mv_encoding.clone_from(&graph.spec.multivariate);
+        self.mv_levels.clear();
+        self.mv_level_is_x = true;
+        self.mv_levels_dirty = false;
         let series_idx = self.selected_series_index.min(graph.spec.series.len().saturating_sub(1));
         self.selected_series_index = series_idx;
         if let Some(series) = graph.spec.series.get(series_idx) {
@@ -4353,6 +4373,86 @@ impl FormatGraphState {
             }
             self.extract_series_marker_and_dash(&series.gdo);
         }
+    }
+
+    /// Populate draft controls plus any categorical `MultipleVariables` level ordering from `doc`.
+    pub fn sync_from_graph_with_doc(&mut self, graph: &GraphSheet, doc: Option<&ProjectDocument>) {
+        self.sync_from_graph(graph);
+        let Some(doc) = doc else {
+            return;
+        };
+        let Some(enc) = &graph.spec.multivariate else {
+            return;
+        };
+        let Some(ds) = doc.data_sheet(&graph.spec.primary_source_sheet_id) else {
+            return;
+        };
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+            return;
+        };
+        let x_cat = mv
+            .variables
+            .get(enc.x_column)
+            .filter(|col| col.role == VariableRole::Categorical || matches!(enc.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }));
+        if let Some(col) = x_cat {
+            let lvls: Vec<String> =
+                col.ordered_levels_with(enc.x_level_order_override.as_ref().unwrap_or(&col.level_order)).into_iter().map(|l| l.level).collect();
+            if !lvls.is_empty() {
+                self.mv_levels = lvls;
+                self.mv_level_is_x = true;
+                self.mv_selected_level = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref())
+                    .and_then(|i| self.mv_levels.get(i).cloned());
+                return;
+            }
+        }
+        if let ColorChannelMapping::Categorical { column, level_order_override, .. } = &enc.color
+            && let Some(col) = mv.variables.get(*column)
+        {
+            let lvls: Vec<String> =
+                col.ordered_levels_with(level_order_override.as_ref().unwrap_or(&col.level_order)).into_iter().map(|l| l.level).collect();
+            if !lvls.is_empty() {
+                self.mv_levels = lvls;
+                self.mv_level_is_x = false;
+                self.mv_selected_level = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref())
+                    .and_then(|i| self.mv_levels.get(i).cloned());
+            }
+        }
+    }
+
+    /// Cycle selected categorical level inside the `Format Graph` dialog.
+    pub fn cycle_selected_mv_level(&mut self) {
+        if self.mv_levels.is_empty() {
+            return;
+        }
+        let cur = crate::views::mv_formula::resolve_selected_level_idx(&self.mv_levels, self.mv_selected_level.as_deref()).unwrap_or(0);
+        let next = (cur + 1) % self.mv_levels.len();
+        self.mv_selected_level = self.mv_levels.get(next).cloned();
+    }
+
+    /// Stepwise reorder the selected MV level (`"top"`, `"up"`, `"down"`, `"end"`) into `Explicit` order.
+    pub fn reorder_mv_level(&mut self, op_str: &str) -> Result<bool, String> {
+        use crate::views::mv_formula::{LevelMoveOp, apply_explicit_level_move};
+        if self.mv_levels.is_empty() {
+            return Err(String::from("Graph has no categorical levels to reorder."));
+        }
+        let op = match op_str {
+            "top" | "move_to_top" => LevelMoveOp::Top,
+            "up" | "move_up" => LevelMoveOp::Up,
+            "down" | "move_down" => LevelMoveOp::Down,
+            "end" | "move_to_end" => LevelMoveOp::End,
+            other => return Err(format!("unknown level move op `{other}`")),
+        };
+        let moved = apply_explicit_level_move(&mut self.mv_levels, &mut self.mv_selected_level, op);
+        let explicit_spec = LevelOrderSpec { order: LevelOrderKind::Explicit(self.mv_levels.clone()), reversed: false };
+        if let Some(enc) = &mut self.mv_encoding {
+            if self.mv_level_is_x {
+                enc.x_level_order_override = Some(explicit_spec);
+            } else if let ColorChannelMapping::Categorical { level_order_override, .. } = &mut enc.color {
+                *level_order_override = Some(explicit_spec);
+            }
+            self.mv_levels_dirty = true;
+        }
+        Ok(moved)
     }
 
     fn extract_series_marker_and_dash(&mut self, gdo: &GraphicalDataObject) {
@@ -4399,6 +4499,11 @@ impl FormatGraphState {
         spec.legend = LegendSpec { visible: self.show_legend, bordered: self.legend_bordered, ..spec.legend };
         if self.annotations_dirty {
             spec.annotations.clone_from(&self.model_equation_annotations);
+        }
+        if self.mv_levels_dirty
+            && let Some(enc) = &self.mv_encoding
+        {
+            spec.multivariate = Some(enc.clone());
         }
         if let Some(series) = spec.series.get_mut(self.selected_series_index) {
             series.y_error_bars = self.error_bar_enabled.then_some(self.error_bar_spec);
@@ -4476,6 +4581,22 @@ impl FormatGraphState {
                     };
                     self.set_model_equation_mode(next);
                 }
+                "selected_level" | "format_graph.selected_level" => {
+                    let s = val.as_str().ok_or_else(|| String::from("`selected_level` must be a string"))?;
+                    self.mv_selected_level = Some(s.to_owned());
+                }
+                "move_to_top" | "format_graph.move_to_top" => {
+                    let _ = self.reorder_mv_level("top")?;
+                }
+                "move_up" | "format_graph.move_up" => {
+                    let _ = self.reorder_mv_level("up")?;
+                }
+                "move_down" | "format_graph.move_down" => {
+                    let _ = self.reorder_mv_level("down")?;
+                }
+                "move_to_end" | "format_graph.move_to_end" => {
+                    let _ = self.reorder_mv_level("end")?;
+                }
                 other => return Err(format!("unknown Format Graph field `{other}`")),
             }
         }
@@ -4510,6 +4631,11 @@ impl FormatGraphState {
         }
         if self.annotations_dirty {
             spec_patch.insert(String::from("annotations"), json!(self.model_equation_annotations));
+        }
+        if self.mv_levels_dirty
+            && let Some(enc) = &self.mv_encoding
+        {
+            spec_patch.insert(String::from("multivariate"), json!(enc));
         }
         spec_patch.insert(String::from("legend"), json!({ "visible": self.show_legend, "bordered": self.legend_bordered }));
         let mut series_obj = json!({
@@ -7314,7 +7440,7 @@ impl CanvasDialogState {
         let Some(gs) = doc.graph_sheet(graph_sheet_id) else {
             return false;
         };
-        self.format_graph.sync_from_graph(gs);
+        self.format_graph.sync_from_graph_with_doc(gs, Some(doc));
         self.active_inspector = ActiveInspector::FormatGraph;
         self.active_dialog = ActiveDialog::FormatGraph { graph_sheet_id: gs.id.clone() };
         true

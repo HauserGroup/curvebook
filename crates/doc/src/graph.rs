@@ -6,7 +6,7 @@
 pub use curvebook_math::{AxisScale, LogitDomain};
 use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 
-use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype};
+use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype, VariableRole};
 use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
 use crate::links::DataSheet;
@@ -744,17 +744,44 @@ impl GraphSpec {
         };
 
         let multivariate = match &sheet.archetype {
-            TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => Some(MultivariateGraphEncoding {
-                plot_mode: MultivariatePlotMode::default(),
-                x_column: 0,
-                y_column: 1,
-                color: ColorChannelMapping::Constant(palette.color_at(0)),
-                size: SizeChannelMapping::Constant { radius_pt: 5.0 },
-                label_column: None,
-                x_level_order_override: None,
-                show_convex_hulls: false,
-                show_confidence_ellipses: false,
-            }),
+            TableArchetype::MultipleVariables(mv) if mv.variables.len() >= 2 => {
+                let first_cat = mv.variables.iter().position(|v| v.role == VariableRole::Categorical);
+                let first_cont = mv
+                    .variables
+                    .iter()
+                    .position(|v| v.role == VariableRole::Continuous)
+                    .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Calculated));
+                let cont_count = mv.variables.iter().filter(|v| matches!(v.role, VariableRole::Continuous | VariableRole::Calculated)).count();
+                let (plot_mode, x_column, y_column) = match (first_cat, first_cont) {
+                    (Some(cat_col), Some(cont_col)) if cont_count <= 1 => (
+                        MultivariatePlotMode::CategoricalSummary {
+                            gdo: GraphicalDataObject::BarWithReplicates {
+                                summary: SummaryMeasure::Mean,
+                                fill_color: palette.color_at(0),
+                                border_color: Rgba8::BLACK,
+                                border_width_pt: 0.75,
+                                replicate_overlay: Some(ReplicateOverlayStyle::DeterministicBeeswarm),
+                            },
+                            y_error_bars: Some(ErrorBarSpec::default()),
+                        },
+                        cat_col,
+                        cont_col,
+                    ),
+                    (Some(cat_col), Some(cont_col)) => (MultivariatePlotMode::default(), cat_col, cont_col),
+                    _ => (MultivariatePlotMode::default(), 0, 1),
+                };
+                Some(MultivariateGraphEncoding {
+                    plot_mode,
+                    x_column,
+                    y_column,
+                    color: ColorChannelMapping::Constant(palette.color_at(0)),
+                    size: SizeChannelMapping::Constant { radius_pt: 5.0 },
+                    label_column: None,
+                    x_level_order_override: None,
+                    show_convex_hulls: false,
+                    show_confidence_ellipses: false,
+                })
+            }
             _ => None,
         };
 
@@ -1369,5 +1396,43 @@ mod tests {
         let legacy_decoded: GraphSpec = serde_json::from_value(serde_json::Value::Object(legacy)).expect("deserialize legacy GraphSpec");
         assert!(legacy_decoded.point_overrides.is_empty());
         assert_eq!(legacy_decoded.grouped_arrangement, GroupedArrangement::Superimposed);
+    }
+
+    #[test]
+    fn multivariate_default_for_data_sheet_assigns_categorical_x_and_continuous_y() {
+        use crate::{MultipleVariablesTable, MultivariatePlotMode, VariableRole};
+
+        // 1. [Continuous, Categorical] -> CategoricalSummary with X = col 1 (Cat), Y = col 0 (Cont).
+        let mut mv_rev = MultipleVariablesTable::new(2, 4).expect("mv 2");
+        mv_rev.variables[0].title = String::from("Biomarker");
+        mv_rev.variables[1].title = String::from("Group");
+        mv_rev.variables[1].lock_role(VariableRole::Categorical);
+        let ds_rev = DataSheet::new(SheetId::new("mv_rev"), "Rev", TableArchetype::MultipleVariables(mv_rev)).expect("ds_rev");
+        let spec_rev = GraphSpec::default_for_data_sheet(&ds_rev);
+        let enc_rev = spec_rev.multivariate.as_ref().expect("mv enc");
+        assert!(matches!(enc_rev.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }));
+        assert_eq!(enc_rev.x_column, 1);
+        assert_eq!(enc_rev.y_column, 0);
+
+        // 2. [Label, Categorical, Continuous] -> CategoricalSummary with X = col 1 (Cat), Y = col 2 (Cont).
+        let mut mv_lbl = MultipleVariablesTable::new(3, 4).expect("mv 3");
+        mv_lbl.variables[0].lock_role(VariableRole::Label);
+        mv_lbl.variables[1].lock_role(VariableRole::Categorical);
+        mv_lbl.variables[2].lock_role(VariableRole::Continuous);
+        let ds_lbl = DataSheet::new(SheetId::new("mv_lbl"), "Lbl", TableArchetype::MultipleVariables(mv_lbl)).expect("ds_lbl");
+        let spec_lbl = GraphSpec::default_for_data_sheet(&ds_lbl);
+        let enc_lbl = spec_lbl.multivariate.as_ref().expect("mv enc lbl");
+        assert!(matches!(enc_lbl.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }));
+        assert_eq!(enc_lbl.x_column, 1);
+        assert_eq!(enc_lbl.y_column, 2);
+
+        // 3. All Continuous -> BubbleScatter with X = 0, Y = 1.
+        let mv_cont = MultipleVariablesTable::new(3, 4).expect("mv all cont");
+        let ds_cont = DataSheet::new(SheetId::new("mv_cont"), "Cont", TableArchetype::MultipleVariables(mv_cont)).expect("ds_cont");
+        let spec_cont = GraphSpec::default_for_data_sheet(&ds_cont);
+        let enc_cont = spec_cont.multivariate.as_ref().expect("mv enc cont");
+        assert_eq!(enc_cont.plot_mode, MultivariatePlotMode::BubbleScatter);
+        assert_eq!(enc_cont.x_column, 0);
+        assert_eq!(enc_cont.y_column, 1);
     }
 }

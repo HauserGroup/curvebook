@@ -1970,6 +1970,10 @@ fn handle_double_click(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
         WorkspaceHitTarget::GridXCell { sheet_id, row, subcol } => {
             app.grid.select_x_cell_sync(row, subcol);
             app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
+            let is_frozen = app.document().data_sheet(&sheet_id).is_some_and(|ds| ds.frozen);
+            if is_frozen {
+                return UiEventOutcome { handled: true, action: String::from("grid_core.frozen_read_only"), ..Default::default() };
+            }
             let is_generated = app
                 .document()
                 .data_sheet(&sheet_id)
@@ -2225,6 +2229,7 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "formula_bar.input" => {
             let doc = app.document().clone();
             app.grid.formula_bar.set_input(&text, None, &doc);
+            app.view_shards.mv_formula.validation_feedback = None;
         }
         "analyze.search" => {
             app.view_shards.analyze_picker.search_query = text.clone();
@@ -2241,7 +2246,10 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         }
         "rand_groups.title_input" => app.canvas_dialogs.randomize_groups.title = text,
         "mv_formula.func.search" => app.view_shards.mv_formula.function_search = text,
-        "mv_formula.name.input" => app.grid.formula_bar.target_title = text,
+        "mv_formula.name.input" => {
+            app.grid.formula_bar.target_title = text;
+            app.view_shards.mv_formula.validation_feedback = None;
+        }
         "mv_formula.vars.recode_from.input" => app.view_shards.mv_formula.recode_from = text,
         "mv_formula.vars.recode_to.input" => app.view_shards.mv_formula.recode_to = text,
         "fit.eq.search" => app.view_shards.fit_params.model_search = text,
@@ -2852,9 +2860,17 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         }
     }
 
-    if is_space
+    let activate_focused_workspace = !modifiers.ctrl
+        && !modifiers.meta
+        && !modifiers.alt
+        && (is_space
+            || (matches!(trimmed, "Enter" | "Return")
+                && app.view_shards.grid_core.editing_title.is_none()
+                && app.focus_widget_id.as_deref().is_some_and(|f| !f.starts_with("grid.") && !f.starts_with("secondary.grid."))));
+    if activate_focused_workspace
         && let Some(fid) = app.focus_widget_id.clone()
         && let Some(node) = app.build_and_cache_layout_tree(metrics).node(&fid).cloned()
+        && node.a11y.role != WidgetRole::TextBox
         && node.state.enablement.enabled
         && node.action != WidgetAction::NoOp
     {
@@ -3007,17 +3023,22 @@ fn handle_textbox_key(
     key: &str,
     modifiers: KeyModifiers,
 ) -> Result<Option<UiEventOutcome>, String> {
-    if fid == "formula_bar.input" && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
+    if matches!(fid, "formula_bar.input" | "mv_formula.name.input") && !modifiers.ctrl && !modifiers.meta && !modifiers.alt {
         if matches!(key, "Enter" | "Return") {
-            let res = crate::gui_actions::commit_formula_bar(app).map_err(|e| e.to_string())?;
-            return Ok(Some(UiEventOutcome {
-                handled: true,
-                action: String::from("formula_bar.committed"),
-                command_result: Some(res),
-                ..Default::default()
-            }));
+            if app.view_shards.mv_formula.right_panel_open {
+                return crate::views::mv_formula::commit_from_textbox_enter(app).map(Some);
+            }
+            if fid == "formula_bar.input" {
+                let res = crate::gui_actions::commit_formula_bar(app).map_err(|e| e.to_string())?;
+                return Ok(Some(UiEventOutcome {
+                    handled: true,
+                    action: String::from("formula_bar.committed"),
+                    command_result: Some(res),
+                    ..Default::default()
+                }));
+            }
         }
-        if matches!(key, "Escape" | "Esc") {
+        if fid == "formula_bar.input" && matches!(key, "Escape" | "Esc") {
             crate::gui_actions::cancel_formula_bar(app);
             return Ok(Some(UiEventOutcome { handled: true, action: String::from("formula_bar.cancelled"), ..Default::default() }));
         }
