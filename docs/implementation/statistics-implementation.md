@@ -2,17 +2,13 @@
 
 Governing specification for `crates/math` (`L0`) and `crates/stats` (`L2`). Parity checklist: [`stats-parity.md`](../stats-parity.md).
 
-Public behavioural & mathematical references:
-- [Principles of statistics & exact P-value computation](https://www.graphpad.com/guides/prism/latest/statistics/stat_how_prism_computes_exact_p_val.htm)
-- [Decimal formatting & asterisk summaries of P values](https://www.graphpad.com/guides/prism/latest/statistics/stat_decimal_formatting_of_p_values.htm)
-- [Outlier identification: ROUT and Grubbs methods](https://www.graphpad.com/guides/prism/latest/statistics/stat_how_it_works_rout_method.htm)
-- [Prism 11.0 & 11.1 release notes (Multifactor ANOVA, Effect Sizes, MV analyses, decimal CIs)](https://www.graphpad.com/updates/prism-11-1-0-release-notes)
-- Primary literature (exact equations, polynomial approximations & test vectors):
-  - **Special functions & Studentized range:** Abramowitz & Stegun; NIST DLMF; Copenhaver & Holland (1988) *J. Stat. Comput. Simul.* 30:1–15 (`10.1080/00949658808811082`).
-  - **Normality & outliers:** Dallal & Wilkinson (1986) *Am. Stat.* 40:294–296 (`10.1080/00031305.1986.10475419`); D'Agostino, Belanger & D'Agostino (1990) *Am. Stat.* 44:316–321 (`10.1080/00031305.1990.10475751`); Royston (1992) *Stat. Comput.* 2:117–119 (`10.1007/BF01891203`) & Royston (1995) *Appl. Stat.* 44:547–551 (`10.2307/2986146`); Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
-  - **Multiplicity, REML mixed models & ROC:** Benjamini, Krieger & Yekutieli (2006) *Biometrika* 93:491–507 (`10.1093/biomet/93.3.491`); Kenward & Roger (1997) *Biometrics* 53:983–997 (`10.2307/2533558`); DeLong, DeLong & Clarke-Pearson (1988) *Biometrics* 44:837–845 (`10.2307/2531595`).
-  - **Contingency CIs & survival:** Baptista & Pike (1977) *Appl. Stat.* 26:214–220 (`10.2307/2347041`); Koopman (1984) *Biometrics* 40:513–517 (`10.2307/2531405`); Newcombe (1998) *Stat. Med.* 17:873–890 (`10.1002/(SICI)1097-0258(19980430)17:8<873::AID-SIM779>3.0.CO;2-I`); Klein & Moeschberger, *Survival Analysis*.
-  - **Further sources cited in `crates/math` / `crates/stats` doc comments:** Wilson (1927) and Clopper & Pearson (1934) binomial intervals; Boschloo (1970) and Suissa & Shuster (1985) unconditional `2x2` tests; Brookmeyer & Crowley (1982) median-survival CI; Grambsch & Therneau (1994) scaled Schoenfeld test; Passing & Bablok (1983); Rubin (1987) and Barnard & Rubin (1999) imputation pooling; Lenth (1989, AS 243) and Benton & Krishnamoorthy (2003) noncentral distributions; Dunnett (1955, 1964).
+Primary literature & numerical references (exact equations, polynomial approximations & test vectors):
+- **Oracle benchmarks & R cross-validation:** NIST Statistical Reference Datasets (StRD), Statistical Methods (`crates/stats/tests/nist_strd.rs`), and R `4.5.2` independent reference oracles (`crates/stats/tests/d1_edge_matrix.rs`).
+- **Special functions & Studentized range:** Abramowitz & Stegun; NIST DLMF; Copenhaver & Holland (1988) *J. Stat. Comput. Simul.* 30:1–15 (`10.1080/00949658808811082`).
+- **Normality & outliers:** Dallal & Wilkinson (1986) *Am. Stat.* 40:294–296 (`10.1080/00031305.1986.10475419`); D'Agostino, Belanger & D'Agostino (1990) *Am. Stat.* 44:316–321 (`10.1080/00031305.1990.10475751`); Royston (1992) *Stat. Comput.* 2:117–119 (`10.1007/BF01891203`) & Royston (1995) *Appl. Stat.* 44:547–551 (`10.2307/2986146`); Motulsky & Brown (2006) *BMC Bioinformatics* 7:123 (`10.1186/1471-2105-7-123`).
+- **Multiplicity, REML mixed models & ROC:** Benjamini, Krieger & Yekutieli (2006) *Biometrika* 93:491–507 (`10.1093/biomet/93.3.491`); Kenward & Roger (1997) *Biometrics* 53:983–997 (`10.2307/2533558`); DeLong, DeLong & Clarke-Pearson (1988) *Biometrics* 44:837–845 (`10.2307/2531595`).
+- **Contingency CIs & survival:** Baptista & Pike (1977) *Appl. Stat.* 26:214–220 (`10.2307/2347041`); Koopman (1984) *Biometrics* 40:513–517 (`10.2307/2531405`); Newcombe (1998) *Stat. Med.* 17:873–890 (`10.1002/(SICI)1097-0258(19980430)17:8<873::AID-SIM779>3.0.CO;2-I`); Klein & Moeschberger, *Survival Analysis*.
+- **Further sources cited in `crates/math` / `crates/stats` doc comments:** Wilson (1927) and Clopper & Pearson (1934) binomial intervals; Boschloo (1970) and Suissa & Shuster (1985) unconditional `2x2` tests; Brookmeyer & Crowley (1982) median-survival CI; Grambsch & Therneau (1994) scaled Schoenfeld test; Passing & Bablok (1983); Rubin (1987) and Barnard & Rubin (1999) imputation pooling; Lenth (1989, AS 243) and Benton & Krishnamoorthy (2003) noncentral distributions; Dunnett (1955, 1964).
 
 ---
 
@@ -36,7 +32,7 @@ Never compute small upper-tail probabilities via `1.0 - cdf(x)` (which loses all
 
 ### 1.2 Arbitrary Confidence Levels & P-Value Formatting
 
-- **Confidence levels:** All confidence-interval routines accept any `ConfidenceLevel` built via `ConfidenceLevel::from_percent` in `[0.01, 99.99]` (`alpha = (100 - percent) / 100`, `crates/math/src/pvalue.rs`), supporting $\alpha = 0.001$ ($99.9\%$ CI) and decimal levels introduced in Prism 11.1.
+- **Confidence levels:** All confidence-interval routines accept any `ConfidenceLevel` built via `ConfidenceLevel::from_percent` in `[0.01, 99.99]` (`alpha = (100 - percent) / 100`, `crates/math/src/pvalue.rs`), supporting $\alpha = 0.001$ ($99.9\%$ CI) and arbitrary decimal levels.
 - **P-value display presets (`PValueFormat`):**
   - `FourDecimal` (default): leading zero, 4 decimal places (`0.1234`), floor `< 0.0001`, up to 4 stars (`ns` $> 0.05$, `*` $\le 0.05$, `**` $\le 0.01$, `***` $\le 0.001$, `****` $\le 0.0001$).
   - `Apa`: no leading zero, 3 decimal places (`.123`), floor `< .001`, ceiling of 3 stars (`***` for all $p \le 0.001$).
@@ -84,7 +80,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 
 ### 3.1 Two-Group Comparisons & Standardized Effect Sizes
 - **Unpaired *t*-test** (pooled SD + *F*-test of variances), **Welch's *t*-test** (Welch–Satterthwaite $\nu$), **Paired *t*-test**, **Ratio paired *t*-test** (paired *t* on $\ln x_i$, reporting geometric mean of ratios), and **Unpaired lognormal *t*-test**.
-- **Standardized effect sizes (Prism 11.0 parity):**
+- **Standardized effect sizes:**
   - Unpaired: **Cohen's $d$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{pooled}}$, **Hedges' $g$** $= J(\nu)\,d$ with exact gamma bias factor $J(\nu) = \frac{\Gamma(\nu/2)}{\sqrt{\nu/2}\,\Gamma((\nu-1)/2)}$, and **Glass's $\Delta$** $= (\bar{x}_1 - \bar{x}_2)/s_{\text{control}}$, with noncentral-$t$ exact confidence intervals (`curvebook_math::noncentral_t_ci`).
   - Paired: $d_z = \bar{d} / s_d$ and Hedges' corrected $g_z$ with noncentral-$t$ CIs.
 - **Nonparametric two-group:**
@@ -98,7 +94,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 - **Factorial & Multifactor designs:**
   - Classic `Grouped` Two-Way and Three-Way ANOVA supporting Type I (sequential) and Type III (marginal orthogonal-contrast) sums of squares for unbalanced cells, plus repeated measures on one or both factors.
   - **Multifactor ($N$-way) GLM (`MultipleVariables`):** Accepts arbitrary numbers of categorical grouping factors from a `MultipleVariables` table with configurable main effects, two-way through $k$-way interactions, reference/sum contrasts, residual diagnostics, and post-hoc main/simple/cell comparisons.
-  - **ANOVA effect sizes (Prism 11.0 parity):** $\eta^2 = \text{SS}_{\text{effect}} / \text{SS}_{\text{total}}$, partial $\eta_p^2 = \text{SS}_{\text{effect}} / (\text{SS}_{\text{effect}} + \text{SS}_{\text{error}})$, omega-squared $\omega^2$, and Cohen's $f = \sqrt{\eta_p^2 / (1 - \eta_p^2)}$, with noncentral-$F$ confidence intervals.
+  - **ANOVA effect sizes:** $\eta^2 = \text{SS}_{\text{effect}} / \text{SS}_{\text{total}}$, partial $\eta_p^2 = \text{SS}_{\text{effect}} / (\text{SS}_{\text{effect}} + \text{SS}_{\text{error}})$, omega-squared $\omega^2$, and Cohen's $f = \sqrt{\eta_p^2 / (1 - \eta_p^2)}$, with noncentral-$F$ confidence intervals.
   - When a post-hoc comparison family contains only $m = 1$ comparison, emit an explicit informational note on the `ResultSheet` clarifying why multiplicity adjustment leaves the unadjusted *p*-value unchanged.
 
 ### 3.3 Linear Mixed-Effects Models (REML) & Nested Designs
@@ -137,7 +133,7 @@ All multiplicity engines operate cleanly on contrast vectors $c_j^\top \hat{\bet
   - **Relative Risk:** **Koopman (1984)** asymptotic score interval via constrained maximum likelihood root-finding.
   - **Difference of proportions:** Newcombe hybrid Wilson score interval.
   - **Sensitivity, Specificity, PPV, NPV:** Wilson score (default) and Clopper–Pearson exact binomial intervals.
-  - **Standardized effect sizes (Prism 11.0 parity):** $\phi$ coefficient ($2 \times 2$) and Cramér's $V = \sqrt{\chi^2 / (N \cdot \min(R-1, C-1))}$ with noncentral-$\chi^2$ confidence intervals (detecting perfect separation / zero-margin edge cases explicitly).
+  - **Standardized effect sizes:** $\phi$ coefficient ($2 \times 2$) and Cramér's $V = \sqrt{\chi^2 / (N \cdot \min(R-1, C-1))}$ with noncentral-$\chi^2$ confidence intervals (detecting perfect separation / zero-margin edge cases explicitly).
 
 ### 5.2 Survival Analysis (`crates/stats/src/survival.rs`)
 Supports both classic `Survival` sheets and `MultipleVariables` variable assignment (time, event/censoring indicator, grouping factor(s)):

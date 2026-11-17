@@ -2,7 +2,7 @@
 
 Every non-code asset in this repository (icons, images, presets, example datasets) is listed here with its author, source and licence. `cargo xtask assets` (part of `cargo xtask ci`) fails if an asset file is missing from this table.
 
-**Policy (mandatory):** CurveBook contains **no GraphPad or Dotmatics iconography, images, artwork, templates, sample files, equation libraries or screenshots**. Every asset is either original work by CurveBook contributors, or third-party material under an open licence on the repository allowlist, and is attributed below.
+**Policy (mandatory):** CurveBook contains **no third-party proprietary or competitor iconography, images, artwork, templates, sample files, equation libraries or screenshots**. Every asset is either original work by CurveBook contributors, or third-party material under an open licence on the repository allowlist, and is attributed below.
 
 Generated-in-code art (scientific colour palettes, marker glyphs, error-bar caps, graph previews and tool cursors) is original and has no file to list.
 

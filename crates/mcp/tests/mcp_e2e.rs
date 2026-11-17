@@ -463,7 +463,7 @@ fn open_file_supports_csv_tsv_pzfx_and_prism_containers() {
     fs::write(&pzfx_file, pzfx_xml).expect("write pzfx");
 
     let mut zw = ZipWriter::new();
-    let manifest = br#"{"title":"Cleanroom Prism Archive","sheets":[{"id":"dose","title":"Dose","kind":"xy","csv_path":"tables/dose.csv"}]}"#;
+    let manifest = br#"{"title":"Cleanroom External Archive","sheets":[{"id":"dose","title":"Dose","kind":"xy","csv_path":"tables/dose.csv"}]}"#;
     let table_csv = b"Dose,Response\n-8,5\n-6,50\n-4,95\n";
     zw.add_file("manifest.json", manifest.to_vec()).expect("zip manifest");
     zw.add_file("tables/dose.csv", table_csv.to_vec()).expect("zip table");
@@ -503,7 +503,7 @@ fn open_file_supports_csv_tsv_pzfx_and_prism_containers() {
         first_text_json(&call_tool_rpc(&mut state, 5, "open_file", json!({ "path": prism_file.display().to_string() })).expect("open prism"))
             .expect("prism json");
     assert_eq!(prism_res["format"], json!("prism"));
-    assert_eq!(prism_res["title"], json!("Cleanroom Prism Archive"));
+    assert_eq!(prism_res["title"], json!("Cleanroom External Archive"));
 }
 
 fn run_ndjson_batch(state: &mut McpServerState, requests: &[Value]) -> Result<Vec<Value>, String> {

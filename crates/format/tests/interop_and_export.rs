@@ -130,7 +130,7 @@ fn pzfx_importer_covers_all_eight_table_types_exclusions_and_info_constants() {
 fn prism_zip_importer_reads_csv_json_and_warns_on_unknown_binary_chunks() {
     let mut writer = ZipWriter::new();
     let manifest = serde_json::json!({
-        "title": "Prism Container Assay",
+        "title": "External Container Assay",
         "sheets": [
             {
                 "id": "sheet-xy",
@@ -160,7 +160,7 @@ fn prism_zip_importer_reads_csv_json_and_warns_on_unknown_binary_chunks() {
 
     let zip_bytes = writer.finish().unwrap();
     let report = import_prism_bytes(&zip_bytes).unwrap();
-    assert_eq!(report.document.title, "Prism Container Assay");
+    assert_eq!(report.document.title, "External Container Assay");
     assert_eq!(report.document.info_sheets.len(), 1);
     assert_eq!(report.document.info_sheets[0].get_constant("Km").unwrap().value.as_finite_f64(), Some(12.5));
     assert_eq!(report.document.data_sheets.len(), 1);

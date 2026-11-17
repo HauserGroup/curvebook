@@ -10,7 +10,7 @@
 - [x] **Grouped Graphs:** Interleaved vs. Separated bars (`Column = Color/Legend`, `Row = X-Axis Cluster`, configurable `Row titles` / `Column titles` categorical axis ticks), stacked bars, grouped scatter/beeswarm + bars, grouped box-and-whisker, grouped violin, superimposed interaction symbols + connecting lines
 - [x] **Contingency & Parts of Whole:** Interleaved/stacked count & percentage bars, $100\%$ stacked fraction bar, ring/donut, pie, and $10 \times 10$ unit/waffle grid
 - [x] **Survival Graphs:** Kaplan–Meier staircase curve, censored tick marks, shaded/dashed Greenwood $95\%$ CI envelope, and axis-aligned **Number at Risk** table
-- [x] **Multiple Variables Graphs (Prism 11.1 parity):** Five-channel bubble/multivariate scatter (`X`, `Y`, `Color` discrete/continuous ramp, `Size` continuous/categorical, point `Label` text) with non-modal `Apply`, group convex hulls & confidence ellipses, plus **categorical $\times$ continuous GDOs** (bars, box-and-whisker, violin, column scatter, summary connecting lines) with independent graph-level categorical ordering
+- [x] **Multiple Variables Graphs:** Five-channel bubble/multivariate scatter (`X`, `Y`, `Color` discrete/continuous ramp, `Size` continuous/categorical, point `Label` text) with non-modal `Apply`, group convex hulls & confidence ellipses, plus **categorical $\times$ continuous GDOs** (bars, box-and-whisker, violin, column scatter, summary connecting lines) with independent graph-level categorical ordering
 - [x] **Diagnostic & Specialized:** Grouped & correlation heatmaps (with colorbar), Volcano plot ($-\log_{10} p$ / $-\log_{10} q$ vs. effect), Bland–Altman plot, ROC curve, and Forest / parameter-CI plot
 
 ## Axes, Nonlinear Scales & Framing

@@ -11,7 +11,7 @@
 - [x] Differential weighting: unweighted, $1/Y$, $1/Y^2$, $1/|Y|^k$, $1/X$, $1/X^2$, $1/\text{SD}^2$, and IRLS Poisson deviance regression
 - [x] Lorentzian / Cauchy ($t_1$) robust nonlinear regression *(uses OLS initial starting pass before Cauchy IRLS)*
 - [x] Automatic ROUT outlier identification & exclusion during nonlinear regression ($Q$ FDR threshold)
-- [x] Unified nonlinear regression directly from `MultipleVariables` tables across multi-factor combinations (Prism 11.0/11.1) *(`MultivarExtractionSpec` supports explicit `x_columns`, `y_column`, and `group_columns` for single and Cartesian multi-factor subgroup splitting)*
+- [x] Unified nonlinear regression directly from `MultipleVariables` tables across multi-factor combinations *(`MultivarExtractionSpec` supports explicit `x_columns`, `y_column`, and `group_columns` for single and Cartesian multi-factor subgroup splitting)*
 
 ## Parameter Constraints, Global Fitting & Confidence Intervals
 - [x] Fixed constants, data-set column constants, and parameters hooked to Info/Result constants (with cycle guard) *(`ParameterScope::{Constant, PerDatasetConstant, ColumnTitleConstant}` and `HookedConstant(HookSource)` verified end-to-end with cycle detection)*

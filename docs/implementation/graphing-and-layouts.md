@@ -2,12 +2,10 @@
 
 Governing specification for `crates/palette` (`L0`), `crates/text` (`L2`), `crates/chart` (`L2`), `crates/render` (`L3`), `crates/svg` (`L3`), `crates/pdf` (`L3`), and canvas tools in `crates/tools` (`L4`). Parity checklist: [`graphing-parity.md`](../graphing-parity.md) and [`file-format-parity.md`](../file-format-parity.md).
 
-Public behavioural references:
-- [Graphs & graph families overview](https://www.graphpad.com/guides/prism/latest/user-guide/making_graphs.htm)
-- [Axes, discontinuous segments & nonlinear scales](https://www.graphpad.com/guides/prism/latest/user-guide/axes.htm)
-- [Pairwise comparisons on graphs (asterisks & P values)](https://www.graphpad.com/guides/prism/latest/user-guide/adding_pairwise_comparisons.htm)
-- [Page layouts & publication figure export](https://www.graphpad.com/guides/prism/latest/user-guide/layouts.htm)
-- [Prism 11.1 release notes (Multiple Variables categorical graphs, dashed error bars, level ordering)](https://www.graphpad.com/updates/prism-11-1-0-release-notes)
+Design, typography, and color-vision literature references:
+- **Grammar & statistical graphics:** Wilkinson (2005) *The Grammar of Graphics* (2nd ed., Springer); Cleveland (1994) *The Elements of Graphing Data*; Tufte (2001) *The Visual Display of Quantitative Information*.
+- **Colorblind-safe palettes & CVD simulation:** Okabe & Ito (2008) *Color Universal Design*; Tol (2021) SRON Technical Note SRON/EPS/TN/09-002; Machado, Oliveira & Fernandes (2009) *IEEE Trans. Vis. Comput. Graph.* 15(6):1291–1298 (`10.1109/TVCG.2009.113`).
+- **Scene compilation & export crates:** `crates/chart` (`ChartScene`), `crates/text` (`RichText`), `crates/svg`, `crates/pdf` (`%PDF-1.7` / `1.4`), `crates/render` (`PNG`/`TIFF`/ECMA-234 `.emf`).
 
 ---
 
@@ -42,7 +40,7 @@ Creating a new `DataSheet` automatically provisions a paired `GraphSheet` (`init
    - Interleaved/stacked count or percentage bars, $100\%$ stacked fraction bar, pie, ring/donut (with center total callout), and $10 \times 10$ unit/waffle grid.
 4. **Survival Graphs:**
    - Kaplan–Meier right-continuous step curves, vertical/cross censored-observation tick marks, shaded/dashed asymmetrical Greenwood $95\%$ CI bands, and an axis-aligned **Number at Risk** table rendered directly beneath major X-axis ticks.
-5. **Multiple Variables & Diagnostic Graphs (Prism 11.1 scope):**
+5. **Multiple Variables & Diagnostic Graphs:**
    - **Five-channel Multivariate & Bubble Scatter:** Maps up to five independent columns simultaneously to `X`, `Y`, `Color` (discrete categorical palette or continuous perceptual ramp + colorbar), `Size` (continuous area scaling or ordered discrete step radii), and point `Label` text, with non-modal `Apply` live preview, optional group **convex hulls**, and **confidence ellipses**,
    - **Categorical $\times$ continuous GDOs directly from `MultipleVariables` sheets** (bars, box-and-whisker, violin, column scatter, summary symbols & connecting lines) honoring independent graph-level categorical ordering,
    - **Heatmaps** (grouped cell means/medians or correlation matrix $r/\rho$ with continuous perceptual colorbar and optional cell value labels),
