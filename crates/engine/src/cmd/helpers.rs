@@ -1,12 +1,13 @@
 //! Shared sheet lookup, table geometry, color, base64, and export helpers for engine commands.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
 use curvebook_chart::ChartScene;
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, GraphAnnotation, GraphSheet, GraphSpec, HookSource, InfoSheet, LayoutItem, LayoutSheet,
-    LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype, TransformAnalysisSpec,
+    AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, HookSource, InfoSheet, LayoutItem,
+    LayoutSheet, LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype,
+    TransformAnalysisSpec,
 };
 use curvebook_palette::Rgba8;
 use serde_json::json;
@@ -591,6 +592,239 @@ pub(super) fn remap_layout_spec_references(spec: &mut LayoutSpec, id_map: &HashM
             LayoutItem::LiveTable { source_sheet_id, .. } => remap_sheet_id(source_sheet_id, id_map),
             LayoutItem::TextCallout { markdown, .. } => remap_inline_hook_tokens(markdown, id_map),
         }
+    }
+}
+
+/// Ensure `data_id` is listed in `info_id.linked_data_sheets` without duplicating entries.
+pub(super) fn link_data_sheet_to_info(doc: &mut ProjectDocument, info_id: &SheetId, data_id: &SheetId) {
+    if let Some(info) = doc.info_sheet_mut(info_id)
+        && !info.linked_data_sheets.contains(data_id)
+    {
+        info.linked_data_sheets.push(data_id.clone());
+    }
+}
+
+/// Prune `deleted` sheet IDs from all `InfoSheet.linked_data_sheets` lists and ensure every
+/// [`DataSheet`] with `info_sheet_id = Some(iid)` is recorded in `iid.linked_data_sheets`.
+pub(super) fn sync_info_linked_data_sheets(doc: &mut ProjectDocument, deleted: &HashSet<SheetId>) {
+    if !deleted.is_empty() {
+        for info in &mut doc.info_sheets {
+            info.linked_data_sheets.retain(|id| !deleted.contains(id));
+        }
+    }
+    let pairs: Vec<(SheetId, SheetId)> =
+        doc.data_sheets.iter().filter_map(|ds| ds.info_sheet_id.as_ref().map(|iid| (iid.clone(), ds.id.clone()))).collect();
+    for (iid, ds_id) in pairs {
+        link_data_sheet_to_info(doc, &iid, &ds_id);
+    }
+}
+
+fn find_backing_data_sheet<'a>(data_sheets: &'a [DataSheet], result_sheets: &'a [ResultSheet], id: &SheetId) -> Option<&'a DataSheet> {
+    data_sheets.iter().find(|d| &d.id == id).or_else(|| result_sheets.iter().find(|r| &r.id == id).and_then(|r| r.analyzable_data.as_ref()))
+}
+
+fn point_override_bounds_parts(
+    data_sheets: &[DataSheet],
+    result_sheets: &[ResultSheet],
+    spec: &GraphSpec,
+    series_index: usize,
+) -> Result<(usize, usize), EngineError> {
+    let result_row_upper = |res: &ResultSheet| -> usize {
+        let mut cursor = &res.analysis.source_sheet_id;
+        let mut origin_rows = 0usize;
+        let mut seen = Vec::new();
+        while !seen.contains(&cursor) {
+            seen.push(cursor);
+            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, cursor) {
+                origin_rows = ds.archetype.row_count();
+                break;
+            }
+            if let Some(upstream) = result_sheets.iter().find(|r| &r.id == cursor) {
+                cursor = &upstream.analysis.source_sheet_id;
+            } else {
+                break;
+            }
+        }
+        let tab_rows = res.tabs.iter().map(|t| t.rows.len()).max().unwrap_or(0);
+        origin_rows.max(res.pairwise_comparisons.len()).max(tab_rows)
+    };
+
+    let result_col_and_subcols = |res: &ResultSheet, col: usize| -> (usize, usize) {
+        let mut cursor = &res.analysis.source_sheet_id;
+        let mut seen = Vec::new();
+        while !seen.contains(&cursor) {
+            seen.push(cursor);
+            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, cursor) {
+                return (ds.archetype.column_count().max(1), column_subcolumn_count(&ds.archetype, col));
+            }
+            if let Some(upstream) = result_sheets.iter().find(|r| &r.id == cursor) {
+                cursor = &upstream.analysis.source_sheet_id;
+            } else {
+                break;
+            }
+        }
+        (1, 1)
+    };
+
+    if !spec.series.is_empty() {
+        let Some(series) = spec.series.iter().find(|s| s.data_set_index == series_index) else {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("`series_index` {series_index} is out of bounds for this graph's plotted series"),
+            ));
+        };
+        if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &series.source_sheet_id) {
+            return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series.data_set_index)));
+        }
+        if let Some(res) = result_sheets.iter().find(|r| r.id == series.source_sheet_id) {
+            let (_cols, subcols) = result_col_and_subcols(res, series.data_set_index);
+            return Ok((result_row_upper(res), subcols));
+        }
+        return Err(EngineError::with_code(
+            ErrorCode::NotFound,
+            format!("source sheet `{}` for series `{series_index}` was not found", series.source_sheet_id),
+        ));
+    }
+
+    match spec.kind {
+        GraphKind::MultipleVariables => {
+            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+                if series_index >= ds.archetype.column_count() {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("`series_index` {series_index} exceeds column count {}", ds.archetype.column_count()),
+                    ));
+                }
+                return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series_index)));
+            }
+        }
+        GraphKind::Diagnostic(_) => {
+            if let Some(ds) = find_backing_data_sheet(data_sheets, result_sheets, &spec.primary_source_sheet_id) {
+                if series_index >= ds.archetype.column_count().max(1) {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("`series_index` {series_index} exceeds column count {}", ds.archetype.column_count()),
+                    ));
+                }
+                return Ok((ds.archetype.row_count(), column_subcolumn_count(&ds.archetype, series_index)));
+            }
+            if let Some(res) = result_sheets.iter().find(|r| r.id == spec.primary_source_sheet_id) {
+                let (cols, subcols) = result_col_and_subcols(res, series_index);
+                if series_index >= cols {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("`series_index` {series_index} exceeds diagnostic source column count {cols}"),
+                    ));
+                }
+                return Ok((result_row_upper(res), subcols));
+            }
+        }
+        _ => {}
+    }
+
+    Err(EngineError::with_code(ErrorCode::BadInput, format!("`series_index` {series_index} is out of bounds: graph has no matching plotted series")))
+}
+
+/// Validate `(series_index, point_index, subcol)` against the target graph's plotted series and table bounds.
+pub(super) fn validate_point_override_in_bounds(
+    doc: &ProjectDocument,
+    spec: &GraphSpec,
+    series_index: usize,
+    point_index: usize,
+    subcol: Option<usize>,
+) -> Result<(), EngineError> {
+    let (row_count, subcol_count) = point_override_bounds_parts(&doc.data_sheets, &doc.result_sheets, spec, series_index)?;
+    if point_index >= row_count {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("`point_index` {point_index} is out of bounds for series `{series_index}` (row_count={row_count})"),
+        ));
+    }
+    if let Some(sc) = subcol
+        && sc >= subcol_count
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("`subcol` {sc} is out of bounds for series `{series_index}` (subcol_count={subcol_count})"),
+        ));
+    }
+    Ok(())
+}
+
+/// Remove any `PointStyleOverride` entries whose `(series_index, point_index, subcol)` is now out of bounds.
+pub(super) fn prune_out_of_bounds_point_overrides(doc: &mut ProjectDocument) {
+    let ProjectDocument { data_sheets, result_sheets, graph_sheets, .. } = doc;
+    for gs in graph_sheets {
+        if gs.spec.point_overrides.is_empty() {
+            continue;
+        }
+        let spec_snapshot = gs.spec.clone();
+        gs.spec.point_overrides.retain(|ov| {
+            let Ok((row_count, subcol_count)) = point_override_bounds_parts(data_sheets, result_sheets, &spec_snapshot, ov.series_index) else {
+                return false;
+            };
+            ov.point_index < row_count && ov.subcol.is_none_or(|sc| sc < subcol_count)
+        });
+    }
+}
+
+fn active_series_row_len(ds: &DataSheet, col: usize) -> usize {
+    let rows = ds.archetype.row_count();
+    let subcols = column_subcolumn_count(&ds.archetype, col);
+    for r in (0..rows).rev() {
+        let has_y = (0..subcols).any(|s| ds.archetype.data_cell(curvebook_doc::CellCoord::new(r, col, s)).is_some_and(|c| !c.is_empty()));
+        let has_x = match &ds.archetype {
+            TableArchetype::Xy(xy) => match &xy.x_mode {
+                curvebook_doc::XColumnMode::GeneratedSequence { .. } => true,
+                _ => xy.x_cells.get(r).is_some_and(|row| row.iter().any(|c| !c.is_empty())),
+            },
+            TableArchetype::Survival(sv) => sv.times.get(r).is_some_and(|c| !c.is_empty()),
+            _ => true,
+        };
+        if has_y && has_x {
+            return r + 1;
+        }
+    }
+    0
+}
+
+/// Record the active non-empty trailing length of each dataset column in `ds` prior to a cell edit.
+pub(super) fn snapshot_active_series_lengths(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
+    let Some(ds) = doc.data_sheet(sheet_id) else {
+        return Vec::new();
+    };
+    (0..ds.archetype.column_count()).map(|col| active_series_row_len(ds, col)).collect()
+}
+
+/// Prune point overrides targeting trailing rows of `sheet_id` when an edit shortened active data.
+pub(super) fn prune_shortened_series_overrides(doc: &mut ProjectDocument, sheet_id: &SheetId, before_active: &[usize]) {
+    let Some(ds) = doc.data_sheet(sheet_id) else {
+        return;
+    };
+    let after_active: Vec<usize> = (0..ds.archetype.column_count()).map(|col| active_series_row_len(ds, col)).collect();
+    let mut shortened_limits: HashMap<usize, usize> = HashMap::new();
+    for (col, &before_len) in before_active.iter().enumerate() {
+        let after_len = after_active.get(col).copied().unwrap_or(0);
+        if after_len < before_len {
+            shortened_limits.insert(col, after_len);
+        }
+    }
+    if shortened_limits.is_empty() {
+        return;
+    }
+    for gs in &mut doc.graph_sheets {
+        if gs.spec.point_overrides.is_empty() {
+            continue;
+        }
+        let series_sources: HashMap<usize, &SheetId> = gs.spec.series.iter().map(|s| (s.data_set_index, &s.source_sheet_id)).collect();
+        let primary_is_sheet = &gs.spec.primary_source_sheet_id == sheet_id;
+        gs.spec.point_overrides.retain(|ov| {
+            let targets_sheet = series_sources.get(&ov.series_index).map_or(primary_is_sheet && gs.spec.series.is_empty(), |src| *src == sheet_id);
+            if !targets_sheet {
+                return true;
+            }
+            shortened_limits.get(&ov.series_index).is_none_or(|&limit| ov.point_index < limit)
+        });
     }
 }
 

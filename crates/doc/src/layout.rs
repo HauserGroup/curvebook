@@ -298,11 +298,45 @@ impl LayoutSpec {
         None
     }
 
-    /// Validate item budget and float finiteness for this layout specification.
+    /// Validate item budget, float finiteness, and positive page/item geometry for this layout specification.
     pub fn validate(&self) -> Result<(), DocError> {
         self.validate_item_count()?;
         if let Some(reason) = self.first_non_finite_float() {
             return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason });
+        }
+        let geom_err = |reason: &'static str| DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason };
+        if self.width <= 0.0 || self.height <= 0.0 {
+            return Err(geom_err("layout width and height must be finite and > 0"));
+        }
+        if let Some((rows, cols)) = self.grid_template
+            && (rows == 0 || cols == 0)
+        {
+            return Err(geom_err("layout grid_template rows and columns must be >= 1"));
+        }
+        for item in &self.items {
+            match item {
+                LayoutItem::LiveGraph { bounds_pt, scale_percent, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(geom_err("layout item bounds width and height must be finite and > 0"));
+                    }
+                    if *scale_percent <= 0.0 {
+                        return Err(geom_err("layout live_graph scale_percent must be finite and > 0"));
+                    }
+                }
+                LayoutItem::LiveTable { bounds_pt, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(geom_err("layout item bounds width and height must be finite and > 0"));
+                    }
+                }
+                LayoutItem::TextCallout { bounds_pt, font_size_pt, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(geom_err("layout item bounds width and height must be finite and > 0"));
+                    }
+                    if *font_size_pt <= 0.0 {
+                        return Err(geom_err("layout text_callout font_size_pt must be finite and > 0"));
+                    }
+                }
+            }
         }
         Ok(())
     }

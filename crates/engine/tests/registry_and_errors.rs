@@ -172,6 +172,7 @@ fn bad_params_emit_structured_bad_input_with_rfc6901_pointer() {
 fn expected_doc_code(err: &DocError) -> ErrorCode {
     match err {
         DocError::EmptyIdentifier
+        | DocError::InvalidIdentifier { .. }
         | DocError::InvalidSubcolumnCount { .. }
         | DocError::IncompatibleSubcolumnMode { .. }
         | DocError::CellOutOfBounds { .. }

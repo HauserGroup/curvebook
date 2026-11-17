@@ -2390,11 +2390,8 @@ fn apply_locale_chars(raw: &str, policy: &LocaleNumberPolicy) -> String {
 /// Resolve `{{info:...}}` and `{{result:...}}` template hooks using `doc`.
 #[must_use]
 pub fn resolve_template_hooks(template: &str, doc: &ProjectDocument, primary_data_id: Option<&SheetId>) -> String {
-    let paired_info = primary_data_id
-        .and_then(|id| doc.data_sheet(id).or_else(|| doc.result_sheet(id).and_then(|res| res.analyzable_data.as_ref())))
-        .and_then(|ds| ds.info_sheet_id.as_ref())
-        .and_then(|info_id| doc.info_sheet(info_id))
-        .or_else(|| doc.info_sheets.first());
+    let paired_info =
+        primary_data_id.and_then(|id| doc.paired_info_sheet_id(id)).and_then(|info_id| doc.info_sheet(info_id)).or_else(|| doc.info_sheets.first());
 
     expand_template_hooks(template, |token| resolve_single_hook(token, doc, paired_info))
 }

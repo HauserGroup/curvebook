@@ -66,7 +66,8 @@ struct SetConstantParams {
     #[serde(alias = "key")]
     name: String,
     value: Value,
-    units: Option<String>,
+    #[serde(default, deserialize_with = "super::analysis::de_present_opt")]
+    units: Option<Option<String>>,
     kind: Option<String>,
 }
 
@@ -129,11 +130,11 @@ fn run_info_set_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
         return Err(EngineError::with_code(ErrorCode::BadInput, "constant `name` must not be empty"));
     }
     let constant_value = parse_constant_value(parsed.value, parsed.kind.as_deref())?;
-    let units = parsed.units.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty());
+    let units = parsed.units.map(|u_opt| u_opt.map(|u| u.trim().to_owned()).filter(|u| !u.is_empty()));
 
     {
         let info = require_info_sheet_mut(&mut ctx.session.doc, &info_id)?;
-        info.set_constant(name.clone(), constant_value, units)?;
+        info.upsert_constant(name.clone(), constant_value, units)?;
     }
 
     let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;

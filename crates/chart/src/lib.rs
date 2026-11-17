@@ -15,7 +15,6 @@ pub mod xy;
 
 use curvebook_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocument};
 use curvebook_palette::{MarkerStyle, Rgba8};
-use curvebook_text::parse_markup;
 pub use scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
     RectPt, ScenePrimitive, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
@@ -150,8 +149,9 @@ pub fn compile_graph(graph: &GraphSheet, doc: &ProjectDocument) -> Result<ChartS
     }
 
     if !graph.spec.title.trim().is_empty() {
+        let info_id = xy::primary_info_sheet_id(doc, &graph.spec.primary_source_sheet_id);
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
-            rich: parse_markup(&graph.spec.title),
+            rich: xy::expand_doc_text(&graph.spec.title, doc, info_id),
             anchor_pt: PointPt::new(scene.width_pt * 0.5, 18.0),
             anchor: TextAnchor::Middle,
             font_size_pt: 12.0,

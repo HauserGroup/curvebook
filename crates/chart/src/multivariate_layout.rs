@@ -67,7 +67,7 @@ pub fn compile_multivariate_or_diagnostic_graph(graph: &GraphSheet, doc: &Projec
         }
     }?;
 
-    draw_graph_annotations(scene, &graph.spec.annotations, doc);
+    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id));
     Ok(())
 }
 
@@ -3674,7 +3674,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                 }
             }
             LayoutItem::TextCallout { markdown, bounds_pt, font_size_pt, .. } => {
-                let expanded = resolve_graph_text(markdown, doc);
+                let expanded = resolve_graph_text(markdown, doc, None);
                 let bounds = RectPt::from(*bounds_pt);
                 let fs = if font_size_pt.is_finite() && *font_size_pt > 0.0 { *font_size_pt } else { 10.0 };
                 let line_h = fs * 1.3;

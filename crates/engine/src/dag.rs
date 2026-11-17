@@ -327,7 +327,8 @@ pub(crate) fn validate_inline_hook_refs(doc: &ProjectDocument, sheet_id: &SheetI
 
 /// Validate that candidate `spec` on `graph_id` introduces no self-reference or dependency cycle.
 pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &SheetId, spec: &curvebook_doc::GraphSpec) -> Result<(), EngineError> {
-    let default_info = doc.info_sheets.first().map(|s| s.id.clone());
+    let default_info = doc.info_sheets.first().map(|s| &s.id);
+    let paired_info = doc.paired_info_sheet_id(&spec.primary_source_sheet_id).or(default_info);
     let mut deps = Vec::new();
     deps.push(spec.primary_source_sheet_id.clone());
     for series in &spec.series {
@@ -350,7 +351,7 @@ pub(crate) fn validate_graph_spec_acyclic(doc: &ProjectDocument, graph_id: &Shee
         }
     }
     for hook in spec.inline_hooks() {
-        push_spec_hook_dep(&mut deps, &hook, default_info.as_ref());
+        push_spec_hook_dep(&mut deps, &hook, paired_info);
     }
     validate_spec_deps_acyclic(doc, graph_id, deps, "graph")
 }

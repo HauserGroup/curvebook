@@ -16,7 +16,9 @@ use serde_json::{Map, Value, json};
 
 use super::analysis::{de_present_opt, merge_json_struct, strip_keys};
 use super::export::{compile_scene_for_sheet, de_opt_u16, de_opt_usize};
-use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet};
+use super::helpers::{
+    next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet, validate_point_override_in_bounds,
+};
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
@@ -1212,6 +1214,13 @@ fn run_graph_format_selected_points(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
             "graph.formatSelectedPoints requires at least one style attribute (`color`, `symbol`, `size_pt`, `border_width_pt`, `fill_color`, `fill_mode`, or `hidden`)",
         ));
     }
+    {
+        let doc = ctx.session.document();
+        let current_spec = &require_graph_sheet(doc, &id)?.spec;
+        for (series_index, point_index, subcol, _) in &entries {
+            validate_point_override_in_bounds(doc, current_spec, *series_index, *point_index, *subcol)?;
+        }
+    }
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
     if mode == "clear" {
@@ -1372,6 +1381,14 @@ fn run_graph_set_spec(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, E
     if let Some(ref title) = params.title {
         curvebook_doc::validate_title(title)?;
     }
+    let explicit_point_overrides = patch.get("point_overrides").is_some();
+    if explicit_point_overrides {
+        for ov in &new_spec.point_overrides {
+            validate_point_override_in_bounds(ctx.session.document(), &new_spec, ov.series_index, ov.point_index, ov.subcol)?;
+        }
+    } else if new_spec.series != current_spec.series {
+        reconcile_point_overrides_on_series_change(ctx.session.document(), &current_spec.series, &mut new_spec);
+    }
     validate_graph_spec_in_doc(ctx.session.document(), &id, &new_spec)?;
 
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1496,11 +1513,30 @@ fn run_graph_set_additional_ticks(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comma
     ))
 }
 
+fn reconcile_point_overrides_on_series_change(doc: &ProjectDocument, old_series: &[SeriesSpec], spec: &mut GraphSpec) {
+    if spec.point_overrides.is_empty() || old_series == spec.series.as_slice() {
+        return;
+    }
+    let retained_series = spec.series.clone();
+    let spec_snapshot = spec.clone();
+    spec.point_overrides.retain(|ov| {
+        let Some(prev) = old_series.iter().find(|s| s.data_set_index == ov.series_index) else {
+            return false;
+        };
+        let still_present = retained_series.iter().any(|s| s.source_sheet_id == prev.source_sheet_id && s.data_set_index == prev.data_set_index);
+        if !still_present {
+            return false;
+        }
+        validate_point_override_in_bounds(doc, &spec_snapshot, ov.series_index, ov.point_index, ov.subcol).is_ok()
+    });
+}
+
 fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_set_series();
     let params: GraphSetSeriesParams = parse_params(&schema, raw)?;
     let id = parse_sheet_id(&params.sheet_id)?;
     let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
+    let old_series = spec.series.clone();
 
     if let Some(ref series_list) = params.series {
         let mut updated_vec = Vec::with_capacity(series_list.len());
@@ -1522,6 +1558,7 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         spec.multivariate = Some(parse_multivariate_encoding(mv_val, spec.multivariate.as_ref())?);
     }
 
+    reconcile_point_overrides_on_series_change(ctx.session.document(), &old_series, &mut spec);
     validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
     let count = spec.series.len();
     let graph = require_graph_sheet_mut(&mut ctx.session.doc, &id)?;
@@ -1589,6 +1626,19 @@ fn run_graph_set_regression_overlay(ctx: &mut Ctx<'_>, raw: Value) -> Result<Com
     ))
 }
 
+fn upsert_comparison_bracket(comparisons: &mut Vec<PairwiseBracketSpec>, candidate: PairwiseBracketSpec) -> (usize, usize) {
+    let key = (candidate.group_a.min(candidate.group_b), candidate.group_a.max(candidate.group_b));
+    if let Some(existing) =
+        comparisons.iter_mut().find(|b| b.result_sheet_id == candidate.result_sheet_id && (b.group_a.min(b.group_b), b.group_a.max(b.group_b)) == key)
+    {
+        *existing = candidate;
+        (0, 1)
+    } else {
+        comparisons.push(candidate);
+        (1, 0)
+    }
+}
+
 fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let schema = schema_graph_add_comparison_brackets();
     let params: GraphAddComparisonBracketsParams = parse_params(&schema, raw)?;
@@ -1608,42 +1658,65 @@ fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
     let font_size_pt = params.font_size_pt.unwrap_or(8.5);
     let bracket_step_pt = params.bracket_step_pt.unwrap_or(12.0);
 
-    let added = if let (Some(ga_val), Some(gb_val)) = (params.group_a.as_ref(), params.group_b.as_ref()) {
-        let ga = resolve_group_index(ga_val, &comparisons)?;
-        let gb = resolve_group_index(gb_val, &comparisons)?;
-        spec.comparisons.push(PairwiseBracketSpec {
-            result_sheet_id: res_id,
-            group_a: ga,
-            group_b: gb,
-            style,
-            label_mode,
-            hide_if_non_significant,
-            stroke_width_pt,
-            font_size_pt,
-            bracket_step_pt,
-        });
-        1_usize
-    } else {
-        let significant_only = params.significant_only.unwrap_or(false);
-        let mut count = 0_usize;
-        for cmp in comparisons {
-            if significant_only && !cmp.significant {
-                continue;
+    let (added, updated) = match (params.group_a.as_ref(), params.group_b.as_ref()) {
+        (Some(ga_val), Some(gb_val)) => {
+            let ga = resolve_group_index(ga_val, &comparisons)?;
+            let gb = resolve_group_index(gb_val, &comparisons)?;
+            if ga == gb {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("comparison bracket requires two distinct groups, got index {ga} for both"),
+                ));
             }
-            spec.comparisons.push(PairwiseBracketSpec {
-                result_sheet_id: res_id.clone(),
-                group_a: cmp.group_a,
-                group_b: cmp.group_b,
-                style,
-                label_mode: label_mode.clone(),
-                hide_if_non_significant,
-                stroke_width_pt,
-                font_size_pt,
-                bracket_step_pt,
-            });
-            count += 1;
+            upsert_comparison_bracket(
+                &mut spec.comparisons,
+                PairwiseBracketSpec {
+                    result_sheet_id: res_id,
+                    group_a: ga,
+                    group_b: gb,
+                    style,
+                    label_mode,
+                    hide_if_non_significant,
+                    stroke_width_pt,
+                    font_size_pt,
+                    bracket_step_pt,
+                },
+            )
         }
-        count
+        (Some(_), None) | (None, Some(_)) => {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                "both `group_a` and `group_b` must be provided together to add a single comparison bracket",
+            )
+            .with_remediation("Pass both `group_a` and `group_b` for a single pair, or omit both to add all comparisons."));
+        }
+        (None, None) => {
+            let significant_only = params.significant_only.unwrap_or(false);
+            let mut added = 0_usize;
+            let mut updated = 0_usize;
+            for cmp in comparisons {
+                if significant_only && !cmp.significant {
+                    continue;
+                }
+                let (da, du) = upsert_comparison_bracket(
+                    &mut spec.comparisons,
+                    PairwiseBracketSpec {
+                        result_sheet_id: res_id.clone(),
+                        group_a: cmp.group_a,
+                        group_b: cmp.group_b,
+                        style,
+                        label_mode: label_mode.clone(),
+                        hide_if_non_significant,
+                        stroke_width_pt,
+                        font_size_pt,
+                        bracket_step_pt,
+                    },
+                );
+                added += da;
+                updated += du;
+            }
+            (added, updated)
+        }
     };
 
     validate_graph_spec_in_doc(ctx.session.document(), &id, &spec)?;
@@ -1654,8 +1727,8 @@ fn run_graph_add_comparison_brackets(ctx: &mut Ctx<'_>, raw: Value) -> Result<Co
 
     Ok(CommandOutcome::mutated(
         "graph.addComparisonBrackets",
-        format!("added {added} comparison bracket(s) to `{id}`"),
-        json!({ "sheet_id": id.as_str(), "added": added, "total_brackets": total }),
+        format!("added {added} and updated {updated} comparison bracket(s) on `{id}`"),
+        json!({ "sheet_id": id.as_str(), "added": added, "updated": updated, "total_brackets": total }),
     ))
 }
 

@@ -113,6 +113,11 @@ impl From<DocError> for EngineError {
         let msg = err.to_string();
         let (code, details, remediation) = match err {
             DocError::EmptyIdentifier => (ErrorCode::BadInput, None, Some("Provide a non-empty identifier.")),
+            DocError::InvalidIdentifier { reason } => (
+                ErrorCode::BadInput,
+                Some(json!({ "reason": reason })),
+                Some("Provide a valid sheet identifier up to 256 UTF-8 bytes without whitespace, control characters, or hook delimiters."),
+            ),
             DocError::TooManyRows { count, max } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Reduce row count below the project maximum."))
             }

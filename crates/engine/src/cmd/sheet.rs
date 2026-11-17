@@ -15,7 +15,8 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{
-    ensure_sheet_not_frozen, parse_sheet_id, require_data_sheet_mut, require_result_sheet, select_result_tab, sheet_id_exists,
+    ensure_sheet_not_frozen, link_data_sheet_to_info, parse_sheet_id, require_data_sheet_mut, require_result_sheet, select_result_tab,
+    sheet_id_exists, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
@@ -527,6 +528,9 @@ fn run_sheet_create_data(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutc
         ctx.session.doc.add_info_sheet(info)?;
     }
     ctx.session.doc.add_data_sheet(sheet)?;
+    if let Some(ref iid) = attached_info_id {
+        link_data_sheet_to_info(&mut ctx.session.doc, iid, &id);
+    }
     let created_graph_id = if let Some(graph) = new_graph {
         let gid = graph.id.clone();
         ctx.session.doc.add_graph_sheet(graph)?;
@@ -779,7 +783,11 @@ fn collect_downstream_for_delete(doc: &ProjectDocument, root_id: &SheetId, inclu
             {
                 let shared_elsewhere =
                     doc.data_sheets.iter().any(|other| !to_delete.contains(&other.id) && other.info_sheet_id.as_ref() == Some(iid))
-                        || doc.result_sheets.iter().any(|rs| !to_delete.contains(&rs.id) && result_hooks_info_sheet(doc, rs, iid));
+                        || doc.result_sheets.iter().any(|rs| {
+                            !to_delete.contains(&rs.id) && (result_hooks_info_sheet(doc, rs, iid) || doc.upstream_dependencies(&rs.id).contains(iid))
+                        })
+                        || doc.graph_sheets.iter().any(|gs| !to_delete.contains(&gs.id) && graph_references_sheet(doc, gs, iid))
+                        || doc.layout_sheets.iter().any(|ls| !to_delete.contains(&ls.id) && layout_references_sheet(doc, ls, iid));
                 if !shared_elsewhere && !to_delete.contains(iid) && iid != root_id {
                     to_delete.insert(iid.clone());
                 }
@@ -861,6 +869,7 @@ fn prune_deleted_sheets(doc: &mut ProjectDocument, to_delete: &HashSet<SheetId>)
         }
         ds.linked_regions.retain(|r| r.spec.source.upstream_sheet_id().is_none_or(|up| !to_delete.contains(up)));
     }
+    sync_info_linked_data_sheets(doc, to_delete);
     for rs in &mut doc.result_sheets {
         if let AnalysisKind::PowerAnalysis(p) = &mut rs.analysis.kind
             && p.info_sheet_id.as_ref().is_some_and(|iid| to_delete.contains(iid))
@@ -976,7 +985,11 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
             validate_title(&title)?;
             copy.title = title;
             copy.frozen = parsed.frozen.unwrap_or(false);
+            let linked_info = copy.info_sheet_id.clone();
             ctx.session.doc.add_data_sheet(copy)?;
+            if let Some(ref iid) = linked_info {
+                link_data_sheet_to_info(&mut ctx.session.doc, iid, &new_id);
+            }
             let _ = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&new_id), false)?;
         }
         SheetSection::Info => {
@@ -987,6 +1000,7 @@ fn run_sheet_duplicate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcom
                 .cloned()
                 .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("info sheet `{}` not found", id.as_str())))?;
             copy.id = new_id.clone();
+            copy.linked_data_sheets.clear();
             let title = parsed.title.unwrap_or_else(|| format!("{} (Copy)", copy.title));
             validate_title(&title)?;
             copy.title = title;
@@ -1366,6 +1380,7 @@ fn clone_paired_info(
     let new_info_id = next_unique_id_with_reserved(doc, &candidate, reserved)?;
     reserved.insert(new_info_id.as_str().to_owned());
     cloned_info.id = new_info_id.clone();
+    cloned_info.linked_data_sheets = vec![cloned_ds.id.clone()];
     let info_title = format!("{} Info", cloned_ds.title);
     validate_title(&info_title)?;
     cloned_info.title = info_title;

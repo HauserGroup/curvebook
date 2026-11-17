@@ -12,7 +12,7 @@ use curvebook_format::{
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::helpers::{decode_base64, encode_base64, parse_sheet_id};
+use crate::cmd::helpers::{decode_base64, encode_base64, parse_sheet_id, prune_out_of_bounds_point_overrides};
 use crate::cmd::params::{
     bool_schema, empty_object_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases, parse_params, str_schema,
 };
@@ -38,6 +38,7 @@ pub(super) fn recalculate_with_links_under_policy(
 ) -> Result<RecalcSummary, EngineError> {
     let external_policy = include_external_links.then_some(policy);
     let (report, refreshed_links) = dag::recalculate_project_with_links_report(doc, external_policy)?;
+    prune_out_of_bounds_point_overrides(doc);
     Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
 }
 
@@ -50,6 +51,7 @@ pub(super) fn recalculate_dirty_with_links(
 ) -> Result<RecalcSummary, EngineError> {
     let external_policy = include_external_links.then_some(&ExternalPathPolicy::Unconstrained);
     let (report, refreshed_links) = dag::recalculate_dirty_with_links_report(doc, dirty_seeds, external_policy)?;
+    prune_out_of_bounds_point_overrides(doc);
     Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
 }
 
@@ -539,6 +541,69 @@ fn next_checkpoint_id(doc: &ProjectDocument) -> String {
     }
 }
 
+fn is_valid_iso8601_utc_timestamp(raw: &str) -> bool {
+    if let Some(secs) = raw.strip_prefix("unix:") {
+        return !secs.is_empty() && secs.bytes().all(|b| b.is_ascii_digit());
+    }
+    let bytes = raw.as_bytes();
+    if bytes.len() < 20 {
+        return false;
+    }
+    // Core calendar + time prefix: YYYY-MM-DDTHH:MM:SS (or 't')
+    if !(bytes[4] == b'-' && bytes[7] == b'-' && matches!(bytes[10], b'T' | b't') && bytes[13] == b':' && bytes[16] == b':') {
+        return false;
+    }
+    let parse_2 = |i: usize| -> Option<u32> {
+        let s = raw.get(i..i + 2)?;
+        if s.bytes().all(|b| b.is_ascii_digit()) { s.parse().ok() } else { None }
+    };
+    let Some(year_str) = raw.get(0..4).filter(|s| s.bytes().all(|b| b.is_ascii_digit())) else {
+        return false;
+    };
+    let Ok(year) = year_str.parse::<u32>() else {
+        return false;
+    };
+    let (Some(month), Some(day), Some(hour), Some(min), Some(sec)) = (parse_2(5), parse_2(8), parse_2(11), parse_2(14), parse_2(17)) else {
+        return false;
+    };
+    let is_leap = (year.is_multiple_of(4) && !year.is_multiple_of(100)) || year.is_multiple_of(400);
+    let max_day = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 => {
+            if is_leap {
+                29
+            } else {
+                28
+            }
+        }
+        _ => return false,
+    };
+    if !(1..=max_day).contains(&day) || hour > 23 || min > 59 || sec > 60 {
+        return false;
+    }
+    let mut rest = &raw[19..];
+    if let Some(after_dot) = rest.strip_prefix('.') {
+        let frac_len = after_dot.bytes().take_while(u8::is_ascii_digit).count();
+        if frac_len == 0 || frac_len > 9 {
+            return false;
+        }
+        rest = &after_dot[frac_len..];
+    }
+    if matches!(rest, "Z" | "z") {
+        return true;
+    }
+    if let Some(off) = rest.strip_prefix('+').or_else(|| rest.strip_prefix('-'))
+        && off.len() == 5
+        && off.as_bytes()[2] == b':'
+    {
+        let oh = off[0..2].bytes().all(|b| b.is_ascii_digit()).then(|| off[0..2].parse::<u32>().ok()).flatten();
+        let om = off[3..5].bytes().all(|b| b.is_ascii_digit()).then(|| off[3..5].parse::<u32>().ok()).flatten();
+        return matches!((oh, om), (Some(h), Some(m)) if h <= 23 && m <= 59);
+    }
+    false
+}
+
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 32;
 const MAX_TOTAL_CHECKPOINT_BYTES: usize = MAX_ARCHIVE_FILE_BYTES;
 
@@ -583,6 +648,13 @@ fn run_project_create_checkpoint(ctx: &mut Ctx<'_>, params: Value) -> Result<Com
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`timestamp_utc` cannot be empty"));
             }
             validate_title(trimmed)?;
+            if !is_valid_iso8601_utc_timestamp(trimmed) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("invalid `timestamp_utc` `{trimmed}`; expected ISO-8601 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`) or `unix:<seconds>`"),
+                )
+                .with_details(json!({ "pointer": "/timestamp_utc" })));
+            }
             trimmed.to_owned()
         }
         None => current_utc_timestamp(),

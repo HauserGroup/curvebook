@@ -5,7 +5,7 @@ use std::fmt;
 
 use curvebook_palette::Rgba8;
 
-use crate::error::DocError;
+use crate::error::{DocError, MAX_SHEET_ID_BYTES};
 
 /// Stable project-unique identifier for a `DataSheet`, `InfoSheet`, `ResultSheet`, `GraphSheet`,
 /// or `LayoutSheet`.
@@ -20,11 +20,20 @@ impl SheetId {
         Self(id.into())
     }
 
-    /// Construct a validated non-empty `SheetId`.
+    /// Construct a validated non-empty, hook-safe `SheetId`.
     pub fn try_new(id: impl Into<String>) -> Result<Self, DocError> {
         let s = id.into();
         if s.trim().is_empty() {
             return Err(DocError::EmptyIdentifier);
+        }
+        if s.len() > MAX_SHEET_ID_BYTES {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must be at most 256 UTF-8 bytes" });
+        }
+        if s.chars().any(|ch| ch.is_whitespace() || ch.is_control()) {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain whitespace or control characters" });
+        }
+        if s.contains(':') || s.contains("{{") || s.contains("}}") {
+            return Err(DocError::InvalidIdentifier { reason: "sheet_id must not contain hook delimiter sequences (`:`, `{{`, `}}`)" });
         }
         Ok(Self(s))
     }

@@ -314,9 +314,19 @@ fn validate_layout_spec_in_doc(
     spec: &LayoutSpec,
 ) -> Result<(), EngineError> {
     spec.validate_item_count().map_err(DocError::from)?;
+    spec.validate()?;
+    if spec.width < 0.01 || spec.height < 0.01 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "layout `width` and `height` must be finite and >= 0.01"));
+    }
     for (idx, item) in spec.items.iter().enumerate() {
         match item {
-            LayoutItem::LiveGraph { graph_sheet_id, .. } => {
+            LayoutItem::LiveGraph { graph_sheet_id, scale_percent, .. } => {
+                if *scale_percent < 0.01 {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("layout item[{idx}] `scale_percent` must be >= 0.01 (got {scale_percent})"),
+                    ));
+                }
                 if graph_sheet_id == layout_id {
                     return Err(EngineError::with_code(
                         ErrorCode::CycleDetected,
@@ -343,7 +353,14 @@ fn validate_layout_spec_in_doc(
                     None => return Err(DocError::SheetNotFound { sheet_id: source_sheet_id.clone() }.into()),
                 }
             }
-            LayoutItem::TextCallout { .. } => {}
+            LayoutItem::TextCallout { font_size_pt, .. } => {
+                if *font_size_pt < 0.5 {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("layout item[{idx}] `font_size_pt` must be >= 0.5 (got {font_size_pt})"),
+                    ));
+                }
+            }
         }
     }
     crate::dag::validate_inline_hook_refs(doc, layout_id, &spec.inline_hooks())?;

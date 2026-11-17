@@ -103,16 +103,28 @@ impl InfoSheet {
 
     /// Upsert a named constant (`info.setConstant`), updating in place if the key already exists
     /// or appending a new row otherwise.
-    pub fn set_constant(&mut self, name: impl Into<String>, value: ConstantValue, units: Option<String>) -> Result<(), DocError> {
-        let entry = InfoConstant::new(name, value, units)?;
+    ///
+    /// When `units` is `None`, existing units on an updated constant are preserved (and new constants
+    /// receive `None`). Passing `Some(None)` explicitly clears existing units, and `Some(Some(u))`
+    /// sets `u`.
+    pub fn upsert_constant(&mut self, name: impl Into<String>, value: ConstantValue, units: Option<Option<String>>) -> Result<(), DocError> {
+        let entry = InfoConstant::new(name, value, units.clone().flatten())?;
         let needle = entry.name.trim();
         if let Some(existing) = self.constants.iter_mut().find(|c| c.name.trim().eq_ignore_ascii_case(needle)) {
             existing.value = entry.value;
-            existing.units = entry.units;
+            if let Some(new_units) = units {
+                existing.units = new_units;
+            }
         } else {
             self.constants.push(entry);
         }
         Ok(())
+    }
+
+    /// Upsert a named constant (`info.setConstant`), updating in place if the key already exists
+    /// or appending a new row otherwise.
+    pub fn set_constant(&mut self, name: impl Into<String>, value: ConstantValue, units: Option<String>) -> Result<(), DocError> {
+        self.upsert_constant(name, value, Some(units))
     }
 
     /// Remove a constant by case-insensitive name, returning `true` if one was removed.

@@ -23,10 +23,11 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::helpers::{
-    column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, locate_target_and_info_indices, next_unique_sheet_id,
-    next_unique_sheet_id_excluding, parse_sheet_id, remap_analysis_hooks, remap_data_sheet_links, remap_graph_spec_references,
-    remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet, require_info_sheet_mut,
-    require_unfrozen_data_sheet_mut, select_result_tab, sheet_id_exists, x_subcolumn_count,
+    column_subcolumn_count, decode_base64, ensure_sheet_not_frozen, link_data_sheet_to_info, locate_target_and_info_indices, next_unique_sheet_id,
+    next_unique_sheet_id_excluding, parse_sheet_id, prune_shortened_series_overrides, remap_analysis_hooks, remap_data_sheet_links,
+    remap_graph_spec_references, remap_layout_spec_references, remap_sheet_id, require_analyzable_data_sheet, require_data_sheet,
+    require_info_sheet_mut, require_unfrozen_data_sheet_mut, select_result_tab, sheet_id_exists, snapshot_active_series_lengths,
+    sync_info_linked_data_sheets, x_subcolumn_count,
 };
 use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
@@ -1224,11 +1225,13 @@ fn run_set_cell(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineE
     let coord = p.coord.resolve()?;
     let cell = p.cell.into_cell()?;
     let doc = &mut ctx.session.doc;
+    let before_active = snapshot_active_series_lengths(doc, &id);
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, std::iter::once(coord.col))?;
     ensure_coord_outside_linked_regions(ds, coord, "edit")?;
     ds.set_cell(coord, cell)?;
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    prune_shortened_series_overrides(doc, &id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.setCell",
         "updated cell",
@@ -1340,6 +1343,7 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
     let id = parse_sheet_id(&p.sheet_id)?;
     let edits = collect_set_cells_edits(p)?;
     let doc = &mut ctx.session.doc;
+    let before_active = snapshot_active_series_lengths(doc, &id);
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     ensure_mv_columns_editable(ds, edits.iter().map(|(c, _)| c.col))?;
     ensure_coords_outside_linked_regions(ds, edits.iter().map(|(c, _)| *c), "edit")?;
@@ -1347,6 +1351,7 @@ fn run_set_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engine
         ds.set_cell(*coord, cell.clone())?;
     }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    prune_shortened_series_overrides(doc, &id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.setCells",
         "updated cells",
@@ -1459,11 +1464,13 @@ fn run_set_x_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let id = parse_sheet_id(&p.sheet_id)?;
     let updates = collect_set_x_updates(p)?;
     let doc = &mut ctx.session.doc;
+    let before_active = snapshot_active_series_lengths(doc, &id);
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
     for (row, subcol, cell) in &updates {
         ds.set_x_or_time_cell(*row, *subcol, cell.clone())?;
     }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    prune_shortened_series_overrides(doc, &id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.setXCells",
         "updated X/time cells",
@@ -2313,6 +2320,7 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     let range_opt = p.bounds.resolve_range()?;
 
     let doc = &mut ctx.session.doc;
+    let before_active = snapshot_active_series_lengths(doc, &id);
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
 
     let unlink = p.unlink.unwrap_or(false);
@@ -2366,6 +2374,7 @@ fn run_clear_cells(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
         ds.linked_regions.clear();
     }
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
+    prune_shortened_series_overrides(doc, &id, &before_active);
     Ok(CommandOutcome::mutated(
         "table.clearCells",
         "cleared cells",
@@ -3299,6 +3308,7 @@ fn run_import_prism(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Eng
     } else {
         *doc = report.document;
     }
+    sync_info_linked_data_sheets(doc, &HashSet::new());
     Ok(CommandOutcome::mutated(
         "table.importPrism",
         "imported external archive",
@@ -3357,6 +3367,7 @@ fn run_import_pzfx(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
     } else {
         *doc = report.document;
     }
+    sync_info_linked_data_sheets(doc, &HashSet::new());
     Ok(CommandOutcome::mutated(
         "table.importPzfx",
         "imported XML project",
@@ -4105,7 +4116,8 @@ fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engi
             if let Some(ds) = doc.data_sheet_mut(&id) {
                 ds.info_sheet_id = Some(iid.clone());
             }
-            doc.add_info_sheet(InfoSheet::new_preseeded(iid, format!("{title} Info"))?)?;
+            doc.add_info_sheet(InfoSheet::new_preseeded(iid.clone(), format!("{title} Info"))?)?;
+            link_data_sheet_to_info(doc, &iid, &id);
         }
         if let Some(graph_id) = p.graph_sheet_id.as_deref()
             && let Some(ds) = doc.data_sheet(&id).cloned()
@@ -4947,6 +4959,7 @@ fn run_randomize_groups(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         .ok_or_else(|| EngineError::with_code(ErrorCode::InternalError, "failed resolving InfoSheet for ARRIVE constants"))?;
     rand_out.data_sheet.info_sheet_id = Some(info_id.clone());
     doc.add_data_sheet(rand_out.data_sheet)?;
+    link_data_sheet_to_info(doc, &info_id, &id);
     let recalc = recalculate_dirty_with_links(doc, &[id.clone(), info_id.clone()], false)?;
 
     let constants_map: serde_json::Map<String, Value> = rand_out.arrive_constants.into_iter().map(|(k, v)| (k, Value::String(v))).collect();
@@ -5053,6 +5066,9 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
         sampled.info_sheet_id = Some(iid.clone());
     }
     doc.add_data_sheet(sampled)?;
+    if let Some(ref iid) = info_id {
+        link_data_sheet_to_info(doc, iid, &id);
+    }
     let mut dirty_seeds = vec![id.clone()];
     if let Some(ref iid) = info_id {
         dirty_seeds.push(iid.clone());

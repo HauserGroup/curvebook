@@ -149,7 +149,7 @@ fn resolve_hook_token(token: &str, doc: &ProjectDocument, primary_info_id: Optio
 }
 
 pub(crate) fn primary_info_sheet_id<'a>(doc: &'a ProjectDocument, primary_data_id: &SheetId) -> Option<&'a SheetId> {
-    resolve_data_sheet(doc, primary_data_id).and_then(|ds| ds.info_sheet_id.as_ref())
+    doc.paired_info_sheet_id(primary_data_id)
 }
 
 /// Configure `scene.plot_rect_pt` with dynamic margins accounting for title, axis titles, Y2, brackets, and legend.

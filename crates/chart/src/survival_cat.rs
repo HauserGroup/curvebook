@@ -73,7 +73,7 @@ pub fn compile_survival_or_categorical_graph(graph: &GraphSheet, doc: &ProjectDo
         }
     }?;
 
-    draw_graph_annotations(scene, &graph.spec.annotations, doc);
+    draw_graph_annotations(scene, &graph.spec.annotations, doc, doc.paired_info_sheet_id(&graph.spec.primary_source_sheet_id));
     Ok(())
 }
 
@@ -108,27 +108,21 @@ pub(crate) fn draw_empty_open_frame(scene: &mut ChartScene) {
     });
 }
 
-/// Expand `{{info:...}}` and `{{result:...}}` template hooks using `doc`.
-pub(crate) fn resolve_graph_text(raw: &str, doc: &ProjectDocument) -> String {
+/// Expand `{{info:...}}` and `{{result:...}}` template hooks using `doc`, preferring `primary_info_id`.
+pub(crate) fn resolve_graph_text(raw: &str, doc: &ProjectDocument, primary_info_id: Option<&SheetId>) -> String {
     if !raw.contains("{{") {
         return raw.to_owned();
     }
-    expand_template_hooks(raw, |token| resolve_hook_token(token, doc))
+    expand_template_hooks(raw, |token| resolve_hook_token(token, doc, primary_info_id))
 }
 
-fn resolve_hook_token(token: &str, doc: &ProjectDocument) -> Option<String> {
+fn resolve_hook_token(token: &str, doc: &ProjectDocument, primary_info_id: Option<&SheetId>) -> Option<String> {
     let parts: Vec<&str> = token.split(':').map(str::trim).collect();
     match parts.as_slice() {
-        ["info", name] => {
-            for info in &doc.info_sheets {
-                if let Some(constant) = info.get_constant(name) {
-                    let txt = constant.value.display_text();
-                    if !txt.is_empty() {
-                        return Some(txt);
-                    }
-                }
-            }
-            None
+        ["info", name] if !name.is_empty() => {
+            let info = primary_info_id.and_then(|id| doc.info_sheet(id)).or_else(|| doc.info_sheets.first())?;
+            let txt = info.get_constant(name)?.value.display_text();
+            if txt.is_empty() { None } else { Some(txt) }
         }
         ["info", sheet, name] => {
             let info = doc.info_sheet(&SheetId::new(*sheet))?;
@@ -473,7 +467,8 @@ pub(crate) fn draw_categorical_x_ticks(scene: &mut ChartScene, spec: &GraphSpec,
 }
 
 fn emit_x_title(scene: &mut ChartScene, spec: &GraphSpec, doc: &ProjectDocument, rotated_ticks: bool) {
-    let title = resolve_graph_text(&spec.x_axis.title, doc);
+    let primary_info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
+    let title = resolve_graph_text(&spec.x_axis.title, doc, primary_info_id);
     if title.trim().is_empty() {
         return;
     }
@@ -527,7 +522,8 @@ pub(crate) fn draw_y_numeric_ticks(
 }
 
 pub(crate) fn emit_y_title(scene: &mut ChartScene, spec: &GraphSpec, max_y_label_w: f64, doc: &ProjectDocument) {
-    let y_title = resolve_graph_text(&spec.y_axis.title, doc);
+    let primary_info_id = doc.paired_info_sheet_id(&spec.primary_source_sheet_id);
+    let y_title = resolve_graph_text(&spec.y_axis.title, doc, primary_info_id);
     if y_title.trim().is_empty() {
         return;
     }
@@ -770,7 +766,7 @@ pub(crate) fn draw_legend_entries(scene: &mut ChartScene, spec: &GraphSpec, entr
                 clip: None,
             });
         }
-        let resolved = resolve_graph_text(&entry.label, doc);
+        let resolved = resolve_graph_text(&entry.label, doc, doc.paired_info_sheet_id(&spec.primary_source_sheet_id));
         scene.primitives.push(ScenePrimitive::Text(PositionedText {
             rich: parse_markup(&resolved),
             anchor_pt: PointPt::new(lx + 20.0, cy + 3.0),
@@ -828,7 +824,12 @@ pub(crate) fn draw_colorbar(scene: &mut ChartScene, ramp: &ColorRamp, min_v: f64
     }
 }
 
-pub(crate) fn draw_graph_annotations(scene: &mut ChartScene, annotations: &[GraphAnnotation], doc: &ProjectDocument) {
+pub(crate) fn draw_graph_annotations(
+    scene: &mut ChartScene,
+    annotations: &[GraphAnnotation],
+    doc: &ProjectDocument,
+    primary_info_id: Option<&SheetId>,
+) {
     for ann in annotations {
         match ann {
             GraphAnnotation::TextBox { bounds_pt, markdown, bordered } => {
@@ -841,7 +842,7 @@ pub(crate) fn draw_graph_annotations(scene: &mut ChartScene, annotations: &[Grap
                         clip: None,
                     });
                 }
-                let expanded = resolve_graph_text(markdown, doc);
+                let expanded = resolve_graph_text(markdown, doc, primary_info_id);
                 scene.primitives.push(ScenePrimitive::Text(PositionedText {
                     rich: parse_markup(&expanded),
                     anchor_pt: PointPt::new(rect.x + 4.0, rect.y + 11.0),

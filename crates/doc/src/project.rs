@@ -241,6 +241,32 @@ impl ProjectDocument {
         self.layout_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Resolve the paired [`InfoSheet`] ID for a `DataSheet` or (chained) `ResultSheet` source,
+    /// without falling back to the project's first info sheet.
+    #[must_use]
+    pub fn paired_info_sheet_id(&self, source_id: &SheetId) -> Option<&SheetId> {
+        if let Some(ds) = self.data_sheet(source_id) {
+            return ds.info_sheet_id.as_ref();
+        }
+        let mut cursor = source_id;
+        let mut seen = Vec::new();
+        while !seen.contains(&cursor) {
+            seen.push(cursor);
+            if let Some(ds) = self.data_sheet(cursor) {
+                return ds.info_sheet_id.as_ref();
+            }
+            if let Some(res) = self.result_sheet(cursor) {
+                if let Some(info_id) = res.analyzable_data.as_ref().and_then(|d| d.info_sheet_id.as_ref()) {
+                    return Some(info_id);
+                }
+                cursor = &res.analysis.source_sheet_id;
+            } else {
+                break;
+            }
+        }
+        None
+    }
+
     /// Return sorted, deduplicated direct upstream `SheetId` dependencies of `id` across data links,
     /// analyses, constant hooks, graph series/overlays/brackets, and layout placements.
     #[must_use]
@@ -259,7 +285,7 @@ impl ProjectDocument {
             }
         } else if let Some(rs) = self.result_sheet(id) {
             deps.push(rs.analysis.source_sheet_id.clone());
-            let paired_info = self.data_sheet(&rs.analysis.source_sheet_id).and_then(|d| d.info_sheet_id.clone()).or_else(|| default_info.clone());
+            let paired_info = self.paired_info_sheet_id(&rs.analysis.source_sheet_id).cloned().or_else(|| default_info.clone());
             for hook in rs.analysis.kind.hooked_sources() {
                 push_hook_dep(&mut deps, &hook, paired_info.as_ref());
             }
@@ -290,11 +316,7 @@ impl ProjectDocument {
                     GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
                 }
             }
-            let paired_info = self
-                .data_sheet(&gs.spec.primary_source_sheet_id)
-                .or_else(|| self.result_sheet(&gs.spec.primary_source_sheet_id).and_then(|res| res.analyzable_data.as_ref()))
-                .and_then(|d| d.info_sheet_id.clone())
-                .or_else(|| default_info.clone());
+            let paired_info = self.paired_info_sheet_id(&gs.spec.primary_source_sheet_id).cloned().or_else(|| default_info.clone());
             for hook in gs.spec.inline_hooks() {
                 push_hook_dep(&mut deps, &hook, paired_info.as_ref());
             }

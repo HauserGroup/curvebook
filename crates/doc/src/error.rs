@@ -22,6 +22,9 @@ pub const MAX_SUBCOLUMNS: usize = 512;
 /// Hard ceiling on UTF-8 byte length of sheet, axis, row, and column titles.
 pub const MAX_TITLE_BYTES: usize = 4_096;
 
+/// Hard ceiling on UTF-8 byte length of user-supplied [`SheetId`] identifiers.
+pub const MAX_SHEET_ID_BYTES: usize = 256;
+
 /// Maximum total sheets across all five navigator sections in a single project.
 pub const MAX_SHEETS_PER_PROJECT: usize = 500;
 
@@ -141,6 +144,7 @@ impl std::error::Error for SummaryPointError {}
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocError {
     EmptyIdentifier,
+    InvalidIdentifier { reason: &'static str },
     TooManyRows { count: usize, max: usize },
     TooManyDataSets { count: usize, max: usize },
     TooManySubcolumns { count: usize, max: usize },
@@ -165,6 +169,7 @@ impl fmt::Display for DocError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::EmptyIdentifier => f.write_str("identifier must not be empty"),
+            Self::InvalidIdentifier { reason } => write!(f, "invalid identifier: {reason}"),
             Self::TooManyRows { count, max } => write!(f, "row count {count} exceeds maximum {max}"),
             Self::TooManyDataSets { count, max } => write!(f, "column count {count} exceeds maximum {max}"),
             Self::TooManySubcolumns { count, max } => write!(f, "subcolumn count {count} exceeds maximum {max}"),
