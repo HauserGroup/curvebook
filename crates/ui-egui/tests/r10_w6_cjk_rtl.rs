@@ -178,12 +178,13 @@ fn has_foreign_script_contamination(locale: &str, text: &str) -> Option<&'static
 
 fn contains_prohibited_brand(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
+    let mut hits: Vec<&'static str> = Vec::new();
     for forbidden in ["graphpad", "dotmatics", "prism", "instat", "statmate", "spss", "minitab", "originlab", "originpro", "sigmaplot", "systat"] {
         if lower.contains(forbidden) {
-            return Some(forbidden);
+            hits.push(forbidden);
         }
     }
-    None
+    hits.first().copied()
 }
 
 /// Build an exhaustive 5-sheet-type project containing all key data archetypes + analysis/graph/layout.
