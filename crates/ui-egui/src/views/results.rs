@@ -1099,7 +1099,7 @@ fn emit_table_corner_and_col_headers(
     let size_px = (11.5 * builder.scale()).clamp(9.0, 20.0);
     let hdr_style = UiTextStyle::ui_bold(size_px);
     let (row_col_x, data_col_x) = if is_rtl {
-        (table_rect.x + i32::try_from(geom.data_vp_w).unwrap_or(0), table_rect.x)
+        (table_rect.x + i32::try_from(geom.v_thick + geom.data_vp_w).unwrap_or(0), table_rect.x + i32::try_from(geom.v_thick).unwrap_or(0))
     } else {
         (table_rect.x, table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0))
     };
@@ -1206,7 +1206,7 @@ fn emit_table_row_labels(
     sel: Option<(usize, usize, usize, usize)>,
 ) {
     let is_rtl = builder.tree.is_rtl;
-    let row_hdr_x = if is_rtl { table_rect.x + i32::try_from(geom.data_vp_w).unwrap_or(0) } else { table_rect.x };
+    let row_hdr_x = if is_rtl { table_rect.x + i32::try_from(geom.v_thick + geom.data_vp_w).unwrap_or(0) } else { table_rect.x };
     let row_hdr_clip = LayoutRectPx::new(row_hdr_x, table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24), geom.row_label_w, geom.data_vp_h);
     if row_hdr_clip.width < 8 || row_hdr_clip.height < 8 {
         return;
@@ -1284,7 +1284,8 @@ fn emit_table_cells_and_footnotes(
     sel: Option<(usize, usize, usize, usize)>,
 ) {
     let is_rtl = builder.tree.is_rtl;
-    let data_x = if is_rtl { table_rect.x } else { table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0) };
+    let data_x =
+        if is_rtl { table_rect.x + i32::try_from(geom.v_thick).unwrap_or(0) } else { table_rect.x + i32::try_from(geom.row_label_w).unwrap_or(0) };
     let data_clip = LayoutRectPx::new(data_x, table_rect.y + i32::try_from(geom.hdr_h).unwrap_or(24), geom.data_vp_w, geom.data_vp_h);
     if data_clip.width < 8 || data_clip.height < 8 {
         return;
