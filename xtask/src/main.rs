@@ -35,7 +35,7 @@ usage: cargo xtask <command> [args...]
 
 commands:
   ci                    run full local/CI gate (fmt, clippy, tests, doctests, feature checks, policy gates, wasm)
-  r10-gate              run R10.2 anti-phantom parity gate & R10.22 frame/latency budgets
+  r10-gate              run R10 parity, Unicode, screenshot baseline, web parity & latency gates
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene
   secrets [--history]   scan repo (or git history additions) for API tokens, private keys, and local paths
@@ -259,7 +259,12 @@ fn cmd_wasm(root: &Path) -> Result<(), String> {
 }
 
 fn cmd_r10_gate(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_core_and_spike"])
+    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_core_and_spike"])?;
+    run_cargo_strs(root, &["test", "-p", "curvebook-ui-egui", "--test", "r10_phase7_gates"])?;
+    run_cargo_strs(root, &["test", "-p", "curvebook-web", "--test", "r10_7_web_shared_layout"])?;
+    screenshots::run(root, &[String::from("--check")])?;
+    web_fonts::check_web_bundle_readiness(root)?;
+    Ok(())
 }
 
 fn cmd_ci(root: &Path) -> Result<(), String> {

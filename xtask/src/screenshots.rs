@@ -22,14 +22,15 @@ const MIN_HEIGHT: u32 = 800;
 const MIN_IDAT_BYTES: usize = 1024;
 
 pub const SCREENSHOT_REL_PATHS: &[&str] = &["docs/images/workspace-split-fit.png", "docs/images/workspace-layout-dark.png"];
+const EXTRA_DOC_IMAGES: &[(&str, (u32, u32), usize)] = &[("docs/images/curvebook.png", (128, 128), 64)];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-struct PngSummary {
-    width: u32,
-    height: u32,
-    color_type: u8,
-    idat_bytes: usize,
-    chunk_count: usize,
+pub struct PngSummary {
+    pub width: u32,
+    pub height: u32,
+    pub color_type: u8,
+    pub idat_bytes: usize,
+    pub chunk_count: usize,
 }
 
 /// Entry point for `cargo xtask screenshots [--check]`.
@@ -85,9 +86,32 @@ fn verify_existing(root: &Path) -> Result<(), String> {
         let summary = validate_png_bytes(rel, &bytes)?;
         ensure_asset_listed(rel, &assets_md)?;
         println!(
-            "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={})",
-            summary.width, summary.height, summary.color_type, summary.idat_bytes, summary.chunk_count
+            "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
+            summary.width,
+            summary.height,
+            summary.color_type,
+            summary.idat_bytes,
+            summary.chunk_count,
+            crc32_ieee(&bytes)
         );
+    }
+
+    for &(rel, (exp_w, exp_h), min_idat) in EXTRA_DOC_IMAGES {
+        let abs = root.join(rel);
+        if abs.exists() {
+            let bytes = fs::read(&abs).map_err(|e| format!("unreadable doc image `{rel}`: {e}"))?;
+            let summary = validate_png_bytes_with_bounds(rel, &bytes, Some((exp_w, exp_h)), min_idat)?;
+            ensure_asset_listed(rel, &assets_md)?;
+            println!(
+                "screenshots: {rel} OK ({}x{}, color_type={}, idat={} B, chunks={}, crc32={:#010x})",
+                summary.width,
+                summary.height,
+                summary.color_type,
+                summary.idat_bytes,
+                summary.chunk_count,
+                crc32_ieee(&bytes)
+            );
+        }
     }
     Ok(())
 }
@@ -97,7 +121,18 @@ fn ensure_asset_listed(rel: &str, assets_md: &str) -> Result<(), String> {
     if assets_md.contains(&needle) { Ok(()) } else { Err(format!("ASSETS.md is missing attribution row containing {needle}")) }
 }
 
-fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
+/// Validate a 1440x900 8-bit RGBA PNG payload (`R0.14`).
+pub fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
+    validate_png_bytes_with_bounds(label, bytes, Some((EXPECTED_WIDTH, EXPECTED_HEIGHT)), MIN_IDAT_BYTES)
+}
+
+/// Validate any 8-bit RGBA PNG payload against optional exact `(width, height)` bounds and minimum `IDAT` bytes.
+pub fn validate_png_bytes_with_bounds(
+    label: &str,
+    bytes: &[u8],
+    expected_dims: Option<(u32, u32)>,
+    min_idat_bytes: usize,
+) -> Result<PngSummary, String> {
     if !bytes.starts_with(PNG_SIGNATURE) {
         return Err(format!("{label}: invalid PNG signature"));
     }
@@ -128,7 +163,7 @@ fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
         }
 
         if chunk_count == 0 {
-            ihdr = Some(parse_ihdr(label, kind, data)?);
+            ihdr = Some(parse_ihdr_with_bounds(label, kind, data, expected_dims)?);
         } else if &kind == b"IDAT" {
             idat_bytes = idat_bytes.saturating_add(data.len());
         } else if &kind == b"IEND" {
@@ -150,14 +185,14 @@ fn validate_png_bytes(label: &str, bytes: &[u8]) -> Result<PngSummary, String> {
     }
 
     let (width, height, color_type) = ihdr.ok_or_else(|| format!("{label}: missing IHDR chunk"))?;
-    if idat_bytes < MIN_IDAT_BYTES {
-        return Err(format!("{label}: IDAT payload too small ({idat_bytes} B < {MIN_IDAT_BYTES} B)"));
+    if idat_bytes < min_idat_bytes {
+        return Err(format!("{label}: IDAT payload too small ({idat_bytes} B < {min_idat_bytes} B)"));
     }
 
     Ok(PngSummary { width, height, color_type, idat_bytes, chunk_count })
 }
 
-fn parse_ihdr(label: &str, kind: [u8; 4], data: &[u8]) -> Result<(u32, u32, u8), String> {
+fn parse_ihdr_with_bounds(label: &str, kind: [u8; 4], data: &[u8], expected_dims: Option<(u32, u32)>) -> Result<(u32, u32, u8), String> {
     if &kind != b"IHDR" || data.len() != 13 {
         return Err(format!("{label}: first PNG chunk must be 13-byte IHDR"));
     }
@@ -165,11 +200,15 @@ fn parse_ihdr(label: &str, kind: [u8; 4], data: &[u8]) -> Result<(u32, u32, u8),
     let height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
     let bit_depth = data[8];
     let color_type = data[9];
-    if width < MIN_WIDTH || height < MIN_HEIGHT {
-        return Err(format!("{label}: dimensions {width}x{height} below minimum {MIN_WIDTH}x{MIN_HEIGHT}"));
-    }
-    if width != EXPECTED_WIDTH || height != EXPECTED_HEIGHT {
-        return Err(format!("{label}: dimensions {width}x{height} != expected {EXPECTED_WIDTH}x{EXPECTED_HEIGHT}"));
+    if let Some((exp_w, exp_h)) = expected_dims {
+        if (exp_w, exp_h) == (EXPECTED_WIDTH, EXPECTED_HEIGHT) && (width < MIN_WIDTH || height < MIN_HEIGHT) {
+            return Err(format!("{label}: dimensions {width}x{height} below minimum {MIN_WIDTH}x{MIN_HEIGHT}"));
+        }
+        if width != exp_w || height != exp_h {
+            return Err(format!("{label}: dimensions {width}x{height} != expected {exp_w}x{exp_h}"));
+        }
+    } else if width == 0 || height == 0 {
+        return Err(format!("{label}: non-positive PNG dimensions {width}x{height}"));
     }
     if bit_depth != 8 || color_type != 6 {
         return Err(format!("{label}: expected 8-bit RGBA (color_type=6), got bit_depth={bit_depth}, color_type={color_type}"));
@@ -177,7 +216,22 @@ fn parse_ihdr(label: &str, kind: [u8; 4], data: &[u8]) -> Result<(u32, u32, u8),
     Ok((width, height, color_type))
 }
 
-fn png_chunk_crc32(kind: [u8; 4], data: &[u8]) -> u32 {
+/// Compute IEEE 802.3 CRC-32 over raw PNG bytes.
+#[must_use]
+pub fn crc32_ieee(bytes: &[u8]) -> u32 {
+    let mut crc = 0xFFFF_FFFF_u32;
+    for &byte in bytes {
+        crc ^= u32::from(byte);
+        for _ in 0..8 {
+            let mask = (crc & 1).wrapping_neg();
+            crc = (crc >> 1) ^ (0xEDB8_8320_u32 & mask);
+        }
+    }
+    !crc
+}
+
+#[must_use]
+pub fn png_chunk_crc32(kind: [u8; 4], data: &[u8]) -> u32 {
     let mut crc = 0xFFFF_FFFF_u32;
     for byte in kind.into_iter().chain(data.iter().copied()) {
         crc ^= u32::from(byte);
@@ -191,7 +245,10 @@ fn png_chunk_crc32(kind: [u8; 4], data: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use super::{EXPECTED_HEIGHT, EXPECTED_WIDTH, PNG_SIGNATURE, parse_args, png_chunk_crc32, validate_png_bytes};
+    use super::{
+        EXPECTED_HEIGHT, EXPECTED_WIDTH, PNG_SIGNATURE, parse_args, png_chunk_crc32, validate_png_bytes, validate_png_bytes_with_bounds,
+        verify_existing,
+    };
 
     fn make_chunk(kind: [u8; 4], payload: &[u8]) -> Vec<u8> {
         let len = payload.len() as u32;
@@ -229,6 +286,16 @@ mod tests {
             assert_eq!(summary.idat_bytes, 2048);
             assert_eq!(summary.chunk_count, 3);
         }
+
+        let custom = make_synthetic_png(1280, 800, 6, 1024);
+        let custom_res = validate_png_bytes_with_bounds("custom.png", &custom, Some((1280, 800)), 512);
+        assert!(custom_res.is_ok(), "{custom_res:?}");
+    }
+
+    #[test]
+    fn verifies_repo_doc_screenshots_against_assets() {
+        let root = crate::workspace_root().unwrap();
+        assert!(verify_existing(&root).is_ok());
     }
 
     #[test]
