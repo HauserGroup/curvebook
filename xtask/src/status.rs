@@ -568,7 +568,8 @@ fn is_wf_harness_fn(seg: &str) -> bool {
         return false;
     };
     let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
-    digit_count > 0 && rest[digit_count..].starts_with('_')
+    let suffix = &rest[digit_count..];
+    digit_count > 0 && suffix.starts_with('_') && !suffix.starts_with("_human_") && suffix != "_human"
 }
 
 fn is_test_identifier(tok: &str) -> bool {
@@ -778,6 +779,62 @@ fn active_human_test() {}
         assert!(tests.contains_test("desktop_host_loop::one_line_active_test"));
         assert!(!tests.contains_test("desktop_host_loop::skipped_human_test"));
         assert!(!tests.contains_test("desktop_host_loop::single_line_skipped_test"));
+    }
+
+    #[test]
+    fn r10_2_accepts_human_wf_and_rejects_gui_wf_and_non_human_wf_fns() {
+        let mut tests = WorkspaceTests::default();
+        for (qual, unqual) in [
+            ("human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason", "wf01_human_xy_dose_response_format_exclude_with_reason"),
+            ("human_wf_32_37::wf34_human_qpcr_ddct_calculated_variables_and_welch", "wf34_human_qpcr_ddct_calculated_variables_and_welch"),
+            ("gui_wf_foundations_and_data::wf01_one_sample_t_test", "wf01_one_sample_t_test"),
+            ("gui_wf_foundations_and_data::wf01_human_spoof", "wf01_human_spoof"),
+            ("other_suite::wf01_non_human_harness", "wf01_non_human_harness"),
+        ] {
+            tests.qualified.insert(String::from(qual));
+            tests.unqualified.insert(String::from(unqual));
+        }
+
+        let valid_md = "\
+- [x] WF-01 qualified (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`).
+- [x] WF-01 unqualified (`wf01_human_xy_dose_response_format_exclude_with_reason`).
+";
+        let valid_parity = check_ui_parity_evidence("docs/ui-parity.md", valid_md, Some(&tests));
+        assert!(valid_parity.is_empty(), "unexpected violations: {valid_parity:?}");
+
+        let valid_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | `1 / 6` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | None |
+| Shard 6 | Pass | `1 / 6` (`wf34_human_qpcr_ddct_calculated_variables_and_welch`) | None | None |
+";
+        let valid_wf = check_gui_workflows_human_path("docs/gui-workflows.md", valid_wf_table, Some(&tests));
+        assert!(valid_wf.is_empty(), "unexpected violations: {valid_wf:?}");
+
+        for bad_line in [
+            "- [x] Bad harness (`gui_wf_foundations_and_data::wf01_one_sample_t_test`).\n",
+            "- [x] Bad spoof (`gui_wf_foundations_and_data::wf01_human_spoof`).\n",
+            "- [x] Bad non-human wf (`other_suite::wf01_non_human_harness`).\n",
+            "- [x] Bad unqualified (`wf01_one_sample_t_test`).\n",
+        ] {
+            let violations = check_ui_parity_evidence("docs/ui-parity.md", bad_line, Some(&tests));
+            assert_eq!(violations.len(), 1, "expected rejection for `{bad_line}`, got {violations:?}");
+            assert!(violations[0].reason.contains("agent-harness"), "got `{}`", violations[0].reason);
+        }
+
+        let bad_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | Pass (`gui_wf_foundations_and_data::wf01_one_sample_t_test`) | None | None |
+| Shard 2 | Pass | Pass (`wf01_non_human_harness`) | None | None |
+";
+        let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
+        assert_eq!(bad_wf.len(), 2, "expected 2 violations, got {bad_wf:?}");
+        assert!(bad_wf.iter().all(|v| v.reason.contains("agent-harness")), "got {bad_wf:?}");
     }
 }
 

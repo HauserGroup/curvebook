@@ -3,7 +3,10 @@
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 
-use curvebook_doc::{Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype};
+use curvebook_doc::{
+    Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype, VariableColumn,
+    VariableRole,
+};
 
 use crate::error::FitError;
 
@@ -455,6 +458,29 @@ fn mv_group_token(cell: &Cell) -> Option<String> {
     }
 }
 
+fn is_mv_numeric_role(var: &VariableColumn) -> bool {
+    !matches!(var.role, VariableRole::Label | VariableRole::Categorical)
+}
+
+fn pick_default_mv_numeric_col(mv: &curvebook_doc::MultipleVariablesTable, candidates: impl Iterator<Item = usize>) -> Option<usize> {
+    let mut role_match = None;
+    for idx in candidates {
+        let Some(var) = mv.variables.get(idx) else {
+            continue;
+        };
+        if !is_mv_numeric_role(var) {
+            continue;
+        }
+        if var.cells.iter().any(|c| c.active_number().is_some()) {
+            return Some(idx);
+        }
+        if role_match.is_none() {
+            role_match = Some(idx);
+        }
+    }
+    role_match
+}
+
 fn resolve_mv_columns(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
@@ -479,40 +505,47 @@ fn resolve_mv_columns(
 
     let group_set: HashSet<usize> = mv_spec.group_columns.iter().copied().collect();
     let x_set: HashSet<usize> = mv_spec.x_columns.iter().copied().collect();
+    let selected_numeric: Vec<usize> = selected_data_sets
+        .iter()
+        .copied()
+        .filter(|&idx| idx < n_vars && !group_set.contains(&idx) && mv.variables.get(idx).is_some_and(is_mv_numeric_role))
+        .collect();
 
     let y_col = if let Some(yc) = mv_spec.y_column {
         yc
-    } else if mv_spec.x_columns.is_empty() && selected_data_sets.len() >= 2 {
-        selected_data_sets[selected_data_sets.len() - 1]
-    } else if let Some(&sel) = selected_data_sets.first()
+    } else if mv_spec.x_columns.is_empty() && selected_numeric.len() >= 2 {
+        selected_numeric[selected_numeric.len() - 1]
+    } else if let Some(&sel) = selected_numeric.first()
         && !x_set.contains(&sel)
-        && !group_set.contains(&sel)
     {
         sel
     } else {
-        (0..n_vars)
-            .rev()
-            .find(|idx| !x_set.contains(idx) && !group_set.contains(idx))
+        pick_default_mv_numeric_col(mv, (0..n_vars).rev().filter(|idx| !x_set.contains(idx) && !group_set.contains(idx)))
+            .or_else(|| (0..n_vars).rev().find(|idx| !x_set.contains(idx) && !group_set.contains(idx)))
             .unwrap_or_else(|| selected_data_sets.first().copied().unwrap_or(1))
     };
 
     let x_cols = if !mv_spec.x_columns.is_empty() {
         mv_spec.x_columns.to_vec()
-    } else if selected_data_sets.len() >= 2 {
-        selected_data_sets[..selected_data_sets.len() - 1].to_vec()
+    } else if selected_numeric.len() >= 2 {
+        let filtered: Vec<usize> = selected_numeric.iter().copied().filter(|&idx| idx != y_col).collect();
+        if filtered.is_empty() { selected_numeric[..selected_numeric.len() - 1].to_vec() } else { filtered }
     } else {
-        let fallback = (0..n_vars).find(|&idx| idx != y_col && !group_set.contains(&idx)).unwrap_or(usize::from(y_col == 0));
+        let fallback = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|&idx| idx != y_col && !group_set.contains(&idx)))
+            .or_else(|| (0..n_vars).find(|&idx| idx != y_col && !group_set.contains(&idx)))
+            .unwrap_or(usize::from(y_col == 0));
         vec![fallback]
     };
 
     let x_used: HashSet<usize> = x_cols.iter().copied().collect();
+    let has_selected_categorical = selected_data_sets.iter().any(|&idx| mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical));
     let group_cols = if !mv_spec.group_columns.is_empty() {
         mv_spec.group_columns.to_vec()
-    } else if selected_data_sets.len() < 2 {
+    } else if selected_data_sets.len() < 2 || has_selected_categorical {
         mv.variables
             .iter()
             .enumerate()
-            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == curvebook_doc::VariableRole::Categorical)
+            .find(|(idx, v)| *idx != y_col && !x_used.contains(idx) && v.role == VariableRole::Categorical)
             .map(|(idx, _)| vec![idx])
             .unwrap_or_default()
     } else {
@@ -623,4 +656,79 @@ fn extract_from_multivar(
         return Err(FitError::EmptyInput);
     }
     Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use curvebook_doc::{Cell, DataSheet, MultipleVariablesTable, SheetId, TableArchetype, VariableRole};
+
+    #[test]
+    fn resolve_mv_columns_excludes_label_and_categorical_from_x_and_y() {
+        let mut mv = MultipleVariablesTable::new(4, 6).unwrap();
+        mv.variables[0].title = String::from("Well");
+        mv.variables[0].lock_role(VariableRole::Label);
+        mv.variables[1].title = String::from("Compound");
+        mv.variables[1].lock_role(VariableRole::Categorical);
+        mv.variables[2].title = String::from("LogConcM");
+        mv.variables[2].lock_role(VariableRole::Continuous);
+        mv.variables[3].title = String::from("Response");
+        mv.variables[3].lock_role(VariableRole::Continuous);
+
+        let rows = [
+            ("A1", "InhibitorA", -9.0, 98.0),
+            ("A2", "InhibitorA", -7.0, 50.0),
+            ("A3", "InhibitorA", -5.0, 2.0),
+            ("B1", "InhibitorB", -9.0, 99.0),
+            ("B2", "InhibitorB", -6.0, 76.0),
+            ("B3", "InhibitorB", -4.0, 3.0),
+        ];
+        for (r, &(well, cmpd, x, y)) in rows.iter().enumerate() {
+            mv.variables[0].cells[r] = Cell::text(well);
+            mv.variables[1].cells[r] = Cell::text(cmpd);
+            mv.variables[2].cells[r] = Cell::number(x);
+            mv.variables[3].cells[r] = Cell::number(y);
+        }
+
+        let (x_cols, y_col, group_cols) = resolve_mv_columns(&mv, &[], &MultivarExtractionSpec::default()).unwrap();
+        assert_eq!(x_cols, vec![2]);
+        assert_eq!(y_col, 3);
+        assert_eq!(group_cols, vec![1]);
+
+        let ds = DataSheet::new(SheetId::new("mv-4pl"), "MV 4PL", TableArchetype::MultipleVariables(mv.clone())).unwrap();
+        let series = extract_datasets_from_sheet(&ds, &[]).unwrap();
+        assert_eq!(series.len(), 2);
+        assert_eq!(series[0].label, "InhibitorA");
+        assert_eq!(series[1].label, "InhibitorB");
+        assert_eq!(series[0].points.len(), 3);
+        assert_eq!(series[0].points[1].x, vec![-7.0]);
+        assert_eq!(series[0].points[1].y, 50.0);
+
+        // Even when selected_data_sets includes Label + Categorical indices, numeric X/Y + grouping still resolve cleanly.
+        let (x_all, y_all, g_all) = resolve_mv_columns(&mv, &[0, 1, 2, 3], &MultivarExtractionSpec::default()).unwrap();
+        assert_eq!(x_all, vec![2]);
+        assert_eq!(y_all, 3);
+        assert_eq!(g_all, vec![1]);
+
+        // Trailing Label column and numeric Label tokens must also be excluded.
+        let mut mv_trailing = MultipleVariablesTable::new(5, 6).unwrap();
+        for c in 0..4 {
+            mv_trailing.variables[c] = mv.variables[c].clone();
+        }
+        mv_trailing.variables[0].cells = (0..6).map(|i| Cell::number((100 + i) as f64)).collect();
+        mv_trailing.variables[4].title = String::from("Notes");
+        mv_trailing.variables[4].lock_role(VariableRole::Label);
+        mv_trailing.variables[4].cells = (0..6).map(|i| Cell::number((900 + i) as f64)).collect();
+
+        let (xt, yt, gt) = resolve_mv_columns(&mv_trailing, &[], &MultivarExtractionSpec::default()).unwrap();
+        assert_eq!(xt, vec![2]);
+        assert_eq!(yt, 3);
+        assert_eq!(gt, vec![1]);
+
+        // Explicit 2-column numeric subset remains ungrouped.
+        let (x_sub, y_sub, g_sub) = resolve_mv_columns(&mv, &[2, 3], &MultivarExtractionSpec::default()).unwrap();
+        assert_eq!(x_sub, vec![2]);
+        assert_eq!(y_sub, 3);
+        assert!(g_sub.is_empty());
+    }
 }
