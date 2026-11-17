@@ -8,7 +8,7 @@ use curvebook_render::{RasterImage, RenderError, RenderTargetSpec};
 
 use crate::UiApp;
 use crate::compositor::render_workspace_rgba;
-use crate::inspect::{UiTreeSnapshot, inspect_ui_tree};
+use crate::inspect::{UiTreeSnapshot, inspect_ui_tree_for_metrics};
 use crate::interaction::{
     KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, dispatch_mouse_wheel, dispatch_ui_event_without_layout_rebuild,
 };
@@ -93,7 +93,7 @@ impl HumanPathDriver {
     /// Inspect semantic UI tree projected from [`LayoutTree`].
     #[must_use]
     pub fn inspect_tree(&self, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
-        inspect_ui_tree(&self.app, scope, include_bounds)
+        inspect_ui_tree_for_metrics(&self.app, self.metrics, scope, include_bounds)
     }
 
     /// Return the logical `[cx, cy]` center of rendered widget `widget_id` if drawn and enabled.
@@ -250,5 +250,45 @@ impl HumanPathDriver {
             }
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{DataSheet, MultipleVariablesTable, ProjectDocument, SheetId, TableArchetype};
+    use curvebook_engine::Session;
+
+    use super::HumanPathDriver;
+    use crate::UiApp;
+    use crate::inspect::inspect_ui_tree;
+    use crate::interaction::ViewportMetrics;
+
+    #[test]
+    fn inspect_tree_uses_driver_metrics() -> Result<(), String> {
+        let mv = MultipleVariablesTable::new(2, 40).map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("mv-metrics", "Tall MV", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())?;
+        let mut doc = ProjectDocument::new("Driver Metrics").map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.select_in_navigator(&SheetId::from("mv-metrics")).map_err(|e| e.to_string())?;
+
+        let compact = ViewportMetrics::new(640.0, 420.0, 1.0);
+        let driver = HumanPathDriver::new(UiApp::from_session(Session::from_document(doc)), compact);
+        let snap = driver.inspect_tree(Some("grid"), true);
+        let default_snap = inspect_ui_tree(driver.app(), Some("grid"), true);
+
+        let bounded_count =
+            |s: &crate::inspect::UiTreeSnapshot| s.grid_cells.as_ref().map_or(0, |cells| cells.iter().filter(|w| w.bounds.is_some()).count());
+        assert!(
+            bounded_count(&snap) < bounded_count(&default_snap),
+            "420px driver viewport must expose fewer bounded grid cells than default 800px viewport ({} vs {})",
+            bounded_count(&snap),
+            bounded_count(&default_snap)
+        );
+        assert!(default_snap.find_widget("grid.cell.12.0.0").and_then(|w| w.bounds).is_some(), "default 800px viewport should lay out row 12");
+        assert!(
+            snap.find_widget("grid.cell.12.0.0").and_then(|w| w.bounds).is_none(),
+            "420px viewport must clip row 12 rather than falling back to ViewportMetrics::default()"
+        );
+        Ok(())
     }
 }

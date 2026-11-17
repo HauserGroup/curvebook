@@ -1008,12 +1008,13 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
         return;
     }
 
+    let content_origin_x = grid_rect.x.saturating_add(i32::try_from(if is_rtl { vscroll_reserve } else { 0 }).unwrap_or(0));
     let gutter_local_x = mirror_x_for_rtl(0, left_gutter_w, inner_w, is_rtl);
-    let gutter_x = grid_rect.x.saturating_add(i32::try_from(gutter_local_x).unwrap_or(0));
+    let gutter_x = content_origin_x.saturating_add(i32::try_from(gutter_local_x).unwrap_or(0));
     let row_num_local_x = mirror_x_for_rtl(0, row_num_w, left_gutter_w, is_rtl);
     let rt_local_x = mirror_x_for_rtl(row_num_w, rt_w, left_gutter_w, is_rtl);
     let cols_local_x = mirror_x_for_rtl(left_gutter_w, cols_w, inner_w, is_rtl);
-    let cols_x = grid_rect.x.saturating_add(i32::try_from(cols_local_x).unwrap_or(0));
+    let cols_x = content_origin_x.saturating_add(i32::try_from(cols_local_x).unwrap_or(0));
 
     let metrics = GridLayoutMetrics {
         grid_rect,
@@ -1079,6 +1080,8 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
             col_spans.push((u32::try_from(d.x_px.max(0)).unwrap_or(0), d.width_px));
         }
         let x_col_spans = vis_x_cols.iter().map(|x| (u32::try_from(x.x_px.max(0)).unwrap_or(0), x.width_px)).collect();
+        let sy_rem = if metrics.scroll_y >= 0.0 && row_h > 0 { (metrics.scroll_y as u64) % u64::from(row_h) } else { 0 };
+        let body_y_i = i64::from(metrics.data_y).saturating_sub(i64::try_from(sy_rem).unwrap_or(0));
         let geom = GridHitGeometry {
             sheet_id: ds.id.clone(),
             sheet_rect: WorkspacePixelRect {
@@ -1088,7 +1091,7 @@ pub fn build_data_grid_view(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, rec
                 height: grid_rect.height,
             },
             hdr_y: u32::try_from(metrics.header_y.max(0)).unwrap_or(0),
-            body_y: u32::try_from(metrics.data_y.max(0)).unwrap_or(0),
+            body_y: u32::try_from(body_y_i.max(0)).unwrap_or(0),
             row_h,
             gutter_w: left_gutter_w,
             col_w: vis_data_cols.first().map_or_else(|| scale_u32(DEFAULT_DATA_COL_WIDTH_PX, scale), |v| v.width_px),
@@ -1342,6 +1345,9 @@ fn emit_visible_cells_window(
 
         for xcol in vis_x_cols {
             let cell_rect = LayoutRectPx::new(xcol.x_px, row_y, xcol.width_px, metrics.row_h);
+            if !rect_visible_in_clip(cell_rect, body_clip) {
+                continue;
+            }
             let display = x_cell_display(ds, row, xcol.subcol, preset);
             let is_numeric = ds.x_or_time_cell(row, xcol.subcol).is_some_and(|c| matches!(c.value, curvebook_doc::CellValue::Number(_)))
                 || matches!(&ds.archetype, TableArchetype::Xy(xy) if xy.x_value_at(row).is_some());
@@ -1352,6 +1358,7 @@ fn emit_visible_cells_window(
                 builder,
                 CellRenderArgs {
                     ds,
+                    sheet_wid: &metrics.scroll_id,
                     row,
                     col: 0,
                     subcol: xcol.subcol,
@@ -1371,6 +1378,9 @@ fn emit_visible_cells_window(
 
         for dcol in vis_data_cols {
             let cell_rect = LayoutRectPx::new(dcol.x_px, row_y, dcol.width_px, metrics.row_h);
+            if !rect_visible_in_clip(cell_rect, body_clip) {
+                continue;
+            }
             let coord = CellCoord::new(row, dcol.col, dcol.subcol);
             let cell_opt = ds.cell(coord);
             let display = cell_opt.map(|c| format_cell_display(c, preset)).unwrap_or_default();
@@ -1394,6 +1404,7 @@ fn emit_visible_cells_window(
                 builder,
                 CellRenderArgs {
                     ds,
+                    sheet_wid: &metrics.scroll_id,
                     row,
                     col: dcol.col,
                     subcol: dcol.subcol,
@@ -1417,6 +1428,7 @@ fn emit_visible_cells_window(
 
 struct CellRenderArgs<'a> {
     ds: &'a DataSheet,
+    sheet_wid: &'a WidgetId,
     row: usize,
     col: usize,
     subcol: usize,
@@ -1467,7 +1479,7 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
     let val_preview = if let Some(tip) = &excl_tip { format!("{} ({tip})", args.display) } else { args.display.clone() };
     let wid = builder.push_node(NodeSpec {
         id: WidgetId::from(wid_str.as_str()),
-        parent: None,
+        parent: Some(args.sheet_wid.clone()),
         z_layer: ZLayer::Workspace,
         rect_px: args.rect,
         a11y: grid_cell_meta(cell_a11y_label, args.is_selected, Some(val_preview.as_str())),
@@ -1499,7 +1511,15 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
         let _ = paint_text_fitted(
             builder,
             &wid,
-            FittedTextSpec { z_layer: ZLayer::Workspace, rect: text_rect, pad_x: 4, text: &label, style: &style, color: fg, scroll_container: None },
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: text_rect,
+                pad_x: 4,
+                text: &label,
+                style: &style,
+                color: fg,
+                scroll_container: Some(args.sheet_wid.as_str()),
+            },
         );
     }
 
@@ -1600,47 +1620,53 @@ fn emit_gutter_body_window(
         }
         let row_y = i32::try_from(row_y_i).unwrap_or(0);
         let rn_rect = LayoutRectPx::new(row_num_x, row_y, metrics.row_num_w, metrics.row_h);
-        let rn_id = scoped_id(slot_tag, &format!("grid.row_num.{row}"));
-        let rn_num = (row + 1).to_string();
-        let rn_wid = builder.push_node(NodeSpec {
-            id: WidgetId::from(rn_id.as_str()),
-            parent: None,
-            z_layer: ZLayer::Workspace,
-            rect_px: rn_rect,
-            a11y: AccessibilityMeta::new(WidgetRole::Label, rn_num.clone(), FocusScope::Workspace),
-            state: widget_state(builder, &rn_id, ControlEnablement::enabled()),
-            action: WidgetAction::NoOp,
-        });
-        builder.paint_fill(ZLayer::Workspace, Some(&rn_wid), rn_rect, palette.header);
-        builder.paint_stroke(ZLayer::Workspace, Some(&rn_wid), rn_rect, palette.border, 1);
-        let _ = paint_text_fitted(
-            builder,
-            &rn_wid,
-            FittedTextSpec {
+        if rect_visible_in_clip(rn_rect, gutter_clip) {
+            let rn_id = scoped_id(slot_tag, &format!("grid.row_num.{row}"));
+            let rn_num = (row + 1).to_string();
+            let rn_wid = builder.push_node(NodeSpec {
+                id: WidgetId::from(rn_id.as_str()),
+                parent: Some(metrics.scroll_id.clone()),
                 z_layer: ZLayer::Workspace,
-                rect: rn_rect,
-                pad_x: 4,
-                text: &rn_num,
-                style: &rn_style,
-                color: palette.muted,
-                scroll_container: None,
-            },
-        );
+                rect_px: rn_rect,
+                a11y: AccessibilityMeta::new(WidgetRole::Label, rn_num.clone(), FocusScope::Workspace),
+                state: widget_state(builder, &rn_id, ControlEnablement::enabled()),
+                action: WidgetAction::NoOp,
+            });
+            builder.paint_fill(ZLayer::Workspace, Some(&rn_wid), rn_rect, palette.header);
+            builder.paint_stroke(ZLayer::Workspace, Some(&rn_wid), rn_rect, palette.border, 1);
+            if row_y >= metrics.data_y && i64::from(rn_rect.bottom()) <= body_bottom {
+                let _ = paint_text_fitted(
+                    builder,
+                    &rn_wid,
+                    FittedTextSpec {
+                        z_layer: ZLayer::Workspace,
+                        rect: rn_rect,
+                        pad_x: 4,
+                        text: &rn_num,
+                        style: &rn_style,
+                        color: palette.muted,
+                        scroll_container: Some(metrics.scroll_id.as_str()),
+                    },
+                );
+            }
+        }
 
         let rt_rect = LayoutRectPx::new(metrics.rt_x, row_y, metrics.rt_w, metrics.row_h);
         if state.row_titles_collapsed {
-            let c_id = scoped_id(slot_tag, &format!("grid.row_title_collapsed.{row}"));
-            let c_wid = builder.push_node(NodeSpec {
-                id: WidgetId::from(c_id.as_str()),
-                parent: None,
-                z_layer: ZLayer::Workspace,
-                rect_px: rt_rect,
-                a11y: AccessibilityMeta::new(WidgetRole::Label, "", FocusScope::Workspace),
-                state: widget_state(builder, &c_id, ControlEnablement::enabled()),
-                action: WidgetAction::NoOp,
-            });
-            builder.paint_fill(ZLayer::Workspace, Some(&c_wid), rt_rect, palette.header);
-            builder.paint_stroke(ZLayer::Workspace, Some(&c_wid), rt_rect, palette.border, 1);
+            if rect_visible_in_clip(rt_rect, gutter_clip) {
+                let c_id = scoped_id(slot_tag, &format!("grid.row_title_collapsed.{row}"));
+                let c_wid = builder.push_node(NodeSpec {
+                    id: WidgetId::from(c_id.as_str()),
+                    parent: Some(metrics.scroll_id.clone()),
+                    z_layer: ZLayer::Workspace,
+                    rect_px: rt_rect,
+                    a11y: AccessibilityMeta::new(WidgetRole::Label, "", FocusScope::Workspace),
+                    state: widget_state(builder, &c_id, ControlEnablement::enabled()),
+                    action: WidgetAction::NoOp,
+                });
+                builder.paint_fill(ZLayer::Workspace, Some(&c_wid), rt_rect, palette.header);
+                builder.paint_stroke(ZLayer::Workspace, Some(&c_wid), rt_rect, palette.border, 1);
+            }
         } else if rect_visible_in_clip(rt_rect, gutter_clip) {
             let title_text = archetype_row_title(&ds.archetype, row).unwrap_or("");
             let a11y_lbl = if title_text.is_empty() {
@@ -1653,7 +1679,7 @@ fn emit_gutter_body_window(
                 builder,
                 ButtonWidgetSpec {
                     id: &rt_wid_str,
-                    parent: None,
+                    parent: Some(metrics.scroll_id.clone()),
                     z_layer: ZLayer::Workspace,
                     rect: rt_rect,
                     label: title_text,
@@ -2516,5 +2542,105 @@ fn replicate_subcol_label(mode: &curvebook_doc::SubcolumnMode, sub_count: usize,
                 format!("Y{}", subcol + 1)
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{Cell, DataSheet, MultipleVariablesTable, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_engine::Session;
+
+    use crate::UiApp;
+    use crate::human_driver::HumanPathDriver;
+    use crate::interaction::ViewportMetrics;
+    use crate::layout::WidgetId;
+
+    fn build_large_mv_driver(cols: usize, rows: usize, locale: &str) -> Result<HumanPathDriver, String> {
+        let mut mv = MultipleVariablesTable::new(cols, rows).map_err(|e| e.to_string())?;
+        for r in 0..rows {
+            mv.row_titles[r] = format!("Row {}", r + 1);
+            for (c, var) in mv.variables.iter_mut().enumerate() {
+                var.cells[r] = Cell::number((r as f64) * 10.0 + (c as f64));
+            }
+        }
+        let ds = DataSheet::new("mv-big", "Big MV Cohort", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())?;
+        let mut doc = ProjectDocument::new("Large Grid Parity").map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.select_in_navigator(&SheetId::from("mv-big")).map_err(|e| e.to_string())?;
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        let _ = app.set_locale(locale);
+        Ok(HumanPathDriver::new(app, ViewportMetrics::new(1280.0, 800.0, 1.0)))
+    }
+
+    #[test]
+    fn large_mv_bottom_partial_row_passes_parity_ltr_and_rtl() -> Result<(), String> {
+        // 4 cols at 1280x800 has hscroll_reserve == 0 and >= 26 rows (row 25 clipped right above status.summary).
+        for locale in ["en", "ar"] {
+            let mut driver = build_large_mv_driver(4, 120, locale)?;
+            for scroll_y in [0.0, 10.0, 18.0] {
+                driver.app_mut().interaction.scroll_offsets.offsets.insert(String::from("grid.sheet.mv-big"), [0.0, scroll_y]);
+                let report = driver.verify_parity();
+                assert!(report.is_clean(), "{locale} scroll_y={scroll_y} parity violations: {:?}", report.violations);
+            }
+            if locale == "ar" {
+                let tree = driver.layout_tree();
+                let sheet = tree.node("grid.sheet.mv-big").ok_or_else(|| String::from("missing grid.sheet.mv-big"))?;
+                let vscroll = tree.node("grid.sheet.mv-big.vscroll").ok_or_else(|| String::from("missing RTL vscroll"))?;
+                assert_eq!(vscroll.bounds.rect_px.x, sheet.bounds.rect_px.x, "RTL vertical scrollbar must sit on left edge");
+                if let Some(grid) = &tree.grid_geometry {
+                    let gutter = grid.row_gutter_rect(0);
+                    assert!(gutter.x >= grid.sheet_rect.right().saturating_sub(grid.gutter_w + 2), "RTL gutter must flush right");
+                }
+            }
+        }
+        Ok(())
+    }
+
+    #[test]
+    fn grid_cells_parent_and_fractional_wheel_scroll_align_hit_test() -> Result<(), String> {
+        let mut driver = build_large_mv_driver(5, 130, "en")?;
+        let tree0 = driver.layout_tree();
+        let sheet_id = WidgetId::from("grid.sheet.mv-big");
+        let c0 = tree0.node("grid.cell.0.0.0").ok_or_else(|| String::from("missing grid.cell.0.0.0"))?;
+        assert_eq!(c0.parent.as_ref(), Some(&sheet_id), "grid.cell must parent to grid.sheet.<id>");
+
+        // Non-multiple-of-24 vertical scroll offsets must align GridHitGeometry::hit_test_cell exactly.
+        for scroll_y in [18.0_f64, 2730.0_f64] {
+            driver.app_mut().interaction.scroll_offsets.offsets.insert(String::from("grid.sheet.mv-big"), [0.0, scroll_y]);
+            let tree = driver.layout_tree();
+            let geom = tree.grid_geometry.as_ref().ok_or_else(|| String::from("missing grid_geometry"))?;
+            let mut checked = 0usize;
+            for r in (geom.start_row + 1)..geom.end_row.saturating_sub(1) {
+                let id = format!("grid.cell.{r}.0.0");
+                if let Some(node) = tree.node(&id)
+                    && node.bounds.visible_rect_px.height >= 12
+                {
+                    let [cx, cy] = node.bounds.visible_rect_px.center();
+                    let hit = geom.hit_test_cell(cx as u32, cy as u32);
+                    assert_eq!(hit.map(|(coord, _)| coord.row), Some(r), "scroll_y={scroll_y}: expected row {r}, got {hit:?}");
+                    checked += 1;
+                }
+            }
+            assert!(checked >= 5, "expected multiple visible cells verified at scroll_y={scroll_y}");
+        }
+
+        // XY X-cells must also parent to grid.sheet.<id> and hit-test cleanly at fractional scroll.
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 80).map_err(|e| e.to_string())?;
+        for r in 0..80 {
+            xy.x_cells[r][0] = Cell::number(r as f64);
+        }
+        let xy_ds = DataSheet::new("xy-big", "XY Big", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?;
+        let mut doc = ProjectDocument::new("XY Parent Test").map_err(|e| e.to_string())?;
+        doc.add_data_sheet(xy_ds).map_err(|e| e.to_string())?;
+        doc.select_in_navigator(&SheetId::from("xy-big")).map_err(|e| e.to_string())?;
+        let mut xy_driver = HumanPathDriver::new(UiApp::from_session(Session::from_document(doc)), ViewportMetrics::new(1280.0, 800.0, 1.0));
+        xy_driver.app_mut().interaction.scroll_offsets.offsets.insert(String::from("grid.sheet.xy-big"), [0.0, 318.0]);
+        let xy_tree = xy_driver.layout_tree();
+        let xcell = xy_tree.node("grid.xcell.14.0").ok_or_else(|| String::from("missing grid.xcell.14.0"))?;
+        assert_eq!(xcell.parent.as_ref(), Some(&WidgetId::from("grid.sheet.xy-big")));
+        let [xcx, xcy] = xcell.bounds.visible_rect_px.center();
+        let xy_geom = xy_tree.grid_geometry.as_ref().ok_or_else(|| String::from("missing xy grid_geometry"))?;
+        assert_eq!(xy_geom.hit_test_x_cell(xcx as u32, xcy as u32), Some((14, 0)));
+        Ok(())
     }
 }

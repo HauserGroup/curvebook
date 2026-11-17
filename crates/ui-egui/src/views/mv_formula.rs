@@ -1356,8 +1356,13 @@ pub fn build_mv_column_badges(
     }
     let total = mv.variables.len();
     let start_col = state.badge_scroll_col.min(total.saturating_sub(1));
-    let min_slot_threshold = scaled_u32(116.0, scale, 96, 232);
-    let nav_w = if total > 1 && (start_col > 0 || rect.width < (total as u32) * min_slot_threshold) { scaled_u32(20.0, scale, 18, 40) } else { 0 };
+    let lock_w = scaled_u32(22.0, scale, 18, 44);
+    let badge_overhead = lock_w + 6;
+    let min_badge_w = scaled_u32(76.0, scale, 64, 152);
+    let min_slot_w = min_badge_w + badge_overhead;
+    let max_slot_w = scaled_u32(158.0, scale, 130, 316);
+    let nav_w =
+        if total > 1 && (start_col > 0 || rect.width < (total as u32).saturating_mul(min_slot_w)) { scaled_u32(20.0, scale, 18, 40) } else { 0 };
     let mut cx = rect.x;
     let right_limit = rect.right() - i32::try_from(nav_w).unwrap_or(0);
 
@@ -1383,11 +1388,10 @@ pub fn build_mv_column_badges(
         cx += i32::try_from(nav_w + 3).unwrap_or(23);
     }
 
-    let lock_w = scaled_u32(22.0, scale, 18, 44);
     let remaining_w = u32::try_from((right_limit - cx).max(0)).unwrap_or(0);
     let visible_count = mv.variables.len().saturating_sub(start_col).max(1);
-    let item_slot_w = (remaining_w / (visible_count as u32)).clamp(scaled_u32(108.0, scale, 90, 216), scaled_u32(158.0, scale, 130, 316));
-    let badge_w = item_slot_w.saturating_sub(lock_w + 4).max(scaled_u32(76.0, scale, 64, 152));
+    let item_slot_w = (remaining_w / (visible_count as u32)).clamp(min_slot_w, max_slot_w);
+    let badge_w = item_slot_w.saturating_sub(badge_overhead).max(min_badge_w);
     let size_px = (10.5 * scale).clamp(8.5, 22.0);
     let style = UiTextStyle::ui_sans(size_px);
 
@@ -2983,4 +2987,50 @@ pub fn emit_mv_column_fx_button(
             action: custom_action(format!("open_col:{col}")),
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{DataSheet, MultipleVariablesTable, ProjectDocument, SheetId, TableArchetype};
+    use curvebook_engine::Session;
+
+    use crate::UiApp;
+    use crate::human_driver::HumanPathDriver;
+    use crate::interaction::ViewportMetrics;
+
+    fn build_mv_cols_driver(cols: usize, viewport: ViewportMetrics) -> Result<HumanPathDriver, String> {
+        let mv = MultipleVariablesTable::new(cols, 6).map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("mv-strip", "Strip Test", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())?;
+        let mut doc = ProjectDocument::new("MV Strip Test").map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.select_in_navigator(&SheetId::from("mv-strip")).map_err(|e| e.to_string())?;
+        Ok(HumanPathDriver::new(UiApp::from_session(Session::from_document(doc)), viewport))
+    }
+
+    #[test]
+    fn mv_role_strip_handles_five_plus_columns_at_1280x800_and_scrolls_when_overflowing() -> Result<(), String> {
+        // 5 columns at 1280x800: role_badge.4 must be visibly drawn (or reachable via role_strip.next) with clean parity.
+        let mut d5 = build_mv_cols_driver(5, ViewportMetrics::new(1280.0, 800.0, 1.0))?;
+        assert!(d5.verify_parity().is_clean(), "5-col MV parity violations: {:?}", d5.verify_parity().violations);
+        if d5.find_widget("mv_formula.role_badge.4").is_none_or(|n| !n.drawn_in_frame) {
+            assert!(d5.find_widget("mv_formula.role_strip.next").is_some_and(|n| n.drawn_in_frame && n.state.enablement.enabled));
+            let _ = d5.click_widget("mv_formula.role_strip.next")?;
+        }
+        assert!(d5.find_widget("mv_formula.role_badge.4").is_some_and(|n| n.drawn_in_frame));
+
+        // 8 columns at 1280x800: must emit enabled role_strip.next and scroll smoothly to column 7.
+        let mut d8 = build_mv_cols_driver(8, ViewportMetrics::new(1280.0, 800.0, 1.0))?;
+        assert!(d8.verify_parity().is_clean(), "8-col MV parity violations: {:?}", d8.verify_parity().violations);
+        for _ in 0..8 {
+            if d8.find_widget("mv_formula.role_badge.7").is_some_and(|n| n.drawn_in_frame) {
+                break;
+            }
+            let next_node = d8.find_widget("mv_formula.role_strip.next").ok_or_else(|| String::from("missing mv_formula.role_strip.next"))?;
+            assert!(next_node.drawn_in_frame && next_node.state.enablement.enabled);
+            let _ = d8.click_widget("mv_formula.role_strip.next")?;
+        }
+        assert!(d8.find_widget("mv_formula.role_badge.7").is_some_and(|n| n.drawn_in_frame));
+        assert!(d8.verify_parity().is_clean());
+        Ok(())
+    }
 }

@@ -190,13 +190,18 @@ pub fn paint_text_fitted(builder: &mut LayoutBuilder<'_>, owner: &WidgetId, spec
     let avail_w = f64::from(vis_rect.width.saturating_sub(spec.pad_x.saturating_mul(2)));
     let (display, ellipsized) = ellipsize_text(builder.measurer, spec.text, spec.style, &builder.tree.locale, avail_w);
     let metrics = builder.measurer.measure(&display, spec.style, &builder.tree.locale);
-    if display == "…" && metrics.width_px > f64::from(vis_rect.width.saturating_sub(spec.pad_x)) {
+    if f64::from(vis_rect.height) < metrics.line_height_px
+        || (display == "…" && metrics.width_px > f64::from(vis_rect.width.saturating_sub(spec.pad_x)))
+    {
+        return false;
+    }
+    let top_y = f64::from(spec.rect.y) + ((f64::from(spec.rect.height) - metrics.line_height_px) * 0.5).max(0.0);
+    if top_y + metrics.line_height_px <= f64::from(vis_rect.y) || top_y >= f64::from(vis_rect.bottom()) {
         return false;
     }
     if let Some(node) = builder.tree.nodes.iter_mut().rev().find(|n| n.id == *owner) {
         node.state.ellipsized = node.state.ellipsized || ellipsized;
     }
-    let top_y = f64::from(spec.rect.y) + ((f64::from(spec.rect.height) - metrics.line_height_px) * 0.5).max(0.0);
     let x_px = f64::from(vis_rect.x + i32::try_from(spec.pad_x).unwrap_or(0));
     builder.paint_text(TextRunSpec {
         z_layer: spec.z_layer,
@@ -208,6 +213,16 @@ pub fn paint_text_fitted(builder: &mut LayoutBuilder<'_>, owner: &WidgetId, spec
         color: spec.color,
         ellipsized,
     });
+    if let Some(last_run) = builder.tree.text_runs.last_mut()
+        && last_run.owner_widget_id == *owner
+    {
+        let clamped = last_run.bounds_px.intersect(vis_rect);
+        if clamped.width == 0 || clamped.height == 0 {
+            builder.tree.text_runs.pop();
+        } else {
+            last_run.bounds_px = clamped;
+        }
+    }
     ellipsized
 }
 
@@ -752,12 +767,9 @@ pub fn emit_slider(builder: &mut LayoutBuilder<'_>, spec: SliderWidgetSpec<'_>) 
 pub fn emit_scrollbars_for_meta(builder: &mut LayoutBuilder<'_>, z_layer: ZLayer, scroll_meta: &ScrollMeta, parent: Option<WidgetId>) {
     let thick = scrollbar_thickness_px(builder.scale());
     if scroll_meta.has_vertical_overflow() && scroll_meta.viewport_px.width > thick + 8 {
-        let track_rect = LayoutRectPx::new(
-            scroll_meta.viewport_px.right() - i32::try_from(thick).unwrap_or(10),
-            scroll_meta.viewport_px.y,
-            thick,
-            scroll_meta.viewport_px.height,
-        );
+        let track_x =
+            if builder.tree.is_rtl { scroll_meta.viewport_px.x } else { scroll_meta.viewport_px.right() - i32::try_from(thick).unwrap_or(10) };
+        let track_rect = LayoutRectPx::new(track_x, scroll_meta.viewport_px.y, thick, scroll_meta.viewport_px.height);
         if let Some((track, thumb)) =
             compute_scrollbar_thumb(track_rect, scroll_meta.viewport_px.height, scroll_meta.content_size_px[1], scroll_meta.scroll_offset_px[1], true)
         {
@@ -885,3 +897,111 @@ fn button_fg(builder: &LayoutBuilder<'_>, state: &WidgetVisualState, primary: bo
 
 /// Collection type alias for per-widget edit states.
 pub type TextFieldBufferMap = BTreeMap<String, TextFieldEditState>;
+
+#[cfg(test)]
+mod tests {
+    use curvebook_palette::Rgba8;
+
+    use super::{FittedTextSpec, emit_scrollbars_for_meta, paint_text_fitted};
+    use crate::UiApp;
+    use crate::compositor::FramePalette;
+    use crate::interaction::ViewportMetrics;
+    use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
+    use crate::layout::scroll::{ScrollAxes, ScrollMeta};
+    use crate::layout::{LayoutBuilder, LayoutRectPx, NodeSpec, WidgetAction, WidgetId, WidgetVisualState, ZLayer};
+    use crate::text_bridge::{DesktopTextMeasurer, UiTextStyle};
+    use crate::theme::UiThemeMode;
+
+    #[test]
+    fn paint_text_fitted_clamps_bounds_and_skips_short_clipped_runs() {
+        let app = UiApp::new();
+        let measurer = DesktopTextMeasurer::global();
+        let palette = FramePalette::from_theme(&app.theme);
+        let mut builder = LayoutBuilder::new(&app, ViewportMetrics::new(800.0, 600.0, 1.0), measurer, &palette);
+        let style = UiTextStyle::ui_sans(12.0);
+
+        let clip = LayoutRectPx::new(10, 100, 120, 100);
+        builder.push_clip(clip);
+
+        // 8px visible slice (< 16px line_height_px) must be skipped completely.
+        let short_id = builder.push_node(NodeSpec {
+            id: WidgetId::from("test.short"),
+            parent: None,
+            z_layer: ZLayer::Workspace,
+            rect_px: LayoutRectPx::new(10, 192, 120, 24),
+            a11y: AccessibilityMeta::new(WidgetRole::Label, "26", FocusScope::Workspace),
+            state: WidgetVisualState::default(),
+            action: WidgetAction::NoOp,
+        });
+        let _ = paint_text_fitted(
+            &mut builder,
+            &short_id,
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: LayoutRectPx::new(10, 192, 120, 24),
+                pad_x: 4,
+                text: "26",
+                style: &style,
+                color: Rgba8::BLACK,
+                scroll_container: None,
+            },
+        );
+        assert!(builder.tree.text_runs.is_empty(), "clipped sliver < line_height_px must not emit text run");
+
+        // 18px visible slice (>= 16px line_height_px) must clamp bounds_px strictly within clip.
+        let tall_id = builder.push_node(NodeSpec {
+            id: WidgetId::from("test.tall"),
+            parent: None,
+            z_layer: ZLayer::Workspace,
+            rect_px: LayoutRectPx::new(10, 182, 120, 24),
+            a11y: AccessibilityMeta::new(WidgetRole::Label, "25", FocusScope::Workspace),
+            state: WidgetVisualState::default(),
+            action: WidgetAction::NoOp,
+        });
+        let _ = paint_text_fitted(
+            &mut builder,
+            &tall_id,
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: LayoutRectPx::new(10, 182, 120, 24),
+                pad_x: 4,
+                text: "25",
+                style: &style,
+                color: Rgba8::BLACK,
+                scroll_container: None,
+            },
+        );
+        builder.pop_clip();
+        assert_eq!(builder.tree.text_runs.len(), 1);
+        assert!(builder.tree.text_runs[0].bounds_px.bottom() <= clip.bottom());
+        let _ = UiThemeMode::Light;
+    }
+
+    #[test]
+    fn emit_scrollbars_for_meta_mirrors_vertical_track_to_left_in_rtl() {
+        let mut app = UiApp::new();
+        app.set_locale("ar");
+        let measurer = DesktopTextMeasurer::global();
+        let palette = FramePalette::from_theme(&app.theme);
+        let mut rtl_builder = LayoutBuilder::new(&app, ViewportMetrics::new(800.0, 600.0, 1.0), measurer, &palette);
+        let vp = LayoutRectPx::new(40, 60, 220, 300);
+        let meta = ScrollMeta::new("scroll.rtl_test", vp, [220, 900], [0.0, 0.0], ScrollAxes::Vertical);
+        emit_scrollbars_for_meta(&mut rtl_builder, ZLayer::Workspace, &meta, None);
+        let rtl_tree = rtl_builder.finish();
+        let vscroll_rtl = rtl_tree.node("scroll.rtl_test.vscroll");
+        assert!(vscroll_rtl.is_some());
+        if let Some(node) = vscroll_rtl {
+            assert_eq!(node.bounds.rect_px.x, vp.x, "RTL vertical scrollbar must mirror to left edge");
+        }
+
+        app.set_locale("en");
+        let mut ltr_builder = LayoutBuilder::new(&app, ViewportMetrics::new(800.0, 600.0, 1.0), measurer, &palette);
+        emit_scrollbars_for_meta(&mut ltr_builder, ZLayer::Workspace, &meta, None);
+        let ltr_tree = ltr_builder.finish();
+        let vscroll_ltr = ltr_tree.node("scroll.rtl_test.vscroll");
+        assert!(vscroll_ltr.is_some());
+        if let Some(node) = vscroll_ltr {
+            assert_eq!(node.bounds.rect_px.right(), vp.right(), "LTR vertical scrollbar must flush right");
+        }
+    }
+}
