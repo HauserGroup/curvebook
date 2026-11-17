@@ -981,6 +981,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.graph.format.open"
             | "ui.graph.axes.open"
             | "ui.graph.pairwise.open"
+            | "ui.applyStyleFrom.open"
             | "ui.layout.composer.open"
             | "ui.export.figure.open"
             | "ui.import.reshape.open"
@@ -1052,6 +1053,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.graph.format.open" => map_ui_result(dispatch_ui_format_graph_open(app, params)),
         "ui.graph.axes.open" => map_ui_result(dispatch_ui_format_axes_open(app, params)),
         "ui.graph.pairwise.open" => map_ui_result(dispatch_ui_pairwise_open(app, params)),
+        "ui.applyStyleFrom.open" => map_ui_result(dispatch_ui_apply_style_from_open(app, params)),
         "ui.layout.composer.open" => map_ui_result(dispatch_ui_layout_composer_open(app, params)),
         "ui.export.figure.open" => map_ui_result(dispatch_ui_export_figure_open(app, params)),
         "ui.import.reshape.open" => map_ui_result(dispatch_ui_import_reshape_open(app, params)),
@@ -2678,6 +2680,18 @@ fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
         app.canvas_dialogs.format_graph.apply_field_patch_localized(&fields, &preset)?;
     }
     Ok(json!({ "dialog": "FormatGraph", "graph_sheet_id": graph_id.as_str() }))
+}
+
+fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let graph_id = resolve_target_graph_id(&doc, params)?;
+    if !app.canvas_dialogs.open_apply_style_from(&doc, &graph_id) {
+        return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
+    }
+    Ok(json!({
+        "dialog": "ApplyStyleFrom",
+        "graph_sheet_id": graph_id.as_str(),
+    }))
 }
 
 fn dispatch_ui_format_axes_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {

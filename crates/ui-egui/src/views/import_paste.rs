@@ -2202,7 +2202,8 @@ fn build_source_tab(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: La
 
     // Row 1: Sheet title
     if let Some(ry) = row_y_if_visible(&frame, 1, frame.row_h) {
-        emit_labeled_text_field(builder, &frame, ry, frame.row_h, WID_TITLE, "Sheet Title", &st.title, false, 30);
+        let title_lbl = tr_or_default(locale, "welcome.field.title", "Sheet Title");
+        emit_labeled_text_field(builder, &frame, ry, frame.row_h, WID_TITLE, title_lbl, &st.title, false, 30);
     }
 
     // Row 2: Target Table Archetype

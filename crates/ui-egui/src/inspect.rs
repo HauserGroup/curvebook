@@ -792,6 +792,11 @@ fn node(
     }
 }
 
+fn insp_tr(app: &UiApp, key: &str, fallback: &'static str) -> &'static str {
+    let norm = crate::i18n::normalize_locale(&app.locale);
+    crate::i18n::try_tr(norm, key).unwrap_or(fallback)
+}
+
 type DialogBuildParts = (&'static str, Option<String>, Option<String>, Vec<UiWidgetNode>, Vec<UiWidgetNode>, Vec<(&'static str, &'static str)>);
 
 fn build_power_dialog_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -868,7 +873,7 @@ fn build_power_dialog_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool)
         ));
     }
 
-    let btns = vec![("create", "Create"), ("next", "Next"), ("back", "Back"), ("cancel", "Cancel")];
+    let btns = vec![("create", "Create"), ("next", "Next"), ("back", "Back"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))];
     ("Power and Sample Size", None, Some(pw.stage.label().to_owned()), tabs, controls, btns)
 }
 
@@ -883,7 +888,14 @@ fn build_format_points_nodes(app: &UiApp, graph_id: &SheetId, bx: f64, by: f64, 
         node("format_points.show_row_labels", "checkbox", "Show row labels", json!(fp.show_row_labels), ControlEnablement::enabled(), pos(4)),
         node("format_points.clear", "checkbox", "Clear overrides", json!(fp.clear_overrides), ControlEnablement::enabled(), pos(5)),
     ];
-    ("Format Selected Points...", Some(graph_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        "Format Selected Points...",
+        Some(graph_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_analyze_dialog_nodes(
@@ -1025,7 +1037,7 @@ fn build_analyze_dialog_nodes(
         st.extracted_result_tab_id.clone(),
         Vec::new(),
         controls,
-        vec![("ok", "OK"), ("cancel", "Cancel")],
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -1491,7 +1503,7 @@ fn build_edit_params_dialog_nodes(
         Some(ep.active_tab.clone()),
         tabs,
         controls,
-        vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("apply", "Apply"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -1673,7 +1685,14 @@ fn build_import_reshape_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: boo
         node("import.x_col", "textbox", "X column", json!(st.x_col), ControlEnablement::enabled(), pos(9)),
         node("import.replicate_col", "textbox", "Replicate column", json!(st.replicate_col), ControlEnablement::enabled(), pos(10)),
     ];
-    ("Import Reshape (Plate Map / Tidy Long)", None, None, Vec::new(), controls, vec![("ok", "Import"), ("cancel", "Cancel")])
+    (
+        "Import Reshape (Plate Map / Tidy Long)",
+        None,
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "Import"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_convert_archetype_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1696,7 +1715,7 @@ fn build_convert_archetype_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f
         None,
         Vec::new(),
         controls,
-        vec![("ok", "Convert"), ("preview", "Preview"), ("cancel", "Cancel")],
+        vec![("ok", "Convert"), ("preview", "Preview"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -1708,7 +1727,14 @@ fn build_change_graph_type_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64,
         node("graph_type.summary_measure", "combobox", "Summary measure", json!(st.summary_measure), ControlEnablement::enabled(), pos(1)),
         node("graph_type.error_bar_metric", "combobox", "Error bar metric", json!(st.error_bar_metric), ControlEnablement::enabled(), pos(2)),
     ];
-    ("Change Graph Type", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        "Change Graph Type",
+        Some(graph_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1761,12 +1787,12 @@ fn build_format_graph_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: 
         ),
     ];
     (
-        "Format Graph",
+        insp_tr(app, "inspector.format_graph", "Format Graph"),
         Some(graph_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
         controls,
-        vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("apply", "Apply"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -1786,7 +1812,14 @@ fn build_format_axes_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, in
         node("axes.x_thresholds", "textbox", "X axis thresholds", json!(st.effective_x_thresholds()), ControlEnablement::enabled(), pos(8)),
         node("axes.y_thresholds", "textbox", "Y axis thresholds", json!(st.effective_y_thresholds()), ControlEnablement::enabled(), pos(9)),
     ];
-    ("Format Axes", Some(sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        insp_tr(app, "inspector.format_axes", "Format Axes"),
+        Some(sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_pairwise_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1852,12 +1885,12 @@ fn build_pairwise_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64,
         node("pairwise.cld_offset_pt", "spinbutton", "CLD vertical offset (pt)", json!(st.cld_offset_pt), gate("pairwise.cld_offset_pt"), pos(12)),
     ];
     (
-        "Pairwise Comparisons",
+        insp_tr(app, "inspector.pairwise_comparisons", "Pairwise Comparisons"),
         Some(graph_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
         controls,
-        vec![("ok", "OK"), ("apply", "Apply"), ("cancel", "Cancel")],
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("apply", "Apply"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -1895,7 +1928,14 @@ fn build_bubble_plot_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f
         node("bubble.size_column", "combobox", "Size column", json!(size_col), ControlEnablement::enabled(), pos(10)),
         node("bubble.available_columns", "readonly", "Available columns", json!(avail), ControlEnablement::enabled(), pos(11)),
     ];
-    ("Bubble Plot Channels", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        "Bubble Plot Channels",
+        Some(graph_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_apply_style_nodes(app: &UiApp, target_graph_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1928,7 +1968,14 @@ fn build_apply_style_nodes(app: &UiApp, target_graph_id: &SheetId, bx: f64, by: 
             pos(3),
         ),
     ];
-    ("Apply Style From...", Some(target_graph_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        insp_tr(app, "cmd.ui.applyStyleFrom.open", "Apply Style From..."),
+        Some(target_graph_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_page_layout_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1943,7 +1990,14 @@ fn build_page_layout_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: 
         node("layout.panel_badges", "combobox", "Panel badges", json!(format!("{:?}", st.panel_badges)), ControlEnablement::enabled(), pos(5)),
         node("layout.item_count", "readonly", "Placed items", json!(st.items.len()), ControlEnablement::enabled(), pos(6)),
     ];
-    ("Page Layout Composer", Some(layout_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        "Page Layout Composer",
+        Some(layout_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_export_figure_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1955,7 +2009,14 @@ fn build_export_figure_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, 
         node("export.height_px", "spinbutton", "Height (px)", json!(st.height_px), ControlEnablement::enabled(), pos(2)),
         node("export.dpi", "spinbutton", "DPI", json!(st.dpi), ControlEnablement::enabled(), pos(3)),
     ];
-    ("Export Publication Figure", Some(sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Export"), ("cancel", "Cancel")])
+    (
+        "Export Publication Figure",
+        Some(sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.export", "Export")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_randomize_groups_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -1978,7 +2039,7 @@ fn build_randomize_groups_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: b
             pos(6),
         ),
     ];
-    ("Randomize Groups...", None, None, Vec::new(), controls, vec![("ok", "Generate"), ("cancel", "Cancel")])
+    ("Randomize Groups...", None, None, Vec::new(), controls, vec![("ok", "Generate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))])
 }
 
 fn build_random_sample_rows_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2012,7 +2073,7 @@ fn build_random_sample_rows_nodes(app: &UiApp, bx: f64, by: f64, include_bounds:
         None,
         Vec::new(),
         controls,
-        vec![("ok", "Sample"), ("cancel", "Cancel")],
+        vec![("ok", "Sample"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -2043,7 +2104,7 @@ fn build_simulate_distributions_nodes(app: &UiApp, bx: f64, by: f64, include_bou
         node("simulate.column_name", "textbox", "Primary column name", json!(first.map(|c| c.name.as_str())), ControlEnablement::enabled(), pos(5)),
         node("simulate.columns", "readonly", "Configured columns", json!(st.columns.len()), ControlEnablement::enabled(), pos(6)),
     ];
-    ("Simulate Distributions...", None, None, Vec::new(), controls, vec![("ok", "Simulate"), ("cancel", "Cancel")])
+    ("Simulate Distributions...", None, None, Vec::new(), controls, vec![("ok", "Simulate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))])
 }
 
 fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2072,7 +2133,14 @@ fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: 
         node("equation.bordered", "checkbox", "Draw border", json!(st.bordered), ControlEnablement::enabled(), pos(5)),
         node("equation.update_existing", "checkbox", "Update existing equation", json!(st.update_existing), ControlEnablement::enabled(), pos(6)),
     ];
-    ("Insert Model Equation", Some(graph_sheet_id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Insert"), ("cancel", "Cancel")])
+    (
+        "Insert Model Equation",
+        Some(graph_sheet_id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "Insert"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_print_dialog_nodes(app: &UiApp, sheet_id: Option<&SheetId>, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2091,7 +2159,14 @@ fn build_print_dialog_nodes(app: &UiApp, sheet_id: Option<&SheetId>, bx: f64, by
         node("print.selected_printer", "combobox", "Printer", json!(st.selected_printer), ControlEnablement::enabled(), pos(4)),
         node("print.submit_to_os", "checkbox", "Submit to OS print queue", json!(st.submit_to_os), submit_gate, pos(5)),
     ];
-    ("Print...", sheet_id.map(|id| id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "Print"), ("cancel", "Cancel")])
+    (
+        insp_tr(app, "toolbar.print", "Print"),
+        sheet_id.map(|id| id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "toolbar.print", "Print")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2120,7 +2195,7 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
                 ControlEnablement::enabled(),
                 pos(1),
             ));
-            ("Change Data Analyzed", Some(result_sheet_id))
+            (insp_tr(app, "btn.change_data_analyzed", "Change Data Analyzed"), Some(result_sheet_id))
         }
         ActiveDialog::ResultViewer { result_sheet_id } => ("Result Sheet Viewer", Some(result_sheet_id)),
         ActiveDialog::ConstantHookPicker { target_sheet_id } => {
@@ -2144,11 +2219,15 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
             ("Insert Hooked Constant", Some(target_sheet_id))
         }
         ActiveDialog::ChangeGraphType { graph_sheet_id } => ("Change Graph Type", Some(graph_sheet_id)),
-        ActiveDialog::FormatGraph { graph_sheet_id } => ("Format Graph", Some(graph_sheet_id)),
-        ActiveDialog::FormatAxes { sheet_id } => ("Format Axes", Some(sheet_id)),
-        ActiveDialog::PairwiseComparisons { graph_sheet_id } => ("Pairwise Comparisons", Some(graph_sheet_id)),
+        ActiveDialog::FormatGraph { graph_sheet_id } => (insp_tr(app, "inspector.format_graph", "Format Graph"), Some(graph_sheet_id)),
+        ActiveDialog::FormatAxes { sheet_id } => (insp_tr(app, "inspector.format_axes", "Format Axes"), Some(sheet_id)),
+        ActiveDialog::PairwiseComparisons { graph_sheet_id } => {
+            (insp_tr(app, "inspector.pairwise_comparisons", "Pairwise Comparisons"), Some(graph_sheet_id))
+        }
         ActiveDialog::BubblePlotInspector { graph_sheet_id } => ("Bubble Plot Channels", Some(graph_sheet_id)),
-        ActiveDialog::ApplyStyleFrom { target_graph_id } => ("Apply Style From...", Some(target_graph_id)),
+        ActiveDialog::ApplyStyleFrom { target_graph_id } => {
+            (insp_tr(app, "cmd.ui.applyStyleFrom.open", "Apply Style From..."), Some(target_graph_id))
+        }
         ActiveDialog::PageLayoutComposer { layout_sheet_id } => ("Page Layout Composer", Some(layout_sheet_id)),
         ActiveDialog::ExportFigure { sheet_id } => ("Export Publication Figure", Some(sheet_id)),
         ActiveDialog::ConvertArchetype { sheet_id } => ("Convert Table Archetype...", Some(sheet_id)),
@@ -2163,7 +2242,7 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
         ActiveDialog::RandomSampleRows { .. } => ("Random Sample Rows...", None),
         ActiveDialog::SimulateDistributions => ("Simulate Distributions...", None),
         ActiveDialog::InsertModelEquation { graph_sheet_id } => ("Insert Model Equation", Some(graph_sheet_id)),
-        ActiveDialog::Print { sheet_id } => ("Print...", sheet_id.as_ref()),
+        ActiveDialog::Print { sheet_id } => (insp_tr(app, "toolbar.print", "Print"), sheet_id.as_ref()),
         ActiveDialog::CommandPalette => {
             let st = &app.canvas_dialogs.command_palette;
             controls.push(node("palette.query", "textbox", "Search Commands", json!(st.query), ControlEnablement::enabled(), pos(0)));
@@ -2175,12 +2254,19 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
                 ControlEnablement::enabled(),
                 pos(1),
             ));
-            ("Command Palette (Cmd+K)", None)
+            (insp_tr(app, "inspector.command_palette", "Command Palette (Cmd+K)"), None)
         }
-        ActiveDialog::About => ("About CurveBook", None),
+        ActiveDialog::About => (insp_tr(app, "menu.help.about", "About CurveBook"), None),
         _ => ("", None),
     };
-    (title, target.map(|id| id.as_str().to_owned()), None, Vec::new(), controls, vec![("ok", "OK"), ("cancel", "Cancel")])
+    (
+        title,
+        target.map(|id| id.as_str().to_owned()),
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn sheet_section_name(sec: curvebook_doc::SheetSection) -> String {

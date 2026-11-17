@@ -352,6 +352,14 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         beginner: "Hook P-value stars or exact numeric p/q labels cleanly above bars and dot plots.",
     },
     UiCommandSpec {
+        id: "ui.applyStyleFrom.open",
+        label: "Apply Style From...",
+        shortcut: "",
+        params_doc: "{\"sheet_id\":\"optional GraphSheetId\"}",
+        summary: "Open Apply Style From to clone palette, stroke, axis, or legend styling from another graph sheet.",
+        beginner: "Copy visual styling from an existing graph onto the active graph sheet.",
+    },
+    UiCommandSpec {
         id: "ui.layout.composer.open",
         label: "Page Layout Composer...",
         shortcut: "",

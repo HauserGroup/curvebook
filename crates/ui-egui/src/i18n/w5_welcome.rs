@@ -424,7 +424,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
     ]),
     entry!("welcome.x_mode.dates" => [
         en: "Dates",
-        de: "Daten",
+        de: "Datum",
         es: "Fechas",
         fr: "Dates",
         ja: "日付",
@@ -433,7 +433,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         zh_cn: "日期",
         zh_tw: "日期",
         it: "Date",
-        nl: "Data",
+        nl: "Datums",
         pl: "Daty",
         ru: "Даты",
         tr: "Tarihler",

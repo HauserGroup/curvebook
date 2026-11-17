@@ -2396,12 +2396,13 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
     let hdr_h = scaled(22.0, s);
     let scroll_rect = LayoutRectPx::new(rect.x, rect.y + i32::try_from(hdr_h).unwrap_or(22), rect.width, rect.height.saturating_sub(hdr_h));
 
+    let sidebar_title = wiz_tr(&locale, "pw.section.sidebar", "Live Parameters");
     let sidebar_wid = builder.push_node(NodeSpec {
         id: WidgetId::from("power.sidebar"),
         parent: Some(parent.clone()),
         z_layer: ZLayer::ModalDialog,
         rect_px: rect,
-        a11y: labeled_meta(WidgetRole::Dialog, "Live Parameters", FocusScope::ModalDialog, "Tab"),
+        a11y: labeled_meta(WidgetRole::Dialog, sidebar_title, FocusScope::ModalDialog, "Tab"),
         state: WidgetVisualState::default(),
         action: WidgetAction::NoOp,
     });
@@ -2409,7 +2410,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
     builder.paint_stroke(ZLayer::ModalDialog, Some(&sidebar_wid), rect, builder.palette.border, 1);
 
     let hdr_rect = LayoutRectPx::new(rect.x + 6, rect.y + 2, rect.width.saturating_sub(12), hdr_h.saturating_sub(4));
-    paint_section_heading(builder, &sidebar_wid, hdr_rect, wiz_tr(&locale, "pw.section.sidebar", "Live Parameters"));
+    paint_section_heading(builder, &sidebar_wid, hdr_rect, sidebar_title);
 
     if scroll_rect.height < scaled(40.0, s) {
         return;
@@ -2464,7 +2465,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
     let controls: [SidebarControlSpec<'_>; 6] = [
         SidebarControlSpec {
             field_key: "alpha",
-            label: "Alpha",
+            label: wiz_tr(&locale, "pw.param.alpha", "Alpha"),
             value_text: &format!("{:.3}", pw.alpha),
             normalized: slider_norm(pw.alpha, 0.001, 0.20),
             step: 0.01,
@@ -2473,7 +2474,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
         },
         SidebarControlSpec {
             field_key: "target_power",
-            label: "Target Power",
+            label: wiz_tr(&locale, "pw.param.target_power", "Target Power"),
             value_text: &format!("{:.2}", pw.target_power),
             normalized: slider_norm(pw.target_power, min_p, 0.99),
             step: 0.05,
@@ -2482,7 +2483,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
         },
         SidebarControlSpec {
             field_key: "effect_size",
-            label: "Effect Size",
+            label: wiz_tr(&locale, "pw.param.effect_size", "Effect Size"),
             value_text: &format!("{eff_val:.2}"),
             normalized: slider_norm(eff_val, eff_lo, eff_hi),
             step: 0.05,
@@ -2491,7 +2492,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
         },
         SidebarControlSpec {
             field_key: "allocation_ratio",
-            label: "Ratio (n2/n1)",
+            label: wiz_tr(&locale, "pw.param.allocation_ratio", "Ratio (n2/n1)"),
             value_text: &format!("{:.2}", pw.allocation_ratio),
             normalized: slider_norm(pw.allocation_ratio, 0.25, 4.0),
             step: 0.25,
@@ -2500,7 +2501,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
         },
         SidebarControlSpec {
             field_key: "dropout",
-            label: "Dropout (%)",
+            label: wiz_tr(&locale, "pw.param.dropout", "Dropout (%)"),
             value_text: &format!("{:.0}%", vs.dropout_rate * 100.0),
             normalized: slider_norm(vs.dropout_rate, 0.0, 0.50),
             step: 0.05,
@@ -2509,7 +2510,7 @@ fn build_live_sidebar(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: 
         },
         SidebarControlSpec {
             field_key: "sample_size",
-            label: "Sample N",
+            label: wiz_tr(&locale, "pw.param.sample_size", "Sample N"),
             value_text: &format!("{:.0}", pw.sample_size),
             normalized: slider_norm(pw.sample_size, min_n, 300.0),
             step: 2.0,

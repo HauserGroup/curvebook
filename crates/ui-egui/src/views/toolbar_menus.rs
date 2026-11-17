@@ -19,6 +19,7 @@ use crate::menus::command_tooltip;
 use crate::modal_predicates::ControlEnablement;
 use crate::os_integration::ClipboardBundle;
 use crate::text_bridge::{TextMeasurer, UiTextStyle};
+use crate::theme::UiThemeMode;
 
 use super::a11y::labeled_meta;
 
@@ -114,6 +115,7 @@ enum ToolbarIconKind {
     Palette,
     Print,
     Export,
+    Theme,
     Overflow,
 }
 
@@ -1158,6 +1160,26 @@ fn append_toolbar_output_items(app: &UiApp, locale: &str, items: &mut Vec<Toolba
         enablement: if can_visual { ControlEnablement::enabled() } else { ControlEnablement::disabled("Create a graph or layout sheet to export.") },
         action: WidgetAction::InvokeCommand { command_id: String::from("ui.export.figure.open"), params: Value::Object(export_map) },
     });
+    for (id, label, mode, mode_str, tip) in [
+        ("toolbar.theme.light", "Light", UiThemeMode::Light, "light", "Switch to Light theme"),
+        ("toolbar.theme.dark", "Dark", UiThemeMode::Dark, "dark", "Switch to Dark theme"),
+        ("toolbar.theme.high_contrast", "HC", UiThemeMode::HighContrast, "high_contrast", "Switch to High Contrast theme"),
+    ] {
+        items.push(ToolbarControlItem {
+            id,
+            group: ToolbarGroup::Output,
+            icon: ToolbarIconKind::Theme,
+            label,
+            tooltip: String::from(tip),
+            keyboard_path: String::from("ui.theme.set"),
+            shortcut: None,
+            primary: false,
+            selected: app.theme.mode == mode,
+            essential: false,
+            enablement: ControlEnablement::enabled(),
+            action: WidgetAction::InvokeCommand { command_id: String::from("ui.theme.set"), params: json!({ "mode": mode_str }) },
+        });
+    }
 }
 
 fn build_contextual_toolbar_items(app: &UiApp, locale: &str, state: &ToolbarMenusViewState) -> Vec<ToolbarControlItem> {
@@ -1370,6 +1392,12 @@ fn paint_toolbar_icon(
             builder.paint_line(z_layer, Some(owner), [cx, y + 1], [cx + 3, y + 4], accent, 1);
             builder.paint_line(z_layer, Some(owner), [x + 2, b - 2], [r - 2, b - 2], color, 1);
         }
+        ToolbarIconKind::Theme => {
+            let sz = icon_rect.width.saturating_sub(2).max(4);
+            let half = (sz / 2).max(2);
+            builder.paint_stroke(z_layer, Some(owner), LayoutRectPx::new(x + 1, y + 1, sz, sz), color, 1);
+            builder.paint_fill(z_layer, Some(owner), LayoutRectPx::new(x + 1, y + 1, half, sz), accent);
+        }
         ToolbarIconKind::Overflow => {
             builder.paint_fill(z_layer, Some(owner), LayoutRectPx::new(x + 1, cy - 1, 2, 2), color);
             builder.paint_fill(z_layer, Some(owner), LayoutRectPx::new(cx - 1, cy - 1, 2, 2), color);
@@ -1424,13 +1452,25 @@ fn emit_icon_toolbar_button(builder: &mut LayoutBuilder<'_>, item: &ToolbarContr
     builder.paint_stroke(ZLayer::Workspace, Some(&wid), rect, border, 1);
     maybe_paint_focus_ring(builder, ZLayer::Workspace, &wid, rect, state.focused);
 
+    let is_rtl = builder.tree.is_rtl;
     let icon_sz = rect.height.saturating_sub(10).clamp(8, 12);
     let icon_y = rect.y + i32::try_from((rect.height.saturating_sub(icon_sz)) / 2).unwrap_or(0);
-    let icon_rect = LayoutRectPx::new(rect.x + 4, icon_y, icon_sz, icon_sz);
+    let icon_rect = if is_rtl {
+        LayoutRectPx::new(rect.right() - 4 - i32::try_from(icon_sz).unwrap_or(10), icon_y, icon_sz, icon_sz)
+    } else {
+        LayoutRectPx::new(rect.x + 4, icon_y, icon_sz, icon_sz)
+    };
     paint_toolbar_icon(builder, &wid, ZLayer::Workspace, item.icon, icon_rect, fg, icon_accent);
 
-    let text_x = icon_rect.right() + 3;
-    let text_w = u32::try_from((rect.right() - text_x).max(0)).unwrap_or(0);
+    let (text_x, text_w) = if is_rtl {
+        let tx = rect.x + 2;
+        let tw = u32::try_from((icon_rect.x - 3 - tx).max(0)).unwrap_or(0);
+        (tx, tw)
+    } else {
+        let tx = icon_rect.right() + 3;
+        let tw = u32::try_from((rect.right() - tx).max(0)).unwrap_or(0);
+        (tx, tw)
+    };
     if text_w > 6 {
         let text_rect = LayoutRectPx::new(text_x, rect.y, text_w, rect.height);
         state.ellipsized = paint_text_fitted(
@@ -1546,23 +1586,9 @@ fn emit_menu_bar_button(
     );
 }
 
-/// Build the top menu bar + contextual icon-and-label toolbar strip inside `rect`.
-pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
-    if rect.width == 0 || rect.height == 0 {
-        return;
-    }
-    builder.paint_fill(ZLayer::Workspace, None, rect, builder.palette.panel);
-    builder.paint_line(ZLayer::Workspace, None, [rect.x, rect.bottom() - 1], [rect.right(), rect.bottom() - 1], builder.palette.border, 1);
-
-    if rect.width < 120 || rect.height < 14 {
-        return;
-    }
-
-    builder.push_clip(rect);
-    let two_rows = rect.height >= 40;
-    let menu_h = if two_rows { (rect.height / 2).saturating_sub(3).max(14) } else { rect.height.saturating_sub(8).clamp(14, 28) };
-    let menu_y = if two_rows { rect.y + 2 } else { rect.y + i32::try_from((rect.height.saturating_sub(menu_h)) / 2).unwrap_or(0) };
-    let mut cur_x = rect.x + 8;
+fn emit_menu_bar_and_badge(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx, two_rows: bool, menu_y: i32, menu_h: u32) -> i32 {
+    let is_rtl = builder.tree.is_rtl;
+    let mut cur_x = if is_rtl { rect.right() - 8 } else { rect.x + 8 };
 
     let max_row_font = f64::from(menu_h.saturating_sub(5)).max(8.5) * 0.78;
     let menu_size_px = (11.5 * builder.scale()).min(max_row_font).clamp(8.5, 18.0);
@@ -1575,22 +1601,24 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
     for (idx, sec) in menus.iter().enumerate() {
         let measured = builder.measurer.measure(sec.title, &menu_style, &builder.tree.locale).width_px.ceil() as u32;
         let bw = (measured + pad_bw).clamp(min_bw, max_bw);
-        if cur_x + i32::try_from(bw).unwrap_or(44) > rect.right() - 8 {
+        let btn_x = if is_rtl { cur_x - i32::try_from(bw).unwrap_or(44) } else { cur_x };
+        if if is_rtl { btn_x < rect.x + 8 } else { cur_x + i32::try_from(bw).unwrap_or(44) > rect.right() - 8 } {
             break;
         }
         let selected = builder.app.interaction.open_menu.as_deref() == Some(sec.menu_key);
         let kpath = format!("Alt+{}", idx + 1);
-        emit_menu_bar_button(builder, sec.menu_key, LayoutRectPx::new(cur_x, menu_y, bw, menu_h), sec.title, &kpath, selected, &menu_style);
-        cur_x += i32::try_from(bw + 3).unwrap_or(46);
+        emit_menu_bar_button(builder, sec.menu_key, LayoutRectPx::new(btn_x, menu_y, bw, menu_h), sec.title, &kpath, selected, &menu_style);
+        cur_x = if is_rtl { cur_x - i32::try_from(bw + 3).unwrap_or(46) } else { cur_x + i32::try_from(bw + 3).unwrap_or(46) };
     }
 
-    let doc = builder.app.document();
-    let ctx = active_toolbar_context(doc);
-    if two_rows && rect.right() - cur_x > 110 {
+    let ctx = active_toolbar_context(builder.app.document());
+    let remaining_menu_w = if is_rtl { cur_x - (rect.x + 8) } else { rect.right() - cur_x };
+    if two_rows && remaining_menu_w > 110 {
         let badge = format!("[{}]", ctx.badge());
         let bw = (builder.measurer.measure(&badge, &menu_style, &builder.tree.locale).width_px.ceil() as u32 + 12).clamp(52, 92);
-        let bx = rect.right() - i32::try_from(bw + 8).unwrap_or(72);
-        if bx > cur_x + 8 {
+        let bx = if is_rtl { rect.x + 8 } else { rect.right() - i32::try_from(bw + 8).unwrap_or(72) };
+        let fits_badge = if is_rtl { bx + i32::try_from(bw + 8).unwrap_or(72) < cur_x } else { bx > cur_x + 8 };
+        if fits_badge {
             let b_rect = LayoutRectPx::new(bx, menu_y, bw, menu_h);
             let b_wid = builder.push_node(NodeSpec {
                 id: WidgetId::from("toolbar.context_badge"),
@@ -1616,16 +1644,11 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
             );
         }
     }
+    cur_x
+}
 
-    let tb_y = if two_rows { rect.y + i32::try_from(rect.height / 2 + 1).unwrap_or(23) } else { menu_y };
-    let tb_h = if two_rows { rect.height.saturating_sub(rect.height / 2 + 3).max(14) } else { menu_h };
-    let tb_x_start = if two_rows { rect.x + 8 } else { cur_x + 6 };
-    let avail_w = u32::try_from((rect.right() - 8 - tb_x_start).max(0)).unwrap_or(0);
-    if avail_w < 36 {
-        builder.pop_clip();
-        return;
-    }
-
+fn emit_contextual_toolbar_strip(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx, tb_x_start: i32, avail_w: u32, tb_y: i32, tb_h: u32) {
+    let is_rtl = builder.tree.is_rtl;
     let max_tb_font = f64::from(tb_h.saturating_sub(4)).max(8.5) * 0.78;
     let tb_size_px = (10.5 * builder.scale()).min(max_tb_font).clamp(8.5, 17.0);
     let tb_style = UiTextStyle::ui_sans(tb_size_px);
@@ -1641,7 +1664,7 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
     for (item, bw) in &visible_items {
         if let Some(pg) = prev_group {
             if pg != item.group {
-                let div_x = tb_x + 2;
+                let div_x = if is_rtl { tb_x - 3 } else { tb_x + 2 };
                 builder.paint_line(
                     ZLayer::Workspace,
                     None,
@@ -1650,18 +1673,20 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
                     builder.palette.border,
                     1,
                 );
-                tb_x += 5;
+                tb_x += if is_rtl { -5 } else { 5 };
             } else {
-                tb_x += 2;
+                tb_x += if is_rtl { -2 } else { 2 };
             }
         }
-        let item_rect = LayoutRectPx::new(tb_x, tb_y, *bw, tb_h);
-        emit_icon_toolbar_button(builder, item, item_rect, &tb_style);
-        tb_x += i32::try_from(*bw).unwrap_or(44);
+        let item_x = if is_rtl { tb_x - i32::try_from(*bw).unwrap_or(44) } else { tb_x };
+        emit_icon_toolbar_button(builder, item, LayoutRectPx::new(item_x, tb_y, *bw, tb_h), &tb_style);
+        tb_x += if is_rtl { -i32::try_from(*bw).unwrap_or(44) } else { i32::try_from(*bw).unwrap_or(44) };
         prev_group = Some(item.group);
     }
 
-    if !overflow_items.is_empty() && tb_x + 44 <= rect.right() - 6 {
+    let can_overflow =
+        if is_rtl { !overflow_items.is_empty() && tb_x - 44 >= rect.x + 6 } else { !overflow_items.is_empty() && tb_x + 44 <= rect.right() - 6 };
+    if can_overflow {
         let ov_item = ToolbarControlItem {
             id: "toolbar.overflow",
             group: ToolbarGroup::Output,
@@ -1676,11 +1701,48 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
             enablement: ControlEnablement::enabled(),
             action: WidgetAction::Custom { domain: String::from("toolbar_menus"), payload: String::from("overflow.toggle") },
         };
-        let ov_w =
-            measure_toolbar_item_width(builder, &ov_item, &tb_style, icon_sz).min(u32::try_from((rect.right() - 6 - tb_x - 3).max(36)).unwrap_or(52));
-        emit_icon_toolbar_button(builder, &ov_item, LayoutRectPx::new(tb_x + 3, tb_y, ov_w, tb_h), &tb_style);
+        let max_ov_w = if is_rtl {
+            u32::try_from((tb_x - 3 - (rect.x + 6)).max(36)).unwrap_or(52)
+        } else {
+            u32::try_from((rect.right() - 6 - tb_x - 3).max(36)).unwrap_or(52)
+        };
+        let ov_w = measure_toolbar_item_width(builder, &ov_item, &tb_style, icon_sz).min(max_ov_w);
+        let ov_x = if is_rtl { tb_x - 3 - i32::try_from(ov_w).unwrap_or(44) } else { tb_x + 3 };
+        emit_icon_toolbar_button(builder, &ov_item, LayoutRectPx::new(ov_x, tb_y, ov_w, tb_h), &tb_style);
+    }
+}
+
+/// Build the top menu bar + contextual icon-and-label toolbar strip inside `rect`.
+pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
+    if rect.width == 0 || rect.height == 0 {
+        return;
+    }
+    builder.paint_fill(ZLayer::Workspace, None, rect, builder.palette.panel);
+    builder.paint_line(ZLayer::Workspace, None, [rect.x, rect.bottom() - 1], [rect.right(), rect.bottom() - 1], builder.palette.border, 1);
+
+    if rect.width < 120 || rect.height < 14 {
+        return;
     }
 
+    let is_rtl = builder.tree.is_rtl;
+    builder.push_clip(rect);
+    let two_rows = rect.height >= 40;
+    let menu_h = if two_rows { (rect.height / 2).saturating_sub(3).max(14) } else { rect.height.saturating_sub(8).clamp(14, 28) };
+    let menu_y = if two_rows { rect.y + 2 } else { rect.y + i32::try_from((rect.height.saturating_sub(menu_h)) / 2).unwrap_or(0) };
+    let cur_x = emit_menu_bar_and_badge(builder, rect, two_rows, menu_y, menu_h);
+
+    let tb_y = if two_rows { rect.y + i32::try_from(rect.height / 2 + 1).unwrap_or(23) } else { menu_y };
+    let tb_h = if two_rows { rect.height.saturating_sub(rect.height / 2 + 3).max(14) } else { menu_h };
+    let (tb_x_start, avail_w) = if is_rtl {
+        let right_edge = if two_rows { rect.right() - 8 } else { cur_x - 6 };
+        (right_edge, u32::try_from((right_edge - (rect.x + 8)).max(0)).unwrap_or(0))
+    } else {
+        let left_edge = if two_rows { rect.x + 8 } else { cur_x + 6 };
+        (left_edge, u32::try_from((rect.right() - 8 - left_edge).max(0)).unwrap_or(0))
+    };
+    if avail_w >= 36 {
+        emit_contextual_toolbar_strip(builder, rect, tb_x_start, avail_w, tb_y, tb_h);
+    }
     builder.pop_clip();
 }
 
@@ -1741,6 +1803,9 @@ fn resolve_menu_item_action(app: &UiApp, command_id: &str) -> WidgetAction {
         "project.save" => WidgetAction::InvokeCommand { command_id: String::from("project.save"), params: json!({ "return_bytes": true }) },
         "graph.setAxes" => {
             WidgetAction::InvokeCommand { command_id: String::from("ui.graph.axes.open"), params: non_null_obj_with_sheet(target_gid.as_ref()) }
+        }
+        "graph.applyStyleFrom" | "ui.applyStyleFrom.open" => {
+            WidgetAction::InvokeCommand { command_id: String::from("ui.applyStyleFrom.open"), params: non_null_obj_with_sheet(target_gid.as_ref()) }
         }
         "sheet.duplicate" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" | "sheet.duplicateFamily" | "sheet.clonePipeline" => {
             WidgetAction::InvokeCommand { command_id: command_id.to_owned(), params: non_null_obj_with_sheet(active_sid) }
@@ -1810,13 +1875,26 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     let Some(section) = sections.into_iter().find(|s| s.menu_key == menu_key) else {
         return;
     };
+    let mut items = section.items;
+    if menu_key == "menu.graph" {
+        if !items.iter().any(|it| it.command_id == "ui.applyStyleFrom.open")
+            && let Some(tip) = command_tooltip(builder.app, "ui.applyStyleFrom.open")
+        {
+            let pos = items.iter().position(|it| it.command_id == "graph.applyStyleFrom").unwrap_or(0).min(12);
+            items.insert(pos, tip);
+        }
+    } else if menu_key == "menu.view" {
+        items.retain(|it| it.command_id != "ui.applyStyleFrom.open");
+    }
     let scale = builder.scale();
     let su = |px: u32| -> u32 { (f64::from(px) * scale).round().clamp(f64::from(px) * 0.75, f64::from(px) * 3.0) as u32 };
-    let anchor_x = builder.tree.node(menu_key).map_or(toolbar_rect.x + 8, |n| n.bounds.rect_px.x);
     let pop_w = su(256).min(builder.tree.metrics.physical_width_px().saturating_sub(12).max(120));
+    let anchor_x = builder.tree.node(menu_key).map_or(toolbar_rect.x + 8, |n| {
+        if builder.tree.is_rtl { n.bounds.rect_px.right() - i32::try_from(pop_w).unwrap_or(256) } else { n.bounds.rect_px.x }
+    });
     let row_h = su(22).max(20);
     let max_h = builder.tree.metrics.physical_height_px().saturating_sub(toolbar_rect.bottom() as u32 + 12).clamp(60, su(320));
-    let content_h = (section.items.len() as u32).saturating_mul(row_h) + su(6);
+    let content_h = (items.len() as u32).saturating_mul(row_h) + su(6);
     let pop_h = content_h.min(max_h);
     let clamped_x = anchor_x.min(i32::try_from(builder.tree.metrics.physical_width_px().saturating_sub(pop_w + 6)).unwrap_or(0)).max(2);
     let pop_rect = LayoutRectPx::new(clamped_x, toolbar_rect.bottom(), pop_w, pop_h);
@@ -1843,7 +1921,7 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     builder.push_clip(clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
     let size_px = (12.0 * builder.scale()).clamp(9.0, 22.0);
-    for (idx, tip) in section.items.iter().enumerate() {
+    for (idx, tip) in items.iter().enumerate() {
         let ry = clip.y + i32::try_from(idx as u32 * row_h).unwrap_or(0) - y_scroll;
         if ry + i32::try_from(row_h).unwrap_or(22) <= clip.y || ry >= clip.bottom() {
             continue;
@@ -1918,7 +1996,8 @@ pub(crate) fn build_toolbar_overflow_popup(builder: &mut LayoutBuilder<'_>) {
     let row_h = 22u32;
     let pop_h = (overflow_items.len() as u32).saturating_mul(row_h) + 6;
     let max_x = i32::try_from(builder.tree.metrics.physical_width_px().saturating_sub(pop_w + 6)).unwrap_or(0);
-    let pop_x = anchor_rect.x.clamp(2, max_x.max(2));
+    let raw_x = if builder.tree.is_rtl { anchor_rect.right() - i32::try_from(pop_w).unwrap_or(212) } else { anchor_rect.x };
+    let pop_x = raw_x.clamp(2, max_x.max(2));
     let pop_rect = LayoutRectPx::new(pop_x, toolbar_rect.bottom(), pop_w, pop_h);
 
     let wid = builder.push_node(NodeSpec {
@@ -2378,7 +2457,8 @@ pub fn build_open_context_menu_popup(builder: &mut LayoutBuilder<'_>, target: &s
         let fg = if st.enablement.enabled { builder.palette.text } else { builder.palette.muted };
         builder.paint_fill(ZLayer::ContextMenu, Some(&item_wid), item_rect, bg);
         if st.enablement.enabled {
-            let bar = LayoutRectPx::new(item_rect.x + 2, item_rect.y + 4, 2, row_h.saturating_sub(8).max(4));
+            let bar_x = if builder.tree.is_rtl { item_rect.right() - 4 } else { item_rect.x + 2 };
+            let bar = LayoutRectPx::new(bar_x, item_rect.y + 4, 2, row_h.saturating_sub(8).max(4));
             builder.paint_fill(ZLayer::ContextMenu, Some(&item_wid), bar, builder.palette.accent);
         }
         paint_text_fitted(
@@ -2456,5 +2536,49 @@ pub fn build_status_bar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx
                 scroll_container: None,
             },
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ViewportMetrics;
+    use crate::dialogs_canvas::ActiveDialog;
+    use crate::human_driver::HumanPathDriver;
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, TableArchetype};
+    use curvebook_engine::Session;
+
+    #[test]
+    fn toolbar_themes_apply_style_menu_and_rtl_order_work() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Toolbar W6").map_err(|e| format!("{e}"))?;
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).map_err(|e| format!("{e}"))?;
+        doc.add_data_sheet(DataSheet::new("ds-1", "Data", TableArchetype::Column(col)).map_err(|e| format!("{e}"))?).map_err(|e| format!("{e}"))?;
+        let mut session = Session::from_document(doc);
+        session.execute("graph.create", json!({ "sheet_id": "gr-1", "data_sheet_id": "ds-1", "kind": "column" })).map_err(|e| format!("{e}"))?;
+        session.execute("sheet.select", json!({ "sheet_id": "gr-1" })).map_err(|e| format!("{e}"))?;
+        let app = UiApp::from_session(session);
+        let mut driver = HumanPathDriver::new(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+
+        driver.click_widget("toolbar.theme.dark")?;
+        assert_eq!(driver.app().theme.mode, UiThemeMode::Dark);
+        driver.click_widget("toolbar.theme.high_contrast")?;
+        assert_eq!(driver.app().theme.mode, UiThemeMode::HighContrast);
+        driver.click_widget("toolbar.theme.light")?;
+        assert_eq!(driver.app().theme.mode, UiThemeMode::Light);
+
+        driver.click_widget("menu.graph")?;
+        let graph_popup = driver.layout_tree();
+        assert!(graph_popup.node("menu.ui.applyStyleFrom.open").is_some());
+        driver.click_widget("menu.ui.applyStyleFrom.open")?;
+        assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::ApplyStyleFrom { .. }));
+        driver.click_widget("modal.cancel")?;
+
+        driver.app_mut().locale = String::from("he");
+        let rtl_tree = driver.layout_tree();
+        assert!(rtl_tree.is_rtl);
+        let tn = rtl_tree.node("toolbar.new").ok_or("missing toolbar.new")?;
+        let te = rtl_tree.node("toolbar.export_svg").ok_or("missing toolbar.export_svg")?;
+        assert!(tn.bounds.rect_px.x > te.bounds.rect_px.x);
+        Ok(())
     }
 }

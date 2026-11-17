@@ -11,13 +11,14 @@ use serde_json::{Value, json};
 
 use curvebook_chart::{RectPt, SourceCellId};
 use curvebook_doc::{
-    AnalysisKind, AxisScale, AxisSegment, AxisSpec, BracketLabelMode, BreakOrnament, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec,
-    ConnectingLineStyle, ErrorBarDirection, ErrorBarMetric, GraphSheet, GraphicalDataObject, LayoutItem, LayoutSheet, LayoutSpec, LineConnectionKind,
-    MultivariateGraphEncoding, MultivariatePlotMode, PairwiseDisplayMode, PhysicalUnit, ProjectDocument, ReplicateOverlayStyle, SeriesSpec, SheetId,
-    SizeChannelMapping, SummaryMeasure, WhiskerMethod,
+    AnalysisKind, AxisScale, AxisSegment, AxisSpec, BracketLabelMode, BreakOrnament, CanvasResizeMode, CldOrdering, ColorChannelMapping,
+    CompactLetterDisplaySpec, ConnectingLineStyle, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FigureCanvasPreset, GraphKind, GraphSheet,
+    GraphicalDataObject, GroupedArrangement, LayoutItem, LayoutSheet, LayoutSpec, LineConnectionKind, MultivariateGraphEncoding,
+    MultivariatePlotMode, PairwiseDisplayMode, PhysicalUnit, ProjectDocument, ReplicateOverlayStyle, SeriesSpec, SheetId, SizeChannelMapping,
+    SummaryMeasure, WhiskerMethod,
 };
 use curvebook_math::LogitDomain;
-use curvebook_palette::{ColorRamp, ColormapId, LineDashStyle, MarkerShape, MarkerStyle, PaletteId, Rgba8};
+use curvebook_palette::{CanvasPreviewFilter, ColorRamp, ColormapId, LineDashStyle, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use curvebook_tools::GridCellCoord;
 
 use crate::UiApp;
@@ -39,6 +40,9 @@ const SCALE_BAR_ITEM_ID: &str = "inspector-scale-bar";
 const AXIS_MIN_INPUT_ID: &str = "inspector.axes.min.input";
 const AXIS_MAX_INPUT_ID: &str = "inspector.axes.max.input";
 const AXIS_INTERVAL_INPUT_ID: &str = "inspector.axes.interval.input";
+const AXIS_TITLE_INPUT_ID: &str = "inspector.axes.title.input";
+const MV_CLAMP_MIN_INPUT_ID: &str = "inspector.mv.color_clamp_min.input";
+const MV_CLAMP_MAX_INPUT_ID: &str = "inspector.mv.color_clamp_max.input";
 
 const COLOR_SWATCHES: [(&str, &str); 8] = [
     ("Black", "#000000"),
@@ -73,6 +77,16 @@ pub struct InspectorViewState {
     pub target_graph_id: Option<String>,
     #[serde(default)]
     pub target_layout_id: Option<String>,
+    #[serde(default)]
+    pub regression_result_sheet_id: Option<String>,
+    #[serde(default)]
+    pub regression_all_series: bool,
+    #[serde(default)]
+    pub regression_confidence_band: bool,
+    #[serde(default)]
+    pub regression_shaded_ribbon: bool,
+    #[serde(default)]
+    pub last_canvas_preset: Option<String>,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -212,7 +226,19 @@ struct StepperArgs<'a> {
     enabled: bool,
 }
 
+const fn rtl_row_x(row_x: i32, row_w: u32, rel_x: i32, item_w: u32, is_rtl: bool) -> i32 {
+    if is_rtl { row_x + (row_w as i32) - rel_x - (item_w as i32) } else { row_x + rel_x }
+}
+
 impl<'a, 'b> SectionDrawCtx<'a, 'b> {
+    fn is_rtl(&self) -> bool {
+        self.builder.tree.is_rtl
+    }
+
+    fn mirrored_x(&self, rel_x: i32, item_w: u32) -> i32 {
+        rtl_row_x(self.panel_x, self.panel_w, rel_x, item_w, self.is_rtl())
+    }
+
     fn scale(&self) -> f64 {
         self.builder.scale()
     }
@@ -297,6 +323,17 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
     }
 
     fn emit_chip_row(&mut self, y: i32, title: Option<&str>, items: &[(&str, &str, &str, bool)], enabled: bool) -> i32 {
+        self.emit_chip_row_capped(y, title, items, 4, enabled)
+    }
+
+    fn emit_chip_row_capped(
+        &mut self,
+        y: i32,
+        title: Option<&str>,
+        items: &[(&str, &str, &str, bool)],
+        single_row_limit: usize,
+        enabled: bool,
+    ) -> i32 {
         let mut cy = y;
         if let Some(t) = title {
             let muted = self.builder.app.theme.text_muted;
@@ -306,7 +343,7 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
         let n = items.len().max(1);
         let max_per_row = if self.panel_w < self.su(210) {
             2
-        } else if n > 4 {
+        } else if n > single_row_limit.max(1) {
             3
         } else {
             n
@@ -323,7 +360,7 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
             let total_gaps = gap * (cols.saturating_sub(1));
             let btn_w = (self.panel_w.saturating_sub(total_gaps) / cols).max(self.su(24));
             for (idx, (id, lbl, payload, active)) in slice.iter().enumerate() {
-                let bx = self.panel_x + ((idx as u32) * (btn_w + gap)) as i32;
+                let bx = self.mirrored_x(((idx as u32) * (btn_w + gap)) as i32, btn_w);
                 let rect = LayoutRectPx::new(bx, cy, btn_w, btn_h);
                 self.emit_action_btn(id, rect, (lbl, lbl), payload, *active, enabled);
             }
@@ -339,7 +376,7 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
         let gap = self.su(4);
         let stepper_w = btn_w.saturating_mul(2).saturating_add(gap);
         let lbl_w = self.panel_w.saturating_sub(stepper_w.saturating_add(gap)).max(self.su(60));
-        let lbl_rect = LayoutRectPx::new(self.panel_x, args.y + self.si(3), lbl_w, self.su(18));
+        let lbl_rect = LayoutRectPx::new(self.mirrored_x(0, lbl_w), args.y + self.si(3), lbl_w, self.su(18));
         if self.is_row_visible(lbl_rect) {
             let txt = format!("{}: {}", args.title, args.value_display);
             let txt_style = UiTextStyle::ui_sans(self.sp(10.5));
@@ -357,9 +394,11 @@ impl<'a, 'b> SectionDrawCtx<'a, 'b> {
                 },
             );
         }
-        let right_x = self.panel_x + (self.panel_w as i32);
-        let dec_rect = LayoutRectPx::new(right_x - i32::try_from(stepper_w).unwrap_or(58), args.y, btn_w, btn_h);
-        let inc_rect = LayoutRectPx::new(right_x - i32::try_from(btn_w).unwrap_or(27), args.y, btn_w, btn_h);
+        let step_rel = i32::try_from(self.panel_w.saturating_sub(stepper_w)).unwrap_or(0);
+        let dec_rel = step_rel;
+        let inc_rel = step_rel + i32::try_from(btn_w + gap).unwrap_or(31);
+        let dec_rect = LayoutRectPx::new(self.mirrored_x(dec_rel, btn_w), args.y, btn_w, btn_h);
+        let inc_rect = LayoutRectPx::new(self.mirrored_x(inc_rel, btn_w), args.y, btn_w, btn_h);
         self.emit_action_btn(args.dec_id, dec_rect, ("-", &format!("Decrease {}", args.title)), args.dec_payload, false, args.enabled);
         self.emit_action_btn(args.inc_id, inc_rect, ("+", &format!("Increase {}", args.title)), args.inc_payload, false, args.enabled);
         args.y + self.si(26)
@@ -734,7 +773,8 @@ fn dispatch_format_graph_action(app: &mut UiApp, state: &mut InspectorViewState,
                 }
             }
         }
-        app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": spec })).map_err(|e| e.to_string())?;
+        app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "palette": spec.palette, "series": spec.series } }))
+            .map_err(|e| e.to_string())?;
         state.open_popup = None;
         return Ok(outcome_ok(sub, Some("graph.setSpec")));
     }
@@ -855,7 +895,109 @@ fn dispatch_format_graph_action(app: &mut UiApp, state: &mut InspectorViewState,
         return Ok(outcome_ok(sub, Some("graph.setSeries")));
     }
 
+    if let Some(arr_raw) = sub.strip_prefix("arrangement:") {
+        let arr = match arr_raw {
+            "Interleaved" => GroupedArrangement::Interleaved,
+            "Separated" => GroupedArrangement::Separated,
+            "Stacked" => GroupedArrangement::Stacked,
+            "Superimposed" => GroupedArrangement::Superimposed,
+            _ => return Ok(UiEventOutcome::default()),
+        };
+        app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "grouped_arrangement": arr } }))
+            .map_err(|e| e.to_string())?;
+        return Ok(outcome_ok(sub, Some("graph.setSpec")));
+    }
+
+    if sub == "apply_style_from" {
+        let doc = app.document().clone();
+        app.canvas_dialogs.open_apply_style_from(&doc, &gs.id);
+        state.open_popup = None;
+        return Ok(outcome_ok(sub, Some("ui.applyStyleFrom.open")));
+    }
+
     Ok(UiEventOutcome::default())
+}
+
+fn dispatch_regression_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &str) -> Result<UiEventOutcome, String> {
+    let Some(gs) = resolve_graph_sheet(app.document(), state).cloned() else {
+        return Ok(UiEventOutcome::default());
+    };
+    state.target_graph_id = Some(gs.id.as_str().to_string());
+    let sel_idx = resolve_selected_series_index(app, &gs);
+    let cur_ov = gs
+        .spec
+        .series
+        .get(sel_idx)
+        .and_then(|s| s.regression_overlay.as_ref())
+        .or_else(|| gs.spec.series.iter().find_map(|s| s.regression_overlay.as_ref()));
+    let candidates: Vec<String> =
+        app.document().result_sheets.iter().filter(|rs| !rs.fitted_curves.is_empty()).map(|rs| rs.id.as_str().to_string()).collect();
+
+    let mut res_id = cur_ov.map(|o| o.result_sheet_id.as_str().to_string()).or_else(|| state.regression_result_sheet_id.clone());
+    let mut all_series = if cur_ov.is_some() && !gs.spec.series.is_empty() {
+        gs.spec.series.iter().all(|s| s.regression_overlay.is_some()) || state.regression_all_series
+    } else {
+        state.regression_all_series
+    };
+    let mut conf_band = cur_ov.map_or(state.regression_confidence_band, |o| o.show_confidence_band);
+    let mut shaded_ribbon = cur_ov.map_or(state.regression_shaded_ribbon, |o| o.shaded_ribbon);
+
+    let apply_now = match sub {
+        "cycle_result" => {
+            let mut ring: Vec<Option<String>> = candidates.iter().cloned().map(Some).collect();
+            ring.push(None);
+            let cur_pos = ring.iter().position(|entry| entry.as_deref() == res_id.as_deref()).unwrap_or(ring.len().saturating_sub(1));
+            res_id = ring[(cur_pos + 1) % ring.len()].clone();
+            state.regression_result_sheet_id = res_id.clone();
+            true
+        }
+        "all_series" => {
+            all_series = !all_series;
+            state.regression_all_series = all_series;
+            res_id.is_some()
+        }
+        "confidence_band" => {
+            conf_band = !conf_band;
+            state.regression_confidence_band = conf_band;
+            res_id.is_some()
+        }
+        "shaded_ribbon" => {
+            shaded_ribbon = !shaded_ribbon;
+            state.regression_shaded_ribbon = shaded_ribbon;
+            res_id.is_some()
+        }
+        "apply" => {
+            if res_id.is_none() {
+                res_id = candidates.first().cloned();
+                state.regression_result_sheet_id = res_id.clone();
+            }
+            true
+        }
+        _ => return Ok(UiEventOutcome::default()),
+    };
+
+    if !apply_now || gs.spec.series.is_empty() {
+        return Ok(outcome_ok(sub, None));
+    }
+    let payload = if let Some(rid) = res_id {
+        json!({
+            "sheet_id": gs.id.as_str(),
+            "result_sheet_id": rid,
+            "series_index": sel_idx,
+            "all_series": all_series,
+            "show_confidence_band": conf_band,
+            "shaded_ribbon": shaded_ribbon,
+        })
+    } else {
+        json!({
+            "sheet_id": gs.id.as_str(),
+            "clear": true,
+            "series_index": sel_idx,
+            "all_series": all_series,
+        })
+    };
+    app.execute_command("graph.setRegressionOverlay", payload).map_err(|e| e.to_string())?;
+    Ok(outcome_ok(sub, Some("graph.setRegressionOverlay")))
 }
 
 fn current_axis_which(app: &UiApp) -> AxisWhich {
@@ -986,6 +1128,7 @@ fn dispatch_axes_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &s
         app.canvas_dialogs.format_axes.target_axis = next;
         app.canvas_dialogs.format_axes.sync_from_graph(&gs, next);
         clear_axis_input_buffers(app);
+        app.interaction.text_field_buffers.remove(AXIS_TITLE_INPUT_ID);
         state.open_popup = None;
         return Ok(outcome_ok(sub, None));
     }
@@ -993,6 +1136,15 @@ fn dispatch_axes_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &s
     let which = current_axis_which(app);
     let mut axis = read_live_axis_spec(&gs, which);
     let mut seg = axis_primary_seg(&axis);
+
+    if sub == "apply_title" {
+        if let Some(buf) = app.interaction.text_field_buffers.get(AXIS_TITLE_INPUT_ID) {
+            axis.title = buf.text.trim().to_owned();
+        }
+        commit_axis_update(app, &gs, which, axis)?;
+        app.interaction.text_field_buffers.remove(AXIS_TITLE_INPUT_ID);
+        return Ok(outcome_ok(sub, Some("graph.setAxes")));
+    }
 
     if sub == "y2_toggle" {
         let y2_val = if gs.spec.y2_axis.is_some() { Value::Null } else { json!(gs.spec.y_axis) };
@@ -1173,6 +1325,31 @@ fn current_mv_encoding(doc: &ProjectDocument, gs: &GraphSheet) -> MultivariateGr
     }
 }
 
+fn mv_summary_measure(enc: &MultivariateGraphEncoding) -> Option<SummaryMeasure> {
+    match &enc.plot_mode {
+        MultivariatePlotMode::BubbleScatter => None,
+        MultivariatePlotMode::CategoricalSummary { gdo, .. } => match gdo {
+            GraphicalDataObject::BarWithReplicates { summary, .. }
+            | GraphicalDataObject::AlignedDotPlot { summary, .. }
+            | GraphicalDataObject::FloatingBar { summary: Some(summary), .. } => Some(*summary),
+            _ => Some(SummaryMeasure::Mean),
+        },
+    }
+}
+
+fn default_mv_categorical_summary(gs: &GraphSheet, summary: SummaryMeasure) -> MultivariatePlotMode {
+    MultivariatePlotMode::CategoricalSummary {
+        gdo: GraphicalDataObject::BarWithReplicates {
+            summary,
+            fill_color: gs.spec.palette.color_at(0),
+            border_color: Rgba8::BLACK,
+            border_width_pt: 0.75,
+            replicate_overlay: None,
+        },
+        y_error_bars: Some(ErrorBarSpec::default()),
+    }
+}
+
 fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &str) -> Result<UiEventOutcome, String> {
     let Some(gs) = resolve_graph_sheet(app.document(), state).cloned() else {
         return Ok(UiEventOutcome::default());
@@ -1180,7 +1357,73 @@ fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState
     state.target_graph_id = Some(gs.id.as_str().to_string());
     let mut enc = current_mv_encoding(app.document(), &gs);
 
-    if let Some(raw) = sub.strip_prefix("x:") {
+    if let Some(mode) = sub.strip_prefix("mode:") {
+        match mode {
+            "bubble" => enc.plot_mode = MultivariatePlotMode::BubbleScatter,
+            "cat_summary" => {
+                if matches!(enc.plot_mode, MultivariatePlotMode::BubbleScatter) {
+                    enc.plot_mode = default_mv_categorical_summary(&gs, SummaryMeasure::Mean);
+                }
+            }
+            _ => return Ok(UiEventOutcome::default()),
+        }
+    } else if let Some(m_raw) = sub.strip_prefix("metric:") {
+        let next_m = match m_raw {
+            "Mean" => SummaryMeasure::Mean,
+            "Median" => SummaryMeasure::Median,
+            "Count" => SummaryMeasure::GeometricMean,
+            _ => return Ok(UiEventOutcome::default()),
+        };
+        match &mut enc.plot_mode {
+            MultivariatePlotMode::BubbleScatter => enc.plot_mode = default_mv_categorical_summary(&gs, next_m),
+            MultivariatePlotMode::CategoricalSummary { gdo, .. } => match gdo {
+                GraphicalDataObject::BarWithReplicates { summary, .. } | GraphicalDataObject::AlignedDotPlot { summary, .. } => *summary = next_m,
+                GraphicalDataObject::FloatingBar { summary, .. } => *summary = Some(next_m),
+                other => {
+                    *other = GraphicalDataObject::BarWithReplicates {
+                        summary: next_m,
+                        fill_color: gs.spec.palette.color_at(0),
+                        border_color: Rgba8::BLACK,
+                        border_width_pt: 0.75,
+                        replicate_overlay: None,
+                    };
+                }
+            },
+        }
+    } else if sub == "clamp_apply" {
+        let parse_clamp = |wid_str: &str| -> Option<f64> {
+            let raw = app.interaction.text_field_buffers.get(wid_str)?.text.trim().to_owned();
+            if raw.is_empty() {
+                return None;
+            }
+            crate::grid_view::parse_localized_number_input(&raw, &app.locale_preset).or_else(|| raw.parse::<f64>().ok()).filter(|v| v.is_finite())
+        };
+        let lo = parse_clamp(MV_CLAMP_MIN_INPUT_ID);
+        let hi = parse_clamp(MV_CLAMP_MAX_INPUT_ID);
+        let next_clamp = match (lo, hi) {
+            (Some(a), Some(b)) if b > a => Some((a, b)),
+            (None, None) => None,
+            _ => return Ok(UiEventOutcome::default()),
+        };
+        match &mut enc.color {
+            ColorChannelMapping::Continuous { domain_clamp, .. } => *domain_clamp = next_clamp,
+            _ => {
+                let cur_col = match &enc.color {
+                    ColorChannelMapping::Categorical { column, .. } => *column,
+                    ColorChannelMapping::Constant(_) | ColorChannelMapping::Continuous { .. } => {
+                        source_columns_for_graph(app.document(), &gs).last().map_or(0, |(c, _)| *c)
+                    }
+                };
+                enc.color = ColorChannelMapping::Continuous {
+                    column: cur_col,
+                    ramp: ColorRamp::Named { id: ColormapId::Viridis, reversed: false },
+                    domain_clamp: next_clamp,
+                };
+            }
+        }
+        app.interaction.text_field_buffers.remove(MV_CLAMP_MIN_INPUT_ID);
+        app.interaction.text_field_buffers.remove(MV_CLAMP_MAX_INPUT_ID);
+    } else if let Some(raw) = sub.strip_prefix("x:") {
         if let Ok(col) = raw.parse::<usize>() {
             enc.x_column = col;
         }
@@ -1290,9 +1533,7 @@ fn dispatch_pairwise_action(app: &mut UiApp, state: &mut InspectorViewState, sub
             return Ok(outcome_ok(sub, Some("graph.addComparisonBrackets")));
         }
         "clear_brackets" => {
-            let mut spec = gs.spec.clone();
-            spec.comparisons.clear();
-            app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": spec })).map_err(|e| e.to_string())?;
+            app.execute_command("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "comparisons": [] } })).map_err(|e| e.to_string())?;
             return Ok(outcome_ok(sub, Some("graph.setSpec")));
         }
         "sig_only:toggle" => {
@@ -1604,6 +1845,58 @@ fn dispatch_layout_action(app: &mut UiApp, state: &mut InspectorViewState, sub: 
     Ok(UiEventOutcome::default())
 }
 
+fn resolve_renderable_canvas_target(doc: &ProjectDocument, state: &InspectorViewState) -> Option<(SheetId, bool)> {
+    if let Some(active) = &doc.active_sheet_id {
+        if doc.layout_sheet(active).is_some() {
+            return Some((active.clone(), true));
+        }
+        if doc.graph_sheet(active).is_some() {
+            return Some((active.clone(), false));
+        }
+    }
+    if let Some(ls) = resolve_layout_sheet(doc, state) {
+        return Some((ls.id.clone(), true));
+    }
+    resolve_graph_sheet(doc, state).map(|gs| (gs.id.clone(), false))
+}
+
+fn dispatch_canvas_action(app: &mut UiApp, state: &mut InspectorViewState, sub: &str) -> Result<UiEventOutcome, String> {
+    let apply_preset_for_target = |app: &mut UiApp, state: &mut InspectorViewState, preset: FigureCanvasPreset| -> Result<bool, String> {
+        let doc_snap = app.document().clone();
+        let Some((sheet_id, is_layout)) = resolve_renderable_canvas_target(&doc_snap, state) else {
+            return Ok(false);
+        };
+        let intent = app.canvas_dialogs.apply_canvas_preset_intent(&sheet_id, is_layout, preset);
+        app.execute_command(&intent.command_id, intent.params).map_err(|e| e.to_string())?;
+        Ok(true)
+    };
+
+    if let Some(preset_raw) = sub.strip_prefix("preset:") {
+        let Some(preset) = FigureCanvasPreset::from_name(preset_raw) else {
+            return Ok(UiEventOutcome::default());
+        };
+        state.last_canvas_preset = Some(format!("{preset:?}"));
+        let applied = apply_preset_for_target(app, state, preset)?;
+        return Ok(outcome_ok(sub, if applied { Some("ui.canvas.applyPreset") } else { None }));
+    }
+
+    if let Some(mode_raw) = sub.strip_prefix("resize:") {
+        let Some(mode) = CanvasResizeMode::from_name(mode_raw) else {
+            return Ok(UiEventOutcome::default());
+        };
+        app.canvas_dialogs.canvas_resize_mode = mode;
+        let preset = app
+            .canvas_dialogs
+            .active_canvas_preset
+            .or_else(|| state.last_canvas_preset.as_deref().and_then(FigureCanvasPreset::from_name))
+            .unwrap_or(FigureCanvasPreset::SingleColumn88mm);
+        let applied = apply_preset_for_target(app, state, preset)?;
+        return Ok(outcome_ok(sub, if applied { Some("ui.canvas.applyPreset") } else { None }));
+    }
+
+    Ok(UiEventOutcome::default())
+}
+
 fn active_graph_scene_and_points(app: &UiApp, state: &InspectorViewState) -> (Option<GraphSheet>, Vec<curvebook_chart::PlottedPointMeta>) {
     let Some(gs) = resolve_graph_sheet(app.document(), state).cloned() else {
         return (None, Vec::new());
@@ -1795,6 +2088,16 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut InspectorViewState, pay
     if let Some(sub) = payload.strip_prefix("fg.") {
         return dispatch_format_graph_action(app, state, sub);
     }
+    if let Some(sub) = payload.strip_prefix("regression.") {
+        return dispatch_regression_action(app, state, sub);
+    }
+    if let Some(filter_raw) = payload.strip_prefix("cvd:") {
+        let Some(filter) = CanvasPreviewFilter::from_name(filter_raw) else {
+            return Ok(UiEventOutcome::default());
+        };
+        app.preview_filter = filter;
+        return Ok(outcome_ok(payload, Some("ui.previewFilter.set")));
+    }
     if let Some(sub) = payload.strip_prefix("axes.") {
         return dispatch_axes_action(app, state, sub);
     }
@@ -1806,6 +2109,9 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut InspectorViewState, pay
     }
     if let Some(sub) = payload.strip_prefix("layout.") {
         return dispatch_layout_action(app, state, sub);
+    }
+    if let Some(sub) = payload.strip_prefix("canvas.") {
+        return dispatch_canvas_action(app, state, sub);
     }
     if let Some(sub) = payload.strip_prefix("drill.") {
         return dispatch_drill_action(app, state, sub);
@@ -1850,8 +2156,8 @@ fn draw_drill_back_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSh
 
     let gap = ctx.su(4);
     let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
-    let prev_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, ctx.su(22));
-    let next_rect = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, ctx.su(22));
+    let prev_rect = LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, ctx.su(22));
+    let next_rect = LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, ctx.su(22));
     let prev_lbl = insp_text(app, "inspector.drill_back.prev_pt", "Prev Pt");
     let next_lbl = insp_text(app, "inspector.drill_back.next_pt", "Next Pt");
     ctx.emit_action_btn("inspector.drill.prev", prev_rect, (prev_lbl, prev_lbl), "drill.point:prev", false, has_pts);
@@ -1907,9 +2213,10 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
     let nav_gap = ctx.su(4);
     let row_h = ctx.su(24);
     let mid_w = ctx.panel_w.saturating_sub(2 * nav_w + 2 * nav_gap).max(ctx.su(50));
-    let prev_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, nav_w, row_h);
-    let mid_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + (nav_gap as i32), ctx.cursor_y, mid_w, row_h);
-    let next_r = LayoutRectPx::new(ctx.panel_x + (nav_w as i32) + (nav_gap as i32) + (mid_w as i32) + (nav_gap as i32), ctx.cursor_y, nav_w, row_h);
+    let prev_r = LayoutRectPx::new(ctx.mirrored_x(0, nav_w), ctx.cursor_y, nav_w, row_h);
+    let mid_r = LayoutRectPx::new(ctx.mirrored_x((nav_w as i32) + (nav_gap as i32), mid_w), ctx.cursor_y, mid_w, row_h);
+    let next_r =
+        LayoutRectPx::new(ctx.mirrored_x((nav_w as i32) + (nav_gap as i32) + (mid_w as i32) + (nav_gap as i32), nav_w), ctx.cursor_y, nav_w, row_h);
     ctx.emit_action_btn("inspector.fg.dataset_prev", prev_r, ("<", "Previous series"), "fg.dataset:prev", false, has_series);
     ctx.emit_action_btn(
         "inspector.fg.dataset_btn",
@@ -1991,7 +2298,7 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
     for (idx, (cname, hex)) in COLOR_SWATCHES.iter().enumerate() {
         let r = (idx as u32) / sw_cols;
         let c = (idx as u32) % sw_cols;
-        let sw_rect = LayoutRectPx::new(ctx.panel_x + (c * (sw_w + sw_gap)) as i32, ctx.cursor_y + (r * sw_step) as i32, sw_w, sw_h);
+        let sw_rect = LayoutRectPx::new(ctx.mirrored_x((c * (sw_w + sw_gap)) as i32, sw_w), ctx.cursor_y + (r * sw_step) as i32, sw_w, sw_h);
         if ctx.is_row_visible(sw_rect) {
             let rgba = parse_hex_rgba8(hex).unwrap_or(Rgba8::BLACK);
             let active = cur_hex.eq_ignore_ascii_case(hex);
@@ -2082,6 +2389,122 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
         ],
         has_series,
     );
+
+    if matches!(gs.spec.kind, GraphKind::Grouped | GraphKind::Contingency) {
+        ctx.cursor_y = ctx.emit_chip_row(
+            ctx.cursor_y,
+            Some("Grouped Arrangement"),
+            &[
+                (
+                    "inspector.fg.arr_interleaved",
+                    "Interleaved",
+                    "fg.arrangement:Interleaved",
+                    gs.spec.grouped_arrangement == GroupedArrangement::Interleaved,
+                ),
+                ("inspector.fg.arr_stacked", "Stacked", "fg.arrangement:Stacked", gs.spec.grouped_arrangement == GroupedArrangement::Stacked),
+                (
+                    "inspector.fg.arr_superimposed",
+                    "Superimposed",
+                    "fg.arrangement:Superimposed",
+                    gs.spec.grouped_arrangement == GroupedArrangement::Superimposed,
+                ),
+            ],
+            true,
+        );
+    }
+
+    let style_lbl = insp_text(ctx.builder.app, "cmd.ui.applyStyleFrom.open", "Apply Style From...");
+    let style_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(22));
+    ctx.emit_action_btn("inspector.fg.apply_style_from", style_rect, (style_lbl, style_lbl), "fg.apply_style_from", false, true);
+    ctx.cursor_y += ctx.si(25);
+
+    let reg_candidates: Vec<(String, String)> = ctx
+        .builder
+        .app
+        .document()
+        .result_sheets
+        .iter()
+        .filter(|rs| !rs.fitted_curves.is_empty())
+        .map(|rs| (rs.id.as_str().to_string(), rs.title().to_owned()))
+        .collect();
+    let cur_ov = cur_series.and_then(|s| s.regression_overlay.as_ref()).or_else(|| gs.spec.series.iter().find_map(|s| s.regression_overlay.as_ref()));
+    if !reg_candidates.is_empty() || cur_ov.is_some() {
+        let state_snap = &ctx.builder.app.view_shards.inspector;
+        let active_res_id = cur_ov.map(|o| o.result_sheet_id.as_str().to_string()).or_else(|| state_snap.regression_result_sheet_id.clone());
+        let reg_all_series = if cur_ov.is_some() && !gs.spec.series.is_empty() {
+            gs.spec.series.iter().all(|s| s.regression_overlay.is_some()) || state_snap.regression_all_series
+        } else {
+            state_snap.regression_all_series
+        };
+        let reg_conf_band = cur_ov.map_or(state_snap.regression_confidence_band, |o| o.show_confidence_band);
+        let reg_shaded_ribbon = cur_ov.map_or(state_snap.regression_shaded_ribbon, |o| o.shaded_ribbon);
+        let reg_res_label = match &active_res_id {
+            Some(rid) => reg_candidates.iter().find(|(id, _)| id == rid).map(|(_, t)| t.clone()).unwrap_or_else(|| rid.clone()),
+            None => String::from("None (Select Fit)"),
+        };
+        let reg_muted = ctx.builder.app.theme.text_muted;
+        ctx.paint_label("Regression Overlay", ctx.cursor_y, 15, 10.5, reg_muted, false);
+        ctx.cursor_y += ctx.si(16);
+        let reg_btn_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(24));
+        ctx.emit_action_btn(
+            "inspector.regression.result_sheet",
+            reg_btn_rect,
+            (&reg_res_label, "Regression Result Sheet"),
+            "regression.cycle_result",
+            active_res_id.is_some(),
+            has_series,
+        );
+        ctx.cursor_y += ctx.si(28);
+        ctx.cursor_y = ctx.emit_checkbox_row(
+            "inspector.regression.all_series",
+            ctx.cursor_y,
+            "Apply to All Series",
+            reg_all_series,
+            "regression.all_series",
+            has_series,
+        );
+        ctx.cursor_y = ctx.emit_checkbox_row(
+            "inspector.regression.confidence_band",
+            ctx.cursor_y,
+            "95% Confidence Band",
+            reg_conf_band,
+            "regression.confidence_band",
+            has_series,
+        );
+        ctx.cursor_y = ctx.emit_checkbox_row(
+            "inspector.regression.shaded_ribbon",
+            ctx.cursor_y,
+            "Shaded Ribbon",
+            reg_shaded_ribbon,
+            "regression.shaded_ribbon",
+            has_series,
+        );
+        let reg_apply_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(22));
+        ctx.emit_action_btn(
+            "inspector.regression.apply",
+            reg_apply_rect,
+            ("Apply Overlay", "Apply Regression Overlay"),
+            "regression.apply",
+            false,
+            has_series,
+        );
+        ctx.cursor_y += ctx.si(28);
+    }
+
+    let cur_cvd = ctx.builder.app.preview_filter;
+    ctx.cursor_y = ctx.emit_chip_row_capped(
+        ctx.cursor_y,
+        Some("CVD Preview"),
+        &[
+            ("inspector.cvd.normal", "Norm", "cvd:normal", cur_cvd == CanvasPreviewFilter::Normal),
+            ("inspector.cvd.protanopia", "Prot", "cvd:protanopia", cur_cvd == CanvasPreviewFilter::Protanopia),
+            ("inspector.cvd.deuteranopia", "Deut", "cvd:deuteranopia", cur_cvd == CanvasPreviewFilter::Deuteranopia),
+            ("inspector.cvd.tritanopia", "Trit", "cvd:tritanopia", cur_cvd == CanvasPreviewFilter::Tritanopia),
+            ("inspector.cvd.grayscale", "Gray", "cvd:grayscale", cur_cvd == CanvasPreviewFilter::GrayscalePrint),
+        ],
+        5,
+        true,
+    );
 }
 
 struct AxisInputArgs<'a> {
@@ -2107,7 +2530,7 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
     let gap = ctx.su(4);
     let field_w = ctx.panel_w.saturating_sub(label_w + stepper_w + gap * 2).max(ctx.su(44));
 
-    let lbl_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y + ctx.si(3), label_w, ctx.su(18));
+    let lbl_rect = LayoutRectPx::new(ctx.mirrored_x(0, label_w), ctx.cursor_y + ctx.si(3), label_w, ctx.su(18));
     if ctx.is_row_visible(lbl_rect) {
         let lbl_style = UiTextStyle::ui_sans(ctx.sp(10.5));
         paint_text_fitted(
@@ -2125,7 +2548,8 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
         );
     }
 
-    let field_rect = LayoutRectPx::new(ctx.panel_x + (label_w as i32) + (gap as i32), ctx.cursor_y, field_w, row_h);
+    let field_rel = (label_w as i32) + (gap as i32);
+    let field_rect = LayoutRectPx::new(ctx.mirrored_x(field_rel, field_w), ctx.cursor_y, field_w, row_h);
     if ctx.is_row_visible(field_rect) {
         let kbd_path = format!("Inspector > {}", args.label);
         emit_text_field(
@@ -2146,9 +2570,10 @@ fn draw_axis_input_row(ctx: &mut SectionDrawCtx<'_, '_>, args: AxisInputArgs<'_>
         );
     }
 
-    let dec_x = ctx.panel_x + (label_w as i32) + (gap as i32) + (field_w as i32) + (gap as i32);
-    let dec_r = LayoutRectPx::new(dec_x, ctx.cursor_y, btn_w, row_h);
-    let inc_r = LayoutRectPx::new(dec_x + i32::try_from(btn_w + btn_gap).unwrap_or(27), ctx.cursor_y, btn_w, row_h);
+    let dec_rel = field_rel + (field_w as i32) + (gap as i32);
+    let inc_rel = dec_rel + i32::try_from(btn_w + btn_gap).unwrap_or(27);
+    let dec_r = LayoutRectPx::new(ctx.mirrored_x(dec_rel, btn_w), ctx.cursor_y, btn_w, row_h);
+    let inc_r = LayoutRectPx::new(ctx.mirrored_x(inc_rel, btn_w), ctx.cursor_y, btn_w, row_h);
     ctx.emit_action_btn(args.dec_id, dec_r, ("-", &format!("Decrease {}", args.label)), args.dec_payload, false, true);
     ctx.emit_action_btn(args.inc_id, inc_r, ("+", &format!("Increase {}", args.label)), args.inc_payload, false, true);
 
@@ -2203,16 +2628,93 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
     }
 
     let axis = read_live_axis_spec(gs, which);
+    {
+        let app_ref = ctx.builder.app;
+        let muted_c = app_ref.theme.text_muted;
+        let title_val = app_ref.interaction.text_field_buffers.get(AXIS_TITLE_INPUT_ID).map_or_else(|| axis.title.clone(), |st| st.text.clone());
+        let lbl_w = if ctx.panel_w < ctx.su(210) { ctx.su(40) } else { ctx.su(50) };
+        let btn_w = ctx.su(48);
+        let gap = ctx.su(4);
+        let field_w = ctx.panel_w.saturating_sub(lbl_w + btn_w + gap * 2).max(ctx.su(52));
+        let row_h = ctx.su(22);
+        let lbl_rect = LayoutRectPx::new(ctx.mirrored_x(0, lbl_w), ctx.cursor_y + ctx.si(3), lbl_w, ctx.su(18));
+        if ctx.is_row_visible(lbl_rect) {
+            let lbl_style = UiTextStyle::ui_sans(ctx.sp(10.5));
+            paint_text_fitted(
+                ctx.builder,
+                ctx.parent_wid,
+                FittedTextSpec {
+                    rect: lbl_rect,
+                    text: "Title",
+                    style: &lbl_style,
+                    pad_x: 2,
+                    color: muted_c,
+                    z_layer: ZLayer::Workspace,
+                    scroll_container: Some(SCROLL_ID),
+                },
+            );
+        }
+        let field_rel = (lbl_w as i32) + (gap as i32);
+        let field_rect = LayoutRectPx::new(ctx.mirrored_x(field_rel, field_w), ctx.cursor_y, field_w, row_h);
+        if ctx.is_row_visible(field_rect) {
+            emit_text_field(
+                ctx.builder,
+                TextFieldSpec {
+                    id: AXIS_TITLE_INPUT_ID,
+                    rect: field_rect,
+                    label: "Axis Title",
+                    keyboard_path: "Inspector > Axis Title",
+                    fallback_text: &title_val,
+                    multiline: false,
+                    parent: Some(ctx.parent_wid.clone()),
+                    focus_scope: FocusScope::Workspace,
+                    z_layer: ZLayer::Workspace,
+                    tab_order: Some(0),
+                    enablement: ControlEnablement::enabled(),
+                },
+            );
+        }
+        let btn_rel = field_rel + (field_w as i32) + (gap as i32);
+        let btn_rect = LayoutRectPx::new(ctx.mirrored_x(btn_rel, btn_w), ctx.cursor_y, btn_w, row_h);
+        ctx.emit_action_btn("inspector.axes.title_apply", btn_rect, ("Apply", "Apply Axis Title"), "axes.apply_title", false, true);
+        ctx.cursor_y += ctx.si(26);
+    }
     let seg = axis_primary_seg(&axis);
+    let app = ctx.builder.app;
+    let state = &app.view_shards.inspector;
     let scale_options = vec![
-        PopupOptionSpec { label: String::from("Linear"), payload: String::from("axes.scale:Linear"), active: seg.scale == AxisScale::Linear },
-        PopupOptionSpec { label: String::from("Log10"), payload: String::from("axes.scale:Log10"), active: seg.scale == AxisScale::Log10 },
-        PopupOptionSpec { label: String::from("Log2"), payload: String::from("axes.scale:Log2"), active: seg.scale == AxisScale::Log2 },
-        PopupOptionSpec { label: String::from("Ln (Natural)"), payload: String::from("axes.scale:Ln"), active: seg.scale == AxisScale::Ln },
-        PopupOptionSpec { label: String::from("Logit"), payload: String::from("axes.scale:Logit"), active: matches!(seg.scale, AxisScale::Logit(_)) },
-        PopupOptionSpec { label: String::from("Probit"), payload: String::from("axes.scale:Probit"), active: seg.scale == AxisScale::Probit },
         PopupOptionSpec {
-            label: String::from("Reciprocal 1/Y"),
+            label: String::from(insp_text(app, "inspector.scale.linear", "Linear")),
+            payload: String::from("axes.scale:Linear"),
+            active: seg.scale == AxisScale::Linear,
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.log10", "Log10")),
+            payload: String::from("axes.scale:Log10"),
+            active: seg.scale == AxisScale::Log10,
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.log2", "Log2")),
+            payload: String::from("axes.scale:Log2"),
+            active: seg.scale == AxisScale::Log2,
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.ln", "Ln (Natural)")),
+            payload: String::from("axes.scale:Ln"),
+            active: seg.scale == AxisScale::Ln,
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.logit", "Logit")),
+            payload: String::from("axes.scale:Logit"),
+            active: matches!(seg.scale, AxisScale::Logit(_)),
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.probit", "Probit")),
+            payload: String::from("axes.scale:Probit"),
+            active: seg.scale == AxisScale::Probit,
+        },
+        PopupOptionSpec {
+            label: String::from(insp_text(app, "inspector.scale.reciprocal", "Reciprocal 1/Y")),
             payload: String::from("axes.scale:Reciprocal"),
             active: seg.scale == AxisScale::Reciprocal,
         },
@@ -2233,9 +2735,9 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
         ctx.cursor_y,
         None,
         &[
-            ("inspector.axes.scale_linear", "Linear", "axes.scale:Linear", seg.scale == AxisScale::Linear),
-            ("inspector.axes.scale_log10", "Log10", "axes.scale:Log10", seg.scale == AxisScale::Log10),
-            ("inspector.axes.scale_log2", "Log2", "axes.scale:Log2", seg.scale == AxisScale::Log2),
+            ("inspector.axes.scale_linear", insp_text(app, "inspector.scale.linear", "Linear"), "axes.scale:Linear", seg.scale == AxisScale::Linear),
+            ("inspector.axes.scale_log10", insp_text(app, "inspector.scale.log10", "Log10"), "axes.scale:Log10", seg.scale == AxisScale::Log10),
+            ("inspector.axes.scale_log2", insp_text(app, "inspector.scale.log2", "Log2"), "axes.scale:Log2", seg.scale == AxisScale::Log2),
             ("inspector.axes.scale_nonlin", "Nonlin", "axes.scale:Nonlinear", is_nonlinear),
         ],
         true,
@@ -2283,8 +2785,8 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
 
     let gap = ctx.su(4);
     let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
-    let apply_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, ctx.su(22));
-    let auto_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, ctx.su(22));
+    let apply_r = LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, ctx.su(22));
+    let auto_r = LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, ctx.su(22));
     ctx.emit_action_btn("inspector.axes.apply_range", apply_r, ("Apply Range", "Apply Range"), "axes.apply_range", false, true);
     ctx.emit_action_btn("inspector.axes.auto_range", auto_r, ("Auto Range", "Auto Range"), "axes.auto_range", false, true);
     ctx.cursor_y += ctx.si(26);
@@ -2341,6 +2843,29 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
     let has_cols = !cols.is_empty();
     let enc = current_mv_encoding(app.document(), gs);
     let col_name = |c: usize| -> String { cols.iter().find(|(idx, _)| *idx == c).map_or_else(|| format!("Col {}", c + 1), |(_, t)| t.clone()) };
+    let is_cat_summary = matches!(enc.plot_mode, MultivariatePlotMode::CategoricalSummary { .. });
+    let active_metric = mv_summary_measure(&enc);
+    ctx.cursor_y = ctx.emit_chip_row(
+        ctx.cursor_y,
+        Some("Plot Mode"),
+        &[
+            ("inspector.mv.mode_bubble", "Bubble", "mv.mode:bubble", !is_cat_summary),
+            ("inspector.mv.mode_cat_summary", "Cat Summary", "mv.mode:cat_summary", is_cat_summary),
+        ],
+        true,
+    );
+    ctx.cursor_y = ctx.emit_chip_row(
+        ctx.cursor_y,
+        Some("Summary Metric"),
+        &[
+            ("inspector.mv.metric_mean", "Mean", "mv.metric:Mean", active_metric == Some(SummaryMeasure::Mean)),
+            ("inspector.mv.metric_median", "Median", "mv.metric:Median", active_metric == Some(SummaryMeasure::Median)),
+            ("inspector.mv.metric_count", "Count", "mv.metric:Count", active_metric == Some(SummaryMeasure::GeometricMean)),
+        ],
+        true,
+    );
+    let app = ctx.builder.app;
+    let state = &app.view_shards.inspector;
 
     let x_opts: Vec<PopupOptionSpec> =
         cols.iter().map(|(c, t)| PopupOptionSpec { label: t.clone(), payload: format!("mv.x:{c}"), active: *c == enc.x_column }).collect();
@@ -2402,6 +2927,72 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
         ],
         has_cols,
     );
+
+    {
+        let app_ref = ctx.builder.app;
+        let muted_c = app_ref.theme.text_muted;
+        let clamp_pair = match &enc.color {
+            ColorChannelMapping::Continuous { domain_clamp, .. } => *domain_clamp,
+            _ => None,
+        };
+        let min_fallback = clamp_pair.map(|(lo, _)| format!("{lo}")).unwrap_or_default();
+        let max_fallback = clamp_pair.map(|(_, hi)| format!("{hi}")).unwrap_or_default();
+        let min_val = app_ref.interaction.text_field_buffers.get(MV_CLAMP_MIN_INPUT_ID).map_or(min_fallback, |st| st.text.clone());
+        let max_val = app_ref.interaction.text_field_buffers.get(MV_CLAMP_MAX_INPUT_ID).map_or(max_fallback, |st| st.text.clone());
+        ctx.paint_label("Color Clamp (Min / Max)", ctx.cursor_y, 15, 10.5, muted_c, false);
+        ctx.cursor_y += ctx.si(16);
+        let gap = ctx.su(4);
+        let row_h = ctx.su(22);
+        let apply_w = ctx.su(44);
+        let fields_avail = ctx.panel_w.saturating_sub(apply_w + gap * 2);
+        let field_w = (fields_avail / 2).max(ctx.su(38));
+        let apply_actual_w = ctx.panel_w.saturating_sub(field_w * 2 + gap * 2).max(ctx.su(36));
+        let min_r = LayoutRectPx::new(ctx.mirrored_x(0, field_w), ctx.cursor_y, field_w, row_h);
+        let max_rel = (field_w as i32) + (gap as i32);
+        let max_r = LayoutRectPx::new(ctx.mirrored_x(max_rel, field_w), ctx.cursor_y, field_w, row_h);
+        let app_rel = max_rel + (field_w as i32) + (gap as i32);
+        let app_r = LayoutRectPx::new(ctx.mirrored_x(app_rel, apply_actual_w), ctx.cursor_y, apply_actual_w, row_h);
+        if ctx.is_row_visible(min_r) {
+            emit_text_field(
+                ctx.builder,
+                TextFieldSpec {
+                    id: MV_CLAMP_MIN_INPUT_ID,
+                    rect: min_r,
+                    label: "Color Clamp Min",
+                    keyboard_path: "Inspector > Color Clamp Min",
+                    fallback_text: &min_val,
+                    multiline: false,
+                    parent: Some(ctx.parent_wid.clone()),
+                    focus_scope: FocusScope::Workspace,
+                    z_layer: ZLayer::Workspace,
+                    tab_order: Some(0),
+                    enablement: ControlEnablement::enabled(),
+                },
+            );
+        }
+        if ctx.is_row_visible(max_r) {
+            emit_text_field(
+                ctx.builder,
+                TextFieldSpec {
+                    id: MV_CLAMP_MAX_INPUT_ID,
+                    rect: max_r,
+                    label: "Color Clamp Max",
+                    keyboard_path: "Inspector > Color Clamp Max",
+                    fallback_text: &max_val,
+                    multiline: false,
+                    parent: Some(ctx.parent_wid.clone()),
+                    focus_scope: FocusScope::Workspace,
+                    z_layer: ZLayer::Workspace,
+                    tab_order: Some(0),
+                    enablement: ControlEnablement::enabled(),
+                },
+            );
+        }
+        ctx.emit_action_btn("inspector.mv.color_clamp_apply", app_r, ("Apply", "Apply Color Clamp"), "mv.clamp_apply", false, true);
+        ctx.cursor_y += ctx.si(26);
+    }
+    let app = ctx.builder.app;
+    let state = &app.view_shards.inspector;
 
     let (size_val, active_size_col) = match &enc.size {
         SizeChannelMapping::Constant { .. } => (String::from("None"), None),
@@ -2479,8 +3070,8 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
     let gap = ctx.su(4);
     let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
     let row_h = ctx.su(24);
-    let auto_r = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, half, row_h);
-    let clr_r = LayoutRectPx::new(ctx.panel_x + (half as i32) + (gap as i32), ctx.cursor_y, half, row_h);
+    let auto_r = LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, row_h);
+    let clr_r = LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, row_h);
     let auto_lbl = insp_text(app, "inspector.pw.auto_brackets", "Auto Brackets");
     let clr_lbl = insp_text(app, "inspector.pw.clear_brackets", "Clear");
     ctx.emit_action_btn("inspector.pw.auto_brackets", auto_r, (auto_lbl, auto_lbl), "pw.auto_brackets", false, has_result);
@@ -2581,7 +3172,6 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
 
 fn draw_page_layout_section(ctx: &mut SectionDrawCtx<'_, '_>, ls: Option<&LayoutSheet>) {
     let app = ctx.builder.app;
-    let muted = app.theme.text_muted;
     let state = &app.view_shards.inspector;
     let expanded = is_section_expanded(app, state, SectionKind::PageLayout);
     let title = insp_text(app, "inspector.page_layout", "Page Layout");
@@ -2590,6 +3180,42 @@ fn draw_page_layout_section(ctx: &mut SectionDrawCtx<'_, '_>, ls: Option<&Layout
         return;
     }
 
+    let active_preset = ctx.builder.app.canvas_dialogs.active_canvas_preset;
+    let resize_mode = ctx.builder.app.canvas_dialogs.canvas_resize_mode;
+    let has_canvas_target = resolve_renderable_canvas_target(ctx.builder.app.document(), &ctx.builder.app.view_shards.inspector).is_some();
+    ctx.cursor_y = ctx.emit_chip_row(
+        ctx.cursor_y,
+        Some("Canvas Presets"),
+        &[
+            (
+                "inspector.canvas.preset_single_88mm",
+                "88mm 1-Col",
+                "canvas.preset:SingleColumn88mm",
+                active_preset == Some(FigureCanvasPreset::SingleColumn88mm),
+            ),
+            (
+                "inspector.canvas.preset_double_180mm",
+                "180mm 2-Col",
+                "canvas.preset:DoubleColumn180mm",
+                active_preset == Some(FigureCanvasPreset::DoubleColumn180mm),
+            ),
+            ("inspector.canvas.preset_slide_16x9", "Slide 16:9", "canvas.preset:Slide16x9", active_preset == Some(FigureCanvasPreset::Slide16x9)),
+        ],
+        has_canvas_target,
+    );
+    ctx.cursor_y = ctx.emit_chip_row(
+        ctx.cursor_y,
+        Some("Resize Mode"),
+        &[
+            ("inspector.canvas.resize_keep_pt", "Keep pt", "canvas.resize:KeepTypographyPt", resize_mode == CanvasResizeMode::KeepTypographyPt),
+            ("inspector.canvas.resize_scale", "Scale", "canvas.resize:ProportionalScale", resize_mode == CanvasResizeMode::ProportionalScale),
+        ],
+        has_canvas_target,
+    );
+
+    let app = ctx.builder.app;
+    let muted = app.theme.text_muted;
+    let state = &app.view_shards.inspector;
     let Some(ls) = ls else {
         ctx.paint_label("No Page Layout sheet in project yet.", ctx.cursor_y, 18, 10.5, muted, false);
         ctx.cursor_y += ctx.si(22);
@@ -2768,7 +3394,17 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
     let header_rect = LayoutRectPx::new(rect.x + pad, rect.y + pad, inner_w, insp_u32(20, scale));
     let title_str = insp_text(app, "inspector.live_subtitle", "Live engine controls (undoable)");
     let active_insp = app.canvas_dialogs.active_inspector;
-    let header_title = if active_insp != ActiveInspector::None { String::from(active_insp.label()) } else { String::from("Inspector") };
+    let (hdr_key, hdr_fb) = match active_insp {
+        ActiveInspector::FormatGraph => ("inspector.format_graph", active_insp.label()),
+        ActiveInspector::FormatAxes => ("inspector.format_axes", active_insp.label()),
+        ActiveInspector::BubblePlot => ("inspector.section.multivariate", active_insp.label()),
+        ActiveInspector::PairwiseComparisons => ("inspector.section.pairwise_cld", active_insp.label()),
+        ActiveInspector::PageLayout => ("inspector.page_layout", active_insp.label()),
+        ActiveInspector::ResultDetails | ActiveInspector::None => {
+            ("inspector.title", if active_insp == ActiveInspector::None { "Inspector" } else { active_insp.label() })
+        }
+    };
+    let header_title = String::from(insp_text(app, hdr_key, hdr_fb));
     let hdr_style = UiTextStyle::ui_bold(insp_pt(12.5, scale));
     paint_text_fitted(
         builder,
@@ -2809,6 +3445,7 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         ("inspector.tab.layout", insp_text(app, "inspector.tab.layout", "Layout"), "tab:layout", active_sec == SectionKind::PageLayout),
     ];
 
+    let is_rtl = builder.tree.is_rtl;
     let tab_top = sub_rect.bottom() + insp_i32(6, scale);
     let tab_gap = insp_u32(3, scale);
     let two_rows = rect.width < insp_u32(236, scale);
@@ -2817,7 +3454,8 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
     let tabs_bottom = if two_rows {
         let w1 = (inner_w.saturating_sub(2 * tab_gap) / 3).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs[0..3].iter().enumerate() {
-            let tr_rect = LayoutRectPx::new(rect.x + pad + (i as u32 * (w1 + tab_gap)) as i32, tab_top, w1, tab_h);
+            let tx = rtl_row_x(rect.x + pad, inner_w, (i as u32 * (w1 + tab_gap)) as i32, w1, is_rtl);
+            let tr_rect = LayoutRectPx::new(tx, tab_top, w1, tab_h);
             push_btn_widget(
                 builder,
                 BtnArgs {
@@ -2836,8 +3474,8 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         }
         let w2 = (inner_w.saturating_sub(tab_gap) / 2).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs[3..5].iter().enumerate() {
-            let tr_rect =
-                LayoutRectPx::new(rect.x + pad + (i as u32 * (w2 + tab_gap)) as i32, tab_top + (tab_h as i32) + (tab_gap as i32), w2, tab_h);
+            let tx = rtl_row_x(rect.x + pad, inner_w, (i as u32 * (w2 + tab_gap)) as i32, w2, is_rtl);
+            let tr_rect = LayoutRectPx::new(tx, tab_top + (tab_h as i32) + (tab_gap as i32), w2, tab_h);
             push_btn_widget(
                 builder,
                 BtnArgs {
@@ -2858,7 +3496,8 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
     } else {
         let tw = (inner_w.saturating_sub(4 * tab_gap) / 5).max(min_tab_w);
         for (i, (id, lbl, payload, selected)) in tab_defs.iter().enumerate() {
-            let tr_rect = LayoutRectPx::new(rect.x + pad + (i as u32 * (tw + tab_gap)) as i32, tab_top, tw, tab_h);
+            let tx = rtl_row_x(rect.x + pad, inner_w, (i as u32 * (tw + tab_gap)) as i32, tw, is_rtl);
+            let tr_rect = LayoutRectPx::new(tx, tab_top, tw, tab_h);
             push_btn_widget(
                 builder,
                 BtnArgs {
@@ -2942,5 +3581,148 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
 
     if let Some(popup) = pending_popup {
         draw_popup_overlay(builder, &popup, &inspector_wid, rect);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::ViewportMetrics;
+    use crate::dialogs_canvas::ActiveDialog;
+    use crate::human_driver::HumanPathDriver;
+    use crate::interaction::KeyModifiers;
+    use curvebook_doc::{Cell, CellCoord, DataSheet, GroupedTable, MultipleVariablesTable, SubcolumnMode, TableArchetype, VariableRole, XyTable};
+    use curvebook_engine::Session;
+
+    fn scroll_click(driver: &mut HumanPathDriver, id: &str) -> Result<(), String> {
+        for _ in 0..16 {
+            if driver.find_widget(id).is_some() {
+                return driver.click_widget(id).map(|_| ());
+            }
+            driver.wheel_widget("scroll.inspector", 0.0, 90.0, KeyModifiers::default())?;
+        }
+        driver.click_widget(id).map(|_| ())
+    }
+
+    fn mv_driver() -> Result<(HumanPathDriver, SheetId), String> {
+        let mut mv = MultipleVariablesTable::new(3, 4).map_err(|e| format!("{e}"))?;
+        mv.variables[0].title = String::from("Group");
+        mv.variables[0].role = VariableRole::Categorical;
+        mv.variables[1].title = String::from("Dose");
+        mv.variables[1].role = VariableRole::Continuous;
+        mv.variables[2].title = String::from("Signal");
+        mv.variables[2].role = VariableRole::Continuous;
+        let ds = DataSheet::new("ds-mv", "MV", TableArchetype::MultipleVariables(mv)).map_err(|e| format!("{e}"))?;
+        let mut doc = ProjectDocument::new("MV Test").map_err(|e| format!("{e}"))?;
+        doc.add_data_sheet(ds).map_err(|e| format!("{e}"))?;
+        let mut session = Session::from_document(doc);
+        session
+            .execute("graph.create", json!({ "sheet_id": "gr-mv", "data_sheet_id": "ds-mv", "kind": "multiple_variables" }))
+            .map_err(|e| format!("{e}"))?;
+        session.execute("sheet.select", json!({ "sheet_id": "gr-mv" })).map_err(|e| format!("{e}"))?;
+        let mut app = UiApp::from_session(session);
+        app.nav.inspector_open = true;
+        Ok((HumanPathDriver::new(app, ViewportMetrics::new(1280.0, 800.0, 1.0)), SheetId::new("gr-mv")))
+    }
+
+    #[test]
+    fn inspector_w6_controls_and_rtl_tabs_behave_cleanly() -> Result<(), String> {
+        let (mut driver, gr_mv) = mv_driver()?;
+        driver.click_widget("inspector.tab.multi")?;
+        driver.click_widget("inspector.mv.mode_cat_summary")?;
+        driver.click_widget("inspector.mv.metric_median")?;
+        let gs = driver.app().document().graph_sheet(&gr_mv).ok_or("missing gr-mv")?;
+        let enc = gs.spec.multivariate.as_ref().ok_or("missing multivariate")?;
+        assert!(matches!(enc.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }));
+        assert_eq!(mv_summary_measure(enc), Some(SummaryMeasure::Median));
+
+        driver.click_widget("inspector.mv.color_clamp_min.input")?;
+        driver.type_text("0")?;
+        driver.click_widget("inspector.mv.color_clamp_max.input")?;
+        driver.type_text("100")?;
+        driver.click_widget("inspector.mv.color_clamp_apply")?;
+        let gs = driver.app().document().graph_sheet(&gr_mv).ok_or("missing gr-mv")?;
+        assert!(matches!(
+            gs.spec.multivariate.as_ref().and_then(|m| match &m.color {
+                ColorChannelMapping::Continuous { domain_clamp, .. } => *domain_clamp,
+                _ => None,
+            }),
+            Some((lo, hi)) if (lo - 0.0).abs() < 1e-9 && (hi - 100.0).abs() < 1e-9
+        ));
+
+        // Canvas preset + resize works cleanly even when no LayoutSheet exists yet.
+        driver.click_widget("inspector.tab.layout")?;
+        scroll_click(&mut driver, "inspector.canvas.preset_single_88mm")?;
+        scroll_click(&mut driver, "inspector.canvas.resize_keep_pt")?;
+        assert_eq!(driver.app().canvas_dialogs.active_canvas_preset, Some(FigureCanvasPreset::SingleColumn88mm));
+        assert_eq!(driver.app().canvas_dialogs.canvas_resize_mode, CanvasResizeMode::KeepTypographyPt);
+
+        // CVD filter + Apply Style From in Format Graph + RTL tab mirroring.
+        driver.click_widget("inspector.tab.graph")?;
+        scroll_click(&mut driver, "inspector.cvd.deuteranopia")?;
+        assert_eq!(driver.app().preview_filter, CanvasPreviewFilter::Deuteranopia);
+        scroll_click(&mut driver, "inspector.fg.apply_style_from")?;
+        assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::ApplyStyleFrom { .. }));
+        driver.click_widget("modal.cancel")?;
+
+        driver.click_widget("inspector.tab.axes")?;
+        driver.click_widget("inspector.axes.title.input")?;
+        driver.type_text("Concentration")?;
+        driver.click_widget("inspector.axes.title_apply")?;
+        let gs = driver.app().document().graph_sheet(&gr_mv).ok_or("missing gr-mv")?;
+        assert!(gs.spec.y_axis.title.contains("Concentration"));
+
+        driver.app_mut().locale = String::from("ar");
+        let rtl_tree = driver.layout_tree();
+        assert!(rtl_tree.is_rtl);
+        let tg = rtl_tree.node("inspector.tab.graph").ok_or("missing tab.graph")?;
+        let tl = rtl_tree.node("inspector.tab.layout").ok_or("missing tab.layout")?;
+        assert!(tg.bounds.rect_px.x > tl.bounds.rect_px.x);
+        Ok(())
+    }
+
+    #[test]
+    fn grouped_arrangement_and_regression_overlay_dispatch_cleanly() -> Result<(), String> {
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 2).map_err(|e| format!("{e}"))?;
+        grp.data_sets[0].title = String::from("A");
+        grp.data_sets[1].title = String::from("B");
+        let ds_g = DataSheet::new("ds-g", "Grp", TableArchetype::Grouped(grp)).map_err(|e| format!("{e}"))?;
+
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 4).map_err(|e| format!("{e}"))?;
+        let mut ds_xy = DataSheet::new("ds-xy", "XY", TableArchetype::Xy(xy)).map_err(|e| format!("{e}"))?;
+        for r in 0..4 {
+            let x = (r + 1) as f64;
+            let y = 1.0 + 2.0 * x;
+            ds_xy.set_x_or_time_cell(r, 0, Cell::number(x)).map_err(|e| format!("{e}"))?;
+            ds_xy.set_cell(CellCoord::new(r, 0, 0), Cell::number(y)).map_err(|e| format!("{e}"))?;
+        }
+        let mut doc = ProjectDocument::new("GrpReg").map_err(|e| format!("{e}"))?;
+        doc.add_data_sheet(ds_g).map_err(|e| format!("{e}"))?;
+        doc.add_data_sheet(ds_xy).map_err(|e| format!("{e}"))?;
+
+        let mut session = Session::from_document(doc);
+        session
+            .execute("analysis.run", json!({ "sheet_id": "res-lin", "source_sheet": "ds-xy", "kind": "linear_regression" }))
+            .map_err(|e| format!("{e}"))?;
+        session.execute("graph.create", json!({ "sheet_id": "gr-grp", "data_sheet_id": "ds-g", "kind": "grouped" })).map_err(|e| format!("{e}"))?;
+        session.execute("sheet.select", json!({ "sheet_id": "gr-grp" })).map_err(|e| format!("{e}"))?;
+        let mut app = UiApp::from_session(session);
+        app.nav.inspector_open = true;
+        let mut driver = HumanPathDriver::new(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
+
+        scroll_click(&mut driver, "inspector.fg.arr_superimposed")?;
+        assert_eq!(
+            driver.app().document().graph_sheet(&SheetId::new("gr-grp")).map(|g| g.spec.grouped_arrangement),
+            Some(GroupedArrangement::Superimposed)
+        );
+
+        scroll_click(&mut driver, "inspector.regression.result_sheet")?;
+        scroll_click(&mut driver, "inspector.regression.all_series")?;
+        scroll_click(&mut driver, "inspector.regression.confidence_band")?;
+        scroll_click(&mut driver, "inspector.regression.shaded_ribbon")?;
+        scroll_click(&mut driver, "inspector.regression.apply")?;
+        let g = driver.app().document().graph_sheet(&SheetId::new("gr-grp")).ok_or("missing gr-grp")?;
+        assert!(g.spec.series.iter().all(|s| s.regression_overlay.as_ref().is_some_and(|o| o.show_confidence_band && o.shaded_ribbon)));
+        Ok(())
     }
 }

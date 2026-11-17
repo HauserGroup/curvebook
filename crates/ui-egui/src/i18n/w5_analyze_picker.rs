@@ -166,7 +166,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         ru: "Целевой существующий лист результатов",
         tr: "Hedef mevcut sonuç sayfası",
         ar: "ورقة النتائج الحالية المستهدفة",
-        he: "גיליון התוצאות הקיים היעד",
+        he: "גיליון תוצאות קיים כיעד",
     ]),
     entry!("analyze_picker.cat.transform" => [
         en: "Transform & Derive",
