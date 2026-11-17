@@ -60,14 +60,14 @@
     </dict>
     <dict>
       <key>CFBundleTypeName</key>
-      <string>Prism Scientific Project</string> <!-- brand-ok -->
+      <string>External Scientific Project (.prism, .pzfx)</string>
       <key>CFBundleTypeRole</key>
       <string>Viewer</string>
       <key>LSHandlerRank</key>
       <string>Alternate</string>
       <key>CFBundleTypeExtensions</key>
       <array>
-        <string>prism</string> <!-- brand-ok -->
+        <string>prism</string>
         <string>pzfx</string>
       </array>
     </dict>

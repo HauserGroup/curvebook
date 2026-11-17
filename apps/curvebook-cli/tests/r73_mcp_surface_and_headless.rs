@@ -424,7 +424,7 @@ fn r73_stdio_headless_workflows_command_run_batch_save_reopen_export() -> Result
     let mut zw = ZipWriter::new();
     zw.add_file(
         "manifest.json",
-        br#"{"title":"Headless Prism","sheets":[{"id":"dose","title":"Dose","kind":"xy","csv_path":"tables/dose.csv"}]}"#.to_vec(),
+        br#"{"title":"Headless External Archive","sheets":[{"id":"dose","title":"Dose","kind":"xy","csv_path":"tables/dose.csv"}]}"#.to_vec(),
     )
     .map_err(|e| format!("zip manifest: {e}"))?;
     zw.add_file("tables/dose.csv", b"Dose,Response\n-8,5\n-6,50\n-4,95\n".to_vec()).map_err(|e| format!("zip table: {e}"))?;

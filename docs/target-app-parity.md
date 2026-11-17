@@ -1,12 +1,12 @@
-# Parity with GraphPad Prism 11
+# Target-Application Functional Parity
 
-> **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** Updated through Waves 20–24 + `R8.3`–`R8.4` presenters (`eframe 0.37` / `egui 0.37` / `wgpu` native desktop window `gui_window.rs` and `wasm32` + Trunk WebGL2 bundle `curvebook-web-0.1.0.zip`, both presenting a non-interactive RGBA chrome, `R5.4` native clipboard/print/layout drag, `R8.6`–`R8.8` & `R9.17` `49`-workflow `gui_only` agent-harness parity, active `R9` QoL suite, and local universal macOS `.dmg`/`.zip` `verify.sh` + `THIRD-PARTY-LICENSES.html` complete; external hosted CI runners, Apple Developer ID notarization, & Windows/Linux/FreeBSD VM QA stay in `R8.5`/`R0.6`/`R0.14`; 2026-11-15 human-GUI audit re-graded area 10 and opened `R10`) · **Target:** GraphPad Prism 11 (11.1.x; public guides & release notes through 11.1.0, August 2026)
+> **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** Updated through Waves 20–24 + `R8.3`–`R8.4` presenters (`eframe 0.37` / `egui 0.37` / `wgpu` native desktop window `gui_window.rs` and `wasm32` + Trunk WebGL2 bundle `curvebook-web-0.1.0.zip`, both presenting a non-interactive RGBA chrome, `R5.4` native clipboard/print/layout drag, `R8.6`–`R8.8` & `R9.17` `49`-workflow `gui_only` agent-harness parity, active `R9` QoL suite, and local universal macOS `.dmg`/`.zip` `verify.sh` + `THIRD-PARTY-LICENSES.html` complete; external hosted CI runners, Apple Developer ID notarization, & Windows/Linux/FreeBSD VM QA stay in `R8.5`/`R0.6`/`R0.14`; 2026-11-15 human-GUI audit re-graded area 10 and opened `R10`) · **Target:** Scientific biostatistics, nonlinear regression, and publication-graphing workbench parity (through multifactor ANOVA, effect sizes, multivariate analyses, and arbitrary decimal confidence levels)
 
 Authoritative clean-room parity assessment for CurveBook. Active task queue in [`ROADMAP.md`](ROADMAP.md) and [`STATUS.md`](STATUS.md); legacy mapping stubs in [`gaps.md`](gaps.md), [`ROADMAP.md#legacy-milestone--gate-mapping`](ROADMAP.md#legacy-milestone--gate-mapping), and [`roadmap-history.md`](planning/roadmap-history.md).
 
 ## Methodology
 
-Every score in this document is graded strictly from shipped, tested code in `crates/*` and `apps/*` against public documentation (`https://www.graphpad.com/guides/prism/latest/{user-guide,statistics,curve-fitting}/` and public release notes at `https://www.graphpad.com/updates`), peer-reviewed statistical methods, and certified reference benchmarks (NIST StRD). In accordance with [`AGENTS.md`](../AGENTS.md), no proprietary binary, installation directory, or vendor-created sample file is ever inspected or run.
+Every score in this document is graded strictly from shipped, tested code in `crates/*` and `apps/*` against peer-reviewed biostatistical and numerical methods, primary literature specifications (Motulsky & Christopoulos, *Fitting Models to Biological Data*; Zar, *Biostatistical Analysis*; Klein & Moeschberger, *Survival Analysis*; Wilkinson, *The Grammar of Graphics*), and certified reference benchmarks (NIST StRD and R `4.5.2` independent oracles). In accordance with [`AGENTS.md`](../AGENTS.md), no proprietary binary, installation directory, or vendor-created sample file is ever inspected or run.
 
 The [limited local JPG reference policy](../AGENTS.md#limited-local-jpg-reference-policy) allows the designated existing frames to inform high-level workflows, information hierarchy, and generic functional organization while requiring independent implementation and original visual design. Frames provide no numerical reference answers, visual matching targets, acceptance baselines, or evidence of workflow completion. Scores and completion claims still require the shipped-code and test evidence described here.
 
@@ -18,7 +18,7 @@ The [limited local JPG reference policy](../AGENTS.md#limited-local-jpg-referenc
 | `10–30%` | Core data types and happy-path math exist headlessly with unit tests, not yet wired through engine commands or UI. |
 | `40–65%` | Mainstream variants work end to end (engine + CLI/MCP + UI + `.curvebook` save/reopen) and pass NIST/analytical tests; secondary options or diagnostics missing. |
 | `70–85%` | Everyday wet-lab researcher workflow complete, including missing-value edge cases, multiplicity CIs, plain-language checklists, and vector SVG/PDF export. |
-| `90–100%` | Indistinguishable mathematical precision and workflow completeness against public Prism 11.1 specifications, property-tested against hostile inputs. |
+| `90–100%` | Indistinguishable mathematical precision and workflow completeness against target biostatistics and nonlinear-regression functional specifications, property-tested against hostile inputs. |
 
 ### Ready for real work
 
@@ -29,7 +29,7 @@ The [limited local JPG reference policy](../AGENTS.md#limited-local-jpg-referenc
 
 ### Calibration
 
-Hour ranges are single-agent wall-clock hours calibrated from sibling Craft repositories (`~1.0–2.0 h` per self-contained statistical test or equation family with NIST/analytical tests + command wiring; `~6–12 h` per multi-tab dialog or chart family). Parallel agents (`4–6`) achieve `~3.2–3.8×` wall-clock speedup when partitioned cleanly across `math`/`stats`, `fit`, `doc`/`transform`/`format`, `chart`/`svg`/`pdf`, and `ui-egui`.
+Hour ranges are single-agent wall-clock hours calibrated from comparable clean-room Rust workspaces (`~1.0–2.0 h` per self-contained statistical test or equation family with NIST/analytical tests + command wiring; `~6–12 h` per multi-tab dialog or chart family). Parallel agents (`4–6`) achieve `~3.2–3.8×` wall-clock speedup when partitioned cleanly across `math`/`stats`, `fit`, `doc`/`transform`/`format`, `chart`/`svg`/`pdf`, and `ui-egui`.
 
 ---
 

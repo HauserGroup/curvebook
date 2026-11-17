@@ -18,12 +18,12 @@
 - [x] Unpaired two-sample Student *t*-test (with *F*-test for equal variances)
 - [x] Unpaired Welch *t*-test (unequal variances, Welch–Satterthwaite fractional df)
 - [x] Paired *t*-test, Ratio paired *t*-test (geometric mean of ratios), and Lognormal unpaired *t*-test
-- [x] Standardized *t*-test effect sizes with noncentral-$t$ CIs: Cohen's $d$, Hedges' $g$, and Glass's $\Delta$ (Prism 11.0+)
+- [x] Standardized *t*-test effect sizes with noncentral-$t$ CIs: Cohen's $d$, Hedges' $g$, and Glass's $\Delta$
 - [x] Mann–Whitney $U$ test (exact small-sample & tie-corrected asymptotic *p*-values + Hodges–Lehmann median difference & CI)
 - [x] Wilcoxon matched-pairs signed-rank test (exact & asymptotic + Pratt/Wilcoxon zero handling + Hodges–Lehmann pseudomedian)
 - [x] Two-sample Kolmogorov–Smirnov test (exact Smirnov lattice & asymptotic)
 - [x] Multiple unpaired/paired/nonparametric tests (one per row) with Holm–Šídák or BH/BY/BKY FDR (Volcano plot source) *(`AnalysisKind::MultipleRowTTests` + `multiple_row_t_tests` verified end-to-end)*
-- [x] Unified *t*-tests directly from `MultipleVariables` tables via typed/color-coded variable assignment (Prism 11.0/11.1) *(`TwoGroupSpec` `mv_group_column` + `mv_response_column` and multi-column extraction verified end-to-end)*
+- [x] Unified *t*-tests directly from `MultipleVariables` tables via typed/color-coded variable assignment *(`TwoGroupSpec` `mv_group_column` + `mv_response_column` and multi-column extraction verified end-to-end)*
 
 ## One-Way, Factorial, Multifactor ($N$-Way), Nested & Mixed-Effects Models
 - [x] Ordinary one-way ANOVA + Brown–Forsythe and Bartlett variance-homogeneity tests
@@ -32,8 +32,8 @@
 - [x] Kruskal–Wallis nonparametric one-way test and Friedman nonparametric repeated-measures test
 - [x] Ordinary & repeated-measures Two-Way factorial ANOVA (balanced & unbalanced Type I / Type III SS)
 - [x] Three-Way factorial ANOVA ($2 \times 2 \times K$, ordinary & mixed)
-- [x] Multifactor ($N$-way) GLM ANOVA from `MultipleVariables` tables with arbitrary factor count & interactions (Prism 11.0/11.1)
-- [x] Standardized ANOVA effect sizes with noncentral-$F$ CIs: $\eta^2$, partial $\eta_p^2$, $\omega^2$, and Cohen's $f$ (Prism 11.0+)
+- [x] Multifactor ($N$-way) GLM ANOVA from `MultipleVariables` tables with arbitrary factor count & interactions
+- [x] Standardized ANOVA effect sizes with noncentral-$F$ CIs: $\eta^2$, partial $\eta_p^2$, $\omega^2$, and Cohen's $f$
 - [x] Nested *t*-test and Nested one-way ANOVA (hierarchical biological/technical subcolumns)
 - [x] Linear Mixed-Effects Model (REML) with Kenward–Roger / Satterthwaite df for missing-replicate repeated-measures designs
 
@@ -50,7 +50,7 @@
 
 ## Contingency, Survival, Diagnostic & Multivariate
 - [x] Contingency $2 \times 2$ and $R \times C$: Pearson $\chi^2$, Yates correction, likelihood-ratio $G^2$, Fisher's exact test, Barnard's exact $2 \times 2$ test (`ContingencyMethod::BarnardExact`), Cochran–Armitage trend, McNemar's test
-- [x] Contingency CIs & effect sizes: Relative Risk (Koopman score CI with Wave 5 `G8` `Option<f64>` `None`/open-bound reporting when bracketing or finiteness fails), Odds Ratio (Baptista–Pike CI), sensitivity/specificity/PPV/NPV (Wilson & Clopper–Pearson CIs), NNT, and $\phi$ / Cramér's $V$ with CIs (Prism 11.0+)
+- [x] Contingency CIs & effect sizes: Relative Risk (Koopman score CI with Wave 5 `G8` `Option<f64>` `None`/open-bound reporting when bracketing or finiteness fails), Odds Ratio (Baptista–Pike CI), sensitivity/specificity/PPV/NPV (Wilson & Clopper–Pearson CIs), NNT, and $\phi$ / Cramér's $V$ with CIs
 - [x] Kaplan–Meier survival (from `Survival` and `MultipleVariables` tables) with asymmetrical $\log(-\log)$ Greenwood CIs, median survival, and number-at-risk table *(verified on both `Survival` and `MultipleVariables` via `mv_time_column` / `mv_status_column` / `mv_group_column`)*
 - [x] Log-rank (Mantel–Cox), Gehan–Breslow–Wilcoxon, trend log-rank, multiplicity-adjusted pairwise curve comparisons, and Mantel–Haenszel / log-rank hazard ratios
 - [x] Cox proportional hazards regression (Breslow & Efron ties, Schoenfeld residuals, `ResultTabKind::BaselineSurvival` & `ResultTabKind::LogMinusLog` tabs verified end-to-end)
