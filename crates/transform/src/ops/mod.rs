@@ -6,7 +6,7 @@ pub mod reshape_select;
 
 pub use math::{MathTransformOp, execute_math_op, execute_math_transform};
 pub use normalize_baseline::{BaselineKind, execute_normalize, execute_remove_baseline, execute_remove_baseline_kind};
-pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_transpose};
+pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_select_with_derived, execute_transpose};
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, DataSheet, HookSource, InfoSheet, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
@@ -153,14 +153,14 @@ pub fn execute_transform(source: &DataSheet, spec: &TransformAnalysisSpec, ctx: 
             let method = if *average_window { PruneMethod::AverageBins(*every_k_rows) } else { PruneMethod::EveryNth(*every_k_rows) };
             execute_prune(source, method, ctx)
         }
-        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype } => {
+        TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns } => {
             let mut rules = Vec::new();
             if let Some(formula) = filter_formula
                 && !formula.trim().is_empty()
             {
                 rules.push(SelectRule::Predicate(formula.clone()));
             }
-            execute_select(source, &rules, *target_archetype, ctx)
+            execute_select_with_derived(source, &rules, derived_columns, *target_archetype, ctx)
         }
         TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, parameters, noise } => {
             let (id, title) = ctx.derived_ids(source, "simulate", "Simulated");

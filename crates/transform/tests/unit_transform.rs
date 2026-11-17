@@ -421,7 +421,11 @@ fn normalize_baseline_transpose_prune_and_select() {
     // Select & Transform (predicate + projection to Column)
     let sel_out = execute_transform(
         &xy,
-        &TransformAnalysisSpec::SelectAndTransform { filter_formula: Some(String::from("X >= 2 AND X <= 3")), target_archetype: TableKind::Column },
+        &TransformAnalysisSpec::SelectAndTransform {
+            filter_formula: Some(String::from("X >= 2 AND X <= 3")),
+            target_archetype: TableKind::Column,
+            derived_columns: Vec::new(),
+        },
         &ctx,
     )
     .unwrap();
@@ -742,6 +746,7 @@ fn select_and_transform_selected_columns_into_xy_column_and_grouped() {
         &TransformAnalysisSpec::SelectAndTransform {
             filter_formula: Some(String::from("Dose > 0 && Response > Baseline")),
             target_archetype: TableKind::Xy,
+            derived_columns: Vec::new(),
         },
         &ctx_xy,
     )

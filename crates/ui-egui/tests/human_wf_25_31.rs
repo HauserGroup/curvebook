@@ -978,6 +978,7 @@ fn wf31_human_extract_and_rearrange_cross_schema() -> Result<(), String> {
         AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
             target_archetype: TableKind::Grouped,
             filter_formula: Some(f),
+            ..
         }) if f == "VALUE >= 10"
     ) {
         return Err(format!("expected transform.select target_archetype=Grouped and filter_formula=\"VALUE >= 10\", got {:?}", sel_rs.analysis.kind));

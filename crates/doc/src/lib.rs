@@ -33,13 +33,13 @@ pub mod schema;
 
 pub use analysis::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CorrelationPowerMethod, CoxTieMethod, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, KappaWeighting,
-    LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
-    MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat,
-    PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection,
-    PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SimulationNoise,
-    SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
-    WeightingScheme,
+    CorrelationPowerMethod, CoxTieMethod, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
+    GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
+    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
+    OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec,
+    PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign, ResidualCovariance,
+    RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,

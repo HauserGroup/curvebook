@@ -775,7 +775,7 @@ fn w22c_transform_baseline_select_archetype_and_km_modals() -> TestRes {
     let sel_rs = app.document().result_sheet(&sel_rs_id).ok_or_else(|| String::from("missing select rs"))?;
     if !matches!(
         sel_rs.analysis.kind,
-        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { ref filter_formula, target_archetype: TableKind::Grouped })
+        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { ref filter_formula, target_archetype: TableKind::Grouped, .. })
             if filter_formula.as_deref() == Some("[Time] >= 7")
     ) || sel_rs.analysis.selected_data_sets != vec![0, 1]
     {
@@ -805,7 +805,7 @@ fn w22c_transform_baseline_select_archetype_and_km_modals() -> TestRes {
     let sel_rs_after = app.document().result_sheet(&sel_rs_id).ok_or_else(|| String::from("missing edited select rs"))?;
     if !matches!(
         sel_rs_after.analysis.kind,
-        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { ref filter_formula, target_archetype: TableKind::Xy })
+        AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { ref filter_formula, target_archetype: TableKind::Xy, .. })
             if filter_formula.as_deref() == Some("[Time] >= 10")
     ) || sel_rs_after.analysis.selected_data_sets != vec![0]
     {
