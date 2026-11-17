@@ -555,7 +555,8 @@ fn build_combo_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {
         let mut parts = Vec::with_capacity(5);
         if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
             parts.push("Cmd");
-        } else if modifiers.ctrl {
+        }
+        if modifiers.ctrl && !(use_cmd_for_ctrl && !modifiers.meta) {
             parts.push("Ctrl");
         }
         if modifiers.alt {
@@ -644,6 +645,7 @@ pub struct WebChromeSnapshot {
     pub menu_titles: Vec<String>,
     pub toolbar_ids: Vec<String>,
     pub status_summary: String,
+    pub dirty: bool,
     pub a11y_tree: Option<Box<Value>>,
 }
 
@@ -664,6 +666,7 @@ impl WebChromeSnapshot {
             "menu_titles": self.menu_titles,
             "toolbar_ids": self.toolbar_ids,
             "status_summary": self.status_summary,
+            "dirty": self.dirty,
             "a11y_tree": self.a11y_tree,
         })
     }
@@ -690,6 +693,7 @@ impl WebChromeSnapshot {
             menu_titles: str_list("menu_titles"),
             toolbar_ids: str_list("toolbar_ids"),
             status_summary: obj.get("status_summary").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            dirty: obj.get("dirty").and_then(Value::as_bool).unwrap_or(false),
             a11y_tree: obj.get("a11y_tree").filter(|v| !v.is_null()).cloned().map(Box::new),
         }
     }
@@ -817,6 +821,7 @@ impl WebChromeBridge {
             menu_titles,
             toolbar_ids,
             status_summary,
+            dirty: app.session().is_dirty(),
             a11y_tree: Some(Box::new(a11y_update.to_aria_json_value())),
         };
         WebChromeLayout { tree, nodes, snapshot }

@@ -196,16 +196,20 @@ pub fn r2_post_hoc_option_enabled(assume_gaussian: bool, option_is_parametric: b
     }
 }
 
-/// Apply Rule R2 automatically when toggling `assume_gaussian` on a draft [`AnalysisKind`].
+/// Apply Rule R2 automatically when toggling `assume_gaussian` on a draft [`AnalysisKind`],
+/// preserving compatible sub-methods (`WelchT`, `RatioPairedT`, `LognormalUnpairedT`, `KolmogorovSmirnov`,
+/// `PairedSignTest`, `BrownForsytheAndWelch`, `RepeatedMeasures { geisser_greenhouse }`) and REML settings (`RV-78`).
 pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, matched: bool, control_col: usize) {
     match kind {
         AnalysisKind::OneWayAnova(spec) => {
             if assume_gaussian {
-                spec.method = if matched {
-                    curvebook_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: true }
-                } else {
-                    curvebook_doc::OneWayMethod::OrdinaryAnova
-                };
+                if matched {
+                    if !matches!(spec.method, curvebook_doc::OneWayMethod::RepeatedMeasures { .. }) {
+                        spec.method = curvebook_doc::OneWayMethod::RepeatedMeasures { geisser_greenhouse: true };
+                    }
+                } else if !matches!(spec.method, curvebook_doc::OneWayMethod::OrdinaryAnova | curvebook_doc::OneWayMethod::BrownForsytheAndWelch) {
+                    spec.method = curvebook_doc::OneWayMethod::OrdinaryAnova;
+                }
                 if spec.multiplicity.method == MultiplicityMethod::DunnRankSum {
                     spec.multiplicity.method = MultiplicityMethod::TukeyHsd;
                 }
@@ -215,11 +219,24 @@ pub fn apply_r2_gaussian_toggle(kind: &mut AnalysisKind, assume_gaussian: bool, 
             }
         }
         AnalysisKind::TwoGroupComparison(spec) => {
-            spec.method = match (assume_gaussian, matched) {
-                (true, false) => TwoGroupMethod::UnpairedT,
-                (true, true) => TwoGroupMethod::PairedT,
-                (false, false) => TwoGroupMethod::MannWhitneyU,
-                (false, true) => TwoGroupMethod::WilcoxonSignedRank,
+            spec.method = match spec.method {
+                TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } => {
+                    if assume_gaussian {
+                        TwoGroupMethod::OneSampleT { hypothetical }
+                    } else {
+                        TwoGroupMethod::OneSampleWilcoxon { hypothetical }
+                    }
+                }
+                TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT if assume_gaussian && !matched => spec.method,
+                TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT if assume_gaussian && matched => spec.method,
+                TwoGroupMethod::MannWhitneyU | TwoGroupMethod::KolmogorovSmirnov if !assume_gaussian && !matched => spec.method,
+                TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest if !assume_gaussian && matched => spec.method,
+                _ => match (assume_gaussian, matched) {
+                    (true, false) => TwoGroupMethod::UnpairedT,
+                    (true, true) => TwoGroupMethod::PairedT,
+                    (false, false) => TwoGroupMethod::MannWhitneyU,
+                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
+                },
             };
         }
         _ => {

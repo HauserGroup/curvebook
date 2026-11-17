@@ -3439,7 +3439,8 @@ fn build_shortcut_candidates_for(key: &str, modifiers: KeyModifiers) -> Vec<Stri
         let mut parts = Vec::with_capacity(5);
         if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
             parts.push("Cmd");
-        } else if modifiers.ctrl {
+        }
+        if modifiers.ctrl && !(use_cmd_for_ctrl && !modifiers.meta) {
             parts.push("Ctrl");
         }
         if modifiers.alt {
@@ -3496,8 +3497,9 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         // Let clipboard paste shortcut use host pasteboard instead of opening Paste Special wizard.
         return None;
     }
+    let on_result_sheet = app.is_result_sheet_shortcut_context();
     for candidate in build_shortcut_candidates_for(key, modifiers) {
-        if let Some(matched) = app.shortcuts.handle_key_combo(&candidate)
+        if let Some(matched) = app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet)
             && shortcut_uses_desktop_routing(&matched.command_id)
         {
             return Some(matched.command_id);

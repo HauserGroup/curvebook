@@ -30,7 +30,7 @@ use serde_json::{Value, json};
 pub use crate::dialogs_r9::*;
 use crate::i18n::LocalePreset;
 use crate::menus::shortcuts::ShortcutRegistry;
-use crate::menus::ui_commands::UI_COMMANDS;
+use crate::menus::ui_commands::{STAGED_UI_COMMANDS, UI_COMMANDS};
 use crate::power_wizard::PowerWizardState;
 use crate::theme::UiThemeSpec;
 
@@ -717,8 +717,56 @@ pub struct AnalyzeDialogState {
     pub pvalue_stack_column: Option<usize>,
     #[serde(default)]
     pub compute_effect_sizes: Option<bool>,
+    #[serde(default = "default_outlier_method")]
+    pub outlier_method: String,
+    #[serde(default = "default_outlier_alpha")]
+    pub outlier_alpha: f64,
+    #[serde(default = "default_outlier_fdr_q")]
+    pub outlier_fdr_q_percent: f64,
+    #[serde(default)]
+    pub outlier_iterative: bool,
+    #[serde(default = "default_tg_param_unpaired")]
+    pub saved_two_group_param_unpaired: TwoGroupMethod,
+    #[serde(default = "default_tg_param_paired")]
+    pub saved_two_group_param_paired: TwoGroupMethod,
+    #[serde(default = "default_tg_nonparam_unpaired")]
+    pub saved_two_group_nonparam_unpaired: TwoGroupMethod,
+    #[serde(default = "default_tg_nonparam_paired")]
+    pub saved_two_group_nonparam_paired: TwoGroupMethod,
     #[serde(skip)]
     pub explicit_response_column: Option<usize>,
+}
+
+fn default_outlier_method() -> String {
+    String::from("rout")
+}
+
+const fn default_outlier_alpha() -> f64 {
+    0.05
+}
+
+const fn default_outlier_fdr_q() -> f64 {
+    1.0
+}
+
+const fn default_tg_param_unpaired() -> TwoGroupMethod {
+    TwoGroupMethod::UnpairedT
+}
+
+const fn default_tg_param_paired() -> TwoGroupMethod {
+    TwoGroupMethod::PairedT
+}
+
+const fn default_tg_nonparam_unpaired() -> TwoGroupMethod {
+    TwoGroupMethod::MannWhitneyU
+}
+
+const fn default_tg_nonparam_paired() -> TwoGroupMethod {
+    TwoGroupMethod::WilcoxonSignedRank
+}
+
+const fn default_one_way_param_unpaired() -> OneWayMethod {
+    OneWayMethod::OrdinaryAnova
 }
 
 const fn default_pvalue_stack_threshold() -> f64 {
@@ -826,6 +874,14 @@ impl Default for AnalyzeDialogState {
             pvalue_stack_threshold: default_pvalue_stack_threshold(),
             pvalue_stack_column: None,
             compute_effect_sizes: None,
+            outlier_method: default_outlier_method(),
+            outlier_alpha: default_outlier_alpha(),
+            outlier_fdr_q_percent: default_outlier_fdr_q(),
+            outlier_iterative: false,
+            saved_two_group_param_unpaired: default_tg_param_unpaired(),
+            saved_two_group_param_paired: default_tg_param_paired(),
+            saved_two_group_nonparam_unpaired: default_tg_nonparam_unpaired(),
+            saved_two_group_nonparam_paired: default_tg_nonparam_paired(),
             explicit_response_column: None,
         }
     }
@@ -883,6 +939,14 @@ impl AnalyzeDialogState {
         self.descriptive_aggregation = SubcolumnAggregation::RowMeans;
         self.pvalue_stack_method = PValueStackMethod::default();
         self.pvalue_stack_threshold = default_pvalue_stack_threshold();
+        self.outlier_method = default_outlier_method();
+        self.outlier_alpha = default_outlier_alpha();
+        self.outlier_fdr_q_percent = default_outlier_fdr_q();
+        self.outlier_iterative = false;
+        self.saved_two_group_param_unpaired = default_tg_param_unpaired();
+        self.saved_two_group_param_paired = default_tg_param_paired();
+        self.saved_two_group_nonparam_unpaired = default_tg_nonparam_unpaired();
+        self.saved_two_group_nonparam_paired = default_tg_nonparam_paired();
         self.pvalue_stack_column = None;
         self.compute_effect_sizes = None;
         self.explicit_response_column = None;
@@ -999,6 +1063,45 @@ impl AnalyzeDialogState {
     }
 
     /// Apply modal field updates using regional numeric parsing (`preset`).
+    fn remember_two_group_submethod(&mut self, method: TwoGroupMethod) {
+        match method {
+            TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT => {
+                self.saved_two_group_param_unpaired = method;
+            }
+            TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT => {
+                self.saved_two_group_param_paired = method;
+            }
+            TwoGroupMethod::MannWhitneyU | TwoGroupMethod::KolmogorovSmirnov => {
+                self.saved_two_group_nonparam_unpaired = method;
+            }
+            TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest => {
+                self.saved_two_group_nonparam_paired = method;
+            }
+            TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+        }
+    }
+
+    fn toggle_two_group_design(&mut self, gaussian: bool, paired: bool) {
+        if let Some(cur) = self.two_group_method {
+            self.remember_two_group_submethod(cur);
+            if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = cur {
+                self.two_group_method =
+                    Some(if gaussian { TwoGroupMethod::OneSampleT { hypothetical } } else { TwoGroupMethod::OneSampleWilcoxon { hypothetical } });
+                return;
+            }
+        }
+        self.two_group_method = Some(match (gaussian, paired) {
+            (true, false) => self.saved_two_group_param_unpaired,
+            (true, true) => self.saved_two_group_param_paired,
+            (false, false) => self.saved_two_group_nonparam_unpaired,
+            (false, true) => self.saved_two_group_nonparam_paired,
+        });
+    }
+
+    /// Apply modal field updates using regional numeric parsing (`preset`).
+    ///
+    /// # Errors
+    /// Returns an error if an explicit field fails validation or points to an unknown key.
     pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
         let has_explicit_predictors =
             ["selected_data_sets", "analyze.selected_data_sets", "pca_predictors", "analyze.pca_predictors"].iter().any(|k| fields.contains_key(*k));
@@ -1011,9 +1114,37 @@ impl AnalyzeDialogState {
                 }
             }
         }
+        // Apply method selectors before sub-parameters (`alpha`, `fdr_q_percent`, `rout_q`) so JSON
+        // object key ordering never resets a caller-provided Q% or alpha (`RV-76`).
+        for key in ["outlier_method", "analyze.outlier.method", "fit_method", "analyze.fit.method", "method"] {
+            if let Some(val) = fields.get(key) {
+                if matches!(key, "outlier_method" | "analyze.outlier.method")
+                    || (key == "method" && self.selected_entry_id.as_deref() == Some("stats.outliers"))
+                {
+                    let raw = val.as_str().ok_or_else(|| String::from("`outlier_method` must be a string"))?;
+                    let (m, iter_opt) = parse_outlier_method_str(raw)?;
+                    self.outlier_method = m.to_owned();
+                    if let Some(it) = iter_opt {
+                        self.outlier_iterative = it;
+                    }
+                } else if matches!(key, "fit_method" | "analyze.fit.method")
+                    || (key == "method" && self.selected_entry_id.as_deref() == Some("fit.nonlinear"))
+                {
+                    self.fit_method = parse_fit_method(val)?;
+                }
+            }
+        }
         for (key, val) in fields {
             match key.as_str() {
-                "entry_id" | "selected_entry_id" | "analysis" | "analyze.entry" | "analyze.entries_list" => {}
+                "entry_id"
+                | "selected_entry_id"
+                | "analysis"
+                | "analyze.entry"
+                | "analyze.entries_list"
+                | "outlier_method"
+                | "analyze.outlier.method"
+                | "fit_method"
+                | "analyze.fit.method" => {}
                 "search" | "search_query" | "analyze.search" => {
                     if let Some(s) = val.as_str() {
                         self.search_query = s.to_owned();
@@ -1138,14 +1269,11 @@ impl AnalyzeDialogState {
                 let g = val.as_bool().ok_or_else(|| String::from("`assume_gaussian` must be boolean"))?;
                 let paired = matches!(
                     self.two_group_method,
-                    Some(TwoGroupMethod::PairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest)
+                    Some(
+                        TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT | TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest
+                    )
                 );
-                self.two_group_method = Some(match (g, paired) {
-                    (true, true) => TwoGroupMethod::PairedT,
-                    (true, false) => TwoGroupMethod::UnpairedT,
-                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
-                    (false, false) => TwoGroupMethod::MannWhitneyU,
-                });
+                self.toggle_two_group_design(g, paired);
             }
             "paired_or_matched" | "analyze.paired_or_matched" => {
                 let paired = val.as_bool().ok_or_else(|| String::from("`paired_or_matched` must be boolean"))?;
@@ -1156,21 +1284,19 @@ impl AnalyzeDialogState {
                             | TwoGroupMethod::WilcoxonSignedRank
                             | TwoGroupMethod::PairedSignTest
                             | TwoGroupMethod::KolmogorovSmirnov
+                            | TwoGroupMethod::OneSampleWilcoxon { .. }
                     )
                 );
-                self.two_group_method = Some(match (gaussian, paired) {
-                    (true, true) => TwoGroupMethod::PairedT,
-                    (true, false) => TwoGroupMethod::UnpairedT,
-                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
-                    (false, false) => TwoGroupMethod::MannWhitneyU,
-                });
+                self.toggle_two_group_design(gaussian, paired);
             }
             "descriptive_subcolumn_agg" | "subcolumn_agg" | "analyze.descriptive.subcolumn_agg" => {
                 self.descriptive_aggregation = parse_subcolumn_aggregation_val(val)?;
             }
             "two_group_method" | "analyze.two_group.method" | "analyze.two_group_method" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`two_group_method` must be a string"))?;
-                self.two_group_method = Some(parse_two_group_method_str(raw, self.two_group_hypothetical)?);
+                let parsed = parse_two_group_method_str(raw, self.two_group_hypothetical)?;
+                self.remember_two_group_submethod(parsed);
+                self.two_group_method = Some(parsed);
             }
             "compute_effect_sizes" | "analyze.compute_effect_sizes" | "analyze.two_group.compute_effect_sizes" => {
                 let b = val.as_bool().ok_or_else(|| String::from("`compute_effect_sizes` must be boolean"))?;
@@ -1305,9 +1431,6 @@ impl AnalyzeDialogState {
             "custom_dsl" | "analyze.fit.custom_dsl" => {
                 self.custom_dsl = val.as_str().map(str::trim).filter(|s| !s.is_empty()).map(ToOwned::to_owned);
             }
-            "fit_method" | "analyze.fit.method" => {
-                self.fit_method = parse_fit_method(val)?;
-            }
             "parameter_rules" | "analyze.fit.parameter_rules" => {
                 self.parameter_rules = parse_parameter_rules(val)?;
             }
@@ -1339,7 +1462,49 @@ impl AnalyzeDialogState {
 
     fn apply_pvalue_stack_analyze_field(&mut self, key: &str, val: &Value, preset: &LocalePreset) -> Result<(), String> {
         let is_pstack = self.selected_entry_id.as_deref() == Some("stats.pvalue_stack");
+        let is_outliers = self.selected_entry_id.as_deref() == Some("stats.outliers");
+        let is_nonlinear = self.selected_entry_id.as_deref() == Some("fit.nonlinear");
         match key {
+            "outlier_fdr_q_percent" | "analyze.outlier.fdr_q_percent" | "analyze.fit.rout_q" => {
+                let q = parse_outlier_fdr_q_percent(val)?;
+                self.outlier_fdr_q_percent = q;
+                if let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut self.fit_method {
+                    *fdr_q_percent = q;
+                }
+                return Ok(());
+            }
+            "outlier_alpha" | "analyze.outlier.alpha" => {
+                self.outlier_alpha = parse_outlier_alpha(val)?;
+                return Ok(());
+            }
+            "outlier_iterative" | "analyze.outlier.iterative" => {
+                self.outlier_iterative = val.as_bool().ok_or_else(|| String::from("`outlier_iterative` must be boolean"))?;
+                return Ok(());
+            }
+            "fdr_q_percent" | "q_percent" | "rout_q" if is_outliers || is_nonlinear => {
+                let q = parse_outlier_fdr_q_percent(val)?;
+                if is_outliers {
+                    self.outlier_fdr_q_percent = q;
+                }
+                if is_nonlinear {
+                    let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut self.fit_method else {
+                        return Err(String::from("`fdr_q_percent` requires ROUT outlier elimination fit method"));
+                    };
+                    *fdr_q_percent = q;
+                }
+                return Ok(());
+            }
+            "alpha" if is_outliers => {
+                self.outlier_alpha = parse_outlier_alpha(val)?;
+                return Ok(());
+            }
+            "iterative" if is_outliers => {
+                self.outlier_iterative = val.as_bool().ok_or_else(|| String::from("`iterative` must be boolean"))?;
+                return Ok(());
+            }
+            "method" if is_outliers || is_nonlinear => {
+                return Ok(());
+            }
             "pvalue_stack_method" | "analyze.pvalue_stack.method" | "analyze.pvalue_stack.multiplicity_method" => {
                 self.pvalue_stack_method = parse_pvalue_stack_method_val(val)?;
             }
@@ -1452,6 +1617,13 @@ impl AnalyzeDialogState {
             .collect();
 
         match &mut kind {
+            AnalysisKind::OutlierDetection(out) => {
+                *out = if self.outlier_method == "grubbs" {
+                    OutlierSpec::Grubbs { alpha: self.outlier_alpha, iterative: self.outlier_iterative }
+                } else {
+                    OutlierSpec::Rout { fdr_q_percent: self.outlier_fdr_q_percent }
+                };
+            }
             AnalysisKind::DescriptiveStats(desc) => {
                 desc.aggregation = self.descriptive_aggregation;
             }
@@ -1869,6 +2041,24 @@ pub struct EditAnalysisParametersState {
     pub pca_predictors: Vec<usize>,
     #[serde(default)]
     pub pcr_outcome_column: Option<usize>,
+    #[serde(default = "default_tg_param_unpaired")]
+    pub saved_two_group_param_unpaired: TwoGroupMethod,
+    #[serde(default = "default_tg_param_paired")]
+    pub saved_two_group_param_paired: TwoGroupMethod,
+    #[serde(default = "default_tg_nonparam_unpaired")]
+    pub saved_two_group_nonparam_unpaired: TwoGroupMethod,
+    #[serde(default = "default_tg_nonparam_paired")]
+    pub saved_two_group_nonparam_paired: TwoGroupMethod,
+    #[serde(default = "default_one_way_param_unpaired")]
+    pub saved_one_way_param_unpaired: OneWayMethod,
+    #[serde(default = "default_true_flag")]
+    pub saved_rm_geisser_greenhouse: bool,
+    #[serde(default = "default_outlier_fdr_q")]
+    pub saved_outlier_rout_q: f64,
+    #[serde(default = "default_outlier_alpha")]
+    pub saved_outlier_grubbs_alpha: f64,
+    #[serde(default)]
+    pub saved_outlier_grubbs_iterative: bool,
 }
 
 impl Default for EditAnalysisParametersState {
@@ -1897,6 +2087,15 @@ impl Default for EditAnalysisParametersState {
             welch_correction: false,
             pca_predictors: Vec::new(),
             pcr_outcome_column: None,
+            saved_two_group_param_unpaired: default_tg_param_unpaired(),
+            saved_two_group_param_paired: default_tg_param_paired(),
+            saved_two_group_nonparam_unpaired: default_tg_nonparam_unpaired(),
+            saved_two_group_nonparam_paired: default_tg_nonparam_paired(),
+            saved_one_way_param_unpaired: default_one_way_param_unpaired(),
+            saved_rm_geisser_greenhouse: true,
+            saved_outlier_rout_q: default_outlier_fdr_q(),
+            saved_outlier_grubbs_alpha: default_outlier_alpha(),
+            saved_outlier_grubbs_iterative: false,
         }
     }
 }
@@ -1930,7 +2129,9 @@ impl EditAnalysisParametersState {
         Ok(())
     }
     /// Load an existing [`ResultSheet`] for parameter re-entry (`Cmd+T`).
+    /// Reset dialog state and open Edit Analysis Parameters for an existing `ResultSheet` (`RV-79`).
     pub fn open_for_result(&mut self, result: &ResultSheet) {
+        *self = Self::default();
         self.result_sheet_id = Some(result.id.clone());
         self.title_was_custom = result.analysis.custom_title.is_some();
         self.active_tab = default_edit_tab();
@@ -1944,12 +2145,63 @@ impl EditAnalysisParametersState {
         self.sync_rule_flags_from_kind();
     }
 
+    /// Capture compatible sub-method selections before a design/Gaussian toggle (`RV-76`, `RV-78`).
+    pub fn remember_submethods_from_kind(&mut self, kind: &AnalysisKind) {
+        match kind {
+            AnalysisKind::OneWayAnova(spec) => match spec.method {
+                OneWayMethod::OrdinaryAnova | OneWayMethod::BrownForsytheAndWelch => {
+                    self.saved_one_way_param_unpaired = spec.method;
+                }
+                OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
+                    self.saved_rm_geisser_greenhouse = geisser_greenhouse;
+                }
+                OneWayMethod::KruskalWallis | OneWayMethod::Friedman => {}
+            },
+            AnalysisKind::TwoGroupComparison(spec) => match spec.method {
+                TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT | TwoGroupMethod::LognormalUnpairedT => {
+                    self.saved_two_group_param_unpaired = spec.method;
+                }
+                TwoGroupMethod::PairedT | TwoGroupMethod::RatioPairedT => {
+                    self.saved_two_group_param_paired = spec.method;
+                }
+                TwoGroupMethod::MannWhitneyU | TwoGroupMethod::KolmogorovSmirnov => {
+                    self.saved_two_group_nonparam_unpaired = spec.method;
+                }
+                TwoGroupMethod::WilcoxonSignedRank | TwoGroupMethod::PairedSignTest => {
+                    self.saved_two_group_nonparam_paired = spec.method;
+                }
+                TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. } => {}
+            },
+            AnalysisKind::OutlierDetection(spec) => match spec {
+                OutlierSpec::Rout { fdr_q_percent } => self.saved_outlier_rout_q = *fdr_q_percent,
+                OutlierSpec::Grubbs { alpha, iterative } => {
+                    self.saved_outlier_grubbs_alpha = *alpha;
+                    self.saved_outlier_grubbs_iterative = *iterative;
+                }
+            },
+            _ => {}
+        }
+    }
+
+    fn resolved_two_group_method(&self, assume_gaussian: bool, matched: bool, current: TwoGroupMethod) -> TwoGroupMethod {
+        if let TwoGroupMethod::OneSampleT { hypothetical } | TwoGroupMethod::OneSampleWilcoxon { hypothetical } = current {
+            return if assume_gaussian { TwoGroupMethod::OneSampleT { hypothetical } } else { TwoGroupMethod::OneSampleWilcoxon { hypothetical } };
+        }
+        match (assume_gaussian, matched) {
+            (true, false) => self.saved_two_group_param_unpaired,
+            (true, true) => self.saved_two_group_param_paired,
+            (false, false) => self.saved_two_group_nonparam_unpaired,
+            (false, true) => self.saved_two_group_nonparam_paired,
+        }
+    }
+
     /// Synchronize predicate flags (`assume_gaussian`, `paired_or_matched`, etc.) from `draft.kind`.
     pub fn sync_rule_flags_from_kind(&mut self) {
-        let Some(kind) = self.draft.as_ref().map(|s| &s.kind) else {
+        let Some(kind) = self.draft.as_ref().map(|s| s.kind.clone()) else {
             return;
         };
-        match kind {
+        self.remember_submethods_from_kind(&kind);
+        match &kind {
             AnalysisKind::OneWayAnova(spec) => {
                 self.assume_gaussian = !matches!(spec.method, OneWayMethod::KruskalWallis | OneWayMethod::Friedman);
                 self.paired_or_matched = matches!(spec.method, OneWayMethod::RepeatedMeasures { .. } | OneWayMethod::Friedman);
@@ -2039,13 +2291,25 @@ impl EditAnalysisParametersState {
 
     /// Apply modal field updates using regional numeric parsing (`preset`) while enforcing R1–R9 predicates.
     pub fn apply_field_patch_localized(&mut self, fields: &serde_json::Map<String, Value>, preset: &LocalePreset) -> Result<(), String> {
-        for key in ["assume_gaussian", "edit.assume_gaussian", "paired_or_matched", "matched", "edit.paired_or_matched"] {
+        let priority_keys = [
+            "outlier_method",
+            "edit.outlier.method",
+            "fit_method",
+            "edit.fit.method",
+            "method",
+            "assume_gaussian",
+            "edit.assume_gaussian",
+            "paired_or_matched",
+            "matched",
+            "edit.paired_or_matched",
+        ];
+        for key in priority_keys {
             if let Some(val) = fields.get(key) {
                 self.apply_single_param_patch(key, val, preset)?;
             }
         }
         for (key, val) in fields {
-            if matches!(key.as_str(), "assume_gaussian" | "edit.assume_gaussian" | "paired_or_matched" | "matched" | "edit.paired_or_matched") {
+            if priority_keys.contains(&key.as_str()) {
                 continue;
             }
             self.apply_single_param_patch(key, val, preset)?;
@@ -2073,14 +2337,7 @@ impl EditAnalysisParametersState {
             }
             "assume_gaussian" | "edit.assume_gaussian" => {
                 let g = val.as_bool().ok_or_else(|| String::from("`assume_gaussian` must be boolean"))?;
-                self.assume_gaussian = g;
-                let matched = self.paired_or_matched;
-                let ctrl = self.control_column;
-                if let Some(spec) = &mut self.draft {
-                    let mut k = spec.kind.clone();
-                    crate::modal_predicates::apply_r2_gaussian_toggle(&mut k, g, matched, ctrl);
-                    spec.update_kind(k);
-                }
+                self.apply_gaussian_toggle_patch(g);
             }
             "paired_or_matched" | "matched" | "edit.paired_or_matched" => {
                 let matched = val.as_bool().ok_or_else(|| String::from("`paired_or_matched` must be boolean"))?;
@@ -2113,6 +2370,7 @@ impl EditAnalysisParametersState {
                     self.welch_correction = w;
                     two.method = if w { TwoGroupMethod::WelchT } else { TwoGroupMethod::UnpairedT };
                     spec.update_kind(AnalysisKind::TwoGroupComparison(two));
+                    self.sync_rule_flags_from_kind();
                 }
             }
             "graph_differences" | "edit.two_group.graph_differences" => {
@@ -2195,7 +2453,14 @@ impl EditAnalysisParametersState {
                 }
             }
             "custom_title" | "edit.custom_title" => {
-                self.set_custom_title(val.as_str().map(ToOwned::to_owned))?;
+                let parsed = match val {
+                    Value::Null => None,
+                    Value::String(s) => Some(s.clone()),
+                    Value::Number(n) => Some(n.to_string()),
+                    Value::Bool(b) => Some(b.to_string()),
+                    _ => return Err(String::from("`custom_title` must be a string or null")),
+                };
+                self.set_custom_title(parsed)?;
             }
             "selected_data_sets" | "edit.selected_data_sets" | "edit.transform.selected_data_sets" => {
                 let cols = parse_usize_list(val, key)?;
@@ -2265,19 +2530,22 @@ impl EditAnalysisParametersState {
             }
             "anova_method" | "one_way_method" | "edit.anova_method" | "edit.one_way_method" => {
                 let raw = val.as_str().ok_or_else(|| String::from("`anova_method` must be a string"))?.trim().to_ascii_lowercase();
+                let saved_gg = self.saved_rm_geisser_greenhouse;
                 let next_method = match raw.as_str() {
                     "ordinary" | "ordinary_anova" | "anova" => OneWayMethod::OrdinaryAnova,
                     "welch" | "brown_forsythe" | "brown_forsythe_welch" | "brown_forsythe_and_welch" => OneWayMethod::BrownForsytheAndWelch,
                     "kruskal" | "kruskal_wallis" => OneWayMethod::KruskalWallis,
                     "friedman" => OneWayMethod::Friedman,
-                    "rm" | "repeated_measures" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
+                    "rm" | "repeated_measures" => OneWayMethod::RepeatedMeasures { geisser_greenhouse: saved_gg },
                     _ => return Err(format!("unknown one-way ANOVA method `{raw}`")),
                 };
-                if let Some(spec) = &mut self.draft
-                    && let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone()
-                {
-                    a.method = next_method;
-                    spec.update_kind(AnalysisKind::OneWayAnova(a));
+                if let Some(mut spec) = self.draft.take() {
+                    self.remember_submethods_from_kind(&spec.kind);
+                    if let AnalysisKind::OneWayAnova(mut a) = spec.kind.clone() {
+                        a.method = next_method;
+                        spec.update_kind(AnalysisKind::OneWayAnova(a));
+                    }
+                    self.draft = Some(spec);
                     self.sync_rule_flags_from_kind();
                 }
             }
@@ -2615,27 +2883,53 @@ impl EditAnalysisParametersState {
         Ok(true)
     }
 
-    fn apply_matched_toggle(&mut self, matched: bool) {
-        let Some(spec) = &mut self.draft else {
+    fn apply_gaussian_toggle_patch(&mut self, assume_gaussian: bool) {
+        self.assume_gaussian = assume_gaussian;
+        let matched = self.paired_or_matched;
+        let ctrl = self.control_column;
+        let Some(mut spec) = self.draft.take() else {
             return;
         };
+        self.remember_submethods_from_kind(&spec.kind);
+        let mut k = spec.kind.clone();
+        crate::modal_predicates::apply_r2_gaussian_toggle(&mut k, assume_gaussian, matched, ctrl);
+        match &mut k {
+            AnalysisKind::OneWayAnova(a) => {
+                if assume_gaussian {
+                    a.method = if matched {
+                        OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse }
+                    } else {
+                        self.saved_one_way_param_unpaired
+                    };
+                }
+            }
+            AnalysisKind::TwoGroupComparison(t) => {
+                t.method = self.resolved_two_group_method(assume_gaussian, matched, t.method);
+            }
+            _ => {}
+        }
+        spec.update_kind(k);
+        self.draft = Some(spec);
+        self.sync_rule_flags_from_kind();
+    }
+
+    fn apply_matched_toggle(&mut self, matched: bool) {
+        let Some(mut spec) = self.draft.take() else {
+            return;
+        };
+        self.remember_submethods_from_kind(&spec.kind);
         let mut updated = spec.kind.clone();
         match &mut updated {
             AnalysisKind::OneWayAnova(a) => {
                 a.method = match (self.assume_gaussian, matched) {
-                    (true, true) => OneWayMethod::RepeatedMeasures { geisser_greenhouse: true },
-                    (true, false) => OneWayMethod::OrdinaryAnova,
+                    (true, true) => OneWayMethod::RepeatedMeasures { geisser_greenhouse: self.saved_rm_geisser_greenhouse },
+                    (true, false) => self.saved_one_way_param_unpaired,
                     (false, true) => OneWayMethod::Friedman,
                     (false, false) => OneWayMethod::KruskalWallis,
                 };
             }
             AnalysisKind::TwoGroupComparison(t) => {
-                t.method = match (self.assume_gaussian, matched) {
-                    (true, true) => TwoGroupMethod::PairedT,
-                    (true, false) => TwoGroupMethod::UnpairedT,
-                    (false, true) => TwoGroupMethod::WilcoxonSignedRank,
-                    (false, false) => TwoGroupMethod::MannWhitneyU,
-                };
+                t.method = self.resolved_two_group_method(self.assume_gaussian, matched, t.method);
             }
             AnalysisKind::FactorialAnova(f) => {
                 f.repeated_measures = if matched { RepeatedMeasuresDesign::RowFactorMatched } else { RepeatedMeasuresDesign::None };
@@ -2643,6 +2937,8 @@ impl EditAnalysisParametersState {
             _ => {}
         }
         spec.update_kind(updated);
+        self.draft = Some(spec);
+        self.sync_rule_flags_from_kind();
     }
 
     fn apply_checked_post_hoc_patch(&mut self, method: MultiplicityMethod) -> Result<(), String> {
@@ -2676,6 +2972,59 @@ impl EditAnalysisParametersState {
         };
         let mut updated = spec.kind.clone();
         let handled = match (key, &mut updated) {
+            ("outlier_method" | "edit.outlier.method" | "method", AnalysisKind::OutlierDetection(out)) => {
+                match *out {
+                    OutlierSpec::Rout { fdr_q_percent } => self.saved_outlier_rout_q = fdr_q_percent,
+                    OutlierSpec::Grubbs { alpha, iterative } => {
+                        self.saved_outlier_grubbs_alpha = alpha;
+                        self.saved_outlier_grubbs_iterative = iterative;
+                    }
+                }
+                let raw = val.as_str().ok_or_else(|| String::from("`outlier_method` must be a string"))?;
+                let (mode, iter_opt) = parse_outlier_method_str(raw)?;
+                *out = if mode == "grubbs" {
+                    OutlierSpec::Grubbs { alpha: self.saved_outlier_grubbs_alpha, iterative: iter_opt.unwrap_or(self.saved_outlier_grubbs_iterative) }
+                } else {
+                    OutlierSpec::Rout { fdr_q_percent: self.saved_outlier_rout_q }
+                };
+                true
+            }
+            (
+                "fdr_q_percent" | "q_percent" | "rout_q" | "outlier_fdr_q_percent" | "edit.outlier.fdr_q_percent" | "edit.fit.rout_q",
+                AnalysisKind::OutlierDetection(out),
+            ) => {
+                let q = parse_outlier_fdr_q_percent(val)?;
+                self.saved_outlier_rout_q = q;
+                match out {
+                    OutlierSpec::Rout { fdr_q_percent } => *fdr_q_percent = q,
+                    OutlierSpec::Grubbs { .. } => {
+                        return Err(String::from("`fdr_q_percent` requires ROUT outlier detection mode"));
+                    }
+                }
+                true
+            }
+            ("outlier_alpha" | "edit.outlier.alpha" | "alpha", AnalysisKind::OutlierDetection(out)) => {
+                let a = parse_outlier_alpha(val)?;
+                self.saved_outlier_grubbs_alpha = a;
+                match out {
+                    OutlierSpec::Grubbs { alpha, .. } => *alpha = a,
+                    OutlierSpec::Rout { .. } => {
+                        return Err(String::from("`alpha` for Grubbs requires Grubbs outlier detection mode"));
+                    }
+                }
+                true
+            }
+            ("iterative" | "outlier_iterative" | "edit.outlier.iterative", AnalysisKind::OutlierDetection(out)) => {
+                let it = val.as_bool().ok_or_else(|| String::from("`iterative` must be boolean"))?;
+                self.saved_outlier_grubbs_iterative = it;
+                match out {
+                    OutlierSpec::Grubbs { iterative, .. } => *iterative = it,
+                    OutlierSpec::Rout { .. } => {
+                        return Err(String::from("`iterative` requires Grubbs outlier detection mode"));
+                    }
+                }
+                true
+            }
             ("descriptive_subcolumn_agg" | "subcolumn_agg" | "edit.descriptive.subcolumn_agg", AnalysisKind::DescriptiveStats(desc)) => {
                 desc.aggregation = parse_subcolumn_aggregation_val(val)?;
                 true
@@ -2985,8 +3334,16 @@ impl EditAnalysisParametersState {
                 fit.weighting = parse_weighting_scheme(val)?;
                 true
             }
-            ("fit_method" | "edit.fit.method", AnalysisKind::NonlinearRegression(fit)) => {
+            ("fit_method" | "edit.fit.method" | "method", AnalysisKind::NonlinearRegression(fit)) => {
                 fit.method = parse_fit_method(val)?;
+                true
+            }
+            ("rout_q" | "fdr_q_percent" | "q_percent" | "edit.fit.rout_q", AnalysisKind::NonlinearRegression(fit)) => {
+                let q = parse_outlier_fdr_q_percent(val)?;
+                let FitMethod::RoutOutlierElimination { fdr_q_percent } = &mut fit.method else {
+                    return Err(String::from("`rout_q` requires ROUT outlier elimination fit method"));
+                };
+                *fdr_q_percent = q;
                 true
             }
             ("parameter_rules" | "edit.fit.parameter_rules", AnalysisKind::NonlinearRegression(fit)) => {
@@ -6309,7 +6666,7 @@ impl CommandPaletteState {
                 results.push(entry);
             }
         }
-        for spec in UI_COMMANDS {
+        for spec in UI_COMMANDS.iter().chain(STAGED_UI_COMMANDS.iter()) {
             let candidate = PaletteCandidate {
                 id: spec.id,
                 label: spec.label,

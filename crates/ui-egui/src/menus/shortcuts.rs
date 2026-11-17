@@ -6,7 +6,46 @@ use curvebook_engine::cmd::registry;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-use crate::menus::ui_commands::UI_COMMANDS;
+use crate::menus::ui_commands::{STAGED_UI_COMMANDS, UI_COMMANDS};
+
+/// Context scope within which a [`ShortcutBinding`] applies (`RV-75`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ShortcutScope {
+    /// Applies in every workspace context.
+    #[default]
+    Global,
+    /// Applies when a ResultSheet (or split result pane) is active.
+    ResultSheet,
+    /// Applies when the active workspace sheet/focus is not a ResultSheet.
+    NonResultSheet,
+}
+
+impl ShortcutScope {
+    /// Returns `true` when two bindings can be active simultaneously (`RV-75`).
+    #[must_use]
+    pub const fn conflicts_with(self, other: Self) -> bool {
+        !matches!((self, other), (Self::ResultSheet, Self::NonResultSheet) | (Self::NonResultSheet, Self::ResultSheet))
+    }
+
+    /// Returns `true` when this scope matches the given ResultSheet context.
+    #[must_use]
+    pub const fn matches_result_sheet(self, on_result_sheet: bool) -> bool {
+        match self {
+            Self::Global => true,
+            Self::ResultSheet => on_result_sheet,
+            Self::NonResultSheet => !on_result_sheet,
+        }
+    }
+}
+
+fn default_scope_for_command(command_id: &str) -> ShortcutScope {
+    match command_id {
+        "ui.editParams.open" => ShortcutScope::ResultSheet,
+        "sheet.createData" => ShortcutScope::NonResultSheet,
+        _ => ShortcutScope::Global,
+    }
+}
 
 /// A single command's default and currently active keyboard shortcut binding.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -16,6 +55,8 @@ pub struct ShortcutBinding {
     pub default_combo: String,
     pub active_combo: String,
     pub is_ui: bool,
+    #[serde(default)]
+    pub scope: ShortcutScope,
 }
 
 impl ShortcutBinding {
@@ -68,10 +109,11 @@ impl ShortcutRegistry {
                     default_combo: normalized.clone(),
                     active_combo: normalized,
                     is_ui: false,
+                    scope: default_scope_for_command(spec.id),
                 },
             );
         }
-        for spec in UI_COMMANDS {
+        for spec in UI_COMMANDS.iter().chain(STAGED_UI_COMMANDS.iter()) {
             let normalized = normalize_shortcut_combo(spec.shortcut).unwrap_or_else(|_| spec.shortcut.trim().to_owned());
             bindings.insert(
                 spec.id.to_owned(),
@@ -81,6 +123,7 @@ impl ShortcutRegistry {
                     default_combo: normalized.clone(),
                     active_combo: normalized,
                     is_ui: true,
+                    scope: default_scope_for_command(spec.id),
                 },
             );
         }
@@ -116,19 +159,49 @@ impl ShortcutRegistry {
         self.bindings.values()
     }
 
-    /// Return the conflicting `command_id` if `combo` is already assigned to another command.
+    /// Return the conflicting `command_id` if `combo` is already assigned to another command whose
+    /// [`ShortcutScope`] overlaps `exclude_command_id`, including implicit `Shift+<pane.cycle>` reverse
+    /// navigation bindings (`RV-75`, `R8`).
     #[must_use]
     pub fn find_conflict(&self, combo: &str, exclude_command_id: Option<&str>) -> Option<&str> {
+        let scope = exclude_command_id
+            .and_then(|id| self.bindings.get(id))
+            .map_or_else(|| exclude_command_id.map_or(ShortcutScope::Global, default_scope_for_command), |b| b.scope);
+        self.find_conflict_with_scope(combo, scope, exclude_command_id)
+    }
+
+    /// Return the conflicting `command_id` whose [`ShortcutScope`] conflicts with `scope` (`RV-75`, `R8`).
+    #[must_use]
+    pub fn find_conflict_with_scope(&self, combo: &str, scope: ShortcutScope, exclude_command_id: Option<&str>) -> Option<&str> {
         let Ok(canonical) = normalize_shortcut_combo(combo) else {
             return None;
         };
         if canonical.is_empty() {
             return None;
         }
-        self.bindings
+        if let Some(hit) = self
+            .bindings
             .values()
-            .find(|b| Some(b.command_id.as_str()) != exclude_command_id && b.active_combo == canonical)
-            .map(|b| b.command_id.as_str())
+            .find(|b| Some(b.command_id.as_str()) != exclude_command_id && b.scope.conflicts_with(scope) && b.active_combo == canonical)
+        {
+            return Some(hit.command_id.as_str());
+        }
+        if exclude_command_id != Some("ui.pane.cycle")
+            && let Some(pane_binding) = self.bindings.get("ui.pane.cycle")
+            && !pane_binding.active_combo.is_empty()
+            && pane_binding.scope.conflicts_with(scope)
+            && with_shift_modifier(&pane_binding.active_combo).as_deref() == Some(canonical.as_str())
+        {
+            return Some("ui.pane.cycle");
+        }
+        if exclude_command_id == Some("ui.pane.cycle")
+            && let Some(shifted) = with_shift_modifier(&canonical)
+            && let Some(hit) =
+                self.bindings.values().find(|b| b.command_id != "ui.pane.cycle" && b.scope.conflicts_with(scope) && b.active_combo == shifted)
+        {
+            return Some(hit.command_id.as_str());
+        }
+        None
     }
 
     /// Assign a custom key combination `combo` (or `""` to unbind) to `command_id`.
@@ -238,20 +311,30 @@ impl ShortcutRegistry {
     }
 
     /// Resolve a keyboard combination (such as `"F6"`, `"Shift+F6"`, `"Cmd+K"`, or a custom
-    /// binding) into its target command ID and parameters.
+    /// binding) into its target command ID and parameters (defaulting to non-ResultSheet context).
     #[must_use]
     pub fn handle_key_combo(&self, combo: &str) -> Option<ShortcutMatch> {
+        self.handle_key_combo_for_context(combo, false)
+    }
+
+    /// Resolve a keyboard combination against bindings valid in the given ResultSheet context (`RV-75`).
+    #[must_use]
+    pub fn handle_key_combo_for_context(&self, combo: &str, on_result_sheet: bool) -> Option<ShortcutMatch> {
         let canonical = normalize_shortcut_combo(combo).ok()?;
         if canonical.is_empty() {
             return None;
         }
 
-        if let Some(binding) = self.bindings.values().find(|b| b.active_combo == canonical) {
+        let mut matched: Vec<&ShortcutBinding> =
+            self.bindings.values().filter(|b| b.active_combo == canonical && b.scope.matches_result_sheet(on_result_sheet)).collect();
+        matched.sort_by_key(|b| if b.scope == ShortcutScope::Global { 1 } else { 0 });
+        if let Some(binding) = matched.into_iter().next() {
             let params = if binding.command_id == "ui.pane.cycle" { json!({ "reverse": false }) } else { json!({}) };
             return Some(ShortcutMatch { command_id: binding.command_id.clone(), params });
         }
 
         if let Some(pane_binding) = self.bindings.get("ui.pane.cycle")
+            && pane_binding.scope.matches_result_sheet(on_result_sheet)
             && !pane_binding.active_combo.is_empty()
             && let Some(shifted) = with_shift_modifier(&pane_binding.active_combo)
             && canonical == shifted
@@ -261,6 +344,41 @@ impl ShortcutRegistry {
 
         None
     }
+}
+
+/// Split a shortcut expression into `+`-delimited tokens while preserving a literal `+` primary key (`R8`).
+fn split_shortcut_tokens(trimmed: &str) -> Result<Vec<&str>, String> {
+    if trimmed == "+" {
+        return Ok(vec!["+"]);
+    }
+    if let Some(before_plus) = trimmed.strip_suffix('+') {
+        let sep_trimmed = before_plus.trim_end();
+        if let Some(mods_part) = sep_trimmed.strip_suffix('+') {
+            if mods_part.trim().is_empty() {
+                return Err(format!("invalid shortcut `{trimmed}`: empty modifier token"));
+            }
+            let mut out = Vec::new();
+            for part in mods_part.split('+') {
+                let token = part.trim();
+                if token.is_empty() {
+                    return Err(format!("invalid shortcut `{trimmed}`: empty key token"));
+                }
+                out.push(token);
+            }
+            out.push("+");
+            return Ok(out);
+        }
+        return Err(format!("invalid shortcut `{trimmed}`: empty key token"));
+    }
+    let mut out = Vec::new();
+    for part in trimmed.split('+') {
+        let token = part.trim();
+        if token.is_empty() {
+            return Err(format!("invalid shortcut `{trimmed}`: empty key token"));
+        }
+        out.push(token);
+    }
+    Ok(out)
 }
 
 /// Normalize a shortcut string into canonical modifier-ordered form (`Cmd+Ctrl+Alt+Shift+<Key>`).
@@ -282,11 +400,7 @@ pub fn normalize_shortcut_combo(raw: &str) -> Result<String, String> {
     let mut has_shift = false;
     let mut primary_key: Option<String> = None;
 
-    for part in trimmed.split('+') {
-        let token = part.trim();
-        if token.is_empty() {
-            return Err(format!("invalid shortcut `{raw}`: empty key token"));
-        }
+    for token in split_shortcut_tokens(trimmed)? {
         match token.to_ascii_lowercase().as_str() {
             "cmd" | "command" | "meta" | "super" => has_cmd = true,
             "ctrl" | "control" => has_ctrl = true,
@@ -343,6 +457,7 @@ fn canonical_key_token(token: &str) -> Result<String, String> {
         "down" | "arrowdown" => Some("Down"),
         "left" | "arrowleft" => Some("Left"),
         "right" | "arrowright" => Some("Right"),
+        "+" | "plus" => Some("+"),
         _ => None,
     };
     if let Some(canon) = named {

@@ -68,9 +68,9 @@ pub use layout::{
     verify_click_action_parity, verify_pixel_to_hit_box_parity,
 };
 pub use menus::{
-    CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, TOOLBAR_BUTTONS, ToolbarButtonSpec,
-    ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id,
-    toolbar_tooltips,
+    CommandTooltip, MenuSectionTooltips, STAGED_UI_COMMANDS, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope,
+    TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips,
+    normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
@@ -696,8 +696,23 @@ impl UiApp {
     ///
     /// # Errors
     /// Returns a descriptive error string if executing the matched UI or engine command fails.
+    /// Return `true` when the active workspace sheet or focused split pane targets a ResultSheet (`RV-75`).
+    #[must_use]
+    pub fn is_result_sheet_shortcut_context(&self) -> bool {
+        interaction::resolve_result_sheet_for_shortcut(self, true).is_some()
+    }
+
     pub fn handle_key_combo(&mut self, combo: &str) -> Result<Option<ShortcutExecution>, String> {
-        let Some(matched) = self.shortcuts.handle_key_combo(combo) else {
+        let on_result_sheet = self.is_result_sheet_shortcut_context();
+        self.handle_key_combo_for_context(combo, on_result_sheet)
+    }
+
+    /// Resolve and execute `combo` within an explicit ResultSheet vs non-ResultSheet context (`RV-75`).
+    ///
+    /// # Errors
+    /// Returns a descriptive error string if executing the matched UI or engine command fails.
+    pub fn handle_key_combo_for_context(&mut self, combo: &str, on_result_sheet: bool) -> Result<Option<ShortcutExecution>, String> {
+        let Some(matched) = self.shortcuts.handle_key_combo_for_context(combo, on_result_sheet) else {
             return Ok(None);
         };
         if let Some(ui_result) = control_io::dispatch_ui_command(self, &matched.command_id, &matched.params)? {

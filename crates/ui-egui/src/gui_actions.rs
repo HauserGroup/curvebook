@@ -1012,7 +1012,7 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
         && !field_id.starts_with("grid.cell.")
         && parse_x_cell_widget_id(field_id).is_none()
     {
-        return apply_type_text_to_dialog(app, field_id, text, commit_enter);
+        return apply_type_text_to_dialog(app, field_id, text, clear_existing, commit_enter);
     }
 
     let is_formula_target = wid.as_deref() == Some("formula_bar.input")
@@ -1035,15 +1035,131 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
     Err(EngineError::with_code(ErrorCode::Conflict, "active sheet does not accept text input"))
 }
 
-fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, commit_enter: bool) -> Result<Value, EngineError> {
+fn is_text_dialog_field(field_id: &str) -> bool {
+    let lower = field_id.trim().to_ascii_lowercase();
+    let tail = lower.rsplit('.').next().unwrap_or(lower.as_str());
+    matches!(
+        lower.as_str(),
+        "custom_title"
+            | "edit.custom_title"
+            | "search"
+            | "search_query"
+            | "analyze.search"
+            | "query"
+            | "palette.query"
+            | "hook.search_query"
+            | "formula"
+            | "filter_formula"
+            | "custom_dsl"
+            | "equation"
+            | "equation_id"
+            | "note"
+            | "notes"
+            | "reason"
+            | "reason_tag"
+            | "exclude.note"
+            | "exclude.reason_tag"
+            | "title"
+            | "x_label"
+            | "y_label"
+            | "right_y_label"
+            | "subtitle"
+            | "caption"
+            | "legend_title"
+            | "comment"
+            | "text"
+            | "name"
+            | "label"
+    ) || matches!(
+        tail,
+        "custom_title"
+            | "search"
+            | "search_query"
+            | "query"
+            | "formula"
+            | "filter_formula"
+            | "custom_dsl"
+            | "equation"
+            | "equation_id"
+            | "note"
+            | "notes"
+            | "reason"
+            | "reason_tag"
+            | "title"
+            | "subtitle"
+            | "caption"
+            | "comment"
+            | "label"
+            | "name"
+            | "text"
+            | "input"
+            | "x_label"
+            | "y_label"
+    )
+}
+
+fn current_dialog_text_value(app: &UiApp, tree: &crate::inspect::UiTreeSnapshot, field_id: &str) -> Option<String> {
+    if let Some(buf) = app.interaction.text_field_buffers.get(field_id) {
+        return Some(buf.text.clone());
+    }
+    if let Some(s) = tree.find_widget(field_id).and_then(|n| n.value.and_then(|v| v.as_str().map(ToOwned::to_owned))) {
+        return Some(s);
+    }
+    match &app.canvas_dialogs.active_dialog {
+        ActiveDialog::CommandPalette => Some(app.canvas_dialogs.command_palette.query.clone()),
+        ActiveDialog::AnalyzeSheet { .. } => match field_id {
+            "search" | "search_query" | "analyze.search" => Some(app.canvas_dialogs.analyze.search_query.clone()),
+            "equation_id" | "analyze.equation_id" | "analyze.fit.model_id" => Some(app.canvas_dialogs.analyze.equation_id.clone()),
+            "custom_dsl" | "analyze.fit.custom_dsl" => app.canvas_dialogs.analyze.custom_dsl.clone(),
+            "transform_formula" | "formula" | "analyze.transform.formula" => app.canvas_dialogs.analyze.transform_formula.clone(),
+            _ => None,
+        },
+        ActiveDialog::EditAnalysisParameters { .. } => match field_id {
+            "custom_title" | "edit.custom_title" => app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| d.custom_title.clone()),
+            "custom_dsl" | "edit.fit.custom_dsl" => app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| match &d.kind {
+                AnalysisKind::NonlinearRegression(fit) => fit.custom_dsl.clone(),
+                _ => None,
+            }),
+            "filter_formula" | "edit.transform.filter_formula" => app.canvas_dialogs.edit_params.draft.as_ref().and_then(|d| match &d.kind {
+                AnalysisKind::Transform(curvebook_doc::TransformAnalysisSpec::SelectAndTransform { filter_formula, .. }) => filter_formula.clone(),
+                _ => None,
+            }),
+            _ => None,
+        },
+        ActiveDialog::ExcludeWithReason { .. } => match field_id {
+            "reason_tag" | "exclude.reason_tag" => Some(app.canvas_dialogs.exclude_with_reason.reason_tag.clone()),
+            "note" | "exclude.note" => Some(app.canvas_dialogs.exclude_with_reason.note.clone()),
+            _ => None,
+        },
+        ActiveDialog::ConstantHookPicker { .. } => match field_id {
+            "search_query" | "hook.search_query" => Some(app.canvas_dialogs.hook_picker.search_query.clone()),
+            _ => None,
+        },
+        _ => None,
+    }
+}
+
+fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, clear_existing: bool, commit_enter: bool) -> Result<Value, EngineError> {
     let tree = inspect_ui_tree(app, Some("dialog"), false);
     if let Some(node) = tree.find_widget(field_id)
         && !node.enabled
     {
         return Err(disabled_err(node.disabled_reason.unwrap_or_else(|| format!("control `{field_id}` is disabled"))));
     }
+    let combined_text = if clear_existing {
+        text.to_owned()
+    } else if let Some(prev) = current_dialog_text_value(app, &tree, field_id) {
+        format!("{prev}{text}")
+    } else {
+        text.to_owned()
+    };
+    if let Some(buf) = app.interaction.text_field_buffers.get_mut(field_id) {
+        buf.text.clone_from(&combined_text);
+        buf.cursor_char = buf.text.chars().count();
+        buf.selection_anchor = None;
+    }
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
-        app.canvas_dialogs.command_palette.query = text.to_owned();
+        app.canvas_dialogs.command_palette.query.clone_from(&combined_text);
         if commit_enter && let Some(hit) = app.canvas_dialogs.command_palette.matches_for_session(app.session()).first().cloned() {
             if app.is_gui_only() && is_gui_only_blocked_menu_command(hit.id) {
                 return Err(EngineError::with_code(
@@ -1053,20 +1169,25 @@ fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, commit
                 .with_remediation("Select a parameterless menu/dialog command or toggle under --gui-only."));
             }
             if let Some(res) = dispatch_ui_command_as_ui(app, hit.id, &Value::Null)? {
-                return Ok(json!({ "typed": text, "executed": hit.id, "result": res }));
+                return Ok(json!({ "typed": combined_text, "executed": hit.id, "result": res }));
             }
             let out = app.execute_command(hit.id, Value::Null)?;
             app.canvas_dialogs.close_dialog();
-            return Ok(json!({ "typed": text, "executed": hit.id, "mutated": out.mutated }));
+            return Ok(json!({ "typed": combined_text, "executed": hit.id, "mutated": out.mutated }));
         }
-        return Ok(json!({ "typed": text, "widget_id": field_id, "dialog": "command_palette" }));
+        return Ok(json!({ "typed": combined_text, "widget_id": field_id, "dialog": "command_palette" }));
     }
 
-    let val = parse_typed_json_scalar(text, &app.locale_preset);
+    let node_is_text = tree.find_widget(field_id).is_some_and(|n| matches!(n.role.as_str(), "textbox" | "text_field" | "search_box" | "textarea"));
+    let val = if node_is_text || is_text_dialog_field(field_id) {
+        Value::String(combined_text.clone())
+    } else {
+        parse_typed_json_scalar(&combined_text, &app.locale_preset)
+    };
     let mut patch = Map::new();
     patch.insert(field_id.to_owned(), val);
     patch_active_dialog(app, &patch)?;
-    Ok(json!({ "typed": text, "widget_id": field_id, "committed": true }))
+    Ok(json!({ "typed": combined_text, "widget_id": field_id, "committed": true }))
 }
 
 fn apply_type_text_to_grid(
@@ -1181,27 +1302,74 @@ fn apply_type_text_to_x_cell(
 
     if text.contains('\n') || text.contains('\t') {
         let preset = app.locale_preset.clone();
-        let vals: Vec<Value> = text
-            .lines()
-            .map(|line| {
-                let first = line.split('\t').next().unwrap_or("");
-                parse_grid_scalar_value(first, &preset)
-            })
-            .collect();
-        let out = app.execute_command(
-            "table.setXCells",
-            json!({
-                "sheet_id": sheet_id.as_str(),
-                "start_row": x_row,
-                "subcol": x_subcol,
-                "values": vals,
-            }),
-        )?;
+        let x_subcol_count = app.document().data_sheet(sheet_id).map_or(1, |ds| match &ds.archetype {
+            TableArchetype::Xy(xy) => xy.x_cells.first().map_or(1, Vec::len).max(1),
+            _ => 1,
+        });
+        let avail_x_cols = x_subcol_count.saturating_sub(x_subcol);
+        let mut x_edits = Vec::new();
+        let mut y_lines = Vec::new();
+        let mut has_y_cols = false;
+
+        for (dr, line) in text.lines().enumerate() {
+            let line = line.strip_suffix('\r').unwrap_or(line);
+            let cols: Vec<&str> = line.split('\t').collect();
+            for (dc, token) in cols.iter().take(avail_x_cols).enumerate() {
+                x_edits.push(json!({
+                    "row": x_row + dr,
+                    "subcol": x_subcol + dc,
+                    "value": parse_grid_scalar_value(token, &preset),
+                }));
+            }
+            if cols.len() > avail_x_cols {
+                has_y_cols = true;
+                y_lines.push(cols[avail_x_cols..].join("\t"));
+            } else {
+                y_lines.push(String::new());
+            }
+        }
+
+        if has_y_cols {
+            let dec = if preset.decimal_separator == ',' { "," } else { "." };
+            let _ = app.execute_command(
+                "table.paste",
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "text": y_lines.join("\n"),
+                    "start_row": x_row,
+                    "start_col": 0,
+                    "start_subcol": 0,
+                    "delimiter": "\t",
+                    "decimal_separator": dec,
+                }),
+            )?;
+        }
+
+        let out = if x_edits.is_empty() {
+            app.execute_command(
+                "table.setXCells",
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "start_row": x_row,
+                    "subcol": x_subcol,
+                    "values": [],
+                }),
+            )?
+        } else {
+            app.execute_command(
+                "table.setXCells",
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "edits": x_edits,
+                }),
+            )?
+        };
         app.grid.select_x_cell_sync(x_row, x_subcol);
         app.grid.refresh_selection_stats(app.session.document());
         return Ok(json!({
             "pasted": true,
             "x_col": true,
+            "multi_col_spill": has_y_cols,
             "sheet_id": sheet_id.as_str(),
             "row": x_row,
             "subcol": x_subcol,

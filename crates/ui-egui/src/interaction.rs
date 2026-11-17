@@ -2651,7 +2651,7 @@ fn is_text_widget_id(wid: &str) -> bool {
         || wid.contains("input")
 }
 
-fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fallback: bool) -> Option<SheetId> {
+pub(crate) fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fallback: bool) -> Option<SheetId> {
     let doc = app.document();
     if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()) {
         return Some(active.clone());
@@ -2800,19 +2800,7 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         }
     }
 
-    if (modifiers.meta || modifiers.ctrl) && !modifiers.shift && !modifiers.alt && trimmed.eq_ignore_ascii_case("t") {
-        let doc = app.document().clone();
-        if let Some(rs_id) = resolve_result_sheet_for_shortcut(app, true) {
-            app.canvas_dialogs.open_edit_parameters(&doc, &rs_id);
-            return Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("shortcut:ui.editParams.open"),
-                command_id: Some(String::from("ui.editParams.open")),
-                command_result: Some(json!({ "dialog": "EditAnalysisParameters", "result_sheet_id": rs_id.as_str() })),
-            });
-        }
-    }
-
+    // `Cmd/Ctrl+T` is context-scoped (`ui.editParams.open` vs `sheet.createData`) via `ShortcutRegistry` (`RV-75`).
     let text_focused = app.focus_widget_id.as_deref().is_some_and(is_text_widget_id);
     if !text_focused
         && (modifiers.meta || modifiers.ctrl)
@@ -2903,7 +2891,8 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
     }
 
     for candidate in build_shortcut_candidates(trimmed, modifiers) {
-        if let Ok(Some(exec)) = app.handle_key_combo(&candidate) {
+        let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
+        if let Ok(Some(exec)) = app.handle_key_combo_for_context(&candidate, on_result_sheet) {
             if matches!(exec.command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
                 clear_inspector_axis_buffers(app);
             }
@@ -3109,7 +3098,8 @@ fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> 
         let mut parts = Vec::with_capacity(5);
         if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
             parts.push("Cmd");
-        } else if modifiers.ctrl {
+        }
+        if modifiers.ctrl && !(use_cmd_for_ctrl && !modifiers.meta) {
             parts.push("Ctrl");
         }
         if modifiers.alt {

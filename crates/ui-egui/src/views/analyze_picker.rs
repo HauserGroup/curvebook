@@ -110,6 +110,32 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut AnalyzePickerViewState,
         app.canvas_dialogs.analyze.select_pcr_outcome(col)?;
         return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.set_pcr_outcome:{col}"), ..Default::default() });
     }
+    if payload == "outlier_mode:rout" {
+        app.canvas_dialogs.analyze.outlier_method = String::from("rout");
+        return Ok(UiEventOutcome { handled: true, action: String::from("analyze_picker.outlier_mode:rout"), ..Default::default() });
+    }
+    if payload == "outlier_mode:grubbs" {
+        app.canvas_dialogs.analyze.outlier_method = String::from("grubbs");
+        return Ok(UiEventOutcome { handled: true, action: String::from("analyze_picker.outlier_mode:grubbs"), ..Default::default() });
+    }
+    if let Some(delta_raw) = payload.strip_prefix("outlier_param_step:")
+        && let Ok(delta) = delta_raw.parse::<f64>()
+    {
+        let an = &mut app.canvas_dialogs.analyze;
+        if an.outlier_method == "grubbs" {
+            an.outlier_alpha = (an.outlier_alpha + delta).clamp(0.001, 0.25);
+        } else {
+            an.outlier_fdr_q_percent = (an.outlier_fdr_q_percent + delta).clamp(0.1, 20.0);
+        }
+        return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.outlier_param_step:{delta_raw}"), ..Default::default() });
+    }
+    if payload == "outlier_toggle_iterative" {
+        let an = &mut app.canvas_dialogs.analyze;
+        if an.outlier_method == "grubbs" {
+            an.outlier_iterative = !an.outlier_iterative;
+        }
+        return Ok(UiEventOutcome { handled: true, action: String::from("analyze_picker.outlier_toggle_iterative"), ..Default::default() });
+    }
     Ok(UiEventOutcome::default())
 }
 
@@ -843,7 +869,9 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
         && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty()
         && sum_rect.width >= 320
         && sum_rect.height >= 72;
-    let text_rect = if show_pcr_panel {
+    let show_outlier_panel =
+        builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some("stats.outliers") && sum_rect.width >= 320 && sum_rect.height >= 72;
+    let text_rect = if show_pcr_panel || show_outlier_panel {
         let left_w = (sum_rect.width * 42) / 100;
         LayoutRectPx::new(sum_rect.x, sum_rect.y, left_w, sum_rect.height)
     } else {
@@ -931,7 +959,167 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
         let pcr_w = sum_rect.width.saturating_sub(text_rect.width.saturating_add(10));
         let pcr_rect = LayoutRectPx::new(pcr_x, sum_rect.y + 4, pcr_w, sum_rect.height.saturating_sub(8));
         build_pcr_predictor_outcome_panel(builder, &sum_wid, pcr_rect);
+    } else if show_outlier_panel {
+        let out_x = text_rect.right() + i32::try_from(scaled_u32(6.0, scale, 4, 12)).unwrap_or(6);
+        let out_w = sum_rect.width.saturating_sub(text_rect.width.saturating_add(10));
+        let out_rect = LayoutRectPx::new(out_x, sum_rect.y + 4, out_w, sum_rect.height.saturating_sub(8));
+        build_outlier_options_panel(builder, &sum_wid, out_rect);
     }
+}
+
+fn build_outlier_options_panel(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, panel_rect: LayoutRectPx) {
+    if panel_rect.width < 140 || panel_rect.height < 48 {
+        return;
+    }
+    let locale = builder.app.locale.as_str();
+    let an = builder.app.canvas_dialogs.analyze.clone();
+    let is_grubbs = an.outlier_method == "grubbs";
+    let panel_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("analyze.outlier_panel"),
+        parent: Some(parent.clone()),
+        z_layer: ZLayer::ModalDialog,
+        rect_px: panel_rect,
+        a11y: labeled_meta(
+            WidgetRole::Dialog,
+            picker_tr(locale, "analyze_picker.outlier.section", "Outlier Method"),
+            FocusScope::ModalDialog,
+            "dialog.analyze.outliers",
+        ),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), panel_rect, builder.palette.surface);
+    builder.paint_stroke(ZLayer::ModalDialog, Some(&panel_wid), panel_rect, builder.palette.border, 1);
+
+    let half_w = panel_rect.width.saturating_sub(12) / 2;
+    let row_h = ((panel_rect.height.saturating_sub(10)) / 3).max(16);
+    let rout_label = picker_tr(locale, "analyze_picker.outlier.rout", "ROUT (FDR Q%)");
+    let grubbs_label = picker_tr(locale, "analyze_picker.outlier.grubbs", "Grubbs' ESD (alpha)");
+    emit_toggle(
+        builder,
+        ToggleWidgetSpec {
+            id: "analyze.outlier.rout",
+            parent: Some(panel_wid.clone()),
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 4, panel_rect.y + 4, half_w, row_h.saturating_sub(2)),
+            label: rout_label,
+            keyboard_path: "dialog.analyze.outlier.rout",
+            focus_scope: FocusScope::ModalDialog,
+            tab_order: Some(410),
+            checked: !is_grubbs,
+            is_radio: true,
+            enablement: ControlEnablement::enabled(),
+            scroll_container: None,
+            action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: String::from("outlier_mode:rout") },
+        },
+    );
+    emit_toggle(
+        builder,
+        ToggleWidgetSpec {
+            id: "analyze.outlier.grubbs",
+            parent: Some(panel_wid.clone()),
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 8 + half_w as i32, panel_rect.y + 4, half_w, row_h.saturating_sub(2)),
+            label: grubbs_label,
+            keyboard_path: "dialog.analyze.outlier.grubbs",
+            focus_scope: FocusScope::ModalDialog,
+            tab_order: Some(411),
+            checked: is_grubbs,
+            is_radio: true,
+            enablement: ControlEnablement::enabled(),
+            scroll_container: None,
+            action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: String::from("outlier_mode:grubbs") },
+        },
+    );
+
+    let param_y = panel_rect.y + 4 + row_h as i32;
+    let btn_w = 24u32.min(panel_rect.width / 6);
+    let val_w = panel_rect.width.saturating_sub(btn_w.saturating_mul(2).saturating_add(16));
+    let (step, val_text) =
+        if is_grubbs { ("0.01", format!("alpha: {:.3}", an.outlier_alpha)) } else { ("0.5", format!("FDR Q: {:.2}%", an.outlier_fdr_q_percent)) };
+    let dec_payload = format!("outlier_param_step:-{step}");
+    let inc_payload = format!("outlier_param_step:{step}");
+    emit_button(
+        builder,
+        ButtonWidgetSpec {
+            id: "analyze.outlier.param.dec",
+            parent: Some(panel_wid.clone()),
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 4, param_y, btn_w, row_h.saturating_sub(2)),
+            label: "-",
+            keyboard_path: "dialog.analyze.outlier.param.dec",
+            focus_scope: FocusScope::ModalDialog,
+            tab_order: Some(412),
+            primary: false,
+            selected: false,
+            shortcut: None,
+            enablement: ControlEnablement::enabled(),
+            action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: dec_payload },
+        },
+    );
+    let val_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("analyze.outlier.param.value"),
+        parent: Some(panel_wid.clone()),
+        z_layer: ZLayer::ModalDialog,
+        rect_px: LayoutRectPx::new(panel_rect.x + 8 + btn_w as i32, param_y, val_w, row_h.saturating_sub(2)),
+        a11y: AccessibilityMeta::new(WidgetRole::Label, val_text.clone(), FocusScope::ModalDialog),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    paint_text_fitted(
+        builder,
+        &val_wid,
+        FittedTextSpec {
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 8 + btn_w as i32, param_y, val_w, row_h.saturating_sub(2)),
+            pad_x: 4,
+            text: &val_text,
+            style: &UiTextStyle::ui_sans(11.0),
+            color: builder.palette.text,
+            scroll_container: None,
+        },
+    );
+    emit_button(
+        builder,
+        ButtonWidgetSpec {
+            id: "analyze.outlier.param.inc",
+            parent: Some(panel_wid.clone()),
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 12 + (btn_w + val_w) as i32, param_y, btn_w, row_h.saturating_sub(2)),
+            label: "+",
+            keyboard_path: "dialog.analyze.outlier.param.inc",
+            focus_scope: FocusScope::ModalDialog,
+            tab_order: Some(413),
+            primary: false,
+            selected: false,
+            shortcut: None,
+            enablement: ControlEnablement::enabled(),
+            action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: inc_payload },
+        },
+    );
+
+    let iter_y = param_y + row_h as i32;
+    let iter_label = picker_tr(locale, "analyze_picker.outlier.iterative", "Iterative Grubbs (multiple outliers)");
+    let iter_en =
+        if is_grubbs { ControlEnablement::enabled() } else { ControlEnablement::disabled("Iterative mode applies only to Grubbs' outlier test.") };
+    emit_toggle(
+        builder,
+        ToggleWidgetSpec {
+            id: "analyze.outlier.iterative",
+            parent: Some(panel_wid),
+            z_layer: ZLayer::ModalDialog,
+            rect: LayoutRectPx::new(panel_rect.x + 4, iter_y, panel_rect.width.saturating_sub(8), row_h.saturating_sub(2)),
+            label: iter_label,
+            keyboard_path: "dialog.analyze.outlier.iterative",
+            focus_scope: FocusScope::ModalDialog,
+            tab_order: Some(414),
+            checked: an.outlier_iterative,
+            is_radio: false,
+            enablement: iter_en,
+            scroll_container: None,
+            action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: String::from("outlier_toggle_iterative") },
+        },
+    );
 }
 
 fn build_pcr_predictor_outcome_panel(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, panel_rect: LayoutRectPx) {
@@ -1105,7 +1293,9 @@ fn localized_category_label(locale: &str, cat: AnalysisCategory) -> &'static str
 
 fn picker_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
     let canonical = crate::i18n::normalize_locale(locale);
-    crate::i18n::try_tr(canonical, key).unwrap_or(fallback)
+    crate::i18n::try_tr(canonical, key)
+        .or_else(|| crate::i18n::try_tr_in_slices(&[crate::i18n::w8_rv_ui::STAGED_ENTRIES], canonical, key))
+        .unwrap_or(fallback)
 }
 
 #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

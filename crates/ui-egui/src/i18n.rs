@@ -72,6 +72,7 @@ pub mod w5_toolbar_menus;
 pub mod w5_welcome;
 pub mod w7_mv_ui;
 pub mod w7_rm_reml;
+pub mod w8_rv_ui;
 
 /// Additional translation catalog shard slices merged with [`CATALOG`] during lookup and reporting.
 pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[

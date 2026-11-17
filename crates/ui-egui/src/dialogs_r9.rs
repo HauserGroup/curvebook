@@ -276,16 +276,115 @@ pub(crate) fn parse_weighting_scheme(val: &Value) -> Result<WeightingScheme, Str
     }
 }
 
+pub(crate) fn parse_outlier_fdr_q_percent(val: &Value) -> Result<f64, String> {
+    let q = parse_finite_f64_with_locale(val, "fdr_q_percent", &LocalePreset::default())?;
+    if q <= 0.0 || q > 100.0 {
+        return Err(format!("`fdr_q_percent` must lie in (0, 100], got {q}"));
+    }
+    Ok(q)
+}
+
+pub(crate) fn parse_outlier_alpha(val: &Value) -> Result<f64, String> {
+    let a = parse_finite_f64_with_locale(val, "alpha", &LocalePreset::default())?;
+    if a <= 0.0 || a >= 1.0 {
+        return Err(format!("`alpha` must lie strictly in (0, 1), got {a}"));
+    }
+    Ok(a)
+}
+
+pub(crate) fn parse_outlier_method_str(raw: &str) -> Result<(&'static str, Option<bool>), String> {
+    match norm_key(raw).as_str() {
+        "rout" | "routq" | "fdrrout" => Ok(("rout", None)),
+        "grubbs" | "grubbss" | "grubbsesd" => Ok(("grubbs", None)),
+        "grubbssingle" | "singlegrubbs" => Ok(("grubbs", Some(false))),
+        "grubbsiterative" | "iterativegrubbs" => Ok(("grubbs", Some(true))),
+        _ => Err(format!("unknown outlier method `{raw}`; use `rout` or `grubbs`")),
+    }
+}
+
+fn parse_rout_inline_q(raw: &str) -> Result<Option<f64>, String> {
+    let trimmed = raw.trim();
+    let lower = trimmed.to_ascii_lowercase();
+    if !lower.starts_with("rout") {
+        return Ok(None);
+    }
+    let rest = trimmed[4..].trim();
+    if rest.is_empty() {
+        return Ok(None);
+    }
+    // Accept forms like `"rout:2.5"`, `"rout(2.5)"`, `"rout@2.5"`, `"rout q=2.5"`, `"rout 2.5%"`.
+    let cleaned = rest.trim_start_matches([':', '@', '(', '=', ',', ' ', '_']).trim_end_matches([')', '%', ' ']).trim();
+    let after_q = cleaned
+        .strip_prefix("fdr_q_percent")
+        .or_else(|| cleaned.strip_prefix("fdr_q"))
+        .or_else(|| cleaned.strip_prefix("q_percent"))
+        .or_else(|| cleaned.strip_prefix("rout_q"))
+        .or_else(|| cleaned.strip_prefix('q'))
+        .or_else(|| cleaned.strip_prefix('Q'))
+        .map(|s| s.trim_start_matches(['=', ':', ' ']))
+        .unwrap_or(cleaned)
+        .trim_end_matches('%')
+        .trim();
+    if after_q.is_empty() || !after_q.chars().any(|c| c.is_ascii_digit()) {
+        return Ok(None);
+    }
+    let q: f64 = after_q.parse().map_err(|_| format!("invalid ROUT Q% in fit method `{raw}`"))?;
+    if !q.is_finite() || q <= 0.0 || q > 100.0 {
+        return Err(format!("ROUT `fdr_q_percent` must lie in (0, 100], got {q}"));
+    }
+    Ok(Some(q))
+}
+
 pub(crate) fn parse_fit_method(val: &Value) -> Result<FitMethod, String> {
     if let Ok(direct) = serde_json::from_value::<FitMethod>(val.clone()) {
+        if let FitMethod::RoutOutlierElimination { fdr_q_percent } = direct
+            && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 100.0)
+        {
+            return Err(format!("`fdr_q_percent` must lie in (0, 100], got {fdr_q_percent}"));
+        }
         return Ok(direct);
     }
+    if let Some(obj) = val.as_object() {
+        if let Some(rout_val) = obj.get("rout").or_else(|| obj.get("RoutOutlierElimination")) {
+            let q = match rout_val {
+                Value::Object(inner) => inner
+                    .get("fdr_q_percent")
+                    .or_else(|| inner.get("q_percent"))
+                    .or_else(|| inner.get("rout_q"))
+                    .or_else(|| inner.get("q"))
+                    .map(parse_outlier_fdr_q_percent)
+                    .transpose()?
+                    .unwrap_or(1.0),
+                other => parse_outlier_fdr_q_percent(other)?,
+            };
+            return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
+        }
+        if let Some(method_raw) = obj.get("method").or_else(|| obj.get("type")).and_then(Value::as_str) {
+            let parsed = parse_fit_method(&Value::String(method_raw.to_owned()))?;
+            if let FitMethod::RoutOutlierElimination { fdr_q_percent } = parsed {
+                let q = obj
+                    .get("fdr_q_percent")
+                    .or_else(|| obj.get("q_percent"))
+                    .or_else(|| obj.get("rout_q"))
+                    .or_else(|| obj.get("q"))
+                    .map(parse_outlier_fdr_q_percent)
+                    .transpose()?
+                    .unwrap_or(fdr_q_percent);
+                return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
+            }
+            return Ok(parsed);
+        }
+        return Err(String::from("`fit_method` object must specify `method` or `RoutOutlierElimination`"));
+    }
     let raw = val.as_str().ok_or_else(|| String::from("`fit_method` must be a string or FitMethod object"))?;
+    if let Some(q) = parse_rout_inline_q(raw)? {
+        return Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: q });
+    }
     match norm_key(raw).as_str() {
         "leastsquares" | "ols" | "ls" => Ok(FitMethod::LeastSquares),
         "poissondeviance" | "poisson" => Ok(FitMethod::PoissonDeviance),
         "robustcauchy" | "robust" | "cauchy" => Ok(FitMethod::RobustCauchy),
-        "rout" | "routoutlierelimination" => Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }),
+        "rout" | "routoutlierelimination" | "routoutlier" => Ok(FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 }),
         _ => Err(format!("unknown fit method `{raw}`")),
     }
 }
