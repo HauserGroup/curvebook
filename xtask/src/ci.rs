@@ -10,7 +10,7 @@ use crate::{
 
 // Keep existing UI frame/latency, grid, and curve-fit throughput gates off the
 // parallel correctness runner. The complement below still covers every other test.
-const PERFORMANCE_FILTER: &str = "binary(=r10_core_and_spike) | binary(*perf*) | binary(r10_human_wf_*)";
+const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(*perf*)";
 const STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "wasm", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {

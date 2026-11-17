@@ -12,7 +12,7 @@ cancelled or skipped dependencies fail that gate.
 | `cargo xtask ci policy` | Formatting, assets, brands, cleanroom, cursors, exact i18n report, UI/engine command and schema sync, layers, secrets, licences, telemetry, workflow lint, screenshot integrity, pending items, and status. Hosted CI also runs the full `cargo deny check`. |
 | `cargo xtask ci lint` | Workspace Clippy, every target, with warnings denied. |
 | `cargo xtask ci tests` | Every native test except the performance-sensitive binaries selected by `PERFORMANCE_FILTER` in `xtask/src/ci.rs`. |
-| `cargo xtask ci performance` | The R10 budget and human-workflow scaffold binaries, plus `*perf*` grid and curve-fit benchmark binaries, serially; existing assertions and budgets are unchanged. |
+| `cargo xtask ci performance` | Every `r10_*` binary, including the landed Wave 5 human-path latency checks, plus `*perf*` grid and curve-fit benchmark binaries, serially; existing assertions and budgets are unchanged. |
 | `cargo xtask ci doctests` | Workspace doctests. |
 | `cargo xtask ci features` | Text tests without default features; every UI test and doctest without default features, with its performance-sensitive binaries serial; MCP compilation without default features. |
 | `cargo xtask ci wasm` | Web and engine compilation for `wasm32-unknown-unknown`, including their dependencies. |

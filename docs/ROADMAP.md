@@ -229,7 +229,7 @@ Reuse the existing `cargo xtask brands`, `cargo xtask cleanroom`, and `cargo xta
 ---
 
 ### R0.22 Supply-chain advisory coverage and focused contributor guides
-Owner: open · Status: in progress — claimed: Codex, 2026-11-16, branch `chore/R0.22-maintenance-landing`; prepared locally, waiting for the active R10 integration before merge · Was: selected maintenance review 2026-11-16
+Owner: open · Status: in progress — claimed: Codex, 2026-11-16, branch `chore/R0.22-maintenance-landing`; reconciled with published `main` at `1d20c33` on 2026-11-17; validation and review tracked in PR #10 · Was: selected maintenance review 2026-11-16
 
 Planned grouping: land the supply-chain checks together with the focused localization and MCP troubleshooting documentation as one maintenance PR. Include the `R0.24` TCP/CI repair as a separate commit in PR #10 so its checks can finish before landing. The original supply-chain and engineering-pitfalls IDs were reused by the CurveBook cutover and branding clearance; this item does not change those assignments. Prepare in an isolated checkout and integrate after the active R10 merge so its verification candidate remains stable.
 
@@ -237,7 +237,8 @@ Planned grouping: land the supply-chain checks together with the focused localiz
 - [x] Add the localization contributor guide, including catalog shards, fallback behavior, font limitations, machine-draft disclosure, and the limits of automated coverage checks.
 - [x] Add MCP connection troubleshooting with a manual handshake, current CurveBook names, and live-control authentication guidance.
 - [x] Verify the local candidate based on `2a948b0`: full `cargo deny check`, `xtask licenses`, workflow lint, formatting, brands, cleanroom, secrets, telemetry, status, generated commands/schemas/UI catalog sync, and local documentation links. The manual MCP handshake passed using the existing CLI build. No Rust source, dependency versions, or R10 fixtures were changed.
-- [ ] Rebase onto the completed R10 integration, reconcile any intervening documentation changes, and rerun affected checks before squash merge. Do not claim this maintenance branch as R10 acceptance evidence.
+- [x] Merge published `main` at `1d20c33`, preserving the R10 Wave 5 integration, reference policy, and documentation tidy-up. Add the new guides to the documentation index. This reconciliation does not modify the ongoing R10 Wave 6 worktrees.
+- [ ] Complete integrated validation and hosted checks recorded in PR #10 before squash merge. Do not claim this maintenance branch as R10 acceptance evidence.
 
 ---
 
@@ -250,7 +251,8 @@ Planned grouping with `R0.22` in PR #10: fix acknowledged TCP fixture shutdown a
 - [x] Configure a native test archive built once, a cache saved before test execution, and visible policy, lint, native-test, doctest, feature, WASM, and serial-performance stages. The existing required gate requires every stage to succeed.
 - [x] Enforce failing per-test timeouts without retries; reserve the live macOS clipboard test exclusive access; preserve all assertions and oracle/performance tolerances. Security regressions audit both workflows and the pinned-tools composite action. Remove duplicate R10 budget execution, not its checks.
 - [x] Full local `cargo xtask ci` passed on `814ae7e` plus this change with Rust `1.99.1`, nextest `0.9.152`, `CARGO_INCREMENTAL=0`, offline Cargo, and the existing NIST StRD corpus required: `1,638` correctness tests and `33` performance tests, workspace doctests, feature checks, policy/lint/generator checks, and WASM. Archive metadata selects all `1,671` native tests exactly once; the archived correctness stage also passed all `1,638` tests without rebuilding. Results apply to that candidate, not the later R10 changes on local `main`.
-- [ ] Complete hosted staged CI; reconcile the later R10 integration and documentation tidy-up, then rerun affected checks before squash merge. Do not treat these results as R10 acceptance evidence.
+- [x] Reconcile published `main` at `1d20c33` and the documentation tidy-up. Include all `r10_*` binaries in the serial stage, covering the landed Wave 5 latency assertions without changing their budgets; the correctness filter remains its exact complement.
+- [ ] Complete integrated local validation and hosted staged CI, with results recorded in PR #10 before squash merge. Do not treat these results as R10 acceptance evidence.
 
 ---
 

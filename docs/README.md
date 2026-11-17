@@ -20,6 +20,8 @@ Read the [contributor guide](../CONTRIBUTING.md), [agent rules](../AGENTS.md), [
 | Guide | Contents |
 |---|---|
 | [Development](development.md) | Toolchain, builds, tests, coverage, and local configuration |
+| [Continuous integration](ci.md) | Quality stages, shared test binaries, deadlines, and local verification |
+| [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
 | [Data tables and transforms](implementation/data-tables-and-transforms.md) | Table archetypes, formulas, reactive data, and engine contracts |
 | [Statistics](implementation/statistics-implementation.md) | Numerical methods, statistical tests, and oracle requirements |
