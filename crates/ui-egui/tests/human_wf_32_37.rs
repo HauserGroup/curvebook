@@ -325,6 +325,7 @@ fn exclude_cell_with_reason_human(driver: &mut HumanPathDriver, sheet_id: &str, 
     }
     replace_focused_textbox(driver, &WidgetId::from("exclude.note_input"), note)?;
     let _ = click_widget_center(driver, &WidgetId::from("exclude.apply_note"))?;
+    let _ = click_widget_center(driver, &WidgetId::from("modal.ok"))?;
     Ok(())
 }
 
@@ -887,7 +888,9 @@ fn wf36_human_direct_mv_4pl_dose_response() -> TestRes {
     let _ = click_widget_center(&mut driver, &WidgetId::from("fit.tab.confidence"))?;
     let _ = click_widget_center(&mut driver, &WidgetId::from("fit.ci.profile"))?;
     let _ = click_widget_center(&mut driver, &WidgetId::from("fit.tab.weights_range"))?;
-    let _ = click_widget_center(&mut driver, &WidgetId::from("fit.wr.opt.res_tab"))?;
+    if !driver.find_widget("fit.wr.opt.res_tab").and_then(|n| n.a11y.checked).unwrap_or(false) {
+        let _ = click_widget_center(&mut driver, &WidgetId::from("fit.wr.opt.res_tab"))?;
+    }
     let _ = click_widget_center(&mut driver, &WidgetId::from("modal.ok"))?;
 
     verify_result_tabs_and_scroll(&mut driver, &fit_id, &["nonlinear_parameters", "nonlinear_residuals"])?;

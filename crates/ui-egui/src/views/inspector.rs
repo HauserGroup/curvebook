@@ -2149,7 +2149,7 @@ fn draw_drill_back_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSh
             format!("{} · R{} C{} S{}", state.selected_point_summary, sc.row + 1, sc.col + 1, sc.subcol + 1)
         }
         Some(sc) => format!("Cell R{} C{} S{} ({})", sc.row + 1, sc.col + 1, sc.subcol + 1, sc.sheet_id.as_str()),
-        None => String::from("No plotted points on active sheet"),
+        None => String::from(insp_text(app, "w6.view.insp.no_plotted_points", "No plotted points on active sheet")),
     };
     ctx.paint_label(&summary, ctx.cursor_y, 16, 10.5, muted, false);
     ctx.cursor_y += ctx.si(18);
@@ -2172,7 +2172,8 @@ fn draw_drill_back_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphSh
 
     if on_data_sheet && gs.is_some() {
         let back_rect = LayoutRectPx::new(ctx.panel_x, ctx.cursor_y, ctx.panel_w, ctx.su(22));
-        ctx.emit_action_btn("inspector.drill.return_graph", back_rect, ("Return to Graph", "Return to Graph"), "drill.return_to_graph", false, true);
+        let back_lbl = insp_text(app, "w6.view.insp.return_to_graph", "Return to Graph");
+        ctx.emit_action_btn("inspector.drill.return_graph", back_rect, (back_lbl, back_lbl), "drill.return_to_graph", false, true);
         ctx.cursor_y += ctx.si(26);
     }
 }
@@ -2217,7 +2218,14 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
     let mid_r = LayoutRectPx::new(ctx.mirrored_x((nav_w as i32) + (nav_gap as i32), mid_w), ctx.cursor_y, mid_w, row_h);
     let next_r =
         LayoutRectPx::new(ctx.mirrored_x((nav_w as i32) + (nav_gap as i32) + (mid_w as i32) + (nav_gap as i32), nav_w), ctx.cursor_y, nav_w, row_h);
-    ctx.emit_action_btn("inspector.fg.dataset_prev", prev_r, ("<", "Previous series"), "fg.dataset:prev", false, has_series);
+    ctx.emit_action_btn(
+        "inspector.fg.dataset_prev",
+        prev_r,
+        ("<", insp_text(app, "w6.view.insp.prev_series", "Previous series")),
+        "fg.dataset:prev",
+        false,
+        has_series,
+    );
     ctx.emit_action_btn(
         "inspector.fg.dataset_btn",
         mid_r,
@@ -2226,7 +2234,14 @@ fn draw_format_graph_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Graph
         state.open_popup.as_deref() == Some("dataset"),
         has_series,
     );
-    ctx.emit_action_btn("inspector.fg.dataset_next", next_r, (">", "Next series"), "fg.dataset:next", false, has_series);
+    ctx.emit_action_btn(
+        "inspector.fg.dataset_next",
+        next_r,
+        (">", insp_text(app, "w6.view.insp.next_series", "Next series")),
+        "fg.dataset:next",
+        false,
+        has_series,
+    );
     if state.open_popup.as_deref() == Some("dataset") && ctx.is_row_visible(mid_r) && has_series {
         let options = gs
             .spec
@@ -2620,7 +2635,7 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
         ctx.cursor_y = ctx.emit_checkbox_row(
             "inspector.axes.y2_enable",
             ctx.cursor_y,
-            "Enable Right Y2 Axis",
+            insp_text(app, "w6.view.insp.enable_y2", "Enable Right Y2 Axis"),
             gs.spec.y2_axis.is_some(),
             "axes.y2_toggle",
             true,
@@ -2787,8 +2802,10 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
     let half = (ctx.panel_w.saturating_sub(gap) / 2).max(ctx.su(40));
     let apply_r = LayoutRectPx::new(ctx.mirrored_x(0, half), ctx.cursor_y, half, ctx.su(22));
     let auto_r = LayoutRectPx::new(ctx.mirrored_x((half as i32) + (gap as i32), half), ctx.cursor_y, half, ctx.su(22));
-    ctx.emit_action_btn("inspector.axes.apply_range", apply_r, ("Apply Range", "Apply Range"), "axes.apply_range", false, true);
-    ctx.emit_action_btn("inspector.axes.auto_range", auto_r, ("Auto Range", "Auto Range"), "axes.auto_range", false, true);
+    let apply_lbl = insp_text(app, "w6.view.insp.apply_range", "Apply Range");
+    let auto_lbl = insp_text(app, "w6.view.insp.auto_range", "Auto Range");
+    ctx.emit_action_btn("inspector.axes.apply_range", apply_r, (apply_lbl, apply_lbl), "axes.apply_range", false, true);
+    ctx.emit_action_btn("inspector.axes.auto_range", auto_r, (auto_lbl, auto_lbl), "axes.auto_range", false, true);
     ctx.cursor_y += ctx.si(26);
 
     let seg_cnt = axis.segments.len().max(1);
@@ -2796,9 +2813,9 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
         ctx.cursor_y,
         Some(insp_text(app, "inspector.axes.breaks", "Axis Breaks")),
         &[
-            ("inspector.axes.breaks_1", "1 (None)", "axes.breaks:1", seg_cnt <= 1),
-            ("inspector.axes.breaks_2", "2 Segs", "axes.breaks:2", seg_cnt == 2),
-            ("inspector.axes.breaks_3", "3 Segs", "axes.breaks:3", seg_cnt >= 3),
+            ("inspector.axes.breaks_1", insp_text(app, "w6.view.insp.breaks_none", "1 (None)"), "axes.breaks:1", seg_cnt <= 1),
+            ("inspector.axes.breaks_2", insp_text(app, "w6.view.insp.breaks_two", "2 Segs"), "axes.breaks:2", seg_cnt == 2),
+            ("inspector.axes.breaks_3", insp_text(app, "w6.view.insp.breaks_three", "3 Segs"), "axes.breaks:3", seg_cnt >= 3),
         ],
         true,
     );
@@ -2807,9 +2824,24 @@ fn draw_format_axes_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphS
         ctx.cursor_y,
         Some(insp_text(app, "inspector.axes.ornament", "Break Style")),
         &[
-            ("inspector.axes.orn_double", "Slash", "axes.ornament:DoubleSlash", axis.break_ornament == BreakOrnament::DoubleSlash),
-            ("inspector.axes.orn_zigzag", "Zigzag", "axes.ornament:Zigzag", axis.break_ornament == BreakOrnament::Zigzag),
-            ("inspector.axes.orn_gap", "Gap", "axes.ornament:BlankGap", axis.break_ornament == BreakOrnament::BlankGap),
+            (
+                "inspector.axes.orn_double",
+                insp_text(app, "w6.view.insp.orn_slash", "Slash"),
+                "axes.ornament:DoubleSlash",
+                axis.break_ornament == BreakOrnament::DoubleSlash,
+            ),
+            (
+                "inspector.axes.orn_zigzag",
+                insp_text(app, "w6.view.insp.orn_zigzag", "Zigzag"),
+                "axes.ornament:Zigzag",
+                axis.break_ornament == BreakOrnament::Zigzag,
+            ),
+            (
+                "inspector.axes.orn_gap",
+                insp_text(app, "w6.view.insp.orn_gap", "Gap"),
+                "axes.ornament:BlankGap",
+                axis.break_ornament == BreakOrnament::BlankGap,
+            ),
         ],
         true,
     );
@@ -3033,11 +3065,11 @@ fn draw_multivariable_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&Grap
     );
 }
 
-fn cld_mode_label(mode: PairwiseDisplayMode) -> &'static str {
+fn cld_mode_label(app: &UiApp, mode: PairwiseDisplayMode) -> &'static str {
     match mode {
-        PairwiseDisplayMode::BracketsOnly => "Brackets Only",
-        PairwiseDisplayMode::CompactLetterDisplayOnly => "CLD Letters",
-        PairwiseDisplayMode::BracketsAndCompactLetterDisplay => "Brackets + CLD",
+        PairwiseDisplayMode::BracketsOnly => insp_text(app, "w6.view.insp.brackets_only", "Brackets Only"),
+        PairwiseDisplayMode::CompactLetterDisplayOnly => insp_text(app, "w6.view.insp.cld_letters", "CLD Letters"),
+        PairwiseDisplayMode::BracketsAndCompactLetterDisplay => insp_text(app, "w6.view.insp.brackets_and_cld", "Brackets + CLD"),
     }
 }
 
@@ -3118,17 +3150,17 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
 
     let mode_opts = vec![
         PopupOptionSpec {
-            label: String::from("Brackets Only"),
+            label: String::from(insp_text(app, "w6.view.insp.brackets_only", "Brackets Only")),
             payload: String::from("pw.cld_mode:BracketsOnly"),
             active: gs.spec.pairwise_display_mode == PairwiseDisplayMode::BracketsOnly,
         },
         PopupOptionSpec {
-            label: String::from("CLD Letters"),
+            label: String::from(insp_text(app, "w6.view.insp.cld_letters", "CLD Letters")),
             payload: String::from("pw.cld_mode:CompactLetterDisplayOnly"),
             active: gs.spec.pairwise_display_mode == PairwiseDisplayMode::CompactLetterDisplayOnly,
         },
         PopupOptionSpec {
-            label: String::from("Brackets + CLD"),
+            label: String::from(insp_text(app, "w6.view.insp.brackets_and_cld", "Brackets + CLD")),
             payload: String::from("pw.cld_mode:BracketsAndCompactLetterDisplay"),
             active: gs.spec.pairwise_display_mode == PairwiseDisplayMode::BracketsAndCompactLetterDisplay,
         },
@@ -3136,8 +3168,8 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
     ctx.cursor_y = ctx.emit_dropdown_trigger(DropdownArgs {
         id: "inspector.pw.cld_mode_btn",
         y: ctx.cursor_y,
-        title: "Pairwise Mode",
-        current_val: cld_mode_label(gs.spec.pairwise_display_mode),
+        title: insp_text(app, "w6.view.insp.pairwise_mode", "Pairwise Mode"),
+        current_val: cld_mode_label(app, gs.spec.pairwise_display_mode),
         popup_kind: "cld_mode",
         open_popup: state.open_popup.as_deref(),
         options: mode_opts,
@@ -3165,7 +3197,8 @@ fn draw_pairwise_section(ctx: &mut SectionDrawCtx<'_, '_>, gs: Option<&GraphShee
         has_result,
     );
 
-    let info_line = format!("Brackets: {} · CLD: {}", gs.spec.comparisons.len(), if cld_enabled { "On" } else { "Off" });
+    let state_word = if cld_enabled { insp_text(app, "w6.view.insp.on", "On") } else { insp_text(app, "w6.view.insp.off", "Off") };
+    let info_line = format!("Brackets: {} · CLD: {state_word}", gs.spec.comparisons.len());
     ctx.paint_label(&info_line, ctx.cursor_y, 16, 10.5, muted, false);
     ctx.cursor_y += ctx.si(20);
 }
@@ -3217,7 +3250,7 @@ fn draw_page_layout_section(ctx: &mut SectionDrawCtx<'_, '_>, ls: Option<&Layout
     let muted = app.theme.text_muted;
     let state = &app.view_shards.inspector;
     let Some(ls) = ls else {
-        ctx.paint_label("No Page Layout sheet in project yet.", ctx.cursor_y, 18, 10.5, muted, false);
+        ctx.paint_label(insp_text(app, "w6.view.insp.no_page_layout", "No Page Layout sheet in project yet."), ctx.cursor_y, 18, 10.5, muted, false);
         ctx.cursor_y += ctx.si(22);
         return;
     };
@@ -3310,7 +3343,8 @@ fn draw_popup_overlay(builder: &mut LayoutBuilder<'_>, popup: &PendingPopup, par
     let item_h = insp_u32(24, scale);
     let pad = insp_i32(4, scale);
     let gap = insp_u32(2, scale);
-    let visible_n = popup.options.len().min(7) as u32;
+    let visible_max = ((vp.height.saturating_sub(insp_u32(16, scale))) / item_h).max(7) as usize;
+    let visible_n = popup.options.len().min(visible_max) as u32;
     let pop_w = popup.anchor.width.max(insp_u32(150, scale)).min(vp.width.saturating_sub(insp_u32(16, scale)).max(insp_u32(120, scale)));
     let pop_h = visible_n * item_h + (2 * pad) as u32;
     let min_x = vp.x + pad;
@@ -3341,7 +3375,7 @@ fn draw_popup_overlay(builder: &mut LayoutBuilder<'_>, popup: &PendingPopup, par
         state: WidgetVisualState::default(),
     });
 
-    for (idx, opt) in popup.options.iter().take(7).enumerate() {
+    for (idx, opt) in popup.options.iter().take(visible_max).enumerate() {
         let ir = LayoutRectPx::new(
             pop_x + pad,
             pop_y + pad + (idx as i32) * (item_h as i32),
@@ -3384,7 +3418,7 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         parent: None,
         z_layer: ZLayer::Workspace,
         action: WidgetAction::NoOp,
-        a11y: AccessibilityMeta::new(WidgetRole::Label, "Inspector", FocusScope::Workspace),
+        a11y: AccessibilityMeta::new(WidgetRole::Label, insp_text(builder.app, "w6.view.insp.panel_title", "Inspector"), FocusScope::Workspace),
         state: WidgetVisualState::default(),
     });
 
@@ -3400,9 +3434,8 @@ pub fn build_inspector_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx)
         ActiveInspector::BubblePlot => ("inspector.section.multivariate", active_insp.label()),
         ActiveInspector::PairwiseComparisons => ("inspector.section.pairwise_cld", active_insp.label()),
         ActiveInspector::PageLayout => ("inspector.page_layout", active_insp.label()),
-        ActiveInspector::ResultDetails | ActiveInspector::None => {
-            ("inspector.title", if active_insp == ActiveInspector::None { "Inspector" } else { active_insp.label() })
-        }
+        ActiveInspector::ResultDetails => ("w6.view.insp.analysis_checklist", active_insp.label()),
+        ActiveInspector::None => ("w6.view.insp.panel_title", "Inspector"),
     };
     let header_title = String::from(insp_text(app, hdr_key, hdr_fb));
     let hdr_style = UiTextStyle::ui_bold(insp_pt(12.5, scale));

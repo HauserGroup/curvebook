@@ -147,7 +147,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Existing implementation:** Unpacked-directory I/O already ships as plain functions beside the ZIP path in `crates/format/src/archive.rs` (`is_unpacked_project_dir`, `save_project_unpacked_dir`, `open_project_unpacked_dir`) with the same schema validation; there is no `ArchiveReader` / `ArchiveWriter` trait.
 
 ### QOL-12 Categorical and continuous table-analysis completions
-- **Crates:** `crates/doc`, `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `8–13 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol12-table-completions)
+- **Crates:** `crates/doc`, `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `8–13 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#2-categorical--continuous-table-analysis-completions-r912--qol-12--implemented-wave-21)
 - **Scope:**
   - Emit `ResultTabKind::MultipleComparisons` post-hoc tabs inside `run_factorial_anova` (`FactorialAnovaSpec::multiplicity`, also tracked on `R8.7` for `WF-09`/`WF-10`).
   - Expose `cohens_kappa` (`Unweighted`, `Linear`, `Quadratic`) and `fleiss_kappa` via `ContingencyMethod`, invert Newcombe `2×2` risk-difference bounds into Altman `NNTB`/`NNTH` CIs, emit McNemar discordant-pair OR CIs, add custom expected proportions to `PartsOfWhole` goodness-of-fit $\chi^2$, and add exact one-sample Binomial ($p_0 \in (0, 1)$) & paired Sign tests.
@@ -156,26 +156,26 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 
 ### QOL-13 Instant statistical, distribution and Bayesian calculators
 - **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference; it does not authorize new calculator commands, formula builtins, or UI drawers.
-- **Crates:** `crates/stats`, `crates/transform`, `crates/engine`, `crates/mcp`, `crates/ui-egui` · **Est.:** `10–16 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol13-calculators)
+- **Crates:** `crates/stats`, `crates/transform`, `crates/engine`, `crates/mcp`, `crates/ui-egui` · **Est.:** `10–16 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#3-instant-statistical-distribution--bayesian-calculators-r913--qol-13)
 - **Scope:**
   - *Proposed (none of these IDs exist today):* add stateless read-only `calc.*` commands (a new `CommandGroup::Calculator` with `READ_ONLY` effects) and a non-modal **Calculators** drawer (`ui.calculator.open`) for table-free calculations: binomial proportion & Garwood exact Poisson count CIs, clinical Bayes PPV/NPV/$\text{LR}^{\pm}$ from sensitivity/specificity/prior prevalence, two-mean error propagation ($A \pm B$, $A \cdot B$, and Fieller's exact quotient CI for $A / B$), summary-table multi-way ANOVA post-tests, forward/inverse probability distributions ($z, t, F, r, \chi^2$, Binomial, Poisson, Gaussian — also exposed as scalar functions in `=` Calculated Variables), Sellke–Bayarri–Berger & Colquhoun Bayesian $P$-value / False Positive Risk interpretation, summary $F$/$\text{AIC}_c$ fit comparisons, and scalar $\text{EC}_F$ from $(\text{EC}_{50}, h, F)$.
 - **Non-breaking invariant:** Zero document or undo-stack mutation during calculation; zero `.curvebook` archive version changes.
 
 ### QOL-14 Experimental subject randomization and random subset sampling
-- **Crates:** `crates/doc`, `crates/transform`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol14-randomization)
+- **Crates:** `crates/doc`, `crates/transform`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#4-experimental-randomization--subset-sampling-r914--qol-14--implemented-wave-22)
 - **Scope:**
   - Add `crates/transform/src/randomize.rs` over `DeterministicRng` providing seeded **Complete** and **Permuted-Block** subject-to-group randomization (`table.randomizeGroups`, writing seed & block metadata to `InfoSheet` for ARRIVE reporting), non-destructive uniform/stratified $k$-of-$N$ row subset sampling without replacement (`table.randomSampleRows` / `TransformAnalysisSpec::RandomSample`), and multi-distribution column simulation (`table.simulateDistributions`).
 - **Non-breaking invariant:** Never mutates upstream raw observations in place; deterministic across native and `wasm32` targets.
 
 ### QOL-15 Bench molarity, dilution and radiochemical decay calculators
 - **Planning status:** Deferred without a scheduled milestone. The scope below is retained for reference; no subset is moved into active work by this revision.
-- **Crates:** `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol15-bench-calculators)
+- **Crates:** `crates/stats`, `crates/engine`, `crates/ui-egui` · **Est.:** `6–10 h` · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#5-bench-molarity-dilution--radiochemical-calculators-r915--qol-15)
 - **Scope:**
   - *Proposed (none of these IDs exist today):* add stateless wet-lab bench calculators (`calc.molarity`, `calc.dilution`, `calc.molesGrams`, `calc.radioactivity`) solving $m = C \cdot V \cdot \text{FW}$, single & serial stock dilutions ($C_1 V_1 = C_2 V_2$), moles $\leftrightarrow$ grams, and NUBASE2020-evaluated radionuclide half-life decay ($A(t) = A_0 2^{-\Delta t / t_{1/2}}$, carrier-free & decay-corrected specific activity, molar radioligand concentration, $\text{Bq} \leftrightarrow \text{Ci} \leftrightarrow \text{dpm}$), with optional one-click export to `InfoSheet` constants or `XY` dilution columns.
 - **Non-breaking invariant:** Pure read-only `calc.*` queries unless the user explicitly exports constants or creates a new dilution sheet.
 
 ### QOL-16 Live $\TeX$ model equation annotations (equations only)
-- **Crates:** `crates/doc`, `crates/fit`, `crates/text`, `crates/chart`, `crates/engine`, `crates/ui-egui` · **Est.:** Re-estimate for equations-only scope · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#qol16-equations)
+- **Crates:** `crates/doc`, `crates/fit`, `crates/text`, `crates/chart`, `crates/engine`, `crates/ui-egui` · **Est.:** Re-estimate for equations-only scope · **Spec:** [`calculators-and-quick-stats.md`](calculators-and-quick-stats.md#6-live-best-fit-equation-annotations-r916--qol-16-equations-only--implemented-wave-22b)
 - **Scope:**
   - Add one-click insertion of symbolic or live-parameterized $\TeX$-subset best-fit model equations onto fitted `XY` graphs, rendered deterministically across RGBA, SVG, and `%PDF-1.7`.
   - Refresh substituted coefficients when the linked fit recalculates; keep symbolic form available without copying values manually.

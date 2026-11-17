@@ -25,7 +25,7 @@ use crate::modal_predicates::{
     r1_sphericity_or_reml_control, r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
     r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
     r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
-    source_table_shape,
+    r_km_trend_test, source_table_shape, survival_group_count,
 };
 use crate::power_wizard::PowerWizardStage;
 use curvebook_tools::SelectionQuickStats;
@@ -873,8 +873,13 @@ fn build_power_dialog_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool)
         ));
     }
 
-    let btns = vec![("create", "Create"), ("next", "Next"), ("back", "Back"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))];
-    ("Power and Sample Size", None, Some(pw.stage.label().to_owned()), tabs, controls, btns)
+    let btns = vec![
+        ("create", insp_tr(app, "w6.view.btn.create", "Create")),
+        ("next", "Next"),
+        ("back", "Back"),
+        ("cancel", insp_tr(app, "btn.cancel", "Cancel")),
+    ];
+    (insp_tr(app, "w6.view.modal.power_and_sample_size", "Power & Sample Size"), None, Some(pw.stage.label().to_owned()), tabs, controls, btns)
 }
 
 fn build_format_points_nodes(app: &UiApp, graph_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -889,7 +894,7 @@ fn build_format_points_nodes(app: &UiApp, graph_id: &SheetId, bx: f64, by: f64, 
         node("format_points.clear", "checkbox", "Clear overrides", json!(fp.clear_overrides), ControlEnablement::enabled(), pos(5)),
     ];
     (
-        "Format Selected Points...",
+        insp_tr(app, "cmd.graph.formatSelectedPoints", "Format Selected Points"),
         Some(graph_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -1032,7 +1037,7 @@ fn build_analyze_dialog_nodes(
     }
     push_r9_analyze_controls(st, doc, source_sheet_id, &mut controls, &pos);
     (
-        "Analyze...",
+        insp_tr(app, "w6.view.modal.analyze_data", "Analyze Data"),
         Some(source_sheet_id.as_str().to_owned()),
         st.extracted_result_tab_id.clone(),
         Vec::new(),
@@ -1134,8 +1139,9 @@ fn push_r9_analyze_controls(
         json!(st.km_gehan_breslow_wilcoxon),
         ControlEnablement::enabled(),
     );
-    push("analyze.km.trend_test", "checkbox", "Log-rank trend test", json!(st.km_trend_test), ControlEnablement::enabled());
-    push("analyze.km.log_rank_for_trend", "checkbox", "Log-rank test for trend", json!(st.km_trend_test), ControlEnablement::enabled());
+    let km_trend_gate = r_km_trend_test(survival_group_count(doc, Some(source_sheet_id), st.mv_group_column));
+    push("analyze.km.trend_test", "checkbox", "Log-rank trend test", json!(st.km_trend_test), km_trend_gate.clone());
+    push("analyze.km.log_rank_for_trend", "checkbox", "Log-rank test for trend", json!(st.km_trend_test), km_trend_gate);
     push(
         "analyze.km.multiplicity_method",
         "combobox",
@@ -1495,29 +1501,36 @@ fn build_edit_params_dialog_nodes(
             _ => {}
         }
     }
-    push_r9_edit_params_controls(ep, &mut controls, &pos);
+    push_r9_edit_params_controls(app, doc, &mut controls, &pos);
 
     (
-        "Edit Analysis Parameters (Cmd+T)",
+        insp_tr(app, "w6.view.modal.edit_analysis_params", "Edit Analysis Parameters"),
         Some(result_sheet_id.as_str().to_owned()),
         Some(ep.active_tab.clone()),
         tabs,
         controls,
-        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("apply", "Apply"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+        vec![("ok", insp_tr(app, "btn.ok", "OK")), ("apply", insp_tr(app, "btn.apply", "Apply")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
 fn push_r9_edit_params_controls(
-    ep: &crate::dialogs_canvas::EditAnalysisParametersState,
+    app: &UiApp,
+    doc: &ProjectDocument,
     controls: &mut Vec<UiWidgetNode>,
     pos: &impl Fn(usize) -> Option<[f64; 4]>,
 ) {
+    let ep = &app.canvas_dialogs.edit_params;
     let Some(spec) = ep.draft.as_ref() else {
         return;
     };
     let mut row = controls.len() + 2;
     let mut push = |id: &str, role: &str, label: &str, value: Value| {
-        controls.push(node(id, role, label, value, ControlEnablement::enabled(), pos(row)));
+        let gate = if matches!(id, "edit.km.trend_test" | "edit.km.log_rank_for_trend") {
+            evaluate_dialog_widget(&app.canvas_dialogs, doc, id)
+        } else {
+            ControlEnablement::enabled()
+        };
+        controls.push(node(id, role, label, value, gate, pos(row)));
         row += 1;
     };
     match &spec.kind {
@@ -1686,7 +1699,7 @@ fn build_import_reshape_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: boo
         node("import.replicate_col", "textbox", "Replicate column", json!(st.replicate_col), ControlEnablement::enabled(), pos(10)),
     ];
     (
-        "Import Reshape (Plate Map / Tidy Long)",
+        insp_tr(app, "w6.view.modal.import_reshape", "Import Reshape"),
         None,
         None,
         Vec::new(),
@@ -1710,7 +1723,7 @@ fn build_convert_archetype_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f
         node("convert.preview_warnings", "label", "Preview warnings", json!(st.preview_warnings), ControlEnablement::enabled(), pos(8)),
     ];
     (
-        "Convert Table Archetype...",
+        insp_tr(app, "cmd.table.convertArchetype", "Convert Table Archetype"),
         Some(sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -1728,7 +1741,7 @@ fn build_change_graph_type_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64,
         node("graph_type.error_bar_metric", "combobox", "Error bar metric", json!(st.error_bar_metric), ControlEnablement::enabled(), pos(2)),
     ];
     (
-        "Change Graph Type",
+        insp_tr(app, "cmd.graph.setKind", "Change Graph Type"),
         Some(graph_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -1929,7 +1942,7 @@ fn build_bubble_plot_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f
         node("bubble.available_columns", "readonly", "Available columns", json!(avail), ControlEnablement::enabled(), pos(11)),
     ];
     (
-        "Bubble Plot Channels",
+        insp_tr(app, "w6.view.modal.bubble_plot_channels", "Bubble Plot Channels"),
         Some(graph_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -1991,7 +2004,7 @@ fn build_page_layout_nodes(app: &UiApp, layout_sheet_id: &SheetId, bx: f64, by: 
         node("layout.item_count", "readonly", "Placed items", json!(st.items.len()), ControlEnablement::enabled(), pos(6)),
     ];
     (
-        "Page Layout Composer",
+        insp_tr(app, "w6.view.modal.page_layout_composer", "Page Layout Composer"),
         Some(layout_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -2010,7 +2023,7 @@ fn build_export_figure_nodes(app: &UiApp, sheet_id: &SheetId, bx: f64, by: f64, 
         node("export.dpi", "spinbutton", "DPI", json!(st.dpi), ControlEnablement::enabled(), pos(3)),
     ];
     (
-        "Export Publication Figure",
+        insp_tr(app, "w6.view.modal.export_publication_figure", "Export Publication Figure"),
         Some(sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -2039,7 +2052,14 @@ fn build_randomize_groups_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: b
             pos(6),
         ),
     ];
-    ("Randomize Groups...", None, None, Vec::new(), controls, vec![("ok", "Generate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))])
+    (
+        insp_tr(app, "w6.view.modal.randomize_groups", "Randomize Groups"),
+        None,
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "Generate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_random_sample_rows_nodes(app: &UiApp, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2068,7 +2088,7 @@ fn build_random_sample_rows_nodes(app: &UiApp, bx: f64, by: f64, include_bounds:
         node("sample.title", "textbox", "Sample sheet title", json!(st.title), ControlEnablement::enabled(), pos(5)),
     ];
     (
-        "Random Sample Rows...",
+        insp_tr(app, "cmd.table.randomSampleRows", "Random Sample Rows"),
         st.source_sheet_id.as_ref().map(|id| id.as_str().to_owned()),
         None,
         Vec::new(),
@@ -2104,7 +2124,14 @@ fn build_simulate_distributions_nodes(app: &UiApp, bx: f64, by: f64, include_bou
         node("simulate.column_name", "textbox", "Primary column name", json!(first.map(|c| c.name.as_str())), ControlEnablement::enabled(), pos(5)),
         node("simulate.columns", "readonly", "Configured columns", json!(st.columns.len()), ControlEnablement::enabled(), pos(6)),
     ];
-    ("Simulate Distributions...", None, None, Vec::new(), controls, vec![("ok", "Simulate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))])
+    (
+        insp_tr(app, "cmd.table.simulateDistributions", "Simulate Distributions"),
+        None,
+        None,
+        Vec::new(),
+        controls,
+        vec![("ok", "Simulate"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+    )
 }
 
 fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: f64, by: f64, include_bounds: bool) -> DialogBuildParts {
@@ -2134,12 +2161,12 @@ fn build_insert_model_equation_nodes(app: &UiApp, graph_sheet_id: &SheetId, bx: 
         node("equation.update_existing", "checkbox", "Update existing equation", json!(st.update_existing), ControlEnablement::enabled(), pos(6)),
     ];
     (
-        "Insert Model Equation",
+        insp_tr(app, "w6.view.modal.insert_model_equation", "Insert Model Equation"),
         Some(graph_sheet_id.as_str().to_owned()),
         None,
         Vec::new(),
         controls,
-        vec![("ok", "Insert"), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
+        vec![("ok", insp_tr(app, "w6.view.btn.insert", "Insert")), ("cancel", insp_tr(app, "btn.cancel", "Cancel"))],
     )
 }
 
@@ -2175,7 +2202,7 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
     let (title, target) = match dialog {
         ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } => {
             controls.push(node("duplicate.choice", "combobox", "Duplicate handling", json!("create_new"), ControlEnablement::enabled(), pos(0)));
-            ("Analysis Already Exists", Some(source_sheet_id))
+            (insp_tr(app, "w6.view.modal.analysis_already_exists", "Analysis Already Exists"), Some(source_sheet_id))
         }
         ActiveDialog::ChangeDataAnalyzed { result_sheet_id } => {
             let st = &app.canvas_dialogs.change_data;
@@ -2197,7 +2224,7 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
             ));
             (insp_tr(app, "btn.change_data_analyzed", "Change Data Analyzed"), Some(result_sheet_id))
         }
-        ActiveDialog::ResultViewer { result_sheet_id } => ("Result Sheet Viewer", Some(result_sheet_id)),
+        ActiveDialog::ResultViewer { result_sheet_id } => (insp_tr(app, "w6.view.modal.result_viewer", "Result Viewer"), Some(result_sheet_id)),
         ActiveDialog::ConstantHookPicker { target_sheet_id } => {
             let st = &app.canvas_dialogs.hook_picker;
             controls.push(node(
@@ -2216,32 +2243,40 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
                 ControlEnablement::enabled(),
                 pos(1),
             ));
-            ("Insert Hooked Constant", Some(target_sheet_id))
+            (insp_tr(app, "w6.view.modal.hook_constant", "Hook Constant"), Some(target_sheet_id))
         }
-        ActiveDialog::ChangeGraphType { graph_sheet_id } => ("Change Graph Type", Some(graph_sheet_id)),
+        ActiveDialog::ChangeGraphType { graph_sheet_id } => (insp_tr(app, "cmd.graph.setKind", "Change Graph Type"), Some(graph_sheet_id)),
         ActiveDialog::FormatGraph { graph_sheet_id } => (insp_tr(app, "inspector.format_graph", "Format Graph"), Some(graph_sheet_id)),
         ActiveDialog::FormatAxes { sheet_id } => (insp_tr(app, "inspector.format_axes", "Format Axes"), Some(sheet_id)),
         ActiveDialog::PairwiseComparisons { graph_sheet_id } => {
             (insp_tr(app, "inspector.pairwise_comparisons", "Pairwise Comparisons"), Some(graph_sheet_id))
         }
-        ActiveDialog::BubblePlotInspector { graph_sheet_id } => ("Bubble Plot Channels", Some(graph_sheet_id)),
+        ActiveDialog::BubblePlotInspector { graph_sheet_id } => {
+            (insp_tr(app, "w6.view.modal.bubble_plot_channels", "Bubble Plot Channels"), Some(graph_sheet_id))
+        }
         ActiveDialog::ApplyStyleFrom { target_graph_id } => {
             (insp_tr(app, "cmd.ui.applyStyleFrom.open", "Apply Style From..."), Some(target_graph_id))
         }
-        ActiveDialog::PageLayoutComposer { layout_sheet_id } => ("Page Layout Composer", Some(layout_sheet_id)),
-        ActiveDialog::ExportFigure { sheet_id } => ("Export Publication Figure", Some(sheet_id)),
-        ActiveDialog::ConvertArchetype { sheet_id } => ("Convert Table Archetype...", Some(sheet_id)),
-        ActiveDialog::ImportReshape => ("Import Reshape (Plate Map / Tidy Long)", None),
+        ActiveDialog::PageLayoutComposer { layout_sheet_id } => {
+            (insp_tr(app, "w6.view.modal.page_layout_composer", "Page Layout Composer"), Some(layout_sheet_id))
+        }
+        ActiveDialog::ExportFigure { sheet_id } => {
+            (insp_tr(app, "w6.view.modal.export_publication_figure", "Export Publication Figure"), Some(sheet_id))
+        }
+        ActiveDialog::ConvertArchetype { sheet_id } => (insp_tr(app, "cmd.table.convertArchetype", "Convert Table Archetype"), Some(sheet_id)),
+        ActiveDialog::ImportReshape => (insp_tr(app, "w6.view.modal.import_reshape", "Import Reshape"), None),
         ActiveDialog::ExcludeWithReason { sheet_id } => {
             let st = &app.canvas_dialogs.exclude_with_reason;
             controls.push(node("exclude.reason_tag", "combobox", "Exclusion Reason", json!(st.reason_tag), ControlEnablement::enabled(), pos(0)));
             controls.push(node("exclude.note", "textbox", "Audit Note", json!(st.note), ControlEnablement::enabled(), pos(1)));
-            ("Exclude Selection with Reason", Some(sheet_id))
+            (insp_tr(app, "w6.view.modal.exclude_with_reason", "Exclude with Reason"), Some(sheet_id))
         }
-        ActiveDialog::RandomizeGroups => ("Randomize Groups...", None),
-        ActiveDialog::RandomSampleRows { .. } => ("Random Sample Rows...", None),
-        ActiveDialog::SimulateDistributions => ("Simulate Distributions...", None),
-        ActiveDialog::InsertModelEquation { graph_sheet_id } => ("Insert Model Equation", Some(graph_sheet_id)),
+        ActiveDialog::RandomizeGroups => (insp_tr(app, "w6.view.modal.randomize_groups", "Randomize Groups"), None),
+        ActiveDialog::RandomSampleRows { .. } => (insp_tr(app, "cmd.table.randomSampleRows", "Random Sample Rows"), None),
+        ActiveDialog::SimulateDistributions => (insp_tr(app, "cmd.table.simulateDistributions", "Simulate Distributions"), None),
+        ActiveDialog::InsertModelEquation { graph_sheet_id } => {
+            (insp_tr(app, "w6.view.modal.insert_model_equation", "Insert Model Equation"), Some(graph_sheet_id))
+        }
         ActiveDialog::Print { sheet_id } => (insp_tr(app, "toolbar.print", "Print"), sheet_id.as_ref()),
         ActiveDialog::CommandPalette => {
             let st = &app.canvas_dialogs.command_palette;

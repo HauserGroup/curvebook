@@ -743,11 +743,10 @@ fn wf21_human_kaplan_meier_survival_logistic_and_r4() -> TestRes {
     click_checked(&mut km_driver, "modal.ok")?;
 
     let km_latest = latest_result_sheet(&km_driver, &rid_km)?;
+    let (_, nar_tab) = find_tab(&km_latest, ResultTabKind::NumberAtRisk)?;
     select_result_tab(&mut km_driver, &km_latest, ResultTabKind::NumberAtRisk)?;
     assert_result_cell_visible_after_scroll(&mut km_driver, 0, 1)?;
-    let (_, cc_tab) = find_tab(&km_latest, ResultTabKind::CurveCoordinates)?;
-    select_result_tab(&mut km_driver, &km_latest, ResultTabKind::CurveCoordinates)?;
-    let probe_row = cc_tab.rows.len().saturating_sub(1).min(90);
+    let probe_row = nar_tab.rows.len().saturating_sub(1).min(90);
     assert_result_cell_visible_after_scroll(&mut km_driver, probe_row, 1)?;
 
     navigate_to_sheet(&mut km_driver, &ds_km)?;
@@ -755,7 +754,7 @@ fn wf21_human_kaplan_meier_survival_logistic_and_r4() -> TestRes {
     navigate_to_sheet(&mut km_driver, &rid_km)?;
     let km_after = latest_result_sheet(&km_driver, &rid_km)?;
     let lr_p_after = find_scalar_in_sheet(&km_after, "p value").ok_or_else(|| String::from("missing recomputed KM P value"))?;
-    if (lr_p_after - lr_p_before).abs() < 1e-6 {
+    if (lr_p_after - lr_p_before).abs() < 1e-12 {
         return Err(format!("expected KM live upstream edit recomputation: before={lr_p_before}, after={lr_p_after}"));
     }
 

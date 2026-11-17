@@ -555,10 +555,13 @@ fn wf26_human_bubble_volcano_heatmap_and_r7_to_r10() -> Result<(), String> {
         return Err(String::from("unexpected missing result sheet"));
     }
 
-    // 5. Proposed R10 human-path PCR blocker (pending r10-w6-integ wiring in ANALYSIS_CATALOG & AnalyzeSheet/StatParams):
-    // Select stats.pcr in Analyze Picker and verify predictor leakage R10 outcome selection.
-    let _pcr_id = run_analyze_picker(&mut driver, &mv_id, "stats.pcr")?;
+    // 5. Select stats.pcr in Analyze Picker and verify predictor leakage R10 outcome selection in EditAnalysisParameters.
+    let pcr_id = run_analyze_picker(&mut driver, &mv_id, "stats.pcr")?;
+    select_nav_sheet(&mut driver, &pcr_id)?;
+    let _ = click_widget_center(&mut driver, &wid("toolbar.parameters"))?;
+    click_modal_control(&mut driver, "scroll.modal.stat_params", "edit.pca.pred.4")?;
     click_modal_control(&mut driver, "scroll.modal.stat_params", "edit.pcr.outcome.4")?;
+    let _ = click_widget_center(&mut driver, &wid("modal.ok"))?;
 
     assert_parity_clean(&mut driver, "wf26 final state")?;
     let _ = assert_zero_shortcut_compliance(&mut driver)?;

@@ -492,6 +492,9 @@ fn wf38_human_kmeans_clustering_silhouette_elbow_and_scatter() -> TestRes {
 
     // Configure MV cluster scatter with categorical colors, convex hulls & confidence ellipses via BubblePlotInspector.
     select_sheet_in_nav(&mut driver, &graph_id)?;
+    if matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::ChangeGraphType { .. }) {
+        let _ = press_key_combo(&mut driver, "Escape", KeyModifiers::default())?;
+    }
     let _ = open_menu_and_click(&mut driver, "menu.graph", "menu.ui.graph.bubblePlot.open")?;
     ensure(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::BubblePlotInspector { .. }), "BubblePlotInspector did not open")?;
     cycle_dialog_control_until(&mut driver, "bubble.plot_mode", 4, |app| {

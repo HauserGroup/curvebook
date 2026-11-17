@@ -85,7 +85,8 @@ impl Default for PowerWizardViewState {
 }
 
 fn wiz_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    crate::i18n::try_tr(locale, key).or_else(|| crate::i18n::try_tr_in_slices(&[w5_i18n::ENTRIES], locale, key)).unwrap_or(fallback)
+    let norm = crate::i18n::normalize_locale(locale);
+    crate::i18n::try_tr(norm, key).or_else(|| crate::i18n::try_tr_in_slices(&[w5_i18n::ENTRIES], norm, key)).unwrap_or(fallback)
 }
 
 fn custom_action(payload: impl Into<String>) -> WidgetAction {
@@ -1532,6 +1533,7 @@ fn format_derived_effect_summary(pw: &PowerWizardState, vs: &PowerWizardViewStat
 
 fn build_stage3_significance(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: LayoutRectPx) {
     let s = builder.scale();
+    let locale = &builder.app.locale;
     let pw = &builder.app.canvas_dialogs.power_wizard;
     let vs = &builder.app.view_shards.power_wizard;
     let hdr_h = scaled(18.0, s);
@@ -1539,7 +1541,12 @@ fn build_stage3_significance(builder: &mut LayoutBuilder<'_>, parent: &WidgetId,
     let gap = scaled(6.0, s);
     let mut y = rect.y;
 
-    paint_section_heading(builder, parent, LayoutRectPx::new(rect.x, y, rect.width, hdr_h), "Hypothesis Tail Mode");
+    paint_section_heading(
+        builder,
+        parent,
+        LayoutRectPx::new(rect.x, y, rect.width, hdr_h),
+        wiz_tr(locale, "w6.view.pw.hypothesis_tail_mode", "Hypothesis Tail Mode"),
+    );
     y += i32::try_from(hdr_h + 4).unwrap_or(22);
 
     let half_w = (rect.width.saturating_sub(gap)) / 2;
@@ -1550,7 +1557,7 @@ fn build_stage3_significance(builder: &mut LayoutBuilder<'_>, parent: &WidgetId,
             parent: Some(parent.clone()),
             z_layer: ZLayer::ModalDialog,
             rect: LayoutRectPx::new(rect.x, y, half_w, row_h),
-            label: "Two-Tailed Test",
+            label: wiz_tr(locale, "w6.view.pw.two_tailed", "Two-Tailed Test"),
             keyboard_path: "power.two_tailed",
             focus_scope: FocusScope::ModalDialog,
             tab_order: Some(20),
@@ -1569,7 +1576,7 @@ fn build_stage3_significance(builder: &mut LayoutBuilder<'_>, parent: &WidgetId,
             parent: Some(parent.clone()),
             z_layer: ZLayer::ModalDialog,
             rect: LayoutRectPx::new(rect.x + i32::try_from(half_w + gap).unwrap_or(100), y, half_w, row_h),
-            label: "One-Sided Test",
+            label: wiz_tr(locale, "w6.view.pw.one_sided", "One-Sided Test"),
             keyboard_path: "power.one_sided",
             focus_scope: FocusScope::ModalDialog,
             tab_order: Some(21),
@@ -2122,7 +2129,7 @@ fn paint_plot_labels(
             z_layer: ZLayer::ModalDialog,
             rect: LayoutRectPx::new(rect.x + 4, rect.y + 2, y_title_w, top_h),
             pad_x: 1,
-            text: "Power",
+            text: wiz_tr(locale, "w6.view.pw.power", "Power"),
             style: &UiTextStyle::ui_bold(sz_tick),
             color: builder.palette.muted,
             scroll_container: None,
@@ -2224,7 +2231,7 @@ fn paint_plot_labels(
                 z_layer: ZLayer::ModalDialog,
                 rect: LayoutRectPx::new(plot_box.x, x_title_y, plot_box.width, x_title_h),
                 pad_x: 4,
-                text: "Sample Size (N per group)",
+                text: wiz_tr(locale, "w6.view.pw.sample_size_axis", "Sample Size (N per group)"),
                 style: &UiTextStyle::ui_sans(sz_tick),
                 color: builder.palette.muted,
                 scroll_container: None,
@@ -2299,7 +2306,12 @@ fn build_sensitivity_table(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, r
         parent: Some(parent.clone()),
         z_layer: ZLayer::ModalDialog,
         rect_px: body_rect,
-        a11y: labeled_meta(WidgetRole::Dialog, "Sensitivity Table", FocusScope::ModalDialog, "ArrowUp/Down"),
+        a11y: labeled_meta(
+            WidgetRole::Dialog,
+            wiz_tr(&builder.app.locale, "w6.view.pw.sensitivity_table", "Sensitivity Table"),
+            FocusScope::ModalDialog,
+            "ArrowUp/Down",
+        ),
         state: WidgetVisualState::default(),
         action: WidgetAction::NoOp,
     });

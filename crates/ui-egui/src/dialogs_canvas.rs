@@ -1499,6 +1499,9 @@ impl AnalyzeDialogState {
             AnalysisKind::Survival(surv) => self.populate_survival_kind(surv, response_col, &predictor_cols),
             AnalysisKind::FactorialAnova(fac) => {
                 fac.three_way = self.factorial_three_way;
+                if fac.three_way {
+                    fac.max_interaction_order = fac.max_interaction_order.max(3);
+                }
                 fac.repeated_measures = self.factorial_repeated_measures;
                 fac.residual_covariance = self.factorial_residual_covariance;
                 fac.ss_type = self.factorial_ss_type;
@@ -2705,6 +2708,11 @@ impl EditAnalysisParametersState {
             }
             ("three_way" | "edit.factorial.three_way", AnalysisKind::FactorialAnova(f)) => {
                 f.three_way = val.as_bool().ok_or_else(|| String::from("`three_way` must be boolean"))?;
+                if f.three_way {
+                    f.max_interaction_order = f.max_interaction_order.max(3);
+                } else {
+                    f.max_interaction_order = f.max_interaction_order.min(2);
+                }
                 true
             }
             ("repeated_measures" | "edit.factorial.repeated_measures", AnalysisKind::FactorialAnova(f)) => {

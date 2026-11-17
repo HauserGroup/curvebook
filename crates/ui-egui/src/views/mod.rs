@@ -305,7 +305,12 @@ fn build_center_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
             parent: None,
             z_layer: ZLayer::SplitHandle,
             rect_px: d_rect,
-            a11y: labeled_meta(WidgetRole::Splitter, "Split Pane Divider", FocusScope::Workspace, "Cmd+Shift+\\"),
+            a11y: labeled_meta(
+                WidgetRole::Splitter,
+                crate::i18n::try_tr(crate::i18n::normalize_locale(&builder.tree.locale), "w6.view.split_divider").unwrap_or("Split Pane Divider"),
+                FocusScope::Workspace,
+                "Cmd+Shift+\\",
+            ),
             state: widget_state(builder, "split.divider", ControlEnablement::enabled()),
             action: WidgetAction::SwapSplitPanes,
         });
@@ -367,7 +372,12 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
         parent: None,
         z_layer: ZLayer::ModalBackdrop,
         rect_px: full_rect,
-        a11y: labeled_meta(WidgetRole::Dialog, "Modal Backdrop", FocusScope::ModalDialog, "Escape"),
+        a11y: labeled_meta(
+            WidgetRole::Dialog,
+            crate::i18n::try_tr(crate::i18n::normalize_locale(&builder.tree.locale), "w6.view.modal_backdrop").unwrap_or("Modal Backdrop"),
+            FocusScope::ModalDialog,
+            "Escape",
+        ),
         state: Default::default(),
         action: WidgetAction::NoOp,
     });
@@ -497,7 +507,7 @@ fn build_modal_dialog_slot(builder: &mut LayoutBuilder<'_>, full_rect: LayoutRec
         let norm_loc = crate::i18n::normalize_locale(&builder.tree.locale);
         let cancel_lbl = crate::i18n::try_tr(norm_loc, "btn.cancel").unwrap_or("Cancel");
         let ok_lbl = if matches!(builder.app.canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize) {
-            "Create"
+            crate::i18n::try_tr(norm_loc, "w6.view.btn.create").unwrap_or("Create")
         } else {
             crate::i18n::try_tr(norm_loc, "btn.ok").unwrap_or("OK")
         };

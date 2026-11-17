@@ -2179,19 +2179,19 @@ fn build_source_tab(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, rect: La
                 },
                 SegmentedItem {
                     id: "import_paste.source.clipboard",
-                    label: "Clipboard",
+                    label: tr_or_default(locale, "w6.view.import.clipboard", "Clipboard"),
                     payload: "source:clipboard",
                     selected: state.source_origin == "clipboard",
                 },
                 SegmentedItem {
                     id: "import_paste.source.csv",
-                    label: "CSV / Text",
+                    label: tr_or_default(locale, "w6.view.import.csv_text", "CSV / Text"),
                     payload: "source:external_csv",
                     selected: state.source_origin == "external_csv",
                 },
                 SegmentedItem {
                     id: "import_paste.source.internal",
-                    label: "Sheet Link",
+                    label: tr_or_default(locale, "w6.view.import.sheet_link", "Sheet Link"),
                     payload: "source:internal_sheet",
                     selected: state.source_origin == "internal_sheet",
                 },

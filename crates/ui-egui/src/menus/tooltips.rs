@@ -130,6 +130,7 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.graph.bubblePlot.open" => ("menu.graph", "Graph/Bubble Plot Channels..."),
         "ui.graph.format.open" => ("menu.graph", "Format/Format Graph..."),
         "ui.graph.pairwise.open" => ("menu.graph", "Format/Pairwise Comparison Brackets..."),
+        "ui.applyStyleFrom.open" => ("menu.graph", "Graph/Apply Style From..."),
         "ui.layout.composer.open" => ("menu.graph", "Layout/Page Layout Composer..."),
         "ui.changeGraphType.open" => ("menu.graph", "Graph/Change Graph Type..."),
         "ui.canvas.applyPreset" => ("menu.graph", "Graph/Apply Canvas Preset"),
@@ -167,7 +168,8 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
         | "ui.graph.insertModelEquation"
         | "ui.graph.bubblePlot.open"
         | "ui.graph.format.open"
-        | "ui.graph.pairwise.open" => !doc.graph_sheets.is_empty(),
+        | "ui.graph.pairwise.open"
+        | "ui.applyStyleFrom.open" => !doc.graph_sheets.is_empty(),
         "ui.result.copyMethodsReport" | "ui.result.applyRemediation" | "ui.result.inspectDiagnostics" => !doc.result_sheets.is_empty(),
         "ui.result.appendClusterColumn" => doc
             .result_sheets
@@ -310,7 +312,7 @@ mod tests {
         let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
         assert!(frame.len() > 8);
 
-        // Menu bar covers all 97 engine + 45 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 97 engine + 46 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -322,7 +324,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 142);
+        assert_eq!(seen.len(), 143);
         Ok(())
     }
 }

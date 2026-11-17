@@ -440,6 +440,7 @@ impl CurveBookNativeApp {
         if win.app().presentation_mode {
             return;
         }
+        let win_locale = win.app().locale.clone();
         let chrome: DesktopMenuChromeState = win.chrome_state();
         if !chrome.menu_bar_visible || chrome.sections.is_empty() {
             if let Some(err) = self.status_banner.clone() {
@@ -471,7 +472,7 @@ impl CurveBookNativeApp {
                     });
                 }
                 if !window_entries.is_empty() {
-                    ui.menu_button("Window", |ui| {
+                    ui.menu_button(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.window_menu"), |ui| {
                         for (id, title) in &window_entries {
                             let label = if *id == window_id { format!("✓ Window {}: {title}", id.0) } else { format!("Window {}: {title}", id.0) };
                             if ui.button(label).clicked() {
@@ -524,6 +525,7 @@ impl CurveBookNativeApp {
     }
 
     fn try_handle_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Option<Result<(), String>> {
+        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
         let res = match command_id {
             "project.open" | "file.open" => self.handle_native_open(window_id),
             "file.open_unpacked_dir" => self.handle_native_open_folder(window_id),
@@ -531,9 +533,24 @@ impl CurveBookNativeApp {
             "project.saveAs" | "file.save_as" => self.handle_native_save(window_id, true),
             "project.saveTemplate" => self.handle_native_save_template(window_id),
             "project.instantiateTemplate" => self.handle_native_instantiate_template(window_id),
-            "table.importCsv" => self.handle_native_import_file(window_id, "table.importCsv", "Delimited Table", &["csv", "tsv", "txt"]),
-            "table.importPrism" => self.handle_native_import_file(window_id, "table.importPrism", "External Archive", &["prism"]),
-            "table.importPzfx" => self.handle_native_import_file(window_id, "table.importPzfx", "XML Project", &["pzfx"]),
+            "table.importCsv" => self.handle_native_import_file(
+                window_id,
+                "table.importCsv",
+                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_delimited"),
+                &["csv", "tsv", "txt"],
+            ),
+            "table.importPrism" => self.handle_native_import_file(
+                window_id,
+                "table.importPrism",
+                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_archive"),
+                &["prism"],
+            ),
+            "table.importPzfx" => self.handle_native_import_file(
+                window_id,
+                "table.importPzfx",
+                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_xml_project"),
+                &["pzfx"],
+            ),
             _ => {
                 let spec = native_export_spec_for_command(command_id)?;
                 self.handle_native_export(window_id, spec)
@@ -590,8 +607,9 @@ impl CurveBookNativeApp {
     }
 
     fn handle_native_save_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
+        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
         let Some(path) = rfd::FileDialog::new()
-            .add_filter("CurveBook Template", NATIVE_TEMPLATE_FILE_EXTENSIONS)
+            .add_filter(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_template"), NATIVE_TEMPLATE_FILE_EXTENSIONS)
             .set_file_name(DEFAULT_TEMPLATE_FILE_NAME)
             .save_file()
         else {
@@ -604,7 +622,11 @@ impl CurveBookNativeApp {
     }
 
     fn handle_native_instantiate_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter("CurveBook Template", NATIVE_TEMPLATE_FILE_EXTENSIONS).pick_file() else {
+        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
+        let Some(path) = rfd::FileDialog::new()
+            .add_filter(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_template"), NATIVE_TEMPLATE_FILE_EXTENSIONS)
+            .pick_file()
+        else {
             return Ok(());
         };
         let win = self.runtime.window_mut(window_id)?;
@@ -654,12 +676,13 @@ impl CurveBookNativeApp {
         if !self.close_dialog_open {
             return;
         }
+        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
         egui::Modal::new(egui::Id::unique("curvebook_unsaved_close_modal")).show(ctx, |ui| {
-            ui.heading("Unsaved Changes");
-            ui.label("Save changes to this project before closing?");
+            ui.heading(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.unsaved_title"));
+            ui.label(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.unsaved_prompt"));
             ui.add_space(10.0);
             ui.horizontal(|ui| {
-                if ui.button("Save").clicked() {
+                if ui.button(curvebook_ui_egui::tr(&win_locale, "menu.file.save")).clicked() {
                     match self.handle_native_save(window_id, false) {
                         Ok(()) => {
                             let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
@@ -675,13 +698,13 @@ impl CurveBookNativeApp {
                         }
                     }
                 }
-                if ui.button("Don't Save").clicked() {
+                if ui.button(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.dont_save")).clicked() {
                     match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
                         Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
                         Err(err) => self.status_banner = Some(err),
                     }
                 }
-                if ui.button("Cancel").clicked() {
+                if ui.button(curvebook_ui_egui::tr(&win_locale, "btn.cancel")).clicked() {
                     self.close_dialog_open = false;
                 }
             });

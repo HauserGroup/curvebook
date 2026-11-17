@@ -839,7 +839,7 @@ fn wf17_human_dose_response_4pl_5pl_interp_and_heatmap_r7() -> Result<(), Box<dy
 
     // Re-open Cmd+T, switch to 5PL Richards asymmetric curve and confirm convergence.
     human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
-    click(&mut driver, "fit.tab.equation")?;
+    click(&mut driver, "fit.tab.model")?;
     click(&mut driver, "fit.eq.expand_all")?;
     click_inside_scroll(&mut driver, "fit.eq.tree.scroll", "fit.eq.item.log_agonist_vs_response_5pl")?;
     click(&mut driver, "modal.ok")?;
@@ -847,7 +847,7 @@ fn wf17_human_dose_response_4pl_5pl_interp_and_heatmap_r7() -> Result<(), Box<dy
 
     // Switch back to 4PL so LogEC50 stays well-conditioned for live edit check, and render XY scatter graph.
     human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
-    click(&mut driver, "fit.tab.equation")?;
+    click(&mut driver, "fit.tab.model")?;
     click(&mut driver, "fit.eq.expand_all")?;
     click_inside_scroll(&mut driver, "fit.eq.tree.scroll", "fit.eq.item.log_agonist_vs_response_4pl")?;
     click(&mut driver, "modal.ok")?;

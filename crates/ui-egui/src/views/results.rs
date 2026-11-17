@@ -71,7 +71,8 @@ impl ResultsViewState {
 }
 
 fn tr_res(locale: &str, key: &str, fallback: &'static str) -> &'static str {
-    crate::i18n::try_tr(locale, key).unwrap_or(fallback)
+    let norm = crate::i18n::normalize_locale(locale);
+    crate::i18n::try_tr(norm, key).or_else(|| crate::i18n::try_tr("en", key)).unwrap_or(fallback)
 }
 
 /// Dispatch custom `WidgetAction::Custom` events targeting the `results` domain.
@@ -870,9 +871,9 @@ fn compute_body_split(body_rect: LayoutRectPx, drawer_open: bool, is_rtl: bool, 
     }
 }
 
-fn tab_kind_badge(kind: ResultTabKind) -> &'static str {
+fn tab_kind_badge(kind: ResultTabKind, locale: &str) -> &'static str {
     match kind {
-        ResultTabKind::MainSummary => "Summary",
+        ResultTabKind::MainSummary => tr_res(locale, "w6.view.results.summary_badge", "Summary"),
         ResultTabKind::AnovaTable => "ANOVA",
         ResultTabKind::MultipleComparisons => "Multiple Comparisons",
         ResultTabKind::ParametersAndConfidenceIntervals => "Parameters & CI",
@@ -882,7 +883,7 @@ fn tab_kind_badge(kind: ResultTabKind) -> &'static str {
         ResultTabKind::InterpolatedUnknowns => "Interpolated",
         ResultTabKind::CurveCoordinates => "Curve Points",
         ResultTabKind::NumberAtRisk => "At Risk",
-        ResultTabKind::Diagnostics => "Diagnostics",
+        ResultTabKind::Diagnostics => tr_res(locale, "w6.view.results.diagnostics", "Diagnostics"),
         ResultTabKind::CovarianceMatrix => "Covariance",
         ResultTabKind::NormalQq => "Normal Q-Q",
         ResultTabKind::BaselineSurvival => "Baseline Survival",
@@ -899,7 +900,7 @@ fn build_table_section_bar(
     pfx: &str,
 ) {
     let num_cols = tab_column_count(tab);
-    let badge = tab_kind_badge(tab.kind);
+    let badge = tab_kind_badge(tab.kind, &builder.tree.locale);
     let summary = format!("[{badge}] {} ({} x {})", tab.title, tab.rows.len(), num_cols);
     let sel_info = builder.app.view_shards.results.selection_bounds(rs.id.as_str(), active_tab_idx).map(|(r0, r1, c0, c1)| {
         if r0 == r1 && c0 == c1 { format!("Sel R{}C{}", r0 + 1, c0 + 1) } else { format!("Sel R{}-{} C{}-{}", r0 + 1, r1 + 1, c0 + 1, c1 + 1) }
@@ -1412,7 +1413,7 @@ fn emit_table_cells_and_footnotes(
 fn build_empty_or_failed_body(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, area: LayoutRectPx, pfx: &str) {
     let msg = match &rs.status {
         ResultStatus::Failed { code, message } => format!("Analysis failed ({}): {message}", code.as_str()),
-        ResultStatus::Dirty => String::from("Analysis pending recalculation."),
+        ResultStatus::Dirty => String::from(tr_res(&builder.tree.locale, "w6.view.results.status_pending", "Status: Recalculation pending")),
         ResultStatus::UpToDate => String::from("No tabular output generated for this result sheet."),
     };
     let wid = builder.push_node(NodeSpec {
@@ -1451,7 +1452,11 @@ fn build_interpret_drawer(builder: &mut LayoutBuilder<'_>, rs: &ResultSheet, dra
         parent: None,
         z_layer: ZLayer::Workspace,
         rect_px: drawer_rect,
-        a11y: AccessibilityMeta::new(WidgetRole::Label, String::from("Interpret and Assumption Checklist"), FocusScope::Workspace),
+        a11y: AccessibilityMeta::new(
+            WidgetRole::Label,
+            String::from(tr_res(&builder.app.locale, "w6.view.results.interpret_checklist", "Interpret and Assumption Checklist")),
+            FocusScope::Workspace,
+        ),
         state: WidgetVisualState::default(),
         action: WidgetAction::NoOp,
     });

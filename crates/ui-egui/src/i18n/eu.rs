@@ -10,10 +10,7 @@
 use super::CatalogEntry;
 
 /// Live European localization entries registered into [`super::EXTRA_SHARD_CATALOGS`].
-///
-/// Kept empty until Wave 6 integration promotes [`STAGED_ENTRIES`] and updates the baseline key
-/// count assertion in `i18n.rs`.
-pub const ENTRIES: &[CatalogEntry] = &[];
+pub const ENTRIES: &[CatalogEntry] = STAGED_ENTRIES;
 
 /// Staged Wave 6 `16`-locale UI catalog entries (`w6.view.*`) ready for `r10-w6-integ` mounting.
 pub const STAGED_ENTRIES: &[CatalogEntry] = &[

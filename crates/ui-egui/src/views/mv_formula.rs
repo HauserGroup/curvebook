@@ -449,7 +449,7 @@ const FORMULA_FUNCTIONS: &[FormulaFnSpec] = &[
 ];
 
 fn mv_tr(locale: &str, key: &str, fallback: &'static str) -> &'static str {
-    crate::i18n::try_tr(locale, key).unwrap_or(fallback)
+    crate::i18n::try_tr(crate::i18n::normalize_locale(locale), key).unwrap_or(fallback)
 }
 
 fn custom_action(payload: impl Into<String>) -> WidgetAction {
@@ -1132,7 +1132,7 @@ fn build_legacy_formula_strip(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, s
             parent: None,
             z_layer: ZLayer::Workspace,
             rect: fx_rect,
-            label: "Formula Bar",
+            label: mv_tr(&builder.tree.locale, "w6.view.mv.formula_bar", "Formula Bar"),
             fallback_text: &builder.app.grid.formula_bar.input,
             keyboard_path: "F2",
             focus_scope: FocusScope::Workspace,
@@ -1210,7 +1210,7 @@ fn build_mv_top_toolbar_row(builder: &mut LayoutBuilder<'_>, ds: &DataSheet, she
                 parent: None,
                 z_layer: ZLayer::Workspace,
                 rect: fx_rect,
-                label: "Formula Bar",
+                label: mv_tr(&builder.tree.locale, "w6.view.mv.formula_bar", "Formula Bar"),
                 fallback_text: &builder.app.grid.formula_bar.input,
                 keyboard_path: "F2",
                 focus_scope: FocusScope::Workspace,
@@ -1978,7 +1978,7 @@ fn build_formula_definitions_list(
                 z_layer: ZLayer::FloatingOverlay,
                 rect: LayoutRectPx::new(clip.x, clip.y, clip.width, row_h.saturating_sub(2)),
                 pad_x: 4,
-                text: "No calculated variables defined yet.",
+                text: mv_tr(&builder.tree.locale, "w6.view.mv.no_calc_vars", "No calculated variables defined yet."),
                 style,
                 color: builder.palette.muted,
                 scroll_container: Some(&scroll_id),

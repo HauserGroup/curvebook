@@ -1322,7 +1322,9 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
         return;
     };
     let locale = builder.tree.locale.as_str();
-    let supports_rm = supports_repeated_measures(&spec.kind);
+    let is_mv = resolve_source_sheet(builder.app.document(), spec)
+        .is_some_and(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_)));
+    let supports_rm = supports_repeated_measures(&spec.kind, is_mv);
     let tab2_id = if supports_rm { "repeated_measures" } else { "factor_settings" };
     let tab2_lbl = if supports_rm {
         label_i18n(locale, "stat_params.tab.repeated_measures", "Repeated Measures")
@@ -1426,15 +1428,14 @@ pub fn build_edit_params_modal_body(builder: &mut LayoutBuilder<'_>, parent: Wid
     render_tab_body(builder, &parent, content_rect, active_tab, spec, &shape);
 }
 
-fn supports_repeated_measures(kind: &AnalysisKind) -> bool {
-    matches!(
-        kind,
-        AnalysisKind::OneWayAnova(_)
-            | AnalysisKind::FactorialAnova(_)
-            | AnalysisKind::TwoGroupComparison(_)
-            | AnalysisKind::MultipleRowTTests(_)
-            | AnalysisKind::NestedComparison(_)
-    )
+fn supports_repeated_measures(kind: &AnalysisKind, source_is_mv: bool) -> bool {
+    match kind {
+        AnalysisKind::FactorialAnova(_) => !source_is_mv,
+        AnalysisKind::OneWayAnova(_) | AnalysisKind::TwoGroupComparison(_) | AnalysisKind::MultipleRowTTests(_) | AnalysisKind::NestedComparison(_) => {
+            true
+        }
+        _ => false,
+    }
 }
 
 fn normalize_active_tab(raw: &str, supports_rm: bool) -> &'static str {
@@ -2191,7 +2192,7 @@ fn collect_experimental_design_items(app: &UiApp, spec: &AnalysisSpec, shape: &T
             push_alpha_spinner(spec, items);
         }
         AnalysisKind::Contingency(c) => collect_contingency_design_items(ep, c, shape, items),
-        AnalysisKind::Survival(s) => collect_survival_design_items(s, shape, items),
+        AnalysisKind::Survival(s) => collect_survival_design_items(app, s, shape, items),
         AnalysisKind::RocCurve(r) => {
             items.push(StatItem::Section(String::from("edit.sec.roc"), String::from("ROC Curve & AUC Method")));
             items.push(StatItem::Toggle {
@@ -2824,7 +2825,7 @@ fn collect_contingency_design_items(ep: &EditAnalysisParametersState, c: &Contin
     }
 }
 
-fn collect_survival_design_items(s: &SurvivalAnalysisSpec, shape: &TableShapeInfo<'_>, items: &mut Vec<StatItem>) {
+fn collect_survival_design_items(app: &UiApp, s: &SurvivalAnalysisSpec, shape: &TableShapeInfo<'_>, items: &mut Vec<StatItem>) {
     match s {
         SurvivalAnalysisSpec::KaplanMeier {
             log_rank_mantel_cox,
@@ -2857,7 +2858,7 @@ fn collect_survival_design_items(s: &SurvivalAnalysisSpec, shape: &TableShapeInf
                 label: String::from("Log-rank test for trend"),
                 checked: *trend_test,
                 is_radio: false,
-                enablement: ControlEnablement::enabled(),
+                enablement: evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.km.trend_test"),
                 action: custom_action("toggle_km_flag:trend"),
             });
             if shape.is_multiple_variables() {

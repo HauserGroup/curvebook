@@ -33,7 +33,6 @@ use human_wf_common::{assert_zero_shortcut_compliance, click_widget_center, defa
 use serde_json::json;
 
 const EU_LOCALES: &[&str] = &["de", "es", "fr", "it", "nl", "pl", "pt-BR", "tr"];
-const COMPETITOR_BRANDS: &[&str] = &["graphpad", "prism", "originpro", "sigmaplot", "minitab", "stata"];
 
 fn locale_idx(locale: &str) -> Result<usize, String> {
     LOCALES.iter().position(|&tag| tag == locale).ok_or_else(|| format!("unknown locale `{locale}` in LOCALES"))
@@ -197,12 +196,10 @@ fn tree_has_exact_english_leak(tree: &LayoutTree, locale: &str, key: &str) -> Op
     if en == localized || is_valid_eu_cognate(key, locale, en) {
         return None;
     }
-    // Note: `welcome.root` container a11y label at views/welcome.rs:984 and `inspector.panel`
-    // header at views/inspector.rs:2771 are logged for r10-w6-integ wiring.
-    if tree.nodes.iter().any(|n| n.drawn_in_frame && !matches!(n.id.as_str(), "welcome.root" | "inspector.panel") && n.a11y.label.trim() == en) {
+    if tree.nodes.iter().any(|n| n.drawn_in_frame && n.a11y.label.trim() == en) {
         return Some(format!("node `{}` a11y.label leaked English `{en}` in `{locale}`", key));
     }
-    if tree.text_runs.iter().any(|r| r.owner_widget_id.as_str() != "inspector.panel" && r.text.trim() == en) {
+    if tree.text_runs.iter().any(|r| r.text.trim() == en) {
         return Some(format!("text_run `{}` leaked exact English `{en}` in `{locale}` (expected `{localized}`)", key));
     }
     None
@@ -323,9 +320,9 @@ fn eu_staged_catalog_completeness_scripts_and_zero_collisions() -> Result<(), St
                 return Err(format!("staged key `{}` has empty/stub `{locale}` translation `{val}`", entry.key));
             }
             let lower = val.to_ascii_lowercase();
-            for brand in COMPETITOR_BRANDS {
-                if lower.contains(brand) {
-                    return Err(format!("staged key `{}` `{locale}` contains unapproved brand `{brand}`", entry.key));
+            for forbidden in ["graphpad", "prism", "originpro", "sigmaplot", "minitab", "stata"] {
+                if lower.contains(forbidden) {
+                    return Err(format!("staged key `{}` `{locale}` contains unapproved brand `{forbidden}`", entry.key));
                 }
             }
             if EU_LOCALES.contains(&locale) && val == en && !is_valid_eu_cognate(entry.key, locale, val) {
@@ -396,9 +393,9 @@ fn eu_existing_catalog_completeness_autonyms_and_terminology_checks() -> Result<
                 return Err(format!("key `{}` `{locale}` has empty/stub `{val}`", entry.key));
             }
             let lower = val.to_ascii_lowercase();
-            for brand in COMPETITOR_BRANDS {
-                if lower.contains(brand) {
-                    return Err(format!("key `{}` `{locale}` contains prohibited brand `{brand}`", entry.key));
+            for forbidden in ["graphpad", "prism", "originpro", "sigmaplot", "minitab", "stata"] {
+                if lower.contains(forbidden) {
+                    return Err(format!("key `{}` `{locale}` contains prohibited brand `{forbidden}`", entry.key));
                 }
             }
             // Spot-check command/navigation/menu/button keys aren't empty or raw English fallbacks when tr() is queried.

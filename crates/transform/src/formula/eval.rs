@@ -3,7 +3,7 @@
 
 use std::cmp::Ordering;
 
-use curvebook_doc::{Cell, CellValue, DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, default_column_label};
+use curvebook_doc::{Cell, CellValue, DataSheet, InfoSheet, MultipleVariablesTable, TableArchetype, VariableRole, default_column_label};
 use curvebook_math::{dist, special, sum};
 
 use crate::error::TransformError;
@@ -166,7 +166,22 @@ impl FormulaContext for TableEvalContext<'_> {
     }
 
     fn resolve_column_index(&self, name: &str) -> Option<usize> {
-        resolve_archetype_column(&self.sheet.archetype, name)
+        resolve_archetype_column(&self.sheet.archetype, name).or_else(|| {
+            if !name.trim().eq_ignore_ascii_case("value") {
+                return None;
+            }
+            match &self.sheet.archetype {
+                TableArchetype::MultipleVariables(mv) => mv
+                    .variables
+                    .iter()
+                    .position(|v| {
+                        matches!(v.role, VariableRole::Continuous | VariableRole::Calculated) && v.cells.iter().any(|c| c.active_number().is_some())
+                    })
+                    .or_else(|| mv.variables.iter().position(|v| v.cells.iter().any(|c| c.active_number().is_some())))
+                    .or_else(|| (!mv.variables.is_empty()).then_some(0)),
+                _ => (self.column_count() > 0).then_some(0),
+            }
+        })
     }
 
     fn column_count(&self) -> usize {

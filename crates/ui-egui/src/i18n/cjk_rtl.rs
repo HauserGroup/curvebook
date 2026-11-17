@@ -13,9 +13,7 @@
 use super::{CatalogEntry, LOCALES, normalize_locale};
 
 /// CJK / RTL localization shard entries registered into [`super::EXTRA_SHARD_CATALOGS`].
-///
-/// Kept empty until `r10-w6-integ` wires [`STAGED_ENTRIES`] and updates `catalog_len()` assertions.
-pub const ENTRIES: &[CatalogEntry] = &[];
+pub const ENTRIES: &[CatalogEntry] = STAGED_ENTRIES;
 
 /// Typed replacement proposal for an existing catalog entry in an off-limits shared catalog file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

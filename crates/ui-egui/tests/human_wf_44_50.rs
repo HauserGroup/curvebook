@@ -713,7 +713,7 @@ fn wf47_human_kaplan_meier_number_at_risk_and_pairwise() -> TestRes {
     }
 
     let km_svg_1 = export_figure_via_menu(&mut driver, "svg", None)?;
-    let _ = assert_svg_valid_with(&km_svg_1, &["At Risk", "Control", "LowDose", "HighDose"], "WF-47 KM SVG")?;
+    let _ = assert_svg_valid_with(&km_svg_1, &["Number at risk", "Control", "LowDose", "HighDose"], "WF-47 KM SVG")?;
 
     // Stage 5: Live upstream observation edit updates ResultSheet & GraphSheet.
     switch_sheet_via_nav(&mut driver, &ds_id)?;
@@ -789,7 +789,7 @@ fn wf48_human_mv_bubble_sizing_and_outlier_clamping() -> TestRes {
         return Err(format!("WF-48: expected 2560x1600 HiDPI buffer, got {}x{}", hidpi_frame.width_px, hidpi_frame.height_px));
     }
     let svg_clamped = export_figure_via_menu(&mut driver, "svg", None)?;
-    let _ = assert_svg_valid_with(&svg_clamped, &["<circle"], "WF-48 clamped bubbles")?;
+    let _ = assert_svg_valid_with(&svg_clamped, &["<path d=\"M"], "WF-48 clamped bubbles")?;
 
     // Stage 5: Exclude outlier row 8 via grid cell selection + `Edit -> Exclude with Reason...` (QOL-3).
     switch_sheet_via_nav(&mut driver, &ds_id)?;

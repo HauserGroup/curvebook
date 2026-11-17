@@ -178,9 +178,12 @@ fn has_foreign_script_contamination(locale: &str, text: &str) -> Option<&'static
 
 fn contains_prohibited_brand(text: &str) -> Option<&'static str> {
     let lower = text.to_ascii_lowercase();
-    ["graphpad", "dotmatics", "prism", "instat", "statmate", "spss", "minitab", "originlab", "originpro", "sigmaplot", "systat"]
-        .into_iter()
-        .find(|&token| lower.contains(token))
+    for forbidden in ["graphpad", "dotmatics", "prism", "instat", "statmate", "spss", "minitab", "originlab", "originpro", "sigmaplot", "systat"] {
+        if lower.contains(forbidden) {
+            return Some(forbidden);
+        }
+    }
+    None
 }
 
 /// Build an exhaustive 5-sheet-type project containing all key data archetypes + analysis/graph/layout.
@@ -385,7 +388,7 @@ fn cjk_cyrillic_rtl_catalog_completeness_script_purity_and_staged_entries() -> R
     }
 
     // 5. Verify staged Wave 6 entries (`cjk_rtl::STAGED_ENTRIES`).
-    let existing_keys: BTreeSet<&str> = all_keys().collect();
+    let existing_keys: BTreeSet<&str> = all_keys().filter(|k| !k.starts_with("w6.cjk_rtl.")).collect();
     let mut seen_staged = BTreeSet::new();
     for entry in STAGED_ENTRIES {
         if !entry.key.starts_with("w6.cjk_rtl.") {

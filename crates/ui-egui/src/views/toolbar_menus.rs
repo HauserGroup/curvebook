@@ -158,7 +158,7 @@ struct ContextMenuItemSpec {
 }
 
 fn tr_with_fallback(locale: &str, key: &'static str, fallback: &'static str) -> &'static str {
-    crate::i18n::try_tr(locale, key).unwrap_or(fallback)
+    crate::i18n::try_tr(crate::i18n::normalize_locale(locale), key).unwrap_or(fallback)
 }
 
 fn active_data_sheet(doc: &ProjectDocument) -> Option<&DataSheet> {
@@ -1877,9 +1877,9 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
     };
     let mut items = section.items;
     if menu_key == "menu.graph" {
-        if !items.iter().any(|it| it.command_id == "ui.applyStyleFrom.open")
-            && let Some(tip) = command_tooltip(builder.app, "ui.applyStyleFrom.open")
-        {
+        let existing_idx = items.iter().position(|it| it.command_id == "ui.applyStyleFrom.open");
+        let tip_opt = existing_idx.map(|idx| items.remove(idx)).or_else(|| command_tooltip(builder.app, "ui.applyStyleFrom.open"));
+        if let Some(tip) = tip_opt {
             let pos = items.iter().position(|it| it.command_id == "graph.applyStyleFrom").unwrap_or(0).min(12);
             items.insert(pos, tip);
         }
@@ -2486,7 +2486,7 @@ pub fn build_status_bar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx
 
         let doc = builder.app.document();
         let ctx = active_toolbar_context(doc);
-        let active_title = active_sheet_title(doc).unwrap_or("Ready");
+        let active_title = active_sheet_title(doc).unwrap_or_else(|| tr_with_fallback(&builder.tree.locale, "w6.view.status.ready", "Ready"));
         let frozen_tag = if active_data_sheet(doc).is_some_and(|ds| ds.frozen) { " [Frozen]" } else { "" };
         let notice_tag = builder.app.view_shards.toolbar_menus.last_toolbar_notice.as_deref().map(|n| format!(" | {n}")).unwrap_or_default();
 

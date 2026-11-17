@@ -3,7 +3,10 @@
 //! Single source of truth consumed by live egui dialog widgets (`.add_enabled` + disabled tooltips),
 //! `ui.inspect` (`ControlNode { enabled, disabled_reason }`), `ui.switch_tab`, and `ui.answer_dialog`.
 
-use curvebook_doc::{AnalysisKind, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, TableArchetype, TwoGroupMethod};
+use curvebook_doc::{
+    AnalysisKind, CellValue, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, SurvivalAnalysisSpec, TableArchetype,
+    TwoGroupMethod, VariableRole,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDialogState, CanvasDialogState, EditAnalysisParametersState, PairwiseComparisonsState};
@@ -229,6 +232,50 @@ pub fn r9_pvalue_precision_spinner(format: &PValueFormat) -> ControlEnablement {
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Custom decimal-digit precision spinner is disabled unless Custom P-value format is selected.")
+    }
+}
+
+/// Count survival cohorts on `Survival` (cohort count) or distinct active levels in the MV grouping column.
+#[must_use]
+pub fn survival_group_count(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>, mv_group_col: Option<usize>) -> usize {
+    let Some(ds) = resolve_data_sheet(doc, source_sheet_id) else {
+        return 2;
+    };
+    match &ds.archetype {
+        TableArchetype::Survival(s) => s.cohorts.len(),
+        TableArchetype::MultipleVariables(mv) => {
+            let col = mv_group_col.or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Categorical));
+            let Some(var) = col.and_then(|c| mv.variables.get(c)) else {
+                return mv.variables.len();
+            };
+            let mut levels = std::collections::BTreeSet::new();
+            for cell in &var.cells {
+                if cell.excluded {
+                    continue;
+                }
+                match &cell.value {
+                    CellValue::Text(s) if !s.trim().is_empty() => {
+                        levels.insert(s.trim().to_owned());
+                    }
+                    CellValue::Number(v) if v.is_finite() => {
+                        levels.insert(format!("{v}"));
+                    }
+                    _ => {}
+                }
+            }
+            levels.len()
+        }
+        other => other.column_count(),
+    }
+}
+
+/// R11: Kaplan-Meier Log-rank test for trend requires >= 3 ordered cohorts/groups.
+#[must_use]
+pub fn r_km_trend_test(survival_groups: usize) -> ControlEnablement {
+    if survival_groups >= 3 {
+        ControlEnablement::enabled()
+    } else {
+        ControlEnablement::disabled(format!("Log-rank test for trend requires 3 or more ordered cohorts (got {survival_groups})."))
     }
 }
 
@@ -647,6 +694,12 @@ fn evaluate_edit_params_widget(
     if norm.contains("subcolumnagg") || norm.contains("replicatesubcolumn") {
         return r8_subcolumn_aggregation(max_sub);
     }
+    if (norm == "editkmtrendtest" || norm == "editkmlogrankfortrend" || norm == "trendtest")
+        && let Some(spec) = &edit.draft
+        && let AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_group_column, .. }) = spec.kind
+    {
+        return r_km_trend_test(survival_group_count(doc, Some(&spec.source_sheet_id), mv_group_column));
+    }
     if (norm.contains("pvaluedigits") || norm.contains("pvaluespinner"))
         && let Some(spec) = &edit.draft
     {
@@ -668,6 +721,9 @@ fn evaluate_analyze_widget(
     }
     if norm == "analyzeassumegaussian" || norm == "assumegaussian" {
         return r2_assume_gaussian_allowed(doc, source_sheet_id);
+    }
+    if norm == "analyzekmtrendtest" || norm == "analyzekmlogrankfortrend" {
+        return r_km_trend_test(survival_group_count(doc, source_sheet_id, analyze.mv_group_column));
     }
     if norm.contains("heatmap") {
         return r7_correlation_heatmap_toggle(analyze.correlation_all_pairs);
@@ -774,6 +830,11 @@ mod tests {
         assert!(!r10_pcr_outcome_column(1, &[0, 1, 2]).enabled);
         assert!(r10_pcr_outcome_column(1, &[0, 1, 2]).disabled_reason.is_some());
         assert!(r10_pcr_outcome_column(3, &[0, 1, 2]).enabled);
+
+        // KM Log-rank trend requires >= 3 cohorts
+        assert!(!r_km_trend_test(2).enabled);
+        assert!(r_km_trend_test(2).disabled_reason.is_some());
+        assert!(r_km_trend_test(3).enabled);
 
         // Verify TwoGroupSpec constructor compiles cleanly in test scope
         let _tg = TwoGroupSpec::default();

@@ -621,7 +621,7 @@ fn r10_2_and_r10_16_and_r10_20_full_sheets_26_dialogs_tabs_and_7_inspectors_pari
     verify_modal_tab_sweep(
         &mut app,
         metrics,
-        &["fit.tab.equation", "fit.tab.constraints", "fit.tab.initial_values", "fit.tab.confidence", "fit.tab.compare", "fit.tab.weights_range"],
+        &["fit.tab.model", "fit.tab.constraints", "fit.tab.initial_values", "fit.tab.confidence", "fit.tab.compare", "fit.tab.weights_range"],
         "edit_fit",
     )?;
 
@@ -736,7 +736,7 @@ fn r10_13_b2_visual_screenshot_baselines_5_sheets_and_modal_tabs() -> Result<(),
     app.canvas_dialogs.active_dialog = ActiveDialog::EditAnalysisParameters { result_sheet_id: fit_id };
     let mut fit_driver = HumanPathDriver::new(app.clone(), metrics);
     let mut fit_tab_hashes = BTreeSet::new();
-    for tab in ["fit.tab.equation", "fit.tab.constraints", "fit.tab.weights_range"] {
+    for tab in ["fit.tab.model", "fit.tab.constraints", "fit.tab.weights_range"] {
         let _ = fit_driver.click_widget(tab)?;
         let (h, _) = render_verified_png_baseline(fit_driver.app(), target, &format!("baseline/{tab}"))?;
         ensure(fit_tab_hashes.insert(h), format!("baseline `{tab}` identical to sibling tab"))?;
