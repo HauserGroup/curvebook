@@ -51,6 +51,7 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 
 - [MCP Alpha site](index.html): prepared static GitHub Pages entry point for onboarding, status, and downloads; [preview and publication checklist](release/github-pages.md). Hosting remains a separate Alpha launch step.
 - [Release guide](release/releasing.md): packaging, verification, and release gates.
+- [Alpha known issues & release notes](release/alpha-known-issues.md): `v0.1.0-alpha.1` MCP Alpha scope, platform signing caveats, known limitations, and GitHub Release notes template (`R0.20`).
 - [Alpha branding clearance](release/alpha-branding-clearance.md): strict Alpha branding, clean-room, and asset-provenance gate architecture and launch-artefact verification (`R0.21` / `R10.14`).
 - [Windows signing](release/windows-signing.md): test signing and distribution.
 - [Contributor credits](contributors.md), [asset inventory](../ASSETS.md), and [attribution](../ATTRIBUTION.md).
