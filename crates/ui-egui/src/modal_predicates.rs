@@ -4,8 +4,8 @@
 //! `ui.inspect` (`ControlNode { enabled, disabled_reason }`), `ui.switch_tab`, and `ui.answer_dialog`.
 
 use curvebook_doc::{
-    AnalysisKind, CellValue, ContingencySpec, MultiplicityMethod, PValueFormat, ProjectDocument, SheetId, SurvivalAnalysisSpec, TableArchetype,
-    TwoGroupMethod, VariableRole,
+    AnalysisKind, Cell, CellValue, ColumnDesignHint, ContingencySpec, MultiplicityMethod, OneWayMethod, PValueFormat, ProjectDocument,
+    RepeatedMeasuresDesign, ResidualCovariance, SheetId, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TwoGroupMethod, VariableRole,
 };
 use serde::{Deserialize, Serialize};
 
@@ -54,6 +54,122 @@ pub fn r1_sphericity_or_reml_control(paired_or_matched: bool) -> ControlEnableme
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Geisser-Greenhouse sphericity and Mixed-effects REML require matched/repeated measures.")
+    }
+}
+
+/// R1b: Sphericity corrections (`Geisser-Greenhouse` / `Assume sphericity`) require matched ANOVA and
+/// are disabled whenever Mixed-Effects REML (`Kenward-Roger` / `Satterthwaite`) is active.
+#[must_use]
+pub fn r1b_sphericity_correction(paired_or_matched: bool, reml_active: bool) -> ControlEnablement {
+    if !paired_or_matched {
+        return r1_sphericity_or_reml_control(false);
+    }
+    if reml_active {
+        ControlEnablement::disabled("Sphericity corrections are disabled when Mixed-Effects REML (Kenward-Roger / Satterthwaite) is active.")
+    } else {
+        ControlEnablement::enabled()
+    }
+}
+
+/// Whether a multiplicity adjustment is supported under Mixed-Effects REML (`KenwardRoger` / `Satterthwaite`):
+/// Bonferroni, Sidak, Holm-Sidak, FDR (BH/BKY/BY), Fisher's LSD, or None.
+#[must_use]
+pub fn r1b_is_reml_allowed_post_hoc(method: MultiplicityMethod) -> bool {
+    matches!(
+        method,
+        MultiplicityMethod::None
+            | MultiplicityMethod::Bonferroni
+            | MultiplicityMethod::Sidak
+            | MultiplicityMethod::HolmSidak
+            | MultiplicityMethod::BenjaminiHochbergFdr
+            | MultiplicityMethod::TwoStageBkyFdr
+            | MultiplicityMethod::BenjaminiYekutieliFdr
+            | MultiplicityMethod::FisherLsd
+    )
+}
+
+/// R1b + R2 combined post-hoc option enablement gate.
+#[must_use]
+pub fn r1b_post_hoc_option_enabled(assume_gaussian: bool, reml_active: bool, method: MultiplicityMethod) -> ControlEnablement {
+    if matches!(method, MultiplicityMethod::DunnRankSum) {
+        if reml_active {
+            return ControlEnablement::disabled("Nonparametric Dunn's comparisons are disabled in Mixed-Effects REML mode.");
+        }
+        return r2_post_hoc_option_enabled(assume_gaussian, false);
+    }
+    if matches!(
+        method,
+        MultiplicityMethod::None
+            | MultiplicityMethod::BenjaminiHochbergFdr
+            | MultiplicityMethod::TwoStageBkyFdr
+            | MultiplicityMethod::BenjaminiYekutieliFdr
+    ) {
+        return ControlEnablement::enabled();
+    }
+    let gaussian_gate = r2_post_hoc_option_enabled(assume_gaussian, true);
+    if !gaussian_gate.enabled {
+        return gaussian_gate;
+    }
+    if reml_active && !r1b_is_reml_allowed_post_hoc(method) {
+        return ControlEnablement::disabled(
+            "Mixed-Effects REML (Kenward-Roger / Satterthwaite) restricts post-hoc comparisons to Bonferroni, Sidak, Holm-Sidak, FDR, and Fisher's LSD.",
+        );
+    }
+    ControlEnablement::enabled()
+}
+
+/// Inspect the upstream sheet for missing observations in repeated-measures blocks (`Column` or `Grouped`).
+#[must_use]
+pub fn table_has_incomplete_rm_blocks(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>, selected: &[usize]) -> bool {
+    let Some(ds) = resolve_data_sheet(doc, source_sheet_id) else {
+        return false;
+    };
+    match &ds.archetype {
+        TableArchetype::Column(col) => {
+            let indices: Vec<usize> = if selected.is_empty() {
+                (0..col.data_sets.len()).collect()
+            } else {
+                selected.iter().copied().filter(|&i| i < col.data_sets.len()).collect()
+            };
+            col.complete_paired_rows_with_report(&indices).skipped_incomplete_rows > 0
+        }
+        TableArchetype::Grouped(grouped) => {
+            let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
+                return false;
+            };
+            let indices: Vec<usize> = if selected.is_empty() {
+                (0..grouped.data_sets.len()).collect()
+            } else {
+                selected.iter().copied().filter(|&i| i < grouped.data_sets.len()).collect()
+            };
+            (0..grouped.row_count())
+                .any(|r| indices.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(Cell::active_number).is_none())))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `edit` currently executes a Mixed-Effects REML repeated-measures model (`Kenward-Roger` / `Satterthwaite`).
+#[must_use]
+pub fn is_reml_mixed_effects_active(edit: &EditAnalysisParametersState, doc: &ProjectDocument) -> bool {
+    let Some(spec) = edit.draft.as_ref() else {
+        return false;
+    };
+    match &spec.kind {
+        AnalysisKind::OneWayAnova(a) => {
+            matches!(a.method, OneWayMethod::RepeatedMeasures { .. })
+                && (a.mixed_effects_reml
+                    || a.residual_covariance == ResidualCovariance::Unstructured
+                    || table_has_incomplete_rm_blocks(doc, Some(&spec.source_sheet_id), &spec.selected_data_sets))
+        }
+        AnalysisKind::FactorialAnova(f) => {
+            f.repeated_measures != RepeatedMeasuresDesign::None
+                && (f.mixed_effects_reml
+                    || f.residual_covariance == ResidualCovariance::Unstructured
+                    || f.three_way
+                    || (f.fit_reml_on_missing && table_has_incomplete_rm_blocks(doc, Some(&spec.source_sheet_id), &spec.selected_data_sets)))
+        }
+        _ => false,
     }
 }
 
@@ -162,6 +278,16 @@ pub fn r4_two_group_welch_correction(method: TwoGroupMethod) -> ControlEnablemen
         ControlEnablement::enabled()
     } else {
         ControlEnablement::disabled("Welch's unequal-variance correction applies only to unpaired parametric t-tests.")
+    }
+}
+
+/// R4d: Two-group test mode -> `Diagnostics / Residuals` disabled under `TwoGroupMethod::WelchT`.
+#[must_use]
+pub fn r4_two_group_diagnostics(method: TwoGroupMethod) -> ControlEnablement {
+    if method == TwoGroupMethod::WelchT {
+        ControlEnablement::disabled("Diagnostics / Residuals are disabled under Welch's unequal-variance t-test.")
+    } else {
+        ControlEnablement::enabled()
     }
 }
 
@@ -302,6 +428,11 @@ pub fn evaluate_edit_params_tab(state: &EditAnalysisParametersState, tab_id: &st
     if norm == "repeatedmeasures" {
         return r1_repeated_measures_tab(state.paired_or_matched);
     }
+    if (norm == "diagnostics" || norm == "residuals" || norm == "diagnosticsresiduals")
+        && let Some(AnalysisKind::TwoGroupComparison(two)) = state.draft.as_ref().map(|d| &d.kind)
+    {
+        return r4_two_group_diagnostics(two.method);
+    }
     ControlEnablement::enabled()
 }
 
@@ -362,7 +493,9 @@ pub fn r2_assume_gaussian_allowed(doc: &ProjectDocument, source_sheet_id: Option
 }
 
 /// R1 predicate for `edit.paired_or_matched`: on `Column` tables, requires raw replicates and `>= 2`
-/// data columns with equal active replicate counts (`>= 2` rows / complete paired blocks).
+/// data columns; for `ColumnDesignHint::PairedRepeatedMeasures`, incomplete-block RM tables remain
+/// selectable for mixed-effects REML (`>= 2` active columns, `>= 2` subject rows, total obs > columns),
+/// while `UnpairedReplicates` still requires equal replicate counts (`>= 2` complete blocks).
 #[must_use]
 pub fn r1_paired_or_matched_allowed(doc: &ProjectDocument, source_sheet_id: Option<&SheetId>) -> ControlEnablement {
     let Some(ds) = resolve_data_sheet(doc, source_sheet_id) else {
@@ -380,6 +513,19 @@ pub fn r1_paired_or_matched_allowed(doc: &ProjectDocument, source_sheet_id: Opti
         return ControlEnablement::disabled("Paired or repeated-measures analysis requires at least 2 data columns.");
     }
     let counts: Vec<usize> = (0..col.data_sets.len()).map(|c| col.active_column_values(c).len()).collect();
+    if col.design_hint == ColumnDesignHint::PairedRepeatedMeasures {
+        let active_cols = counts.iter().filter(|&&n| n >= 1).count();
+        let total_obs: usize = counts.iter().sum();
+        let rows_with_any = (0..col.row_count())
+            .filter(|&r| (0..col.data_sets.len()).any(|c| col.data_sets[c].cell(r, 0).and_then(Cell::active_number).is_some()))
+            .count();
+        if active_cols < 2 || rows_with_any < 2 || total_obs <= active_cols {
+            return ControlEnablement::disabled(
+                "Incomplete-block repeated-measures analysis requires at least 2 active columns, 2 subject rows, and more total observations than conditions.",
+            );
+        }
+        return ControlEnablement::enabled();
+    }
     let first_n = counts.first().copied().unwrap_or(0);
     let all_cols: Vec<usize> = (0..col.data_sets.len()).collect();
     let complete_rows = col.complete_paired_rows(&all_cols).len();
@@ -616,16 +762,41 @@ fn evaluate_edit_params_widget(
     if norm == "editassumegaussian" || norm == "assumegaussian" {
         return r2_assume_gaussian_allowed(doc, edit.draft.as_ref().map(|d| &d.source_sheet_id));
     }
+    let reml_active = is_reml_mixed_effects_active(edit, doc);
     if norm.contains("repeatedmeasures") && norm.contains("tab") {
         return r1_repeated_measures_tab(edit.paired_or_matched);
     }
-    if norm.contains("geissergreenhouse") || norm.contains("sphericity") || norm.contains("reml") {
+    if norm.contains("geissergreenhouse") || norm.contains("assumesphericity") || norm == "editsphericity" || norm == "sphericity" {
+        return r1b_sphericity_correction(edit.paired_or_matched, reml_active);
+    }
+    if norm.contains("reml") || norm.contains("dfkenwardroger") || norm.contains("dfsatterthwaite") || norm.contains("residualcov") {
         return r1_sphericity_or_reml_control(edit.paired_or_matched);
     }
     if norm.contains("dunn") && !norm.contains("dunnett") {
-        return r2_post_hoc_option_enabled(edit.assume_gaussian, false);
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::DunnRankSum);
     }
-    if norm.contains("posthoc") || norm.contains("tukey") || norm.contains("dunnett") || norm.contains("sidak") || norm.contains("bonferroni") {
+    if norm.contains("tukey") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::TukeyHsd);
+    }
+    if norm.contains("dunnett") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Dunnett { control_column: 0 });
+    }
+    if norm.contains("gameshowell") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::GamesHowell);
+    }
+    if norm.contains("bonferroni") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Bonferroni);
+    }
+    if norm.contains("holmsidak") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::HolmSidak);
+    }
+    if norm.contains("sidak") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::Sidak);
+    }
+    if norm.contains("fisherlsd") || norm.contains("lsd") {
+        return r1b_post_hoc_option_enabled(edit.assume_gaussian, reml_active, MultiplicityMethod::FisherLsd);
+    }
+    if norm.contains("posthoc") {
         return r2_post_hoc_option_enabled(edit.assume_gaussian, true);
     }
     if norm.contains("controlcolumn") {
@@ -636,6 +807,9 @@ fn evaluate_edit_params_widget(
         return r3_control_column_picker(edit.compare_against_control, method);
     }
     if let Some(AnalysisKind::TwoGroupComparison(two)) = edit.draft.as_ref().map(|s| &s.kind) {
+        if norm.contains("tabdiagnostics") || norm.starts_with("editdiag") {
+            return r4_two_group_diagnostics(two.method);
+        }
         if norm.contains("graphdifferences") {
             return r4_two_group_graph_differences(two.method);
         }
@@ -776,6 +950,7 @@ mod tests {
                 threshold: 0.05,
                 report_confidence_intervals: true,
             },
+            ..OneWayAnovaSpec::default()
         });
         apply_r2_gaussian_toggle(&mut anova, false, false, 0);
         if let AnalysisKind::OneWayAnova(spec) = anova {
@@ -838,5 +1013,72 @@ mod tests {
 
         // Verify TwoGroupSpec constructor compiles cleanly in test scope
         let _tg = TwoGroupSpec::default();
+    }
+
+    #[test]
+    fn wave7_r1_incomplete_rm_r1b_reml_and_r4_welch_predicates() {
+        use curvebook_doc::{ColumnTable, DataSheet, FactorialAnovaSpec};
+
+        // R1: Incomplete-block PairedRepeatedMeasures Column table remains selectable,
+        // while unequal UnpairedReplicates remains disabled.
+        let mut rm_tab = ColumnTable::new(ColumnDesignHint::PairedRepeatedMeasures, 3, 4).unwrap();
+        rm_tab.data_sets[0].cells[0][0] = Cell::number(10.0);
+        rm_tab.data_sets[1].cells[0][0] = Cell::number(12.0);
+        rm_tab.data_sets[0].cells[1][0] = Cell::number(11.0);
+        rm_tab.data_sets[2].cells[1][0] = Cell::number(14.0);
+        rm_tab.data_sets[1].cells[2][0] = Cell::number(13.0);
+        rm_tab.data_sets[2].cells[2][0] = Cell::number(15.0);
+        let rm_ds = DataSheet::new("rm-inc", "RM Inc", TableArchetype::Column(rm_tab)).unwrap();
+
+        let mut unp_tab = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 4).unwrap();
+        for c in 0..3 {
+            unp_tab.data_sets[c].cells[0][0] = Cell::number(1.0);
+        }
+        unp_tab.data_sets[0].cells[1][0] = Cell::number(2.0);
+        unp_tab.data_sets[1].cells[1][0] = Cell::number(3.0);
+        let unp_ds = DataSheet::new("unp-inc", "Unp Inc", TableArchetype::Column(unp_tab)).unwrap();
+
+        let mut doc = ProjectDocument::new("Pred Test").unwrap();
+        doc.add_data_sheet(rm_ds).unwrap();
+        doc.add_data_sheet(unp_ds).unwrap();
+        assert!(r1_paired_or_matched_allowed(&doc, Some(&SheetId::new("rm-inc"))).enabled);
+        assert!(!r1_paired_or_matched_allowed(&doc, Some(&SheetId::new("unp-inc"))).enabled);
+
+        // R1b: Sphericity disabled under KR/Satterthwaite REML, and post-hoc restricted to Bonferroni/Sidak/Holm-Sidak/FDR/Fisher's LSD
+        assert!(r1b_sphericity_correction(true, false).enabled);
+        assert!(!r1b_sphericity_correction(true, true).enabled);
+        assert!(!r1b_post_hoc_option_enabled(true, true, MultiplicityMethod::TukeyHsd).enabled);
+        assert!(!r1b_post_hoc_option_enabled(true, true, MultiplicityMethod::Dunnett { control_column: 0 }).enabled);
+        assert!(!r1b_post_hoc_option_enabled(true, true, MultiplicityMethod::GamesHowell).enabled);
+        for allowed in [
+            MultiplicityMethod::Bonferroni,
+            MultiplicityMethod::Sidak,
+            MultiplicityMethod::HolmSidak,
+            MultiplicityMethod::BenjaminiHochbergFdr,
+            MultiplicityMethod::TwoStageBkyFdr,
+            MultiplicityMethod::BenjaminiYekutieliFdr,
+            MultiplicityMethod::FisherLsd,
+            MultiplicityMethod::None,
+        ] {
+            assert!(r1b_post_hoc_option_enabled(true, true, allowed).enabled, "REML post-hoc should allow {allowed:?}");
+        }
+
+        // R4: TwoGroupMethod::WelchT disables Diagnostics / Residuals tab & widgets
+        assert!(!r4_two_group_diagnostics(TwoGroupMethod::WelchT).enabled);
+        assert!(r4_two_group_diagnostics(TwoGroupMethod::UnpairedT).enabled);
+        let ep = EditAnalysisParametersState {
+            draft: Some(
+                curvebook_doc::AnalysisSpec::new(
+                    "res-w",
+                    "rm-inc",
+                    AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::WelchT, ..TwoGroupSpec::default() }),
+                )
+                .unwrap(),
+            ),
+            ..Default::default()
+        };
+        assert!(!evaluate_edit_params_tab(&ep, "diagnostics").enabled);
+        assert!(!evaluate_edit_params_widget(&ep, &doc, 4, 2, 1, "edit.diag.residuals_table").enabled);
+        let _fac = FactorialAnovaSpec { df_method: curvebook_doc::MixedModelDfMethod::Satterthwaite, ..FactorialAnovaSpec::default() };
     }
 }

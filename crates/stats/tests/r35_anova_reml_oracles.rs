@@ -296,6 +296,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
     let nspec = NestedAnalysisSpec {
         two_group_t_test: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+        ..NestedAnalysisSpec::default()
     };
     let spec = AnalysisSpec::new("an-nest-tuk", ds_id, AnalysisKind::NestedComparison(nspec.clone())).unwrap();
     let res = run_nested_analysis(&sheet, &spec, &nspec).unwrap();
@@ -329,6 +330,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
     let tuk_spec = NestedAnalysisSpec {
         two_group_t_test: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: true },
+        ..NestedAnalysisSpec::default()
     };
     let res_tuk = run_nested_analysis(
         &sheet_unb,
@@ -343,6 +345,7 @@ fn r35_2_nested_posthoc_uses_hierarchical_group_mean_variance_oracle() {
     let gh_spec = NestedAnalysisSpec {
         two_group_t_test: false,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::GamesHowell, threshold: 0.05, report_confidence_intervals: true },
+        ..NestedAnalysisSpec::default()
     };
     let res_gh =
         run_nested_analysis(&sheet_unb, &AnalysisSpec::new("an-unb-gh", ds_unb, AnalysisKind::NestedComparison(gh_spec.clone())).unwrap(), &gh_spec)

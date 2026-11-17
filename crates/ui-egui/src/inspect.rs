@@ -21,11 +21,12 @@ use crate::interaction::{ViewportMetrics, WorkspaceLayoutMap};
 use crate::layout::LayoutTree;
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
-    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, r_km_trend_test, r1_paired_or_matched_allowed,
-    r1_sphericity_or_reml_control, r2_assume_gaussian_allowed, r2_post_hoc_option_enabled, r3_control_column_picker, r4_two_group_graph_differences,
-    r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
-    r6_contingency_ci_selector, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column,
-    source_table_shape, survival_group_count,
+    ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, is_reml_mixed_effects_active, r_km_trend_test,
+    r1_paired_or_matched_allowed, r1_sphericity_or_reml_control, r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed,
+    r3_control_column_picker, r4_two_group_diagnostics, r4_two_group_graph_differences, r4_two_group_nonparametric_options,
+    r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r6_contingency_ci_selector,
+    r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape,
+    survival_group_count,
 };
 use crate::power_wizard::PowerWizardStage;
 use curvebook_tools::SelectionQuickStats;
@@ -1200,6 +1201,7 @@ fn build_edit_params_dialog_nodes(
         ("repeated_measures", "Repeated Measures"),
         ("multiple_comparisons", "Multiple Comparisons"),
         ("options", "Options"),
+        ("diagnostics", "Diagnostics / Residuals"),
     ];
     let tabs = tab_specs
         .iter()
@@ -1218,6 +1220,7 @@ fn build_edit_params_dialog_nodes(
 
     let (method, pv_fmt, cont_spec, two_method) = extract_edit_params_details(ep);
     let source_sheet_id = ep.draft.as_ref().map(|d| &d.source_sheet_id);
+    let reml_active = is_reml_mixed_effects_active(ep, doc);
     let gg_checked = ep.draft.as_ref().is_none_or(|d| {
         !matches!(
             d.kind,
@@ -1246,7 +1249,7 @@ fn build_edit_params_dialog_nodes(
             "checkbox",
             "Geisser-Greenhouse sphericity",
             json!(gg_checked),
-            r1_sphericity_or_reml_control(ep.paired_or_matched),
+            r1b_sphericity_correction(ep.paired_or_matched, reml_active),
             pos(3),
         ),
         node(
@@ -1254,7 +1257,7 @@ fn build_edit_params_dialog_nodes(
             "radio",
             "Tukey post-hoc",
             json!(matches!(method, curvebook_doc::MultiplicityMethod::TukeyHsd)),
-            r2_post_hoc_option_enabled(ep.assume_gaussian, true),
+            r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, curvebook_doc::MultiplicityMethod::TukeyHsd),
             pos(4),
         ),
         node(
@@ -1262,8 +1265,16 @@ fn build_edit_params_dialog_nodes(
             "radio",
             "Dunn's rank comparisons",
             json!(matches!(method, curvebook_doc::MultiplicityMethod::DunnRankSum)),
-            r2_post_hoc_option_enabled(ep.assume_gaussian, false),
+            r1b_post_hoc_option_enabled(ep.assume_gaussian, reml_active, curvebook_doc::MultiplicityMethod::DunnRankSum),
             pos(5),
+        ),
+        node(
+            "edit.diag.residuals_table",
+            "checkbox",
+            "Emit Residuals & Standardized Residuals",
+            json!(app.view_shards.stat_params.diag_residuals_plot),
+            two_method.map_or_else(ControlEnablement::enabled, r4_two_group_diagnostics),
+            pos(19),
         ),
         node(
             "edit.control_column",

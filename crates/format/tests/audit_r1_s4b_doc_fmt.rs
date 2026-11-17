@@ -411,6 +411,7 @@ fn r1_s06_06_nonfinite_floats_rejected_across_graphs_layouts_notes_and_analyses(
             AnalysisKind::NestedComparison(NestedAnalysisSpec {
                 two_group_t_test: false,
                 multiplicity: MultiplicitySpec { threshold: f64::NAN, ..MultiplicitySpec::default() },
+                ..NestedAnalysisSpec::default()
             }),
         ),
         (

@@ -110,6 +110,7 @@ fn r1_s02_08_summary_one_way_anova_marks_homogeneity_not_computable() {
             method: OneWayMethod::OrdinaryAnova,
             compute_effect_sizes: true,
             multiplicity: MultiplicitySpec::default(),
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();
@@ -143,6 +144,7 @@ fn r1_s02_08_summary_one_way_anova_marks_homogeneity_not_computable() {
             method: OneWayMethod::BrownForsytheAndWelch,
             compute_effect_sizes: false,
             multiplicity: MultiplicitySpec::default(),
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();
@@ -439,14 +441,14 @@ fn r1_x2_05_selected_data_sets_respected_in_factorial_nested_and_contingency() {
     let mut sel_nest_spec = AnalysisSpec::new(
         SheetId::new("nest-sel"),
         full_nest.id.clone(),
-        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
+        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, ..NestedAnalysisSpec::default() }),
     )
     .unwrap();
     sel_nest_spec.selected_data_sets = vec![0, 2];
     let ref_nest_spec = AnalysisSpec::new(
         SheetId::new("nest-ref"),
         two_nest.id.clone(),
-        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
+        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, ..NestedAnalysisSpec::default() }),
     )
     .unwrap();
 

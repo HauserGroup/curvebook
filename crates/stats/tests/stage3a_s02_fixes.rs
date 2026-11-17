@@ -283,6 +283,7 @@ fn r1_s02_04_multiplicity_exhaustive_and_dunn_fwer() {
             method: OneWayMethod::KruskalWallis,
             multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
             compute_effect_sizes: true,
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();

@@ -78,10 +78,12 @@
 //! - Tomczak, M., & Tomczak, E. (2014). The need to report effect size estimates revisited. An
 //!   overview of some recommended measures of effect size. *Trends in Sport Sciences* 1(21):19–25.
 
+use std::collections::BTreeSet;
+
 use curvebook_doc::{
-    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MultiplicityMethod, MultiplicitySpec, NestedAnalysisSpec,
-    OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet,
-    ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
+    AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, FactorialAnovaSpec, MixedModelDfMethod, MultiplicityMethod, MultiplicitySpec,
+    NestedAnalysisSpec, OneWayAnovaSpec, OneWayMethod, PValueFormat, PairwiseComparisonRecord, RepeatedMeasuresDesign, ResidualCovariance,
+    ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, SumOfSquaresType, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
@@ -2262,18 +2264,46 @@ fn kr_scale_and_df(qf: f64, a1: f64, a2: f64, nu_sat: f64, n_minus_p: f64) -> (f
     (lambda.max(0.0), nu_kr)
 }
 
-fn kr_single_term_df1(ctx: &KrTermContext<'_>, term_name: &str, col: usize) -> Result<(FactorialAnovaTerm, f64, f64), StatsError> {
+struct KrSatTermPair {
+    kr: FactorialAnovaTerm,
+    sat: FactorialAnovaTerm,
+    nu_sat: f64,
+    nu_kr: f64,
+}
+
+fn build_wald_term(term_name: &str, qf: f64, f_val: f64, nu: f64, sigma2_e: f64) -> Result<FactorialAnovaTerm, StatsError> {
+    let f_clean = f_val.max(0.0);
+    let p_val = f_sf(f_clean, qf, nu)?;
+    let ms = f_clean * sigma2_e;
+    let part_eta = if qf * f_clean + nu > 0.0 { Some((qf * f_clean) / (qf * f_clean + nu)) } else { Some(0.0) };
+    Ok(FactorialAnovaTerm {
+        name: term_name.to_owned(),
+        ss: ms * qf,
+        df: qf,
+        ms,
+        f_statistic: Some(f_clean),
+        p_value: Some(p_val),
+        partial_eta_squared: part_eta,
+        eta_squared: None,
+    })
+}
+
+fn kr_single_term_df1(ctx: &KrTermContext<'_>, term_name: &str, col: usize) -> Result<KrSatTermPair, StatsError> {
     let v = ctx.phi.get(col, col).unwrap_or(0.0).max(0.0);
     let v_a_raw = ctx.phi_a.get(col, col).unwrap_or(v);
     let v_a = if v_a_raw > 1e-12 * v { v_a_raw } else { v };
     let b = ctx.beta[col];
-    let f_kr = if v_a > 0.0 {
-        (b * b) / v_a
-    } else if b != 0.0 {
-        f64::INFINITY
-    } else {
-        0.0
+    let f_from_var = |var: f64| -> f64 {
+        if var > 0.0 {
+            (b * b) / var
+        } else if b != 0.0 {
+            f64::INFINITY
+        } else {
+            0.0
+        }
     };
+    let f_kr = f_from_var(v_a);
+    let f_sat = f_from_var(v);
     let mut grad = Vec::with_capacity(ctx.phi_m_phi.len());
     for pmp in ctx.phi_m_phi {
         grad.push(pmp.get(col, col).unwrap_or(0.0));
@@ -2281,23 +2311,12 @@ fn kr_single_term_df1(ctx: &KrTermContext<'_>, term_name: &str, col: usize) -> R
     let wg = ctx.w_info_inv.matvec(&grad)?;
     let denom: f64 = grad.iter().zip(wg.iter()).map(|(&a, &c)| a * c).sum();
     let nu = if denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, ctx.n_minus_p) } else { ctx.n_minus_p };
-    let p_val = f_sf(f_kr, 1.0, nu)?;
-    let ms = f_kr * ctx.sigma2_e;
-    let part_eta = if f_kr + nu > 0.0 { Some(f_kr / (f_kr + nu)) } else { Some(0.0) };
-    let term = FactorialAnovaTerm {
-        name: term_name.to_owned(),
-        ss: ms,
-        df: 1.0,
-        ms,
-        f_statistic: Some(f_kr),
-        p_value: Some(p_val),
-        partial_eta_squared: part_eta,
-        eta_squared: None,
-    };
-    Ok((term, nu, nu))
+    let kr = build_wald_term(term_name, 1.0, f_kr, nu, ctx.sigma2_e)?;
+    let sat = build_wald_term(term_name, 1.0, f_sat, nu, ctx.sigma2_e)?;
+    Ok(KrSatTermPair { kr, sat, nu_sat: nu, nu_kr: nu })
 }
 
-fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: usize) -> Result<(FactorialAnovaTerm, f64, f64), StatsError> {
+fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: usize) -> Result<KrSatTermPair, StatsError> {
     let qf = q as f64;
     let sigma = symmetrize_dense(&subblock_dense(ctx.phi, start, q)?)?;
     let sigma_a = symmetrize_dense(&subblock_dense(ctx.phi_a, start, q)?)?;
@@ -2344,6 +2363,10 @@ fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: u
 
     // Kenward & Roger (1997, Biometrics 53:985 Eq. (6)) scaled F* and denominator df.
     let sigma_inv = invert_reml_info(&sigma)?;
+    let inv_b_sat = sigma_inv.matvec(beta_sub)?;
+    let quad_sat: f64 = beta_sub.iter().zip(inv_b_sat.iter()).map(|(&b, &ib)| b * ib).sum();
+    let f_sat = (quad_sat / qf).max(0.0);
+
     let mut t_mats = Vec::with_capacity(n_vc);
     let mut tr_t = Vec::with_capacity(n_vc);
     for pmp in ctx.phi_m_phi {
@@ -2367,20 +2390,9 @@ fn kr_multi_term_df(ctx: &KrTermContext<'_>, term_name: &str, start: usize, q: u
     }
     let (lambda_kr, nu_kr) = kr_scale_and_df(qf, a1, a2, nu_sat, ctx.n_minus_p);
     let f_kr = (lambda_kr * f_raw).max(0.0);
-    let p_val = f_sf(f_kr, qf, nu_kr)?;
-    let ms = f_kr * ctx.sigma2_e;
-    let part_eta = if qf * f_kr + nu_kr > 0.0 { Some((qf * f_kr) / (qf * f_kr + nu_kr)) } else { Some(0.0) };
-    let term = FactorialAnovaTerm {
-        name: term_name.to_owned(),
-        ss: ms * qf,
-        df: qf,
-        ms,
-        f_statistic: Some(f_kr),
-        p_value: Some(p_val),
-        partial_eta_squared: part_eta,
-        eta_squared: None,
-    };
-    Ok((term, nu_sat, nu_kr))
+    let kr = build_wald_term(term_name, qf, f_kr, nu_kr, ctx.sigma2_e)?;
+    let sat = build_wald_term(term_name, qf, f_sat, nu_sat, ctx.sigma2_e)?;
+    Ok(KrSatTermPair { kr, sat, nu_sat, nu_kr })
 }
 
 type RemlWaldTermsOut = (Vec<FactorialAnovaTerm>, Vec<f64>, Vec<f64>);
@@ -2394,15 +2406,17 @@ struct RemlContrastCore {
     n_minus_p: f64,
     y_scale: f64,
     col_map: Vec<Option<usize>>,
+    df_method: MixedModelDfMethod,
 }
 
-fn eval_reml_wald_terms_with_core(
+fn eval_reml_wald_terms_for_df(
     phi: &DenseMatrix,
     beta: &[f64],
     sigma2_e: f64,
     fisher: &OwnedRemlFisherMats,
     terms: &[(&str, usize, usize)],
     n_minus_p: f64,
+    df_method: MixedModelDfMethod,
 ) -> Result<(RemlWaldTermsOut, RemlContrastCore), StatsError> {
     let w_info_inv = invert_reml_info(&fisher.info_e)?;
     let n_vc = fisher.m_mats.len();
@@ -2438,10 +2452,13 @@ fn eval_reml_wald_terms_with_core(
         if len == 0 || start + len > p {
             continue;
         }
-        let (term, nu_sat, nu_kr) = if len == 1 { kr_single_term_df1(&ctx, name, start)? } else { kr_multi_term_df(&ctx, name, start, len)? };
-        fixed_terms.push(term);
-        satt_dfs.push(nu_sat);
-        kr_dfs.push(nu_kr);
+        let pair = if len == 1 { kr_single_term_df1(&ctx, name, start)? } else { kr_multi_term_df(&ctx, name, start, len)? };
+        fixed_terms.push(match df_method {
+            MixedModelDfMethod::KenwardRoger => pair.kr,
+            MixedModelDfMethod::Satterthwaite => pair.sat,
+        });
+        satt_dfs.push(pair.nu_sat);
+        kr_dfs.push(pair.nu_kr);
     }
     let core = RemlContrastCore {
         beta: beta.to_vec(),
@@ -2452,6 +2469,7 @@ fn eval_reml_wald_terms_with_core(
         n_minus_p,
         y_scale: 1.0,
         col_map: (0..p).map(Some).collect(),
+        df_method,
     };
     Ok(((fixed_terms, satt_dfs, kr_dfs), core))
 }
@@ -2465,14 +2483,27 @@ pub fn fit_random_intercept_reml(
     cluster_ids: &[usize],
     terms: &[(&str, usize, usize)],
 ) -> Result<MixedRemlResult, StatsError> {
-    fit_random_intercept_reml_with_core(x, y, cluster_ids, terms).map(|(res, _)| res)
+    fit_random_intercept_reml_with_method_and_core(x, y, cluster_ids, terms, MixedModelDfMethod::KenwardRoger).map(|(res, _)| res)
 }
 
-fn fit_random_intercept_reml_with_core(
+/// Variant of [`fit_random_intercept_reml`] selecting Kenward–Roger (`Phi_A`, scaled `F*`) vs
+/// Fai–Cornelius Satterthwaite (`Phi`, unscaled `F`) denominator *df* inference for fixed effects.
+pub fn fit_random_intercept_reml_with_df_method(
     x: &DenseMatrix,
     y: &[f64],
     cluster_ids: &[usize],
     terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+) -> Result<MixedRemlResult, StatsError> {
+    fit_random_intercept_reml_with_method_and_core(x, y, cluster_ids, terms, df_method).map(|(res, _)| res)
+}
+
+fn fit_random_intercept_reml_with_method_and_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
 ) -> Result<(MixedRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
@@ -2569,7 +2600,8 @@ fn fit_random_intercept_reml_with_core(
     let phi = scale_dense(&xtvx_rel_inv, sigma2_e)?;
 
     let fisher = ri_build_fisher_mats(&clusters, p, n, tau_hat, sigma2_e, &xtvx_rel_inv)?;
-    let ((fixed_terms, satterthwaite_df, kenward_roger_df), core) = eval_reml_wald_terms_with_core(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p)?;
+    let ((fixed_terms, satterthwaite_df, kenward_roger_df), core) =
+        eval_reml_wald_terms_for_df(&phi, &beta, sigma2_e, &fisher, terms, n_minus_p, df_method)?;
 
     let res = MixedRemlResult {
         sigma2_random: sigma2_u,
@@ -2768,14 +2800,26 @@ pub fn fit_multi_vc_reml(
     random_effects: &[(&str, DenseMatrix, usize)],
     terms: &[(&str, usize, usize)],
 ) -> Result<MultiVcRemlResult, StatsError> {
-    fit_multi_vc_reml_with_core(x, y, random_effects, terms).map(|(res, _)| res)
+    fit_multi_vc_reml_with_method_and_core(x, y, random_effects, terms, MixedModelDfMethod::KenwardRoger).map(|(res, _)| res)
 }
 
-fn fit_multi_vc_reml_with_core(
+/// Variant of [`fit_multi_vc_reml`] selecting Kenward–Roger vs Fai–Cornelius Satterthwaite fixed-effect inference.
+pub fn fit_multi_vc_reml_with_df_method(
     x: &DenseMatrix,
     y: &[f64],
     random_effects: &[(&str, DenseMatrix, usize)],
     terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+) -> Result<MultiVcRemlResult, StatsError> {
+    fit_multi_vc_reml_with_method_and_core(x, y, random_effects, terms, df_method).map(|(res, _)| res)
+}
+
+fn fit_multi_vc_reml_with_method_and_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    random_effects: &[(&str, DenseMatrix, usize)],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
 ) -> Result<(MultiVcRemlResult, RemlContrastCore), StatsError> {
     let n = x.nrows();
     let p = x.ncols();
@@ -2850,7 +2894,7 @@ fn fit_multi_vc_reml_with_core(
     let fisher = OwnedRemlFisherMats { info_e: DenseMatrix::from_row_major(n_vc, n_vc, ie_data)?, m_mats, q_mats };
     let sigma2_error = theta[0] * y_scale * y_scale;
     let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_with_core(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p)?;
+        eval_reml_wald_terms_for_df(&st.phi, &st.beta, theta[0], &fisher, terms, n_minus_p, df_method)?;
     core.y_scale = y_scale;
     for term in &mut fixed_terms {
         if let Some(f_val) = term.f_statistic {
@@ -3676,16 +3720,31 @@ pub fn fit_unstructured_rm_reml(
     timepoint_labels: &[String],
     terms: &[(&str, usize, usize)],
 ) -> Result<UnstructuredRemlResult, StatsError> {
-    fit_unstructured_rm_reml_with_core(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms).map(|(res, _)| res)
+    fit_unstructured_rm_reml_with_method_and_core(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms, MixedModelDfMethod::KenwardRoger)
+        .map(|(res, _)| res)
 }
 
-fn fit_unstructured_rm_reml_with_core(
+/// Variant of [`fit_unstructured_rm_reml`] selecting Kenward–Roger vs Fai–Cornelius Satterthwaite fixed-effect inference.
+pub fn fit_unstructured_rm_reml_with_df_method(
     x: &DenseMatrix,
     y: &[f64],
     cluster_ids: &[usize],
     timepoint_ids: &[usize],
     timepoint_labels: &[String],
     terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+) -> Result<UnstructuredRemlResult, StatsError> {
+    fit_unstructured_rm_reml_with_method_and_core(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms, df_method).map(|(res, _)| res)
+}
+
+fn fit_unstructured_rm_reml_with_method_and_core(
+    x: &DenseMatrix,
+    y: &[f64],
+    cluster_ids: &[usize],
+    timepoint_ids: &[usize],
+    timepoint_labels: &[String],
+    terms: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
 ) -> Result<(UnstructuredRemlResult, RemlContrastCore), StatsError> {
     let prep = unstructured_prepare_clusters(x, y, cluster_ids, timepoint_ids, timepoint_labels, terms)?;
     let t_obs = prep.active_tp_indices.len();
@@ -3727,7 +3786,7 @@ fn fit_unstructured_rm_reml_with_core(
     let mean_diag_scaled: f64 = (0..t_obs).map(|i| sigma_scaled.get(i, i).unwrap_or(1.0)).sum::<f64>() / (t_obs as f64);
 
     let ((mut fixed_terms, satterthwaite_df, kenward_roger_df), mut core) =
-        eval_reml_wald_terms_with_core(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &term_refs, n_minus_p)?;
+        eval_reml_wald_terms_for_df(&st_final.phi, &st_final.beta, mean_diag_scaled, &fisher, &term_refs, n_minus_p, df_method)?;
     core.y_scale = prep.y_scale;
     core.col_map = prep.col_map;
 
@@ -3782,14 +3841,25 @@ fn fit_unstructured_rm_reml_with_core(
 /// Kenward & Roger, 1997). For two groups, the nested `t` is the signed square root of that
 /// adjusted Wald *F*.
 pub fn nested_one_way_anova(table: &curvebook_doc::NestedTable, two_group_t_test: bool) -> Result<NestedAnovaResult, StatsError> {
+    nested_one_way_anova_with_df_method(table, two_group_t_test, MixedModelDfMethod::KenwardRoger)
+}
+
+/// Variant of [`nested_one_way_anova`] selecting [`MixedModelDfMethod`] (Kenward–Roger vs Satterthwaite)
+/// for the among-groups REML Wald *F* / nested *t* test and denominator *df*.
+pub fn nested_one_way_anova_with_df_method(
+    table: &curvebook_doc::NestedTable,
+    two_group_t_test: bool,
+    df_method: MixedModelDfMethod,
+) -> Result<NestedAnovaResult, StatsError> {
     let selected: Vec<usize> = (0..table.groups.len()).collect();
-    nested_one_way_anova_selected(table, &selected, two_group_t_test)
+    nested_one_way_anova_selected(table, &selected, two_group_t_test, df_method)
 }
 
 fn nested_one_way_anova_selected(
     table: &curvebook_doc::NestedTable,
     selected_groups: &[usize],
     two_group_t_test: bool,
+    df_method: MixedModelDfMethod,
 ) -> Result<NestedAnovaResult, StatsError> {
     let g_count = selected_groups.len();
     if two_group_t_test && g_count != 2 {
@@ -3888,7 +3958,7 @@ fn nested_one_way_anova_selected(
     let (f_sub, p_sub) = f_ratio_p(mss, mse, df1_sub, df2_err)?;
 
     let x_mat = DenseMatrix::from_row_major(total_obs, g_count, x_data)?;
-    let reml = fit_random_intercept_reml(&x_mat, &y_vec, &cluster_ids, &[("Group", 1, g_count - 1)])?;
+    let (reml, _) = fit_random_intercept_reml_with_method_and_core(&x_mat, &y_vec, &cluster_ids, &[("Group", 1, g_count - 1)], df_method)?;
 
     let f_g = reml.fixed_terms.first().and_then(|t| t.f_statistic).unwrap_or(if mss > 0.0 {
         msg / mss
@@ -3899,7 +3969,11 @@ fn nested_one_way_anova_selected(
     });
     let df2_satt = reml.satterthwaite_df.first().copied().unwrap_or(df1_sub);
     let df2_kr = reml.kenward_roger_df.first().copied().unwrap_or(df1_sub);
-    let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_kr)?);
+    let df2_active = match df_method {
+        MixedModelDfMethod::KenwardRoger => df2_kr,
+        MixedModelDfMethod::Satterthwaite => df2_satt,
+    };
+    let p_g = reml.fixed_terms.first().and_then(|t| t.p_value).unwrap_or(f_sf(f_g, df1_g, df2_active)?);
 
     let t_nested = if two_group_t_test {
         let sign = if (group_sums[0] / (group_n[0] as f64)) >= (group_sums[1] / (group_n[1] as f64)) { 1.0 } else { -1.0 };
@@ -4104,6 +4178,499 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     Ok(out)
 }
 
+struct RmOneWayScan {
+    blocks: Vec<Vec<f64>>,
+    incomplete_rows: usize,
+    non_numeric_cells: usize,
+    y_vec: Vec<f64>,
+    subj_ids: Vec<usize>,
+    cond_ids: Vec<usize>,
+    cond_counts: Vec<usize>,
+}
+
+fn scan_rm_one_way_column_table(col_tab: &curvebook_doc::ColumnTable, indices: &[usize]) -> RmOneWayScan {
+    let row_count = col_tab.row_count();
+    let mut active_end = 0_usize;
+    for r in (0..row_count).rev() {
+        let has_any = indices
+            .iter()
+            .any(|&c| col_tab.data_sets.get(c).and_then(|ds| ds.cell(r, 0)).is_some_and(|cell| cell.excluded || !cell.value.is_empty()));
+        if has_any {
+            active_end = r + 1;
+            break;
+        }
+    }
+
+    let mut blocks = Vec::new();
+    let mut incomplete_rows = 0_usize;
+    let mut non_numeric_cells = 0_usize;
+    let mut y_vec = Vec::new();
+    let mut subj_ids = Vec::new();
+    let mut cond_ids = Vec::new();
+    let mut cond_counts = vec![0_usize; indices.len()];
+
+    for r in 0..active_end {
+        let mut row_vals = Vec::with_capacity(indices.len());
+        let mut row_long: Vec<(usize, f64)> = Vec::with_capacity(indices.len());
+        let mut complete = true;
+        let mut row_has_entry = false;
+
+        for (pos, &c) in indices.iter().enumerate() {
+            let cell = col_tab.data_sets.get(c).and_then(|ds| ds.cell(r, 0));
+            if let Some(cell) = cell {
+                if cell.excluded || !cell.value.is_empty() {
+                    row_has_entry = true;
+                }
+                if !cell.excluded {
+                    match &cell.value {
+                        curvebook_doc::CellValue::Text(s) if !s.trim().is_empty() => non_numeric_cells += 1,
+                        curvebook_doc::CellValue::Number(v) if !v.is_finite() => non_numeric_cells += 1,
+                        _ => {}
+                    }
+                }
+            }
+            if let Some(val) = cell.and_then(curvebook_doc::Cell::active_number) {
+                row_vals.push(val);
+                row_long.push((pos, val));
+            } else {
+                complete = false;
+            }
+        }
+
+        if complete && !row_vals.is_empty() {
+            blocks.push(row_vals);
+        } else if row_has_entry {
+            incomplete_rows += 1;
+        }
+        if !row_long.is_empty() {
+            for (pos, val) in row_long {
+                subj_ids.push(r);
+                cond_ids.push(pos);
+                cond_counts[pos] += 1;
+                y_vec.push(val);
+            }
+        }
+    }
+
+    RmOneWayScan { blocks, incomplete_rows, non_numeric_cells, y_vec, subj_ids, cond_ids, cond_counts }
+}
+
+fn emit_random_intercept_reml(
+    out: &mut ResultSheet,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    cluster_ids: &[usize],
+    term_slices: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+    p_fmt: PValueFormat,
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
+    let (reml, core) = fit_random_intercept_reml_with_method_and_core(x_mat, y_vec, cluster_ids, term_slices, df_method)?;
+    push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
+    push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
+    push_scalar(out, "REML ICC", None, reml.icc);
+    push_scalar(out, "REML log-likelihood", None, reml.reml_log_lik);
+    push_reml_df_scalars(out, &reml.fixed_terms, &reml.satterthwaite_df, &reml.kenward_roger_df);
+
+    let reml_headers =
+        vec![String::from("Component"), String::from("Variance"), String::from("ICC"), String::from("LRT chi2"), String::from("LRT P")];
+    let reml_rows = vec![
+        vec![
+            ResultCell::Text(String::from("Subject (random)")),
+            num_cell(reml.sigma2_random),
+            num_cell(reml.icc),
+            num_cell(reml.lrt_random_chi2),
+            p_cell(reml.lrt_random_p, p_fmt),
+        ],
+        vec![ResultCell::Text(String::from("Residual")), num_cell(reml.sigma2_error), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
+    ];
+    out.tabs.push(build_tab(
+        "mixed-reml",
+        "Mixed-effects REML variance components",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        reml_headers,
+        vec![String::from("Subject"), String::from("Residual")],
+        reml_rows,
+    ));
+    Ok((reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, core))
+}
+
+fn emit_multi_vc_rm_reml(
+    out: &mut ResultSheet,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    strata: &[(&str, &str, &[usize])],
+    term_slices: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, f64, RemlContrastCore), StatsError> {
+    let mut specs = Vec::with_capacity(strata.len());
+    for &(scalar_name, _, ids) in strata {
+        let (g_mat, rank_c) = cluster_ids_to_g_matrix(ids)?;
+        specs.push((scalar_name, g_mat, rank_c));
+    }
+    let refs: Vec<(&str, DenseMatrix, usize)> = specs.iter().map(|(n, g, c)| (*n, g.clone(), *c)).collect();
+    let (mres, core) = fit_multi_vc_reml_with_method_and_core(x_mat, y_vec, &refs, term_slices, df_method)?;
+    let sum_rand: f64 = mres.variance_components.iter().map(|(_, v)| *v).sum();
+    let tot = (sum_rand + mres.sigma2_error).max(1e-18);
+    let icc_subj = mres.variance_components.first().map_or(0.0, |(_, v)| *v / tot);
+
+    for (name, var) in &mres.variance_components {
+        push_scalar(out, format!("REML sigma^2 ({name})"), None, *var);
+    }
+    push_scalar(out, "REML sigma^2 (residual)", None, mres.sigma2_error);
+    push_scalar(out, "REML ICC", None, icc_subj);
+    push_scalar(out, "REML log-likelihood", None, mres.reml_log_lik);
+    push_reml_df_scalars(out, &mres.fixed_terms, &mres.satterthwaite_df, &mres.kenward_roger_df);
+
+    let vc_headers = vec![String::from("Component"), String::from("Variance"), String::from("SD"), String::from("% of total")];
+    let mut vc_rows = Vec::with_capacity(strata.len() + 1);
+    let mut vc_labels = Vec::with_capacity(strata.len() + 1);
+    for (idx, (_, row_title, _)) in strata.iter().enumerate() {
+        let var = mres.variance_components.get(idx).map_or(0.0, |(_, v)| *v);
+        vc_labels.push((*row_title).to_owned());
+        vc_rows.push(vec![ResultCell::Text((*row_title).to_owned()), num_cell(var), num_cell(var.sqrt()), num_cell(100.0 * var / tot)]);
+    }
+    vc_labels.push(String::from("Residual"));
+    vc_rows.push(vec![
+        ResultCell::Text(String::from("Residual")),
+        num_cell(mres.sigma2_error),
+        num_cell(mres.sigma2_error.sqrt()),
+        num_cell(100.0 * mres.sigma2_error / tot),
+    ]);
+    out.tabs.push(build_tab(
+        "mixed-reml",
+        "Mixed-effects REML variance components",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        vc_headers,
+        vc_labels,
+        vc_rows,
+    ));
+    Ok((mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc_subj, core))
+}
+
+fn unstructured_fallback_label(reason: UnstructuredFallbackReason) -> &'static str {
+    match reason {
+        UnstructuredFallbackReason::SingleSubject => "single-subject isotropic covariance fallback",
+        UnstructuredFallbackReason::SmallSampleRankDeficient => "small-sample rank-deficient shrinkage fallback",
+        UnstructuredFallbackReason::SingularCovarianceEstimate => "singular covariance boundary shrinkage fallback",
+        UnstructuredFallbackReason::IterationLimitReached => "iteration-budget regularized iterate fallback",
+    }
+}
+
+fn build_matrix_tab(id: &str, title: &str, labels: &[String], matrix: &[Vec<f64>], footnotes: Vec<String>) -> ResultTab {
+    let rows: Vec<Vec<ResultCell>> = matrix.iter().map(|row| row.iter().map(|&v| num_cell(v)).collect()).collect();
+    let mut tab = build_tab(id, title, ResultTabKind::CovarianceMatrix, labels.to_vec(), labels.to_vec(), rows);
+    tab.footnotes = footnotes;
+    tab
+}
+
+#[allow(clippy::too_many_arguments)]
+fn emit_unstructured_rm_reml(
+    out: &mut ResultSheet,
+    x_mat: &DenseMatrix,
+    y_vec: &[f64],
+    cluster_ids: &[usize],
+    tp_ids: &[usize],
+    tp_labels: &[String],
+    term_slices: &[(&str, usize, usize)],
+    df_method: MixedModelDfMethod,
+) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, RemlContrastCore), StatsError> {
+    let (ures, core) = fit_unstructured_rm_reml_with_method_and_core(x_mat, y_vec, cluster_ids, tp_ids, tp_labels, term_slices, df_method)?;
+    push_scalar(out, "REML mean diagonal variance", None, ures.mean_diagonal_variance);
+    push_scalar(out, "REML log-likelihood", None, ures.reml_log_lik);
+    push_reml_df_scalars(out, &ures.fixed_terms, &ures.satterthwaite_df, &ures.kenward_roger_df);
+
+    let mut dropped_labels = Vec::new();
+    for (idx, lbl) in tp_labels.iter().enumerate() {
+        if !ures.active_timepoint_indices.contains(&idx) {
+            dropped_labels.push(lbl.clone());
+        }
+    }
+
+    let mut footnotes = Vec::new();
+    if !dropped_labels.is_empty() {
+        footnotes.push(format!("Excluded all-missing timepoint(s): {}.", dropped_labels.join(", ")));
+    }
+    if let Some(reason) = ures.fallback_reason {
+        footnotes.push(format!("Regularized SPD covariance used ({}).", unstructured_fallback_label(reason)));
+    }
+
+    out.tabs.push(build_matrix_tab(
+        "unstructured-reml-covariance",
+        "Estimated residual covariance matrix (REML)",
+        &ures.timepoint_labels,
+        &ures.covariance_matrix,
+        footnotes.clone(),
+    ));
+    out.tabs.push(build_matrix_tab(
+        "unstructured-reml-correlation",
+        "Estimated residual correlation matrix (REML)",
+        &ures.timepoint_labels,
+        &ures.correlation_matrix,
+        footnotes,
+    ));
+
+    let status = if ures.fallback_reason.is_some() || !dropped_labels.is_empty() { ChecklistStatus::Warn } else { ChecklistStatus::Info };
+    let mut explanation = String::from(
+        "Fitted unstructured t x t repeated-measures residual covariance by Cholesky REML with Fai-Cornelius Satterthwaite and Kenward-Roger degrees of freedom.",
+    );
+    if !dropped_labels.is_empty() {
+        explanation.push_str(&format!(" Excluded all-missing timepoint(s): {}.", dropped_labels.join(", ")));
+    }
+    if let Some(reason) = ures.fallback_reason {
+        explanation.push_str(&format!(" Engaged {}.", unstructured_fallback_label(reason)));
+    }
+    out.checklist.push(checklist_item(
+        "Unstructured covariance REML",
+        status,
+        Some(format!(
+            "t = {}, REML logL = {:.2}, mean diag var = {:.4}",
+            ures.timepoint_labels.len(),
+            ures.reml_log_lik,
+            ures.mean_diagonal_variance
+        )),
+        explanation,
+    ));
+
+    let df_sum: f64 = ures.fixed_terms.iter().map(|t| t.df).sum();
+    let df_resid = ((y_vec.len() as f64) - 1.0 - df_sum).max(1.0);
+    Ok((ures.fixed_terms, ures.mean_diagonal_variance, df_resid, core))
+}
+
+struct RemlEffectDesign {
+    x_mat: DenseMatrix,
+    subsets: Vec<Vec<usize>>,
+    factor_basis: Vec<Vec<Vec<f64>>>,
+    terms: Vec<(String, usize, usize)>,
+    observed_cells: BTreeSet<Vec<usize>>,
+}
+
+fn build_reml_effect_design(
+    obs_cells: &[Vec<usize>],
+    factor_names: &[String],
+    factor_levels: &[Vec<String>],
+    max_interaction_order: usize,
+) -> Result<RemlEffectDesign, StatsError> {
+    let n_obs = obs_cells.len();
+    let n_factors = factor_names.len();
+    let order_cap = max_interaction_order.clamp(1, n_factors);
+    let mut subsets: Vec<Vec<usize>> = Vec::new();
+    for ord in 1..=order_cap {
+        collect_index_combinations(n_factors, ord, 0, &mut Vec::new(), &mut subsets);
+    }
+    let factor_basis: Vec<Vec<Vec<f64>>> = factor_levels.iter().map(|levels| sum_contrast_vectors(levels.len())).collect();
+    let obs_dummy: Vec<(Vec<usize>, f64)> = obs_cells.iter().map(|c| (c.clone(), 0.0)).collect();
+    let mut cols: Vec<Vec<f64>> = vec![vec![1.0_f64; n_obs]];
+    let mut terms = Vec::with_capacity(subsets.len());
+    for sub in &subsets {
+        let col_start = cols.len();
+        let prod_cols = kronecker_term_columns(&obs_dummy, &factor_basis, sub);
+        let col_count = prod_cols.len();
+        cols.extend(prod_cols);
+        let name = sub.iter().map(|&idx| factor_names[idx].as_str()).collect::<Vec<_>>().join(" × ");
+        terms.push((name, col_start, col_count));
+    }
+    let x_mat = columns_to_matrix(&cols, n_obs)?;
+    let observed_cells: BTreeSet<Vec<usize>> = obs_cells.iter().cloned().collect();
+    Ok(RemlEffectDesign { x_mat, subsets, factor_basis, terms, observed_cells })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_rm_one_way_reml(
+    col_tab: &curvebook_doc::ColumnTable,
+    out: &mut ResultSheet,
+    indices: &[usize],
+    scan: &RmOneWayScan,
+    anova_spec: &OneWayAnovaSpec,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) -> Result<ResultSheet, StatsError> {
+    let k = indices.len();
+    if k < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "repeated-measures groups", required: 2, actual: k });
+    }
+    if scan.y_vec.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    if let Some((empty_pos, _)) = scan.cond_counts.iter().enumerate().find(|(_, count)| **count == 0) {
+        let _ = empty_pos;
+        return Err(StatsError::EmptyInput);
+    }
+    let n_obs = scan.y_vec.len();
+    if anova_spec.residual_covariance == ResidualCovariance::CompoundSymmetry && n_obs <= k {
+        return Err(StatsError::InsufficientSampleSize { context: "RM REML observations", required: k + 1, actual: n_obs });
+    }
+
+    let cond_labels: Vec<String> = indices.iter().map(|&c| col_tab.data_sets[c].title.clone()).collect();
+    let factor_names = vec![String::from("Treatment (between columns)")];
+    let factor_levels = vec![cond_labels.clone()];
+    let obs_cells: Vec<Vec<usize>> = scan.cond_ids.iter().map(|&c| vec![c]).collect();
+    let RemlEffectDesign { x_mat, subsets, factor_basis, terms: term_ranges, observed_cells } =
+        build_reml_effect_design(&obs_cells, &factor_names, &factor_levels, 1)?;
+    let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
+
+    let (fixed_terms, sigma2_e, df_resid, reml_core, model_desc) = match anova_spec.residual_covariance {
+        ResidualCovariance::Unstructured => {
+            let (terms, ms_e, df_r, core) = emit_unstructured_rm_reml(
+                out,
+                &x_mat,
+                &scan.y_vec,
+                &scan.subj_ids,
+                &scan.cond_ids,
+                &cond_labels,
+                &term_slices,
+                anova_spec.df_method,
+            )?;
+            (terms, ms_e, df_r, core, "unstructured repeated-measures residual covariance")
+        }
+        ResidualCovariance::CompoundSymmetry => {
+            let (terms, ms_e, _, _, core) =
+                emit_random_intercept_reml(out, &x_mat, &scan.y_vec, &scan.subj_ids, &term_slices, anova_spec.df_method, p_fmt)?;
+            (terms, ms_e, (n_obs - k) as f64, core, "random-intercept compound-symmetry REML")
+        }
+    };
+
+    let trt_term = fixed_terms.first().ok_or(StatsError::EmptyInput)?;
+    let denom_df = match anova_spec.df_method {
+        MixedModelDfMethod::KenwardRoger => scalar_value_or_fallback(&out.scalars, "Treatment (between columns): Kenward-Roger df", df_resid),
+        MixedModelDfMethod::Satterthwaite => scalar_value_or_fallback(&out.scalars, "Treatment (between columns): Satterthwaite df", df_resid),
+    };
+    let f_trt = trt_term.f_statistic.unwrap_or(0.0);
+    let p_trt = trt_term.p_value.unwrap_or(1.0);
+    push_scalar(out, "F (treatment)", None, f_trt);
+    push_scalar(out, "P value", None, p_trt);
+    push_scalar(out, "Denominator df", None, denom_df);
+    if let Some(pe) = trt_term.partial_eta_squared {
+        push_scalar(out, "Partial eta squared", None, pe);
+    }
+
+    let mut headers =
+        vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value"), String::from("Denom df")];
+    if anova_spec.compute_effect_sizes {
+        headers.push(String::from("Partial eta squared"));
+    }
+    let ss_res = sigma2_e * denom_df;
+    let mut row_trt =
+        vec![num_cell(trt_term.ss), num_cell(trt_term.df), num_cell(trt_term.ms), num_cell(f_trt), p_cell(p_trt, p_fmt), num_cell(denom_df)];
+    let mut row_res = vec![num_cell(ss_res), num_cell(denom_df), num_cell(sigma2_e), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty];
+    if anova_spec.compute_effect_sizes {
+        row_trt.push(opt_num_cell(trt_term.partial_eta_squared));
+        row_res.push(ResultCell::Empty);
+    }
+    out.tabs.push(build_tab(
+        "rm-one-way-anova",
+        "RM one-way ANOVA (Mixed-effects REML)",
+        ResultTabKind::AnovaTable,
+        headers,
+        vec![String::from("Treatment (between columns)"), String::from("Residual (REML)")],
+        vec![row_trt, row_res],
+    ));
+
+    let (_, row_proj) = build_xtx_pinv_and_proj(&x_mat)?;
+    let reml_model = RemlContrastModel {
+        factor_levels: vec![k],
+        factor_basis,
+        subsets,
+        total_cols: x_mat.ncols(),
+        row_proj,
+        col_map: reml_core.col_map,
+        beta: reml_core.beta,
+        phi: reml_core.phi,
+        phi_a: reml_core.phi_a,
+        w_info_inv: reml_core.w_info_inv,
+        phi_m_phi: reml_core.phi_m_phi,
+        n_minus_p: reml_core.n_minus_p,
+        y_scale: reml_core.y_scale,
+        df_method: reml_core.df_method,
+        observed_cells,
+    };
+
+    if anova_spec.multiplicity.method != MultiplicityMethod::None {
+        if anova_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
+            let kf = k as f64;
+            let weights: Vec<f64> = (0..k).map(|j| (j as f64) - 0.5 * (kf - 1.0)).collect();
+            let pos_sum: f64 = weights.iter().filter(|&&w| w > 0.0).sum();
+            let mut wa = vec![0.0_f64; x_mat.ncols()];
+            let mut wb = vec![0.0_f64; x_mat.ncols()];
+            for (j, &w) in weights.iter().enumerate() {
+                let dv = factorial_design_vector(reml_model.total_cols, &reml_model.subsets, &reml_model.factor_basis, &[j]);
+                let scale = w.abs() / pos_sum.max(1.0);
+                let dst = if w >= 0.0 { &mut wa } else { &mut wb };
+                for (d, &v) in dst.iter_mut().zip(dv.iter()) {
+                    *d += scale * v;
+                }
+            }
+            if let Some(est) = reml_model.eval_weight_vecs(&wa, &wb)? {
+                let f_tr = if est.se > 0.0 { (est.diff / est.se).powi(2) } else { 0.0 };
+                let p_tr = f_sf(f_tr, 1.0, est.df)?;
+                push_scalar(out, "Linear trend F", None, f_tr);
+                push_scalar(out, "Linear trend P", None, p_tr);
+                out.tabs.push(build_tab(
+                    "linear-trend",
+                    "Test for linear trend",
+                    ResultTabKind::MultipleComparisons,
+                    vec![String::from("Contrast"), String::from("SE"), String::from("F"), String::from("P value")],
+                    vec![String::from("Linear trend")],
+                    vec![vec![num_cell(est.diff), num_cell(est.se), num_cell(f_tr), p_cell(p_tr, p_fmt)]],
+                ));
+            }
+        } else {
+            let mut mapped_mult = anova_spec.multiplicity;
+            if let MultiplicityMethod::Dunnett { control_column } = mapped_mult.method {
+                let ctrl_pos = indices
+                    .iter()
+                    .position(|&c| c == control_column)
+                    .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+                mapped_mult.method = MultiplicityMethod::Dunnett { control_column: ctrl_pos };
+            }
+            let pairs = collect_factor_pairs(k, mapped_mult.method, |i, j| reml_model.eval_marginal_pair(0, i, j))?;
+            if !pairs.is_empty() {
+                let numbered_levels: Vec<(usize, String)> = indices.iter().zip(cond_labels.iter()).map(|(&c, l)| (c, l.clone())).collect();
+                let mut level_means = Vec::with_capacity(k);
+                for lvl in 0..k {
+                    level_means.push(reml_model.level_mean_estimate(0, lvl)?);
+                }
+                let (details, fam_note) = compare_contrast_family(ContrastFamilyEval {
+                    levels: &numbered_levels,
+                    level_means: &level_means,
+                    mult_spec: &mapped_mult,
+                    confidence,
+                    n_slices: 1,
+                    pairs,
+                })?;
+                push_pairwise_outputs_with_footnote(out, &details, "multiple-comparisons", "Multiple comparisons", p_fmt, confidence, fam_note);
+            }
+        }
+    }
+
+    let n_subjects = scan.subj_ids.iter().copied().collect::<BTreeSet<_>>().len();
+    let df_lbl = match anova_spec.df_method {
+        MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+        MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+    };
+    out.checklist.push(checklist_item(
+        "Mixed-effects REML (repeated measures)",
+        ChecklistStatus::Info,
+        Some(format!(
+            "{} subjects, {} observations, {} incomplete block(s), {} df = {:.2}",
+            n_subjects, n_obs, scan.incomplete_rows, df_lbl, denom_df
+        )),
+        format!("Fitted mixed-effects REML ({model_desc}) with {df_lbl} degrees of freedom across all available repeated measurements without listwise deletion."),
+    ));
+    if scan.non_numeric_cells > 0 {
+        append_ignored_text_checklist_and_footnote(
+            out,
+            "Repeated-measures one-way ANOVA",
+            &[(String::from("Selected columns"), scan.non_numeric_cells)],
+        );
+    }
+    sanitize_result_sheet_floats(out)?;
+    Ok(out.clone())
+}
+
+fn scalar_value_or_fallback(scalars: &[curvebook_doc::ResultScalarEntry], key: &str, fallback: f64) -> f64 {
+    scalars.iter().find(|s| s.key == key).map_or(fallback, |s| s.value)
+}
+
 fn run_rm_one_way_anova_sheet(
     sheet: &DataSheet,
     out: &mut ResultSheet,
@@ -4115,11 +4682,21 @@ fn run_rm_one_way_anova_sheet(
         return Err(StatsError::IncompatibleTable { analysis: "RM one-way ANOVA", actual: sheet.archetype.kind() });
     };
     let indices = resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len());
-    let report = col_tab.complete_paired_rows_with_report(&indices);
-    if report.blocks.is_empty() {
+    let scan = scan_rm_one_way_column_table(col_tab, &indices);
+
+    if let OneWayMethod::RepeatedMeasures { .. } = anova_spec.method {
+        if scan.y_vec.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        if scan.incomplete_rows > 0 || anova_spec.mixed_effects_reml || anova_spec.residual_covariance == ResidualCovariance::Unstructured {
+            return run_rm_one_way_reml(col_tab, out, &indices, &scan, anova_spec, confidence, p_fmt);
+        }
+    }
+
+    if scan.blocks.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    let blocks = &report.blocks;
+    let blocks = &scan.blocks;
 
     let rm_analysis_name = match anova_spec.method {
         OneWayMethod::RepeatedMeasures { .. } => "Repeated-measures one-way ANOVA",
@@ -4259,9 +4836,9 @@ fn run_rm_one_way_anova_sheet(
         }
         _ => {}
     }
-    append_listwise_filtered_checklist_and_footnote(out, rm_analysis_name, report.skipped_incomplete_rows, report.blocks.len());
-    if report.non_numeric_cells > 0 {
-        append_ignored_text_checklist_and_footnote(out, rm_analysis_name, &[(String::from("Selected columns"), report.non_numeric_cells)]);
+    append_listwise_filtered_checklist_and_footnote(out, rm_analysis_name, scan.incomplete_rows, blocks.len());
+    if scan.non_numeric_cells > 0 {
+        append_ignored_text_checklist_and_footnote(out, rm_analysis_name, &[(String::from("Selected columns"), scan.non_numeric_cells)]);
     }
     sanitize_result_sheet_floats(out)?;
     Ok(out.clone())
@@ -4604,11 +5181,10 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
 
 #[derive(Debug, Clone)]
 struct RemlContrastModel {
-    n_rows: usize,
-    n_cols: usize,
-    include_interaction: bool,
-    row_basis: Vec<Vec<f64>>,
-    col_basis: Vec<Vec<f64>>,
+    factor_levels: Vec<usize>,
+    factor_basis: Vec<Vec<Vec<f64>>>,
+    subsets: Vec<Vec<usize>>,
+    total_cols: usize,
     row_proj: DenseMatrix,
     col_map: Vec<Option<usize>>,
     beta: Vec<f64>,
@@ -4618,7 +5194,8 @@ struct RemlContrastModel {
     phi_m_phi: Vec<DenseMatrix>,
     n_minus_p: f64,
     y_scale: f64,
-    observed_cells: Vec<Vec<bool>>,
+    df_method: MixedModelDfMethod,
+    observed_cells: BTreeSet<Vec<usize>>,
 }
 
 #[derive(Debug, Clone)]
@@ -4740,52 +5317,87 @@ fn enumerate_cartesian(radices: &[usize]) -> Result<Vec<Vec<usize>>, StatsError>
     Ok(out)
 }
 
-impl OlsPostHocModel {
-    fn design_vector(&self, cell: &[usize]) -> Vec<f64> {
-        let mut row = Vec::with_capacity(self.total_cols);
-        row.push(1.0);
-        for sub in &self.subsets {
-            let mut prod = vec![1.0_f64];
-            for &f_idx in sub {
-                let b_row = &self.factor_basis[f_idx][cell[f_idx]];
-                if b_row.is_empty() {
-                    prod.clear();
-                    break;
-                }
-                let mut next = Vec::with_capacity(prod.len() * b_row.len());
-                for &pv in &prod {
-                    for &bv in b_row {
-                        next.push(pv * bv);
-                    }
-                }
-                prod = next;
+fn factorial_design_vector(total_cols: usize, subsets: &[Vec<usize>], factor_basis: &[Vec<Vec<f64>>], cell: &[usize]) -> Vec<f64> {
+    let mut row = Vec::with_capacity(total_cols);
+    row.push(1.0);
+    for sub in subsets {
+        let mut prod = vec![1.0_f64];
+        for &f_idx in sub {
+            let b_row = &factor_basis[f_idx][cell[f_idx]];
+            if b_row.is_empty() {
+                prod.clear();
+                break;
             }
-            row.extend(prod);
+            let mut next = Vec::with_capacity(prod.len() * b_row.len());
+            for &pv in &prod {
+                for &bv in b_row {
+                    next.push(pv * bv);
+                }
+            }
+            prod = next;
         }
-        row
+        row.extend(prod);
     }
+    row
+}
 
+fn avg_factorial_design_over(
+    total_cols: usize,
+    subsets: &[Vec<usize>],
+    factor_basis: &[Vec<Vec<f64>>],
+    n_factors: usize,
+    other_factors: &[usize],
+    tuples: &[Vec<usize>],
+    fixed: &[(usize, usize)],
+) -> Vec<f64> {
+    let mut sum_vec = vec![0.0_f64; total_cols];
+    let mut cell = vec![0_usize; n_factors];
+    for &(f, lvl) in fixed {
+        cell[f] = lvl;
+    }
+    for tup in tuples {
+        for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+            cell[f] = v;
+        }
+        let dv = factorial_design_vector(total_cols, subsets, factor_basis, &cell);
+        for (dst, &val) in sum_vec.iter_mut().zip(dv.iter()) {
+            *dst += val;
+        }
+    }
+    let inv = 1.0 / (tuples.len().max(1) as f64);
+    for dst in &mut sum_vec {
+        *dst *= inv;
+    }
+    sum_vec
+}
+
+fn factorial_pair_cells_exist(
+    observed: &BTreeSet<Vec<usize>>,
+    n_factors: usize,
+    other_factors: &[usize],
+    tup: &[usize],
+    fixed_a: &[(usize, usize)],
+    fixed_b: &[(usize, usize)],
+) -> bool {
+    let mut cell = vec![0_usize; n_factors];
+    for (&f, &v) in other_factors.iter().zip(tup.iter()) {
+        cell[f] = v;
+    }
+    for &(f, lvl) in fixed_a {
+        cell[f] = lvl;
+    }
+    if !observed.contains(&cell) {
+        return false;
+    }
+    for &(f, lvl) in fixed_b {
+        cell[f] = lvl;
+    }
+    observed.contains(&cell)
+}
+
+impl OlsPostHocModel {
     fn avg_design_over(&self, other_factors: &[usize], tuples: &[Vec<usize>], fixed: &[(usize, usize)]) -> Vec<f64> {
-        let n_factors = self.factor_levels.len();
-        let mut sum_vec = vec![0.0_f64; self.total_cols];
-        let mut cell = vec![0_usize; n_factors];
-        for &(f, lvl) in fixed {
-            cell[f] = lvl;
-        }
-        for tup in tuples {
-            for (&f, &v) in other_factors.iter().zip(tup.iter()) {
-                cell[f] = v;
-            }
-            let dv = self.design_vector(&cell);
-            for (dst, &val) in sum_vec.iter_mut().zip(dv.iter()) {
-                *dst += val;
-            }
-        }
-        let inv = 1.0 / (tuples.len().max(1) as f64);
-        for dst in &mut sum_vec {
-            *dst *= inv;
-        }
-        sum_vec
+        avg_factorial_design_over(self.total_cols, &self.subsets, &self.factor_basis, self.factor_levels.len(), other_factors, tuples, fixed)
     }
 
     fn pair_cells_exist(&self, other_factors: &[usize], tup: &[usize], fixed_a: &[(usize, usize)], fixed_b: &[(usize, usize)]) -> bool {
@@ -5035,22 +5647,8 @@ impl RmBalancedPostHocModel {
 }
 
 impl RemlContrastModel {
-    fn cell_design_vector(&self, r: usize, c: usize) -> Vec<f64> {
-        let n_r = self.n_rows.saturating_sub(1);
-        let n_c = self.n_cols.saturating_sub(1);
-        let inter_df = if self.include_interaction { n_r * n_c } else { 0 };
-        let mut v = Vec::with_capacity(1 + n_r + n_c + inter_df);
-        v.push(1.0);
-        v.extend_from_slice(&self.row_basis[r]);
-        v.extend_from_slice(&self.col_basis[c]);
-        if self.include_interaction {
-            for &rb in &self.row_basis[r] {
-                for &cb in &self.col_basis[c] {
-                    v.push(rb * cb);
-                }
-            }
-        }
-        v
+    fn avg_design_over(&self, other_factors: &[usize], tuples: &[Vec<usize>], fixed: &[(usize, usize)]) -> Vec<f64> {
+        avg_factorial_design_over(self.total_cols, &self.subsets, &self.factor_basis, self.factor_levels.len(), other_factors, tuples, fixed)
     }
 
     fn map_to_eff(&self, v_orig: &[f64]) -> Vec<f64> {
@@ -5071,76 +5669,85 @@ impl RemlContrastModel {
         let l = self.map_to_eff(&l_orig);
         let diff = dot_slice(&l, &self.beta) * self.y_scale;
         let v = quad_form(&l, &self.phi).max(0.0);
-        let v_a = quad_form(&l, &self.phi_a).max(0.0);
-        let se = v_a.sqrt() * self.y_scale;
+        let cov_mat = match self.df_method {
+            MixedModelDfMethod::KenwardRoger => &self.phi_a,
+            MixedModelDfMethod::Satterthwaite => &self.phi,
+        };
+        let v_cov = quad_form(&l, cov_mat).max(0.0);
+        let se = v_cov.sqrt() * self.y_scale;
         let grad: Vec<f64> = self.phi_m_phi.iter().map(|pmp| quad_form(&l, pmp)).collect();
         let wg = self.w_info_inv.matvec(&grad)?;
         let denom = dot_slice(&grad, &wg);
         let df = if v > 0.0 && denom > 1e-30 * v * v { (2.0 * v * v / denom).clamp(1.0, self.n_minus_p) } else { self.n_minus_p };
 
         let y2 = self.y_scale * self.y_scale;
-        let phi_a_l = self.phi_a.matvec(&l)?;
-        let cov_l: Vec<f64> = phi_a_l.into_iter().map(|val| val * y2).collect();
+        let cov_l_raw = cov_mat.matvec(&l)?;
+        let cov_l: Vec<f64> = cov_l_raw.into_iter().map(|val| val * y2).collect();
         let ctrl_var_pair = if is_vec_estimable(&self.row_proj, wa_orig)? && is_vec_estimable(&self.row_proj, wb_orig)? {
             let wa = self.map_to_eff(wa_orig);
             let wb = self.map_to_eff(wb_orig);
-            Some(((quad_form(&wa, &self.phi_a) * y2).max(0.0), (quad_form(&wb, &self.phi_a) * y2).max(0.0)))
+            Some(((quad_form(&wa, cov_mat) * y2).max(0.0), (quad_form(&wb, cov_mat) * y2).max(0.0)))
         } else {
             None
         };
         Ok(Some(ContrastEstimate { diff, se, df, ctrl_var_pair, cov_vectors: Some((l, cov_l)) }))
     }
 
-    fn avg_cell_vec(&self, f_idx: usize, lvl: usize, other_indices: &[usize]) -> Vec<f64> {
-        let p = self.row_proj.nrows();
-        let mut acc = vec![0.0_f64; p];
-        for &o in other_indices {
-            let (r, c) = if f_idx == 0 { (lvl, o) } else { (o, lvl) };
-            let dv = self.cell_design_vector(r, c);
-            for (dst, &val) in acc.iter_mut().zip(dv.iter()) {
-                *dst += val;
-            }
+    fn eval_contrast_over(
+        &self,
+        other_factors: &[usize],
+        tuples: &[Vec<usize>],
+        fixed_a: &[(usize, usize)],
+        fixed_b: &[(usize, usize)],
+        require_shared: bool,
+    ) -> Result<Option<ContrastEstimate>, StatsError> {
+        let n_factors = self.factor_levels.len();
+        let shared: Vec<Vec<usize>> = tuples
+            .iter()
+            .filter(|t| factorial_pair_cells_exist(&self.observed_cells, n_factors, other_factors, t, fixed_a, fixed_b))
+            .cloned()
+            .collect();
+        if require_shared && shared.is_empty() {
+            return Ok(None);
         }
-        let inv = 1.0 / (other_indices.len().max(1) as f64);
-        for dst in &mut acc {
-            *dst *= inv;
-        }
-        acc
-    }
-
-    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
-        let n_other = if f_idx == 0 { self.n_cols } else { self.n_rows };
-        let all_other: Vec<usize> = (0..n_other).collect();
-        let wa_all = self.avg_cell_vec(f_idx, lvl_a, &all_other);
-        let wb_all = self.avg_cell_vec(f_idx, lvl_b, &all_other);
-        if let Some(est) = self.eval_weight_vecs(&wa_all, &wb_all)? {
+        let all_a = self.avg_design_over(other_factors, tuples, fixed_a);
+        let all_b = self.avg_design_over(other_factors, tuples, fixed_b);
+        if let Some(est) = self.eval_weight_vecs(&all_a, &all_b)? {
             return Ok(Some(est));
         }
-        let shared: Vec<usize> = all_other
-            .into_iter()
-            .filter(|&o| {
-                let (ra, ca) = if f_idx == 0 { (lvl_a, o) } else { (o, lvl_a) };
-                let (rb, cb) = if f_idx == 0 { (lvl_b, o) } else { (o, lvl_b) };
-                self.observed_cells[ra][ca] && self.observed_cells[rb][cb]
-            })
-            .collect();
         if shared.is_empty() {
             return Ok(None);
         }
-        let wa = self.avg_cell_vec(f_idx, lvl_a, &shared);
-        let wb = self.avg_cell_vec(f_idx, lvl_b, &shared);
+        let wa = self.avg_design_over(other_factors, &shared, fixed_a);
+        let wb = self.avg_design_over(other_factors, &shared, fixed_b);
         self.eval_weight_vecs(&wa, &wb)
     }
 
-    fn eval_simple_pair(&self, cond_lvl: usize, tgt_f: usize, t_a: usize, t_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
-        let (ra, ca) = if tgt_f == 0 { (t_a, cond_lvl) } else { (cond_lvl, t_a) };
-        let (rb, cb) = if tgt_f == 0 { (t_b, cond_lvl) } else { (cond_lvl, t_b) };
-        if !self.observed_cells[ra][ca] || !self.observed_cells[rb][cb] {
-            return Ok(None);
+    fn eval_marginal_pair(&self, f_idx: usize, lvl_a: usize, lvl_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != f_idx).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f]).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        self.eval_contrast_over(&other_factors, &tuples, &[(f_idx, lvl_a)], &[(f_idx, lvl_b)], false)
+    }
+
+    fn eval_simple_pair(&self, cond_f: usize, cond_lvl: usize, tgt_f: usize, t_a: usize, t_b: usize) -> Result<Option<ContrastEstimate>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != cond_f && f != tgt_f).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f]).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        self.eval_contrast_over(&other_factors, &tuples, &[(cond_f, cond_lvl), (tgt_f, t_a)], &[(cond_f, cond_lvl), (tgt_f, t_b)], true)
+    }
+
+    fn level_mean_estimate(&self, f_idx: usize, lvl: usize) -> Result<Option<f64>, StatsError> {
+        let other_factors: Vec<usize> = (0..self.factor_levels.len()).filter(|&f| f != f_idx).collect();
+        let radices: Vec<usize> = other_factors.iter().map(|&f| self.factor_levels[f]).collect();
+        let tuples = enumerate_cartesian(&radices)?;
+        let w_orig = self.avg_design_over(&other_factors, &tuples, &[(f_idx, lvl)]);
+        if is_vec_estimable(&self.row_proj, &w_orig)? {
+            let w = self.map_to_eff(&w_orig);
+            Ok(Some(dot_slice(&w, &self.beta) * self.y_scale))
+        } else {
+            Ok(None)
         }
-        let wa = self.cell_design_vector(ra, ca);
-        let wb = self.cell_design_vector(rb, cb);
-        self.eval_weight_vecs(&wa, &wb)
     }
 }
 
@@ -5165,7 +5772,7 @@ impl FactorialPostHocContext {
         match self {
             Self::Ols(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
             Self::RmBalanced(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b, unequal_var),
-            Self::Reml(m) => m.eval_simple_pair(cond_lvl, tgt_f, t_a, t_b),
+            Self::Reml(m) => m.eval_simple_pair(cond_f, cond_lvl, tgt_f, t_a, t_b),
         }
     }
 
@@ -5173,17 +5780,7 @@ impl FactorialPostHocContext {
         match self {
             Self::Ols(m) => m.level_mean_estimate(f_idx, lvl),
             Self::RmBalanced(m) => Ok(Some(if f_idx == 0 { m.row_means[lvl] } else { m.col_means[lvl] })),
-            Self::Reml(m) => {
-                let n_other = if f_idx == 0 { m.n_cols } else { m.n_rows };
-                let other: Vec<usize> = (0..n_other).collect();
-                let w_orig = m.avg_cell_vec(f_idx, lvl, &other);
-                if is_vec_estimable(&m.row_proj, &w_orig)? {
-                    let w = m.map_to_eff(&w_orig);
-                    Ok(Some(dot_slice(&w, &m.beta) * m.y_scale))
-                } else {
-                    Ok(None)
-                }
-            }
+            Self::Reml(m) => m.level_mean_estimate(f_idx, lvl),
         }
     }
 }
@@ -6285,13 +6882,16 @@ fn run_grouped_factorial(
         return Err(StatsError::RequiresRawReplicates);
     };
 
-    // Repeated-measures 2-way path (REML mixed-effects fallback on missing replicates or explicit unstructured covariance).
+    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
     if !fac_spec.three_way && fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
         let has_missing_selected = (0..n_rows).any(|r| {
             selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
         });
-        if (has_missing_selected && fac_spec.fit_reml_on_missing) || fac_spec.residual_covariance == ResidualCovariance::Unstructured {
-            return run_rm_two_way_reml_fallback(grouped, out, &selected_cols, fac_spec, p_fmt);
+        if (has_missing_selected && fac_spec.fit_reml_on_missing)
+            || fac_spec.residual_covariance == ResidualCovariance::Unstructured
+            || fac_spec.mixed_effects_reml
+        {
+            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
         }
         let mut subject_data = vec![vec![vec![0.0_f64; n_cols]; n_rows]; n_subs];
         let mut obs = Vec::with_capacity(n_subs * n_rows * n_cols);
@@ -6299,7 +6899,7 @@ fn run_grouped_factorial(
             for (r, row_vec) in subj.iter_mut().enumerate() {
                 for (c_pos, (&orig_c, slot)) in selected_cols.iter().zip(row_vec.iter_mut()).enumerate() {
                     let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
-                        return run_rm_two_way_reml_fallback(grouped, out, &selected_cols, fac_spec, p_fmt);
+                        return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, true, p_fmt);
                     };
                     *slot = v;
                     obs.push((vec![r, c_pos], v));
@@ -6327,8 +6927,14 @@ fn run_grouped_factorial(
         });
     }
 
-    // Three-way 2 x 2 x K path.
+    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
     if fac_spec.three_way && n_cols == 4 {
+        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+            let has_missing_selected = (0..n_rows).any(|r| {
+                selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
+            });
+            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
+        }
         let grouping = grouped.three_way_grouping.as_ref();
         let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
         let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
@@ -6384,123 +6990,12 @@ fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], sat
     }
 }
 
-struct RmUnstructuredDesign<'a> {
-    x_mat: &'a DenseMatrix,
-    y_vec: &'a [f64],
-    subj_ids: &'a [usize],
-    subj_row_ids: &'a [usize],
-    subj_col_ids: &'a [usize],
-    row_ids: &'a [usize],
-    col_ids: &'a [usize],
-    row_levels: &'a [String],
-    col_levels: &'a [String],
-    term_slices: &'a [(&'a str, usize, usize)],
-    design: RepeatedMeasuresDesign,
-}
-
-fn unstructured_fallback_label(reason: UnstructuredFallbackReason) -> &'static str {
-    match reason {
-        UnstructuredFallbackReason::SingleSubject => "single-subject isotropic covariance fallback",
-        UnstructuredFallbackReason::SmallSampleRankDeficient => "small-sample rank-deficient shrinkage fallback",
-        UnstructuredFallbackReason::SingularCovarianceEstimate => "singular covariance boundary shrinkage fallback",
-        UnstructuredFallbackReason::IterationLimitReached => "iteration-budget regularized iterate fallback",
-    }
-}
-
-fn build_matrix_tab(id: &str, title: &str, labels: &[String], matrix: &[Vec<f64>], footnotes: Vec<String>) -> ResultTab {
-    let rows: Vec<Vec<ResultCell>> = matrix.iter().map(|row| row.iter().map(|&v| num_cell(v)).collect()).collect();
-    let mut tab = build_tab(id, title, ResultTabKind::CovarianceMatrix, labels.to_vec(), labels.to_vec(), rows);
-    tab.footnotes = footnotes;
-    tab
-}
-
-fn run_rm_two_way_unstructured_reml(
-    out: &mut ResultSheet,
-    ctx: &RmUnstructuredDesign<'_>,
-) -> Result<(Vec<FactorialAnovaTerm>, f64, f64, RemlContrastCore), StatsError> {
-    let n_cols = ctx.col_levels.len();
-    let (cluster_ids, tp_ids, tp_labels): (Vec<usize>, Vec<usize>, Vec<String>) = match ctx.design {
-        RepeatedMeasuresDesign::ColumnFactorMatched => (ctx.subj_row_ids.to_vec(), ctx.col_ids.to_vec(), ctx.col_levels.to_vec()),
-        RepeatedMeasuresDesign::RowFactorMatched => (ctx.subj_col_ids.to_vec(), ctx.row_ids.to_vec(), ctx.row_levels.to_vec()),
-        _ => {
-            let tps: Vec<usize> = ctx.row_ids.iter().zip(ctx.col_ids.iter()).map(|(&r, &c)| r * n_cols + c).collect();
-            let mut labels = Vec::with_capacity(ctx.row_levels.len() * n_cols);
-            for r_lbl in ctx.row_levels {
-                for c_lbl in ctx.col_levels {
-                    labels.push(format!("{r_lbl} × {c_lbl}"));
-                }
-            }
-            (ctx.subj_ids.to_vec(), tps, labels)
-        }
-    };
-
-    let (ures, core) = fit_unstructured_rm_reml_with_core(ctx.x_mat, ctx.y_vec, &cluster_ids, &tp_ids, &tp_labels, ctx.term_slices)?;
-    push_scalar(out, "REML mean diagonal variance", None, ures.mean_diagonal_variance);
-    push_scalar(out, "REML log-likelihood", None, ures.reml_log_lik);
-    push_reml_df_scalars(out, &ures.fixed_terms, &ures.satterthwaite_df, &ures.kenward_roger_df);
-
-    let mut dropped_labels = Vec::new();
-    for (idx, lbl) in tp_labels.iter().enumerate() {
-        if !ures.active_timepoint_indices.contains(&idx) {
-            dropped_labels.push(lbl.clone());
-        }
-    }
-
-    let mut footnotes = Vec::new();
-    if !dropped_labels.is_empty() {
-        footnotes.push(format!("Excluded all-missing timepoint(s): {}.", dropped_labels.join(", ")));
-    }
-    if let Some(reason) = ures.fallback_reason {
-        footnotes.push(format!("Regularized SPD covariance used ({}).", unstructured_fallback_label(reason)));
-    }
-
-    out.tabs.push(build_matrix_tab(
-        "unstructured-reml-covariance",
-        "Estimated residual covariance matrix (REML)",
-        &ures.timepoint_labels,
-        &ures.covariance_matrix,
-        footnotes.clone(),
-    ));
-    out.tabs.push(build_matrix_tab(
-        "unstructured-reml-correlation",
-        "Estimated residual correlation matrix (REML)",
-        &ures.timepoint_labels,
-        &ures.correlation_matrix,
-        footnotes,
-    ));
-
-    let status = if ures.fallback_reason.is_some() || !dropped_labels.is_empty() { ChecklistStatus::Warn } else { ChecklistStatus::Info };
-    let mut explanation = String::from(
-        "Fitted unstructured t x t repeated-measures residual covariance by Cholesky REML with Fai-Cornelius Satterthwaite and Kenward-Roger degrees of freedom.",
-    );
-    if !dropped_labels.is_empty() {
-        explanation.push_str(&format!(" Excluded all-missing timepoint(s): {}.", dropped_labels.join(", ")));
-    }
-    if let Some(reason) = ures.fallback_reason {
-        explanation.push_str(&format!(" Engaged {}.", unstructured_fallback_label(reason)));
-    }
-    out.checklist.push(checklist_item(
-        "Unstructured covariance REML",
-        status,
-        Some(format!(
-            "t = {}, REML logL = {:.2}, mean diag var = {:.4}",
-            ures.timepoint_labels.len(),
-            ures.reml_log_lik,
-            ures.mean_diagonal_variance
-        )),
-        explanation,
-    ));
-
-    let df_sum: f64 = ures.fixed_terms.iter().map(|t| t.df).sum();
-    let df_resid = ((ctx.y_vec.len() as f64) - 1.0 - df_sum).max(1.0);
-    Ok((ures.fixed_terms, ures.mean_diagonal_variance, df_resid, core))
-}
-
-fn run_rm_two_way_reml_fallback(
+fn run_rm_grouped_reml(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
     selected_cols: &[usize],
     fac_spec: &FactorialAnovaSpec,
+    has_missing: bool,
     p_fmt: PValueFormat,
 ) -> Result<GroupedFactorialOutcome, StatsError> {
     let n_rows = grouped.row_count();
@@ -6508,188 +7003,217 @@ fn run_rm_two_way_reml_fallback(
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
-    let row_basis = sum_contrast_vectors(n_rows);
-    let col_basis = sum_contrast_vectors(n_cols);
-    let n_r = n_rows.saturating_sub(1);
-    let n_c = n_cols.saturating_sub(1);
-    let include_interaction = fac_spec.max_interaction_order >= 2;
-    let inter_df = if include_interaction { n_r * n_c } else { 0 };
-    let p_total = 1 + n_r + n_c + inter_df;
+    let is_three_way = fac_spec.three_way && n_cols == 4;
 
-    let mut x_rows: Vec<f64> = Vec::new();
-    let mut y_vec: Vec<f64> = Vec::new();
+    let (factor_names, factor_levels, max_order, ab_labels) = if is_three_way {
+        let grouping = grouped.three_way_grouping.as_ref();
+        let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
+        let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
+        let f3_name = grouped.row_factor_title.clone();
+        let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+        let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+        let f3_levels = grouped_row_levels(grouped, n_rows);
+        let mut ab_lbls = Vec::with_capacity(4);
+        for a_l in &f1_levels {
+            for b_l in &f2_levels {
+                ab_lbls.push(format!("{a_l} × {b_l}"));
+            }
+        }
+        (vec![f1_name, f2_name, f3_name], vec![f1_levels, f2_levels, f3_levels], fac_spec.max_interaction_order.clamp(1, 3), ab_lbls)
+    } else {
+        let row_levels = grouped_row_levels(grouped, n_rows);
+        let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+        (
+            vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
+            vec![row_levels, col_levels],
+            fac_spec.max_interaction_order.clamp(1, 2),
+            Vec::new(),
+        )
+    };
+
+    let mut obs_cells = Vec::new();
     let mut obs = Vec::new();
-    let mut subj_ids: Vec<usize> = Vec::new();
-    let mut subj_row_ids: Vec<usize> = Vec::new();
-    let mut subj_col_ids: Vec<usize> = Vec::new();
-    let mut row_ids: Vec<usize> = Vec::new();
-    let mut col_ids: Vec<usize> = Vec::new();
-    let mut observed_cells = vec![vec![false; n_cols]; n_rows];
+    let mut y_vec = Vec::new();
+    let mut subj_ids = Vec::new();
+    let mut subj_row_ids = Vec::new();
+    let mut subj_col_ids = Vec::new();
+    let mut id_sa = Vec::new();
+    let mut id_sb = Vec::new();
+    let mut id_sab = Vec::new();
+    let mut id_sac = Vec::new();
+    let mut id_sbc = Vec::new();
+    let mut id_sr_a = Vec::new();
+    let mut id_sr_b = Vec::new();
+    let mut row_ids = Vec::new();
+    let mut col_ids = Vec::new();
+
     for s in 0..n_subs {
-        for (r, r_basis) in row_basis.iter().enumerate() {
-            for (c_pos, (&orig_c, c_basis)) in selected_cols.iter().zip(col_basis.iter()).enumerate() {
-                if let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) {
-                    let mut row_x = Vec::with_capacity(p_total);
-                    row_x.push(1.0);
-                    row_x.extend_from_slice(r_basis);
-                    row_x.extend_from_slice(c_basis);
-                    if include_interaction {
-                        for &rb in r_basis {
-                            for &cb in c_basis {
-                                row_x.push(rb * cb);
-                            }
-                        }
-                    }
-                    x_rows.extend_from_slice(&row_x);
-                    y_vec.push(v);
-                    obs.push((vec![r, c_pos], v));
-                    observed_cells[r][c_pos] = true;
-                    subj_ids.push(s);
-                    subj_row_ids.push(s * n_rows + r);
-                    subj_col_ids.push(s * n_cols + c_pos);
-                    row_ids.push(r);
-                    col_ids.push(c_pos);
+        for r in 0..n_rows {
+            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+                let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
+                    continue;
+                };
+                let cell = if is_three_way { vec![c_pos / 2, c_pos % 2, r] } else { vec![r, c_pos] };
+                obs_cells.push(cell.clone());
+                obs.push((cell, v));
+                y_vec.push(v);
+                subj_ids.push(s);
+                subj_row_ids.push(s * n_rows + r);
+                subj_col_ids.push(s * n_cols + c_pos);
+                row_ids.push(r);
+                col_ids.push(c_pos);
+                if is_three_way {
+                    let l1 = c_pos / 2;
+                    let l2 = c_pos % 2;
+                    id_sa.push(s * 2 + l1);
+                    id_sb.push(s * 2 + l2);
+                    id_sab.push(s * 4 + c_pos);
+                    id_sac.push((s * 2 + l1) * n_rows + r);
+                    id_sbc.push((s * 2 + l2) * n_rows + r);
+                    let sr = s * n_rows + r;
+                    id_sr_a.push(sr * 2 + l1);
+                    id_sr_b.push(sr * 2 + l2);
                 }
             }
         }
     }
+
     let n_obs = y_vec.len();
     if n_obs == 0 {
         return Err(StatsError::EmptyInput);
     }
+    let RemlEffectDesign { x_mat, subsets, factor_basis, terms: term_ranges, observed_cells } =
+        build_reml_effect_design(&obs_cells, &factor_names, &factor_levels, max_order)?;
+    let p_total = x_mat.ncols();
     if fac_spec.residual_covariance == ResidualCovariance::CompoundSymmetry && n_obs <= p_total {
         return Err(StatsError::InsufficientSampleSize { context: "RM REML observations", required: p_total + 1, actual: n_obs });
     }
-    let x_mat = DenseMatrix::from_row_major(n_obs, p_total, x_rows)?;
-    let inter_name = format!("{} × {}", grouped.row_factor_title, grouped.column_factor_title);
-    let mut term_slices = vec![(grouped.row_factor_title.as_str(), 1, n_r), (grouped.column_factor_title.as_str(), 1 + n_r, n_c)];
-    if include_interaction {
-        term_slices.push((inter_name.as_str(), 1 + n_r + n_c, inter_df));
-    }
-
-    let row_levels = grouped_row_levels(grouped, n_rows);
-    let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+    let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
 
     let (fixed_terms, sigma2_e, df_residual, reml_core) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
-        run_rm_two_way_unstructured_reml(
-            out,
-            &RmUnstructuredDesign {
-                x_mat: &x_mat,
-                y_vec: &y_vec,
-                subj_ids: &subj_ids,
-                subj_row_ids: &subj_row_ids,
-                subj_col_ids: &subj_col_ids,
-                row_ids: &row_ids,
-                col_ids: &col_ids,
-                row_levels: &row_levels,
-                col_levels: &col_levels,
-                term_slices: &term_slices,
-                design: fac_spec.repeated_measures,
-            },
-        )?
-    } else {
-        let (fixed_terms, sigma2_e, reml_ll, icc_subj, vc_tab, reml_core) = match fac_spec.repeated_measures {
-            RepeatedMeasuresDesign::BothFactorsMatched => {
-                let (g_s, c_s) = cluster_ids_to_g_matrix(&subj_ids)?;
-                let (g_sr, c_sr) = cluster_ids_to_g_matrix(&subj_row_ids)?;
-                let (g_sc, c_sc) = cluster_ids_to_g_matrix(&subj_col_ids)?;
-                let sr_name = format!("subject × {}", grouped.row_factor_title);
-                let sc_name = format!("subject × {}", grouped.column_factor_title);
-                let (mres, core) = fit_multi_vc_reml_with_core(
-                    &x_mat,
-                    &y_vec,
-                    &[("subject", g_s, c_s), (sr_name.as_str(), g_sr, c_sr), (sc_name.as_str(), g_sc, c_sc)],
-                    &term_slices,
-                )?;
-                let s2_s = mres.variance_components.first().map_or(0.0, |(_, v)| *v);
-                let s2_sr = mres.variance_components.get(1).map_or(0.0, |(_, v)| *v);
-                let s2_sc = mres.variance_components.get(2).map_or(0.0, |(_, v)| *v);
-                let tot = (s2_s + s2_sr + s2_sc + mres.sigma2_error).max(1e-18);
-                let icc = s2_s / tot;
-
-                push_scalar(out, "REML sigma^2 (subject)", None, s2_s);
-                push_scalar(out, format!("REML sigma^2 ({sr_name})"), None, s2_sr);
-                push_scalar(out, format!("REML sigma^2 ({sc_name})"), None, s2_sc);
-                push_scalar(out, "REML sigma^2 (residual)", None, mres.sigma2_error);
-                push_scalar(out, "REML ICC", None, icc);
-                push_scalar(out, "REML log-likelihood", None, mres.reml_log_lik);
-                push_reml_df_scalars(out, &mres.fixed_terms, &mres.satterthwaite_df, &mres.kenward_roger_df);
-
-                let sr_title = format!("Subject × {}", grouped.row_factor_title);
-                let sc_title = format!("Subject × {}", grouped.column_factor_title);
-                let vc_headers = vec![String::from("Component"), String::from("Variance"), String::from("SD"), String::from("% of total")];
-                let vc_rows = vec![
-                    vec![ResultCell::Text(String::from("Subject (random)")), num_cell(s2_s), num_cell(s2_s.sqrt()), num_cell(100.0 * s2_s / tot)],
-                    vec![ResultCell::Text(sr_title.clone()), num_cell(s2_sr), num_cell(s2_sr.sqrt()), num_cell(100.0 * s2_sr / tot)],
-                    vec![ResultCell::Text(sc_title.clone()), num_cell(s2_sc), num_cell(s2_sc.sqrt()), num_cell(100.0 * s2_sc / tot)],
-                    vec![
-                        ResultCell::Text(String::from("Residual")),
-                        num_cell(mres.sigma2_error),
-                        num_cell(mres.sigma2_error.sqrt()),
-                        num_cell(100.0 * mres.sigma2_error / tot),
-                    ],
-                ];
-                let tab = build_tab(
-                    "mixed-reml",
-                    "Mixed-effects REML variance components",
-                    ResultTabKind::ParametersAndConfidenceIntervals,
-                    vc_headers,
-                    vec![String::from("Subject"), sr_title, sc_title, String::from("Residual")],
-                    vc_rows,
-                );
-                (mres.fixed_terms, mres.sigma2_error, mres.reml_log_lik, icc, tab, core)
+        let (cluster_ids, tp_ids, tp_labels): (&[usize], Vec<usize>, Vec<String>) = if is_three_way {
+            match fac_spec.repeated_measures {
+                RepeatedMeasuresDesign::RowFactorMatched => (&id_sab, row_ids.clone(), factor_levels[2].clone()),
+                RepeatedMeasuresDesign::ColumnFactorMatched => (&subj_row_ids, col_ids.clone(), ab_labels),
+                _ => {
+                    let tps: Vec<usize> = col_ids.iter().zip(row_ids.iter()).map(|(&c, &r)| c * n_rows + r).collect();
+                    let mut labels = Vec::with_capacity(n_cols * n_rows);
+                    for ab_l in &ab_labels {
+                        for c_l in &factor_levels[2] {
+                            labels.push(format!("{ab_l} × {c_l}"));
+                        }
+                    }
+                    (&subj_ids, tps, labels)
+                }
             }
-            design => {
-                let cluster_ids: Vec<usize> = match design {
-                    RepeatedMeasuresDesign::ColumnFactorMatched => subj_row_ids.clone(),
-                    RepeatedMeasuresDesign::RowFactorMatched => subj_col_ids.clone(),
-                    _ => subj_ids,
-                };
-                let (reml, core) = fit_random_intercept_reml_with_core(&x_mat, &y_vec, &cluster_ids, &term_slices)?;
-                push_scalar(out, "REML sigma^2 (subject)", None, reml.sigma2_random);
-                push_scalar(out, "REML sigma^2 (residual)", None, reml.sigma2_error);
-                push_scalar(out, "REML ICC", None, reml.icc);
-                push_scalar(out, "REML log-likelihood", None, reml.reml_log_lik);
-                push_reml_df_scalars(out, &reml.fixed_terms, &reml.satterthwaite_df, &reml.kenward_roger_df);
-
-                let reml_headers =
-                    vec![String::from("Component"), String::from("Variance"), String::from("ICC"), String::from("LRT chi2"), String::from("LRT P")];
-                let reml_rows = vec![
-                    vec![
-                        ResultCell::Text(String::from("Subject (random)")),
-                        num_cell(reml.sigma2_random),
-                        num_cell(reml.icc),
-                        num_cell(reml.lrt_random_chi2),
-                        p_cell(reml.lrt_random_p, p_fmt),
-                    ],
-                    vec![
-                        ResultCell::Text(String::from("Residual")),
-                        num_cell(reml.sigma2_error),
-                        ResultCell::Empty,
-                        ResultCell::Empty,
-                        ResultCell::Empty,
-                    ],
-                ];
-                let tab = build_tab(
-                    "mixed-reml",
-                    "Mixed-effects REML variance components",
-                    ResultTabKind::ParametersAndConfidenceIntervals,
-                    reml_headers,
-                    vec![String::from("Subject"), String::from("Residual")],
-                    reml_rows,
-                );
-                (reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, tab, core)
+        } else {
+            match fac_spec.repeated_measures {
+                RepeatedMeasuresDesign::ColumnFactorMatched => (&subj_row_ids, col_ids.clone(), factor_levels[1].clone()),
+                RepeatedMeasuresDesign::RowFactorMatched => (&subj_col_ids, row_ids.clone(), factor_levels[0].clone()),
+                _ => {
+                    let tps: Vec<usize> = row_ids.iter().zip(col_ids.iter()).map(|(&r, &c)| r * n_cols + c).collect();
+                    let mut labels = Vec::with_capacity(n_rows * n_cols);
+                    for r_lbl in &factor_levels[0] {
+                        for c_lbl in &factor_levels[1] {
+                            labels.push(format!("{r_lbl} × {c_lbl}"));
+                        }
+                    }
+                    (&subj_ids, tps, labels)
+                }
+            }
+        };
+        emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?
+    } else {
+        let (fixed_terms, sigma2_e, reml_ll, icc_subj, core) = if is_three_way {
+            match fac_spec.repeated_measures {
+                RepeatedMeasuresDesign::BothFactorsMatched => {
+                    let s_a = format!("subject × {}", factor_names[0]);
+                    let s_b = format!("subject × {}", factor_names[1]);
+                    let s_c = format!("subject × {}", factor_names[2]);
+                    let s_ab = format!("subject × {} × {}", factor_names[0], factor_names[1]);
+                    let s_ac = format!("subject × {} × {}", factor_names[0], factor_names[2]);
+                    let s_bc = format!("subject × {} × {}", factor_names[1], factor_names[2]);
+                    let t_a = format!("Subject × {}", factor_names[0]);
+                    let t_b = format!("Subject × {}", factor_names[1]);
+                    let t_c = format!("Subject × {}", factor_names[2]);
+                    let t_ab = format!("Subject × {} × {}", factor_names[0], factor_names[1]);
+                    let t_ac = format!("Subject × {} × {}", factor_names[0], factor_names[2]);
+                    let t_bc = format!("Subject × {} × {}", factor_names[1], factor_names[2]);
+                    let strata = [
+                        ("subject", "Subject (random)", subj_ids.as_slice()),
+                        (s_a.as_str(), t_a.as_str(), id_sa.as_slice()),
+                        (s_b.as_str(), t_b.as_str(), id_sb.as_slice()),
+                        (s_c.as_str(), t_c.as_str(), subj_row_ids.as_slice()),
+                        (s_ab.as_str(), t_ab.as_str(), id_sab.as_slice()),
+                        (s_ac.as_str(), t_ac.as_str(), id_sac.as_slice()),
+                        (s_bc.as_str(), t_bc.as_str(), id_sbc.as_slice()),
+                    ];
+                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
+                }
+                RepeatedMeasuresDesign::ColumnFactorMatched => {
+                    let s_a = format!("subject × {}", factor_names[0]);
+                    let s_b = format!("subject × {}", factor_names[1]);
+                    let t_a = format!("Subject × {}", factor_names[0]);
+                    let t_b = format!("Subject × {}", factor_names[1]);
+                    let strata = [
+                        ("subject", "Subject (random)", subj_row_ids.as_slice()),
+                        (s_a.as_str(), t_a.as_str(), id_sr_a.as_slice()),
+                        (s_b.as_str(), t_b.as_str(), id_sr_b.as_slice()),
+                    ];
+                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
+                }
+                RepeatedMeasuresDesign::RowFactorMatched => {
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &id_sab, &term_slices, fac_spec.df_method, p_fmt)?
+                }
+                RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
+            }
+        } else {
+            match fac_spec.repeated_measures {
+                RepeatedMeasuresDesign::BothFactorsMatched => {
+                    let sr_name = format!("subject × {}", factor_names[0]);
+                    let sc_name = format!("subject × {}", factor_names[1]);
+                    let sr_title = format!("Subject × {}", factor_names[0]);
+                    let sc_title = format!("Subject × {}", factor_names[1]);
+                    let strata = [
+                        ("subject", "Subject (random)", subj_ids.as_slice()),
+                        (sr_name.as_str(), sr_title.as_str(), subj_row_ids.as_slice()),
+                        (sc_name.as_str(), sc_title.as_str(), subj_col_ids.as_slice()),
+                    ];
+                    emit_multi_vc_rm_reml(out, &x_mat, &y_vec, &strata, &term_slices, fac_spec.df_method)?
+                }
+                RepeatedMeasuresDesign::ColumnFactorMatched => {
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_row_ids, &term_slices, fac_spec.df_method, p_fmt)?
+                }
+                RepeatedMeasuresDesign::RowFactorMatched => {
+                    emit_random_intercept_reml(out, &x_mat, &y_vec, &subj_col_ids, &term_slices, fac_spec.df_method, p_fmt)?
+                }
+                RepeatedMeasuresDesign::None => return Err(StatsError::EmptyInput),
             }
         };
 
-        out.tabs.push(vc_tab);
+        let df_lbl = match fac_spec.df_method {
+            MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+            MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+        };
+        let (check_title, check_desc) = if has_missing {
+            (
+                "Missing-value mixed-effects REML",
+                format!(
+                    "Missing replicates detected in repeated-measures cells; fitted linear mixed-effects REML with {df_lbl} degrees of freedom instead of listwise deletion."
+                ),
+            )
+        } else if is_three_way {
+            ("Three-way repeated-measures mixed-effects REML", format!("Fitted three-way mixed-effects REML with {df_lbl} degrees of freedom."))
+        } else {
+            ("Repeated-measures mixed-effects REML", format!("Fitted linear mixed-effects REML with {df_lbl} degrees of freedom."))
+        };
         out.checklist.push(checklist_item(
-            "Missing-value mixed-effects REML",
+            check_title,
             ChecklistStatus::Info,
             Some(format!("ICC = {icc_subj:.3}, REML logL = {reml_ll:.2}")),
-            "Missing replicates detected in repeated-measures cells; fitted linear mixed-effects REML with Kenward-Roger degrees of freedom instead of listwise deletion.",
+            check_desc,
         ));
-        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, reml_core)
+        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core)
     };
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
@@ -6701,21 +7225,17 @@ fn run_rm_two_way_reml_fallback(
         ss_total: ym.css,
         df_total: (n_obs - 1) as f64,
         total_n: n_obs,
-        unbalanced: true,
+        unbalanced: has_missing,
         ss_type: SumOfSquaresType::TypeIII,
     };
-    let data = FactorialObservations {
-        factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
-        factor_levels: vec![row_levels, col_levels],
-        rows: obs,
-    };
+    let data = FactorialObservations { factor_names, factor_levels: factor_levels.clone(), rows: obs };
     let (_, row_proj) = build_xtx_pinv_and_proj(&x_mat)?;
+    let factor_level_counts: Vec<usize> = factor_levels.iter().map(Vec::len).collect();
     let reml_model = RemlContrastModel {
-        n_rows,
-        n_cols,
-        include_interaction,
-        row_basis,
-        col_basis,
+        factor_levels: factor_level_counts,
+        factor_basis,
+        subsets,
+        total_cols: p_total,
         row_proj,
         col_map: reml_core.col_map,
         beta: reml_core.beta,
@@ -6725,6 +7245,7 @@ fn run_rm_two_way_reml_fallback(
         phi_m_phi: reml_core.phi_m_phi,
         n_minus_p: reml_core.n_minus_p,
         y_scale: reml_core.y_scale,
+        df_method: reml_core.df_method,
         observed_cells,
     };
     Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Reml(reml_model), aux_tabs: Vec::new() })
@@ -6795,9 +7316,14 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     let p_fmt = spec.p_value_format;
 
     let selected_groups = resolve_selected_indices(&spec.selected_data_sets, nested.groups.len());
-    let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test)?;
+    let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
+    let active_df2 = match nested_spec.df_method {
+        MixedModelDfMethod::KenwardRoger => res.df2_groups_kenward_roger,
+        MixedModelDfMethod::Satterthwaite => res.df2_groups_satterthwaite,
+    };
     push_scalar(&mut out, "F (among groups)", None, res.f_among_groups);
     push_scalar(&mut out, "P value (groups)", None, res.p_among_groups);
+    push_scalar(&mut out, "Group denominator df", None, active_df2);
     push_scalar(&mut out, "Subcluster variance", None, res.variance_subclusters);
     push_scalar(&mut out, "Residual variance", None, res.variance_error);
     push_scalar(&mut out, "ICC (subcluster)", None, res.icc_subclusters);
@@ -6864,13 +7390,17 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     // Optional group-level pairwise comparisons using hierarchical group-mean variances:
     // Var(mean_g) = sigma_u^2 * sum_j(n_{gj}^2) / N_g^2 + sigma_e^2 / N_g (Sokal & Rohlf / Montgomery).
     if !nested_spec.two_group_t_test && selected_groups.len() >= 3 {
-        append_nested_multiplicity(&mut out, nested, &selected_groups, &res, spec, nested_spec)?;
+        append_nested_multiplicity(&mut out, nested, &selected_groups, &res, active_df2, spec, nested_spec)?;
     }
 
+    let df_lbl = match nested_spec.df_method {
+        MixedModelDfMethod::KenwardRoger => "KR",
+        MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+    };
     out.checklist.push(checklist_item(
         "Biological vs. technical nesting",
         if res.icc_subclusters > 0.05 { ChecklistStatus::Pass } else { ChecklistStatus::Info },
-        Some(format!("ICC = {:.3}, KR df = {:.2}", res.icc_subclusters, res.df2_groups_kenward_roger)),
+        Some(format!("ICC = {:.3}, {df_lbl} df = {:.2}", res.icc_subclusters, active_df2)),
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
     sanitize_result_sheet_floats(&mut out)?;
@@ -6882,6 +7412,7 @@ fn append_nested_multiplicity(
     nested: &curvebook_doc::NestedTable,
     selected_groups: &[usize],
     res: &NestedAnovaResult,
+    active_df2: f64,
     spec: &AnalysisSpec,
     nested_spec: &NestedAnalysisSpec,
 ) -> Result<(), StatsError> {
@@ -6920,7 +7451,7 @@ fn append_nested_multiplicity(
         g_inputs.push(GroupComparisonInput { index: g_idx, label, n: n_eff, mean, sd: sd_eff });
     }
     if nested_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
-        let trend = linear_trend_test(&g_inputs, mse_eff, res.df2_groups_kenward_roger)?;
+        let trend = linear_trend_test(&g_inputs, mse_eff, active_df2)?;
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
         let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
@@ -6934,8 +7465,7 @@ fn append_nested_multiplicity(
             rows,
         ));
     } else {
-        let details =
-            compare_groups_pairwise_with_confidence(&g_inputs, mse_eff, res.df2_groups_kenward_roger, &nested_spec.multiplicity, confidence)?;
+        let details = compare_groups_pairwise_with_confidence(&g_inputs, mse_eff, active_df2, &nested_spec.multiplicity, confidence)?;
         push_pairwise_outputs(out, &details, "Nested multiple comparisons", p_fmt, confidence);
     }
     Ok(())

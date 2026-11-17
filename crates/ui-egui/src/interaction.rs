@@ -2533,15 +2533,24 @@ fn open_dropdown_for_id(app: &mut UiApp, dropdown_id: &str, metrics: ViewportMet
     let tree = app.build_and_cache_layout_tree(metrics);
     let anchor = tree.node(dropdown_id).map(|n| n.bounds.rect_px).unwrap_or_default();
     if dropdown_id == "edit.multiplicity_method" {
-        let param_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.posthoc.tukey").enabled;
-        let nonparam_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.posthoc.dunn").enabled;
+        let tukey_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.tukey").enabled;
+        let bonf_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.bonferroni").enabled;
+        let sidak_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.sidak").enabled;
+        let holm_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.holm_sidak").enabled;
+        let lsd_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.fisher_lsd").enabled;
+        let dunnett_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.dunnett").enabled;
+        let nonparam_ok = evaluate_dialog_widget(&app.canvas_dialogs, app.document(), "edit.post_hoc.dunn").enabled;
         let opts = vec![
             DropdownOption { value: String::from("none"), label: String::from("None (uncorrected)"), enabled: true },
-            DropdownOption { value: String::from("tukey"), label: String::from("Tukey HSD"), enabled: param_ok },
-            DropdownOption { value: String::from("bonferroni"), label: String::from("Bonferroni"), enabled: param_ok },
-            DropdownOption { value: String::from("sidak"), label: String::from("Sidak"), enabled: param_ok },
-            DropdownOption { value: String::from("holm_sidak"), label: String::from("Holm-Sidak"), enabled: param_ok },
-            DropdownOption { value: String::from("dunnett"), label: String::from("Dunnett"), enabled: param_ok },
+            DropdownOption { value: String::from("tukey"), label: String::from("Tukey HSD"), enabled: tukey_ok },
+            DropdownOption { value: String::from("bonferroni"), label: String::from("Bonferroni"), enabled: bonf_ok },
+            DropdownOption { value: String::from("sidak"), label: String::from("Sidak"), enabled: sidak_ok },
+            DropdownOption { value: String::from("holm_sidak"), label: String::from("Holm-Sidak"), enabled: holm_ok },
+            DropdownOption { value: String::from("fisher_lsd"), label: String::from("Fisher's LSD"), enabled: lsd_ok },
+            DropdownOption { value: String::from("bh"), label: String::from("Benjamini-Hochberg (FDR)"), enabled: true },
+            DropdownOption { value: String::from("bky"), label: String::from("Two-Stage BKY (FDR)"), enabled: true },
+            DropdownOption { value: String::from("by"), label: String::from("Benjamini-Yekutieli (FDR)"), enabled: true },
+            DropdownOption { value: String::from("dunnett"), label: String::from("Dunnett"), enabled: dunnett_ok },
             DropdownOption { value: String::from("dunn"), label: String::from("Dunn (Rank Sum)"), enabled: nonparam_ok },
         ];
         app.interaction.open_dropdown = Some(OpenDropdownState {

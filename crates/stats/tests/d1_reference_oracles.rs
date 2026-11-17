@@ -1310,6 +1310,7 @@ fn oracle_end_to_end_run_analysis_sheets() {
                 threshold: 0.05,
                 report_confidence_intervals: true,
             },
+            ..OneWayAnovaSpec::default()
         }),
     )
     .unwrap();
@@ -1499,7 +1500,7 @@ fn oracle_end_to_end_run_analysis_multifactor_mv_and_nested() {
     let sp_nt = AnalysisSpec::new(
         "res-nt",
         "nt-1",
-        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, multiplicity: MultiplicitySpec::default() }),
+        AnalysisKind::NestedComparison(NestedAnalysisSpec { two_group_t_test: true, ..NestedAnalysisSpec::default() }),
     )
     .unwrap();
     let res_nt = run_analysis(&s_nt, &sp_nt).unwrap();

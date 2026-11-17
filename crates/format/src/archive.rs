@@ -1137,8 +1137,11 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
     Ok(out)
 }
 
-const MIGRATION_STEPS: &[VersionStep] =
-    &[VersionStep { from_version: 0, apply: migrate_v0_to_v1 }, VersionStep { from_version: 1, apply: migrate_v1_to_v2 }];
+const MIGRATION_STEPS: &[VersionStep] = &[
+    VersionStep { from_version: 0, apply: migrate_v0_to_v1 },
+    VersionStep { from_version: 1, apply: migrate_v1_to_v2 },
+    VersionStep { from_version: 2, apply: migrate_v2_to_v3 },
+];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
 
@@ -1159,9 +1162,9 @@ fn migrate_v0_to_v1(value: &mut serde_json::Value) -> Result<(), FormatError> {
     Ok(())
 }
 
-fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), FormatError> {
+fn migrate_result_sheet_step(value: &mut serde_json::Value, schema_version: u32) {
     if let Some(obj) = value.as_object_mut() {
-        obj.insert(String::from("schema_version"), serde_json::Value::from(2_u32));
+        obj.insert(String::from("schema_version"), serde_json::Value::from(schema_version));
         backfill_top_level_fields(obj);
         if let Some(result_sheets) = obj.get_mut("result_sheets").and_then(serde_json::Value::as_array_mut) {
             for res in result_sheets {
@@ -1169,6 +1172,15 @@ fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), FormatError> {
             }
         }
     }
+}
+
+fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 2);
+    Ok(())
+}
+
+fn migrate_v2_to_v3(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 3);
     Ok(())
 }
 
@@ -1291,8 +1303,18 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
         km.entry(String::from("mv_status_column")).or_insert(serde_json::Value::Null);
         km.entry(String::from("mv_group_column")).or_insert(serde_json::Value::Null);
     }
+    if let Some(one_way) = kind.get_mut("OneWayAnova").and_then(serde_json::Value::as_object_mut) {
+        one_way.entry(String::from("mixed_effects_reml")).or_insert(serde_json::Value::Bool(false));
+        one_way.entry(String::from("df_method")).or_insert_with(|| serde_json::Value::String(String::from("KenwardRoger")));
+        one_way.entry(String::from("residual_covariance")).or_insert_with(|| serde_json::Value::String(String::from("CompoundSymmetry")));
+    }
     if let Some(fac) = kind.get_mut("FactorialAnova").and_then(serde_json::Value::as_object_mut) {
+        fac.entry(String::from("mixed_effects_reml")).or_insert(serde_json::Value::Bool(false));
+        fac.entry(String::from("df_method")).or_insert_with(|| serde_json::Value::String(String::from("KenwardRoger")));
         fac.entry(String::from("residual_covariance")).or_insert_with(|| serde_json::Value::String(String::from("CompoundSymmetry")));
+    }
+    if let Some(nested) = kind.get_mut("NestedComparison").and_then(serde_json::Value::as_object_mut) {
+        nested.entry(String::from("df_method")).or_insert_with(|| serde_json::Value::String(String::from("KenwardRoger")));
     }
 }
 

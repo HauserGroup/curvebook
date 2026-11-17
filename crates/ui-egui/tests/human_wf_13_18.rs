@@ -402,15 +402,20 @@ fn wf13_human_rm_anova_sphericity_gg_and_hf() -> Result<(), Box<dyn Error>> {
     }
     assert_rendered_png_non_empty(&driver)?;
 
-    // Verify R1 gate flips edit.anova.rm disabled when one group drops a replicate (unequal N).
+    // Verify R3.6 + R1b: on PairedRepeatedMeasures, missing a replicate keeps `edit.anova.rm` enabled
+    // (Mixed-Effects REML fits incomplete blocks) while disabling sphericity corrections in `R1b`.
     switch_to_sheet_in_navigator(&mut driver, &ds_id)?;
     click(&mut driver, "grid.cell.5.2.0")?;
     let _ = driver.press_key("Backspace", KeyModifiers::default())?;
     let _ = driver.render_frame();
     switch_to_sheet_in_navigator(&mut driver, &rs_id)?;
     human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
-    if widget_enabled(&mut driver, "edit.anova.rm")? {
-        return Err(String::from("R1 violated: edit.anova.rm stayed enabled despite unequal N across groups").into());
+    if !widget_enabled(&mut driver, "edit.anova.rm")? {
+        return Err(String::from("R3.6 expected edit.anova.rm to remain enabled on incomplete PairedRepeatedMeasures blocks").into());
+    }
+    click(&mut driver, "edit.tab.repeated_measures")?;
+    if widget_enabled(&mut driver, "edit.sphericity.geisser_greenhouse")? {
+        return Err(String::from("R1b violated: sphericity must disable when incomplete blocks trigger Mixed-Effects REML").into());
     }
     click(&mut driver, "modal.cancel")?;
 

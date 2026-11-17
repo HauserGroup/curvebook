@@ -9,13 +9,13 @@ use std::fmt::Write as _;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ChecklistItem, ChecklistStatus, CiBound, ClusterDistance, ClusterLinkage,
     ContingencyMethod, ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DataSheet, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
-    FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec,
-    PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance,
-    ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId, SimulationNoise, SubcolumnAggregation,
-    SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod,
-    WeightingScheme,
+    FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
+    RepeatedMeasuresDesign, ResidualCovariance, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, RocCiMethod, RocSpec, SheetId,
+    SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
 };
 use curvebook_fit::get_builtin_model;
 
@@ -338,14 +338,26 @@ fn describe_one_way_anova(s: &OneWayAnovaSpec, source_ds: Option<&DataSheet>) ->
             "Groups with potentially unequal variances were compared using Welch's ANOVA (W) and the Brown-Forsythe F* ANOVA without assuming variance homogeneity.",
         )],
         OneWayMethod::RepeatedMeasures { geisser_greenhouse } => {
-            if geisser_greenhouse {
-                vec![plain(
-                    "Matched subject blocks were analyzed via repeated-measures one-way ANOVA with the Geisser-Greenhouse sphericity correction applied to treatment degrees of freedom (reporting epsilon_GG, epsilon_HF, and Mauchly's sphericity test).",
-                )]
+            let df_lbl = match s.df_method {
+                MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+                MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+            };
+            if s.residual_covariance == ResidualCovariance::Unstructured {
+                vec![plain(format!(
+                    "Matched subject blocks were analyzed via a mixed-effects REML model with unstructured residual covariance and {df_lbl} degrees of freedom."
+                ))]
+            } else if s.mixed_effects_reml {
+                vec![plain(format!(
+                    "Matched subject blocks were analyzed via a compound-symmetry mixed-effects REML model with {df_lbl} degrees of freedom."
+                ))]
+            } else if geisser_greenhouse {
+                vec![plain(format!(
+                    "Matched subject blocks were analyzed via repeated-measures one-way ANOVA with the Geisser-Greenhouse sphericity correction applied to treatment degrees of freedom (reporting epsilon_GG, epsilon_HF, and Mauchly's sphericity test; falling back to mixed-effects REML with {df_lbl} degrees of freedom if observations are missing)."
+                ))]
             } else {
-                vec![plain(
-                    "Matched subject blocks were analyzed via repeated-measures one-way ANOVA assuming compound symmetry / sphericity (with Geisser-Greenhouse and Huynh-Feldt epsilon diagnostics reported).",
-                )]
+                vec![plain(format!(
+                    "Matched subject blocks were analyzed via repeated-measures one-way ANOVA assuming compound symmetry / sphericity (with Geisser-Greenhouse and Huynh-Feldt epsilon diagnostics reported; falling back to mixed-effects REML with {df_lbl} degrees of freedom if observations are missing)."
+                ))]
             }
         }
         OneWayMethod::KruskalWallis => vec![plain(
@@ -412,13 +424,17 @@ fn describe_factorial_anova(s: &FactorialAnovaSpec, source_ds: Option<&DataSheet
         RepeatedMeasuresDesign::ColumnFactorMatched => "repeated measures matched across the column factor",
         RepeatedMeasuresDesign::BothFactorsMatched => "repeated measures matched across both row and column factors",
     };
-    let reml_text = match (s.repeated_measures, s.residual_covariance, s.fit_reml_on_missing) {
+    let df_lbl = match s.df_method {
+        MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+        MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+    };
+    let reml_text = match (s.repeated_measures, s.residual_covariance, s.fit_reml_on_missing || s.mixed_effects_reml || s.three_way) {
         (RepeatedMeasuresDesign::None, _, _) => String::new(),
-        (_, ResidualCovariance::Unstructured, _) => String::from(
-            " Repeated-measures correlations were modeled with an unstructured residual covariance matrix estimated by Cholesky restricted maximum likelihood (REML) with Kenward-Roger degrees of freedom.",
+        (_, ResidualCovariance::Unstructured, _) => format!(
+            " Repeated-measures correlations were modeled with an unstructured residual covariance matrix estimated by Cholesky restricted maximum likelihood (REML) with {df_lbl} degrees of freedom."
         ),
-        (_, ResidualCovariance::CompoundSymmetry, true) => String::from(
-            " When missing observations create unbalanced repeated-measures cells, a restricted maximum likelihood (REML) mixed-effects model with compound-symmetry covariance and Kenward-Roger degrees of freedom was fitted.",
+        (_, ResidualCovariance::CompoundSymmetry, true) => format!(
+            " Repeated-measures mixed-effects restricted maximum likelihood (REML) with compound-symmetry covariance and {df_lbl} degrees of freedom was fitted (retaining incomplete or multi-way repeated-measures blocks without listwise deletion)."
         ),
         (_, ResidualCovariance::CompoundSymmetry, false) => String::new(),
     };
@@ -437,8 +453,12 @@ fn describe_factorial_anova(s: &FactorialAnovaSpec, source_ds: Option<&DataSheet
 
 fn describe_nested(s: &NestedAnalysisSpec) -> Vec<ReportBlock> {
     let test_name = if s.two_group_t_test { "nested hierarchical t-test" } else { "nested hierarchical one-way ANOVA" };
+    let df_lbl = match s.df_method {
+        MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+        MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+    };
     let mut runs = vec![plain(format!(
-        "Subcolumn technical/biological replicates nested within clusters were analyzed via a {test_name} (mixed-effects variance decomposition of cluster vs. residual variance). "
+        "Subcolumn technical/biological replicates nested within clusters were analyzed via a {test_name} (mixed-effects REML variance decomposition of cluster vs. residual variance with {df_lbl} denominator degrees of freedom). "
     ))];
     runs.extend(describe_multiplicity_runs(&s.multiplicity));
     vec![ReportBlock::Paragraph(runs)]

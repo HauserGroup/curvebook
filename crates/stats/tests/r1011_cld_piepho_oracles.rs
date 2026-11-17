@@ -355,6 +355,7 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
         method: OneWayMethod::OrdinaryAnova,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::TukeyHsd, threshold: 0.05, report_confidence_intervals: false },
         compute_effect_sizes: false,
+        ..OneWayAnovaSpec::default()
     };
     let spec_tukey = AnalysisSpec::new("r_tukey", "d_anova", AnalysisKind::OneWayAnova(anova_tukey.clone())).unwrap();
     let rs_tukey = run_one_way_anova(&sheet, &spec_tukey, &anova_tukey).unwrap();
@@ -369,6 +370,7 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
         method: OneWayMethod::KruskalWallis,
         multiplicity: MultiplicitySpec { method: MultiplicityMethod::DunnRankSum, threshold: 0.05, report_confidence_intervals: false },
         compute_effect_sizes: false,
+        ..OneWayAnovaSpec::default()
     };
     let spec_kw = AnalysisSpec::new("r_kw", "d_anova", AnalysisKind::OneWayAnova(anova_kw.clone())).unwrap();
     let rs_kw = run_one_way_anova(&sheet, &spec_kw, &anova_kw).unwrap();
@@ -386,6 +388,7 @@ fn consumes_anova_and_kruskal_wallis_dunn_result_sheets_and_rejects_dunnett() {
             report_confidence_intervals: false,
         },
         compute_effect_sizes: false,
+        ..OneWayAnovaSpec::default()
     };
     let spec_dunnett = AnalysisSpec::new("r_dun", "d_anova", AnalysisKind::OneWayAnova(anova_dunnett.clone())).unwrap();
     let rs_dun = run_one_way_anova(&sheet, &spec_dunnett, &anova_dunnett).unwrap();
