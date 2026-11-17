@@ -4042,7 +4042,16 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             }
             out.tabs.push(main_tab);
             out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, p_fmt));
-            append_one_way_multiplicity(&mut out, &group_inputs, res.ms_within, res.df_within, &anova_spec.multiplicity, p_fmt, confidence)?;
+            append_one_way_multiplicity(
+                &mut out,
+                &group_inputs,
+                res.ms_within,
+                res.df_within,
+                res.ss_total,
+                &anova_spec.multiplicity,
+                p_fmt,
+                confidence,
+            )?;
             append_one_way_checklist(&mut out, &res, &group_inputs, &raw_slices_owned, false, confidence.alpha());
         }
         OneWayMethod::BrownForsytheAndWelch => {
@@ -4782,7 +4791,7 @@ fn run_rm_one_way_anova_sheet(
                     sd: m.sample_sd().unwrap_or(0.0),
                 });
             }
-            append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, &anova_spec.multiplicity, p_fmt, confidence)?;
+            append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
             let mauchly_p_lbl = if rm.sphericity.mauchly_p.is_finite() { format!("{:.4}", rm.sphericity.mauchly_p) } else { String::from("n/a") };
@@ -4985,21 +4994,24 @@ fn build_one_way_tab(res: &OneWayAnovaResult, include_effect: bool, confidence: 
     build_tab("anova-table", "ANOVA summary", ResultTabKind::AnovaTable, headers, labels, vec![row_treat, row_resid, row_total])
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_one_way_multiplicity(
     out: &mut ResultSheet,
     inputs: &[GroupComparisonInput],
     ms_within: f64,
     df_within: f64,
+    ss_total: f64,
     mult: &MultiplicitySpec,
     p_fmt: PValueFormat,
     confidence: ConfidenceLevel,
 ) -> Result<(), StatsError> {
     if mult.method == MultiplicityMethod::LinearTrend {
         let trend = linear_trend_test(inputs, ms_within, df_within)?;
+        let r_squared = if ss_total > 0.0 { (trend.ss_trend / ss_total).clamp(0.0, 1.0) } else { trend.r_squared };
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
         let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
-        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(trend.ss_trend), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
+        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(r_squared), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
         out.tabs.push(build_tab(
             "linear-trend",
             "Test for linear trend",
@@ -6875,6 +6887,9 @@ fn run_grouped_factorial(
     let n_rows = grouped.row_count();
     let selected_cols = resolve_selected_indices(selected, grouped.data_sets.len());
     let n_cols = selected_cols.len();
+    if fac_spec.three_way && n_cols != 4 {
+        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
+    }
     if n_cols < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: n_cols });
     }
@@ -7000,6 +7015,9 @@ fn run_rm_grouped_reml(
 ) -> Result<GroupedFactorialOutcome, StatsError> {
     let n_rows = grouped.row_count();
     let n_cols = selected_cols.len();
+    if fac_spec.three_way && n_cols != 4 {
+        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
+    }
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
@@ -7260,6 +7278,9 @@ fn run_multifactor_mv(
     if fac_spec.multifactor_columns.is_empty() {
         return Err(StatsError::InsufficientSampleSize { context: "multifactor columns", required: 1, actual: 0 });
     }
+    if fac_spec.three_way && fac_spec.multifactor_columns.len() != 3 {
+        return Err(StatsError::InvalidParameter { name: "three_way_factor_count", value: fac_spec.multifactor_columns.len() as f64 });
+    }
     let mut factor_names = Vec::with_capacity(fac_spec.multifactor_columns.len());
     let mut factor_levels = Vec::with_capacity(fac_spec.multifactor_columns.len());
     for &c_idx in &fac_spec.multifactor_columns {
@@ -7455,7 +7476,7 @@ fn append_nested_multiplicity(
         push_scalar(out, "Linear trend F", None, trend.f_statistic);
         push_scalar(out, "Linear trend P", None, trend.p_value);
         let headers = vec![String::from("Slope"), String::from("R squared"), String::from("F"), String::from("P value")];
-        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(trend.ss_trend), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
+        let rows = vec![vec![num_cell(trend.slope_estimate), num_cell(trend.r_squared), num_cell(trend.f_statistic), p_cell(trend.p_value, p_fmt)]];
         out.tabs.push(build_tab(
             "linear-trend",
             "Test for linear trend",

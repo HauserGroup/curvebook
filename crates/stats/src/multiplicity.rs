@@ -166,6 +166,8 @@ pub struct LinearTrendResult {
     pub f_statistic: f64,
     pub p_value: f64,
     pub slope_estimate: f64,
+    /// Proportion of total variation explained by the linear trend (`SS_trend / (SS_between + SS_error)`), in `[0, 1]`.
+    pub r_squared: f64,
 }
 
 /// Compute post-hoc linear trend test across ordered groups using pooled `mse` and `df_error`.
@@ -174,8 +176,9 @@ pub struct LinearTrendResult {
 /// `c_i = i - (k - 1) / 2` (unweighted means approach): `L = sum(c_i * mean_i)`,
 /// `SS_trend = L^2 / sum(c_i^2 / n_i)`, `F = SS_trend / MSE` on `(1, df_error)` df, as in the trend
 /// analysis of Maxwell & Delaney (2004). `slope_estimate = L / sum(c_i^2)` is the least-squares slope
-/// of the group means on group index. When `mse == 0`, returns `F = +inf, p = 0` for any nonzero linear
-/// contrast (`ss_trend > 0`) and `F = 0, p = 1` when `ss_trend == 0`.
+/// of the group means on group index, and `r_squared = SS_trend / (SS_between + MSE * df_error)`
+/// lies in `[0, 1]`. When `mse == 0`, returns `F = +inf, p = 0` for any nonzero linear contrast
+/// (`ss_trend > 0`) and `F = 0, p = 1` when `ss_trend == 0`.
 pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f64) -> Result<LinearTrendResult, StatsError> {
     let k = groups.len();
     if k < 2 {
@@ -188,6 +191,8 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
     let mut num = NeumaierSum::new();
     let mut denom_ss = NeumaierSum::new();
     let mut denom_slope = NeumaierSum::new();
+    let mut total_n = NeumaierSum::new();
+    let mut weighted_mean_sum = NeumaierSum::new();
     for (i, g) in groups.iter().enumerate() {
         if g.n <= 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
@@ -196,10 +201,20 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
         num.add(c * g.mean);
         denom_ss.add((c * c) / g.n);
         denom_slope.add(c * c);
+        total_n.add(g.n);
+        weighted_mean_sum.add(g.n * g.mean);
     }
     let l_val = num.total();
     let d_val = denom_ss.total();
     let ss_trend = if d_val > 0.0 { (l_val * l_val) / d_val } else { 0.0 };
+    let grand_mean = if total_n.total() > 0.0 { weighted_mean_sum.total() / total_n.total() } else { 0.0 };
+    let mut ss_between_acc = NeumaierSum::new();
+    for g in groups {
+        let diff = g.mean - grand_mean;
+        ss_between_acc.add(g.n * diff * diff);
+    }
+    let ss_total_implied = ss_between_acc.total() + mse * df_error;
+    let r_squared = if ss_total_implied > 0.0 { (ss_trend / ss_total_implied).clamp(0.0, 1.0) } else { 0.0 };
     let (f_stat, p_value) = if mse > 0.0 {
         let f = ss_trend / mse;
         (f, f_sf(f, 1.0, df_error)?)
@@ -209,7 +224,7 @@ pub fn linear_trend_test(groups: &[GroupComparisonInput], mse: f64, df_error: f6
         (0.0, 1.0)
     };
     let slope_estimate = if denom_slope.total() > 0.0 { l_val / denom_slope.total() } else { 0.0 };
-    Ok(LinearTrendResult { ss_trend, df_trend: 1.0, df_error, f_statistic: f_stat, p_value, slope_estimate })
+    Ok(LinearTrendResult { ss_trend, df_trend: 1.0, df_error, f_statistic: f_stat, p_value, slope_estimate, r_squared })
 }
 
 // ============================================================================

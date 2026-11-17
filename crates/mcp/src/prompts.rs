@@ -179,20 +179,20 @@ fn build_two_group_prompt(args: &Map<String, Value>, gui_only: bool) -> Result<P
     let paired = read_opt_str_arg(args, "paired", "false")?;
     let parametric = read_opt_str_arg(args, "parametric", "unknown")?;
 
-    let recommendation = match (paired.eq_ignore_ascii_case("true"), parametric.to_ascii_lowercase().as_str()) {
-        (true, "true") => "Paired Student's t-test (assume Gaussian distribution of differences).",
-        (true, "false") => "Wilcoxon matched-pairs signed-rank test (non-parametric paired).",
-        (true, _) => {
-            "Start by evaluating paired differences for normality (e.g. Shapiro-Wilk); use Paired t-test if Gaussian or Wilcoxon matched-pairs otherwise."
-        }
-        (false, "true") => "Unpaired Welch's t-test (robust when variances may differ) or Student's t-test if equal SDs are verified.",
-        (false, "false") => "Mann-Whitney U test (non-parametric rank test for independent groups).",
-        (false, _) if gui_only => {
-            "Inspect the visible grid values via `ui_inspect` first; prefer Welch's t-test for roughly Gaussian continuous data or Mann-Whitney for skewed/ordinal data."
-        }
-        (false, _) => {
+    let recommendation: String = match (paired.eq_ignore_ascii_case("true"), parametric.to_ascii_lowercase().as_str()) {
+        (true, "true") => String::from("Paired Student's t-test (assume Gaussian distribution of differences)."),
+        (true, "false") => String::from("Wilcoxon matched-pairs signed-rank test (non-parametric paired)."),
+        (true, _) => String::from(
+            "Start by evaluating paired differences for normality (e.g. Shapiro-Wilk); use Paired t-test if Gaussian or Wilcoxon matched-pairs otherwise.",
+        ),
+        (false, "true") => String::from("Unpaired Welch's t-test (robust when variances may differ) or Student's t-test if equal SDs are verified."),
+        (false, "false") => String::from("Mann-Whitney U test (non-parametric rank test for independent groups)."),
+        (false, _) if gui_only => String::from(
+            "Inspect the visible grid values via `ui_inspect` first; prefer Welch's t-test for roughly Gaussian continuous data or Mann-Whitney for skewed/ordinal data.",
+        ),
+        (false, _) => format!(
             "Inspect `sheet://{sheet_id}` sample size and distribution first; prefer Welch's t-test for roughly Gaussian continuous data or Mann-Whitney for skewed/ordinal data."
-        }
+        ),
     };
 
     let text = if gui_only {

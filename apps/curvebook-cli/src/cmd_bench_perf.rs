@@ -6,7 +6,7 @@ use std::time::Instant;
 use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, DataSheet, GraphSheet, MultipleVariablesTable, NonlinearFitSpec, ProjectDocument, RegressionOverlaySpec,
-    ResultSheet, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    ResultSheet, ResultStatus, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
 use curvebook_engine::Session;
 use curvebook_format::{ArchiveKind, open_archive_bytes, save_project_bytes};
@@ -29,6 +29,7 @@ const MAX_RASTER_EDGE_PX: f64 = 16_384.0;
 struct SingleFlagArgs {
     file: Option<String>,
     json: bool,
+    require_release: bool,
 }
 
 /// Execute `curvebook-cli bench <file> [--json]`.
@@ -113,9 +114,14 @@ pub fn run_bench(args: &[String]) -> Result<(), CliError> {
     })
 }
 
-/// Execute `curvebook-cli perf [--json]` covering synthetic G12 performance checks.
+/// Execute `curvebook-cli perf [--json] [--require-release]` covering synthetic G12 performance checks.
 pub fn run_perf(args: &[String]) -> Result<(), CliError> {
-    let parsed = parse_bench_args(args, false, "usage: curvebook-cli perf [--json]")?;
+    let parsed = parse_bench_args(args, false, "usage: curvebook-cli perf [--json] [--require-release]")?;
+    if parsed.require_release && cfg!(debug_assertions) {
+        return Err(CliError::Runtime(String::from(
+            "G12 performance gate with --require-release must run in a `--release` build (current binary is debug)",
+        )));
+    }
 
     let mv_bench = bench_mv_100k_calculated_variable()?;
     let (batch_bench, batch_doc, batch_scene) = bench_96_curve_dose_response()?;
@@ -130,9 +136,12 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
 
     emit_report(&report, parsed.json, || {
         println!(
-            "G12 perf results:\n  (a) 100k MV CalcVar: {} ms (budget < {PERF_MV_BUDGET_MS:.0} ms, within_budget={})\n  (b) 96-curve 4PL fit + compile: fit={} ms (budget <= {PERF_96_CURVE_BUDGET_MS:.0} ms, within_budget={}), compile={} ms, total={} ms (total_within_budget={})\n  (c) .curvebook save/reopen: save={} ms, open={} ms, total={} ms ({} bytes)\n  (d) exports ({} DPI): svg={} ms ({} B), pdf={} ms ({} B), png={} ms ({} B)",
+            "G12 perf results (profile={}):\n  (a) 100k MV CalcVar: {} ms (budget < {PERF_MV_BUDGET_MS:.0} ms, within_budget={})\n  (b) 96-curve 4PL fit + compile: {}/{} converged, fit={} ms (budget <= {PERF_96_CURVE_BUDGET_MS:.0} ms, within_budget={}), compile={} ms, total={} ms (total_within_budget={})\n  (c) .curvebook save/reopen: save={} ms, open={} ms, total={} ms ({} bytes)\n  (d) exports ({} DPI): svg={} ms ({} B), pdf={} ms ({} B), png={} ms ({} B)",
+            report["build_profile"],
             mv_check["eval_ms"],
             mv_check["within_budget"],
+            curve_check["converged_curves"],
+            curve_check["curves"],
             curve_check["fit_ms"],
             curve_check["within_budget"],
             curve_check["compile_ms"],
@@ -158,10 +167,14 @@ pub fn run_perf(args: &[String]) -> Result<(), CliError> {
 fn build_perf_report(mv_bench: Value, batch_bench: Value, archive_bench: Value, export_bench: Value) -> (Value, Result<(), CliError>) {
     let mv_within = mv_bench["within_budget"].as_bool().unwrap_or(false);
     let curve_within = batch_bench["within_budget"].as_bool().unwrap_or(false);
-    let all_within_budget = mv_within && curve_within;
+    let curve_total_within = batch_bench["total_within_budget"].as_bool().unwrap_or(false);
+    let all_within_budget = mv_within && curve_within && curve_total_within;
+    let build_profile = if cfg!(debug_assertions) { "debug" } else { "release" };
 
     let report = json!({
         "ok": all_within_budget,
+        "build_profile": build_profile,
+        "release_build": !cfg!(debug_assertions),
         "checks": {
             "mv_100k_calculated_variable": mv_bench,
             "dose_response_96_curves": batch_bench,
@@ -174,7 +187,7 @@ fn build_perf_report(mv_bench: Value, batch_bench: Value, archive_bench: Value, 
         Ok(())
     } else {
         Err(CliError::Runtime(format!(
-            "G12 performance budget exceeded (mv_100k within_budget={mv_within}, dose_response_96_curves within_budget={curve_within})"
+            "G12 performance budget exceeded (mv_100k within_budget={mv_within}, dose_response_96_curves within_budget={curve_within}, total_within_budget={curve_total_within})"
         )))
     };
 
@@ -237,9 +250,11 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
             let log_ec50 = -7.2 + 0.015 * f64_from_usize(c);
             let hill = 1.0 + 0.08 * f64_from_usize(c % 4);
             let mean_y = bottom + (top - bottom) / (1.0 + 10.0_f64.powf((log_ec50 - lx) * hill));
+            // Deterministic per-(row, curve) scatter so replicate means stay genuinely noisy around the 4PL model.
+            let curve_noise = 1.6 * (f64_from_usize(c) * 0.73 + f64_from_usize(r) * 1.37).sin();
             let jitter = [-0.6, 0.0, 0.6];
             for (rep, &jit) in jitter.iter().enumerate() {
-                xy.data_sets[c].cells[r][rep] = Cell::number(mean_y + jit);
+                xy.data_sets[c].cells[r][rep] = Cell::number(mean_y + curve_noise + jit);
             }
         }
     }
@@ -277,14 +292,30 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
     let fit_ms = elapsed_ms(t_fit);
 
     let fitted_doc = session.document().clone();
-    let fitted_res = fitted_doc.result_sheets.first();
-    let fitted_curves = fitted_res.map_or(0, |r| r.fitted_curves.len());
+    let fitted_res =
+        fitted_doc.result_sheets.first().ok_or_else(|| CliError::Runtime(String::from("missing result sheet in 96-curve perf batch")))?;
+    if fitted_res.status != ResultStatus::UpToDate {
+        return Err(CliError::Runtime(format!("96-curve perf fit status was {:?}, expected UpToDate", fitted_res.status)));
+    }
+    let fitted_curves = fitted_res.fitted_curves.len();
     if fitted_curves != PERF_BATCH_CURVES {
-        let status_desc = fitted_res
-            .map_or_else(|| String::from("missing result sheet"), |r| format!("{:?} (tabs={}, scalars={})", r.status, r.tabs.len(), r.scalars.len()));
         return Err(CliError::Runtime(format!(
-            "expected {PERF_BATCH_CURVES} fitted curves in perf batch, got {fitted_curves}; status={status_desc}"
+            "expected {PERF_BATCH_CURVES} fitted curves in perf batch, got {fitted_curves}; status={:?} (tabs={}, scalars={})",
+            fitted_res.status,
+            fitted_res.tabs.len(),
+            fitted_res.scalars.len()
         )));
+    }
+    let converged_curves = fitted_res.fitted_curves.iter().filter(|fc| fc.converged && !fc.ambiguous && !fc.points.is_empty()).count();
+    if converged_curves != PERF_BATCH_CURVES {
+        return Err(CliError::Runtime(format!(
+            "expected all {PERF_BATCH_CURVES} curves to converge cleanly without ambiguity, got {converged_curves}/{PERF_BATCH_CURVES}"
+        )));
+    }
+    let r2 =
+        fitted_res.lookup_scalar("R2", None).ok_or_else(|| CliError::Runtime(String::from("missing global R2 scalar in 96-curve perf batch")))?;
+    if !r2.is_finite() || !(0.95..1.0).contains(&r2) {
+        return Err(CliError::Runtime(format!("unexpected noisy 96-curve global R2={r2} (expected finite value in (0.95, 1.0))")));
     }
 
     let t_compile = Instant::now();
@@ -296,6 +327,8 @@ fn bench_96_curve_dose_response() -> Result<(Value, ProjectDocument, ChartScene)
 
     let summary = json!({
         "curves": fitted_curves,
+        "converged_curves": converged_curves,
+        "r_squared": r2,
         "fit_ms": fit_ms,
         "compile_ms": compile_ms,
         "total_ms": total_ms,
@@ -415,9 +448,12 @@ fn emit_report(report: &Value, as_json: bool, print_human: impl FnOnce()) -> Res
 fn parse_bench_args(args: &[String], require_file: bool, usage: &str) -> Result<SingleFlagArgs, CliError> {
     let mut file = None;
     let mut json = false;
+    let mut require_release = false;
     for arg in args {
         if arg == "--json" {
             json = true;
+        } else if !require_file && arg == "--require-release" {
+            require_release = true;
         } else if arg.starts_with('-') {
             return Err(CliError::Usage(format!("unknown flag `{arg}`\n\n{usage}")));
         } else if require_file && file.is_none() {
@@ -429,34 +465,45 @@ fn parse_bench_args(args: &[String], require_file: bool, usage: &str) -> Result<
     if require_file && file.is_none() {
         return Err(CliError::Usage(String::from(usage)));
     }
-    Ok(SingleFlagArgs { file, json })
+    Ok(SingleFlagArgs { file, json, require_release })
 }
 
 #[cfg(test)]
 mod tests {
     use serde_json::json;
 
-    use super::{PERF_96_CURVE_BUDGET_MS, PERF_MV_BUDGET_MS, build_perf_report};
+    use super::{PERF_96_CURVE_BUDGET_MS, PERF_MV_BUDGET_MS, build_perf_report, run_perf};
     use crate::error::CliError;
 
     #[test]
     fn perf_report_fails_when_either_budget_is_exceeded() {
         let mv_ok = json!({ "rows": 100_000, "eval_ms": 12.0, "budget_ms": PERF_MV_BUDGET_MS, "within_budget": true });
         let mv_slow = json!({ "rows": 100_000, "eval_ms": 300.0, "budget_ms": PERF_MV_BUDGET_MS, "within_budget": false });
-        let curve_ok = json!({ "curves": 96, "fit_ms": 15.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": true });
-        let curve_slow = json!({ "curves": 96, "fit_ms": 55.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": false });
+        let curve_ok = json!({ "curves": 96, "fit_ms": 15.0, "total_ms": 20.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": true, "total_within_budget": true });
+        let curve_slow_fit = json!({ "curves": 96, "fit_ms": 55.0, "total_ms": 60.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": false, "total_within_budget": false });
+        let curve_slow_compile = json!({ "curves": 96, "fit_ms": 15.0, "total_ms": 55.0, "budget_ms": PERF_96_CURVE_BUDGET_MS, "within_budget": true, "total_within_budget": false });
         let dummy = json!({});
 
         let (ok_report, ok_res) = build_perf_report(mv_ok.clone(), curve_ok.clone(), dummy.clone(), dummy.clone());
         assert_eq!(ok_report["ok"], json!(true));
+        assert_eq!(ok_report["release_build"], json!(!cfg!(debug_assertions)));
         assert!(ok_res.is_ok());
 
         let (slow_mv_report, slow_mv_res) = build_perf_report(mv_slow, curve_ok, dummy.clone(), dummy.clone());
         assert_eq!(slow_mv_report["ok"], json!(false));
         assert!(matches!(slow_mv_res, Err(CliError::Runtime(_))));
 
-        let (slow_curve_report, slow_curve_res) = build_perf_report(mv_ok, curve_slow, dummy.clone(), dummy);
+        let (slow_curve_report, slow_curve_res) = build_perf_report(mv_ok.clone(), curve_slow_fit, dummy.clone(), dummy.clone());
         assert_eq!(slow_curve_report["ok"], json!(false));
         assert!(matches!(slow_curve_res, Err(CliError::Runtime(_))));
+
+        let (slow_total_report, slow_total_res) = build_perf_report(mv_ok, curve_slow_compile, dummy.clone(), dummy);
+        assert_eq!(slow_total_report["ok"], json!(false));
+        assert!(matches!(slow_total_res, Err(CliError::Runtime(_))));
+
+        if cfg!(debug_assertions) {
+            let err = run_perf(&[String::from("--require-release")]).expect_err("debug build must fail --require-release");
+            assert!(matches!(err, CliError::Runtime(_)));
+        }
     }
 }

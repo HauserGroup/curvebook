@@ -149,6 +149,8 @@ fn spike_s1_grouped_one_million_cells_120_frames_sub_16ms() {
     println!(
         "SPIKE_S1_UI_1M grouped 120 frames: p50={p50:.3}ms p95={p95:.3}ms mean={mean_ms:.3}ms max={max_ms:.3}ms visible={last_visible_rows}x{last_visible_cols}"
     );
+    let median_budget_ms = if cfg!(debug_assertions) { 5.0 } else { 1.0 };
+    assert!(p50 < median_budget_ms, "p50 median frame time {p50:.3}ms exceeded {median_budget_ms:.2}ms budget");
     assert!(p95 < 16.67, "p95 frame time {p95:.3}ms exceeded 16.67ms budget");
     assert!(max_ms < 16.67, "max frame time {max_ms:.3}ms exceeded 16.67ms budget");
 }
@@ -220,9 +222,14 @@ fn spike_s1_multiple_variables_one_million_cells_scroll_and_role_strip() {
         frame_ms.push(start.elapsed().as_secs_f64() * 1_000.0);
     }
 
-    let max_ms = frame_ms.iter().copied().fold(0.0_f64, f64::max);
+    let mut sorted = frame_ms.clone();
+    sorted.sort_by(|a, b| a.total_cmp(b));
+    let p50 = sorted[sorted.len() / 2];
+    let max_ms = sorted.last().copied().unwrap_or(0.0);
     let mean_ms = frame_ms.iter().sum::<f64>() / (frame_ms.len() as f64);
-    println!("SPIKE_S1_UI_1M multivar 30 frames: mean={mean_ms:.3}ms max={max_ms:.3}ms");
+    println!("SPIKE_S1_UI_1M multivar 30 frames: p50={p50:.3}ms mean={mean_ms:.3}ms max={max_ms:.3}ms");
+    let median_budget_ms = if cfg!(debug_assertions) { 5.0 } else { 1.0 };
+    assert!(p50 < median_budget_ms, "multivar p50 median frame time {p50:.3}ms exceeded {median_budget_ms:.2}ms budget");
     assert!(max_ms < 16.67, "multivar max frame time {max_ms:.3}ms exceeded 16.67ms budget");
 
     let role_strip = app.grid.variable_role_strip(app.document().data_sheet(&SheetId::from("mv-1m")).expect("mv sheet"));

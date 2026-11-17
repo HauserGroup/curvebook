@@ -458,7 +458,23 @@ fn qol6_survival_km_and_cox_reports() {
 #[test]
 fn qol6_nonlinear_regression_formula_rout_weighting_global_comparison_and_latex_escaping() {
     let mut doc = ProjectDocument::new("IC50_Project & 100% $Test$").unwrap();
-    doc.add_data_sheet(sample_4pl_two_dataset_xy_sheet("xy-4pl", "Dose_Response_100% & $Assay$")).unwrap();
+    // Use multiplicative replicate spread (±1.5%) matching RelativeSquare (1/Y^2) weighting so
+    // homoscedastic-relative ROUT eliminates the same observations under both 4PL and 3PL (RV-99).
+    let xs = [-9.5_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+    let mut table = XyTable::new(SubcolumnMode::RawReplicates(2), 2, xs.len()).unwrap();
+    table.x_title = String::from("Log10 [Agonist] (M)");
+    table.data_sets[0].title = String::from("Wildtype_A");
+    table.data_sets[1].title = String::from("Mutant_B");
+    for (r, &x) in xs.iter().enumerate() {
+        table.x_cells[r][0] = Cell::number(x);
+        let y0 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.1));
+        let y1 = 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-5.8 - x) * 1.1));
+        table.data_sets[0].cells[r][0] = Cell::number(y0 * 0.985);
+        table.data_sets[0].cells[r][1] = Cell::number(y0 * 1.015);
+        table.data_sets[1].cells[r][0] = Cell::number(y1 * 0.985);
+        table.data_sets[1].cells[r][1] = Cell::number(y1 * 1.015);
+    }
+    doc.add_data_sheet(DataSheet::new(SheetId::new("xy-4pl"), "Dose_Response_100% & $Assay$", TableArchetype::Xy(table)).unwrap()).unwrap();
     let mut session = Session::from_document(doc);
 
     let mut fit_spec_f = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
