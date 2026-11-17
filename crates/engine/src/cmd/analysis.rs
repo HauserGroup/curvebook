@@ -2124,11 +2124,14 @@ fn parse_cox_tie_method(val: &Value) -> Result<CoxTieMethod, EngineError> {
     if let Ok(parsed) = serde_json::from_value::<CoxTieMethod>(val.clone()) {
         return Ok(parsed);
     }
-    let raw = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`tie_method` must be `Efron` or `Breslow`"))?;
+    let raw = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`tie_method` must be `Efron`, `Breslow`, or `Exact`"))?;
     match raw.trim().to_ascii_lowercase().as_str() {
         "efron" => Ok(CoxTieMethod::Efron),
         "breslow" => Ok(CoxTieMethod::Breslow),
-        other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown Cox tie method `{other}`; expected `Efron` or `Breslow`"))),
+        "exact" => Ok(CoxTieMethod::Exact),
+        other => {
+            Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown Cox tie method `{other}`; expected `Efron`, `Breslow`, or `Exact`")))
+        }
     }
 }
 

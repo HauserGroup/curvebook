@@ -15,7 +15,7 @@ use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, noncentral_chi2_ci, norm_sf, norm_two_sided_isf};
 use curvebook_math::rng::DeterministicRng;
 use curvebook_math::roots::{RootOptions, brent_root};
-use curvebook_math::special::{ln_choose, ln_factorial, reg_beta_inv};
+use curvebook_math::special::{digamma, ln_choose, ln_factorial, ln_gamma, reg_beta_inv};
 use curvebook_math::sum::NeumaierSum;
 use serde::{Deserialize, Serialize};
 
@@ -284,6 +284,31 @@ const MCNEMAR_MAX_TOTAL: u64 = 5_000_000;
 const EXACT_BINOMIAL_MAX_TOTAL: u64 = 5_000_000;
 const NONCENTRAL_HYPERGEOM_MAX_TOTAL: u64 = 5_000_000;
 const NONCENTRAL_HYPERGEOM_MAX_SPAN: u64 = 100_000;
+const NONCENTRAL_HYPERGEOM_CUTOFF_LOG: f64 = -65.0;
+const NONCENTRAL_HYPERGEOM_EXACT_WINDOW_MAX: u64 = 4_096;
+const NONCENTRAL_HYPERGEOM_STIRLING_MIN: f64 = 20.0;
+const NONCENTRAL_HYPERGEOM_EM_MIN_CELL: u64 = 100;
+
+const GL8_NODES: [f64; 8] = [
+    -0.960_289_856_497_536_3,
+    -0.796_666_477_413_626_7,
+    -0.525_532_409_916_329,
+    -0.183_434_642_495_649_8,
+    0.183_434_642_495_649_8,
+    0.525_532_409_916_329,
+    0.796_666_477_413_626_7,
+    0.960_289_856_497_536_3,
+];
+const GL8_WEIGHTS: [f64; 8] = [
+    0.101_228_536_290_376_3,
+    0.222_381_034_453_374_5,
+    0.313_706_645_877_887_3,
+    0.362_683_783_378_362,
+    0.362_683_783_378_362,
+    0.313_706_645_877_887_3,
+    0.222_381_034_453_374_5,
+    0.101_228_536_290_376_3,
+];
 
 fn checked_sum_u64(vals: &[u64], name: &'static str) -> Result<u64, StatsError> {
     vals.iter().try_fold(0_u64, |acc, &v| acc.checked_add(v)).ok_or(StatsError::InvalidParameter { name, value: f64::INFINITY })
@@ -1205,11 +1230,360 @@ fn noncentral_hypergeom_p_and_mean_log_or(
     Ok((p_sum.clamp(0.0, 1.0), mean_num / norm))
 }
 
+#[inline]
+fn ln1p_minus_x(r: f64) -> f64 {
+    if r.abs() < 1e-2 {
+        let mut term = -r * r;
+        let mut acc = 0.0_f64;
+        for k in 2..=16 {
+            acc += term / f64::from(k);
+            term *= -r;
+            if term.abs() <= 1e-18 * acc.abs() {
+                break;
+            }
+        }
+        acc
+    } else {
+        r.ln_1p() - r
+    }
+}
+
+#[inline]
+fn stirling_rem_diff(z: f64, t: f64) -> f64 {
+    let zp = z + t;
+    let inv_z = 1.0 / z;
+    let inv_zp = 1.0 / zp;
+    let d1 = -t / (12.0 * z * zp);
+    let d3 = t * (inv_zp * inv_zp + inv_zp * inv_z + inv_z * inv_z) / (360.0 * z * zp);
+    let d5 = (inv_zp.powi(5) - inv_z.powi(5)) / 1260.0;
+    d1 + d3 + d5
+}
+
+/// Cancellation-free `ln Gamma(z + 1 + t) - ln Gamma(z + 1) - t * ln(z + 1)`.
+fn ln_factorial_centered_diff(z: f64, t: f64) -> Result<f64, StatsError> {
+    let z1 = z + 1.0;
+    if z >= NONCENTRAL_HYPERGEOM_STIRLING_MIN && z + t >= NONCENTRAL_HYPERGEOM_STIRLING_MIN {
+        return Ok((z1 + t - 0.5) * ln1p_minus_x(t / z1) + t * (t - 0.5) / z1 + stirling_rem_diff(z1, t));
+    }
+    Ok((ln_gamma(z1 + t)? - ln_gamma(z1)?) - t * z1.ln())
+}
+
+#[inline]
+fn noncentral_hypergeom_log_step(x: u64, r1: u64, r2: u64, c1: u64, log_or: f64) -> f64 {
+    let num = ((r1 - x) as f64).ln() + ((c1 - x) as f64).ln();
+    let den = ((x + 1) as f64).ln() + ((r2 - (c1 - x) + 1) as f64).ln();
+    log_or + num - den
+}
+
+fn find_noncentral_hypergeom_mode(r1: u64, r2: u64, c1: u64, lo: u64, hi: u64, log_or: f64) -> u64 {
+    if lo >= hi {
+        return lo;
+    }
+    if noncentral_hypergeom_log_step(lo, r1, r2, c1, log_or) <= 0.0 {
+        return lo;
+    }
+    if noncentral_hypergeom_log_step(hi - 1, r1, r2, c1, log_or) >= 0.0 {
+        return hi;
+    }
+    let mut l = lo;
+    let mut r = hi - 1;
+    while l < r {
+        let mid = l + (r - l) / 2;
+        if noncentral_hypergeom_log_step(mid, r1, r2, c1, log_or) >= 0.0 {
+            l = mid + 1;
+        } else {
+            r = mid;
+        }
+    }
+    l
+}
+
+fn noncentral_hypergeom_lw_diff(xm: u64, delta: f64, r1: u64, r2: u64, c1: u64, log_or: f64) -> Result<f64, StatsError> {
+    if delta == 0.0 {
+        return Ok(0.0);
+    }
+    let bm = (r1 - xm) as f64;
+    let cm = (c1 - xm) as f64;
+    let dm = (r2 - (c1 - xm)) as f64;
+    let xmf = xm as f64;
+    let s0 = log_or + ((bm + 1.0) / (xmf + 1.0)).ln() + ((cm + 1.0) / (dm + 1.0)).ln();
+    let c_diff = ln_factorial_centered_diff(xmf, delta)?
+        + ln_factorial_centered_diff(bm, -delta)?
+        + ln_factorial_centered_diff(cm, -delta)?
+        + ln_factorial_centered_diff(dm, delta)?;
+    Ok(delta * s0 - c_diff)
+}
+
+#[inline]
+fn noncentral_hypergeom_delta_u64(x: u64, xm: u64) -> f64 {
+    if x >= xm { (x - xm) as f64 } else { -((xm - x) as f64) }
+}
+
+#[inline]
+fn noncentral_hypergeom_min_cell(x: u64, r1: u64, r2: u64, c1: u64) -> u64 {
+    x.min(r1 - x).min(c1 - x).min(r2 - (c1 - x))
+}
+
+fn noncentral_hypergeom_lprime(x: f64, r1: u64, r2: u64, c1: u64, log_or: f64) -> Result<f64, StatsError> {
+    Ok(log_or - digamma(x + 1.0)? + digamma((r1 as f64) - x + 1.0)? + digamma((c1 as f64) - x + 1.0)? - digamma((r2 as f64) - (c1 as f64) + x + 1.0)?)
+}
+
 #[allow(clippy::too_many_arguments)]
-fn baptista_pike_anchor_log_or(a_obs: u64, r1: u64, r2: u64, c1: u64, lo: u64, hi: u64, span_usize: usize, alpha: f64, or_pt: f64) -> Option<f64> {
+fn sum_noncentral_hypergeom_range(
+    a_start: u64,
+    b_end: u64,
+    xm: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    log_or: f64,
+    need_mean: bool,
+) -> Result<(f64, f64), StatsError> {
+    if a_start > b_end {
+        return Ok((0.0, 0.0));
+    }
+    if b_end - a_start <= NONCENTRAL_HYPERGEOM_EXACT_WINDOW_MAX {
+        let mut s0 = 0.0_f64;
+        let mut s1 = 0.0_f64;
+        for x in a_start..=b_end {
+            let dx = noncentral_hypergeom_delta_u64(x, xm);
+            let w = noncentral_hypergeom_lw_diff(xm, dx, r1, r2, c1, log_or)?.exp();
+            s0 += w;
+            if need_mean {
+                s1 += dx * w;
+            }
+        }
+        return Ok((s0, s1));
+    }
+    if noncentral_hypergeom_min_cell(a_start, r1, r2, c1) < NONCENTRAL_HYPERGEOM_EM_MIN_CELL {
+        let split = a_start + NONCENTRAL_HYPERGEOM_EM_MIN_CELL + 28;
+        let (s0a, s1a) = sum_noncentral_hypergeom_range(a_start, split, xm, r1, r2, c1, log_or, need_mean)?;
+        let (s0b, s1b) = sum_noncentral_hypergeom_range(split + 1, b_end, xm, r1, r2, c1, log_or, need_mean)?;
+        return Ok((s0a + s0b, s1a + s1b));
+    }
+    if noncentral_hypergeom_min_cell(b_end, r1, r2, c1) < NONCENTRAL_HYPERGEOM_EM_MIN_CELL {
+        let split = b_end - NONCENTRAL_HYPERGEOM_EM_MIN_CELL - 28;
+        let (s0a, s1a) = sum_noncentral_hypergeom_range(a_start, split - 1, xm, r1, r2, c1, log_or, need_mean)?;
+        let (s0b, s1b) = sum_noncentral_hypergeom_range(split, b_end, xm, r1, r2, c1, log_or, need_mean)?;
+        return Ok((s0a + s0b, s1a + s1b));
+    }
+    if a_start < xm && xm < b_end {
+        let (s0a, s1a) = sum_noncentral_hypergeom_range(a_start, xm, xm, r1, r2, c1, log_or, need_mean)?;
+        let (s0b, s1b) = sum_noncentral_hypergeom_range(xm + 1, b_end, xm, r1, r2, c1, log_or, need_mean)?;
+        return Ok((s0a + s0b, s1a + s1b));
+    }
+
+    // Smooth unimodal window with interior margins >= 100: composite 32-panel 8-point Gauss-Legendre + Euler-Maclaurin.
+    let panels = 32_usize;
+    let af = a_start as f64;
+    let bf = b_end as f64;
+    let xmf = xm as f64;
+    let step = (bf - af) / (panels as f64);
+    let mut t0 = 0.0_f64;
+    let mut t1 = 0.0_f64;
+    for k in 0..panels {
+        let x0 = af + (k as f64) * step;
+        let x1 = if k + 1 < panels { af + ((k + 1) as f64) * step } else { bf };
+        let mid = 0.5 * (x0 + x1);
+        let half = 0.5 * (x1 - x0);
+        for (&nd, &wt) in GL8_NODES.iter().zip(GL8_WEIGHTS.iter()) {
+            let xv = mid + half * nd;
+            let dx = xv - xmf;
+            let fv = noncentral_hypergeom_lw_diff(xm, dx, r1, r2, c1, log_or)?.exp();
+            t0 += half * wt * fv;
+            if need_mean {
+                t1 += half * wt * dx * fv;
+            }
+        }
+    }
+    let dxa = noncentral_hypergeom_delta_u64(a_start, xm);
+    let dxb = noncentral_hypergeom_delta_u64(b_end, xm);
+    let fa = noncentral_hypergeom_lw_diff(xm, dxa, r1, r2, c1, log_or)?.exp();
+    let fb = noncentral_hypergeom_lw_diff(xm, dxb, r1, r2, c1, log_or)?.exp();
+    let lpa = noncentral_hypergeom_lprime(af, r1, r2, c1, log_or)?;
+    let lpb = noncentral_hypergeom_lprime(bf, r1, r2, c1, log_or)?;
+    let s0 = t0 + 0.5 * (fa + fb) + (fb * lpb - fa * lpa) / 12.0;
+    if !need_mean {
+        return Ok((s0, 0.0));
+    }
+    let ga = dxa * fa;
+    let gb = dxb * fb;
+    let gpa = fa + dxa * fa * lpa;
+    let gpb = fb + dxb * fb * lpb;
+    let s1 = t1 + 0.5 * (ga + gb) + (gpb - gpa) / 12.0;
+    Ok((s0, s1))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn noncentral_hypergeom_p_and_mean_windowed(
+    a_obs: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    lo: u64,
+    hi: u64,
+    log_or: f64,
+    need_mean: bool,
+) -> Result<(f64, f64), StatsError> {
+    if !log_or.is_finite() {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_or", value: log_or });
+    }
+    let xm = find_noncentral_hypergeom_mode(r1, r2, c1, lo, hi, log_or);
+    let w_lo = if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(lo, xm), r1, r2, c1, log_or)? >= NONCENTRAL_HYPERGEOM_CUTOFF_LOG {
+        lo
+    } else {
+        let mut l = lo;
+        let mut r = xm;
+        while l < r {
+            let mid = l + (r - l) / 2;
+            if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? >= NONCENTRAL_HYPERGEOM_CUTOFF_LOG {
+                r = mid;
+            } else {
+                l = mid + 1;
+            }
+        }
+        l
+    };
+    let w_hi = if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(hi, xm), r1, r2, c1, log_or)? >= NONCENTRAL_HYPERGEOM_CUTOFF_LOG {
+        hi
+    } else {
+        let mut l = xm;
+        let mut r = hi;
+        while l < r {
+            let mid = l + (r - l).div_ceil(2);
+            if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? >= NONCENTRAL_HYPERGEOM_CUTOFF_LOG {
+                l = mid;
+            } else {
+                r = mid - 1;
+            }
+        }
+        l
+    };
+
+    let (norm, mean_num) = sum_noncentral_hypergeom_range(w_lo, w_hi, xm, r1, r2, c1, log_or, need_mean)?;
+    if !norm.is_finite() || norm <= 0.0 {
+        return Err(StatsError::InvalidParameter { name: "noncentral_hypergeom_norm", value: norm });
+    }
+    let mean_val = (xm as f64) + mean_num / norm;
+    let la = noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(a_obs, xm), r1, r2, c1, log_or)?;
+    if la >= -1e-12 {
+        return Ok((1.0, mean_val));
+    }
+    if la < NONCENTRAL_HYPERGEOM_CUTOFF_LOG {
+        return Ok((0.0, mean_val));
+    }
+    let thresh = la + 1e-12;
+    if w_hi - w_lo <= NONCENTRAL_HYPERGEOM_EXACT_WINDOW_MAX {
+        let mut tail = 0.0_f64;
+        for x in w_lo..=w_hi {
+            let lwv = noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(x, xm), r1, r2, c1, log_or)?;
+            if lwv <= thresh {
+                tail += lwv.exp();
+            }
+        }
+        return Ok(((tail / norm).clamp(0.0, 1.0), mean_val));
+    }
+
+    let (t_left, t_right) = if a_obs < xm {
+        let mut l = a_obs;
+        let mut r = xm;
+        while l < r {
+            let mid = l + (r - l).div_ceil(2);
+            if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? <= thresh {
+                l = mid;
+            } else {
+                r = mid - 1;
+            }
+        }
+        let x_left = l;
+        let (tl, _) = sum_noncentral_hypergeom_range(w_lo, x_left, xm, r1, r2, c1, log_or, false)?;
+        let tr = if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(w_hi, xm), r1, r2, c1, log_or)? > thresh {
+            0.0
+        } else {
+            let mut rl = xm;
+            let mut rr = w_hi;
+            while rl < rr {
+                let mid = rl + (rr - rl) / 2;
+                if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? <= thresh {
+                    rr = mid;
+                } else {
+                    rl = mid + 1;
+                }
+            }
+            sum_noncentral_hypergeom_range(rl, w_hi, xm, r1, r2, c1, log_or, false)?.0
+        };
+        (tl, tr)
+    } else {
+        let mut rl = xm;
+        let mut rr = a_obs;
+        while rl < rr {
+            let mid = rl + (rr - rl) / 2;
+            if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? <= thresh {
+                rr = mid;
+            } else {
+                rl = mid + 1;
+            }
+        }
+        let x_right = rl;
+        let (tr, _) = sum_noncentral_hypergeom_range(x_right, w_hi, xm, r1, r2, c1, log_or, false)?;
+        let tl = if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(w_lo, xm), r1, r2, c1, log_or)? > thresh {
+            0.0
+        } else {
+            let mut ll = w_lo;
+            let mut lr = xm;
+            while ll < lr {
+                let mid = ll + (lr - ll).div_ceil(2);
+                if noncentral_hypergeom_lw_diff(xm, noncentral_hypergeom_delta_u64(mid, xm), r1, r2, c1, log_or)? <= thresh {
+                    ll = mid;
+                } else {
+                    lr = mid - 1;
+                }
+            }
+            sum_noncentral_hypergeom_range(w_lo, ll, xm, r1, r2, c1, log_or, false)?.0
+        };
+        (tl, tr)
+    };
+    Ok((((t_left + t_right) / norm).clamp(0.0, 1.0), mean_val))
+}
+
+#[allow(clippy::too_many_arguments)]
+fn eval_noncentral_hypergeom(
+    a_obs: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    lo: u64,
+    hi: u64,
+    span: u64,
+    windowed: bool,
+    log_or: f64,
+    need_mean: bool,
+) -> Result<(f64, f64), StatsError> {
+    if windowed {
+        noncentral_hypergeom_p_and_mean_windowed(a_obs, r1, r2, c1, lo, hi, log_or, need_mean)
+    } else {
+        let span_usize =
+            usize::try_from(span).map_err(|_| StatsError::InvalidParameter { name: "noncentral_hypergeom_max_span", value: span as f64 })?;
+        noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, log_or)
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn baptista_pike_anchor_log_or(
+    a_obs: u64,
+    r1: u64,
+    r2: u64,
+    c1: u64,
+    lo: u64,
+    hi: u64,
+    span: u64,
+    windowed: bool,
+    alpha: f64,
+    or_pt: f64,
+) -> Option<f64> {
     if or_pt.is_finite() && or_pt > 0.0 {
         let u_try = or_pt.ln();
-        if let Ok((p, _)) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_try)
+        if let Ok((p, _)) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, u_try, false)
             && p >= alpha
         {
             return Some(u_try);
@@ -1221,14 +1595,14 @@ fn baptista_pike_anchor_log_or(a_obs: u64, r1: u64, r2: u64, c1: u64, lo: u64, h
     let mut u_lo = -40.0_f64;
     let mut u_hi = 40.0_f64;
     while u_lo > -640.0 {
-        let (_, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_lo).ok()?;
+        let (_, m) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, u_lo, true).ok()?;
         if m <= target {
             break;
         }
         u_lo *= 2.0;
     }
     while u_hi < 640.0 {
-        let (_, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_hi).ok()?;
+        let (_, m) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, u_hi, true).ok()?;
         if m >= target {
             break;
         }
@@ -1238,7 +1612,7 @@ fn baptista_pike_anchor_log_or(a_obs: u64, r1: u64, r2: u64, c1: u64, lo: u64, h
     for _ in 0..64 {
         let mid = 0.5 * (u_lo + u_hi);
         best_u = mid;
-        let (p, m) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, mid).ok()?;
+        let (p, m) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, mid, true).ok()?;
         if (m - target).abs() <= 1e-12 && p >= alpha {
             return Some(mid);
         }
@@ -1248,7 +1622,7 @@ fn baptista_pike_anchor_log_or(a_obs: u64, r1: u64, r2: u64, c1: u64, lo: u64, h
             u_hi = mid;
         }
     }
-    let (p_best, _) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, best_u).ok()?;
+    let (p_best, _) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, best_u, false).ok()?;
     (p_best >= alpha).then_some(best_u)
 }
 
@@ -1260,20 +1634,25 @@ fn baptista_pike_solve_side(
     c1: u64,
     lo: u64,
     hi: u64,
-    span_usize: usize,
+    span: u64,
+    windowed: bool,
     alpha: f64,
     u_center: f64,
     lower_branch: bool,
 ) -> Option<f64> {
+    let b_obs = r1 - a_obs;
+    let c_obs = c1 - a_obs;
+    let d_obs = r2 - c_obs;
+    let sigma_u = (1.0 / (a_obs.max(1) as f64) + 1.0 / (b_obs.max(1) as f64) + 1.0 / (c_obs.max(1) as f64) + 1.0 / (d_obs.max(1) as f64)).sqrt();
     let mut u_in = u_center;
-    let mut step = 1.0_f64;
+    let mut step = (4.0 * sigma_u).clamp(1e-7, 1.0);
     let mut bracket = None;
-    for _ in 0..16 {
+    for _ in 0..48 {
         let u_out = if lower_branch { (u_center - step).max(-700.0) } else { (u_center + step).min(700.0) };
         if u_out == u_in {
             break;
         }
-        let (p_out, _) = noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u_out).ok()?;
+        let (p_out, _) = eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, u_out, false).ok()?;
         if p_out < alpha {
             bracket = Some(if lower_branch { (u_out, u_in) } else { (u_in, u_out) });
             break;
@@ -1285,14 +1664,15 @@ fn baptista_pike_solve_side(
         step *= 2.0;
     }
     let (u_a, u_b) = bracket?;
+    let abs_tol = (1e-11 * sigma_u.min(1.0)).max(1e-15);
     let u_root = brent_root(
-        |u| match noncentral_hypergeom_p_and_mean_log_or(a_obs, r1, r2, c1, lo, hi, span_usize, u) {
+        |u| match eval_noncentral_hypergeom(a_obs, r1, r2, c1, lo, hi, span, windowed, u, false) {
             Ok((p, _)) => p - alpha,
             Err(_) => f64::NAN,
         },
         u_a,
         u_b,
-        RootOptions { rel_tol: 1e-9, abs_tol: 1e-11, max_iters: 100 },
+        RootOptions { rel_tol: 1e-10, abs_tol, max_iters: 100 },
     )
     .ok()?;
     let val = u_root.exp();
@@ -1300,6 +1680,10 @@ fn baptista_pike_solve_side(
 }
 
 /// Baptista–Pike (1977) exact conditional odds-ratio confidence interval for `2 x 2` table `[[a, b], [c, d]]`.
+///
+/// Uses full log-space summation for `total <= 5_000_000` and `span <= 100_000`, and automatically
+/// switches to mode-windowed log-space summation (with cancellation-free Stirling differences and
+/// composite Gauss–Legendre / Euler–Maclaurin summation on wide smooth windows) for larger tables.
 pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Option<(f64, f64)> {
     let r1 = a.checked_add(b)?;
     let r2 = c.checked_add(d)?;
@@ -1308,10 +1692,10 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
     let lo_x = c1.saturating_sub(r2);
     let hi_x = r1.min(c1);
     let span = hi_x.checked_sub(lo_x).and_then(|v| v.checked_add(1))?;
-    if r1 == 0 || r2 == 0 || lo_x >= hi_x || total > NONCENTRAL_HYPERGEOM_MAX_TOTAL || span > NONCENTRAL_HYPERGEOM_MAX_SPAN {
+    if r1 == 0 || r2 == 0 || lo_x >= hi_x {
         return None;
     }
-    let span_usize = usize::try_from(span).ok()?;
+    let windowed = total > NONCENTRAL_HYPERGEOM_MAX_TOTAL || span > NONCENTRAL_HYPERGEOM_MAX_SPAN;
     let alpha = confidence.alpha();
     // Point OR estimate with Haldane correction only as an initial hint for locating an interior point.
     let or_pt = if b == 0 || c == 0 {
@@ -1322,9 +1706,10 @@ pub fn baptista_pike_or_ci(a: u64, b: u64, c: u64, d: u64, confidence: Confidenc
         ((a as f64) * (d as f64)) / ((b as f64) * (c as f64))
     };
 
-    let u_center = baptista_pike_anchor_log_or(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, or_pt)?;
-    let lo_bound = if a <= lo_x { 0.0 } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, u_center, true)? };
-    let hi_bound = if a >= hi_x { f64::INFINITY } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span_usize, alpha, u_center, false)? };
+    let u_center = baptista_pike_anchor_log_or(a, r1, r2, c1, lo_x, hi_x, span, windowed, alpha, or_pt)?;
+    let lo_bound = if a <= lo_x { 0.0 } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span, windowed, alpha, u_center, true)? };
+    let hi_bound =
+        if a >= hi_x { f64::INFINITY } else { baptista_pike_solve_side(a, r1, r2, c1, lo_x, hi_x, span, windowed, alpha, u_center, false)? };
     if lo_bound > hi_bound {
         return None;
     }
@@ -2765,5 +3150,59 @@ mod tests {
         // Balanced moderate table roundtrip.
         let (lo_bal, hi_bal) = baptista_pike_or_ci(10, 5, 3, 12, ConfidenceLevel::DEFAULT_95).expect("balanced CI");
         assert_inf_sup_bracket(10, 15, 15, 13, Some(lo_bal), Some(hi_bal));
+    }
+
+    #[test]
+    fn baptista_pike_windowed_matches_unwindowed_and_handles_large_spans_and_totals() {
+        use super::{noncentral_hypergeom_p_and_mean_log_or, noncentral_hypergeom_p_and_mean_windowed};
+
+        // 1. Direct windowed vs full-span summation parity on exact discrete boundary tables.
+        for &(a, b, c, d, log_or) in &[(14_u64, 6_u64, 5_u64, 15_u64, 1.9_f64), (1, 1000, 1000, 1, -13.5), (5_000, 15_000, 10_000, 20_000, -0.45)] {
+            let r1 = a + b;
+            let r2 = c + d;
+            let c1 = a + c;
+            let lo = c1.saturating_sub(r2);
+            let hi = r1.min(c1);
+            let span_usize = usize::try_from(hi - lo + 1).unwrap();
+            let (p_full, m_full) = noncentral_hypergeom_p_and_mean_log_or(a, r1, r2, c1, lo, hi, span_usize, log_or).unwrap();
+            let (p_win, m_win) = noncentral_hypergeom_p_and_mean_windowed(a, r1, r2, c1, lo, hi, log_or, true).unwrap();
+            assert!((p_full - p_win).abs() < 1e-11, "p mismatch: full={p_full} win={p_win}");
+            assert!((m_full - m_win).abs() < 1e-9, "mean mismatch: full={m_full} win={m_win}");
+        }
+
+        // 2. Exceeding NONCENTRAL_HYPERGEOM_MAX_SPAN (100_000) with total <= 5_000_000:
+        //    (50_000, 150_000, 150_000, 50_000) has span=200_001 and exact reciprocal symmetry.
+        let (lo_sym, hi_sym) = baptista_pike_or_ci(50_000, 150_000, 150_000, 50_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        let (lo_flip, hi_flip) = baptista_pike_or_ci(150_000, 50_000, 50_000, 150_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!((lo_sym * hi_flip - 1.0).abs() < 1e-9 && (hi_sym * lo_flip - 1.0).abs() < 1e-9);
+        assert!(lo_sym < 1.0 / 9.0 && 1.0 / 9.0 < hi_sym);
+
+        // Verify exact conditional inf/sup bracket p(theta) crosses alpha at both roots on the span > 100_000 table.
+        let alpha = ConfidenceLevel::DEFAULT_95.alpha();
+        let (p_lo_out, _) =
+            noncentral_hypergeom_p_and_mean_windowed(50_000, 200_000, 200_000, 200_000, 0, 200_000, (lo_sym * (1.0 - 1e-6)).ln(), false).unwrap();
+        let (p_lo_in, _) =
+            noncentral_hypergeom_p_and_mean_windowed(50_000, 200_000, 200_000, 200_000, 0, 200_000, (lo_sym * (1.0 + 1e-6)).ln(), false).unwrap();
+        let (p_hi_in, _) =
+            noncentral_hypergeom_p_and_mean_windowed(50_000, 200_000, 200_000, 200_000, 0, 200_000, (hi_sym * (1.0 - 1e-6)).ln(), false).unwrap();
+        let (p_hi_out, _) =
+            noncentral_hypergeom_p_and_mean_windowed(50_000, 200_000, 200_000, 200_000, 0, 200_000, (hi_sym * (1.0 + 1e-6)).ln(), false).unwrap();
+        assert!(p_lo_out <= alpha + 1e-9 && p_lo_in + 1e-9 >= alpha, "p_lo_out={p_lo_out}, p_lo_in={p_lo_in}");
+        assert!(p_hi_in + 1e-9 >= alpha && p_hi_out <= alpha + 1e-9, "p_hi_in={p_hi_in}, p_hi_out={p_hi_out}");
+
+        // 3. Asymmetric large-count table exceeding both MAX_TOTAL and MAX_SPAN (1M/3M/2M/12M, OR=2.0).
+        let (lo_asym, hi_asym) = baptista_pike_or_ci(1_000_000, 3_000_000, 2_000_000, 12_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        let (lo_aflip, hi_aflip) = baptista_pike_or_ci(3_000_000, 1_000_000, 12_000_000, 2_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(lo_asym < 2.0 && 2.0 < hi_asym);
+        assert!((lo_asym * hi_aflip - 1.0).abs() < 1e-8 && (hi_asym * lo_aflip - 1.0).abs() < 1e-8);
+
+        // 4. Sparse / zero-cell large-total tables (> 5_000_000 total).
+        let (lo_tiny_lg, hi_tiny_lg) = baptista_pike_or_ci(1, 10_000_000, 10_000_000, 1, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(lo_tiny_lg > 0.0 && lo_tiny_lg < 1e-13 && hi_tiny_lg > 1e-13 && hi_tiny_lg < 1e-4);
+        let (lo_z0, hi_z0) = baptista_pike_or_ci(0, 10_000_000, 5, 10_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert_eq!(lo_z0, 0.0);
+        assert!(hi_z0.is_finite() && hi_z0 > 0.0);
+        let (lo_zb, hi_zb) = baptista_pike_or_ci(5, 0, 10_000_000, 10_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(lo_zb > 0.0 && lo_zb.is_finite() && hi_zb.is_infinite());
     }
 }

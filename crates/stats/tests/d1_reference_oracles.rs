@@ -1028,6 +1028,20 @@ fn oracle_kaplan_meier_greenwood_and_cox_ph() {
     assert_approx_eq(c_ef.covariates[1].se, 0.075_004_256_292_423_3, 1e-7, 1e-7, "Cox Efron se age");
     assert_approx_eq(c_ef.concordance, 2.0 / 3.0, 1e-9, 0.0, "Cox Efron C-index");
     assert!(c_ef.global_schoenfeld_p.is_finite() && c_ef.global_schoenfeld_p > 0.3);
+
+    let c_ex = cox_ph_regression(&subjects, &names, CoxTieMethod::Exact, conf_95()).unwrap();
+    assert!(c_ex.converged);
+    assert_approx_eq(c_ex.log_lik_null, -13.407_963_283_651_783, 1e-9, 1e-9, "Cox Exact null logLik");
+    assert_approx_eq(c_ex.log_lik_model, -11.760_219_020_924_108, 1e-9, 1e-9, "Cox Exact model logLik");
+    assert_approx_eq(c_ex.covariates[0].beta, -0.182_610_805_280_124_4, 1e-7, 1e-7, "Cox Exact beta trt");
+    assert_approx_eq(c_ex.covariates[1].beta, 0.124_846_432_400_133_9, 1e-7, 1e-7, "Cox Exact beta age");
+    assert_approx_eq(c_ex.covariates[0].se, 0.793_932_752_616_092_9, 1e-7, 1e-7, "Cox Exact se trt");
+    assert_approx_eq(c_ex.covariates[1].se, 0.079_739_928_081_494_77, 1e-7, 1e-7, "Cox Exact se age");
+    assert_approx_eq(c_ex.likelihood_ratio_chi2, 3.295_488_525_455_351, 1e-7, 1e-7, "Cox Exact LR");
+    assert_approx_eq(c_ex.score_chi2, 3.035_931_093_670_372_5, 1e-6, 1e-6, "Cox Exact Score");
+    assert_approx_eq(c_ex.wald_chi2, 2.735_096_419_031_38, 1e-6, 1e-6, "Cox Exact Wald");
+    assert_approx_eq(c_ex.concordance, 2.0 / 3.0, 1e-9, 0.0, "Cox Exact C-index");
+    assert!(c_ex.global_schoenfeld_p.is_finite() && c_ex.global_schoenfeld_p > 0.2);
 }
 
 #[test]

@@ -1019,9 +1019,10 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
             computed.floating_notes = existing.floating_notes;
             computed.color_tag = existing.color_tag;
             if let AnalysisKind::Survival(curvebook_doc::SurvivalAnalysisSpec::CoxProportionalHazards { tie_method, .. }) = &computed.analysis.kind {
-                let tie_label = match tie_method {
-                    curvebook_doc::CoxTieMethod::Efron => "Efron",
-                    curvebook_doc::CoxTieMethod::Breslow => "Breslow",
+                let (tie_label, tie_desc) = match tie_method {
+                    curvebook_doc::CoxTieMethod::Efron => ("Efron", "Efron approximation"),
+                    curvebook_doc::CoxTieMethod::Breslow => ("Breslow", "Breslow approximation"),
+                    curvebook_doc::CoxTieMethod::Exact => ("Exact", "Exact discrete conditional partial likelihood"),
                 };
                 if let Some(tab) = computed.tabs.iter_mut().find(|t| t.id == "cox-ph") {
                     tab.footnotes.push(format!("Tie handling method: {tie_label}."));
@@ -1030,7 +1031,7 @@ fn recompute_result_sheet(doc: &mut ProjectDocument, res_idx: usize) -> bool {
                     assumption: String::from("Cox tie handling"),
                     status: curvebook_doc::ChecklistStatus::Info,
                     diagnostic_metric: Some(format!("tie_method = {tie_label}")),
-                    explanation: format!("Partial likelihood ties handled via {tie_label} approximation."),
+                    explanation: format!("Partial likelihood ties handled via {tie_desc}."),
                     remediation: None,
                 });
             }

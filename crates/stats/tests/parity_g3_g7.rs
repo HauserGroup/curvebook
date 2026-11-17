@@ -741,7 +741,7 @@ fn cox_ph_emits_baseline_survival_and_log_minus_log_tabs() {
     }
     let sheet = DataSheet::new(SheetId::new("cox-src"), "Cox PH", TableArchetype::MultipleVariables(mv)).unwrap();
 
-    for tie_method in [CoxTieMethod::Breslow, CoxTieMethod::Efron] {
+    for tie_method in [CoxTieMethod::Breslow, CoxTieMethod::Efron, CoxTieMethod::Exact] {
         let spec = spec_for(
             "r-cox",
             "cox-src",

@@ -401,14 +401,15 @@ fn edge_02b_grouped_rm_missing_cell_fallback_and_sparse_cluster_reml() {
 
 #[test]
 fn edge_03_heavily_tied_cox_ph_breslow_vs_efron_and_schoenfeld_diagnostics() {
-    // Provenance: R 4.5.2 (2025-10-31) `survival::coxph(Surv(time, status) ~ x1 + x2, ties="breslow"/"efron")`
+    // Provenance: R 4.5.2 (2025-10-31) `survival::coxph(Surv(time, status) ~ x1 + x2, ties="breslow"/"efron"/"exact")`
     // on synthetic 28-subject heavy-tie cohort (18 events across 5 tied time clusters + tied censors).
     let subjects = heavily_tied_cox_subjects();
     let names = vec![String::from("x1"), String::from("x2")];
     let bres = cox_ph_regression(&subjects, &names, CoxTieMethod::Breslow, ConfidenceLevel::DEFAULT_95).unwrap();
     let efrn = cox_ph_regression(&subjects, &names, CoxTieMethod::Efron, ConfidenceLevel::DEFAULT_95).unwrap();
+    let exct = cox_ph_regression(&subjects, &names, CoxTieMethod::Exact, ConfidenceLevel::DEFAULT_95).unwrap();
 
-    assert!(bres.converged && efrn.converged);
+    assert!(bres.converged && efrn.converged && exct.converged);
     assert_eq!((bres.n_subjects, bres.n_events), (28, 18));
 
     assert_approx_eq(bres.covariates[0].beta, -2.507_024_691_411_398_3, 1e-6, 1e-6, "Breslow beta x1");
@@ -437,12 +438,71 @@ fn edge_03_heavily_tied_cox_ph_breslow_vs_efron_and_schoenfeld_diagnostics() {
     assert_approx_eq(efrn.score_chi2, 32.082_681_331_849_13, 1e-4, 1e-5, "Efron Score");
     assert_approx_eq(efrn.concordance, 0.921_428_571_428_571, 1e-12, 1e-12, "Efron C-index");
 
+    assert_approx_eq(exct.covariates[0].beta, -4.075_442_513_476_269, 1e-6, 1e-6, "Exact beta x1");
+    assert_approx_eq(exct.covariates[0].se, 1.494_809_819_210_741_5, 1e-6, 1e-6, "Exact SE x1");
+    assert_approx_eq(exct.covariates[0].hazard_ratio, (-4.075_442_513_476_269_f64).exp(), 1e-6, 1e-6, "Exact HR x1");
+    assert_approx_eq(exct.covariates[1].beta, 5.611_755_992_824_016, 1e-6, 1e-6, "Exact beta x2");
+    assert_approx_eq(exct.covariates[1].se, 1.499_724_395_116_958_3, 1e-6, 1e-6, "Exact SE x2");
+    assert_approx_eq(exct.covariates[1].hazard_ratio, (5.611_755_992_824_016_f64).exp(), 1e-4, 1e-6, "Exact HR x2");
+    assert_approx_eq(exct.log_lik_null, -37.113_750_613_331_12, 1e-6, 1e-7, "Exact logLik0");
+    assert_approx_eq(exct.log_lik_model, -17.798_289_757_135_91, 1e-6, 1e-7, "Exact logLik");
+    assert_approx_eq(exct.likelihood_ratio_chi2, 38.630_921_712_390_42, 1e-5, 1e-6, "Exact LR");
+    assert_approx_eq(exct.wald_chi2, 15.276_622_686_327_087, 1e-5, 1e-6, "Exact Wald");
+    assert_approx_eq(exct.score_chi2, 29.790_003_749_162_48, 1e-4, 1e-5, "Exact Score");
+    assert_approx_eq(exct.concordance, 0.921_428_571_428_571, 1e-12, 1e-12, "Exact C-index");
+
     assert!((efrn.covariates[0].beta - bres.covariates[0].beta).abs() > 0.45);
     assert!((efrn.covariates[1].beta - bres.covariates[1].beta).abs() > 0.55);
+    assert!((exct.covariates[0].beta - efrn.covariates[0].beta).abs() > 1.0);
+    assert!((exct.covariates[1].beta - efrn.covariates[1].beta).abs() > 1.5);
     assert!(efrn.likelihood_ratio_chi2 > bres.likelihood_ratio_chi2 + 7.0);
+    assert!(exct.likelihood_ratio_chi2 > efrn.likelihood_ratio_chi2 + 2.5);
 
     assert_cox_residuals_valid("Breslow", &bres);
     assert_cox_residuals_valid("Efron", &efrn);
+    // Exact Schoenfeld test uses exact conditional expectations mu_d / d (check global PH p > 0.10 & martingale sum == 0).
+    assert_eq!(exct.global_schoenfeld_df, 2.0);
+    assert!(exct.global_schoenfeld_chi2.is_finite() && exct.global_schoenfeld_chi2 >= 0.0);
+    assert!(exct.global_schoenfeld_p > 0.10, "Exact global Schoenfeld p={}", exct.global_schoenfeld_p);
+    let m_sum_ex: f64 = exct.martingale_residuals.iter().sum();
+    assert_approx_eq(m_sum_ex, 0.0, 1e-9, 1e-9, "Exact sum martingale residuals == 0");
+    assert!(exct.deviance_residuals.iter().all(|v| v.is_finite()));
+
+    // Non-separated Exact complement-symmetry cluster (d = 8 > m / 2 = 5 at t = 10) vs R survival::coxph(ties="exact").
+    let t_hi = [2.0, 2.0, 2.0, 2.0, 5.0, 5.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 10.0, 15.0, 15.0];
+    let e_hi = [true, false, true, false, true, false, true, true, true, true, true, true, true, true, false, false];
+    let x_hi = [0.4, 3.1, 2.5, -1.2, -0.5, 1.8, 1.1, 0.9, 1.4, 0.2, -0.3, 0.7, 1.6, 0.5, 0.8, 1.0];
+    let comp_subjects: Vec<CoxSubject> = (0..t_hi.len()).map(|i| CoxSubject { time: t_hi[i], event: e_hi[i], x: vec![x_hi[i]] }).collect();
+    let comp_res = cox_ph_regression(&comp_subjects, &[String::from("x")], CoxTieMethod::Exact, ConfidenceLevel::DEFAULT_95).unwrap();
+    assert!(comp_res.converged);
+    assert_approx_eq(comp_res.log_lik_null, -11.079_060_882_340_364, 1e-8, 1e-8, "Exact d>m/2 logLik0");
+    assert_approx_eq(comp_res.log_lik_model, -11.060_268_211_617_712, 1e-8, 1e-8, "Exact d>m/2 logLik");
+    assert_approx_eq(comp_res.covariates[0].beta, -0.111_885_980_533_789_2, 1e-7, 1e-7, "Exact d>m/2 beta");
+    assert_approx_eq(comp_res.covariates[0].se, 0.578_535_660_011_036_6, 1e-7, 1e-7, "Exact d>m/2 SE");
+    assert_approx_eq(comp_res.wald_chi2, 0.037_401_677_214_507_97, 1e-6, 1e-6, "Exact d>m/2 Wald");
+    assert_approx_eq(comp_res.score_chi2, 0.037_439_121_514_741_07, 1e-6, 1e-6, "Exact d>m/2 Score");
+
+    // Large predicted-risk span across follow-up time (lp_span > 120 and > 1000) converges cleanly without underflow.
+    let t_span = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0, 7.0, 8.0, 9.0, 10.0, 11.0, 12.0];
+    let e_span = [true, true, true, false, true, true, false, true, true, false, true, false];
+    let x_span_120 = [500.0, 480.0, 0.5, 2.0, 0.2, 0.8, 1.2, -0.5, -1.0, 0.1, -1.5, -0.2];
+    let subj_120: Vec<CoxSubject> = (0..12).map(|i| CoxSubject { time: t_span[i], event: e_span[i], x: vec![x_span_120[i]] }).collect();
+    for tie in [CoxTieMethod::Breslow, CoxTieMethod::Efron, CoxTieMethod::Exact] {
+        let fit_120 = cox_ph_regression(&subj_120, &[String::from("x")], tie, ConfidenceLevel::DEFAULT_95).unwrap();
+        assert!(fit_120.converged, "{tie:?} large-span (lp_span ~ 123) must converge");
+        assert_approx_eq(fit_120.covariates[0].beta, 0.245_378_791_179_591_7, 1e-7, 1e-7, "large-span beta");
+        assert_approx_eq(fit_120.covariates[0].se, 0.394_086_100_609_612_2, 1e-7, 1e-7, "large-span SE");
+        assert_approx_eq(fit_120.log_lik_model, -9.952_996_449_202_7, 1e-7, 1e-7, "large-span logLik");
+        assert!(fit_120.global_schoenfeld_p.is_finite());
+        assert_approx_eq(fit_120.martingale_residuals.iter().sum(), 0.0, 1e-9, 1e-9, "large-span martingale sum == 0");
+    }
+
+    let x_span_huge = [50_000.0, 48_000.0, 0.5, 2.0, 0.2, 0.8, 1.2, -0.5, -1.0, 0.1, -1.5, -0.2];
+    let subj_huge: Vec<CoxSubject> = (0..12).map(|i| CoxSubject { time: t_span[i], event: e_span[i], x: vec![x_span_huge[i]] }).collect();
+    let fit_huge = cox_ph_regression(&subj_huge, &[String::from("x")], CoxTieMethod::Efron, ConfidenceLevel::DEFAULT_95).unwrap();
+    assert!(fit_huge.converged, "non-separated early outlier cohort (lp_span > 10000) must converge without underflow");
+    assert!(fit_huge.covariates[0].se.is_finite() && fit_huge.covariates[0].se > 0.0);
+    assert_approx_eq(fit_huge.martingale_residuals.iter().sum(), 0.0, 1e-9, 1e-9, "huge-span martingale sum == 0");
 }
 
 #[test]
@@ -797,4 +857,22 @@ fn edge_06b_extreme_tied_rank_kruskal_wallis_and_friedman() {
     assert_approx_eq(fr.q_statistic, 13.568_181_818_181_818, 1e-9, 1e-9, "Tied Friedman Q");
     assert_approx_eq(fr.p_value, 3.555_940_280_396_475e-03, 1e-9, 1e-8, "Tied Friedman p");
     assert_approx_eq(fr.kendalls_w, 0.753_787_878_787_879, 1e-9, 1e-9, "Tied Friedman Kendall W");
+}
+
+#[test]
+fn edge_07_large_span_baptista_pike_or_ci() {
+    use curvebook_stats::categorical::baptista_pike_or_ci;
+
+    // Provenance: exact conditional noncentral hypergeometric inversion (Baptista & Pike 1977)
+    // verified via exact inversion symmetry & large-N Cornfield/Woolf asymptotic convergence.
+    let (lo_span, hi_span) = baptista_pike_or_ci(50_000, 150_000, 150_000, 50_000, ConfidenceLevel::DEFAULT_95).unwrap();
+    let (lo_flip, hi_flip) = baptista_pike_or_ci(150_000, 50_000, 50_000, 150_000, ConfidenceLevel::DEFAULT_95).unwrap();
+    assert_approx_eq(lo_span * hi_flip, 1.0, 1e-9, 1e-9, "BP span>100k symmetry lo");
+    assert_approx_eq(hi_span * lo_flip, 1.0, 1e-9, 1e-9, "BP span>100k symmetry hi");
+
+    // Large total > 5_000_000 & span > 100_000: [[1e6, 3e6], [2e6, 12e6]] (OR = 2.0).
+    let (lo_lg, hi_lg) = baptista_pike_or_ci(1_000_000, 3_000_000, 2_000_000, 12_000_000, ConfidenceLevel::DEFAULT_95).unwrap();
+    assert!(lo_lg < 2.0 && 2.0 < hi_lg);
+    assert_approx_eq(lo_lg, 1.994_579_8, 1e-6, 1e-6, "BP large-total lo");
+    assert_approx_eq(hi_lg, 2.005_435_8, 1e-6, 1e-6, "BP large-total hi");
 }
