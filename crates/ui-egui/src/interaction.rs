@@ -1037,6 +1037,22 @@ pub(crate) fn clear_inspector_axis_buffers(app: &mut UiApp) {
     app.interaction.text_field_buffers.remove("inspector.axes.min.input");
     app.interaction.text_field_buffers.remove("inspector.axes.max.input");
     app.interaction.text_field_buffers.remove("inspector.axes.interval.input");
+    app.interaction.text_field_buffers.remove("inspector.axes.title.input");
+}
+
+/// Clear transient modal textbox buffers so stale values never bleed across separate dialog sessions.
+pub fn clear_modal_text_buffers(app: &mut UiApp) {
+    for id in [
+        "axes.title",
+        "axes.y_thresholds",
+        "axes.x_thresholds",
+        "edit.transform.formula",
+        "edit.transform.filter_formula",
+        "edit.transform.selected_data_sets",
+        "edit.transform.baseline_columns",
+    ] {
+        app.interaction.text_field_buffers.remove(id);
+    }
 }
 
 fn clear_context_menu_state(app: &mut UiApp) {
@@ -2118,6 +2134,82 @@ fn sync_power_pilot_text_field(app: &mut UiApp, fid: &str, text: &str) {
     }
 }
 
+fn parse_usize_list_text(raw: &str) -> Option<Vec<usize>> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Some(Vec::new());
+    }
+    if trimmed.starts_with('[') {
+        return serde_json::from_str::<Vec<usize>>(trimmed).ok();
+    }
+    let mut out = Vec::new();
+    for tok in trimmed.split(|c: char| c == ',' || c.is_whitespace()).filter(|s| !s.is_empty()) {
+        out.push(tok.parse::<usize>().ok()?);
+    }
+    Some(out)
+}
+
+fn sync_edit_params_text_field(app: &mut UiApp, fid: &str, text: &str) {
+    let mut map = serde_json::Map::new();
+    match fid {
+        "edit.transform.formula" | "edit.transform.filter_formula" => {
+            map.insert(fid.to_owned(), Value::String(text.to_owned()));
+        }
+        "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" => {
+            let Some(cols) = parse_usize_list_text(text) else {
+                return;
+            };
+            map.insert(fid.to_owned(), serde_json::json!(cols));
+        }
+        _ => return,
+    }
+    let _ = app.canvas_dialogs.edit_params.apply_field_patch(&map);
+}
+
+fn sync_format_axes_text_field(app: &mut UiApp, fid: &str, text: &str) {
+    let doc = app.document().clone();
+    let mut map = serde_json::Map::new();
+    match fid {
+        "axes.title" => {
+            map.insert(String::from("axes.title"), Value::String(text.to_owned()));
+        }
+        "axes.y_thresholds" | "axes.x_thresholds" => {
+            let trimmed = text.trim();
+            let val = if trimmed.is_empty() {
+                Value::Array(Vec::new())
+            } else if trimmed.starts_with('[') || trimmed.starts_with('{') {
+                let Ok(parsed) = serde_json::from_str::<Value>(trimmed) else {
+                    return;
+                };
+                parsed
+            } else {
+                Value::String(trimmed.to_owned())
+            };
+            map.insert(fid.to_owned(), val);
+        }
+        _ => return,
+    }
+    let _ = app.canvas_dialogs.format_axes.apply_field_patch(&map, Some(&doc));
+}
+
+/// Flush any buffered `FormatAxes` textbox edits (`axes.title`, `axes.y_thresholds`, `axes.x_thresholds`) into `format_axes`.
+pub fn sync_format_axes_text_buffers(app: &mut UiApp) {
+    for fid in ["axes.title", "axes.y_thresholds", "axes.x_thresholds"] {
+        if let Some(text) = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()) {
+            sync_format_axes_text_field(app, fid, &text);
+        }
+    }
+}
+
+/// Flush any buffered `EditAnalysisParameters` transform textbox edits into `edit_params`.
+pub fn sync_edit_params_text_buffers(app: &mut UiApp) {
+    for fid in ["edit.transform.formula", "edit.transform.filter_formula", "edit.transform.selected_data_sets", "edit.transform.baseline_columns"] {
+        if let Some(text) = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()) {
+            sync_edit_params_text_field(app, fid, &text);
+        }
+    }
+}
+
 fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
     let text = app.interaction.text_field_buffers.get(fid).map(|b| b.text.clone()).unwrap_or_default();
     if fid.starts_with("import_paste.input.") {
@@ -2153,6 +2245,11 @@ fn sync_focused_text_field(app: &mut UiApp, fid: &str) {
         "mv_formula.vars.recode_from.input" => app.view_shards.mv_formula.recode_from = text,
         "mv_formula.vars.recode_to.input" => app.view_shards.mv_formula.recode_to = text,
         "fit.eq.search" => app.view_shards.fit_params.model_search = text,
+        "edit.transform.formula" | "edit.transform.filter_formula" | "edit.transform.selected_data_sets" | "edit.transform.baseline_columns" => {
+            sync_edit_params_text_field(app, fid, &text)
+        }
+        "axes.title" | "axes.y_thresholds" | "axes.x_thresholds" => sync_format_axes_text_field(app, fid, &text),
+        "inspector.axes.title.input" | "inspector.mv.color_clamp_min.input" | "inspector.mv.color_clamp_max.input" => {}
         _ => {}
     }
 }
@@ -2336,12 +2433,12 @@ fn execute_dialog_widget_action(app: &mut UiApp, action: &WidgetAction, metrics:
             };
             let first = app.canvas_dialogs.analyze.compatible_entries().first().map(|e| e.id.to_owned());
             if let Some(id) = first {
-                app.canvas_dialogs.analyze.selected_entry_id = Some(id);
+                app.canvas_dialogs.analyze.select_catalog_entry(&id);
             }
             Ok(UiEventOutcome { handled: true, action: format!("analyze.category:{cat}"), ..Default::default() })
         }
         WidgetAction::SelectAnalyzeEntry(entry_id) => {
-            app.canvas_dialogs.analyze.selected_entry_id = Some(entry_id.clone());
+            app.canvas_dialogs.analyze.select_catalog_entry(entry_id);
             Ok(UiEventOutcome { handled: true, action: format!("analyze.entry:{entry_id}"), ..Default::default() })
         }
         WidgetAction::SelectEditParamsTab(tab_id) => {
@@ -2520,7 +2617,21 @@ fn handle_text_input(app: &mut UiApp, metrics: ViewportMetrics, text: &str) -> U
 }
 
 fn is_text_widget_id(wid: &str) -> bool {
-    matches!(wid, "palette.query" | "formula_bar.input" | "info.notes" | "info.secondary.notes") || wid.contains("search") || wid.contains("input")
+    matches!(
+        wid,
+        "palette.query"
+            | "formula_bar.input"
+            | "info.notes"
+            | "info.secondary.notes"
+            | "edit.transform.formula"
+            | "edit.transform.filter_formula"
+            | "edit.transform.selected_data_sets"
+            | "edit.transform.baseline_columns"
+            | "axes.y_thresholds"
+            | "axes.x_thresholds"
+            | "axes.title"
+    ) || wid.contains("search")
+        || wid.contains("input")
 }
 
 fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fallback: bool) -> Option<SheetId> {

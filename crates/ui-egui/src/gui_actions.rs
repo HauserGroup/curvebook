@@ -9,8 +9,9 @@
 //! wizards, and modal dialogs identically to an interactive desktop user.
 
 use curvebook_doc::{
-    AnalysisKind, Cell, CellValue, CldOrdering, ContingencyMethod, EquationDisplayMode, ErrorBarMetric, ErrorCode, MultivariateSpec, OneWayMethod,
-    ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TransformAnalysisSpec, VariableSource, XColumnMode,
+    AnalysisKind, BaselineOperation, Cell, CellValue, CldOrdering, ColorChannelMapping, ContingencyMethod, EquationDisplayMode, ErrorBarMetric,
+    ErrorCode, ErrorPropagationMode, FramePreset, GroupedArrangement, MathTransformPreset, MultivariatePlotMode, MultivariateSpec, OneWayMethod,
+    ResidualCovariance, SheetId, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use curvebook_engine::{EngineError, cmd};
 use curvebook_render::RenderTargetSpec;
@@ -24,9 +25,12 @@ use crate::control_io::{
     dispatch_ui_command_as_ui, encode_base64, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
     require_params_object_or_null, write_host_file,
 };
-use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, ExportFigureFormat, equation_display_mode_str};
+use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, AxisTarget, ExportFigureFormat, equation_display_mode_str};
 use crate::inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
-use crate::interaction::{KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, dispatch_ui_event, sync_dialogs_on_sheet_switch};
+use crate::interaction::{
+    KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, clear_modal_text_buffers, dispatch_ui_event, sync_dialogs_on_sheet_switch,
+    sync_edit_params_text_buffers, sync_format_axes_text_buffers,
+};
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
 use crate::modal_predicates::{
@@ -378,14 +382,7 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
             }
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
-        ActiveDialog::BubblePlotInspector { .. } if matches!(wid, "bubble.show_convex_hulls" | "bubble.show_confidence_ellipses") => {
-            if wid == "bubble.show_convex_hulls" {
-                app.canvas_dialogs.bubble_plot.show_convex_hulls = !app.canvas_dialogs.bubble_plot.show_convex_hulls;
-            } else {
-                app.canvas_dialogs.bubble_plot.show_confidence_ellipses = !app.canvas_dialogs.bubble_plot.show_confidence_ellipses;
-            }
-            Ok(Some(json!({ "clicked": wid, "updated": true })))
-        }
+        ActiveDialog::BubblePlotInspector { .. } => try_toggle_bubble_plot_click(app, wid),
         ActiveDialog::ApplyStyleFrom { .. }
             if matches!(wid, "apply_style.clone_palette" | "apply_style.clone_frame_and_axes" | "apply_style.clone_error_bars_and_legend") =>
         {
@@ -404,8 +401,22 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
             app.canvas_dialogs.page_layout.align_plot_origins = !app.canvas_dialogs.page_layout.align_plot_origins;
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
-        ActiveDialog::FormatAxes { .. } if wid == "axes.enable_y2" => {
-            app.canvas_dialogs.format_axes.enable_y2 = !app.canvas_dialogs.format_axes.enable_y2;
+        ActiveDialog::FormatAxes { .. } if matches!(wid, "axes.enable_y2" | "axes.target_axis") => {
+            if wid == "axes.enable_y2" {
+                app.canvas_dialogs.format_axes.enable_y2 = !app.canvas_dialogs.format_axes.enable_y2;
+            } else {
+                sync_format_axes_text_buffers(app);
+                app.interaction.text_field_buffers.remove("axes.title");
+                let next_target = match app.canvas_dialogs.format_axes.target_axis {
+                    AxisTarget::X => "y",
+                    AxisTarget::Y => "y2",
+                    AxisTarget::Y2 => "x",
+                };
+                let doc = app.document().clone();
+                let mut map = Map::new();
+                map.insert(String::from("axes.target_axis"), json!(next_target));
+                app.canvas_dialogs.format_axes.apply_field_patch(&map, Some(&doc)).map_err(disabled_err)?;
+            }
             Ok(Some(json!({ "clicked": wid, "updated": true })))
         }
         ActiveDialog::RandomSampleRows { .. } if wid == "sample.proportional_allocation" => {
@@ -422,6 +433,98 @@ fn try_toggle_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<V
         }
         ActiveDialog::AnalyzeSheet { .. } => try_toggle_analyze_click(app, wid),
         _ => Ok(None),
+    }
+}
+
+fn try_toggle_bubble_plot_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
+    let bp = &app.canvas_dialogs.bubble_plot;
+    let n_cols = bp.available_columns.len().max(1);
+    let mut patch = Map::new();
+    match wid {
+        "bubble.show_convex_hulls" => {
+            app.canvas_dialogs.bubble_plot.show_convex_hulls = !app.canvas_dialogs.bubble_plot.show_convex_hulls;
+            return Ok(Some(json!({ "clicked": wid, "updated": true })));
+        }
+        "bubble.show_confidence_ellipses" => {
+            app.canvas_dialogs.bubble_plot.show_confidence_ellipses = !app.canvas_dialogs.bubble_plot.show_confidence_ellipses;
+            return Ok(Some(json!({ "clicked": wid, "updated": true })));
+        }
+        "bubble.plot_mode" => {
+            let next = match bp.plot_mode {
+                MultivariatePlotMode::BubbleScatter => "categorical_summary",
+                MultivariatePlotMode::CategoricalSummary { .. } => "bubble_scatter",
+            };
+            patch.insert(String::from("plot_mode"), json!(next));
+        }
+        "bubble.x_column" => {
+            patch.insert(String::from("x_column"), json!((bp.x_column + 1) % n_cols));
+        }
+        "bubble.y_column" => {
+            patch.insert(String::from("y_column"), json!((bp.y_column + 1) % n_cols));
+        }
+        "bubble.color_mode" => match &bp.color_channel {
+            ColorChannelMapping::Constant(_) => {
+                patch.insert(String::from("color_mode"), json!("categorical"));
+                patch.insert(String::from("color_column"), json!(bp.label_column.unwrap_or(0)));
+            }
+            ColorChannelMapping::Categorical { column, .. } => {
+                patch.insert(String::from("color_mode"), json!("continuous"));
+                patch.insert(String::from("color_column"), json!(*column));
+            }
+            ColorChannelMapping::Continuous { .. } => {
+                patch.insert(String::from("color_mode"), json!("constant"));
+            }
+        },
+        "bubble.color_column" => match &bp.color_channel {
+            ColorChannelMapping::Constant(_) => {
+                patch.insert(String::from("color_mode"), json!("categorical"));
+                patch.insert(String::from("color_column"), json!(0));
+            }
+            ColorChannelMapping::Categorical { column, .. } => {
+                patch.insert(String::from("color_mode"), json!("categorical"));
+                patch.insert(String::from("color_column"), json!((column + 1) % n_cols));
+            }
+            ColorChannelMapping::Continuous { column, .. } => {
+                patch.insert(String::from("color_mode"), json!("continuous"));
+                patch.insert(String::from("color_column"), json!((column + 1) % n_cols));
+            }
+        },
+        _ => return Ok(None),
+    }
+    app.canvas_dialogs.bubble_plot.apply_field_patch(&patch).map_err(disabled_err)?;
+    Ok(Some(json!({ "clicked": wid, "updated": true })))
+}
+
+fn next_math_transform_str(cur: Option<MathTransformPreset>) -> &'static str {
+    match cur {
+        None => "log10",
+        Some(MathTransformPreset::Log10) => "ln",
+        Some(MathTransformPreset::Ln) => "log2",
+        Some(MathTransformPreset::Log2) => "exp10",
+        Some(MathTransformPreset::Exp10) => "sqrt",
+        _ => "none",
+    }
+}
+
+fn next_table_kind_str(cur: TableKind) -> &'static str {
+    match cur {
+        TableKind::Column => "grouped",
+        TableKind::Grouped => "xy",
+        TableKind::Xy => "multiple_variables",
+        TableKind::MultipleVariables => "contingency",
+        TableKind::Contingency => "survival",
+        TableKind::Survival => "parts_of_whole",
+        TableKind::PartsOfWhole => "nested",
+        TableKind::Nested => "column",
+    }
+}
+
+fn next_baseline_op_str(cur: BaselineOperation) -> &'static str {
+    match cur {
+        BaselineOperation::Difference => "ratio",
+        BaselineOperation::Ratio => "percent_change",
+        BaselineOperation::PercentChange => "fractional_change",
+        BaselineOperation::FractionalChange => "difference",
     }
 }
 
@@ -570,7 +673,80 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
         "edit.correlation.heatmap" => {
             patch.insert(String::from("correlation_heatmap"), json!(!ep.correlation_heatmap));
         }
-        _ => return Ok(None),
+        "edit.cluster.k_means_auto" => {
+            let cur_auto =
+                matches!(ep.draft.as_ref().map(|d| &d.kind), Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: None, .. })));
+            patch.insert(String::from("k_means_auto"), json!(!cur_auto));
+        }
+        "edit.transform.x_transform" => {
+            let cur = match ep.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, .. })) => *x_transform,
+                _ => None,
+            };
+            patch.insert(String::from("x_transform"), json!(next_math_transform_str(cur)));
+        }
+        "edit.transform.y_transform" => {
+            let cur = match ep.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) => *y_transform,
+                _ => None,
+            };
+            patch.insert(String::from("y_transform"), json!(next_math_transform_str(cur)));
+        }
+        "edit.transform.target_archetype" => {
+            let cur = match ep.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. })) => *target_archetype,
+                _ => TableKind::Column,
+            };
+            patch.insert(String::from("target_archetype"), json!(next_table_kind_str(cur)));
+        }
+        "edit.transform.baseline_operation" => {
+            let cur = match ep.draft.as_ref().map(|d| &d.kind) {
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { operation, .. })) => *operation,
+                _ => BaselineOperation::Difference,
+            };
+            patch.insert(String::from("baseline_operation"), json!(next_baseline_op_str(cur)));
+        }
+        "edit.transform.error_propagation" => {
+            let cur_endpoints = matches!(
+                ep.draft.as_ref().map(|d| &d.kind),
+                Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { error_propagation: ErrorPropagationMode::ReplicateEndpoints, .. }))
+            );
+            let next = if cur_endpoints { "delta" } else { "endpoints" };
+            patch.insert(String::from("error_propagation"), json!(next));
+        }
+        _ => {
+            if let Some(col_raw) = wid.strip_prefix("edit.pca.pred.")
+                && let Ok(col) = col_raw.parse::<usize>()
+            {
+                app.canvas_dialogs.edit_params.toggle_pca_predictor(col);
+                return Ok(Some(json!({ "clicked": wid, "updated": true })));
+            }
+            if let Some(col_raw) = wid.strip_prefix("edit.pcr.outcome.")
+                && let Ok(col) = col_raw.parse::<usize>()
+            {
+                app.canvas_dialogs.edit_params.select_pcr_outcome(col).map_err(disabled_err)?;
+                return Ok(Some(json!({ "clicked": wid, "updated": true })));
+            }
+            if let Some(col_raw) = wid.strip_prefix("edit.two_group.group.")
+                && let Ok(col) = col_raw.parse::<usize>()
+            {
+                patch.insert(String::from("mv_group_column"), json!(col));
+            } else if let Some(col_raw) = wid.strip_prefix("edit.two_group.resp.")
+                && let Ok(col) = col_raw.parse::<usize>()
+            {
+                patch.insert(String::from("mv_response_column"), json!(col));
+            } else if let Some(col_raw) = wid.strip_prefix("edit.fac.resp.")
+                && let Ok(col) = col_raw.parse::<usize>()
+            {
+                patch.insert(String::from("response_column"), json!(col));
+            } else if let Some(col_raw) = wid.strip_prefix("edit.fac.col.")
+                && col_raw.parse::<usize>().is_ok()
+            {
+                patch.insert(wid.to_owned(), Value::Null);
+            } else {
+                return Ok(None);
+            }
+        }
     }
     app.canvas_dialogs.edit_params.apply_field_patch(&patch).map_err(disabled_err)?;
     Ok(Some(json!({ "clicked": wid, "updated": true })))
@@ -578,6 +754,23 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
 
 fn try_toggle_format_graph_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     match wid {
+        "format_graph.grouped_arrangement" => {
+            app.canvas_dialogs.format_graph.grouped_arrangement = match app.canvas_dialogs.format_graph.grouped_arrangement {
+                GroupedArrangement::Interleaved => GroupedArrangement::Stacked,
+                GroupedArrangement::Stacked => GroupedArrangement::Superimposed,
+                GroupedArrangement::Superimposed => GroupedArrangement::Separated,
+                GroupedArrangement::Separated => GroupedArrangement::Interleaved,
+            };
+        }
+        "format_graph.frame_preset" => {
+            app.canvas_dialogs.format_graph.frame_preset = match app.canvas_dialogs.format_graph.frame_preset {
+                FramePreset::OpenL => FramePreset::OffsetRangeTufte,
+                FramePreset::OffsetRangeTufte => FramePreset::PlainBoxed,
+                FramePreset::PlainBoxed => FramePreset::DualYSecondaryRight,
+                FramePreset::DualYSecondaryRight => FramePreset::OriginCrossing,
+                FramePreset::OriginCrossing => FramePreset::OpenL,
+            };
+        }
         "format_graph.show_legend" => app.canvas_dialogs.format_graph.show_legend = !app.canvas_dialogs.format_graph.show_legend,
         "format_graph.legend_bordered" => app.canvas_dialogs.format_graph.legend_bordered = !app.canvas_dialogs.format_graph.legend_bordered,
         "format_graph.half_violin_with_points" => {
@@ -1797,7 +1990,12 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             let intents = app.canvas_dialogs.change_graph_type.commit_intents(app.document());
             commit_many_intents_opt_close(app, intents, action != "apply")
         }
-        ActiveDialog::FormatAxes { .. } => commit_single_intent(app, app.canvas_dialogs.format_axes.commit_intent(), true),
+        ActiveDialog::FormatAxes { .. } => {
+            sync_format_axes_text_buffers(app);
+            let res = commit_single_intent(app, app.canvas_dialogs.format_axes.commit_intent(), true)?;
+            clear_modal_text_buffers(app);
+            Ok(res)
+        }
         ActiveDialog::PairwiseComparisons { .. } => {
             commit_many_intents_opt_close(app, app.canvas_dialogs.pairwise.commit_intents(), action != "apply")
         }
@@ -2021,11 +2219,19 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
 }
 
 fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
+    sync_edit_params_text_buffers(app);
     let close = action == "ok";
-    let intent = app.canvas_dialogs.edit_params.commit_intent().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
-    let out = app.execute_command(&intent.command_id, intent.params)?;
+    let doc = app.document().clone();
+    let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
+    let mut iter = intents.into_iter();
+    let primary = iter.next().ok_or_else(|| bad_input("missing analysis parameter draft"))?;
+    let out = app.execute_command(&primary.command_id, primary.params)?;
+    for extra in iter {
+        let _ = app.execute_command(&extra.command_id, extra.params)?;
+    }
     if close {
         app.canvas_dialogs.close_dialog();
+        clear_modal_text_buffers(app);
     }
     Ok(json!({ "action": action, "mutated": out.mutated, "closed": close, "payload": out.payload }))
 }
@@ -2168,5 +2374,260 @@ pub(crate) fn cancel_formula_bar(app: &mut UiApp) {
     app.grid.formula_bar.cancel();
     if app.focus_widget_id.as_deref() == Some("formula_bar.input") {
         app.focus_widget_id = None;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::compositor::FramePalette;
+    use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
+    use crate::layout::LayoutTree;
+    use crate::text_bridge::DesktopTextMeasurer;
+    use crate::views::build_workspace_layout_tree;
+
+    fn build_tree(app: &UiApp, vp: ViewportMetrics) -> LayoutTree {
+        build_workspace_layout_tree(app, vp, &DesktopTextMeasurer::new(), &FramePalette::from_theme(&app.theme))
+    }
+
+    fn make_9col_mv_app() -> Result<(UiApp, SheetId, SheetId), String> {
+        let mut app = UiApp::new();
+        let created = app
+            .execute_command(
+                "sheet.createData",
+                json!({ "sheet_id": "mv-9", "kind": "multiple_variables", "cols": 9, "rows": 8, "auto_family": false }),
+            )
+            .map_err(|e| e.to_string())?;
+        let ds_id = SheetId::from(created.payload["sheet_id"].as_str().ok_or("missing mv sheet_id")?);
+        app.execute_command("table.setVariableRole", json!({ "sheet_id": ds_id.as_str(), "col": 0, "role": "label" })).map_err(|e| e.to_string())?;
+        app.execute_command("table.setVariableRole", json!({ "sheet_id": ds_id.as_str(), "col": 1, "role": "categorical" }))
+            .map_err(|e| e.to_string())?;
+        let mut edits = Vec::new();
+        for r in 0..8usize {
+            let grp = if r < 4 { "Ctrl" } else { "Treat" };
+            edits.push(json!({ "row": r, "col": 0, "value": format!("S{r}") }));
+            edits.push(json!({ "row": r, "col": 1, "value": grp }));
+            for c in 2..9usize {
+                edits.push(json!({ "row": r, "col": c, "value": ((r + 1) * (c + 1)) as f64 + if r >= 4 { 10.0 } else { 0.0 } }));
+            }
+        }
+        app.execute_command("table.setCells", json!({ "sheet_id": ds_id.as_str(), "edits": edits })).map_err(|e| e.to_string())?;
+        let g = app
+            .execute_command("graph.create", json!({ "data_sheet_id": ds_id.as_str(), "kind": "multiple_variables" }))
+            .map_err(|e| e.to_string())?;
+        let gs_id = SheetId::from(g.payload["sheet_id"].as_str().ok_or("missing graph sheet_id")?);
+        Ok((app, ds_id, gs_id))
+    }
+
+    #[test]
+    fn w6_mv_pcr_cluster_two_group_factorial_and_fit() -> Result<(), String> {
+        let (mut app, ds_id, _gs_id) = make_9col_mv_app()?;
+        let vp = ViewportMetrics::default();
+
+        // 1. Analyze picker PCR inline controls & R10 outcome gating.
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &ds_id));
+        app.canvas_dialogs.analyze.select_catalog_entry("stats.pcr");
+        let tree_an = build_tree(&app, vp);
+        assert!(tree_an.node("analyze.pca.pred.0").is_some());
+        assert!(tree_an.node("analyze.pcr.outcome.0").is_some());
+        app.canvas_dialogs.analyze.toggle_pca_predictor(2);
+        let tree_an2 = build_tree(&app, vp);
+        assert_eq!(tree_an2.node("analyze.pcr.outcome.2").map(|n| n.state.enablement.enabled), Some(false));
+        assert_eq!(tree_an2.node("analyze.pcr.outcome.3").map(|n| n.state.enablement.enabled), Some(true));
+        app.canvas_dialogs.close_dialog();
+
+        // 2. Two-group & Factorial ANOVA MV selectors (>6 cols).
+        let tg = app
+            .execute_command(
+                "analysis.run",
+                json!({ "source_sheet_id": ds_id.as_str(), "kind": "unpaired_t", "mv_group_column": 1, "mv_response_column": 8 }),
+            )
+            .map_err(|e| e.to_string())?;
+        let tg_id = SheetId::from(tg.payload["sheet_id"].as_str().ok_or("missing tg sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &tg_id));
+        let tree_tg = build_tree(&app, vp);
+        assert!(tree_tg.node("edit.dataset.8").is_some(), "expected >6 dataset buttons rendered");
+        assert!(tree_tg.node("edit.two_group.welch").is_some());
+        assert!(tree_tg.node("edit.two_group.group.1").is_some());
+        assert!(tree_tg.node("edit.two_group.resp.8").is_some());
+        app.canvas_dialogs.close_dialog();
+
+        let fac = app
+            .execute_command(
+                "analysis.run",
+                json!({ "source_sheet_id": ds_id.as_str(), "kind": "two_way_anova", "multifactor_columns": [1], "response_column": 8 }),
+            )
+            .map_err(|e| e.to_string())?;
+        let fac_id = SheetId::from(fac.payload["sheet_id"].as_str().ok_or("missing fac sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &fac_id));
+        let tree_fac = build_tree(&app, vp);
+        assert!(tree_fac.node("edit.fac.resp.8").is_some());
+        assert!(tree_fac.node("edit.fac.col.1").is_some());
+        app.canvas_dialogs.close_dialog();
+
+        // 3. Clustering controls & Fit MV selectors on fit.tab.model.
+        let cl =
+            app.execute_command("analysis.run", json!({ "source_sheet_id": ds_id.as_str(), "kind": "clustering" })).map_err(|e| e.to_string())?;
+        let cl_id = SheetId::from(cl.payload["sheet_id"].as_str().ok_or("missing clust sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &cl_id));
+        let tree_cl = build_tree(&app, vp);
+        for id in [
+            "edit.cluster.k_means_auto",
+            "edit.cluster.k_sweep_max.inc",
+            "edit.cluster.dist.cosine",
+            "edit.cluster.link.single",
+            "edit.cluster.link.wpgma",
+            "edit.cluster.link.centroid",
+            "edit.cluster.link.median",
+        ] {
+            assert!(tree_cl.node(id).is_some(), "missing cluster control {id}");
+        }
+        try_toggle_edit_params_click(&mut app, "edit.cluster.k_means_auto").map_err(|e| e.to_string())?;
+        assert!(matches!(
+            app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind),
+            Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: Some(3), .. }))
+        ));
+        try_toggle_edit_params_click(&mut app, "edit.cluster.k_means_auto").map_err(|e| e.to_string())?;
+        assert!(matches!(
+            app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind),
+            Some(AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k: None, .. }))
+        ));
+        app.canvas_dialogs.close_dialog();
+
+        let fit = app
+            .execute_command(
+                "analysis.run",
+                json!({
+                    "source_sheet_id": ds_id.as_str(),
+                    "kind": "nonlinear_regression",
+                    "equation_id": "straight_line",
+                    "mv_x_columns": [2],
+                    "mv_y_column": 3,
+                    "mv_group_columns": [1],
+                }),
+            )
+            .map_err(|e| e.to_string())?;
+        let fit_id = SheetId::from(fit.payload["sheet_id"].as_str().ok_or("missing fit sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &fit_id));
+        let tree_fit = build_tree(&app, vp);
+        assert!(tree_fit.node("fit.tab.model").is_some());
+        assert!(tree_fit.node("fit.mv.x.2").is_some());
+        assert!(tree_fit.node("fit.mv.y.3").is_some());
+        assert!(tree_fit.node("fit.mv.group.1").is_some());
+        Ok(())
+    }
+
+    #[test]
+    fn w6_transform_text_sync_and_cycling() -> Result<(), String> {
+        let (mut app, ds_id, _gs_id) = make_9col_mv_app()?;
+        let vp = ViewportMetrics::default();
+
+        let math = app
+            .execute_command("analysis.run", json!({ "source_sheet_id": ds_id.as_str(), "kind": "math", "y_transform": "log10" }))
+            .map_err(|e| e.to_string())?;
+        let math_id = SheetId::from(math.payload["sheet_id"].as_str().ok_or("missing math sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &math_id));
+        try_toggle_edit_params_click(&mut app, "edit.transform.x_transform").map_err(|e| e.to_string())?;
+        try_toggle_edit_params_click(&mut app, "edit.transform.y_transform").map_err(|e| e.to_string())?;
+        assert!(matches!(
+            app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind),
+            Some(AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                x_transform: Some(MathTransformPreset::Log10),
+                y_transform: Some(MathTransformPreset::Ln),
+                ..
+            }))
+        ));
+        app.canvas_dialogs.close_dialog();
+
+        let sel = app
+            .execute_command("analysis.run", json!({ "source_sheet_id": ds_id.as_str(), "kind": "select_and_transform" }))
+            .map_err(|e| e.to_string())?;
+        let sel_id = SheetId::from(sel.payload["sheet_id"].as_str().ok_or("missing select sheet")?);
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &sel_id));
+        if let Some(d) = &mut app.canvas_dialogs.edit_params.draft {
+            d.update_kind(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                filter_formula: None,
+                target_archetype: TableKind::Column,
+            }));
+        }
+        try_toggle_edit_params_click(&mut app, "edit.transform.target_archetype").map_err(|e| e.to_string())?;
+        let col2_title = match app.document().data_sheet(&ds_id).map(|ds| &ds.archetype) {
+            Some(curvebook_doc::TableArchetype::MultipleVariables(mv)) => mv.variables[2].title.clone(),
+            _ => String::from("Var 3"),
+        };
+        let filter_expr = format!("[{col2_title}] >= 10");
+        app.focus_widget_id = Some(String::from("edit.transform.filter_formula"));
+        let ev_filter = dispatch_ui_event(&mut app, UiInputEvent::TextInput { text: filter_expr.clone() }, vp)?;
+        assert!(ev_filter.handled, "expected edit.transform.filter_formula TextInput handled, got {ev_filter:?}");
+        commit_edit_params_action(&mut app, "ok").map_err(|e| e.to_string())?;
+        let rs_sel = app.document().result_sheet(&sel_id).ok_or("missing sel rs")?;
+        assert!(
+            matches!(
+                &rs_sel.analysis.kind,
+                AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
+                    target_archetype: TableKind::Grouped,
+                    filter_formula: Some(f),
+                }) if f == &filter_expr
+            ),
+            "unexpected select_and_transform kind after commit: {:?}",
+            rs_sel.analysis.kind
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn w6_axes_bubble_and_heatmap_spawn() -> Result<(), String> {
+        let (mut app, ds_id, gs_id) = make_9col_mv_app()?;
+        let vp = ViewportMetrics::default();
+
+        let gs_ref = app.document().graph_sheet(&gs_id).ok_or("missing gs")?.clone();
+        app.canvas_dialogs.format_axes.sync_from_graph(&gs_ref, AxisTarget::Y);
+        app.canvas_dialogs.active_dialog = ActiveDialog::FormatAxes { sheet_id: gs_id.clone() };
+        try_toggle_dialog_widget_click(&mut app, "axes.target_axis").map_err(|e| e.to_string())?;
+        assert_eq!(app.canvas_dialogs.format_axes.target_axis, AxisTarget::Y2);
+        try_toggle_dialog_widget_click(&mut app, "axes.enable_y2").map_err(|e| e.to_string())?;
+        assert!(app.canvas_dialogs.format_axes.enable_y2);
+        app.focus_widget_id = Some(String::from("axes.title"));
+        let ev_title = dispatch_ui_event(&mut app, UiInputEvent::TextInput { text: String::from("Signal (AU)") }, vp)?;
+        assert!(ev_title.handled, "expected axes.title TextInput handled, got {ev_title:?}");
+        app.focus_widget_id = Some(String::from("axes.y_thresholds"));
+        let ev_thresh = dispatch_ui_event(&mut app, UiInputEvent::TextInput { text: String::from("50") }, vp)?;
+        assert!(ev_thresh.handled, "expected axes.y_thresholds TextInput handled, got {ev_thresh:?}");
+        commit_active_dialog_action(&mut app, "ok", &Value::Null).map_err(|e| e.to_string())?;
+        let gs = app.document().graph_sheet(&gs_id).ok_or("missing gs")?;
+        assert_eq!(gs.spec.y2_axis.as_ref().map(|a| a.title.as_str()), Some("Signal (AU)"));
+        assert!(gs.spec.y_axis.thresholds.iter().any(|t| (t.value - 50.0).abs() < 1e-6));
+
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_bubble_plot(&doc, &gs_id));
+        try_toggle_dialog_widget_click(&mut app, "bubble.plot_mode").map_err(|e| e.to_string())?;
+        assert!(matches!(app.canvas_dialogs.bubble_plot.plot_mode, MultivariatePlotMode::CategoricalSummary { .. }));
+        try_toggle_dialog_widget_click(&mut app, "bubble.color_mode").map_err(|e| e.to_string())?;
+        try_toggle_dialog_widget_click(&mut app, "bubble.color_column").map_err(|e| e.to_string())?;
+        assert!(matches!(app.canvas_dialogs.bubble_plot.color_channel, ColorChannelMapping::Categorical { column: 1, .. }));
+        app.canvas_dialogs.close_dialog();
+
+        let corr = app
+            .execute_command("analysis.run", json!({ "source_sheet_id": ds_id.as_str(), "kind": "correlation_matrix" }))
+            .map_err(|e| e.to_string())?;
+        let corr_id = SheetId::from(corr.payload["sheet_id"].as_str().ok_or("missing corr sheet")?);
+        let graphs_before = app.document().graph_sheets.len();
+        let doc = app.document().clone();
+        assert!(app.canvas_dialogs.open_edit_parameters(&doc, &corr_id));
+        try_toggle_edit_params_click(&mut app, "edit.correlation.heatmap").map_err(|e| e.to_string())?;
+        commit_edit_params_action(&mut app, "ok").map_err(|e| e.to_string())?;
+        assert_eq!(app.document().graph_sheets.len(), graphs_before + 1);
+        assert!(app.document().graph_sheets.iter().any(|g| {
+            g.spec.primary_source_sheet_id == corr_id
+                && g.spec.kind == curvebook_doc::GraphKind::Diagnostic(curvebook_doc::DiagnosticPlotKind::Heatmap)
+        }));
+        Ok(())
     }
 }
