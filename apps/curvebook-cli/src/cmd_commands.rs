@@ -195,6 +195,7 @@ fn print_commands_usage() {
     println!("usage: curvebook-cli commands [--group <group>] [--json]");
     let groups: Vec<&str> = CommandGroup::all().iter().map(|g| g.as_str()).collect();
     println!("groups: {}", groups.join(", "));
+    println!("docs: {}#cli-commands", crate::cli_catalog::CLI_REGISTRY_DOCS_URL);
 }
 
 fn parse_list_commands_args(args: &[String]) -> Result<ListCommandsArgs, CliError> {

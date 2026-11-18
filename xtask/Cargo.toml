@@ -10,11 +10,14 @@ publish = false
 curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-engine = { workspace = true }
+curvebook-fit = { workspace = true }
 curvebook-format = { workspace = true }
 curvebook-mcp = { workspace = true, default-features = false }
+curvebook-palette = { workspace = true }
 curvebook-pdf = { workspace = true }
 curvebook-platform = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
+curvebook-stats = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-testkit = { workspace = true }
 curvebook-ui-egui = { workspace = true, default-features = false }

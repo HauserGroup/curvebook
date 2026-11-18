@@ -1,10 +1,23 @@
 # GitHub Pages publication
 
-The site consists of [`index.html`](../index.html), [`privacy.html`](../privacy.html), [`site.css`](../site.css), and the attributed existing logo at [`images/curvebook.png`](../images/curvebook.png). `index.html` introduces the product, full-workspace file sharing, and downloads, while `privacy.html` publishes the dedicated plain-language privacy policy at the stable `/privacy.html` path for desktop installers, Windows MSIX / Microsoft Store, CLI/MCP, and browser-bundle users. See [`website-design.md`](website-design.md) for the current design and claim decisions.
+The site consists of [`index.html`](../index.html), [`privacy.html`](../privacy.html), [`site.css`](../site.css), the attributed existing logo at [`images/curvebook.png`](../images/curvebook.png), and the static documentation manual entry at [`manual/index.html`](../manual/index.html) (with frozen release snapshots written under `docs/manual/v<major>.<minor>/` by `cargo xtask docs-site --release <version>`). `index.html` introduces the product, full-workspace file sharing, and downloads, while `privacy.html` publishes the dedicated plain-language privacy policy at the stable `/privacy.html` path for desktop installers, Windows MSIX / Microsoft Store, CLI/MCP, and browser-bundle users. See [`website-design.md`](website-design.md) for the current design and claim decisions.
 
 ## Preview and checks
 
-Serve `docs/` with a local static HTTP server. No build, package installation, scripts, or external fonts are required. Relative asset and page paths (`site.css`, `images/curvebook.png`, `privacy.html`, `index.html`) support deployment below `/curvebook/` or at a domain root. Verify cross-page links (`index.html` ↔ `privacy.html`), fragment destinations (`#main`, `#workspace`, `#downloads` on `index.html`; `#main`, `#summary`, `#local-storage`, `#automation`, `#operators`, `#changes` on `privacy.html`), keyboard focus, text contrast, and desktop/narrow (`1280px` / `390px` / `320px`) layouts without horizontal overflow, then run the relevant documentation/asset policies:
+Generate a local preview of the full documentation manual (into the gitignored `target/docs-site/` directory) and serve either `docs/` or `target/docs-site/` with a local static HTTP server. No external build toolchain, scripts, or external fonts are required:
+
+```sh
+cargo xtask docs-site
+cargo xtask docs-site --check
+```
+
+At release tagging time, generate a frozen versioned snapshot under `docs/manual/v<major>.<minor>/`:
+
+```sh
+cargo xtask docs-site --release <version>
+```
+
+Relative asset and page paths (`site.css`, `images/curvebook.png`, `privacy.html`, `manual/index.html`, `index.html`) support deployment below `/curvebook/` or at a domain root. Verify cross-page links (`index.html` ↔ `privacy.html` ↔ `manual/index.html` and generated manual internal `#fragment` links), keyboard focus, text contrast, and desktop/narrow (`1280px` / `390px` / `320px`) layouts without horizontal overflow, then run the full gate suite:
 
 ```sh
 cargo xtask assets
@@ -12,6 +25,7 @@ cargo xtask brands
 cargo xtask cleanroom
 cargo xtask secrets
 cargo xtask telemetry
+cargo xtask docs-site --check
 cargo xtask status
 git diff --check
 ```

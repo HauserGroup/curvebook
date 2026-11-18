@@ -340,7 +340,7 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     } else if ext == "md" {
         scan_markdown(path, text, out);
     } else if matches!(ext.as_str(), "html" | "htm") {
-        scan_plain_lines_no_waiver(path, text, out);
+        scan_html_file(path, text, out);
         out.extend(check_html_metadata(path, text));
     } else if path == "docs/development.md" || is_scanned_non_rs_text_file(path, &ext) {
         scan_plain_lines_no_waiver(path, text, out);
@@ -381,6 +381,74 @@ fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
 fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
     let mut scanner = TomlScanner::new(path, text, out);
     scanner.run();
+}
+
+fn is_generated_docs_html_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    (trimmed.starts_with("docs/manual/v") && trimmed != "docs/manual/index.html")
+        || trimmed.starts_with("docs-site/")
+        || trimmed.starts_with("target/docs-site/")
+}
+
+fn mask_generated_docs_html_tokens(path: &str, line: &str) -> Option<String> {
+    let norm = path.replace('\\', "/");
+    let mut work = line.to_owned();
+    let mut changed = false;
+    if work.contains(ROADMAP_R24_ANCHOR) {
+        work = work.replace(ROADMAP_R24_ANCHOR, "r24-clean-room-interchange");
+        changed = true;
+    }
+    if norm.ends_with("/contribute/agents.html") && ((line.contains("Scope:") && line.contains(PLAN_PRISM_SCOPE)) || line.trim() == "plan/prism/") {
+        work = work.replace(PLAN_PRISM_SCOPE, "plan/ref_frames");
+        changed = true;
+    }
+    if norm.ends_with("/registry/formats.html") && line.trim() == "prism" {
+        work = String::from("format_token");
+        changed = true;
+    }
+    for url_prefix in ["https://github.com/HauserGroup/curvebook/", "http://github.com/HauserGroup/curvebook/"] {
+        if work.contains(url_prefix) {
+            work = work.replace(url_prefix, "repo_blob_link/");
+            changed = true;
+        }
+    }
+    for tok in [
+        "table.importPrism",
+        "table_import_prism",
+        "#cmd-table-importprism",
+        "#mcp-tool-table_import_prism",
+        "#format-prism",
+        "id=\"format-prism\"",
+        "import_prism_bytes",
+        "prism.rs",
+        "{pzfx,prism,",
+        "&quot;prism&quot;",
+        "\"prism\"",
+        "<code>prism</code>",
+        "`prism`",
+    ] {
+        if work.contains(tok) {
+            work = work.replace(tok, "format_token");
+            changed = true;
+        }
+    }
+    if changed { Some(work) } else { None }
+}
+
+fn scan_html_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
+    if !is_generated_docs_html_path(path) {
+        scan_plain_lines_no_waiver(path, text, out);
+        return;
+    }
+    for (idx, line) in text.lines().enumerate() {
+        let line_no = idx + 1;
+        if let Some(masked) = mask_generated_docs_html_tokens(path, line) {
+            collect_line_words(path, line_no, &masked, BRANDS, PrismPolicy::Standard, out);
+        } else {
+            collect_line_words(path, line_no, line, BRANDS, PrismPolicy::Standard, out);
+        }
+    }
 }
 
 fn scan_plain_lines_no_waiver(path: &str, text: &str, out: &mut Vec<BrandHit>) {
@@ -2699,17 +2767,20 @@ pub fn check_html_metadata(source: &str, html: &str) -> Vec<BrandHit> {
 
 fn flush_html_text(source: &str, start_line: usize, raw: &str, strict: bool, out: &mut Vec<BrandHit>) {
     let decoded = decode_xml_or_html_entities(raw);
+    let gen_docs = !strict && is_generated_docs_html_path(source);
     for (offset, line_text) in decoded.lines().enumerate() {
+        let masked_opt = if gen_docs { mask_generated_docs_html_tokens(source, line_text) } else { None };
+        let scanned = masked_opt.as_deref().unwrap_or(line_text);
         let policy = if strict {
             PrismPolicy::Strict
         } else {
             PrismPolicy::UiTextRun {
-                allow_dot_prism: is_dot_prism_extension_description(line_text),
+                allow_dot_prism: is_dot_prism_extension_description(scanned),
                 allow_it_statistica: false,
                 allow_palette_cmd_id: false,
             }
         };
-        check_single_string_with_extra(source, start_line + offset, line_text, policy, strict, out);
+        check_single_string_with_extra(source, start_line + offset, scanned, policy, strict, out);
     }
 }
 
@@ -4261,7 +4332,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         scan_svg(display_path, &text, hits);
         hits.extend(check_svg_metadata(display_path, &text));
     } else if matches!(ext.as_str(), "html" | "htm") {
-        scan_plain_lines_no_waiver(display_path, &text, hits);
+        scan_html_file(display_path, &text, hits);
         hits.extend(check_html_metadata(display_path, &text));
     } else if display_path.ends_with(".plist") || display_path.ends_with(".plist.in") {
         scan_plist(display_path, &text, hits);
@@ -4306,6 +4377,31 @@ pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandH
     }
     dedup_tail_hits(&mut hits, from);
     hits
+}
+
+/// Scan a generated static documentation site directory under the narrow generated-HTML
+/// format-boundary policy while keeping `PrismPolicy::Strict` on non-HTML text and suite brands.
+pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
+    if !dir.exists() {
+        return Err(format!("docs-site directory `{}` does not exist", dir.display()));
+    }
+    let mut rel_files = Vec::new();
+    collect_dist_files(dir, dir, &mut rel_files)?;
+    rel_files.sort();
+    let mut stats = DistScanStats::default();
+    let mut hits = Vec::new();
+    for rel in rel_files {
+        let display_path = format!("docs-site/{rel}");
+        stats.files += 1;
+        collect_line_words(&display_path, 1, &rel, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
+        collect_line_words(&display_path, 1, &rel, BRANDS, PrismPolicy::Strict, &mut hits);
+        collect_line_words(&display_path, 1, &rel, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
+        let bytes = std::fs::read(dir.join(&rel)).map_err(|e| format!("read docs-site file {rel}: {e}"))?;
+        scan_dist_bytes(&display_path, &bytes, 0, &mut stats, &mut hits)?;
+    }
+    hits.sort();
+    hits.dedup();
+    Ok(hits)
 }
 
 #[cfg(test)]
@@ -5299,5 +5395,33 @@ it: "Copia Statistica report",
             idx += 3;
         }
         out
+    }
+
+    #[test]
+    fn generated_docs_html_allows_exact_format_tokens_and_rejects_brand_prose() {
+        let mut ok_hits = Vec::new();
+        let ok_html = "\
+<!doctype html><html><body>\
+<p>Supports <code>table.importPrism</code> and <code>&quot;prism&quot;</code> for <code>.prism</code> files (<a href=\"https://github.com/HauserGroup/curvebook/blob/main/crates/format/src/prism.rs\">source</a>).</p>\
+<p>Anchor <a href=\"#mcp-tool-table_import_prism\">tool</a> and <a href=\"#format-prism\">format</a>.</p>\
+</body></html>\n";
+        scan_file("docs/manual/v0.1/registry/formats.html", ok_html, &mut ok_hits);
+        ok_hits.extend(check_html_metadata("docs/manual/v0.1/registry/formats.html", ok_html));
+        assert!(ok_hits.is_empty(), "unexpected hits in generated docs HTML: {ok_hits:?}");
+
+        let mut agents_hits = Vec::new();
+        let agents_html = "<p>Scope: crates/format/src/lib.rs (<code>plan/prism/</code> reference notes)</p>\n";
+        scan_file("docs/manual/v0.1/contribute/agents.html", agents_html, &mut agents_hits);
+        agents_hits.extend(check_html_metadata("docs/manual/v0.1/contribute/agents.html", agents_html));
+        assert!(agents_hits.is_empty(), "unexpected hits in contribute/agents.html: {agents_hits:?}");
+
+        let mut bad_gen_hits = Vec::new();
+        scan_file("docs/manual/v0.1/files.html", "<p>Matches GraphPad Prism output with PrismStyle headers.</p>\n", &mut bad_gen_hits);
+        assert!(bad_gen_hits.iter().any(|h| h.brand == "graphpad"), "{bad_gen_hits:?}");
+        assert!(bad_gen_hits.iter().any(|h| h.brand == "prism"), "{bad_gen_hits:?}");
+
+        let mut stub_hits = Vec::new();
+        scan_file("docs/manual/index.html", "<p>table.importPrism</p>\n", &mut stub_hits);
+        assert!(stub_hits.iter().any(|h| h.brand == "prism"), "stub index.html must stay strict: {stub_hits:?}");
     }
 }
