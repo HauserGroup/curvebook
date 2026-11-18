@@ -1,13 +1,15 @@
 # CurveBook documentation
 
-Start with the [beginner's guide](mcp-for-beginners.md) to connect your AI assistant, run an analysis, and save your work. For verified capabilities and current limitations, read [Status](STATUS.md). Contributors should start with [Development](development.md) and the [active roadmap](ROADMAP.md).
+Start with the [README](../README.md) to install and use the desktop application, or the [beginner's guide](mcp-for-beginners.md) to connect your AI assistant, run an analysis, and save your work. For verified capabilities and current limitations, read [Status](STATUS.md) and [Beta known issues](release/beta-known-issues.md). Contributors should start with [Contributing](../CONTRIBUTING.md), [Development](development.md), and the [active roadmap](ROADMAP.md).
 
 ## Using CurveBook
 
 | Guide | Contents |
 |---|---|
-| [Beginner's guide](mcp-for-beginners.md) | Setup, first analysis, saving, and troubleshooting |
-| [MCP server](mcp.md) | Protocol, configuration, toolsets, and desktop connection |
+| [Beta known issues](release/beta-known-issues.md) | Beta scope, streamlined installer matrix, unsigned Windows / FreeBSD preview notes, and draft locale status |
+| [Verifying downloads](release/verifying-downloads.md) | Checking release checksums (`SHA256SUMS.txt`) and Sigstore build provenance on every platform |
+| [Beginner's guide (MCP)](mcp-for-beginners.md) | Step-by-step AI assistant setup, first analysis, saving, and troubleshooting |
+| [MCP server](mcp.md) | Protocol, source builds, client configuration, Welch's *t*-test example, toolsets, and desktop connection |
 | [Command reference](commands.md) | Generated engine command catalog and parameters |
 | [Scripting and automation](implementation/scripting-and-automation.md) | CLI, templates, and batch recipes |
 | [Control protocol](control-protocol.md) | Local desktop JSONL interface and security boundaries |
@@ -19,7 +21,7 @@ Read the [contributor guide](../CONTRIBUTING.md), [agent rules](../AGENTS.md), [
 
 | Guide | Contents |
 |---|---|
-| [Development](development.md) | Toolchain, builds, tests, coverage, and local configuration |
+| [Development](development.md) | Prerequisites, source build quick start, everyday commands, tests, coverage, and local configuration |
 | [Continuous integration](ci.md) | Quality stages, shared test binaries, deadlines, and local verification |
 | [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
@@ -51,12 +53,12 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 
 ## Releases and reference files
 
-- [GitHub Pages site](index.html): prepared static GitHub Pages entry point introducing CurveBook, complete-workspace sharing, and downloads ([design decisions](release/website-design.md), [preview and publication checklist](release/github-pages.md)). Hosting remains a separate Alpha launch step.
+- [GitHub Pages site](index.html) and [Privacy policy](privacy.html): static entry point introducing CurveBook, complete-workspace sharing, downloads, and zero-telemetry privacy disclosures ([design decisions](release/website-design.md), [preview and publication checklist](release/github-pages.md)).
+- [Beta known issues & release notes](release/beta-known-issues.md): Beta supported surfaces (`curvebook` desktop GUI, `curvebook-cli`, `curvebook-cli mcp`), streamlined download set (`R0.28`), platform signing notes, `[Draft]` non-English locale status, known limits, and GitHub Release notes template.
+- [Alpha known issues & release notes (historical)](release/alpha-known-issues.md): historical `v0.1.0-alpha.1` / Alpha prerelease scope, caveats, and release notes (`R0.20`).
 - [Alpha branding clearance](release/alpha-branding-clearance.md): strict `R0.21` / `R10.14` branding, clean-room, and asset-provenance verification records.
 - [Release guide](release/releasing.md): packaging, verification, and release gates.
 - [Verifying a download](release/verifying-downloads.md): checking a release file's checksum and Sigstore build provenance on every platform.
-- [Alpha known issues & release notes](release/alpha-known-issues.md): `v0.1.0-alpha.2` MCP Alpha scope, platform signing caveats, known limitations, and GitHub Release notes template (`R0.20`).
-- [Alpha branding clearance](release/alpha-branding-clearance.md): strict Alpha branding, clean-room, and asset-provenance gate architecture and launch-artefact verification (`R0.21` / `R10.14`).
 - [Windows signing](release/windows-signing.md): test signing and distribution.
 - [Contributor credits](contributors.md), [asset inventory](../ASSETS.md), and [attribution](../ATTRIBUTION.md).
 - [Schemas](schemas/): generated JSON schemas for documents, archives, preferences, journals, and batches.
