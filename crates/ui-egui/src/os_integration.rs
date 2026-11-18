@@ -154,6 +154,167 @@ impl OsAdapterStatus {
     }
 }
 
+/// Injectable platform clipboard adapter used by [`crate::UiApp`] and [`crate::HumanPathDriver`].
+///
+/// Production desktop sessions delegate to [`SystemPlatformClipboardAdapter`], while parallel
+/// human-path tests install [`StubPlatformClipboardAdapter`] (or a custom implementation) to
+/// capture multi-flavor [`ClipboardBundle`] payloads without mutating the live OS pasteboard.
+pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
+    /// Write UTF-8 plain/TSV text to the platform clipboard.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the clipboard backend fails unexpectedly.
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String>;
+
+    /// Write a multi-flavor [`ClipboardBundle`] (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`) to the platform clipboard.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the bundle is empty or the clipboard backend fails.
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String>;
+}
+
+/// Default platform clipboard adapter delegating to native OS pasteboard tools on desktop targets.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SystemPlatformClipboardAdapter;
+
+impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            write_os_pasteboard(text)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = text;
+            Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard requires host DOM bridge"))
+        }
+    }
+
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            write_os_clipboard_bundle(bundle)
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            if bundle.available_flavors().is_empty() {
+                return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
+            }
+            Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard requires host DOM bridge"))
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StubClipboardInner {
+    bundles: Vec<ClipboardBundle>,
+    texts: Vec<String>,
+    available: bool,
+}
+
+/// Deterministic in-memory clipboard adapter stub used by [`crate::HumanPathDriver`] and tests
+/// to capture [`ClipboardBundle`] and UTF-8 text writes with zero live OS pasteboard mutation.
+#[derive(Debug, Clone)]
+pub struct StubPlatformClipboardAdapter {
+    inner: std::sync::Arc<std::sync::RwLock<StubClipboardInner>>,
+}
+
+impl Default for StubPlatformClipboardAdapter {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StubPlatformClipboardAdapter {
+    /// Construct an available in-memory clipboard stub with empty capture buffers.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: true })) }
+    }
+
+    /// Construct an in-memory clipboard stub simulating a headless environment (`available = false`)
+    /// while still recording submitted payloads.
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: false })) }
+    }
+
+    /// Return all captured multi-flavor [`ClipboardBundle`] writes in submission order.
+    #[must_use]
+    pub fn captured_bundles(&self) -> Vec<ClipboardBundle> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.bundles.clone()
+    }
+
+    /// Return the most recently captured [`ClipboardBundle`], if any.
+    #[must_use]
+    pub fn last_bundle(&self) -> Option<ClipboardBundle> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.bundles.last().cloned()
+    }
+
+    /// Return all captured plain-text / TSV writes in submission order.
+    #[must_use]
+    pub fn captured_texts(&self) -> Vec<String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.texts.clone()
+    }
+
+    /// Return the most recently captured plain-text / TSV write, if any.
+    #[must_use]
+    pub fn last_text(&self) -> Option<String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.texts.last().cloned()
+    }
+
+    /// Clear all captured bundle and text entries.
+    pub fn clear(&self) {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.bundles.clear();
+        guard.texts.clear();
+    }
+}
+
+impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
+    fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.texts.push(text.to_owned());
+        if guard.available {
+            Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("stub-pasteboard"),
+                detail: format!("captured {} UTF-8 bytes", text.len()),
+                text: None,
+                job_id: None,
+            })
+        } else {
+            Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"))
+        }
+    }
+
+    fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        let flavors = bundle.available_flavors();
+        if flavors.is_empty() {
+            return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
+        }
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.bundles.push(bundle.clone());
+        if guard.available {
+            Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("stub-pasteboard"),
+                detail: format!("captured {} pasteboard flavors ({})", flavors.len(), flavors.join(", ")),
+                text: None,
+                job_id: None,
+            })
+        } else {
+            Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"))
+        }
+    }
+}
+
 #[cfg(not(target_arch = "wasm32"))]
 #[derive(Debug, Clone)]
 struct OsCommandCandidate {

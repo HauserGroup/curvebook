@@ -674,6 +674,8 @@ pub fn compute_ui_state_fingerprint(app: &UiApp, metrics: ViewportMetrics) -> u6
         u8::from(app.family_open),
         u8::from(app.canvas_dialogs.rulers_visible),
         u8::from(app.session().is_dirty()),
+        u8::from(app.interaction.last_clipboard_text.as_deref().is_some_and(|t| !t.is_empty())),
+        u8::from(app.interaction.last_clipboard_bundle.is_some()),
     ]);
     feed_bytes(app.locale.as_bytes());
     feed_bytes(&[app.theme.mode as u8]);
