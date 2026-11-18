@@ -945,11 +945,40 @@ pub struct LinearRegressionSpec {
     pub prediction_bands: bool,
     /// When `true`, interpolates unpaired `(X, empty)` rows (`Y` from `X`) and `(empty, Y)` rows (`X` from `Y` via Fieller/inverse calibration) on the source sheet.
     pub interpolate_unknowns: bool,
+    /// Inclusive X bounds for observations entering the fit. A missing bound leaves that side unrestricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    /// Fitted-curve starting X, overriding the filter bound or fitted data minimum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_min: Option<f64>,
+    /// Fitted-curve ending X, overriding the filter bound or fitted data maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_max: Option<f64>,
+    /// Number of curve segments, or the default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_segments: Option<usize>,
+}
+
+impl LinearRegressionSpec {
+    /// Number of segments when no count is specified.
+    pub const DEFAULT_PLOT_SEGMENTS: usize = 100;
+    /// Maximum number of segments for a fitted line.
+    pub const MAX_PLOT_SEGMENTS: usize = 10_000;
 }
 
 impl Default for LinearRegressionSpec {
     fn default() -> Self {
-        Self { deming_model_ii: false, force_through_origin: false, confidence_bands: true, prediction_bands: false, interpolate_unknowns: false }
+        Self {
+            deming_model_ii: false,
+            force_through_origin: false,
+            confidence_bands: true,
+            prediction_bands: false,
+            interpolate_unknowns: false,
+            x_range_filter: None,
+            plot_x_min: None,
+            plot_x_max: None,
+            plot_segments: None,
+        }
     }
 }
 
@@ -1057,6 +1086,12 @@ pub struct NonlinearFitSpec {
     pub parameter_rules: Vec<ParameterRule>,
     /// When `true`, computes Venzon–Moolgavkar (1988) / Bates–Watts (1988) asymmetrical profile-likelihood confidence intervals (falling back to [`crate::CiBound::Open`] on flat plateaus) at [`AnalysisSpec::confidence_level`]; when `false`, reports symmetric Wald-*t* intervals.
     pub profile_likelihood_ci: bool,
+    /// Assess whether the fitted data support stable estimation of the free parameters.
+    #[serde(default)]
+    pub identify_unstable_parameters: bool,
+    /// Warn when the reported unweighted R squared is below this threshold in [0, 1].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag_r_squared_below: Option<f64>,
     /// Optional competing model comparison (`ExtraSumOfSquaresF`, `Aicc`, or `LikelihoodRatioTest`); `None` fits a single model.
     pub comparison: Option<ModelComparisonSpec>,
     /// When `true`, evaluates two-sided delta-method confidence bands along each [`crate::FittedCurveOverlay`] at [`AnalysisSpec::confidence_level`].
@@ -1126,6 +1161,8 @@ impl NonlinearFitSpec {
             weighting: WeightingScheme::None,
             parameter_rules: Vec::new(),
             profile_likelihood_ci: true,
+            identify_unstable_parameters: false,
+            flag_r_squared_below: None,
             comparison: None,
             confidence_bands: true,
             prediction_bands: false,

@@ -23,6 +23,8 @@
 //!
 //! Reference: Efron, B. & Tibshirani, R. J. (1993). *An Introduction to the Bootstrap*. Chapman & Hall.
 
+use std::borrow::Cow;
+
 use curvebook_doc::{CiBound, CurveSamplePoint};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, student_t_two_sided_isf};
@@ -43,6 +45,12 @@ pub struct SimpleLinearOptions {
     pub compute_bands: bool,
     /// Number of evenly spaced grid points emitted in `SimpleLinearResult::bands` (minimum clamped internally when `compute_bands` is `true`).
     pub band_grid_points: usize,
+    /// Inclusive X bounds for the observations used in estimation and inference.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    /// Explicit X bounds for band sampling. Missing sides use the filter bounds, then the fitted data extent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_range: Option<(Option<f64>, Option<f64>)>,
     /// Observed `Y` values queued for inverse calibration (`X` from `Y` with Fieller CI).
     pub unknown_y_values: Vec<f64>,
     /// Input `X` values queued for forward prediction (`Y` from `X` with confidence and prediction intervals).
@@ -56,6 +64,8 @@ impl Default for SimpleLinearOptions {
             confidence_level: ConfidenceLevel::DEFAULT_95,
             compute_bands: true,
             band_grid_points: 101,
+            x_range_filter: None,
+            plot_x_range: None,
             unknown_y_values: Vec::new(),
             unknown_x_values: Vec::new(),
         }
@@ -213,9 +223,12 @@ pub struct LinearResidual {
 /// Complete simple linear regression output.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimpleLinearResult {
-    /// Effective sample size (sum of replicate weights `n_total`).
+    /// Number of observations analyzed, including replicate counts for summarized points.
     pub n: usize,
-    /// Residual degrees of freedom (`n_total - 1` when `force_through_origin`, else `n_total - 2`).
+    /// Number of observations excluded by the inclusive X filter.
+    #[serde(default)]
+    pub n_excluded_by_range: usize,
+    /// Residual degrees of freedom (`n - 1` when `force_through_origin`, else `n - 2`).
     pub df_residual: usize,
     /// Whether the fit constrained the intercept to zero (`y = slope * x`).
     pub force_through_origin: bool,
@@ -425,6 +438,50 @@ fn fit_ols_core(points: &[DataPoint], force_through_origin: bool) -> Result<OlsF
     Ok(OlsFitCore { series, n, df_res, slope, intercept, se_slope, se_intercept, s_xx, s_yy, s_xy, x_mean, rss, sy_x, raw_res, residuals })
 }
 
+pub(crate) fn prepare_linear_points(
+    points: &[DataPoint],
+    (min, max): (Option<f64>, Option<f64>),
+    count_replicates: bool,
+) -> Result<(Cow<'_, [DataPoint]>, usize), FitError> {
+    if min.into_iter().chain(max).any(|x| !x.is_finite()) || matches!((min, max), (Some(a), Some(b)) if a > b) {
+        return Err(FitError::InvalidParameter { name: "x_range_filter", reason: "X bounds must be finite and ordered".to_owned() });
+    }
+    if min.is_none() && max.is_none() {
+        return Ok((Cow::Borrowed(points), 0));
+    }
+
+    let mut included = Vec::with_capacity(points.len());
+    let mut excluded = 0_usize;
+    for point in points {
+        let x = point.x0();
+        if x.is_finite() && (min.is_some_and(|lo| x < lo) || max.is_some_and(|hi| x > hi)) {
+            let n = if count_replicates { validated_replicate_moments(point)?.1 } else { 1 };
+            excluded = excluded
+                .checked_add(n)
+                .ok_or_else(|| FitError::InvalidParameter { name: "n", reason: "excluded replicate count overflowed usize".to_owned() })?;
+        } else {
+            included.push(point.clone());
+        }
+    }
+    Ok((Cow::Owned(included), excluded))
+}
+
+pub(crate) fn resolve_linear_grid_bounds(
+    xs: impl Iterator<Item = f64> + Clone,
+    filter: (Option<f64>, Option<f64>),
+    plot: (Option<f64>, Option<f64>),
+) -> Result<(f64, f64), FitError> {
+    let x_min = plot.0.or(filter.0).unwrap_or_else(|| xs.clone().fold(f64::INFINITY, f64::min));
+    let x_max = plot.1.or(filter.1).unwrap_or_else(|| xs.fold(f64::NEG_INFINITY, f64::max));
+    if x_min > x_max || !x_min.is_finite() || !x_max.is_finite() || !(x_max - x_min).is_finite() {
+        return Err(FitError::InvalidParameter {
+            name: "plot_x_range",
+            reason: "plot bounds must be finite, ordered, and have a finite span".to_owned(),
+        });
+    }
+    Ok((x_min, x_max))
+}
+
 /// Perform simple OLS linear regression (or origin-forced linear regression) on `(x, y)` pairs.
 ///
 /// Textbook least squares (Draper & Smith 1998; Zar 2010): `b = S_xy / S_xx`, `a = ybar - b xbar`,
@@ -439,10 +496,23 @@ fn fit_ols_core(points: &[DataPoint], force_through_origin: bool) -> Result<OlsF
 /// bounded (`g < 1`). Use [`interpolate_x_from_y`] for `m >= 1` replicates or full
 /// [`InverseIntervalSet`] classification.
 ///
+/// An inclusive X filter applies before estimating coefficients, residuals, and uncertainty.
+/// Band sampling may independently specify X bounds to display extrapolation.
+///
 /// # Errors
-/// Returns [`FitError::InsufficientData`] if too few observations are given, or
-/// [`FitError::InvalidParameter`] if `X` has zero variance (or all `X == 0` when forced through origin).
+/// Returns [`FitError::EmptyInput`] when no observations remain, [`FitError::InsufficientData`]
+/// when too few remain, or [`FitError::InvalidParameter`] for invalid bounds, non-finite included
+/// observations, or zero X variance (all X zero when forced through origin).
 pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions) -> Result<SimpleLinearResult, FitError> {
+    let (points, n_excluded_by_range) = prepare_linear_points(points, opts.x_range_filter.unwrap_or_default(), true)?;
+    fit_linear_points(&points, opts, n_excluded_by_range)
+}
+
+pub(crate) fn fit_linear_points(
+    points: &[DataPoint],
+    opts: &SimpleLinearOptions,
+    n_excluded_by_range: usize,
+) -> Result<SimpleLinearResult, FitError> {
     let fit = fit_ols_core(points, opts.force_through_origin)?;
     let t_crit = student_t_two_sided_isf(opts.confidence_level.alpha(), fit.df_res as f64)?;
     let ci_slope = (fit.slope - t_crit * fit.se_slope, fit.slope + t_crit * fit.se_slope);
@@ -471,7 +541,11 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
 
     let bands = if opts.compute_bands {
         build_linear_bands(
-            &fit.series.xs,
+            resolve_linear_grid_bounds(
+                fit.series.xs.iter().copied(),
+                opts.x_range_filter.unwrap_or_default(),
+                opts.plot_x_range.unwrap_or_default(),
+            )?,
             fit.n,
             fit.slope,
             fit.intercept,
@@ -481,7 +555,7 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
             fit.s_xx,
             opts.force_through_origin,
             opts.band_grid_points,
-        )
+        )?
     } else {
         Vec::new()
     };
@@ -492,6 +566,7 @@ pub fn simple_linear_regression(points: &[DataPoint], opts: &SimpleLinearOptions
 
     Ok(SimpleLinearResult {
         n: fit.n,
+        n_excluded_by_range,
         df_residual: fit.df_res,
         force_through_origin: opts.force_through_origin,
         slope: fit.slope,
@@ -649,12 +724,21 @@ fn fit_through_origin(xs: &[f64], ys: &[f64], ns: &[f64], ss_within: f64) -> Res
     Ok((slope, 0.0, se_slope_factor, 0.0, s_xx, s_yy, s_xy, 0.0))
 }
 
+pub(crate) fn linear_grid((x_min, x_max): (f64, f64), grid_points: usize) -> impl ExactSizeIterator<Item = f64> {
+    let count = grid_points.max(2);
+    let span = x_max - x_min;
+    (0..count).map(move |i| {
+        let frac = (i as f64) / ((count - 1) as f64);
+        if i == count - 1 { x_max } else { (x_min + frac * span).clamp(x_min, x_max) }
+    })
+}
+
 /// Pointwise confidence band `yhat +/- t s sqrt(h)` and prediction band
 /// `yhat +/- t s sqrt(1 + h)`, with `h = 1/n + (x - xbar)^2 / S_xx` (or `x^2 / S_xx` through the
 /// origin) (Draper & Smith 1998). Not simultaneous (Working–Hotelling) bands.
 #[allow(clippy::too_many_arguments)]
 fn build_linear_bands(
-    xs: &[f64],
+    bounds: (f64, f64),
     n_total: usize,
     slope: f64,
     intercept: f64,
@@ -664,31 +748,33 @@ fn build_linear_bands(
     s_xx: f64,
     origin: bool,
     grid_points: usize,
-) -> Vec<CurveSamplePoint> {
-    let count = grid_points.max(2);
-    let x_min = xs.iter().copied().fold(f64::INFINITY, f64::min);
-    let x_max = xs.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+) -> Result<Vec<CurveSamplePoint>, FitError> {
     let n_inv = if origin { 0.0 } else { 1.0 / (n_total as f64) };
-    let span = x_max - x_min;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let frac = (i as f64) / ((count - 1) as f64);
-        let x = x_min + frac * span;
+    let grid = linear_grid(bounds, grid_points);
+    let mut out = Vec::with_capacity(grid.len());
+    for x in grid {
         let y = intercept + slope * x;
         let dx = if origin { x } else { x - x_mean };
         let h = n_inv + (dx * dx) / s_xx;
         let ci_half = t_crit * sy_x * h.sqrt();
         let pi_half = t_crit * sy_x * (1.0 + h).sqrt();
+        let [ci_lower, ci_upper, pred_lower, pred_upper] = [y - ci_half, y + ci_half, y - pi_half, y + pi_half];
+        if [y, ci_lower, ci_upper, pred_lower, pred_upper].into_iter().any(|v| !v.is_finite()) {
+            return Err(FitError::InvalidParameter {
+                name: "plot_x_range",
+                reason: "plot range produced a non-finite estimate or band endpoint".to_owned(),
+            });
+        }
         out.push(CurveSamplePoint {
             x,
             y,
-            ci_lower: Some(y - ci_half),
-            ci_upper: Some(y + ci_half),
-            pred_lower: Some(y - pi_half),
-            pred_upper: Some(y + pi_half),
+            ci_lower: Some(ci_lower),
+            ci_upper: Some(ci_upper),
+            pred_lower: Some(pred_lower),
+            pred_upper: Some(pred_upper),
         });
     }
-    out
+    Ok(out)
 }
 
 /// Tolerance around Fieller `g = 1` so exact algebraic `g == 1` inputs distorted by a few

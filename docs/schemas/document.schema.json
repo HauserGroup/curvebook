@@ -531,7 +531,7 @@
       "type": "array"
     },
     "schema_version": {
-      "maximum": 3,
+      "maximum": 5,
       "minimum": 1,
       "type": "integer"
     },

@@ -23,9 +23,12 @@ use curvebook_math::dist::norm_ppf;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::CompiledDslModel;
-use crate::error::{FitError, FitStatus, ParameterNote};
+use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
-use crate::linear::{DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, simple_linear_regression};
+use crate::linear::{
+    DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points, linear_grid,
+    prepare_linear_points, resolve_linear_grid_bounds,
+};
 use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles};
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
@@ -65,32 +68,50 @@ pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookCont
 /// and populate a [`ResultSheet`].
 pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionSpec, sheet: &DataSheet) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
-    let datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
+    let mut datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
     let p_fmt = spec.p_value_format;
+    let mut excluded = vec![0; datasets.len()];
+    let x_filter = lin_spec.x_range_filter.filter(|(min, max)| min.is_some() || max.is_some());
+    if let Some(bounds) = x_filter {
+        for (ds, n_excluded) in datasets.iter_mut().zip(&mut excluded) {
+            let (points, count) = prepare_linear_points(&ds.points, bounds, !lin_spec.deming_model_ii)?;
+            ds.points = points.into_owned();
+            *n_excluded = count;
+        }
+    }
 
+    let segments = lin_spec.plot_segments.unwrap_or(LinearRegressionSpec::DEFAULT_PLOT_SEGMENTS);
+    if !(1..=LinearRegressionSpec::MAX_PLOT_SEGMENTS).contains(&segments) {
+        return Err(FitError::InvalidParameter {
+            name: "plot_segments",
+            reason: format!("must be between 1 and {}", LinearRegressionSpec::MAX_PLOT_SEGMENTS),
+        });
+    }
+    let options = SimpleLinearOptions {
+        force_through_origin: lin_spec.force_through_origin,
+        confidence_level: spec.confidence_level,
+        compute_bands: lin_spec.confidence_bands || lin_spec.prediction_bands,
+        band_grid_points: segments + 1,
+        x_range_filter: x_filter,
+        plot_x_range: Some((lin_spec.plot_x_min, lin_spec.plot_x_max)),
+        ..SimpleLinearOptions::default()
+    };
     if lin_spec.deming_model_ii {
-        return build_deming_result_sheet(result, &datasets, spec.confidence_level);
+        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec.plot_segments.is_some());
     }
 
     let mut fits: Vec<(usize, String, SimpleLinearResult)> = Vec::with_capacity(datasets.len());
-    for ds in &datasets {
-        let mut opts = SimpleLinearOptions {
-            force_through_origin: lin_spec.force_through_origin,
-            confidence_level: spec.confidence_level,
-            compute_bands: lin_spec.confidence_bands || lin_spec.prediction_bands,
-            band_grid_points: 101,
-            unknown_y_values: Vec::new(),
-            unknown_x_values: Vec::new(),
-        };
+    for (ds, n_excluded) in datasets.iter().zip(excluded) {
+        let mut opts = options.clone();
         if lin_spec.interpolate_unknowns {
             opts.unknown_y_values = ds.unknowns_y.iter().map(|&(_, y)| y).collect();
             opts.unknown_x_values = ds.unknowns_x.iter().map(|&(_, x)| x).collect();
         }
-        let fit = simple_linear_regression(&ds.points, &opts)?;
+        let mut fit = fit_linear_points(&ds.points, &opts, n_excluded)?;
         let overlay_points = if fit.bands.is_empty() {
-            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, opts.band_grid_points)
+            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, &opts)?
         } else {
-            fit.bands.clone()
+            std::mem::take(&mut fit.bands)
         };
         result.fitted_curves.push(FittedCurveOverlay {
             data_set_index: ds.data_set_index,
@@ -138,7 +159,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
 
     // Main summary tab across datasets.
     let col_headers: Vec<String> = fits.iter().map(|(_, lbl, _)| lbl.clone()).collect();
-    let row_labels = vec![
+    let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE of Slope".to_owned(),
@@ -162,6 +183,9 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         rows[7].push(num_cell(f.f_stat));
         rows[8].push(p_cell(p_fmt, f.p_value));
         rows[9].push(p_cell(p_fmt, f.runs_test.p_too_few_runs));
+    }
+    if x_filter.is_some() {
+        append_linear_observation_counts(&mut row_labels, &mut rows, fits.iter().map(|(_, _, f)| [f.n, f.n_excluded_by_range, f.df_residual]));
     }
     result.tabs.push(ResultTab {
         id: "linear_summary".to_owned(),
@@ -253,16 +277,33 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     Ok(result)
 }
 
+fn append_linear_observation_counts(labels: &mut Vec<String>, rows: &mut Vec<Vec<ResultCell>>, counts: impl Iterator<Item = [usize; 3]>) {
+    let mut count_rows = [Vec::new(), Vec::new(), Vec::new()];
+    for counts in counts {
+        for (row, count) in count_rows.iter_mut().zip(counts) {
+            row.push(num_cell(count as f64));
+        }
+    }
+    labels.extend(["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"].map(str::to_owned));
+    rows.extend(count_rows);
+}
+
 fn build_deming_result_sheet(
     mut result: ResultSheet,
-    datasets: &[crate::types::DatasetSeries],
-    confidence: curvebook_math::ConfidenceLevel,
+    datasets: &[DatasetSeries],
+    excluded: &[usize],
+    options: &SimpleLinearOptions,
+    has_explicit_segments: bool,
 ) -> Result<ResultSheet, FitError> {
     // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
     // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
-    let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: confidence };
+    let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: options.confidence_level };
     let mut headers = Vec::with_capacity(datasets.len());
-    let row_labels = vec![
+    let mut counts = Vec::with_capacity(datasets.len());
+    let has_range = options.x_range_filter.is_some();
+    let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
+    let emit_overlay = has_range || plot_min.is_some() || plot_max.is_some() || has_explicit_segments;
+    let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE Slope (Jackknife)".to_owned(),
@@ -273,8 +314,20 @@ fn build_deming_result_sheet(
     ];
     let mut rows = vec![Vec::with_capacity(datasets.len()); row_labels.len()];
 
-    for ds in datasets {
+    for (ds, &n_excluded) in datasets.iter().zip(excluded) {
         let dem = deming_regression(&ds.points, &opts)?;
+        if has_range {
+            counts.push([dem.n, n_excluded, dem.df]);
+        }
+        if emit_overlay {
+            result.fitted_curves.push(FittedCurveOverlay {
+                data_set_index: ds.data_set_index,
+                equation_id: "straight_line".to_owned(),
+                converged: true,
+                ambiguous: false,
+                points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options)?,
+            });
+        }
         headers.push(ds.label.clone());
         rows[0].push(num_cell(dem.slope));
         rows[1].push(num_cell(dem.intercept));
@@ -292,6 +345,9 @@ fn build_deming_result_sheet(
         });
     }
 
+    if has_range {
+        append_linear_observation_counts(&mut row_labels, &mut rows, counts.into_iter());
+    }
     result.tabs.push(ResultTab {
         id: "deming_summary".to_owned(),
         title: "Deming (Model II) linear regression".to_owned(),
@@ -327,6 +383,9 @@ pub fn execute_nonlinear_analysis(
     hooks: &HookContext,
 ) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
+    if nl_spec.flag_r_squared_below.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
+        return Err(FitError::InvalidParameter { name: "flag_r_squared_below", reason: "threshold must be a finite number from 0 to 1".to_owned() });
+    }
     let mv_spec =
         MultivarExtractionSpec { group_columns: &nl_spec.mv_group_columns, x_columns: &nl_spec.mv_x_columns, y_column: nl_spec.mv_y_column };
     let datasets = match extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) {
@@ -351,6 +410,7 @@ pub fn execute_nonlinear_analysis(
         confidence: spec.confidence_level,
         max_iters: nl_spec.clamped_max_iters(),
         compute_profile_ci: nl_spec.profile_likelihood_ci,
+        identify_unstable_parameters: nl_spec.identify_unstable_parameters,
         compute_hougaard: true,
         compute_bands: nl_spec.confidence_bands || nl_spec.prediction_bands || nl_spec.plot_function_only,
         compute_prediction_bands: nl_spec.prediction_bands,
@@ -423,8 +483,13 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
 
     for p in &fit.parameters {
-        param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
-        let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
+        let mut label = parameter_display_label(fit, &p.name, p.dataset_index);
+        let unstable = p.notes.contains(&ParameterNote::Unstable);
+        if unstable {
+            label.push_str(" (Unstable)");
+        }
+        param_labels.push(label);
+        let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
         let row = if is_robust || !p.inference_availability.is_available() {
             let na = ResultCell::Text("Not applicable".to_owned());
             vec![ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
@@ -606,6 +671,51 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
 
     append_nonlinear_checklist(result, fit, is_robust);
+    if let Some(threshold) = nl_spec.flag_r_squared_below
+        && !nl_spec.plot_function_only
+        && fit.r_squared.is_finite()
+        && fit.r_squared < threshold
+    {
+        result.checklist.push(ChecklistItem {
+            assumption: "R squared below threshold".to_owned(),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: Some(format!("R² = {}, threshold = {threshold}", fit.r_squared)),
+            explanation: "The reported unweighted R squared is below the configured threshold.".to_owned(),
+            remediation: None,
+        });
+    }
+    if nl_spec.custom_dsl.is_none() && !nl_spec.plot_function_only {
+        append_midpoint_extrapolation_checks(result, fit);
+    }
+}
+
+/// Compare fitted dose–response midpoints to each dataset's observed X extent. Use the
+/// parameter in the equation's own X scale. See Sebaugh (2011), Pharmaceutical Statistics
+/// 10:128–134, doi:10.1002/pst.426, for the importance of concentration coverage.
+fn append_midpoint_extrapolation_checks(result: &mut ResultSheet, fit: &NonlinearFitResult) {
+    if !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        return;
+    }
+    for param in &fit.parameters {
+        if !matches!(param.name.as_str(), "EC50" | "IC50" | "LogEC50" | "LogIC50") || !param.estimate.is_finite() {
+            continue;
+        }
+        for ds in fit.datasets.iter().filter(|ds| param.dataset_index.is_none_or(|index| index == ds.data_set_index)) {
+            let Some((min, max)) = ds.observed_x_range else {
+                continue;
+            };
+            if (min..=max).contains(&param.estimate) {
+                continue;
+            }
+            result.checklist.push(ChecklistItem {
+                assumption: format!("{} outside observed X range ({})", param.name, ds.label),
+                status: ChecklistStatus::Warn,
+                diagnostic_metric: Some(format!("{} = {}, observed X [{min}, {max}]", param.name, param.estimate)),
+                explanation: format!("The fitted {} estimate lies outside the X range of observations used for this dataset.", param.name),
+                remediation: None,
+            });
+        }
+    }
 }
 
 fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult, is_robust: bool) {
@@ -618,6 +728,16 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
             explanation: "Asymptotic standard errors, confidence intervals, covariance matrices, confidence bands, and F/AICc comparisons are omitted in Robust (Cauchy) regression.".to_owned(),
             remediation: None,
         });
+    } else if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
+        for reason in reasons {
+            result.checklist.push(ChecklistItem {
+                assumption: "Parameter identifiability (Ambiguous)".to_owned(),
+                status: ChecklistStatus::Violated,
+                diagnostic_metric: None,
+                explanation: reason.clone(),
+                remediation: None,
+            });
+        }
     } else if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
         result.checklist.push(ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
@@ -1009,32 +1129,26 @@ fn canonical_zero(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x }
 }
 
-fn build_linear_overlay_points(points: &[DataPoint], slope: f64, intercept: f64, grid_points: usize) -> Vec<CurveSamplePoint> {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    for pt in points {
-        if let Some(&x) = pt.x.first()
-            && x.is_finite()
-        {
-            x_min = x_min.min(x);
-            x_max = x_max.max(x);
-        }
-    }
-    if !x_min.is_finite() || !x_max.is_finite() {
-        return Vec::new();
-    }
-    let count = grid_points.max(2);
-    let span = x_max - x_min;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let frac = (i as f64) / ((count - 1) as f64);
-        let x = x_min + frac * span;
-        let y = intercept + slope * x;
-        if x.is_finite() && y.is_finite() {
-            out.push(CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
-        }
-    }
-    out
+fn build_linear_overlay_points(
+    points: &[DataPoint],
+    slope: f64,
+    intercept: f64,
+    options: &SimpleLinearOptions,
+) -> Result<Vec<CurveSamplePoint>, FitError> {
+    let bounds = resolve_linear_grid_bounds(
+        points.iter().map(DataPoint::x0),
+        options.x_range_filter.unwrap_or_default(),
+        options.plot_x_range.unwrap_or_default(),
+    )?;
+    linear_grid(bounds, options.band_grid_points)
+        .map(|x| {
+            let y = intercept + slope * x;
+            if !y.is_finite() {
+                return Err(FitError::InvalidParameter { name: "plot_x_range", reason: "plot range produced a non-finite fitted value".to_owned() });
+            }
+            Ok(CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None })
+        })
+        .collect()
 }
 
 fn collapse_duplicate_x(sorted_pts: &[(f64, f64)], out: &mut Vec<(f64, f64)>) {
@@ -1342,6 +1456,82 @@ mod tests {
             panic!("{ctx}: expected numeric cell, got {cell:?}");
         };
         assert!((*value - expected).abs() <= tol, "{ctx}: got {value}, expected {expected} (tol {tol})");
+    }
+
+    #[test]
+    fn nonlinear_identifiability_and_r_squared_threshold_reach_result_sheet() {
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
+        let mut sheet = DataSheet::new("xy", "Trend", TableArchetype::Xy(xy)).unwrap();
+        for (row, (x, y)) in [(10.0, 24.0), (12.0, 26.0), (14.0, 30.0), (16.0, 36.0)].into_iter().enumerate() {
+            sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
+            sheet.set_cell(CellCoord::new(row, 0, 0), Cell::number(y)).unwrap();
+        }
+
+        let mut nl = NonlinearFitSpec::new("straight_line");
+        nl.profile_likelihood_ci = false;
+        nl.identify_unstable_parameters = true;
+        nl.flag_r_squared_below = Some(0.96);
+        let run = |nl| {
+            let spec = AnalysisSpec::new("fit", "xy", AnalysisKind::NonlinearRegression(nl)).unwrap();
+            execute_analysis(&spec, &sheet, &HookContext::default())
+        };
+        let result = run(nl.clone()).unwrap();
+        // The residuals [1, -1, -1, 1] are orthogonal to both columns of the design.
+        // RSS = 4 and TSS = 84, giving R² = 20/21 (Draper & Smith, Applied Regression Analysis).
+        assert!((result.lookup_scalar("R2", None).unwrap() - 20.0 / 21.0).abs() < 1e-10);
+        assert!(result.checklist.iter().any(|item| item.assumption == "R squared below threshold" && item.remediation.is_none()));
+        assert!(result.checklist.iter().all(|item| !item.assumption.contains("Ambiguous")));
+
+        nl.flag_r_squared_below = Some(0.95);
+        let in_range = run(nl.clone()).unwrap();
+        assert!(in_range.checklist.iter().all(|item| item.assumption != "R squared below threshold"));
+
+        nl.x_range_filter = Some((None, Some(12.0)));
+        let saturated = run(nl.clone()).unwrap();
+        assert!(saturated.checklist.iter().any(|item| item.explanation == "Residual degrees of freedom are zero."));
+        let params = saturated.tabs.iter().find(|tab| tab.kind == ResultTabKind::ParametersAndConfidenceIntervals).unwrap();
+        assert_eq!(params.row_labels.iter().filter(|label| label.ends_with("(Unstable)")).count(), 2);
+        assert!(params.rows.iter().all(|row| !matches!(row.first(), Some(ResultCell::Number { prefix: Some(prefix), .. }) if prefix == "~")));
+        assert!(saturated.fitted_curves.iter().all(|overlay| overlay.ambiguous));
+
+        nl.flag_r_squared_below = Some(f64::NAN);
+        assert!(run(nl).is_err());
+    }
+
+    #[test]
+    fn nonlinear_midpoint_extrapolation_uses_fitted_observations_and_model_scale() {
+        // Inverting the normalized one-parameter Hill equation gives the known LogEC50
+        // or LogIC50 exactly. The numerical fit must recover it within 1e-7 log units.
+        // Sebaugh (2011), doi:10.1002/pst.426, describes concentration coverage at midpoints.
+        let xs = [-9.0, -8.5, -8.0, -7.5, -7.0, -6.0, -5.5];
+        let midpoint = -6.5;
+        for (equation_id, param_name, sign) in
+            [("log_agonist_vs_response_normalized", "LogEC50", 1.0), ("log_inhibitor_vs_response_normalized", "LogIC50", -1.0)]
+        {
+            let xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
+            let mut sheet = DataSheet::new("dose", "Dose Response", TableArchetype::Xy(xy)).unwrap();
+            for (row, x) in xs.into_iter().enumerate() {
+                let y = 100.0 / (1.0 + 10_f64.powf(sign * (midpoint - x)));
+                sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
+                sheet.set_cell(CellCoord::new(row, 0, 0), Cell::number(y)).unwrap();
+            }
+            let mut nl = NonlinearFitSpec::new(equation_id);
+            nl.profile_likelihood_ci = false;
+            nl.x_range_filter = Some((None, Some(-6.75)));
+            nl.plot_x_max = Some(-5.0);
+            let make_spec = |nl| AnalysisSpec::new("fit", "dose", AnalysisKind::NonlinearRegression(nl)).unwrap();
+            let restricted = execute_analysis(&make_spec(nl.clone()), &sheet, &HookContext::default()).unwrap();
+            let estimate = restricted.lookup_scalar(param_name, Some(0)).unwrap();
+            assert!((estimate - midpoint).abs() < 1e-7, "{param_name}: {estimate}");
+            let warning = restricted.checklist.iter().find(|c| c.assumption.starts_with(&format!("{param_name} outside observed X range"))).unwrap();
+            assert_eq!(warning.status, curvebook_doc::ChecklistStatus::Warn);
+            assert!(warning.diagnostic_metric.as_deref().is_some_and(|metric| metric.contains("observed X [-9, -7]")));
+            assert!(warning.remediation.is_none());
+
+            nl.x_range_filter = None;
+            let bracketed = execute_analysis(&make_spec(nl), &sheet, &HookContext::default()).unwrap();
+            assert!(bracketed.checklist.iter().all(|c| !c.assumption.contains("outside observed X range")));
+        }
     }
 
     #[test]

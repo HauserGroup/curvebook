@@ -625,8 +625,8 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
             force_through_origin: false,
             confidence_bands: false,
             prediction_bands: false,
-            interpolate_unknowns: false,
             deming_model_ii: true,
+            ..LinearRegressionSpec::default()
         }),
     )
     .unwrap();

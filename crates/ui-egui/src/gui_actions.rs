@@ -29,8 +29,8 @@ use crate::control_io::{
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, AxisTarget, ExportFigureFormat, equation_display_mode_str};
 use crate::inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
 use crate::interaction::{
-    KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, clear_modal_text_buffers, dispatch_ui_event, sync_dialogs_on_sheet_switch,
-    sync_edit_params_text_buffers, sync_format_axes_text_buffers,
+    KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, clear_modal_text_buffers, close_active_modal, dispatch_ui_event,
+    sync_dialogs_on_sheet_switch, sync_edit_params_text_buffers, sync_format_axes_text_buffers,
 };
 use crate::menus::tooltips::menu_bar_tooltips;
 use crate::menus::ui_commands::UI_COMMANDS;
@@ -1882,7 +1882,7 @@ pub(crate) fn execute_dialog_button_action(app: &mut UiApp, action: &str) -> Res
     }
     if action == "cancel" {
         let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
-        app.canvas_dialogs.close_dialog();
+        close_active_modal(app);
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
     let check = evaluate_dialog_button(&app.canvas_dialogs, app.document(), action).unwrap_or_else(ControlEnablement::enabled);
@@ -1936,7 +1936,7 @@ fn handle_answer_dialog(app: &mut UiApp, params: &Value) -> Result<Value, Engine
 
     if action == "cancel" {
         let prev = format!("{:?}", app.canvas_dialogs.active_dialog);
-        app.canvas_dialogs.close_dialog();
+        close_active_modal(app);
         app.interaction.context_menu_target = None;
         return Ok(json!({ "action": "cancel", "closed": true, "previous_dialog": prev }));
     }
@@ -2456,6 +2456,7 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
 
 fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
     sync_edit_params_text_buffers(app);
+    crate::views::fit_params::sync_fit_parameter_inputs(app).map_err(bad_input)?;
     let close = action == "ok";
     let doc = app.document().clone();
     let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));
@@ -2466,7 +2467,7 @@ fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, Eng
         let _ = app.execute_command(&extra.command_id, extra.params)?;
     }
     if close {
-        app.canvas_dialogs.close_dialog();
+        close_active_modal(app);
         clear_modal_text_buffers(app);
     }
     Ok(json!({ "action": action, "mutated": out.mutated, "closed": close, "payload": out.payload }))

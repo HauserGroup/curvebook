@@ -51,6 +51,8 @@
 //!
 //! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
 
+mod identifiability;
+
 use curvebook_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
@@ -67,11 +69,12 @@ use crate::diagnostics::{
     compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
-use crate::error::{FitError, FitStatus, ParameterNote};
+use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::types::{
     DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number, validated_replicate_moments,
 };
+use identifiability::Assessment;
 
 /// Configuration for executing nonlinear regression via [`fit_nonlinear`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -88,6 +91,8 @@ pub struct SolverConfig {
     pub max_iters: usize,
     /// Compute profile-likelihood confidence intervals (Venzon & Moolgavkar 1988) instead of only symmetric Wald intervals.
     pub compute_profile_ci: bool,
+    /// Assess free-parameter identifiability (`FitIdentifiability` and `ParameterNote::Unstable`).
+    pub identify_unstable_parameters: bool,
     /// Compute Hougaard skewness `|g1|` per free parameter (`Ratkowsky 1990`) via directional finite differences.
     pub compute_hougaard: bool,
     /// Compute smooth mean-response confidence bands along `FittedCurveOverlay`.
@@ -129,6 +134,7 @@ impl Default for SolverConfig {
             confidence: ConfidenceLevel::DEFAULT_95,
             max_iters: 1_000,
             compute_profile_ci: true,
+            identify_unstable_parameters: false,
             compute_hougaard: true,
             compute_bands: true,
             compute_prediction_bands: false,
@@ -385,6 +391,10 @@ pub struct FittedDatasetResult {
     pub params: Vec<f64>,
     /// Ordered equation parameter names corresponding 1-to-1 with `params`.
     pub param_names: Vec<String>,
+    /// Inclusive X extent of the observations used in a scalar-predictor fit.
+    /// Absent for multivariate datasets, empty datasets, and plot-only evaluations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_x_range: Option<(f64, f64)>,
     /// Fitted model predictions $\hat{y}_i$ at each included point in this dataset.
     pub y_hat: Vec<f64>,
     /// Unweighted residuals $y_i - \hat{y}_i$ in original $Y$ units.
@@ -482,6 +492,9 @@ pub struct NonlinearFitResult {
     pub inference_availability: InferenceAvailability,
     /// Convergence status of the nonlinear optimizer (`Converged`, `Ambiguous`, `HitMaxIters`, etc.).
     pub status: FitStatus,
+    /// Optional parameter identifiability assessment across fitted datasets.
+    #[serde(default)]
+    pub identifiability: FitIdentifiability,
     /// Total number of optimization outer steps executed by Levenberg–Marquardt / IRLS.
     pub iterations: usize,
     /// Number of active non-excluded non-outlier observations included in the final fit.
@@ -2477,6 +2490,7 @@ fn fit_plot_function_only(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: None,
             y_hat: ds_yh,
             residuals: ds_res.clone(),
             weighted_residuals: ds_res.clone(),
@@ -2506,6 +2520,7 @@ fn fit_plot_function_only(
         fit_method: config.method,
         inference_availability,
         status: FitStatus::Converged,
+        identifiability: FitIdentifiability::NotAssessed,
         iterations: 0,
         n_obs: total_obs,
         n_outliers_excluded: 0,
@@ -2583,6 +2598,7 @@ fn solve_lm_by_method(
 
 struct FinalizedUncertainty {
     cov: CovarianceDiagnostics,
+    identifiability: Assessment,
     cov_unscaled: Option<DenseMatrix>,
     hougaard: Vec<f64>,
     profile_cis: Vec<(CiBound, CiBound)>,
@@ -2612,6 +2628,7 @@ fn finalize_fit_uncertainty(
                 numerical_rank: 0,
                 ambiguous: false,
             },
+            identifiability: Assessment::default(),
             cov_unscaled: None,
             hougaard: vec![f64::NAN; k_free],
             profile_cis: vec![(CiBound::Open, CiBound::Open); k_free],
@@ -2670,10 +2687,11 @@ fn finalize_fit_uncertainty(
     };
 
     let bounds = layout.bounds();
+    let profile_computed = config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous;
     let profile_cis = match config.method {
         FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
         FitMethod::PoissonDeviance => {
-            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+            if profile_computed {
                 compute_deviance_profile_likelihood_cis(
                     &lm_out.theta,
                     lm_out.weighted_ss,
@@ -2687,7 +2705,7 @@ fn finalize_fit_uncertainty(
             }
         }
         FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
-            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+            if profile_computed {
                 let mut wy2_acc = NeumaierSum::new();
                 for o in obs {
                     let wy = o.sqrt_weight * o.point.y;
@@ -2710,7 +2728,12 @@ fn finalize_fit_uncertainty(
         }
     };
 
-    Ok(FinalizedUncertainty { cov, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
+    let identifiability = if config.identify_unstable_parameters && k_free > 0 && lm_out.status != FitStatus::Diverged {
+        identifiability::assess(layout, obs, &lm_out.j_mat, df, &cov.dependencies, profile_computed.then_some(profile_cis.as_slice()))?
+    } else {
+        Assessment::default()
+    };
+    Ok(FinalizedUncertainty { cov, identifiability, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
 }
 
 fn fit_single_or_shared(
@@ -2733,7 +2756,15 @@ fn fit_single_or_shared(
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let unc = finalize_fit_uncertainty(model, &layout, &obs, &mut lm_out, df, ss_within_total, config)?;
-    let parameters = build_fitted_parameter_summaries(&layout, &lm_out.theta, &unc.cov, &unc.hougaard, &unc.profile_cis, inference_availability);
+    let parameters = build_fitted_parameter_summaries(
+        &layout,
+        &lm_out.theta,
+        &unc.cov,
+        &unc.hougaard,
+        &unc.profile_cis,
+        &unc.identifiability.unstable,
+        inference_availability,
+    );
 
     let mut raw_rss_acc = NeumaierSum::new();
     let mut y_mean_acc = NeumaierSum::new();
@@ -2783,7 +2814,7 @@ fn fit_single_or_shared(
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd,
-            ambiguous: cov.ambiguous,
+            ambiguous: cov.ambiguous || unc.identifiability.fit.is_ambiguous(),
             solver: config,
         },
     );
@@ -2804,6 +2835,7 @@ fn fit_single_or_shared(
         fit_method: config.method,
         inference_availability,
         status: lm_out.status,
+        identifiability: unc.identifiability.fit,
         iterations: lm_out.iterations,
         n_obs,
         n_outliers_excluded,
@@ -2842,6 +2874,7 @@ struct SingleDatasetOutcome {
     cov: CovarianceDiagnostics,
     hougaard: Vec<f64>,
     profile_cis: Vec<(CiBound, CiBound)>,
+    identifiability: Assessment,
     ds_result: FittedDatasetResult,
     derived_scalars: Vec<DerivedScalar>,
     interpolated_x: Vec<InterpolatedUnknown>,
@@ -2907,7 +2940,7 @@ fn solve_single_dataset_unit(
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd: rsd_d,
-            ambiguous: cov.ambiguous,
+            ambiguous: cov.ambiguous || unc.identifiability.fit.is_ambiguous(),
             solver: config,
         },
     );
@@ -2926,6 +2959,7 @@ fn solve_single_dataset_unit(
         cov,
         hougaard: unc.hougaard,
         profile_cis: unc.profile_cis,
+        identifiability: unc.identifiability,
         ds_result,
         derived_scalars: derived,
         interpolated_x: assembled.interpolated_x,
@@ -3027,6 +3061,8 @@ fn fit_independent_datasets(
     let mut global_deps = vec![f64::NAN; k_free];
     let mut global_hougaard = vec![f64::NAN; k_free];
     let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
+    let mut global_unstable = vec![false; k_free];
+    let mut identifiability = FitIdentifiability::NotAssessed;
     let mut global_cov_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
     let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
@@ -3065,6 +3101,7 @@ fn fit_independent_datasets(
                 global_deps[*g_slot] = sub.cov.dependencies[*l_slot];
                 global_hougaard[*g_slot] = sub.hougaard[*l_slot];
                 global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
+                global_unstable[*g_slot] = sub.identifiability.unstable.get(*l_slot).copied().unwrap_or(false);
             }
         }
         if !is_robust && !sub.cov.covariance_matrix.is_empty() {
@@ -3076,6 +3113,7 @@ fn fit_independent_datasets(
             }
         }
 
+        identifiability::include_dataset(&mut identifiability, sub.identifiability.fit, &ds.label);
         total_rank += sub.cov.numerical_rank;
         any_diverged |= sub.status == FitStatus::Diverged;
         any_ambiguous |= sub.cov.ambiguous || sub.status == FitStatus::Ambiguous;
@@ -3124,8 +3162,15 @@ fn fit_independent_datasets(
     };
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
-    let parameters =
-        build_fitted_parameter_summaries(&global_layout, &global_theta, &cov, &global_hougaard, &global_profile_cis, inference_availability);
+    let parameters = build_fitted_parameter_summaries(
+        &global_layout,
+        &global_theta,
+        &cov,
+        &global_hougaard,
+        &global_profile_cis,
+        &global_unstable,
+        inference_availability,
+    );
 
     let raw_rss = total_raw_rss.total();
     let weighted_ss = total_weighted_ss.total();
@@ -3166,6 +3211,7 @@ fn fit_independent_datasets(
         fit_method: config.method,
         inference_availability,
         status,
+        identifiability,
         iterations: max_iterations,
         n_obs,
         n_outliers_excluded,
@@ -3201,6 +3247,7 @@ fn build_fitted_parameter_summaries(
     cov: &CovarianceDiagnostics,
     hougaard: &[f64],
     profile_cis: &[(CiBound, CiBound)],
+    unstable: &[bool],
     inference_availability: InferenceAvailability,
 ) -> Vec<FittedParameterSummary> {
     let is_robust = inference_availability.is_not_applicable_in_robust_mode();
@@ -3217,7 +3264,9 @@ fn build_fitted_parameter_summaries(
         if slot.upper.is_some_and(|u| (u - est).abs() <= 1e-9 * est.abs().max(1.0)) {
             notes.push(ParameterNote::HitUpperBound);
         }
-        if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
+        if unstable.get(idx).copied().unwrap_or(false) {
+            notes.push(ParameterNote::Unstable);
+        } else if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
             notes.push(ParameterNote::Ambiguous);
         }
         if !is_robust && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
@@ -3309,8 +3358,18 @@ fn assemble_dataset_results(
         let mut ds_y_vals: Vec<(f64, usize, f64)> = Vec::new();
         let mut ds_n = 0_usize;
         let mut ds_y_sum = NeumaierSum::new();
+        let mut scalar_x = true;
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
         for (i, rec) in obs.iter().enumerate() {
             if rec.ds_local_idx == ds_local_idx {
+                match rec.point.x.as_slice() {
+                    [x] if x.is_finite() => {
+                        x_min = x_min.min(*x);
+                        x_max = x_max.max(*x);
+                    }
+                    _ => scalar_x = false,
+                }
                 let yh = lm_out.y_hat[i];
                 let r = rec.point.y - yh;
                 let w_rep = rec.rep_n as f64;
@@ -3436,6 +3495,7 @@ fn assemble_dataset_results(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: (scalar_x && x_min.is_finite() && x_max.is_finite()).then_some((x_min, x_max)),
             y_hat: ds_y_hat,
             residuals: ds_res,
             weighted_residuals: ds_w_res,

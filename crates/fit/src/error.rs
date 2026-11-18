@@ -22,6 +22,29 @@ pub enum FitStatus {
     Diverged,
 }
 
+/// Identifiability assessment for a nonlinear fit.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FitIdentifiability {
+    /// The assessment was disabled or was unavailable for this fit mode.
+    #[default]
+    NotAssessed,
+    /// The fit passed the configured identifiability checks.
+    Identifiable,
+    /// At least one check found evidence of unstable parameter estimation.
+    Ambiguous {
+        /// Human-readable diagnostic reasons explaining why parameter estimation is unstable.
+        reasons: Vec<String>,
+    },
+}
+
+impl FitIdentifiability {
+    /// Whether the assessment detected instability.
+    #[must_use]
+    pub const fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
+    }
+}
+
 /// Diagnostic note attached to an individual fitted parameter estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ParameterNote {
@@ -37,6 +60,8 @@ pub enum ParameterNote {
     HitUpperBound,
     /// Parameter is unidentifiable or severely collinear (`Dependency > 0.9999`).
     Ambiguous,
+    /// Parameter flagged by the opt-in identifiability assessment.
+    Unstable,
     /// Profile-likelihood confidence interval is unbounded on at least one side.
     UnboundedCi,
 }

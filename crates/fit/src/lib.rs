@@ -56,7 +56,7 @@ pub use diagnostics::{
     lilliefors_ks_test, replicates_lack_of_fit, rout_detect_outliers, runs_test, shapiro_wilk_test,
 };
 pub use dsl::{CompiledDslModel, DslEquationKind, integrate_rk45};
-pub use error::{FitError, FitStatus, ParameterNote};
+pub use error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 pub use library::{EquationCatalogEntry, ParametricModel, get_builtin_model, list_builtin_equations};
 pub use linear::{
     DemingOptions, DemingResult, LinearComparisonResult, LinearInterpolation, LinearResidual, SimpleLinearOptions, SimpleLinearResult,
