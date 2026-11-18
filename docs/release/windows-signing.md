@@ -154,4 +154,4 @@ When the signing identity is no longer needed, the signing user can also delete 
 
 The Store developer account, reserved product name, and Partner Center identity are configured. Build the package with the workflow above. Test and submit through Partner Center; Microsoft provides the package signature after certification. A self-signed test certificate is not a prerequisite for Store publishing. The implementation and submission checklist is in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
-Store identity and workflow instructions updated on 2026-11-18. Record a successful hosted build before claiming Windows packaging verification; the manual self-signing commands and installed MSIX behavior remain unverified.
+Store identity and workflow instructions updated on 2026-11-18. Initial x64 package construction, CLI version smoke check, and Windows SDK validation passed in [GitHub run `44301984148`](https://github.com/HauserGroup/curvebook/actions/runs/44301984148); the downloaded artifact's checksums and contents were also checked. The manual self-signing commands and installed MSIX behavior remain unverified.
