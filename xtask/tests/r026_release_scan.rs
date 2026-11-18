@@ -464,9 +464,12 @@ fn write_sha256sums_for_dir(dir: &Path) -> Result<(), String> {
     fs::write(dir.join("SHA256SUMS.txt"), lines).map_err(|e| e.to_string())
 }
 
+/// The synthetic `.rpm` from [`build_synthetic_rpm`] has empty signature and main headers.
+/// libarchive (`bsdtar`) reads its payload, but `rpm2cpio` from rpm 4.x rejects it
+/// ("signature region: no tags"), so an `rpm2cpio`-only host cannot exercise these cases.
+/// CI installs `bsdtar` (`libarchive-tools`) for the `tests` stage in `.github/workflows/ci.yml`.
 fn host_can_unpack_rpm() -> bool {
     Command::new("bsdtar").arg("--version").output().is_ok_and(|o| o.status.success())
-        || (Command::new("rpm2cpio").arg("--version").output().is_ok() && Command::new("cpio").arg("--version").output().is_ok())
 }
 
 #[cfg(target_os = "macos")]
@@ -538,7 +541,7 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     let gnu_deb = build_gnu_ar_deb(&[("debian-binary", b"2.0\n"), ("control.tar.gz", &gnu_ctrl_tgz), ("data.tar.gz", &gnu_data_tgz)])?;
     fs::write(rel_dir.join("curvebook-0.1.0-linux-aarch64.deb"), gnu_deb).unwrap();
 
-    // 5. `.rpm` built dynamically at test time when host has `bsdtar` or `rpm2cpio`+`cpio`
+    // 5. `.rpm` built dynamically at test time when the host has `bsdtar`
     let mut expected_assets = 7usize; // SHA256SUMS.txt + html + zip + tar.gz + 2 debs + zsync
     if host_can_unpack_rpm() {
         let rpm_bytes = build_synthetic_rpm(&[
@@ -674,7 +677,7 @@ fn r026_planted_brand_tokens_inside_each_container_fail_closed_naming_container(
         assert!(stderr.contains("curvebook-ctrl-leak.deb!_deb_control/"), "{stderr}");
     }
 
-    // 5. Planted token inside `.rpm` (when host has `bsdtar` or `rpm2cpio`+`cpio`)
+    // 5. Planted token inside `.rpm` (when the host has `bsdtar`)
     if host_can_unpack_rpm() {
         let dir = fx.path.join("case-rpm");
         fs::create_dir_all(&dir).unwrap();

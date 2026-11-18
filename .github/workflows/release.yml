@@ -547,6 +547,34 @@ jobs:
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:
           subject-path: 'dist/release/*'
+      # Fail closed: before anything is uploaded, check every file with the same command
+      # docs/release/verifying-downloads.md gives users, pinned to this workflow and ref.
+      # Retries cover the short delay before a new attestation can be looked up.
+      - name: Verify attestations the way a downloader would
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          workflow="$GITHUB_REPOSITORY/.github/workflows/release.yml"
+          cd dist/release
+          for file in *; do
+            verified=false
+            for attempt in 1 2 3 4 5; do
+              if gh attestation verify "$file" --repo "$GITHUB_REPOSITORY" \
+                --signer-workflow "$workflow" --source-ref "$GITHUB_REF" \
+                --deny-self-hosted-runners >/dev/null; then
+                verified=true
+                break
+              fi
+              echo "attestation for $file not verified (attempt $attempt of 5)" >&2
+              sleep 10
+            done
+            if [ "$verified" != true ]; then
+              echo "error: $file has no attestation from $workflow at $GITHUB_REF" >&2
+              exit 1
+            fi
+            echo "verified: $file"
+          done
       - name: Create or update draft GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}

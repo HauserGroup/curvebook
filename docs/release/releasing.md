@@ -95,6 +95,8 @@ Every tagged release distributes binaries and archives alongside licence disclos
 
 ### Verifying Downloaded Release Artefacts
 
+User-facing steps for every platform, and why Linux and FreeBSD downloads carry no separate signature file, are in [verifying-downloads.md](verifying-downloads.md). The `publish` job runs the pinned `gh attestation verify` command below on every file before upload and stops the release if any file fails.
+
 Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — Linux (`.AppImage`, `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, `.flatpak`), Windows (`.msi`, `-portable.zip`), macOS (`.dmg`, CLI `.zip`), FreeBSD (`.tar.gz`), web (`.zip`), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` itself — receives a keyless GitHub Sigstore build provenance attestation (`actions/attest-build-provenance`).
 
 1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):

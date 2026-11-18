@@ -71,6 +71,10 @@ jobs:
         with:
           name: native-tests
           path: target
+      # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
+      - name: Install bsdtar for the release-scan tests
+        if: matrix.stage == 'tests'
+        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libarchive-tools
       - name: Check licences, advisories, yanked crates, bans and sources
         if: matrix.stage == 'policy'
         run: cargo deny check
