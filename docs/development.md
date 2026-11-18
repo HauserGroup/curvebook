@@ -56,7 +56,7 @@ Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) ›
 
 ## Web build
 
-`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Web menus and toolbar are not built yet (`R10.7`):
+`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Menus, toolbar, dialogs, and context menus come from the shared layout tree (`R10.7`). The `curvebook-web` tests run natively; browser-run tests and the remaining browser gaps are tracked in [`R11`](ROADMAP.md#r11-usable-browser-app):
 
 ```sh
 rustup target add wasm32-unknown-unknown
