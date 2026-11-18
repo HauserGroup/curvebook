@@ -1,6 +1,6 @@
 # Roadmap History
 
-Historical progress log moved from root [`ROADMAP.md`](../../ROADMAP.md) during the Wave 8A roadmap conversion (`R0.2`). Current active tasks live in [`ROADMAP.md`](../ROADMAP.md); current verified status and limits live in [`STATUS.md`](../STATUS.md).
+This document records [completed roadmap items](#completed-roadmap-items), [earlier sequencing](#earlier-sequencing), and the [wave-by-wave progress log](#progress-log). See the [active roadmap](../ROADMAP.md) for current work and [Status](../STATUS.md) for verified capabilities and limits.
 
 ## Progress Log
 
@@ -17,3 +17,46 @@ Historical progress log moved from root [`ROADMAP.md`](../../ROADMAP.md) during 
 | 2026-11-13 | `G2` (partial) | Landed `lumencraft-palette` (`L0`: sRGB/Oklab/OkLCH/CMYK, WCAG contrast, Okabe–Ito & Paul Tol + Viridis/Cividis/Plasma colormaps, Machado CVD) and `lumencraft-doc` (`L1`: all `8` `TableArchetype`s, `8` `SubcolumnMode`s, exclusions, `FloatingNote`, `InfoSheet`, `LinkedDataRegion`, `AnalysisSpec`/`ResultSheet`, `GraphSpec`/`LayoutSpec`, `ProjectDocument` DAG dependencies). |
 | 2026-11-13 | `M0` | Clean-room subsystem implementation guidelines (`data-tables-and-transforms.md`, `statistics-implementation.md`, `curve-fitting-implementation.md`, `graphing-and-layouts.md`, `scripting-and-automation.md`), domain parity checklists, ranked `G1`–`G14` work list, and crate rustdoc wiring completed. |
 | 2026-11-13 | `M0` | Initialized 21-crate layered Rust 2024 workspace (`L0`–`L7`), `xtask` CI/layer/asset/brand/cleanroom/cursor/i18n/ui-commands gates, original vector/raster app icons, cross-platform `packaging/`, and GitHub Actions workflows. |
+
+## Completed roadmap items
+
+Use the [archive index in the main roadmap](../ROADMAP.md#completed-roadmap-items) to open each completed item directly.
+
+## Earlier sequencing
+
+These rows record the original planning sequence, including the completed portions of steps that also covered open items. See the [current order and dependencies](../ROADMAP.md#order-and-dependencies) for remaining work.
+
+| Step | Items | Depends on | Target gate |
+|---|---|---|---|
+| **Toolchain baseline — R0.18** | Rust `1.99.1` minimum across all `22` packages; pinned local/CI/coverage/packaging toolchains and local verification (**done**; hosted CI/FreeBSD/Windows ARM64 runners open) | None; preserve existing claims | Build-toolchain baseline (**done** locally) |
+| **MCP functionality — R7.3** | Fully functional MCP for existing engine capabilities (**done**): real stdio/headless workflow parity (`WF-01`–`WF-50`), protocol coverage, and opt-in `--window` shared visible session | `R0.18`, `R7.1`, `R8.3`, `R8.6` (done) | **Alpha functional scope** (implemented; known bugs acceptable) |
+| **MCP onboarding — R7.4** | Short beginner MCP guide in a minimal, presentable README; verified first-run instructions (**done**) | `R7.3` (done) | Documentation handoff before GUI (**done**) |
+| **Alpha launch identity — R0.20** | Full CurveBook identity, native-format, desktop/browser/MCP, packaging, and documentation cutover; [rename plan](../../plan/curvebook-rename.md) | `R0.18`, `R7.3`, `R7.4` (done); coordinate current audit/GUI claims | **Alpha launch requirement** (in progress); precedes `R0.19` Wave B & further unclaimed R10 work |
+| **Alpha branding clearance — R0.21** | Strict branding/naming, MCP JSON-RPC surface, live `LayoutTree`, and original-asset/provenance checks (**done** across `720` tracked files, `51` assets, & assembled local `dist/` artefacts; [clearance record](../release/alpha-branding-clearance.md)); only `.pzfx` / `.prism` file-format handling is excepted | `R0.20`; reuse existing guards and verify actual launch outputs | **Mandatory Alpha launch gate** (**done** on workspace & local artefacts; hosted GH Actions release-asset rerun under `R0.14`/`R0.20`) |
+| **Maintenance & review — R0.22, R0.24, R0.25** | `R0.22` supply-chain advisory coverage & localization/MCP troubleshooting guides (**done**); `R0.24` bounded TCP fixtures & staged CI (integrated locally; hosted staged run open); `R0.25` R0–R9 review ledger (all `97` non-rejected `RV-01`–`RV-99` + S4 notes remediated across Waves 4 & 8; `RV-28`/`RV-45` rejected — **done**) | `R0.22` before `R0.24`; `R0.25` UI/web items coordinated with `R10` owners | Engineering hygiene (`R0.22` & `R0.25` **done**; not Alpha prerequisites; not R10 acceptance evidence) |
+| **Step 1 (8A)** | `R0.1`, `R0.2` (done); foundations for `R0.3`, `R0.5`, `R0.6`, `R0.7`, `R0.10`, `R0.14` | — | Scaffold |
+| **Step 2 (8B)** | `R0.3` (secrets gate), `R0.4` (pending/status), `R0.5` (licenses gate — done), `R0.6` (Zero Telemetry & local `actionlint`/`shellcheck` done; hosted GH Actions run open) | `R0.2` for `R0.4` | Scaffold |
+| **Step 3** | `R0.10` (`curvebook-platform` wiring & source checks), `R0.11` (versioned files) | `R0.6` | Scaffold |
+| **Step 4** | `R0.8` (`CommandSpec` registry, area by area), then `R0.9` (structured errors & remediation) | — (runs beside Step 3) | Engine contract |
+| **Step 5** | `R0.7` (generated `commands.md` & `schemas`), `R0.12` (format registry) | `R0.8` (commands), `R0.11` (schemas) | Docs & seams |
+| **Step 6** | `R0.13` (MCP/CLI/UI alignment) | `R0.8`, `R0.9` | Surfaces |
+| **Step 7** | `R8.3` (live `eframe`/`egui`/`wgpu` desktop window — **done**), `R8.4` (`wasm32` Trunk WebGL2 bundle — **done**) | `R8.1` (done) | Desktop/WASM presenters (**done**); human GUI readiness tracked separately in `R10` |
+| **Step 7B** | `R8.6` (`ui.inspect`, `gui` MCP toolset & `--gui-only` lock — **done**), `R8.7` (Power & Sample Size wizard, 10 modal predicates & chained GUI surfaces — **done**), then `R8.8` (4-shard 28-workflow `gui_only` acceptance suite — **done**) | `R8.1` (done), `R0.13` (done) | **Agent-harness workflows** (`R8.6`–`R8.8` done) |
+| **Step 8** | `R5.4` (native binary OS clipboard, `ActiveDialog::Print` & WYSIWYG layout drag-snap — **done**) | `R8.1` | Beta clipboard/print/layout capabilities (`R5.4` done; Beta launch not claimed) |
+| **Step 9** | `R8.5` (universal macOS `.dmg`/`.zip` `verify.sh` done locally; Apple Developer ID notarization, Windows/Linux/FreeBSD VMs & live browser QA open), `R0.14` (`README.md` screenshots, `release.yml` `tags: ["v*"]`, `cargo-about`/`cargo-deny`, & local universal macOS/web packaging done; hosted `v0.1.0-rc1` CI tag/matrix open) | `R0.5` (done), `R8.3` (done), `R8.4` (done), `R8.8` (done), **`R10.13`** | **1.0** |
+| **Beta release gates — R0.26, R0.27, R8.10** | `R0.26` hosted release-asset branding/provenance scan; `R0.27` user-first README overhaul; `R8.10` signed and notarized installers on every platform (all **todo**) | `R0.21` (done), `R0.14`; `R0.27` after `R8.10` install steps; `R8.10` needs maintainer signing accounts | **Beta** |
+| **Step 10 (M8+)** | `R9.7` (diagnostics-only banners), `R9.12` (table-analysis completions), `R9.14` (randomization & sampling), `R9.16` (equation callouts only), `R9.17` (extended 21-workflow `gui_only` suite `WF-29`–`WF-49`); `R9.10`, `R9.11`, `R9.13`, and `R9.15` excluded from active sequencing | `R0.8` (done), `R3.1`–`R3.3` (done), `R4.4` (done), `R5.1` (done), `R8.8` (done) | **Done (active scope)** across Waves 20–23 (`0 h` remaining); deferred items unscheduled |
+| **Step 11a (`R10` Phases 1–2)** | `R0.15` (evidence-backed done markers; can land now), `R0.16` (local coverage reports; can land now), `R10.1` (in-house layout tree & browser-font decisions made; spike), `R10.22` (performance & size budgets), `R10.14` (external-branding exclusion), `R10.9` (typography & glyph gate), `R10.16` (widgets, modals, scrolling), `R10.15` (canvas viewport), `R10.2` (human-path harness & pixel-to-hit-box gate) | `R0.20` (CurveBook cutover), `R7.3` (existing-capability MCP gate, done), `R7.4` (README handoff, done), then `R8.3`, `R8.4`, `R8.6` (done) | **Human GUI workflows** |
+| **Step 11b (`R10` Phase 3)** | `R10.4` (Welcome launcher), `R10.6` (contextual toolbar, menu & context routing), `R10.17` (Navigator, Family tree, floating notes), `R10.7` (web host chrome) | `R10.16` | **Human GUI workflows** |
+| **Step 11c (`R10` Phases 4 & 6)** | `R10.8` (multi-tier grid & calculated-variable editor), `R10.12` grid side (linked regions & exclusions), `R10.5` (multi-column results), `R10.18` (live inspector), `R10.19` (typeset equations) | `R10.16`, `R10.9` | **Human GUI workflows** |
+| **Step 11d (`R10` Phase 5)** | `R10.3` (multi-tab dialogs, Power wizard, Graph Type / Hook / Export), `R10.12` dialog side (Import & Paste Special dialog) | `R10.16`, `R10.6` | **Human GUI workflows** |
+| **Step 11e (`R10` Phase 7)** | `R10.20` (keyboard & screen-reader gate), `R10.21` (translation gate), `R10.13` (pure mouse/keyboard 50-workflow acceptance, screenshot baselines, computer-use mouse/screen or manual human QA) | all other `R10` items | **Human GUI workflows** -> **1.0** (full release; not **Beta**) |
+| **Step 11f (`R10`, parallel engine work)** | `R10.10` (stack of *P* values), `R10.11` (CLD, scope confirmed) | none for engine parts; dialog parts need `R10.3`, `R10.18` | **Human GUI workflows** |
+| **Step 11h (parallel, statistics)** | `R3.5` (statistical method fidelity), `R4.6` (fitting method fidelity), `R4.5` (robust-mode inference suppression), `R0.17` (clean-room provenance review), `R3.4` (unstructured REML covariance) | `R4.1`, `R3.2` (done) | **1.0** (`R3.5`, `R4.6`, `R4.5`, `R0.17`); unscheduled (`R3.4`) |
+| **Step 11i (post-Alpha formulas & stats)** | `R6.3` (window clauses `OVER`/`WHERE`/`ORDER BY`/`ROWS` & conditional aggregations — **done**), `R3.6` (1-way/3-way RM REML & selectable *df* methods — **done**), `R3.7` (Cox PH `Exact` ties, per-risk-set stability & large-span Baptista–Pike CIs — **done**) | `R0.20` (Alpha cutover), `R0.21` (done), plus `R6.1`, `R4.4`, `R3.3`–`R3.5` (done) | Post-Alpha parity -> **1.0** (**done** in Wave 7) |
+
+**Recorded decisions**
+
+- **Shared layout tree implementation (`R10.1`):** **Decision resolved (2026-11-15):** in-house retained layout tree rendered by `compositor.rs`; web text uses the browser's canvas text rendering and fonts; `R10.22` budgets set (≤ `16.67 ms` frame, ≤ `50 ms` input-to-paint, web zip ≤ 1.5× current, startup < `3 s`).
+- **Compact Letter Display scope (`R10.11`):** **Decision resolved (2026-11-15):** CLD is back in product scope as `R10.11` so the CLD reference workflow (`WF-50`) can be completed; `R9.16` remains equations-only.
+- **SonarCloud (`R0.6`):** **Decision resolved (Zero-Telemetry policy):** SonarCloud and all external cloud scanners/telemetry services are permanently excluded; `cargo xtask telemetry` enforces zero telemetry/egress/analytics and workflow `permissions` / `${{ }}` hygiene inside `cargo xtask ci`.

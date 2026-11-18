@@ -2,7 +2,7 @@
 
 > **Release tier:** MCP Alpha (`v0.1.0-alpha.2`, prerelease) · **Primary surface:** `curvebook-cli` & `curvebook-cli mcp` (stdio JSON-RPC 2.0) · **Onboarding:** [`mcp-for-beginners.md`](../mcp-for-beginners.md) · **Branding & provenance clearance:** [`alpha-branding-clearance.md`](alpha-branding-clearance.md)
 
-This document records the supported functional scope, known limitations, platform signing caveats, and GitHub Release notes template for CurveBook's public Alpha launch ([`R0.20`](../ROADMAP.md#r020-rename-lumencraft-to-curvebook), [`R0.21`](../ROADMAP.md#r021-strict-alpha-branding-and-asset-provenance-gate), [`R0.14`](../ROADMAP.md#r014-release-verification-scripts--readme-scaffold)).
+This document records the supported functional scope, known limitations, platform signing caveats, and GitHub Release notes template for CurveBook's public Alpha launch ([`R0.20`](../planning/roadmap-history/r0.md#r020-rename-lumencraft-to-curvebook), [`R0.21`](../planning/roadmap-history/r0.md#r021-strict-alpha-branding-and-asset-provenance-gate), [`R0.14`](../ROADMAP.md#r014-release-verification-scripts--readme-scaffold)).
 
 ---
 
