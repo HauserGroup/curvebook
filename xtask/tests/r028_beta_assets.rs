@@ -123,6 +123,7 @@ fn r028_packaging_file_presence_and_scripts_enforced() {
     let root = workspace_root().unwrap();
 
     for removed in [
+        "packaging/macos/INSTALLATION.md",
         "packaging/windows/portable.txt",
         "packaging/linux/nfpm.yaml",
         "packaging/linux/postinst.sh",
@@ -135,7 +136,6 @@ fn r028_packaging_file_presence_and_scripts_enforced() {
     }
 
     for retained in [
-        "packaging/macos/INSTALLATION.md",
         "packaging/linux/org.curvebook.CurveBook.desktop",
         "packaging/linux/org.curvebook.CurveBook.metainfo.xml.in",
         "packaging/linux/org.curvebook.CurveBook.mime.xml",

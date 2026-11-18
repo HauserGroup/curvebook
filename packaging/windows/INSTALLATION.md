@@ -24,10 +24,4 @@ payloads and verifies scope guards, folder preservation, action sequencing, upgr
 identity, and the registry contract in `install-policy.json` using a read-only Windows Installer
 session.
 
-Release builds produce `.msi` installers for Windows `x64` (`curvebook-<version>-windows-x64.msi`)
-and `arm64` (`curvebook-<version>-windows-arm64.msi`), each bundling both `curvebook.exe` and
-`curvebook-cli.exe` (`x86` / 32-bit and `-portable.zip` downloads were retired in `R0.28`).
-Beta `.msi` installers are **unsigned** until `R8.11`; verify `SHA256SUMS.txt` and the GitHub
-Sigstore attestation ([verifying downloads](../../docs/release/verifying-downloads.md)), and use
-SmartScreen **More info → Run anyway** if prompted (Windows 11 Smart App Control may block
-unsigned installers).
+For user-facing Windows `.msi` installation (`x64` and `arm64`) and verification steps, see [Get Started](https://hausergroup.github.io/curvebook/get-started.html) (`docs/reference/get-started.md`).
