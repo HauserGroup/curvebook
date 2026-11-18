@@ -1,13 +1,14 @@
 # CurveBook documentation
 
-Start with the [README](../README.md) to install and use the desktop application, or the [beginner's guide](mcp-for-beginners.md) to connect your AI assistant, run an analysis, and save your work. For verified capabilities and current limitations, read [Status](STATUS.md) and [Beta known issues](release/beta-known-issues.md). Contributors should start with [Contributing](../CONTRIBUTING.md), [Development](development.md), and the [active roadmap](ROADMAP.md).
+Start with the [README](../README.md) or the [online Get Started guide](https://hausergroup.github.io/curvebook/get-started.html) to install and use CurveBook, or the [beginner's guide](mcp-for-beginners.md) to connect your AI assistant, run an analysis, and save your work. For verified capabilities and current limitations, read [Status](STATUS.md) and [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues). Contributors should start with [Contributing](../CONTRIBUTING.md), [Development](development.md), and the [active roadmap](ROADMAP.md).
 
 ## Using CurveBook
 
 | Guide | Contents |
 |---|---|
-| [Beta known issues](release/beta-known-issues.md) | Beta scope, streamlined installer matrix, unsigned Windows / FreeBSD preview notes, and draft locale status |
-| [Verifying downloads](release/verifying-downloads.md) | Checking release checksums (`SHA256SUMS.txt`) and Sigstore build provenance on every platform |
+| [Get started & downloads](https://hausergroup.github.io/curvebook/get-started.html) | Installer guide (*Which file do I need?*), per-OS install steps, verification, and first steps |
+| [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) | Beta supported scope, `[Draft]` non-English locale note, platform caveats, and troubleshooting |
+| [Verifying downloads](release/verifying-downloads.md) | Checking release checksums (`SHA256SUMS.txt`) and Sigstore build provenance |
 | [Beginner's guide (MCP)](mcp-for-beginners.md) | Step-by-step AI assistant setup, first analysis, saving, and troubleshooting |
 | [MCP server](mcp.md) | Protocol, source builds, client configuration, Welch's *t*-test example, toolsets, and desktop connection |
 | [Command reference](commands.md) | Generated engine command catalog and parameters |
@@ -54,7 +55,7 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 ## Releases and reference files
 
 - [GitHub Pages site](index.html) and [Privacy policy](privacy.html): static entry point introducing CurveBook, complete-workspace sharing, downloads, and zero-telemetry privacy disclosures ([design decisions](release/website-design.md), [preview and publication checklist](release/github-pages.md)).
-- [Beta known issues & release notes](release/beta-known-issues.md): Beta supported surfaces (`curvebook` desktop GUI, `curvebook-cli`, `curvebook-cli mcp`), streamlined download set (`R0.28`), platform signing notes, `[Draft]` non-English locale status, known limits, and GitHub Release notes template.
+- [Get Started](https://hausergroup.github.io/curvebook/get-started.html) and [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues): single canonical home for Beta installer selection, platform install steps, verification, supported surfaces, `[Draft]` non-English locale status, unsigned Windows / FreeBSD preview caveats, and known limits.
 - [Alpha known issues & release notes (historical)](release/alpha-known-issues.md): historical `v0.1.0-alpha.1` / Alpha prerelease scope, caveats, and release notes (`R0.20`).
 - [Alpha branding clearance](release/alpha-branding-clearance.md): strict `R0.21` / `R10.14` branding, clean-room, and asset-provenance verification records.
 - [Release guide](release/releasing.md): packaging, verification, and release gates.

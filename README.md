@@ -12,9 +12,10 @@
 All calculations run locally on your computer with **zero telemetry**. You can work interactively in the **desktop application**, automate pipelines with the **command-line runner** (`curvebook-cli`), or analyze data through an **AI assistant** using the built-in Model Context Protocol server (`curvebook-cli mcp`).
 
 - **Website:** [hausergroup.github.io/curvebook](https://hausergroup.github.io/curvebook/)
+- **Install & Download Guide:** [Get Started (Which File Do I Need, Install & Verify)](https://hausergroup.github.io/curvebook/get-started.html)
 - **Documentation:** [Online Manual](https://hausergroup.github.io/curvebook/manual/) · [Repository Docs](docs/README.md)
 - **Downloads:** [Latest Release (GitHub Releases)](https://github.com/HauserGroup/curvebook/releases)
-- **Known Issues (Beta):** [Beta Known Issues & Release Scope](docs/release/beta-known-issues.md)
+- **Known Issues (Beta):** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)
 
 ## What You Can Do
 
@@ -33,83 +34,12 @@ All calculations run locally on your computer with **zero telemetry**. You can w
   <em>Page Layout view (Dark theme): multi-panel figure with significance brackets, embedded summary table, physical millimeter rulers, and Page Layout controls.</em>
 </p>
 
-## Download and Install (Beta)
+## Download & Install
 
-Download the installer for your computer from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)** (Beta builds are listed as prereleases). Each kept installer already includes both the desktop app (`curvebook`) and the CLI/MCP executable (`curvebook-cli`), so no separate CLI download is required.
+Download CurveBook installers from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)** (Beta releases appear as prereleases; every desktop installer bundles both `curvebook` and `curvebook-cli`).
 
-### Which file do I need?
-
-| Operating System | Architecture | File to Download | Status & Notes |
-|---|---|---|---|
-| **macOS** | Apple Silicon & Intel (`universal`) | `curvebook-<version>-macos-universal.dmg` | Signed & notarized universal app (`CurveBook.app`, with `curvebook-cli` inside the bundle). |
-| **Windows 10/11** | 64-bit Intel/AMD (`x64`) | `curvebook-<version>-windows-x64.msi` | **Unsigned** until post-Beta Authenticode signing (`R8.11`); see SmartScreen note below. |
-| **Windows 10/11** | Windows on Arm (`arm64`) | `curvebook-<version>-windows-arm64.msi` | **Unsigned** until post-Beta Authenticode signing (`R8.11`); see SmartScreen note below. |
-| **Linux** | 64-bit x86 (`x86_64`) | `curvebook-<version>-linux-x86_64.AppImage` | Single-file AppImage bundling both `curvebook` and `curvebook-cli`. |
-| **Linux** | 64-bit Arm (`aarch64`) | `curvebook-<version>-linux-aarch64.AppImage` | Single-file AppImage bundling both `curvebook` and `curvebook-cli`. |
-| **FreeBSD** | 64-bit x86 (`x86_64`) | `curvebook-<version>-freebsd-x86_64.tar.gz` | **Preview** desktop GUI & CLI archive. |
-| **Browser** | WebAssembly (`curvebook-web`) | *Not shipped in Beta* | Deferred to **1.0** (`R0.28`, `R11`). |
-
-*(Note: Legacy Windows 32-bit `x86` installers, Windows `-portable.zip`, separate macOS CLI `.zip`, and Linux `.deb`/`.rpm`/`.tar.gz`/Flatpak packages are no longer shipped starting with Beta. See [`docs/release/beta-known-issues.md`](docs/release/beta-known-issues.md) for details.)*
-
-### Platform Install Steps
-
-- **macOS:**
-  1. Open `curvebook-<version>-macos-universal.dmg` and drag **CurveBook.app** into **Applications**.
-  2. Launch **CurveBook** from Applications.
-  3. **Using `curvebook-cli` / MCP:** `curvebook-cli` lives inside `CurveBook.app/Contents/MacOS/curvebook-cli`.
-     - For MCP clients such as Claude Desktop, use the full path `/Applications/CurveBook.app/Contents/MacOS/curvebook-cli`.
-     - To run `curvebook-cli` in your terminal, add it to `PATH` (for zsh, add to `~/.zshrc`):
-       ```sh
-       export PATH="/Applications/CurveBook.app/Contents/MacOS:$PATH"
-       ```
-- **Windows (`x64` / `arm64`):**
-  1. Verify the downloaded `.msi` checksum and attestation first (see [Verifying Your Download](#verifying-your-download)).
-  2. Double-click `curvebook-<version>-windows-x64.msi` (or `-arm64.msi`). Because Beta Windows installers are **unsigned** (`R8.11`), Windows Defender SmartScreen displays an *Unknown publisher* prompt: click **More info** and then **Run anyway**.
-     - *Windows 11 Smart App Control & managed PCs:* Where **Smart App Control** is enabled, or on managed lab/university computers that block unsigned software, Windows blocks unsigned installers with no override option. A Microsoft-signed Microsoft Store package is planned separately (`R8.9`).
-  3. Follow the Setup Wizard (defaults to installing for your account under `%LOCALAPPDATA%\Programs\CurveBook\`, with an option to install for everyone under `Program Files\CurveBook\`). Both `curvebook.exe` and `curvebook-cli.exe` are placed in that install folder.
-- **Linux (`.AppImage`):**
-  1. Make the AppImage executable and launch it:
-     ```sh
-     chmod +x curvebook-<version>-linux-x86_64.AppImage
-     ./curvebook-<version>-linux-x86_64.AppImage
-     ```
-     *(Requires FUSE such as `libfuse2`/`fuse3`; if FUSE is unavailable, pass `--appimage-extract-and-run`.)*
-  2. To invoke `curvebook-cli` directly (for example from an MCP client or script), extract the AppImage once with `--appimage-extract` and point to `squashfs-root/usr/bin/curvebook-cli`.
-- **FreeBSD (`x86_64` preview):**
-  1. Extract the archive and run `bin/curvebook` or `bin/curvebook-cli`:
-     ```sh
-     tar -xzf curvebook-<version>-freebsd-x86_64.tar.gz
-     cd curvebook-<version>-freebsd-x86_64
-     ./bin/curvebook
-     ```
-
-## Verifying Your Download
-
-Every release file includes a SHA-256 checksum in `SHA256SUMS.txt` and a keyless [Sigstore](https://www.sigstore.dev/) build provenance attestation generated by CurveBook's GitHub Actions release workflow.
-
-Put your downloaded installer and `SHA256SUMS.txt` in the same folder, then verify **both** provenance and checksum:
-
-1. **Check build provenance** using the [GitHub CLI](https://cli.github.com/) (`gh`, signed in with `gh auth login`):
-
-   ```sh
-   gh attestation verify SHA256SUMS.txt --repo HauserGroup/curvebook \
-     --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
-   ```
-
-   For tag-built releases, you can also pin the release tag with `--source-ref refs/tags/v<version>`.
-
-2. **Verify your downloaded file against `SHA256SUMS.txt`:**
-   - **macOS:** `shasum -a 256 --check --ignore-missing SHA256SUMS.txt`
-   - **Linux:** `sha256sum --check --ignore-missing SHA256SUMS.txt`
-   - **Windows (PowerShell):**
-     ```powershell
-     $f = "curvebook-<version>-windows-x64.msi"
-     $expected = (Select-String -Path SHA256SUMS.txt -SimpleMatch "  $f").Line.Split(" ")[0]
-     (Get-FileHash $f -Algorithm SHA256).Hash -eq $expected.ToUpper()
-     ```
-   - **FreeBSD:** see [`docs/release/verifying-downloads.md`](docs/release/verifying-downloads.md) for the `sha256` check command.
-
-Full verification instructions and details on why Linux and FreeBSD downloads use Sigstore attestations instead of separate signature files are in [`docs/release/verifying-downloads.md`](docs/release/verifying-downloads.md).
+- **Which File Do I Need, Install Steps & Checksums:** Follow **[Get Started on the CurveBook website](https://hausergroup.github.io/curvebook/get-started.html)** for platform installer selection, OS setup instructions (including macOS `PATH` setup for `curvebook-cli` and Windows SmartScreen guidance), and SHA-256 / Sigstore download verification (`SHA256SUMS.txt` and `gh attestation verify`).
+- **Known Issues & Platform Caveats:** Check **[Known Issues (Beta)](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)** before installing.
 
 ## Your First Analysis
 
@@ -133,7 +63,7 @@ For MCP framing details, attaching to a shared desktop window (`curvebook --cont
 
 - **Online Manual & Reference:** [hausergroup.github.io/curvebook/manual/](https://hausergroup.github.io/curvebook/manual/)
 - **Repository Documentation Index:** [`docs/README.md`](docs/README.md)
-- **Known Issues & Release Notes:** [`docs/release/beta-known-issues.md`](docs/release/beta-known-issues.md) (historical Alpha notes: [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md))
+- **Known Issues & Release Notes:** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) (historical Alpha notes: [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md))
 - **Report a Bug or Numerical Issue:** Open a [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml), [Numerical Result Report](.github/ISSUE_TEMPLATE/numerical_result.yml), or [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) via GitHub Issues (avoid attaching unpublished or confidential research data).
 - **Security Vulnerabilities:** Report privately following [`SECURITY.md`](SECURITY.md).
 

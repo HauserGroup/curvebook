@@ -1,7 +1,7 @@
 # CurveBook Alpha Known Issues & Release Scope (`v0.1.0-alpha.2`)
 
 > [!NOTE]
-> **Historical Alpha record:** This document is preserved as the historical record of CurveBook's Alpha prereleases (beginning with [`v0.1.0-alpha.1`](https://github.com/HauserGroup/curvebook/releases/tag/v0.1.0-alpha.1)). For current Beta scope, supported desktop GUI usage, streamlined installers, and known issues, see [`beta-known-issues.md`](beta-known-issues.md). Note that **later releases (starting with Beta) no longer ship Windows `x86` (32-bit)** (or Windows `-portable.zip`, separate macOS CLI `.zip`, Linux `.deb`/`.rpm`/`.tar.gz`/Flatpak/`.zsync`, or the `1.0`-deferred web bundle; [`R0.28`](../ROADMAP.md#r028-rein-in-the-number-of-release-install-files)).
+> **Historical Alpha record:** This document is preserved as the historical record of CurveBook's Alpha prereleases (beginning with [`v0.1.0-alpha.1`](https://github.com/HauserGroup/curvebook/releases/tag/v0.1.0-alpha.1)). For current Beta scope, supported desktop GUI usage, and known issues, see [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues). Note that **later releases (starting with Beta) no longer ship Windows `x86` (32-bit)** ([`R0.28`](../ROADMAP.md#r028-rein-in-the-number-of-release-install-files)).
 
 > **Release tier:** MCP Alpha (`v0.1.0-alpha.2`, prerelease) · **Primary surface:** `curvebook-cli` & `curvebook-cli mcp` (stdio JSON-RPC 2.0) · **Onboarding:** [`mcp-for-beginners.md`](../mcp-for-beginners.md) · **Branding & provenance clearance:** [`alpha-branding-clearance.md`](alpha-branding-clearance.md)
 
