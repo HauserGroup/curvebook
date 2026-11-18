@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="CurveBook Privacy Policy: CurveBook runs locally, collects no personal data, sends no telemetry or crash reports, makes no network connections, and includes no auto-updater.">
+  <meta name="referrer" content="no-referrer">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'">
+  <meta name="color-scheme" content="light">
+  <title>Privacy Policy — CurveBook</title>
+  <link rel="icon" type="image/png" href="images/curvebook.png">
+  <link rel="stylesheet" href="site.css">
+</head>
+<body>
+  <a class="skip-link" href="#main">Skip to content</a>
+  <div class="desktop-window wrap">
+    <header class="site-header">
+      <div class="title-bar">
+        <div class="wordmark">
+          <img src="images/curvebook.png" width="64" height="64" alt="">
+          <span>CurveBook</span>
+        </div>
+        <span class="window-status">Privacy Policy</span>
+      </div>
+      <nav aria-label="Privacy policy navigation">
+        <a href="index.html">CurveBook home</a>
+        <a href="#summary">Summary</a>
+        <a href="#local-storage">Local storage</a>
+        <a href="#automation">Control &amp; MCP</a>
+        <a href="#operators">Operators</a>
+        <a href="#changes">Changes &amp; contact</a>
+      </nav>
+    </header>
+
+    <main id="main" tabindex="-1">
+      <div class="overview">
+        <section id="summary" aria-labelledby="policy-title" tabindex="-1">
+          <div class="document-brand"><img src="images/curvebook.png" width="64" height="64" alt=""><span>CurveBook</span></div>
+          <p class="eyebrow">Privacy Policy · Effective 2026-11-18</p>
+          <h1 id="policy-title">Local by design.<br><span>Zero telemetry.</span></h1>
+          <p class="lead"><strong>CurveBook</strong> runs locally on your computer or inside your browser tab. Across every distribution, CurveBook collects no personal data, sends no telemetry or crash reports, makes no outbound network connections, and has no auto-updater.</p>
+          <ul>
+            <li><strong>Distributions covered:</strong> native desktop installers and portable archives (macOS, Windows, Linux, and FreeBSD), the Windows MSIX / Microsoft Store package (<code>JakobSture.CurveBook</code>), the command-line tool and Model Context Protocol server (<code>curvebook-cli</code> and <code>curvebook-cli mcp</code>), and the WebAssembly browser bundle (<code>curvebook-web</code>).</li>
+            <li><strong>No personal or scientific data collection:</strong> CurveBook never collects, transmits, sells, or shares your name, contact details, identifiers, usage activity, or research datasets. No user account or sign-in exists.</li>
+            <li><strong>No telemetry or crash reporting:</strong> CurveBook embeds no analytics libraries, usage beacons, or automatic crash-reporting agents.</li>
+            <li><strong>No outbound network connections:</strong> CurveBook makes no internet or cloud requests. Automated repository checks (<code>cargo xtask telemetry</code>) reject HTTP client crates, telemetry SDKs, non-loopback network sockets, and external browser requests.</li>
+            <li><strong>No built-in updater:</strong> CurveBook never checks for updates in the background. Updates happen only when you install a new release yourself or update through Microsoft Store or your operating system’s package manager.</li>
+          </ul>
+        </section>
+
+        <hr>
+
+        <section id="local-storage" aria-labelledby="local-storage-title" tabindex="-1">
+          <p class="eyebrow">On-device files &amp; browser storage</p>
+          <h2 id="local-storage-title">What CurveBook stores locally</h2>
+
+          <h3>1. Data written on your device</h3>
+          <ul>
+            <li><strong>Project, template, and exported files:</strong> <code>.curvebook</code> archives, unpacked <code>.curvebook.d/</code> directories, <code>.cbtemplate</code> templates, and exported figures or tables (<code>.csv</code>, <code>.tsv</code>, <code>.svg</code>, <code>.pdf</code>, <code>.png</code>, <code>.tiff</code>, <code>.emf</code>, <code>.json</code>) are written atomically only to paths you explicitly save or export to. A saved project stores your data sheets, formulas, statistical results, graphs, layouts, notes, named checkpoints, and the local paths of any external CSV/TSV files you explicitly linked into a table.</li>
+            <li><strong>User preferences (<code>preferences.json</code> and <code>shortcuts.json</code>):</strong> stores only your selected interface language (<code>locale</code>), visual theme (<code>light</code>, <code>dark</code>, or <code>high-contrast</code>), and custom keyboard shortcut overrides (<code>shortcuts</code>). CurveBook writes <code>preferences.json</code> only when you change a preference away from defaults (or when the file already exists).</li>
+            <li><strong>Crash-recovery write-ahead journal (<code>recovery/</code>):</strong> protects unsaved desktop edits if the process or power stops unexpectedly. The directory holds <code>snapshot.curvebook</code> (an atomic workspace baseline), <code>ops.journal</code> (an append-only newline-delimited JSON log of workspace commands since the last checkpoint), and <code>curvebook.lock</code> (a local writer lease recording process/window owner ID, timestamps, lease duration, and a non-secret local OS/architecture/hostname identifier used solely on the same machine to detect stale locks). Secondary windows and <code>--new-instance</code> runs use isolated <code>win-&lt;n&gt;</code> or <code>instance-&lt;pid&gt;-...</code> subdirectories. Closing a saved or discarded session cleanly releases the lock and clears pending recovery entries.</li>
+            <li><strong>Temporary loopback control token (<code>control-&lt;port&gt;.token</code>):</strong> created in the configuration folder (mode <code>0600</code> on Unix) only while <code>curvebook --control &lt;port&gt;</code> is running so local tools under the same user account can authenticate, then removed automatically when that session exits.</li>
+            <li><strong>Recent files:</strong> CurveBook does not persist a recent-files (<code>MRU</code>) history file on disk or in browser storage. Your operating system’s native file dialogs or desktop shell may maintain their own recent-items list under your OS privacy settings.</li>
+            <li><strong>Headless command-line runs (<code>curvebook-cli</code>):</strong> one-shot CLI subcommands (<code>info</code>, <code>convert</code>, <code>export</code>, <code>run</code>, <code>batch</code>) and default headless <code>curvebook-cli mcp</code> read and write only the file paths you specify and do not create <code>preferences.json</code> or background <code>recovery/</code> folders.</li>
+          </ul>
+
+          <h3>2. Where each platform keeps local data</h3>
+          <ul>
+            <li><strong>macOS:</strong> <code>~/Library/Application Support/CurveBook/</code> (contains <code>preferences.json</code>, <code>shortcuts.json</code>, temporary <code>control-&lt;port&gt;.token</code>, and <code>recovery/</code>).</li>
+            <li><strong>Windows (MSI installer &amp; portable/standalone executable):</strong> <code>%APPDATA%\CurveBook\</code> for <code>preferences.json</code>, <code>shortcuts.json</code>, and temporary <code>control-&lt;port&gt;.token</code>; <code>%LOCALAPPDATA%\CurveBook\recovery\</code> for crash-recovery files.</li>
+            <li><strong>Windows (MSIX / Microsoft Store <code>JakobSture.CurveBook</code>):</strong> the WindowsApps package directory is read-only and never stores user data. Preferences and crash-recovery files stay in per-user package-external <code>AppData</code> storage (<code>%APPDATA%\CurveBook\</code> and <code>%LOCALAPPDATA%\CurveBook\recovery\</code>, which Windows Desktop Bridge maps per user under <code>%LOCALAPPDATA%\Packages\JakobSture.CurveBook_&lt;publisherId&gt;\LocalCache\</code> when package redirection applies).</li>
+            <li><strong>Linux &amp; FreeBSD:</strong> <code>$XDG_CONFIG_HOME/curvebook/</code> (default <code>~/.config/curvebook/</code>) for preferences, shortcuts, and temporary control tokens; <code>$XDG_DATA_HOME/curvebook/recovery/</code> (default <code>~/.local/share/curvebook/recovery/</code>) for crash recovery. In the Linux Flatpak (<code>org.curvebook.CurveBook</code>), these paths live inside <code>~/.var/app/org.curvebook.CurveBook/config/curvebook/</code> and <code>~/.var/app/org.curvebook.CurveBook/data/curvebook/recovery/</code>. When <code>HOME</code> and XDG variables are unset on Unix, CurveBook uses a private <code>0700</code> per-UID directory under <code>$XDG_RUNTIME_DIR/curvebook</code> or <code>$TMPDIR/curvebook-uid-&lt;uid&gt;</code>.</li>
+            <li><strong>Portable mode &amp; environment overrides:</strong> passing <code>--portable-dir &lt;dir&gt;</code> or placing <code>portable.txt</code> next to the desktop executable keeps preferences, shortcuts, and <code>recovery/</code> inside <code>&lt;dir&gt;/curvebook-data/</code>. Setting <code>CURVEBOOK_CONFIG_DIR=&lt;dir&gt;</code> stores both config and recovery files under <code>&lt;dir&gt;</code>, and setting <code>CURVEBOOK_NO_PREFS=1</code> disables on-disk preferences and crash-recovery writes for that session.</li>
+            <li><strong>WebAssembly browser bundle (<code>curvebook-web</code>):</strong> runs entirely inside your browser tab without uploading files to any server. Files you open or drop are processed in local memory, and saves/exports use your browser’s local download or File System Access picker. Preferences and crash-recovery autosave data are kept in your browser’s origin-scoped <code>window.localStorage</code> under <code>curvebook.v1.preferences</code> and <code>curvebook.v1.autosave.&lt;doc_id&gt;</code> (<code>curvebook.v1.autosave.default</code> in the current single-slot browser shell, bounded to a 5 MiB quota with least-recently-used eviction), alongside local multi-tab lock coordination (<code>navigator.locks</code> / <code>BroadcastChannel</code>, or short-lived <code>curvebook.v1.lock.&lt;doc_id&gt;</code> fallback entries).</li>
+          </ul>
+
+          <h3>3. How to delete local data</h3>
+          <ul>
+            <li><strong>Desktop (macOS, Windows, Linux, FreeBSD):</strong> quit CurveBook and delete the CurveBook folder(s) listed above for your platform (or <code>&lt;dir&gt;/curvebook-data/</code> when using portable mode). For Windows Store / MSIX installations, <strong>Settings → Apps → Installed apps → CurveBook → Uninstall</strong> (or <strong>Advanced options → Reset</strong>) removes the package’s per-user app data container. For Flatpak, run <code>flatpak uninstall --delete-data org.curvebook.CurveBook</code>. Delete any saved <code>.curvebook</code>, <code>.curvebook.d/</code>, <code>.cbtemplate</code>, or exported files from the folders where you placed them.</li>
+            <li><strong>Browser bundle:</strong> clear site data / local storage for the hosting origin in your browser settings (or remove <code>curvebook.v1.*</code> entries in browser developer tools).</li>
+          </ul>
+        </section>
+
+        <hr>
+
+        <section id="automation" aria-labelledby="automation-title" tabindex="-1">
+          <p class="eyebrow">Local IPC &amp; AI assistants</p>
+          <h2 id="automation-title">Loopback control and MCP modes</h2>
+
+          <h3>1. Local-only transports</h3>
+          <ul>
+            <li><strong>Disabled by default:</strong> normal desktop, CLI, and browser launches open no network listeners.</li>
+            <li><strong>Stdio MCP mode (<code>curvebook-cli mcp</code>):</strong> exchanges JSON-RPC messages with a parent MCP client over standard input and standard output (<code>stdin</code>/<code>stdout</code>) on the same computer with zero network sockets. Passing <code>--workdir &lt;dir&gt;</code> confines file reads, saves, exports, and external CSV/TSV links strictly within <code>&lt;dir&gt;</code>, and <code>--gui-only</code> restricts automation to interactive GUI widget actions.</li>
+            <li><strong>Loopback TCP control (<code>curvebook --control &lt;port&gt;</code> and <code>curvebook-cli mcp --control-port &lt;port&gt;</code>):</strong> when explicitly enabled via <code>--control &lt;port&gt;</code> or <code>CURVEBOOK_CONTROL_PORT</code>, CurveBook binds strictly to local loopback (<code>127.0.0.1</code> / <code>::1</code>) and refuses non-loopback addresses. Every connection requires per-session bearer-token authentication (<code>--control-token</code>, <code>CURVEBOOK_CONTROL_TOKEN</code>, or <code>control-&lt;port&gt;.token</code>), and HTTP request lines receive <code>403 Forbidden</code> so web pages in a browser cannot probe the local port.</li>
+          </ul>
+
+          <h3>2. External AI clients and model providers</h3>
+          <p>CurveBook itself never connects to AI services or external APIs. When you connect an AI assistant, IDE, or language-model client to CurveBook over MCP or <code>--control</code>, any table cells, column labels, notes, statistical outputs, rendered figure previews/screenshots, or project metadata that you or your client request through MCP are handled under <strong>that AI client’s and model provider’s own privacy policy and data-retention terms, not CurveBook’s</strong>. If your AI client transmits prompts and tool results to a cloud model, data leaves your machine through that client. Use local models or de-identified/synthetic data whenever confidentiality, institutional review, or data-governance rules require it.</p>
+        </section>
+
+        <hr>
+
+        <section id="operators" aria-labelledby="operators-title" tabindex="-1">
+          <p class="eyebrow">Distribution &amp; hosting</p>
+          <h2 id="operators-title">Third-party platform operators</h2>
+          <ul>
+            <li><strong>Microsoft Store:</strong> downloading, licensing, and receiving Store-delivered package updates for the Windows MSIX distribution (<code>JakobSture.CurveBook</code>) are governed by Microsoft’s Privacy Statement and your Windows privacy settings. CurveBook adds no Store telemetry or in-app tracking SDKs.</li>
+            <li><strong>GitHub Releases &amp; repository hosting:</strong> downloading installers, archives, <code>SHA256SUMS.txt</code>, or Sigstore build provenance attestations from <a href="https://github.com/HauserGroup/curvebook">github.com/HauserGroup/curvebook <span aria-hidden="true">↗</span></a>, browsing repository files, and participating in issues or discussions are governed by GitHub’s Privacy Statement.</li>
+            <li><strong>GitHub Pages (this website):</strong> <code>index.html</code> and <code>privacy.html</code> are static HTML/CSS pages with no JavaScript, cookies, forms, analytics, or external asset requests, served with <code>Referrer-Policy: no-referrer</code> and a strict <code>Content-Security-Policy</code>. As the web host, GitHub Pages logs visitor IP addresses for security and operational reliability under GitHub’s Privacy Statement. If you or your institution host the static <code>curvebook-web</code> bundle on another server, standard HTTP access logs are governed by that server’s operator.</li>
+          </ul>
+        </section>
+      </div>
+
+      <p class="primary-action"><a class="button primary" href="index.html"><span aria-hidden="true">←</span> Back to CurveBook</a></p>
+
+      <section id="changes" class="downloads" aria-labelledby="changes-title" tabindex="-1">
+        <div class="panel-title">Effective date, change history &amp; contact</div>
+        <div class="download-content">
+          <div>
+            <h2 id="changes-title">Change history</h2>
+            <p><strong>Effective date:</strong> 2026-11-18</p>
+            <p>Maintainers review and update this policy whenever a change touches local storage locations, loopback sockets, or the <code>cargo xtask telemetry</code> verification rules. Material updates are recorded here and in the public Git commit log.</p>
+            <p><strong>2026-11-18:</strong> Published initial CurveBook Privacy Policy covering desktop installers and portable archives, Windows MSIX / Microsoft Store distribution, CLI and MCP modes, and the WebAssembly browser bundle.</p>
+          </div>
+          <aside class="release-status" aria-label="Privacy questions and security reporting">
+            <p><strong>Privacy questions &amp; security reports</strong></p>
+            <p>For privacy questions about CurveBook or this policy, open an issue on GitHub (do not attach confidential or unpublished research data) or contact maintainer Jakob Sture (<code>@jsture</code>) through the repository.</p>
+            <p><strong>Vulnerability reporting:</strong> Do not open a public issue for security problems; follow the private disclosure instructions in <code>SECURITY.md</code>.</p>
+            <div class="download-links">
+              <a href="https://github.com/HauserGroup/curvebook/issues">Privacy questions <span aria-hidden="true">↗</span></a>
+              <a href="https://github.com/HauserGroup/curvebook/blob/main/SECURITY.md">SECURITY.md <span aria-hidden="true">↗</span></a>
+            </div>
+          </aside>
+        </div>
+      </section>
+    </main>
+
+    <footer class="site-footer">
+      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>
+      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>
+      <p class="privacy">CurveBook runs locally and collects no telemetry. GitHub Pages logs visitor IP addresses for security. <a href="index.html">CurveBook home</a>.</p>
+      <a href="https://github.com/HauserGroup/curvebook">Source code &amp; credits <span aria-hidden="true">↗</span></a>
+    </footer>
+  </div>
+</body>
+</html>
