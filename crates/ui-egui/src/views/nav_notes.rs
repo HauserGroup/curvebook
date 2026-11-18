@@ -677,19 +677,41 @@ fn build_sheet_entry_row(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, ctx
 
     let size_px = (12.0 * scale).clamp(9.0, 22.0);
     let style = if selected || entry.is_bold { UiTextStyle::ui_bold(size_px) } else { UiTextStyle::ui_sans(size_px) };
-    paint_text_fitted(
-        builder,
-        &ewid,
-        FittedTextSpec {
-            z_layer: ZLayer::Workspace,
-            rect: text_rect,
-            pad_x: 2,
-            text: raw_title,
-            style: &style,
-            color: fg,
-            scroll_container: Some(NAV_SCROLL_ID),
-        },
-    );
+    let is_editing_title = builder.app.inline_editor.active
+        && matches!(&builder.app.inline_editor.target, Some(InlineEditorTarget::SheetTitle { sheet_id }) if *sheet_id == entry.sheet_id);
+    if is_editing_title {
+        let edit_rect = LayoutRectPx::new(text_rect.x, text_rect.y + 1, text_rect.width, text_rect.height.saturating_sub(2).max(12));
+        builder.paint_fill(ZLayer::Workspace, Some(&ewid), edit_rect, builder.palette.surface);
+        builder.paint_stroke(ZLayer::Workspace, Some(&ewid), edit_rect, builder.palette.accent, 2);
+        let edit_text = format!("{}|", builder.app.inline_editor.buffer);
+        paint_text_fitted(
+            builder,
+            &ewid,
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: edit_rect,
+                pad_x: 3,
+                text: &edit_text,
+                style: &style,
+                color: builder.palette.text,
+                scroll_container: Some(NAV_SCROLL_ID),
+            },
+        );
+    } else {
+        paint_text_fitted(
+            builder,
+            &ewid,
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: text_rect,
+                pad_x: 2,
+                text: raw_title,
+                style: &style,
+                color: fg,
+                scroll_container: Some(NAV_SCROLL_ID),
+            },
+        );
+    }
 
     builder.tree.navigator_entries.push(NavigatorEntryHitRect {
         sheet_id: entry.sheet_id.clone(),

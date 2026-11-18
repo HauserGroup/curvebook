@@ -567,3 +567,85 @@ fn jsonl_script_playback_and_cli_runtime_flags_integration() -> Result<(), Box<d
     let _ = fs::remove_dir_all(&dir);
     Ok(())
 }
+
+#[test]
+fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook_doc::{CellCoord, TableArchetype};
+    use curvebook_format::ZipWriter;
+
+    let dir = temp_test_dir("curvebook-dnd-pzfx-zip")?;
+    let pzfx_path = dir.join("dropped.pzfx");
+    fs::write(
+        &pzfx_path,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<PrismFile SchemaVersion="2">
+  <Title>Dropped PZFX Study</Title>
+  <TableSequence>
+    <Table ID="pz-1" TableType="OneWay">
+      <Title>Dropped XML Columns</Title>
+      <YColumn><Title>Baseline</Title><Subcolumn><d>3.5</d><d>4.5</d></Subcolumn></YColumn>
+    </Table>
+  </TableSequence>
+</PrismFile>"#,
+    )?;
+
+    let archive_path = dir.join("dropped.prism");
+    {
+        let mut writer = ZipWriter::new();
+        writer.add_file(
+            "manifest.json",
+            serde_json::to_vec(&json!({
+                "title": "Dropped Archive Container",
+                "sheets": [{
+                    "id": "pr-1",
+                    "title": "Dropped Archive Trace",
+                    "kind": "XY",
+                    "subcolumn_mode": "Single",
+                    "csv_path": "data/trace.csv"
+                }]
+            }))?,
+        )?;
+        writer.add_file("data/trace.csv", b"Time,Signal\n0,1.25\n10,9.75\n".to_vec())?;
+        fs::write(&archive_path, writer.finish()?)?;
+    }
+
+    let metrics = ViewportMetrics::new(1100.0, 720.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        new_instance: false,
+        gui_only: false,
+        locale_override: None,
+        theme_override: None,
+        recovery_root: None,
+        initial_viewport: metrics,
+    });
+    let wid = rt.open_window(None, metrics)?;
+
+    // Drop .pzfx
+    let pzfx_out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: pzfx_path })?;
+    assert!(pzfx_out.handled);
+    let pzfx_win = pzfx_out.opened_window_id.unwrap_or(wid);
+    {
+        let doc = rt.window(pzfx_win)?.app().document();
+        let ds = doc.data_sheets.iter().find(|d| d.title == "Dropped XML Columns").ok_or("missing dropped .pzfx sheet")?;
+        assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(3.5));
+        assert!(rt.window(pzfx_win)?.app().session().file_path().is_none(), "foreign .pzfx drop detaches native archive path");
+    }
+
+    // Drop .prism
+    let zip_out = rt.dispatch(DesktopHostEvent::FileDropped { window_id: wid, path: archive_path })?;
+    assert!(zip_out.handled);
+    let zip_win = zip_out.opened_window_id.unwrap_or(wid);
+    {
+        let doc = rt.window(zip_win)?.app().document();
+        let ds = doc.data_sheets.iter().find(|d| d.title == "Dropped Archive Trace").ok_or("missing dropped .prism sheet")?;
+        let TableArchetype::Xy(_) = &ds.archetype else {
+            return Err(String::from("expected XY archetype from dropped .prism").into());
+        };
+        assert_eq!(ds.cell(CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(9.75));
+        assert!(rt.window(zip_win)?.app().session().file_path().is_none(), "foreign .prism drop detaches native archive path");
+    }
+
+    let _ = fs::remove_dir_all(&dir);
+    Ok(())
+}

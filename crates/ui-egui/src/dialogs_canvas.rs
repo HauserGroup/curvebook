@@ -541,6 +541,27 @@ impl VariableRoleFilter {
             Self::NumericForModeling => "Numeric (Continuous + Calculated)",
         }
     }
+
+    /// Parse a canonical role-filter slug (`all`, `continuous`, `categorical`, `label`, `calculated`, `numeric`).
+    #[must_use]
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug.trim().to_ascii_lowercase().as_str() {
+            "all" => Some(Self::All),
+            "continuous" => Some(Self::ContinuousOnly),
+            "categorical" => Some(Self::CategoricalOnly),
+            "label" => Some(Self::LabelOnly),
+            "calculated" => Some(Self::CalculatedOnly),
+            "numeric" | "numeric_for_modeling" => Some(Self::NumericForModeling),
+            _ => None,
+        }
+    }
+}
+
+/// Contrasting badge foreground ink (`BLACK` or `WHITE`) for a [`variable_role_color`] fill.
+#[must_use]
+pub const fn variable_role_badge_fg(bg: Rgba8) -> Rgba8 {
+    let luma = (bg.r as u32) * 299 + (bg.g as u32) * 587 + (bg.b as u32) * 114;
+    if luma >= 145_000 { Rgba8::BLACK } else { Rgba8::WHITE }
 }
 
 /// Short badge text for a typed variable role (`MultipleVariablesTable`).
@@ -2041,6 +2062,8 @@ pub struct EditAnalysisParametersState {
     pub pca_predictors: Vec<usize>,
     #[serde(default)]
     pub pcr_outcome_column: Option<usize>,
+    #[serde(default)]
+    pub role_filter: VariableRoleFilter,
     #[serde(default = "default_tg_param_unpaired")]
     pub saved_two_group_param_unpaired: TwoGroupMethod,
     #[serde(default = "default_tg_param_paired")]
@@ -2087,6 +2110,7 @@ impl Default for EditAnalysisParametersState {
             welch_correction: false,
             pca_predictors: Vec::new(),
             pcr_outcome_column: None,
+            role_filter: VariableRoleFilter::All,
             saved_two_group_param_unpaired: default_tg_param_unpaired(),
             saved_two_group_param_paired: default_tg_param_paired(),
             saved_two_group_nonparam_unpaired: default_tg_nonparam_unpaired(),
