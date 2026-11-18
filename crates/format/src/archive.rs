@@ -24,6 +24,11 @@ use crate::zip::{ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
+const UNPACKED_TX_DIR: &str = ".curvebook.tx";
+const UNPACKED_TX_NEXT_DIR: &str = "next";
+const UNPACKED_TX_PREV_DIR: &str = "prev";
+const UNPACKED_TX_COMMIT_MARKER: &str = "COMMITTING";
+const UNPACKED_TX_FORMAT: &str = "curvebook-unpacked-tx";
 pub(crate) const FORMAT_MAGIC: &str = "curvebook-archive";
 pub(crate) const LEGACY_FORMAT_MAGIC: &str = "lumencraft-archive";
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
@@ -169,8 +174,23 @@ pub(crate) fn platform_read_regular_file(_path: &Path, _max_bytes: usize) -> Res
     Err(FormatError::Io(String::from("filesystem reads are not supported on wasm32")))
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+fn platform_sync_dir(dir: &Path) -> Result<(), FormatError> {
+    curvebook_platform::fs::sync_dir(dir)?;
+    Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+fn platform_sync_dir(_dir: &Path) -> Result<(), FormatError> {
+    Ok(())
+}
+
+fn clamp_peek_schema_version(raw: u64) -> u32 {
+    u32::try_from(raw).unwrap_or(u32::MAX)
+}
+
 fn peek_json_schema_version(bytes: &[u8]) -> Option<u32> {
-    serde_json::from_slice::<DocumentSchemaPeek>(bytes).ok()?.schema_version
+    serde_json::from_slice::<DocumentSchemaPeek>(bytes).ok()?.schema_version.map(clamp_peek_schema_version)
 }
 
 fn ensure_schema_version_supported(version: u32) -> Result<(), FormatError> {
@@ -193,7 +213,7 @@ where
         saw_metadata_entry = true;
         let peek: DocumentSchemaPeek = serde_json::from_slice(entry_bytes)
             .map_err(|err| FormatError::Json(format!("existing archive `{entry_path}` could not be parsed while checking schema version: {err}")))?;
-        if let Some(version) = peek.schema_version {
+        if let Some(version) = peek.schema_version.map(clamp_peek_schema_version) {
             ensure_schema_version_supported(version)?;
         }
     }
@@ -203,7 +223,9 @@ where
     Ok(())
 }
 
-fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
+/// Inspect any existing `.curvebook` or `.cbtemplate` archive at `path` and refuse if its
+/// `schema_version` exceeds [`CURRENT_SCHEMA_VERSION`].
+pub fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
     #[cfg(not(target_arch = "wasm32"))]
     {
         let Some(bytes) = curvebook_platform::fs::read_regular_file_bytes_if_exists(path, MAX_ARCHIVE_FILE_BYTES)? else {
@@ -233,6 +255,29 @@ fn ensure_existing_archive_not_newer(path: &Path) -> Result<(), FormatError> {
     #[cfg(target_arch = "wasm32")]
     {
         let _ = path;
+        Ok(())
+    }
+}
+
+/// Inspect any existing unpacked `.curvebook.d/` directory at `dir` (and any pending crash
+/// recovery snapshots under `.curvebook.tx/`) and refuse if any `schema_version` exceeds
+/// [`CURRENT_SCHEMA_VERSION`].
+pub fn ensure_existing_unpacked_dir_not_newer(dir: &Path) -> Result<(), FormatError> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        match std::fs::metadata(dir) {
+            Ok(meta) if meta.is_dir() => {
+                let canon_root = std::fs::canonicalize(dir)?;
+                ensure_existing_unpacked_not_newer(&canon_root)
+            }
+            Ok(_) => Ok(()),
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(err) => Err(FormatError::Io(err.to_string())),
+        }
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        let _ = dir;
         Ok(())
     }
 }
@@ -281,16 +326,42 @@ pub fn save_project_unpacked_dir(doc: &ProjectDocument, dir: &Path) -> Result<()
     save_project_unpacked_dir_with_hook(doc, dir, |_| Ok(()))
 }
 
+enum MidCommitDirective {
+    Proceed,
+    FailRollback(std::io::Error),
+    #[cfg(test)]
+    SimulateCrash,
+}
+
 fn save_project_unpacked_dir_with_hook<F>(doc: &ProjectDocument, dir: &Path, mut before_commit: F) -> Result<(), FormatError>
 where
     F: FnMut(&str) -> Result<(), std::io::Error>,
 {
+    save_project_unpacked_dir_driven(doc, dir, |rel| match before_commit(rel) {
+        Ok(()) => MidCommitDirective::Proceed,
+        Err(err) => MidCommitDirective::FailRollback(err),
+    })
+}
+
+fn save_project_unpacked_dir_driven<F>(doc: &ProjectDocument, dir: &Path, mut on_commit_entry: F) -> Result<(), FormatError>
+where
+    F: FnMut(&str) -> MidCommitDirective,
+{
     let entries = build_archive_entries(doc, ArchiveKind::Project)?;
     ensure_dir_exists(dir)?;
     let canon_root = std::fs::canonicalize(dir)?;
-    let prior_paths = preflight_unpacked_save(&canon_root, &entries)?;
+    preflight_unpacked_save(&canon_root, &entries)?;
+    reconcile_pending_unpacked_tx(&canon_root)?;
 
+    let prior_paths = collect_prior_manifest_csv_paths(&canon_root)?;
     let expected_paths: HashSet<String> = entries.iter().map(|(rel, _)| rel.clone()).collect();
+    if !unpacked_changes_needed(&canon_root, &entries, &prior_paths, &expected_paths)? {
+        return Ok(());
+    }
+
+    let prev_entries = capture_prior_snapshot_entries(&canon_root, ZipLimits::default());
+    let mut tx_guard = begin_unpacked_tx(&canon_root, &entries, prev_entries.as_deref())?;
+
     let sheets_dir = canon_root.join(SHEETS_DIR);
     let sheets_existed_before = std::fs::symlink_metadata(&sheets_dir).is_ok();
 
@@ -304,14 +375,26 @@ where
         }
     };
 
-    if let Err(err) = commit_staged_unpacked_entries(&staged, &mut stage_guard, &mut before_commit) {
+    if let Err(err) = write_unpacked_tx_commit_marker(&canon_root, &staged, &prior_paths, &entries) {
+        drop(stage_guard);
         if !sheets_existed_before {
             let _ = std::fs::remove_dir(&sheets_dir);
         }
         return Err(err);
     }
 
-    prune_stale_unpacked_files(&canon_root, &prior_paths, &expected_paths)
+    if let Err(err) = commit_staged_unpacked_entries(&staged, &mut stage_guard, &mut tx_guard, &mut on_commit_entry) {
+        drop(stage_guard);
+        if !sheets_existed_before {
+            let _ = std::fs::remove_dir(&sheets_dir);
+        }
+        return Err(err);
+    }
+
+    prune_stale_unpacked_files(&canon_root, &prior_paths, &expected_paths)?;
+    sync_unpacked_target_dirs(&canon_root)?;
+    tx_guard.finish()?;
+    platform_sync_dir(&canon_root)
 }
 
 /// Read and validate an unpacked `.curvebook.d/` project directory, enforcing strict relative-path
@@ -322,24 +405,23 @@ pub fn open_project_unpacked_dir(dir: &Path) -> Result<ProjectDocument, FormatEr
     }
     let canon_root = std::fs::canonicalize(dir)?;
     let limits = ZipLimits::default();
-    let mut remaining_budget = limits.max_total_uncompressed_bytes;
-
-    let manifest_bytes = read_contained_file(&canon_root, MANIFEST_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
-    let manifest_text = std::str::from_utf8(&manifest_bytes)
-        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
-    let manifest = parse_and_validate_manifest(manifest_text)?;
-    if manifest.kind != ArchiveKind::Project {
-        return Err(FormatError::InvalidArchiveKind { expected: ArchiveKind::Project.as_str(), found: manifest.kind.as_str() });
+    match inspect_pending_tx_state(&canon_root)? {
+        PendingUnpackedTx::None => open_validated_unpacked_snapshot(&canon_root, limits),
+        PendingUnpackedTx::Committing { next_dir, prev_dir } => match open_validated_unpacked_snapshot(&next_dir, limits) {
+            Ok(doc) => Ok(doc),
+            Err(err @ (FormatError::UnsupportedSchemaVersion { .. } | FormatError::InvalidArchiveKind { .. } | FormatError::UnsafePath { .. })) => {
+                Err(err)
+            }
+            Err(next_err) => {
+                if let Some(prev) = prev_dir
+                    && let Ok(doc) = open_validated_unpacked_snapshot(&prev, limits)
+                {
+                    return Ok(doc);
+                }
+                Err(next_err)
+            }
+        },
     }
-
-    let doc_bytes = read_contained_file(&canon_root, DOCUMENT_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
-    let actual_doc_crc = crc32fast::hash(&doc_bytes);
-    if actual_doc_crc != manifest.document_crc32 {
-        return Err(FormatError::CorruptCrc { entry: String::from(DOCUMENT_PATH), expected: manifest.document_crc32, actual: actual_doc_crc });
-    }
-
-    verify_unpacked_sheet_entries(&canon_root, &manifest, limits, &mut remaining_budget)?;
-    decode_and_validate_document(&doc_bytes, manifest.schema_version)
 }
 
 fn check_unpacked_project_dir(path: &Path) -> Result<bool, FormatError> {
@@ -347,17 +429,18 @@ fn check_unpacked_project_dir(path: &Path) -> Result<bool, FormatError> {
         return Ok(false);
     }
     let canon_root = std::fs::canonicalize(path)?;
-    let mut remaining_budget = crate::zip::MAX_ZIP_UNCOMPRESSED_BYTES;
-    let manifest_bytes = read_contained_file(&canon_root, MANIFEST_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
-    let manifest_text = std::str::from_utf8(&manifest_bytes)
-        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
-    let manifest = parse_and_validate_manifest(manifest_text)?;
-    if manifest.kind != ArchiveKind::Project {
-        return Ok(false);
+    match inspect_pending_tx_state(&canon_root)? {
+        PendingUnpackedTx::None => check_snapshot_project_dir(&canon_root, false),
+        PendingUnpackedTx::Committing { next_dir, prev_dir } => {
+            if check_snapshot_project_dir(&next_dir, true).unwrap_or(false) {
+                return Ok(true);
+            }
+            if let Some(prev) = prev_dir {
+                return check_snapshot_project_dir(&prev, true);
+            }
+            Ok(false)
+        }
     }
-    let doc_path = resolve_contained_path(&canon_root, DOCUMENT_PATH, true)?;
-    let doc_meta = std::fs::metadata(doc_path)?;
-    Ok(doc_meta.is_file() && doc_meta.len() <= crate::zip::MAX_ZIP_ENTRY_BYTES)
 }
 
 fn validate_sheet_csv_path(raw: &str) -> Result<(), FormatError> {
@@ -427,7 +510,7 @@ const MAX_MIGRATION_JSON_BYTES: usize = 64 * 1024 * 1024;
 #[derive(serde::Deserialize)]
 struct DocumentSchemaPeek {
     #[serde(default)]
-    schema_version: Option<u32>,
+    schema_version: Option<u64>,
 }
 
 struct JsonDomBudget {
@@ -555,7 +638,7 @@ fn decode_and_validate_document_inner(
     validate_checkpoint_entries: bool,
 ) -> Result<ProjectDocument, FormatError> {
     let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
-    let doc_version = peek.schema_version.unwrap_or(manifest_schema_version);
+    let doc_version = peek.schema_version.map(clamp_peek_schema_version).unwrap_or(manifest_schema_version);
     if doc_version > CURRENT_SCHEMA_VERSION {
         return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
     }
@@ -745,37 +828,7 @@ fn read_contained_file(canon_root: &Path, rel: &str, max_entry_bytes: u64, remai
     Ok(buf)
 }
 
-fn verify_unpacked_sheet_entries(
-    canon_root: &Path,
-    manifest: &ArchiveManifest,
-    limits: ZipLimits,
-    remaining_budget: &mut u64,
-) -> Result<(), FormatError> {
-    let mut seen_csvs = HashSet::new();
-    let mut entry_count = 2_usize;
-    for entry in &manifest.sheets {
-        let Some(csv_path) = &entry.csv_path else {
-            continue;
-        };
-        if !seen_csvs.insert(csv_path.as_str()) {
-            return Err(FormatError::DuplicateEntry { path: csv_path.clone() });
-        }
-        entry_count += 1;
-        if entry_count > limits.max_entries {
-            return Err(FormatError::ZipBomb { reason: format!("unpacked entry count exceeds limit {}", limits.max_entries) });
-        }
-        let csv_bytes = read_contained_file(canon_root, csv_path, limits.max_entry_uncompressed_bytes, remaining_budget)?;
-        if let Some(expected_crc) = entry.crc32 {
-            let actual_crc = crc32fast::hash(&csv_bytes);
-            if actual_crc != expected_crc {
-                return Err(FormatError::CorruptCrc { entry: csv_path.clone(), expected: expected_crc, actual: actual_crc });
-            }
-        }
-    }
-    Ok(())
-}
-
-fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<Vec<String>, FormatError> {
+fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), FormatError> {
     ensure_existing_unpacked_not_newer(canon_root)?;
     for (rel, _) in entries {
         resolve_contained_path(canon_root, rel, false)?;
@@ -794,13 +847,27 @@ fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> 
             }
         }
     }
-    collect_prior_manifest_csv_paths(canon_root)
+    Ok(())
 }
 
-fn ensure_existing_unpacked_not_newer(canon_root: &Path) -> Result<(), FormatError> {
+fn ensure_non_symlink_subpath(parent: &Path, child_name: &str, rel_label: &str) -> Result<Option<PathBuf>, FormatError> {
+    let path = parent.join(child_name);
+    match std::fs::symlink_metadata(&path) {
+        Ok(meta) => {
+            if meta.file_type().is_symlink() {
+                return Err(FormatError::UnsafePath { path: rel_label.to_owned() });
+            }
+            Ok(Some(path))
+        }
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Ok(None),
+        Err(err) => Err(FormatError::Io(err.to_string())),
+    }
+}
+
+fn ensure_unpacked_metadata_files_not_newer(dir_root: &Path, allow_corrupt_json: bool) -> Result<(), FormatError> {
     let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
     for rel in [MANIFEST_PATH, DOCUMENT_PATH] {
-        let resolved = match resolve_contained_path(canon_root, rel, true) {
+        let resolved = match resolve_contained_path(dir_root, rel, true) {
             Ok(path) => path,
             Err(FormatError::MissingArchiveEntry { .. }) => continue,
             Err(err) => return Err(err),
@@ -809,13 +876,403 @@ fn ensure_existing_unpacked_not_newer(canon_root: &Path) -> Result<(), FormatErr
         if bytes.is_empty() {
             continue;
         }
-        let peek: DocumentSchemaPeek = serde_json::from_slice(&bytes)
-            .map_err(|err| FormatError::Json(format!("existing unpacked `{rel}` could not be parsed while checking schema version: {err}")))?;
-        if let Some(version) = peek.schema_version {
-            ensure_schema_version_supported(version)?;
+        match serde_json::from_slice::<DocumentSchemaPeek>(&bytes) {
+            Ok(peek) => {
+                if let Some(version) = peek.schema_version.map(clamp_peek_schema_version) {
+                    ensure_schema_version_supported(version)?;
+                }
+            }
+            Err(_) if allow_corrupt_json => continue,
+            Err(err) => {
+                return Err(FormatError::Json(format!("existing unpacked `{rel}` could not be parsed while checking schema version: {err}")));
+            }
         }
     }
     Ok(())
+}
+
+fn ensure_existing_unpacked_not_newer(canon_root: &Path) -> Result<(), FormatError> {
+    let tx_dir = ensure_non_symlink_subpath(canon_root, UNPACKED_TX_DIR, UNPACKED_TX_DIR)?;
+    let tx_commit_active = match tx_dir.as_ref() {
+        Some(dir) if std::fs::metadata(dir).map(|m| m.is_dir()).unwrap_or(false) => {
+            let marker_rel = format!("{UNPACKED_TX_DIR}/{UNPACKED_TX_COMMIT_MARKER}");
+            ensure_non_symlink_subpath(dir, UNPACKED_TX_COMMIT_MARKER, &marker_rel)?.is_some()
+        }
+        _ => false,
+    };
+    ensure_unpacked_metadata_files_not_newer(canon_root, tx_commit_active)?;
+    let Some(tx_dir) = tx_dir else {
+        return Ok(());
+    };
+    if !std::fs::metadata(&tx_dir).map(|m| m.is_dir()).unwrap_or(false) {
+        return Ok(());
+    }
+    for sub in [UNPACKED_TX_NEXT_DIR, UNPACKED_TX_PREV_DIR] {
+        let rel = format!("{UNPACKED_TX_DIR}/{sub}");
+        let Some(sub_path) = ensure_non_symlink_subpath(&tx_dir, sub, &rel)? else {
+            continue;
+        };
+        if std::fs::metadata(&sub_path).map(|m| m.is_dir()).unwrap_or(false) {
+            let canon_sub = std::fs::canonicalize(&sub_path)?;
+            if !canon_sub.starts_with(canon_root) {
+                return Err(FormatError::UnsafePath { path: rel });
+            }
+            ensure_unpacked_metadata_files_not_newer(&canon_sub, true)?;
+        }
+    }
+    Ok(())
+}
+
+enum PendingUnpackedTx {
+    None,
+    Committing { next_dir: PathBuf, prev_dir: Option<PathBuf> },
+}
+
+fn validated_tx_subdir(canon_root: &Path, tx_dir: &Path, name: &str) -> Result<Option<PathBuf>, FormatError> {
+    let rel = format!("{UNPACKED_TX_DIR}/{name}");
+    let Some(sub) = ensure_non_symlink_subpath(tx_dir, name, &rel)? else {
+        return Ok(None);
+    };
+    if !std::fs::metadata(&sub).map(|m| m.is_dir()).unwrap_or(false) {
+        return Ok(None);
+    }
+    let canon_sub = std::fs::canonicalize(&sub)?;
+    if !canon_sub.starts_with(canon_root) {
+        return Err(FormatError::UnsafePath { path: rel });
+    }
+    Ok(Some(canon_sub))
+}
+
+fn inspect_pending_tx_state(canon_root: &Path) -> Result<PendingUnpackedTx, FormatError> {
+    let Some(tx_dir) = ensure_non_symlink_subpath(canon_root, UNPACKED_TX_DIR, UNPACKED_TX_DIR)? else {
+        return Ok(PendingUnpackedTx::None);
+    };
+    if !std::fs::metadata(&tx_dir).map(|m| m.is_dir()).unwrap_or(false) {
+        return Ok(PendingUnpackedTx::None);
+    }
+    let marker_rel = format!("{UNPACKED_TX_DIR}/{UNPACKED_TX_COMMIT_MARKER}");
+    let Some(marker) = ensure_non_symlink_subpath(&tx_dir, UNPACKED_TX_COMMIT_MARKER, &marker_rel)? else {
+        return Ok(PendingUnpackedTx::None);
+    };
+    if !std::fs::metadata(&marker).map(|m| m.is_file()).unwrap_or(false) {
+        return Ok(PendingUnpackedTx::None);
+    }
+    let next_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_NEXT_DIR)?
+        .ok_or_else(|| FormatError::MissingArchiveEntry { path: format!("{UNPACKED_TX_DIR}/{UNPACKED_TX_NEXT_DIR}/{MANIFEST_PATH}") })?;
+    let prev_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_PREV_DIR)?;
+    Ok(PendingUnpackedTx::Committing { next_dir, prev_dir })
+}
+
+struct VerifiedUnpackedSnapshot {
+    manifest: ArchiveManifest,
+    entries: Vec<(String, Vec<u8>)>,
+    doc: ProjectDocument,
+}
+
+fn verify_and_read_snapshot(canon_snap: &Path, limits: ZipLimits, collect_entries: bool) -> Result<VerifiedUnpackedSnapshot, FormatError> {
+    let mut remaining_budget = limits.max_total_uncompressed_bytes;
+    let manifest_bytes = read_contained_file(canon_snap, MANIFEST_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
+    let manifest = parse_and_validate_manifest(manifest_text)?;
+    if manifest.kind != ArchiveKind::Project {
+        return Err(FormatError::InvalidArchiveKind { expected: ArchiveKind::Project.as_str(), found: manifest.kind.as_str() });
+    }
+
+    let doc_bytes = read_contained_file(canon_snap, DOCUMENT_PATH, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+    let actual_doc_crc = crc32fast::hash(&doc_bytes);
+    if actual_doc_crc != manifest.document_crc32 {
+        return Err(FormatError::CorruptCrc { entry: String::from(DOCUMENT_PATH), expected: manifest.document_crc32, actual: actual_doc_crc });
+    }
+
+    let mut entries = Vec::new();
+    if collect_entries {
+        entries.push((String::from(MANIFEST_PATH), manifest_bytes));
+        entries.push((String::from(DOCUMENT_PATH), doc_bytes.clone()));
+    }
+
+    let mut seen_csvs = HashSet::new();
+    let mut entry_count = 2_usize;
+    for entry in &manifest.sheets {
+        let Some(csv_path) = &entry.csv_path else {
+            continue;
+        };
+        if !seen_csvs.insert(csv_path.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: csv_path.clone() });
+        }
+        entry_count += 1;
+        if entry_count > limits.max_entries {
+            return Err(FormatError::ZipBomb { reason: format!("unpacked entry count exceeds limit {}", limits.max_entries) });
+        }
+        let csv_bytes = read_contained_file(canon_snap, csv_path, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+        if let Some(expected_crc) = entry.crc32 {
+            let actual_crc = crc32fast::hash(&csv_bytes);
+            if actual_crc != expected_crc {
+                return Err(FormatError::CorruptCrc { entry: csv_path.clone(), expected: expected_crc, actual: actual_crc });
+            }
+        }
+        if collect_entries {
+            entries.push((csv_path.clone(), csv_bytes));
+        }
+    }
+
+    let doc = decode_and_validate_document(&doc_bytes, manifest.schema_version)?;
+    Ok(VerifiedUnpackedSnapshot { manifest, entries, doc })
+}
+
+fn open_validated_unpacked_snapshot(canon_snap: &Path, limits: ZipLimits) -> Result<ProjectDocument, FormatError> {
+    verify_and_read_snapshot(canon_snap, limits, false).map(|snap| snap.doc)
+}
+
+fn check_snapshot_project_dir(canon_snap: &Path, verify_doc_crc: bool) -> Result<bool, FormatError> {
+    let mut remaining_budget = crate::zip::MAX_ZIP_UNCOMPRESSED_BYTES;
+    let manifest_bytes = read_contained_file(canon_snap, MANIFEST_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
+    let manifest_text = std::str::from_utf8(&manifest_bytes)
+        .map_err(|err| FormatError::InvalidZip { reason: format!("entry `{MANIFEST_PATH}` is not valid UTF-8: {err}") })?;
+    let manifest = parse_and_validate_manifest(manifest_text)?;
+    if manifest.kind != ArchiveKind::Project {
+        return Ok(false);
+    }
+    if verify_doc_crc {
+        let doc_bytes = read_contained_file(canon_snap, DOCUMENT_PATH, crate::zip::MAX_ZIP_ENTRY_BYTES, &mut remaining_budget)?;
+        return Ok(crc32fast::hash(&doc_bytes) == manifest.document_crc32);
+    }
+    let doc_path = resolve_contained_path(canon_snap, DOCUMENT_PATH, true)?;
+    let doc_meta = std::fs::metadata(doc_path)?;
+    Ok(doc_meta.is_file() && doc_meta.len() <= crate::zip::MAX_ZIP_ENTRY_BYTES)
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct UnpackedTxCommitRecord {
+    format: String,
+    version: u32,
+    stage_paths: Vec<String>,
+    prior_csv_paths: Vec<String>,
+    new_csv_paths: Vec<String>,
+}
+
+struct TxDirGuard {
+    root_dir: PathBuf,
+    tx_dir: PathBuf,
+    active: bool,
+}
+
+impl TxDirGuard {
+    fn new(root_dir: &Path, tx_dir: PathBuf) -> Self {
+        Self { root_dir: root_dir.to_path_buf(), tx_dir, active: true }
+    }
+
+    #[cfg(test)]
+    fn defuse(&mut self) {
+        self.active = false;
+    }
+
+    fn finish(mut self) -> Result<(), FormatError> {
+        self.active = false;
+        let marker = self.tx_dir.join(UNPACKED_TX_COMMIT_MARKER);
+        if std::fs::symlink_metadata(&marker).is_ok() {
+            std::fs::remove_file(&marker)?;
+        }
+        std::fs::remove_dir_all(&self.tx_dir)?;
+        let _ = platform_sync_dir(&self.root_dir);
+        Ok(())
+    }
+}
+
+impl Drop for TxDirGuard {
+    fn drop(&mut self) {
+        if self.active {
+            let marker = self.tx_dir.join(UNPACKED_TX_COMMIT_MARKER);
+            let _ = std::fs::remove_file(&marker);
+            let _ = std::fs::remove_dir_all(&self.tx_dir);
+        }
+    }
+}
+
+fn write_snapshot_dir(snap_dir: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), FormatError> {
+    std::fs::create_dir_all(snap_dir)?;
+    for (rel, bytes) in entries {
+        validate_unpacked_relative_path(rel)?;
+        let target = snap_dir.join(rel);
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        let mut opts = OpenOptions::new();
+        opts.write(true).create_new(true);
+        #[cfg(all(unix, not(target_arch = "wasm32")))]
+        opts.mode(0o644);
+        let mut file = opts.open(&target)?;
+        file.write_all(bytes)?;
+        file.sync_all()?;
+    }
+    let snap_sheets = snap_dir.join(SHEETS_DIR);
+    if std::fs::symlink_metadata(&snap_sheets).is_ok_and(|m| m.is_dir()) {
+        platform_sync_dir(&snap_sheets)?;
+    }
+    platform_sync_dir(snap_dir)
+}
+
+fn capture_prior_snapshot_entries(canon_root: &Path, limits: ZipLimits) -> Option<Vec<(String, Vec<u8>)>> {
+    verify_and_read_snapshot(canon_root, limits, true).ok().map(|snap| snap.entries)
+}
+
+fn begin_unpacked_tx(
+    canon_root: &Path,
+    entries: &[(String, Vec<u8>)],
+    prev_entries: Option<&[(String, Vec<u8>)]>,
+) -> Result<TxDirGuard, FormatError> {
+    let tx_dir = canon_root.join(UNPACKED_TX_DIR);
+    if std::fs::symlink_metadata(&tx_dir).is_ok() {
+        std::fs::remove_dir_all(&tx_dir)?;
+    }
+    std::fs::create_dir_all(&tx_dir)?;
+    let guard = TxDirGuard::new(canon_root, tx_dir.clone());
+    write_snapshot_dir(&tx_dir.join(UNPACKED_TX_NEXT_DIR), entries)?;
+    if let Some(prev) = prev_entries {
+        write_snapshot_dir(&tx_dir.join(UNPACKED_TX_PREV_DIR), prev)?;
+    }
+    platform_sync_dir(&tx_dir)?;
+    Ok(guard)
+}
+
+fn collect_csv_paths(entries: &[(String, Vec<u8>)]) -> Vec<String> {
+    entries.iter().map(|(rel, _)| rel).filter(|rel| validate_sheet_csv_path(rel).is_ok()).cloned().collect()
+}
+
+fn write_unpacked_tx_commit_marker(
+    canon_root: &Path,
+    staged: &[StagedWrite],
+    prior_paths: &[String],
+    entries: &[(String, Vec<u8>)],
+) -> Result<(), FormatError> {
+    let tx_dir = canon_root.join(UNPACKED_TX_DIR);
+    let record = UnpackedTxCommitRecord {
+        format: String::from(UNPACKED_TX_FORMAT),
+        version: 1,
+        stage_paths: staged.iter().map(|s| s.stage_rel.clone()).collect(),
+        prior_csv_paths: prior_paths.to_vec(),
+        new_csv_paths: collect_csv_paths(entries),
+    };
+    let bytes = serde_json::to_vec(&record).map_err(|err| FormatError::Json(format!("serialize unpacked tx marker failed: {err}")))?;
+    platform_write_atomic(&tx_dir.join(UNPACKED_TX_COMMIT_MARKER), &bytes)?;
+    platform_sync_dir(&tx_dir)
+}
+
+fn remove_stage_rel_files(canon_root: &Path, stage_rels: &[String]) -> Result<(), FormatError> {
+    for rel in stage_rels {
+        validate_unpacked_relative_path(rel)?;
+        let path = resolve_contained_path(canon_root, rel, false)?;
+        if let Ok(meta) = std::fs::symlink_metadata(&path)
+            && !meta.file_type().is_symlink()
+            && meta.is_file()
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+    Ok(())
+}
+
+fn install_recovered_snapshot(
+    canon_root: &Path,
+    entries: &[(String, Vec<u8>)],
+    stale_candidates: &[String],
+    keep_csv_paths: &[String],
+) -> Result<(), FormatError> {
+    for (rel, bytes) in entries {
+        let target = resolve_contained_path(canon_root, rel, false)?;
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        platform_write_atomic(&target, bytes)?;
+    }
+    let keep_set: HashSet<String> = keep_csv_paths.iter().cloned().collect();
+    prune_stale_unpacked_files(canon_root, stale_candidates, &keep_set)?;
+    sync_unpacked_target_dirs(canon_root)
+}
+
+fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
+    let Some(tx_dir) = ensure_non_symlink_subpath(canon_root, UNPACKED_TX_DIR, UNPACKED_TX_DIR)? else {
+        return Ok(());
+    };
+    if !std::fs::metadata(&tx_dir).map(|m| m.is_dir()).unwrap_or(false) {
+        return Err(FormatError::Io(format!("`{}` exists and is not a directory", tx_dir.display())));
+    }
+    let marker_rel = format!("{UNPACKED_TX_DIR}/{UNPACKED_TX_COMMIT_MARKER}");
+    let Some(marker) = ensure_non_symlink_subpath(&tx_dir, UNPACKED_TX_COMMIT_MARKER, &marker_rel)? else {
+        std::fs::remove_dir_all(&tx_dir)?;
+        return platform_sync_dir(canon_root);
+    };
+    let cap = usize::try_from(crate::zip::MAX_ZIP_ENTRY_BYTES).unwrap_or(usize::MAX);
+    let marker_bytes = platform_read_regular_file(&marker, cap)?;
+    let record: UnpackedTxCommitRecord =
+        serde_json::from_slice(&marker_bytes).map_err(|err| FormatError::Json(format!("unpacked transaction marker could not be parsed: {err}")))?;
+    if record.format != UNPACKED_TX_FORMAT || record.version != 1 {
+        return Err(FormatError::Io(String::from("unsupported unpacked transaction marker format")));
+    }
+
+    remove_stage_rel_files(canon_root, &record.stage_paths)?;
+    let next_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_NEXT_DIR)?;
+    let prev_dir = validated_tx_subdir(canon_root, &tx_dir, UNPACKED_TX_PREV_DIR)?;
+
+    let mut primary_err: Option<FormatError> = None;
+    let recovered = match next_dir {
+        Some(ref next) => match verify_and_read_snapshot(next, ZipLimits::default(), true) {
+            Ok(snap) => {
+                install_recovered_snapshot(canon_root, &snap.entries, &record.prior_csv_paths, &record.new_csv_paths)?;
+                true
+            }
+            Err(err @ (FormatError::UnsupportedSchemaVersion { .. } | FormatError::InvalidArchiveKind { .. } | FormatError::UnsafePath { .. })) => {
+                return Err(err);
+            }
+            Err(err) => {
+                primary_err = Some(err);
+                false
+            }
+        },
+        None => false,
+    };
+
+    if !recovered {
+        if let Some(prev) = prev_dir {
+            let prev_snap = verify_and_read_snapshot(&prev, ZipLimits::default(), true)?;
+            let prev_csvs: Vec<String> = prev_snap.manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect();
+            install_recovered_snapshot(canon_root, &prev_snap.entries, &record.new_csv_paths, &prev_csvs)?;
+        } else if let Some(err) = primary_err {
+            return Err(err);
+        } else {
+            return Err(FormatError::MissingArchiveEntry { path: format!("{UNPACKED_TX_DIR}/{UNPACKED_TX_NEXT_DIR}/{MANIFEST_PATH}") });
+        }
+    }
+
+    std::fs::remove_file(&marker)?;
+    std::fs::remove_dir_all(&tx_dir)?;
+    platform_sync_dir(canon_root)
+}
+
+fn unpacked_changes_needed(
+    canon_root: &Path,
+    entries: &[(String, Vec<u8>)],
+    prior_paths: &[String],
+    expected_paths: &HashSet<String>,
+) -> Result<bool, FormatError> {
+    if prior_paths.iter().any(|rel| !expected_paths.contains(rel) && validate_sheet_csv_path(rel).is_ok()) {
+        return Ok(true);
+    }
+    for (rel, bytes) in entries {
+        let target = resolve_contained_path(canon_root, rel, false)?;
+        if !matches!(inspect_existing_unpacked_entry(&target, bytes)?, ExistingEntryState::Unchanged) {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn sync_unpacked_target_dirs(canon_root: &Path) -> Result<(), FormatError> {
+    let sheets_dir = canon_root.join(SHEETS_DIR);
+    if std::fs::symlink_metadata(&sheets_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+        platform_sync_dir(&sheets_dir)?;
+    }
+    platform_sync_dir(canon_root)
 }
 
 fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, FormatError> {
@@ -848,6 +1305,7 @@ enum PriorSnapshot {
 
 struct StagedWrite {
     rel: String,
+    stage_rel: String,
     target_path: PathBuf,
     stage_path: PathBuf,
     prior: PriorSnapshot,
@@ -855,11 +1313,12 @@ struct StagedWrite {
 
 struct UnpackedStageGuard {
     stage_paths: Vec<Option<PathBuf>>,
+    active: bool,
 }
 
 impl UnpackedStageGuard {
     fn new(len: usize) -> Self {
-        Self { stage_paths: Vec::with_capacity(len) }
+        Self { stage_paths: Vec::with_capacity(len), active: true }
     }
 
     fn push(&mut self, path: PathBuf) {
@@ -871,14 +1330,32 @@ impl UnpackedStageGuard {
             slot.take();
         }
     }
+
+    #[cfg(test)]
+    fn defuse(&mut self) {
+        self.active = false;
+    }
 }
 
 impl Drop for UnpackedStageGuard {
     fn drop(&mut self) {
+        if !self.active {
+            return;
+        }
         for path in self.stage_paths.iter().flatten() {
             let _ = std::fs::remove_file(path);
         }
     }
+}
+
+fn stage_rel_for_entry(entry_rel: &str, stage_path: &Path) -> Result<String, FormatError> {
+    let file_name = stage_path.file_name().and_then(|s| s.to_str()).ok_or_else(|| FormatError::UnsafePath { path: entry_rel.to_owned() })?;
+    let stage_rel = match entry_rel.rsplit_once('/') {
+        Some((dir_prefix, _)) => format!("{dir_prefix}/{file_name}"),
+        None => file_name.to_owned(),
+    };
+    validate_unpacked_relative_path(&stage_rel)?;
+    Ok(stage_rel)
 }
 
 fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<(Vec<StagedWrite>, UnpackedStageGuard), FormatError> {
@@ -900,8 +1377,9 @@ fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>
         };
 
         let stage_path = create_and_write_stage_file(parent, &target, bytes, existing_perms)?;
+        let stage_rel = stage_rel_for_entry(rel, &stage_path)?;
         guard.push(stage_path.clone());
-        staged.push(StagedWrite { rel: rel.clone(), target_path: target, stage_path, prior });
+        staged.push(StagedWrite { rel: rel.clone(), stage_rel, target_path: target, stage_path, prior });
     }
 
     Ok((staged, guard))
@@ -972,12 +1450,28 @@ fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], exist
     Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
 }
 
-fn commit_staged_unpacked_entries<F>(staged: &[StagedWrite], guard: &mut UnpackedStageGuard, before_commit: &mut F) -> Result<(), FormatError>
+fn commit_staged_unpacked_entries<F>(
+    staged: &[StagedWrite],
+    guard: &mut UnpackedStageGuard,
+    tx_guard: &mut TxDirGuard,
+    on_commit_entry: &mut F,
+) -> Result<(), FormatError>
 where
-    F: FnMut(&str) -> Result<(), std::io::Error>,
+    F: FnMut(&str) -> MidCommitDirective,
 {
+    let _ = tx_guard;
     for (idx, item) in staged.iter().enumerate() {
-        if let Err(err) = before_commit(&item.rel).and_then(|()| std::fs::rename(&item.stage_path, &item.target_path)) {
+        let rename_res = match on_commit_entry(&item.rel) {
+            MidCommitDirective::Proceed => std::fs::rename(&item.stage_path, &item.target_path),
+            MidCommitDirective::FailRollback(err) => Err(err),
+            #[cfg(test)]
+            MidCommitDirective::SimulateCrash => {
+                guard.defuse();
+                tx_guard.defuse();
+                return Err(FormatError::Io(String::from("simulated abrupt crash mid-commit")));
+            }
+        };
+        if let Err(err) = rename_res {
             rollback_unpacked_commits(&staged[..idx]);
             return Err(FormatError::Io(err.to_string()));
         }
@@ -2202,9 +2696,18 @@ fn strip_template_hooks_targeting(text: &mut String, target_id: &SheetId, defaul
 #[cfg(test)]
 #[cfg(not(target_arch = "wasm32"))]
 mod tests {
-    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
+    use curvebook_doc::{CURRENT_SCHEMA_VERSION, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
 
-    use super::{MANIFEST_PATH, open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_with_hook};
+    use super::{
+        DOCUMENT_PATH, MANIFEST_PATH, MidCommitDirective, UNPACKED_TX_COMMIT_MARKER, UNPACKED_TX_DIR, UNPACKED_TX_NEXT_DIR, is_unpacked_project_dir,
+        open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_driven, save_project_unpacked_dir_with_hook,
+    };
+
+    fn test_col_sheet(id: &str, title: &str, val: f64) -> DataSheet {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
+        col.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(val)];
+        DataSheet::new(id, title, TableArchetype::Column(col)).unwrap()
+    }
 
     #[test]
     fn unpacked_save_rolls_back_committed_files_on_mid_commit_failure() {
@@ -2212,16 +2715,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
 
         let mut doc_v1 = ProjectDocument::new("Version One").unwrap();
-        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        col.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(10.0)];
-        doc_v1.add_data_sheet(DataSheet::new("sheet-a", "A", TableArchetype::Column(col)).unwrap()).unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-a", "A", 10.0)).unwrap();
         save_project_unpacked_dir(&doc_v1, &dir).unwrap();
 
         let mut doc_v2 = doc_v1.clone();
         doc_v2.title = String::from("Version Two");
-        let mut col2 = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).unwrap();
-        col2.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(20.0)];
-        doc_v2.add_data_sheet(DataSheet::new("sheet-b", "B", TableArchetype::Column(col2)).unwrap()).unwrap();
+        doc_v2.add_data_sheet(test_col_sheet("sheet-b", "B", 20.0)).unwrap();
 
         // Simulate failure right before committing `manifest.json` (after `document.json` and new CSV committed).
         let err = save_project_unpacked_dir_with_hook(&doc_v2, &dir, |rel| {
@@ -2234,10 +2733,118 @@ mod tests {
         let reloaded = open_project_unpacked_dir(&dir).unwrap();
         assert_eq!(reloaded, doc_v1);
         assert!(!dir.join("sheets/sheet-b.csv").exists());
+        assert!(!dir.join(UNPACKED_TX_DIR).exists());
         for entry in std::fs::read_dir(&dir).unwrap() {
             let name = entry.unwrap().file_name().to_string_lossy().into_owned();
             assert!(!name.contains(".stage."), "leaked staging temp file: {name}");
         }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpacked_save_crash_between_document_and_manifest_recovers_on_reopen_and_resave() {
+        let dir = std::env::temp_dir().join(format!("cb-unpacked-crash-tx-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut doc_v1 = ProjectDocument::new("Version One").unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-a", "A", 10.0)).unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-c", "C", 30.0)).unwrap();
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+
+        let mut doc_v2 = ProjectDocument::new("Version Two").unwrap();
+        doc_v2.add_data_sheet(test_col_sheet("sheet-a", "A", 10.0)).unwrap();
+        doc_v2.add_data_sheet(test_col_sheet("sheet-b", "B", 20.0)).unwrap();
+
+        // Abruptly crash right after `document.json` and `sheets/sheet-b.csv` rename, BEFORE `manifest.json` rename & pruning.
+        let err = save_project_unpacked_dir_driven(&doc_v2, &dir, |rel| {
+            if rel == MANIFEST_PATH { MidCommitDirective::SimulateCrash } else { MidCommitDirective::Proceed }
+        })
+        .unwrap_err();
+        assert!(matches!(err, crate::error::FormatError::Io(_)));
+
+        // Verify the torn on-disk state matches the bug window: new document.json vs old manifest.json.
+        let disk_doc = std::fs::read_to_string(dir.join(DOCUMENT_PATH)).unwrap();
+        let disk_manifest = std::fs::read_to_string(dir.join(MANIFEST_PATH)).unwrap();
+        assert!(disk_doc.contains("Version Two"));
+        assert!(disk_manifest.contains("Version One"));
+        assert!(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_COMMIT_MARKER).exists());
+
+        // Reopen must recover a complete valid generation (`doc_v2`) repeatedly without CorruptCrc.
+        assert!(is_unpacked_project_dir(&dir));
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
+
+        // Subsequent save reconciles the interrupted transaction, prunes stale `sheet-c.csv`, and cleans all tx/stage artifacts.
+        let mut doc_v3 = doc_v2.clone();
+        doc_v3.title = String::from("Version Three");
+        save_project_unpacked_dir(&doc_v3, &dir).unwrap();
+
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v3);
+        assert!(!dir.join(UNPACKED_TX_DIR).exists());
+        assert!(!dir.join("sheets/sheet-c.csv").exists());
+        for entry in std::fs::read_dir(&dir).unwrap() {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            assert!(!name.contains(".stage."), "leaked staging temp file after recovery: {name}");
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpacked_save_crash_falls_back_to_prev_and_recovers_initial_commit() {
+        let dir = std::env::temp_dir().join(format!("cb-unpacked-crash-fallback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        // Part A: crash on initial commit (no prior `prev/` snapshot exists) still recovers Gen 1 from `next/`.
+        let mut doc_v1 = ProjectDocument::new("Initial Gen").unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-a", "A", 10.0)).unwrap();
+        let _ = save_project_unpacked_dir_driven(&doc_v1, &dir, |rel| {
+            if rel == MANIFEST_PATH { MidCommitDirective::SimulateCrash } else { MidCommitDirective::Proceed }
+        })
+        .unwrap_err();
+        assert!(is_unpacked_project_dir(&dir));
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+        assert!(!dir.join(UNPACKED_TX_DIR).exists());
+
+        // Part B: crash updating to `doc_v2`, then corrupt `tx/next/document.json` -> must fall back cleanly to `tx/prev/` (`doc_v1`).
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.title = String::from("Second Gen");
+        doc_v2.add_data_sheet(test_col_sheet("sheet-b", "B", 25.0)).unwrap();
+        let _ = save_project_unpacked_dir_driven(&doc_v2, &dir, |rel| {
+            if rel == MANIFEST_PATH { MidCommitDirective::SimulateCrash } else { MidCommitDirective::Proceed }
+        })
+        .unwrap_err();
+        std::fs::write(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR).join(DOCUMENT_PATH), b"{corrupt").unwrap();
+        assert!(is_unpacked_project_dir(&dir));
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
+
+        // Re-saving reconciles cleanly to `doc_v1` and removes orphaned `sheet-b.csv`.
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
+        assert!(!dir.join("sheets/sheet-b.csv").exists());
+        assert!(!dir.join(UNPACKED_TX_DIR).exists());
+
+        // Part C: pre-commit `.curvebook.tx/next` with future schema version must block overwrite & preserve tx state.
+        let future_dir = dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR);
+        std::fs::create_dir_all(&future_dir).unwrap();
+        let future_ver = CURRENT_SCHEMA_VERSION + 1;
+        std::fs::write(
+            future_dir.join(MANIFEST_PATH),
+            format!(
+                r#"{{"format":"curvebook-archive","schema_version":{future_ver},"kind":"project","title":"Future","document_crc32":0,"sheets":[]}}"#
+            ),
+        )
+        .unwrap();
+        assert!(matches!(
+            save_project_unpacked_dir(&doc_v1, &dir),
+            Err(crate::error::FormatError::UnsupportedSchemaVersion { version, .. }) if version == future_ver
+        ));
+
+        // Removing the pending future tx leaves intact `doc_v1` (with only a benign non-COMMITTING folder ignored if removed).
+        std::fs::remove_dir_all(dir.join(UNPACKED_TX_DIR)).unwrap();
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
 
         let _ = std::fs::remove_dir_all(&dir);
     }

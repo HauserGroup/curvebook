@@ -196,6 +196,27 @@ impl ExternalPathPolicy {
         }
     }
 
+    /// Atomically write archive bytes to `raw_path` after verifying any pre-existing target file does
+    /// not carry a `schema_version` newer than [`curvebook_doc::CURRENT_SCHEMA_VERSION`].
+    pub(crate) fn write_atomic_archive_bytes(&self, raw_path: &str, bytes: &[u8]) -> Result<(), EngineError> {
+        validate_raw_path(raw_path, "output path")?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = bytes;
+            if matches!(self, Self::RejectExternal) {
+                return Err(reject_external_err(raw_path));
+            }
+            Err(EngineError::with_code(ErrorCode::UnsupportedFormat, format!("writing `{raw_path}` to local filesystem is unsupported on wasm32"))
+                .with_details(json!({ "path": raw_path })))
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let resolved = self.resolve_target_path(raw_path, "output path")?;
+            curvebook_format::ensure_existing_archive_not_newer(&resolved)?;
+            write_resolved_atomic(&resolved, raw_path, bytes)
+        }
+    }
+
     /// Resolve a `project.open` target path and determine whether it targets an unpacked directory.
     ///
     /// Rejects escapes, broken symlinks, and non-regular archive files before opening.
@@ -232,6 +253,11 @@ impl ExternalPathPolicy {
             if use_unpacked {
                 ensure_unpacked_dir_if_present(&resolved, raw_path)?;
             } else if resolved.is_dir() {
+                if let Err(err @ curvebook_format::FormatError::UnsupportedSchemaVersion { .. }) =
+                    curvebook_format::ensure_existing_unpacked_dir_not_newer(&resolved)
+                {
+                    return Err(EngineError::from(err));
+                }
                 return Err(EngineError::with_code(
                     ErrorCode::BadInput,
                     format!(

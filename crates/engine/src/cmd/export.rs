@@ -8,7 +8,7 @@ use std::path::Path;
 use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{ErrorCode, ProjectDocument, SheetId};
 use curvebook_pdf::{MAX_PDF_PAGES, MAX_PDF_TOTAL_PRIMITIVES, PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_page_refs};
-use curvebook_render::{MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
+use curvebook_render::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RenderTargetSpec, TiffCompression, encode_emf, encode_png, encode_tiff, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::Deserialize;
 use serde::de::{Deserializer, Error as DeError, Visitor};
@@ -607,6 +607,33 @@ fn run_pdf_with_id(ctx: &mut Ctx<'_>, command_id: &str, raw: Value) -> Result<Co
     ))
 }
 
+fn check_raster_dim_bounds(w_f: f64, h_f: f64, dpi_val: u16, max_dim: u32) -> Result<(u32, u32), EngineError> {
+    if !w_f.is_finite() || !h_f.is_finite() {
+        return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("raster dimensions at {dpi_val} DPI overflow numeric bounds"))
+            .with_remediation("Reduce `dpi`, `width_px`, or `height_px`.")
+            .with_details(json!({ "dpi": dpi_val, "max_dim_px": max_dim })));
+    }
+    if w_f < 1.0 || h_f < 1.0 {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("scaled raster dimensions ({w_f}x{h_f}) at {dpi_val} DPI are smaller than 1 pixel"),
+        )
+        .with_remediation("Increase `dpi` or specify explicit `width_px` and `height_px`.")
+        .with_details(json!({ "dpi": dpi_val, "width_px": w_f, "height_px": h_f })));
+    }
+    let max_dim_f = f64::from(max_dim);
+    if w_f > max_dim_f || h_f > max_dim_f {
+        return Err(EngineError::with_code(
+            ErrorCode::ResourceLimit,
+            format!("raster dimensions {w_f}x{h_f} at {dpi_val} DPI exceed maximum {max_dim}x{max_dim}"),
+        )
+        .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
+        .with_details(json!({ "width_px": w_f, "height_px": h_f, "dpi": dpi_val, "max_dim_px": max_dim })));
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok((w_f as u32, h_f as u32))
+}
+
 fn resolve_raster_target(
     scene: &ChartScene,
     width_px: Option<u32>,
@@ -620,22 +647,48 @@ fn resolve_raster_target(
     if dpi_val == 0 {
         return Err(EngineError::with_code(ErrorCode::BadInput, "`dpi` must be greater than 0").with_details(json!({ "pointer": "/dpi" })));
     }
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let default_w = ((scene.width_pt * f64::from(dpi_val) / 72.0).round().clamp(16.0, 8192.0)) as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let default_h = ((scene.height_pt * f64::from(dpi_val) / 72.0).round().clamp(16.0, 8192.0)) as u32;
-    let w = width_px.unwrap_or(default_w);
-    let h = height_px.unwrap_or(default_h);
-    if w == 0 || h == 0 {
-        return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
-            .with_details(json!({ "pointer": if w == 0 { "/width_px" } else { "/height_px" } })));
-    }
-    let max_dim = curvebook_render::rasterizer::MAX_RASTER_DIM_PX;
-    if w > max_dim || h > max_dim {
-        return Err(EngineError::with_code(ErrorCode::ResourceLimit, format!("raster dimensions {w}x{h} exceed maximum {max_dim}x{max_dim}"))
-            .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
-            .with_details(json!({ "width_px": w, "height_px": h, "max_dim_px": max_dim })));
-    }
+    let max_dim = MAX_RASTER_DIM_PX;
+    let (w, h) = match (width_px, height_px) {
+        (Some(w), Some(h)) => {
+            if w == 0 || h == 0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
+                    .with_details(json!({ "pointer": if w == 0 { "/width_px" } else { "/height_px" } })));
+            }
+            if w > max_dim || h > max_dim {
+                return Err(EngineError::with_code(
+                    ErrorCode::ResourceLimit,
+                    format!("raster dimensions {w}x{h} exceed maximum {max_dim}x{max_dim}"),
+                )
+                .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
+                .with_details(json!({ "width_px": w, "height_px": h, "max_dim_px": max_dim })));
+            }
+            (w, h)
+        }
+        (Some(w), None) => {
+            if w == 0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
+                    .with_details(json!({ "pointer": "/width_px" })));
+            }
+            let w_f = f64::from(w);
+            let h_f = (w_f * (scene.height_pt / scene.width_pt)).round();
+            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
+        }
+        (None, Some(h)) => {
+            if h == 0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "raster width and height must be greater than 0")
+                    .with_details(json!({ "pointer": "/height_px" })));
+            }
+            let h_f = f64::from(h);
+            let w_f = (h_f * (scene.width_pt / scene.height_pt)).round();
+            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
+        }
+        (None, None) => {
+            let scale = f64::from(dpi_val) / 72.0;
+            let w_f = (scene.width_pt * scale).round();
+            let h_f = (scene.height_pt * scale).round();
+            check_raster_dim_bounds(w_f, h_f, dpi_val, max_dim)?
+        }
+    };
     let total_pixels = u64::from(w).saturating_mul(u64::from(h));
     if total_pixels > MAX_RASTER_PIXELS {
         return Err(EngineError::with_code(
@@ -643,7 +696,7 @@ fn resolve_raster_target(
             format!("raster pixel count {total_pixels} ({w}x{h}) exceeds budget {MAX_RASTER_PIXELS}"),
         )
         .with_remediation("Reduce `width_px`, `height_px`, or `dpi`.")
-        .with_details(json!({ "total_pixels": total_pixels, "max_pixels": MAX_RASTER_PIXELS })));
+        .with_details(json!({ "total_pixels": total_pixels, "max_pixels": MAX_RASTER_PIXELS, "width_px": w, "height_px": h, "dpi": dpi_val })));
     }
     Ok(RenderTargetSpec { width_px: w, height_px: h, dpi: dpi_val })
 }
@@ -859,5 +912,131 @@ mod tests {
         let bad = s.execute("export.pdf", json!({ "color_space": "lab" })).expect_err("invalid pdf color space");
         assert_eq!(bad.code, ErrorCode::BadInput);
         assert!(SheetId::try_new("g1").is_ok());
+    }
+
+    fn parse_png_ihdr_and_phys(bytes: &[u8]) -> (u32, u32, Option<(u32, u32, u8)>) {
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"), "PNG signature missing");
+        let mut pos = 8_usize;
+        let mut width = 0_u32;
+        let mut height = 0_u32;
+        let mut phys = None;
+        while pos + 12 <= bytes.len() {
+            let len = u32::from_be_bytes([bytes[pos], bytes[pos + 1], bytes[pos + 2], bytes[pos + 3]]) as usize;
+            let tag = &bytes[pos + 4..pos + 8];
+            let data = &bytes[pos + 8..pos + 8 + len];
+            if tag == b"IHDR" && data.len() >= 8 {
+                width = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                height = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+            } else if tag == b"pHYs" && data.len() == 9 {
+                let x = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
+                let y = u32::from_be_bytes([data[4], data[5], data[6], data[7]]);
+                phys = Some((x, y, data[8]));
+            }
+            pos += 12 + len;
+        }
+        (width, height, phys)
+    }
+
+    fn parse_tiff_dimensions_and_dpi(bytes: &[u8]) -> (u32, u32, (u32, u32), (u32, u32), u16) {
+        assert!(bytes.starts_with(b"II\x2a\x00"), "little-endian TIFF header missing");
+        let u16_le = |off: usize| u16::from_le_bytes([bytes[off], bytes[off + 1]]);
+        let u32_le = |off: usize| u32::from_le_bytes([bytes[off], bytes[off + 1], bytes[off + 2], bytes[off + 3]]);
+        let ifd = u32_le(4) as usize;
+        let count = u16_le(ifd) as usize;
+        let mut width = 0_u32;
+        let mut height = 0_u32;
+        let mut x_res = (0_u32, 0_u32);
+        let mut y_res = (0_u32, 0_u32);
+        let mut res_unit = 0_u16;
+        for idx in 0..count {
+            let entry = ifd + 2 + idx * 12;
+            let tag = u16_le(entry);
+            let field_type = u16_le(entry + 2);
+            let val_or_off = u32_le(entry + 8);
+            match tag {
+                256 => width = val_or_off,
+                257 => height = val_or_off,
+                282 if field_type == 5 => {
+                    let off = val_or_off as usize;
+                    x_res = (u32_le(off), u32_le(off + 4));
+                }
+                283 if field_type == 5 => {
+                    let off = val_or_off as usize;
+                    y_res = (u32_le(off), u32_le(off + 4));
+                }
+                296 => res_unit = u16_le(entry + 8),
+                _ => {}
+            }
+        }
+        (width, height, x_res, y_res, res_unit)
+    }
+
+    #[test]
+    fn dpi_raster_export_preserves_aspect_ratio_and_enforces_limits() {
+        let mut doc = doc_with_graph_and_layout();
+        let wide_spec =
+            LayoutSpec { width: 2000.0, height: 60.0, unit: curvebook_doc::PhysicalUnit::Points, grid_template: None, ..LayoutSpec::default() };
+        doc.add_layout_sheet(LayoutSheet::new("l_wide", "Wide Banner", wide_spec).unwrap()).unwrap();
+        let sq_spec =
+            LayoutSpec { width: 1000.0, height: 1000.0, unit: curvebook_doc::PhysicalUnit::Points, grid_template: None, ..LayoutSpec::default() };
+        doc.add_layout_sheet(LayoutSheet::new("l_sq", "Large Square", sq_spec).unwrap()).unwrap();
+
+        let mut session = Session::from_document(doc);
+        let png_res = session
+            .execute("export.png", json!({ "sheet_id": "l_wide", "dpi": 360 }))
+            .expect("wide 360 DPI layout fits MAX_RASTER_DIM_PX and MAX_RASTER_PIXELS");
+        assert_eq!(png_res.payload["width_px"], json!(10_000));
+        assert_eq!(png_res.payload["height_px"], json!(300));
+        assert_eq!(png_res.payload["dpi"], json!(360));
+        let png_bytes = crate::cmd::helpers::decode_base64(png_res.payload["base64"].as_str().expect("base64 string")).expect("decode png base64");
+        let (pw, ph, phys) = parse_png_ihdr_and_phys(&png_bytes);
+        assert_eq!((pw, ph), (10_000, 300));
+        let expected_ppm = (360.0_f64 / 0.0254).round() as u32;
+        assert_eq!(phys, Some((expected_ppm, expected_ppm, 1)));
+
+        let graph_png =
+            session.execute("graph.exportPng", json!({ "sheet_id": "g1", "dpi": 360 })).expect("graph.exportPng honors uniform DPI scaling");
+        assert_eq!(graph_png.payload["dpi"], json!(360));
+        let graph_png_bytes =
+            crate::cmd::helpers::decode_base64(graph_png.payload["base64"].as_str().expect("base64 string")).expect("decode graph png base64");
+        let (gw, gh, g_phys) = parse_png_ihdr_and_phys(&graph_png_bytes);
+        assert_eq!(gw, graph_png.payload["width_px"].as_u64().expect("width_px") as u32);
+        assert_eq!(gh, graph_png.payload["height_px"].as_u64().expect("height_px") as u32);
+        assert_eq!(g_phys, Some((expected_ppm, expected_ppm, 1)));
+
+        let tiff_res = session
+            .execute("export.tiff", json!({ "sheet_id": "l_wide", "dpi": 360 }))
+            .expect("wide 360 DPI TIFF fits MAX_RASTER_DIM_PX and MAX_RASTER_PIXELS");
+        assert_eq!(tiff_res.payload["width_px"], json!(10_000));
+        assert_eq!(tiff_res.payload["height_px"], json!(300));
+        assert_eq!(tiff_res.payload["dpi"], json!(360));
+        let tiff_bytes = crate::cmd::helpers::decode_base64(tiff_res.payload["base64"].as_str().expect("base64 string")).expect("decode tiff base64");
+        let (tw, th, xr, yr, ru) = parse_tiff_dimensions_and_dpi(&tiff_bytes);
+        assert_eq!((tw, th), (10_000, 300));
+        assert_eq!((xr, yr, ru), ((360, 1), (360, 1), 2));
+
+        // 720 DPI on 2000x60 pt asks for 20,000x600 (> MAX_RASTER_DIM_PX = 16,384): must fail cleanly.
+        let err_png_dim =
+            session.execute("export.png", json!({ "sheet_id": "l_wide", "dpi": 720 })).expect_err("oversized DPI width must return ResourceLimit");
+        assert_eq!(err_png_dim.code, ErrorCode::ResourceLimit);
+        let err_tiff_dim = session
+            .execute("export.tiff", json!({ "sheet_id": "l_wide", "dpi": 720 }))
+            .expect_err("oversized TIFF DPI width must return ResourceLimit");
+        assert_eq!(err_tiff_dim.code, ErrorCode::ResourceLimit);
+
+        // 600 DPI on 1000x1000 pt asks for 8333x8333 = 69,438,889 px (> MAX_RASTER_PIXELS): must fail cleanly.
+        let err_png_pixels = session
+            .execute("export.png", json!({ "sheet_id": "l_sq", "dpi": 600 }))
+            .expect_err("over-pixel-budget PNG DPI must return ResourceLimit");
+        assert_eq!(err_png_pixels.code, ErrorCode::ResourceLimit);
+        let err_tiff_pixels = session
+            .execute("export.tiff", json!({ "sheet_id": "l_sq", "dpi": 600 }))
+            .expect_err("over-pixel-budget TIFF DPI must return ResourceLimit");
+        assert_eq!(err_tiff_pixels.code, ErrorCode::ResourceLimit);
+
+        let err_graph_dpi = session
+            .execute("graph.exportPng", json!({ "sheet_id": "g1", "dpi": 5000 }))
+            .expect_err("graph.exportPng oversized DPI must return ResourceLimit");
+        assert_eq!(err_graph_dpi.code, ErrorCode::ResourceLimit);
     }
 }

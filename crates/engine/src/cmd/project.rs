@@ -215,7 +215,7 @@ fn run_project_save(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, 
             (true, bytes)
         } else {
             let bytes = save_project_bytes(&ctx.session.doc)?;
-            ctx.session.path_policy.write_atomic_bytes(path, &bytes)?;
+            ctx.session.path_policy.write_atomic_archive_bytes(path, &bytes)?;
             (false, bytes)
         }
     } else {
@@ -266,7 +266,7 @@ fn run_project_save_template(ctx: &mut Ctx<'_>, params: Value) -> Result<Command
     let return_bytes = parsed.return_bytes.unwrap_or(parsed.path.is_none());
     let bytes = save_template_bytes(&ctx.session.doc)?;
     if let Some(ref path) = parsed.path {
-        ctx.session.path_policy.write_atomic_bytes(path, &bytes)?;
+        ctx.session.path_policy.write_atomic_archive_bytes(path, &bytes)?;
     }
     let encoded = if return_bytes { Some(encode_base64(&bytes)) } else { None };
     Ok(CommandOutcome::read_only(
@@ -1108,5 +1108,80 @@ mod tests {
 
         let missing_err = exec_cmd(&mut session, "project.deleteCheckpoint", Caller::Mcp, json!({ "name": "Missing" })).unwrap_err();
         assert_eq!(missing_err.code, ErrorCode::NotFound);
+    }
+
+    fn build_future_archive_bytes(kind: &str, schema_version: u64) -> Vec<u8> {
+        let mut w = curvebook_format::zip::ZipWriter::new();
+        let doc_json = format!(r#"{{"schema_version":{schema_version},"title":"Future Study"}}"#).into_bytes();
+        let manifest_json = format!(
+            r#"{{"format":"curvebook-archive","schema_version":{schema_version},"kind":"{kind}","title":"Future Study","document_crc32":0,"sheets":[]}}"#
+        )
+        .into_bytes();
+        w.add_file("manifest.json", manifest_json).unwrap();
+        w.add_file("document.json", doc_json).unwrap();
+        w.finish().unwrap()
+    }
+
+    #[test]
+    fn forward_version_save_commands_refuse_to_overwrite_existing_targets() {
+        let dir = std::env::temp_dir().join(format!("cb_proj_forward_guard_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+
+        let future_ver = u64::from(curvebook_doc::CURRENT_SCHEMA_VERSION) + 1;
+        let archive_path = dir.join("future.curvebook");
+        let tpl_path = dir.join("future.cbtemplate");
+        let archive_bytes = build_future_archive_bytes("project", future_ver);
+        let tpl_bytes = build_future_archive_bytes("template", future_ver);
+        std::fs::write(&archive_path, &archive_bytes).unwrap();
+        std::fs::write(&tpl_path, &tpl_bytes).unwrap();
+
+        let overflow_path = dir.join("overflow.curvebook");
+        let overflow_bytes = build_future_archive_bytes("project", 9_999_999_999);
+        std::fs::write(&overflow_path, &overflow_bytes).unwrap();
+
+        let unpacked_d = dir.join("future.curvebook.d");
+        std::fs::create_dir_all(&unpacked_d).unwrap();
+        let manifest_vnext = format!(
+            r#"{{"format":"curvebook-archive","schema_version":{future_ver},"kind":"project","title":"Future","document_crc32":0,"sheets":[]}}"#
+        );
+        let doc_vnext = format!(r#"{{"schema_version":{future_ver},"title":"Future"}}"#);
+        std::fs::write(unpacked_d.join("manifest.json"), &manifest_vnext).unwrap();
+        std::fs::write(unpacked_d.join("document.json"), &doc_vnext).unwrap();
+
+        let explicit_dir = dir.join("future_unpacked_plain");
+        std::fs::create_dir_all(&explicit_dir).unwrap();
+        std::fs::write(explicit_dir.join("manifest.json"), &manifest_vnext).unwrap();
+        std::fs::write(explicit_dir.join("document.json"), &doc_vnext).unwrap();
+
+        let mut session = new_session("Current Writer");
+
+        let save_err = exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": archive_path.to_string_lossy() })).unwrap_err();
+        assert_eq!(save_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read(&archive_path).unwrap(), archive_bytes);
+
+        let overflow_err = exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": overflow_path.to_string_lossy() })).unwrap_err();
+        assert_eq!(overflow_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read(&overflow_path).unwrap(), overflow_bytes);
+
+        let tpl_err = exec_cmd(&mut session, "project.saveTemplate", Caller::Cli, json!({ "path": tpl_path.to_string_lossy() })).unwrap_err();
+        assert_eq!(tpl_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read(&tpl_path).unwrap(), tpl_bytes);
+
+        let dir_err = exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": unpacked_d.to_string_lossy() })).unwrap_err();
+        assert_eq!(dir_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read_to_string(unpacked_d.join("manifest.json")).unwrap(), manifest_vnext);
+        assert_eq!(std::fs::read_to_string(unpacked_d.join("document.json")).unwrap(), doc_vnext);
+
+        let explicit_err =
+            exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": explicit_dir.to_string_lossy(), "unpacked": true })).unwrap_err();
+        assert_eq!(explicit_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read_to_string(explicit_dir.join("manifest.json")).unwrap(), manifest_vnext);
+
+        let implicit_err = exec_cmd(&mut session, "project.save", Caller::Cli, json!({ "path": explicit_dir.to_string_lossy() })).unwrap_err();
+        assert_eq!(implicit_err.code, ErrorCode::UnsupportedVersion);
+        assert_eq!(std::fs::read_to_string(explicit_dir.join("manifest.json")).unwrap(), manifest_vnext);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

@@ -43,26 +43,73 @@ pub struct RasterImage {
     pub rgba: Vec<u8>,
 }
 
+/// Validate target raster dimensions, DPI, [`MAX_RASTER_DIM_PX`], and [`MAX_RASTER_PIXELS`],
+/// returning total pixel count.
+pub(crate) fn validate_raster_target_dims(width_px: u32, height_px: u32, dpi: u16, label: &str) -> Result<u64, RenderError> {
+    if width_px == 0 || height_px == 0 || dpi == 0 {
+        return Err(RenderError::InvalidTarget { message: format!("{label} width, height, and dpi must be positive") });
+    }
+    if width_px > MAX_RASTER_DIM_PX || height_px > MAX_RASTER_DIM_PX {
+        return Err(RenderError::InvalidTarget {
+            message: format!("{label} dimensions {width_px}x{height_px} exceed maximum {MAX_RASTER_DIM_PX}x{MAX_RASTER_DIM_PX}"),
+        });
+    }
+    let total_pixels = u64::from(width_px).saturating_mul(u64::from(height_px));
+    if total_pixels > MAX_RASTER_PIXELS {
+        return Err(RenderError::InvalidTarget {
+            message: format!("{label} pixel count {total_pixels} ({width_px}x{height_px}) exceeds budget {MAX_RASTER_PIXELS}"),
+        });
+    }
+    Ok(total_pixels)
+}
+
+impl RenderTargetSpec {
+    /// Resolve uniform pixel dimensions for `scene` at `dpi` without independently clamping axes.
+    ///
+    /// # Errors
+    /// Returns [`RenderError::InvalidTarget`] when `dpi == 0`, scene bounds are non-positive or
+    /// non-finite, any scaled dimension rounds below `1` pixel, or uniform dimensions exceed
+    /// [`MAX_RASTER_DIM_PX`] or [`MAX_RASTER_PIXELS`].
+    pub fn from_scene_dpi(scene: &ChartScene, dpi: u16) -> Result<Self, RenderError> {
+        if dpi == 0 {
+            return Err(RenderError::InvalidTarget { message: String::from("raster DPI must be positive") });
+        }
+        if !scene.width_pt.is_finite() || !scene.height_pt.is_finite() || scene.width_pt <= 0.0 || scene.height_pt <= 0.0 {
+            return Err(RenderError::InvalidTarget { message: String::from("scene dimensions must be finite and positive") });
+        }
+        let scale = f64::from(dpi) / 72.0;
+        let w_round = (scene.width_pt * scale).round();
+        let h_round = (scene.height_pt * scale).round();
+        if !w_round.is_finite() || !h_round.is_finite() {
+            return Err(RenderError::InvalidTarget { message: format!("scaled raster dimensions at {dpi} DPI overflow numeric bounds") });
+        }
+        if w_round < 1.0 || h_round < 1.0 {
+            return Err(RenderError::InvalidTarget {
+                message: format!("scaled raster dimensions ({w_round}x{h_round}) at {dpi} DPI are smaller than 1 pixel"),
+            });
+        }
+        let max_dim_f = f64::from(MAX_RASTER_DIM_PX);
+        if w_round > max_dim_f || h_round > max_dim_f {
+            return Err(RenderError::InvalidTarget {
+                message: format!("uniform raster dimensions {w_round}x{h_round} at {dpi} DPI exceed maximum {MAX_RASTER_DIM_PX}x{MAX_RASTER_DIM_PX}"),
+            });
+        }
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let width_px = w_round as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let height_px = h_round as u32;
+        let _ = validate_raster_target_dims(width_px, height_px, dpi, "raster")?;
+        Ok(Self { width_px, height_px, dpi })
+    }
+}
+
 impl RasterImage {
     /// Allocate a pixel buffer validated against zero dimensions, max bounds, and size overflows.
     ///
     /// # Errors
     /// Returns [`RenderError::InvalidTarget`] on zero/oversized dimensions, zero DPI, or overflow.
     pub fn new(width_px: u32, height_px: u32, dpi: u16, fill: Rgba8) -> Result<Self, RenderError> {
-        if width_px == 0 || height_px == 0 || dpi == 0 {
-            return Err(RenderError::InvalidTarget { message: String::from("raster width, height, and dpi must be positive") });
-        }
-        if width_px > MAX_RASTER_DIM_PX || height_px > MAX_RASTER_DIM_PX {
-            return Err(RenderError::InvalidTarget {
-                message: format!("raster dimensions {width_px}x{height_px} exceed maximum {MAX_RASTER_DIM_PX}x{MAX_RASTER_DIM_PX}"),
-            });
-        }
-        let total_pixels = u64::from(width_px).saturating_mul(u64::from(height_px));
-        if total_pixels > MAX_RASTER_PIXELS {
-            return Err(RenderError::InvalidTarget {
-                message: format!("raster pixel count {total_pixels} ({width_px}x{height_px}) exceeds budget {MAX_RASTER_PIXELS}"),
-            });
-        }
+        let total_pixels = validate_raster_target_dims(width_px, height_px, dpi, "raster")?;
         let pixel_count = usize::try_from(total_pixels)
             .map_err(|_| RenderError::InvalidTarget { message: String::from("raster dimensions overflow addressable pixel count") })?;
         let byte_len =
