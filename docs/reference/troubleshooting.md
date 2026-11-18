@@ -1,6 +1,6 @@
-# Troubleshooting, Error Codes & Beta Known Limits
+# Troubleshooting, Error Codes & Known Issues
 
-Use this reference to diagnose installation warnings, font discovery issues, MCP/CLI confinement errors, WAL crash recovery messages, structured `ErrorCode` diagnostics, and known Beta platform limits.
+Use this reference to diagnose installation warnings, font discovery issues, MCP/CLI confinement errors, WAL crash recovery messages, structured `ErrorCode` diagnostics, and Beta known issues.
 
 ---
 
@@ -8,13 +8,13 @@ Use this reference to diagnose installation warnings, font discovery issues, MCP
 
 ### macOS Gatekeeper / Quarantine {#macos-gatekeeper}
 
-- Beta universal `.dmg` releases are Developer ID signed and Apple-notarized (`R8.10`). If Gatekeeper flags a file copied across unsigned local media, confirm checksum and provenance with [`verifying-downloads.md`](../release/verifying-downloads.md), and ensure `CurveBook.app` lives inside `/Applications` with clean extended attributes.
+- Beta universal `.dmg` releases are Developer ID signed and Apple-notarized (`R8.10`). If Gatekeeper flags a file copied across unsigned local media, confirm checksum and provenance with [Get Started: Verifying Checksums & Build Attestations](get-started.md#verifying-downloads), and ensure `CurveBook.app` lives inside `/Applications` with clean extended attributes.
 - If `curvebook-cli` reports `command not found` in Terminal, verify `/Applications/CurveBook.app/Contents/MacOS` is on `PATH` ([Get Started: macOS](get-started.md#install-macos)).
 
 ### Windows SmartScreen & Smart App Control {#windows-smartscreen}
 
-- **Defender SmartScreen ("Windows protected your PC"):** Beta Windows `.msi` installers (`x64`, `arm64`) are **unsigned** until `R8.11`. After verifying `SHA256SUMS.txt` and `gh attestation verify` against `HauserGroup/curvebook`, select **More info** -> **Run anyway**.
-- **Windows 11 Smart App Control (Enforcement Mode):** Smart App Control blocks unsigned installers and executables automatically without a bypass prompt; signed Windows releases will resolve this in `R8.11`.
+- **Defender SmartScreen ("Windows protected your PC"):** Beta Windows `.msi` installers (`x64`, `arm64`) are **unsigned** until `R8.11`. After verifying `SHA256SUMS.txt` and `gh attestation verify` against `HauserGroup/curvebook` ([Get Started: Verification](get-started.md#verifying-downloads)), select **More info** -> **Run anyway**.
+- **Windows 11 Smart App Control (Enforcement Mode):** Smart App Control blocks unsigned installers and executables automatically without a bypass prompt; signed Windows releases (`R8.11`) or a signed Microsoft Store MSIX distribution (`R8.9`) will address this after Beta.
 - **Cross-context duplicate MSI error:** Upgrading or switching between per-user (`Programs\CurveBook`) and machine-wide (`ALLUSERS=1`) installs requires uninstalling the opposite-scope installation first ([Windows installation policy](get-started.md#install-windows)).
 
 ### Linux AppImage & Missing FUSE v2 (`libfuse2`) {#linux-fuse}
@@ -84,11 +84,13 @@ Every validation, format, policy, solver, and system error maps deterministicall
 
 ---
 
-## Beta Known Limits {#beta-known-limits}
+## Known Issues & Beta Scope {#known-issues}
 
-- **Windows code signing:** Windows `x64` / `arm64` `.msi` installers are unsigned in Beta (`R8.11` pending); Windows `x86` and `-portable.zip` packages are omitted (`R0.28`).
-- **Draft translations:** Non-English UI translations across all non-English locales (`de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW`, `it`, `nl`, `pl`, `ru`, `tr`, `ar`, `he`) display a `[Draft]` suffix pending native-speaker review (`R10.23`).
-- **FreeBSD package:** Shipped as an experimental desktop + CLI `.tar.gz` preview.
-- **Browser bundle (`curvebook-web`):** Deferred to `1.0` (`R0.28`, `R11`).
-- **Formula scope:** `=` Calculated Variables support numeric, boolean/3-valued logic, conditional aggregates, and window functions, and omit text-manipulation and date-arithmetic functions in Beta.
-- **Local fonts:** International glyph rendering depends on OS-installed TrueType/OpenType fonts or `CURVEBOOK_FONTS_DIR`.
+- **Supported Interfaces & Verification Boundary:** The desktop GUI (`curvebook`) is a supported CurveBook interface alongside `curvebook-cli` and `curvebook-cli mcp` (the Alpha *"GUI is pre-alpha"* warning no longer applies). Automated `HumanPathDriver` desktop suites verify interactive widget, menu, dialog, and canvas parity across workflows `WF-01`–`WF-50`, while recorded interactive OS walkthroughs (`R10.13` macOS walkthrough and `R10.24` cross-OS Windows/Linux smoke QA) remain the Beta release-gate verification. The FreeBSD `x86_64` package (`curvebook-<version>-freebsd-x86_64.tar.gz`) is shipped as a **preview** (`R10.24`, `R8.5`).
+- **Windows `x86` Dropped & Unsigned Beta `.msi` Installers:** Beta omits 32-bit Windows (`x86`) and `-portable.zip` archives (`R0.28`). `curvebook-<version>-windows-x64.msi` and `curvebook-<version>-windows-arm64.msi` are currently **unsigned** until `R8.11` (Windows Defender SmartScreen prompts **More info** -> **Run anyway**, and Windows 11 Smart App Control in enforcement mode blocks unsigned installers until Authenticode signing or Microsoft Store MSIX distribution under `R8.9` arrives). Direct `x64` `.msi` upgrade over an Alpha `x86` `.msi` has not yet been runner-verified; manually uninstall any Alpha `x86` copy before installing `x64`.
+- **Draft Non-English Translations (`[Draft]`):** All non-English UI locales (`de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW`, `it`, `nl`, `pl`, `ru`, `tr`, `ar`, `he`) carry `[Draft]` suffix labels in **View › Language** (`ui.locale.set`) pending native-speaker scientific review (`R10.23`).
+- **Browser App (`curvebook-web`) Deferred to `1.0`:** The browser WebAssembly bundle (`curvebook-web`) is deferred until CurveBook `1.0` (`R0.28`, `R11`) and is not published in Beta releases.
+- **Zero Bundled Binary Fonts:** International CJK, RTL, and special technical glyph rendering depends on OS system TrueType/OpenType fonts or user-provided `.ttf`/`.otf` faces via `CURVEBOOK_FONTS_DIR` / `--ttf-font` ([Get Started: Fonts](get-started.md#fonts)).
+- **Pre-`R0.20` Legacy Archive Rejection:** Pre-`R0.20` containers stamped with the legacy `lumencraft-archive` magic are rejected with `unsupported_format`; only current `.curvebook` / `.curvebook.d/` containers (`schema_version <= 3`) and documented import formats (`.csv`, `.tsv`, `.pzfx`, `.prism`) are supported.
+- **Formula Evaluator & `1.0`-Deferred Capabilities:** `=` Calculated Variables support numeric, boolean/3-valued logic, conditional aggregates, and window functions, and omit text-manipulation and date-arithmetic functions in Beta. Post-Beta `1.0` scope (`R13` `WF-51`–`WF-65` workflows, `QOL-10` browser collaborator viewer extensions, `QOL-11` additional unpacked-directory QoL extensions, `QOL-13` instant statistical/Bayesian calculators, and `QOL-15` bench molarity/dilution/radiochemical calculators) is deferred beyond Beta.
+- **Release Notes & Downloads:** Inspect [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases) for per-tag Beta release notes, checksums, and build provenance attestations.

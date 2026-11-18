@@ -2,7 +2,7 @@
 
 CurveBook compiles every graph specification (`GraphSheet`) and multi-panel composition (`LayoutSheet`) into a device-independent vector intermediate representation (`ChartScene`, `crates/chart`), guaranteeing identical geometry across desktop canvas rendering, SVG, `%PDF-1.7`, PNG/TIFF rasterization, and ECMA-234 Enhanced Metafiles (`.emf`).
 
-See [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), and [Analyses Reference](analyses.md) for graph/layout command parameters.
+See [Command Reference](../commands.md), [Automation: MCP](automation/mcp.md), [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html) for graph/layout and overlay parameters.
 
 ---
 

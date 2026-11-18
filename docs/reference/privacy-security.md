@@ -51,7 +51,7 @@ When enabled via `--control <port>` (or `CURVEBOOK_CONTROL_PORT`, `port` in `1..
 
 ## Clean-Room Implementation Statement {#clean-room}
 
-CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, distribution evaluators, vector graphics renderers, file container parsers, and user interface components are implemented independently in Rust from published peer-reviewed academic literature (`D1` citations documented in [Analyses Reference](analyses.md) and [Fitting Reference](fitting.md)), validated against public NIST StRD and open-source reference oracles, and verified continuously via `cargo xtask brands`, `cargo xtask cleanroom`, and `cargo xtask citations`. Support for `.pzfx` and `.prism` files is implemented purely at the external file-format import boundary (`crates/format`).
+CurveBook is an original clean-room scientific software suite. Statistical methods, nonlinear least-squares solvers, distribution evaluators, vector graphics renderers, file container parsers, and user interface components are implemented independently in Rust from published peer-reviewed academic literature (`D1` citations documented in the numerical modules, [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Parametric Equations Registry](registry/equations.html)), validated against public NIST StRD and open-source reference oracles, and verified continuously via `cargo xtask brands`, `cargo xtask cleanroom`, and `cargo xtask citations`. Support for `.pzfx` and `.prism` files is implemented purely at the external file-format import boundary (`crates/format`).
 
 ---
 

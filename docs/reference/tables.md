@@ -100,4 +100,4 @@ CurveBook executes derived transforms (`transform.run`, `table.convertArchetype`
 | **Monte Carlo & Distribution Simulation (`QOL-14`, `table.simulateDistributions`, `table.simulateXy`)** | Generates independent seeded columns (`Uniform`, `Normal`, `LogNormal`, `Binomial`, `Poisson`, `Exponential`) or synthetic `Xy` noisy curves (`Gaussian`, `Uniform`, `LogNormal` / multiplicative noise). | Deterministic across native and `wasm32` targets given the recorded 64-bit PRNG seed. |
 | **4-Stage `ImportLinkSpec` Pipeline** | Reconciles upstream `DataSheet`, `ResultSheet`, or delimited text payloads across `filter -> reshape/transpose -> baseline -> exclude/*` while maintaining `LinkedDataRegion` provenance. | Cycle detection via Kahn's topological sort (`detect_link_cycles`) aborts circular sheet links before mutation. |
 
-See [Concepts & Document Architecture](concepts.md), [Analyses Reference](analyses.md), and [Command Reference](../commands.md) for parameter schemas.
+See [Concepts & Document Architecture](concepts.md), [Analysis Kinds Registry](registry/tables.html#analysis-kinds), and [Command Reference](../commands.md) for parameter schemas.
