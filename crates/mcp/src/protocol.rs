@@ -23,17 +23,29 @@ use crate::tools::{McpServerState, ToolCallError, call_tool, list_tools_for_stat
 pub const MCP_PROTOCOL_VERSION: &str = "2024-11-05";
 
 /// Guidance string advertised to MCP clients during `initialize`.
-pub const SERVER_INSTRUCTIONS: &str = "\
-CurveBook MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. \
-Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. \
-Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). \
-Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows.";
+pub const SERVER_INSTRUCTIONS: &str = concat!(
+    "CurveBook MCP server for scientific tables, statistical analysis, curve fitting, and publication figures. ",
+    "Use `doc_inspect` or MCP resources (`resources/list`, `resources/read` with `sheet://<id>` or `result://<id>`) to inspect active sheets and results. ",
+    "Core tools are available immediately; call `list_toolsets` and `enable_toolset` to dynamically load per-command CommandGroup tools (which emits `notifications/tools/list_changed`). ",
+    "Inspect each tool's `annotations` (`readOnlyHint`, `destructiveHint`, `idempotentHint`, `openWorldHint`) before executing mutating or filesystem commands, and use `prompts/list` + `prompts/get` for guided analysis workflows. ",
+    "Reference docs: https://hausergroup.github.io/curvebook/manual/v",
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR"),
+    "/automation/mcp.html",
+);
 
 /// Guidance string advertised during `initialize` when strict `--gui-only` policy is active.
-pub const GUI_ONLY_SERVER_INSTRUCTIONS: &str = "\
-CurveBook MCP server running under strict `--gui-only` policy. \
-Only the 8 human-equivalent GUI tools are exposed (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). \
-Direct engine commands (`command_run`, `command_batch`, `enable_toolset`), `doc_inspect`, file shortcuts (`open_file`, `save_file`, `export`, `render_preview`), and `resources/read` are blocked with `gui_only_violation`.";
+pub const GUI_ONLY_SERVER_INSTRUCTIONS: &str = concat!(
+    "CurveBook MCP server running under strict `--gui-only` policy. ",
+    "Only the 8 human-equivalent GUI tools are exposed (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`). ",
+    "Direct engine commands (`command_run`, `command_batch`, `enable_toolset`), `doc_inspect`, file shortcuts (`open_file`, `save_file`, `export`, `render_preview`), and `resources/read` are blocked with `gui_only_violation`. ",
+    "Reference docs: https://hausergroup.github.io/curvebook/manual/v",
+    env!("CARGO_PKG_VERSION_MAJOR"),
+    ".",
+    env!("CARGO_PKG_VERSION_MINOR"),
+    "/automation/mcp.html#gui-only",
+);
 
 /// Newer MCP protocol revision accepted when explicitly requested by a client.
 const SUPPORTED_PROTOCOL_VERSIONS: [&str; 2] = ["2024-11-05", "2025-03-26"];

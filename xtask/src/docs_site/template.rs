@@ -1,0 +1,320 @@
+//! Classic coral static HTML page template shared by every generated manual page.
+//!
+//! Enforces strict CSP (`default-src 'none'`), `no-referrer`, zero scripts, zero forms,
+//! zero inline `style=` attributes, skip link, breadcrumbs, optional table of contents,
+//! version banner (plus optional live-`main` contributor notice), and prev/next navigation.
+
+use super::markdown::{TocHeading, push_html_escaped};
+
+/// Strict Content-Security-Policy matching `docs/index.html` and `docs/privacy.html`.
+pub const STRICT_CSP: &str = "default-src 'none'; style-src 'self'; img-src 'self'; base-uri 'none'; form-action 'none'; connect-src 'none'";
+
+/// Release / build context rendered into every manual page banner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SiteMeta {
+    /// Human-readable documented version label (e.g., `"v0.1.0-alpha.2 (local preview)"` or `"v0.1.0"`).
+    pub version_label: String,
+    /// Optional git commit SHA for release snapshots.
+    pub commit_sha: Option<String>,
+    /// Optional release date (`YYYY-MM-DD`).
+    pub release_date: Option<String>,
+    /// True when emitting a committed release snapshot under `docs/manual/v<major>.<minor>/`.
+    pub is_release_snapshot: bool,
+}
+
+/// Single breadcrumb trail entry (`href` relative to current page, or `None` for active leaf).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Breadcrumb<'a> {
+    pub label: &'a str,
+    pub href: Option<String>,
+}
+
+/// Previous/Next sequential navigation target.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NavLink {
+    pub label: String,
+    pub rel_path: String,
+}
+
+/// Complete page specification passed to [`render_page`].
+pub struct PageSpec<'a> {
+    /// Page `<title>` prefix (`" — CurveBook Documentation"` is appended).
+    pub title: &'a str,
+    /// `<meta name="description">` summary.
+    pub description: &'a str,
+    /// Output path relative to generated site root (e.g. `"automation/mcp.html"`).
+    pub rel_path: &'a str,
+    /// Section label shown in window status & breadcrumbs.
+    pub section_title: &'a str,
+    /// Section overview path relative to site root (`"section-automation.html"`).
+    pub section_rel_path: Option<&'a str>,
+    /// Primary `<h1>` heading (skipped if `body_starts_with_h1` is true).
+    pub h1: &'a str,
+    /// Optional headings extracted from Markdown or registry sections for the per-page TOC.
+    pub toc_headings: &'a [TocHeading],
+    /// Safe HTML fragment inside `<article>`.
+    pub body_html: &'a str,
+    /// When true, `body_html` already opens with `<h1 ...>` (e.g. rendered from Markdown `# Title`).
+    pub body_has_h1: bool,
+    /// Previous page in deterministic reading order.
+    pub prev: Option<&'a NavLink>,
+    /// Next page in deterministic reading order.
+    pub next: Option<&'a NavLink>,
+    /// Site release metadata.
+    pub meta: &'a SiteMeta,
+}
+
+/// Compute relative path prefix (`""`, `"../"`, ...) from `from_rel` to site root or sibling `to_rel`.
+#[must_use]
+pub fn rel_href(from_rel: &str, to_rel: &str) -> String {
+    let depth = from_rel.matches('/').count();
+    let mut out = String::new();
+    for _ in 0..depth {
+        out.push_str("../");
+    }
+    out.push_str(to_rel);
+    out
+}
+
+/// Compute relative prefix from a generated page back to shared `site.css` / `images/`.
+#[must_use]
+pub fn asset_prefix(from_rel: &str, is_release_snapshot: bool) -> String {
+    let extra = if is_release_snapshot { 2 } else { 0 };
+    let depth = from_rel.matches('/').count() + extra;
+    let mut out = String::new();
+    for _ in 0..depth {
+        out.push_str("../");
+    }
+    out
+}
+
+/// Render one complete Classic coral HTML5 document.
+#[must_use]
+pub fn render_page(spec: &PageSpec<'_>) -> String {
+    let root = rel_href(spec.rel_path, "");
+    let assets = asset_prefix(spec.rel_path, spec.meta.is_release_snapshot);
+    let mut out = String::with_capacity(spec.body_html.len() + 3072);
+
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n");
+    out.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str("  <meta name=\"description\" content=\"");
+    push_html_escaped(spec.description, &mut out);
+    out.push_str("\">\n");
+    out.push_str("  <meta name=\"referrer\" content=\"no-referrer\">\n");
+    out.push_str("  <meta http-equiv=\"Content-Security-Policy\" content=\"");
+    out.push_str(STRICT_CSP);
+    out.push_str("\">\n  <meta name=\"color-scheme\" content=\"light\">\n  <title>");
+    push_html_escaped(spec.title, &mut out);
+    out.push_str(" — CurveBook Documentation</title>\n  <link rel=\"icon\" type=\"image/png\" href=\"");
+    out.push_str(&assets);
+    out.push_str("images/curvebook.png\">\n  <link rel=\"stylesheet\" href=\"");
+    out.push_str(&assets);
+    out.push_str("site.css\">\n</head>\n<body>\n");
+    out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n");
+    out.push_str("  <div class=\"desktop-window wrap\">\n");
+
+    render_header(spec, &root, &assets, &mut out);
+    render_version_banner(spec, &mut out);
+
+    out.push_str("    <main id=\"main\" tabindex=\"-1\">\n");
+    out.push_str("      <article class=\"overview doc-body\">\n");
+    render_breadcrumbs(spec, &root, &mut out);
+
+    if !spec.body_has_h1 {
+        out.push_str("        <h1 id=\"page-title\" tabindex=\"-1\">");
+        push_html_escaped(spec.h1, &mut out);
+        out.push_str("</h1>\n");
+    }
+
+    render_toc(spec.toc_headings, &mut out);
+    out.push_str(spec.body_html);
+    if !spec.body_html.ends_with('\n') {
+        out.push('\n');
+    }
+    render_pager(spec, &mut out);
+
+    out.push_str("      </article>\n    </main>\n");
+    render_footer(spec, &root, &assets, &mut out);
+    out.push_str("  </div>\n</body>\n</html>\n");
+    out
+}
+
+fn render_header(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String) {
+    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n        <div class=\"wordmark\">\n");
+    out.push_str("          <img src=\"");
+    out.push_str(assets);
+    out.push_str("images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\">\n");
+    out.push_str("          <span>CurveBook · Reference Manual</span>\n        </div>\n");
+    out.push_str("        <span class=\"window-status\">");
+    push_html_escaped(spec.section_title, out);
+    out.push_str("</span>\n      </div>\n      <nav aria-label=\"Manual navigation\">\n");
+
+    let nav_items = [
+        ("Manual Home", "index.html"),
+        ("Get Started", "section-get-started.html"),
+        ("Reference", "section-analyses.html"),
+        ("Automation", "section-automation.html"),
+        ("Commands &amp; Tools", "registry/commands.html"),
+        ("A–Z Index", "az-index.html"),
+        ("Contribute", "section-contribute.html"),
+    ];
+    for (label, target) in nav_items {
+        out.push_str("        <a href=\"");
+        out.push_str(root);
+        out.push_str(target);
+        out.push_str("\">");
+        out.push_str(label);
+        out.push_str("</a>\n");
+    }
+    if spec.meta.is_release_snapshot {
+        out.push_str("        <a href=\"");
+        out.push_str(assets);
+        out.push_str("index.html\">Product Home</a>\n");
+    }
+    out.push_str("      </nav>\n    </header>\n");
+}
+
+fn render_version_banner(spec: &PageSpec<'_>, out: &mut String) {
+    out.push_str("    <div class=\"version-banner\" role=\"note\" aria-label=\"Documentation version\">\n");
+    out.push_str("      <span><strong>Documented release:</strong> ");
+    push_html_escaped(&spec.meta.version_label, out);
+    if let Some(date) = &spec.meta.release_date {
+        out.push_str(" · ");
+        push_html_escaped(date, out);
+    }
+    if let Some(sha) = &spec.meta.commit_sha {
+        let short = &sha[..sha.len().min(10)];
+        out.push_str(" (commit <code>");
+        push_html_escaped(short, out);
+        out.push_str("</code>)");
+    }
+    out.push_str("</span>\n      <span>No scripts · No telemetry · <a href=\"");
+    out.push_str(&rel_href(spec.rel_path, "az-index.html"));
+    out.push_str("\">A–Z Index</a></span>\n    </div>\n");
+}
+
+fn render_breadcrumbs(spec: &PageSpec<'_>, root: &str, out: &mut String) {
+    if spec.rel_path == "index.html" {
+        return;
+    }
+    out.push_str("        <nav class=\"breadcrumbs\" aria-label=\"Breadcrumb\">\n");
+    out.push_str("          <a href=\"");
+    out.push_str(root);
+    out.push_str("index.html\">Manual</a>\n");
+    if let Some(sec_rel) = spec.section_rel_path
+        && sec_rel != spec.rel_path
+    {
+        out.push_str("          <span aria-hidden=\"true\">/</span>\n          <a href=\"");
+        out.push_str(root);
+        out.push_str(sec_rel);
+        out.push_str("\">");
+        push_html_escaped(spec.section_title, out);
+        out.push_str("</a>\n");
+    }
+    out.push_str("          <span aria-hidden=\"true\">/</span>\n          <span aria-current=\"page\">");
+    push_html_escaped(spec.title, out);
+    out.push_str("</span>\n        </nav>\n");
+}
+
+fn render_toc(headings: &[TocHeading], out: &mut String) {
+    let entries: Vec<&TocHeading> = headings.iter().filter(|h| matches!(h.level, 2 | 3)).collect();
+    if entries.len() < 2 {
+        return;
+    }
+    out.push_str("        <nav class=\"toc\" aria-label=\"On this page\">\n");
+    out.push_str("          <p class=\"toc-title\">On this page</p>\n          <ul>\n");
+    for item in entries {
+        out.push_str("            <li><a href=\"#");
+        push_html_escaped(&item.id, out);
+        out.push_str("\">");
+        if item.level == 3 {
+            out.push_str("— ");
+        }
+        push_html_escaped(&item.text, out);
+        out.push_str("</a></li>\n");
+    }
+    out.push_str("          </ul>\n        </nav>\n");
+}
+
+fn render_pager(spec: &PageSpec<'_>, out: &mut String) {
+    if spec.prev.is_none() && spec.next.is_none() {
+        return;
+    }
+    out.push_str("        <nav class=\"pager\" aria-label=\"Previous and next pages\">\n");
+    if let Some(prev) = spec.prev {
+        out.push_str("          <a href=\"");
+        push_html_escaped(&rel_href(spec.rel_path, &prev.rel_path), out);
+        out.push_str("\">← ");
+        push_html_escaped(&prev.label, out);
+        out.push_str("</a>\n");
+    } else {
+        out.push_str("          <span></span>\n");
+    }
+    if let Some(next) = spec.next {
+        out.push_str("          <a href=\"");
+        push_html_escaped(&rel_href(spec.rel_path, &next.rel_path), out);
+        out.push_str("\">");
+        push_html_escaped(&next.label, out);
+        out.push_str(" →</a>\n");
+    } else {
+        out.push_str("          <span></span>\n");
+    }
+    out.push_str("        </nav>\n");
+}
+
+fn render_footer(spec: &PageSpec<'_>, root: &str, assets: &str, out: &mut String) {
+    out.push_str("    <footer class=\"site-footer\">\n");
+    out.push_str("      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n");
+    out.push_str("      <p><strong>Clean-room development:</strong> Independently implemented from published scientific references. No commercial statistical or graphing software was used to develop CurveBook, and no proprietary code or assets were copied.</p>\n");
+    let privacy_href = if spec.meta.is_release_snapshot { format!("{assets}privacy.html") } else { format!("{root}privacy-security.html") };
+    out.push_str("      <p class=\"privacy\">CurveBook runs locally and collects no telemetry. Read <a href=\"");
+    push_html_escaped(&privacy_href, out);
+    out.push_str("\">Privacy, Licences &amp; Security</a> · <a href=\"https://github.com/HauserGroup/curvebook\">Source code &amp; credits <span aria-hidden=\"true\">↗</span></a></p>\n");
+    out.push_str("    </footer>\n");
+}
+
+/// Deterministic helper to render a static script-free `docs/manual/index.html` meta-refresh page
+/// when `--release <version>` snapshots a release.
+#[must_use]
+pub fn render_release_redirect_index(version_dir: &str, version_label: &str, available_versions: &[String]) -> String {
+    let target = format!("{version_dir}/index.html");
+    let mut out = String::with_capacity(2048);
+    out.push_str("<!doctype html>\n<html lang=\"en\">\n<head>\n  <meta charset=\"utf-8\">\n");
+    out.push_str("  <meta name=\"viewport\" content=\"width=device-width, initial-scale=1\">\n");
+    out.push_str("  <meta name=\"description\" content=\"CurveBook reference manual entry redirecting to the latest frozen release snapshot.\">\n");
+    out.push_str("  <meta name=\"referrer\" content=\"no-referrer\">\n");
+    out.push_str("  <meta http-equiv=\"Content-Security-Policy\" content=\"");
+    out.push_str(STRICT_CSP);
+    out.push_str("\">\n");
+    out.push_str("  <meta http-equiv=\"refresh\" content=\"0; url=");
+    push_html_escaped(&target, &mut out);
+    out.push_str("\">\n  <meta name=\"color-scheme\" content=\"light\">\n");
+    out.push_str("  <title>Documentation — CurveBook</title>\n");
+    out.push_str("  <link rel=\"icon\" type=\"image/png\" href=\"../images/curvebook.png\">\n");
+    out.push_str("  <link rel=\"stylesheet\" href=\"../site.css\">\n</head>\n<body>\n");
+    out.push_str("  <a class=\"skip-link\" href=\"#main\">Skip to content</a>\n  <div class=\"desktop-window wrap\">\n");
+    out.push_str("    <header class=\"site-header\">\n      <div class=\"title-bar\">\n        <div class=\"wordmark\"><img src=\"../images/curvebook.png\" width=\"64\" height=\"64\" alt=\"\"><span>CurveBook · Documentation</span></div>\n");
+    out.push_str("        <span class=\"window-status\">Latest: ");
+    push_html_escaped(version_label, &mut out);
+    out.push_str("</span>\n      </div>\n      <nav aria-label=\"Main navigation\"><a href=\"../index.html\">Home</a><a href=\"../privacy.html\">Privacy</a></nav>\n    </header>\n");
+    out.push_str("    <main id=\"main\" tabindex=\"-1\">\n      <div class=\"overview doc-body\">\n");
+    out.push_str("        <h1>CurveBook Reference Manual</h1>\n");
+    out.push_str("        <p>Redirecting to the latest frozen release snapshot: <a href=\"");
+    push_html_escaped(&target, &mut out);
+    out.push_str("\">");
+    push_html_escaped(version_label, &mut out);
+    out.push_str("</a>.</p>\n");
+    if !available_versions.is_empty() {
+        out.push_str("        <h2>Published snapshots</h2>\n        <ul>\n");
+        for ver in available_versions {
+            out.push_str("          <li><a href=\"");
+            push_html_escaped(ver, &mut out);
+            out.push_str("/index.html\">");
+            push_html_escaped(ver, &mut out);
+            out.push_str("</a></li>\n");
+        }
+        out.push_str("        </ul>\n");
+    }
+    out.push_str("      </div>\n    </main>\n    <footer class=\"site-footer\">\n      <p><strong>License:</strong> Dual-licensed under <strong>MIT OR Apache-2.0</strong>.</p>\n    </footer>\n  </div>\n</body>\n</html>\n");
+    out
+}

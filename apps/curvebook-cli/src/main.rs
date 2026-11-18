@@ -1,6 +1,7 @@
 //! Headless command-line runner and stdio MCP server entry point for CurveBook.
 #![forbid(unsafe_code)]
 
+mod cli_catalog;
 mod cmd_bench_perf;
 mod cmd_commands;
 mod cmd_convert;
@@ -13,36 +14,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use error::{CliError, EXIT_OK};
-
-const USAGE: &str = "\
-usage: curvebook-cli <command> [args]
-
-commands:
-  info <file> [--json]
-                    inspect tables, info sheets, analyses, graphs and layouts in an archive
-  commands [--group <group>] [--json]
-                    list registered engine commands with schemas, effects and shortcuts
-  <command-id> [--in <file>] [--out <file>] [--workdir <dir>] [--json] [--<param> <val> ...]
-                    execute a registered engine command directly with schema-typed flags
-  run <script> [--workdir <dir>] [--json]
-                    execute a JSON-lines command stream headlessly
-  batch <manifest> [--workdir <dir>] [--json]
-                    execute a `curvebook.batch.v1` JSON manifest headlessly
-  convert <in> <out> [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]
-                    convert archives/unpacked `.curvebook.d` dirs or export tables and figures (curvebook, curvebook.d, svg, pdf, emf, png, tiff, csv, tsv, json)
-  export <in> (<out> | --out <out>) [--format <fmt>] [--sheet <id>] [--dpi <u16>] [--pdf-version <1.4|1.7>] [--ttf-font <path>] [--json]
-                    export a table, graph, layout, or project to svg, pdf, emf, png, tiff, csv, tsv, json, or .curvebook/.curvebook.d
-  bench <file> [--json]
-                    measure parse, recalculation, compilation and export timings
-  perf [--json]
-                    run synthetic G12 performance checks
-  mcp [--control-port <port>] [--gui-only] [--workdir <dir>] [--control-token <token>]
-                    run the Model Context Protocol (MCP) server over stdio
-
-options:
-  -V, --version     print version and exit
-  -h, --help        print this help message and exit
-";
 
 fn main() -> ExitCode {
     let args: Vec<String> = std::env::args().skip(1).collect();
@@ -63,14 +34,36 @@ fn wants_json_output(args: &[String]) -> bool {
     args.iter().take_while(|arg| *arg != "--").any(|arg| arg == "--json")
 }
 
+fn wants_subcommand_help(args: &[String]) -> bool {
+    args.len() == 1 && matches!(args[0].as_str(), "-h" | "--help")
+}
+
 fn dispatch(args: &[String]) -> Result<(), CliError> {
     cmd_convert::run_guarded_cli("cli.dispatch", || match args.first().map(String::as_str) {
-        None | Some("-h" | "--help" | "help") => {
-            print!("{USAGE}");
+        None | Some("-h" | "--help") => {
+            print!("{}", cli_catalog::format_usage());
+            Ok(())
+        }
+        Some("help") => {
+            if let Some(sub) = args.get(1)
+                && let Some(help) = cli_catalog::format_subcommand_help(sub)
+            {
+                print!("{help}");
+                return Ok(());
+            }
+            print!("{}", cli_catalog::format_usage());
             Ok(())
         }
         Some("-V" | "--version" | "version") => {
             println!("curvebook-cli {}", env!("CARGO_PKG_VERSION"));
+            Ok(())
+        }
+        Some(sub @ ("info" | "run" | "batch" | "convert" | "export" | "bench" | "perf" | "mcp")) if wants_subcommand_help(&args[1..]) => {
+            if let Some(help) = cli_catalog::format_subcommand_help(sub) {
+                print!("{help}");
+            } else {
+                print!("{}", cli_catalog::format_usage());
+            }
             Ok(())
         }
         Some("info") => cmd_info::run_info(&args[1..]),
@@ -86,7 +79,8 @@ fn dispatch(args: &[String]) -> Result<(), CliError> {
             if let Some(spec) = curvebook_engine::cmd::registry().get(other) {
                 return cmd_commands::run_direct_command(spec, &args[1..]);
             }
-            Err(CliError::Usage(format!("unknown command `{other}`\n\n{USAGE}")))
+            let usage = cli_catalog::format_usage();
+            Err(CliError::Usage(format!("unknown command `{other}`\n\n{usage}")))
         }
     })
 }
@@ -343,9 +337,17 @@ mod tests {
             parse_mcp_args(&[String::from("--control-port=49155"), String::from("--control-token=tok-2")]).unwrap(),
             super::McpCliConfig { control_port: Some(49155), gui_only: false, workdir: None, control_token: Some(String::from("tok-2")) }
         );
-        assert!(super::USAGE.contains("--gui-only"));
-        assert!(super::USAGE.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>]"));
-        assert!(super::USAGE.contains("--control-token <token>"));
+        let usage = super::cli_catalog::format_usage();
+        assert!(usage.contains("--gui-only"));
+        assert!(usage.contains("mcp [--control-port <port>] [--gui-only] [--workdir <dir>]"));
+        assert!(usage.contains("--control-token <token>"));
+        assert!(usage.contains(super::cli_catalog::CLI_DOCS_URL));
+        for cmd in super::cli_catalog::CLI_COMMANDS {
+            let sub_help = super::cli_catalog::format_subcommand_help(cmd.id).unwrap();
+            assert!(sub_help.contains(&format!("#cli-{}", cmd.id)));
+            assert!(dispatch(&[String::from(cmd.id), String::from("--help")]).is_ok() || cmd.id == "direct-command");
+        }
+        assert!(dispatch(&[String::from("help"), String::from("mcp")]).is_ok());
 
         for bad in [
             vec!["--control-port", "0"],
