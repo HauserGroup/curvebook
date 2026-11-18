@@ -1086,6 +1086,12 @@ pub struct NonlinearFitSpec {
     pub parameter_rules: Vec<ParameterRule>,
     /// When `true`, computes Venzon–Moolgavkar (1988) / Bates–Watts (1988) asymmetrical profile-likelihood confidence intervals (falling back to [`crate::CiBound::Open`] on flat plateaus) at [`AnalysisSpec::confidence_level`]; when `false`, reports symmetric Wald-*t* intervals.
     pub profile_likelihood_ci: bool,
+    /// Assess whether the fitted data support stable estimation of the free parameters.
+    #[serde(default)]
+    pub identify_unstable_parameters: bool,
+    /// Warn when the reported unweighted R squared is below this threshold in [0, 1].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub flag_r_squared_below: Option<f64>,
     /// Optional competing model comparison (`ExtraSumOfSquaresF`, `Aicc`, or `LikelihoodRatioTest`); `None` fits a single model.
     pub comparison: Option<ModelComparisonSpec>,
     /// When `true`, evaluates two-sided delta-method confidence bands along each [`crate::FittedCurveOverlay`] at [`AnalysisSpec::confidence_level`].
@@ -1155,6 +1161,8 @@ impl NonlinearFitSpec {
             weighting: WeightingScheme::None,
             parameter_rules: Vec::new(),
             profile_likelihood_ci: true,
+            identify_unstable_parameters: false,
+            flag_r_squared_below: None,
             comparison: None,
             confidence_bands: true,
             prediction_bands: false,

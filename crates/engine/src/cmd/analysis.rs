@@ -420,6 +420,11 @@ fn schema_analysis_base(summary: &str, include_fit_extras: bool, include_stats_e
             )),
         ));
         props.push(("y_range_filter", nullable_schema(any_json_schema("Optional [min, max] Y inclusion filter"))));
+        props.push(("identify_unstable_parameters", nullable_schema(bool_schema("Assess nonlinear parameter identifiability"))));
+        props.push((
+            "flag_r_squared_below",
+            nullable_schema(num_schema("Warn when nonlinear R squared is below this threshold", Some(0.0), Some(1.0))),
+        ));
     }
     obj_schema_with_aliases(
         props,
@@ -2117,6 +2122,8 @@ fn apply_nonlinear_flag_and_mv_overrides(spec: &mut NonlinearFitSpec, params: &V
     apply_bool_opt_checked(params, &["prediction_bands"], &mut spec.prediction_bands)?;
     apply_bool_opt_checked(params, &["interpolate_unknowns"], &mut spec.interpolate_unknowns)?;
     apply_bool_opt_checked(params, &["profile_likelihood_ci"], &mut spec.profile_likelihood_ci)?;
+    apply_bool_opt_checked(params, &["identify_unstable_parameters"], &mut spec.identify_unstable_parameters)?;
+    apply_opt_f64_field(params, &["flag_r_squared_below"], &mut spec.flag_r_squared_below)?;
     apply_bool_opt_checked(params, &["normality_of_residuals", "normality_tests"], &mut spec.normality_of_residuals)?;
     apply_bool_opt_checked(params, &["replicates_lack_of_fit_test"], &mut spec.replicates_lack_of_fit_test)?;
     apply_bool_opt_checked(params, &["plot_function_only"], &mut spec.plot_function_only)?;
@@ -2165,6 +2172,7 @@ const SHORTHAND_OVERRIDDEN_PATCH_KEYS: &[&str] = &[
     "plot_x_min",
     "plot_x_max",
     "plot_segments",
+    "flag_r_squared_below",
     "expected_proportions",
     "null_proportion",
     "x_transform",

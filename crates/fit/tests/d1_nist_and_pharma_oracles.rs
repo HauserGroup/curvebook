@@ -1195,12 +1195,15 @@ fn profile_likelihood_vs_wald_asymmetric_ci_and_open_bound_oracle() {
         &HookContext::default(),
         &SolverConfig {
             compute_profile_ci: true,
+            identify_unstable_parameters: true,
             parameter_rules: vec![rule_local("Vmax", Some(120.0), Some(0.0), None), rule_local("Km", Some(12.0), Some(0.0), None)],
             ..SolverConfig::default()
         },
     )
     .expect("partial curve profile CI");
     let vmax_p = find_param(&res_open, 0, "Vmax");
+    assert!(res_open.identifiability.is_ambiguous());
+    assert!(vmax_p.notes.contains(&ParameterNote::Unstable));
     let is_open =
         matches!(vmax_p.ci_upper, CiBound::Open) || matches!(vmax_p.ci_lower, CiBound::Open) || vmax_p.notes.contains(&ParameterNote::UnboundedCi);
     assert!(

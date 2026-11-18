@@ -1059,7 +1059,7 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
 
 pub(crate) fn close_active_modal(app: &mut UiApp) {
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
-        crate::views::fit_params::clear_linear_range_inputs(app);
+        crate::views::fit_params::clear_fit_parameter_inputs(app);
     }
     app.canvas_dialogs.close_dialog();
 }

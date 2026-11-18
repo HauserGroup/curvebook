@@ -10,7 +10,7 @@ use std::fmt::Write as _;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ConfidenceLevel, DataSheet, FitMethod, HookSource, LinearRegressionSpec, ModelComparisonSpec, NonlinearFitSpec,
-    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, ResultStatus, SheetId, TableArchetype, WeightingScheme,
+    ParameterRule, ParameterScope, PassingBablokSpec, ProjectDocument, SheetId, TableArchetype, WeightingScheme,
 };
 use curvebook_fit::{
     CompiledDslModel, DataPoint, DslEquationKind, EquationCatalogEntry, EquationCategory, ParametricModel as _, extract_datasets_from_sheet,
@@ -37,6 +37,7 @@ use super::a11y::{disclosure_meta, labeled_meta, selectable_meta};
 
 const DOMAIN: &str = "fit_params";
 const LINEAR_RANGE_INPUT_PREFIX: &str = "fit.lr.range.input.";
+const R_SQUARED_THRESHOLD_INPUT: &str = "fit.diagnostics.r2.input";
 const LINEAR_RANGE_FIELDS: [(&str, &str); 5] = [
     ("x_min", "Ignore points where X <"),
     ("x_max", "Ignore points where X >"),
@@ -71,17 +72,9 @@ pub struct FitParamsViewState {
     pub dsl_status: String,
     #[serde(default)]
     pub selected_param_idx: usize,
-    #[serde(default)]
-    pub unstable_flag_disabled: bool,
 }
 
 impl FitParamsViewState {
-    /// Whether ambiguous / unstable fit diagnostics should be surfaced.
-    #[must_use]
-    pub fn report_unstable_fits(&self) -> bool {
-        !self.unstable_flag_disabled
-    }
-
     fn effective_tab(&self) -> FitTab {
         FitTab::from_id(&self.active_fit_tab)
     }
@@ -102,10 +95,12 @@ enum FitTab {
     Confidence,
     Compare,
     WeightsRange,
+    Diagnostics,
 }
 
 impl FitTab {
-    const ALL: [Self; 6] = [Self::Equation, Self::Constraints, Self::InitialValues, Self::Confidence, Self::Compare, Self::WeightsRange];
+    const ALL: [Self; 7] =
+        [Self::Equation, Self::Constraints, Self::InitialValues, Self::Confidence, Self::Compare, Self::WeightsRange, Self::Diagnostics];
 
     fn from_id(id: &str) -> Self {
         match id {
@@ -114,6 +109,7 @@ impl FitTab {
             "confidence" => Self::Confidence,
             "compare" => Self::Compare,
             "weights_range" => Self::WeightsRange,
+            "diagnostics" => Self::Diagnostics,
             _ => Self::Equation,
         }
     }
@@ -126,6 +122,7 @@ impl FitTab {
             Self::Confidence => "confidence",
             Self::Compare => "compare",
             Self::WeightsRange => "weights_range",
+            Self::Diagnostics => "diagnostics",
         }
     }
 
@@ -137,6 +134,7 @@ impl FitTab {
             Self::Confidence => "fit_params.tab.confidence",
             Self::Compare => "fit_params.tab.compare",
             Self::WeightsRange => "fit_params.tab.weights_range",
+            Self::Diagnostics => "w6.view.results.diagnostics",
         }
     }
 
@@ -148,6 +146,7 @@ impl FitTab {
             Self::Confidence => "Confidence",
             Self::Compare => "Compare",
             Self::WeightsRange => "Weights & Range",
+            Self::Diagnostics => "Diagnostics",
         }
     }
 }
@@ -607,7 +606,7 @@ fn handle_nonlinear_action(
     handle_equation_action(app, state, nl, payload)
         || handle_constraints_action(app, state, nl, payload)
         || handle_initial_values_action(app, state, nl, payload)
-        || handle_confidence_action(app, state, nl, confidence_level, payload)
+        || handle_confidence_action(app, nl, confidence_level, payload)
         || handle_compare_action(app, nl, payload)
         || handle_weights_range_action(app, nl, payload)
 }
@@ -1074,13 +1073,7 @@ fn step_initial_value(app: &mut UiApp, state: &mut FitParamsViewState, nl: &mut 
     true
 }
 
-fn handle_confidence_action(
-    app: &mut UiApp,
-    state: &mut FitParamsViewState,
-    nl: &mut NonlinearFitSpec,
-    confidence_level: &mut ConfidenceLevel,
-    payload: &str,
-) -> bool {
+fn handle_confidence_action(app: &mut UiApp, nl: &mut NonlinearFitSpec, confidence_level: &mut ConfidenceLevel, payload: &str) -> bool {
     if let Some(mode) = payload.strip_prefix("ci_method:") {
         if mode == "profile" && robust_or_rout(nl.method) {
             return false;
@@ -1135,7 +1128,7 @@ fn handle_confidence_action(
             return true;
         }
         "toggle_flag_unstable" => {
-            state.unstable_flag_disabled = !state.unstable_flag_disabled;
+            nl.identify_unstable_parameters = !nl.identify_unstable_parameters;
             return true;
         }
         _ => {}
@@ -1338,24 +1331,47 @@ fn read_linear_range_inputs(app: &UiApp, mut fit: LinearRegressionSpec) -> Resul
     Ok(fit)
 }
 
-pub(crate) fn sync_linear_range_inputs(app: &mut UiApp) -> Result<(), String> {
+fn read_r_squared_threshold(app: &UiApp, current: Option<f64>) -> Result<Option<f64>, String> {
+    let Some(text) = app.interaction.text_field_buffers.get(R_SQUARED_THRESHOLD_INPUT).map(|buf| buf.text.trim()) else {
+        return Ok(current);
+    };
+    if text.is_empty() {
+        return Ok(None);
+    }
+    parse_localized_number_input(text, &app.locale_preset)
+        .filter(|value| (0.0..=1.0).contains(value))
+        .map(Some)
+        .ok_or_else(|| "Enter an R² threshold from 0 to 1 or leave it blank.".to_owned())
+}
+
+pub(crate) fn sync_fit_parameter_inputs(app: &mut UiApp) -> Result<(), String> {
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() else {
         return Ok(());
     };
-    let AnalysisKind::LinearRegression(fit) = spec.kind else {
-        return Ok(());
+    let kind = match &spec.kind {
+        AnalysisKind::LinearRegression(fit) => {
+            let fit = read_linear_range_inputs(app, *fit).inspect_err(|_| {
+                app.view_shards.fit_params.linear_range_selected = true;
+            })?;
+            AnalysisKind::LinearRegression(fit)
+        }
+        AnalysisKind::NonlinearRegression(fit) if app.interaction.text_field_buffers.contains_key(R_SQUARED_THRESHOLD_INPUT) => {
+            let mut fit = fit.clone();
+            fit.flag_r_squared_below = read_r_squared_threshold(app, fit.flag_r_squared_below).inspect_err(|_| {
+                app.view_shards.fit_params.active_fit_tab = FitTab::Diagnostics.id().to_owned();
+            })?;
+            AnalysisKind::NonlinearRegression(fit)
+        }
+        _ => return Ok(()),
     };
-    let fit = read_linear_range_inputs(app, fit).inspect_err(|_| {
-        app.view_shards.fit_params.linear_range_selected = true;
-    })?;
     if let Some(draft) = app.canvas_dialogs.edit_params.draft.as_mut() {
-        draft.update_kind(AnalysisKind::LinearRegression(fit));
+        draft.update_kind(kind);
     }
     Ok(())
 }
 
-pub(crate) fn clear_linear_range_inputs(app: &mut UiApp) {
-    app.interaction.text_field_buffers.retain(|id, _| !id.starts_with(LINEAR_RANGE_INPUT_PREFIX));
+pub(crate) fn clear_fit_parameter_inputs(app: &mut UiApp) {
+    app.interaction.text_field_buffers.retain(|id, _| id != R_SQUARED_THRESHOLD_INPUT && !id.starts_with(LINEAR_RANGE_INPUT_PREFIX));
     app.view_shards.fit_params.linear_range_selected = false;
 }
 
@@ -1705,9 +1721,10 @@ fn build_nonlinear_section(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, r
         FitTab::Equation => build_equation_tab(builder, parent, body, spec, nl, state, &locale),
         FitTab::Constraints => build_constraints_tab(builder, parent, body, nl, state, &locale),
         FitTab::InitialValues => build_initial_values_tab(builder, parent, body, spec, nl, state, &locale),
-        FitTab::Confidence => build_confidence_tab(builder, parent, body, spec, nl, state, &locale),
+        FitTab::Confidence => build_confidence_tab(builder, parent, body, spec, nl, &locale),
         FitTab::Compare => build_compare_tab(builder, parent, body, nl, &locale),
         FitTab::WeightsRange => build_weights_range_tab(builder, parent, body, nl),
+        FitTab::Diagnostics => build_diagnostics_tab(builder, parent, body, nl),
     }
 }
 
@@ -2779,7 +2796,6 @@ fn build_confidence_tab(
     body: LayoutRectPx,
     spec: &AnalysisSpec,
     nl: &NonlinearFitSpec,
-    state: &FitParamsViewState,
     locale: &str,
 ) {
     let col_w = body.width.saturating_sub(14) / 2;
@@ -3008,9 +3024,9 @@ fn build_confidence_tab(
         FitToggle {
             id: "fit.ci.flag_unstable",
             rect: LayoutRectPx::new(right_x, body.y + 138, col_w, 24),
-            label: fit_tr(locale, "fit_params.ci.flag_unstable", "Report Ambiguous / Unstable Fits"),
+            label: fit_tr(locale, "fit_params.ci.flag_unstable", "Identify unstable parameters"),
             kb_path: "dialog.fit.ci.flag_unstable",
-            checked: state.report_unstable_fits(),
+            checked: nl.identify_unstable_parameters,
             is_radio: false,
             enablement: ControlEnablement::enabled(),
             scroll_container: None,
@@ -3077,20 +3093,10 @@ fn build_confidence_tab(
 
     let pts = active_sheet_points(builder.app.document(), &spec.source_sheet_id).len();
     let free_p = model_param_names(nl).into_iter().filter(|name| !find_rule(nl, name).is_some_and(|r| is_fixed_scope(&r.scope))).count();
-    let ambiguous_rs =
-        builder.app.canvas_dialogs.edit_params.result_sheet_id.as_ref().and_then(|id| builder.app.document().result_sheet(id)).is_some_and(|rs| {
-            matches!(rs.status, ResultStatus::Failed { .. })
-                || rs.scalars.iter().any(|s| s.key.contains("ambiguous"))
-                || rs.floating_notes.iter().any(|n| n.body_markdown.to_ascii_lowercase().contains("ambiguous"))
-        });
-    let diag_msg = if ambiguous_rs {
-        String::from("Active result flagged warning/ambiguous; review bounds or initials.")
-    } else if pts > 0 && free_p >= pts {
-        format!("Warning: {free_p} free parameters for {pts} points (potential ambiguous fit).")
-    } else if state.report_unstable_fits() {
-        format!("Identifiability check active: {free_p} free params vs {pts} data points.")
+    let diag_msg = if nl.identify_unstable_parameters {
+        format!("The fit will assess identifiability for {free_p} free parameters and {pts} observations.")
     } else {
-        String::from("Unstable fit highlight muted in preview (solver warnings still logged).")
+        String::new()
     };
     paint_label_line(
         builder,
@@ -3101,6 +3107,50 @@ fn build_confidence_tab(
             size_px: 11.0,
             bold: false,
             color: builder.palette.muted,
+            scroll_container: None,
+        },
+    );
+}
+
+fn build_diagnostics_tab(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, body: LayoutRectPx, nl: &NonlinearFitSpec) {
+    paint_label_line(
+        builder,
+        parent,
+        LabelLine {
+            rect: LayoutRectPx::new(body.x, body.y, body.width, 22),
+            text: "Flag R² below",
+            size_px: 12.0,
+            bold: true,
+            color: builder.palette.text,
+            scroll_container: None,
+        },
+    );
+    let fallback = nl.flag_r_squared_below.map_or_else(String::new, |v| format_cell_display(&Cell::number(v), &builder.app.locale_preset));
+    emit_fit_input(
+        builder,
+        parent,
+        FitInput {
+            id: R_SQUARED_THRESHOLD_INPUT,
+            rect: LayoutRectPx::new(body.x, body.y + 24, body.width.min(180), 24),
+            label: "Flag R² below",
+            fallback_text: &fallback,
+            kb_path: "dialog.fit.diagnostics.r2",
+            multiline: false,
+            enablement: ControlEnablement::enabled(),
+        },
+    );
+    let help = read_r_squared_threshold(builder.app, nl.flag_r_squared_below)
+        .err()
+        .unwrap_or_else(|| "Use a value from 0 to 1. Leave blank to disable the warning.".to_owned());
+    paint_label_line(
+        builder,
+        parent,
+        LabelLine {
+            rect: LayoutRectPx::new(body.x, body.y + 52, body.width, 22),
+            text: &help,
+            size_px: 12.0,
+            bold: false,
+            color: builder.palette.text,
             scroll_container: None,
         },
     );

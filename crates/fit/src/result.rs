@@ -23,7 +23,7 @@ use curvebook_math::dist::norm_ppf;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::CompiledDslModel;
-use crate::error::{FitError, FitStatus, ParameterNote};
+use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
 use crate::linear::{
     DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points, linear_grid,
@@ -383,6 +383,9 @@ pub fn execute_nonlinear_analysis(
     hooks: &HookContext,
 ) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
+    if nl_spec.flag_r_squared_below.is_some_and(|value| !(0.0..=1.0).contains(&value)) {
+        return Err(FitError::InvalidParameter { name: "flag_r_squared_below", reason: "threshold must be a finite number from 0 to 1".to_owned() });
+    }
     let mv_spec =
         MultivarExtractionSpec { group_columns: &nl_spec.mv_group_columns, x_columns: &nl_spec.mv_x_columns, y_column: nl_spec.mv_y_column };
     let datasets = match extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) {
@@ -407,6 +410,7 @@ pub fn execute_nonlinear_analysis(
         confidence: spec.confidence_level,
         max_iters: nl_spec.clamped_max_iters(),
         compute_profile_ci: nl_spec.profile_likelihood_ci,
+        identify_unstable_parameters: nl_spec.identify_unstable_parameters,
         compute_hougaard: true,
         compute_bands: nl_spec.confidence_bands || nl_spec.prediction_bands || nl_spec.plot_function_only,
         compute_prediction_bands: nl_spec.prediction_bands,
@@ -472,8 +476,13 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
 
     for p in &fit.parameters {
-        param_labels.push(parameter_display_label(fit, &p.name, p.dataset_index));
-        let prefix = if p.notes.contains(&ParameterNote::Ambiguous) { Some("~".to_owned()) } else { None };
+        let mut label = parameter_display_label(fit, &p.name, p.dataset_index);
+        let unstable = p.notes.contains(&ParameterNote::Unstable);
+        if unstable {
+            label.push_str(" (Unstable)");
+        }
+        param_labels.push(label);
+        let prefix = (!unstable && p.notes.contains(&ParameterNote::Ambiguous)).then(|| "~".to_owned());
         let row = if is_robust || !p.inference_availability.is_available() {
             let na = ResultCell::Text("Not applicable".to_owned());
             vec![ResultCell::Number { value: p.estimate, prefix, units: None }, na.clone(), na.clone(), na.clone(), na]
@@ -655,6 +664,19 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
 
     append_nonlinear_checklist(result, fit, is_robust);
+    if let Some(threshold) = nl_spec.flag_r_squared_below
+        && !nl_spec.plot_function_only
+        && fit.r_squared.is_finite()
+        && fit.r_squared < threshold
+    {
+        result.checklist.push(ChecklistItem {
+            assumption: "R squared below threshold".to_owned(),
+            status: ChecklistStatus::Warn,
+            diagnostic_metric: Some(format!("R² = {}, threshold = {threshold}", fit.r_squared)),
+            explanation: "The reported unweighted R squared is below the configured threshold.".to_owned(),
+            remediation: None,
+        });
+    }
     if nl_spec.custom_dsl.is_none() && !nl_spec.plot_function_only {
         append_midpoint_extrapolation_checks(result, fit);
     }
@@ -699,6 +721,16 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
             explanation: "Asymptotic standard errors, confidence intervals, covariance matrices, confidence bands, and F/AICc comparisons are omitted in Robust (Cauchy) regression.".to_owned(),
             remediation: None,
         });
+    } else if let FitIdentifiability::Ambiguous { reasons } = &fit.identifiability {
+        for reason in reasons {
+            result.checklist.push(ChecklistItem {
+                assumption: "Parameter identifiability (Ambiguous)".to_owned(),
+                status: ChecklistStatus::Violated,
+                diagnostic_metric: None,
+                explanation: reason.clone(),
+                remediation: None,
+            });
+        }
     } else if fit.status == FitStatus::Ambiguous || fit.covariance.ambiguous {
         result.checklist.push(ChecklistItem {
             assumption: "Parameter identifiability".to_owned(),
@@ -1417,6 +1449,46 @@ mod tests {
             panic!("{ctx}: expected numeric cell, got {cell:?}");
         };
         assert!((*value - expected).abs() <= tol, "{ctx}: got {value}, expected {expected} (tol {tol})");
+    }
+
+    #[test]
+    fn nonlinear_identifiability_and_r_squared_threshold_reach_result_sheet() {
+        let xy = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
+        let mut sheet = DataSheet::new("xy", "Trend", TableArchetype::Xy(xy)).unwrap();
+        for (row, (x, y)) in [(10.0, 24.0), (12.0, 26.0), (14.0, 30.0), (16.0, 36.0)].into_iter().enumerate() {
+            sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
+            sheet.set_cell(CellCoord::new(row, 0, 0), Cell::number(y)).unwrap();
+        }
+
+        let mut nl = NonlinearFitSpec::new("straight_line");
+        nl.profile_likelihood_ci = false;
+        nl.identify_unstable_parameters = true;
+        nl.flag_r_squared_below = Some(0.96);
+        let run = |nl| {
+            let spec = AnalysisSpec::new("fit", "xy", AnalysisKind::NonlinearRegression(nl)).unwrap();
+            execute_analysis(&spec, &sheet, &HookContext::default())
+        };
+        let result = run(nl.clone()).unwrap();
+        // The residuals [1, -1, -1, 1] are orthogonal to both columns of the design.
+        // RSS = 4 and TSS = 84, giving R² = 20/21 (Draper & Smith, Applied Regression Analysis).
+        assert!((result.lookup_scalar("R2", None).unwrap() - 20.0 / 21.0).abs() < 1e-10);
+        assert!(result.checklist.iter().any(|item| item.assumption == "R squared below threshold" && item.remediation.is_none()));
+        assert!(result.checklist.iter().all(|item| !item.assumption.contains("Ambiguous")));
+
+        nl.flag_r_squared_below = Some(0.95);
+        let in_range = run(nl.clone()).unwrap();
+        assert!(in_range.checklist.iter().all(|item| item.assumption != "R squared below threshold"));
+
+        nl.x_range_filter = Some((None, Some(12.0)));
+        let saturated = run(nl.clone()).unwrap();
+        assert!(saturated.checklist.iter().any(|item| item.explanation == "Residual degrees of freedom are zero."));
+        let params = saturated.tabs.iter().find(|tab| tab.kind == ResultTabKind::ParametersAndConfidenceIntervals).unwrap();
+        assert_eq!(params.row_labels.iter().filter(|label| label.ends_with("(Unstable)")).count(), 2);
+        assert!(params.rows.iter().all(|row| !matches!(row.first(), Some(ResultCell::Number { prefix: Some(prefix), .. }) if prefix == "~")));
+        assert!(saturated.fitted_curves.iter().all(|overlay| overlay.ambiguous));
+
+        nl.flag_r_squared_below = Some(f64::NAN);
+        assert!(run(nl).is_err());
     }
 
     #[test]

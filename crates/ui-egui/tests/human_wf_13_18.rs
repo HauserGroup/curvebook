@@ -1079,3 +1079,55 @@ fn r13_1_human_linear_fit_range_controls() -> Result<(), Box<dyn Error>> {
     assert_clean_parity_and_budget(&mut driver)?;
     Ok(())
 }
+
+#[test]
+fn r13_1_human_nonlinear_diagnostics_settings() -> Result<(), Box<dyn Error>> {
+    let mut driver = new_strict_human_driver()?;
+    let data_id = import_csv_via_dialog(
+        &mut driver,
+        ImportSpec {
+            target_kind_widget: "import_paste.target.xy",
+            title: "Dose Trend",
+            csv_text: "X\tResponse\n-9\t10\n-8\t13\n-7\t28\n-6\t58\n-5\t83\n-4\t96\n",
+            existing_sheet_id: None,
+            replace_existing_mode: false,
+        },
+    )?;
+    switch_to_sheet_in_navigator(&mut driver, &data_id)?;
+    let fit_id = run_analysis_from_toolbar(&mut driver, "fit.nonlinear")?;
+
+    human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+    click(&mut driver, "fit.tab.confidence")?;
+    click(&mut driver, "fit.ci.flag_unstable")?;
+    assert!(widget_checked(&mut driver, "fit.ci.flag_unstable")?);
+
+    click(&mut driver, "fit.tab.diagnostics")?;
+    clear_and_type_into_textbox(&mut driver, "fit.diagnostics.r2.input", "1.1")?;
+    let rejected = human_wf_common::click_widget_center(&mut driver, &wid("modal.ok")).err().ok_or("invalid R² threshold was accepted")?;
+    assert!(rejected.contains("R² threshold"));
+    clear_and_type_into_textbox(&mut driver, "fit.diagnostics.r2.input", "1")?;
+    click(&mut driver, "modal.ok")?;
+
+    let result = result_sheet(driver.app().document(), &fit_id)?;
+    assert!(matches!(
+        &result.analysis.kind,
+        AnalysisKind::NonlinearRegression(spec) if spec.identify_unstable_parameters && spec.flag_r_squared_below == Some(1.0)
+    ));
+    assert!(result.checklist.iter().any(|item| item.assumption == "R squared below threshold" && item.remediation.is_none()));
+    let banner = curvebook_ui_egui::AssumptionDiagnosticBanner::from_result(result).ok_or("missing diagnostic banner")?;
+    assert_eq!(banner.source_result_id, result.id);
+
+    human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+    click(&mut driver, "fit.tab.diagnostics")?;
+    let field = driver.find_widget("fit.diagnostics.r2.input").ok_or("missing threshold field")?;
+    assert_eq!(field.a11y.value_text.as_deref(), Some("1"));
+    click(&mut driver, "fit.diagnostics.r2.input")?;
+    human_wf_common::press_cmd_shortcut(&mut driver, "a")?;
+    driver.press_key("Backspace", KeyModifiers::default())?;
+    click(&mut driver, "modal.ok")?;
+    let result = result_sheet(driver.app().document(), &fit_id)?;
+    assert!(matches!(&result.analysis.kind, AnalysisKind::NonlinearRegression(spec) if spec.flag_r_squared_below.is_none()));
+    assert!(result.checklist.iter().all(|item| item.assumption != "R squared below threshold"));
+    assert_clean_parity_and_budget(&mut driver)?;
+    Ok(())
+}

@@ -786,3 +786,35 @@ fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> Test
     assert!((refitted - 2.3).abs() < 1e-12);
     Ok(())
 }
+
+#[test]
+fn nonlinear_diagnostic_settings_run_and_update_through_commands() -> TestRes {
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4).map_err(|e| e.to_string())?;
+    for (row, (x, y)) in [(10.0, 24.0), (12.0, 26.0), (14.0, 30.0), (16.0, 36.0)].into_iter().enumerate() {
+        xy.x_cells[row][0] = Cell::number(x);
+        xy.data_sets[0].cells[row][0] = Cell::number(y);
+    }
+    let mut doc = ProjectDocument::new("Diagnostics").map_err(|e| e.to_string())?;
+    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let mut session = Session::from_document(doc);
+    exec(
+        &mut session,
+        "fit.run",
+        json!({
+            "sheet_id": "fit", "source_sheet": "xy", "kind": "nonlinear", "equation_id": "straight_line",
+            "identify_unstable_parameters": true, "flag_r_squared_below": 0.96
+        }),
+    )?;
+    let result = result_sheet_by_id(&session, "fit")?;
+    assert!(matches!(
+        &result.analysis.kind,
+        AnalysisKind::NonlinearRegression(spec) if spec.identify_unstable_parameters && spec.flag_r_squared_below == Some(0.96)
+    ));
+    assert!(result.checklist.iter().any(|item| item.assumption == "R squared below threshold"));
+
+    exec(&mut session, "analysis.updateParams", json!({ "sheet_id": "fit", "params": { "flag_r_squared_below": null } }))?;
+    let result = result_sheet_by_id(&session, "fit")?;
+    assert!(matches!(&result.analysis.kind, AnalysisKind::NonlinearRegression(spec) if spec.flag_r_squared_below.is_none()));
+    assert!(result.checklist.iter().all(|item| item.assumption != "R squared below threshold"));
+    Ok(())
+}

@@ -2456,7 +2456,7 @@ fn commit_duplicate_prompt(app: &mut UiApp, existing_ids: &[SheetId], params: &V
 
 fn commit_edit_params_action(app: &mut UiApp, action: &str) -> Result<Value, EngineError> {
     sync_edit_params_text_buffers(app);
-    crate::views::fit_params::sync_linear_range_inputs(app).map_err(bad_input)?;
+    crate::views::fit_params::sync_fit_parameter_inputs(app).map_err(bad_input)?;
     let close = action == "ok";
     let doc = app.document().clone();
     let intents = app.canvas_dialogs.edit_params.commit_intents(Some(&doc));

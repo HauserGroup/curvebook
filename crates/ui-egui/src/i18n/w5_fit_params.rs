@@ -348,7 +348,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
     CatalogEntry {
         key: "fit_params.ci.flag_unstable",
         translations: [
-            "Report Ambiguous / Unstable Fits",
+            "Identify unstable parameters",
             "Mehrdeutige / instabile Fits melden",
             "Notificar ajustes ambiguos",
             "Signaler ajustements instables",

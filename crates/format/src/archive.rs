@@ -1142,6 +1142,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 1, apply: migrate_v1_to_v2 },
     VersionStep { from_version: 2, apply: migrate_v2_to_v3 },
     VersionStep { from_version: 3, apply: migrate_v3_to_v4 },
+    VersionStep { from_version: 4, apply: migrate_v4_to_v5 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -1187,6 +1188,11 @@ fn migrate_v2_to_v3(value: &mut serde_json::Value) -> Result<(), FormatError> {
 
 fn migrate_v3_to_v4(value: &mut serde_json::Value) -> Result<(), FormatError> {
     migrate_result_sheet_step(value, 4);
+    Ok(())
+}
+
+fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 5);
     Ok(())
 }
 
@@ -1293,13 +1299,13 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
         }
     }
     if let Some(fit) = kind.get_mut("NonlinearRegression").and_then(serde_json::Value::as_object_mut) {
-        for opt_key in ["x_range_filter", "y_range_filter", "plot_x_min", "plot_x_max", "mv_y_column"] {
+        for opt_key in ["x_range_filter", "y_range_filter", "plot_x_min", "plot_x_max", "mv_y_column", "flag_r_squared_below"] {
             fit.entry(String::from(opt_key)).or_insert(serde_json::Value::Null);
         }
         for vec_key in ["mv_group_columns", "mv_x_columns"] {
             fit.entry(String::from(vec_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
         }
-        for bool_key in ["plot_function_only", "homoscedasticity_test", "emit_residuals_tab", "emit_covariance_tab"] {
+        for bool_key in ["plot_function_only", "homoscedasticity_test", "emit_residuals_tab", "emit_covariance_tab", "identify_unstable_parameters"] {
             fit.entry(String::from(bool_key)).or_insert(serde_json::Value::Bool(false));
         }
     }
@@ -1535,6 +1541,7 @@ fn validate_transform_floats(transform: &curvebook_doc::TransformAnalysisSpec, s
 }
 
 fn validate_nonlinear_fit_floats(fit: &curvebook_doc::NonlinearFitSpec, sheet_id: &str) -> Result<(), FormatError> {
+    check_opt_finite(fit.flag_r_squared_below, || format!("{sheet_id}.analysis.flag_r_squared_below"))?;
     if let curvebook_doc::FitMethod::RoutOutlierElimination { fdr_q_percent } = fit.method {
         check_finite(fdr_q_percent, || format!("{sheet_id}.analysis.fit_method.fdr_q_percent"))?;
     }

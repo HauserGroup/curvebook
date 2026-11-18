@@ -720,7 +720,7 @@ fn r1_s05_03_x_column_mode_rejected_by_archive_csv_export_and_placement() {
 }
 
 #[test]
-fn linear_fit_range_schema_migrates_v3_and_round_trips_v4() {
+fn linear_fit_range_schema_migrates_v3_and_round_trips() {
     let mut doc = ProjectDocument::new("Linear Regression").unwrap();
     let xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
     doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).unwrap()).unwrap();
@@ -743,4 +743,31 @@ fn linear_fit_range_schema_migrates_v3_and_round_trips_v4() {
     let bytes = save_project_bytes(&migrated).unwrap();
     let reopened = open_project_bytes(&bytes).unwrap();
     assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::LinearRegression(expected));
+}
+
+#[test]
+fn nonlinear_fit_diagnostics_migrate_v4_and_round_trip() {
+    let mut doc = ProjectDocument::new("Dose Response").unwrap();
+    let xy = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
+    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).unwrap()).unwrap();
+    let kind = AnalysisKind::NonlinearRegression(NonlinearFitSpec::new("straight_line"));
+    doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new("fit", "xy", kind).unwrap()).unwrap()).unwrap();
+    let mut legacy = serde_json::to_value(&doc).unwrap();
+    legacy["schema_version"] = serde_json::json!(4);
+    legacy["result_sheets"][0]["analysis"]["kind"]["NonlinearRegression"].as_object_mut().unwrap().remove("identify_unstable_parameters");
+
+    let migrated = curvebook_format::migrate_document_json(legacy, 4).unwrap();
+    let mut migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    let AnalysisKind::NonlinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else {
+        panic!("expected a migrated nonlinear fit");
+    };
+    assert!(!spec.identify_unstable_parameters);
+    assert!(spec.flag_r_squared_below.is_none());
+    spec.identify_unstable_parameters = true;
+    spec.flag_r_squared_below = Some(0.92);
+    let expected = spec.clone();
+
+    let reopened = open_project_bytes(&save_project_bytes(&migrated).unwrap()).unwrap();
+    assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::NonlinearRegression(expected));
 }
