@@ -64,7 +64,7 @@ Concise definitions of scientific, statistical, numerical, graphing, and product
 - **ROUT Outlier Elimination:** Two-stage outlier detector pairing Cauchy robust regression, `RSDR` residual scaling, and Benjamini–Hochberg FDR over the furthest ~30% residuals before OLS/WLS inlier refitting (Motulsky & Brown 2006).
 - **RSDR (Robust Standard Deviation of Residuals):** Scale estimate derived from the 68.27th percentile of sorted $|r_i|$ multiplied by $N/(N - K)$ for robust regression and ROUT.
 - **Schoenfeld Residuals:** Covariate-specific time-indexed Cox PH residuals tested for zero slope vs. transformed time to diagnose proportional-hazards violations (Schoenfeld 1982; Grambsch & Therneau 1994).
-- **Subcolumn Mode (`SubcolumnMode`):** Interpretation of subcolumns per dataset (`Single`, `Replicates`, `MeanSdN`, `MeanSemN`, `MeanSymmetricError`, `MeanAsymmetricError`, `UpperLowerLimits`, `MedianIqrQuartiles`).
+- **Subcolumn Mode (`SubcolumnMode`):** Interpretation of subcolumns per dataset (`Single`, `RawReplicates`, `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `UpperLowerLimits`, `MedianIqr`).
 - **WAL (`CrashRecoveryJournal`):** Directory-backed Write-Ahead Log (`snapshot.curvebook`, CRC-32 `ops.journal`, `curvebook.lock`) preserving unsaved desktop mutations between explicit saves.
 - **Welch–Satterthwaite `df`:** Fractional denominator degrees of freedom correcting two-sample *t*-tests and one-way ANOVA under unequal group variances (Welch 1947, 1951; Satterthwaite 1946).
 - **Youden's $J$:** Optimal diagnostic cutoff criterion $J = \text{Sensitivity} + \text{Specificity} - 1$ maximized across empirical ROC thresholds (Youden 1950).

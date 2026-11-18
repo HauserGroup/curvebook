@@ -11,15 +11,15 @@ A `ProjectDocument` pairs a project title, persistent analysis/workspace metadat
 | Limit Constant | Value | Scope |
 |---|---:|---|
 | `CURRENT_SCHEMA_VERSION` | `3` | Active project document JSON schema version |
-| `MAX_SHEETS_PER_PROJECT` | `512` | Maximum sheets across all five sections in one project |
+| `MAX_SHEETS_PER_PROJECT` | `500` | Maximum sheets across all five navigator sections in one project |
 | `MAX_ROWS` | `1,000,000` | Maximum rows per individual data table |
 | `MAX_DATA_SETS` | `1,024` | Maximum dataset/group/variable columns per data table |
-| `MAX_SUBCOLUMNS` | `256` | Maximum replicate or summary subcolumns per dataset |
-| `MAX_SHEET_CELLS` | `10,000,000` | Maximum total dense cells (`rows * cols * subcols`) in one table |
+| `MAX_SUBCOLUMNS` | `512` | Maximum replicate subcolumns per dataset (`RawReplicates(n)`) |
+| `MAX_SHEET_CELLS` | `30,000,000` | Maximum total dense cells (`rows * cols * subcols`) in one table |
 | `MAX_PROJECT_CELLS` | `50,000,000` | Maximum total cells across all data sheets in one project |
 | `MAX_TITLE_BYTES` | `4,096` | Maximum UTF-8 byte length for project or sheet titles |
-| `MAX_SHEET_ID_BYTES` | `128` | Maximum UTF-8 byte length for a `SheetId` |
-| `MAX_CHECKPOINTS_PER_PROJECT` | `64` | Maximum in-file `NamedCheckpoint` snapshots per project |
+| `MAX_SHEET_ID_BYTES` | `256` | Maximum UTF-8 byte length for a `SheetId` |
+| `MAX_CHECKPOINTS_PER_PROJECT` | `32` (creation) / `64` (archive ceiling) | `project.createCheckpoint` allows up to `32` per project; archive/loader validation accepts up to `64` |
 
 Every sheet carries a stable, non-whitespace `SheetId` (distinct across the project) and a mutable display `title`.
 
@@ -57,12 +57,11 @@ DataSheet (raw observations)       ├──► Formula (= Calculated Variables)
 
 - **Cycle detection:** Formula circularity, linked-region loops (`detect_link_cycles`), and cyclic `HookSource` parameter bindings are rejected with `ErrorCode::CycleDetected` before committing edits or running recalculation.
 - **Dirty propagation & topological order:** Editing a cell, toggling an exclusion, updating an `InfoSheet` constant, or modifying an `AnalysisSpec` marks downstream dependents dirty and recalculates them in deterministic topological order (`project.recalculate`).
-- **Freezing (`sheet.freeze` / `sheet.unfreeze`):** A frozen `DataSheet` (`frozen: true`) rejects direct mutations with `ErrorCode::FrozenSheet`; a frozen `ResultSheet` retains its snapshot with `ResultStatus::Frozen` instead of overwriting when upstream data change.
-- **`ResultStatus` lifecycle:** Every `ResultSheet` reports one of four statuses:
-  - `UpToDate`: Computed from current upstream inputs and parameters without error.
-  - `Frozen`: Computation frozen on user snapshot; upstream edits do not update values until unfrozen.
-  - `Stale`: Upstream dependencies changed and automatic/manual recalculation has not yet refreshed the sheet.
-  - `Failed`: Computation could not succeed for current inputs (e.g., all rows excluded or singular model); structured `ErrorCode` diagnostics explain the failure. When upstream valid data are restored, `up_to_date` results resume automatically.
+- **Freezing (`sheet.freeze` / `sheet.unfreeze`):** Sets `frozen: bool` on a sheet (`DataSheet`, `ResultSheet`, `GraphSheet`, `LayoutSheet`). A frozen `DataSheet` (`frozen: true`) rejects direct mutations with `ErrorCode::FrozenSheet`; a frozen `ResultSheet` retains its snapshot instead of recomputing when upstream data change.
+- **`ResultStatus` lifecycle:** Every `ResultSheet` reports one of three statuses:
+  - `Dirty`: Upstream inputs or `AnalysisSpec` parameters changed and recalculation is pending.
+  - `UpToDate`: Computed tabs, scalars, pairwise comparisons, fitted curves, and checklist reflect current upstream inputs without error.
+  - `Failed { code, message }`: Most recent recalculation could not succeed for current inputs (e.g., all rows excluded or singular model); `lookup_scalar` returns `None` while failed so invalid results never propagate through hooks. When valid upstream data are restored, recalculation resumes `UpToDate` results automatically.
 
 ---
 
@@ -93,15 +92,15 @@ Undo/redo history lives only in the active session and is intentionally not writ
 
 ### Named In-File Checkpoints (`NamedCheckpoint`) {#named-checkpoints}
 
-For persistent milestone snapshots across sessions, `ProjectDocument` supports named in-file checkpoints (`project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, `project.deleteCheckpoint`, up to `64` per project). Each `NamedCheckpoint` stores an `id`, human-readable `name`, optional `note`, UTC timestamp, and a complete validated JSON snapshot of the project at creation time (subject to `MAX_ARCHIVE_FILE_BYTES = 128 MiB` on restore). Restoring a checkpoint creates a single undoable action in the live session.
+For persistent milestone snapshots across sessions, `ProjectDocument` supports named in-file checkpoints (`project.createCheckpoint`, `project.listCheckpoints`, `project.restoreCheckpoint`, `project.deleteCheckpoint`, up to `32` created per project via `project.createCheckpoint`, with `crates/format` permitting up to `64` on archive validation). Each `NamedCheckpoint` stores an `id`, human-readable `name`, optional `note`, UTC timestamp, and a complete validated JSON snapshot of the project at creation time (subject to `MAX_ARCHIVE_FILE_BYTES = 128 MiB` on restore). Restoring a checkpoint creates a single undoable action in the live session.
 
 ---
 
 ## Number Formatting & *P*-Value Conventions {#number-and-pvalue-formatting}
 
-- **Data & Tick Formatting (`LocaleNumberPolicy`, `AxisTickFormat`):** Graphs and tables separate stored IEEE-754 `f64` precision from display formatting. `LocaleNumberPolicy` controls decimal separators (`.` vs `,`) and thousands grouping, while axis tick labels support `Auto`, `FixedDecimals`, `SignificantFigures`, `Scientific`, `Engineering`, `SiPrefix` (`y`..`Y`), and `Percentage` (`0..=1` scaled by `100%`) without rounding underlying computed data.
+- **Data & Tick Formatting (`LocaleNumberPolicy`, `AxisTickFormat`, `TickLabelFormat`):** Graphs and tables separate stored IEEE-754 `f64` precision from display formatting. `LocaleNumberPolicy` controls decimal separators (`.` vs `,`) and thousands grouping, while numeric axis ticks (`AxisTickFormat`) support `Decimal`, `PowerOfTenSuperscript`, `ScientificE`, `Antilog`, and `EngineeringSi` (with `TickLabelFormat` adding `Categorical(CategoricalTickSource)`) without rounding underlying computed data.
 - ***P*-Value Display (`PValueFormat`):** Stored per `AnalysisSpec` (`curvebook-math`):
-  - Exact numeric *P* formats (`Decimal(digits)`, `AutoSignificance`, `Scientific`, `ThresholdsOnly`) paired with standard threshold markers (`ns`, `*`, `**`, `***`, `****` at `< 0.05`, `< 0.01`, `< 0.001`, `< 0.0001`).
+  - Exact numeric formats: `FourDecimal` (default, floor `< 0.0001`, up to `****`), `Apa` (`.123`, floor `< .001`, up to `***`), `Nejm` (`0.123`, floor `< 0.001`, up to `***`), and `Custom { decimals, scientific_below }` (`decimals` in `1..=15` with optional positive scientific-notation cutoff).
   - Formatting affects presentation only; multiplicity procedures and hypothesis decisions operate on full unrounded IEEE-754 probabilities.
 
 ---

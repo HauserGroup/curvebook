@@ -32,7 +32,7 @@ CurveBook exposes eight `GraphKind` families (`crates/doc/src/graph.rs`), each b
   - `ConfidenceInterval95` (two-sided $95\%$ Student-*t* interval around the sample mean)
   - `InterquartileRange` (asymmetric $[Q_1, Q_3]$ quartiles)
   - `Range` (`[min, max]`)
-  - `ExplicitSubcolumns` (pre-summarized bounds read directly from `MeanSdN`, `MeanSemN`, `MeanSymmetricError`, `MeanAsymmetricError`, `UpperLowerLimits`, or `MedianIqrQuartiles` subcolumns)
+  - `ExplicitSubcolumns` (pre-summarized bounds read directly from `MeanSdN`, `MeanSemN`, `MeanCvN`, `MeanLowHigh`, `UpperLowerLimits`, or `MedianIqr` subcolumns)
   with directional options (`ErrorBarDirection::{Both, UpperOnly, LowerOnly}`) and selectable end caps/stroke patterns. On log scales, non-positive lower error bounds clamp safely to the axis floor and increment `ScaleDiagnostics::log_error_bars_clamped`.
 - **Per-Point Overrides (`PointStyleOverride`):** Targets `(series_index, point_index, optional subcol)` (`graph.formatSelectedPoints`) to highlight, restyle, or hide single replicates without mutating upstream cell data; exact `subcol` rules take precedence over wildcard overrides.
 
@@ -51,10 +51,10 @@ Configured per axis (`x_axis`, `y_axis`, secondary `y2_axis` in `crates/doc/src/
 | `Log2` | $\log_2(x)$ | Strictly positive $x > 0$ |
 | `Ln` | $\ln(x)$ | Strictly positive $x > 0$ |
 | `Logit(LogitDomain)` | $\ln\!\left(\frac{p}{1 - p}\right)$ (unit `[0, 1]` or `[0, 100]`% domain) | Strictly open interior $0 < p < 1$ (or $0 < p < 100$) |
-| `Probit` | $\Phi^{-1}(p)$ | Strictly open interior $0 < p < 1$ |
+| `Probit` | $\Phi^{-1}(u / 100)$ | Strictly open percentage interior $u \in (0, 100)$ |
 | `Reciprocal` | $1 / x$ (with direction reversal option) | Non-zero $x \ne 0$ |
 
-Observations outside a non-linear axis domain (or non-finite points) are safely omitted and counted in `ScaleDiagnostics` (`non_positive_log_skipped`, `out_of_domain_logit_skipped`, `out_of_domain_probit_skipped`, `zero_reciprocal_skipped`, `non_finite_skipped`) rather than collapsing or panicking. Each segment generates at most `MAX_TICKS_PER_SEGMENT = 256` ticks using `AxisTickFormat` (`Auto`, `FixedDecimals`, `SignificantFigures`, `Scientific`, `Engineering`, `SiPrefix`, `Percentage`).
+Observations outside a non-linear axis domain (or non-finite points) are safely omitted and counted in `ScaleDiagnostics` (`non_positive_log_skipped`, `out_of_domain_logit_skipped`, `out_of_domain_probit_skipped`, `zero_reciprocal_skipped`, `non_finite_skipped`) rather than collapsing or panicking. Each segment generates at most `MAX_TICKS_PER_SEGMENT = 256` ticks using `AxisTickFormat` (`Decimal`, `PowerOfTenSuperscript`, `ScientificE`, `Antilog`, `EngineeringSi`, with `TickLabelFormat` adding `Categorical(CategoricalTickSource)`).
 
 ### Discontinuous / Broken Axes (`AxisSegment`) {#broken-axes}
 
@@ -82,7 +82,7 @@ Every axis (`AxisSpec::segments`) supports **`1` to `3` contiguous `AxisSegment`
 
 - **Qualitative Scientific Palettes (`PaletteId`, `crates/palette`):** `OkabeIto` (default CVD-safe 8-colour palette), `PaulTolBright`, `PaulTolMuted`, `PaulTolHighContrast`, `PaulTolVibrant`, and `MonochromePrint`.
 - **Continuous Colormaps (`ColormapId`):** Perceptually uniform Oklab-interpolated ramps (`Viridis`, `Cividis`, `Plasma`, `DivergingBlueRed`, `Grayscale`) plus custom user stops up to `MAX_CUSTOM_STOPS = 256` and discrete sampling up to `MAX_DISCRETE_SAMPLES = 4,096`.
-- **Live CVD & Grayscale Canvas Preview (`QOL-9`):** Applies Machado (2009) physiologically validated colour-vision-deficiency transformation matrices (`CanvasPreviewFilter::{Normal, Deuteranopia, Protanopia, Tritanopia, Grayscale}`) in the viewport rasterizer (`crates/render`) without altering stored graph specs or exported vector files.
+- **Live CVD & Grayscale Canvas Preview (`QOL-9`):** Applies Machado (2009) physiologically validated colour-vision-deficiency transformation matrices (`CanvasPreviewFilter::{Normal, Deuteranopia, Protanopia, Tritanopia, GrayscalePrint}`, serialized `"grayscale"` for grayscale print) in the viewport rasterizer (`crates/render`) without altering stored graph specs or exported vector files.
 
 ---
 

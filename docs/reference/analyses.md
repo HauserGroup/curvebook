@@ -12,7 +12,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 - **Accepted Table Archetypes:** `Xy`, `Column`, `Grouped`, `MultipleVariables`, `Contingency`, `PartsOfWhole`, `Survival`, or `Nested` depending on the `TransformAnalysisSpec` variant (e.g., `Normalize`, `RemoveBaseline`, and `Math` require numeric value columns; `SelectAndTransform` targets arbitrary `TableKind`; `Simulate` creates a new `Xy` dataset; `RandomSample` draws from active rows).
 - **Commands & Automation:** `transform.run`, `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`TransformAnalysisSpec`):**
-  - `Math { x_transform, y_transform, error_propagation }`: optional `MathTransformPreset` (`Ln`, `Log10`, `Log2`, `Exp10`, `Exp`, `Reciprocal`, `Square`, `Sqrt`, `Probit`, `Logit`, `Center`, `Standardize`, `CustomFormula`); `ErrorPropagationMode` for `MeanSdN` / `MeanSemN` spread propagation.
+  - `Math { x_transform, y_transform, error_propagation }`: optional `MathTransformPreset` (`Ln`, `Log10`, `Log2`, `Exp10`, `Exp`, `Reciprocal`, `Sqrt`, `Square`, `Logit`, `Probit`, `ArcsinSqrt`, `LinearScale`, `ConcentrationToNegativeLogM`); `ErrorPropagationMode` for `MeanSdN` / `MeanSemN` / `MeanCvN` spread propagation.
   - `Normalize { zero_anchor, hundred_anchor, output_percent, per_data_set }`: `NormalizeAnchor` (`ColumnMin`, `ColumnMax`, `ColumnSum`, `FirstRow`, `LastRow`, `FixedValue`, `ControlColumnMean`, `Hooked`).
   - `RemoveBaseline { baseline_columns, operation }`: `BaselineOperation` (`Difference`, `Ratio`, `PercentChange`, `FractionalChange`).
   - `Transpose { swap_row_and_column_titles }`: swaps row and column dimensions.
@@ -42,7 +42,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
   - `n`, `min`, `max`, `range`, `sum`, `mean`, `sd` ($n - 1$ denominator via Chan–Golub–LeVeque variance), `sem` ($\text{SD}/\sqrt{n}$), `cv_percent` ($100\cdot\text{SD}/\text{mean}$), `quadratic_mean` (RMS).
   - **Parametric CIs at `confidence_level`:** Two-sided Student-*t* confidence interval for the mean (`df = n - 1`), exact $\chi^2$ confidence interval `sd_ci` (`[s*sqrt((n-1)/chi2_{1-alpha/2,n-1}), s*sqrt((n-1)/chi2_{alpha/2,n-1})]`) assuming Gaussian normality (`R9.12`).
   - **Order & Robust Quantiles:** `median`, Hyndman & Fan (1996) Type-6 hinges `q1`, `q3`, `iqr`, plus Hyndman–Fan Type-7 custom percentiles; **exact binomial nonparametric `MedianCi`** achieving $\ge$ target coverage with achieved coverage percentage (`n >= 3`).
-  - **Geometric & Harmonic Summaries (positive observations $x > 0$):** `geometric_mean`, geometric SD factor `gsd` (Kirkwood 1979), log-back-transformed geometric mean CI, `harmonic_mean`, skewness `g1`, excess kurtosis `g2`.
+  - **Geometric & Harmonic Summaries (positive observations $x > 0$):** `geometric_mean`, geometric SD factor `geometric_sd_factor` (Kirkwood 1979), log-back-transformed geometric mean CI, `harmonic_mean`, skewness `g1`, excess kurtosis `g2`.
   - **Optional One-Sample Tests (when `hypothetical_value` is `Some`):** `one_sample_t_test` (`t`, `df = n - 1`, two-sided *P*, discrepancy CI, Hedges' $g$) and `one_sample_wilcoxon` ($W^+$, exact small-$n$ or Pratt tie-adjusted asymptotic *P*, Walsh-average Hodges–Lehmann pseudomedian & CI).
 - **Assumptions & `QOL-7` Diagnostics:** When `run_normality_battery == true` on raw replicates ($n \ge 3$), executes Shapiro–Wilk (`3 <= n <= 5000`), D'Agostino–Pearson $K^2$ (`n >= 8`), Anderson–Darling $A^{2*}$, and Lilliefors KS on raw values and (when strictly positive) log-transformed values; reports `Pass`/`Fail`/`Inconclusive` without suggesting test switches. Ignores text cells explicitly via checklist + footnotes (`append_ignored_text_checklist_and_footnote`).
 - **Edge Cases & Known Limits:** Excluded and blank cells are omitted; zero-variance samples mark normality/one-sample `t` unavailable cleanly (`ZeroVariance`); $n < 3$ omits Shapiro–Wilk / binomial median CI; `MeanSdN`/`MeanSemN` inputs skip raw-replicate normality and rank summaries (`RequiresRawReplicates`). Non-positive entries omit geometric/lognormality summaries (`None`).
@@ -93,7 +93,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
   - `column_a: usize` — default `0`.
   - `column_b: usize` — default `1`.
   - `percent_difference: bool` — default `false` (computes $A - B$ vs. $(A + B)/2$; when `true`, computes $100(A - B)/((A + B)/2)$).
-- **Reported Values & Semantics (`BlandAltmanResult`):** `n_pairs`, `bias` ($\bar{d}$), `sd_bias` ($\text{SD}_d$), `bias_ci` ($\bar{d} \pm t_{1-\alpha/2,\,n-1}\text{SD}_d/\sqrt{n}$), `loa_lower` and `loa_upper` ($\bar{d} \pm z_{1-\alpha/2}\text{SD}_d$ at `AnalysisSpec::confidence_level`) with normal-approximation SE CIs for each LoA bound, proportional-bias slope test, and scatter coordinates feeding `DiagnosticPlotKind::BlandAltman`.
+- **Reported Values & Semantics (`BlandAltmanResult`):** `n` (paired sample count), `bias` ($\bar{d}$), `sd_bias` ($\text{SD}_d$), `bias_ci` ($\bar{d} \pm t_{1-\alpha/2,\,n-1}\text{SD}_d/\sqrt{n}$), `loa_lower` and `loa_upper` ($\bar{d} \pm z_{1-\alpha/2}\text{SD}_d$ at `AnalysisSpec::confidence_level`) with normal-approximation SE CIs for each LoA bound, proportional-bias slope test, and scatter coordinates feeding `DiagnosticPlotKind::BlandAltman`.
 - **Assumptions & `QOL-7` Diagnostics:** Assesses normality of paired differences (`shapiro_wilk`) and proportional bias correlation between difference and average.
 - **Edge Cases & Known Limits:** Rejects explicit out-of-range column indices with `MissingColumn`; omits pairs with zero pair mean when `percent_difference == true`; requires $n \ge 2$ complete finite pairs.
 - **Literature & Oracle Verification:** Bland & Altman (1986, 1999). Verified vs. R 4.5.2 within `1e-9`–`1e-12` (`bias`, `sd_bias`, `bias_ci`, `loa_lower`, `loa_upper`).
@@ -103,14 +103,14 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Multiple Row-Wise Comparisons (`AnalysisKind::MultipleRowTTests`) {#analysis-multiple-row-t-tests}
 
 - **Purpose:** Executes independent or paired two-group *t*-tests or rank tests row-by-row across high-throughput matrices (e.g., differential expression / screening assays) with multiplicity control and Volcano plot outputs.
-- **Accepted Table Archetypes:** `Grouped` (two dataset groups across replicate subcolumns per row) and `Column` (even pairs when `paired: true`).
+- **Accepted Table Archetypes:** `Grouped`, `Xy`, `Column`, and `MultipleVariables` (`AnalysisKind::is_compatible_with`).
 - **Commands & Automation:** `stats.run` (`kind: "multiple_row_t_tests"`), `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`MultipleRowTestsSpec`):**
   - `paired: bool` — default `false`.
   - `nonparametric: bool` — default `false` (`MannWhitneyU` unpaired / `WilcoxonSignedRank` paired).
   - `assume_equal_sd: bool` — default `true` (Student pooled *t* vs. Welch–Satterthwaite *df* when `!paired && !nonparametric`).
   - `multiplicity: MultiplicitySpec` — default `MultiplicityMethod::None`, `threshold: 0.05`, `report_confidence_intervals: true`.
-- **Reported Values & Semantics:** Per-row `MultipleRowTestEntry`: mean difference / shift, SE, test statistic, `df`, raw two-sided *P*-value, adjusted *P*-value / FDR *q*-value (`Bonferroni`, `Sidak`, `HolmBonferroni`, `HolmSidak`, `BenjaminiHochbergFdr`, `TwoStageBkyFdr`, `BenjaminiYekutieliFdr`), discovery boolean, and $-\log_{10} P$ / effect coordinates for `Volcano` diagnostic graphs.
+- **Reported Values & Semantics:** Per-row `MultipleRowTestEntry`: mean difference / shift, SE, test statistic, `df`, raw two-sided *P*-value, adjusted *P*-value / FDR *q*-value (`Bonferroni`, `Sidak`, `HolmSidak`, `BenjaminiHochbergFdr`, `TwoStageBkyFdr`, `BenjaminiYekutieliFdr`), discovery boolean, and $-\log_{10} P$ / effect coordinates for `Volcano` diagnostic graphs.
 - **Assumptions & `QOL-7` Diagnostics:** Reports tested row count, discovery count, multiplicity rule, and zero-variance / under-replicated skipped rows without auto-filtering rows destructively.
 - **Edge Cases & Known Limits:** Rejects odd column selection when `paired == true`; handles per-row zero variance or $n < 2$ cleanly per entry; two-pair (`df = 1`) paired rows still yield valid *t*/*P* while omitting unavailable Hedges' $g$.
 - **Literature & Oracle Verification:** Student (1908); Welch (1947); Benjamini & Hochberg (1995); Benjamini, Krieger & Yekutieli (2006); Benjamini & Yekutieli (2001); Holm (1979); Šidák (1967). Verified against R 4.5.2 in `d1_reference_oracles.rs` (`1e-10`–`1e-15`).
@@ -144,7 +144,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
   - `df_method: MixedModelDfMethod` — default `KenwardRoger` (`KenwardRoger`, `Satterthwaite`).
   - `residual_covariance: ResidualCovariance` — default `CompoundSymmetry` (`CompoundSymmetry`, `Unstructured`).
   - `compute_effect_sizes: bool` — default `true`.
-  - `multiplicity: MultiplicitySpec` — `Tukey`, `TukeyKramer`, `GamesHowell`, `Dunnett`, `DunnettT3`, `Bonferroni`, `Sidak`, `HolmSidak`, `NewmanKeuls`, `FisherLsd`, `Dunn`, `LinearTrend`, or FDR procedures (`None` by default).
+  - `multiplicity: MultiplicitySpec` — `TukeyHsd`, `GamesHowell`, `Dunnett`, `DunnettT3`, `TamhaneT2`, `Bonferroni`, `Sidak`, `HolmSidak`, `NewmanKeuls`, `FisherLsd`, `DunnRankSum`, `LinearTrend`, `BenjaminiHochbergFdr`, `BenjaminiYekutieliFdr`, or `TwoStageBkyFdr` (`None` by default).
 - **Reported Values & Semantics:** ANOVA partition (`SS`, `df`, `MS`, `F`, *P*-value), variance homogeneity tests (Bartlett $\chi^2$, Brown–Forsythe median Levene), Welch `W` & Brown–Forsythe $F^*$ with Satterthwaite denominator `df2`, Mauchly's $W$ sphericity test + Greenhouse–Geisser $\hat{\varepsilon}$ and Huynh–Feldt $\tilde{\varepsilon}$ (Lecoutre 1991), Kruskal–Wallis tie-corrected $H$ / Friedman $Q$ + Kendall's $W$, omnibus effect sizes ($\eta^2$, $\omega^2$, Cohen's $f$ with noncentral-*F* CIs, $\varepsilon^2$), REML variance components ($\sigma^2_{\text{subj}}, \sigma^2_{\text{err}}$), and `ResultTabKind::MultipleComparisons` adjusted *P*-values + simultaneous confidence intervals (`PairwiseComparisonRecord` feeding CLD/brackets).
 - **Assumptions & `QOL-7` Diagnostics:** Reports per-group Shapiro–Wilk normality, Bartlett/Brown–Forsythe homoscedasticity, Mauchly sphericity (`k >= 3`), and REML missing-cell handling strictly as diagnostics.
 - **Edge Cases & Known Limits:** Unbalanced REML falls back deterministically from unstructured to compound-symmetry only with explicit `UnstructuredFallbackReason` reporting when covariance estimation is singular; `MeanSdN`/`MeanSemN` reject raw-only RM/Kruskal/Friedman; post-hoc `Dunnett` requires specifying control index (defaults to column `0`).
@@ -161,7 +161,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
   - `three_way: bool` — default `false`.
   - `multifactor_columns: Vec<usize>`, `response_column: Option<usize>`, `max_interaction_order: usize` — default `2` (for `MultipleVariables`).
   - `ss_type: SumOfSquaresType` — default `TypeIII` (`TypeI`, `TypeII`, `TypeIII`).
-  - `repeated_measures: RepeatedMeasuresDesign` — default `None` (`None`, `MatchedByRow`, `MatchedByColumn`, `MatchedBoth`).
+  - `repeated_measures: RepeatedMeasuresDesign` — default `None` (`None`, `RowFactorMatched`, `ColumnFactorMatched`, `BothFactorsMatched`).
   - `mixed_effects_reml: bool` — default `false` (`fit_reml_on_missing: true` switches automatically when missing cells exist under RM).
   - `df_method: MixedModelDfMethod` — default `KenwardRoger`.
   - `residual_covariance: ResidualCovariance` — default `CompoundSymmetry` (`CompoundSymmetry`, `Unstructured`).
@@ -193,7 +193,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Contingency, Agreement & Categorical Tests (`AnalysisKind::Contingency`) {#analysis-contingency}
 
 - **Purpose:** Evaluates association, trend, exact small-sample inference, diagnostic accuracy, matched-pair discordance, inter-rater agreement, and multinomial/binomial goodness of fit on count tables.
-- **Accepted Table Archetypes:** `Contingency` ($2 \times 2$, $R \times C$, square $k \times k$ for Cohen's $\kappa$, subjects $\times$ categories for Fleiss' $\kappa$, paired $2 \times 2$ for McNemar) and `PartsOfWhole` (goodness-of-fit $\chi^2$ and `ExactBinomial`).
+- **Accepted Table Archetypes:** `Contingency` ($2 \times 2$, $R \times C$, square $k \times k$ for Cohen's $\kappa$, subjects $\times$ categories for Fleiss' $\kappa$, paired $2 \times 2$ for McNemar), `PartsOfWhole` (`PearsonChiSquare` goodness-of-fit and `ExactBinomial`), and `Column` (`ExactBinomial`).
 - **Commands & Automation:** `stats.run` (`kind: "contingency"`), `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`ContingencySpec`):**
   - `method: ContingencyMethod` — default `PearsonChiSquare { yates_continuity: false }`; variants: `PearsonChiSquare { yates_continuity }`, `LikelihoodRatioG2`, `FisherExact`, `BarnardExact`, `CochranArmitageTrend`, `McNemarPaired`, `CohenKappa { weighting: KappaWeighting::{Unweighted, Linear, Quadratic} }`, `FleissKappa`, `ExactBinomial`.
@@ -243,7 +243,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Generalized Linear Models (`AnalysisKind::GeneralizedLinearModel`) {#analysis-generalized-linear-model}
 
 - **Purpose:** Fits multivariable Gaussian OLS linear regression, Binomial logistic regression (logit link), or Poisson log-linear count regression (log link) with diagnostics, VIF multicollinearity checks, and residual/leverage tables.
-- **Accepted Table Archetypes:** `MultipleVariables` (continuous/categorical predictors with reference-level dummy coding via `reference_levels`), `Xy` (response/predictor modeling).
+- **Accepted Table Archetypes:** `MultipleVariables` (continuous/categorical predictors with reference-level dummy coding via `reference_levels`), `Xy`, and `Column` (`AnalysisKind::is_compatible_with`).
 - **Commands & Automation:** `stats.run` (`kind: "generalized_linear_model"`), `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`GlmSpec`):**
   - `family: GlmFamily` — default `Linear` (`Linear`, `Logistic`, `Poisson`).
@@ -261,12 +261,12 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Multivariate Analysis & Multiple Imputation (`AnalysisKind::Multivariate`) {#analysis-multivariate}
 
 - **Purpose:** Performs Principal Component Analysis (PCA), Pearson/Spearman pairwise correlation matrices, agglomerative hierarchical clustering & $k$-means++ partitioning, or MICE predictive mean matching (PMM) with Rubin pooling.
-- **Accepted Table Archetypes:** `MultipleVariables` (and numeric column matrices for correlation/PCA/clustering).
+- **Accepted Table Archetypes:** `MultipleVariables`, `Xy`, and `Column` (`AnalysisKind::is_compatible_with`).
 - **Commands & Automation:** `stats.run` (`kind: "multivariate"`), `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`MultivariateSpec`):**
   - `Pca { standardize, parallel_analysis_seed }`: SVD of centered covariance (`standardize: false`) or standardized correlation (`standardize: true`) matrix; optional deterministic Horn (1965) Monte Carlo parallel analysis.
   - `CorrelationMatrix { spearman_rank }`: pairwise Pearson $r$ (`false`) or Spearman $\rho$ (`true`) with two-sided *P*-values, Fisher-$z$ CIs, and BH FDR *q*-values.
-  - `Clustering { k_means_k, distance, linkage, k_sweep_max }`: `ClusterDistance` (`Euclidean` default, `Manhattan`, `Cosine`, `Correlation`) and `ClusterLinkage` (`Ward` default, `Complete`, `Single`, `Upgma`, `Wpgma`, `Centroid`, `Median`); optional $k$-means++ (Arthur & Vassilvitskii 2007) with silhouette & $k$-sweep.
+  - `Clustering { k_means_k, distance, linkage, k_sweep_max }`: `ClusterDistance` (`Euclidean` default, `Manhattan`, `Cosine`, `Pearson`) and `ClusterLinkage` (`Ward` default, `Complete`, `Single`, `Upgma`, `Wpgma`, `Centroid`, `Median`); optional $k$-means++ (Arthur & Vassilvitskii 2007) with silhouette & $k$-sweep.
   - `MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns }`: MICE PMM across $m \ge 2$ imputed datasets pooled by Rubin (1987) / Barnard–Rubin (1999) rules.
 - **Reported Values & Semantics:** PCA eigenvalues, variance proportions, loadings, observation scores, Kaiser & parallel-analysis counts; full correlation/$P$/FDR matrices; hierarchical merge heights, dendrogram cuts, cophenetic correlation, cluster assignments, centroids & mean silhouette; MICE pooled parameter estimates, within/between variance, fraction of missing information (FMI), Barnard–Rubin `df`, and pooled CIs.
 - **Assumptions & `QOL-7` Diagnostics:** Reports complete-case listwise deletion (PCA/Clustering), pairwise complete observations (CorrelationMatrix), standardization scale notes, and zero-variance constant-column guards.
@@ -278,7 +278,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Linear & Deming Regression (`AnalysisKind::LinearRegression`) {#analysis-linear-regression}
 
 - **Purpose:** Fits simple OLS regression (with ANCOVA slope/elevation comparison across multiple datasets) or Model II orthogonal/Deming errors-in-variables regression, including inverse calibration and AUC reporting.
-- **Accepted Table Archetypes:** `Xy` (raw replicates or `MeanSdN`/`MeanSemN` subcolumns).
+- **Accepted Table Archetypes:** `Xy`, `Grouped`, and `MultipleVariables` (`MeanSdN`/`MeanSemN`/`MeanCvN` supported on `Xy`/`Grouped`; `AnalysisKind::is_compatible_with`).
 - **Commands & Automation:** `fit.run` (`kind: "linear"` / `"deming"`), `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`LinearRegressionSpec`):** `deming_model_ii: false`, `force_through_origin: false`, `confidence_bands: true`, `prediction_bands: false`, `interpolate_unknowns: false`.
 - **Reported Values & Semantics:**
@@ -293,7 +293,7 @@ All diagnostic checklists surfaced in `ResultSheet::checklist` obey [`QOL-7` dia
 ## Nonlinear Regression (`AnalysisKind::NonlinearRegression`) {#analysis-nonlinear-regression}
 
 - **Purpose:** Fits built-in parametric or custom DSL (algebraic, implicit, piecewise, `<A>`/`<B>` shared, first-order RK45 ODE) models using OLS, WLS, Poisson deviance IRLS, Cauchy robust regression, or ROUT outlier elimination, with profile-likelihood CIs, bands, unknown interpolation, and nested/AICc model comparison.
-- **Accepted Table Archetypes:** `Xy` (raw replicates or `MeanSdN`/`MeanSemN` weighted/unweighted points; grouped replicate extractors reject unsupported quartile/asymmetric error bounds) and `MultipleVariables` (`grouping_columns` partitioning multiple curve datasets).
+- **Accepted Table Archetypes:** `Xy`, `Grouped`, and `MultipleVariables` (`grouping_columns` partitioning multiple curve datasets on `MultipleVariables`; `MeanSdN`/`MeanSemN`/`MeanCvN` parametric moment modes supported where applicable, while grouped/replicate extractors reject `MeanLowHigh`, `UpperLowerLimits`, and `MedianIqr`).
 - **Commands & Automation:** `fit.run`, `analyze.run`, `analysis.add` ([Command Reference](../commands.md), [MCP](automation/mcp.md), [CLI](automation/cli.md)).
 - **Options & Defaults (`NonlinearFitSpec`):**
   - `equation_id: String`, `custom_dsl: Option<String>` (mutually resolved; custom DSL compiles via `CompiledDslModel` with `MAX_AST_NODES = 4,096`).

@@ -82,7 +82,9 @@ Download `SHA256SUMS.txt` alongside your installer from the same release tag and
 2. **Verify GitHub Sigstore Build Provenance Attestation** (requires GitHub CLI `gh`):
 
 ```sh
-gh attestation verify curvebook-<version>-macos-universal.dmg --repo HauserGroup/curvebook
+gh attestation verify curvebook-<version>-macos-universal.dmg \
+  --repo HauserGroup/curvebook \
+  --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
 ```
 
 Every Beta release artifact and `SHA256SUMS.txt` itself receives a keyless GitHub Sigstore provenance attestation during CI publishing.
@@ -102,7 +104,7 @@ CurveBook contains **zero bundled binary font files** in its source tree (`cargo
 
 ### Updating Without an Auto-Updater {#updating}
 
-Because CurveBook enforces **zero background network egress** (`privacy-security.md#zero-egress`), it never checks for updates automatically or phones home. To update:
+Because CurveBook enforces **zero background network egress** ([Privacy & Security](privacy-security.md#zero-egress)), it never checks for updates automatically or phones home. To update:
 
 1. Download and verify the new release package from [GitHub Releases](https://github.com/HauserGroup/curvebook/releases).
 2. Replace `CurveBook.app` on macOS, replace the `.AppImage` on Linux (or `.tar.gz` directory on FreeBSD), or run the new `.msi` on Windows (which preserves your remembered install folder and scope).

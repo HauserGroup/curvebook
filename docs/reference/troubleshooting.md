@@ -74,7 +74,7 @@ Every validation, format, policy, solver, and system error maps deterministicall
 | `corrupt_data` | `Format` | Malformed UTF-8/JSON/XML/ZIP structure or CRC-32 mismatch in archives or WAL journals. |
 | `io_error` | `Io` | OS file read/write/rename failure, missing input file, or permission denied. |
 | `path_escape` | `Policy` | Path traversal (`..`), absolute external path, or escaping symlink rejected under `--workdir` or ZIP extraction. |
-| `resource_limit` | `Policy` | Exceeded `MAX_ARCHIVE_FILE_BYTES` (`128 MiB`), `MAX_CSV_FILE_BYTES` (`64 MiB`), `MAX_SHEET_CELLS` (`10M`), `MAX_RASTER_DIM_PX` (`16,384`), `MAX_RASTER_PIXELS` (`67,108,864`), `MAX_PDF_PAGES` (`64`), `MAX_PDF_OUTPUT_BYTES` (`32 MiB`), or DSL/ODE step budgets. |
+| `resource_limit` | `Policy` | Exceeded `MAX_ARCHIVE_FILE_BYTES` (`128 MiB`), `MAX_CSV_FILE_BYTES` (`64 MiB`), `MAX_SHEET_CELLS` (`30M` / `30,000,000`), `MAX_RASTER_DIM_PX` (`16,384`), `MAX_RASTER_PIXELS` (`67,108,864`), `MAX_PDF_PAGES` (`64`), `MAX_PDF_OUTPUT_BYTES` (`32 MiB`), or DSL/ODE step budgets. |
 | `solver_failed` | `Compute` | Non-convergence (`HitMaxIters`), `ZeroVariance`, singular design/covariance matrix, unbracketed implicit root, ODE divergence, or `WeightingScheme` zero denominator (`ImpossibleWeights`). |
 | `insufficient_data` | `Compute` | Empty input, too few non-excluded observations/events for `df`, or missing raw replicates (`RequiresRawReplicates`) when `MeanSdN`/`MeanSemN` subcolumns are supplied. |
 | `cancelled` | `Compute` | Operation aborted via MCP/engine cancellation token. |
