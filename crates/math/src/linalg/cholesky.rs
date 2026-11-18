@@ -1,6 +1,21 @@
 //! Symmetric positive-definite Cholesky factorization (`A = L L^T`) and symmetric eigenvalue
 //! decomposition (`A = Q diag(lambda) Q^T`) for REML mixed-effects covariance matrices, PCA, and
 //! confidence ellipses.
+//!
+//! [`cholesky`] is the row-oriented Cholesky factorization with compensated (Neumaier) inner
+//! products. [`sym_eigen`] is the cyclic-by-row Jacobi method of Forsythe & Henrici (1960): each
+//! sweep visits the pairs `(p, q)`, `p < q`, in row order (their rule III_r) and applies the
+//! rotation that zeroes `a_pq` (rule II). It uses the smaller root `t = tan(phi)`, so
+//! `|phi| <= pi / 4`, which satisfies their angle restriction (rule IV) under which the cyclic
+//! method converges. Rotations are skipped when `|a_pq|` is below roundoff relative to the
+//! diagonal; this is a threshold variant of the method.
+//!
+//! References:
+//! - Forsythe, G. E., & Henrici, P. (1960). The cyclic Jacobi method for computing the principal
+//!   values of a complex matrix. *Transactions of the American Mathematical Society*, 94(1), 1-23.
+//!   `doi:10.1090/S0002-9947-1960-0109825-2`.
+//! - Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed.). Johns Hopkins
+//!   University Press (Cholesky factorization; symmetric Jacobi methods).
 
 use crate::error::MathError;
 use crate::linalg::matrix::DenseMatrix;

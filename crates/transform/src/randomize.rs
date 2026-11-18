@@ -1,5 +1,11 @@
 //! Seeded experimental subject randomization, uniform/stratified row sampling, and probability
 //! distribution column simulation (`R9.14` / `QOL-14`, `docs/planning/calculators-and-quick-stats.md` §4).
+//!
+//! References:
+//! - Durstenfeld, R. (1964). Algorithm 235: Random permutation. *Communications of the ACM*,
+//!   7(7), 420. `doi:10.1145/364520.364540`.
+//! - Hörmann, W. (1993). The generation of binomial random variates. *Journal of Statistical
+//!   Computation and Simulation*, 46(1-2), 101-110. `doi:10.1080/00949659308811496`.
 
 use std::collections::{BTreeSet, HashMap};
 
@@ -615,6 +621,9 @@ fn apportion_stratified_equal(sample_size: usize, stratum_sizes: &[usize]) -> Ve
     alloc
 }
 
+/// First `k` steps of a Fisher-Yates shuffle (Durstenfeld 1964, run front to back): position `i`
+/// swaps with a uniformly chosen position in `i..n`, so `pool[..k]` is a uniform random sample
+/// without replacement.
 fn partial_fisher_yates(pool: &mut [usize], k: usize, rng: &mut DeterministicRng) {
     let n = pool.len();
     let take = k.min(n);
@@ -809,6 +818,11 @@ fn sample_binomial_geo(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
 }
 
 // Hörmann (1993) BTRS transformed rejection for binomial with n * q >= 10, q <= 0.5.
+// Set-up constants b, a, c and the mode follow the paper's Table 1 and BTRS step 0. Alpha uses
+// Table 1's `(2.83 + 5.1 / b) * spq` (also used in the paper's BTRD); the printed BTRS listing
+// shows `1.5 / b`, which disagrees with Table 1. The paper's `us >= 0.07 && v <= v_r` squeeze is
+// omitted, which only costs speed. The acceptance test compares against the log-pmf ratio computed
+// with Loader's saddlepoint form instead of the paper's Stirling log-factorials.
 #[allow(clippy::cast_precision_loss, clippy::cast_possible_truncation, clippy::cast_sign_loss)]
 fn sample_binomial_btrs(rng: &mut DeterministicRng, trials: u64, q: f64) -> u64 {
     let n = trials as f64;
