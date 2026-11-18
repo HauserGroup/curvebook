@@ -1,5 +1,12 @@
 //! Mathematical transforms on X and/or Y series with analytical and endpoint error
 //! propagation (`TransformAnalysisSpec::Math`, `docs/implementation/data-tables-and-transforms.md` §5.1).
+//!
+//! References:
+//! - Joint Committee for Guides in Metrology (2008). *Evaluation of measurement data — Guide to
+//!   the expression of uncertainty in measurement* (JCGM 100:2008 / GUM §5.1.2).
+//!   `doi:10.59161/JCGM100-2008E`.
+//! - Zar, J. H. (2010). *Biostatistical Analysis* (5th ed.). Prentice Hall (logit, probit, and
+//!   angular arcsine square-root transformations).
 
 use curvebook_doc::{
     Cell, CellValue, DataSetColumn, DataSheet, ErrorPropagationMode, InfoSheet, MathTransformPreset, ResultCell, SubcolumnMode, TableArchetype,
@@ -583,12 +590,15 @@ fn transform_mean_low_high(
     let high_in = row_cells[2].value.finite_f64();
     match err_mode {
         ErrorPropagationMode::FirstOrderDeltaMethod => {
-            let slope = op.derivative(mean_in, x_val, is_x_axis, info).map(f64::abs);
-            row_cells[1].value = match (low_in, slope) {
+            let deriv = op.derivative(mean_in, x_val, is_x_axis, info);
+            // A locally decreasing transform (g'(mean) < 0) reverses lower and upper asymmetric offsets.
+            let (eff_lo, eff_hi) = if deriv.is_some_and(|d| d < 0.0) { (high_in, low_in) } else { (low_in, high_in) };
+            let slope = deriv.map(f64::abs);
+            row_cells[1].value = match (eff_lo, slope) {
                 (Some(d), Some(s)) => CellValue::from_finite_or_empty(d * s),
                 _ => CellValue::Empty,
             };
-            row_cells[2].value = match (high_in, slope) {
+            row_cells[2].value = match (eff_hi, slope) {
                 (Some(u), Some(s)) => CellValue::from_finite_or_empty(u * s),
                 _ => CellValue::Empty,
             };
@@ -623,6 +633,7 @@ fn transform_explicit_limits(
     if row_cells.len() < 3 {
         return;
     }
+    let reverses = row_cells[0].value.finite_f64().and_then(|m| op.derivative(m, x_val, is_x_axis, info)).is_some_and(|d| d < 0.0);
     transform_single_cell(&mut row_cells[0], op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
     let t1 = row_cells[1].value.finite_f64().and_then(|v| op.eval(v, x_val, is_x_axis, info));
     let t2 = row_cells[2].value.finite_f64().and_then(|v| op.eval(v, x_val, is_x_axis, info));
@@ -633,8 +644,9 @@ fn transform_explicit_limits(
             row_cells[2].value = CellValue::from_finite_or_empty(hi);
         }
         _ => {
-            row_cells[1].value = t1.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-            row_cells[2].value = t2.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+            let (lo, hi) = if reverses { (t2, t1) } else { (t1, t2) };
+            row_cells[1].value = lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+            row_cells[2].value = hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
         }
     }
 }
