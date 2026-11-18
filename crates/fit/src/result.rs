@@ -655,6 +655,38 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
     }
 
     append_nonlinear_checklist(result, fit, is_robust);
+    if nl_spec.custom_dsl.is_none() && !nl_spec.plot_function_only {
+        append_midpoint_extrapolation_checks(result, fit);
+    }
+}
+
+/// Compare fitted dose–response midpoints to each dataset's observed X extent. Use the
+/// parameter in the equation's own X scale. See Sebaugh (2011), Pharmaceutical Statistics
+/// 10:128–134, doi:10.1002/pst.426, for the importance of concentration coverage.
+fn append_midpoint_extrapolation_checks(result: &mut ResultSheet, fit: &NonlinearFitResult) {
+    if !matches!(fit.status, FitStatus::Converged | FitStatus::Ambiguous) {
+        return;
+    }
+    for param in &fit.parameters {
+        if !matches!(param.name.as_str(), "EC50" | "IC50" | "LogEC50" | "LogIC50") || !param.estimate.is_finite() {
+            continue;
+        }
+        for ds in fit.datasets.iter().filter(|ds| param.dataset_index.is_none_or(|index| index == ds.data_set_index)) {
+            let Some((min, max)) = ds.observed_x_range else {
+                continue;
+            };
+            if (min..=max).contains(&param.estimate) {
+                continue;
+            }
+            result.checklist.push(ChecklistItem {
+                assumption: format!("{} outside observed X range ({})", param.name, ds.label),
+                status: ChecklistStatus::Warn,
+                diagnostic_metric: Some(format!("{} = {}, observed X [{min}, {max}]", param.name, param.estimate)),
+                explanation: format!("The fitted {} estimate lies outside the X range of observations used for this dataset.", param.name),
+                remediation: None,
+            });
+        }
+    }
 }
 
 fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult, is_robust: bool) {
@@ -1385,6 +1417,42 @@ mod tests {
             panic!("{ctx}: expected numeric cell, got {cell:?}");
         };
         assert!((*value - expected).abs() <= tol, "{ctx}: got {value}, expected {expected} (tol {tol})");
+    }
+
+    #[test]
+    fn nonlinear_midpoint_extrapolation_uses_fitted_observations_and_model_scale() {
+        // Inverting the normalized one-parameter Hill equation gives the known LogEC50
+        // or LogIC50 exactly. The numerical fit must recover it within 1e-7 log units.
+        // Sebaugh (2011), doi:10.1002/pst.426, describes concentration coverage at midpoints.
+        let xs = [-9.0, -8.5, -8.0, -7.5, -7.0, -6.0, -5.5];
+        let midpoint = -6.5;
+        for (equation_id, param_name, sign) in
+            [("log_agonist_vs_response_normalized", "LogEC50", 1.0), ("log_inhibitor_vs_response_normalized", "LogIC50", -1.0)]
+        {
+            let xy = XyTable::new(SubcolumnMode::Single, 1, xs.len()).unwrap();
+            let mut sheet = DataSheet::new("dose", "Dose Response", TableArchetype::Xy(xy)).unwrap();
+            for (row, x) in xs.into_iter().enumerate() {
+                let y = 100.0 / (1.0 + 10_f64.powf(sign * (midpoint - x)));
+                sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
+                sheet.set_cell(CellCoord::new(row, 0, 0), Cell::number(y)).unwrap();
+            }
+            let mut nl = NonlinearFitSpec::new(equation_id);
+            nl.profile_likelihood_ci = false;
+            nl.x_range_filter = Some((None, Some(-6.75)));
+            nl.plot_x_max = Some(-5.0);
+            let make_spec = |nl| AnalysisSpec::new("fit", "dose", AnalysisKind::NonlinearRegression(nl)).unwrap();
+            let restricted = execute_analysis(&make_spec(nl.clone()), &sheet, &HookContext::default()).unwrap();
+            let estimate = restricted.lookup_scalar(param_name, Some(0)).unwrap();
+            assert!((estimate - midpoint).abs() < 1e-7, "{param_name}: {estimate}");
+            let warning = restricted.checklist.iter().find(|c| c.assumption.starts_with(&format!("{param_name} outside observed X range"))).unwrap();
+            assert_eq!(warning.status, curvebook_doc::ChecklistStatus::Warn);
+            assert!(warning.diagnostic_metric.as_deref().is_some_and(|metric| metric.contains("observed X [-9, -7]")));
+            assert!(warning.remediation.is_none());
+
+            nl.x_range_filter = None;
+            let bracketed = execute_analysis(&make_spec(nl), &sheet, &HookContext::default()).unwrap();
+            assert!(bracketed.checklist.iter().all(|c| !c.assumption.contains("outside observed X range")));
+        }
     }
 
     #[test]

@@ -339,6 +339,10 @@ pub struct FittedDatasetResult {
     pub label: String,
     pub params: Vec<f64>,
     pub param_names: Vec<String>,
+    /// Inclusive X extent of the observations used in a scalar-predictor fit.
+    /// Absent for multivariate datasets, empty datasets, and plot-only evaluations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_x_range: Option<(f64, f64)>,
     pub y_hat: Vec<f64>,
     pub residuals: Vec<f64>,
     pub weighted_residuals: Vec<f64>,
@@ -2325,6 +2329,7 @@ fn fit_plot_function_only(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: None,
             y_hat: ds_yh,
             residuals: ds_res.clone(),
             weighted_residuals: ds_res.clone(),
@@ -3149,8 +3154,18 @@ fn assemble_dataset_results(
         let mut ds_y_vals: Vec<(f64, usize, f64)> = Vec::new();
         let mut ds_n = 0_usize;
         let mut ds_y_sum = NeumaierSum::new();
+        let mut scalar_x = true;
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
         for (i, rec) in obs.iter().enumerate() {
             if rec.ds_local_idx == ds_local_idx {
+                match rec.point.x.as_slice() {
+                    [x] if x.is_finite() => {
+                        x_min = x_min.min(*x);
+                        x_max = x_max.max(*x);
+                    }
+                    _ => scalar_x = false,
+                }
                 let yh = lm_out.y_hat[i];
                 let r = rec.point.y - yh;
                 let w_rep = rec.rep_n as f64;
@@ -3276,6 +3291,7 @@ fn assemble_dataset_results(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: (scalar_x && x_min.is_finite() && x_max.is_finite()).then_some((x_min, x_max)),
             y_hat: ds_y_hat,
             residuals: ds_res,
             weighted_residuals: ds_w_res,
