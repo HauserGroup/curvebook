@@ -2,7 +2,7 @@
 //!
 //! Produces [`UiTreeSnapshot`] from the live [`UiApp`] without requiring an OS window, attaching
 //! declarative enablement (`enabled`, `disabled_reason`) from [`crate::modal_predicates`] and
-//! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`].
+//! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`](crate::compositor::compute_workspace_layout_map).
 
 use curvebook_doc::{
     AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, RepeatedMeasuresDesign,
