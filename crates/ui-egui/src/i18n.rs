@@ -5842,6 +5842,25 @@ pub fn locale_display_name(locale: &str) -> &'static str {
     }
 }
 
+/// Returns `true` when `locale` uses machine-drafted UI strings pending native-speaker review (`R10.21` / `R10.23`).
+///
+/// Only `"en"` is authored directly; all 15 non-English [`LOCALES`] are labelled as draft translations in the
+/// language picker until native-speaker review completes.
+#[must_use]
+pub fn is_draft_translation_locale(locale: &str) -> bool {
+    normalize_locale(locale) != "en"
+}
+
+/// Display caption for a locale row in the UI language picker (`R10.23`).
+///
+/// Formats `"en"` as `"English (en)"` and appends `" [Draft]"` to all 15 non-English [`LOCALES`].
+#[must_use]
+pub fn locale_picker_label(locale: &str) -> String {
+    let norm = normalize_locale(locale);
+    let autonym = locale_display_name(norm);
+    if is_draft_translation_locale(norm) { format!("{autonym} ({norm}) [Draft]") } else { format!("{autonym} ({norm})") }
+}
+
 /// Iterate over every registered [`CatalogEntry`] across [`CATALOG`] and [`EXTRA_SHARD_CATALOGS`].
 pub fn all_entries() -> impl Iterator<Item = &'static CatalogEntry> {
     CATALOG.iter().chain(EXTRA_SHARD_CATALOGS.iter().flat_map(|shard| shard.iter()))
@@ -6087,8 +6106,9 @@ mod tests {
     use curvebook_math::{AxisScale, PValueFormat};
 
     use super::{
-        CATALOG, EXTRA_SHARD_CATALOGS, LOCALES, LocalePreset, all_keys, catalog_len, command_label, is_rtl_locale, locale_display_name,
-        mirror_x_for_rtl, missing_translations, normalize_locale, tr, translate_command_label, try_tr, try_tr_command, try_tr_in_slices,
+        CATALOG, EXTRA_SHARD_CATALOGS, LOCALES, LocalePreset, all_keys, catalog_len, command_label, is_draft_translation_locale, is_rtl_locale,
+        locale_display_name, locale_picker_label, mirror_x_for_rtl, missing_translations, normalize_locale, tr, translate_command_label, try_tr,
+        try_tr_command, try_tr_in_slices,
     };
 
     fn assert_rtl_and_non_latin_scripts() {
@@ -6114,6 +6134,14 @@ mod tests {
         assert!(has_cyrillic(locale_display_name("ru")));
         assert!(has_arabic(locale_display_name("ar")));
         assert!(has_hebrew(locale_display_name("he")));
+        assert!(!is_draft_translation_locale("en"));
+        assert!(!is_draft_translation_locale("en-US"));
+        assert_eq!(locale_picker_label("en"), "English (en)");
+        for &loc in &LOCALES[1..] {
+            assert!(is_draft_translation_locale(loc), "expected `{loc}` to be marked as draft translation");
+            let picker_lbl = locale_picker_label(loc);
+            assert_eq!(picker_lbl, format!("{} ({loc}) [Draft]", locale_display_name(loc)));
+        }
 
         for key in all_keys() {
             if matches!(key, "table.xy" | "w5.grid_core.n_col" | "w5.grid_core.x_col" | "w5.grid_core.row_number_header") {

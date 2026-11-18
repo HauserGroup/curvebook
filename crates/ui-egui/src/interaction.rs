@@ -2277,6 +2277,12 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
             Ok(UiEventOutcome { handled: true, action: format!("menu.toggle:{key}"), ..Default::default() })
         }
         WidgetAction::InvokeCommand { command_id, params } => {
+            if command_id == "ui.locale.set" && params.get("locale").and_then(Value::as_str).is_none_or(|s| s.trim().is_empty()) {
+                let out = open_dropdown_for_id(app, "menu.ui.locale.set", metrics)?;
+                app.interaction.open_menu = None;
+                clear_context_menu_state(app);
+                return Ok(out);
+            }
             app.interaction.open_menu = None;
             app.interaction.open_dropdown = None;
             clear_context_menu_state(app);
@@ -2486,6 +2492,14 @@ fn execute_dialog_widget_action(app: &mut UiApp, action: &WidgetAction, metrics:
             } else if dropdown_id == "inspector.pairwise_mode" {
                 map.insert(String::from("display_mode"), Value::String(value.clone()));
                 app.canvas_dialogs.pairwise.apply_field_patch(&map, None)?;
+            } else if dropdown_id == "menu.ui.locale.set" {
+                let ui_val = crate::control_io::dispatch_ui_command(app, "ui.locale.set", &json!({ "locale": value })).map_err(|e| e.to_string())?;
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: format!("dropdown.select:{dropdown_id}={value}"),
+                    command_id: Some(String::from("ui.locale.set")),
+                    command_result: ui_val,
+                });
             }
             Ok(UiEventOutcome { handled: true, action: format!("dropdown.select:{dropdown_id}={value}"), ..Default::default() })
         }
@@ -2583,6 +2597,26 @@ fn open_dropdown_for_id(app: &mut UiApp, dropdown_id: &str, metrics: ViewportMet
             z_layer: ZLayer::DropdownMenu,
             anchor_rect_px: anchor,
             selected_value: String::from("stars"),
+            options: opts,
+        });
+    } else if dropdown_id == "menu.ui.locale.set" {
+        let picker_w = (248.0 * metrics.scale_factor).round().clamp(210.0, 520.0) as u32;
+        let toolbar_rect = crate::LayoutRectPx::from_workspace_rect(tree.frame.toolbar);
+        let anchor_x = tree.node("menu.view").map_or(toolbar_rect.x + 8, |n| {
+            if tree.is_rtl { n.bounds.rect_px.right() - i32::try_from(picker_w).unwrap_or(248) } else { n.bounds.rect_px.x }
+        });
+        let picker_anchor = crate::LayoutRectPx::new(anchor_x, toolbar_rect.bottom(), picker_w, 0);
+        app.interaction.scroll_offsets.offsets.remove("dropdown_popup.menu.ui.locale.set");
+        let opts: Vec<DropdownOption> = crate::i18n::LOCALES
+            .iter()
+            .map(|&loc| DropdownOption { value: String::from(loc), label: crate::i18n::locale_picker_label(loc), enabled: true })
+            .collect();
+        app.interaction.open_dropdown = Some(OpenDropdownState {
+            dropdown_id: dropdown_id.to_owned(),
+            label: String::from(crate::i18n::command_label(&app.locale, "ui.locale.set", "Language")),
+            z_layer: ZLayer::DropdownMenu,
+            anchor_rect_px: picker_anchor,
+            selected_value: String::from(crate::i18n::normalize_locale(&app.locale)),
             options: opts,
         });
     }

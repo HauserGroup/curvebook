@@ -6,6 +6,8 @@
 //! - Bullet 4 (**Graph and layout copy**): `Cmd/Ctrl+C` key events on a rendered [`GraphSheet`]
 //!   and on a rendered [`LayoutSheet`] placing the `R5.4` multi-flavor vector [`ClipboardBundle`]
 //!   (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`) through a stubbed [`PlatformClipboardAdapter`].
+//! - Bullet 7 (**Translations at Beta — language picker**): `View › Language` picker labelling all
+//!   15 non-English UI locales as `[Draft]` translations while keeping `"English (en)"` unmarked.
 
 mod human_wf_common;
 
@@ -478,6 +480,87 @@ fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Re
     assert_valid_vector_bundle(&custom_captured[0], "HiDPI 2.0x LayoutSheet Cmd+C")?;
     drop(custom_captured);
 
+    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    Ok(())
+}
+
+#[test]
+fn r10_23_language_picker_marks_15_non_english_locales_as_draft_human_path() -> Result<(), String> {
+    use curvebook_ui_egui::{LOCALES, is_draft_translation_locale, locale_display_name, locale_picker_label};
+
+    let app = build_r10_23_workspace()?;
+    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    let initial_frame = driver.render_frame().map_err(|e| e.to_string())?;
+
+    // 1. Open `View` menu via physical click, scroll if needed, and click `Language` (`menu.ui.locale.set`).
+    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    human_wf_common::scroll_until_widget_visible(&mut driver, &WidgetId::from("popup.menu.view"), &WidgetId::from("menu.ui.locale.set"), 120.0, 6)?;
+    let open_picker = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
+    assert!(open_picker.handled, "clicking View > Language must open the language picker dropdown");
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+
+    let picker_popup = driver
+        .layout_tree()
+        .node("popup.menu.ui.locale.set")
+        .cloned()
+        .ok_or_else(|| String::from("expected `popup.menu.ui.locale.set` in LayoutTree"))?;
+    assert!(picker_popup.drawn_in_frame);
+
+    // 2. Collect every option label visible from top through bottom of the scrollable picker via physical wheel scroll.
+    let mut seen_labels = std::collections::BTreeMap::<usize, String>::new();
+    let popup_id = WidgetId::from("popup.menu.ui.locale.set");
+    for step in 0..6 {
+        let tree = driver.layout_tree();
+        for idx in 0..LOCALES.len() {
+            let opt_id = format!("popup.menu.ui.locale.set.opt.{idx}");
+            if let Some(node) = tree.node(&opt_id)
+                && node.drawn_in_frame
+            {
+                seen_labels.insert(idx, node.a11y.label.clone());
+            }
+        }
+        let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+        if step < 5 {
+            let _ = human_wf_common::scroll_widget_wheel(&mut driver, &popup_id, 0.0, 96.0)?;
+        }
+    }
+    assert_eq!(seen_labels.len(), 16, "all 16 locale options must be reachable by physical wheel scroll: {seen_labels:?}");
+    assert_eq!(seen_labels.get(&0).map(String::as_str), Some("English (en)"));
+    assert!(!is_draft_translation_locale("en"));
+    for (idx, &loc) in LOCALES.iter().enumerate().skip(1) {
+        assert!(is_draft_translation_locale(loc));
+        let expected = format!("{} ({loc}) [Draft]", locale_display_name(loc));
+        assert_eq!(locale_picker_label(loc), expected);
+        assert_eq!(seen_labels.get(&idx), Some(&expected), "locale option {idx} (`{loc}`) must display `[Draft]` in picker");
+    }
+
+    // 3. At the bottom of the scrolled list, physically click Arabic (`ar`, index 14) -> switches to RTL Arabic UI.
+    let click_ar = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("popup.menu.ui.locale.set.opt.14"))?;
+    assert!(click_ar.handled, "clicking Arabic draft option must succeed");
+    assert_eq!(driver.app().locale, "ar");
+    assert!(driver.layout_tree().is_rtl, "selecting `ar` in language picker must mirror LayoutTree to RTL");
+    let rtl_frame = driver.render_frame().map_err(|e| e.to_string())?;
+    assert_ne!(rtl_frame.rgba, initial_frame.rgba, "selecting `ar` must repaint workspace in RTL");
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+
+    // 4. Reopen `View > Language` while in RTL (`1.5x` HiDPI), verify picker stays within viewport & clean parity, and switch back to `en`.
+    driver.set_metrics(ViewportMetrics::new(1280.0, 800.0, 1.5));
+    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
+    human_wf_common::scroll_until_widget_visible(&mut driver, &WidgetId::from("popup.menu.view"), &WidgetId::from("menu.ui.locale.set"), 140.0, 6)?;
+    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
+    let rtl_picker =
+        driver.layout_tree().node("popup.menu.ui.locale.set").cloned().ok_or_else(|| String::from("expected RTL language picker popup"))?;
+    assert!(rtl_picker.bounds.rect_px.x >= 0);
+    assert!(rtl_picker.bounds.rect_px.right() <= i32::try_from(driver.metrics().physical_width_px()).unwrap_or(1920));
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+
+    let click_en = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("popup.menu.ui.locale.set.opt.0"))?;
+    assert!(click_en.handled);
+    assert_eq!(driver.app().locale, "en");
+    assert!(!driver.layout_tree().is_rtl);
+    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
     human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
     Ok(())
 }

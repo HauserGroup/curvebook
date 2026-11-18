@@ -55,7 +55,7 @@ pub use dialogs_canvas::{
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use human_driver::HumanPathDriver;
-pub use i18n::{LOCALES, LocalePreset, locale_display_name, normalize_locale, tr};
+pub use i18n::{LOCALES, LocalePreset, is_draft_translation_locale, locale_display_name, locale_picker_label, normalize_locale, tr};
 pub use inspect::{UiTreeSnapshot, inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,

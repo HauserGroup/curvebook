@@ -470,7 +470,10 @@ pub fn emit_open_dropdown_popup(builder: &mut LayoutBuilder<'_>, open: &OpenDrop
     let row_h = (22.0 * builder.scale()).round().clamp(18.0, 36.0) as u32;
     let visible_rows = (open.options.len() as u32).clamp(1, 8);
     let pop_h = visible_rows * row_h + 4;
-    let pop_w = open.anchor_rect_px.width.max(180);
+    let max_pop_w = builder.tree.metrics.physical_width_px().saturating_sub(8).max(120);
+    let pop_w = open.anchor_rect_px.width.max(180).min(max_pop_w);
+    let max_x = i32::try_from(builder.tree.metrics.physical_width_px().saturating_sub(pop_w + 4)).unwrap_or(0).max(2);
+    let pop_x = open.anchor_rect_px.x.clamp(2, max_x);
     let max_bottom = i32::try_from(builder.tree.metrics.physical_height_px()).unwrap_or(900);
     let below_y = open.anchor_rect_px.bottom() + 2;
     let pop_y = if below_y + i32::try_from(pop_h).unwrap_or(0) <= max_bottom {
@@ -478,13 +481,14 @@ pub fn emit_open_dropdown_popup(builder: &mut LayoutBuilder<'_>, open: &OpenDrop
     } else {
         (open.anchor_rect_px.y - i32::try_from(pop_h).unwrap_or(0) - 2).max(4)
     };
-    let popup_rect = LayoutRectPx::new(open.anchor_rect_px.x, pop_y, pop_w, pop_h);
+    let popup_rect = LayoutRectPx::new(pop_x, pop_y, pop_w, pop_h);
     let content_h = (open.options.len() as u32).saturating_mul(row_h);
     let container_id = format!("dropdown_popup.{}", open.dropdown_id);
     let scroll_off = builder.scroll_offset(&container_id);
     let scroll_meta = ScrollMeta::new(container_id.clone(), popup_rect, [pop_w, content_h], scroll_off, super::ScrollAxes::Vertical);
 
-    let mut cont_a11y = AccessibilityMeta::new(WidgetRole::ContextMenu, open.label.clone(), FocusScope::ModalDialog);
+    let focus_scope = if open.z_layer >= ZLayer::ModalDialog { FocusScope::ModalDialog } else { FocusScope::PopupMenu };
+    let mut cont_a11y = AccessibilityMeta::new(WidgetRole::ContextMenu, open.label.clone(), focus_scope);
     cont_a11y.keyboard_path = Some(format!("dropdown.{}", open.dropdown_id));
     let cont_id = builder.push_node(NodeSpec {
         id: WidgetId::from(format!("popup.{}", open.dropdown_id)),
@@ -499,7 +503,10 @@ pub fn emit_open_dropdown_popup(builder: &mut LayoutBuilder<'_>, open: &OpenDrop
     builder.paint_fill(open.z_layer, Some(&cont_id), popup_rect, builder.palette.surface);
     builder.paint_stroke(open.z_layer, Some(&cont_id), popup_rect, builder.palette.accent, 1);
 
-    let inner_clip = popup_rect.inset(2);
+    let sb_reserve = if scroll_meta.has_vertical_overflow() { scrollbar_thickness_px(builder.scale()).saturating_add(2) } else { 0 };
+    let clip_x = if builder.tree.is_rtl { popup_rect.x + 2 + i32::try_from(sb_reserve).unwrap_or(0) } else { popup_rect.x + 2 };
+    let inner_clip =
+        LayoutRectPx::new(clip_x, popup_rect.y + 2, popup_rect.width.saturating_sub(4 + sb_reserve).max(16), popup_rect.height.saturating_sub(4));
     builder.push_clip(inner_clip);
     let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
     let size_px = (12.0 * builder.scale()).clamp(9.0, 24.0);
@@ -516,7 +523,7 @@ pub fn emit_open_dropdown_popup(builder: &mut LayoutBuilder<'_>, open: &OpenDrop
             &item_id,
             if opt.enabled { ControlEnablement::enabled() } else { ControlEnablement::disabled("Option unavailable") },
         );
-        let mut a11y = AccessibilityMeta::new(WidgetRole::MenuItem, opt.label.clone(), FocusScope::ModalDialog)
+        let mut a11y = AccessibilityMeta::new(WidgetRole::MenuItem, opt.label.clone(), focus_scope)
             .with_keyboard_path(format!("dropdown.{}.{}", open.dropdown_id, opt.value));
         a11y.selected = Some(selected);
         let wid = builder.push_node(NodeSpec {

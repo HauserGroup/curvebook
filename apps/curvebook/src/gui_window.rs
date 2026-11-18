@@ -13,7 +13,7 @@ use curvebook_doc::{ProjectDocument, SheetId, SheetSection};
 use curvebook_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
-use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp, locale_display_name};
+use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp, locale_picker_label};
 use eframe::egui;
 use serde_json::json;
 
@@ -1611,7 +1611,7 @@ fn render_menu_item(ui: &mut egui::Ui, item: &DesktopMenuItem, pending_command: 
     if item.command_id == "ui.locale.set" {
         ui.menu_button(&item.localized_label, |ui| {
             for &loc in LOCALES {
-                let caption = format!("{} ({loc})", locale_display_name(loc));
+                let caption = locale_picker_label(loc);
                 if ui.button(caption).on_hover_text(&tooltip).clicked() {
                     *pending_command = Some(format!("ui.locale.set:{loc}"));
                     ui.close();
@@ -2188,5 +2188,17 @@ mod tests {
             "expected AccessKit Click on toolbar.analyze to open AnalyzeSheet"
         );
         Ok(())
+    }
+
+    #[test]
+    fn language_picker_labels_mark_15_non_english_locales_as_draft() {
+        assert_eq!(LOCALES.len(), 16);
+        assert_eq!(locale_picker_label("en"), "English (en)");
+        let draft_labels: Vec<String> = LOCALES.iter().skip(1).map(|&loc| locale_picker_label(loc)).collect();
+        assert_eq!(draft_labels.len(), 15);
+        for (&loc, label) in LOCALES.iter().skip(1).zip(&draft_labels) {
+            assert!(label.ends_with(" [Draft]"), "expected `[Draft]` suffix on `{loc}`, got `{label}`");
+            assert!(label.contains(&format!("({loc})")), "expected locale tag `({loc})` in `{label}`");
+        }
     }
 }
