@@ -25,7 +25,10 @@ use curvebook_math::sum::NeumaierSum;
 use crate::dsl::CompiledDslModel;
 use crate::error::{FitError, FitStatus, ParameterNote};
 use crate::library::{ParametricModel, get_builtin_model};
-use crate::linear::{DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, simple_linear_regression};
+use crate::linear::{
+    DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points, linear_grid,
+    prepare_linear_points, resolve_linear_grid_bounds,
+};
 use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles};
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
@@ -65,32 +68,50 @@ pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookCont
 /// and populate a [`ResultSheet`].
 pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionSpec, sheet: &DataSheet) -> Result<ResultSheet, FitError> {
     let mut result = ResultSheet::new(spec.clone())?;
-    let datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
+    let mut datasets = extract_datasets_from_sheet(sheet, &spec.selected_data_sets)?;
     let p_fmt = spec.p_value_format;
+    let mut excluded = vec![0; datasets.len()];
+    let x_filter = lin_spec.x_range_filter.filter(|(min, max)| min.is_some() || max.is_some());
+    if let Some(bounds) = x_filter {
+        for (ds, n_excluded) in datasets.iter_mut().zip(&mut excluded) {
+            let (points, count) = prepare_linear_points(&ds.points, bounds, !lin_spec.deming_model_ii)?;
+            ds.points = points.into_owned();
+            *n_excluded = count;
+        }
+    }
 
+    let segments = lin_spec.plot_segments.unwrap_or(LinearRegressionSpec::DEFAULT_PLOT_SEGMENTS);
+    if !(1..=LinearRegressionSpec::MAX_PLOT_SEGMENTS).contains(&segments) {
+        return Err(FitError::InvalidParameter {
+            name: "plot_segments",
+            reason: format!("must be between 1 and {}", LinearRegressionSpec::MAX_PLOT_SEGMENTS),
+        });
+    }
+    let options = SimpleLinearOptions {
+        force_through_origin: lin_spec.force_through_origin,
+        confidence_level: spec.confidence_level,
+        compute_bands: lin_spec.confidence_bands || lin_spec.prediction_bands,
+        band_grid_points: segments + 1,
+        x_range_filter: x_filter,
+        plot_x_range: Some((lin_spec.plot_x_min, lin_spec.plot_x_max)),
+        ..SimpleLinearOptions::default()
+    };
     if lin_spec.deming_model_ii {
-        return build_deming_result_sheet(result, &datasets, spec.confidence_level);
+        return build_deming_result_sheet(result, &datasets, &excluded, &options, lin_spec.plot_segments.is_some());
     }
 
     let mut fits: Vec<(usize, String, SimpleLinearResult)> = Vec::with_capacity(datasets.len());
-    for ds in &datasets {
-        let mut opts = SimpleLinearOptions {
-            force_through_origin: lin_spec.force_through_origin,
-            confidence_level: spec.confidence_level,
-            compute_bands: lin_spec.confidence_bands || lin_spec.prediction_bands,
-            band_grid_points: 101,
-            unknown_y_values: Vec::new(),
-            unknown_x_values: Vec::new(),
-        };
+    for (ds, n_excluded) in datasets.iter().zip(excluded) {
+        let mut opts = options.clone();
         if lin_spec.interpolate_unknowns {
             opts.unknown_y_values = ds.unknowns_y.iter().map(|&(_, y)| y).collect();
             opts.unknown_x_values = ds.unknowns_x.iter().map(|&(_, x)| x).collect();
         }
-        let fit = simple_linear_regression(&ds.points, &opts)?;
+        let mut fit = fit_linear_points(&ds.points, &opts, n_excluded)?;
         let overlay_points = if fit.bands.is_empty() {
-            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, opts.band_grid_points)
+            build_linear_overlay_points(&ds.points, fit.slope, fit.intercept, &opts)?
         } else {
-            fit.bands.clone()
+            std::mem::take(&mut fit.bands)
         };
         result.fitted_curves.push(FittedCurveOverlay {
             data_set_index: ds.data_set_index,
@@ -138,7 +159,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
 
     // Main summary tab across datasets.
     let col_headers: Vec<String> = fits.iter().map(|(_, lbl, _)| lbl.clone()).collect();
-    let row_labels = vec![
+    let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE of Slope".to_owned(),
@@ -162,6 +183,9 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
         rows[7].push(num_cell(f.f_stat));
         rows[8].push(p_cell(p_fmt, f.p_value));
         rows[9].push(p_cell(p_fmt, f.runs_test.p_too_few_runs));
+    }
+    if x_filter.is_some() {
+        append_linear_observation_counts(&mut row_labels, &mut rows, fits.iter().map(|(_, _, f)| [f.n, f.n_excluded_by_range, f.df_residual]));
     }
     result.tabs.push(ResultTab {
         id: "linear_summary".to_owned(),
@@ -253,16 +277,33 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     Ok(result)
 }
 
+fn append_linear_observation_counts(labels: &mut Vec<String>, rows: &mut Vec<Vec<ResultCell>>, counts: impl Iterator<Item = [usize; 3]>) {
+    let mut count_rows = [Vec::new(), Vec::new(), Vec::new()];
+    for counts in counts {
+        for (row, count) in count_rows.iter_mut().zip(counts) {
+            row.push(num_cell(count as f64));
+        }
+    }
+    labels.extend(["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"].map(str::to_owned));
+    rows.extend(count_rows);
+}
+
 fn build_deming_result_sheet(
     mut result: ResultSheet,
-    datasets: &[crate::types::DatasetSeries],
-    confidence: curvebook_math::ConfidenceLevel,
+    datasets: &[DatasetSeries],
+    excluded: &[usize],
+    options: &SimpleLinearOptions,
+    has_explicit_segments: bool,
 ) -> Result<ResultSheet, FitError> {
     // `LinearRegressionSpec` currently does not carry a variance-ratio parameter, so orthogonal
     // Deming regression fixes `variance_ratio_lambda = 1.0` (equal measurement-error variances).
-    let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: confidence };
+    let opts = DemingOptions { variance_ratio_lambda: 1.0, confidence_level: options.confidence_level };
     let mut headers = Vec::with_capacity(datasets.len());
-    let row_labels = vec![
+    let mut counts = Vec::with_capacity(datasets.len());
+    let has_range = options.x_range_filter.is_some();
+    let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
+    let emit_overlay = has_range || plot_min.is_some() || plot_max.is_some() || has_explicit_segments;
+    let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE Slope (Jackknife)".to_owned(),
@@ -273,8 +314,20 @@ fn build_deming_result_sheet(
     ];
     let mut rows = vec![Vec::with_capacity(datasets.len()); row_labels.len()];
 
-    for ds in datasets {
+    for (ds, &n_excluded) in datasets.iter().zip(excluded) {
         let dem = deming_regression(&ds.points, &opts)?;
+        if has_range {
+            counts.push([dem.n, n_excluded, dem.df]);
+        }
+        if emit_overlay {
+            result.fitted_curves.push(FittedCurveOverlay {
+                data_set_index: ds.data_set_index,
+                equation_id: "straight_line".to_owned(),
+                converged: true,
+                ambiguous: false,
+                points: build_linear_overlay_points(&ds.points, dem.slope, dem.intercept, options)?,
+            });
+        }
         headers.push(ds.label.clone());
         rows[0].push(num_cell(dem.slope));
         rows[1].push(num_cell(dem.intercept));
@@ -292,6 +345,9 @@ fn build_deming_result_sheet(
         });
     }
 
+    if has_range {
+        append_linear_observation_counts(&mut row_labels, &mut rows, counts.into_iter());
+    }
     result.tabs.push(ResultTab {
         id: "deming_summary".to_owned(),
         title: "Deming (Model II) linear regression".to_owned(),
@@ -1002,32 +1058,26 @@ fn canonical_zero(x: f64) -> f64 {
     if x == 0.0 { 0.0 } else { x }
 }
 
-fn build_linear_overlay_points(points: &[DataPoint], slope: f64, intercept: f64, grid_points: usize) -> Vec<CurveSamplePoint> {
-    let mut x_min = f64::INFINITY;
-    let mut x_max = f64::NEG_INFINITY;
-    for pt in points {
-        if let Some(&x) = pt.x.first()
-            && x.is_finite()
-        {
-            x_min = x_min.min(x);
-            x_max = x_max.max(x);
-        }
-    }
-    if !x_min.is_finite() || !x_max.is_finite() {
-        return Vec::new();
-    }
-    let count = grid_points.max(2);
-    let span = x_max - x_min;
-    let mut out = Vec::with_capacity(count);
-    for i in 0..count {
-        let frac = (i as f64) / ((count - 1) as f64);
-        let x = x_min + frac * span;
-        let y = intercept + slope * x;
-        if x.is_finite() && y.is_finite() {
-            out.push(CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None });
-        }
-    }
-    out
+fn build_linear_overlay_points(
+    points: &[DataPoint],
+    slope: f64,
+    intercept: f64,
+    options: &SimpleLinearOptions,
+) -> Result<Vec<CurveSamplePoint>, FitError> {
+    let bounds = resolve_linear_grid_bounds(
+        points.iter().map(DataPoint::x0),
+        options.x_range_filter.unwrap_or_default(),
+        options.plot_x_range.unwrap_or_default(),
+    )?;
+    linear_grid(bounds, options.band_grid_points)
+        .map(|x| {
+            let y = intercept + slope * x;
+            if !y.is_finite() {
+                return Err(FitError::InvalidParameter { name: "plot_x_range", reason: "plot range produced a non-finite fitted value".to_owned() });
+            }
+            Ok(CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None })
+        })
+        .collect()
 }
 
 fn collapse_duplicate_x(sorted_pts: &[(f64, f64)], out: &mut Vec<(f64, f64)>) {

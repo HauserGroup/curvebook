@@ -718,3 +718,29 @@ fn r1_s05_03_x_column_mode_rejected_by_archive_csv_export_and_placement() {
     .expect("wrap xmode zip");
     assert!(open_project_bytes(&forged_xmode_bytes).is_err());
 }
+
+#[test]
+fn linear_fit_range_schema_migrates_v3_and_round_trips_v4() {
+    let mut doc = ProjectDocument::new("Linear Regression").unwrap();
+    let xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
+    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).unwrap()).unwrap();
+    let kind = AnalysisKind::LinearRegression(curvebook_doc::LinearRegressionSpec::default());
+    doc.add_result_sheet(ResultSheet::new(AnalysisSpec::new("linear", "xy", kind).unwrap()).unwrap()).unwrap();
+    let mut legacy = serde_json::to_value(&doc).unwrap();
+    legacy["schema_version"] = serde_json::json!(3);
+    let migrated = curvebook_format::migrate_document_json(legacy, 3).unwrap();
+    let mut migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    let AnalysisKind::LinearRegression(spec) = &mut migrated.result_sheets[0].analysis.kind else {
+        panic!("expected a migrated linear fit");
+    };
+    assert_eq!(*spec, curvebook_doc::LinearRegressionSpec::default());
+    spec.x_range_filter = Some((Some(10.0), None));
+    spec.plot_x_max = Some(20.0);
+    spec.plot_segments = Some(12);
+    let expected = *spec;
+
+    let bytes = save_project_bytes(&migrated).unwrap();
+    let reopened = open_project_bytes(&bytes).unwrap();
+    assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::LinearRegression(expected));
+}

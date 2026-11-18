@@ -478,3 +478,54 @@ fn inverse_x_from_y_fieller_regimes_g_eq_1_and_gt_1_and_edges() {
         Err(FitError::InvalidParameter { name: "unknown_replicates", .. })
     ));
 }
+
+#[test]
+fn restricted_linear_fit_matches_terminal_phase_ols_oracle() {
+    // Draper & Smith (1998), Ch. 3. For the four included observations,
+    // the residuals (1, -1, -1, 1) are orthogonal to both the intercept
+    // and X columns, so the exact fit is Y = 3 + 2X, with RSS = 4, TSS = 84.
+    let points = xy_points(&[0.0, 10.0, 12.0, 14.0, 16.0, 20.0], &[90.0, 24.0, 26.0, 30.0, 36.0, -100.0]);
+    let mut opts = SimpleLinearOptions { x_range_filter: Some((Some(10.0), Some(16.0))), band_grid_points: 4, ..SimpleLinearOptions::default() };
+    let fit = simple_linear_regression(&points, &opts).expect("restricted OLS");
+    assert_eq!((fit.n, fit.n_excluded_by_range, fit.df_residual), (4, 2, 2));
+    assert_close(fit.slope, 2.0, 1e-12, 0.0, "terminal slope");
+    assert_close(fit.intercept, 3.0, 1e-12, 0.0, "terminal intercept");
+    assert_close(fit.rss, 4.0, 1e-12, 0.0, "terminal RSS");
+    assert_close(fit.r_squared, 20.0 / 21.0, 1e-12, 0.0, "terminal R squared");
+    assert_eq!(fit.residuals.iter().map(|p| (p.x, p.residual)).collect::<Vec<_>>(), [(10.0, 1.0), (12.0, -1.0), (14.0, -1.0), (16.0, 1.0)]);
+    assert_eq!(fit.bands.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 12.0, 14.0, 16.0]);
+
+    opts.plot_x_range = Some((None, Some(19.0)));
+    let extended = simple_linear_regression(&points, &opts).expect("explicit plot range");
+    assert_eq!(extended.bands.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 13.0, 16.0, 19.0]);
+    assert_eq!(extended.residuals, fit.residuals);
+    assert_eq!(extended.r_squared, fit.r_squared);
+}
+
+#[test]
+fn restricted_linear_fit_counts_replicates_and_validates_bounds() {
+    let mut points = xy_points(&[0.0, 11.0, 13.0, 15.0], &[9.0, 25.0, 29.0, 33.0]);
+    points[0].n = Some(7.0);
+    points[1].n = Some(3.0);
+    let mut opts = SimpleLinearOptions { x_range_filter: Some((Some(10.0), None)), ..SimpleLinearOptions::default() };
+
+    let fit = simple_linear_regression(&points, &opts).expect("one-sided filter");
+    assert_eq!((fit.n, fit.n_excluded_by_range, fit.df_residual), (5, 7, 3));
+    assert_eq!(fit.bands.first().map(|p| p.x), Some(10.0));
+    assert_eq!(fit.bands.last().map(|p| p.x), Some(15.0));
+
+    opts.x_range_filter = Some((Some(20.0), None));
+    assert!(matches!(simple_linear_regression(&points, &opts), Err(FitError::EmptyInput)));
+    opts.x_range_filter = Some((Some(12.0), None));
+    assert!(matches!(simple_linear_regression(&points, &opts), Err(FitError::InsufficientData { required: 3, actual: 2 })));
+
+    for range in [(Some(f64::NAN), None), (None, Some(f64::INFINITY)), (Some(15.0), Some(11.0))] {
+        opts.x_range_filter = Some(range);
+        assert!(matches!(simple_linear_regression(&points, &opts), Err(FitError::InvalidParameter { name: "x_range_filter", .. })));
+    }
+    opts.x_range_filter = None;
+    for range in [(Some(99.0), None), (None, Some(f64::MAX))] {
+        opts.plot_x_range = Some(range);
+        assert!(matches!(simple_linear_regression(&points, &opts), Err(FitError::InvalidParameter { name: "plot_x_range", .. })));
+    }
+}

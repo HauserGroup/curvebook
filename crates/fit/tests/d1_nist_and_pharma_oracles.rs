@@ -1356,7 +1356,7 @@ fn deming_model_ii_and_weighting_and_poisson_and_robust_oracles() {
         force_through_origin: false,
         confidence_bands: false,
         prediction_bands: false,
-        interpolate_unknowns: false,
+        ..LinearRegressionSpec::default()
     };
     let dem_ana =
         AnalysisSpec::new(SheetId::new("ana-dem"), dem_sheet.id.clone(), AnalysisKind::LinearRegression(lin_spec)).expect("AnalysisSpec::new");

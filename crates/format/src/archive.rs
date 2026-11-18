@@ -1141,6 +1141,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 0, apply: migrate_v0_to_v1 },
     VersionStep { from_version: 1, apply: migrate_v1_to_v2 },
     VersionStep { from_version: 2, apply: migrate_v2_to_v3 },
+    VersionStep { from_version: 3, apply: migrate_v3_to_v4 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -1181,6 +1182,11 @@ fn migrate_v1_to_v2(value: &mut serde_json::Value) -> Result<(), FormatError> {
 
 fn migrate_v2_to_v3(value: &mut serde_json::Value) -> Result<(), FormatError> {
     migrate_result_sheet_step(value, 3);
+    Ok(())
+}
+
+fn migrate_v3_to_v4(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 4);
     Ok(())
 }
 
@@ -1281,6 +1287,11 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
     let Some(kind) = analysis.get_mut("kind").and_then(serde_json::Value::as_object_mut) else {
         return;
     };
+    if let Some(fit) = kind.get_mut("LinearRegression").and_then(serde_json::Value::as_object_mut) {
+        for key in ["x_range_filter", "plot_x_min", "plot_x_max", "plot_segments"] {
+            fit.entry(String::from(key)).or_insert(serde_json::Value::Null);
+        }
+    }
     if let Some(fit) = kind.get_mut("NonlinearRegression").and_then(serde_json::Value::as_object_mut) {
         for opt_key in ["x_range_filter", "y_range_filter", "plot_x_min", "plot_x_max", "mv_y_column"] {
             fit.entry(String::from(opt_key)).or_insert(serde_json::Value::Null);
@@ -1616,12 +1627,19 @@ fn validate_analysis_kind_floats(spec: &curvebook_doc::AnalysisSpec, sheet_id: &
             curvebook_doc::SurvivalAnalysisSpec::CoxProportionalHazards { .. } => Ok(()),
         },
         curvebook_doc::AnalysisKind::NonlinearRegression(fit) => validate_nonlinear_fit_floats(fit, sheet_id),
+        curvebook_doc::AnalysisKind::LinearRegression(fit) => {
+            if let Some((lo, hi)) = fit.x_range_filter {
+                check_opt_finite(lo, || format!("{sheet_id}.analysis.x_range_filter.min"))?;
+                check_opt_finite(hi, || format!("{sheet_id}.analysis.x_range_filter.max"))?;
+            }
+            check_opt_finite(fit.plot_x_min, || format!("{sheet_id}.analysis.plot_x_min"))?;
+            check_opt_finite(fit.plot_x_max, || format!("{sheet_id}.analysis.plot_x_max"))
+        }
         curvebook_doc::AnalysisKind::BlandAltman(_)
         | curvebook_doc::AnalysisKind::PassingBablok(_)
         | curvebook_doc::AnalysisKind::RocCurve(_)
         | curvebook_doc::AnalysisKind::GeneralizedLinearModel(_)
-        | curvebook_doc::AnalysisKind::Multivariate(_)
-        | curvebook_doc::AnalysisKind::LinearRegression(_) => Ok(()),
+        | curvebook_doc::AnalysisKind::Multivariate(_) => Ok(()),
         curvebook_doc::AnalysisKind::PValueStack(ps) => check_finite(ps.threshold, || format!("{sheet_id}.analysis.pvalue_stack.threshold")),
         curvebook_doc::AnalysisKind::PowerAnalysis(p) => {
             if let Some(field) = p.first_non_finite_float() {

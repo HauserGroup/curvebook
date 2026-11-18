@@ -1057,6 +1057,13 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
     }
 }
 
+pub(crate) fn close_active_modal(app: &mut UiApp) {
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+        crate::views::fit_params::clear_linear_range_inputs(app);
+    }
+    app.canvas_dialogs.close_dialog();
+}
+
 fn clear_context_menu_state(app: &mut UiApp) {
     app.interaction.context_menu_target = None;
     app.view_shards.toolbar_menus.active_context_menu_id = None;
@@ -2419,7 +2426,7 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
         }
         WidgetAction::ClosePopupOrModal => {
             if app.interaction.open_dropdown.take().is_none() && app.interaction.open_menu.take().is_none() {
-                app.canvas_dialogs.close_dialog();
+                close_active_modal(app);
             }
             app.interaction.context_menu_target = None;
             Ok(UiEventOutcome { handled: true, action: String::from("popup_or_modal.closed"), ..Default::default() })
@@ -2521,7 +2528,7 @@ fn execute_dialog_widget_action(app: &mut UiApp, action: &WidgetAction, metrics:
             Ok(UiEventOutcome { handled: true, action: format!("slider.set:{field_id}"), ..Default::default() })
         }
         WidgetAction::DialogCancel => {
-            app.canvas_dialogs.close_dialog();
+            close_active_modal(app);
             app.interaction.open_dropdown = None;
             Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() })
         }
@@ -3034,7 +3041,7 @@ fn handle_modal_key_down(
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
         }
-        app.canvas_dialogs.close_dialog();
+        close_active_modal(app);
         return Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() });
     }
 

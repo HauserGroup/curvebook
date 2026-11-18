@@ -997,3 +997,85 @@ fn wf18_human_enzyme_kinetics_global_vmax_diagnostics() -> Result<(), Box<dyn Er
     assert_clean_parity_and_budget(&mut driver)?;
     Ok(())
 }
+
+#[test]
+fn r13_1_human_linear_fit_range_controls() -> Result<(), Box<dyn Error>> {
+    let mut driver = new_strict_human_driver()?;
+    let data_id = import_csv_via_dialog(
+        &mut driver,
+        ImportSpec {
+            target_kind_widget: "import_paste.target.xy",
+            title: "Terminal Phase",
+            csv_text: "X\tResponse\n0\t90\n10\t24\n12\t26\n14\t30\n16\t36\n20\t-100\n",
+            existing_sheet_id: None,
+            replace_existing_mode: false,
+        },
+    )?;
+    switch_to_sheet_in_navigator(&mut driver, &data_id)?;
+    let fit_id = run_analysis_from_toolbar(&mut driver, "fit.linear")?;
+
+    human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+    click(&mut driver, "fit.lr.tab.model")?;
+    driver.press_key("Tab", KeyModifiers::default())?;
+    driver.press_key("Space", KeyModifiers::default())?;
+    driver.press_key("Tab", KeyModifiers::default())?;
+    assert_eq!(driver.app().focus_widget_id.as_deref(), Some("fit.lr.range.input.x_min"));
+    human_wf_common::type_into_focused(&mut driver, "10")?;
+    clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.x_max", "16")?;
+    clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.segments", "0")?;
+    let field = driver.find_widget("fit.lr.range.input.segments").ok_or("missing segments field")?;
+    assert_eq!(field.a11y.value_text.as_deref(), Some("0"));
+
+    // An invalid segment count keeps the dialog open and leaves the stored fit untouched.
+    let error = human_wf_common::click_widget_center(&mut driver, &wid("modal.ok")).err().ok_or("zero segments should be rejected")?;
+    assert!(error.contains("Curve segments"), "{error}");
+    assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
+    let unchanged = result_sheet(driver.app().document(), &fit_id)?;
+    assert!(matches!(&unchanged.analysis.kind, AnalysisKind::LinearRegression(spec) if spec.x_range_filter.is_none()));
+
+    clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.segments", "3")?;
+    click(&mut driver, "fit.lr.tab.model")?;
+    click(&mut driver, "fit.lr.conf")?;
+    click(&mut driver, "modal.ok")?;
+    let restricted = result_sheet(driver.app().document(), &fit_id)?;
+    assert!(matches!(
+        &restricted.analysis.kind,
+        AnalysisKind::LinearRegression(spec) if spec.x_range_filter == Some((Some(10.0), Some(16.0)))
+            && spec.plot_segments == Some(3) && !spec.confidence_bands
+    ));
+    assert!((scalar_val(restricted, "slope")? - 2.0).abs() < 1e-12);
+    let overlay = restricted.fitted_curves.first().ok_or("missing restricted overlay")?;
+    assert_eq!(overlay.points.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 12.0, 14.0, 16.0]);
+
+    // Both dismissal routes discard buffered input before the next edit session.
+    for escape in [true, false] {
+        human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+        click(&mut driver, "fit.lr.tab.range")?;
+        clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.plot_max", "22")?;
+        if escape {
+            driver.press_key("Escape", KeyModifiers::default())?;
+        } else {
+            click(&mut driver, "modal.cancel")?;
+        }
+        assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::None));
+        human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+        click(&mut driver, "fit.lr.tab.range")?;
+        driver.render_frame()?;
+        let tree = driver.layout_tree();
+        let field = tree.node("fit.lr.range.input.plot_max").ok_or("missing curve end field")?;
+        assert_eq!(field.a11y.value_text.as_deref(), Some(""));
+        click(&mut driver, "modal.cancel")?;
+    }
+
+    human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+    click(&mut driver, "fit.lr.tab.range")?;
+    clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.plot_min", "7")?;
+    clear_and_type_into_textbox(&mut driver, "fit.lr.range.input.plot_max", "19")?;
+    click(&mut driver, "modal.ok")?;
+    let extrapolated = result_sheet(driver.app().document(), &fit_id)?;
+    assert!((scalar_val(extrapolated, "slope")? - 2.0).abs() < 1e-12);
+    let overlay = extrapolated.fitted_curves.first().ok_or("missing extrapolated overlay")?;
+    assert_eq!(overlay.points.iter().map(|p| p.x).collect::<Vec<_>>(), [7.0, 11.0, 15.0, 19.0]);
+    assert_clean_parity_and_budget(&mut driver)?;
+    Ok(())
+}

@@ -945,11 +945,40 @@ pub struct LinearRegressionSpec {
     pub prediction_bands: bool,
     /// When `true`, interpolates unpaired `(X, empty)` rows (`Y` from `X`) and `(empty, Y)` rows (`X` from `Y` via Fieller/inverse calibration) on the source sheet.
     pub interpolate_unknowns: bool,
+    /// Inclusive X bounds for observations entering the fit. A missing bound leaves that side unrestricted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    /// Fitted-curve starting X, overriding the filter bound or fitted data minimum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_min: Option<f64>,
+    /// Fitted-curve ending X, overriding the filter bound or fitted data maximum.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_x_max: Option<f64>,
+    /// Number of curve segments, or the default when absent.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub plot_segments: Option<usize>,
+}
+
+impl LinearRegressionSpec {
+    /// Number of segments when no count is specified.
+    pub const DEFAULT_PLOT_SEGMENTS: usize = 100;
+    /// Maximum number of segments for a fitted line.
+    pub const MAX_PLOT_SEGMENTS: usize = 10_000;
 }
 
 impl Default for LinearRegressionSpec {
     fn default() -> Self {
-        Self { deming_model_ii: false, force_through_origin: false, confidence_bands: true, prediction_bands: false, interpolate_unknowns: false }
+        Self {
+            deming_model_ii: false,
+            force_through_origin: false,
+            confidence_bands: true,
+            prediction_bands: false,
+            interpolate_unknowns: false,
+            x_range_filter: None,
+            plot_x_min: None,
+            plot_x_max: None,
+            plot_segments: None,
+        }
     }
 }
 
