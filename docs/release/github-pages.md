@@ -35,7 +35,7 @@ git diff --check
 Keep hosting disabled during preparation. No deployment workflow or extra token permissions are needed.
 
 1. Review the final source and site against `R0.20`, `R0.21`, and the final renamed MCP/setup checks. Include the site/logo in the branding and asset-provenance review.
-2. Review and publish the Alpha prerelease using [`releasing.md`](releasing.md#alpha-releases-with-the-existing-builder). Confirm that its public release page contains the intended packages and checksums. The full releases list includes prereleases; `/releases/latest` does not.
+2. Review and publish the Alpha prerelease using [`releasing.md`](releasing.md#alpha-and-beta-releases-with-the-release-workflow). Confirm that its public release page contains the intended packages and checksums. The full releases list includes prereleases; `/releases/latest` does not.
 3. Update the page's pre-alpha/Alpha-in-preparation wording to match the actual release. Preserve the GUI limitation and the distinction between saved-project sharing and live collaboration.
 4. When the reviewed site is authorized to land and launch, select **Settings → Pages → Deploy from a branch → main → /docs**. The empty `.nojekyll` disables Jekyll processing. Branch publication serves the complete `docs/` directory; canonical Markdown links intentionally point to GitHub for rendering.
 5. Wait for GitHub's Pages deployment to succeed. Use the URL shown in settings, then verify HTTPS, logo/styles, section buttons, `/privacy.html`, external release/setup/status/security links, and a narrow viewport. Only after that add the live URL to repository entry points and record hosted verification.

@@ -1,6 +1,6 @@
 # CurveBook Beta Desktop Smoke & Manual QA Walkthrough (`R10.24`)
 
-This document is the canonical cross-OS smoke walkthrough for `CurveBook` Beta candidate installers on **macOS** (universal `.dmg`), **Windows 11** (`x64` / `arm64` unsigned `.msi`), and **Linux** (`x86_64` / `aarch64` `.AppImage`), aligned with the [`R0.28`](../ROADMAP.md#r028-rein-in-the-number-of-release-install-files) single-format-per-OS Beta download set and [`R10.24`](../ROADMAP.md#r1024-beta-desktop-smoke--manual-qa).
+This document is the canonical cross-OS smoke walkthrough for `CurveBook` Beta candidate installers on **macOS** (universal `.dmg`), **Windows 11** (`x64` / `arm64` unsigned `.msi`), and **Linux** (`x86_64` / `aarch64` `.AppImage`), aligned with the [`R0.28`](../planning/roadmap-history/r0.md#r028-rein-in-the-number-of-release-install-files) single-format-per-OS Beta download set and [`R10.24`](../ROADMAP.md#r1024-windows--linux-desktop-gui-smoke-qa-beta-gate).
 
 Automated interactive regression backing is tracked in [GUI Workflows](../gui-workflows.md) and [UI Feature Parity](../ui-parity.md). Known Beta issues (including Windows SmartScreen guidance) are tracked in [Troubleshooting & Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues).
 
@@ -42,7 +42,7 @@ Execute every stage below sequentially on each target OS session:
 4. **Run an Analysis & a Nonlinear Fit**:
    - Click **Analyze…**, run a group/statistical analysis (e.g., One-way ANOVA or two-group comparison), press `Cmd/Ctrl+T` to adjust parameters in **Edit Analysis Parameters**, and verify live recomputation.
    - On a `MultipleVariables` sheet, open **Analyze…** and `Cmd/Ctrl+T`: verify the role filter chips (`All`, `Continuous`, `Categorical`, `Label`, `Calculated`) filter variables cleanly and colour-coded role badges (`NUM`, `CAT`, `LBL`, `FX=`) match variable roles.
-   - Run a **nonlinear fit** (e.g., `4PL` sigmoidal dose-response or `One-Phase Exponential Decay` from the 117-equation catalog), verify fit summary scalars (`R^2`, `EC50`/rate constant, `95% CI`) and assumption diagnostic banner (`QOL-7`), and confirm parameter constraints / comparison via `Cmd/Ctrl+T`.
+   - Run a **nonlinear fit** (e.g., `4PL` sigmoidal dose-response or `One-Phase Exponential Decay` from the built-in equation catalog), verify fit summary scalars (`R^2`, `EC50`/rate constant, `95% CI`) and assumption diagnostic banner (`QOL-7`), and confirm parameter constraints / comparison via `Cmd/Ctrl+T`.
 5. **Make a Graph, Portfolio Gallery & `F6` Pane Cycling**:
    - Open or create a `GraphSheet` showing the data and fitted curve; test Inspector formatting (`Format Graph` / `Format Axes`) and `Cmd/Ctrl+Z` undo / `Cmd/Ctrl+Shift+Z` redo.
    - Open the **Portfolio Gallery**, filter by folder (`All`, `Data`, `Info`, `Results`, `Graphs`, `Layouts`), wheel-scroll the card grid, and single-click a card to switch sheets and dismiss the gallery.

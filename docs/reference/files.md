@@ -15,7 +15,7 @@ A `.curvebook` file (`ArchiveKind::Project`) is a standard ZIP container compres
 | Entry Path | Contents | Integrity / Limits |
 |---|---|---|
 | `manifest.json` | `ArchiveManifest`: `format: "curvebook-archive"`, `schema_version`, `kind`, `title`, `document_crc32`, and per-sheet descriptors (`id`, `section`, `title`, `csv_path`, `crc32`). | Validated against `archive-manifest.schema.json` and checked against `document_crc32`. |
-| `document.json` | Canonical 2-space-indented `ProjectDocument` JSON (`schema_version = 3`). | Validated against `document.schema.json`, finite floats, dimensions, and acyclic DAGs. |
+| `document.json` | Canonical 2-space-indented `ProjectDocument` JSON (`schema_version = CURRENT_SCHEMA_VERSION`). | Validated against `document.schema.json`, finite floats, dimensions, and acyclic DAGs. |
 | `sheets/<id>.csv` | RFC-4180 CSV snapshots for every `DataSheet` (`*` marks excluded cells). | Per-sheet CRC-32 recorded in `manifest.json`. |
 
 **Archive Safety Limits (`ZipLimits::default()` & `archive.rs`):** `MAX_ARCHIVE_FILE_BYTES = 128 MiB`, `MAX_ZIP_ENTRIES = 4,096`, `MAX_ZIP_UNCOMPRESSED_BYTES = 128 MiB`, `MAX_ZIP_ENTRY_BYTES = 64 MiB`, strict path sanitization rejecting `..` traversal, absolute paths, and symlink escapes. All disk writes go through atomic temp-file write + rename (`platform_write_atomic`).
@@ -48,7 +48,7 @@ A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoShee
 
 | Format / Record | Current Version Constant | Migration & Safety Rule |
 |---|---:|---|
-| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 3` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
+| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 5` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
 | User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
 | Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 1`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation and per-record CRC-32 checking. |
 

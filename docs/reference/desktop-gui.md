@@ -41,7 +41,7 @@ Run a statistical test, curve fit, or table transform from **Analyze › Analyze
 
 ## 4. Composing Multi-Panel Page Layouts {#page-layouts}
 
-Switch to the **Layouts** section in the Project Navigator to arrange multiple `GraphSheet`s onto a physical page canvas (`LayoutSpec`, `MAX_LAYOUT_ITEMS = 64`), apply [journal column-width presets](graphs.md#page-layouts) (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`), align axis origins across panels (**Arrange › Align Plot Origins**), customize Light / Dark / High-Contrast themes in [Settings & Languages](settings.md), and toggle live [CVD / grayscale canvas preview](graphs.md#palettes-and-cvd) (`QOL-9`).
+Switch to the **Layouts** section in the Project Navigator to arrange multiple `GraphSheet`s onto a physical page canvas (`LayoutSpec`, `MAX_LAYOUT_ITEMS = 64`), apply [journal column-width presets](graphs.md#page-layouts) (`SingleColumn88mm`, `ColumnAndHalf130mm`, `DoubleColumn180mm`), align axis origins across panels (**Graph › Align Plot Origins** or the Layout Format Inspector), customize Light / Dark / High-Contrast themes in [Settings & Languages](settings.md), and toggle live [CVD / grayscale canvas preview](graphs.md#palettes-and-cvd) (`QOL-9`).
 
 ![CurveBook multi-panel Page Layout workspace in dark theme with panel badges and publication formatting](../images/workspace-layout-dark.png)
 
