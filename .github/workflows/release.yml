@@ -527,6 +527,22 @@ jobs:
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
           # SemVer pre-release versions (-alpha.N, -beta.N, -rc.N) are always GitHub prereleases.
           ./packaging/release-channel.sh "$ver" "${ALPHA_RELEASE:-}" >> "$GITHUB_OUTPUT"
+      # Refuse before attesting, so a rerun against a published release never
+      # mints Sigstore attestations for rebuilt files that will not be uploaded.
+      - name: Refuse to modify an already-published release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.release_meta.outputs.tag }}
+        run: |
+          set -euo pipefail
+          tag="$RELEASE_TAG"
+          if gh release view "$tag" >/dev/null 2>&1; then
+            is_draft="$(gh release view "$tag" --json isDraft --jq .isDraft)"
+            if [ "$is_draft" != "true" ]; then
+              echo "error: refusing to overwrite already-published release $tag (isDraft=$is_draft)" >&2
+              exit 1
+            fi
+          fi
       - name: Attest release artifacts and SHA256SUMS.txt
         uses: actions/attest-build-provenance@4d101475d8b20a2381f78447822ac1eab6504dd8 # v4.2.2
         with:

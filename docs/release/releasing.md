@@ -99,9 +99,12 @@ Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](..
 
 1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
    ```sh
-   gh attestation verify <file> --repo HauserGroup/curvebook
+   gh attestation verify <file> --repo HauserGroup/curvebook \
+     --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
    ```
-   This confirms that `<file>` (including `SHA256SUMS.txt` or any individual installer/archive) matches a build produced by `.github/workflows/release.yml` in `HauserGroup/curvebook`.
+   This confirms that `<file>` (including `SHA256SUMS.txt` or any individual installer/archive) matches a build produced by `.github/workflows/release.yml` in `HauserGroup/curvebook`. Without `--signer-workflow`, `gh` accepts an attestation signed by any workflow in the repository. A release built from a tag push also records the tag; check it with `--source-ref refs/tags/v<version>`. A manually dispatched run records the branch it ran from instead; for example, `v0.1.0-alpha.1` was built from `refs/heads/main`.
+
+   The `publish` job refuses to modify an already-published release before it attests anything, so a rerun cannot create attestations for rebuilt files that are never uploaded.
 2. **Verify SHA-256 checksums** after downloading `SHA256SUMS.txt` alongside your release files:
    ```sh
    sha256sum -c SHA256SUMS.txt
@@ -109,6 +112,29 @@ Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](..
    *(If you downloaded only one platform's files into the current directory, pass `sha256sum -c --ignore-missing SHA256SUMS.txt`; on macOS without GNU coreutils, use `shasum -a 256 -c SHA256SUMS.txt`.)*
 
 **CI-only provenance & zero binary egress:** Keyless OIDC/Sigstore attestation calls (`id-token: write` and `attestations: write`, scoped strictly to the `publish` job in `.github/workflows/release.yml`) run exclusively in GitHub Actions during release publishing. Shipped CurveBook binaries (`curvebook`, `curvebook-cli`) and the WASM web bundle gain **zero** network access, update checks, or telemetry (`cargo xtask telemetry`).
+
+### Repository Settings That Protect Release Provenance
+
+An attestation names the source commit and ref a file was built from. If someone moves or deletes a release tag afterwards, the tag no longer matches what users can verify. These settings belong to the repository, not to the workflow, so maintainers configure them in GitHub. **Settings → Rules → Rulesets → New tag ruleset**:
+
+| Field | Value | Why |
+|---|---|---|
+| Name | `Release tags` | |
+| Enforcement status | **Active** | A disabled ruleset applies no rules. |
+| Bypass list | Empty | Admins can still edit or turn off the ruleset, and the change appears in the audit log. |
+| Target tags | Include by pattern `v*` | Covers every `v<version>` release tag. |
+| Restrict updates | On | Nobody can repoint a published tag to a different commit. |
+| Restrict deletions | On | Nobody can delete a published tag. |
+| Block force pushes | On | Closes the force-push path to moving a tag. |
+| Restrict creations | **Off** | Releases create tags through `git push` and `gh release create --target` (manual Alpha runs). Restricting creation would block both for anyone not on the bypass list. |
+
+Leave the other rules off; they apply to branches, not release tags. Also turn on **Settings → General → Releases → immutable releases**, so a published release's assets cannot be replaced.
+
+To check the ruleset from a terminal:
+
+```sh
+gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag") | [.name, .enforcement] | @tsv'
+```
 
 ---
 
