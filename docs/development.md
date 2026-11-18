@@ -1,10 +1,10 @@
 # Development
 
-> **Last updated:** 2026-11-18 · **Change:** added `cargo xtask citations` (`R0.30` `D1` literature-citation gate in `ci policy`) and extended `cargo xtask wasm` (`R11.1` `wasm32` Clippy `-D warnings`, `trunk build --cargo-profile web-release`, and `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` enforcement).
+> **Last updated:** 2026-11-18 · **Change:** migrated source quick-start build instructions from the root README (`R0.27`), added `cargo xtask citations` (`R0.30` `D1` literature-citation gate in `ci policy`), and extended `cargo xtask wasm` (`R11.1` `wasm32` Clippy `-D warnings`, `trunk build --cargo-profile web-release`, and `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` enforcement).
 
 ## Prerequisites
 
-- **Rust 1.99.1+** (`edition = "2024"`, `resolver = "3"`), pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`profile = "minimal"`, components `rustfmt`, `clippy`).
+- **Rust 1.99.1+** (`edition = "2024"`, resolver = `"3"`), pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`profile = "minimal"`, components `rustfmt`, `clippy`).
   - Run `rustc --version` and `cargo --version` (and `rustup show active-toolchain`) inside the repository to confirm rustup's proxy selects `1.99.1` (or newer) for both the compiler and Cargo.
   - **macOS Homebrew note:** If both Homebrew `rust` and `rustup` are installed, `/opt/homebrew/bin/{cargo,rustc}` link directly to Homebrew's formula and bypass `rust-toolchain.toml` and `+<toolchain>` selection. Prepend `rustup`'s proxy bin directory (`export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`) ahead of `/opt/homebrew/bin` so `rust-toolchain.toml` takes effect.
 - Optional tools:
@@ -13,6 +13,27 @@
   - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
   - `resvg`, `rsvg-convert`, or ImageMagick (`magick`), plus `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
+
+## Quick start (building from source)
+
+Build the CLI runner (`curvebook-cli`, which also hosts the `mcp` subcommand) and inspect registered commands:
+
+```sh
+# Build the CLI (which also provides the MCP server) and inspect available commands
+cargo build --release -p curvebook-cli
+./target/release/curvebook-cli --help
+./target/release/curvebook-cli commands --group analysis
+```
+
+To build or launch the native desktop application from source:
+
+```sh
+cargo build --release -p curvebook
+# Or run directly:
+cargo run --release -p curvebook
+```
+
+For stdio MCP server configuration, connection checks, and the end-to-end Welch's *t*-test example, see [`mcp.md`](mcp.md). For pull request guidelines and governance checks, see [`CONTRIBUTING.md`](../CONTRIBUTING.md) and [`AGENTS.md`](../AGENTS.md).
 
 ## Everyday commands
 
