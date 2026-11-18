@@ -17,6 +17,7 @@ mod layers;
 mod licenses;
 mod msix;
 mod pending;
+mod release_scan;
 mod schemas;
 mod screenshots;
 mod secrets;
@@ -60,6 +61,7 @@ commands:
   coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
   bundle                build release binaries and assemble dist/CurveBook.app
   msix --arch <arch> --package-version <A.B.C.0>  package Windows binaries for Microsoft Store
+  release-scan <dir>    unpack release assets and run SHA-256, brand, cleanroom & asset gates
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
   stats [--exact]       print line and test counts across workspace crates
@@ -113,6 +115,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "coverage" => coverage::run(&root, rest),
         "bundle" => bundle::run(&root),
         "msix" => msix::run(&root, rest),
+        "release-scan" => release_scan::run(&root, rest),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),
         "stats" => stats::run(&root, rest.iter().any(|a| a == "--exact")),
