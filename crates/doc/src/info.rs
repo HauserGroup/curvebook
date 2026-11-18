@@ -13,11 +13,14 @@ pub const STANDARD_INFO_KEYS: [&str; 6] = ["Experiment Date", "Experiment ID", "
 /// Typed value stored in an [`InfoConstant`] row.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum ConstantValue {
+    /// Unassigned metadata slot (for example a freshly pre-seeded [`STANDARD_INFO_KEYS`] row).
     #[default]
     Empty,
+    /// Numeric experimental constant (for example radioligand concentration or assay temperature) directly usable by [`Self::as_finite_f64`].
     Number(f64),
+    /// Free-form string metadata (also parsed by [`Self::as_finite_f64`] when its trimmed text is a finite decimal number).
     Text(String),
-    /// ISO-8601 date string (`YYYY-MM-DD`).
+    /// ISO-8601 calendar date string (`YYYY-MM-DD`); never coerced to `f64` by [`Self::as_finite_f64`].
     Date(String),
 }
 
@@ -48,12 +51,16 @@ impl ConstantValue {
 /// Structured key–value constant on an [`InfoSheet`] (`docs/implementation/data-tables-and-transforms.md` §3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InfoConstant {
+    /// Non-empty constant key matched case-insensitively by [`InfoSheet::get_constant`] and `{{info:Name}}` hooks.
     pub name: String,
+    /// Typed scalar, text, date, or empty value assigned to `name`.
     pub value: ConstantValue,
+    /// Optional physical or concentration units label (for example `"nM"` or `"°C"`), or `None` when dimensionless/unspecified.
     pub units: Option<String>,
 }
 
 impl InfoConstant {
+    /// Construct a validated `InfoConstant`, rejecting empty names or strings exceeding [`crate::MAX_TITLE_BYTES`].
     pub fn new(name: impl Into<String>, value: ConstantValue, units: Option<String>) -> Result<Self, DocError> {
         let name = name.into();
         if name.trim().is_empty() {
@@ -71,12 +78,19 @@ impl InfoConstant {
 /// more [`crate::DataSheet`]s.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InfoSheet {
+    /// Project-unique sheet identifier.
     pub id: SheetId,
+    /// Display title shown in the `Info` navigator folder.
     pub title: String,
+    /// Upstream [`crate::DataSheet`] identifiers paired with this metadata sheet.
     pub linked_data_sheets: Vec<SheetId>,
+    /// Ordered list of structured key–value experimental constants (left pane).
     pub constants: Vec<InfoConstant>,
+    /// Free-form Markdown protocol and experiment notes (right pane).
     pub notes_markdown: String,
+    /// Canvas sticky-note callouts attached to this info sheet.
     pub floating_notes: Vec<FloatingNote>,
+    /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
 }
 

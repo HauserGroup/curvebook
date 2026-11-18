@@ -15,8 +15,11 @@ use crate::formula::parser::{
 /// Typed runtime value produced by evaluating a formula expression.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FormulaValue {
+    /// Finite IEEE-754 floating-point number (non-finite `NaN`/`±Inf` results map to [`Self::Missing`] via [`Self::from_f64`]).
     Number(f64),
+    /// Non-empty string value.
     Text(String),
+    /// Propagated missing/null value produced by empty cells, excluded cells, domain errors (`ln(-1)`), or division by zero.
     Missing,
 }
 
@@ -87,20 +90,29 @@ impl FormulaValue {
 
 /// Read-only table & constant environment exposed to the formula evaluator.
 pub trait FormulaContext {
+    /// Validate structural invariants of the underlying table before evaluating expressions.
     fn validate_context(&self) -> Result<(), TransformError> {
         Ok(())
     }
+    /// Number of logical rows in the evaluation domain.
     fn row_count(&self) -> usize;
+    /// Resolve a case-insensitive or alias column reference (`name` or `"value"`) to a zero-based column index.
     fn resolve_column_index(&self, name: &str) -> Option<usize>;
+    /// Resolve an identifier strictly against exact/trimmed column titles without fallback aliases.
     fn resolve_column_index_exact(&self, name: &str) -> Option<usize> {
         self.resolve_column_index(name)
     }
+    /// Total number of addressable data/variable columns.
     fn column_count(&self) -> usize;
+    /// Extract a `row_count()`-length vector of [`FormulaValue`]s for zero-based `col_idx` (mapping excluded/empty cells to [`FormulaValue::Missing`]).
     fn column_values(&self, col_idx: usize) -> Option<Vec<FormulaValue>>;
+    /// Extract the independent *X* or elapsed-time vector when the backing table has one (`Xy` or `Survival`).
     fn resolve_x_column(&self) -> Option<Vec<FormulaValue>> {
         None
     }
+    /// Look up a named constant from the paired [`InfoSheet`], if available.
     fn resolve_info_constant(&self, name: &str) -> Option<FormulaValue>;
+    /// Look up a scalar variable binding (such as `"x"`, `"y"`, or parameter names in scalar expressions).
     fn resolve_scalar(&self, _name: &str) -> Option<FormulaValue> {
         None
     }
@@ -109,11 +121,14 @@ pub trait FormulaContext {
 /// Scalar-only environment for `UserExpression` or custom `Simulate` formulas (`x`, `y`, params).
 #[derive(Debug, Clone, Default)]
 pub struct ScalarEnv<'a> {
+    /// Case-insensitive `(name, value)` scalar variable bindings.
     pub bindings: Vec<(&'a str, f64)>,
+    /// Optional paired [`InfoSheet`] for `Info("Key")` constant lookups.
     pub info_sheet: Option<&'a InfoSheet>,
 }
 
 impl<'a> ScalarEnv<'a> {
+    /// Construct a scalar evaluation environment from `(name, value)` bindings and an optional [`InfoSheet`].
     #[must_use]
     pub fn new(bindings: Vec<(&'a str, f64)>, info_sheet: Option<&'a InfoSheet>) -> Self {
         Self { bindings, info_sheet }
@@ -150,12 +165,16 @@ impl FormulaContext for ScalarEnv<'_> {
 /// Full table context wrapping any [`DataSheet`] and optional [`InfoSheet`] + scalar bindings.
 #[derive(Debug, Clone)]
 pub struct TableEvalContext<'a> {
+    /// Borrowed [`DataSheet`] whose columns and *X* values are exposed to formulas.
     pub sheet: &'a DataSheet,
+    /// Optional paired [`InfoSheet`] for `Info("Key")` lookups.
     pub info_sheet: Option<&'a InfoSheet>,
+    /// Additional case-insensitive scalar `(name, value)` bindings overriding or supplementing columns.
     pub extra_scalars: Vec<(&'a str, f64)>,
 }
 
 impl<'a> TableEvalContext<'a> {
+    /// Construct a `TableEvalContext` over `sheet` and optional `info_sheet` with empty `extra_scalars`.
     #[must_use]
     pub fn new(sheet: &'a DataSheet, info_sheet: Option<&'a InfoSheet>) -> Self {
         Self { sheet, info_sheet, extra_scalars: Vec::new() }
@@ -219,7 +238,9 @@ impl FormulaContext for TableEvalContext<'_> {
 /// Context wrapping a [`MultipleVariablesTable`] directly (used during DAG column updates).
 #[derive(Debug, Clone)]
 pub struct MultipleVariablesContext<'a> {
+    /// Borrowed [`MultipleVariablesTable`] whose variable columns are evaluated.
     pub table: &'a MultipleVariablesTable,
+    /// Optional paired [`InfoSheet`] for `Info("Key")` constant lookups.
     pub info_sheet: Option<&'a InfoSheet>,
 }
 

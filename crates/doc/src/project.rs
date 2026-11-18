@@ -14,10 +14,15 @@ use crate::result::ResultSheet;
 /// Navigator sheet folder targeted by sheet-ordering operations such as [`ProjectDocument::reorder_sheet`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SheetFolderKind {
+    /// [`ProjectDocument::data_sheets`] folder.
     Data,
+    /// [`ProjectDocument::info_sheets`] folder.
     Info,
+    /// [`ProjectDocument::result_sheets`] (`Analyses`) folder.
     Results,
+    /// [`ProjectDocument::graph_sheets`] folder.
     Graphs,
+    /// [`ProjectDocument::layout_sheets`] folder.
     Layouts,
 }
 
@@ -38,9 +43,13 @@ impl SheetFolderKind {
 /// Immutable named project milestone snapshot stored alongside the project (`QOL-11`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct NamedCheckpoint {
+    /// Unique checkpoint identifier within `ProjectDocument::checkpoints`.
     pub id: String,
+    /// Short user-facing milestone label.
     pub name: String,
+    /// Optional free-form rationale or audit comment recorded when the checkpoint was captured.
     pub note: String,
+    /// Creation timestamp formatted as an UTC epoch or ISO-8601 string (caller-supplied for determinism).
     pub created_utc: String,
     /// Canonical JSON snapshot of `ProjectDocument` with `checkpoints` empty to prevent recursive nesting.
     pub snapshot_json: String,
@@ -49,13 +58,21 @@ pub struct NamedCheckpoint {
 /// Complete serializable CurveBook project model (`L1`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ProjectDocument {
+    /// Persisted `.curvebook` document schema version (defaults to [`CURRENT_SCHEMA_VERSION`]).
     pub schema_version: u32,
+    /// Human-readable project title (`<= MAX_TITLE_BYTES` UTF-8 bytes).
     pub title: String,
+    /// Ordered `Data` folder tables.
     pub data_sheets: Vec<DataSheet>,
+    /// Ordered `Info` folder laboratory metadata sheets.
     pub info_sheets: Vec<InfoSheet>,
+    /// Ordered `Analyses` folder [`ResultSheet`] nodes.
     pub result_sheets: Vec<ResultSheet>,
+    /// Ordered `Graphs` folder scientific figures.
     pub graph_sheets: Vec<GraphSheet>,
+    /// Ordered `Layouts` folder multi-panel publication canvases.
     pub layout_sheets: Vec<LayoutSheet>,
+    /// Currently focused sheet in the workspace; `None` when the project contains zero sheets or nothing is selected.
     pub active_sheet_id: Option<SheetId>,
     /// Anchored root sheet for the Family dependency pane (updated when navigating in the Project
     /// Navigator, kept stable when inspecting sibling sheets inside the Family pane; `docs/ui-parity.md`).
@@ -83,6 +100,7 @@ impl Default for ProjectDocument {
 }
 
 impl ProjectDocument {
+    /// Construct an empty `ProjectDocument` at [`CURRENT_SCHEMA_VERSION`] with a validated `title`.
     pub fn new(title: impl Into<String>) -> Result<Self, DocError> {
         let title = title.into();
         validate_title(&title)?;
@@ -127,6 +145,7 @@ impl ProjectDocument {
         Ok(())
     }
 
+    /// Append a [`DataSheet`] to the `Data` folder, selecting it as active/family-anchor if none is set yet.
     pub fn add_data_sheet(&mut self, sheet: DataSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
         if self.active_sheet_id.is_none() {
@@ -137,24 +156,28 @@ impl ProjectDocument {
         Ok(())
     }
 
+    /// Append an [`InfoSheet`] to the `Info` folder after checking ID uniqueness and project sheet limits.
     pub fn add_info_sheet(&mut self, sheet: InfoSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
         self.info_sheets.push(sheet);
         Ok(())
     }
 
+    /// Append a [`ResultSheet`] to the `Analyses` folder after checking ID uniqueness and project sheet limits.
     pub fn add_result_sheet(&mut self, sheet: ResultSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
         self.result_sheets.push(sheet);
         Ok(())
     }
 
+    /// Append a [`GraphSheet`] to the `Graphs` folder after checking ID uniqueness and project sheet limits.
     pub fn add_graph_sheet(&mut self, sheet: GraphSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
         self.graph_sheets.push(sheet);
         Ok(())
     }
 
+    /// Append a [`LayoutSheet`] to the `Layouts` folder after checking ID uniqueness and project sheet limits.
     pub fn add_layout_sheet(&mut self, sheet: LayoutSheet) -> Result<(), DocError> {
         self.ensure_can_insert(&sheet.id)?;
         self.layout_sheets.push(sheet);
@@ -196,47 +219,57 @@ impl ProjectDocument {
         Ok(())
     }
 
+    /// Look up an immutable [`DataSheet`] by [`SheetId`].
     #[must_use]
     pub fn data_sheet(&self, id: &SheetId) -> Option<&DataSheet> {
         self.data_sheets.iter().find(|s| &s.id == id)
     }
 
+    /// Look up a mutable [`DataSheet`] by [`SheetId`].
     pub fn data_sheet_mut(&mut self, id: &SheetId) -> Option<&mut DataSheet> {
         self.data_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Look up an immutable [`InfoSheet`] by [`SheetId`].
     #[must_use]
     pub fn info_sheet(&self, id: &SheetId) -> Option<&InfoSheet> {
         self.info_sheets.iter().find(|s| &s.id == id)
     }
 
+    /// Look up a mutable [`InfoSheet`] by [`SheetId`].
     pub fn info_sheet_mut(&mut self, id: &SheetId) -> Option<&mut InfoSheet> {
         self.info_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Look up an immutable [`ResultSheet`] by [`SheetId`].
     #[must_use]
     pub fn result_sheet(&self, id: &SheetId) -> Option<&ResultSheet> {
         self.result_sheets.iter().find(|s| &s.id == id)
     }
 
+    /// Look up a mutable [`ResultSheet`] by [`SheetId`].
     pub fn result_sheet_mut(&mut self, id: &SheetId) -> Option<&mut ResultSheet> {
         self.result_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Look up an immutable [`GraphSheet`] by [`SheetId`].
     #[must_use]
     pub fn graph_sheet(&self, id: &SheetId) -> Option<&GraphSheet> {
         self.graph_sheets.iter().find(|s| &s.id == id)
     }
 
+    /// Look up a mutable [`GraphSheet`] by [`SheetId`].
     pub fn graph_sheet_mut(&mut self, id: &SheetId) -> Option<&mut GraphSheet> {
         self.graph_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Look up an immutable [`LayoutSheet`] by [`SheetId`].
     #[must_use]
     pub fn layout_sheet(&self, id: &SheetId) -> Option<&LayoutSheet> {
         self.layout_sheets.iter().find(|s| &s.id == id)
     }
 
+    /// Look up a mutable [`LayoutSheet`] by [`SheetId`].
     pub fn layout_sheet_mut(&mut self, id: &SheetId) -> Option<&mut LayoutSheet> {
         self.layout_sheets.iter_mut().find(|s| &s.id == id)
     }

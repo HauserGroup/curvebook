@@ -88,7 +88,14 @@ impl PlateGeometry {
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum PlateWellRole {
     /// Experimental treatment sample with group/compound name, x concentration/dilution, and replicate index.
-    Treatment { group_name: String, dilution_x: f64, replicate: usize },
+    Treatment {
+        /// Compound or treatment group column title on the mapped output [`DataSheet`].
+        group_name: String,
+        /// Concentration, dilution, or time *X* coordinate assigned to this well (finite `f64`).
+        dilution_x: f64,
+        /// Zero-based replicate subcolumn index within `(group_name, dilution_x)`.
+        replicate: usize,
+    },
     /// Background blank well used optionally for mean blank subtraction.
     Blank,
     /// Assay positive control well.
@@ -100,9 +107,13 @@ pub enum PlateWellRole {
 /// Serializable 96/384-well plate layout template (`.cbtemplate` JSON).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PlateMapTemplate {
+    /// Human-readable template name.
     pub name: String,
+    /// Physical microplate dimensions (`96`-well `8 × 12` or `384`-well `16 × 24`).
     pub geometry: PlateGeometry,
+    /// Independent *X*-column title assigned to mapped dose-response `XyTable` outputs.
     pub x_title: String,
+    /// Row-major (`A01`, `A02`, ...) well role assignments (`len() == geometry.well_count()`).
     #[serde(deserialize_with = "deserialize_bounded_wells")]
     pub wells: Vec<PlateWellRole>,
 }
@@ -744,10 +755,15 @@ fn append_plate_floating_notes(sheet: &mut DataSheet, collected: &CollectedPlate
 /// Column index mapping describing how a tidy long table should be pivoted into a wide [`DataSheet`].
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct TidyColumnMapping {
+    /// Optional zero-based column index supplying independent *X* values (producing an `XyTable`) or row-factor labels (producing a `GroupedTable`); `None` pivots into a `ColumnTable`.
     pub x_col: Option<usize>,
+    /// Zero-based column index supplying treatment/data-set column names.
     pub group_col: usize,
+    /// Optional zero-based column index identifying replicate/subject IDs within `(x_col, group_col)`; `None` assigns sequential replicate slots in row-appearance order.
     pub replicate_col: Option<usize>,
+    /// Zero-based column index supplying the response *Y* measurement.
     pub value_col: usize,
+    /// Optional zero-based boolean/flag/reason column index marking pivoted cells as `excluded = true` (and attaching [`curvebook_doc::CellExclusionNote`] text when non-boolean); `None` relies only on inline `*` tokens.
     pub excluded_col: Option<usize>,
 }
 

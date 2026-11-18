@@ -7,9 +7,12 @@ use crate::error::{DocError, SummaryPointError, validate_subcolumns};
 /// Typed content of a single grid cell (`docs/implementation/data-tables-and-transforms.md` §1.2).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum CellValue {
+    /// Unpopulated cell (missing observation; non-finite `NaN`/`±Inf` inputs also normalize to `Empty` via [`Self::from_finite_or_empty`]).
     #[default]
     Empty,
+    /// Numeric scalar observation in the column's data units (finite `f64` when constructed via [`Self::from_finite_or_empty`] or [`Cell::number`]).
     Number(f64),
+    /// Categorical label, row/group identifier, or free-form string token.
     Text(String),
 }
 
@@ -48,7 +51,9 @@ impl CellValue {
 /// graphs mask them out without mutating raw observations (`docs/implementation/data-tables-and-transforms.md` §1.2).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Cell {
+    /// Underlying empty, numeric, or text payload stored in the cell.
     pub value: CellValue,
+    /// When `true`, the observation is retained visibly in the sheet (`*` badge) but masked out of [`Self::active_number`], [`Self::active_text`], statistical tests, fits, transforms, and plotted series.
     pub excluded: bool,
 }
 
@@ -271,16 +276,21 @@ impl SubcolumnMode {
 /// Plottable `(center, lower_endpoint, upper_endpoint)` resolved from pre-summarized subcolumns.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExplicitErrorBounds {
+    /// Central point location in data-axis units (`Mean` for parametric/interval modes or `Median` for [`SubcolumnMode::MedianIqr`]).
     pub center: f64,
+    /// Lower error-bar endpoint in data-axis units (`center - SD`, `center - SEM`, `center - (%CV/100)*|center|`, `center - (-Error)`, `LowerLimit`, or `Q1`).
     pub lower: f64,
+    /// Upper error-bar endpoint in data-axis units (`center + SD`, `center + SEM`, `center + (%CV/100)*|center|`, `center + (+Error)`, `UpperLimit`, or `Q3`).
     pub upper: f64,
 }
 
 /// Visual layout of replicate subcolumns in a `Grouped` table (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ReplicateStacking {
+    /// Display replicate subcolumns (`Y1 .. Yn`) horizontally side-by-side within each row (`row = factor A level`, `subcolumn = subject/replicate`).
     #[default]
     SideBySide,
+    /// Display replicates stacked vertically across consecutive rows under a single column.
     Stacked,
 }
 
@@ -290,10 +300,15 @@ pub enum ReplicateStacking {
 /// `SS_within = (n - 1) * SD^2`, where `SD = SEM * sqrt(n)` or `(%CV / 100) * |Mean|`.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SummarizedPoint {
+    /// Sample arithmetic mean in data units.
     pub mean: f64,
+    /// Reconstructed sample standard deviation (`>= 0`, finite) in data units (`SD`, `SEM * sqrt(n)`, or `(%CV / 100) * |mean|`).
     pub sd: f64,
+    /// Integer replicate count `n >= 1.0` stored as `f64` for exact moment algebra.
     pub n: f64,
+    /// Reconstructed within-cell sum of squared deviations `(n - 1) * sd^2` (`0.0` when `n == 1.0`).
     pub ss_within: f64,
+    /// Within-cell degrees of freedom `n - 1.0` (`>= 0.0`).
     pub df_within: f64,
 }
 

@@ -69,11 +69,13 @@ impl From<String> for SheetId {
 pub struct NoteId(String);
 
 impl NoteId {
+    /// Construct a `NoteId` from an arbitrary identifier string.
     #[must_use]
     pub fn new(id: impl Into<String>) -> Self {
         Self(id.into())
     }
 
+    /// Borrow the underlying note identifier string slice.
     #[must_use]
     pub fn as_str(&self) -> &str {
         &self.0
@@ -89,11 +91,14 @@ impl fmt::Display for NoteId {
 /// 2D physical size in typographic points (`1 pt = 1/72 in`).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SizePt {
+    /// Horizontal extent in typographic points (`>= 0.0` when constructed via [`Self::new`]).
     pub width: f64,
+    /// Vertical extent in typographic points (`>= 0.0` when constructed via [`Self::new`]).
     pub height: f64,
 }
 
 impl SizePt {
+    /// Construct a non-negative physical size in points, clamping negative or non-finite inputs to `0.0`.
     #[must_use]
     pub fn new(width: f64, height: f64) -> Self {
         Self { width: if width.is_finite() { width.max(0.0) } else { 0.0 }, height: if height.is_finite() { height.max(0.0) } else { 0.0 } }
@@ -109,13 +114,18 @@ impl Default for SizePt {
 /// Axis-aligned rectangle in typographic points (`1 pt = 1/72 in`).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RectPt {
+    /// Left origin coordinate in typographic points (`0.0` at canvas left).
     pub x: f64,
+    /// Top origin coordinate in typographic points (`0.0` at canvas top).
     pub y: f64,
+    /// Horizontal width in typographic points (`>= 0.0` when constructed via [`Self::new`]).
     pub width: f64,
+    /// Vertical height in typographic points (`>= 0.0` when constructed via [`Self::new`]).
     pub height: f64,
 }
 
 impl RectPt {
+    /// Construct a finite rectangle in points, mapping non-finite origins to `0.0` and clamping negative/non-finite dimensions to `0.0`.
     #[must_use]
     pub fn new(x: f64, y: f64, width: f64, height: f64) -> Self {
         Self {
@@ -131,10 +141,15 @@ impl RectPt {
 /// (`docs/implementation/data-tables-and-transforms.md` §3).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct FloatingNote {
+    /// Stable identifier unique within the owning sheet's `floating_notes` list.
     pub id: NoteId,
+    /// Background sRGB color of the sticky note card (defaults to [`Self::DEFAULT_FILL`]).
     pub fill_color: Rgba8,
+    /// Canvas position and dimensions of the expanded callout in typographic points.
     pub bounds_pt: RectPt,
+    /// When `true`, renders as a compact collapsed badge rather than an expanded note card.
     pub minimized: bool,
+    /// Markdown body text (supports inline `{{info:...}}` and `{{result:...}}` constant hooks).
     pub body_markdown: String,
 }
 
@@ -142,6 +157,7 @@ impl FloatingNote {
     /// Default warm pastel note fill with high black-text contrast.
     pub const DEFAULT_FILL: Rgba8 = Rgba8::rgb(0xFF, 0xF7, 0xCC);
 
+    /// Construct an expanded `FloatingNote` with [`Self::DEFAULT_FILL`] background.
     #[must_use]
     pub fn new(id: impl Into<String>, bounds_pt: RectPt, body_markdown: impl Into<String>) -> Self {
         Self { id: NoteId::new(id), fill_color: Self::DEFAULT_FILL, bounds_pt, minimized: false, body_markdown: body_markdown.into() }
@@ -153,11 +169,28 @@ impl FloatingNote {
 #[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum HookSource {
     /// Named constant on an `InfoSheet` (`info_sheet_id: None` resolves the paired or primary info sheet).
-    InfoConstant { info_sheet_id: Option<SheetId>, constant_name: String },
+    InfoConstant {
+        /// Explicit upstream [`InfoSheet`](crate::InfoSheet) identifier, or `None` to resolve the paired info sheet of the active source table (falling back to the project's primary info sheet).
+        info_sheet_id: Option<SheetId>,
+        /// Case-insensitive [`InfoConstant::name`](crate::InfoConstant::name) key on the resolved info sheet.
+        constant_name: String,
+    },
     /// Named scalar output on an upstream `ResultSheet` (e.g., fitted `EC50`, `Kd`, `r2`, or control mean).
-    ResultScalar { result_sheet_id: SheetId, parameter_key: String, data_set_index: Option<usize> },
+    ResultScalar {
+        /// Identifier of the upstream [`ResultSheet`](crate::ResultSheet) publishing the scalar.
+        result_sheet_id: SheetId,
+        /// Case-insensitive [`ResultScalarEntry::key`](crate::ResultScalarEntry::key) name (for example `"LogEC50"`, `"Km"`, or `"p"`).
+        parameter_key: String,
+        /// Optional zero-based data-set column index when a fit or analysis publishes per-series scalars; `None` matches global scalars or the first matching entry.
+        data_set_index: Option<usize>,
+    },
     /// Numeric value parsed from a data-set column title (e.g., inhibitor concentration `[I]` in enzyme kinetics).
-    ColumnTitleValue { data_sheet_id: SheetId, data_set_index: usize },
+    ColumnTitleValue {
+        /// Identifier of the upstream [`DataSheet`](crate::DataSheet) owning the column header.
+        data_sheet_id: SheetId,
+        /// Zero-based data-set column index whose title is parsed as a finite `f64`.
+        data_set_index: usize,
+    },
 }
 
 impl HookSource {

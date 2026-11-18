@@ -41,13 +41,18 @@ pub enum AllocationScheme {
     /// uniformly per block from `block_sizes` (`block_sizes.len() > 1`). Every block size must be
     /// a positive multiple of `sum(weights)` within the bounded per-block capacity limit
     /// (Matts & Lachin, *Controlled Clinical Trials*, 1988, 9(4), 327–344).
-    PermutedBlock { block_sizes: Vec<usize> },
+    PermutedBlock {
+        /// Candidate positive block sizes (each an integer multiple of the total group allocation weight sum).
+        block_sizes: Vec<usize>,
+    },
 }
 
 /// Named treatment arm and relative allocation weight for [`SubjectRandomizationConfig`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct GroupAllocationWeight {
+    /// Non-empty treatment arm label (for example `"Vehicle"` or `"Drug 10 mg/kg"`).
     pub label: String,
+    /// Positive integer allocation ratio weight (`>= 1`, default `1`; e.g. `[1, 2]` for `1:2` control:treatment allocation).
     #[serde(default = "default_group_weight")]
     pub weight: usize,
 }
@@ -69,11 +74,17 @@ impl GroupAllocationWeight {
 /// Configuration for seeded subject-to-group randomization ([`randomize_subjects_to_groups`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct SubjectRandomizationConfig {
+    /// Identifier assigned to the generated schedule [`DataSheet`].
     pub sheet_id: String,
+    /// Display title assigned to the generated schedule [`DataSheet`].
     pub title: String,
+    /// Ordered unique subject/animal identifiers (`len >= 1`).
     pub subject_ids: Vec<String>,
+    /// Treatment arms and positive integer allocation ratio weights (`len >= 2`).
     pub groups: Vec<GroupAllocationWeight>,
+    /// Complete balanced Durstenfeld shuffle vs Matts–Lachin permuted-block randomization.
     pub scheme: AllocationScheme,
+    /// 64-bit `DeterministicRng` seed recorded in ARRIVE provenance metadata.
     pub seed: u64,
 }
 
@@ -96,21 +107,29 @@ impl SubjectRandomizationConfig {
 /// Generated randomization schedule sheet alongside ARRIVE guideline metadata constants.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RandomizationOutput {
+    /// `MultipleVariables` schedule sheet with `Subject_ID`, `Allocation_Order`, `Block_Index`, `Block_Size`, and `Assigned_Group` columns.
     pub data_sheet: DataSheet,
+    /// Key–value ARRIVE 2.0 reproducibility metadata pairs (PRNG seed, scheme, arm ratios, total `N`) suitable for `InfoSheet` insertion.
     pub arrive_constants: Vec<(String, String)>,
 }
 
 /// Configuration for deterministic row sampling without replacement ([`random_sample_rows`]).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RowSampleConfig {
+    /// 64-bit `DeterministicRng` seed ensuring reproducible row selection.
     pub seed: u64,
+    /// Number of rows (`1..=source_rows`) to draw without replacement.
     pub sample_size: usize,
+    /// Optional zero-based categorical column index partitioning rows into strata prior to sampling; `None` performs simple random sampling.
     #[serde(default)]
     pub stratify_column: Option<usize>,
+    /// When `true` and `stratify_column` is `Some(_)`, allocates draws proportionally to stratum sizes; when `false`, splits draws evenly across strata.
     #[serde(default)]
     pub proportional_allocation: bool,
+    /// Optional explicit [`SheetId`] string for the sampled output sheet; `None` derives `<source>-sample`.
     #[serde(default)]
     pub output_id: Option<String>,
+    /// Optional explicit display title for the sampled output sheet; `None` derives `<title> (Sample)`.
     #[serde(default)]
     pub output_title: Option<String>,
 }
@@ -118,29 +137,69 @@ pub struct RowSampleConfig {
 /// Probability distribution family supported by [`simulate_distribution_columns`].
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SimulatedDistribution {
-    Uniform { min: f64, max: f64 },
-    Gaussian { mean: f64, sd: f64 },
-    LogNormal { mean_log: f64, sd_log: f64 },
-    Binomial { trials: u64, p: f64 },
-    Poisson { lambda: f64 },
-    Exponential { rate: f64 },
+    /// Continuous uniform distribution over `[min, max]` (`min <= max`, finite).
+    Uniform {
+        /// Inclusive lower support bound.
+        min: f64,
+        /// Inclusive upper support bound (`>= min`).
+        max: f64,
+    },
+    /// Univariate normal (Gaussian) distribution `N(mean, sd^2)`.
+    Gaussian {
+        /// Population mean `mu` (finite).
+        mean: f64,
+        /// Population standard deviation `sigma >= 0` (finite).
+        sd: f64,
+    },
+    /// Lognormal distribution `exp(N(mean_log, sd_log^2))` parameterized on the natural-log scale.
+    LogNormal {
+        /// Mean `mu` of `ln(X)` (finite).
+        mean_log: f64,
+        /// Standard deviation `sigma >= 0` of `ln(X)` (finite).
+        sd_log: f64,
+    },
+    /// Discrete binomial count distribution `Binomial(trials, p)` (Hörmann 1993 BTPE / inversion).
+    Binomial {
+        /// Number of Bernoulli trials `n` (`<= 2^53` for exact `f64` integer representation).
+        trials: u64,
+        /// Per-trial success probability `p in [0.0, 1.0]`.
+        p: f64,
+    },
+    /// Discrete Poisson count distribution `Poisson(lambda)`.
+    Poisson {
+        /// Non-negative rate / mean parameter `lambda >= 0.0` (finite).
+        lambda: f64,
+    },
+    /// Continuous exponential waiting-time distribution with density `rate * exp(-rate * x)` for `x >= 0`.
+    Exponential {
+        /// Strictly positive rate parameter `lambda > 0.0` (`mean = 1 / rate`).
+        rate: f64,
+    },
 }
 
 /// Single named output column specification for [`DistributionSimulationConfig`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimulatedColumnSpec {
+    /// Column or variable header title (`<= MAX_TITLE_BYTES`).
     pub name: String,
+    /// Parametric probability distribution sampled across `n_rows`.
     pub distribution: SimulatedDistribution,
 }
 
 /// Configuration for seeded multi-distribution column simulation ([`simulate_distribution_columns`]).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DistributionSimulationConfig {
+    /// Identifier assigned to the simulated output [`DataSheet`].
     pub sheet_id: String,
+    /// Display title assigned to the simulated output [`DataSheet`].
     pub title: String,
+    /// Number of independent simulated observations (`1..=MAX_ROWS`) per column.
     pub n_rows: usize,
+    /// 64-bit `DeterministicRng` seed ensuring reproducible draws across platforms.
     pub seed: u64,
+    /// Non-empty list of column specifications (`1..=MAX_DATA_SETS`).
     pub columns: Vec<SimulatedColumnSpec>,
+    /// When `true`, emits a [`MultipleVariablesTable`] with `Continuous` variable columns; when `false`, emits an unpaired [`ColumnTable`].
     #[serde(default)]
     pub use_multiple_variables: bool,
 }

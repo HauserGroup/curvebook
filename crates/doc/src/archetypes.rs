@@ -14,12 +14,16 @@ use crate::error::{
 /// Zero-based 3D cell address `(row, col, subcol)` inside a data table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct CellCoord {
+    /// Zero-based row index (`0..row_count`).
     pub row: usize,
+    /// Zero-based data-set, cohort, variable, or group column index (`0..column_count`).
     pub col: usize,
+    /// Zero-based replicate, summary, or biological-unit subcolumn index (`0..subcolumn_count`).
     pub subcol: usize,
 }
 
 impl CellCoord {
+    /// Construct a zero-based `(row, col, subcol)` cell coordinate.
     #[must_use]
     pub const fn new(row: usize, col: usize, subcol: usize) -> Self {
         Self { row, col, subcol }
@@ -45,7 +49,9 @@ pub fn default_column_label(mut index: usize) -> String {
 /// Named data-set column (`A`, `B`, ...) storing `[row][subcolumn]` cells.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DataSetColumn {
+    /// Column header title (`<= MAX_TITLE_BYTES` UTF-8 bytes; numeric titles can also supply hooked concentrations via [`crate::HookSource::ColumnTitleValue`]).
     pub title: String,
+    /// Rectangular 2D grid indexed as `cells[row][subcol]`.
     pub cells: Vec<Vec<Cell>>,
 }
 
@@ -60,21 +66,25 @@ impl DataSetColumn {
         Ok(Self { title, cells: vec![vec![Cell::empty(); subcolumn_count]; row_count] })
     }
 
+    /// Number of allocated rows in this data-set column.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.cells.len()
     }
 
+    /// Number of subcolumns per row (`0` when `row_count == 0`).
     #[must_use]
     pub fn subcolumn_count(&self) -> usize {
         self.cells.first().map_or(0, Vec::len)
     }
 
+    /// Borrow the cell at `(row, subcol)`, returning `None` if out of bounds.
     #[must_use]
     pub fn cell(&self, row: usize, subcol: usize) -> Option<&Cell> {
         self.cells.get(row).and_then(|r| r.get(subcol))
     }
 
+    /// Mutably borrow the cell at `(row, subcol)`, returning `None` if out of bounds.
     pub fn cell_mut(&mut self, row: usize, subcol: usize) -> Option<&mut Cell> {
         self.cells.get_mut(row).and_then(|r| r.get_mut(subcol))
     }
@@ -162,11 +172,24 @@ fn validate_table_subcolumn_mode(kind: TableKind, mode: SubcolumnMode) -> Result
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub enum XColumnMode {
     /// Explicit numeric X coordinates with optional error subcolumns (`Single`, `MeanSdN`, etc.).
-    Numbers { subcolumn_mode: SubcolumnMode },
+    Numbers {
+        /// Subcolumn layout of `XyTable::x_cells` (commonly [`SubcolumnMode::Single`], or `MeanSdN`/`MeanSemN` when *X* carries horizontal error bars).
+        subcolumn_mode: SubcolumnMode,
+    },
     /// Elapsed time or date coordinates accompanied by a unit label.
-    DateOrElapsedTime { unit_label: String },
+    DateOrElapsedTime {
+        /// Elapsed-time or calendar unit suffix displayed in headers and axis labels (for example `"min"`, `"h"`, or `"days"`).
+        unit_label: String,
+    },
     /// Automatically generated arithmetic or geometric series (`X0`, `Delta X`).
-    GeneratedSequence { start: f64, step: f64, progression: SequenceProgression },
+    GeneratedSequence {
+        /// Initial coordinate `X_0` at `row == 0`.
+        start: f64,
+        /// Additive increment (`X_r = start + r * step` for [`SequenceProgression::Arithmetic`]) or multiplicative ratio (`X_r = start * step^r` for [`SequenceProgression::Geometric`]).
+        step: f64,
+        /// Arithmetic vs geometric recurrence rule.
+        progression: SequenceProgression,
+    },
 }
 
 #[derive(serde::Deserialize)]
@@ -199,6 +222,7 @@ impl Default for XColumnMode {
 }
 
 impl XColumnMode {
+    /// Number of stored `x_cells` subcolumns per row (`0` for [`Self::GeneratedSequence`], `1` for [`Self::DateOrElapsedTime`], or `subcolumn_mode.subcolumn_count()` for [`Self::Numbers`]).
     #[must_use]
     pub const fn subcolumn_count(&self) -> usize {
         match self {
@@ -221,12 +245,19 @@ impl XColumnMode {
 /// Archetype 1: Continuous independent X variable paired with one or more Y response series.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct XyTable {
+    /// Display title of the independent *X* column (default `"X"`).
     pub x_title: String,
+    /// Storage and evaluation mode of the independent *X* column.
     pub x_mode: XColumnMode,
+    /// Per-row *X* cells (`x_cells[row][subcol]`; width matches [`XColumnMode::subcolumn_count`], or optional `0..=1` exclusion-carrier cells under `GeneratedSequence`).
     pub x_cells: Vec<Vec<Cell>>,
+    /// Optional per-row stub labels (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Whether the `Row Titles` stub column is visibly expanded in the spreadsheet UI.
     pub row_titles_expanded: bool,
+    /// Replicate or pre-summarized subcolumn layout shared across all *Y* [`Self::data_sets`].
     pub y_subcolumn_mode: SubcolumnMode,
+    /// Ordered *Y* response series columns (`A`, `B`, ...).
     pub data_sets: Vec<DataSetColumn>,
 }
 
@@ -262,6 +293,7 @@ impl<'de> serde::Deserialize<'de> for XyTable {
 }
 
 impl XyTable {
+    /// Construct an `XyTable` with default single-column numeric *X* (`XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }`).
     pub fn new(y_subcolumn_mode: SubcolumnMode, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
         Self::new_with_x_mode(XColumnMode::default(), y_subcolumn_mode, data_set_count, row_count)
     }
@@ -290,6 +322,7 @@ impl XyTable {
         })
     }
 
+    /// Number of allocated rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.x_cells.len(), DataSetColumn::row_count)
@@ -505,10 +538,15 @@ pub enum ColumnDesignHint {
 /// Archetype 2: One-factor group comparison table (one treatment/group per column).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ColumnTable {
+    /// Experimental pairing/summary hint guiding default analyses and graph types.
     pub design_hint: ColumnDesignHint,
+    /// Subcolumn mode shared across all columns (`Single`, `MeanSdN`, `MeanSemN`, or `MeanCvN`).
     pub subcolumn_mode: SubcolumnMode,
+    /// Optional subject/replicate row titles (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Whether the `Row Titles` stub column is visibly expanded in the spreadsheet UI.
     pub row_titles_expanded: bool,
+    /// Ordered treatment/group columns (`A`, `B`, ...).
     pub data_sets: Vec<DataSetColumn>,
 }
 
@@ -540,6 +578,7 @@ impl<'de> serde::Deserialize<'de> for ColumnTable {
 }
 
 impl ColumnTable {
+    /// Construct a `ColumnTable` whose subcolumn mode is chosen from `design_hint` (`Single` for raw designs, `MeanSdN` for `PrecomputedError`).
     pub fn new(design_hint: ColumnDesignHint, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
         let subcolumn_mode = match design_hint {
             ColumnDesignHint::UnpairedReplicates | ColumnDesignHint::PairedRepeatedMeasures => SubcolumnMode::Single,
@@ -574,6 +613,7 @@ impl ColumnTable {
         })
     }
 
+    /// Number of allocated rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.row_titles.len(), DataSetColumn::row_count)
@@ -670,8 +710,11 @@ impl ColumnTable {
 /// [`ColumnTable::complete_paired_rows_with_report`].
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct PairedRowsReport {
+    /// Complete subject rows; each inner `Vec<f64>` has length `cols.len()` with active finite values across every requested column.
     pub blocks: Vec<Vec<f64>>,
+    /// Count of non-blank subject rows omitted listwise because at least one selected column was empty, non-numeric, or excluded.
     pub skipped_incomplete_rows: usize,
+    /// Count of non-excluded text or non-finite cells encountered inside the selected numeric columns.
     pub non_numeric_cells: usize,
 }
 
@@ -683,22 +726,34 @@ pub struct PairedRowsReport {
 /// `((F1_0, F2_0), (F1_0, F2_1), (F1_1, F2_0), (F1_1, F2_1))` (`docs/implementation/data-tables-and-transforms.md` §2.2).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ThreeWayColumnGrouping {
+    /// Display name of the outer two-level column factor *B* (columns `{0, 1}` vs `{2, 3}`).
     pub factor_1_name: String,
+    /// Labels `[B_0, B_1]` of the two levels of `factor_1_name`.
     pub factor_1_levels: [String; 2],
+    /// Display name of the inner two-level column factor *C* (columns `{0, 2}` vs `{1, 3}`).
     pub factor_2_name: String,
+    /// Labels `[C_0, C_1]` of the two levels of `factor_2_name`.
     pub factor_2_levels: [String; 2],
 }
 
 /// Archetype 3: Two-factor (or `2 × 2 × K` three-factor) tensor `(Row r × Column c × Subcolumn s)`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct GroupedTable {
+    /// Display name of the row factor *A* (for example `"Time Point"` or `"Dose"`).
     pub row_factor_title: String,
+    /// Display name of the primary column factor *B* (for example `"Genotype"` or `"Treatment"`).
     pub column_factor_title: String,
+    /// Labels for each level `r` of the row factor (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Optional quantitative *X* coordinates corresponding to each row factor level (`len() == row_count()`) for proportional horizontal spacing on grouped line graphs; `None` spaces levels evenly.
     pub row_numeric_spacing: Option<Vec<Option<f64>>>,
+    /// Replicate or pre-summarized subcolumn layout (`Single` is disallowed on `GroupedTable`).
     pub subcolumn_mode: SubcolumnMode,
+    /// Visual arrangement of replicate subcolumns in the spreadsheet grid.
     pub replicate_stacking: ReplicateStacking,
+    /// Optional `2 × 2` column-factor cross-classification enabling three-way factorial ANOVA across 4 data-set columns; `None` for two-way designs.
     pub three_way_grouping: Option<ThreeWayColumnGrouping>,
+    /// Ordered column-factor data sets (`A`, `B`, ...).
     pub data_sets: Vec<DataSetColumn>,
 }
 
@@ -736,6 +791,7 @@ impl<'de> serde::Deserialize<'de> for GroupedTable {
 }
 
 impl GroupedTable {
+    /// Construct a validated `GroupedTable` with `subcolumn_mode` (`RawReplicates(n)` or a pre-summarized mode).
     pub fn new(subcolumn_mode: SubcolumnMode, data_set_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_table_subcolumn_mode(TableKind::Grouped, subcolumn_mode)?;
         validate_data_sets(data_set_count)?;
@@ -758,6 +814,7 @@ impl GroupedTable {
         })
     }
 
+    /// Number of allocated rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.row_titles.len(), DataSetColumn::row_count)
@@ -837,9 +894,13 @@ impl GroupedTable {
 /// Archetype 4: Categorical cross-tabulation of non-negative integer counts (`R × C`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct ContingencyTable {
+    /// Display name of the row classification variable (for example `"Exposure"`).
     pub row_factor_title: String,
+    /// Display name of the column classification variable (for example `"Outcome"`).
     pub column_factor_title: String,
+    /// Category labels for each row (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Single-subcolumn category columns storing non-negative integer counts.
     pub data_sets: Vec<DataSetColumn>,
 }
 
@@ -869,6 +930,7 @@ impl<'de> serde::Deserialize<'de> for ContingencyTable {
 }
 
 impl ContingencyTable {
+    /// Construct an `row_count × column_count` contingency table initialized with empty cells.
     pub fn new(column_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(column_count)?;
         validate_rows(row_count)?;
@@ -885,6 +947,7 @@ impl ContingencyTable {
         })
     }
 
+    /// Number of row categories in the contingency table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.row_titles.len(), DataSetColumn::row_count)
@@ -940,27 +1003,39 @@ impl ContingencyTable {
 /// Subject endpoint status in a [`SurvivalTable`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SurvivalStatus {
+    /// Subject experienced the endpoint event of interest (death, relapse, failure) at `time`.
     Event,
+    /// Subject was right-censored (lost to follow-up or study end without event) at `time`.
     Censored,
 }
 
 /// Validated time-to-event record for a single subject.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SurvivalObservation {
+    /// Zero-based originating row index in [`SurvivalTable`].
     pub row: usize,
+    /// Non-negative elapsed follow-up time (`>= 0.0`, finite) in the table's time units.
     pub time: f64,
+    /// Endpoint event vs right-censored indicator.
     pub status: SurvivalStatus,
 }
 
 /// Archetype 5: Time-to-event survival table (`t >= 0`, configurable event/censored status codes).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct SurvivalTable {
+    /// Display header for the elapsed-time column (default `"Elapsed Time"`).
     pub time_title: String,
+    /// Per-row non-negative elapsed follow-up time cells (`len() == row_count()`).
     pub times: Vec<Cell>,
+    /// Integer indicator code denoting [`SurvivalStatus::Event`] (default `1`).
     pub event_code: i64,
+    /// Integer indicator code denoting [`SurvivalStatus::Censored`] (default `0`).
     pub censored_code: i64,
+    /// Optional subject row identifiers (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Whether the `Row Titles` stub column is visibly expanded in the spreadsheet UI.
     pub row_titles_expanded: bool,
+    /// Treatment/cohort arm columns; each non-empty cell in cohort `c` at row `r` holds `event_code` or `censored_code` for a subject at `times[r]`.
     pub cohorts: Vec<DataSetColumn>,
 }
 
@@ -996,6 +1071,7 @@ impl<'de> serde::Deserialize<'de> for SurvivalTable {
 }
 
 impl SurvivalTable {
+    /// Construct a `SurvivalTable` with `cohort_count` arms, `row_count` rows, `event_code = 1`, and `censored_code = 0`.
     pub fn new(cohort_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(cohort_count)?;
         validate_rows(row_count)?;
@@ -1015,6 +1091,7 @@ impl SurvivalTable {
         })
     }
 
+    /// Number of allocated subject rows in the survival table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.times.len()
@@ -1103,16 +1180,22 @@ impl SurvivalTable {
 /// Validated non-negative slice observation and normalized fraction of total.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SliceFraction {
+    /// Zero-based row index of the slice.
     pub row: usize,
+    /// Category label for the slice.
     pub label: String,
+    /// Raw non-negative slice magnitude (`>= 0.0`).
     pub value: f64,
+    /// Unit proportion `value / sum(values)` in `[0.0, 1.0]` (`0.0` when the series sum is `0.0`).
     pub fraction: f64,
 }
 
 /// Archetype 6: Mutually exclusive categorical slices summing to a whole.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct PartsOfWholeTable {
+    /// Per-row category labels (`empty` or `len() == row_count()`).
     pub slice_labels: Vec<String>,
+    /// Single-subcolumn series of non-negative slice magnitudes.
     pub data_sets: Vec<DataSetColumn>,
 }
 
@@ -1135,6 +1218,7 @@ impl<'de> serde::Deserialize<'de> for PartsOfWholeTable {
 }
 
 impl PartsOfWholeTable {
+    /// Construct a `PartsOfWholeTable` with `series_count` series and `row_count` slice rows.
     pub fn new(series_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(series_count)?;
         validate_rows(row_count)?;
@@ -1146,6 +1230,7 @@ impl PartsOfWholeTable {
         Ok(Self { slice_labels: vec![String::new(); row_count], data_sets })
     }
 
+    /// Number of slice rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.data_sets.first().map_or(self.slice_labels.len(), DataSetColumn::row_count)
@@ -1196,20 +1281,28 @@ impl PartsOfWholeTable {
 /// Typed semantic role of a column in a [`MultipleVariablesTable`] (`docs/implementation/data-tables-and-transforms.md` §2.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableRole {
+    /// Quantitative real-valued variable eligible for regression predictors/outcomes, PCA, correlation, and continuous graph axes.
     #[default]
     Continuous,
+    /// Nominal or ordinal factor encoded into design-matrix dummy contrasts (first ordered level = reference level) and categorical color/symbol channels.
     Categorical,
+    /// Subject/case identifier text used for point callouts and audit tables without entering numerical models.
     Label,
+    /// Read-only column dynamically evaluated from [`VariableSource::Calculated`] formula expressions.
     Calculated,
 }
 
 /// Origin of values in a [`VariableColumn`] (`docs/implementation/data-tables-and-transforms.md` §4).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum VariableSource {
+    /// Directly entered or imported cell values.
     #[default]
     Entered,
     /// Formula stored normalized without a leading `=` character.
-    Calculated { formula: String },
+    Calculated {
+        /// Normalized expression string evaluated across rows by `curvebook-transform::formula`.
+        formula: String,
+    },
 }
 
 /// Ordering rule for distinct levels of a `Categorical` variable (`docs/implementation/data-tables-and-transforms.md` §2.3).
@@ -1231,7 +1324,9 @@ pub enum LevelOrderKind {
 /// Complete categorical level-ordering specification (`LevelOrderKind` + `reversed` modifier).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct LevelOrderSpec {
+    /// Base sorting rule for distinct factor levels (the first resulting level serves as the GLM/regression reference level).
     pub order: LevelOrderKind,
+    /// When `true`, reverses the level sequence produced by `order`.
     pub reversed: bool,
 }
 
@@ -1267,25 +1362,34 @@ impl LevelOrderSpec {
 /// Frequency summary for a single categorical level in a [`VariableColumn`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CategoricalLevelSummary {
+    /// Canonical trimmed level token.
     pub level: String,
+    /// Number of active (`!excluded`) rows carrying `level`.
     pub included_count: usize,
+    /// Number of masked (`excluded == true`) rows carrying `level`.
     pub excluded_count: usize,
 }
 
 /// Single named variable column in a [`MultipleVariablesTable`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct VariableColumn {
+    /// Column variable name (`<= MAX_TITLE_BYTES` UTF-8 bytes; addressable by `[Title]` in calculated formulas).
     pub title: String,
+    /// Semantic variable role (`Continuous`, `Categorical`, `Label`, or `Calculated`).
     pub role: VariableRole,
     /// `true` when `role` was auto-inferred from entered tokens (muted badge); `false` once
     /// explicitly confirmed by the user (accented badge).
     pub role_inferred: bool,
+    /// Whether `cells` are user-entered or derived from a calculated-variable formula.
     pub source: VariableSource,
+    /// Ordering specification for distinct categorical levels when `role == VariableRole::Categorical`.
     pub level_order: LevelOrderSpec,
+    /// Per-subject cells (`len() == row_count()`).
     pub cells: Vec<Cell>,
 }
 
 impl VariableColumn {
+    /// Construct an empty `VariableColumn` with auto-inferred `Continuous` role.
     pub fn new(title: impl Into<String>, row_count: usize) -> Result<Self, DocError> {
         let title = title.into();
         validate_title(&title)?;
@@ -1491,8 +1595,11 @@ fn take_digits<I: Iterator<Item = char>>(iter: &mut std::iter::Peekable<I>) -> S
 /// Archetype 7: Tidy observational dataframe (`rows = observational units`, `columns = typed variables`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct MultipleVariablesTable {
+    /// Optional per-subject row stub labels (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Whether the `Row Titles` stub column is visibly expanded in the spreadsheet UI.
     pub row_titles_expanded: bool,
+    /// Ordered typed variable columns.
     pub variables: Vec<VariableColumn>,
 }
 
@@ -1516,6 +1623,7 @@ impl<'de> serde::Deserialize<'de> for MultipleVariablesTable {
 }
 
 impl MultipleVariablesTable {
+    /// Construct a `MultipleVariablesTable` with `variable_count` columns (`"Variable A"`, `"Variable B"`, ...) and `row_count` rows.
     pub fn new(variable_count: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(variable_count)?;
         validate_rows(row_count)?;
@@ -1527,6 +1635,7 @@ impl MultipleVariablesTable {
         Ok(Self { row_titles: vec![String::new(); row_count], row_titles_expanded: false, variables })
     }
 
+    /// Number of observational rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.variables.first().map_or(self.row_titles.len(), |v| v.cells.len())
@@ -1570,12 +1679,16 @@ impl MultipleVariablesTable {
 /// with technical replicates stacked down rows (`docs/implementation/data-tables-and-transforms.md` §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NestedGroupColumn {
+    /// Top-level experimental treatment group title (for example `"Control"` or `"Treated"`).
     pub title: String,
+    /// Second-level biological sub-unit labels (`len() == biological_unit_count()`, for example `["A:1", "A:2", "A:3"]`).
     pub subcolumn_titles: Vec<String>,
+    /// Technical replicate grid indexed as `cells[tech_replicate_row][bio_unit_subcol]`.
     pub cells: Vec<Vec<Cell>>,
 }
 
 impl NestedGroupColumn {
+    /// Allocate an empty `NestedGroupColumn` with `biological_unit_count` subcolumns and `row_count` technical-replicate rows.
     pub fn new(title: impl Into<String>, biological_unit_count: usize, row_count: usize) -> Result<Self, DocError> {
         let title = title.into();
         validate_title(&title)?;
@@ -1586,6 +1699,7 @@ impl NestedGroupColumn {
         Ok(Self { title, subcolumn_titles, cells: vec![vec![Cell::empty(); biological_unit_count]; row_count] })
     }
 
+    /// Number of nested biological experimental units (subcolumns) inside this group.
     #[must_use]
     pub fn biological_unit_count(&self) -> usize {
         self.subcolumn_titles.len()
@@ -1595,8 +1709,11 @@ impl NestedGroupColumn {
 /// Archetype 8: Hierarchical two-level design (experimental groups -> biological units -> technical replicates).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct NestedTable {
+    /// Optional per-row technical-replicate stub labels (`empty` or `len() == row_count()`).
     pub row_titles: Vec<String>,
+    /// Whether the `Row Titles` stub column is visibly expanded in the spreadsheet UI.
     pub row_titles_expanded: bool,
+    /// Ordered top-level experimental treatment groups.
     pub groups: Vec<NestedGroupColumn>,
 }
 
@@ -1620,6 +1737,7 @@ impl<'de> serde::Deserialize<'de> for NestedTable {
 }
 
 impl NestedTable {
+    /// Construct a `NestedTable` with `group_count` treatments, `biological_units_per_group` subcolumns per treatment, and `row_count` technical-replicate rows.
     pub fn new(group_count: usize, biological_units_per_group: usize, row_count: usize) -> Result<Self, DocError> {
         validate_data_sets(group_count)?;
         validate_subcolumns(biological_units_per_group)?;
@@ -1632,6 +1750,7 @@ impl NestedTable {
         Ok(Self { row_titles: vec![String::new(); row_count], row_titles_expanded: false, groups })
     }
 
+    /// Number of technical-replicate rows in the table.
     #[must_use]
     pub fn row_count(&self) -> usize {
         self.groups.first().map_or(self.row_titles.len(), |g| g.cells.len())
@@ -1700,13 +1819,21 @@ impl NestedTable {
 /// Strongly typed table payload carried by every [`crate::DataSheet`] (`docs/implementation/data-tables-and-transforms.md` §1.1 & §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum TableArchetype {
+    /// Continuous *X* vs one or more *Y* response series ([`XyTable`]).
     Xy(XyTable),
+    /// One-way group comparison columns ([`ColumnTable`]).
     Column(ColumnTable),
+    /// Two-way or `2 × 2 × K` three-way factorial table ([`GroupedTable`]).
     Grouped(GroupedTable),
+    /// Non-negative integer count cross-tabulation ([`ContingencyTable`]).
     Contingency(ContingencyTable),
+    /// Elapsed-time and event/censoring survival table ([`SurvivalTable`]).
     Survival(SurvivalTable),
+    /// Non-negative categorical slice proportions ([`PartsOfWholeTable`]).
     PartsOfWhole(PartsOfWholeTable),
+    /// Multivariate tidy observation dataframe ([`MultipleVariablesTable`]).
     MultipleVariables(MultipleVariablesTable),
+    /// Hierarchical treatment -> biological unit -> technical replicate table ([`NestedTable`]).
     Nested(NestedTable),
 }
 

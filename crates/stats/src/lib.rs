@@ -6,6 +6,24 @@
 //! all 14+ FWER/FDR multiple comparison procedures, contingency tables & kappa agreement,
 //! Kaplan–Meier & Cox PH survival models, DeLong ROC curves, multiple linear/logistic/Poisson GLMs,
 //! and PCA / correlation / clustering.
+//!
+//! # Example
+//!
+//! ```
+//! use curvebook_math::ConfidenceLevel;
+//! use curvebook_stats::two_group::welch_t_test;
+//!
+//! let control = [10.2, 11.0, 9.8, 10.5, 10.9];
+//! let treated = [13.8, 14.4, 15.1, 13.5, 14.9];
+//!
+//! let res = welch_t_test(&treated, &control, true, ConfidenceLevel::DEFAULT_95)
+//!     .expect("two finite samples with n >= 2");
+//! assert!((res.difference - 3.86).abs() < 1e-12);
+//! assert!(res.ci.0 > 2.9 && res.ci.1 < 4.8);
+//! assert!(res.df > 6.5 && res.df < 8.0);
+//! assert!(res.p_value < 1e-4);
+//! assert!(res.effect_sizes.hedges_g > 5.0);
+//! ```
 
 #![forbid(unsafe_code)]
 

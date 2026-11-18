@@ -15,27 +15,68 @@ pub enum TransformError {
     /// Pre-summarized `(Mean, Spread, N)` reconstruction failure.
     SummaryPoint(SummaryPointError),
     /// Cycle detected across calculated variables or linked data regions.
-    CircularDependency { cycle: Vec<String> },
+    CircularDependency {
+        /// Ordered chain of variable or sheet identifiers forming the dependency cycle.
+        cycle: Vec<String>,
+    },
     /// Syntax error in a formula or expression string.
-    ParseError { position: usize, message: String },
+    ParseError {
+        /// Zero-based UTF-8 byte offset in the input formula where parsing failed.
+        position: usize,
+        /// Human-readable syntax diagnostic.
+        message: String,
+    },
     /// Runtime error during formula evaluation or mathematical transform.
-    EvalError { message: String },
+    EvalError {
+        /// Human-readable evaluation diagnostic.
+        message: String,
+    },
     /// Reference to an unknown column, variable, or constant.
-    UnknownVariable { name: String },
+    UnknownVariable {
+        /// Unresolved identifier or column name.
+        name: String,
+    },
     /// Reference to an unknown function name.
-    UnknownFunction { name: String },
+    UnknownFunction {
+        /// Unrecognized function identifier.
+        name: String,
+    },
     /// Function called with an unsupported number of arguments.
-    ArityMismatch { function: String, expected: String, actual: usize },
+    ArityMismatch {
+        /// Canonical name of the called function.
+        function: String,
+        /// Human-readable description of accepted argument count(s) (for example `"2"` or `"1..=3"`).
+        expected: String,
+        /// Actual argument count passed at the call site.
+        actual: usize,
+    },
     /// Invalid transform configuration or parameter value.
-    InvalidSpec { message: String },
+    InvalidSpec {
+        /// Explanation of why the transform specification is invalid.
+        message: String,
+    },
     /// Table archetype cannot support the requested transformation.
-    IncompatibleTable { operation: &'static str, kind: TableKind },
+    IncompatibleTable {
+        /// Static name of the attempted transform or curve-calculus operation.
+        operation: &'static str,
+        /// Actual [`TableKind`] of the rejected input sheet.
+        kind: TableKind,
+    },
     /// Referenced `HookSource` could not be resolved to a finite numeric constant.
-    MissingHook { description: String },
+    MissingHook {
+        /// Diagnostic describing which upstream sheet, constant, or scalar failed to resolve.
+        description: String,
+    },
     /// Unrecognized equation identifier in `Simulate`.
-    UnknownEquation { equation_id: String },
+    UnknownEquation {
+        /// Unrecognized built-in equation ID string.
+        equation_id: String,
+    },
     /// Invalid or insufficient input data for curve calculus or import.
-    InvalidInput { message: String },
+    InvalidInput {
+        /// Explanation of why the input points or payload could not be processed.
+        message: String,
+    },
 }
 
 impl fmt::Display for TransformError {

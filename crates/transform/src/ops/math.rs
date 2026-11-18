@@ -15,23 +15,44 @@ use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
 /// antilogs, and custom user expressions.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MathTransformOp {
+    /// Delegate to a document-layer [`MathTransformPreset`].
     Preset(MathTransformPreset),
+    /// Base-10 logarithm `log10(u)` (`u > 0`).
     Log10,
+    /// Natural logarithm `ln(u)` (`u > 0`).
     Ln,
+    /// Base-2 logarithm `log2(u)` (`u > 0`).
     Log2,
+    /// Base-10 exponential `10^u`.
     Exp10,
+    /// Natural exponential `exp(u)`.
     ExpE,
+    /// Multiplicative inverse `1 / u` (`u != 0`).
     Reciprocal,
+    /// Quadratic square `u^2`.
     Square,
+    /// Principal square root `sqrt(u)` (`u >= 0`).
     Sqrt,
+    /// Scale by constant factor `u * k`.
     MultiplyByConstant(f64),
+    /// Divide by non-zero constant `u / k` (`k != 0`).
     DivideByConstant(f64),
+    /// Add constant offset `u + c`.
     AddConstant(f64),
+    /// Subtract constant offset `u - c`.
     SubtractConstant(f64),
+    /// Unit-proportion log-odds `ln(u / (1 - u))` (`u in (0, 1)`).
     Logit,
-    Antilog { base: f64 },
+    /// Arbitrary-base exponential `base^u` (`base > 0`, `base != 1`).
+    Antilog {
+        /// Positive exponential base (`> 0`).
+        base: f64,
+    },
+    /// Inverse standard normal CDF `Phi^{-1}(u)` (`u in (0, 1)`).
     Probit,
+    /// Angular arcsine square-root transform `arcsin(sqrt(u))` in radians (`u in [0, 1]`).
     ArcsinSqrt,
+    /// Custom scalar formula expression evaluated with bindings `x`, `y`, and paired `InfoSheet` constants.
     UserExpression(String),
 }
 
