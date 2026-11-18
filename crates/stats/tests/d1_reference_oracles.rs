@@ -1017,7 +1017,7 @@ fn oracle_kaplan_meier_greenwood_and_cox_ph() {
     assert_approx_eq(c_br.covariates[1].beta, 0.114_820_791_877_411_6, 1e-7, 1e-7, "Cox Breslow beta age");
     assert_approx_eq(c_br.covariates[0].se, 0.743_819_048_494_277_9, 1e-7, 1e-7, "Cox Breslow se trt");
     assert_approx_eq(c_br.covariates[1].se, 0.074_251_054_864_112_9, 1e-7, 1e-7, "Cox Breslow se age");
-    assert_approx_eq(c_br.concordance, 2.0 / 3.0, 1e-9, 0.0, "Cox C-index");
+    assert_approx_eq(c_br.concordance.unwrap(), 2.0 / 3.0, 1e-9, 0.0, "Cox C-index");
 
     let c_ef = cox_ph_regression(&subjects, &names, CoxTieMethod::Efron, conf_95()).unwrap();
     assert!(c_ef.converged);
@@ -1027,7 +1027,7 @@ fn oracle_kaplan_meier_greenwood_and_cox_ph() {
     assert_approx_eq(c_ef.covariates[1].beta, 0.119_425_996_222_400_5, 1e-7, 1e-7, "Cox Efron beta age");
     assert_approx_eq(c_ef.covariates[0].se, 0.746_341_656_196_286, 1e-7, 1e-7, "Cox Efron se trt");
     assert_approx_eq(c_ef.covariates[1].se, 0.075_004_256_292_423_3, 1e-7, 1e-7, "Cox Efron se age");
-    assert_approx_eq(c_ef.concordance, 2.0 / 3.0, 1e-9, 0.0, "Cox Efron C-index");
+    assert_approx_eq(c_ef.concordance.unwrap(), 2.0 / 3.0, 1e-9, 0.0, "Cox Efron C-index");
     assert!(c_ef.global_schoenfeld_p.is_finite() && c_ef.global_schoenfeld_p > 0.3);
 
     let c_ex = cox_ph_regression(&subjects, &names, CoxTieMethod::Exact, conf_95()).unwrap();
@@ -1041,7 +1041,7 @@ fn oracle_kaplan_meier_greenwood_and_cox_ph() {
     assert_approx_eq(c_ex.likelihood_ratio_chi2, 3.295_488_525_455_351, 1e-7, 1e-7, "Cox Exact LR");
     assert_approx_eq(c_ex.score_chi2, 3.035_931_093_670_372_5, 1e-6, 1e-6, "Cox Exact Score");
     assert_approx_eq(c_ex.wald_chi2, 2.735_096_419_031_38, 1e-6, 1e-6, "Cox Exact Wald");
-    assert_approx_eq(c_ex.concordance, 2.0 / 3.0, 1e-9, 0.0, "Cox Exact C-index");
+    assert_approx_eq(c_ex.concordance.unwrap(), 2.0 / 3.0, 1e-9, 0.0, "Cox Exact C-index");
     assert!(c_ex.global_schoenfeld_p.is_finite() && c_ex.global_schoenfeld_p > 0.2);
 }
 

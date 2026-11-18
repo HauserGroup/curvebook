@@ -369,6 +369,13 @@ pub fn execute_nonlinear_analysis(
     };
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
+    if config.method == curvebook_doc::FitMethod::PoissonDeviance
+        && fit.datasets.iter().any(|ds| ds.y_hat.iter().any(|&yh| !yh.is_finite() || yh <= 0.0))
+    {
+        return Err(FitError::ImpossibleWeights {
+            reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+        });
+    }
     populate_nonlinear_result_sheet(&mut result, &fit, nl_spec, spec.p_value_format);
 
     if let Some(comp_spec) = &nl_spec.comparison {

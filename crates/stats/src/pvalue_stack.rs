@@ -71,16 +71,27 @@ pub struct PValueStackRowResult {
 /// Complete multiplicity summary for one column (stack) of raw *P* values.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PValueStackColumnResult {
+    /// Zero-based dataset/column index within the source table.
     pub data_set_index: usize,
+    /// Human-readable header label of the source column.
     pub column_label: String,
+    /// Multiple-testing adjustment procedure applied to the column's valid *P* values.
     pub method: PValueStackMethod,
+    /// True when an FDR control procedure (Benjamini–Hochberg 1995 or Benjamini–Krieger–Yekutieli 2006) is used instead of FWER control (Holm/Bonferroni).
     pub is_fdr: bool,
+    /// Decision significance threshold (`alpha` for FWER procedures or target FDR `Q` for FDR procedures) in `(0, 1)`.
     pub threshold: f64,
+    /// Number of valid numeric *P* values in `[0, 1]` included in this multiplicity family (`m`).
     pub count: usize,
+    /// Total count of hypotheses marked as discoveries (`adjusted <= threshold`, or BKY adaptive step-up threshold).
     pub discovery_count: usize,
+    /// Minimum raw *P* value observed across valid hypotheses in `[0, 1]`.
     pub min_raw_p: f64,
+    /// Minimum adjusted *P* or FDR *q* value across valid hypotheses in `[0, 1]`.
     pub min_adjusted: f64,
+    /// Count of excluded or blank cells in this column omitted from the test family.
     pub skipped_excluded_or_empty: usize,
+    /// Count of non-numeric text cells in this column ignored during extraction.
     pub ignored_non_numeric: usize,
     /// Per-observation results strictly in original input row order.
     pub rows: Vec<PValueStackRowResult>,

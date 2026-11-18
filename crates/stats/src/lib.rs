@@ -26,6 +26,7 @@
 //! ```
 
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod anova;
 pub mod categorical;
@@ -53,16 +54,27 @@ pub use power::{
 /// High-level families of statistical analyses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AnalysisFamily {
+    /// Column-wise descriptive statistics, quantiles, medians, normality, and single-column outlier tests.
     Descriptive,
+    /// Two-sample paired and unpaired comparisons (Student/Welch *t*, Mann–Whitney, Wilcoxon, KS, Bland–Altman).
     TwoGroupComparison,
+    /// One-way parametric (ordinary/Welch/Brown–Forsythe/RM) and Kruskal–Wallis / Friedman ANOVAs.
     OneWayAnova,
+    /// Two-way factorial and repeated-measures ANOVA / mixed-effects REML analyses.
     TwoWayAnova,
+    /// Three-way factorial and repeated-measures ANOVA / mixed-effects REML analyses.
     ThreeWayAnova,
+    /// Hierarchical nested *t*-test and nested one-way random-effects ANOVA.
     NestedComparison,
+    /// Contingency table tests ($\chi^2$, Fisher exact, McNemar, Barnard exact, binomial, Cohen's kappa, relative ratios).
     Contingency,
+    /// Kaplan–Meier curves, log-rank/Gehan tests, hazard ratios, and Cox proportional hazards regression.
     Survival,
+    /// Pairwise Pearson/Spearman correlation matrices, simple logistic, Passing–Bablok, and GLMs.
     Correlation,
+    /// Multivariate PCA, hierarchical/k-means clustering, and multiple imputation.
     Multivariate,
+    /// Sample size, achieved power, minimum detectable effect, power curves, and sensitivity grids.
     PowerAndSampleSize,
 }
 

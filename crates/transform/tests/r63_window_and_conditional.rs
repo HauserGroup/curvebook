@@ -521,3 +521,50 @@ fn r63_select_and_transform_derived_columns_windowed_conditional_and_chained() {
     assert_approx(xy_after.data_sets[0].cells[1][0].active_number().unwrap(), 0.0, 1e-12);
     assert_approx(xy_after.data_sets[0].cells[3][0].active_number().unwrap(), 20.0, 1e-12);
 }
+
+#[test]
+fn audit_14_conditional_aggregates_canonical_arg_order_with_boolean_values() {
+    // Regression for Audit #14: conditional aggregates must strictly honor canonical `(values, condition)`
+    // argument order even when `values` happens to contain only `0` and `1` and `condition` is a numeric
+    // column whose values exceed 1 (e.g., `Flag = [2, 0, 2]`).
+    let mut mv = MultipleVariablesTable::new(2, 3).unwrap();
+    mv.variables[0].title = String::from("Reading");
+    mv.variables[1].title = String::from("Flag");
+    let readings = [1.0, 1.0, 0.0];
+    let flags = [2.0, 0.0, 2.0];
+    for r in 0..3 {
+        mv.variables[0].cells[r] = Cell::number(readings[r]);
+        mv.variables[1].cells[r] = Cell::number(flags[r]);
+    }
+    let sheet = DataSheet::new("audit14-mv", "Audit14", TableArchetype::MultipleVariables(mv)).unwrap();
+
+    // Active rows where Flag != 0 are rows 0 (Reading=1) and 2 (Reading=0):
+    // sum=1, count=2, counta=2, mean=0.5, min=0, max=1, sd=sqrt(0.5), sem=0.5.
+    for (expr, expected) in [
+        ("sumif(Reading, Flag)", 1.0),
+        ("sumif(Reading, Flag != 0)", 1.0),
+        ("countif(Reading, Flag)", 2.0),
+        ("countif(Reading, Flag != 0)", 2.0),
+        ("countaif(Reading, Flag)", 2.0),
+        ("countaif(Reading, Flag != 0)", 2.0),
+        ("meanif(Reading, Flag)", 0.5),
+        ("meanif(Reading, Flag != 0)", 0.5),
+        ("minif(Reading, Flag)", 0.0),
+        ("minif(Reading, Flag != 0)", 0.0),
+        ("maxif(Reading, Flag)", 1.0),
+        ("maxif(Reading, Flag != 0)", 1.0),
+        ("stdevif(Reading, Flag)", 0.5_f64.sqrt()),
+        ("sdif(Reading, Flag != 0)", 0.5_f64.sqrt()),
+        ("stderrif(Reading, Flag)", 0.5),
+        ("semif(Reading, Flag != 0)", 0.5),
+    ] {
+        let out = evaluate_formula_for_sheet(expr, &sheet, None).unwrap();
+        assert_approx(out[0].as_finite_f64().unwrap(), expected, 1e-12);
+    }
+
+    // Swapped plain columns (values = Flag, condition = Reading):
+    // rows where Reading != 0 are rows 0 (Flag=2) and 1 (Flag=0) -> sum(Flag where Reading != 0) = 2.0.
+    assert_approx(evaluate_formula_for_sheet("sumif(Flag, Reading)", &sheet, None).unwrap()[0].as_finite_f64().unwrap(), 2.0, 1e-12);
+    // Explicit legacy condition AST in arg0 continues to match `Reading` values where `Flag != 0`.
+    assert_approx(evaluate_formula_for_sheet("sumif(Flag != 0, Reading)", &sheet, None).unwrap()[0].as_finite_f64().unwrap(), 1.0, 1e-12);
+}

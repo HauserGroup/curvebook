@@ -1120,44 +1120,17 @@ fn is_condition_ast(expr: &Expr) -> bool {
     }
 }
 
-fn looks_purely_boolean_values(vals: &[FormulaValue]) -> bool {
-    let mut saw_valid = false;
-    for v in vals {
-        match v {
-            FormulaValue::Missing => {}
-            FormulaValue::Number(x) if *x == 0.0 || *x == 1.0 => saw_valid = true,
-            FormulaValue::Text(s) if s.eq_ignore_ascii_case("true") || s.eq_ignore_ascii_case("false") => saw_valid = true,
-            _ => return false,
-        }
-    }
-    saw_valid
-}
-
-fn resolve_cond_val_pair(
-    fn_name: &str,
-    arg0: &Expr,
-    arg1: &Expr,
-    ctx: &dyn FormulaContext,
-) -> Result<(Vec<FormulaValue>, Vec<FormulaValue>), TransformError> {
+/// Resolve a 2-argument conditional aggregate `(arg0, arg1)` into `(condition_values, value_column)`.
+///
+/// Enforces the documented canonical `(values, condition)` order regardless of evaluated cell
+/// contents, while preserving backwards compatibility only when `arg0` is syntactically an explicit
+/// boolean/comparison expression and `arg1` is not (legacy `(condition, values)` syntax).
+fn resolve_cond_val_pair(arg0: &Expr, arg1: &Expr, ctx: &dyn FormulaContext) -> Result<(Vec<FormulaValue>, Vec<FormulaValue>), TransformError> {
     let v0 = eval_column_expr_inner(arg0, ctx)?;
     let v1 = eval_column_expr_inner(arg1, ctx)?;
     let a0_cond = is_condition_ast(arg0);
     let a1_cond = is_condition_ast(arg1);
-    if a0_cond && !a1_cond {
-        return Ok((v0, v1));
-    }
-    if !a0_cond && a1_cond {
-        return Ok((v1, v0));
-    }
-    let b0 = looks_purely_boolean_values(&v0);
-    let b1 = looks_purely_boolean_values(&v1);
-    if b0 && !b1 {
-        return Ok((v0, v1));
-    }
-    if !b0 && b1 {
-        return Ok((v1, v0));
-    }
-    if matches!(fn_name, "sumif" | "meanif") { Ok((v0, v1)) } else { Ok((v1, v0)) }
+    if a0_cond && !a1_cond { Ok((v0, v1)) } else { Ok((v1, v0)) }
 }
 
 enum AggOp {
@@ -1393,7 +1366,7 @@ fn try_eval_aggregate_call(
                         .collect();
                     (AggOp::CountIf { has_value_expr: false }, Vec::new(), Some(cond_vals))
                 } else {
-                    let (cond_vals, val_col) = resolve_cond_val_pair("countif", &args[0], &args[1], ctx)?;
+                    let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
                     (AggOp::CountIf { has_value_expr: true }, val_col, Some(cond_vals))
                 }
             } else {
@@ -1406,37 +1379,37 @@ fn try_eval_aggregate_call(
         }
         "countaif" => {
             check_arity("countaif", args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair("countaif", &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::CountAIf, val_col, Some(cond_vals))
         }
         "sumif" => {
             check_arity("sumif", args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair("sumif", &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::SumIf, val_col, Some(cond_vals))
         }
         "meanif" => {
             check_arity("meanif", args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair("meanif", &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::MeanIf, val_col, Some(cond_vals))
         }
         "minif" => {
             check_arity("minif", args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair("minif", &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::MinIf, val_col, Some(cond_vals))
         }
         "maxif" => {
             check_arity("maxif", args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair("maxif", &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::MaxIf, val_col, Some(cond_vals))
         }
         "stdevif" | "sdif" => {
             check_arity(lower, args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair(lower, &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::SdIf, val_col, Some(cond_vals))
         }
         "stderrif" | "semif" => {
             check_arity(lower, args, 2)?;
-            let (cond_vals, val_col) = resolve_cond_val_pair(lower, &args[0], &args[1], ctx)?;
+            let (cond_vals, val_col) = resolve_cond_val_pair(&args[0], &args[1], ctx)?;
             (AggOp::SemIf, val_col, Some(cond_vals))
         }
         _ => return Ok(None),
