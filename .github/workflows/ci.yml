@@ -78,10 +78,15 @@ jobs:
       - name: Check licences, advisories, yanked crates, bans and sources
         if: matrix.stage == 'policy'
         run: cargo deny check
+      - name: Download and verify the full NIST StRD corpus
+        if: matrix.stage == 'tests'
+        run: cargo run --locked -p xtask -- corpus --fetch-only
       - name: Run quality stage
         env:
           CI_STAGE: ${{ matrix.stage }}
           CURVEBOOK_CI_TEST_ARCHIVE: target/ci-tests.tar.zst
+          CURVEBOOK_CORPUS_DIR: ${{ github.workspace }}/corpus/nist-strd
+          CURVEBOOK_REQUIRE_CORPUS: ${{ matrix.stage == 'tests' && '1' || '0' }}
         run: |
           cargo build --locked -p xtask
           cp target/debug/xtask "$RUNNER_TEMP/curvebook-ci"

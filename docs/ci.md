@@ -37,6 +37,13 @@ archive extractions do not exhaust runner disk space. Uploaded archives are
 removed before the build cache is saved, avoiding a second cached copy.
 Artifacts are retained for two days.
 
+Before the native correctness stage, hosted CI runs
+`cargo xtask corpus --fetch-only` to download and verify the pinned NIST StRD
+datasets. It runs the archived tests with `CURVEBOOK_REQUIRE_CORPUS=1` and
+`CURVEBOOK_CORPUS_DIR` pointing at the checkout, so missing or invalid fixtures
+fail the required check. For the same required-corpus behavior locally, fetch
+the corpus first and run `CURVEBOOK_REQUIRE_CORPUS=1 cargo xtask ci`.
+
 Hosted jobs use the pinned nextest and actionlint binaries and SHA-256 checksums
 in `.github/actions/ci-setup/action.yml`, and only install `cargo-deny` in the
 shared-cache writer and `policy` stage. `.config/nextest.toml` keeps the existing
