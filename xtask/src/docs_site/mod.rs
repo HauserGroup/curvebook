@@ -1,7 +1,7 @@
 //! Static GitHub Pages documentation site generator (`cargo xtask docs-site`).
 //!
 //! Renders hand-written reference guides (`docs/reference/*.md`, `docs/reference/automation/*.md`,
-//! `docs/mcp-for-beginners.md`), contributor documentation (`R12.6`), and live typed Rust
+//! `docs/mcp-for-beginners.md`), direct GitHub contributor links, and live typed Rust
 //! registries (`cmd::registry`, `UI_COMMANDS`, `curvebook-mcp`, `cli_catalog`, `curvebook-fit`,
 //! `curvebook-doc`, `curvebook-palette`, `curvebook-format`, `docs/schemas/*.schema.json`)
 //! into a deterministic, script-free Classic coral HTML manual.

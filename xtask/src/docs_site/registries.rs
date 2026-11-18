@@ -81,7 +81,7 @@ pub struct RegistryBundle {
 }
 
 /// Build all seven registry reference pages, A–Z entries, and coverage expectations from `root`.
-pub fn generate_registry_pages(root: &Path) -> Result<RegistryBundle, String> {
+pub fn generate_registry_pages(root: &Path, defined_analysis_anchors: &BTreeSet<String>) -> Result<RegistryBundle, String> {
     let mut az_entries = Vec::new();
     let mut expected = ExpectedCoverage::default();
 
@@ -89,7 +89,7 @@ pub fn generate_registry_pages(root: &Path) -> Result<RegistryBundle, String> {
     let mcp_page = build_mcp_page(&mut az_entries, &mut expected);
     let cli_page = build_cli_page(&mut az_entries, &mut expected);
     let equations_page = build_equations_page(&mut az_entries, &mut expected);
-    let tables_page = build_tables_page(&mut az_entries, &mut expected);
+    let tables_page = build_tables_page(defined_analysis_anchors, &mut az_entries, &mut expected);
     let graphs_page = build_graphs_page(&mut az_entries, &mut expected);
     let formats_page = build_formats_page(root, &mut az_entries, &mut expected)?;
 
@@ -852,7 +852,7 @@ fn table_kind_slug(kind: TableKind) -> &'static str {
     }
 }
 
-fn build_tables_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
+fn build_tables_page(defined_analysis_anchors: &BTreeSet<String>, az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> RegistryPageSpec {
     let mut toc = Vec::new();
     let mut body = String::with_capacity(24_576);
     let analysis_meta = all_analysis_kinds_meta();
@@ -913,15 +913,20 @@ fn build_tables_page(az: &mut Vec<AzEntry>, expected: &mut ExpectedCoverage) -> 
     body.push_str("</tbody>\n</table></div>\n");
 
     push_heading(&mut toc, &mut body, 2, "analysis-kinds", "Analysis Kinds (AnalysisKind)");
-    body.push_str("<div class=\"table-wrap\"><table>\n<thead><tr><th>Analysis Kind</th><th>Methods Page Link</th><th>Scope Summary</th></tr></thead>\n<tbody>\n");
+    body.push_str(
+        "<div class=\"table-wrap\"><table>\n<thead><tr><th>Analysis Kind</th><th>Reference Link</th><th>Scope Summary</th></tr></thead>\n<tbody>\n",
+    );
     for (slug, title, summary) in analysis_meta {
         let reg_anchor = format!("analysis-kind-{slug}");
         let doc_anchor = format!("analysis-{slug}");
-        expected.analysis_kinds.push(doc_anchor.clone());
-        az.push(AzEntry { term: (*title).to_owned(), category: String::from("Analysis Kind"), rel_href: format!("analyses.html#{doc_anchor}") });
+        let has_methods_anchor = defined_analysis_anchors.contains(&doc_anchor);
+        let az_href = if has_methods_anchor { format!("analyses.html#{doc_anchor}") } else { format!("registry/tables.html#{reg_anchor}") };
+        let cell_href = if has_methods_anchor { format!("../analyses.html#{doc_anchor}") } else { format!("#{reg_anchor}") };
+        expected.analysis_kinds.push((*slug).to_owned());
+        az.push(AzEntry { term: (*title).to_owned(), category: String::from("Analysis Kind"), rel_href: az_href });
         let _ = writeln!(
             body,
-            "<tr id=\"{reg_anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td><a href=\"../analyses.html#{doc_anchor}\">{}</a></td><td>{}</td></tr>",
+            "<tr id=\"{reg_anchor}\" tabindex=\"-1\"><td><code>{slug}</code></td><td><a href=\"{cell_href}\">{}</a></td><td>{}</td></tr>",
             escape_html(title),
             escape_html(summary),
         );

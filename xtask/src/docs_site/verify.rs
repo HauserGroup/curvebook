@@ -40,6 +40,8 @@ fn check_exclusions(site: &GeneratedSite) -> Result<(), String> {
             || lower.contains("status")
             || lower.starts_with("audit/")
             || lower.starts_with("planning/")
+            || lower.starts_with("contribute/")
+            || lower.contains("/contribute/")
             || lower.ends_with("-parity.html")
         {
             return Err(format!("excluded internal document `{rel}` must never be published in docs-site output"));
@@ -334,7 +336,7 @@ fn check_registry_coverage(facts: &BTreeMap<String, PageFacts>, site: &Generated
     assert_ids_present(facts, &az_set, "registry/mcp-tools.html", &exp.mcp_tools, "MCP tool")?;
     assert_ids_present(facts, &az_set, "registry/mcp-tools.html", &exp.mcp_prompts, "MCP prompt")?;
     assert_ids_present(facts, &az_set, "registry/cli.html", &exp.cli_commands, "CLI subcommand")?;
-    assert_ids_present(facts, &az_set, "analyses.html", &exp.analysis_kinds, "analysis kind")?;
+    assert_analysis_kinds_covered(facts, &az_set, &exp.analysis_kinds)?;
     assert_ids_present(facts, &az_set, "registry/equations.html", &exp.fit_equations, "fit equation")?;
     assert_ids_present(facts, &az_set, "registry/graphs.html", &exp.graph_kinds, "graph kind")?;
     assert_ids_present(facts, &az_set, "registry/graphs.html", &exp.graph_options, "graph option")?;
@@ -366,6 +368,28 @@ fn assert_ids_present(
         let target_href = format!("{page_rel}#{id}");
         if !az_hrefs.contains(target_href.as_str()) {
             return Err(format!("missing {label} entry `{target_href}` in `az-index.html`"));
+        }
+    }
+    Ok(())
+}
+
+fn assert_analysis_kinds_covered(facts: &BTreeMap<String, PageFacts>, az_hrefs: &BTreeSet<&str>, analysis_slugs: &[String]) -> Result<(), String> {
+    let tables_page = facts.get("registry/tables.html").ok_or_else(|| String::from("missing generated page `registry/tables.html`"))?;
+    for slug in analysis_slugs {
+        let reg_id = format!("analysis-kind-{slug}");
+        if !tables_page.ids.contains(&reg_id) {
+            return Err(format!("missing analysis kind anchor `#{reg_id}` in `registry/tables.html`"));
+        }
+        let doc_id = format!("analysis-{slug}");
+        let doc_href = format!("analyses.html#{doc_id}");
+        let reg_href = format!("registry/tables.html#{reg_id}");
+        if az_hrefs.contains(doc_href.as_str()) {
+            let analyses_page = facts.get("analyses.html").ok_or_else(|| String::from("missing `analyses.html` referenced by `az-index.html`"))?;
+            if !analyses_page.ids.contains(&doc_id) {
+                return Err(format!("missing analysis kind anchor `#{doc_id}` in `analyses.html`"));
+            }
+        } else if !az_hrefs.contains(reg_href.as_str()) {
+            return Err(format!("missing analysis kind entry `{reg_href}` (or `{doc_href}`) in `az-index.html`"));
         }
     }
     Ok(())
@@ -534,7 +558,6 @@ mod tests {
             toc_headings: &[],
             body_html: "<p>Clean body.</p>",
             body_has_h1: false,
-            live_main_github_url: None,
             prev: None,
             next: None,
             meta: &meta,
@@ -557,10 +580,12 @@ mod tests {
 
     #[test]
     fn check_exclusions_and_fragment_verification_catch_failures() {
-        let mut pages = BTreeMap::new();
-        pages.insert(String::from("ROADMAP.html"), String::from("<h1>bad</h1>"));
-        let site = GeneratedSite { html_pages: pages, expected_coverage: Default::default(), meta: test_meta() };
-        assert!(check_exclusions(&site).unwrap_err().contains("excluded"));
+        for forbidden in ["ROADMAP.html", "contribute/agents.html"] {
+            let mut pages = BTreeMap::new();
+            pages.insert(String::from(forbidden), String::from("<h1>bad</h1>"));
+            let site = GeneratedSite { html_pages: pages, expected_coverage: Default::default(), meta: test_meta() };
+            assert!(check_exclusions(&site).unwrap_err().contains("excluded"));
+        }
 
         let meta = test_meta();
         let page_a = render_page(&PageSpec {
@@ -573,7 +598,6 @@ mod tests {
             toc_headings: &[],
             body_html: "<p><a href=\"b.html#missing-frag\">broken</a></p>",
             body_has_h1: false,
-            live_main_github_url: None,
             prev: None,
             next: None,
             meta: &meta,
@@ -588,7 +612,6 @@ mod tests {
             toc_headings: &[],
             body_html: "<h2 id=\"real-frag\">Real</h2>",
             body_has_h1: false,
-            live_main_github_url: None,
             prev: None,
             next: None,
             meta: &meta,

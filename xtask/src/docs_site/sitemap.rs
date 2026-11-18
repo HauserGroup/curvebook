@@ -116,8 +116,34 @@ const BETA_SECTIONS: &[SectionDef] = &[
     },
 ];
 
+const CONTRIBUTOR_GITHUB_GUIDES: &[(&str, &str, &str)] = &[
+    ("AGENTS Rules & Workspace Policy", "AGENTS.md", "Repository contributor rules, clean-room engineering policy, and module boundaries."),
+    ("Workspace Architecture", "docs/architecture.md", "Crate dependency layers (L0–L7), rendering pipeline, and headless/GUI separation."),
+    ("Developer Setup & Commands", "docs/development.md", "Building, testing, coverage reporting, font env vars, and verification workflows."),
+    ("Extending CurveBook", "docs/extending.md", "How to add new engine commands, statistical analyses, equations, and UI menus."),
+    ("Engineering Pitfalls", "docs/pitfalls.md", "Recurring pitfalls prevented by repository gates and review checklists."),
+    (
+        "Command ID Stability Contract",
+        "docs/command-ids.md",
+        "Naming conventions, area prefixes, and backward-compatibility guarantees for engine command IDs.",
+    ),
+    (
+        "Archive & Format Specifications",
+        "docs/file-formats.md",
+        "Technical format boundaries for .curvebook archives, unpacked directories, templates, and foreign imports.",
+    ),
+    ("Licences & Third-Party Policy", "docs/licences.md", "Dual-licence policy, cargo-deny rules, and asset attribution gates."),
+    ("Localization Architecture", "docs/localization.md", "Translation catalog conventions, ICU/number formatting, and locale testing."),
+    ("CI Stages & Gates", "docs/ci.md", "Repository cargo xtask ci stage matrix, budgets, and compliance scanners."),
+    (
+        "Releasing & Snapshot Publication",
+        "docs/release/releasing.md",
+        "Cutting releases, artifact verification, checksums, and publishing versioned docs snapshots.",
+    ),
+];
+
 enum PageSource {
-    Markdown { repo_path: &'static str, live_main: bool, fallback_kind: FallbackKind },
+    Markdown { repo_path: &'static str, fallback_kind: FallbackKind },
     PreRendered { h1: String, toc: Vec<TocHeading>, body_html: String },
 }
 
@@ -320,23 +346,22 @@ fn build_known_site_targets() -> BTreeMap<&'static str, &'static str> {
     map.insert("docs/schemas/document.schema.json", "registry/formats.html");
     map.insert("docs/schemas/archive-manifest.schema.json", "registry/formats.html");
     map.insert("docs/schemas/journal-record.schema.json", "registry/formats.html");
-    map.insert("AGENTS.md", "contribute/agents.html");
-    map.insert("docs/architecture.md", "contribute/architecture.html");
-    map.insert("docs/development.md", "contribute/development.html");
-    map.insert("docs/extending.md", "contribute/extending.html");
-    map.insert("docs/pitfalls.md", "contribute/pitfalls.html");
-    map.insert("docs/command-ids.md", "contribute/command-ids.html");
-    map.insert("docs/file-formats.md", "contribute/file-formats.html");
-    map.insert("docs/licences.md", "contribute/licences.html");
-    map.insert("docs/localization.md", "contribute/localization.html");
-    map.insert("docs/ci.md", "contribute/ci.html");
-    map.insert("docs/release/releasing.md", "contribute/releasing.html");
     map
+}
+
+fn collect_defined_analysis_anchors(root: &Path) -> BTreeSet<String> {
+    let analyses_md = root.join("docs/reference/analyses.md");
+    let Ok(md_src) = std::fs::read_to_string(analyses_md) else {
+        return BTreeSet::new();
+    };
+    let rendered = render_markdown(&md_src, &super::markdown::IdentityResolver);
+    rendered.headings.into_iter().map(|h| h.id).collect()
 }
 
 /// Assemble the entire deterministic documentation site from repository Markdown and registries.
 pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, String> {
-    let registries: RegistryBundle = generate_registry_pages(root)?;
+    let defined_analysis_anchors = collect_defined_analysis_anchors(root);
+    let registries: RegistryBundle = generate_registry_pages(root, &defined_analysis_anchors)?;
     let known_targets = build_known_site_targets();
     let mut az_entries = registries.az_entries;
 
@@ -388,14 +413,12 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
                 toc_headings: toc,
                 body_html,
                 body_has_h1: false,
-                live_main_github_url: None,
                 prev,
                 next,
                 meta: &meta,
             }),
-            PageSource::Markdown { repo_path, live_main, fallback_kind } => {
+            PageSource::Markdown { repo_path, fallback_kind } => {
                 let full_path = root.join(repo_path);
-                let live_url = if *live_main { Some(format!("{GITHUB_REPO_BASE}/blob/main/{repo_path}")) } else { None };
                 let rendered = if full_path.is_file() {
                     let md_src = std::fs::read_to_string(&full_path).map_err(|e| format!("read {repo_path}: {e}"))?;
                     let resolver = RepoLinkResolver {
@@ -427,7 +450,6 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
                     toc_headings: &rendered.headings,
                     body_html: &rendered.html,
                     body_has_h1: has_h1,
-                    live_main_github_url: live_url.as_deref(),
                     prev,
                     next,
                     meta: &meta,
@@ -453,7 +475,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "System requirements, installing CurveBook, verifying checksums/attestations, and font configuration.",
             "get-started",
             "docs/reference/get-started.md",
-            false,
             FallbackKind::Generic {
                 lead: "Interface-neutral installation, verification, font discovery (`CURVEBOOK_FONTS_DIR`), and initial setup reference.",
                 target_registry: Some(("Format & Package Reference", "registry/formats.html")),
@@ -465,7 +486,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Overview of desktop welcome workflow, sheets, analyses, graphs, saving, and exporting.",
             "get-started",
             "docs/reference/desktop-gui.md",
-            false,
             FallbackKind::Generic {
                 lead: "Overview of the desktop application layout and entry points paired with the typed UI command catalog.",
                 target_registry: Some(("UI Command Catalog", "registry/commands.html#ui-commands")),
@@ -477,7 +497,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Configure an MCP client to connect to CurveBook and verify the connection.",
             "get-started",
             "docs/mcp-for-beginners.md",
-            false,
             FallbackKind::MustExist,
         ),
         md_page(
@@ -486,7 +505,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Project structure, five sheet types, reactive recalculation pipeline, exclusions, checkpoints, and undo.",
             "concepts",
             "docs/reference/concepts.md",
-            false,
             FallbackKind::Generic {
                 lead: "Core CurveBook workspace concepts: projects, linked Data/Info/Result/Graph/Layout sheets, exclusions, hooks, and undo.",
                 target_registry: Some(("Table & Analysis Registry", "registry/tables.html")),
@@ -498,7 +516,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Table archetypes, replicate subcolumn modes, Calculated Variables formula language, and data transforms.",
             "tables",
             "docs/reference/tables.md",
-            false,
             FallbackKind::Generic {
                 lead: "Reference for all eight TableKind archetypes, SubcolumnMode layouts, formula operators, and linked data transforms.",
                 target_registry: Some(("Table Archetypes & Subcolumn Registry", "registry/tables.html#table-archetypes")),
@@ -510,7 +527,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Complete interface-neutral reference for every CurveBook statistical analysis kind, options, diagnostics, and citations.",
             "analyses",
             "docs/reference/analyses.md",
-            false,
             FallbackKind::Analyses,
         ),
         md_page(
@@ -519,7 +535,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Nonlinear regression methods, equation library, weighting, robust/ROUT fitting, bands, custom DSL, and ODE models.",
             "fitting",
             "docs/reference/fitting.md",
-            false,
             FallbackKind::Generic {
                 lead: "Interface-neutral reference for trust-region LM fitting, Poisson deviance, Cauchy/ROUT regression, global sharing, and custom equation DSL.",
                 target_registry: Some(("Parametric Equations & Fitting Registry", "registry/equations.html")),
@@ -531,7 +546,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Graph types, compatible table archetypes, axis scales, error bars, colour palettes, and Page Layout rendering.",
             "graphs",
             "docs/reference/graphs.md",
-            false,
             FallbackKind::Generic {
                 lead: "Reference for scientific graph families, axis scale bijections, frame presets, perceptual colormaps, and Page Layouts.",
                 target_registry: Some(("Graphs, Scales & Palettes Registry", "registry/graphs.html")),
@@ -543,7 +557,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Scientific calculators, quick statistics, and workspace quality-of-life capabilities.",
             "qol",
             "docs/reference/qol.md",
-            false,
             FallbackKind::Generic {
                 lead: "Capability reference for built-in scientific calculators, batch inspection, cloning pipelines, and workspace tools.",
                 target_registry: Some(("UI & Engine Commands", "registry/commands.html")),
@@ -555,7 +568,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "CurveBook archives, unpacked .curvebook.d directories, templates, autosave recovery, and interchange formats.",
             "files",
             "docs/reference/files.md",
-            false,
             FallbackKind::Generic {
                 lead: "Reference for .curvebook archives, unpacked .curvebook.d directories, .cbtemplate templates, and registered import/export formats.",
                 target_registry: Some(("Formats & Schemas Registry", "registry/formats.html")),
@@ -567,7 +579,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "CurveBook Model Context Protocol server transports, core tools, toolsets, resources, prompts, and --gui-only policy.",
             "automation",
             "docs/reference/automation/mcp.md",
-            false,
             FallbackKind::MustExist,
         ),
         md_page(
@@ -576,7 +587,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Headless runner subcommands, schema-typed direct command flags, exit codes, and PDF/format flags.",
             "automation",
             "docs/reference/automation/cli.md",
-            false,
             FallbackKind::MustExist,
         ),
         md_page(
@@ -585,7 +595,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Loopback --control JSON-lines protocol, curvebook.batch.v1 manifests, run scripts, and engine error codes.",
             "automation",
             "docs/reference/automation/control-and-batch.md",
-            false,
             FallbackKind::MustExist,
         ),
         md_page(
@@ -594,7 +603,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Preferences JSON Schema keys, keyboard shortcut customization, interface locales, and locale formatting.",
             "settings",
             "docs/reference/settings.md",
-            false,
             FallbackKind::Generic {
                 lead: "Reference for user preferences keys, keybinding overrides, and compiled interface locale tags.",
                 target_registry: Some(("Preferences Schema & Locales Registry", "registry/formats.html#schema-preferences")),
@@ -606,7 +614,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Zero-telemetry local execution, loopback control rules, dual licensing, and vulnerability reporting.",
             "privacy-security",
             "docs/reference/privacy-security.md",
-            false,
             FallbackKind::Generic {
                 lead: "CurveBook runs strictly locally with zero outbound telemetry, loopback-only control sockets, and dual MIT OR Apache-2.0 licensing.",
                 target_registry: None,
@@ -618,7 +625,6 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Common install, font discovery, MCP transport, archive recovery, and solver diagnostics.",
             "troubleshooting",
             "docs/reference/troubleshooting.md",
-            false,
             FallbackKind::Generic {
                 lead: "Diagnostic guide for font setup, MCP stdio/control attachment, archive version guards, and numerical error codes.",
                 target_registry: Some(("Engine Error Codes", "registry/tables.html#error-codes")),
@@ -630,107 +636,7 @@ fn ordered_content_pages(registry_pages: Vec<RegistryPageSpec>) -> Vec<PageItem>
             "Definitions of core CurveBook scientific, data-model, and automation terms.",
             "glossary",
             "docs/reference/glossary.md",
-            false,
             FallbackKind::Glossary,
-        ),
-        md_page(
-            "contribute/agents.html",
-            "AGENTS Rules & Workspace Policy",
-            "Repository contributor rules, clean-room engineering policy, and module boundaries.",
-            "contribute",
-            "AGENTS.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/architecture.html",
-            "Workspace Architecture",
-            "Crate dependency layers (L0–L7), rendering pipeline, and headless/GUI separation.",
-            "contribute",
-            "docs/architecture.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/development.html",
-            "Developer Setup & Commands",
-            "Building, testing, coverage reporting, font env vars, and verification workflows.",
-            "contribute",
-            "docs/development.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/extending.html",
-            "Extending CurveBook",
-            "How to add new engine commands, statistical analyses, equations, and UI menus.",
-            "contribute",
-            "docs/extending.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/pitfalls.html",
-            "Engineering Pitfalls",
-            "Recurring pitfalls prevented by repository gates and review checklists.",
-            "contribute",
-            "docs/pitfalls.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/command-ids.html",
-            "Command ID Stability Contract",
-            "Naming conventions, area prefixes, and backward-compatibility guarantees for engine command IDs.",
-            "contribute",
-            "docs/command-ids.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/file-formats.html",
-            "Archive & Format Specifications",
-            "Technical format boundaries for .curvebook archives, unpacked directories, templates, and foreign imports.",
-            "contribute",
-            "docs/file-formats.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/licences.html",
-            "Licences & Third-Party Policy",
-            "Dual-licence policy, cargo-deny rules, and asset attribution gates.",
-            "contribute",
-            "docs/licences.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/localization.html",
-            "Localization Architecture",
-            "Translation catalog conventions, ICU/number formatting, and locale testing.",
-            "contribute",
-            "docs/localization.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/ci.html",
-            "CI Stages & Gates",
-            "Repository cargo xtask ci stage matrix, budgets, and compliance scanners.",
-            "contribute",
-            "docs/ci.md",
-            true,
-            FallbackKind::MustExist,
-        ),
-        md_page(
-            "contribute/releasing.html",
-            "Releasing & Snapshot Publication",
-            "Cutting releases, artifact verification, checksums, and publishing versioned docs snapshots.",
-            "contribute",
-            "docs/release/releasing.md",
-            true,
-            FallbackKind::MustExist,
         ),
     ];
 
@@ -762,7 +668,6 @@ fn md_page(
     description: &str,
     section_id: &'static str,
     repo_path: &'static str,
-    live_main: bool,
     fallback_kind: FallbackKind,
 ) -> PageItem {
     PageItem {
@@ -770,7 +675,7 @@ fn md_page(
         title: title.to_owned(),
         description: description.to_owned(),
         section_id,
-        source: PageSource::Markdown { repo_path, live_main, fallback_kind },
+        source: PageSource::Markdown { repo_path, fallback_kind },
     }
 }
 
@@ -877,14 +782,19 @@ fn collect_glossary_az_entries(root: &Path) -> Vec<AzEntry> {
 
 fn build_home_page(pages: &[PageItem]) -> PageItem {
     let mut body = String::with_capacity(8192);
-    body.push_str("<p class=\"lead\">Complete static reference manual for CurveBook scientific tables, statistical methods, nonlinear regression, publication graphics, MCP/CLI automation, and contributor engineering guides.</p>\n");
+    body.push_str("<p class=\"lead\">Complete static reference manual for CurveBook scientific tables, statistical methods, nonlinear regression, publication graphics, MCP/CLI automation, and contributor guides on GitHub.</p>\n");
     body.push_str("<div class=\"section-grid\">\n");
     for sec in BETA_SECTIONS {
-        let count = pages.iter().filter(|p| p.section_id == sec.id).count();
+        let badge = if sec.id == "contribute" {
+            format!("{} GitHub guides", CONTRIBUTOR_GITHUB_GUIDES.len())
+        } else {
+            let count = pages.iter().filter(|p| p.section_id == sec.id).count();
+            format!("{count} pages")
+        };
         let _ = writeln!(body, "  <section class=\"section-card\">");
         let _ = writeln!(body, "    <h2><a href=\"{}\">{}</a></h2>", escape_html(sec.index_rel_path), escape_html(sec.title));
         let _ = writeln!(body, "    <p>{}</p>", escape_html(sec.summary));
-        let _ = writeln!(body, "    <p><span class=\"badge\">{count} pages</span></p>");
+        let _ = writeln!(body, "    <p><span class=\"badge\">{badge}</span></p>");
         let _ = writeln!(body, "  </section>");
     }
     body.push_str("</div>\n");
@@ -903,7 +813,22 @@ fn build_home_page(pages: &[PageItem]) -> PageItem {
 fn build_section_index_page(sec: &SectionDef, children: &[&PageItem]) -> PageItem {
     let mut body = String::with_capacity(4096);
     let _ = writeln!(body, "<p class=\"lead\">{}</p>", escape_html(sec.summary));
+    if sec.id == "contribute" {
+        body.push_str("<div class=\"callout\"><p>Contributor specifications are maintained continuously against the live <code>main</code> branch on GitHub.</p></div>\n");
+    }
     body.push_str("<div class=\"section-grid\">\n");
+    if sec.id == "contribute" {
+        for &(title, repo_path, summary) in CONTRIBUTOR_GITHUB_GUIDES {
+            let _ = writeln!(body, "  <section class=\"section-card\">");
+            let _ = writeln!(
+                body,
+                "    <h2><a href=\"{GITHUB_REPO_BASE}/blob/main/{repo_path}\">{} <span aria-hidden=\"true\">↗</span></a></h2>",
+                escape_html(title),
+            );
+            let _ = writeln!(body, "    <p>{}</p>", escape_html(summary));
+            let _ = writeln!(body, "  </section>");
+        }
+    }
     for child in children {
         let _ = writeln!(body, "  <section class=\"section-card\">");
         let _ = writeln!(

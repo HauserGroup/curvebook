@@ -1,4 +1,4 @@
-//! End-to-end regression tests for `cargo xtask docs-site` (`R12.1`, `R12.4`, `R12.6`).
+//! End-to-end regression tests for `cargo xtask docs-site` (`R12.1`, `R12.4`).
 
 use std::collections::BTreeMap;
 use std::fs;
@@ -90,7 +90,7 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
         assert_eq!(html_a, html_b, "non-deterministic HTML output for `{rel}`");
     }
 
-    // Spot-check critical Beta site map sections, registry content, contributor guides, and CSP.
+    // Spot-check critical Beta site map sections, registry content, direct GitHub contributor links, and CSP.
     assert!(map_a.contains_key("index.html"));
     assert!(map_a.contains_key("az-index.html"));
     assert!(map_a.contains_key("analyses.html"));
@@ -105,28 +105,96 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
     assert!(map_a.contains_key("registry/graphs.html"));
     assert!(map_a.contains_key("registry/formats.html"));
 
-    for contrib in [
-        "contribute/agents.html",
-        "contribute/architecture.html",
-        "contribute/development.html",
-        "contribute/extending.html",
-        "contribute/pitfalls.html",
-        "contribute/command-ids.html",
-        "contribute/file-formats.html",
-        "contribute/licences.html",
-        "contribute/localization.html",
-        "contribute/ci.html",
-        "contribute/releasing.html",
+    assert!(
+        !map_a.keys().any(|k| k.starts_with("contribute/")),
+        "contributor guides must link to GitHub main rather than rendering contribute/*.html"
+    );
+    let contrib_index = map_a.get("section-contribute.html").ok_or("missing section-contribute.html")?;
+    for repo_path in [
+        "AGENTS.md",
+        "docs/architecture.md",
+        "docs/development.md",
+        "docs/extending.md",
+        "docs/pitfalls.md",
+        "docs/command-ids.md",
+        "docs/file-formats.md",
+        "docs/licences.md",
+        "docs/localization.md",
+        "docs/ci.md",
+        "docs/release/releasing.md",
     ] {
-        let html = map_a.get(contrib).ok_or_else(|| format!("missing `{contrib}`"))?;
-        assert!(html.contains("live Markdown source on <code>main</code>"), "`{contrib}` missing live-main banner");
+        let expected_url = format!("https://github.com/HauserGroup/curvebook/blob/main/{repo_path}");
+        assert!(contrib_index.contains(&expected_url), "section-contribute.html missing GitHub main link `{expected_url}`");
     }
 
-    // Internal excluded docs must rewrite to GitHub blob URLs, never generated local pages.
-    let dev_html = map_a.get("contribute/development.html").ok_or("missing contribute/development.html")?;
-    assert!(dev_html.contains("https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md"), "expected GitHub rewrite for ROADMAP.md");
+    // Contributor docs linked from automation pages must rewrite directly to GitHub blob URLs.
+    let batch_html = map_a.get("automation/control-and-batch.html").ok_or("missing automation/control-and-batch.html")?;
+    assert!(
+        batch_html.contains("https://github.com/HauserGroup/curvebook/blob/main/docs/command-ids.md"),
+        "expected GitHub main link for docs/command-ids.md in automation/control-and-batch.html"
+    );
     assert!(!map_a.contains_key("ROADMAP.html"));
     assert!(!map_a.contains_key("STATUS.html"));
+
+    Ok(())
+}
+
+#[test]
+fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result<(), String> {
+    let root = workspace_root()?;
+    let sandbox = WorkspaceScratchDir::new(&root, "partial-r12-3")?;
+    let sim_root = &sandbox.path;
+
+    for file in ["AGENTS.md", "ASSETS.md", "ATTRIBUTION.md", "NOTICE"] {
+        fs::copy(root.join(file), sim_root.join(file)).map_err(|e| format!("copy {file}: {e}"))?;
+    }
+    copy_dir_recursive(&root.join("assets"), &sim_root.join("assets"))?;
+    copy_dir_recursive(&root.join("docs"), &sim_root.join("docs"))?;
+
+    // Explicitly remove R12.3 files if present to exercise absent-methods behavior.
+    for omitted in ["analyses.md", "fitting.md"] {
+        let p = sim_root.join("docs/reference").join(omitted);
+        if p.exists() {
+            fs::remove_file(&p).map_err(|e| format!("remove {}: {e}", p.display()))?;
+        }
+    }
+
+    let absent_out = WorkspaceScratchDir::new(&root, "absent-r12-3-out")?;
+    let absent_res = run_xtask(sim_root, &["docs-site", "--check", "--output", absent_out.path.to_str().ok_or("bad path")?])?;
+    assert!(
+        absent_res.status.success(),
+        "docs-site --check without R12.3 failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&absent_res.stdout),
+        String::from_utf8_lossy(&absent_res.stderr)
+    );
+
+    let absent_az = fs::read_to_string(absent_out.path.join("az-index.html")).map_err(|e| e.to_string())?;
+    assert!(absent_az.contains("registry/tables.html#analysis-kind-two-group-comparison"));
+    assert!(!absent_az.contains("analyses.html#analysis-two-group-comparison"));
+
+    // Now test a partial `docs/reference/analyses.md` covering only one analysis anchor.
+    fs::create_dir_all(sim_root.join("docs/reference")).map_err(|e| e.to_string())?;
+    fs::write(
+        sim_root.join("docs/reference/analyses.md"),
+        "# Statistical Analyses\n\n## Two-Group Comparison {#analysis-two-group-comparison}\n\nParametric and non-parametric two-group comparisons.\n",
+    )
+    .map_err(|e| e.to_string())?;
+
+    let partial_out = WorkspaceScratchDir::new(&root, "partial-r12-3-out")?;
+    let partial_res = run_xtask(sim_root, &["docs-site", "--check", "--output", partial_out.path.to_str().ok_or("bad path")?])?;
+    assert!(
+        partial_res.status.success(),
+        "docs-site --check with partial analyses.md failed:\nstdout:\n{}\nstderr:\n{}",
+        String::from_utf8_lossy(&partial_res.stdout),
+        String::from_utf8_lossy(&partial_res.stderr)
+    );
+
+    let partial_az = fs::read_to_string(partial_out.path.join("az-index.html")).map_err(|e| e.to_string())?;
+    assert!(partial_az.contains("analyses.html#analysis-two-group-comparison"));
+    assert!(partial_az.contains("registry/tables.html#analysis-kind-survival"));
+    let partial_tables = fs::read_to_string(partial_out.path.join("registry/tables.html")).map_err(|e| e.to_string())?;
+    assert!(partial_tables.contains("../analyses.html#analysis-two-group-comparison"));
+    assert!(partial_tables.contains("#analysis-kind-survival"));
 
     Ok(())
 }
@@ -158,7 +226,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
         ("files", "# Files, Import & Export\n\nSee [Batch Schema](../schemas/batch-v1.schema.json).\n"),
         ("settings", "# Settings & Languages\n\nSee [Preferences Schema](../schemas/preferences.schema.json).\n"),
         ("privacy-security", "# Privacy & Security\n\nSee [Security](../../SECURITY.md).\n"),
-        ("troubleshooting", "# Troubleshooting\n\nSee [Beta Known Issues](../release/beta-known-issues.md).\n"),
+        ("troubleshooting", "# Troubleshooting\n\nSee [Privacy & Security](privacy-security.md).\n"),
         ("glossary", "# Glossary\n\n## Reactive DAG {#term-reactive-dag}\n\nRecomputes sheets.\n"),
     ] {
         fs::write(ref_dir.join(format!("{name}.md")), body).map_err(|e| e.to_string())?;

@@ -56,8 +56,6 @@ pub struct PageSpec<'a> {
     pub body_html: &'a str,
     /// When true, `body_html` already opens with `<h1 ...>` (e.g. rendered from Markdown `# Title`).
     pub body_has_h1: bool,
-    /// Optional contributor snapshot notice linking back to live `main` on GitHub (`R12.6`).
-    pub live_main_github_url: Option<&'a str>,
     /// Previous page in deterministic reading order.
     pub prev: Option<&'a NavLink>,
     /// Next page in deterministic reading order.
@@ -126,14 +124,6 @@ pub fn render_page(spec: &PageSpec<'_>) -> String {
         out.push_str("        <h1 id=\"page-title\" tabindex=\"-1\">");
         push_html_escaped(spec.h1, &mut out);
         out.push_str("</h1>\n");
-    }
-
-    if let Some(live_url) = spec.live_main_github_url {
-        out.push_str("        <div class=\"callout\">\n          <p><strong>Contributor guide snapshot (");
-        push_html_escaped(&spec.meta.version_label, &mut out);
-        out.push_str("):</strong> Contributors develop against <code>main</code>. View the <a href=\"");
-        push_html_escaped(live_url, &mut out);
-        out.push_str("\">live Markdown source on <code>main</code></a>.</p>\n        </div>\n");
     }
 
     render_toc(spec.toc_headings, &mut out);
