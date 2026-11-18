@@ -5,6 +5,8 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 
+use curvebook_format::{ZipArchive, ZipLimits};
+
 const FONT_EXT: &[&str] = &["ttf", "otf", "ttc", "woff", "woff2", "eot", "pfb"];
 
 const VISUAL_ASSET_EXT: &[&str] =
@@ -580,6 +582,219 @@ pub fn run(root: &Path) -> Result<(), String> {
     let count = verify_repo_provenance(root, &files, &md, &attr_md, &notice)?;
     println!("assets: all {count} asset files attributed in ASSETS.md with clean provenance and allowlisted licences");
     Ok(())
+}
+
+/// Verified SHA-256 digest catalog of attributed repository assets in `ASSETS.md`.
+#[derive(Debug, Clone)]
+pub(crate) struct RepoAssetCatalog {
+    allowed_sha256: BTreeSet<[u8; 32]>,
+}
+
+/// Load and verify `ASSETS.md`, `ATTRIBUTION.md`, and `NOTICE` from `root`, indexing the SHA-256
+/// digest of every attributed repository asset so unpacked release containers can be verified.
+pub(crate) fn load_repo_asset_catalog(root: &Path) -> Result<RepoAssetCatalog, String> {
+    let assets_md = std::fs::read_to_string(root.join("ASSETS.md")).map_err(|e| format!("ASSETS.md: {e}"))?;
+    let attr_md = std::fs::read_to_string(root.join("ATTRIBUTION.md")).map_err(|e| format!("ATTRIBUTION.md: {e}"))?;
+    let notice = std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("NOTICE: {e}"))?;
+
+    for (name, body) in [("ASSETS.md", assets_md.as_str()), ("ATTRIBUTION.md", attr_md.as_str()), ("NOTICE", notice.as_str())] {
+        check_document_prose(name, body)?;
+    }
+
+    let asset_rows = parse_attribution_table(&assets_md, "ASSETS.md")?;
+    let attr_rows = parse_attribution_table(&attr_md, "ATTRIBUTION.md")?;
+    for row in asset_rows.values().chain(attr_rows.values()) {
+        check_row_safety(row)?;
+    }
+
+    let mut allowed_sha256 = BTreeSet::new();
+    for row in asset_rows.values() {
+        if row_requires_attribution_entry(row) && !attr_rows.contains_key(&row.path) {
+            return Err(format!("{}: third-party or attribution-licensed asset lacks an ATTRIBUTION.md row", row.path));
+        }
+        if is_original_only_visual_asset(&row.path) {
+            verify_original_provenance(row, &asset_rows)?;
+        }
+        let bytes = std::fs::read(root.join(&row.path)).map_err(|e| format!("ASSETS.md attributed file `{}`: {e}", row.path))?;
+        allowed_sha256.insert(crate::release_scan::sha256_bytes(&bytes));
+    }
+    Ok(RepoAssetCatalog { allowed_sha256 })
+}
+
+/// Recursively verify an unpacked release container directory against `catalog`:
+/// - forbids bundled font files (`.ttf`, `.otf`, `.woff`, `.woff2`, ...)
+/// - forbids bundled `plan/prism` or `docs/audit` trees
+/// - verifies prose and table rows of any bundled `ASSETS.md`, `ATTRIBUTION.md`, or `NOTICE`
+/// - verifies binary/SVG metadata and cryptographic `ASSETS.md` provenance of every packaged asset
+pub(crate) fn scan_dist_artefacts(catalog: &RepoAssetCatalog, dist_dir: &Path) -> Result<(usize, Vec<String>), String> {
+    if !dist_dir.exists() {
+        return Err(format!("dist directory `{}` does not exist", dist_dir.display()));
+    }
+    let mut rel_files = Vec::new();
+    collect_dist_files(dist_dir, dist_dir, &mut rel_files)?;
+    rel_files.sort();
+
+    let mut state = DistAssetScanState { catalog, dist_dir, checked_assets: 0, violations: Vec::new() };
+    for rel in rel_files {
+        if is_forbidden_bundled_dir(&rel) {
+            state.violations.push(format!("{rel}: bundled reference or historical audit directory is forbidden"));
+            continue;
+        }
+        let bytes = std::fs::read(dist_dir.join(&rel)).map_err(|e| format!("read dist file `{rel}`: {e}"))?;
+        scan_dist_asset_bytes(&mut state, &rel, &bytes, 0);
+    }
+    state.violations.sort();
+    state.violations.dedup();
+    Ok((state.checked_assets, state.violations))
+}
+
+fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<(), String> {
+    let entries = std::fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?;
+    let mut paths = Vec::new();
+    for entry in entries {
+        paths.push(entry.map_err(|e| format!("dir entry under {}: {e}", dir.display()))?.path());
+    }
+    paths.sort();
+    for path in paths {
+        let meta = std::fs::symlink_metadata(&path).map_err(|e| format!("stat {}: {e}", path.display()))?;
+        if meta.file_type().is_symlink() {
+            continue;
+        }
+        if meta.is_dir() {
+            collect_dist_files(root, &path, out)?;
+        } else if meta.is_file() {
+            let rel = path.strip_prefix(root).map_err(|e| format!("strip prefix {}: {e}", path.display()))?;
+            out.push(rel.to_string_lossy().replace('\\', "/"));
+        }
+    }
+    Ok(())
+}
+
+fn is_forbidden_bundled_dir(rel: &str) -> bool {
+    let norm = rel.replace('\\', "/");
+    norm == "plan/prism"
+        || norm.starts_with("plan/prism/")
+        || norm.contains("/plan/prism/")
+        || norm == "docs/audit"
+        || norm.starts_with("docs/audit/")
+        || norm.contains("/docs/audit/")
+}
+
+struct DistAssetScanState<'a> {
+    catalog: &'a RepoAssetCatalog,
+    dist_dir: &'a Path,
+    checked_assets: usize,
+    violations: Vec<String>,
+}
+
+fn scan_dist_asset_bytes(state: &mut DistAssetScanState<'_>, display_path: &str, bytes: &[u8], depth: usize) {
+    if is_font_file(display_path) {
+        state.checked_assets += 1;
+        state.violations.push(format!("{display_path}: bundled font file forbidden by zero-bundled-fonts policy"));
+        return;
+    }
+
+    check_bundled_attribution_doc(display_path, bytes, &mut state.violations);
+
+    if is_asset(display_path) {
+        state.checked_assets += 1;
+        check_asset_embedded_metadata(display_path, bytes, &mut state.violations);
+        let digest = crate::release_scan::sha256_bytes(bytes);
+        if !state.catalog.allowed_sha256.contains(&digest) && !is_flatpak_appstream_icon_cache(state.catalog, state.dist_dir, display_path) {
+            state
+                .violations
+                .push(format!("{display_path}: unattributed asset in release package (SHA-256 does not match any attributed entry in ASSETS.md)"));
+        }
+    }
+
+    let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
+    if is_zip && depth < 2 {
+        match ZipArchive::from_bytes_with_limits(bytes, ZipLimits::default()) {
+            Ok(zip) => {
+                for (name, entry_bytes) in zip.iter() {
+                    let nested = format!("{display_path}!{name}");
+                    if is_forbidden_bundled_dir(name) {
+                        state.violations.push(format!("{nested}: bundled reference or historical audit directory is forbidden"));
+                        continue;
+                    }
+                    scan_dist_asset_bytes(state, &nested, entry_bytes, depth + 1);
+                }
+            }
+            Err(err) => {
+                state.violations.push(format!("{display_path}: cannot inspect nested archive: {err}"));
+            }
+        }
+    }
+}
+
+fn check_bundled_attribution_doc(display_path: &str, bytes: &[u8], violations: &mut Vec<String>) {
+    let entry_part = display_path.rsplit('!').next().unwrap_or(display_path);
+    let Some(file_name) = Path::new(entry_part).file_name().and_then(|n| n.to_str()) else {
+        return;
+    };
+    if !matches!(file_name, "ASSETS.md" | "ATTRIBUTION.md" | "NOTICE") {
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(bytes) else {
+        violations.push(format!("{display_path}: bundled {file_name} is not valid UTF-8"));
+        return;
+    };
+    if let Err(err) = check_document_prose(display_path, text) {
+        violations.push(err);
+    }
+    if matches!(file_name, "ASSETS.md" | "ATTRIBUTION.md") {
+        match parse_attribution_table(text, display_path) {
+            Ok(rows) => {
+                for row in rows.values() {
+                    if let Err(err) = check_row_safety(row) {
+                        violations.push(format!("{display_path}: {err}"));
+                    }
+                }
+            }
+            Err(err) => violations.push(err),
+        }
+    }
+}
+
+fn check_asset_embedded_metadata(display_path: &str, bytes: &[u8], violations: &mut Vec<String>) {
+    let ext = lower_ext(display_path);
+    let hits = match ext.as_str() {
+        "png" => crate::brands::check_png_metadata(display_path, bytes),
+        "ico" | "icns" => crate::brands::check_icon_container_metadata(display_path, bytes),
+        "gif" => crate::brands::check_gif_metadata(display_path, bytes),
+        "svg" => match std::str::from_utf8(bytes) {
+            Ok(svg) => crate::brands::check_svg_metadata(display_path, svg),
+            Err(e) => {
+                violations.push(format!("{display_path}: invalid UTF-8 in SVG: {e}"));
+                Vec::new()
+            }
+        },
+        _ => Vec::new(),
+    };
+    for hit in hits {
+        violations.push(format!("{}:{}: embedded metadata mentions `{}`", hit.path, hit.line, hit.brand));
+    }
+}
+
+fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, display_path: &str) -> bool {
+    const MARKER: &str = "/share/app-info/icons/flatpak/";
+    const ICON_FILE: &str = "/org.curvebook.CurveBook.png";
+    let Some(marker_pos) = display_path.find(MARKER) else {
+        return false;
+    };
+    let after = &display_path[marker_pos + MARKER.len()..];
+    let Some(dim) = after.strip_suffix(ICON_FILE) else {
+        return false;
+    };
+    if dim.is_empty() || dim.contains('/') {
+        return false;
+    }
+    let prefix = &display_path[..marker_pos];
+    let hicolor_rel = format!("{prefix}/share/icons/hicolor/{dim}/apps/org.curvebook.CurveBook.png");
+    let Ok(src_bytes) = std::fs::read(dist_dir.join(hicolor_rel)) else {
+        return false;
+    };
+    catalog.allowed_sha256.contains(&crate::release_scan::sha256_bytes(&src_bytes))
 }
 
 #[cfg(test)]

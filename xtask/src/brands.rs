@@ -333,7 +333,7 @@ fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
         scan_svg(path, text, out);
     } else if path.ends_with(".plist") || path.ends_with(".plist.in") {
         scan_plist(path, text, out);
-    } else if path.ends_with(".mime.xml") {
+    } else if is_mime_package_xml(path) {
         scan_mime_xml(path, text, out);
     } else if path.ends_with(".desktop") {
         scan_desktop_entry(path, text, out);
@@ -4265,7 +4265,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         hits.extend(check_html_metadata(display_path, &text));
     } else if display_path.ends_with(".plist") || display_path.ends_with(".plist.in") {
         scan_plist(display_path, &text, hits);
-    } else if display_path.ends_with(".mime.xml") {
+    } else if is_mime_package_xml(display_path) {
         scan_mime_xml(display_path, &text, hits);
     } else if display_path.ends_with(".desktop") {
         scan_desktop_entry(display_path, &text, hits);
@@ -4274,6 +4274,38 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
         scan_plain_lines_no_waiver(display_path, &text, hits);
     }
     Ok(())
+}
+
+fn is_mime_package_xml(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    norm.ends_with(".mime.xml") || (norm.ends_with(".xml") && (norm.starts_with("share/mime/packages/") || norm.contains("/share/mime/packages/")))
+}
+
+/// Scan an asset filename or symlink target string strictly against all forbidden brand sets.
+#[must_use]
+pub(crate) fn scan_dist_label(source: &str, label: &str) -> Vec<BrandHit> {
+    let mut hits = Vec::new();
+    collect_line_words(source, 1, label, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
+    collect_line_words(source, 1, label, BRANDS, PrismPolicy::Strict, &mut hits);
+    collect_line_words(source, 1, label, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
+    dedup_tail_hits(&mut hits, 0);
+    hits
+}
+
+/// Scan a standalone release compliance file (`SHA256SUMS.txt`, `THIRD-PARTY-LICENSES.html`,
+/// or decoded `.zsync` header) without waivers.
+#[must_use]
+pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandHit> {
+    let mut hits = scan_dist_label(display_path, display_path);
+    let from = hits.len();
+    scan_suite_lines(display_path, text, &mut hits);
+    scan_plain_lines_no_waiver(display_path, text, &mut hits);
+    let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
+    if matches!(ext.as_str(), "html" | "htm") {
+        hits.extend(check_html_metadata(display_path, text));
+    }
+    dedup_tail_hits(&mut hits, from);
+    hits
 }
 
 #[cfg(test)]
