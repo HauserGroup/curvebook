@@ -6,7 +6,7 @@ Single source of truth for the release version: `[workspace.package] version` in
 
 ## Alpha releases with the existing builder
 
-Use the existing **Release** GitHub Actions workflow; Alpha is a manual option, not a separate build pipeline. The same jobs build macOS, Windows, Linux, WASM, and FreeBSD packages. MSIX remains deferred in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
+Use the existing **Release** GitHub Actions workflow; Alpha is a manual option, not a separate build pipeline. The same jobs build macOS, Windows, Linux, WASM, and FreeBSD packages. Store MSIX uses a separate **Windows Store package** workflow under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
 Once the updated workflow is on GitHub's default branch:
 
@@ -121,7 +121,7 @@ Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](..
 - **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.curvebook`, `.cbtemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
 - **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.curvebook.CurveBook`). Package formats that require a maintainer contact address (such as `.deb` / `.rpm` via `nfpm`) require an explicit `CURVEBOOK_MAINTAINER` environment variable and fail early if it is unset—there is no fallback email address—while `.tar.gz`/portable archive builds remain usable without `CURVEBOOK_MAINTAINER`.
 - **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts. CurveBook installs into a separate `CurveBook` directory (`INSTALLFOLDER`) with fresh upgrade/component GUIDs so it installs alongside any existing LumenCraft installation without uninstalling or upgrading it.
-- **Windows signing and planned Store distribution:** [`windows-signing.md`](windows-signing.md) explains self-signing for trusted test machines without Azure, plus the Microsoft-signed MSIX Store route. MSIX packaging is planned in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution); the current builder produces MSI and portable ZIP only. A self-signed MSI/EXE does not meet Store MSI/EXE signing requirements.
+- **Windows signing and Store distribution:** [`windows-signing.md`](windows-signing.md) explains self-signing for trusted test machines without Azure, plus the Microsoft-signed MSIX Store route. The separate **Windows Store package** workflow prepares an unsigned x64 MSIX with the reserved Store identity; Microsoft signs Store packages after certification. The main **Release** builder continues to produce MSI and portable ZIP. Installed-app validation and Store publication remain open in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). A self-signed MSI/EXE does not meet Store MSI/EXE signing requirements.
 - **Web specifics:** Built via Trunk under `web-release` with relative root paths (`./`) and strict no-egress security headers (`packaging/web/{_headers,.htaccess}`) so bundles deploy cleanly on subpath hosts without rebuilding.
 
 ---

@@ -1,6 +1,6 @@
 # Windows signing without Azure
 
-CurveBook currently builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../../packaging/windows/package.ps1). MSIX packaging is **planned**, not implemented; see [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). The MSIX instructions below apply once a package and its manifest are available.
+CurveBook builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../../packaging/windows/package.ps1). The separate [`Windows Store package`](../../.github/workflows/windows-store.yml) workflow builds an unsigned x64 MSIX for Store submission. It does not use Azure or signing secrets. Windows installation, CLI/MCP alias behavior, upgrade/uninstall, and certification evidence are still required under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
 | Distribution | Signing approach |
 |---|---|
@@ -13,20 +13,23 @@ Microsoft documents the [MSIX Store signing rules](https://learn.microsoft.com/e
 
 ## Use GitHub when no local Windows PC is available
 
-Run the Windows commands below in a GitHub Actions Windows job. You can edit the workflow, start it, and download its outputs from a browser on macOS. GitHub provides [Windows-hosted runners](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/choose-the-runner-for-a-job); the current release workflow already builds Windows MSI/ZIP packages on `windows-latest`.
+Use the **Windows Store package** workflow from a browser on macOS:
 
-The dedicated self-signing/MSIX test workflow is **planned in `R8.9`**, not present yet. To prepare that workflow:
+1. Open the repository's **Actions → Windows Store package → Run workflow** once this workflow has landed on the default branch.
+2. Choose the branch to build. For the first Store submission, use package version **`1.0.0.0`**.
+3. Start the workflow and wait for both jobs to succeed.
+4. Open the completed run and download **`curvebook-store-x64`** from **Artifacts**. Extract the downloaded ZIP.
+5. In Partner Center, open **CurveBook → Start your submission → Packages** and upload the extracted **`.msix`** file. The XML manifest and `SHA256SUMS.txt` are included for review and integrity checking; they are not separate Store uploads.
 
-1. Reuse the Rust toolchain and WiX setup from the `windows` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml). Start with x64, a bounded job timeout, `workflow_dispatch`, and `permissions: contents: read`; keep this test job separate from release publication.
-2. Build with `./packaging/windows/package.ps1 -Arch x64`. Without configured signing credentials this produces unsigned MSI/ZIP files today. MSIX needs the future builder.
-3. Run the certificate creation and signing commands below in the Windows job. Use `$env:RUNNER_TEMP` for certificate exports instead of `$env:LOCALAPPDATA`. Keep creation and signing in the same PowerShell step, or pass only the public thumbprint/path between steps and reload the private certificate from `Cert:\CurrentUser\My`.
-4. For an MSIX test, explicitly import the public certificate into the disposable runner's `LocalMachine\TrustedPeople` store, verify the package, and attempt installation and CLI smoke tests there. Report runner limitations rather than treating an unavailable interactive GUI as passing human QA.
-5. Upload only the intended packages, public `.cer`, thumbprint, checksums, and test logs using an explicit artefact file list. Do not upload the certificate store, private keys, or PFX files. No Azure credentials or signing secrets are needed for a fresh test certificate.
-6. Once this manual workflow is added on the default branch, open **GitHub → repository → Actions → the Windows test workflow → Run workflow**. Select the branch, run it, then open the completed run and download its **Artifacts**. See [manually running a workflow](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow) and [downloading artefacts](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/download-workflow-artifacts).
+A pull request changing the Store builder also runs this scoped workflow. It generates third-party licence notices, builds the desktop/CLI with a static C runtime, validates the payload's PE architectures, runs package tests and a CLI version smoke check, and packages with Windows SDK `MakeAppx.exe` validation enabled. It uploads Actions artifacts, creates no GitHub Release, and does not submit or publish to Microsoft Store.
 
-A fresh certificate on each run means a new test trust identity. Testers must trust each new public certificate; cross-run update tests needing the same key require a separately managed, persistent signing identity. Generate that identity on Windows CI if needed and retain it in restricted secret storage; never use a downloadable private-key artefact as the handoff. The Store route avoids this test-certificate management for public users.
+**Store identity:** the maintainer supplied the reserved name and publisher on 2026-11-18. Public package identifiers live in [`store-identity.json`](../../packaging/windows/store-identity.json): `JakobSture.CurveBook`, `CN=8373FC7D-82BB-4F48-BE69-7A5260B5630A`, and publisher display name `Jakob Sture`. These are not signing credentials.
 
-The existing **Release** workflow is not an isolated self-signing test: non-scheduled runs can create or update a draft release and overwrite its assets. Use its Windows job as a reference; do not run the whole release pipeline just to experiment with certificates.
+**Versioning:** the Store package version is separate from the Cargo/Alpha version. It must have four integer components, a first component of at least `1`, and a final component of `0`. After a version is accepted by Store, increase the version for an update (for example `1.0.1.0`). Never automatically reset it when Cargo's version changes. The package filename retains the Cargo version so the source release remains identifiable. See [Microsoft's package version rules](https://learn.microsoft.com/en-us/windows/apps/publish/publish-your-app/msix/app-package-requirements#package-version-numbering).
+
+**This unsigned MSIX is for Store submission.** It is not a public sideload installer. Microsoft signs the package after certification. No Azure account, CA certificate, or GitHub signing secret is needed. The test self-signing/install workflow remains pending; the manual PowerShell procedure below is for explicitly trusted test machines.
+
+The main **Release** workflow continues to build MSI/portable ZIP files; Store signing does not sign those downloads. Do not run the full release matrix to experiment with MSIX packaging. Store listing text, screenshots, privacy disclosures, age rating, certification, and installed-app testing still need completion before publishing.
 
 ## 1. Prepare a Windows test machine
 
@@ -149,6 +152,6 @@ When the signing identity is no longer needed, the signing user can also delete 
 
 ## 7. Publish through Microsoft Store
 
-For the planned MSIX route, create the Store developer account, reserve the product name, and supply the exact Partner Center identity to the package manifest. Test and submit through Partner Center; Microsoft provides the package signature after certification. A self-signed test certificate is not a prerequisite for Store publishing. The implementation and submission checklist is in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
+The Store developer account, reserved product name, and Partner Center identity are configured. Build the package with the workflow above. Test and submit through Partner Center; Microsoft provides the package signature after certification. A self-signed test certificate is not a prerequisite for Store publishing. The implementation and submission checklist is in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
-These instructions were checked against Microsoft documentation on 2026-11-16. They have not been executed on Windows in this documentation change.
+Store identity and workflow instructions updated on 2026-11-18. Record a successful hosted build before claiming Windows packaging verification; the manual self-signing commands and installed MSIX behavior remain unverified.
