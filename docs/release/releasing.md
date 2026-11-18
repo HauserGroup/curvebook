@@ -4,29 +4,26 @@ Releases are built and published by [.github/workflows/release.yml](../../.githu
 
 Single source of truth for the release version: `[workspace.package] version` in [Cargo.toml](../../Cargo.toml), updated via `cargo xtask version`.
 
-## Alpha releases with the existing builder
+## Alpha and Beta releases with the release workflow
 
-Use the existing **Release** GitHub Actions workflow; Alpha is a manual option, not a separate build pipeline. The same jobs build macOS, Windows, Linux, WASM, and FreeBSD packages. Store MSIX uses a separate **Windows Store package** workflow under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
+Use the **Release** GitHub Actions workflow (`release.yml`); Alpha and Beta are both built by the same pipeline and classified by SemVer pre-release identifiers (`packaging/release-channel.sh`). Store MSIX uses the separate **Windows Store package** workflow under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
-Once the updated workflow is on GitHub's default branch:
+1. Open the repository's **Actions → Release → Run workflow** and choose the branch to build (or push a matching `v<version>` tag for Beta/RC/stable releases).
+2. Leave **version** empty to use `Cargo.toml`. If supplied, it must exactly match the workspace version.
+3. Choose **alpha**:
+   - **Checked (`true`, manual default):** builds an Alpha draft prerelease (`CurveBook Alpha v<version>`) using ad-hoc macOS signing without notarization and unsigned Windows `.msi` installers.
+   - **Unchecked (`false`, or tag/branch push):** enforces **fail-closed Apple Developer ID signing and notarization** on macOS (`R8.10`). If any of `APPLE_CERTIFICATE`, `APPLE_CERTIFICATE_PASSWORD`, `KEYCHAIN_PASSWORD`, `APPLE_ID`, `APPLE_PASSWORD`, or `APPLE_TEAM_ID` is missing, the `macos` job stops with an error instead of falling back to ad-hoc output. Windows `.msi` installers remain **unsigned** for Beta until [`R8.11`](../ROADMAP.md#r811-windows-authenticode-signing-after-beta).
+4. **Nightly schedule guard (`R8.11`):** scheduled dry runs skip the `macos` and `publish` jobs, guard all Windows signing secrets (`github.event_name != 'schedule'`), and upload Actions artifacts only.
+5. Every platform build job (`linux`, `macos`, `windows`, `freebsd`, and `web`) runs `cargo xtask release-scan` and uploads a `scan-report-*` artifact. The `publish` job depends on all build jobs passing, generates `SHA256SUMS.txt`, runs `release-scan --expect-beta-set "$ver" --cross-os-reports dist/scan-reports` to verify exact Beta asset parity and native scan records, creates keyless Sigstore build provenance attestations (`actions/attest-build-provenance`), verifies every file's attestation, and drafts the GitHub Release.
+6. After all jobs pass, review the draft release under **Releases**. Draft assets require repository access; public distribution begins only when a maintainer publishes the reviewed release.
 
-1. Open the repository's **Actions → Release → Run workflow** and choose the branch to build.
-2. Leave **version** empty to use `Cargo.toml`. If supplied, it must exactly match the workspace version; changing the release's display name does not change package versions or the `v<version>` tag.
-3. Leave **alpha** checked (the manual default). macOS skips certificate import and uses the existing ad-hoc signing path without notarization. Windows receives no signing credentials and produces unsigned MSI/portable packages. Linux and WASM use their existing builders.
-4. After all build jobs pass, follow the draft-release link in the run summary, or open **Releases**. The release is named **CurveBook Alpha v<version>**, marked **prerelease**, and kept as a **draft**, without becoming the latest stable release.
-5. Review the files under the release's **Assets**: installers, native archives, Linux packages, the static WASM ZIP, `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt`. These are attached GitHub Release Assets, in addition to the temporary Actions artefacts. Draft assets require appropriate repository access; public distribution begins only when a maintainer publishes the reviewed prerelease.
+Rerunning a version updates its existing draft and replaces matching assets. The workflow refuses to modify a release that is already published before creating any attestations.
 
-Every package/disclosure asset is included in `SHA256SUMS.txt`, excluding the checksum file itself and GitHub's automatically generated source archives. The workflow verifies the manifest before attaching it. After downloading the listed files into one directory, verify with `sha256sum --check SHA256SUMS.txt` on Linux or `shasum -a 256 -c SHA256SUMS.txt` on macOS. On Windows, compare a download's `Get-FileHash -Algorithm SHA256 <path>` result with its manifest entry.
+**Release channel.** [`packaging/release-channel.sh`](../../packaging/release-channel.sh) classifies the resolved version for every draft. Any SemVer pre-release version is drafted as a GitHub **prerelease** that never becomes **Latest**, whatever the trigger, and is named by its first pre-release identifier: `-alpha.N` → **CurveBook Alpha v…**, `-beta.N` → **CurveBook Beta v…**, `-rc.N` → **CurveBook Release Candidate v…**, anything else → **CurveBook Prerelease v…**. A stable version (`X.Y.Z`) is a normal release unless **alpha** is checked. To cut a release, first set the workspace version (`cargo xtask version set 0.1.0-beta.1`) and commit it; a pushed tag `v0.1.0-beta.1` must match it exactly, or the version-parity check fails. Regression test: `xtask/tests/r014_release_channel.rs`.
 
-Rerunning a version updates its existing draft and replaces matching assets. The workflow refuses to modify a release that is already published. Alpha naming uses the same `v<version>` tag as the normal builder; use a new workspace version for a new publicly distributed build. When creating a new tag, the release targets the commit actually built. Uncheck **alpha** for the normal signing configuration; automatic branch/tag builds retain that normal mode. Scheduled builds still upload Actions artefacts only.
-
-**Release channel.** [`packaging/release-channel.sh`](../../packaging/release-channel.sh) classifies the resolved version for every draft. Any SemVer pre-release version is drafted as a GitHub **prerelease** that never becomes **Latest**, whatever the trigger, and is named by its first pre-release identifier: `-alpha.N` → **CurveBook Alpha v…**, `-beta.N` → **CurveBook Beta v…**, `-rc.N` → **CurveBook Release Candidate v…**, anything else → **CurveBook Prerelease v…**. A stable version (`X.Y.Z`) is a normal release unless **alpha** is checked. To cut a release candidate, first set the workspace version (`cargo xtask version set 0.1.0-rc.1`) and commit it; the `v0.1.0-rc.1` tag must match it exactly, or the version-parity check fails. Regression test: `xtask/tests/r014_release_channel.rs`.
-
-macOS testers may need **Privacy & Security → Open Anyway**; Windows testers may encounter unsigned-publisher warnings or organization restrictions. The web ZIP needs an HTTP(S) server and does not publish a live website. Package/signature checks are not evidence of full human GUI readiness. Before public Alpha launch, complete the identity and branding gates in [`R0.20`](../planning/roadmap-history/r0.md#r020-rename-lumencraft-to-curvebook) and [`R0.21`](../planning/roadmap-history/r0.md#r021-strict-alpha-branding-and-asset-provenance-gate) (see [Alpha branding clearance](alpha-branding-clearance.md) and [Alpha known issues & release notes](alpha-known-issues.md)).
-
-GitHub documents [manual workflow runs](https://docs.github.com/en/actions/how-tos/manage-workflow-runs/manually-run-a-workflow), [draft/prerelease creation with attached assets](https://cli.github.com/manual/gh_release_create), and [asset uploads](https://cli.github.com/manual/gh_release_upload).
-
-The [prepared GitHub Pages site](../index.html) covers MCP onboarding, current status, and downloads. Follow its [publication checklist](github-pages.md) alongside the reviewed public Alpha; update its pending-launch wording only after the prerelease is published. GUI onboarding follows `R10` human acceptance, and a live browser demo requires browser QA separately.
+**Installer trust & user guidance (`R8.10`):**
+- **macOS (Beta+):** signed with Developer ID Application and notarized with stapled tickets on both `CurveBook.app` and the `.dmg`; installs and opens without a Gatekeeper bypass (`packaging/macos/INSTALLATION.md`). Historical Alpha prereleases were ad-hoc signed and required **Privacy & Security → Open Anyway**.
+- **Windows (Beta):** `x64` and `arm64` `.msi` installers ship **unsigned** until `R8.11` (`x86` and `-portable.zip` were dropped in `R0.28`). Testers will see SmartScreen (**More info → Run anyway**), and Windows 11 Smart App Control or locked-down lab machines may block unsigned installers until `R8.11` or Microsoft Store MSIX (`R8.9`) lands.
 
 ---
 
@@ -36,75 +33,88 @@ Before tagging or publishing a release, verify both source invariants and packag
 
 1. **Workspace gates & licences:**
    - Bump version cleanly: `cargo xtask version set <X.Y.Z>` (check synced outputs with `git diff`).
-    - Run the Zero-Telemetry & static security hygiene gate:
-      ```sh
-      cargo xtask telemetry
-      ```
-      This asserts zero telemetry/analytics/crash-uploader egress across workspace sources, strict GitHub workflow `permissions` / `${{ }}` hygiene, and no-egress web headers.
-    - Verify clean-room workspace screenshots & `ASSETS.md` attribution:
-      ```sh
-      cargo xtask screenshots --check
-      ```
-      Use `cargo xtask screenshots` (without `--check`) to regenerate `docs/images/workspace-split-fit.png` and `docs/images/workspace-layout-dark.png`.
-    - Run licence compliance & regenerate licence compendium:
-      ```sh
-      cargo xtask licenses
-      ```
-      This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html` (`cargo about generate about.hbs` when `cargo-about` is installed, otherwise a built-in renderer). The release workflow's `licenses` job uses `cargo about` with the `cargo xtask licenses --html` fallback.
-    - Run the full CI gate suite:
-      ```sh
-      cargo xtask ci
-      ```
-      Hosted CI currently fails on `main` at the `actionlint` install step of `.github/workflows/ci.yml` before any Rust gate runs (`R0.6`, open in [ROADMAP.md](../ROADMAP.md)), so a local `cargo xtask ci` pass is the only gate evidence until that is fixed.
-2. **Cross-platform packaging integrity scripts:**
-   - Shared packaging metadata / brand hygiene check (verifies `packaging/env.sh` values and rejects stale template placeholders):
+   - Run the Zero-Telemetry & static security hygiene gate:
+     ```sh
+     cargo xtask telemetry
+     ```
+     This asserts zero telemetry/analytics/crash-uploader egress across workspace sources, strict GitHub workflow `permissions` / `${{ }}` hygiene, and no-egress web headers.
+   - Verify clean-room workspace screenshots & `ASSETS.md` attribution:
+     ```sh
+     cargo xtask screenshots --check
+     ```
+   - Run licence compliance & regenerate licence compendium:
+     ```sh
+     cargo xtask licenses
+     ```
+     This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html`.
+   - Run the full CI gate suite (including the `wasm` stage, which installs pinned `trunk 0.22.1`, builds `./packaging/web/package.sh`, and enforces the `R10.22` bundle budget via `CURVEBOOK_REQUIRE_WEB_BUNDLE=1`):
+     ```sh
+     cargo xtask ci
+     ```
+2. **Mandatory `release-scan` asset verification (`R0.26` / `R0.28`):**
+   - Every release build **must** pass `cargo xtask release-scan` before drafting a GitHub Release:
+     ```sh
+     # Per-platform build check (no combined SHA256SUMS.txt yet):
+     cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-<platform>.json dist/release
+
+     # Full Beta release-directory check in publish (verifies SHA256SUMS.txt, exact 8-file Beta set,
+     # native Linux/FreeBSD/license containers, and matching macOS/Windows native scan reports):
+     cargo run --locked -p xtask -- release-scan \
+       --expect-beta-set "$ver" \
+       --cross-os-reports dist/scan-reports \
+       --report dist/release-scan-publish.json \
+       dist/release
+     ```
+   - `release-scan` unpacks containers through bounded `curvebook-platform` subprocesses (`.zip`, `.tar.gz`/`.tgz`, `.AppImage`, `.dmg` on macOS, `.msi` on Windows, plus historical `.deb`/`.rpm`/`.flatpak`/`.zsync` for Alpha backfill), enforces zip-slip/tar-slip guards, fails closed on unknown or unextractable formats, checks `SHA256SUMS.txt`, and runs `brands`, `cleanroom`, and `assets` over every unpacked entry.
+   - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
+3. **Cross-platform packaging integrity scripts:**
+   - Shared packaging metadata / brand hygiene check:
      ```sh
      sh packaging/check-app-specific.sh
      ```
-   - **macOS:** Build `.app`, `.dmg`, and `curvebook-cli-*.zip` (`packaging/macos/package.sh --arch aarch64` / `universal`), verify `Info.plist` + codesign (`cargo xtask bundle`), and run `verify.sh` on non-sandboxed macOS hosts / CI runners (`hdiutil create` requires disk-image creation outside restricted sandboxes):
+   - **macOS:** Build and verify the universal `.dmg` (`packaging/macos/package.sh --arch universal --require-signing` for non-Alpha releases) and run:
      ```sh
-     sh packaging/macos/verify.sh
+     sh packaging/macos/verify.sh --arch universal --require-notarized
      ```
+     On local developer builds without Apple credentials, omit `--require-signing` and `--require-notarized` for ad-hoc verification (`cargo xtask bundle` also checks `Info.plist` + ad-hoc codesign).
    - **Linux:** Verify `.AppImage` startup / AppRun execution before upload:
      ```sh
      sh packaging/linux/apprun-test.sh
      ```
-   - **Windows:** Verify Windows `.ico` completeness (`cargo xtask ico` if regenerating) and WiX installer policy:
+   - **Windows:** Verify Windows `.ico` completeness (`cargo xtask ico` if regenerating) and WiX v5 installer policy (`x64` and `arm64`):
      ```powershell
      pwsh packaging/windows/check-icons.ps1
-     pwsh packaging/windows/check-install-policy.ps1
+     pwsh packaging/windows/test-install-policy.ps1 -OutputDirectory ./target/install-policy-tests
      ```
-
-*(Notes: `packaging/macos/verify.sh`, `packaging/linux/apprun-test.sh`, and `packaging/windows/check-icons.ps1` live under `packaging/` as part of `R0.14`; run `packaging-lint.yml` cleanly before tagging, and `.github/workflows/release.yml` runs the `licenses` job via `cargo about` with `cargo xtask licenses --html` fallback to ship `THIRD-PARTY-LICENSES.html`.)*
 
 ---
 
-## 2. Shipped Release Artefacts
+## 2. Shipped Beta Release Artefacts (`R0.28`)
 
-Every tagged release distributes binaries and archives alongside licence disclosures and integrity checksums:
+Beta releases ship one installer format per OS and one file per architecture (every installer bundles both `curvebook` and `curvebook-cli`), plus compliance notices and checksums:
 
-| Platform | Artefact / Format | Builder / Config | Notes |
+| Platform | Asset Filename | Builder / Config | Notes |
 | :--- | :--- | :--- | :--- |
-| **macOS** | Signed/universal `.dmg` installer (`x86_64` + `aarch64` `.app`), CLI `.zip` | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist` | Verified via `cargo xtask bundle` / `package.sh` (`CurveBook.app`, `plutil -lint OK`, ad-hoc `codesign --verify --strict --deep`; pre-`R0.20` baseline `LumenCraft.app` arm64 build was `24M`) and `packaging/macos/verify.sh` on non-sandboxed macOS hosts (`hdiutil create` requires disk-image creation outside restricted sandboxes). |
-| **Linux** | `.AppImage` + `.AppImage.zsync`, `.deb`, `.rpm`, portable `.tar.gz` | `packaging/linux/package.sh` | AppImage tested via `packaging/linux/apprun-test.sh`; includes desktop entry, AppStream metadata, and MIME associations. Requires `CURVEBOOK_MAINTAINER` for formats needing a maintainer contact (`.deb`/`.rpm`); `.tar.gz`/portable archives build without it. |
-| **Linux (Flatpak / OCI)** | `.flatpak` bundle and GHCR OCI image (`org.curvebook.CurveBook`) | `packaging/linux/flatpak-bundle.sh`, `packaging/linux/flatpak-oci.sh`, `packaging/linux/flatpak/org.curvebook.CurveBook.yml` | Sandboxed desktop distribution matching `packaging/env.sh` App ID. |
-| **Windows** | WiX v5 `.msi` installer and `-portable.zip` standalone archive | `packaging/windows/package.ps1`, `packaging/windows/INSTALLATION.md` | Dual-scope MSI (`PerUser` default, optional `PerMachine`); static MSVC CRT; checked via `check-icons.ps1` & `check-install-policy.ps1`. Fresh CurveBook upgrade/component identity leaves any existing LumenCraft install separate. |
-| **FreeBSD** | `.tar.gz` binary archive | `packaging/freebsd/package.sh` | Desktop & headless CLI archive for FreeBSD builds. |
-| **Web (WASM)** | Trunk `web-release` static `.zip` bundle | `packaging/web/package.sh`, `packaging/web/{_headers,.htaccess}` | Built targeting `wasm32-unknown-unknown` with relative (`./`) asset URLs and strict Zero-Telemetry CSP (`connect-src 'self'` for same-origin `.wasm` streaming only, zero external origins), COOP, and COEP headers; verified via `cargo xtask wasm` + `telemetry`. |
-| **Compliance & Checksums** | **`THIRD-PARTY-LICENSES.html`**, `LICENSE-MIT`, `LICENSE-APACHE`, `NOTICE`, `ATTRIBUTION.md`, `SHA256SUMS.txt` | `cargo xtask licenses` (`about.toml`), `sha256sum`, & `actions/attest-build-provenance` | Bundled inside packages / release assets so every binary download includes complete third-party dependency & asset notices; `SHA256SUMS.txt` and all uploaded artefacts receive keyless GitHub Sigstore build provenance attestations in CI. |
+| **macOS** | `curvebook-<version>-macos-universal.dmg` | `packaging/macos/package.sh`, `Info.plist.in`, `entitlements.plist`, [`INSTALLATION.md`](../../packaging/macos/INSTALLATION.md) | Universal `arm64` + `x86_64` DMG containing `CurveBook.app` (with `curvebook-cli` inside `Contents/MacOS/`). Signed with Developer ID + hardened runtime, notarized, and stapled (`R8.10`; non-Alpha runs fail closed if credentials are missing). Separate CLI `.zip` dropped (`R0.28`). |
+| **Windows (`x64`, `arm64`)** | `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi` | `packaging/windows/package.ps1`, `curvebook.wxs`, `install-policy.wxi`, [`INSTALLATION.md`](../../packaging/windows/INSTALLATION.md) | Dual-scope WiX v5 MSI (`PerUser` default, optional `PerMachine`) with static MSVC CRT bundling `curvebook.exe` + `curvebook-cli.exe`. Ships **unsigned** for Beta until `R8.11`. `x86` and `-portable.zip` dropped (`R0.28`). |
+| **Linux (`x86_64`, `aarch64`)** | `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage` | `packaging/linux/package.sh`, `apprun-test.sh` | Self-contained AppImage bundling `curvebook`, `curvebook-cli`, `.desktop`, AppStream metadata, MIME associations, and icons. `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, and Flatpak/OCI dropped (`R0.28`). |
+| **FreeBSD (`x86_64`)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | `packaging/freebsd/package.sh` | Preview desktop & CLI tarball built on FreeBSD VM and scanned on Ubuntu host. |
+| **Compliance & Checksums** | `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | `cargo xtask licenses`, `sha256sum`, `actions/attest-build-provenance` | Every asset in the 8-file Beta set receives a keyless GitHub Sigstore build provenance attestation and is verified by `release-scan --expect-beta-set`. |
+
+**Browser bundle (`curvebook-web`, deferred to `1.0`):** `curvebook-web-<version>.zip` is **omitted from Beta GitHub Release assets** until `1.0` (`R0.28`, [`R11`](../ROADMAP.md#r11-usable-browser-app)). Both `.github/workflows/ci.yml` (`wasm` stage) and the `release.yml` `web` job still build `./packaging/web/package.sh` with pinned `trunk 0.22.1` and enforce the `R10.22` size budget (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo xtask web-bundle`) so the WASM target stays healthy.
 
 ### Verifying Downloaded Release Artefacts
 
 User-facing steps for every platform, and why Linux and FreeBSD downloads carry no separate signature file, are in [verifying-downloads.md](verifying-downloads.md). The `publish` job runs the pinned `gh attestation verify` command below on every file before upload and stops the release if any file fails.
 
-Every file uploaded by the `publish` job in [`.github/workflows/release.yml`](../../.github/workflows/release.yml) — Linux (`.AppImage`, `.AppImage.zsync`, `.deb`, `.rpm`, `.tar.gz`, `.flatpak`), Windows (`.msi`, `-portable.zip`), macOS (`.dmg`, CLI `.zip`), FreeBSD (`.tar.gz`), web (`.zip`), `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` itself — receives a keyless GitHub Sigstore build provenance attestation (`actions/attest-build-provenance`).
+Every file in the 8-file Beta set — `curvebook-<version>-macos-universal.dmg`, `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi`, `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage`, `curvebook-<version>-freebsd-x86_64.tar.gz`, `THIRD-PARTY-LICENSES.html`, and `SHA256SUMS.txt` itself — receives a keyless GitHub Sigstore build provenance attestation (`actions/attest-build-provenance`).
 
 1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
    ```sh
    gh attestation verify <file> --repo HauserGroup/curvebook \
      --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml
    ```
-   This confirms that `<file>` (including `SHA256SUMS.txt` or any individual installer/archive) matches a build produced by `.github/workflows/release.yml` in `HauserGroup/curvebook`. Without `--signer-workflow`, `gh` accepts an attestation signed by any workflow in the repository. A release built from a tag push also records the tag; check it with `--source-ref refs/tags/v<version>`. A manually dispatched run records the branch it ran from instead; for example, `v0.1.0-alpha.1` was built from `refs/heads/main`.
+   Without `--signer-workflow`, `gh` accepts an attestation signed by any workflow in the repository. A release built from a tag push also records the tag; check it with `--source-ref refs/tags/v<version>`. A manually dispatched run records the branch it ran from instead; for example, `v0.1.0-alpha.1` was built from `refs/heads/main`.
 
    The `publish` job refuses to modify an already-published release before it attests anything, so a rerun cannot create attestations for rebuilt files that are never uploaded.
 2. **Verify SHA-256 checksums** after downloading `SHA256SUMS.txt` alongside your release files:
@@ -143,14 +153,14 @@ gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag")
 ## 3. App-Specific Packaging Notes
 
 - **Canonical identity (`packaging/env.sh`):** All installers share App ID `org.curvebook.CurveBook`, repository `HauserGroup/curvebook`, binary/CLI slug `curvebook` / `curvebook-cli`, and project/template/interchange file associations (`.curvebook`, `.cbtemplate`, `.pzfx`, `.prism`). `packaging/check-app-specific.sh` must pass cleanly without template leftover strings.
-- **Full breaking cutover & separate install identity (`R0.20`):** CurveBook is a full breaking cutover with zero LumenCraft file readers, executable/env aliases, settings/recovery migrations, or browser-storage migrations. Renaming `.lumencraft` to `.curvebook` does not convert old archives (`lumencraft-archive` is explicitly rejected). Fresh CurveBook installers use a fresh Windows installer identity and never claim old `.lumencraft` / `.lctemplate` associations or uninstall/upgrade an existing LumenCraft installation. See [`file-formats.md` §4](../file-formats.md#4-breaking-cutover-legacy-rejection--residual-name-allowlist) for the narrow residual-name allowlist.
+- **Full breaking cutover & separate install identity (`R0.20`):** CurveBook is a full breaking cutover with zero legacy file readers, executable/env aliases, settings/recovery migrations, or browser-storage migrations. Fresh CurveBook installers use a fresh Windows installer identity and never claim legacy associations or uninstall/upgrade earlier pre-cutover software. See [`file-formats.md` §4](../file-formats.md#4-breaking-cutover-legacy-rejection--residual-name-allowlist) for the narrow residual-name allowlist.
 - **Zero Telemetry & Web Privacy Headers:** CurveBook ships zero telemetry, analytics, crash uploaders, update-check pings, or external third-party cloud scanners (`cargo xtask telemetry`). Web deployments bundle `packaging/web/_headers` and `packaging/web/.htaccess` enforcing `default-src 'self'`, `connect-src 'self'` (same-origin `.wasm` streaming only, zero external origins), `Referrer-Policy: no-referrer`, `Permissions-Policy`, `Cross-Origin-Opener-Policy: same-origin`, and `Cross-Origin-Embedder-Policy: require-corp`.
 - **Zero bundled fonts:** Packages do **not** embed binary fonts by default (`cargo xtask assets` rejects tracked `.ttf`/`.otf`/`.woff`/`.woff2`). Desktop releases probe OS font paths at runtime (`--ttf-font <path>` adds a face); `CURVEBOOK_FONTS_DIR` is read at build time (and for runtime overrides), and web tests using `bundled-fonts` require explicit local font staging (`cargo xtask web-fonts`) with matching licence notice rules ([docs/licences.md](../licences.md)).
-- **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.curvebook`, `.cbtemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`.
-- **Linux specifics:** `packaging/linux/` installs desktop, AppStream, icon sizes, and MIME definitions consistently for `.AppImage`, `.deb`, `.rpm`, and Flatpak (`org.curvebook.CurveBook`). Package formats that require a maintainer contact address (such as `.deb` / `.rpm` via `nfpm`) require an explicit `CURVEBOOK_MAINTAINER` environment variable and fail early if it is unset—there is no fallback email address—while `.tar.gz`/portable archive builds remain usable without `CURVEBOOK_MAINTAINER`.
-- **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../../packaging/windows/INSTALLATION.md)). Both `.msi` and `-portable.zip` link the static CRT to avoid external redistributable prompts. CurveBook installs into a separate `CurveBook` directory (`INSTALLFOLDER`) with fresh upgrade/component GUIDs so it installs alongside any existing LumenCraft installation without uninstalling or upgrading it.
-- **Windows signing and Store distribution:** [`windows-signing.md`](windows-signing.md) explains self-signing for trusted test machines without Azure, plus the Microsoft-signed MSIX Store route. The separate **Windows Store package** workflow prepares an unsigned x64 MSIX with the reserved Store identity; Microsoft signs Store packages after certification. The main **Release** builder continues to produce MSI and portable ZIP. Installed-app validation and Store publication remain open in [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution). A self-signed MSI/EXE does not meet Store MSI/EXE signing requirements.
-- **Web specifics:** Built via Trunk under `web-release` with relative root paths (`./`) and strict no-egress security headers (`packaging/web/{_headers,.htaccess}`) so bundles deploy cleanly on subpath hosts without rebuilding.
+- **macOS specifics:** `packaging/macos/Info.plist.in` registers UTIs/document handlers for `.curvebook`, `.cbtemplate`, `.pzfx`, and `.prism`; hardened runtime entitlements live in `packaging/macos/entitlements.plist`; [`packaging/macos/INSTALLATION.md`](../../packaging/macos/INSTALLATION.md) documents adding bundled `CurveBook.app/Contents/MacOS/curvebook-cli` to `PATH`.
+- **Linux specifics:** `packaging/linux/package.sh` builds `.AppImage` (`x86_64`, `aarch64`) embedding `.desktop`, AppStream metainfo, hicolor icons, and MIME definitions (`org.curvebook.CurveBook`), verified via `desktop-file-validate`, `appstreamcli validate`, and `packaging/linux/apprun-test.sh`.
+- **Windows specifics:** WiX v5 dual-scope MSI supports unprivileged per-user installation by default and elevated per-machine deployment ([packaging/windows/INSTALLATION.md](../../packaging/windows/INSTALLATION.md)) on `x64` and `arm64`, linking the static CRT to avoid external redistributable prompts.
+- **Windows signing and Store distribution:** [`windows-signing.md`](windows-signing.md) explains why Beta `.msi` downloads ship unsigned until `R8.11`, self-signing for trusted test machines without Azure, and the unsigned x64 MSIX route built by the separate **Windows Store package** workflow (`R8.9`).
+- **Web specifics:** Built via Trunk under `web-release` with relative root paths (`./`) and strict no-egress security headers (`packaging/web/{_headers,.htaccess}`), size-checked in CI (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1`), and deferred from GitHub Release asset attachment until `1.0`.
 
 ---
 
@@ -158,7 +168,7 @@ gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag")
 
 Once the release build passes verification and is published:
 
-1. Confirm the release-gate table in [docs/ROADMAP.md](../ROADMAP.md) (`Legacy Milestone & Gate Mapping`): the **Agent-harness workflows** gate (formerly "Core workflows") covers the semantic `gui_only` agent suite only, and a `1.0` release additionally requires the **Human GUI workflows** gate (`R10`).
+1. Confirm the release-gate table in [docs/ROADMAP.md](../ROADMAP.md) (`Legacy Milestone & Gate Mapping`).
 2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](../ROADMAP.md) (moving milestone archival notes to `docs/planning/roadmap-history.md` if retiring a milestone phase).
 3. Refresh and verify [docs/STATUS.md](../STATUS.md) and open-item summaries:
    ```sh

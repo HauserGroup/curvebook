@@ -1,10 +1,9 @@
 #!/usr/bin/env bash
-# Build, sign and (optionally) notarize the macOS release artifacts:
+# Build, sign and (optionally) notarize the macOS release artifact:
 #
-#   $DIST/curvebook-<version>-macos-<arch>.dmg          CurveBook.app on a drag-to-Applications DMG
-#   $DIST/curvebook-cli-<version>-macos-<arch>.zip      the headless CLI
+#   $DIST/curvebook-<version>-macos-<arch>.dmg          CurveBook.app (with bundled curvebook-cli) on a drag-to-Applications DMG
 #
-# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build]
+# Usage: packaging/macos/package.sh [--arch universal|aarch64|x86_64] [--skip-build] [--require-signing]
 set -euo pipefail
 # shellcheck source=../env.sh
 . "$(dirname "${BASH_SOURCE[0]}")/../env.sh"
@@ -12,10 +11,18 @@ HERE="$ROOT/packaging/macos"
 
 ARCH=universal
 SKIP_BUILD=0
+REQUIRE_SIGNING=0
+case "${CURVEBOOK_REQUIRE_MACOS_SIGNING:-0}" in
+  1 | true | TRUE | yes | YES) REQUIRE_SIGNING=1 ;;
+esac
+if [[ "${GITHUB_ACTIONS:-}" == "true" ]] && [[ "${ALPHA_RELEASE:-}" != "true" ]] && [[ "${GITHUB_EVENT_NAME:-}" != "schedule" ]]; then
+  REQUIRE_SIGNING=1
+fi
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --arch) ARCH="$2"; shift 2 ;;
     --skip-build) SKIP_BUILD=1; shift ;;
+    --require-signing) REQUIRE_SIGNING=1; shift ;;
     -h | --help) sed -n '2,8p' "$0"; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 2 ;;
   esac
@@ -33,14 +40,21 @@ SHORT_VERSION="${VERSION%%-*}"
 WORK="$CARGO_TARGET_DIR/macos-package"
 APP="$WORK/CurveBook.app"
 DMG="$DIST/curvebook-$VERSION-macos-$ARCH.dmg"
-CLI_ZIP="$DIST/curvebook-cli-$VERSION-macos-$ARCH.zip"
 
 NOTARIZE=0
 if [[ "$IDENTITY" = "-" ]]; then
+  if [[ "$REQUIRE_SIGNING" = 1 ]]; then
+    echo "error: MACOS_SIGN_IDENTITY is required when signing is enforced (refusing ad-hoc signing fallback)" >&2
+    exit 1
+  fi
   warn "macOS: ad-hoc signing (no MACOS_SIGN_IDENTITY); artifacts are not notarized"
 elif [[ -n "${APPLE_ID:-}" ]] && [[ -n "${APPLE_PASSWORD:-}" ]] && [[ -n "${APPLE_TEAM_ID:-}" ]]; then
   NOTARIZE=1
 else
+  if [[ "$REQUIRE_SIGNING" = 1 ]]; then
+    echo "error: APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID are required for notarization when signing is enforced" >&2
+    exit 1
+  fi
   warn "macOS: APPLE_ID / APPLE_PASSWORD / APPLE_TEAM_ID incomplete; signed but not notarized"
 fi
 
@@ -152,17 +166,6 @@ if [[ "$NOTARIZE" = 1 ]]; then
   spctl --assess --type open --context context:primary-signature -vvv "$DMG"
 fi
 
-echo "==> building $CLI_ZIP"
-CLI_DIR="$WORK/curvebook-cli-$VERSION-macos-$ARCH"
-mkdir -p "$CLI_DIR"
-cp "$WORK/bin/curvebook-cli" "$CLI_DIR/"
-copy_docs "$CLI_DIR"
-sign --options runtime "$CLI_DIR/curvebook-cli"
-codesign --verify --strict --verbose=2 "$CLI_DIR/curvebook-cli"
-rm -f "$CLI_ZIP"
-ditto -c -k --keepParent "$CLI_DIR" "$CLI_ZIP"
-if [[ "$NOTARIZE" = 1 ]]; then notarize "$CLI_ZIP"; fi
-
-"$WORK/bin/curvebook-cli" --version
+"$APP/Contents/MacOS/curvebook-cli" --version
 echo "==> done"
-ls -lh "$DMG" "$CLI_ZIP"
+ls -lh "$DMG"

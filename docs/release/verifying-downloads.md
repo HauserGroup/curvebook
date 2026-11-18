@@ -7,6 +7,20 @@ Every file on a CurveBook GitHub Release can be checked in two ways:
 
 A checksum on its own does not prove where a file came from: anyone able to replace a release file could replace `SHA256SUMS.txt` too. Check provenance at least once, either on `SHA256SUMS.txt` or on the file itself.
 
+## Beta release files (`R0.28`)
+
+From Beta onward, each GitHub Release provides one installer format per OS (`curvebook-cli` is included in every package):
+
+| Platform | File | OS signature status |
+|---|---|---|
+| macOS (`arm64` + `x86_64`) | `curvebook-<version>-macos-universal.dmg` | Signed with Apple Developer ID and notarized (`R8.10`; Alpha prereleases were ad-hoc signed). |
+| Windows (`x64`, `arm64`) | `curvebook-<version>-windows-x64.msi`, `curvebook-<version>-windows-arm64.msi` | **Unsigned** at Beta until `R8.11`. SmartScreen shows **More info → Run anyway**; Windows 11 Smart App Control or managed PCs may block unsigned installers. (`x86` and `-portable.zip` are retired.) |
+| Linux (`x86_64`, `aarch64`) | `curvebook-<version>-linux-x86_64.AppImage`, `curvebook-<version>-linux-aarch64.AppImage` | No detached GPG/Minisign file; verify via Sigstore attestation + `SHA256SUMS.txt`. |
+| FreeBSD (`x86_64`, preview) | `curvebook-<version>-freebsd-x86_64.tar.gz` | No detached signature file; verify via Sigstore attestation + `SHA256SUMS.txt`. |
+| Licences & Checksums | `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | Covered by Sigstore attestation. |
+
+*(The browser bundle `curvebook-web-<version>.zip` is deferred to the `1.0` release under `R0.28` / `R11`.)*
+
 ## What you need
 
 - The file you downloaded and `SHA256SUMS.txt` from the same release, in the same folder. Run every command below from that folder. With `gh`, you can fetch the checksum file with `gh release download v<version> --repo HauserGroup/curvebook --pattern SHA256SUMS.txt`.
@@ -37,6 +51,13 @@ A checksum on its own does not prove where a file came from: anyone able to repl
    shasum -a 256 --check --ignore-missing SHA256SUMS.txt
    ```
 
+   On macOS Beta and later releases, you can also inspect the Apple notarization and Gatekeeper assessment on the `.dmg` or installed `CurveBook.app`:
+
+   ```sh
+   spctl --assess --type open --context context:primary-signature -vvv curvebook-<version>-macos-universal.dmg
+   codesign --verify --strict --deep --verbose=2 /Applications/CurveBook.app
+   ```
+
    **FreeBSD** (replace the file name with the one you downloaded):
 
    ```sh
@@ -65,7 +86,7 @@ gh attestation verify <downloaded-file> --repo HauserGroup/curvebook \
 
 - The file's SHA-256 hash matches an attestation signed by `.github/workflows/release.yml` in `HauserGroup/curvebook`. The attestation names the commit and ref the release was built from.
 - Without `--signer-workflow`, `gh` accepts an attestation from *any* workflow in the repository, so keep that option.
-- It does not mean an operating system trusts the file. macOS Developer ID signing and notarization and Windows Authenticode signing are separate (`R8.10` and `R8.11` in the [roadmap](../ROADMAP.md)).
+- It does not mean an operating system trusts the file. macOS Developer ID signing and notarization (`R8.10`) ships for Beta; Windows Authenticode signing (`R8.11`) is deferred until after Beta, so Beta Windows `.msi` downloads are unsigned.
 
 ## If a check fails
 

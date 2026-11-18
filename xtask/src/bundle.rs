@@ -227,8 +227,6 @@ mod tests {
             "packaging/linux/org.curvebook.CurveBook.desktop",
             "packaging/linux/org.curvebook.CurveBook.metainfo.xml.in",
             "packaging/linux/org.curvebook.CurveBook.mime.xml",
-            "packaging/linux/flatpak/org.curvebook.CurveBook.yml",
-            "packaging/linux/flatpak/org.curvebook.CurveBook.bundle.yml",
             "packaging/windows/curvebook.wxs",
             "packaging/windows/install-policy.wxi",
             "packaging/windows/check-install-policy.ps1",

@@ -19,7 +19,15 @@ On Windows with WiX 5.0.2 and its UI/Util extensions:
 ./packaging/windows/test-install-policy.ps1 -OutputDirectory ./target/install-policy-tests
 ```
 
-The script compiles x64, x86 and arm64 metadata-only MSI fixtures with non-executable placeholder
+The script compiles x64 and arm64 metadata-only MSI fixtures with non-executable placeholder
 payloads and verifies scope guards, folder preservation, action sequencing, upgrade/component
 identity, and the registry contract in `install-policy.json` using a read-only Windows Installer
 session.
+
+Release builds produce `.msi` installers for Windows `x64` (`curvebook-<version>-windows-x64.msi`)
+and `arm64` (`curvebook-<version>-windows-arm64.msi`), each bundling both `curvebook.exe` and
+`curvebook-cli.exe` (`x86` / 32-bit and `-portable.zip` downloads were retired in `R0.28`).
+Beta `.msi` installers are **unsigned** until `R8.11`; verify `SHA256SUMS.txt` and the GitHub
+Sigstore attestation ([verifying downloads](../../docs/release/verifying-downloads.md)), and use
+SmartScreen **More info → Run anyway** if prompted (Windows 11 Smart App Control may block
+unsigned installers).

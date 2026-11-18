@@ -93,3 +93,10 @@ After folding all `12` Wave 6 shards, the `5` `w6-fix-*` fixes, the Classic cora
 | `r10_phase7_gates` (`--release`) | `6 passed; 0 failed` with the staged web zip present (see [`R10.22`](../planning/roadmap-history/r10.md#r1022-ui-performance--size-budgets)) |
 
 Temporary `dist/` outputs were removed before committing. EU, CJK, and RTL translations added in Wave 6 are machine-drafted and pending native-speaker review (not a branding concern); the `R10.14` UI-surface review is recorded by the zero-hit sweep above. Hosted GitHub Actions release assets still need the same rerun at tag time.
+
+---
+
+## 6. Hosted Release-Asset Scan (`R0.26`)
+
+- **CI wiring landed:** `cargo xtask release-scan` (`xtask/src/release_scan.rs`) is wired into every platform build job of [`.github/workflows/release.yml`](../../.github/workflows/release.yml) (`linux`, `macos`, `windows`, `freebsd` on the Ubuntu host after the VM build, and `web`) and into `publish` (`--expect-beta-set "$ver" --cross-os-reports dist/scan-reports` after generating `SHA256SUMS.txt`).
+- **Pending `v0.1.0-alpha.1` online backfill:** Scanning the already-published `v0.1.0-alpha.1` GitHub Release assets requires downloading them from GitHub (`gh release download v0.1.0-alpha.1 --repo HauserGroup/curvebook` followed by `cargo xtask release-scan <dir>`). Because offline verification environments have no network access, that backfill scan has not been run yet and no results are claimed here; run and record the backfill output here from an online maintainer environment before Beta release sign-off.

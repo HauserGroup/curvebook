@@ -139,8 +139,12 @@ fn r2_s13_04_all_workflows_pin_40_char_shas_and_verify_tool_checksums() {
     let coverage = fs::read_to_string(root.join(".github/workflows/coverage.yml")).unwrap();
     assert!(coverage.contains("d039b43c3e0958441b6ad0a39c8884d018b3d2e8fb9928f209074b1100b5e17a"));
     let release = fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
-    assert!(release.contains("17350a838c8e2c422c6e573ed379b18424565d2de8a2b1cb1b20211976124eb5"));
-    assert!(release.contains("b3cf95aa6dabed836d09ad7f0c190a13c74c5b1304db60846f0f702ee407f430"));
+    assert!(!release.contains("nfpm"), "nfpm must be removed from release.yml under R0.28");
+    let linux_pkg = fs::read_to_string(root.join("packaging/linux/package.sh")).unwrap();
+    assert!(linux_pkg.contains("ed4ce84f0d9caff66f50bcca6ff6f35aae54ce8135408b3fa33abfc3cb384eb0"));
+    assert!(linux_pkg.contains("f0837e7448a0c1e4e650a93bb3e85802546e60654ef287576f46c71c126a9158"));
+    assert!(linux_pkg.contains("2fca8b443c92510f1483a883f60061ad09b46b978b2631c807cd873a47ec260d"));
+    assert!(linux_pkg.contains("00cbdfcf917cc6c0ff6d3347d59e0ca1f7f45a6df1a428a0d6d8a78664d87444"));
 }
 
 #[test]
@@ -222,9 +226,7 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     let bin_dir = fx.path.join("bin");
     fs::create_dir_all(&bin_dir).unwrap();
     let dmg_mount = fx.path.join("mount");
-    let cli_bin_dir = fx.path.join("cli-stage");
     fs::create_dir_all(&dmg_mount).unwrap();
-    fs::create_dir_all(&cli_bin_dir).unwrap();
 
     let write_exe = |name: &str, body: &str| {
         let p = bin_dir.join(name);
@@ -244,7 +246,7 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     write_exe("plutil", "#!/usr/bin/env bash\nexit 0\n");
     write_exe(
         "codesign",
-        "#!/usr/bin/env bash\nif [ \"$1\" = \"-dv\" ]; then\n  if [ \"${MOCK_SIGNED:-0}\" = \"1\" ]; then\n    echo 'Authority=Developer ID Application: Test' >&2\n    echo 'flags=0x10000(runtime)' >&2\n    echo 'Timestamp=Jan 1, 2026' >&2\n  else\n    echo 'Signature=adhoc' >&2\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"--test-requirement==notarized\" ]; then\n  if [ \"${MOCK_NOTARIZED:-0}\" = \"1\" ]; then exit 0; fi\n  echo 'rejected (un-notarized executable)' >&2\n  exit 1\nfi\nexit 0\n",
+        "#!/usr/bin/env bash\nif [ \"$1\" = \"-dv\" ]; then\n  if [ \"${MOCK_SIGNED:-0}\" = \"1\" ]; then\n    echo 'Authority=Developer ID Application: Test' >&2\n    echo 'flags=0x10000(runtime)' >&2\n    echo 'Timestamp=Jan 1, 2026' >&2\n  else\n    echo 'Signature=adhoc' >&2\n  fi\n  exit 0\nfi\nif [ \"$1\" = \"--test-requirement==notarized\" ]; then\n  if [ \"${MOCK_CLI_NOTARIZED:-${MOCK_NOTARIZED:-0}}\" = \"1\" ]; then exit 0; fi\n  echo 'rejected (un-notarized executable)' >&2\n  exit 1\nfi\nexit 0\n",
     );
     write_exe("xcrun", "#!/usr/bin/env bash\nif [ \"${MOCK_NOTARIZED:-0}\" = \"1\" ]; then exit 0; fi\nexit 1\n");
     write_exe(
@@ -253,25 +255,16 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     );
     write_exe("lipo", "#!/usr/bin/env bash\necho 'x86_64 arm64'\n");
     write_exe("arch", "#!/usr/bin/env bash\nshift\nexec \"$@\"\n");
-    write_exe("ditto", &format!("#!/usr/bin/env bash\ncp \"{}/curvebook-cli\" \"$4/curvebook-cli\"\n", cli_bin_dir.display()));
     write_exe("uname", "#!/usr/bin/env bash\ncase \"${1:-}\" in\n  -m) echo 'arm64' ;;\n  *) echo \"${MOCK_UNAME_S:-Darwin}\" ;;\nesac\n");
 
-    let mock_cli = cli_bin_dir.join("curvebook-cli");
-    fs::write(&mock_cli, "#!/usr/bin/env bash\necho 'curvebook-cli 0.1.0'\n").unwrap();
-    let mut perms = fs::metadata(&mock_cli).unwrap().permissions();
-    perms.set_mode(0o755);
-    fs::set_permissions(&mock_cli, perms.clone()).unwrap();
-
     let dmg = fx.path.join("app.dmg");
-    let zip = fx.path.join("cli.zip");
     fs::write(&dmg, b"dmg").unwrap();
-    fs::write(&zip, b"zip").unwrap();
 
     let path_env = format!("{}:/usr/bin:/bin", bin_dir.display());
     // 0. Non-macOS host (`uname -s != Darwin`) must fail cleanly.
     let non_macos = Command::new("bash")
         .arg(&verify_sh)
-        .args(["--arch", "universal", dmg.to_str().unwrap(), zip.to_str().unwrap()])
+        .args(["--arch", "universal", dmg.to_str().unwrap()])
         .env("PATH", &path_env)
         .env("MOCK_UNAME_S", "Linux")
         .output()
@@ -280,57 +273,67 @@ fn r2_s11_10_macos_verify_sh_checks_dmg_app_and_require_notarized_cli() {
     assert!(String::from_utf8_lossy(&non_macos.stderr).contains("must run on macOS"), "{}", String::from_utf8_lossy(&non_macos.stderr));
 
     // 1. Missing CurveBook.app inside mounted DMG must fail.
-    let missing_app = Command::new("bash")
-        .arg(&verify_sh)
-        .args(["--arch", "universal", dmg.to_str().unwrap(), zip.to_str().unwrap()])
-        .env("PATH", &path_env)
-        .output()
-        .unwrap();
+    let missing_app =
+        Command::new("bash").arg(&verify_sh).args(["--arch", "universal", dmg.to_str().unwrap()]).env("PATH", &path_env).output().unwrap();
     assert!(!missing_app.status.success());
     assert!(String::from_utf8_lossy(&missing_app.stderr).contains("CurveBook.app"), "{}", String::from_utf8_lossy(&missing_app.stderr));
 
-    // Create CurveBook.app inside mounted DMG.
+    // Create CurveBook.app without curvebook-cli -> must fail.
     fs::create_dir_all(dmg_mount.join("CurveBook.app/Contents/MacOS")).unwrap();
     fs::write(dmg_mount.join("CurveBook.app/Contents/Info.plist"), "<plist/>").unwrap();
     let app_bin = dmg_mount.join("CurveBook.app/Contents/MacOS/curvebook");
     fs::write(&app_bin, "#!/usr/bin/env bash\nexit 0\n").unwrap();
-    fs::set_permissions(&app_bin, perms).unwrap();
+    let mut perms = fs::metadata(&app_bin).unwrap().permissions();
+    perms.set_mode(0o755);
+    fs::set_permissions(&app_bin, perms.clone()).unwrap();
 
-    // 2. Ad-hoc CLI under `--require-notarized` must fail.
+    let missing_cli =
+        Command::new("bash").arg(&verify_sh).args(["--arch", "universal", dmg.to_str().unwrap()]).env("PATH", &path_env).output().unwrap();
+    assert!(!missing_cli.status.success());
+    assert!(String::from_utf8_lossy(&missing_cli.stderr).contains("curvebook-cli"), "{}", String::from_utf8_lossy(&missing_cli.stderr));
+
+    // Populate bundled curvebook-cli inside CurveBook.app/Contents/MacOS/.
+    let cli_bin = dmg_mount.join("CurveBook.app/Contents/MacOS/curvebook-cli");
+    fs::write(&cli_bin, "#!/usr/bin/env bash\necho 'curvebook-cli 0.1.0'\n").unwrap();
+    fs::set_permissions(&cli_bin, perms).unwrap();
+
+    // 2. Ad-hoc DMG/app/CLI under `--require-notarized` must fail.
     let adhoc_notarize = Command::new("bash")
         .arg(&verify_sh)
-        .args(["--arch", "universal", "--require-notarized", dmg.to_str().unwrap(), zip.to_str().unwrap()])
+        .args(["--arch", "universal", "--require-notarized", dmg.to_str().unwrap()])
         .env("PATH", &path_env)
         .env("MOCK_SIGNED", "0")
         .output()
         .unwrap();
     assert!(!adhoc_notarize.status.success());
 
-    // 3. Developer-ID signed but un-notarized standalone CLI `.zip` must fail
-    // `codesign --test-requirement="=notarized"` inside `verify_cli_zip`.
-    let signed_unnotarized = Command::new("bash")
+    // 3. Developer-ID signed DMG/app where bundled `curvebook-cli` fails
+    // `codesign --test-requirement="=notarized"` must fail under `--require-notarized`.
+    let signed_unnotarized_cli = Command::new("bash")
         .arg(&verify_sh)
-        .args(["--arch", "universal", "--require-notarized", zip.to_str().unwrap()])
-        .env("PATH", &path_env)
-        .env("MOCK_SIGNED", "1")
-        .env("MOCK_NOTARIZED", "0")
-        .output()
-        .unwrap();
-    assert!(!signed_unnotarized.status.success());
-    assert!(
-        String::from_utf8_lossy(&signed_unnotarized.stderr).contains("un-notarized"),
-        "expected notarization check failure in verify_cli_zip, got stderr={}",
-        String::from_utf8_lossy(&signed_unnotarized.stderr)
-    );
-
-    // 4. Properly signed + notarized `.dmg` & standalone CLI `.zip` pass `--require-notarized`
-    // without calling `spctl` on the bare CLI executable.
-    let pass = Command::new("bash")
-        .arg(&verify_sh)
-        .args(["--arch", "universal", "--require-notarized", dmg.to_str().unwrap(), zip.to_str().unwrap()])
+        .args(["--arch", "universal", "--require-notarized", dmg.to_str().unwrap()])
         .env("PATH", &path_env)
         .env("MOCK_SIGNED", "1")
         .env("MOCK_NOTARIZED", "1")
+        .env("MOCK_CLI_NOTARIZED", "0")
+        .output()
+        .unwrap();
+    assert!(!signed_unnotarized_cli.status.success());
+    assert!(
+        String::from_utf8_lossy(&signed_unnotarized_cli.stderr).contains("un-notarized"),
+        "expected notarization check failure for bundled curvebook-cli, got stderr={}",
+        String::from_utf8_lossy(&signed_unnotarized_cli.stderr)
+    );
+
+    // 4. Properly signed + notarized `.dmg`, `.app`, and bundled `curvebook-cli` pass `--require-notarized`
+    // without calling `spctl` on the bare CLI executable.
+    let pass = Command::new("bash")
+        .arg(&verify_sh)
+        .args(["--arch", "universal", "--require-notarized", dmg.to_str().unwrap()])
+        .env("PATH", &path_env)
+        .env("MOCK_SIGNED", "1")
+        .env("MOCK_NOTARIZED", "1")
+        .env("MOCK_CLI_NOTARIZED", "1")
         .output()
         .unwrap();
     assert!(pass.status.success(), "stderr={}", String::from_utf8_lossy(&pass.stderr));
