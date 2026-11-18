@@ -61,7 +61,7 @@ impl std::fmt::Display for DuplicateKey {
 }
 
 /// Violation emitted when a `[x]` UI claim or non-zero human-path entry lacks qualifying
-/// human-path test or recorded manual verification evidence.
+/// human-path test or recorded computer-use / manual verification evidence.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EvidenceViolation {
     pub path: String,
@@ -502,9 +502,12 @@ fn validate_human_evidence(path: &str, line: usize, text: &str, known_tests: Opt
 
     if valid_tests.is_empty() && !has_recorded_manual_run(text) {
         let reason = if unknown_tests.is_empty() {
-            String::from("missing passing human-path test name or recorded manual run")
+            String::from("missing passing human-path test name or recorded computer-use/manual run")
         } else {
-            format!("missing passing human-path test or recorded manual run (unmatched test identifier(s): {})", unknown_tests.join(", "))
+            format!(
+                "missing passing human-path test or recorded computer-use/manual run (unmatched test identifier(s): {})",
+                unknown_tests.join(", ")
+            )
         };
         return Some(EvidenceViolation { path: path.to_owned(), line, reason });
     }
@@ -594,7 +597,22 @@ fn is_test_identifier(tok: &str) -> bool {
 
 fn has_recorded_manual_run(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();
-    for prefix in ["manual:", "manual run:", "manual walkthrough:", "manual-verified:", "recorded manual:", "manual qa:"] {
+    for prefix in [
+        "manual:",
+        "manual run:",
+        "manual walkthrough:",
+        "manual-verified:",
+        "recorded manual:",
+        "manual qa:",
+        "computer-use:",
+        "computer-use run:",
+        "computer-use walkthrough:",
+        "computer-use qa:",
+        "recorded computer-use:",
+        "computer use:",
+        "computer use walkthrough:",
+        "computer use qa:",
+    ] {
         if let Some(pos) = lower.find(prefix)
             && !is_negated_prefix(&lower[..pos])
             && has_concrete_manual_detail(&lower[pos + prefix.len()..])
@@ -602,7 +620,19 @@ fn has_recorded_manual_run(text: &str) -> bool {
             return true;
         }
     }
-    ["manual (", "manual run (", "manual walkthrough ("].iter().any(|marker| {
+    [
+        "manual (",
+        "manual run (",
+        "manual walkthrough (",
+        "computer-use (",
+        "computer-use run (",
+        "computer-use walkthrough (",
+        "computer-use qa (",
+        "computer use (",
+        "computer use walkthrough (",
+    ]
+    .iter()
+    .any(|marker| {
         lower.find(marker).is_some_and(|pos| {
             !is_negated_prefix(&lower[..pos])
                 && lower[pos + marker.len()..].split_once(')').is_some_and(|(inside, _)| {
@@ -749,11 +779,29 @@ A checkbox `[x]` in prose is ignored.
             "- [x] Open dialog — manual walkthrough (pending 2026-11).\n",
             "- [x] Open dialog — no manual (2026-11-16) yet.\n",
             "- [x] Open dialog — manual (none recorded 2026).\n",
+            "- [x] Native save — no computer-use run yet; computer-use: todo.\n",
+            "- [x] Open dialog — computer-use walkthrough (pending 2026-11).\n",
+            "- [x] Open dialog — without computer-use (2026-11-18) verification.\n",
         ];
         for md in cases {
             let violations = check_ui_parity_evidence("docs/ui-parity.md", md, None);
             assert_eq!(violations.len(), 1, "expected rejection for `{md}`, got {violations:?}");
         }
+    }
+
+    #[test]
+    fn computer_use_walkthrough_accepts_mouse_screen_run_and_rejects_harness_mix() {
+        let valid_md = "\
+- [x] Native Save — computer-use: 2026-11-18 macOS desktop mouse+screen QA.
+- [x] Native Print — computer-use walkthrough (2026-11-18 macOS + Safari).
+";
+        let violations = check_ui_parity_evidence("docs/ui-parity.md", valid_md, None);
+        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
+
+        let harness_mixed = "- [x] Save dialog — computer-use: 2026-11-18 driven via `--control` and `ui.click`.\n";
+        let bad = check_ui_parity_evidence("docs/ui-parity.md", harness_mixed, None);
+        assert_eq!(bad.len(), 1, "expected agent-harness rejection, got {bad:?}");
+        assert!(bad[0].reason.contains("agent-harness"), "got `{}`", bad[0].reason);
     }
 
     #[test]

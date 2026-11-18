@@ -1,6 +1,20 @@
-# Website design decisions
+# Website and GitHub Pages design decisions
 
-Decision date: 2026-11-17. Scope: the static GitHub Pages entry point in [`index.html`](../index.html), styled by [`site.css`](../site.css). Publication is separate; see [`github-pages.md`](github-pages.md).
+Decisions made: 2026-11-16–17. Record clarified: 2026-11-18. Scope: the static GitHub Pages entry point in [`index.html`](../index.html), styled by [`site.css`](../site.css). Publication is separate; see [`github-pages.md`](github-pages.md).
+
+## Scope
+
+This record governs the public CurveBook website and its GitHub Pages presentation: page structure, visitor-facing copy, visual styling, links, accessibility, and publication. It does not prescribe the desktop application interface, browser application interface, application themes, menus, dialogs, or scientific graph styles. References to windows, title bars, or desktop styling below describe the website's visual treatment only.
+
+## Rationale and choices made
+
+- **One page with a clear hierarchy:** keep the product introduction, complete-workspace sharing, and downloads together. One primary action and two navigation links give visitors a short path to the essentials. Detailed setup and reference material stay in the existing documentation.
+- **Scientific-software identity:** describe CurveBook as an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written from scratch in pure Rust. The landing page should introduce the product; MCP belongs in the setup and release-status context.
+- **Workspace sharing as a central benefit:** make the saved `.curvebook` project prominent rather than presenting sharing as a minor export option. Explain the single-file mechanism and preserve the distinction from live collaboration.
+- **Classic coral over the turquoise proposals:** the earlier turquoise direction made too much of the page feel teal. Warm-grey chrome and white document surfaces provide a quiet base; slate title bars and a restrained coral action give the page character. Keep the logo's spectrum intact and use its warm colors as inspiration for the accent.
+- **A familiar desktop-era visual language:** use square corners, compact typography, two-pixel bevels, inset surfaces, and a status-like footer. Borrow the structural character of the Windows 95 era while retaining an original palette and an ordinary responsive web document.
+- **System fonts for now:** use Tahoma/Verdana with sans-serif fallbacks. A custom typeface is technically possible, but none was selected or added; the current design uses no downloaded font binaries or external font service.
+- **Visible, accurate disclosures:** retain the explicit dual-licence label, clean-room development statement, local/no-telemetry statement, and brief release-readiness note. Do not promote full feature parity as an achieved fact while acceptance work remains open.
 
 ## Purpose and hierarchy
 
