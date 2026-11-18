@@ -1665,6 +1665,41 @@ mod tests {
     }
 
     #[test]
+    fn clipped_overlay_auc_matches_exact_original_point_weights() {
+        use curvebook_doc::{CurveSamplePoint, FittedCurveOverlay};
+        use curvebook_testkit::assert_approx_eq;
+
+        let xs = [0.0, 2.0, 5.0, 9.0];
+        let mut scratch = Vec::new();
+        let mut collapsed = Vec::new();
+        let mut integrate = |ys: [f64; 4]| {
+            let overlay = FittedCurveOverlay {
+                data_set_index: 0,
+                equation_id: "straight_line".to_owned(),
+                converged: true,
+                ambiguous: false,
+                points: xs
+                    .into_iter()
+                    .zip(ys)
+                    .map(|(x, y)| CurveSamplePoint { x, y, ci_lower: None, ci_upper: None, pred_lower: None, pred_upper: None })
+                    .collect(),
+            };
+            super::compute_curve_overlay_auc(&overlay, 0.5, 7.5, &mut scratch, &mut collapsed).expect("both limits lie inside the overlay")
+        };
+
+        // Integrate the linear basis functions on [0.5, 2], [2, 5], and [5, 7.5].
+        // Their contributions are [9/16, 15/16], [3/2, 3/2], and [55/32, 25/32].
+        // With baseline-relative ordinates [-2, 3, -1, 2], the dot product is 145/32.
+        let abs_tol = 1e-12;
+        assert_approx_eq(integrate([-2.0, 3.0, -1.0, 2.0]), 145.0 / 32.0, abs_tol, 0.0, "clipped signed area");
+        for (i, weight) in [9.0 / 16.0, 39.0 / 16.0, 103.0 / 32.0, 25.0 / 32.0].into_iter().enumerate() {
+            let mut basis = [0.0; 4];
+            basis[i] = 1.0;
+            assert_approx_eq(integrate(basis), weight, abs_tol, 0.0, &format!("clipped coefficient at x={}", xs[i]));
+        }
+    }
+
+    #[test]
     fn compute_curve_overlay_auc_rejects_narrowed_or_disjoint_overlays() {
         use curvebook_doc::{CurveSamplePoint, FittedCurveOverlay};
 
