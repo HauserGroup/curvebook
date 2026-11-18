@@ -1,6 +1,6 @@
-# CurveBook Alpha Known Issues & Release Scope (`v0.1.0-alpha.1`)
+# CurveBook Alpha Known Issues & Release Scope (`v0.1.0-alpha.2`)
 
-> **Release tier:** MCP Alpha (`v0.1.0-alpha.1`, prerelease) · **Primary surface:** `curvebook-cli` & `curvebook-cli mcp` (stdio JSON-RPC 2.0) · **Onboarding:** [`mcp-for-beginners.md`](../mcp-for-beginners.md) · **Branding & provenance clearance:** [`alpha-branding-clearance.md`](alpha-branding-clearance.md)
+> **Release tier:** MCP Alpha (`v0.1.0-alpha.2`, prerelease) · **Primary surface:** `curvebook-cli` & `curvebook-cli mcp` (stdio JSON-RPC 2.0) · **Onboarding:** [`mcp-for-beginners.md`](../mcp-for-beginners.md) · **Branding & provenance clearance:** [`alpha-branding-clearance.md`](alpha-branding-clearance.md)
 
 This document records the supported functional scope, known limitations, platform signing caveats, and GitHub Release notes template for CurveBook's public Alpha launch ([`R0.20`](../ROADMAP.md#r020-rename-lumencraft-to-curvebook), [`R0.21`](../ROADMAP.md#r021-strict-alpha-branding-and-asset-provenance-gate), [`R0.14`](../ROADMAP.md#r014-release-verification-scripts--readme-scaffold)).
 
@@ -17,11 +17,11 @@ Alpha delivers full Model Context Protocol (MCP) and command-line access to Curv
 
 ---
 
-## 2. Known Limitations & Caveats in `v0.1.0-alpha.1`
+## 2. Known Limitations & Caveats in `v0.1.0-alpha.2`
 
 1. **Point-and-click desktop & browser GUI is pre-alpha (`R10`):**
    - Human-operable GUI completion (`R10`, accepted through [`R10.13`](../ROADMAP.md#r1013-human-operable-50-workflow-acceptance--manual-qa)) is a separate `1.0` milestone and is **not** required or claimed for Alpha. Treat the desktop window (`curvebook`) and WebAssembly bundle (`curvebook-web`) as experimental previews; use `curvebook-cli mcp` or `curvebook-cli` for Alpha workflows.
-2. **Unsigned Windows & ad-hoc signed macOS packages (`R8.5`, `R8.9`):**
+2. **Unsigned Windows & ad-hoc signed macOS packages (signing is the Beta gate [`R8.10`](../ROADMAP.md#r810-signed-installers-on-every-platform-beta-gate); Store packaging in `R8.9`):**
    - **macOS (`.dmg`, CLI `.zip`):** Built with ad-hoc code signatures (`MACOS_SIGN_IDENTITY="-"`) and no Apple Developer ID notarization. macOS Gatekeeper will prompt on first launch; use **System Settings → Privacy & Security → Open Anyway** (or clear quarantine on an extracted CLI archive after verifying `SHA256SUMS.txt`).
    - **Windows (`.msi`, `-portable.zip`):** Built without Authenticode/Azure code signing in Alpha mode. Windows SmartScreen or enterprise policies may display an unknown-publisher prompt (see [`windows-signing.md`](windows-signing.md)). Microsoft Store MSIX packaging remains planned under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
    - **Linux (`.deb` / `.rpm` maintainer variable):** `.AppImage`, `.tar.gz`, and `.flatpak` build unconditionally in CI; `.deb` and `.rpm` packages are emitted only when the GitHub Actions repository variable `CURVEBOOK_MAINTAINER` (`Name <email>`) is configured on `HauserGroup/curvebook`.
@@ -30,16 +30,16 @@ Alpha delivers full Model Context Protocol (MCP) and command-line access to Curv
    - Pre-cutover `.lumencraft`, `.lumencraft.d/`, `.lctemplate`, `lumencraft-archive`, and `lumencraft.batch.v1` files are intentionally rejected with no compatibility reader or migration tool. Renaming file extensions does not convert old archives ([`file-formats.md` §4](../file-formats.md#4-breaking-cutover-legacy-rejection--residual-name-allowlist)).
 4. **Evolving interfaces & pre-`1.0` audit/QA tracks:**
    - Command parameter schemas, MCP toolset layouts, and persisted schema versions may change between Alpha builds (newer file versions are refused cleanly rather than overwritten).
-   - Cross-OS hardware VM walkthroughs (Windows, Linux X11/Wayland, FreeBSD, live browser QA in `R8.5`) and hosted GitHub Actions CI matrix runs (`R0.6` / `R0.24`) remain open alongside post-Alpha statistical/formula extensions (`R3.6`, `R3.7`, `R6.3`, and deferred `R9.10`/`R9.11`/`R9.13`/`R9.15` calculators) and any unmerged `R0.25` edge-case review items at tag time. See [`STATUS.md`](../STATUS.md) and [`ROADMAP.md`](../ROADMAP.md) for current verification records.
+   - Cross-OS hardware VM walkthroughs (Windows, Linux X11/Wayland, FreeBSD, live browser QA in `R8.5`) and hosted GitHub Actions CI matrix runs (`R0.6` / `R0.24`) remain open, alongside the deferred `R9.10`/`R9.11`/`R9.13`/`R9.15` quality-of-life items. The `R3.6`, `R3.7`, and `R6.3` extensions and all `R0.25` review fixes are included from `v0.1.0-alpha.2`. See [`STATUS.md`](../STATUS.md) and [`ROADMAP.md`](../ROADMAP.md) for current verification records.
 
 ---
 
 ## 3. GitHub Draft Prerelease Notes Template
 
-Copy and adapt the summary below when publishing the reviewed **`CurveBook Alpha v0.1.0-alpha.1`** draft prerelease created by [`.github/workflows/release.yml`](../../.github/workflows/release.yml) (keep **Set as a pre-release** checked and **Set as the latest release** unchecked):
+Copy and adapt the summary below when publishing the reviewed **`CurveBook Alpha v0.1.0-alpha.2`** draft prerelease created by [`.github/workflows/release.yml`](../../.github/workflows/release.yml) (keep **Set as a pre-release** checked and **Set as the latest release** unchecked):
 
 ```markdown
-## CurveBook Alpha v0.1.0-alpha.1 (MCP & CLI Prerelease)
+## CurveBook Alpha v0.1.0-alpha.2 (MCP & CLI Prerelease)
 
 **New to CurveBook?** Start with the **[Beginner's Guide to using CurveBook with your AI assistant](https://github.com/HauserGroup/curvebook/blob/main/docs/mcp-for-beginners.md)**.
 
@@ -47,10 +47,16 @@ CurveBook is an open-source, clean-room biostatistics, nonlinear regression, and
 
 ### Which file should I download?
 For connecting Claude Desktop or another local MCP client, download the package containing `curvebook-cli` (`curvebook-cli.exe` on Windows):
-- **macOS (Apple Silicon & Intel):** `curvebook-cli-0.1.0-alpha.1-macos-universal.zip` *(or `curvebook-0.1.0-alpha.1-macos-universal.dmg`)*
-- **Windows (`x64`, `arm64`, `x86`):** `curvebook-0.1.0-alpha.1-windows-x64-portable.zip` *(or `.msi` installer)*
-- **Linux (`x86_64`, `aarch64`):** `curvebook-0.1.0-alpha.1-linux-x86_64.tar.gz` *(plus `.AppImage`, `.flatpak`, and `.deb`/`.rpm` when configured)*
-- **FreeBSD (`x86_64`):** `curvebook-0.1.0-alpha.1-freebsd-x86_64.tar.gz`
+- **macOS (Apple Silicon & Intel):** `curvebook-cli-0.1.0-alpha.2-macos-universal.zip` *(or `curvebook-0.1.0-alpha.2-macos-universal.dmg`)*
+- **Windows (`x64`, `arm64`, `x86`):** `curvebook-0.1.0-alpha.2-windows-x64-portable.zip` *(or `.msi` installer)*
+- **Linux (`x86_64`, `aarch64`):** `curvebook-0.1.0-alpha.2-linux-x86_64.tar.gz` *(plus `.AppImage`, `.flatpak`, and `.deb`/`.rpm` when configured)*
+- **FreeBSD (`x86_64`):** `curvebook-0.1.0-alpha.2-freebsd-x86_64.tar.gz`
+
+### What's new since v0.1.0-alpha.1
+- **Statistics:** mixed-effects REML for one-way and three-way repeated measures with selectable Kenward–Roger or Satterthwaite *df* (`R3.6`); exact Cox tie handling, per-risk-set stabilisation, and Baptista–Pike odds-ratio intervals for large tables (`R3.7`).
+- **Formulas:** window clauses (`OVER`, `WHERE`, `ORDER BY`, `ROWS`), more conditional aggregates, and derived formulas in Select & Transform (`R6.3`).
+- **Fixes:** the remaining milestone-review findings across the engine, statistics, fitting, MCP, and web host (`R0.25`).
+- **Releases:** candidate and Alpha tags are always published as prereleases (`R0.14`).
 
 ### Early-release notes & OS security prompts
 - **MCP Alpha scope:** The stdio MCP server (`curvebook-cli mcp`) and CLI runner are ready for testing. The point-and-click desktop and browser GUI (`R10`) is still under active development and is **not** complete in this Alpha.
