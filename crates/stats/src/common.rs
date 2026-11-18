@@ -1,4 +1,13 @@
 //! Shared numerical, ranking, quantile, validation, and `ResultSheet` construction helpers.
+//!
+//! References:
+//! - Hyndman, R. J., & Fan, Y. (1996). Sample quantiles in statistical packages. *The American
+//!   Statistician*, 50(4), 361-365. `doi:10.1080/00031305.1996.10473566`.
+//! - Johnson, D. B., & Mizoguchi, T. (1978). Selecting the *K*th element in *X* + *Y* and
+//!   *X*1 + *X*2 + ... + *X*m. *SIAM Journal on Computing*, 7(2), 147-153. `doi:10.1137/0207013`.
+//! - Kruskal, W. H., & Wallis, W. A. (1952). Use of ranks in one-criterion variance analysis.
+//!   *Journal of the American Statistical Association*, 47(260), 583-621.
+//!   `doi:10.1080/01621459.1952.10483441`.
 
 use curvebook_doc::{
     AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, RemediationKind, ResultCell, ResultScalarEntry,
@@ -31,6 +40,9 @@ pub fn sorted_finite(values: &[f64]) -> Vec<f64> {
 
 /// Linearly interpolated quantile (`R` type 7 / standard continuous quantile) on a sorted slice
 /// for `p` in `[0.0, 1.0]`.
+///
+/// This is Definition 7 of Hyndman & Fan (1996): linear interpolation between the points
+/// `(p_k, x_(k))` with `p_k = (k - 1) / (n - 1)`, that is, the 0-based position `p * (n - 1)`.
 #[must_use]
 pub fn quantile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
     let n = sorted.len();
@@ -100,6 +112,10 @@ pub struct TieRankResult {
 }
 
 /// Assign 1-based average ranks in `O(n log n)` with exact tie group accounting.
+///
+/// Tied values share the mean of the ranks they span (mid-ranks). The returned
+/// `sum_k (t_k^3 - t_k)` over tie groups of size `t_k` is the quantity in the tie corrections of
+/// rank tests such as Kruskal & Wallis (1952), `1 - sum (t^3 - t) / (N^3 - N)`.
 pub fn rank_with_ties(values: &[f64]) -> Result<TieRankResult, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
@@ -599,6 +615,13 @@ fn normalize_zero(v: f64) -> f64 {
 
 /// Exact `k`-th smallest (`0`-based) pairwise sum `sorted_xs[i] + sorted_ys[j]` across all pairs
 /// in `O((n + m) log(n + m))` without materializing `O(n * m)` pairs. Both inputs must be sorted ascending and finite.
+///
+/// Algorithm KTHPAIR of Johnson & Mizoguchi (1978): treat `x_i + y_j` as a matrix whose rows and
+/// columns are sorted, take the middle element of each row's remaining range weighted by that
+/// range's length, partition every row at the weighted median of those elements, and discard the
+/// part that cannot contain the `k`-th element. This differs from the paper in two details:
+/// equal values are split into `<`, `=` and `>` counts so the pivot is returned as soon as it is
+/// the answer, and the remaining candidates are selected directly once at most 256 remain.
 pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> Result<f64, StatsError> {
     validate_finite_slice(sorted_xs)?;
     validate_finite_slice(sorted_ys)?;
@@ -619,6 +642,10 @@ pub fn select_kth_pairwise_sum(sorted_xs: &[f64], sorted_ys: &[f64], k: u64) -> 
 
 /// Exact `k`-th smallest (`0`-based) upper-triangular Walsh average `0.5 * (sorted_x[i] + sorted_x[j])`
 /// for `0 <= i <= j < n` in `O(n log n)` without materializing `O(n^2)` pairs. Input must be sorted ascending and finite.
+///
+/// This is the `X + X` case of Johnson & Mizoguchi (1978, Corollary to Theorem 1), with pairs
+/// restricted to `i <= j` (each row starts at its diagonal). The selection itself is the same as
+/// in [`select_kth_pairwise_sum`].
 pub fn select_kth_upper_triangle_half_sum(sorted_x: &[f64], k: u64) -> Result<f64, StatsError> {
     validate_finite_slice(sorted_x)?;
     let n = sorted_x.len();
