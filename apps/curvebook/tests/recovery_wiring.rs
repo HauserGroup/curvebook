@@ -383,3 +383,126 @@ fn r1_s11_05_and_06_binary_corrupt_prefs_config_dir_and_no_prefs() -> Result<(),
 
     Ok(())
 }
+
+#[test]
+fn audit_2_mixed_batch_undo_and_create_recovers_exact_sheet_count() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDirGuard::new("audit2-mixed-batch")?;
+    let recovery_dir = dir.path.join("recovery");
+    let auth = ControlAuth::from_token("audit2-mixed-batch-control-token")?;
+    let viewport = ViewportMetrics::new(900.0, 620.0, 1.0);
+
+    {
+        let (session, journal, report) = Session::open_dir_with_recovery(&recovery_dir, "audit2-1", 2_000, 1_000)?;
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(recovery_dir.clone()), ..DesktopHostConfig::default() });
+        let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
+        let win = rt.window_mut(win_id)?;
+
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t2", "title": "Second", "archetype": "column", "cols": 1, "rows": 2 }))?;
+
+        // Mixed batch: edit.undo removes `t2`, then sheet.createData creates `t3` -> live state has ["t1", "t3"].
+        let batch_req = json!({
+            "id": "b1",
+            "method": "command.batch",
+            "token": auth.as_str(),
+            "params": {
+                "atomic": true,
+                "commands": [
+                    { "command": "edit.undo", "params": {} },
+                    { "command": "sheet.createData", "params": { "sheet_id": "t3", "title": "Third", "archetype": "column", "cols": 1, "rows": 2 } }
+                ]
+            }
+        });
+        let input = format!("{batch_req}\n");
+        let mut reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let mut out = Vec::new();
+        let quit = win.serve_control_stream_with_quit(&mut reader, &mut out, &auth)?;
+        assert!(!quit);
+        let resp: Value = serde_json::from_slice(&out)?;
+        assert_eq!(resp["ok"], json!(true), "mixed batch failed: {resp}");
+
+        let live_ids: Vec<&str> = win.app().session().document().data_sheets.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(live_ids, vec!["t1", "t3"]);
+        drop(rt);
+    }
+
+    let mut rec_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let rec_id = rec_rt.recover_window_from_dir(recovery_dir, viewport, 5_000)?;
+    let rec_ids: Vec<&str> = rec_rt.window(rec_id)?.app().session().document().data_sheets.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(rec_ids, vec!["t1", "t3"], "mixed batch recovery must not duplicate post-undo steps");
+    rec_rt.close_all_force()?;
+    Ok(())
+}
+
+#[test]
+fn audit_5_gui_edit_after_64_undo_eviction_persists_through_crash_recovery() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook::desktop_host::DesktopHostEvent;
+    use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
+
+    let dir = TempDirGuard::new("audit5-64-undo")?;
+    let recovery_dir = dir.path.join("recovery");
+    let viewport = ViewportMetrics::new(1100.0, 720.0, 1.0);
+
+    {
+        let (session, journal, report) = Session::open_dir_with_recovery(&recovery_dir, "audit5-1", 2_000, 1_000)?;
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(recovery_dir.clone()), ..DesktopHostConfig::default() });
+        let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
+        {
+            let win = rt.window_mut(win_id)?;
+            win.execute_and_journal(
+                "sheet.createData",
+                json!({ "sheet_id": "s64", "title": "FullUndo", "archetype": "column", "cols": 2, "rows": 4 }),
+            )?;
+            // Fill the 64-entry session undo ring completely.
+            for i in 0..64 {
+                win.execute_and_journal("table.setCell", json!({ "sheet_id": "s64", "row": (i % 3) + 1, "col": 0, "value": f64::from(i + 1) }))?;
+            }
+            assert_eq!(win.app().session().undo_depth(), 64);
+            assert_eq!(win.app().session().redo_depth(), 0);
+            assert!(win.app().session().is_dirty());
+        }
+
+        // Perform a genuine GUI double-click + text commit + Enter edit on cell (0, 0, 0).
+        let center_pt = {
+            let tree = rt.window_mut(win_id)?.app_mut().build_and_cache_layout_tree(viewport);
+            let cell_node = tree.node("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?;
+            let center_px = cell_node.bounds.visible_rect_px.center();
+            viewport.physical_to_logical_px([f64::from(center_px[0]), f64::from(center_px[1])])
+        };
+
+        rt.dispatch(DesktopHostEvent::PointerButton {
+            window_id: win_id,
+            x_pt: center_pt[0],
+            y_pt: center_pt[1],
+            button: PointerButton::Primary,
+            pressed: true,
+            click_count: 2,
+            modifiers: KeyModifiers::default(),
+        })?;
+        rt.dispatch(DesktopHostEvent::ImeCommit { window_id: win_id, text: String::from("777.25") })?;
+        rt.dispatch(DesktopHostEvent::KeyboardInput {
+            window_id: win_id,
+            key: String::from("Enter"),
+            pressed: true,
+            modifiers: KeyModifiers::default(),
+            text: None,
+        })?;
+
+        let win = rt.window(win_id)?;
+        assert_eq!(win.app().session().undo_depth(), 64, "undo stack stayed capped at 64 after oldest eviction");
+        let ds = win.app().session().document().data_sheet(&SheetId::new("s64")).ok_or("missing live s64")?;
+        assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(777.25));
+        drop(rt);
+    }
+
+    let mut rec_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let rec_id = rec_rt.recover_window_from_dir(recovery_dir, viewport, 5_000)?;
+    let rec_ds = rec_rt.window(rec_id)?.app().session().document().data_sheet(&SheetId::new("s64")).ok_or("missing recovered s64")?;
+    assert_eq!(
+        rec_ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()),
+        Some(777.25),
+        "GUI edit at 64-entry undo eviction boundary must checkpoint to crash recovery"
+    );
+    rec_rt.close_all_force()?;
+    Ok(())
+}

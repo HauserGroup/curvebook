@@ -228,14 +228,23 @@ pub fn check_edit_blocked_by_link(ds: &DataSheet, state: &mut GridCoreViewState,
 /// Returns an error string when an engine command fails.
 pub fn handle_grid_key_down(app: &mut UiApp, state: &mut GridCoreViewState, key: &str, mods: KeyModifiers) -> Result<UiEventOutcome, String> {
     if state.editing_title.is_some() {
-        if key.eq_ignore_ascii_case("Enter") || key.eq_ignore_ascii_case("Return") {
-            let cmd_id = commit_title_edit(app, state)?;
-            return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.title_commit"), command_id: cmd_id, command_result: None });
-        }
-        if key.eq_ignore_ascii_case("Escape") {
-            state.editing_title = None;
+        let is_enter = key.eq_ignore_ascii_case("Enter") || key.eq_ignore_ascii_case("Return");
+        let is_esc = key.eq_ignore_ascii_case("Escape") || key.eq_ignore_ascii_case("Esc");
+        if is_enter || is_esc {
+            let cmd_id = if is_enter { Some(commit_title_edit(app, state)?) } else { None };
+            if is_esc {
+                state.editing_title = None;
+            }
             app.interaction.text_field_buffers.remove("grid.title_editor.input");
-            return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.title_cancel"), ..UiEventOutcome::default() });
+            if app.focus_widget_id.as_deref() == Some("grid.title_editor.input") {
+                app.focus_widget_id = None;
+            }
+            return Ok(UiEventOutcome {
+                handled: true,
+                action: String::from(if is_enter { "grid_core.title_commit" } else { "grid_core.title_cancel" }),
+                command_id: cmd_id.flatten(),
+                command_result: None,
+            });
         }
     }
 
@@ -1358,9 +1367,16 @@ fn emit_visible_cells_window(
             if !rect_visible_in_clip(cell_rect, body_clip) {
                 continue;
             }
-            let display = x_cell_display(ds, row, xcol.subcol, preset);
-            let is_numeric = ds.x_or_time_cell(row, xcol.subcol).is_some_and(|c| matches!(c.value, curvebook_doc::CellValue::Number(_)))
-                || matches!(&ds.archetype, TableArchetype::Xy(xy) if xy.x_value_at(row).is_some());
+            let is_editing = builder.app.inline_editor.active
+                && matches!(
+                    &builder.app.inline_editor.target,
+                    Some(crate::interaction::InlineEditorTarget::GridXCell { sheet_id, row: er, subcol: es })
+                        if *sheet_id == ds.id && *er == row && *es == xcol.subcol
+                );
+            let display = if is_editing { builder.app.inline_editor.buffer.clone() } else { x_cell_display(ds, row, xcol.subcol, preset) };
+            let is_numeric = !is_editing
+                && (ds.x_or_time_cell(row, xcol.subcol).is_some_and(|c| matches!(c.value, curvebook_doc::CellValue::Number(_)))
+                    || matches!(&ds.archetype, TableArchetype::Xy(xy) if xy.x_value_at(row).is_some()));
             let excluded = ds.x_or_time_cell(row, xcol.subcol).is_some_and(|c| c.excluded);
             let is_x_selected = builder.app.grid.active_x_cell.is_some_and(|(ax_row, ax_sub)| ax_row == row && ax_sub == xcol.subcol);
 
@@ -1379,6 +1395,7 @@ fn emit_visible_cells_window(
                     excluded,
                     is_alt,
                     is_selected: is_x_selected,
+                    is_editing,
                     scale: metrics.scale,
                     locale,
                     slot_tag,
@@ -1393,8 +1410,18 @@ fn emit_visible_cells_window(
             }
             let coord = CellCoord::new(row, dcol.col, dcol.subcol);
             let cell_opt = ds.cell(coord);
-            let display = cell_opt.map(|c| format_cell_display(c, preset)).unwrap_or_default();
-            let is_numeric = cell_opt.is_some_and(|c| matches!(c.value, curvebook_doc::CellValue::Number(_)));
+            let is_editing = builder.app.inline_editor.active
+                && matches!(
+                    &builder.app.inline_editor.target,
+                    Some(crate::interaction::InlineEditorTarget::GridCell { sheet_id, coord: ec })
+                        if *sheet_id == ds.id && ec.row == row && ec.col == dcol.col && ec.subcol == dcol.subcol
+                );
+            let display = if is_editing {
+                builder.app.inline_editor.buffer.clone()
+            } else {
+                cell_opt.map(|c| format_cell_display(c, preset)).unwrap_or_default()
+            };
+            let is_numeric = !is_editing && cell_opt.is_some_and(|c| matches!(c.value, curvebook_doc::CellValue::Number(_)));
             let excluded = cell_opt.is_some_and(|c| c.excluded);
 
             let is_active = active.is_some_and(|a| a.row == row && a.col == dcol.col && a.subcol == dcol.subcol);
@@ -1425,6 +1452,7 @@ fn emit_visible_cells_window(
                     excluded,
                     is_alt,
                     is_selected,
+                    is_editing,
                     scale: metrics.scale,
                     locale,
                     slot_tag,
@@ -1449,6 +1477,7 @@ struct CellRenderArgs<'a> {
     excluded: bool,
     is_alt: bool,
     is_selected: bool,
+    is_editing: bool,
     scale: f64,
     locale: &'a str,
     slot_tag: &'a str,
@@ -1460,7 +1489,9 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
     let link_color = region.map(|r| provenance_border_rgba(r.border_color().unwrap_or(LinkBorderColor::Blue)));
 
     let alt_surface = tint_alt_row(palette.surface, palette.panel);
-    let fill = if args.is_selected {
+    let fill = if args.is_editing {
+        palette.surface
+    } else if args.is_selected {
         Rgba8::rgba(palette.accent.r, palette.accent.g, palette.accent.b, 36)
     } else if let Some(lc) = link_color {
         Rgba8::rgba(lc.r, lc.g, lc.b, 22)
@@ -1492,7 +1523,7 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
         parent: Some(args.sheet_wid.clone()),
         z_layer: ZLayer::Workspace,
         rect_px: args.rect,
-        a11y: grid_cell_meta(cell_a11y_label, args.is_selected, Some(val_preview.as_str())),
+        a11y: grid_cell_meta(cell_a11y_label, args.is_selected || args.is_editing, Some(val_preview.as_str())),
         state: widget_state(builder, &wid_str, ControlEnablement::enabled()),
         action: WidgetAction::NoOp,
     });
@@ -1504,16 +1535,22 @@ fn emit_single_cell_node(builder: &mut LayoutBuilder<'_>, args: CellRenderArgs<'
         paint_linked_region_edges(builder, &wid, args.rect, reg, args.row, args.col, lc);
     }
 
-    if args.is_selected {
+    if args.is_selected || args.is_editing {
         builder.paint_stroke(ZLayer::Workspace, Some(&wid), args.rect, palette.accent, 2);
     }
 
-    if !args.display.is_empty() {
-        let fg = if args.excluded { palette.excluded } else { palette.text };
-        let label = if args.excluded { format!("{} *", args.display) } else { args.display };
+    if args.is_editing || !args.display.is_empty() {
+        let fg = if args.excluded && !args.is_editing { palette.excluded } else { palette.text };
+        let label = if args.is_editing {
+            format!("{}|", args.display)
+        } else if args.excluded {
+            format!("{} *", args.display)
+        } else {
+            args.display
+        };
         let font_pt = scale_pt(12.0, args.scale);
         let mut style = if args.is_numeric { UiTextStyle::grid_tabular(font_pt) } else { UiTextStyle::ui_sans(font_pt) };
-        if args.excluded {
+        if args.excluded && !args.is_editing {
             style = style.italic();
         }
         let vis_rect = args.rect.intersect(builder.active_clip_rect());

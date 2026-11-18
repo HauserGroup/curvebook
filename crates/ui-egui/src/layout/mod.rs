@@ -711,6 +711,7 @@ pub fn compute_ui_state_fingerprint(app: &UiApp, metrics: ViewportMetrics) -> u6
     feed_bytes(&(app.canvas_dialogs.canvas.zoom.to_bits()).to_le_bytes());
     feed_bytes(&(app.canvas_dialogs.canvas.pan_pt.x.to_bits()).to_le_bytes());
     feed_bytes(&(app.canvas_dialogs.canvas.pan_pt.y.to_bits()).to_le_bytes());
+    feed_bytes(&app.mutation_seq().to_le_bytes());
     feed_bytes(&[u8::from(app.inline_editor.active), u8::from(app.grid.formula_bar.active)]);
     feed_bytes(app.inline_editor.buffer.as_bytes());
     feed_bytes(app.grid.formula_bar.input.as_bytes());
@@ -759,9 +760,9 @@ pub fn compute_ui_state_fingerprint(app: &UiApp, metrics: ViewportMetrics) -> u6
         &app.grid.tool.active,
         &app.grid.quick_stats,
         &app.nav.collapsed_sections,
-        &app.nav.gallery.open,
-        &app.nav.gallery.selected_ids,
+        &app.nav.gallery,
         &app.nav.active_pane,
+        &app.inline_editor.target,
         &app.view_shards,
     )) {
         feed_bytes(&s3);

@@ -796,3 +796,255 @@ fn welcome_open_file_dialog_hook_invoked_and_escape_closes_welcome() -> Result<(
     let _ = std::fs::remove_file(&archive_path);
     Ok(())
 }
+
+#[test]
+fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter() -> Result<(), Box<dyn std::error::Error>> {
+    use std::fs;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use curvebook::desktop_host::{
+        DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, NativeFileDialogKind, StubNativeFileDialogAdapter,
+    };
+    use curvebook_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, ProjectDocument, TableArchetype};
+    use curvebook_format::{ZipWriter, open_project_file, save_project_file};
+    use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
+
+    fn click_rect_center(
+        rt: &mut DesktopHostRuntime,
+        wid: DesktopWindowId,
+        metrics: ViewportMetrics,
+        rect: curvebook_ui_egui::layout::LayoutRectPx,
+    ) -> Result<curvebook::desktop_host::DesktopEventOutcome, String> {
+        let [cx, cy] = rect.center();
+        let [lx, ly] = metrics.physical_to_logical_px([f64::from(cx), f64::from(cy)]);
+        let _ = rt.dispatch(DesktopHostEvent::PointerMoved { window_id: wid, x_pt: lx, y_pt: ly, modifiers: KeyModifiers::default() })?;
+        let _ = rt.dispatch(DesktopHostEvent::PointerButton {
+            window_id: wid,
+            x_pt: lx,
+            y_pt: ly,
+            button: PointerButton::Primary,
+            pressed: true,
+            click_count: 1,
+            modifiers: KeyModifiers::default(),
+        })?;
+        rt.dispatch(DesktopHostEvent::PointerButton {
+            window_id: wid,
+            x_pt: lx,
+            y_pt: ly,
+            button: PointerButton::Primary,
+            pressed: false,
+            click_count: 1,
+            modifiers: KeyModifiers::default(),
+        })
+    }
+
+    fn click_drawn_file_menu_item(
+        rt: &mut DesktopHostRuntime,
+        wid: DesktopWindowId,
+        metrics: ViewportMetrics,
+        item_id: &str,
+    ) -> Result<curvebook::desktop_host::DesktopEventOutcome, String> {
+        let file_btn_rect = {
+            let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
+            tree.node("menu.file").ok_or("missing menu.file button")?.bounds.visible_rect_px
+        };
+        let _ = click_rect_center(rt, wid, metrics, file_btn_rect)?;
+
+        // Scroll back to top of popup.menu.file first, then scan downward until `item_id` is visible.
+        let pop_rect = {
+            let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
+            tree.node("popup.menu.file").ok_or("missing popup.menu.file")?.bounds.visible_rect_px
+        };
+        let [px, py] = pop_rect.center();
+        let [plx, ply] = metrics.physical_to_logical_px([f64::from(px), f64::from(py)]);
+        for _ in 0..8 {
+            let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
+                window_id: wid,
+                x_pt: plx,
+                y_pt: ply,
+                delta_x: 0.0,
+                delta_y: 120.0,
+                modifiers: KeyModifiers::default(),
+            })?;
+        }
+        for _ in 0..16 {
+            let found = {
+                let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
+                tree.node(item_id).filter(|n| n.drawn_in_frame).map(|n| n.bounds.visible_rect_px)
+            };
+            if let Some(rect) = found {
+                return click_rect_center(rt, wid, metrics, rect);
+            }
+            let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
+                window_id: wid,
+                x_pt: plx,
+                y_pt: ply,
+                delta_x: 0.0,
+                delta_y: -70.0,
+                modifiers: KeyModifiers::default(),
+            })?;
+        }
+        Err(format!("menu item `{item_id}` did not become visible inside popup.menu.file"))
+    }
+
+    let tmp_dir = std::env::temp_dir().join(format!("curvebook-r1023-file-dlg-{}", std::process::id()));
+    let _ = fs::remove_dir_all(&tmp_dir);
+    fs::create_dir_all(&tmp_dir)?;
+
+    // 1. Prepare real .curvebook, .pzfx, .prism, and .csv files on disk.
+    let cb_path = tmp_dir.join("sample.curvebook");
+    {
+        let mut doc = ProjectDocument::default();
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+        let mut ds = DataSheet::new("ds-cb", "Native Archive Sheet", TableArchetype::Column(col))?;
+        ds.set_cell(CellCoord::new(0, 0, 0), Cell::number(42.5))?;
+        doc.add_data_sheet(ds)?;
+        save_project_file(&cb_path, &doc)?;
+    }
+    let pzfx_path = tmp_dir.join("cohort.pzfx");
+    fs::write(
+        &pzfx_path,
+        r#"<?xml version="1.0" encoding="UTF-8"?>
+<PrismFile SchemaVersion="2">
+  <Title>PZFX Dish</Title>
+  <TableSequence>
+    <Table ID="t-pzfx" TableType="OneWay">
+      <Title>PZFX Imported Columns</Title>
+      <YColumn><Title>Ctrl</Title><Subcolumn><d>11.0</d><d>13.0</d></Subcolumn></YColumn>
+    </Table>
+  </TableSequence>
+</PrismFile>"#,
+    )?;
+    let zip_archive_path = tmp_dir.join("kinetics.prism");
+    {
+        let mut writer = ZipWriter::new();
+        writer.add_file(
+            "manifest.json",
+            serde_json::to_vec(&json!({
+                "title": "Archive Container Assay",
+                "sheets": [{
+                    "id": "sheet-kin",
+                    "title": "Archive Zip Kinetics",
+                    "kind": "XY",
+                    "subcolumn_mode": "Single",
+                    "csv_path": "data/kin.csv"
+                }]
+            }))?,
+        )?;
+        writer.add_file("data/kin.csv", b"Time,Resp\n0,2.5\n5,8.5\n".to_vec())?;
+        fs::write(&zip_archive_path, writer.finish()?)?;
+    }
+    let csv_path = tmp_dir.join("extra.csv");
+    fs::write(&csv_path, "GroupA,GroupB\n10.25,20.75\n")?;
+
+    let save_path = tmp_dir.join("saved.curvebook");
+    let save_as_path = tmp_dir.join("saved-as.curvebook");
+    let svg_path = tmp_dir.join("out.svg");
+    let pdf_path = tmp_dir.join("out.pdf");
+    let png_path = tmp_dir.join("out.png");
+
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    adapter.push_response("project.open", Some(cb_path.clone()));
+    adapter.push_response("project.open", Some(pzfx_path.clone()));
+    adapter.push_response("project.open", Some(zip_archive_path.clone()));
+    adapter.push_response("project.open", Some(csv_path.clone()));
+    adapter.push_response("project.save", Some(save_path.clone()));
+    adapter.push_response("file.save_as", Some(save_as_path.clone()));
+    adapter.push_response("export.svg", Some(svg_path.clone()));
+    adapter.push_response("export.pdf", Some(pdf_path.clone()));
+    adapter.push_response("export.png", Some(png_path.clone()));
+
+    let metrics = ViewportMetrics::new(1280.0, 820.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        new_instance: false,
+        gui_only: false,
+        locale_override: None,
+        theme_override: None,
+        recovery_root: None,
+        initial_viewport: metrics,
+    });
+    rt.set_file_dialog_adapter(adapter.clone());
+    let mut wid = rt.open_window(None, metrics)?;
+
+    // 2. Click File > Open... for .curvebook, .pzfx, .prism, and .csv.
+    for (expected_title, ext) in
+        [("Native Archive Sheet", ".curvebook"), ("PZFX Imported Columns", ".pzfx"), ("Archive Zip Kinetics", ".prism"), ("extra", ".csv")]
+    {
+        let outcome = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.open")?;
+        assert!(outcome.handled, "File > Open click for {ext} was not handled");
+        wid = outcome.opened_window_id.unwrap_or(wid);
+        let doc = rt.window(wid)?.app().document();
+        assert!(
+            doc.data_sheets.iter().any(|ds| ds.title == expected_title),
+            "expected `{expected_title}` after File > Open ({ext}), got {:?}",
+            doc.data_sheets.iter().map(|ds| &ds.title).collect::<Vec<_>>()
+        );
+    }
+
+    // 3. Create a GraphSheet so Export SVG/PDF/PNG are enabled, then test Save, direct Save, Save As, Exports.
+    {
+        let win = rt.window_mut(wid)?;
+        let mut doc = win.app().document().clone();
+        let src_id = doc.data_sheets.first().ok_or("missing data sheet")?.id.clone();
+        let ds_ref = doc.data_sheet(&src_id).ok_or("missing source")?.clone();
+        let mut graph = GraphSheet::new_uninitialized_for_data("g-export", &ds_ref)?;
+        graph.initialized = true;
+        graph.title = String::from("Export Plot");
+        graph.spec.kind = GraphKind::Column;
+        doc.add_graph_sheet(graph)?;
+        let _ = doc.select_in_navigator(&"g-export".into());
+        win.app_mut().session_mut().set_file_path(None, true);
+        let bytes = curvebook_format::save_project_bytes(&doc)?;
+        let tmp_seed = tmp_dir.join("seed-export.curvebook");
+        fs::write(&tmp_seed, &bytes)?;
+        let _ = win.execute_and_journal("project.open", json!({ "path": tmp_seed.to_string_lossy() }))?;
+        win.app_mut().session_mut().set_file_path(None, false);
+        win.app_mut().sync_views();
+    }
+
+    let reqs_before_save = adapter.requests().len();
+    let save_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.save")?;
+    assert_eq!(save_out.command_id.as_deref(), Some("project.save"));
+    assert!(save_path.is_file(), "File > Save must write real archive to disk");
+    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(Path::new(&save_path)));
+    assert_eq!(adapter.requests().len(), reqs_before_save + 1);
+
+    // Clicking File > Save again with existing file_path writes directly with no extra dialog.
+    let direct_save = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.save")?;
+    assert!(direct_save.handled);
+    assert_eq!(adapter.requests().len(), reqs_before_save + 1);
+
+    // Clicking File > Save As... always opens SaveFile dialog and switches file_path.
+    let save_as_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.file.save_as")?;
+    assert_eq!(save_as_out.command_id.as_deref(), Some("file.save_as"));
+    assert!(save_as_path.is_file(), "File > Save As... must write archive to picked path");
+    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(Path::new(&save_as_path)));
+    assert!(!open_project_file(&save_as_path)?.data_sheets.is_empty());
+
+    // Clicking File > Export > SVG / PDF / PNG opens SaveFile dialogs and writes valid artifacts.
+    let svg_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.svg")?;
+    assert_eq!(svg_out.command_id.as_deref(), Some("export.svg"));
+    assert!(fs::read_to_string(&svg_path)?.contains("<svg"));
+
+    let pdf_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.pdf")?;
+    assert_eq!(pdf_out.command_id.as_deref(), Some("export.pdf"));
+    assert!(fs::read(&pdf_path)?.starts_with(b"%PDF"));
+
+    let png_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.png")?;
+    assert_eq!(png_out.command_id.as_deref(), Some("export.png"));
+    assert!(fs::read(&png_path)?.starts_with(&[0x89, b'P', b'N', b'G']));
+
+    let recorded = adapter.requests();
+    assert_eq!(recorded.len(), 9);
+    assert!(recorded[..4].iter().all(|r| r.kind == NativeFileDialogKind::OpenFile && r.extensions.iter().any(|e| e == "pzfx")));
+    assert_eq!(recorded[4].kind, NativeFileDialogKind::SaveFile);
+    assert_eq!(recorded[5].command_id, "file.save_as");
+    assert_eq!(recorded[6].extensions, vec!["svg"]);
+    assert_eq!(recorded[7].extensions, vec!["pdf"]);
+    assert_eq!(recorded[8].extensions, vec!["png"]);
+
+    let _ = fs::remove_dir_all(&tmp_dir);
+    Ok(())
+}
