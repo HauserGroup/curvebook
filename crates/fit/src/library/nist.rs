@@ -43,6 +43,7 @@ use std::f64::consts::PI;
 use super::{ParametricModel, data_x_min_max, data_y_min_max};
 use crate::types::{DataPoint, EquationCategory};
 
+/// Canonical identifiers of all 27 NIST Statistical Reference Datasets (StRD) nonlinear models.
 pub const NIST_EQUATION_IDS: &[&str] = &[
     "nist_misra1a",
     "nist_chwirut2",
@@ -73,6 +74,7 @@ pub const NIST_EQUATION_IDS: &[&str] = &[
     "nist_bennett5",
 ];
 
+/// Functional form family implemented by a NIST StRD nonlinear benchmark model.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NistKind {
     /// Misra1a `y = b1 * (1 - exp(-b2 * x))` (NIST StRD; Misra 1978); shares its evaluation with `BoxBod`.
@@ -121,6 +123,7 @@ pub enum NistKind {
     Bennett5,
 }
 
+/// Parametric model wrapper for a NIST StRD nonlinear regression benchmark dataset equation.
 #[derive(Debug, Clone)]
 pub struct NistModel {
     id: String,

@@ -60,12 +60,16 @@ const MAX_BESSEL_ORDER: i32 = 100_000;
 /// Dataset-filter predicate parsed from `<A>`, `<~A>`, `<B:D>`, or `<0>` line prefixes.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum DatasetFilter {
+    /// Applies to every dataset in the table (`no <...>` prefix).
     Any,
+    /// Applies only when zero-based dataset index is in this inclusion list (e.g. `<A>` -> `[0]`).
     Include(Vec<usize>),
+    /// Applies to every dataset except zero-based indices in this exclusion list (e.g. `<~A>` -> `[0]`).
     Exclude(Vec<usize>),
 }
 
 impl DatasetFilter {
+    /// Return `true` when zero-based dataset index `ds_idx` satisfies this filter predicate.
     #[must_use]
     pub fn matches(&self, ds_idx: usize) -> bool {
         match self {
@@ -328,105 +332,191 @@ enum BinaryOp {
 /// Safe bytecode instructions executed by the DSL stack VM.
 #[derive(Debug, Clone)]
 pub enum OpCode {
+    /// Push a finite literal `f64` constant onto the operand stack.
     PushConst(f64),
+    /// Load predictor coordinate `x[idx]` (for example `X` at slot `0`, or multivariate predictor `X1`, `X2`, ...).
     LoadPredictor(usize),
+    /// Load dependent response `Y` (used in implicit `LHS = RHS` or ODE equations).
     LoadY,
+    /// Load the active zero-based dataset column index as `f64`.
     LoadDatasetIndex,
+    /// Load model parameter value at slot index `idx`.
     LoadParam(usize),
+    /// Load temporary local statement variable at slot index `idx`.
     LoadLocal(usize),
+    /// Store top of stack into local statement variable slot `idx`.
     StoreLocal(usize),
+    /// Apply a unary scalar operator to top of stack.
     Unary(UnaryKind),
+    /// Pop two operands and push the result of a binary scalar operator.
     Binary(BinaryKind),
+    /// Invoke built-in mathematical function `fn_id` with `argc` stack arguments.
     CallBuiltin(BuiltinFn, usize),
+    /// Unconditional jump to instruction pointer offset.
     Jump(usize),
+    /// Pop top of stack and jump to offset when equal to `0.0` (`false`).
     JumpIfZero(usize),
+    /// Discard top value from operand stack.
     Pop,
+    /// Terminate VM execution and return top of stack.
     Halt,
 }
 
+/// Unary scalar operator executed by [`OpCode::Unary`].
 #[derive(Debug, Clone, Copy)]
 pub enum UnaryKind {
+    /// Arithmetic negation (`-x`).
     Neg,
+    /// Logical negation (`!x`, returning `1.0` when `x == 0.0` else `0.0`).
     Not,
 }
 
+/// Binary scalar arithmetic or relational operator executed by [`OpCode::Binary`].
 #[derive(Debug, Clone, Copy)]
 pub enum BinaryKind {
+    /// Addition (`a + b`).
     Add,
+    /// Subtraction (`a - b`).
     Sub,
+    /// Multiplication (`a * b`).
     Mul,
+    /// Floating-point division (`a / b`).
     Div,
+    /// Remainder (`a % b`).
     Rem,
+    /// Exponentiation (`a.powf(b)`).
     Pow,
+    /// Equality comparison (`a == b` returning `1.0` or `0.0`).
     Eq,
+    /// Inequality comparison (`a != b` returning `1.0` or `0.0`).
     Ne,
+    /// Strict less-than (`a < b` returning `1.0` or `0.0`).
     Lt,
+    /// Less-than-or-equal (`a <= b` returning `1.0` or `0.0`).
     Le,
+    /// Strict greater-than (`a > b` returning `1.0` or `0.0`).
     Gt,
+    /// Greater-than-or-equal (`a >= b` returning `1.0` or `0.0`).
     Ge,
 }
 
+/// Built-in mathematical, statistical, and special function callable inside custom DSL equations.
 #[derive(Debug, Clone, Copy)]
 pub enum BuiltinFn {
+    /// Absolute value `|x|`.
     Abs,
+    /// Square root `sqrt(x)` (NaN for `x < 0`).
     Sqrt,
+    /// Cube root `cbrt(x)`.
     Cbrt,
+    /// Natural exponential `exp(x)`.
     Exp,
+    /// Base-10 exponential `10^x`.
     Exp10,
+    /// Natural logarithm `ln(x)`.
     Ln,
+    /// Base-10 logarithm `log10(x)`.
     Log10,
+    /// Base-2 logarithm `log2(x)`.
     Log2,
+    /// Trigonometric sine `sin(x)` (radians).
     Sin,
+    /// Trigonometric cosine `cos(x)` (radians).
     Cos,
+    /// Trigonometric tangent `tan(x)` (radians).
     Tan,
+    /// Inverse sine `asin(x)` in `[-pi/2, pi/2]`.
     Asin,
+    /// Inverse cosine `acos(x)` in `[0, pi]`.
     Acos,
+    /// Inverse tangent `atan(x)` in `[-pi/2, pi/2]`.
     Atan,
+    /// Two-argument quadrant-aware inverse tangent `atan2(y, x)`.
     Atan2,
+    /// Hyperbolic sine `sinh(x)`.
     Sinh,
+    /// Hyperbolic cosine `cosh(x)`.
     Cosh,
+    /// Hyperbolic tangent `tanh(x)`.
     Tanh,
+    /// Inverse hyperbolic sine `asinh(x)`.
     Asinh,
+    /// Inverse hyperbolic cosine `acosh(x)` for `x >= 1`.
     Acosh,
+    /// Inverse hyperbolic tangent `atanh(x)` for `|x| < 1`.
     Atanh,
+    /// Floor `floor(x)` (largest integer `<= x`).
     Floor,
+    /// Ceiling `ceil(x)` (smallest integer `>= x`).
     Ceil,
+    /// Nearest integer `round(x)` (ties away from zero).
     Round,
+    /// Truncate fractional part toward zero `trunc(x)`.
     Trunc,
+    /// Signum (`-1`, `0`, or `+1`).
     Sign,
+    /// Variadic minimum `min(...)`.
     Min,
+    /// Variadic maximum `max(...)`.
     Max,
+    /// Clamp `x` to `[lo, hi]` (`clamp(x, lo, hi)`).
     Clamp,
+    /// Euclidean norm `sqrt(a^2 + b^2)` (`hypot(a, b)`).
     Hypot,
+    /// Gauss error function `erf(x)`.
     Erf,
+    /// Complementary error function `erfc(x) = 1 - erf(x)`.
     Erfc,
+    /// Standard normal CDF `Phi(x)` (zero mean, unit SD).
     NormCdf,
+    /// Inverse standard normal CDF (probit) `Phi^-1(p)` for `p in (0, 1)`.
     NormInv,
+    /// Complete Gamma function `Gamma(x)`.
     Gamma,
+    /// Natural log of `|Gamma(x)|` (`lngamma(x)`).
     LnGamma,
+    /// Euler Beta function `B(a, b)`.
     Beta,
+    /// Digamma logarithmic derivative `psi(x) = d/dx ln Gamma(x)`.
     Digamma,
+    /// Cylindrical Bessel function of the first kind, order 0 (`J_0(x)`).
     BesselJ0,
+    /// Cylindrical Bessel function of the first kind, order 1 (`J_1(x)`).
     BesselJ1,
+    /// Cylindrical Bessel function of the first kind, integer order `n` (`J_n(x)`).
     BesselJn,
+    /// Cylindrical Bessel function of the second kind, order 0 (`Y_0(x)`, `x > 0`).
     BesselY0,
+    /// Cylindrical Bessel function of the second kind, order 1 (`Y_1(x)`, `x > 0`).
     BesselY1,
+    /// Cylindrical Bessel function of the second kind, integer order `n` (`Y_n(x)`, `x > 0`).
     BesselYn,
+    /// Modified Bessel function of the first kind, order 0 (`I_0(x)`).
     BesselI0,
+    /// Modified Bessel function of the first kind, order 1 (`I_1(x)`).
     BesselI1,
+    /// Modified Bessel function of the second kind, order 0 (`K_0(x)`, `x > 0`).
     BesselK0,
+    /// Modified Bessel function of the second kind, order 1 (`K_1(x)`, `x > 0`).
     BesselK1,
+    /// Confluent hypergeometric function of the first kind (Kummer `M(a, b, z) = 1F1(a; b; z)`).
     Hyp1F1,
+    /// Gauss hypergeometric function `2F1(a, b; c; z)`.
     Hyp2F1,
+    /// Tricomi confluent hypergeometric function `U(a, b, z)`.
     ConfluentU,
+    /// Function-call power `pow(base, exp)`.
     PowFn,
 }
 
 /// Compiled custom equation mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum DslEquationKind {
+    /// Closed-form explicit equation `Y = f(X, theta)`.
     Explicit,
+    /// Implicit algebraic relation `LHS(X, Y, theta) = RHS(X, Y, theta)` solved per point via Brent root-finding.
     Implicit,
+    /// First-order ordinary differential equation `dY/dX = f(X, Y, theta)` integrated via adaptive RK45 with optional `<0> Y = ...` initial rule.
     OdeFirstOrder,
 }
 
@@ -848,6 +938,7 @@ impl CompiledDslModel {
         })
     }
 
+    /// Return the structural form (`Explicit`, `Implicit`, or `OdeFirstOrder`) of this compiled equation.
     #[must_use]
     pub fn kind(&self) -> DslEquationKind {
         self.kind

@@ -1,4 +1,5 @@
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 //! Linear, Deming (Model II), and Nonlinear Regression + Custom Bytecode/ODE Equation DSL
 //! engine for CurveBook (`Layer L2`).
 //!
