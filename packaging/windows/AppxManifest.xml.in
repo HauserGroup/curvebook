@@ -17,7 +17,8 @@
     <TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.19041.0" MaxVersionTested="10.0.26100.0" />
   </Dependencies>
   <Applications>
-    <Application Id="CurveBook" Executable="curvebook.exe" EntryPoint="Windows.FullTrustApplication">
+    <Application Id="CurveBook" Executable="curvebook.exe" EntryPoint="Windows.FullTrustApplication"
+                 desktop4:SupportsMultipleInstances="true">
       <uap:VisualElements DisplayName="CurveBook" Description="Scientific data analysis and graphing"
                           BackgroundColor="transparent" Square150x150Logo="Assets\Square150x150Logo.png"
                           Square44x44Logo="Assets\Square44x44Logo.png" />
