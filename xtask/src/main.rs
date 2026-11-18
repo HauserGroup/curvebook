@@ -15,6 +15,7 @@ mod ico;
 mod json;
 mod layers;
 mod licenses;
+mod msix;
 mod pending;
 mod schemas;
 mod screenshots;
@@ -58,6 +59,7 @@ commands:
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
   coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
   bundle                build release binaries and assemble dist/CurveBook.app
+  msix --arch <arch> --package-version <A.B.C.0>  package Windows binaries for Microsoft Store
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
   stats [--exact]       print line and test counts across workspace crates
@@ -110,6 +112,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "corpus" => corpus::run(&root, rest),
         "coverage" => coverage::run(&root, rest),
         "bundle" => bundle::run(&root),
+        "msix" => msix::run(&root, rest),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),
         "stats" => stats::run(&root, rest.iter().any(|a| a == "--exact")),

@@ -4223,9 +4223,11 @@ dependencies = [
  "curvebook-format",
  "curvebook-mcp",
  "curvebook-pdf",
+ "curvebook-platform",
  "curvebook-svg",
  "curvebook-testkit",
  "curvebook-ui-egui",
+ "image",
  "serde_json",
 ]
 
