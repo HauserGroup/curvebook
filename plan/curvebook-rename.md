@@ -1,6 +1,6 @@
 # Rename LumenCraft to CurveBook
 
-Status: scheduled as **R0.20 — Rename LumenCraft to CurveBook**, owned by maintainers, **todo**. Complete the cutover after the landed Rust/MCP/README baseline and before further unclaimed R10 GUI implementation. This revision updates planning and sequencing only; it does not start the rename or claim its implementation. See [the roadmap](../docs/ROADMAP.md#r020-rename-lumencraft-to-curvebook).
+Status: scheduled as **R0.20 — Rename LumenCraft to CurveBook**, owned by maintainers, **todo**. Complete the cutover after the landed Rust/MCP/README baseline and before further unclaimed R10 GUI implementation. This revision updates planning and sequencing only; it does not start the rename or claim its implementation. See [the roadmap](../docs/planning/roadmap-history/r0.md#r020-rename-lumencraft-to-curvebook).
 
 ## Basis and retained decisions
 

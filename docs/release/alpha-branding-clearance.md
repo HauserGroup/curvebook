@@ -1,6 +1,6 @@
 # Alpha Branding, Clean-Room & Asset-Provenance Clearance (`R0.21` / `R10.14`)
 
-> **Milestone:** [`R0.21`](../ROADMAP.md#r021-strict-alpha-branding-and-asset-provenance-gate) (`done`) & [`R10.14`](../ROADMAP.md#r1014-external-branding-exclusion-sweep--gate) (checkbox 2 `done`) · **Status:** Enforced by `cargo xtask brands`, `cargo xtask cleanroom`, `cargo xtask assets`, and `xtask/tests/r021_strict_alpha_branding.rs`.
+> **Milestone:** [`R0.21`](../planning/roadmap-history/r0.md#r021-strict-alpha-branding-and-asset-provenance-gate) (`done`) & [`R10.14`](../planning/roadmap-history/r10.md#r1014-external-branding-exclusion-sweep--gate) (checkbox 2 `done`) · **Status:** Enforced by `cargo xtask brands`, `cargo xtask cleanroom`, `cargo xtask assets`, and `xtask/tests/r021_strict_alpha_branding.rs`.
 
 CurveBook maintains original product identity (`CurveBook`, App ID `org.curvebook.CurveBook`) across source code, file paths, UI/window chrome, localization, command catalogs, MCP tools/resources/prompts, documentation, exports, packaging manifests, and visual assets, without copying third-party proprietary materials, icons, screenshots, sample files, or marketing wording.
 
@@ -90,6 +90,6 @@ After folding all `12` Wave 6 shards, the `5` `w6-fix-*` fixes, the Classic cora
 | `./packaging/web/package.sh` | `dist/release/curvebook-web-0.1.0-alpha.1.zip` **`4,862,283` B** (`<= 6,243,591` B `R10.22` budget) |
 | `cargo xtask bundle` + `./packaging/macos/verify.sh dist/CurveBook.app` | `dist/CurveBook.app` `47M` (`curvebook` `28,481,872` B, `curvebook-cli` `20,147,328` B); `valid on disk`, `satisfies its Designated Requirement`; ad-hoc signed, so `stapler`/`spctl` skipped |
 | Live MCP smoke (`dist/CurveBook.app/Contents/MacOS/curvebook-cli mcp`, stdio) | `initialize` -> `serverInfo` `{name: "curvebook", version: "0.1.0-alpha.1"}`, `protocolVersion` `2024-11-05`; `tools/list` -> `10` core tools; `curvebook-cli --version` -> `0.1.0-alpha.1` |
-| `r10_phase7_gates` (`--release`) | `6 passed; 0 failed` with the staged web zip present (see [`R10.22`](../ROADMAP.md#r1022-ui-performance--size-budgets)) |
+| `r10_phase7_gates` (`--release`) | `6 passed; 0 failed` with the staged web zip present (see [`R10.22`](../planning/roadmap-history/r10.md#r1022-ui-performance--size-budgets)) |
 
 Temporary `dist/` outputs were removed before committing. EU, CJK, and RTL translations added in Wave 6 are machine-drafted and pending native-speaker review (not a branding concern); the `R10.14` UI-surface review is recorded by the zero-hit sweep above. Hosted GitHub Actions release assets still need the same rerun at tag time.
