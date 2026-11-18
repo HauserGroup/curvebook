@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::{
-    assets, brands, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, cursors, has_cargo_nextest, licenses, pending, run_cargo,
-    run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, wasm_target_installed, web_fonts, workflows,
+    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, cursors, has_cargo_nextest, licenses, pending,
+    run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, wasm_target_installed, web_fonts, workflows,
 };
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
@@ -161,6 +161,7 @@ fn policy(root: &Path) -> Result<(), String> {
     // Formerly reached through `r10-gate` inside the monolithic `cmd_ci`; the R10 test
     // binaries themselves now run in the serial `performance` stage.
     web_fonts::check_web_bundle_readiness(root)?;
+    citations::run(root, &[])?;
     pending::run_count(root)?;
     status::run(root)
 }

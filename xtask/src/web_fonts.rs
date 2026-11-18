@@ -80,8 +80,30 @@ pub fn verify_web_bundle_zip_bytes(zip_path: &Path) -> Result<u64, String> {
     Ok(size)
 }
 
+/// Parse whether `CURVEBOOK_REQUIRE_WEB_BUNDLE` requires a built `dist/release/curvebook-web-*.zip`.
+///
+/// Unset, empty, `0`, `false`, `no`, and `off` (case-insensitive) return `false`; any other value
+/// (such as `1` or `true`) returns `true` so release/CI bundle checks fail closed.
+#[must_use]
+pub fn parse_require_web_bundle_env(raw: Option<&std::ffi::OsStr>) -> bool {
+    crate::workflows::parse_ci_env_value(raw)
+}
+
+/// Execute `cargo xtask web-bundle`.
+pub fn run_bundle_check(root: &Path, args: &[String]) -> Result<(), String> {
+    if !args.is_empty() {
+        return Err(format!("usage: cargo xtask web-bundle (unexpected args: `{}`)", args.join(" ")));
+    }
+    check_web_bundle_readiness(root)
+}
+
 /// Verify web release packaging readiness and check any built `dist/release/curvebook-web-*.zip` against `MAX_WEB_RELEASE_ZIP_BYTES`.
 pub fn check_web_bundle_readiness(root: &Path) -> Result<(), String> {
+    check_web_bundle_readiness_with_env(root, std::env::var_os("CURVEBOOK_REQUIRE_WEB_BUNDLE").as_deref())
+}
+
+/// Testable core of [`check_web_bundle_readiness`] accepting an explicit `CURVEBOOK_REQUIRE_WEB_BUNDLE` value.
+pub fn check_web_bundle_readiness_with_env(root: &Path, require_bundle_env: Option<&std::ffi::OsStr>) -> Result<(), String> {
     let manifest_raw = std::fs::read_to_string(root.join(MANIFEST_REL)).map_err(|e| format!("read {MANIFEST_REL}: {e}"))?;
     let faces = parse_manifest(&manifest_raw);
     validate_manifest_entries(&faces)?;
@@ -115,12 +137,13 @@ pub fn check_web_bundle_readiness(root: &Path) -> Result<(), String> {
     let release_dir = root.join("dist/release");
     let mut checked_zips = 0usize;
     if release_dir.is_dir() {
-        let mut entries: Vec<PathBuf> = std::fs::read_dir(&release_dir)
-            .map_err(|e| format!("read {}: {e}", release_dir.display()))?
-            .flatten()
-            .map(|e| e.path())
-            .filter(|p| p.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("curvebook-web-") && n.ends_with(".zip")))
-            .collect();
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(&release_dir).map_err(|e| format!("read {}: {e}", release_dir.display()))? {
+            let path = entry.map_err(|e| format!("read entry in {}: {e}", release_dir.display()))?.path();
+            if path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.starts_with("curvebook-web-") && n.ends_with(".zip")) {
+                entries.push(path);
+            }
+        }
         entries.sort();
         for zip_path in entries {
             let size = verify_web_bundle_zip_bytes(&zip_path)?;
@@ -129,7 +152,7 @@ pub fn check_web_bundle_readiness(root: &Path) -> Result<(), String> {
         }
     }
 
-    let require_bundle = std::env::var_os("CURVEBOOK_REQUIRE_WEB_BUNDLE").is_some_and(|v| v == "1" || v == "true");
+    let require_bundle = parse_require_web_bundle_env(require_bundle_env);
     if checked_zips == 0 {
         if require_bundle {
             return Err(String::from("CURVEBOOK_REQUIRE_WEB_BUNDLE is set, but no dist/release/curvebook-web-*.zip archive exists"));
@@ -144,14 +167,33 @@ pub fn check_web_bundle_readiness(root: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{MAX_WEB_RELEASE_ZIP_BYTES, check_web_bundle_readiness, parse_manifest, validate_manifest_entries, verify_web_bundle_zip_bytes};
-    use std::path::PathBuf;
+    use super::{
+        MAX_WEB_RELEASE_ZIP_BYTES, check_web_bundle_readiness, check_web_bundle_readiness_with_env, parse_manifest, parse_require_web_bundle_env,
+        validate_manifest_entries, verify_web_bundle_zip_bytes,
+    };
+    use std::ffi::OsStr;
+    use std::path::{Path, PathBuf};
 
     fn temp_test_dir(label: &str) -> PathBuf {
         let nanos = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos();
         let dir = std::env::temp_dir().join(format!("cb-xtask-webfonts-{label}-{}-{nanos}", std::process::id()));
         let _ = std::fs::create_dir_all(&dir);
         dir
+    }
+
+    fn write_minimal_web_workspace(root: &Path) {
+        std::fs::create_dir_all(root.join("crates/text")).unwrap();
+        std::fs::create_dir_all(root.join("apps/curvebook-web")).unwrap();
+        std::fs::create_dir_all(root.join("packaging/web")).unwrap();
+        std::fs::write(root.join("crates/text/web-fonts.txt"), "Inter/Inter-Regular.ttf\n").unwrap();
+        std::fs::write(
+            root.join("apps/curvebook-web/Trunk.toml"),
+            "[build]\npublic_url = \"./\"\nfilehash = true\ncommand_arguments = [\"xtask\", \"web-fonts\"]\n",
+        )
+        .unwrap();
+        std::fs::write(root.join("apps/curvebook-web/index.html"), "<meta content=\"default-src 'self'\"><link data-wasm-opt=\"z\">").unwrap();
+        std::fs::write(root.join("packaging/web/package.sh"), "trunk build --release --cargo-profile web-release\n").unwrap();
+        std::fs::write(root.join("Cargo.toml"), "[profile.web-release]\ninherits = \"release\"\nlto = \"fat\"\nstrip = \"symbols\"\n").unwrap();
     }
 
     #[test]
@@ -185,8 +227,47 @@ mod tests {
     }
 
     #[test]
+    fn require_web_bundle_env_allows_missing_zip_when_unset_and_fails_closed_when_enabled() {
+        assert!(!parse_require_web_bundle_env(None));
+        assert!(!parse_require_web_bundle_env(Some(OsStr::new(""))));
+        assert!(!parse_require_web_bundle_env(Some(OsStr::new("0"))));
+        assert!(!parse_require_web_bundle_env(Some(OsStr::new("false"))));
+        assert!(parse_require_web_bundle_env(Some(OsStr::new("1"))));
+        assert!(parse_require_web_bundle_env(Some(OsStr::new("true"))));
+
+        let dir = temp_test_dir("require-bundle");
+        write_minimal_web_workspace(&dir);
+
+        // Unset / falsy skips missing zip cleanly after checking static readiness.
+        assert!(check_web_bundle_readiness_with_env(&dir, None).is_ok());
+        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("0"))).is_ok());
+
+        // CURVEBOOK_REQUIRE_WEB_BUNDLE=1 fails closed when dist/release/ has no web zip.
+        let missing_err = check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).unwrap_err();
+        assert!(missing_err.contains("CURVEBOOK_REQUIRE_WEB_BUNDLE"), "unexpected error: {missing_err}");
+
+        // Once a valid in-budget zip exists in dist/release/, CURVEBOOK_REQUIRE_WEB_BUNDLE=1 passes.
+        let rel_dir = dir.join("dist/release");
+        std::fs::create_dir_all(&rel_dir).unwrap();
+        let zip_path = rel_dir.join("curvebook-web-0.1.0-alpha.2.zip");
+        let mut zip_bytes = b"PK\x03\x04".to_vec();
+        zip_bytes.resize(2048, 0);
+        std::fs::write(&zip_path, &zip_bytes).unwrap();
+        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).is_ok());
+
+        // Over-budget zip fails closed in both unset and CURVEBOOK_REQUIRE_WEB_BUNDLE=1 modes.
+        let file = std::fs::OpenOptions::new().write(true).open(&zip_path).unwrap();
+        file.set_len(MAX_WEB_RELEASE_ZIP_BYTES + 1).unwrap();
+        assert!(check_web_bundle_readiness_with_env(&dir, None).is_err());
+        assert!(check_web_bundle_readiness_with_env(&dir, Some(OsStr::new("1"))).is_err());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
     fn workspace_web_bundle_readiness_passes() {
         let root = crate::workspace_root().unwrap();
+        assert!(check_web_bundle_readiness_with_env(&root, None).is_ok());
         assert!(check_web_bundle_readiness(&root).is_ok());
     }
 }
