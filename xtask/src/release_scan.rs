@@ -2,7 +2,7 @@
 //! `curvebook-platform` bounded subprocesses, verify `SHA256SUMS.txt` parity, and run the
 //! `brands`, `cleanroom`, and `assets` distribution scanners over every unpacked container (`R0.26`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::io::Read;
 use std::path::{Component, Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -13,12 +13,14 @@ use curvebook_platform::process::ProcessCommand;
 use curvebook_platform::{PlatformError, write_atomic};
 
 const USAGE: &str = "\
-usage: cargo xtask release-scan [--require-checksums | --no-checksums] [--report <json-out>] <assets-dir>
+usage: cargo xtask release-scan [--require-checksums | --no-checksums] [--expect-beta-set <version>] [--cross-os-reports <dir>] [--report <json-out>] <assets-dir>
 
 Unpacks every release container in <assets-dir> (.zip, .tar.gz/.tgz, .deb, .rpm, .AppImage,
 .flatpak, .dmg on macOS, .msi on Windows) plus plain compliance files (SHA256SUMS.txt,
 THIRD-PARTY-LICENSES.html, *.zsync), verifies SHA-256 digests against SHA256SUMS.txt by default,
-fails closed on unknown/unextractable formats, and runs brands + cleanroom + assets checks.";
+optionally checks the exact R0.28 Beta asset set (--expect-beta-set <version>) and verifies
+cross-OS .dmg/.msi builds via native scan reports (--cross-os-reports <dir>), fails closed on
+unknown/unextractable formats, and runs brands + cleanroom + assets checks.";
 
 const CHECKSUMS_FILE: &str = "SHA256SUMS.txt";
 const LICENSES_HTML_FILE: &str = "THIRD-PARTY-LICENSES.html";
@@ -47,6 +49,8 @@ pub(crate) struct ScanOptions {
     pub assets_dir: PathBuf,
     pub checksum_mode: ChecksumMode,
     pub report_path: Option<PathBuf>,
+    pub expect_beta_set: Option<String>,
+    pub cross_os_reports_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -96,6 +100,7 @@ pub(crate) struct ScannedAssetRecord {
 #[derive(Debug, Clone)]
 pub(crate) struct ReleaseScanReport {
     pub ok: bool,
+    pub host_os: String,
     pub checksum_verified: bool,
     pub asset_count: usize,
     pub total_unpacked_files: usize,
@@ -123,6 +128,7 @@ impl ReleaseScanReport {
             .collect();
         serde_json::json!({
             "ok": self.ok,
+            "host_os": self.host_os,
             "checksum_verified": self.checksum_verified,
             "asset_count": self.asset_count,
             "total_unpacked_files": self.total_unpacked_files,
@@ -302,6 +308,8 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
     let mut saw_require = false;
     let mut saw_no_checksums = false;
     let mut report_path: Option<PathBuf> = None;
+    let mut expect_beta_set: Option<String> = None;
+    let mut cross_os_reports_dir: Option<PathBuf> = None;
 
     let mut idx = 0usize;
     while idx < args.len() {
@@ -316,13 +324,27 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
                 idx += 1;
             }
             "--report" => {
-                let Some(val) = args.get(idx + 1) else {
-                    return Err(format!("missing path after `--report`\n\n{USAGE}"));
-                };
+                let val = take_flag_value(args, idx, "--report")?;
                 if report_path.is_some() {
                     return Err(format!("duplicate `--report` argument\n\n{USAGE}"));
                 }
                 report_path = Some(PathBuf::from(val));
+                idx += 2;
+            }
+            "--expect-beta-set" => {
+                let val = take_flag_value(args, idx, "--expect-beta-set")?;
+                if expect_beta_set.is_some() {
+                    return Err(format!("duplicate `--expect-beta-set` argument\n\n{USAGE}"));
+                }
+                expect_beta_set = Some(normalize_release_version(val)?);
+                idx += 2;
+            }
+            "--cross-os-reports" => {
+                let val = take_flag_value(args, idx, "--cross-os-reports")?;
+                if cross_os_reports_dir.is_some() {
+                    return Err(format!("duplicate `--cross-os-reports` argument\n\n{USAGE}"));
+                }
+                cross_os_reports_dir = Some(PathBuf::from(val));
                 idx += 2;
             }
             other if other.starts_with('-') => {
@@ -341,11 +363,180 @@ fn parse_args(args: &[String]) -> Result<ScanOptions, String> {
     if saw_require && saw_no_checksums {
         return Err(format!("cannot combine `--require-checksums` and `--no-checksums`\n\n{USAGE}"));
     }
+    if expect_beta_set.is_some() && saw_no_checksums {
+        return Err(format!("`--expect-beta-set` requires `{CHECKSUMS_FILE}` verification (cannot combine with `--no-checksums`)\n\n{USAGE}"));
+    }
     let Some(assets_dir) = assets_dir else {
         return Err(USAGE.to_owned());
     };
     let checksum_mode = if saw_no_checksums { ChecksumMode::Disabled } else { ChecksumMode::Required };
-    Ok(ScanOptions { assets_dir, checksum_mode, report_path })
+    Ok(ScanOptions { assets_dir, checksum_mode, report_path, expect_beta_set, cross_os_reports_dir })
+}
+
+fn take_flag_value<'a>(args: &'a [String], idx: usize, flag: &str) -> Result<&'a str, String> {
+    let Some(val) = args.get(idx + 1) else {
+        return Err(format!("missing value after `{flag}`\n\n{USAGE}"));
+    };
+    Ok(val.as_str())
+}
+
+pub(crate) fn normalize_release_version(raw: &str) -> Result<String, String> {
+    let trimmed = raw.trim();
+    let ver = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    if ver.is_empty() || ver.contains('/') || ver.contains('\\') || ver.contains("..") || ver.chars().any(char::is_whitespace) {
+        return Err(format!("invalid release version `{raw}` for `--expect-beta-set`"));
+    }
+    let core_and_pre = ver.split_once('+').map_or(ver, |(left, build)| if build.is_empty() { "" } else { left });
+    if core_and_pre.is_empty() {
+        return Err(format!("invalid release version `{raw}` for `--expect-beta-set`"));
+    }
+    crate::version::validate_semver(core_and_pre)?;
+    if let Some((_, build)) = ver.split_once('+')
+        && !build.split('.').all(|seg| !seg.is_empty() && seg.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-'))
+    {
+        return Err(format!("invalid SemVer build metadata in `{raw}`"));
+    }
+    Ok(ver.to_owned())
+}
+
+#[must_use]
+pub(crate) fn expected_beta_asset_names(version: &str) -> Vec<String> {
+    vec![
+        format!("curvebook-{version}-macos-universal.dmg"),
+        format!("curvebook-{version}-windows-x64.msi"),
+        format!("curvebook-{version}-windows-arm64.msi"),
+        format!("curvebook-{version}-linux-x86_64.AppImage"),
+        format!("curvebook-{version}-linux-aarch64.AppImage"),
+        format!("curvebook-{version}-freebsd-x86_64.tar.gz"),
+        String::from(LICENSES_HTML_FILE),
+        String::from(CHECKSUMS_FILE),
+    ]
+}
+
+fn verify_expected_beta_set(assets_dir: &Path, version: &str, discovered: &[DiscoveredAsset]) -> Result<(), String> {
+    let expected: BTreeSet<String> = expected_beta_asset_names(version).into_iter().collect();
+    let actual: BTreeSet<String> = discovered.iter().map(|d| d.name.clone()).collect();
+    let missing: Vec<&str> = expected.difference(&actual).map(String::as_str).collect();
+    let extra: Vec<&str> = actual.difference(&expected).map(String::as_str).collect();
+    if missing.is_empty() && extra.is_empty() {
+        return Ok(());
+    }
+    let mut parts = Vec::new();
+    if !missing.is_empty() {
+        parts.push(format!("missing expected file(s): {}", missing.join(", ")));
+    }
+    if !extra.is_empty() {
+        parts.push(format!("unexpected extra file(s): {}", extra.join(", ")));
+    }
+    Err(format!("Beta release asset set check failed for `{version}` in `{}` ({})", assets_dir.display(), parts.join("; ")))
+}
+
+#[derive(Debug, Clone)]
+struct CrossOsVerifiedRecord {
+    host_os: String,
+    name: String,
+    kind: String,
+    size_bytes: u64,
+    sha256: String,
+    unpacked_files: usize,
+    nested_archive_entries: usize,
+    checked_assets: usize,
+}
+
+#[derive(Debug, Default)]
+struct CrossOsReportCatalog {
+    records: Vec<CrossOsVerifiedRecord>,
+}
+
+impl CrossOsReportCatalog {
+    fn load(dir: &Path) -> Result<Self, String> {
+        let meta = std::fs::symlink_metadata(dir).map_err(|e| format!("stat `--cross-os-reports` dir `{}`: {e}", dir.display()))?;
+        if !meta.is_dir() {
+            return Err(format!("`--cross-os-reports` path `{}` is not a directory", dir.display()));
+        }
+        let mut paths = Vec::new();
+        for entry in std::fs::read_dir(dir).map_err(|e| format!("read_dir `{}`: {e}", dir.display()))? {
+            let path = entry.map_err(|e| format!("entry in `{}`: {e}", dir.display()))?.path();
+            if path.is_file() && path.extension().and_then(|e| e.to_str()).is_some_and(|e| e.eq_ignore_ascii_case("json")) {
+                paths.push(path);
+            }
+        }
+        paths.sort();
+        if paths.is_empty() {
+            return Err(format!("`--cross-os-reports` directory `{}` contains no `.json` reports", dir.display()));
+        }
+        let mut records = Vec::new();
+        for path in paths {
+            parse_cross_os_report_file(&path, &mut records)?;
+        }
+        Ok(Self { records })
+    }
+
+    fn match_native_asset(&self, expected_host_os: &str, item: &DiscoveredAsset) -> Option<ScannedAssetRecord> {
+        self.records
+            .iter()
+            .find(|rec| {
+                rec.host_os == expected_host_os
+                    && rec.name == item.name
+                    && rec.kind == item.kind.label()
+                    && rec.size_bytes == item.size_bytes
+                    && rec.sha256 == item.sha256
+                    && rec.unpacked_files > 0
+            })
+            .map(|rec| ScannedAssetRecord {
+                name: item.name.clone(),
+                kind: item.kind.label(),
+                size_bytes: item.size_bytes,
+                sha256: item.sha256.clone(),
+                unpacked_files: rec.unpacked_files,
+                nested_archive_entries: rec.nested_archive_entries,
+                checked_assets: rec.checked_assets,
+            })
+    }
+}
+
+fn parse_cross_os_report_file(path: &Path, out: &mut Vec<CrossOsVerifiedRecord>) -> Result<(), String> {
+    let raw = std::fs::read_to_string(path).map_err(|e| format!("read report `{}`: {e}", path.display()))?;
+    let val: serde_json::Value = serde_json::from_str(&raw).map_err(|e| format!("parse report `{}`: {e}", path.display()))?;
+    if val.get("ok").and_then(serde_json::Value::as_bool) != Some(true) {
+        return Err(format!("cross-OS report `{}` is not marked `ok: true`", path.display()));
+    }
+    let Some(host_os) = val.get("host_os").and_then(serde_json::Value::as_str).filter(|s| !s.is_empty()) else {
+        return Err(format!("cross-OS report `{}` missing `host_os`", path.display()));
+    };
+    let Some(assets) = val.get("assets").and_then(serde_json::Value::as_array) else {
+        return Err(format!("cross-OS report `{}` missing `assets` array", path.display()));
+    };
+    for entry in assets {
+        let Some(name) = entry.get("name").and_then(serde_json::Value::as_str) else {
+            return Err(format!("cross-OS report `{}` has asset entry missing `name`", path.display()));
+        };
+        let Some(kind) = entry.get("kind").and_then(serde_json::Value::as_str) else {
+            return Err(format!("cross-OS report `{}` asset `{name}` missing `kind`", path.display()));
+        };
+        let Some(size_bytes) = entry.get("size_bytes").and_then(serde_json::Value::as_u64) else {
+            return Err(format!("cross-OS report `{}` asset `{name}` missing `size_bytes`", path.display()));
+        };
+        let Some(sha256) = entry.get("sha256").and_then(serde_json::Value::as_str) else {
+            return Err(format!("cross-OS report `{}` asset `{name}` missing `sha256`", path.display()));
+        };
+        let Some(unpacked_files) = entry.get("unpacked_files").and_then(serde_json::Value::as_u64) else {
+            return Err(format!("cross-OS report `{}` asset `{name}` missing `unpacked_files`", path.display()));
+        };
+        let nested_archive_entries = entry.get("nested_archive_entries").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        let checked_assets = entry.get("checked_assets").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        out.push(CrossOsVerifiedRecord {
+            host_os: host_os.to_owned(),
+            name: name.to_owned(),
+            kind: kind.to_owned(),
+            size_bytes,
+            sha256: sha256.to_ascii_lowercase(),
+            unpacked_files: usize::try_from(unpacked_files).unwrap_or(usize::MAX),
+            nested_archive_entries: usize::try_from(nested_archive_entries).unwrap_or(usize::MAX),
+            checked_assets: usize::try_from(checked_assets).unwrap_or(usize::MAX),
+        });
+    }
+    Ok(())
 }
 
 struct DiscoveredAsset {
@@ -363,10 +554,14 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
     }
 
     let discovered = discover_release_assets(&options.assets_dir)?;
+    if let Some(beta_ver) = &options.expect_beta_set {
+        verify_expected_beta_set(&options.assets_dir, beta_ver, &discovered)?;
+    }
     let checksum_verified = options.checksum_mode == ChecksumMode::Required;
     if checksum_verified {
         verify_checksum_manifest(&options.assets_dir, &discovered)?;
     }
+    let cross_os_reports = options.cross_os_reports_dir.as_deref().map(CrossOsReportCatalog::load).transpose()?;
 
     let asset_catalog = crate::assets::load_repo_asset_catalog(root)?;
     let scratch = ScratchDirGuard::new("batch")?;
@@ -379,7 +574,7 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
         }
         let item_scratch = scratch.path.join(format!("item-{idx}"));
         std::fs::create_dir_all(&item_scratch).map_err(|e| format!("create staging dir for `{}`: {e}", item.name))?;
-        let outcome = scan_single_asset(&asset_catalog, tools, item, &item_scratch, &mut violations)?;
+        let outcome = scan_single_asset(&asset_catalog, tools, cross_os_reports.as_ref(), item, &item_scratch, &mut violations)?;
         records.push(outcome);
     }
 
@@ -392,6 +587,7 @@ pub(crate) fn scan_release_dir_with_tools(root: &Path, options: &ScanOptions, to
     let total_checked_assets = records.iter().map(|r| r.checked_assets).sum();
     Ok(ReleaseScanReport {
         ok: true,
+        host_os: std::env::consts::OS.to_owned(),
         checksum_verified,
         asset_count: records.len(),
         total_unpacked_files,
@@ -563,6 +759,7 @@ fn parse_sha256_line(line: &str) -> Option<(&str, &str)> {
 fn scan_single_asset(
     asset_catalog: &crate::assets::RepoAssetCatalog,
     tools: &ToolConfig,
+    cross_os_reports: Option<&CrossOsReportCatalog>,
     item: &DiscoveredAsset,
     item_scratch: &Path,
     violations: &mut Vec<String>,
@@ -595,6 +792,34 @@ fn scan_single_asset(
                 nested_archive_entries: 0,
                 checked_assets: 0,
             })
+        }
+        AssetKind::Dmg if !tools.allow_dmg => {
+            if let Some(reports) = cross_os_reports {
+                return reports.match_native_asset("macos", item).ok_or_else(|| {
+                    format!(
+                        "`{}`: missing matching verified macOS native scan report (`host_os=macos`, exact size/sha256, `unpacked_files > 0`)",
+                        item.name
+                    )
+                });
+            }
+            let stage_dir = item_scratch.join("unpacked");
+            std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
+            unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
+            scan_unpacked_tree(asset_catalog, item, &stage_dir, violations)
+        }
+        AssetKind::Msi if !tools.allow_msi => {
+            if let Some(reports) = cross_os_reports {
+                return reports.match_native_asset("windows", item).ok_or_else(|| {
+                    format!(
+                        "`{}`: missing matching verified Windows native scan report (`host_os=windows`, exact size/sha256, `unpacked_files > 0`)",
+                        item.name
+                    )
+                });
+            }
+            let stage_dir = item_scratch.join("unpacked");
+            std::fs::create_dir_all(&stage_dir).map_err(|e| format!("create unpacked dir for `{}`: {e}", item.name))?;
+            unpack_container_asset(tools, item, item_scratch, &stage_dir, violations)?;
+            scan_unpacked_tree(asset_catalog, item, &stage_dir, violations)
         }
         _ => {
             let stage_dir = item_scratch.join("unpacked");
@@ -1506,14 +1731,39 @@ mod tests {
         let ok = parse_args(&[String::from("dist/release")]).unwrap();
         assert_eq!(ok.checksum_mode, ChecksumMode::Required);
         assert!(ok.report_path.is_none());
+        assert!(ok.expect_beta_set.is_none());
+        assert!(ok.cross_os_reports_dir.is_none());
 
         let no_cs = parse_args(&[String::from("--no-checksums"), String::from("--report"), String::from("out.json"), String::from("dist")]).unwrap();
         assert_eq!(no_cs.checksum_mode, ChecksumMode::Disabled);
         assert_eq!(no_cs.report_path, Some(PathBuf::from("out.json")));
 
-        for bad in [vec![], vec!["--require-checksums", "--no-checksums", "dist"], vec!["--unknown", "dist"], vec!["--report"], vec!["a", "b"]] {
+        let beta = parse_args(&[
+            String::from("--expect-beta-set"),
+            String::from("v0.1.0-beta.1"),
+            String::from("--cross-os-reports"),
+            String::from("dist/scan-reports"),
+            String::from("dist/release"),
+        ])
+        .unwrap();
+        assert_eq!(beta.expect_beta_set.as_deref(), Some("0.1.0-beta.1"));
+        assert_eq!(beta.cross_os_reports_dir, Some(PathBuf::from("dist/scan-reports")));
+        assert_eq!(beta.checksum_mode, ChecksumMode::Required);
+
+        for bad in [
+            vec![],
+            vec!["--require-checksums", "--no-checksums", "dist"],
+            vec!["--expect-beta-set", "0.1.0-beta.1", "--no-checksums", "dist"],
+            vec!["--expect-beta-set", "../evil", "dist"],
+            vec!["--expect-beta-set", "", "dist"],
+            vec!["--expect-beta-set"],
+            vec!["--cross-os-reports"],
+            vec!["--unknown", "dist"],
+            vec!["--report"],
+            vec!["a", "b"],
+        ] {
             let owned: Vec<String> = bad.into_iter().map(String::from).collect();
-            assert!(parse_args(&owned).is_err());
+            assert!(parse_args(&owned).is_err(), "expected failure for {owned:?}");
         }
 
         for unsafe_member in ["../escape.txt", "a/../../escape.txt", "/etc/passwd", "C:\\Windows\\win.ini", "dir\\file.txt"] {
@@ -1641,7 +1891,13 @@ mod tests {
         std::fs::write(clean_dir.join("curvebook-0.1.0-linux-x86_64.rpm"), rpm_lead).unwrap();
         write_checksums(&clean_dir);
 
-        let clean_opts = ScanOptions { assets_dir: clean_dir, checksum_mode: ChecksumMode::Required, report_path: None };
+        let clean_opts = ScanOptions {
+            assets_dir: clean_dir,
+            checksum_mode: ChecksumMode::Required,
+            report_path: None,
+            expect_beta_set: None,
+            cross_os_reports_dir: None,
+        };
         let report = scan_release_dir_with_tools(&root, &clean_opts, &tools).unwrap();
         assert_eq!(report.asset_count, 6);
         assert!(std::fs::read_to_string(&detach_log).unwrap().lines().count() == 1);
@@ -1657,7 +1913,13 @@ mod tests {
         std::fs::write(dirty_dir.join("curvebook-dirty.rpm"), rpm_lead).unwrap();
         write_checksums(&dirty_dir);
 
-        let dirty_opts = ScanOptions { assets_dir: dirty_dir, checksum_mode: ChecksumMode::Required, report_path: None };
+        let dirty_opts = ScanOptions {
+            assets_dir: dirty_dir,
+            checksum_mode: ChecksumMode::Required,
+            report_path: None,
+            expect_beta_set: None,
+            cross_os_reports_dir: None,
+        };
         let err = scan_release_dir_with_tools(&root, &dirty_opts, &tools).unwrap_err();
         assert!(err.contains("curvebook-dirty.AppImage!"), "{err}");
         assert!(err.contains("curvebook-dirty.flatpak!"), "{err}");
@@ -1665,5 +1927,181 @@ mod tests {
         assert!(err.contains("curvebook-dirty.msi!"), "{err}");
         assert!(err.contains("curvebook-dirty.rpm!"), "{err}");
         assert_eq!(std::fs::read_to_string(&detach_log).unwrap().lines().count(), 2, "DMG must detach even when scan fails");
+    }
+
+    #[cfg(unix)]
+    fn build_minimal_clean_tar_gz(entry_path: &str, data: &[u8]) -> Vec<u8> {
+        let mut tar = Vec::new();
+        let mut hdr = [0u8; 512];
+        let name_bytes = entry_path.as_bytes();
+        hdr[..name_bytes.len()].copy_from_slice(name_bytes);
+        hdr[100..108].copy_from_slice(b"0000644\0");
+        hdr[108..116].copy_from_slice(b"0000000\0");
+        hdr[116..124].copy_from_slice(b"0000000\0");
+        let size_octal = format!("{:011o}\0", data.len());
+        hdr[124..136].copy_from_slice(size_octal.as_bytes());
+        hdr[136..148].copy_from_slice(b"00000000000\0");
+        hdr[148..156].fill(b' ');
+        hdr[156] = b'0';
+        hdr[257..263].copy_from_slice(b"ustar\0");
+        hdr[263..265].copy_from_slice(b"00");
+        let chksum: u32 = hdr.iter().map(|&b| u32::from(b)).sum();
+        hdr[148..156].copy_from_slice(format!("{chksum:06o}\0 ").as_bytes());
+        tar.extend_from_slice(&hdr);
+        tar.extend_from_slice(data);
+        let pad = (512 - (data.len() % 512)) % 512;
+        tar.resize(tar.len() + pad, 0);
+        tar.resize(tar.len() + 1024, 0);
+
+        let mut gz = vec![0x1f, 0x8b, 0x08, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x03];
+        let len = tar.len() as u16;
+        let nlen = !len;
+        gz.push(1);
+        gz.extend_from_slice(&len.to_le_bytes());
+        gz.extend_from_slice(&nlen.to_le_bytes());
+        gz.extend_from_slice(&tar);
+        let mut crc = 0xffff_ffffu32;
+        for &b in &tar {
+            crc ^= u32::from(b);
+            for _ in 0..8 {
+                let mask = (crc & 1).wrapping_neg();
+                crc = (crc >> 1) ^ (0xedb8_8320u32 & mask);
+            }
+        }
+        gz.extend_from_slice(&(!crc).to_le_bytes());
+        gz.extend_from_slice(&(tar.len() as u32).to_le_bytes());
+        gz
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn expect_beta_set_and_cross_os_reports_verify_exact_8_files_and_fail_closed() {
+        let root = crate::workspace_root().unwrap();
+        let scratch = ScratchDirGuard::new("beta-set").unwrap();
+        let bin_dir = scratch.path.join("bin");
+        std::fs::create_dir_all(&bin_dir).unwrap();
+
+        let unsquashfs = write_exec_script(
+            &bin_dir,
+            "unsquashfs",
+            "#!/bin/sh\nset -eu\ndest=\"\"\nwhile [ $# -gt 0 ]; do\n  case \"$1\" in\n    -no-progress) shift ;;\n    -o) shift 2 ;;\n    -d) dest=\"$2\"; shift 2 ;;\n    *) shift ;;\n  esac\ndone\nmkdir -p \"$dest/usr/share/doc/curvebook\"\nprintf 'CurveBook clean AppImage\\n' > \"$dest/usr/share/doc/curvebook/README.txt\"\n",
+        );
+
+        let ver = "0.1.0-beta.1";
+        let rel_dir = scratch.path.join("release");
+        std::fs::create_dir_all(&rel_dir).unwrap();
+
+        let mut appimage_bytes = vec![0x7f, b'E', b'L', b'F'];
+        appimage_bytes.resize(512, 0);
+        appimage_bytes.extend_from_slice(&build_squashfs_v4_superblock(131_072, 17, 1));
+        let dmg_bytes = b"CurveBook DMG fixture\n";
+        let msi_x64_bytes = b"CurveBook MSI x64 fixture\n";
+        let msi_arm64_bytes = b"CurveBook MSI arm64 fixture\n";
+        let freebsd_tgz =
+            build_minimal_clean_tar_gz("curvebook-0.1.0-beta.1-freebsd-x86_64/share/doc/curvebook/README.txt", b"CurveBook FreeBSD clean\n");
+
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-macos-universal.dmg")), dmg_bytes).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-windows-x64.msi")), msi_x64_bytes).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-windows-arm64.msi")), msi_arm64_bytes).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-x86_64.AppImage")), &appimage_bytes).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-linux-aarch64.AppImage")), &appimage_bytes).unwrap();
+        std::fs::write(rel_dir.join(format!("curvebook-{ver}-freebsd-x86_64.tar.gz")), &freebsd_tgz).unwrap();
+        std::fs::write(rel_dir.join("THIRD-PARTY-LICENSES.html"), "<html><title>CurveBook</title><body>MIT OR Apache-2.0</body></html>\n").unwrap();
+        write_checksums(&rel_dir);
+
+        let reports_dir = scratch.path.join("reports");
+        std::fs::create_dir_all(&reports_dir).unwrap();
+        std::fs::write(
+            reports_dir.join("scan-report-macos.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "ok": true,
+                "host_os": "macos",
+                "assets": [{
+                    "name": format!("curvebook-{ver}-macos-universal.dmg"),
+                    "kind": "dmg",
+                    "size_bytes": dmg_bytes.len(),
+                    "sha256": sha256_hex(dmg_bytes),
+                    "unpacked_files": 4,
+                    "nested_archive_entries": 0,
+                    "checked_assets": 1
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        std::fs::write(
+            reports_dir.join("scan-report-windows.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "ok": true,
+                "host_os": "windows",
+                "assets": [
+                    {
+                        "name": format!("curvebook-{ver}-windows-x64.msi"),
+                        "kind": "msi",
+                        "size_bytes": msi_x64_bytes.len(),
+                        "sha256": sha256_hex(msi_x64_bytes),
+                        "unpacked_files": 5,
+                        "nested_archive_entries": 0,
+                        "checked_assets": 1
+                    },
+                    {
+                        "name": format!("curvebook-{ver}-windows-arm64.msi"),
+                        "kind": "msi",
+                        "size_bytes": msi_arm64_bytes.len(),
+                        "sha256": sha256_hex(msi_arm64_bytes),
+                        "unpacked_files": 5,
+                        "nested_archive_entries": 0,
+                        "checked_assets": 1
+                    }
+                ]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+
+        let linux_host_tools =
+            ToolConfig { unsquashfs_bin: unsquashfs.to_string_lossy().into_owned(), allow_dmg: false, allow_msi: false, ..ToolConfig::default() };
+
+        // 1. Complete 8-file Beta set + matching cross-OS reports passes cleanly.
+        let ok_opts = ScanOptions {
+            assets_dir: rel_dir.clone(),
+            checksum_mode: ChecksumMode::Required,
+            report_path: None,
+            expect_beta_set: Some(ver.to_owned()),
+            cross_os_reports_dir: Some(reports_dir.clone()),
+        };
+        let report = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap();
+        assert_eq!(report.asset_count, 8);
+        assert_eq!(report.host_os, std::env::consts::OS);
+
+        // 2. Without cross-os-reports, cross-OS .dmg / .msi STILL fails closed!
+        let no_reports_opts = ScanOptions { cross_os_reports_dir: None, ..ok_opts.clone() };
+        assert!(scan_release_dir_with_tools(&root, &no_reports_opts, &linux_host_tools).is_err());
+
+        // 3. Forged wrong host_os or mismatched sha256 in cross-OS report fails closed!
+        std::fs::write(
+            reports_dir.join("scan-report-macos.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "ok": true,
+                "host_os": "linux",
+                "assets": [{
+                    "name": format!("curvebook-{ver}-macos-universal.dmg"),
+                    "kind": "dmg",
+                    "size_bytes": dmg_bytes.len(),
+                    "sha256": sha256_hex(dmg_bytes),
+                    "unpacked_files": 4
+                }]
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let bad_host_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
+        assert!(bad_host_err.contains("host_os=macos"), "{bad_host_err}");
+
+        // 4. Extra dropped asset fails closed even if all 8 files are present.
+        std::fs::write(rel_dir.join(format!("curvebook-web-{ver}.zip")), b"PK\x05\x06").unwrap();
+        write_checksums(&rel_dir);
+        let extra_err = scan_release_dir_with_tools(&root, &ok_opts, &linux_host_tools).unwrap_err();
+        assert!(extra_err.contains("unexpected extra file(s)") && extra_err.contains(&format!("curvebook-web-{ver}.zip")), "{extra_err}");
     }
 }

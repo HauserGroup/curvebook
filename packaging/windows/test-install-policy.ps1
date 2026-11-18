@@ -4,7 +4,7 @@
 #>
 param(
   [Parameter(Mandatory = $true)] [string] $OutputDirectory,
-  [ValidateSet('x64','x86','arm64')] [string[]] $Architectures = @('x64','x86','arm64')
+  [ValidateSet('x64','arm64')] [string[]] $Architectures = @('x64','arm64')
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest

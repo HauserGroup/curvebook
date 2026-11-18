@@ -24,14 +24,8 @@
   <Property Id="CURVEBOOK_MACHINE_DIR" Secure="yes" />
   <SetProperty Id="CURVEBOOK_SCOPE" Action="CurveBookPreferMachineScope" Value="machine" After="CurveBookMFromLegacyExe" Sequence="ui" Condition="ALLUSERS = 1 OR (CURVEBOOK_MACHINE_DIR AND NOT CURVEBOOK_USER_DIR)" />
   <SetProperty Id="INSTALLFOLDER" Action="CurveBookRestoreUserFolder" Value="[CURVEBOOK_USER_DIR]" Before="CostInitialize" Sequence="both" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1 AND CURVEBOOK_USER_DIR" />
-  <?if $(sys.BUILDARCH) = x86 ?>
-  <SetProperty Id="INSTALLFOLDER" Action="CurveBookDefaultMachineFolder" Value="[%ProgramFiles(x86)]\CurveBook\" After="CurveBookRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND VersionNT64" />
-  <SetProperty Id="INSTALLFOLDER" Action="CurveBookDefaultMachineFolder32" Value="[%ProgramFiles]\CurveBook\" After="CurveBookDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND NOT VersionNT64" />
-  <SetProperty Id="INSTALLFOLDER" Action="CurveBookDefaultUserFolder" Value="[LocalAppDataFolder]Programs\CurveBook\" After="CurveBookDefaultMachineFolder32" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
-  <?else?>
   <SetProperty Id="INSTALLFOLDER" Action="CurveBookDefaultMachineFolder" Value="[%ProgramW6432]\CurveBook\" After="CurveBookRestoreUserFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1" />
   <SetProperty Id="INSTALLFOLDER" Action="CurveBookDefaultUserFolder" Value="[LocalAppDataFolder]Programs\CurveBook\" After="CurveBookDefaultMachineFolder" Sequence="ui" Condition="NOT INSTALLFOLDER AND ALLUSERS &lt;&gt; 1" />
-  <?endif?>
   <SetProperty Id="INSTALLFOLDER" Action="CurveBookRestoreMachineFolder" Value="[CURVEBOOK_MACHINE_DIR]" Before="CurveBookRestoreUserFolder" Sequence="both" Condition="NOT INSTALLFOLDER AND ALLUSERS = 1 AND CURVEBOOK_MACHINE_DIR" />
   <Launch Condition="Installed OR ALLUSERS &lt;&gt; 1 OR NOT CURVEBOOK_USER_DIR" Message="This app is already installed for your account. Choose Only for me to update it, or uninstall that copy before changing who it is installed for." />
   <Launch Condition="Installed OR ALLUSERS = 1 OR NOT CURVEBOOK_MACHINE_DIR" Message="This app is already installed for everyone. Choose Everyone to update it, or pass ALLUSERS=1 to msiexec. Uninstall that copy before changing who it is installed for." />
