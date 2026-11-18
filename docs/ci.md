@@ -9,13 +9,13 @@ cancelled or skipped dependencies fail that gate.
 | Stage | Checks |
 |---|---|
 | `cargo xtask ci build` | Build and archive every native workspace test target, without running tests. |
-| `cargo xtask ci policy` | Formatting, assets, brands, cleanroom, cursors, exact i18n report, UI/engine command and schema sync, layers, secrets, licences, telemetry, workflow lint, screenshot integrity, web bundle readiness, pending items, and status. Hosted CI also runs the full `cargo deny check`. |
+| `cargo xtask ci policy` | Formatting, assets, brands, cleanroom, cursors, exact i18n report, UI/engine command and schema sync, layers, secrets, licences, telemetry, workflow lint, screenshot integrity, web bundle readiness, numerical `D1` literature citations (`cargo xtask citations`), pending items, and status. Hosted CI also runs the full `cargo deny check`. |
 | `cargo xtask ci lint` | Workspace Clippy, every target, with warnings denied. |
 | `cargo xtask ci tests` | Every native test except the performance-sensitive binaries selected by `PERFORMANCE_FILTER` in `xtask/src/ci.rs`. |
 | `cargo xtask ci performance` | Every `r10_*` binary (including `r10_phase7_gates` and the landed Wave 5 latency checks), every `human_wf_*` human-path workflow binary with its input-to-paint budgets, plus `*perf*` grid and curve-fit benchmark binaries, serially; existing assertions and budgets are unchanged. |
-| `cargo xtask ci doctests` | Workspace doctests. |
+| `cargo xtask ci doctests` | Workspace doctests, then `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` so broken or private intra-doc links and other rustdoc warnings fail CI. |
 | `cargo xtask ci features` | Text tests without default features; every UI test and doctest without default features, with its performance-sensitive binaries serial; MCP compilation without default features. |
-| `cargo xtask ci wasm` | Web and engine compilation for `wasm32-unknown-unknown`, including their dependencies. |
+| `cargo xtask ci wasm` | Web and engine compilation checks plus `curvebook-web` and `curvebook-ui-egui` Clippy (`-D warnings`) for `wasm32-unknown-unknown`, `trunk build --cargo-profile web-release` when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and web bundle readiness/size-budget verification (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1` requires `dist/release/curvebook-web-*.zip`). |
 
 The native and performance selections are exact complements. The full local
 command uses nextest when available; without it, `cargo test --workspace

@@ -1,6 +1,41 @@
 #![forbid(unsafe_code)]
 //! Linear, Deming (Model II), and Nonlinear Regression + Custom Bytecode/ODE Equation DSL
 //! engine for CurveBook (`Layer L2`).
+//!
+//! # Example
+//!
+//! ```
+//! use curvebook_fit::{
+//!     DataPoint, DatasetSeries, FitStatus, HookContext, SolverConfig, fit_nonlinear,
+//!     get_builtin_model,
+//! };
+//!
+//! let model = get_builtin_model("michaelis_menten").expect("built-in enzyme kinetics model");
+//! let substrate_conc = [0.5, 1.0, 2.0, 5.0, 10.0, 20.0];
+//! let points: Vec<DataPoint> = substrate_conc
+//!     .iter()
+//!     .map(|&s| DataPoint::xy(s, 100.0 * s / (2.5 + s)))
+//!     .collect();
+//! let series = DatasetSeries {
+//!     data_set_index: 0,
+//!     label: "Enzyme A".to_owned(),
+//!     points,
+//!     unknowns_y: Vec::new(),
+//!     unknowns_x: Vec::new(),
+//!     is_pre_summarized: false,
+//!     column_title_value: None,
+//! };
+//!
+//! let fit = fit_nonlinear(model.as_ref(), &[series], &HookContext::default(), &SolverConfig::default())
+//!     .expect("nonlinear least-squares fit succeeds");
+//! assert_eq!(fit.status, FitStatus::Converged);
+//!
+//! let vmax = fit.parameters.iter().find(|p| p.name == "Vmax").expect("Vmax parameter");
+//! let km = fit.parameters.iter().find(|p| p.name == "Km").expect("Km parameter");
+//! assert!((vmax.estimate - 100.0).abs() < 1e-6);
+//! assert!((km.estimate - 2.5).abs() < 1e-6);
+//! assert!(fit.datasets[0].r_squared > 0.999_999);
+//! ```
 
 pub mod diagnostics;
 pub mod dsl;

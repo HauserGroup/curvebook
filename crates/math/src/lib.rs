@@ -14,7 +14,9 @@
 //! use curvebook_math::sum::SummaryMoments;
 //!
 //! let moments = SummaryMoments::from_slice(&[10.0, 12.0, 14.0, 16.0]).expect("finite sample");
+//! assert_eq!(moments.count, 4);
 //! assert_eq!(moments.mean, 13.0);
+//! assert!((moments.sem().expect("n >= 2") - 1.290_994_448_735_805_6).abs() < 1e-14);
 //!
 //! let p = student_t_two_sided_p(4.0, 12.0).expect("valid df");
 //! assert_eq!(PValueFormat::Apa.format_p(p), ".002");
@@ -25,6 +27,7 @@
 //! assert_eq!(logit.inverse(0.0), Some(0.5));
 //! ```
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod dist;
 pub mod error;
@@ -56,15 +59,28 @@ pub enum LogitDomain {
 }
 
 /// Scale transformations supported on scientific graph axes (`docs/implementation/graphing-and-layouts.md` §3.1).
+///
+/// Every scale defines a guarded forward map [`Self::transform`] (`g(u)`) and inverse [`Self::inverse`]
+/// (`g^{-1}(t)`); out-of-domain or non-finite inputs yield `None` rather than `NaN` or `±Inf`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum AxisScale {
+    /// Identity scale `g(u) = u` over finite `u in (-inf, +inf)`.
     #[default]
     Linear,
+    /// Common (base-10) logarithm `g(u) = log10(u)` over strictly positive `u > 0` (`g^{-1}(t) = 10^t`).
     Log10,
+    /// Binary (base-2) logarithm `g(u) = log2(u)` over strictly positive `u > 0` (`g^{-1}(t) = 2^t`).
     Log2,
+    /// Natural (base-*e*) logarithm `g(u) = ln(u)` over strictly positive `u > 0` (`g^{-1}(t) = exp(t)`).
     Ln,
+    /// Logit log-odds transform `ln(p / (1 - p))` over either percentages `u in (0, 100)` or unit
+    /// proportions `u in (0, 1)` as selected by [`LogitDomain`].
     Logit(LogitDomain),
+    /// Probit (normal probability) scale `g(u) = Phi^{-1}(u / 100)` over percentages `u in (0, 100)`,
+    /// where `Phi^{-1}` is the standard normal quantile function.
     Probit,
+    /// Reciprocal scale `g(u) = 1 / u` over finite non-zero `u != 0` (useful for Lineweaver–Burk and
+    /// Arrhenius-type reciprocal axes).
     Reciprocal,
 }
 

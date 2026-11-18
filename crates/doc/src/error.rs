@@ -113,15 +113,24 @@ pub fn validate_confidence_level(percent: f64) -> Result<ConfidenceLevel, DocErr
 #[derive(Debug, Clone, PartialEq)]
 pub enum SummaryPointError {
     /// Subcolumn mode does not encode parametric `(Mean, SD/SEM/%CV, N)` moments.
-    NotParametricSummaryMode { mode: SubcolumnMode },
+    NotParametricSummaryMode {
+        /// Non-parametric or raw-replicate [`SubcolumnMode`] passed to [`crate::SummarizedPoint::reconstruct`].
+        mode: SubcolumnMode,
+    },
     /// Mean value was entered, but the spread (`SD` / `SEM` / `%CV`) subcolumn is missing or non-numeric.
     MissingSpread,
     /// Mean value was entered, but sample size `N` is missing or non-numeric.
     MissingSampleSize,
-    /// Sample size `N` is `< 1.0`.
-    SampleSizeBelowOne { n: f64 },
-    /// Entered spread (`SD`, `SEM`, or `%CV`) is negative.
-    NegativeSpread { spread: f64 },
+    /// Sample size `N` is `< 1.0` or non-integer.
+    SampleSizeBelowOne {
+        /// Invalid sample size `N` read from the third subcolumn.
+        n: f64,
+    },
+    /// Entered spread (`SD`, `SEM`, or `%CV`) is negative or overflows moment reconstruction.
+    NegativeSpread {
+        /// Offending spread value read from the second subcolumn.
+        spread: f64,
+    },
 }
 
 impl fmt::Display for SummaryPointError {
@@ -143,26 +152,135 @@ impl std::error::Error for SummaryPointError {}
 /// Structured validation and mutation errors produced by `curvebook-doc`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum DocError {
+    /// Identifier (`SheetId`, constant name, or formula key) was empty or whitespace-only.
     EmptyIdentifier,
-    InvalidIdentifier { reason: &'static str },
-    TooManyRows { count: usize, max: usize },
-    TooManyDataSets { count: usize, max: usize },
-    TooManySubcolumns { count: usize, max: usize },
-    TooManyCells { count: usize, max: usize },
-    TooManyLayoutItems { count: usize, max: usize },
-    TooManySheets { count: usize, max: usize },
-    TitleTooLong { byte_len: usize, max: usize },
-    InvalidSubcolumnCount { count: usize },
-    IncompatibleSubcolumnMode { archetype: TableKind, mode: SubcolumnMode },
-    SheetFrozen { sheet_id: SheetId },
-    CellOutOfBounds { row: usize, col: usize, subcol: usize },
-    InvalidCellValue { archetype: TableKind, row: usize, col: usize, reason: &'static str },
-    SheetNotFound { sheet_id: SheetId },
-    SheetIndexOutOfBounds { folder: SheetFolderKind, index: usize, len: usize },
-    DuplicateSheetId { sheet_id: SheetId },
-    InvalidConfidenceLevel { percent: f64 },
-    InvalidAxisSegments { count: usize },
-    IncompatibleRetargetTable { analysis_title: String, target_kind: TableKind },
+    /// Identifier violated syntax or UTF-8 length constraints (`MAX_SHEET_ID_BYTES`, whitespace/control characters, or reserved `:`/`{{`/`}}` hook delimiters).
+    InvalidIdentifier {
+        /// Static explanation of which identifier rule failed.
+        reason: &'static str,
+    },
+    /// Requested table row count exceeded [`MAX_ROWS`].
+    TooManyRows {
+        /// Requested row count.
+        count: usize,
+        /// Maximum permitted row count ([`MAX_ROWS`]).
+        max: usize,
+    },
+    /// Requested data-set or variable column count exceeded [`MAX_DATA_SETS`].
+    TooManyDataSets {
+        /// Requested column count.
+        count: usize,
+        /// Maximum permitted column count ([`MAX_DATA_SETS`]).
+        max: usize,
+    },
+    /// Requested replicate subcolumn count exceeded [`MAX_SUBCOLUMNS`].
+    TooManySubcolumns {
+        /// Requested subcolumn count.
+        count: usize,
+        /// Maximum permitted subcolumn count ([`MAX_SUBCOLUMNS`]).
+        max: usize,
+    },
+    /// Requested sheet or project cell allocation exceeded [`MAX_SHEET_CELLS`] or [`MAX_PROJECT_CELLS`] (or overflowed `usize`).
+    TooManyCells {
+        /// Requested total cell slots (`usize::MAX` on integer overflow).
+        count: usize,
+        /// Applicable per-sheet or per-project cell ceiling.
+        max: usize,
+    },
+    /// Requested layout item count on a [`crate::LayoutSpec`] exceeded [`crate::MAX_LAYOUT_ITEMS`].
+    TooManyLayoutItems {
+        /// Attempted number of layout items.
+        count: usize,
+        /// Maximum permitted layout items ([`crate::MAX_LAYOUT_ITEMS`]).
+        max: usize,
+    },
+    /// Total sheet count across all navigator sections exceeded [`MAX_SHEETS_PER_PROJECT`].
+    TooManySheets {
+        /// Attempted total sheet count.
+        count: usize,
+        /// Maximum permitted sheets per project ([`MAX_SHEETS_PER_PROJECT`]).
+        max: usize,
+    },
+    /// Title or label UTF-8 byte length exceeded [`MAX_TITLE_BYTES`].
+    TitleTooLong {
+        /// Actual UTF-8 byte length of the title.
+        byte_len: usize,
+        /// Maximum permitted UTF-8 byte length ([`MAX_TITLE_BYTES`]).
+        max: usize,
+    },
+    /// Subcolumn count was `0` (`1..=MAX_SUBCOLUMNS` is required).
+    InvalidSubcolumnCount {
+        /// Offending zero subcolumn count.
+        count: usize,
+    },
+    /// Requested [`SubcolumnMode`] is disallowed for the target [`TableKind`] archetype.
+    IncompatibleSubcolumnMode {
+        /// Table archetype rejecting the subcolumn layout.
+        archetype: TableKind,
+        /// Disallowed subcolumn mode.
+        mode: SubcolumnMode,
+    },
+    /// Mutation was attempted on a [`crate::DataSheet`] with `frozen == true`.
+    SheetFrozen {
+        /// Identifier of the frozen data sheet.
+        sheet_id: SheetId,
+    },
+    /// Zero-based `(row, col, subcol)` coordinate lay outside the table's allocated dimensions.
+    CellOutOfBounds {
+        /// Zero-based row index.
+        row: usize,
+        /// Zero-based data-set or variable column index.
+        col: usize,
+        /// Zero-based replicate or summary subcolumn index.
+        subcol: usize,
+    },
+    /// Cell value violated archetype-specific domain invariants (for example negative counts in [`TableKind::Contingency`] or invalid censor codes in [`TableKind::Survival`]).
+    InvalidCellValue {
+        /// Table archetype enforcing the cell invariant.
+        archetype: TableKind,
+        /// Zero-based row index of the rejected cell.
+        row: usize,
+        /// Zero-based column index of the rejected cell.
+        col: usize,
+        /// Static description of the violated domain constraint.
+        reason: &'static str,
+    },
+    /// Referenced [`SheetId`] does not exist in the project.
+    SheetNotFound {
+        /// Missing sheet identifier.
+        sheet_id: SheetId,
+    },
+    /// Zero-based folder index passed to [`crate::ProjectDocument::reorder_sheet`] was `>= len`.
+    SheetIndexOutOfBounds {
+        /// Navigator folder whose slice bounds were exceeded.
+        folder: SheetFolderKind,
+        /// Out-of-bounds zero-based index.
+        index: usize,
+        /// Current number of sheets in `folder`.
+        len: usize,
+    },
+    /// Attempted to insert a sheet whose [`SheetId`] already exists in the project.
+    DuplicateSheetId {
+        /// Colliding sheet identifier.
+        sheet_id: SheetId,
+    },
+    /// Confidence percentage lay outside `[0.01, 99.99]` or was non-finite.
+    InvalidConfidenceLevel {
+        /// Offending confidence percentage.
+        percent: f64,
+    },
+    /// Axis segment list contained `0` or `> 3` segments (`1..=3` contiguous or broken segments are supported).
+    InvalidAxisSegments {
+        /// Invalid segment count.
+        count: usize,
+    },
+    /// Retargeting an [`crate::AnalysisSpec`] to a new upstream table failed because the analysis family does not accept `target_kind`.
+    IncompatibleRetargetTable {
+        /// Effective display title of the analysis being retargeted.
+        analysis_title: String,
+        /// Archetype of the incompatible target [`crate::DataSheet`].
+        target_kind: TableKind,
+    },
 }
 
 impl fmt::Display for DocError {

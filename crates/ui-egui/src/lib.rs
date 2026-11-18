@@ -74,8 +74,9 @@ pub use menus::{
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
-    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, build_cf_html_payload, discover_os_printers, open_os_print_preview_dialog,
-    open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
+    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, StubPlatformClipboardAdapter, SystemPlatformClipboardAdapter,
+    build_cf_html_payload, discover_os_printers, open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes,
+    read_os_clipboard_text,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
@@ -117,6 +118,7 @@ pub(crate) struct UiShellSnapshot {
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
     pub view_shards: views::ViewShardStates,
+    pub clipboard_adapter: ClipboardAdapterSlot,
 }
 
 /// Equality-transparent cache slot storing the latest finalized [`layout::RetainedLayoutFrame`].
@@ -124,6 +126,25 @@ pub(crate) struct UiShellSnapshot {
 pub(crate) struct CachedLayoutSlot(pub Option<layout::RetainedLayoutFrame>);
 
 impl PartialEq for CachedLayoutSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
+/// Equality-transparent holder for [`UiApp`]'s active [`PlatformClipboardAdapter`].
+#[derive(Debug, Clone)]
+pub(crate) struct ClipboardAdapterSlot {
+    pub adapter: std::sync::Arc<dyn PlatformClipboardAdapter>,
+    pub is_custom: bool,
+}
+
+impl Default for ClipboardAdapterSlot {
+    fn default() -> Self {
+        Self { adapter: std::sync::Arc::new(os_integration::SystemPlatformClipboardAdapter), is_custom: false }
+    }
+}
+
+impl PartialEq for ClipboardAdapterSlot {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
@@ -213,6 +234,7 @@ pub struct UiApp {
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
     pub view_shards: views::ViewShardStates,
+    pub(crate) clipboard_adapter: ClipboardAdapterSlot,
     pub(crate) retained_layout: CachedLayoutSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
 }
@@ -256,6 +278,7 @@ impl UiApp {
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
             human_path_only: false,
             view_shards: views::ViewShardStates::default(),
+            clipboard_adapter: ClipboardAdapterSlot::default(),
             retained_layout: CachedLayoutSlot::default(),
             batch_undo_log: None,
         };
@@ -288,6 +311,7 @@ impl UiApp {
             power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
             human_path_only: self.human_path_only,
             view_shards: self.view_shards.clone(),
+            clipboard_adapter: self.clipboard_adapter.clone(),
         }
     }
 
@@ -314,6 +338,7 @@ impl UiApp {
         self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
         self.human_path_only = snap.human_path_only;
         self.view_shards = snap.view_shards;
+        self.clipboard_adapter = snap.clipboard_adapter;
         self.retained_layout.0 = None;
         self.sync_views();
     }
@@ -415,6 +440,81 @@ impl UiApp {
     /// Enable or disable `R10.2` human-path-only enforcement rejecting synthetic semantic bypasses.
     pub fn set_human_path_only(&mut self, enabled: bool) {
         self.human_path_only = enabled;
+    }
+
+    /// Install a custom [`PlatformClipboardAdapter`] (such as [`StubPlatformClipboardAdapter`])
+    /// for deterministic clipboard capture without touching the host OS pasteboard.
+    pub fn set_clipboard_adapter(&mut self, adapter: std::sync::Arc<dyn PlatformClipboardAdapter>) {
+        self.clipboard_adapter = ClipboardAdapterSlot { adapter, is_custom: true };
+    }
+
+    /// Borrow the currently configured [`PlatformClipboardAdapter`].
+    #[must_use]
+    pub fn clipboard_adapter(&self) -> &dyn PlatformClipboardAdapter {
+        self.clipboard_adapter.adapter.as_ref()
+    }
+
+    /// Return whether a caller explicitly installed a custom [`PlatformClipboardAdapter`].
+    #[must_use]
+    pub const fn has_custom_clipboard_adapter(&self) -> bool {
+        self.clipboard_adapter.is_custom
+    }
+
+    pub(crate) fn write_clipboard_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        }
+        self.clipboard_adapter.adapter.write_text(text)
+    }
+
+    pub(crate) fn write_clipboard_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        }
+        self.clipboard_adapter.adapter.write_bundle(bundle)
+    }
+
+    pub(crate) fn toggle_navigator_pane(&mut self) -> bool {
+        self.nav.navigator_open = !self.nav.navigator_open;
+        if !self.nav.navigator_open {
+            if self.focus_widget_id.as_deref().is_some_and(|id| id.starts_with("nav.") || id.starts_with("navigator.") || id.starts_with("family.")) {
+                self.focus_widget_id = None;
+            }
+            if matches!(self.nav.active_pane, workspace_nav::ActiveWorkspacePane::Navigator | workspace_nav::ActiveWorkspacePane::FamilyStrip) {
+                self.nav.active_pane = workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid;
+            }
+        }
+        self.nav.navigator_open
+    }
+
+    pub(crate) fn toggle_inspector_pane(&mut self) -> bool {
+        self.nav.inspector_open = !self.nav.inspector_open;
+        if !self.nav.inspector_open {
+            if self.focus_widget_id.as_deref().is_some_and(|id| id.starts_with("inspector.")) {
+                self.focus_widget_id = None;
+            }
+            if self.nav.active_pane == workspace_nav::ActiveWorkspacePane::Inspector {
+                self.nav.active_pane = workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid;
+            }
+        }
+        self.nav.inspector_open
+    }
+
+    pub(crate) fn toggle_family_pane(&mut self) -> bool {
+        self.family_open = !self.family_open;
+        if !self.family_open {
+            if self.focus_widget_id.as_deref().is_some_and(|id| id.starts_with("family.")) {
+                self.focus_widget_id = None;
+            }
+            if self.nav.active_pane == workspace_nav::ActiveWorkspacePane::FamilyStrip {
+                self.nav.active_pane = if self.nav.navigator_open {
+                    workspace_nav::ActiveWorkspacePane::Navigator
+                } else {
+                    workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid
+                };
+            }
+        }
+        self.family_open
     }
 
     /// Build or return the cached retained [`layout::LayoutTree`] for `metrics`.

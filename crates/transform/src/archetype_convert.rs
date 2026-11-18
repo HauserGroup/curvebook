@@ -19,10 +19,15 @@ use crate::import::validate_cell_budget;
 /// Target table archetype supported by non-destructive table conversion (`QOL-1`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TargetArchetypeKind {
+    /// Convert into a one-factor [`ColumnTable`].
     Column,
+    /// Convert into a two-factor [`GroupedTable`] with raw replicate subcolumns.
     Grouped,
+    /// Convert into a continuous *X* vs *Y* [`XyTable`].
     Xy,
+    /// Convert into a tidy observational [`MultipleVariablesTable`].
     MultipleVariables,
+    /// Convert into an `R × C` non-negative integer count [`ContingencyTable`].
     Contingency,
 }
 
@@ -49,12 +54,19 @@ impl TargetArchetypeKind {
 /// Non-mutating impact summary produced before or during archetype conversion (`QOL-1`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ConversionPreview {
+    /// Archetype of the input [`DataSheet`].
     pub source_kind: TableKind,
+    /// Requested destination [`TargetArchetypeKind`].
     pub target_kind: TargetArchetypeKind,
+    /// Count of non-empty cells carried over into the converted table.
     pub preserved_cells: usize,
+    /// Count of non-empty cells that cannot be represented in `target_kind` (for example non-integer/negative values when targeting `Contingency` or collapsed replicate cells).
     pub dropped_cells: usize,
+    /// Count of `excluded == true` cell flags preserved across the coordinate remapping.
     pub preserved_exclusions: usize,
+    /// Plain-language descriptions of any structural simplifications, coerced cells, or dropped subcolumns.
     pub warnings: Vec<String>,
+    /// `true` when conversion drops cells, coerces values, or discards structural metadata (refused by [`convert_datasheet_archetype`] unless `allow_lossy == true`).
     pub lossy: bool,
 }
 

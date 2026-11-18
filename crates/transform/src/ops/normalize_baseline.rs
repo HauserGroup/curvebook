@@ -20,9 +20,19 @@ pub enum BaselineKind {
     /// Constant scalar baseline.
     Constant(f64),
     /// Per-column mean over inclusive row slice `start_row..=end_row`.
-    RowRangeMean { start_row: usize, end_row: usize },
+    RowRangeMean {
+        /// Zero-based inclusive starting row index of the baseline window.
+        start_row: usize,
+        /// Zero-based inclusive ending row index of the baseline window (`end_row >= start_row`).
+        end_row: usize,
+    },
     /// Per-column linear baseline interpolated between mean of first `first_k` rows and last `last_k` rows.
-    FirstAndLastLinear { first_k: usize, last_k: usize },
+    FirstAndLastLinear {
+        /// Number of leading rows (`>= 1`) averaged to anchor the initial baseline point.
+        first_k: usize,
+        /// Number of trailing rows (`>= 1`) averaged to anchor the terminal baseline point.
+        last_k: usize,
+    },
 }
 
 /// Normalize a [`DataSheet`] between `zero_anchor` and `hundred_anchor`.

@@ -296,7 +296,12 @@ fn copy_active_sheet_to_clipboard(app: &mut UiApp, col_only: Option<usize>) -> R
         match app.session().render_sheet_scene(sid) {
             Ok(scene) => {
                 let bundle = ClipboardBundle::from_scene(&scene, 144)?;
-                if !bundle.svg.is_empty() { bundle.svg } else { active_sheet_title(&doc).unwrap_or("Figure").to_owned() }
+                let _ = app.write_clipboard_bundle(&bundle);
+                let text = if !bundle.svg.is_empty() { bundle.svg.clone() } else { active_sheet_title(&doc).unwrap_or("Figure").to_owned() };
+                let line_count = text.lines().count().max(1);
+                app.interaction.last_clipboard_text = Some(text);
+                app.interaction.last_clipboard_bundle = Some(bundle);
+                return Ok(format!("Copied {line_count} line(s)"));
             }
             Err(_) => active_sheet_title(&doc).unwrap_or("Figure").to_owned(),
         }
@@ -304,6 +309,8 @@ fn copy_active_sheet_to_clipboard(app: &mut UiApp, col_only: Option<usize>) -> R
         return Err(String::from("active sheet is not copyable"));
     };
     let line_count = payload.lines().count().max(1);
+    let _ = app.write_clipboard_text(&payload);
+    app.interaction.last_clipboard_bundle = None;
     app.interaction.last_clipboard_text = Some(payload);
     Ok(format!("Copied {line_count} line(s)"))
 }

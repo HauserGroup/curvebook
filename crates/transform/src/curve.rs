@@ -37,41 +37,70 @@ impl Default for AucOptions {
 /// Summary of a single detected peak excursion above the baseline.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PeakSummary {
+    /// Independent *X* coordinate at the maximum height of the excursion.
     pub peak_x: f64,
+    /// Raw *Y* coordinate at the peak apex (`peak_x`).
     pub peak_y: f64,
+    /// Vertical amplitude above baseline (`peak_y - baseline >= 0.0`).
     pub height_above_baseline: f64,
+    /// Interpolated *X* coordinate where the curve crosses upward above `baseline` (or first sample *X* if already above `baseline`).
     pub start_x: f64,
+    /// Interpolated *X* coordinate where the curve crosses back down to `baseline` (or last sample *X* if still above `baseline`).
     pub end_x: f64,
+    /// Positive trapezoidal area (`>= 0.0`, in `X * Y` units) enclosed between `[start_x, end_x]` and `baseline`.
     pub area: f64,
+    /// Share `area / positive_area` in `[0.0, 1.0]` (`0.0` when `positive_area == 0.0`).
     pub area_fraction: f64,
 }
 
 /// Complete Area Under the Curve result with baseline partitioning, peak list, and optional SE.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AucResult {
+    /// Total unsigned excursion area `positive_area + negative_area >= 0.0` relative to `baseline` (`X * Y` units).
     pub total_area: f64,
+    /// Cumulative trapezoidal area (`>= 0.0`) of all curve segments lying above `baseline` (`Y > baseline`).
     pub positive_area: f64,
+    /// Cumulative unsigned trapezoidal area (`>= 0.0`) of all curve segments lying below `baseline` (`Y < baseline`).
     pub negative_area: f64,
+    /// Signed net trapezoidal integral `positive_area - negative_area = integral (Y(x) - baseline) dx`.
     pub net_area: f64,
+    /// Sum of `area` across all retained [`Self::peaks`] passing `min_peak_height` and `min_area_fraction`.
     pub total_peak_area: f64,
+    /// Analytical Bailer (1988) standard error `sqrt(sum_i w_i^2 SE_i^2)` of `net_area` assuming independent point estimates; `None` when point SEs were not supplied (`compute_auc` or single-replicate series).
     pub standard_error: Option<f64>,
+    /// Chronologically ordered (`start_x` ascending) positive excursions above `baseline` meeting height and area-fraction filters.
     pub peaks: Vec<PeakSummary>,
 }
 
 /// Smoothing algorithm selection.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SmoothMethod {
+    /// 5-point quadratic/cubic Savitzky–Golay local polynomial filter (Savitzky & Golay 1964).
     SavitzkyGolay5,
+    /// 7-point quadratic/cubic Savitzky–Golay local polynomial filter (Savitzky & Golay 1964).
     SavitzkyGolay7,
+    /// 9-point quadratic/cubic Savitzky–Golay local polynomial filter (Savitzky & Golay 1964).
     SavitzkyGolay9,
-    MovingAverage { window: usize },
-    Lowess { span: f64, robustness_iters: usize },
+    /// Symmetric unweighted sliding-window arithmetic mean.
+    MovingAverage {
+        /// Odd/positive window width (`>= 1` points).
+        window: usize,
+    },
+    /// Locally weighted linear regression smoother with tricube kernel and optional bisquare robustness iterations (Cleveland 1979).
+    Lowess {
+        /// Fraction of sample points in `(0.0, 1.0]` included in each local neighborhood fit.
+        span: f64,
+        /// Number of Tukey bisquare outlier-downweighting iterations (`0` for standard unweighted LOESS, `2`–`3` for robust LOWESS).
+        robustness_iters: usize,
+    },
 }
 
 /// Numerical differentiation order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DerivativeOrder {
+    /// First derivative `dY / dX` via non-uniform three-point Lagrange finite differences (`Y / X` units).
     First,
+    /// Second derivative `d^2Y / dX^2` (`Y / X^2` units).
     Second,
 }
 
@@ -610,9 +639,15 @@ pub fn apply_curve_calculus_to_sheet(sheet: &DataSheet, op: CurveSheetOp) -> Res
 /// Curve-calculus operation applicable to an entire `XyTable`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum CurveSheetOp {
+    /// Smooth each series using [`SmoothMethod`].
     Smooth(SmoothMethod),
+    /// Compute numerical [`DerivativeOrder::First`] (`dY/dX`) or [`DerivativeOrder::Second`] (`d^2Y/dX^2`).
     Differentiate(DerivativeOrder),
-    Integrate { baseline: f64 },
+    /// Compute running cumulative trapezoidal integral `integral_{x_0}^x (Y(u) - baseline) du`.
+    Integrate {
+        /// Horizontal baseline subtracted from *Y* prior to cumulative integration.
+        baseline: f64,
+    },
 }
 
 fn transform_dataset_curve(xy: &XyTable, ds_idx: usize, op: CurveSheetOp) -> Result<Vec<(usize, f64, f64)>, TransformError> {

@@ -1,6 +1,6 @@
 //! `R10.2` Human-Path Input Driver (`0` external UI-test crate dependencies).
 //!
-//! Enforces [`UiApp::set_human_path_only(true)`] and drives workflows strictly through physical/logical
+//! Enforces [`UiApp::set_human_path_only(true)`](crate::UiApp::set_human_path_only) and drives workflows strictly through physical/logical
 //! pointer coordinates, scroll wheels, focus navigation, raw keystrokes, and IME text events resolved
 //! against rendered [`LayoutTree`] bounds — measuring real input-to-paint latency (`R10.22 <= 50 ms`).
 
@@ -20,20 +20,38 @@ use crate::layout::{LayoutTree, WidgetNode};
 pub struct HumanPathDriver {
     app: UiApp,
     metrics: ViewportMetrics,
+    clipboard_stub: crate::os_integration::StubPlatformClipboardAdapter,
     last_input_to_paint_ms: f64,
     max_input_to_paint_ms: f64,
 }
 
 impl HumanPathDriver {
-    /// Wrap `app` under `metrics`, enabling both `gui_only` and `human_path_only` strict guards.
+    /// Wrap `app` under `metrics`, enabling both `gui_only` and `human_path_only` strict guards
+    /// and installing an in-memory [`crate::StubPlatformClipboardAdapter`] when no custom adapter
+    /// was pre-installed on `app`.
     #[must_use]
     pub fn new(mut app: UiApp, metrics: ViewportMetrics) -> Self {
         app.set_gui_only(true);
         app.set_human_path_only(true);
+        let clipboard_stub = crate::os_integration::StubPlatformClipboardAdapter::new();
+        if !app.has_custom_clipboard_adapter() {
+            app.set_clipboard_adapter(std::sync::Arc::new(clipboard_stub.clone()));
+        }
         let _ = app.build_and_cache_layout_tree(metrics);
-        let driver = Self { app, metrics, last_input_to_paint_ms: 0.0, max_input_to_paint_ms: 0.0 };
+        let driver = Self { app, metrics, clipboard_stub, last_input_to_paint_ms: 0.0, max_input_to_paint_ms: 0.0 };
         let _ = render_workspace_rgba(&driver.app, driver.render_target_spec());
         driver
+    }
+
+    /// Borrow the driver's built-in in-memory [`crate::StubPlatformClipboardAdapter`].
+    #[must_use]
+    pub const fn clipboard_stub(&self) -> &crate::os_integration::StubPlatformClipboardAdapter {
+        &self.clipboard_stub
+    }
+
+    /// Install a custom [`crate::PlatformClipboardAdapter`] on the underlying [`UiApp`].
+    pub fn set_clipboard_adapter(&mut self, adapter: std::sync::Arc<dyn crate::os_integration::PlatformClipboardAdapter>) {
+        self.app.set_clipboard_adapter(adapter);
     }
 
     #[must_use]

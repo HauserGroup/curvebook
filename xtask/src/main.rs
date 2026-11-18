@@ -5,6 +5,7 @@ mod assets;
 mod brands;
 mod bundle;
 mod ci;
+mod citations;
 mod cleanroom;
 mod commands;
 mod contributors;
@@ -15,7 +16,9 @@ mod ico;
 mod json;
 mod layers;
 mod licenses;
+mod msix;
 mod pending;
+mod release_scan;
 mod schemas;
 mod screenshots;
 mod secrets;
@@ -49,15 +52,19 @@ commands:
   assets                verify all non-code assets are attributed in ASSETS.md
   brands                verify user-facing strings and packaging contain no competitor trademarks
   cleanroom             verify no vendor copyright headers or vendor-created fixtures exist
+  citations             verify D1 literature citations across math, stats, fit, and transform
   cursors               verify Cursor variants match crates/tools/src/cursors.toml
   i18n-report           report untranslated locale keys in curvebook-ui-egui
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
   commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
-  wasm                  check wasm32-unknown-unknown compilation across web-targeted crates
+  wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
+  web-bundle            verify web bundle readiness and R10.22 zip size budget (CURVEBOOK_REQUIRE_WEB_BUNDLE=1 requires zip)
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
   coverage [-p <crate>] write a local cargo-llvm-cov lcov + HTML report (diagnostic; no threshold)
   bundle                build release binaries and assemble dist/CurveBook.app
+  msix --arch <arch> --package-version <A.B.C.0>  package Windows binaries for Microsoft Store
+  release-scan <dir>    unpack release assets and run SHA-256, brand, cleanroom & asset gates
   ico <out> <png...>    pack PNG frames (<=256px) into a Windows .ico container
   version [set <ver>]   print or update [workspace.package] version
   stats [--exact]       print line and test counts across workspace crates
@@ -101,15 +108,19 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "assets" => assets::run(&root),
         "brands" => brands::run(&root),
         "cleanroom" => cleanroom::run(&root),
+        "citations" => citations::run(&root, rest),
         "cursors" => cursors::run(&root),
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
         "commands" => commands::run_cli(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
         "wasm" => cmd_wasm(&root),
+        "web-bundle" => web_fonts::run_bundle_check(&root, rest),
         "corpus" => corpus::run(&root, rest),
         "coverage" => coverage::run(&root, rest),
         "bundle" => bundle::run(&root),
+        "msix" => msix::run(&root, rest),
+        "release-scan" => release_scan::run(&root, rest),
         "ico" => ico::run(rest),
         "version" => version::run(&root, rest),
         "stats" => stats::run(&root, rest.iter().any(|a| a == "--exact")),
@@ -257,7 +268,60 @@ fn verify_exact_single_test_passed(stdout: &str, test_name: &str) -> Result<(), 
 }
 
 fn cmd_wasm(root: &Path) -> Result<(), String> {
-    run_cargo_strs(root, &["check", "--target", "wasm32-unknown-unknown", "-p", "curvebook-web", "-p", "curvebook-engine", "--keep-going"])
+    run_cargo_strs(
+        root,
+        &["check", "--locked", "--target", "wasm32-unknown-unknown", "-p", "curvebook-web", "-p", "curvebook-engine", "--keep-going"],
+    )?;
+    run_cargo_strs(
+        root,
+        &["clippy", "--locked", "--target", "wasm32-unknown-unknown", "-p", "curvebook-web", "-p", "curvebook-ui-egui", "--", "-D", "warnings"],
+    )?;
+    run_trunk_web_release_if_available(root)?;
+    web_fonts::check_web_bundle_readiness(root)
+}
+
+fn run_trunk_web_release_if_available(root: &Path) -> Result<(), String> {
+    let require_trunk = workflows::parse_ci_env_value(std::env::var_os("CURVEBOOK_REQUIRE_TRUNK").as_deref())
+        || web_fonts::parse_require_web_bundle_env(std::env::var_os("CURVEBOOK_REQUIRE_WEB_BUNDLE").as_deref());
+    if !has_trunk() {
+        if require_trunk {
+            return Err(String::from(
+                "`trunk` is not installed in PATH (required when CURVEBOOK_REQUIRE_TRUNK=1 or CURVEBOOK_REQUIRE_WEB_BUNDLE=1 is set)",
+            ));
+        }
+        println!("wasm: `trunk` not found in PATH; skipping `trunk build --cargo-profile web-release` (set CURVEBOOK_REQUIRE_TRUNK=1 to require it)");
+        return Ok(());
+    }
+
+    let target_dir = std::env::var_os("CARGO_TARGET_DIR").map_or_else(|| root.join("target"), PathBuf::from);
+    let dist_dir = target_dir.join("wasm-trunk-dist");
+    std::fs::create_dir_all(&dist_dir).map_err(|e| format!("mkdir {}: {e}", dist_dir.display()))?;
+    let dist_arg = dist_dir.to_string_lossy().into_owned();
+    let web_dir = root.join("apps/curvebook-web");
+    println!("+ (cd apps/curvebook-web && trunk build --dist {dist_arg} --cargo-profile web-release)");
+    let status = Command::new("trunk")
+        .current_dir(&web_dir)
+        .args(["build", "--dist", &dist_arg, "--cargo-profile", "web-release"])
+        .status()
+        .map_err(|e| format!("trunk build: {e}"))?;
+    if !status.success() {
+        return Err(format!("`trunk build --cargo-profile web-release` failed with {status}"));
+    }
+    if !dist_dir.join("index.html").is_file() {
+        return Err(format!("trunk build succeeded, but `{}/index.html` is missing", dist_dir.display()));
+    }
+    let has_wasm = std::fs::read_dir(&dist_dir)
+        .map_err(|e| format!("read {}: {e}", dist_dir.display()))?
+        .flatten()
+        .any(|entry| entry.path().extension().and_then(|ext| ext.to_str()) == Some("wasm"));
+    if !has_wasm {
+        return Err(format!("trunk build succeeded, but `{}` contains no `.wasm` binary", dist_dir.display()));
+    }
+    Ok(())
+}
+
+fn has_trunk() -> bool {
+    Command::new("trunk").arg("--version").output().is_ok_and(|o| o.status.success())
 }
 
 fn cmd_r10_gate(root: &Path) -> Result<(), String> {

@@ -987,6 +987,8 @@ pub struct InteractionControllerState {
     pub text_field_buffers: TextFieldBufferMap,
     #[serde(default)]
     pub last_clipboard_text: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clipboard_bundle: Option<crate::os_integration::ClipboardBundle>,
 }
 
 /// Structured outcome emitted by [`dispatch_ui_event`].
@@ -2336,7 +2338,7 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
             Ok(UiEventOutcome { handled: true, action: format!("nav.toggle_folder:{section:?}"), ..Default::default() })
         }
         WidgetAction::ToggleFamilyPane => {
-            app.family_open = !app.family_open;
+            let _ = app.toggle_family_pane();
             Ok(UiEventOutcome { handled: true, action: String::from("nav.toggle_family"), ..Default::default() })
         }
         WidgetAction::SetSplitRatio(ratio) => {
@@ -2681,6 +2683,90 @@ pub(crate) fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fal
     None
 }
 
+fn resolve_figure_sheet_for_shortcut(app: &UiApp) -> Option<SheetId> {
+    let doc = app.document();
+    let is_figure = |id: &SheetId| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some();
+    if app.split.enabled {
+        let (_prim, sec) = app.split.resolve_sheets(doc);
+        if app.focus_widget_id.as_deref().is_some_and(|f| f.starts_with("secondary."))
+            && let Some(id) = sec.filter(is_figure)
+        {
+            return Some(id);
+        }
+    }
+    doc.active_sheet_id.as_ref().filter(|id| is_figure(id)).cloned()
+}
+
+fn copy_figure_sheet_bundle(app: &mut UiApp, sheet_id: &SheetId, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
+    let dpi = metrics.dpi_for_base(144);
+    let bundle = crate::os_integration::ClipboardBundle::from_sheet(app.session(), sheet_id, dpi)?;
+    let flavors = bundle.available_flavors();
+    let pdf_bytes = bundle.pdf_bytes.len();
+    let svg_bytes = bundle.svg.len();
+    let png_bytes = bundle.png_bytes.len();
+    let emf_bytes = bundle.emf_bytes.as_ref().map_or(0, Vec::len);
+    let write_res = app.write_clipboard_bundle(&bundle);
+    app.interaction.last_clipboard_text = (!bundle.svg.is_empty()).then(|| bundle.svg.clone());
+    app.interaction.last_clipboard_bundle = Some(bundle);
+
+    match write_res {
+        Ok(status) => {
+            let action = if status.available { "clipboard.copied_bundle" } else { "clipboard.copied_bundle_os_unavailable" };
+            Ok(UiEventOutcome {
+                handled: true,
+                action: String::from(action),
+                command_id: None,
+                command_result: Some(json!({
+                    "sheet_id": sheet_id.as_str(),
+                    "flavors": flavors,
+                    "pdf_bytes": pdf_bytes,
+                    "svg_bytes": svg_bytes,
+                    "png_bytes": png_bytes,
+                    "emf_bytes": emf_bytes,
+                    "os_clipboard": status,
+                })),
+            })
+        }
+        Err(err) => Ok(UiEventOutcome {
+            handled: true,
+            action: String::from("clipboard.copied_bundle_os_failed"),
+            command_id: None,
+            command_result: Some(json!({
+                "sheet_id": sheet_id.as_str(),
+                "flavors": flavors,
+                "pdf_bytes": pdf_bytes,
+                "svg_bytes": svg_bytes,
+                "png_bytes": png_bytes,
+                "emf_bytes": emf_bytes,
+                "os_clipboard": { "available": false, "error": err },
+            })),
+        }),
+    }
+}
+
+fn try_handle_workspace_copy_shortcut(app: &mut UiApp, metrics: ViewportMetrics) -> Result<Option<UiEventOutcome>, String> {
+    if app.inline_editor.active {
+        return Ok(None);
+    }
+    if let Some(rs_id) = resolve_result_sheet_for_shortcut(app, false) {
+        let mut results_state = std::mem::take(&mut app.view_shards.results);
+        let out = crate::views::results::handle_custom_action(app, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
+        app.view_shards.results = results_state;
+        if let Ok(outcome) = out
+            && outcome.handled
+        {
+            return Ok(Some(outcome));
+        }
+    }
+    if !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && let Some(fig_id) = resolve_figure_sheet_for_shortcut(app)
+    {
+        return copy_figure_sheet_bundle(app, &fig_id, metrics).map(Some);
+    }
+    Ok(None)
+}
+
 fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOutcome>, String> {
     let doc = app.document().clone();
     let Some(sid) = doc.active_sheet_id.as_ref() else {
@@ -2817,16 +2903,9 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         && !modifiers.shift
         && !modifiers.alt
         && trimmed.eq_ignore_ascii_case("c")
-        && let Some(rs_id) = resolve_result_sheet_for_shortcut(app, false)
+        && let Some(out) = try_handle_workspace_copy_shortcut(app, metrics)?
     {
-        let mut results_state = std::mem::take(&mut app.view_shards.results);
-        let out = crate::views::results::handle_custom_action(app, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
-        app.view_shards.results = results_state;
-        if let Ok(outcome) = out
-            && outcome.handled
-        {
-            return Ok(outcome);
-        }
+        return Ok(out);
     }
 
     if let Some(fid) = app.focus_widget_id.clone()

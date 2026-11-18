@@ -10,10 +10,14 @@ use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_temp
 /// Physical measurement unit for figure and page dimensions (`docs/implementation/graphing-and-layouts.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PhysicalUnit {
+    /// Millimeters (`25.4 mm = 1 in = 72 pt`).
     #[default]
     Millimeters,
+    /// Centimeters (`2.54 cm = 1 in = 72 pt`).
     Centimeters,
+    /// Imperial inches (`1 in = 72 pt`).
     Inches,
+    /// PostScript / PDF typographic points (`1 pt = 1/72 in`).
     Points,
 }
 
@@ -51,15 +55,25 @@ impl PhysicalUnit {
 /// Standard academic journal figure-width and page presets (`docs/implementation/graphing-and-layouts.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum JournalWidthPreset {
+    /// Single-column journal figure (`85 mm x 85 mm`).
     SingleColumn85Mm,
+    /// Single-column journal figure (`89 mm x 89 mm`).
     SingleColumn89Mm,
+    /// 1.5-column journal figure (`120 mm x 90 mm`).
     OneAndHalfColumn120Mm,
+    /// 1.5-column journal figure (`136 mm x 102 mm`).
     OneAndHalfColumn136Mm,
+    /// Double-column journal figure (`174 mm x 120 mm`; default for [`LayoutSpec`]).
     DoubleColumn174Mm,
+    /// Double-column journal figure (`183 mm x 125 mm`).
     DoubleColumn183Mm,
+    /// US Letter portrait page (`8.5 in x 11.0 in`).
     LetterPortrait,
+    /// US Letter landscape page (`11.0 in x 8.5 in`).
     LetterLandscape,
+    /// ISO 216 A4 portrait page (`210 mm x 297 mm`).
     A4Portrait,
+    /// ISO 216 A4 landscape page (`297 mm x 210 mm`).
     A4Landscape,
 }
 
@@ -85,11 +99,17 @@ impl JournalWidthPreset {
 /// Standardized print / presentation figure size presets (`QOL-8`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum FigureCanvasPreset {
+    /// Standard single-column print figure (`88 mm x 66 mm`).
     SingleColumn88mm,
+    /// Standard 1.5-column print figure (`130 mm x 97.5 mm`).
     ColumnAndHalf130mm,
+    /// Standard double-column print figure (`180 mm x 120 mm`).
     DoubleColumn180mm,
+    /// Full-page portrait journal figure (`180 mm x 240 mm`).
     FullPagePortrait,
+    /// Widescreen 16:9 presentation slide canvas (`720 pt x 405 pt`).
     Slide16x9,
+    /// Large conference poster panel canvas (`864 pt x 648 pt`).
     PosterPanel,
 }
 
@@ -140,12 +160,15 @@ impl FigureCanvasPreset {
 /// How strokes, annotations, and font sizes behave when applying a [`FigureCanvasPreset`] (`QOL-8`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CanvasResizeMode {
+    /// Preserve exact font sizes, line widths, and marker sizes in typographic points so text stays legible at print size.
     #[default]
     KeepTypographyPt,
+    /// Scale font sizes, strokes, and annotations proportionally with the canvas size change.
     ProportionalScale,
 }
 
 impl CanvasResizeMode {
+    /// Parse a case- and punctuation-insensitive [`CanvasResizeMode`] name from CLI/RPC inputs.
     #[must_use]
     pub fn from_name(raw: &str) -> Option<Self> {
         let norm: String = raw.chars().filter(char::is_ascii_alphanumeric).map(|c| c.to_ascii_lowercase()).collect();
@@ -157,9 +180,12 @@ impl CanvasResizeMode {
     }
 }
 
+/// Page aspect orientation of a [`LayoutSpec`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PageOrientation {
+    /// Vertical page (`height > width`).
     Portrait,
+    /// Horizontal page (`width >= height`).
     #[default]
     Landscape,
 }
@@ -167,9 +193,12 @@ pub enum PageOrientation {
 /// Automatic panel lettering badge style (`A, B, C` vs `a, b, c`; `docs/implementation/graphing-and-layouts.md` §6).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PanelBadgeStyle {
+    /// Uppercase alphabetical panel badges (`"A"`, `"B"`, `"C"`, ...).
     #[default]
     UpperCaseLetters,
+    /// Lowercase alphabetical panel badges (`"a"`, `"b"`, `"c"`, ...).
     LowerCaseLetters,
+    /// Suppress automatic panel lettering badges.
     None,
 }
 
@@ -189,9 +218,41 @@ impl PanelBadgeStyle {
 /// Live element placed onto a [`LayoutSpec`] page.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum LayoutItem {
-    LiveGraph { id: String, graph_sheet_id: SheetId, bounds_pt: RectPt, scale_percent: f64, badge_override: Option<String> },
-    LiveTable { id: String, source_sheet_id: SheetId, tab_id: Option<String>, bounds_pt: RectPt },
-    TextCallout { id: String, markdown: String, bounds_pt: RectPt, font_size_pt: f64 },
+    /// Live vector projection of an upstream [`crate::GraphSheet`].
+    LiveGraph {
+        /// Stable item identifier within `LayoutSpec::items`.
+        id: String,
+        /// Upstream [`crate::GraphSheet`] rendered inside `bounds_pt`.
+        graph_sheet_id: SheetId,
+        /// Bounding box on the layout page in typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+        /// Magnification percentage (`> 0.0`, `100.0` = unscaled 1:1 typography/stroke sizing).
+        scale_percent: f64,
+        /// Custom panel badge text overriding [`LayoutSpec::panel_badges`]; `None` uses automatic sequence lettering.
+        badge_override: Option<String>,
+    },
+    /// Live tabular projection of an upstream [`crate::DataSheet`] or [`crate::ResultSheet`] sub-tab.
+    LiveTable {
+        /// Stable item identifier within `LayoutSpec::items`.
+        id: String,
+        /// Upstream [`crate::DataSheet`] or [`crate::ResultSheet`] identifier.
+        source_sheet_id: SheetId,
+        /// Specific [`crate::ResultTab::id`] when `source_sheet_id` names a multi-tab result sheet; `None` selects the primary tab or full data table.
+        tab_id: Option<String>,
+        /// Bounding box on the layout page in typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+    },
+    /// Free-placed Markdown caption or callout box supporting inline `{{info:...}}` and `{{result:...}}` hooks.
+    TextCallout {
+        /// Stable item identifier within `LayoutSpec::items`.
+        id: String,
+        /// Markdown text content (with optional inline constant/result hooks).
+        markdown: String,
+        /// Bounding box on the layout page in typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+        /// Base font size in typographic points (`> 0.0`).
+        font_size_pt: f64,
+    },
 }
 
 /// Maximum number of items allowed in a single [`LayoutSpec`] page layout.
@@ -200,7 +261,9 @@ pub const MAX_LAYOUT_ITEMS: usize = 64;
 /// Error returned when a [`LayoutSpec`] exceeds [`MAX_LAYOUT_ITEMS`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LayoutItemLimitError {
+    /// Attempted layout item count.
     pub count: usize,
+    /// Maximum allowed layout item count ([`MAX_LAYOUT_ITEMS`]).
     pub max: usize,
 }
 
@@ -215,16 +278,23 @@ impl std::error::Error for LayoutItemLimitError {}
 /// Multi-panel publication layout specification.
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct LayoutSpec {
+    /// Page width expressed in [`Self::unit`] (`> 0.0`, finite).
     pub width: f64,
+    /// Page height expressed in [`Self::unit`] (`> 0.0`, finite).
     pub height: f64,
+    /// Physical unit of [`Self::width`] and [`Self::height`].
     pub unit: PhysicalUnit,
+    /// Portrait vs landscape page orientation metadata.
     pub orientation: PageOrientation,
-    /// Optional `(rows, cols)` arrangement template.
+    /// Optional `(rows, cols)` arrangement template (`rows >= 1`, `cols >= 1`); `None` for freeform placement.
     pub grid_template: Option<(u8, u8)>,
     /// Align plot-area origins across adjacent panels even when Y-tick label widths differ.
     pub align_plot_origins: bool,
+    /// Automatic panel badge lettering mode (`A, B, C`, `a, b, c`, or `None`).
     pub panel_badges: PanelBadgeStyle,
+    /// Solid page background color; `None` exports a transparent canvas background.
     pub background_fill: Option<Rgba8>,
+    /// Ordered z-stack (back-to-front) of placed graphs, tables, and text callouts (`<= MAX_LAYOUT_ITEMS`).
     pub items: Vec<LayoutItem>,
 }
 
@@ -408,10 +478,15 @@ impl Default for LayoutSpec {
 /// Navigator sheet wrapping a [`LayoutSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LayoutSheet {
+    /// Project-unique sheet identifier.
     pub id: SheetId,
+    /// Display title shown in the `Layouts` navigator folder.
     pub title: String,
+    /// Physical page dimensions, grid alignment settings, and placed items.
     pub spec: LayoutSpec,
+    /// Sticky-note callouts attached to this layout sheet.
     pub floating_notes: Vec<FloatingNote>,
+    /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
 }
 
@@ -420,6 +495,7 @@ fn rect_is_finite(rect: RectPt) -> bool {
 }
 
 impl LayoutSheet {
+    /// Construct a validated `LayoutSheet`, rejecting empty IDs, oversized titles, or invalid [`LayoutSpec`] geometry.
     pub fn new(id: impl Into<SheetId>, title: impl Into<String>, spec: LayoutSpec) -> Result<Self, DocError> {
         let id = id.into();
         if id.as_str().trim().is_empty() {

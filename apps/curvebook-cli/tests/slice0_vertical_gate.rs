@@ -674,7 +674,8 @@ fn cli_batch_template_convert_perf_bench_mcp_and_exit_codes() -> GateResult {
     let out_batch_esc = run_cli(&["batch", path_str(&escape_manifest)?, "--workdir", workdir_str], None)?;
     assert_eq!(out_batch_esc.status.code(), Some(2), "batch export escape must return exit code 2");
 
-    // 5. Invalid schema -> exit code 2, missing file -> exit code 1, `perf --json` -> exit code 0.
+    // 5. Invalid schema -> exit code 2, missing file -> exit code 1, and `perf --json` reports its
+    //    budgets with an exit code that agrees with its `ok` flag.
     let bad_schema = work.path().join("bad_schema.json");
     fs::write(&bad_schema, r#"{"schema":"wrong.v0"}"#).map_err(|e| format!("write bad schema: {e}"))?;
     let out_schema = run_cli(&["batch", path_str(&bad_schema)?], None)?;
@@ -683,11 +684,38 @@ fn cli_batch_template_convert_perf_bench_mcp_and_exit_codes() -> GateResult {
     let out_missing = run_cli(&["info", path_str(&work.path().join("missing.curvebook"))?], None)?;
     assert_eq!(out_missing.status.code(), Some(1), "missing file runtime failure must return exit code 1");
 
-    let perf_out = run_cli_ok(&["perf", "--json"], None)?;
-    let perf_json: Value = serde_json::from_str(&perf_out).map_err(|e| format!("parse perf JSON: {e}"))?;
-    assert_eq!(perf_json["ok"], json!(true));
-    assert_eq!(perf_json["checks"]["mv_100k_calculated_variable"]["within_budget"], json!(true));
-    assert_eq!(perf_json["checks"]["dose_response_96_curves"]["curves"], json!(96));
+    // This test runs in the parallel correctness stage, so it checks the `perf` report and exit
+    // code contract, not wall-clock time. The G12 budgets themselves are enforced by
+    // `pdf17_and_perf_gate::perf_gate_passes_100k_mv_and_96_curve_budgets`, which CI runs
+    // serially in the performance stage.
+    let perf = run_cli(&["perf", "--json"], None)?;
+    let perf_stdout = String::from_utf8_lossy(&perf.stdout).into_owned();
+    let mut perf_docs = serde_json::Deserializer::from_str(&perf_stdout).into_iter::<Value>();
+    let perf_json = perf_docs
+        .next()
+        .ok_or_else(|| String::from("perf --json printed no report"))?
+        .map_err(|e| format!("parse perf JSON: {e}\nstdout:\n{perf_stdout}"))?;
+    let mv = &perf_json["checks"]["mv_100k_calculated_variable"];
+    assert_eq!(mv["rows"], json!(100_000));
+    assert_eq!(mv["budget_ms"], json!(250.0));
+    let curves = &perf_json["checks"]["dose_response_96_curves"];
+    assert_eq!(curves["curves"], json!(96));
+    assert_eq!(curves["converged_curves"], json!(96));
+    assert_eq!(curves["budget_ms"], json!(50.0));
+    let within = |v: &Value, key: &str| v[key].as_bool().ok_or_else(|| format!("perf report missing boolean `{key}`"));
+    let all_within = within(mv, "within_budget")? && within(curves, "within_budget")? && within(curves, "total_within_budget")?;
+    assert_eq!(perf_json["ok"], json!(all_within), "perf `ok` must be the conjunction of its budget flags");
+    if all_within {
+        assert_eq!(perf.status.code(), Some(0), "perf within budget must exit 0\nstdout:\n{perf_stdout}");
+    } else {
+        assert_eq!(perf.status.code(), Some(1), "perf over budget must exit 1\nstdout:\n{perf_stdout}");
+        let err_doc = perf_docs
+            .next()
+            .ok_or_else(|| String::from("perf over budget printed no structured error"))?
+            .map_err(|e| format!("parse perf error JSON: {e}"))?;
+        let message = err_doc["error"]["message"].as_str().unwrap_or_default();
+        assert!(message.contains("G12 performance budget exceeded"), "unexpected perf error: {err_doc}");
+    }
 
     Ok(())
 }

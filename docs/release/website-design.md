@@ -1,6 +1,6 @@
 # Website and GitHub Pages design decisions
 
-Decisions made: 2026-11-16–17. Record clarified: 2026-11-18. Scope: the static GitHub Pages entry point in [`index.html`](../index.html), styled by [`site.css`](../site.css). Publication is separate; see [`github-pages.md`](github-pages.md).
+Decisions made: 2026-11-16–17. Record clarified: 2026-11-18. Scope: the static GitHub Pages entry point in [`index.html`](../index.html) and dedicated privacy policy in [`privacy.html`](../privacy.html), styled by [`site.css`](../site.css). Publication is separate; see [`github-pages.md`](github-pages.md).
 
 ## Scope
 
@@ -8,7 +8,7 @@ This record governs the public CurveBook website and its GitHub Pages presentati
 
 ## Rationale and choices made
 
-- **One page with a clear hierarchy:** keep the product introduction, complete-workspace sharing, and downloads together. One primary action and two navigation links give visitors a short path to the essentials. Detailed setup and reference material stay in the existing documentation.
+- **Focused landing page plus dedicated privacy policy:** keep the product introduction, complete-workspace sharing, and downloads together on [`index.html`](../index.html), accompanied by a dedicated plain-language privacy policy at [`privacy.html`](../privacy.html) for Microsoft Store and distribution disclosures. One primary action and three navigation links give visitors a short path to the essentials. Detailed setup and reference material stay in the existing documentation.
 - **Scientific-software identity:** describe CurveBook as an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written from scratch in pure Rust. The landing page should introduce the product; MCP belongs in the setup and release-status context.
 - **Workspace sharing as a central benefit:** make the saved `.curvebook` project prominent rather than presenting sharing as a minor export option. Explain the single-file mechanism and preserve the distinction from live collaboration.
 - **Classic coral over the turquoise proposals:** the earlier turquoise direction made too much of the page feel teal. Warm-grey chrome and white document surfaces provide a quiet base; slate title bars and a restrained coral action give the page character. Keep the logo's spectrum intact and use its warm colors as inspiration for the accent.
@@ -18,7 +18,7 @@ This record governs the public CurveBook website and its GitHub Pages presentati
 
 ## Purpose and hierarchy
 
-Introduce CurveBook as scientific software and help a visitor understand its central benefit and find the current release. Keep one page with three core topics: the product, sharing a complete workspace, and getting CurveBook. Use one primary action, **Get CurveBook**, pointing to the download section. The compact navigation has only **Share a workspace** and **Get CurveBook**. Avoid repeated calls to action, redundant return-to-top links, long resource menus, separate privacy panels, and technical tutorials on the landing page.
+Introduce CurveBook as scientific software and help a visitor understand its central benefit and find the current release. Keep [`index.html`](../index.html) focused on three core topics: the product, sharing a complete workspace, and getting CurveBook, while [`privacy.html`](../privacy.html) provides the standalone per-distribution privacy policy (desktop installers, Windows MSIX / Microsoft Store, CLI/MCP, and the browser bundle). Use one primary action on the landing page, **Get CurveBook**, pointing to the download section. The compact navigation on `index.html` has **Share a workspace**, **Get CurveBook**, and **Privacy** (plus a footer link to `privacy.html`); `privacy.html` links back to `index.html` and its own policy sections (`#summary`, `#local-storage`, `#automation`, `#operators`, `#changes`). Avoid repeated calls to action, redundant return-to-top links, long resource menus, and technical tutorials on the landing page.
 
 The product introduction describes the independently written Rust application and its biostatistics, nonlinear regression, and scientific graphing scope. MCP is a currently implemented access path, not the product's identity; keep its details in the setup guide. A brief release-status note preserves the distinction between implemented engine/MCP/CLI workflows and the unfinished graphical interface. Keep licence and clean-room information visible in the footer.
 
@@ -58,6 +58,6 @@ Concentrate the spectrum in the logo. Keep large surfaces neutral, headings in i
 
 Use native fragment links, semantic headings, a skip link, keyboard focus on destination sections, and visible focus styling. Reflow at narrow widths rather than shrinking the page. Link to the full release list so Alpha prereleases remain discoverable; do not assume that `/releases/latest` or an unpublished asset exists.
 
-Keep the page buildless: local HTML/CSS/PNG only, no scripts, external fonts, analytics, forms, or background requests. Preserve the content security and referrer policies. The application collects no telemetry; GitHub Pages itself logs IP addresses for security, as disclosed in the footer and [GitHub documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#data-collection).
+Keep the site buildless: local HTML/CSS/PNG only, no scripts, external fonts, analytics, forms, or background requests across both [`index.html`](../index.html) and [`privacy.html`](../privacy.html). Preserve the content security and referrer policies. The application collects no telemetry; GitHub Pages itself logs IP addresses for security, as disclosed in the footer, [`privacy.html`](../privacy.html), and [GitHub documentation](https://docs.github.com/en/pages/getting-started-with-github-pages/what-is-github-pages#data-collection).
 
 At Alpha launch, update the pending-release wording only after verifying the published prerelease. GUI onboarding follows human GUI acceptance; a browser demo needs its own live browser QA. No changes to hosting or release state are part of preparing this page.

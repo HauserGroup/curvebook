@@ -27,87 +27,154 @@ pub enum VarRef {
 /// Unary prefix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnaryOp {
+    /// Arithmetic negation (`-x`).
     Neg,
+    /// Unary plus (`+x`).
     Pos,
+    /// Logical negation (`!x` or `NOT x`).
     Not,
 }
 
 /// Binary infix operator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum BinaryOp {
+    /// Addition (`a + b`).
     Add,
+    /// Subtraction (`a - b`).
     Sub,
+    /// Multiplication (`a * b`).
     Mul,
+    /// Division (`a / b`; yields `Missing` when `b == 0`).
     Div,
+    /// Floating-point remainder (`a % b`).
     Mod,
+    /// Exponentiation (`a ^ b`).
     Pow,
+    /// Equality comparison (`a == b` or `a = b`, emitting `1.0` or `0.0`).
     Eq,
+    /// Inequality comparison (`a != b` or `a <> b`).
     Ne,
+    /// Strictly less than (`a < b`).
     Lt,
+    /// Less than or equal (`a <= b`).
     Le,
+    /// Strictly greater than (`a > b`).
     Gt,
+    /// Greater than or equal (`a >= b`).
     Ge,
+    /// Logical conjunction (`a && b` or `a AND b`).
     And,
+    /// Logical disjunction (`a || b` or `a OR b`).
     Or,
 }
 
 /// Sort direction inside a window `ORDER BY` clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum SortDirection {
+    /// Ascending sort order (`ASC`).
     Asc,
+    /// Descending sort order (`DESC`).
     Desc,
 }
 
 /// Missing/null placement inside a window `ORDER BY` clause.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum NullsOrder {
+    /// Place missing values before finite/non-missing values (`NULLS FIRST`).
     First,
+    /// Place missing values after finite/non-missing values (`NULLS LAST`).
     Last,
 }
 
 /// One ordering key expression inside `OVER (... ORDER BY ...)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct OrderByExpr {
+    /// Key expression evaluated per row within the partition.
     pub expr: Expr,
+    /// Ascending vs descending sort direction.
     pub direction: SortDirection,
+    /// Placement of [`crate::FormulaValue::Missing`] keys relative to non-missing keys.
     pub nulls: NullsOrder,
 }
 
 /// Frame endpoint inside `OVER (... ROWS ...)`.
 #[derive(Debug, Clone, PartialEq)]
 pub enum FrameBound {
+    /// Start of the partition (`UNBOUNDED PRECEDING`).
     UnboundedPreceding,
+    /// `n` rows before the current row (`<expr> PRECEDING`).
     Preceding(Box<Expr>),
+    /// The current row (`CURRENT ROW`).
     CurrentRow,
+    /// `n` rows after the current row (`<expr> FOLLOWING`).
     Following(Box<Expr>),
+    /// End of the partition (`UNBOUNDED FOLLOWING`).
     UnboundedFollowing,
 }
 
 /// Inclusive row-frame bounds inside `OVER (... ROWS ...)`.
 #[derive(Debug, Clone, PartialEq)]
 pub struct WindowFrame {
+    /// Lower row-frame bound.
     pub start: FrameBound,
+    /// Upper row-frame bound.
     pub end: FrameBound,
 }
 
 /// Window specification parsed from `OVER (...)`.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct WindowSpec {
+    /// Expressions partitioning rows into independent groups (`PARTITION BY ...`).
     pub partition_by: Vec<Expr>,
+    /// Intra-partition sort keys (`ORDER BY ...`).
     pub order_by: Vec<OrderByExpr>,
+    /// Optional explicit `ROWS BETWEEN ...` sliding window frame; `None` uses the default partition/peer frame.
     pub frame: Option<WindowFrame>,
 }
 
 /// Formula abstract syntax tree node.
 #[derive(Debug, Clone, PartialEq)]
 pub enum Expr {
+    /// Numeric literal (`f64`).
     Number(f64),
+    /// Quoted string literal.
     Text(String),
+    /// Column, scalar, row-index, or `InfoSheet` variable reference.
     Var(VarRef),
-    Unary { op: UnaryOp, expr: Box<Expr> },
-    Binary { op: BinaryOp, left: Box<Expr>, right: Box<Expr> },
-    Call { name: String, args: Vec<Expr> },
-    WindowCall { name: String, args: Vec<Expr>, filter: Option<Box<Expr>>, window: Option<WindowSpec> },
+    /// Unary prefix operation (`-x`, `+x`, `!x`).
+    Unary {
+        /// Prefix operator.
+        op: UnaryOp,
+        /// Operand sub-expression.
+        expr: Box<Expr>,
+    },
+    /// Binary infix operation (`left op right`).
+    Binary {
+        /// Infix operator.
+        op: BinaryOp,
+        /// Left-hand operand.
+        left: Box<Expr>,
+        /// Right-hand operand.
+        right: Box<Expr>,
+    },
+    /// Standard scalar or aggregate function call (`name(args...)`).
+    Call {
+        /// Function identifier (matched case-insensitively during evaluation).
+        name: String,
+        /// Positional argument expressions.
+        args: Vec<Expr>,
+    },
+    /// SQL-style analytic/window function call (`name(args...) [FILTER (WHERE ...)] OVER (...)`).
+    WindowCall {
+        /// Window or aggregate function identifier.
+        name: String,
+        /// Positional argument expressions.
+        args: Vec<Expr>,
+        /// Optional `FILTER (WHERE <predicate>)` row mask applied prior to aggregation; `None` includes all frame rows.
+        filter: Option<Box<Expr>>,
+        /// Optional `OVER (...)` partition, sort, and row-frame specification.
+        window: Option<WindowSpec>,
+    },
 }
 
 fn push_frame_bound_expr(bound: FrameBound, stack: &mut Vec<Expr>) {

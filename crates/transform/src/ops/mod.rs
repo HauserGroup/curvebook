@@ -21,15 +21,22 @@ use crate::simulate::simulate_xy_sheet;
 /// supplied when executing a derived data transformation.
 #[derive(Debug, Clone, Default)]
 pub struct TransformContext<'a> {
+    /// Optional paired [`InfoSheet`] resolving [`HookSource::InfoConstant`] hooks and `Info("Key")` formula references.
     pub info_sheet: Option<&'a InfoSheet>,
+    /// Upstream [`ResultSheet`] slice resolving [`HookSource::ResultScalar`] hooks.
     pub result_sheets: &'a [ResultSheet],
+    /// Project [`DataSheet`] slice resolving cross-sheet [`HookSource::ColumnTitleValue`] hooks.
     pub data_sheets: &'a [DataSheet],
+    /// Zero-based dataset column indices to include (`empty` selects all columns on `source`).
     pub selected_data_sets: Vec<usize>,
+    /// Optional explicit identifier for the derived output [`DataSheet`]; `None` appends an operation suffix to `source.id`.
     pub output_id: Option<String>,
+    /// Optional explicit display title for the derived output [`DataSheet`]; `None` appends an operation suffix to `source.title`.
     pub output_title: Option<String>,
 }
 
 impl<'a> TransformContext<'a> {
+    /// Construct a `TransformContext` pre-bound to `info_sheet` with default empty upstream slices.
     #[must_use]
     pub fn with_info(info_sheet: &'a InfoSheet) -> Self {
         Self { info_sheet: Some(info_sheet), ..Self::default() }
@@ -118,9 +125,13 @@ impl<'a> TransformContext<'a> {
 /// Complete output produced by executing a data transformation.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TransformOutput {
+    /// Derived [`DataSheet`] suitable for [`ResultSheet::analyzable_data`], downstream analyses, curve fits, and graphs.
     pub data_sheet: DataSheet,
+    /// Audit [`ResultTab`] summarizing row/column counts, anchors, or parameters applied by the transform.
     pub summary_tab: ResultTab,
+    /// Hookable scalar outputs (such as computed normalization anchors or baseline means).
     pub scalars: Vec<ResultScalarEntry>,
+    /// Non-fatal domain warnings (such as out-of-domain `ln(<= 0)` cells mapped to empty).
     pub warnings: Vec<String>,
 }
 

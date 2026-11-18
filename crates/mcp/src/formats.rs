@@ -4,7 +4,7 @@
 //! # Filesystem Trust Boundary (`--workdir` vs. Unconstrained Mode)
 //!
 //! MCP file operations (`open_file`, `save_file`, `export`, engine command path parameters via
-//! [`sanitize_command_params`], and stored external data-link refreshes) operate in one of two
+//! `sanitize_command_params`, and stored external data-link refreshes) operate in one of two
 //! explicit path-policy modes configured on [`McpServerState`]:
 //!
 //! 1. **Unconstrained local-user mode (default when `--workdir` is omitted):** Intended for trusted

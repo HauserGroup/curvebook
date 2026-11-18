@@ -259,12 +259,9 @@ fn handle_copy_action(app: &mut UiApp, state: &mut ResultsViewState, sheet_id: &
     let sel = if force_full { None } else { state.selection_bounds(sheet_id, active_idx) };
     let tsv = format_tab_selection_tsv(tab, rs.analysis.p_value_format, sel);
     state.last_copied_tsv = Some(tsv.clone());
+    app.interaction.last_clipboard_bundle = None;
     app.interaction.last_clipboard_text = Some(tsv.clone());
-
-    #[cfg(not(target_arch = "wasm32"))]
-    if !app.is_gui_only() {
-        let _ = crate::os_integration::write_os_pasteboard(&tsv);
-    }
+    let _ = app.write_clipboard_text(&tsv);
 
     UiEventOutcome {
         handled: true,

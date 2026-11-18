@@ -119,6 +119,16 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
     hits
 }
 
+/// Scan a standalone release compliance payload (`SHA256SUMS.txt`, `THIRD-PARTY-LICENSES.html`,
+/// or `.zsync`) for vendor copyright notices and creator tags.
+#[must_use]
+pub(crate) fn scan_compliance_bytes(display_path: &str, bytes: &[u8]) -> Vec<CleanroomHit> {
+    let mut archive_entries = 0usize;
+    let mut hits = Vec::new();
+    scan_bytes_recursive(display_path, bytes, 0, &mut archive_entries, &mut hits);
+    hits
+}
+
 /// Recursively scan all assembled artefacts under `dist_dir` (including nested ZIP/`.curvebook`/`.prism`/`.pzf`
 /// archives, HTML, manifests, UTF-16 payloads, and even mistakenly bundled audit files), never following symlinks.
 pub fn scan_dist_artefacts(dist_dir: &Path) -> Result<Vec<CleanroomHit>, String> {

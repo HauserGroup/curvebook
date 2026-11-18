@@ -1200,7 +1200,7 @@ impl SimulateDistributionsDialogState {
 /// Modal state for inserting or toggling a `GraphAnnotation::ModelEquation` callout (`QOL-16`).
 ///
 /// Strictly equations-only: renders symbolic or substituted model equations from an existing
-/// regression [`ResultSheet`] without Compact Letter Display (CLD) or fit-statistic callouts.
+/// regression [`ResultSheet`](curvebook_doc::ResultSheet) without Compact Letter Display (CLD) or fit-statistic callouts.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct InsertModelEquationDialogState {
     pub graph_sheet_id: Option<SheetId>,

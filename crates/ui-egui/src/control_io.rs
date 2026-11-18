@@ -1236,16 +1236,16 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
     require_params_object_or_null(params, command_id).map_err(ControlCallError::from)?;
     match command_id {
         "ui.navigator.toggle" => {
-            app.nav.navigator_open = !app.nav.navigator_open;
-            Ok(Some(json!({ "navigator_open": app.nav.navigator_open })))
+            let open = app.toggle_navigator_pane();
+            Ok(Some(json!({ "navigator_open": open })))
         }
         "ui.inspector.toggle" => {
-            app.nav.inspector_open = !app.nav.inspector_open;
-            Ok(Some(json!({ "inspector_open": app.nav.inspector_open })))
+            let open = app.toggle_inspector_pane();
+            Ok(Some(json!({ "inspector_open": open })))
         }
         "ui.family.toggle" => {
-            app.family_open = !app.family_open;
-            Ok(Some(json!({ "family_open": app.family_open })))
+            let open = app.toggle_family_pane();
+            Ok(Some(json!({ "family_open": open })))
         }
         "ui.palette.open" => {
             app.canvas_dialogs.open_command_palette();

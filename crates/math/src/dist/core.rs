@@ -4,6 +4,28 @@
 //! Every distribution exposes direct lower-tail `cdf`, upper-tail `sf`, log-survival `ln_sf`, and
 //! both lower-tail (`ppf`) and upper-tail (`isf`) quantile evaluators without `1.0 - cdf(x)` or
 //! `1.0 - q` subtraction cancellation.
+//!
+//! Each distribution is evaluated through its standard relation to a special function (equation
+//! numbers from Abramowitz & Stegun 1964, ch. 26):
+//! - Normal: density 26.2.1 and tails 26.2.2-26.2.3, evaluated as `P(z) = erfc(-z / sqrt(2)) / 2`
+//!   with the error functions of `special::erf`.
+//! - Chi-square: density 26.4.1; `P(chi^2 | nu)` and `Q(chi^2 | nu)` are the regularized incomplete
+//!   gamma functions `P(nu / 2, chi^2 / 2)` and `Q(nu / 2, chi^2 / 2)` (26.4.19).
+//! - Snedecor `F`: density 26.6.1; `Q(F | nu1, nu2) = I_x(nu2 / 2, nu1 / 2)` with
+//!   `x = nu2 / (nu2 + nu1 F)` (26.6.2). The lower tail follows from the symmetry
+//!   `I_x(a, b) = 1 - I_{1-x}(b, a)` (NIST DLMF 8.17.4).
+//! - Student `t`: `A(t | nu) = P(|T| <= t) = 1 - I_x(nu / 2, 1 / 2)` with `x = nu / (nu + t^2)`
+//!   (26.7.1). One-sided tails are half the two-sided tail, by symmetry.
+//!
+//! Quantiles invert these relations with the incomplete beta and gamma inverses in `special`,
+//! whose algorithms and references are documented there.
+//!
+//! References:
+//! - Abramowitz, M., & Stegun, I. A. (Eds.). (1964). *Handbook of Mathematical Functions with
+//!   Formulas, Graphs, and Mathematical Tables* (NBS Applied Mathematics Series 55), ch. 26
+//!   (Probability Functions), 26.2.1-26.2.3, 26.4.1, 26.4.19, 26.6.1-26.6.2, 26.7.1. U.S.
+//!   Government Printing Office.
+//! - NIST Digital Library of Mathematical Functions, §8.17 (Incomplete Beta Functions).
 
 use crate::error::MathError;
 use crate::special::erf::exp_neg_sq;

@@ -17,9 +17,16 @@ use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
 /// Decimation strategy for [`execute_prune`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum PruneMethod {
+    /// Retain every `k`-th row (`k >= 1`) without averaging intermediate rows.
     EveryNth(usize),
-    LogarithmicSpacing { target_points: usize },
+    /// Select approximately `target_points` rows spaced uniformly in `log10(X)` across strictly positive *X* coordinates.
+    LogarithmicSpacing {
+        /// Desired approximate number of retained *X* grid points (`>= 2`).
+        target_points: usize,
+    },
+    /// Partition rows into consecutive windows of width `k` (`k >= 1`) and emit the mean *X* and *Y* per window.
     AverageBins(usize),
+    /// Partition rows into consecutive windows of width `k` (`k >= 1`) and retain both the minimum-*Y* and maximum-*Y* envelope points per bin (preserving sharp peaks during downsampling).
     MinMaxBins(usize),
 }
 
@@ -33,9 +40,19 @@ pub enum SelectRule {
     /// Keep rows that have no missing/excluded active cells across selected columns.
     ExcludeMissing,
     /// Keep the `n` rows with largest active numeric values in `column`.
-    TopN { column: usize, n: usize },
+    TopN {
+        /// Zero-based column index ranked descending.
+        column: usize,
+        /// Maximum number of top rows retained.
+        n: usize,
+    },
     /// Keep the `n` rows with smallest active numeric values in `column`.
-    BottomN { column: usize, n: usize },
+    BottomN {
+        /// Zero-based column index ranked ascending.
+        column: usize,
+        /// Maximum number of bottom rows retained.
+        n: usize,
+    },
 }
 
 /// Transpose rows and data-set columns using [`curvebook_doc::transpose_cell_grid`].

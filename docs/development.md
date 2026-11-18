@@ -1,6 +1,6 @@
 # Development
 
-> **Last updated:** 2026-11-15 · **Change:** corrected web build status (`R8.4` landed), environment variables, font feature flags, `cargo xtask cursors` behaviour, and the panic-guard entry point; added `cargo xtask coverage` (`R0.16`).
+> **Last updated:** 2026-11-18 · **Change:** added `cargo xtask citations` (`R0.30` `D1` literature-citation gate in `ci policy`) and extended `cargo xtask wasm` (`R11.1` `wasm32` Clippy `-D warnings`, `trunk build --cargo-profile web-release`, and `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` enforcement).
 
 ## Prerequisites
 
@@ -27,6 +27,7 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 | Verify asset attributions in `ASSETS.md` | `cargo xtask assets` |
 | Verify no competitor trademarks in UI/packaging | `cargo xtask brands` |
 | Verify clean-room fixture/header rules | `cargo xtask cleanroom` |
+| Verify numerical `D1` literature citations | `cargo xtask citations` |
 | Verify tool cursor catalog sync (`cursors.toml`) | `cargo xtask cursors` |
 | Check translation coverage | `cargo xtask i18n-report` |
 | Sync desktop UI commands to MCP catalog | `cargo xtask ui-commands` |
@@ -56,7 +57,7 @@ Font binaries never live inside this repository ([`AGENTS.md`](../AGENTS.md) ›
 
 ## Web build
 
-`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine` for `wasm32-unknown-unknown`; `./packaging/web/package.sh` produces the release zip. Menus, toolbar, dialogs, and context menus come from the shared layout tree (`R10.7`). The `curvebook-web` tests run natively; browser-run tests and the remaining browser gaps are tracked in [`R11`](ROADMAP.md#r11-usable-browser-app):
+`apps/curvebook-web` shares the same pure-Rust `UiApp` + `curvebook-engine` codebase and presents the compositor's RGBA frame on a WebGL2 `<canvas>` (`R8.4`; `init_web_app()` tests also run on the host) using the `window.CurveBookHost` bridge (`curvebook.v1.*` storage namespaces). `cargo xtask wasm` type-checks `curvebook-web` and `curvebook-engine`, runs Clippy (`-D warnings`) on `curvebook-web` and `curvebook-ui-egui` for `wasm32-unknown-unknown`, runs `trunk build --cargo-profile web-release` into an isolated target staging directory when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and verifies web bundle readiness (`cargo xtask web-bundle`). `./packaging/web/package.sh` produces `dist/release/curvebook-web-<version>.zip`; setting `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` fails closed when that release archive is absent and enforces the `R10.22` compressed size budget (`verify_web_bundle_zip_bytes`). Menus, toolbar, dialogs, and context menus come from the shared layout tree (`R10.7`). The `curvebook-web` tests run natively; browser-run tests and the remaining browser gaps are tracked in [`R11`](ROADMAP.md#r11-usable-browser-app):
 
 ```sh
 rustup target add wasm32-unknown-unknown
@@ -77,6 +78,7 @@ trunk serve --release   # serves on http://127.0.0.1:8767
 | `CURVEBOOK_FONTS_REQUIRED` | Build-time: fail the `curvebook-text` build when `CURVEBOOK_FONTS_DIR` is unset |
 | `CURVEBOOK_ALLOW_OS_GUI_DIALOG` | Allow print preview to launch the host OS dialog (otherwise the PDF spool is only staged) |
 | `CURVEBOOK_REQUIRE_CORPUS` / `CURVEBOOK_CORPUS_DIR` | Tests: require the cached NIST StRD corpus / override its location (see below) |
+| `CURVEBOOK_REQUIRE_WEB_BUNDLE` / `CURVEBOOK_REQUIRE_TRUNK` | `xtask`: require `dist/release/curvebook-web-*.zip` (`verify_web_bundle_zip_bytes`) / require `trunk` in `cargo xtask wasm` |
 | `WGPU_POWER_PREF` / `WGPU_BACKEND` | Graphics adapter overrides honoured by the third-party `wgpu` renderer used by `eframe` (not read by CurveBook code) |
 
 To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or place a `portable.txt` next to the executable) so preferences, shortcuts, and the recovery journal live under `<dir>/curvebook-data`. CurveBook has no logging framework and reads no `RUST_LOG` filter.
@@ -95,6 +97,7 @@ To isolate configuration for test or agent runs, pass `--portable-dir <dir>` (or
 
 - `cargo xtask test` runs workspace unit and integration tests (`cargo nextest run` when installed, else `cargo test --workspace --lib --bins --tests`) followed by workspace doctests (`cargo test --workspace --doc`).
 - Every statistical test (`crates/stats`) and regression model (`crates/fit`) must carry analytical unit tests, certified reference-dataset tests (NIST StRD) with explicit relative/ULP tolerances in `curvebook-testkit`, and property tests covering degenerate inputs.
+- `cargo xtask citations` (`R0.30`, included in `cargo xtask ci policy`) enforces [`AGENTS.md`](../AGENTS.md) `D1` rule 1 across `crates/math`, `crates/stats`, `crates/fit`, and `crates/transform`: every non-test `.rs` module defining a public routine (`pub fn`) fails closed unless either its `//!` module header or each routine's `///` doc comment cites a published reference (author + year, DOI, ISBN, NIST DLMF, Abramowitz & Stegun, or NIST StRD). Modules that hold only error types, re-exports, formatting, expression syntax/DAG plumbing, or structural table-reshaping helpers are explicitly allow-listed with a stated reason in `xtask/src/citations.rs`, and nonexistent allow-list paths fail closed.
 
 ### Coverage reports
 
