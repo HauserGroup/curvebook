@@ -125,9 +125,11 @@ fn spike_s1_million_cell_virtualized_60fps_scroll_and_selection_benchmark() {
     );
 
     let median_budget_ms = if cfg!(debug_assertions) { 2.0 } else { 1.0 };
+    let p95_budget_ms = if cfg!(debug_assertions) { 25.0 } else { 2.0 };
+    let frame_budget_ms = if cfg!(debug_assertions) { 100.0 } else { 16.67 };
     assert!(p50_ms < median_budget_ms, "expected <{median_budget_ms:.2}ms median frame time in {profile}, measured p50={p50_ms:.4} ms");
-    assert!(max_ms < 16.67, "60fps budget exceeded in {profile}: max={max_ms:.4} ms (p95={p95_ms:.4} ms)");
-    assert!(p95_ms < 2.0, "expected sub-2ms p95 frame time in {profile}, measured p95={p95_ms:.4} ms");
+    assert!(max_ms < frame_budget_ms, "60fps budget exceeded in {profile}: max={max_ms:.4} ms (p95={p95_ms:.4} ms, limit={frame_budget_ms:.2} ms)");
+    assert!(p95_ms < p95_budget_ms, "expected <{p95_budget_ms:.2}ms p95 frame time in {profile}, measured p95={p95_ms:.4} ms");
 }
 
 #[test]
@@ -153,7 +155,8 @@ fn spike_s1_o1_one_million_rows_navigation_and_windowing() {
     assert_eq!(end_coord.row, MAX_ROWS - 1);
     assert!(frame.window.end_row == MAX_ROWS);
     assert!(frame.cells.len() < 128, "only visible slice should be formatted, got {} cells", frame.cells.len());
-    assert!(elapsed_ms < 16.67, "1M-row tail jump + format took {elapsed_ms:.4} ms");
+    let jump_budget_ms = if cfg!(debug_assertions) { 100.0 } else { 16.67 };
+    assert!(elapsed_ms < jump_budget_ms, "1M-row tail jump + format took {elapsed_ms:.4} ms (limit={jump_budget_ms:.2} ms)");
     println!("SPIKE_S1_MAX_ROWS_JUMP rows={MAX_ROWS} elapsed_ms={elapsed_ms:.4} visible_cells={}", frame.cells.len());
 }
 

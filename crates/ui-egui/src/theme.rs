@@ -266,11 +266,31 @@ pub fn font_diagnostics(locale: &str) -> FontDiagnostics {
     }
 }
 
+#[derive(Debug, Clone)]
+struct FontFaceEntry {
+    name: String,
+    bytes: std::sync::Arc<[u8]>,
+    sfnt_offset: usize,
+}
+
+fn collect_font_entries(path: &str, bytes: Vec<u8>, out: &mut Vec<FontFaceEntry>) {
+    let offsets: Vec<usize> = curvebook_text::TrueTypeFont::parse_collection(&bytes).into_iter().map(|(off, _)| off).collect();
+    if offsets.is_empty() {
+        return;
+    }
+    let shared: std::sync::Arc<[u8]> = std::sync::Arc::from(bytes);
+    let multi = offsets.len() > 1;
+    for (idx, sfnt_offset) in offsets.into_iter().enumerate() {
+        let name = if multi && idx > 0 { format!("{path}#{idx}") } else { path.to_owned() };
+        out.push(FontFaceEntry { name, bytes: std::sync::Arc::clone(&shared), sfnt_offset });
+    }
+}
+
 /// In-memory TrueType/OpenType font collection combining embedded fallbacks and optional
 /// host system font faces for multi-script glyph shaping and rasterization.
 #[derive(Debug, Clone)]
 pub struct FontBook {
-    faces: Vec<(String, Vec<u8>)>,
+    faces: Vec<FontFaceEntry>,
 }
 
 impl Default for FontBook {
@@ -287,13 +307,13 @@ impl FontBook {
         if crate::bundled_fonts_enabled() && curvebook_text::has_bundled_fonts_feature() {
             for &(name, bytes) in curvebook_text::BUNDLED_FONTS {
                 if !name.is_empty() && curvebook_text::TrueTypeFont::parse(bytes).is_some() {
-                    faces.push((name.to_owned(), bytes.to_vec()));
+                    faces.push(FontFaceEntry { name: name.to_owned(), bytes: std::sync::Arc::from(bytes), sfnt_offset: 0 });
                 }
             }
         }
         let minimal = curvebook_text::build_minimal_truetype_font();
         if curvebook_text::TrueTypeFont::parse(&minimal).is_some() {
-            faces.push((String::from("CurveBook Minimal Fallback"), minimal));
+            faces.push(FontFaceEntry { name: String::from("CurveBook Minimal Fallback"), bytes: std::sync::Arc::from(minimal), sfnt_offset: 0 });
         }
         Self { faces }
     }
@@ -312,10 +332,22 @@ impl FontBook {
             "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
             "/System/Library/Fonts/Monaco.ttf",
             "/System/Library/Fonts/Geneva.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSerif-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansArabic-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansHebrew-Regular.ttf",
             "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttf",
+            "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
+            "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
             "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
             "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
+            "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+            "/usr/share/fonts/TTF/DejaVuSans.ttf",
+            "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
             "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
+            "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
             "C:\\Windows\\Fonts\\arial.ttf",
             "C:\\Windows\\Fonts\\consola.ttf",
         ];
@@ -344,8 +376,10 @@ impl FontBook {
         let mut paths = Vec::new();
         for entry in entries.flatten() {
             let path = entry.path();
-            let is_font =
-                path.extension().and_then(|ext| ext.to_str()).is_some_and(|ext| ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf"));
+            let is_font = path
+                .extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf") || ext.eq_ignore_ascii_case("ttc"));
             if is_font && let Some(s) = path.to_str() {
                 paths.push(s.to_owned());
             }
@@ -355,19 +389,33 @@ impl FontBook {
         self.load_host_font_paths(&refs)
     }
 
-    /// Read and register valid SFNT/TrueType fonts from explicit `paths`, prepending them ahead of fallbacks.
+    /// Parse and prepend a single SFNT or `.ttc` TrueType collection from raw `bytes`,
+    /// returning how many sub-faces were registered.
+    pub fn prepend_font_bytes(&mut self, name: &str, bytes: Vec<u8>) -> usize {
+        let mut out = Vec::new();
+        collect_font_entries(name, bytes, &mut out);
+        let count = out.len();
+        if count > 0 {
+            self.faces.splice(0..0, out);
+        }
+        count
+    }
+
+    /// Read and register valid SFNT/TrueType or `.ttc` collection faces from explicit `paths`,
+    /// prepending them ahead of fallbacks.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn load_host_font_paths(&mut self, paths: &[&str]) -> usize {
         const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
-        let mut loaded = 0usize;
-        for &path in paths.iter().rev() {
+        let mut prepended = Vec::new();
+        for &path in paths {
             let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(std::path::Path::new(path), MAX_HOST_FONT_BYTES) else {
                 continue;
             };
-            if curvebook_text::TrueTypeFont::parse(&bytes).is_some() {
-                self.faces.insert(0, (path.to_owned(), bytes));
-                loaded += 1;
-            }
+            collect_font_entries(path, bytes, &mut prepended);
+        }
+        let loaded = prepended.len();
+        if loaded > 0 {
+            self.faces.splice(0..0, prepended);
         }
         loaded
     }
@@ -375,31 +423,44 @@ impl FontBook {
     /// Names/paths of loaded font faces in priority order.
     #[must_use]
     pub fn face_names(&self) -> Vec<&str> {
-        self.faces.iter().map(|(name, _)| name.as_str()).collect()
+        self.faces.iter().map(|entry| entry.name.as_str()).collect()
     }
 
     /// Parse all loaded faces as zero-copy [`curvebook_text::TrueTypeFont`] readers.
     #[must_use]
     pub fn parsed_faces(&self) -> Vec<(&str, curvebook_text::TrueTypeFont<'_>)> {
-        self.faces.iter().filter_map(|(name, bytes)| curvebook_text::TrueTypeFont::parse(bytes).map(|ttf| (name.as_str(), ttf))).collect()
+        self.faces
+            .iter()
+            .filter_map(|entry| curvebook_text::TrueTypeFont::parse_at(&entry.bytes, entry.sfnt_offset).map(|ttf| (entry.name.as_str(), ttf)))
+            .collect()
+    }
+
+    /// Parse the face at `index` in priority order (supporting both standalone SFNT and `.ttc` sub-faces).
+    #[must_use]
+    pub fn parsed_face(&self, index: usize) -> Option<curvebook_text::TrueTypeFont<'_>> {
+        self.faces.get(index).and_then(|entry| curvebook_text::TrueTypeFont::parse_at(&entry.bytes, entry.sfnt_offset))
     }
 
     /// Raw `(face_name, sfnt_bytes)` slices in priority order.
     #[must_use]
-    pub fn raw_faces(&self) -> &[(String, Vec<u8>)] {
-        &self.faces
+    pub fn raw_faces(&self) -> Vec<(&str, &[u8])> {
+        self.faces.iter().map(|entry| (entry.name.as_str(), entry.bytes.as_ref())).collect()
     }
 
-    /// Stable FNV-1a fingerprint over loaded face names and byte lengths.
+    /// Stable FNV-1a fingerprint over loaded face names, byte lengths, and SFNT offsets.
     #[must_use]
     pub fn fingerprint(&self) -> u64 {
         let mut h: u64 = 0xcbf2_9ce4_8422_2325;
-        for (name, bytes) in &self.faces {
-            for b in name.as_bytes() {
+        for entry in &self.faces {
+            for b in entry.name.as_bytes() {
                 h ^= u64::from(*b);
                 h = h.wrapping_mul(0x0100_0000_01b3);
             }
-            for b in (bytes.len() as u64).to_le_bytes() {
+            for b in (entry.bytes.len() as u64).to_le_bytes() {
+                h ^= u64::from(b);
+                h = h.wrapping_mul(0x0100_0000_01b3);
+            }
+            for b in (entry.sfnt_offset as u64).to_le_bytes() {
                 h ^= u64::from(b);
                 h = h.wrapping_mul(0x0100_0000_01b3);
             }
@@ -559,5 +620,45 @@ mod tests {
 
         let he = font_diagnostics("he-IL");
         assert!(he.rtl_supported);
+    }
+
+    #[test]
+    fn font_book_loads_ttc_collections_without_panicking_or_duplicating_blobs() {
+        let sfnt = curvebook_text::build_minimal_truetype_font();
+        let num_tables = u16::from_be_bytes([sfnt[4], sfnt[5]]) as usize;
+        let header_len = 12 + 4 * 2; // 'ttcf'(4) + ver(4) + count(4) + 2 offsets(8)
+        let face0_off = header_len;
+        let face1_off = header_len + sfnt.len();
+
+        let shift_sfnt = |base_off: usize| -> Vec<u8> {
+            let mut copy = sfnt.clone();
+            for t in 0..num_tables {
+                let off_pos = 12 + t * 16 + 8;
+                let orig = u32::from_be_bytes([copy[off_pos], copy[off_pos + 1], copy[off_pos + 2], copy[off_pos + 3]]);
+                let shifted = orig + (base_off as u32);
+                copy[off_pos..off_pos + 4].copy_from_slice(&shifted.to_be_bytes());
+            }
+            copy
+        };
+
+        let mut ttc = Vec::new();
+        ttc.extend_from_slice(b"ttcf");
+        ttc.extend_from_slice(&0x0001_0000_u32.to_be_bytes());
+        ttc.extend_from_slice(&2_u32.to_be_bytes());
+        ttc.extend_from_slice(&(face0_off as u32).to_be_bytes());
+        ttc.extend_from_slice(&(face1_off as u32).to_be_bytes());
+        ttc.extend_from_slice(&shift_sfnt(face0_off));
+        ttc.extend_from_slice(&shift_sfnt(face1_off));
+
+        let mut book = super::FontBook::with_embedded_fallback();
+        let fp_before = book.fingerprint();
+        let loaded = book.prepend_font_bytes("synthetic/NotoSansCJK-Regular.ttc", ttc);
+        assert_eq!(loaded, 2);
+        assert_eq!(book.face_names()[0], "synthetic/NotoSansCJK-Regular.ttc");
+        assert_eq!(book.face_names()[1], "synthetic/NotoSansCJK-Regular.ttc#1");
+        assert!(book.parsed_face(0).is_some());
+        assert!(book.parsed_face(1).is_some());
+        assert!(book.parsed_faces().len() >= 3);
+        assert_ne!(book.fingerprint(), fp_before);
     }
 }

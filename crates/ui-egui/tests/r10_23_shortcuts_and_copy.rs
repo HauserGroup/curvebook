@@ -332,12 +332,10 @@ fn verify_rtl_hidpi_pane_shortcuts(driver: &mut curvebook_ui_egui::HumanPathDriv
     assert_eq!(rtl_both_closed.frame.navigator.width, 0);
     assert_eq!(rtl_both_closed.frame.inspector.width, 0);
     assert_eq!(rtl_both_closed.frame.canvas.width, rtl_both_closed.frame.total_width);
-    let rtl_rep = driver.verify_parity();
-    assert!(rtl_rep.is_clean(), "RTL closed-panes parity failed: {:?}", rtl_rep.violations);
+    human_wf_common::assert_parity_for_locale(driver, "ar", "RTL closed-panes")?;
     let _ = driver.press_key("n", ctrl_shift)?;
     let _ = driver.press_key("i", ctrl_shift)?;
-    let rtl_restored = driver.verify_parity();
-    assert!(rtl_restored.is_clean(), "RTL restored-panes parity failed: {:?}", rtl_restored.violations);
+    human_wf_common::assert_parity_for_locale(driver, "ar", "RTL restored-panes")?;
     Ok(())
 }
 
@@ -562,5 +560,108 @@ fn r10_23_language_picker_marks_15_non_english_locales_as_draft_human_path() -> 
     assert!(!driver.layout_tree().is_rtl);
     let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
     human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    Ok(())
+}
+
+#[test]
+fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Result<(), String> {
+    use curvebook_ui_egui::compositor::FramePalette;
+    use curvebook_ui_egui::layout::verify::verify_tree_invariants;
+    use curvebook_ui_egui::text_bridge::DesktopTextMeasurer;
+    use curvebook_ui_egui::views::build_workspace_layout_tree;
+    use curvebook_ui_egui::{FontBook, UiThemeMode, UiThemeSpec};
+
+    let book = FontBook::with_embedded_fallback();
+    assert!(
+        book.face_names().iter().all(|name| !name.starts_with("/System/Library") && !name.starts_with("/usr/share/fonts")),
+        "embedded fallback must not load OS host fonts: {:?}",
+        book.face_names()
+    );
+    let fallback_measurer = DesktopTextMeasurer::with_font_book(book);
+    let palette = FramePalette::from_theme(&UiThemeSpec::for_mode(UiThemeMode::Light));
+
+    let mut app = build_r10_23_workspace()?;
+    let _ = app.execute_command("sheet.select", serde_json::json!({ "sheet_id": "graph-1" })).map_err(|e| e.to_string())?;
+    let en_metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+
+    // 1. English workspace with zero OS fonts: `navigator.family_toggle` ('▾'/'▸') and all visible text pass with 0 missing glyphs.
+    for family_open in [true, false] {
+        app.family_open = family_open;
+        let tree = build_workspace_layout_tree(&app, en_metrics, &fallback_measurer, &palette);
+        let inv = verify_tree_invariants(&tree);
+        assert!(inv.is_clean(), "fontless English tree invariants failed (family_open={family_open}): {:?}", inv.violations);
+        let toggle_run = tree
+            .text_runs
+            .iter()
+            .find(|r| r.owner_widget_id.as_str() == "navigator.family_toggle")
+            .ok_or_else(|| String::from("missing navigator.family_toggle text run"))?;
+        assert_eq!(toggle_run.shaped.missing_glyph_count, 0, "disclosure triangle reported missing glyph on fontless runner");
+    }
+    app.family_open = true;
+
+    // 2. Fontless RTL (`ar` @ 1.5x HiDPI): pane mirroring, closed-pane width invariance, and geometric/a11y parity pass;
+    // disclosure triangle has 0 missing glyphs and only non-ASCII Arabic runs lack glyphs without OS fonts.
+    let _ = app.set_locale("ar");
+    let rtl_metrics = ViewportMetrics::new(1440.0, 900.0, 1.5);
+    let rtl_open = build_workspace_layout_tree(&app, rtl_metrics, &fallback_measurer, &palette);
+    assert!(rtl_open.is_rtl);
+    assert!(rtl_open.frame.navigator.x > rtl_open.frame.inspector.x);
+    let rtl_toggle = rtl_open
+        .text_runs
+        .iter()
+        .find(|r| r.owner_widget_id.as_str() == "navigator.family_toggle")
+        .ok_or_else(|| String::from("missing RTL navigator.family_toggle run"))?;
+    assert!(
+        rtl_toggle.shaped.glyphs.iter().filter(|g| matches!(g.ch, '▸' | '▾')).all(|g| !g.missing_glyph),
+        "disclosure triangle must never report missing_glyph even in fontless RTL: {:?}",
+        rtl_toggle.shaped.glyphs
+    );
+    let rtl_open_violations: Vec<_> = verify_tree_invariants(&rtl_open).violations.into_iter().filter(|v| v.check != "text_glyphs").collect();
+    assert!(rtl_open_violations.is_empty(), "fontless RTL open-pane invariants failed: {rtl_open_violations:?}");
+
+    app.nav.navigator_open = false;
+    app.nav.inspector_open = false;
+    let rtl_closed = build_workspace_layout_tree(&app, rtl_metrics, &fallback_measurer, &palette);
+    assert_eq!(rtl_closed.frame.navigator.width, 0);
+    assert_eq!(rtl_closed.frame.inspector.width, 0);
+    assert_eq!(rtl_closed.frame.canvas.width, rtl_closed.frame.total_width);
+    let rtl_closed_violations: Vec<_> = verify_tree_invariants(&rtl_closed).violations.into_iter().filter(|v| v.check != "text_glyphs").collect();
+    assert!(rtl_closed_violations.is_empty(), "fontless RTL closed-pane invariants failed: {rtl_closed_violations:?}");
+
+    // 3. Language picker open in both English (`1.0x`) and Arabic RTL (`1.5x`) with zero OS fonts:
+    // `[Draft]` options and viewport containment hold; only `popup.menu.ui.locale.set.opt.*` (or Arabic chrome) lack OS glyphs.
+    app.nav.navigator_open = true;
+    app.nav.inspector_open = true;
+    for (loc, vp) in [("en", en_metrics), ("ar", rtl_metrics)] {
+        let _ = app.set_locale(loc);
+        let mut driver = human_wf_common::new_human_driver(app.clone(), vp);
+        let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
+        human_wf_common::scroll_until_widget_visible(
+            &mut driver,
+            &WidgetId::from("popup.menu.view"),
+            &WidgetId::from("menu.ui.locale.set"),
+            140.0,
+            6,
+        )?;
+        let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
+
+        let picker_tree = build_workspace_layout_tree(driver.app(), vp, &fallback_measurer, &palette);
+        let popup = picker_tree.node("popup.menu.ui.locale.set").ok_or_else(|| String::from("missing picker popup"))?;
+        assert!(popup.drawn_in_frame);
+        assert!(popup.bounds.rect_px.x >= 0);
+        assert!(popup.bounds.rect_px.right() <= i32::try_from(vp.physical_width_px()).unwrap_or(1920));
+        let picker_violations: Vec<_> = verify_tree_invariants(&picker_tree)
+            .violations
+            .into_iter()
+            .filter(|v| {
+                if v.check != "text_glyphs" {
+                    return true;
+                }
+                if loc == "en" { !v.widget_id.starts_with("popup.menu.ui.locale.set.opt.") } else { false }
+            })
+            .collect();
+        assert!(picker_violations.is_empty(), "fontless language picker (`{loc}`) invariants failed: {picker_violations:?}");
+    }
+
     Ok(())
 }

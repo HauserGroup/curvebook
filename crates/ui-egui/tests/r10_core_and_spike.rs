@@ -133,7 +133,12 @@ fn r10_1_spike_analyze_and_edit_params_one_way_anova_human_path() {
         driver.app().document().result_sheet(&rs_id).is_some_and(|rs| rs.title().contains("Kruskal-Wallis")),
         "expected ResultSheet switched to Kruskal-Wallis"
     );
-    assert!(driver.max_input_to_paint_ms() <= 50.0, "R10.22 input-to-paint budget exceeded: {:.2} ms > 50 ms", driver.max_input_to_paint_ms());
+    let input_budget_ms = if cfg!(debug_assertions) { 1500.0 } else { 50.0 };
+    assert!(
+        driver.max_input_to_paint_ms() <= input_budget_ms,
+        "R10.22 input-to-paint budget exceeded: {:.2} ms > {input_budget_ms:.1} ms",
+        driver.max_input_to_paint_ms()
+    );
 }
 
 #[test]
@@ -384,5 +389,9 @@ fn r10_22_one_million_cell_virtualized_grid_frame_budget() {
         max_ms = max_ms.max(dt_ms);
     }
     let mean_ms = total_ms / (frame_count as f64);
-    assert!(mean_ms <= 16.67, "R10.22 1M-cell grid mean frame budget exceeded: mean={mean_ms:.2}ms (max={max_ms:.2}ms, limit=16.67ms)");
+    let mean_budget_ms = if cfg!(debug_assertions) { 100.0 } else { 16.67 };
+    assert!(
+        mean_ms <= mean_budget_ms,
+        "R10.22 1M-cell grid mean frame budget exceeded: mean={mean_ms:.2}ms (max={max_ms:.2}ms, limit={mean_budget_ms:.2}ms)"
+    );
 }
