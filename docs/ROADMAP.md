@@ -149,7 +149,7 @@ The 2026-11-18 audit found that nearly every public function, type, and module i
 - [ ] Turn on `#![warn(missing_docs)]` one crate at a time. Once a crate builds without warnings, raise it to `#![deny(missing_docs)]` so the `R0.29` `cargo doc` gate and Clippy keep it clean. Track progress per crate here instead of quoting warning counts in prose ([pitfalls §2](pitfalls.md#2-hardcoded-headline-counts-going-stale)).
 - [ ] Add an `xtask` check, run in the `cargo xtask ci policy` stage, that fails when a module in `crates/math`, `crates/stats`, `crates/fit`, or `crates/transform` defines a public numerical routine but neither its `//!` header nor the routine's `///` doc cites a published reference. Allow-list modules that only hold error types, shared plumbing, or re-exports, with a stated reason. Document it in [`ci.md`](ci.md) and [`development.md`](development.md).
 - [ ] Add a short, compiled crate-level example (doctest) to the `lib.rs` of `curvebook-math`, `curvebook-stats`, `curvebook-fit`, and `curvebook-transform`. Each shows one typical call and how to read its result.
-- [ ] Keep these field descriptions consistent with the `R12.1` functionality reference so the code docs and the published reference give the same meaning for each reported value.
+- [ ] Keep these field descriptions consistent with the `R12` functionality and methods reference so the code docs and the published reference give the same meaning for each reported value.
 
 ---
 
