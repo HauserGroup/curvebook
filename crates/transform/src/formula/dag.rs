@@ -13,8 +13,11 @@ use crate::formula::parser::{Expr, FrameBound, VarRef, parse_formula};
 /// Referenced dependency target extracted statically from a formula AST.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum DependencyTarget {
+    /// Column referenced by identifier or bracketed/quoted title (for example `[Body Mass]` or `col("Dose")`).
     ColumnName(String),
+    /// Column referenced by explicit zero-based index (`col(0)`).
     ColumnIndex(usize),
+    /// Metadata constant referenced on the paired `InfoSheet` (`Info("Key")`).
     InfoConstant(String),
 }
 

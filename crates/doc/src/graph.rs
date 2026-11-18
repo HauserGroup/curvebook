@@ -14,36 +14,56 @@ use crate::links::DataSheet;
 /// Specialized diagnostic plot subtypes (`docs/implementation/graphing-and-layouts.md` §2.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum DiagnosticPlotKind {
+    /// Color-mapped 2D matrix of correlation coefficients, expression values, or grouped means.
     Heatmap,
+    /// Differential effect (`log2` fold change or difference on *X*) vs `-log10(p)` or `-log10(q)` significance on *Y*.
     Volcano,
+    /// Method-comparison difference (or ratio) vs average plot with bias and 95% limits of agreement (Bland & Altman 1986).
     BlandAltman,
+    /// Sensitivity (`TPR`) vs `1 - Specificity` (`FPR`) receiver operating characteristic curve with diagonal chance line.
     RocCurve,
+    /// Horizontal confidence-interval effect-size / odds-ratio / hazard-ratio plot with null reference line.
     ForestPlot,
+    /// Regression residuals vs predicted *Y* or *X* diagnostic scatter plot.
     ResidualPlot,
+    /// Theoretical normal quantiles vs observed/residual quantiles Q–Q plot with reference line.
     NormalQqPlot,
 }
 
 /// Primary visual family of a [`GraphSpec`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum GraphKind {
+    /// Continuous *X* vs *Y* scatter, connected line, spline, area, and fitted curve figure.
     Xy,
+    /// One-way categorical group comparison figure (bars, box-and-whiskers, violins, dot plots, before–after lines).
     Column,
+    /// Two-way or three-way clustered/stacked/superimposed group figure.
     Grouped,
+    /// Categorical count/proportion bar or stacked bar figure.
     Contingency,
+    /// Pie, donut, stacked fraction bar, or `10 × 10` waffle chart.
     PartsOfWhole,
+    /// Kaplan–Meier staircase survival curve with censoring ticks, optional Greenwood CIs, and optional number-at-risk table.
     Survival,
+    /// Five-channel multivariate bubble scatter or categorical × continuous summary figure.
     MultipleVariables,
+    /// Specialized statistical or regression diagnostic plot ([`DiagnosticPlotKind`]).
     Diagnostic(DiagnosticPlotKind),
 }
 
 /// Axis frame geometry preset (`docs/implementation/graphing-and-layouts.md` §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum FramePreset {
+    /// Classic open L-shaped left *Y* and bottom *X* axes meeting at the bottom-left corner.
     #[default]
     OpenL,
+    /// Tufte range-frame style offsetting left *Y* and bottom *X* spines slightly away from the corner and trimming to data range.
     OffsetRangeTufte,
+    /// Four-sided enclosed rectangular frame (left, bottom, top, and right spines).
     PlainBoxed,
+    /// Left primary *Y* axis paired with an independent right secondary `y2_axis` spine.
     DualYSecondaryRight,
+    /// Axes intersecting directly at data coordinate `(0, 0)`.
     OriginCrossing,
 }
 
@@ -53,50 +73,71 @@ pub type GraphAxisScale = AxisScale;
 /// Break-mark ornament between discontinuous axis segments (`docs/implementation/graphing-and-layouts.md` §3.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BreakOrnament {
+    /// Parallel slanted slash ticks (`//`) straddling the segment gap.
     #[default]
     DoubleSlash,
+    /// Sawtooth zigzag wave bridging the segment gap.
     Zigzag,
+    /// Clean whitespace gap with no drawn ornament.
     BlankGap,
 }
 
 /// Source for categorical tick labels on `Column` and `Grouped` X axes (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum CategoricalTickSource {
+    /// Read category tick labels from the source table's `row_titles`.
     #[default]
     RowTitles,
+    /// Read category tick labels from the source table's data-set / group `column` titles.
     ColumnTitles,
+    /// Display 1-based row numbers (`"1"`, `"2"`, `"3"`, ...).
     RowNumbers,
 }
 
 /// Numeric or categorical tick formatting mode (`docs/implementation/graphing-and-layouts.md` §3.3).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum TickLabelFormat {
+    /// Standard fixed/trimmed decimal numerals (`0.1`, `1`, `10`, `100`).
     #[default]
     Decimal,
+    /// Base-10 superscript powers (`10⁻⁶`, `10⁻³`, `10⁰`, `10³`).
     PowerOfTenSuperscript,
+    /// Exponential scientific notation (`1e-6`, `1e-3`, `1e3`).
     ScientificE,
+    /// Antilogarithm `10^x` display for pre-logged *X* concentrations (for example `-6` labeled as `1e-6` or `0.000001`).
     Antilog,
+    /// SI metric prefix scaling (`p`, `n`, `µ`, `m`, `k`, `M`, `G`).
     EngineeringSi,
+    /// Discrete text category labels sourced via [`CategoricalTickSource`].
     Categorical(CategoricalTickSource),
 }
 
 /// Reference threshold rule or shaded band drawn across a plot area (e.g. Volcano alpha/fold-change cutoffs).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisThreshold {
+    /// Primary threshold coordinate in data-space units on the owning axis (finite).
     pub value: f64,
+    /// Optional second coordinate in data-space units filling a translucent band between `value` and `shade_to`; `None` draws a single line only.
     pub shade_to: Option<f64>,
+    /// Stroke color (and base tint for shaded bands).
     pub color: Rgba8,
+    /// Solid, dashed, or dotted line pattern for the threshold rule.
     pub dash_style: LineDashStyle,
+    /// Rule stroke width in typographic points (`>= 0.0`, finite).
     pub stroke_width_pt: f64,
+    /// Optional text callout rendered adjacent to the threshold line; `None` omits text.
     pub label: Option<String>,
 }
 
 /// Custom extra tick mark (with optional label override and gridline) placed on an axis.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AdditionalTick {
+    /// Coordinate in data-space units where the custom tick is placed (finite).
     pub value: f64,
+    /// Custom tick text overriding the axis's [`TickLabelFormat`]; `None` formats `value` automatically.
     #[serde(default)]
     pub label: Option<String>,
+    /// When `true`, extends a reference gridline perpendicular to the axis across the plot area.
     #[serde(default)]
     pub draw_gridline: bool,
 }
@@ -104,14 +145,17 @@ pub struct AdditionalTick {
 /// One continuous segment (`1..=3` per axis) of a standard or discontinuous axis (`docs/implementation/graphing-and-layouts.md` §3.2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSegment {
-    /// `None` selects automatic data-driven lower bound.
+    /// Explicit lower bound in data-space units; `None` selects an automatic data-driven lower bound.
     pub min: Option<f64>,
-    /// `None` selects automatic data-driven upper bound.
+    /// Explicit upper bound in data-space units; `None` selects an automatic data-driven upper bound.
     pub max: Option<f64>,
+    /// Coordinate scale bijection applied across this segment (`Linear`, `Log10`, `Log2`, `Ln`, `Logit`, `Probit`, or `Reciprocal`).
     pub scale: GraphAxisScale,
     /// Relative physical length weight on the rendered axis (`> 0.0`).
     pub length_share: f64,
+    /// Explicit major tick spacing (in data units for `Linear`, or log-decade step where applicable); `None` chooses nice ticks automatically.
     pub major_tick_interval: Option<f64>,
+    /// Number of minor tick subdivisions drawn between consecutive major ticks (`0` disables minor ticks).
     pub minor_ticks_per_interval: u8,
 }
 
@@ -124,19 +168,29 @@ impl Default for AxisSegment {
 /// Complete X, Y, or secondary Y2 axis model.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AxisSpec {
+    /// Axis title rendered alongside the spine (supports inline `{{info:...}}` and `{{result:...}}` hooks).
     pub title: String,
+    /// Ordered `1..=3` continuous segments composing a standard (`len == 1`) or broken (`len in 2..=3`) axis.
     pub segments: Vec<AxisSegment>,
+    /// Physical gap width in typographic points inserted between adjacent discontinuous segments.
     pub gap_width_pt: f64,
+    /// Visual break-mark symbol drawn at segment boundaries when `segments.len() >= 2`.
     pub break_ornament: BreakOrnament,
+    /// Numeric or categorical formatting applied to major tick labels.
     pub tick_format: TickLabelFormat,
+    /// Rotation angle of tick labels in degrees (`0.0` = horizontal, `-45.0` / `45.0` = angled, `90.0` = vertical).
     pub tick_angle_deg: f64,
+    /// Spine and tick-mark stroke width in typographic points (`>= 0.0`, finite).
     pub stroke_width_pt: f64,
+    /// Reference threshold lines and shaded target zones anchored to this axis.
     pub thresholds: Vec<AxisThreshold>,
+    /// Extra user-pinned tick marks and optional gridlines.
     #[serde(default)]
     pub additional_ticks: Vec<AdditionalTick>,
 }
 
 impl AxisSpec {
+    /// Construct a single-segment linear `AxisSpec` with default decimal ticks and `1.0 pt` stroke width.
     #[must_use]
     pub fn linear(title: impl Into<String>) -> Self {
         Self {
@@ -219,119 +273,191 @@ impl AxisSpec {
 /// Central tendency statistic for bars and summary crossbars.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum SummaryMeasure {
+    /// Sample arithmetic mean.
     #[default]
     Mean,
+    /// Sample 50th percentile (median).
     Median,
+    /// Geometric mean `exp(mean(ln(x)))` over strictly positive observations (`x > 0`).
     GeometricMean,
 }
 
 /// Whisker extent convention for box-and-whisker plots (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum WhiskerMethod {
+    /// Tukey (1977) fences extending to the most extreme observations within `[Q1 - 1.5 * IQR, Q3 + 1.5 * IQR]`.
     #[default]
     Tukey1_5Iqr,
+    /// Full sample range `[min, max]`.
     MinToMax,
+    /// Sample 10th to 90th percentiles.
     Percentile10To90,
+    /// Sample 5th to 95th percentiles.
     Percentile5To95,
+    /// Sample 2.5th to 97.5th percentiles.
     Percentile2_5To97_5,
+    /// Sample 1st to 99th percentiles.
     Percentile1To99,
 }
 
 /// Deterministic replicate point overlay on bars, boxes, and violins.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ReplicateOverlayStyle {
+    /// Symmetric collision-avoiding horizontal beeswarm spread (deterministic; zero random jitter).
     #[default]
     DeterministicBeeswarm,
+    /// Vertically aligned column centered on the category's horizontal anchor.
     AlignedColumn,
 }
 
 /// Curve interpolation rule for XY connecting lines (`docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum LineConnectionKind {
+    /// Piecewise linear segments connecting consecutive points.
     #[default]
     PointToPoint,
+    /// Horizontal-then-vertical right-continuous step function.
     Staircase,
+    /// Shape-preserving Fritsch–Carlson (1980) / Steffen (1990) monotonic piecewise cubic Hermite spline (prevents overshoot between monotone points).
     MonotonicCubicSpline,
+    /// Akima (1970) local five-point cubic spline resistant to oscillations near outlier slopes.
     AkimaSpline,
 }
 
+/// Visual stroke and interpolation style for series connecting lines.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ConnectingLineStyle {
+    /// Polyline, step, or spline curve geometry.
     pub kind: LineConnectionKind,
+    /// Solid, dashed, or dotted stroke pattern.
     pub dash_style: LineDashStyle,
+    /// Line stroke width in typographic points (`>= 0.0`, finite).
     pub stroke_width_pt: f64,
+    /// Line stroke sRGB color.
     pub color: Rgba8,
 }
 
+/// Shaded polygon fill between a plotted XY series and a horizontal baseline.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AreaFillSpec {
+    /// Horizontal reference *Y* coordinate in data-space units anchoring the area polygon (commonly `0.0`).
     pub baseline_y: f64,
+    /// Fill color (typically carrying translucent alpha).
     pub fill_color: Rgba8,
 }
 
+/// Visual geometry for [`GraphicalDataObject::PartsOfWhole`] figures.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub enum PartsOfWholeLayout {
+    /// Circular pie chart with radial wedges proportional to slice fractions.
     Pie,
+    /// Annular ring chart leaving a central cutout (with optional total readout).
     #[default]
     Donut,
+    /// Single `100%` stacked rectangular bar partitioned into proportional segments.
     StackedFractionBar,
+    /// `10 × 10` unit-cell grid (`100` squares) colored by rounded percentage share.
     Waffle10x10,
 }
 
 /// Composable Graphical Data Object (GDO) describing how a series renders (`docs/implementation/graphing-and-layouts.md` §2).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphicalDataObject {
+    /// XY scatter symbols, optional connecting curve/spline, and optional shaded area-under-curve fill.
     ScatterAndLine {
+        /// Optional point symbol style; `None` hides individual point markers (line-only).
         marker: Option<MarkerStyle>,
+        /// Optional connecting line or spline style; `None` draws unconnected scatter points.
         line: Option<ConnectingLineStyle>,
+        /// Optional polygon shading to a horizontal baseline; `None` disables area fill.
         area_fill: Option<AreaFillSpec>,
     },
+    /// Summary column/grouped bar anchored at zero (or axis baseline) with optional overlaid individual replicate points.
     BarWithReplicates {
+        /// Central tendency statistic (`Mean`, `Median`, or `GeometricMean`) setting the bar height.
         summary: SummaryMeasure,
+        /// Interior bar fill color.
         fill_color: Rgba8,
+        /// Bar outline stroke color.
         border_color: Rgba8,
+        /// Bar outline stroke width in typographic points (`>= 0.0`, finite).
         border_width_pt: f64,
+        /// Optional individual replicate point overlay (`DeterministicBeeswarm` or `AlignedColumn`); `None` draws summary bars only.
         replicate_overlay: Option<ReplicateOverlayStyle>,
     },
+    /// Individual-value dot plot (beeswarm/column) with optional horizontal summary crossbar.
     AlignedDotPlot {
+        /// Summary statistic used when `show_crossbar == true`.
         summary: SummaryMeasure,
+        /// Marker symbol, size, and colors for individual observations.
         marker: MarkerStyle,
+        /// When `true`, draws a horizontal summary crossbar across the category column.
         show_crossbar: bool,
     },
+    /// Quartile box (`Q1` to `Q3` with median line) and configurable whiskers.
     BoxAndWhisker {
+        /// Rule determining lower and upper whisker endpoints.
         whiskers: WhiskerMethod,
+        /// Box interior fill color.
         fill_color: Rgba8,
+        /// Box, median line, and whisker stroke color.
         stroke_color: Rgba8,
+        /// When `true`, plots individual observations lying outside the whisker endpoints.
         show_outliers: bool,
+        /// When `true`, overlays all replicate observations across the box.
         show_all_points: bool,
     },
+    /// Kernel density violin plot with optional quartile lines and half-violin point split.
     Violin {
+        /// Violin density interior fill color.
         fill_color: Rgba8,
+        /// Violin contour stroke color.
         stroke_color: Rgba8,
+        /// When `true`, truncates kernel density tails strictly at observed `[min, max]`.
         clip_to_observed_range: bool,
+        /// When `true`, draws internal median and `Q1`/`Q3` quartile rules inside the violin.
         show_median_and_quartiles: bool,
+        /// When `true`, renders a raincloud-style one-sided half-violin paired with individual points on the opposite half.
         half_violin_with_points: bool,
     },
+    /// Min-to-max floating range bar spanning `[min(y), max(y)]` with optional summary line.
     FloatingBar {
+        /// Optional central tendency line drawn inside the `[min, max]` bar; `None` omits the internal line.
         summary: Option<SummaryMeasure>,
+        /// Bar interior fill color.
         fill_color: Rgba8,
+        /// Bar border stroke color.
         border_color: Rgba8,
+        /// Bar border width in typographic points (`>= 0.0`, finite).
         border_width_pt: f64,
     },
+    /// Matched-subject trajectories connecting paired observations across adjacent columns at the same row index.
     BeforeAfterLines {
+        /// Optional symbol drawn at each subject-column vertex; `None` draws connecting lines only.
         marker: Option<MarkerStyle>,
+        /// Subject trajectory line color.
         line_color: Rgba8,
+        /// Subject trajectory stroke width in typographic points (`>= 0.0`, finite).
         stroke_width_pt: f64,
     },
+    /// Right-continuous Kaplan–Meier survival step function (`S(t)` in `[0, 1]` or `[0%, 100%]`).
     KaplanMeierStep {
+        /// Step curve stroke color.
         line_color: Rgba8,
+        /// Step curve stroke width in typographic points (`>= 0.0`, finite).
         stroke_width_pt: f64,
+        /// When `true`, marks right-censored observations with vertical tick marks along the survival curve.
         show_censored_ticks: bool,
+        /// When `true`, draws pointwise confidence bands (log-log complementary Greenwood transform) around `S(t)`.
         show_greenwood_ci: bool,
+        /// When `true`, strokes confidence band bounds with dashed lines rather than solid lines.
         ci_dashed: bool,
     },
+    /// Proportional categorical composition plot (`Pie`, `Donut`, `StackedFractionBar`, or `Waffle10x10`).
     PartsOfWhole {
+        /// Geometric layout of the categorical fractions.
         layout: PartsOfWholeLayout,
+        /// When `true` and `layout == PartsOfWholeLayout::Donut`, prints the series sum inside the central cutout.
         show_center_total: bool,
     },
 }
@@ -339,31 +465,47 @@ pub enum GraphicalDataObject {
 /// Dispersion statistic encoded by error bars (`docs/implementation/graphing-and-layouts.md` §2.1).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorBarMetric {
+    /// Sample standard deviation (`±1 SD`, `n - 1` denominator).
     #[default]
     Sd,
+    /// Standard error of the mean (`±1 SEM = SD / sqrt(n)`).
     Sem,
+    /// Two-sided 95% Student-*t* confidence interval around the sample mean (`mean ± t_{0.025, n-1} * SEM`).
     ConfidenceInterval95,
+    /// Asymmetric interquartile span from `Q1` (25th percentile) to `Q3` (75th percentile).
     InterquartileRange,
+    /// Full observed span from sample minimum to sample maximum.
     Range,
+    /// Pre-summarized bounds read directly from [`crate::SubcolumnMode::explicit_bounds`].
     ExplicitSubcolumns,
 }
 
+/// Which side(s) of the summary anchor draw error whiskers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum ErrorBarDirection {
+    /// Symmetric/two-sided upper and lower whiskers.
     #[default]
     Both,
+    /// Positive/upper whisker only (common above upward bars).
     UpperOnly,
+    /// Negative/lower whisker only.
     LowerOnly,
 }
 
 /// Vertical or horizontal error-bar styling (supporting solid, dashed, and dotted strokes).
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ErrorBarSpec {
+    /// Statistical dispersion or interval quantity represented by the whisker endpoints.
     pub metric: ErrorBarMetric,
+    /// Upper, lower, or two-sided whisker visibility.
     pub direction: ErrorBarDirection,
+    /// Solid, dashed, or dotted whisker stem pattern.
     pub dash_style: LineDashStyle,
+    /// Whisker stem and cap stroke width in typographic points (`>= 0.0`, finite).
     pub stroke_width_pt: f64,
+    /// End-cap crossbar length in typographic points (`0.0` draws capless T-free whiskers).
     pub cap_width_pt: f64,
+    /// Explicit error-bar color override; `None` inherits the parent series stroke color.
     pub color: Option<Rgba8>,
 }
 
@@ -383,56 +525,82 @@ impl Default for ErrorBarSpec {
 /// Overlaid smooth curve bound to an upstream nonlinear/linear regression `ResultSheet`.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RegressionOverlaySpec {
+    /// Upstream regression [`crate::ResultSheet`] supplying [`crate::FittedCurveOverlay`] coordinates for `data_set_index`.
     pub result_sheet_id: SheetId,
     /// Adaptive polyline subdivision count in `[256, 1024]`.
     pub sample_segments: u16,
+    /// When `true`, renders the curve's two-sided confidence band at the regression's configured [`ConfidenceLevel`](crate::ConfidenceLevel).
     pub show_confidence_band: bool,
+    /// When `true`, renders the curve's two-sided single-observation prediction band at the regression's configured [`ConfidenceLevel`](crate::ConfidenceLevel).
     pub show_prediction_band: bool,
+    /// When `true`, fills confidence/prediction bands as translucent ribbons; when `false`, draws dashed boundary curves.
     pub shaded_ribbon: bool,
 }
 
 /// Single plotted data series inside a [`GraphSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SeriesSpec {
+    /// Upstream [`DataSheet`] (or analyzable transform [`crate::ResultSheet`]) supplying observations for this series.
     pub source_sheet_id: SheetId,
+    /// Zero-based data-set, cohort, or group column index on `source_sheet_id`.
     pub data_set_index: usize,
+    /// Optional custom legend label; `None` inherits the upstream column title dynamically.
     pub legend_label: Option<String>,
+    /// When `true`, maps *Y* values against [`GraphSpec::y2_axis`] instead of [`GraphSpec::y_axis`].
     pub bind_to_right_y2: bool,
+    /// Visual mark/bar/box/violin/step geometry for this series.
     pub gdo: GraphicalDataObject,
+    /// Optional vertical (*Y*) error bars; `None` omits *Y* error bars.
     pub y_error_bars: Option<ErrorBarSpec>,
+    /// Optional horizontal (*X*) error bars (for [`crate::XColumnMode::Numbers`] with summary/replicate subcolumns); `None` omits *X* error bars.
     pub x_error_bars: Option<ErrorBarSpec>,
+    /// Optional live fitted regression curve and band overlay; `None` renders no regression overlay.
     pub regression_overlay: Option<RegressionOverlaySpec>,
 }
 
 /// Horizontal cluster arrangement for `Grouped` and `Contingency` graphs (`docs/implementation/graphing-and-layouts.md` §2.2).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum GroupedArrangement {
+    /// Place data-set columns side-by-side within each row-factor cluster (`Row 1: [A, B, C]`, `Row 2: [A, B, C]`).
     #[default]
     Interleaved,
+    /// Group all row-factor levels within separate blocks per data-set column (`A: [Row 1, Row 2]`, `B: [Row 1, Row 2]`).
     Separated,
+    /// Stack data-set magnitudes cumulatively within each row-factor position.
     Stacked,
+    /// Overlay all data sets directly at identical horizontal category anchors (common for interaction line plots).
     Superimposed,
 }
 
 /// Per-point visual style override (`graph.formatSelectedPoints`).
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct PointStyleOverride {
+    /// Zero-based index into [`GraphSpec::series`].
     pub series_index: usize,
+    /// Zero-based row or observation index within the series.
     pub point_index: usize,
+    /// Optional zero-based replicate subcolumn index; `None` applies the override to the summary point or all replicates at `(series_index, point_index)`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub subcol: Option<usize>,
+    /// Optional stroke/outline color override; `None` keeps the series stroke color.
     #[serde(default)]
     pub color: Option<Rgba8>,
+    /// Optional marker glyph shape override; `None` keeps the series marker shape.
     #[serde(default)]
     pub symbol: Option<MarkerShape>,
+    /// Optional marker diameter in typographic points (`> 0.0`, finite); `None` keeps the series marker size.
     #[serde(default)]
     pub size_pt: Option<f64>,
+    /// Optional marker border stroke width in typographic points (`>= 0.0`, finite); `None` keeps the series border width.
     #[serde(default)]
     pub border_width_pt: Option<f64>,
+    /// Optional marker interior fill color override; `None` keeps the series fill color.
     #[serde(default)]
     pub fill_color: Option<Rgba8>,
+    /// Optional solid/open/semi-filled marker fill mode override; `None` keeps the series fill mode.
     #[serde(default)]
     pub fill_mode: Option<MarkerFillMode>,
+    /// When `true`, suppresses rendering of the targeted point without excluding it from upstream analyses.
     #[serde(default)]
     pub hidden: bool,
 }
@@ -440,16 +608,45 @@ pub struct PointStyleOverride {
 /// Fill-colour visual channel in a five-channel `MultipleVariables` plot (`docs/implementation/graphing-and-layouts.md` §2.5).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum ColorChannelMapping {
+    /// Uniform fill color across all plotted observations.
     Constant(Rgba8),
-    Categorical { column: usize, palette: PaletteId, level_order_override: Option<LevelOrderSpec> },
-    Continuous { column: usize, ramp: ColorRamp, domain_clamp: Option<(f64, f64)> },
+    /// Discrete categorical color encoding mapped from a `MultipleVariables` column.
+    Categorical {
+        /// Zero-based variable column index supplying categorical group tokens.
+        column: usize,
+        /// Discrete colorblind-safe or publication palette cycled across levels.
+        palette: PaletteId,
+        /// Optional graph-local level order overriding the column's stored [`LevelOrderSpec`]; `None` uses the column's level order.
+        level_order_override: Option<LevelOrderSpec>,
+    },
+    /// Continuous gradient color encoding mapped from a quantitative `MultipleVariables` column.
+    Continuous {
+        /// Zero-based variable column index supplying finite numeric values.
+        column: usize,
+        /// Perceptually uniform or diverging [`ColorRamp`] mapped across the value domain.
+        ramp: ColorRamp,
+        /// Optional explicit `(min, max)` clamping interval in data units; `None` auto-scales to observed `[min, max]`.
+        domain_clamp: Option<(f64, f64)>,
+    },
 }
 
 /// Symbol-area / radius channel in a five-channel `MultipleVariables` bubble plot.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum SizeChannelMapping {
-    Constant { radius_pt: f64 },
-    Variable { column: usize, min_radius_pt: f64, max_radius_pt: f64 },
+    /// Uniform symbol radius across all observations.
+    Constant {
+        /// Marker radius in typographic points (`> 0.0`, finite).
+        radius_pt: f64,
+    },
+    /// Proportional bubble sizing mapped from a quantitative `MultipleVariables` column.
+    Variable {
+        /// Zero-based variable column index supplying numeric magnitudes.
+        column: usize,
+        /// Minimum marker radius in typographic points mapped to the smallest observed value.
+        min_radius_pt: f64,
+        /// Maximum marker radius in typographic points mapped to the largest observed value.
+        max_radius_pt: f64,
+    },
 }
 
 /// Rendering mode for a `MultipleVariables` graph (`docs/implementation/graphing-and-layouts.md` §2.5).
@@ -459,71 +656,106 @@ pub enum MultivariatePlotMode {
     #[default]
     BubbleScatter,
     /// Categorical × continuous group summary plot (bar, box-and-whisker, violin, dot plot, floating bar).
-    CategoricalSummary { gdo: GraphicalDataObject, y_error_bars: Option<ErrorBarSpec> },
+    CategoricalSummary {
+        /// Summary GDO rendered for each distinct level of `x_column`.
+        gdo: GraphicalDataObject,
+        /// Optional vertical error bars computed over each category's active `y_column` values; `None` omits error bars.
+        y_error_bars: Option<ErrorBarSpec>,
+    },
 }
 
 /// Declarative five-channel (`X`, `Y`, `Color`, `Size`, `Label`) or categorical × continuous
 /// encoding for `MultipleVariables` plots.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct MultivariateGraphEncoding {
+    /// Scatter/bubble vs categorical-summary rendering mode.
     pub plot_mode: MultivariatePlotMode,
+    /// Zero-based variable column index mapped to the horizontal *X* axis.
     pub x_column: usize,
+    /// Zero-based variable column index mapped to the vertical *Y* axis.
     pub y_column: usize,
+    /// Point or category color channel mapping.
     pub color: ColorChannelMapping,
+    /// Point radius channel mapping (used in [`MultivariatePlotMode::BubbleScatter`]).
     pub size: SizeChannelMapping,
+    /// Optional zero-based variable column index supplying per-point text labels; `None` draws no point labels.
     pub label_column: Option<usize>,
+    /// Optional graph-local ordering override when `x_column` is categorical; `None` uses the column's [`LevelOrderSpec`].
     pub x_level_order_override: Option<LevelOrderSpec>,
+    /// When `true` and `color` is [`ColorChannelMapping::Categorical`], draws convex-hull polygons around each color group.
     pub show_convex_hulls: bool,
+    /// When `true` and `color` is [`ColorChannelMapping::Categorical`], draws bivariate normal confidence ellipses around each color group.
     pub show_confidence_ellipses: bool,
 }
 
 /// Geometry style of pairwise significance brackets (`docs/implementation/graphing-and-layouts.md` §4).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum BracketStyle {
+    /// Classic inverted-U bracket with vertical downward legs at `group_a` and `group_b`.
     #[default]
     Square,
+    /// Horizontal bar with short downward end ticks.
     HalfTick,
+    /// Plain horizontal line segment with no vertical end ticks.
     FlatLine,
+    /// Smooth typographic curly brace pointing upward toward the significance label.
     CurlyBrace,
 }
 
 /// Text label mode for pairwise significance brackets.
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub enum BracketLabelMode {
+    /// Display asterisk significance tiers (`"*"`, `"**"`, `"***"`, `"****"`, or `"ns"`) formatted via the upstream analysis's [`crate::PValueFormat`].
     #[default]
     SummaryStars,
+    /// Display exact formatted numeric `p = ...` (or `q = ...` when [`crate::PairwiseComparisonRecord::is_fdr_q`] is `true`).
     NumericPOrQ,
+    /// Display an explicit caller-supplied text string.
     Custom(String),
 }
 
 /// Live pairwise comparison bracket hooked to an upstream statistical `ResultSheet`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct PairwiseBracketSpec {
+    /// Upstream statistical [`crate::ResultSheet`] publishing [`crate::PairwiseComparisonRecord`] entries.
     pub result_sheet_id: SheetId,
+    /// Zero-based index of the first compared group on the categorical axis.
     pub group_a: usize,
+    /// Zero-based index of the second compared group on the categorical axis.
     pub group_b: usize,
+    /// Visual bracket leg/cap shape.
     pub style: BracketStyle,
+    /// Asterisk, numeric *p*/*q*, or custom text label mode.
     pub label_mode: BracketLabelMode,
+    /// When `true`, automatically suppresses rendering when [`crate::PairwiseComparisonRecord::significant`] is `false`.
     pub hide_if_non_significant: bool,
+    /// Bracket line stroke width in typographic points (`>= 0.0`, finite).
     pub stroke_width_pt: f64,
+    /// Label font size in typographic points (`> 0.0`, finite).
     pub font_size_pt: f64,
+    /// Vertical stacking clearance in typographic points between nested/overlapping brackets.
     pub bracket_step_pt: f64,
 }
 
 /// Geometric shape primitive for canvas callout regions (`docs/graphing-parity.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum AnnotationShapeKind {
+    /// Sharp-cornered axis-aligned rectangle.
     #[default]
     Rectangle,
+    /// Axis-aligned rectangle with rounded corner arcs.
     RoundedRectangle,
+    /// Axis-aligned ellipse inscribed in `bounds_pt`.
     Ellipse,
 }
 
 /// Display mode for a fitted model equation callout on a graph canvas.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum EquationDisplayMode {
+    /// Substitute converged numeric parameter estimates (for example `Y = 100.0 * X / (2.50 + X)`).
     #[default]
     Substituted,
+    /// Render symbolic parameter names without numeric substitution (for example `Y = Vmax * X / (Km + X)`).
     Symbolic,
 }
 
@@ -534,49 +766,81 @@ const fn default_model_equation_font_size() -> f64 {
 /// Canvas annotation primitive placed on a [`GraphSpec`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum GraphAnnotation {
+    /// Free-placed Markdown text callout (supports inline `{{info:...}}` and `{{result:...}}` hooks).
     TextBox {
+        /// Canvas bounding box in typographic points (`width >= 0`, `height >= 0`).
         bounds_pt: RectPt,
+        /// Markdown text content.
         markdown: String,
+        /// When `true`, draws a rectangular border frame around the text box.
         bordered: bool,
     },
+    /// Straight line segment or single-headed pointer arrow in canvas point coordinates.
     LineOrArrow {
+        /// Starting `(x_pt, y_pt)` canvas coordinate in typographic points.
         start_pt: (f64, f64),
+        /// Ending `(x_pt, y_pt)` canvas coordinate in typographic points (arrowhead tip when `arrowhead == true`).
         end_pt: (f64, f64),
+        /// When `true`, draws a directional arrowhead at `end_pt`.
         arrowhead: bool,
+        /// Solid, dashed, or dotted line stroke pattern.
         dash: LineDashStyle,
+        /// Stroke and arrowhead sRGB color.
         color: Rgba8,
     },
+    /// Geometric highlight region (`Rectangle`, `RoundedRectangle`, or `Ellipse`) in canvas point coordinates.
     Shape {
+        /// Rectangle, rounded rectangle, or ellipse primitive.
         kind: AnnotationShapeKind,
+        /// Bounding box in typographic points (`width >= 0`, `height >= 0`).
         bounds_pt: RectPt,
+        /// Outline stroke color.
         stroke_color: Rgba8,
+        /// Outline stroke width in typographic points (`>= 0.0`, finite).
         stroke_width_pt: f64,
+        /// Solid, dashed, or dotted outline stroke style.
         dash: LineDashStyle,
+        /// Optional interior fill color; `None` leaves the shape interior transparent.
         fill_color: Option<Rgba8>,
     },
+    /// Live miniature table projecting an upstream [`crate::ResultSheet`] tab onto the graph canvas.
     EmbeddedResultTable {
+        /// Upstream [`crate::ResultSheet`] identifier.
         result_sheet_id: SheetId,
+        /// Specific [`crate::ResultTab::id`] to render; `None` renders the primary summary tab.
         tab_id: Option<String>,
+        /// Canvas bounding box in typographic points (`width >= 0`, `height >= 0`).
         bounds_pt: RectPt,
     },
+    /// Live TeX-formatted regression equation box bound to an upstream regression [`crate::ResultSheet`].
     ModelEquation {
+        /// Upstream linear or nonlinear regression [`crate::ResultSheet`] identifier.
         result_sheet_id: SheetId,
+        /// Zero-based fitted dataset index whose parameters populate [`EquationDisplayMode::Substituted`].
         #[serde(default)]
         data_set_index: usize,
+        /// Numeric parameter substitution vs symbolic formula display.
         #[serde(default)]
         mode: EquationDisplayMode,
+        /// Canvas bounding box in typographic points (`width >= 0`, `height >= 0`).
         bounds_pt: RectPt,
+        /// Base equation font size in typographic points (`in (0, 144]`, default `10.0`).
         #[serde(default = "default_model_equation_font_size")]
         font_size_pt: f64,
+        /// When `true`, draws a rectangular frame around the equation callout.
         #[serde(default)]
         bordered: bool,
     },
 }
 
+/// Legend visibility, placement, and frame configuration on a [`GraphSpec`].
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LegendSpec {
+    /// When `true`, renders the series/channel legend on the figure canvas.
     pub visible: bool,
+    /// Optional explicit top-left `(x_pt, y_pt)` anchor in typographic points; `None` places the legend automatically outside/beside the plot frame.
     pub position_pt: Option<(f64, f64)>,
+    /// When `true`, encloses the legend inside a bordered box.
     pub bordered: bool,
 }
 
@@ -627,18 +891,24 @@ fn is_default_pairwise_display_mode(mode: &PairwiseDisplayMode) -> bool {
 /// Compact Letter Display (CLD) overlay binding a graph to an all-pairwise [`crate::ResultSheet`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CompactLetterDisplaySpec {
+    /// Upstream all-pairwise [`crate::ResultSheet`] supplying pairwise significance decisions (Piepho 2004).
     pub result_sheet_id: SheetId,
-    /// Optional explicit alpha threshold overriding precomputed `significant` decisions when adjusted p/q values are present.
+    /// Optional explicit alpha threshold in `(0, 1)` overriding precomputed `significant` decisions when adjusted *p*/*q* values are present; `None` uses the upstream result sheet's significance flags.
     #[serde(default)]
     pub alpha_override: Option<f64>,
+    /// Whether `'a'` starts at the highest (`DescendingMean`) or lowest (`AscendingMean`) group location.
     #[serde(default)]
     pub ordering: CldOrdering,
+    /// When `true`, formats CLD labels in uppercase (`"A"`, `"AB"`, `"B"`) instead of lowercase (`"a"`, `"ab"`, `"b"`).
     #[serde(default)]
     pub uppercase: bool,
+    /// Font size of CLD group letters in typographic points (`in (0, 144]`, default `9.5`).
     #[serde(default = "default_cld_font_size")]
     pub font_size_pt: f64,
+    /// Vertical clearance in typographic points above each group's highest bar/error-bar/point (`in [0, 200]`, default `6.0`).
     #[serde(default = "default_cld_offset_pt")]
     pub offset_pt: f64,
+    /// Text color of rendered CLD letters (default black).
     #[serde(default = "default_cld_color")]
     pub color: Rgba8,
 }
@@ -662,28 +932,48 @@ impl CompactLetterDisplaySpec {
 /// Resolution-independent figure specification compiled by `curvebook-chart`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSpec {
+    /// Visual graph family (`Xy`, `Column`, `Grouped`, `Contingency`, `PartsOfWhole`, `Survival`, `MultipleVariables`, or `Diagnostic`).
     pub kind: GraphKind,
+    /// Primary upstream [`DataSheet`] (or analyzable [`crate::ResultSheet`]) bound to this figure.
     pub primary_source_sheet_id: SheetId,
+    /// Default categorical color palette applied to series swatches and style cloning.
     pub palette: PaletteId,
+    /// Figure canvas dimensions in typographic points (`width > 0`, `height > 0`).
     pub canvas_size_pt: SizePt,
+    /// Solid canvas background fill color; `None` renders a transparent figure background.
     pub paper_fill: Option<Rgba8>,
+    /// Main figure title above the plot frame (supports inline `{{info:...}}` and `{{result:...}}` hooks).
     pub title: String,
+    /// Axis spine arrangement preset (`OpenL`, `OffsetRangeTufte`, `PlainBoxed`, `DualYSecondaryRight`, or `OriginCrossing`).
     pub frame_preset: FramePreset,
+    /// Horizontal *X* axis specification (`1..=3` segments).
     pub x_axis: AxisSpec,
+    /// Primary left vertical *Y* axis specification (`1..=3` segments).
     pub y_axis: AxisSpec,
+    /// Optional secondary right vertical *Y2* axis specification (used when [`FramePreset::DualYSecondaryRight`] or `bind_to_right_y2` is active); `None` when single-*Y*.
     pub y2_axis: Option<AxisSpec>,
+    /// Horizontal cluster layout for `Grouped` and `Contingency` series.
     pub grouped_arrangement: GroupedArrangement,
+    /// When `true` on [`GraphKind::Survival`] figures, renders an aligned number-at-risk table beneath the time axis.
     pub survival_number_at_risk: bool,
+    /// Ordered plotted data series (`Xy`, `Column`, `Grouped`, `Contingency`, `PartsOfWhole`, `Survival`).
     pub series: Vec<SeriesSpec>,
+    /// Five-channel or categorical-summary encoding when `kind == GraphKind::MultipleVariables`; `None` for non-multivariate graphs.
     pub multivariate: Option<MultivariateGraphEncoding>,
+    /// Live pairwise comparison brackets bound to upstream statistical [`crate::ResultSheet`]s.
     pub comparisons: Vec<PairwiseBracketSpec>,
+    /// Optional Piepho (2004) Compact Letter Display overlay bound to an all-pairwise [`crate::ResultSheet`].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub compact_letter_display: Option<CompactLetterDisplaySpec>,
+    /// Controls whether pairwise significance renders as brackets, CLD letters, or both.
     #[serde(default, skip_serializing_if = "is_default_pairwise_display_mode")]
     pub pairwise_display_mode: PairwiseDisplayMode,
+    /// Free-placed text boxes, lines/arrows, geometric shapes, embedded result tables, and model equations.
     pub annotations: Vec<GraphAnnotation>,
+    /// Per-observation style overrides (`graph.formatSelectedPoints`).
     #[serde(default)]
     pub point_overrides: Vec<PointStyleOverride>,
+    /// Legend visibility, position, and border configuration.
     pub legend: LegendSpec,
 }
 
@@ -1305,13 +1595,18 @@ fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
 /// Navigator sheet wrapping a [`GraphSpec`] and tracking first-visit gallery initialization.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct GraphSheet {
+    /// Project-unique sheet identifier.
     pub id: SheetId,
+    /// Display title shown in the `Graphs` navigator folder.
     pub title: String,
     /// Starts `false` when auto-provisioned alongside a new `DataSheet` so the first visit presents
     /// the visual family schematic chooser (`docs/implementation/graphing-and-layouts.md` §2).
     pub initialized: bool,
+    /// Declarative resolution-independent figure specification.
     pub spec: GraphSpec,
+    /// Sticky-note callouts attached to this graph sheet.
     pub floating_notes: Vec<FloatingNote>,
+    /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
 }
 
@@ -1343,6 +1638,7 @@ impl GraphSheet {
 }
 
 impl GraphSheet {
+    /// Provision an uninitialized (`initialized = false`) `GraphSheet` populated with [`GraphSpec::default_for_data_sheet`].
     pub fn new_uninitialized_for_data(id: impl Into<SheetId>, data_sheet: &DataSheet) -> Result<Self, DocError> {
         let id = id.into();
         if id.as_str().trim().is_empty() {

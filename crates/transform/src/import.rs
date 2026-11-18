@@ -34,17 +34,31 @@ pub struct ImportPipelineOptions {
 /// Source data bundle passed into [`apply_import_link_pipeline`].
 #[derive(Debug, Clone)]
 pub enum ImportSourcePayload<'a> {
+    /// Upstream in-project [`DataSheet`] referenced by [`LinkSource::InternalSheet`].
     InternalData(&'a DataSheet),
+    /// Upstream in-project [`ResultSheet`] (analyzable or terminal tab) referenced by [`LinkSource::InternalSheet`].
     InternalResult(&'a ResultSheet),
-    DelimitedText { text: &'a str, delimiter: char, decimal_separator: char },
+    /// Raw CSV/TSV or clipboard delimited text buffer paired with field and decimal separators.
+    DelimitedText {
+        /// UTF-8 delimited text payload.
+        text: &'a str,
+        /// Column field separator character (for example `','`, `'\t'`, or `';'`).
+        delimiter: char,
+        /// Decimal point character (`'.'` or `','`).
+        decimal_separator: char,
+    },
 }
 
 /// Summary of a completed 4-stage import pipeline run.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ImportPipelineReport {
+    /// Number of rows written or inserted into the target [`DataSheet`].
     pub rows_placed: usize,
+    /// Number of columns or subcolumn slots spanned per placed row.
     pub cols_placed: usize,
+    /// Inclusive destination [`SheetCellRange`] populated on the target [`DataSheet`].
     pub target_range: SheetCellRange,
+    /// Human-readable provenance summary string recorded for any attached [`LinkedDataRegion`].
     pub provenance_summary: String,
 }
 

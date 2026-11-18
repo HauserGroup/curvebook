@@ -99,7 +99,12 @@ pub enum PValueFormat {
     /// Leading zero, 3 decimal places (`0.123`), floor `< 0.001`, ceiling of 3 stars (`***`).
     Nejm,
     /// Custom decimal count (`1..=15`) with optional scientific-notation threshold (`2.41e-9`) and 4-star ceiling.
-    Custom { decimals: u8, scientific_below: Option<f64> },
+    Custom {
+        /// Number of fixed decimal digits (`1..=15`; clamped to `1..=15` during formatting) and significant-figure guide for scientific notation.
+        decimals: u8,
+        /// Strictly positive cutoff below which positive `p < threshold` switches to exponential notation (`e.g. 2.41e-9`); `None` (or non-positive/`NaN` values) disables scientific notation and formats small values with `< 10^{-decimals}`.
+        scientific_below: Option<f64>,
+    },
 }
 
 impl PValueFormat {

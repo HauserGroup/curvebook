@@ -23,12 +23,19 @@ pub const PROJECT_DOCUMENT_SCHEMA_ID: &str = "https://github.com/HauserGroup/cur
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum SchemaType {
+    /// JSON `"string"` primitive type.
     String,
+    /// JSON `"boolean"` primitive type.
     Boolean,
+    /// JSON `"number"` floating-point or numeric primitive type.
     Number,
+    /// JSON `"integer"` integral number primitive type.
     Integer,
+    /// JSON `"array"` ordered sequence type.
     Array,
+    /// JSON `"object"` key-value map type.
     Object,
+    /// JSON `"null"` singleton type.
     Null,
 }
 
@@ -36,7 +43,9 @@ pub enum SchemaType {
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum SchemaTypeSpec {
+    /// Single primitive JSON Schema `"type"` string (for example `"string"`).
     Single(SchemaType),
+    /// Union array of primitive JSON Schema `"type"` strings (for example `["string", "null"]`).
     Multiple(Vec<SchemaType>),
 }
 
@@ -44,10 +53,15 @@ pub enum SchemaTypeSpec {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum SchemaLiteral {
+    /// JSON `null` literal.
     Null,
+    /// JSON `true` or `false` boolean literal.
     Bool(bool),
+    /// Signed 64-bit integer literal.
     Integer(i64),
+    /// IEEE-754 floating-point literal.
     Number(f64),
+    /// UTF-8 string literal.
     String(String),
 }
 
@@ -55,57 +69,82 @@ pub enum SchemaLiteral {
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 #[serde(untagged)]
 pub enum AdditionalProperties {
+    /// Boolean flag (`false` forbids undeclared object keys; `true` allows arbitrary extra keys).
     Allowed(bool),
+    /// Value schema applied to every undeclared/dynamic property key in a map object.
     Schema(Box<SchemaNode>),
 }
 
 /// Pure-Rust representation of a JSON Schema Draft 2020-12 node.
 #[derive(Debug, Clone, PartialEq, Default, serde::Serialize, serde::Deserialize)]
 pub struct SchemaNode {
+    /// Optional `$schema` dialect URI (for example [`DRAFT_2020_12_SCHEMA_URI`]); `None` on nested sub-schemas.
     #[serde(rename = "$schema", default, skip_serializing_if = "Option::is_none")]
     pub schema: Option<String>,
+    /// Optional canonical `$id` resource URI; `None` on local sub-schemas.
     #[serde(rename = "$id", default, skip_serializing_if = "Option::is_none")]
     pub id: Option<String>,
+    /// Optional `$ref` JSON Pointer or URI reference (for example `"#/$defs/SheetId"`); `None` when defined inline.
     #[serde(rename = "$ref", default, skip_serializing_if = "Option::is_none")]
     pub schema_ref: Option<String>,
+    /// Named reusable sub-schema definitions serialized under `$defs` (omitted when empty).
     #[serde(rename = "$defs", default, skip_serializing_if = "BTreeMap::is_empty")]
     pub defs: BTreeMap<String, SchemaNode>,
+    /// Optional short human-readable schema `title`; `None` when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub title: Option<String>,
+    /// Optional human-readable `description` prose; `None` when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Optional JSON `type` constraint (`Single` or `Multiple`); `None` on `$ref`, `oneOf`, `anyOf`, or unconstrained nodes.
     #[serde(rename = "type", default, skip_serializing_if = "Option::is_none")]
     pub schema_type: Option<SchemaTypeSpec>,
+    /// Optional exact `const` scalar value constraint; `None` when unconstrained.
     #[serde(rename = "const", default, skip_serializing_if = "Option::is_none")]
     pub const_value: Option<SchemaLiteral>,
+    /// Closed set of allowed `enum` scalar values (omitted when empty).
     #[serde(rename = "enum", default, skip_serializing_if = "Vec::is_empty")]
     pub enum_values: Vec<SchemaLiteral>,
+    /// Deterministically sorted object property schemas keyed by JSON property name (omitted when empty).
     #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
     pub properties: BTreeMap<String, SchemaNode>,
+    /// Property names that must be present on matching JSON objects (omitted when empty).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub required: Vec<String>,
+    /// Policy or value schema governing object keys absent from `properties`; `None` leaves `additionalProperties` unspecified.
     #[serde(rename = "additionalProperties", default, skip_serializing_if = "Option::is_none")]
     pub additional_properties: Option<AdditionalProperties>,
+    /// Element schema for homogeneous `"array"` instances; `None` for non-array schemas.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items: Option<Box<SchemaNode>>,
+    /// Inclusive minimum element count (`minItems`) for arrays; `None` when unbounded below.
     #[serde(rename = "minItems", default, skip_serializing_if = "Option::is_none")]
     pub min_items: Option<u64>,
+    /// Inclusive maximum element count (`maxItems`) for arrays; `None` when unbounded above.
     #[serde(rename = "maxItems", default, skip_serializing_if = "Option::is_none")]
     pub max_items: Option<u64>,
+    /// Inclusive numeric lower bound (`minimum`); `None` when unbounded below.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub minimum: Option<SchemaLiteral>,
+    /// Inclusive numeric upper bound (`maximum`); `None` when unbounded above.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maximum: Option<SchemaLiteral>,
+    /// Inclusive minimum UTF-8 character length (`minLength`) for strings; `None` when unbounded.
     #[serde(rename = "minLength", default, skip_serializing_if = "Option::is_none")]
     pub min_length: Option<u64>,
+    /// Inclusive maximum length (`maxLength`) for strings; `None` when unbounded.
     #[serde(rename = "maxLength", default, skip_serializing_if = "Option::is_none")]
     pub max_length: Option<u64>,
+    /// Optional ECMA-262 regular expression `pattern` constraint for strings; `None` when unconstrained.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub pattern: Option<String>,
+    /// Optional semantic `format` annotation (for example `"date-time"` or `"uri"`); `None` when omitted.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub format: Option<String>,
+    /// Exclusive union (`oneOf`) requiring instances to match exactly one sub-schema (omitted when empty).
     #[serde(rename = "oneOf", default, skip_serializing_if = "Vec::is_empty")]
     pub one_of: Vec<SchemaNode>,
+    /// Inclusive union (`anyOf`) requiring instances to match at least one sub-schema (omitted when empty).
     #[serde(rename = "anyOf", default, skip_serializing_if = "Vec::is_empty")]
     pub any_of: Vec<SchemaNode>,
 }

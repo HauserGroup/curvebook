@@ -17,6 +17,7 @@
 //! assert_eq!(sheet.cell(CellCoord::new(0, 0, 0)).unwrap().active_number(), None);
 //! ```
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod analysis;
 pub mod archetypes;
@@ -85,17 +86,26 @@ pub use schema::{
 /// The eight typed scientific data-table families in a CurveBook project.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum TableKind {
+    /// Continuous or staggered independent variable *X* paired with one or more response series *Y* (with optional *X*/*Y* replicate or summary subcolumns).
     Xy,
+    /// One-way categorical grouping where each column represents an independent or matched treatment group.
     Column,
+    /// Two-way (or three-way column-grouped) factorial table cross-classifying row factor levels against column data sets with replicate or summary subcolumns.
     Grouped,
+    /// Cross-tabulated non-negative integer event counts (`r x c`) for categorical association, relative risk, odds ratio, and kappa agreement analyses.
     Contingency,
+    /// Time-to-event observations pairing elapsed follow-up time *X* with per-arm censoring/event indicator codes (`1` = event, `0` = censored).
     Survival,
+    /// Single-column non-negative slice magnitudes and labels representing proportions or totals of a whole.
     PartsOfWhole,
+    /// Multivariate tidy observation matrix where rows are subjects/cases and columns carry typed [`VariableRole`] assignments.
     MultipleVariables,
+    /// Hierarchical two-level nested design where each treatment column holds subcolumns corresponding to experimental sub-units (for example litters or cages) and rows hold technical replicates.
     Nested,
 }
 
 impl TableKind {
+    /// Complete ordered list of all eight [`TableKind`] table archetypes.
     pub const ALL: [Self; 8] =
         [Self::Xy, Self::Column, Self::Grouped, Self::Contingency, Self::Survival, Self::PartsOfWhole, Self::MultipleVariables, Self::Nested];
 
@@ -133,10 +143,15 @@ impl TableKind {
 /// Top-level sheet sections in a CurveBook project navigator.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum SheetSection {
+    /// Primary and linked [`DataSheet`] tables across all eight [`TableKind`] archetypes.
     Data,
+    /// Structured [`InfoSheet`] laboratory metadata constants and Markdown experimental notes.
     Info,
+    /// Reactive [`ResultSheet`] outputs produced by statistical tests, curve fits, and data transforms.
     Analyses,
+    /// Scientific [`GraphSheet`] figures bound to upstream data and result sheets.
     Graphs,
+    /// Multi-panel publication [`LayoutSheet`] canvases arranging live graphs, tables, and callouts.
     Layouts,
 }
 

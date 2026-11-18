@@ -3,7 +3,24 @@
 //! simulation for CurveBook.
 //!
 //! Layer L2 domain crate. Governing spec: `docs/implementation/data-tables-and-transforms.md` (§4–§6).
+//!
+//! # Example
+//!
+//! ```
+//! use curvebook_transform::{AucOptions, compute_auc};
+//!
+//! // Concentration-time profile over t = 0..4 h above baseline 0.0:
+//! let profile = [(0.0, 0.0), (1.0, 4.0), (2.0, 6.0), (4.0, 2.0)];
+//! let auc = compute_auc(&profile, &AucOptions::default()).expect("sorted finite curve");
+//!
+//! assert!((auc.net_area - 15.0).abs() < 1e-12);
+//! assert_eq!(auc.peaks.len(), 1);
+//! assert_eq!(auc.peaks[0].peak_x, 2.0);
+//! assert_eq!(auc.peaks[0].peak_y, 6.0);
+//! assert!((auc.peaks[0].area - 15.0).abs() < 1e-12);
+//! ```
 #![forbid(unsafe_code)]
+#![deny(missing_docs)]
 
 pub mod archetype_convert;
 pub mod curve;
@@ -43,10 +60,15 @@ pub use simulate::{evaluate_equation, simulate_xy_sheet};
 /// Built-in families of table transformations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TransformKind {
+    /// Rescale each dataset or global series between configurable baseline (`0%`) and ceiling (`100%`) anchors.
     Normalize,
+    /// Subtract, divide, or compute percentage/fractional change relative to designated baseline columns or rows.
     RemoveBaseline,
+    /// Swap table rows and dataset columns while preserving numeric values, text labels, and exclusion flags.
     Transpose,
+    /// Express each cell as a proportion or percentage of its row total, column total, or grand total.
     FractionOfTotal,
+    /// Downsample or aggregate dense XY/column series by decimation or fixed-width *X*-binning.
     PruneRows,
 }
 

@@ -12,11 +12,14 @@ use crate::ids::{FloatingNote, SheetId};
 /// Inclusive rectangular sub-grid range `(start ..= end)` inside a data or result sheet.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub struct SheetCellRange {
+    /// Inclusive top-left `(row, col, subcol)` cell coordinate.
     pub start: CellCoord,
+    /// Inclusive bottom-right `(row, col, subcol)` cell coordinate.
     pub end: CellCoord,
 }
 
 impl SheetCellRange {
+    /// Construct an inclusive rectangular cell range from `start` through `end`.
     #[must_use]
     pub const fn new(start: CellCoord, end: CellCoord) -> Self {
         Self { start, end }
@@ -51,9 +54,28 @@ pub enum LinkBorderColor {
 /// Stage 1 of [`ImportLinkSpec`]: data origin (`docs/implementation/data-tables-and-transforms.md` §6.1).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub enum LinkSource {
+    /// One-shot unlinked paste from system or internal clipboard text (no reactive provenance border).
     Clipboard,
-    InternalSheet { sheet_id: SheetId, kind: InternalLinkKind, tab_id: Option<String>, range: SheetCellRange },
-    ExternalDelimitedFile { path: String, delimiter: char, decimal_separator: char },
+    /// Reactive link to an internal [`DataSheet`] or [`crate::ResultSheet`] cell range within the same project.
+    InternalSheet {
+        /// Upstream sheet identifier.
+        sheet_id: SheetId,
+        /// Whether `sheet_id` refers to a raw data sheet, an analyzable transform result, or a terminal statistical/fit result.
+        kind: InternalLinkKind,
+        /// Target [`crate::ResultTab::id`] when linking from a `TerminalResultSheet`; `None` for data sheets or primary tabs.
+        tab_id: Option<String>,
+        /// Inclusive source sub-grid rectangle extracted from `sheet_id`.
+        range: SheetCellRange,
+    },
+    /// External CSV/TSV delimited text file path with explicit field and decimal delimiters.
+    ExternalDelimitedFile {
+        /// Filesystem path or display identifier of the delimited source file.
+        path: String,
+        /// Column field separator character (for example `','`, `'\t'`, or `';'`).
+        delimiter: char,
+        /// Decimal radix character (`'.'` or `','`).
+        decimal_separator: char,
+    },
 }
 
 impl LinkSource {
@@ -82,10 +104,15 @@ impl LinkSource {
 /// Stage 2 of [`ImportLinkSpec`]: slicing, periodic decimation, unstacking, and `*` exclusion parsing.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportFilterSpec {
+    /// Optional inclusive `(start_row, end_row)` zero-based row slice applied to the source grid; `None` keeps all rows.
     pub row_window: Option<(usize, usize)>,
+    /// Optional inclusive `(start_col, end_col)` zero-based column slice applied to the source grid; `None` keeps all columns.
     pub col_window: Option<(usize, usize)>,
+    /// Optional stride `k >= 1` retaining every `k`-th row after windowing; `None` retains every row.
     pub decimate_every_k: Option<usize>,
+    /// Optional zero-based grouping column index used to unstack long-format rows into separate columns; `None` leaves columns as-is.
     pub unstack_group_column: Option<usize>,
+    /// When `true` (default), leading or trailing `*` markers (`45.6*`) import as numeric cells with `excluded = true`.
     pub parse_asterisk_exclusions: bool,
 }
 
@@ -98,10 +125,14 @@ impl Default for ImportFilterSpec {
 /// Placement mode at anchor cell `(row, col, subcol)`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum PlacementMode {
+    /// Overwrite cells starting at [`ImportPlacementSpec::anchor`], growing sheet dimensions if needed.
     #[default]
     Overwrite,
+    /// Splice incoming rows before `anchor.row`, shifting existing rows downward.
     InsertRows,
+    /// Append incoming rows immediately after the last non-empty row of the target sheet.
     AppendRows,
+    /// Append incoming columns after the rightmost existing data-set column.
     AppendColumns,
 }
 
@@ -109,27 +140,39 @@ pub enum PlacementMode {
 /// transposition (`Grouped` <-> `Column`; `docs/implementation/data-tables-and-transforms.md` §6.3).
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct ImportPlacementSpec {
+    /// How incoming cells merge into existing rows and columns.
     pub mode: PlacementMode,
+    /// Top-left destination `(row, col, subcol)` cell coordinate on the target [`DataSheet`].
     pub anchor: CellCoord,
+    /// When `true`, promotes the first imported row into target data-set column titles rather than data cells.
     pub propagate_title_header: bool,
+    /// When `true`, drops completely blank rows from the filtered source grid prior to placement.
     pub skip_contiguous_blanks: bool,
+    /// When `true`, transposes rows and columns via [`transpose_cell_grid`] prior to placement.
     pub transpose: bool,
 }
 
 /// Complete four-stage `Import & Paste Special` / `Paste Link` specification.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ImportLinkSpec {
+    /// Stage 1: clipboard, internal sheet range, or external delimited file origin.
     pub source: LinkSource,
+    /// Stage 2: row/column slicing, decimation, unstacking, and `*` exclusion parsing rules.
     pub filter: ImportFilterSpec,
+    /// Stage 3: destination anchor, header promotion, blank-row handling, and transposition rules.
     pub placement: ImportPlacementSpec,
 }
 
 /// Live provenance-tracked cell region embedded inside a [`DataSheet`].
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct LinkedDataRegion {
+    /// Unique identifier for this linked region within `DataSheet::linked_regions`.
     pub id: String,
+    /// Persisted import/link pipeline specification used to refresh the region when upstream data changes.
     pub spec: ImportLinkSpec,
+    /// Inclusive destination cell rectangle currently occupied on the owning [`DataSheet`].
     pub target_range: SheetCellRange,
+    /// Human-readable provenance caption displayed in the inspector/status bar.
     pub provenance_summary: String,
 }
 
@@ -144,9 +187,13 @@ impl LinkedDataRegion {
 /// Auditable justification attached to an excluded cell (`QOL-3`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CellExclusionNote {
+    /// Zero-based `(row, col, subcol)` coordinate of the excluded cell.
     pub coord: CellCoord,
+    /// Short structured reason category (for example `"pipetting_error"`, `"instrument_fault"`, or `"rout_outlier"`).
     pub reason_tag: String,
+    /// Free-form audit explanation entered by the analyst.
     pub note: String,
+    /// Caller-supplied UTC timestamp recording when the exclusion note was attached.
     pub timestamp_utc: String,
 }
 
@@ -154,16 +201,24 @@ pub struct CellExclusionNote {
 /// with one of the eight [`TableArchetype`] schemas (`docs/implementation/data-tables-and-transforms.md` §1).
 #[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct DataSheet {
+    /// Project-unique sheet identifier.
     pub id: SheetId,
+    /// Display title shown in the `Data` navigator folder.
     pub title: String,
+    /// Typed scientific table payload (`Xy`, `Column`, `Grouped`, `Contingency`, `Survival`, `PartsOfWhole`, `MultipleVariables`, or `Nested`).
     pub archetype: TableArchetype,
     /// When `true`, cell edits, pastes, structural edits, and formula changes return
     /// [`DocError::SheetFrozen`] while read-only inspection, analyses, and graphs remain active.
     pub frozen: bool,
+    /// Optional paired [`crate::InfoSheet`] identifier supplying structured experimental constants for this table; `None` when unpaired.
     pub info_sheet_id: Option<SheetId>,
+    /// Active live-linked sub-grid regions (`Paste Link` / external file links) refreshing into this sheet.
     pub linked_regions: Vec<LinkedDataRegion>,
+    /// Sticky-note callouts attached to this data sheet.
     pub floating_notes: Vec<FloatingNote>,
+    /// Optional navigator color swatch; `None` uses no color badge.
     pub color_tag: Option<Rgba8>,
+    /// Sorted audit log of exclusion justifications for cells currently marked `excluded == true`.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub exclusion_notes: Vec<CellExclusionNote>,
 }
@@ -233,6 +288,7 @@ impl DataSheet {
         self.archetype.validate()
     }
 
+    /// Return the [`TableKind`] discriminator of `self.archetype`.
     #[must_use]
     pub const fn kind(&self) -> TableKind {
         self.archetype.kind()
@@ -432,11 +488,17 @@ impl DataSheet {
 /// Options for [`DataSheet::clone_structure`] (`sheet.clonePipeline`).
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct CloneDataSheetOptions {
+    /// Display title assigned to the newly cloned [`DataSheet`].
     pub title: String,
+    /// When `true`, retains `X` (`Xy`) or elapsed-time (`Survival`) cells in the cloned table; when `false`, clears them to [`Cell::empty`].
     pub keep_x_values: bool,
+    /// When `true`, clears all `Y` / count / variable / replicate data cells to [`Cell::empty`].
     pub clear_y_values: bool,
+    /// When `true`, resets data-set / variable / group column titles to default alphabetical labels (`A`, `B`, `C`, ...).
     pub clear_column_titles: bool,
+    /// When `true`, clears row titles (or slice labels on `PartsOfWhole`) to empty strings.
     pub clear_row_titles: bool,
+    /// Optional raw replicate count (`1..=MAX_SUBCOLUMNS`) overriding subcolumn width on `Xy`, `Grouped`, or `Nested` tables; `None` preserves the source layout.
     pub override_replicates: Option<usize>,
 }
 
