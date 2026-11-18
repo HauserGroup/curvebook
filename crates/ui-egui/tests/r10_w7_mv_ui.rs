@@ -437,12 +437,10 @@ fn r10_8_w7_staged_i18n_16_locales_and_rtl_parity() -> Result<(), String> {
         let _ = app.set_locale(loc);
         let mut driver = human_wf_common::new_human_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
         let _ = human_wf_common::click_widget_center(&mut driver, &wid("mv_formula.variables_btn"))?;
-        let parity = driver.verify_parity();
-        assert!(parity.is_clean(), "parity failed for `{loc}`: {:?}", parity.violations);
+        human_wf_common::assert_parity_for_locale(&mut driver, loc, &format!("parity failed for `{loc}`"))?;
         let _ = human_wf_common::click_widget_center(&mut driver, &wid("nav.sheet.gr-1"))?;
         let _ = human_wf_common::click_widget_center(&mut driver, &wid("inspector.tab.multi"))?;
-        let parity_insp = driver.verify_parity();
-        assert!(parity_insp.is_clean(), "inspector parity failed for `{loc}`: {:?}", parity_insp.violations);
+        human_wf_common::assert_parity_for_locale(&mut driver, loc, &format!("inspector parity failed for `{loc}`"))?;
     }
     Ok(())
 }

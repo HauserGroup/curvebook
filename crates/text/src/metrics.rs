@@ -411,9 +411,17 @@ fn core14_symbol_width_1000(ch: char) -> Option<u16> {
         // Scientific, typographic & mathematical operators
         '\u{00B0}' | '\u{2218}' => Some(400), // degree / ring
         '\u{00B1}' | '\u{2213}' => Some(549), // plus-minus / minus-plus
-        '\u{00B2}' | '\u{00B3}' | '\u{00B9}' | '\u{2070}' | '\u{2074}'..='\u{2079}' | '\u{207F}' | '\u{2080}'..='\u{2089}' => Some(333),
+        '\u{00B2}'
+        | '\u{00B3}'
+        | '\u{00B9}'
+        | '\u{2070}'
+        | '\u{2074}'..='\u{2079}'
+        | '\u{207F}'
+        | '\u{2080}'..='\u{2089}'
+        | '\u{1D63}'..='\u{1D65}'
+        | '\u{2090}'..='\u{209C}' => Some(333),
         '\u{207A}' | '\u{207B}' | '\u{207C}' | '\u{208A}' | '\u{208B}' | '\u{208C}' => Some(350),
-        '\u{2071}' | '\u{207D}' | '\u{207E}' | '\u{208D}' | '\u{208E}' => Some(240),
+        '\u{1D62}' | '\u{2071}' | '\u{207D}' | '\u{207E}' | '\u{208D}' | '\u{208E}' => Some(240),
         '\u{00B7}' => Some(250),                                         // middle dot
         '\u{00C5}' => Some(667),                                         // Angstrom A-ring
         '\u{00D7}' | '\u{00F7}' => Some(549),                            // times / divide
@@ -438,6 +446,7 @@ fn core14_symbol_width_1000(ch: char) -> Option<u16> {
         '\u{2229}' | '\u{222A}' => Some(768), // intersection / union
         '\u{222B}' => Some(274),              // integral
         '\u{2234}' => Some(863),              // therefore
+        '\u{25B6}' | '\u{25B8}' | '\u{25BC}' | '\u{25BE}' => Some(556),
         _ => None,
     }
 }
