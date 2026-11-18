@@ -68,5 +68,5 @@ For connecting Claude Desktop or another local MCP client, download the package 
 ### Verify your download
 1. **SHA-256 checksum:** Download `SHA256SUMS.txt` alongside your package and run `shasum -a 256 -c --ignore-missing SHA256SUMS.txt` (macOS) or `sha256sum -c --ignore-missing SHA256SUMS.txt` (Linux).
 2. **GitHub Sigstore build provenance:**
-   `gh attestation verify <downloaded-file> --repo HauserGroup/curvebook`
+   `gh attestation verify <downloaded-file> --repo HauserGroup/curvebook --signer-workflow HauserGroup/curvebook/.github/workflows/release.yml`
 ```
