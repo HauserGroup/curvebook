@@ -885,8 +885,9 @@ fn oracle_contingency_fisher_chi2_mcnemar_kappa_and_ratios() {
     // McNemar continuity-corrected chi2 and exact binomial p (b=18, c=5)
     let (mc_chi2, mc_p) = mcnemar_test(18, 5).unwrap();
     assert_approx_eq(mc_chi2, 6.260_869_565_217, 1e-10, 1e-10, "McNemar cc chi2");
-    // Exact binomial 2 * sum_{k=0..5} C(23,k) / 2^23 = 44642 / 8388608 = 0.0106201171875
-    assert_approx_eq(mc_p, 2.0 * 44_574.0 / 8_388_608.0, 2e-4, 0.02, "McNemar exact binomial p");
+    // Exact binomial 2 * sum_{k=0..5} C(23,k) / 2^23 = 2 * 44552 / 8388608 = 0.0106220245361328125
+    // (C(23,0..5) = 1 + 23 + 253 + 1771 + 8855 + 33649; R 4.5.2 binom.test(5, 23)$p.value = 0.0106220245361328).
+    assert_approx_eq(mc_p, 89_104.0 / 8_388_608.0, 1e-15, 1e-13, "McNemar exact binomial p");
 
     // Wilson score & Clopper-Pearson exact binomial CIs (18/25)
     let wil = wilson_score_ci(18, 25, conf_95());
