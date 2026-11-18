@@ -5,6 +5,38 @@
 //! trend test, McNemar paired test, Wilson & Clopper–Pearson binomial CIs, Baptista–Pike OR CI,
 //! Koopman score RR CI, Newcombe risk-difference CI, Cohen's kappa (unweighted/weighted),
 //! Fleiss' kappa, and phi / Cramér's `V` with exact noncentral chi-square CIs.
+//!
+//! References (D1 citation pass 2026-11-18; helpers cite their own sources inline):
+//! - Pearson, K. (1900). On the criterion that a given system of deviations from the probable in the
+//!   case of a correlated system of variables is such that it can be reasonably supposed to have
+//!   arisen from random sampling. *Philosophical Magazine*, 50(302), 157-175.
+//!   `doi:10.1080/14786440009463897`.
+//! - Yates, F. (1934). Contingency tables involving small numbers and the chi-squared test.
+//!   *Supplement to the Journal of the Royal Statistical Society*, 1(2), 217-235. `doi:10.2307/2983604`.
+//! - Wilks, S. S. (1938). The large-sample distribution of the likelihood ratio for testing composite
+//!   hypotheses. *Annals of Mathematical Statistics*, 9(1), 60-62. `doi:10.1214/aoms/1177732360`.
+//! - Cochran, W. G. (1954). Some methods for strengthening the common chi-squared tests.
+//!   *Biometrics*, 10(4), 417-451. `doi:10.2307/3001616`.
+//! - Armitage, P. (1955). Tests for linear trends in proportions and frequencies. *Biometrics*,
+//!   11(3), 375-386. `doi:10.2307/3001775`.
+//! - McNemar, Q. (1947). Note on the sampling error of the difference between correlated proportions
+//!   or percentages. *Psychometrika*, 12(2), 153-157. `doi:10.1007/bf02295996`.
+//! - Edwards, A. L. (1948). Note on the "correction for continuity" in testing the significance of the
+//!   difference between correlated proportions. *Psychometrika*, 13(3), 185-187.
+//!   `doi:10.1007/bf02289261`.
+//! - Sterne, T. E. (1954). Some remarks on confidence or fiducial limits. *Biometrika*, 41(1-2),
+//!   275-278. `doi:10.1093/biomet/41.1-2.275`.
+//! - Cohen, J. (1960). A coefficient of agreement for nominal scales. *Educational and Psychological
+//!   Measurement*, 20(1), 37-46. `doi:10.1177/001316446002000104`.
+//! - Cohen, J. (1968). Weighted kappa: Nominal scale agreement with provision for scaled disagreement
+//!   or partial credit. *Psychological Bulletin*, 70(4), 213-220. `doi:10.1037/h0026256`.
+//! - Fleiss, J. L., Cohen, J., & Everitt, B. S. (1969). Large sample standard errors of kappa and
+//!   weighted kappa. *Psychological Bulletin*, 72(5), 323-327. `doi:10.1037/h0028106`.
+//! - Fleiss, J. L. (1971). Measuring nominal scale agreement among many raters. *Psychological
+//!   Bulletin*, 76(5), 378-382. `doi:10.1037/h0031619`.
+//! - Fleiss, J. L., Nee, J. C. M., & Landis, J. R. (1979). Large sample variance of kappa in the case
+//!   of different sets of raters. *Psychological Bulletin*, 86(5), 974-977.
+//!   `doi:10.1037/0033-2909.86.5.974`.
 
 pub use curvebook_doc::KappaWeighting;
 use curvebook_doc::{
@@ -211,6 +243,11 @@ pub fn agresti_coull_ci(k: u64, n: u64, confidence: ConfidenceLevel) -> (f64, f6
 }
 
 /// Exact one-sample binomial test for `k` successes out of `n` trials against `null_proportion in (0, 1)`.
+///
+/// `p_value_sterne` is the two-sided *P* of Sterne (1954, eqs. 2-3): the total probability of all
+/// outcomes no more probable than the observed count (ties within a `1e-12` relative tolerance).
+/// `p_value_doubled_tail` doubles the smaller one-sided tail. The CIs cite their helpers
+/// (Clopper & Pearson 1934; Wilson 1927; Agresti & Coull 1998).
 pub fn exact_binomial_test(k: u64, n: u64, null_proportion: f64, confidence: ConfidenceLevel) -> Result<ExactBinomialResult, StatsError> {
     if n == 0 {
         return Err(StatsError::EmptyInput);
@@ -887,6 +924,9 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
     Ok(((extreme + 1) as f64) / ((n_sims + 1) as f64))
 }
 
+/// Pearson (1900) `X^2`, optionally with the Yates (1934) `2 x 2` continuity correction applied as
+/// `max(|O - E| - 0.5, 0)`, plus the likelihood-ratio `G^2 = 2 sum O ln(O / E)` (Wilks 1938), and the
+/// minimum expected count.
 fn chi_square_stats_with_margins(
     counts: &[Vec<u64>],
     r_sums: &[u64],
@@ -928,6 +968,9 @@ fn chi_square_stats_with_margins(
 }
 
 /// Cochran–Armitage chi-square test for linear trend across ordered levels (`R x 2` or `2 x C`).
+///
+/// Cochran (1954); Armitage (1955). Uses equally spaced scores `1..k` and the unconditional
+/// variance `p_bar (1 - p_bar) sum n_i (s_i - s_bar)^2`, returning the two-sided normal *P* of `z`.
 pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsError> {
     let n_rows = counts.len();
     let n_cols = counts.first().map_or(0, Vec::len);
@@ -984,6 +1027,10 @@ pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsEr
 
 /// McNemar's paired `2 x 2` test on discordant counts `(b = cell[0][1], c = cell[1][0])`,
 /// returning `(chi2_with_continuity, exact_binomial_two_sided_p)`.
+///
+/// McNemar (1947) test with the Edwards (1948) continuity correction `(|b - c| - 1)^2 / (b + c)`.
+/// The exact *P* doubles the smaller `Binomial(b + c, 1/2)` tail, which equals the Sterne (1954)
+/// two-sided *P* because the null distribution is symmetric.
 pub fn mcnemar_test(b: u64, c: u64) -> Result<(f64, f64), StatsError> {
     let n = b.checked_add(c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
     if n == 0 {
@@ -1968,6 +2015,9 @@ pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: Confidence
 // ============================================================================
 
 /// Cohen's kappa (unweighted, linear-weighted, or quadratic-weighted) on a square `K x K` matrix.
+///
+/// Cohen (1960) unweighted and Cohen (1968) weighted kappa, with the large-sample standard errors
+/// (non-null and under `H0: kappa = 0`) of Fleiss, Cohen & Everitt (1969).
 pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: ConfidenceLevel) -> Result<KappaResult, StatsError> {
     let k = counts.len();
     if k < 2 || counts.iter().any(|r| r.len() != k) {
@@ -2056,6 +2106,8 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
 
 /// Fleiss' multi-rater kappa across `N` subjects (`rows`) and `K` categories (`cols`), where each
 /// row contains the integer counts of `m` raters assigning the subject into each category.
+///
+/// Fleiss (1971) kappa with the null-hypothesis variance of Fleiss, Nee & Landis (1979).
 pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> Result<KappaResult, StatsError> {
     let n = rater_counts.len();
     let k = rater_counts.first().map_or(0, Vec::len);

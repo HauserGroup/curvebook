@@ -2,6 +2,19 @@
 //! Type I/III partial *F*, VIF multicollinearity, Cook's distance, leverage, Durbin–Watson),
 //! Multiple Logistic Regression (IRLS with separation safeguard, Hosmer–Lemeshow, pseudo-*R*^2,
 //! ROC AUC), and Multiple Poisson Regression (log-link IRLS, deviance & Pearson dispersion).
+//!
+//! References (D1 citation pass 2026-11-18; diagnostics cite their sources inline):
+//! - Golub, G. (1965). Numerical methods for solving linear least squares problems. *Numerische
+//!   Mathematik*, 7(3), 206-216. `doi:10.1007/bf01436075`.
+//! - Björck, Å. (1967). Iterative refinement of linear least squares solutions I. *BIT*, 7(4),
+//!   257-278. `doi:10.1007/bf01939321`.
+//! - McCullagh, P., & Nelder, J. A. (1989). *Generalized Linear Models* (2nd ed.). London: Chapman &
+//!   Hall.
+//! - Albert, A., & Anderson, J. A. (1984). On the existence of maximum likelihood estimates in
+//!   logistic regression models. *Biometrika*, 71(1), 1-10. `doi:10.1093/biomet/71.1.1`.
+//! - Hosmer, D. W., & Lemeshow, S. (1980). Goodness of fit tests for the multiple logistic
+//!   regression model. *Communications in Statistics – Theory and Methods*, 9(10), 1043-1069.
+//!   `doi:10.1080/03610928008827941`.
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CurveSamplePoint, DataSheet, FittedCurveOverlay, GlmFamily, GlmSpec, PValueFormat,
@@ -140,7 +153,8 @@ pub struct MultiplePoissonResult {
 ///
 /// Uses `curvebook_math::linalg::solve_linear_least_squares` (column-equilibrated pivoted QR with
 /// Bjorck mixed-precision refinement and SVD fallback) for full precision on stiff/collinear
-/// benchmarks (`Wampler1..5`, `Filip`, `Longley`, `NoInt1`, `NoInt2`).
+/// benchmarks (`Wampler1..5`, `Filip`, `Longley`, `NoInt1`, `NoInt2`). Householder QR least squares
+/// follows Golub (1965); the refinement is Björck (1967).
 pub fn multiple_linear_regression(
     x: &DenseMatrix,
     y: &[f64],
@@ -507,6 +521,9 @@ fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Re
 /// Fit binary Multiple Logistic Regression (`y in {0, 1}`) via IRLS Newton–Raphson with
 /// backtracking line search and mild ridge/Firth-like safeguard when complete or quasi-complete
 /// separation occurs.
+///
+/// IRLS for the binomial GLM (McCullagh & Nelder 1989); separation per Albert & Anderson
+/// (1984); Hosmer & Lemeshow (1980) decile goodness of fit.
 pub fn multiple_logistic_regression(
     x: &DenseMatrix,
     y_binary: &[f64],
@@ -717,6 +734,8 @@ fn invert_glm_fisher_information(info_mat: &DenseMatrix, diag_null: &[f64], diag
 
 /// Fit count-data Multiple Poisson Regression (`y >= 0`, log link) via IRLS with backtracking
 /// line search, Rate Ratios (`exp(beta)`), deviance, and Pearson dispersion check.
+///
+/// IRLS for the Poisson log-linear GLM (McCullagh & Nelder 1989).
 pub fn multiple_poisson_regression(
     x: &DenseMatrix,
     y_counts: &[f64],

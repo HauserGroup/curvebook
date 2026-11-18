@@ -1,5 +1,36 @@
 //! Column descriptive statistics, exact binomial median CIs, normality & lognormality tests,
 //! outlier identification (Grubbs & ROUT), and one-sample hypothesis tests.
+//!
+//! References (D1 citation pass 2026-11-18; other routines cite their sources inline):
+//! - Chan, T. F., Golub, G. H., & LeVeque, R. J. (1983). Algorithms for computing the sample
+//!   variance: Analysis and recommendations. *The American Statistician*, 37(3), 242-247.
+//!   `doi:10.1080/00031305.1983.10483115`.
+//! - Student (1908). The probable error of a mean. *Biometrika*, 6(1), 1-25.
+//!   `doi:10.1093/biomet/6.1.1`.
+//! - Kirkwood, T. B. L. (1979). Geometric means and measures of dispersion. *Biometrics*, 35,
+//!   908-909 (letter; JSTOR 2530139).
+//! - Blom, G. (1958). *Statistical Estimates and Transformed Beta-Variables*. Stockholm: Almqvist &
+//!   Wiksell; New York: Wiley.
+//! - D'Agostino, R. B. (1970). Transformation to normality of the null distribution of `g1`.
+//!   *Biometrika*, 57(3), 679-681. `doi:10.1093/biomet/57.3.679`.
+//! - Anscombe, F. J., & Glynn, W. J. (1983). Distribution of the kurtosis statistic `b2` for normal
+//!   samples. *Biometrika*, 70(1), 227-234. `doi:10.1093/biomet/70.1.227`.
+//! - D'Agostino, R. B., Belanger, A., & D'Agostino, R. B., Jr. (1990). A suggestion for using
+//!   powerful and informative tests of normality. *The American Statistician*, 44(4), 316-321.
+//!   `doi:10.1080/00031305.1990.10475751`.
+//! - Grubbs, F. E. (1969). Procedures for detecting outlying observations in samples.
+//!   *Technometrics*, 11(1), 1-21. `doi:10.1080/00401706.1969.10490657`.
+//! - Rosner, B. (1983). Percentage points for a generalized ESD many-outlier procedure.
+//!   *Technometrics*, 25(2), 165-172. `doi:10.1080/00401706.1983.10487848`.
+//! - Motulsky, H. J., & Brown, R. E. (2006). Detecting outliers when fitting data with nonlinear
+//!   regression – a new method based on robust nonlinear regression and the false discovery rate.
+//!   *BMC Bioinformatics*, 7, 123. `doi:10.1186/1471-2105-7-123`.
+//! - Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: A practical and
+//!   powerful approach to multiple testing. *Journal of the Royal Statistical Society, Series B*,
+//!   57(1), 289-300. `doi:10.1111/j.2517-6161.1995.tb02031.x`.
+//! - Yeh, K. C., & Kwan, K. C. (1978). A comparison of numerical integrating algorithms by
+//!   trapezoidal, Lagrange, and spline approximation. *Journal of Pharmacokinetics and
+//!   Biopharmaceutics*, 6(1), 79-98. `doi:10.1007/bf01066064`.
 
 use curvebook_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
@@ -122,6 +153,9 @@ pub struct DescriptiveSummary {
 }
 
 /// Compute comprehensive descriptive statistics on raw finite observations.
+///
+/// Moments use the compensated pairwise algorithm of Chan, Golub & LeVeque (1983); the mean CI is
+/// the Student (1908) *t* interval and the SD CI the chi-square interval on `n - 1` df.
 pub fn summarize_column(
     label: impl Into<String>,
     values: &[f64],
@@ -232,6 +266,7 @@ fn compute_custom_percentiles(sorted: &[f64], custom_upper: Option<f64>) -> Resu
     Ok((v_lo, v_hi))
 }
 
+/// Student (1908) *t* interval `mean +/- t_{alpha/2, n-1} * SEM`.
 fn compute_mean_ci(mean: f64, sem: Option<f64>, n: usize, confidence: ConfidenceLevel) -> Result<Option<(f64, f64)>, StatsError> {
     if n < 2 {
         return Ok(None);
@@ -266,6 +301,8 @@ fn compute_sd_ci_df(sd: Option<f64>, df: f64, confidence: ConfidenceLevel) -> Re
 
 type GeomStats = (Option<f64>, Option<f64>, Option<(f64, f64)>);
 
+/// Geometric mean, geometric SD factor `exp(sd(ln x))` (Kirkwood 1979), and the geometric-mean CI
+/// obtained by back-transforming the Student *t* interval of `ln x`.
 fn compute_geometric_stats(values: &[f64], confidence: ConfidenceLevel) -> Result<GeomStats, StatsError> {
     if values.iter().any(|&v| v <= 0.0) {
         return Ok((None, None, None));
@@ -728,6 +765,10 @@ pub struct NormalityBatteryResult {
 }
 
 /// D'Agostino–Pearson omnibus `K^2` normality test (`n >= 8`).
+///
+/// `K^2 = Z(sqrt b1)^2 + Z(b2)^2` referred to chi-square on 2 df (D'Agostino, Belanger &
+/// D'Agostino 1990), using the skewness transform of D'Agostino (1970) and the kurtosis transform of
+/// Anscombe & Glynn (1983).
 pub fn dagostino_pearson_k2(values: &[f64], alpha: f64) -> Result<NormalityTestOutcome, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
@@ -996,6 +1037,8 @@ pub fn normality_battery(values: &[f64], alpha: f64) -> Result<NormalityBatteryR
 }
 
 /// Generate Q–Q expected normal (or lognormal) quantiles paired with sorted sample values.
+///
+/// Plotting positions are Blom's (1958) `(i - 3/8) / (n + 1/4)` for 1-based rank `i`.
 pub fn qq_expected_quantiles(values: &[f64], lognormal: bool) -> Result<Vec<(f64, f64)>, StatsError> {
     validate_finite_slice(values)?;
     if lognormal && values.iter().any(|&v| v <= 0.0) {
@@ -1041,6 +1084,11 @@ pub struct GrubbsResult {
 }
 
 /// Grubbs' extreme studentized deviate test (`n >= 3`, single or iterative two-sided).
+///
+/// Grubbs (1969) statistic `G = max |x_i - mean| / s` against the two-sided critical value
+/// `((n - 1) / sqrt(n)) sqrt(t^2 / (n - 2 + t^2))`, `t = t_{alpha/(2n), n-2}`. Iterative mode removes
+/// the flagged value and repeats on the reduced sample until a test is not significant; it is the
+/// sequential Grubbs procedure, not Rosner's (1983) generalized ESD.
 pub fn grubbs_outliers(values: &[f64], alpha: f64, iterative: bool) -> Result<GrubbsResult, StatsError> {
     validate_finite_slice(values)?;
     if !alpha.is_finite() || alpha <= 0.0 || alpha >= 1.0 {
@@ -1103,6 +1151,8 @@ pub struct RoutResult {
 
 /// Standalone column ROUT outlier detection (`K = 1` robust Cauchy/Lorentzian IRLS location +
 /// `P_68.27` RSDR + Benjamini–Hochberg FDR step-up at `fdr_q_percent`).
+///
+/// Motulsky & Brown (2006) ROUT with the Benjamini & Hochberg (1995) step-up rule.
 pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, StatsError> {
     validate_finite_slice(values)?;
     if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 100.0 {
@@ -1218,7 +1268,7 @@ pub struct OneSampleTResult {
     pub hedges_g_ci: Option<(f64, f64)>,
 }
 
-/// One-sample Student *t*-test against `hypothetical_mean`.
+/// One-sample Student *t*-test against `hypothetical_mean` (Student 1908).
 pub fn one_sample_t_test(
     values: &[f64],
     hypothetical_mean: f64,
@@ -1582,7 +1632,8 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
     Ok(res)
 }
 
-/// Compute per-dataset trapezoidal area under curve (`sum_i 0.5 * (x_{i+1} - x_i) * (y_i + y_{i+1})`)
+/// Compute per-dataset linear trapezoidal area under curve (Yeh & Kwan 1978)
+/// (`sum_i 0.5 * (x_{i+1} - x_i) * (y_i + y_{i+1})`)
 /// for [`TableArchetype::Xy`] when at least 2 distinct sorted finite `(x, mean_y)` knots exist.
 /// Tied `X` rows are collapsed to their replicate-weighted mean `Y` before integration.
 fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected: &[usize]) -> Result<(), StatsError> {

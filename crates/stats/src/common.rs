@@ -48,9 +48,12 @@ pub fn quantile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
     Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
 }
 
-/// Biostatistics hinge quartiles `(Q1, median, Q3)` matching standard Type-6/hinge convention
-/// (`R` type 6: `m = p * (n + 1)` clamped to `[1, n]`), which gives exact medians of lower/upper
-/// halves on small samples.
+/// Quartiles `(Q1, median, Q3)` by the type-6 sample-quantile definition of Hyndman & Fan (1996)
+/// (`R` type 6: `m = p * (n + 1)` clamped to `[1, n]`). These are not Tukey's hinges: for example
+/// `[1, 2, 3, 4, 5]` gives `Q1 = 1.5`, whereas the lower hinge is `2`.
+///
+/// Hyndman, R. J., & Fan, Y. (1996). Sample quantiles in statistical packages. *The American
+/// Statistician*, 50(4), 361-365. `doi:10.1080/00031305.1996.10473566`.
 #[must_use]
 pub fn quartiles_hinge(sorted: &[f64]) -> Option<(f64, f64, f64)> {
     let n = sorted.len();
@@ -63,7 +66,7 @@ pub fn quartiles_hinge(sorted: &[f64]) -> Option<(f64, f64, f64)> {
     Some((q1, med, q3))
 }
 
-/// `R` type-6 quantile (`(n + 1) * p` 1-based index with linear interpolation).
+/// `R` type-6 quantile (`(n + 1) * p` 1-based index with linear interpolation; Hyndman & Fan 1996).
 #[must_use]
 pub fn quantile_type6_sorted(sorted: &[f64], p: f64) -> Option<f64> {
     let n = sorted.len();
