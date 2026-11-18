@@ -13,7 +13,7 @@ cancelled or skipped dependencies fail that gate.
 | `cargo xtask ci lint` | Workspace Clippy, every target, with warnings denied. |
 | `cargo xtask ci tests` | Every native test except the performance-sensitive binaries selected by `PERFORMANCE_FILTER` in `xtask/src/ci.rs`. |
 | `cargo xtask ci performance` | Every `r10_*` binary (including `r10_phase7_gates` and the landed Wave 5 latency checks), every `human_wf_*` human-path workflow binary with its input-to-paint budgets, plus `*perf*` grid and curve-fit benchmark binaries, serially; existing assertions and budgets are unchanged. |
-| `cargo xtask ci doctests` | Workspace doctests. |
+| `cargo xtask ci doctests` | Workspace doctests, then `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` so broken or private intra-doc links and other rustdoc warnings fail CI. |
 | `cargo xtask ci features` | Text tests without default features; every UI test and doctest without default features, with its performance-sensitive binaries serial; MCP compilation without default features. |
 | `cargo xtask ci wasm` | Web and engine compilation for `wasm32-unknown-unknown`, including their dependencies. |
 

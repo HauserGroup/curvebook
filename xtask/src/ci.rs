@@ -52,12 +52,36 @@ fn run_stage(root: &Path, stage: &str) -> Result<(), String> {
         "lint" => run_cargo_strs(root, &["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"])?,
         "tests" => native_tests(root, false)?,
         "performance" => native_tests(root, true)?,
-        "doctests" => run_cargo_strs(root, &["test", "--locked", "--workspace", "--doc"])?,
+        "doctests" => {
+            run_cargo_strs(root, &["test", "--locked", "--workspace", "--doc"])?;
+            rustdoc(root)?;
+        }
         "features" => feature_checks(root)?,
         "wasm" => cmd_wasm(root)?,
         _ => return Err(format!("unknown CI stage `{stage}`")),
     }
     println!("ci: {stage} passed in {:.2}s", start.elapsed().as_secs_f64());
+    Ok(())
+}
+
+/// `RUSTDOCFLAGS` for [`rustdoc`]: every default-on rustdoc lint (broken or private intra-doc
+/// links, invalid HTML tags or code-block attributes, bare URLs) fails the build. `missing_docs`
+/// is a separate rustc lint and stays off here.
+const RUSTDOC_FLAGS: &str = "-D warnings";
+
+/// Build the workspace API docs and fail on any rustdoc warning, so doc links cannot rot silently.
+fn rustdoc(root: &Path) -> Result<(), String> {
+    let args = ["doc", "--locked", "--workspace", "--no-deps"];
+    println!("+ RUSTDOCFLAGS=\"{RUSTDOC_FLAGS}\" cargo {}", args.join(" "));
+    let status = std::process::Command::new("cargo")
+        .current_dir(root)
+        .env("RUSTDOCFLAGS", RUSTDOC_FLAGS)
+        .args(args)
+        .status()
+        .map_err(|e| format!("cargo {}: {e}", args.join(" ")))?;
+    if !status.success() {
+        return Err(format!("`cargo {}` failed with {status}; fix the rustdoc warnings above", args.join(" ")));
+    }
     Ok(())
 }
 

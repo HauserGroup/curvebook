@@ -1,6 +1,6 @@
 //! `R10.2` Human-Path Input Driver (`0` external UI-test crate dependencies).
 //!
-//! Enforces [`UiApp::set_human_path_only(true)`] and drives workflows strictly through physical/logical
+//! Enforces [`UiApp::set_human_path_only(true)`](crate::UiApp::set_human_path_only) and drives workflows strictly through physical/logical
 //! pointer coordinates, scroll wheels, focus navigation, raw keystrokes, and IME text events resolved
 //! against rendered [`LayoutTree`] bounds — measuring real input-to-paint latency (`R10.22 <= 50 ms`).
 

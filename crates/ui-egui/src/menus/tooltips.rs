@@ -1,4 +1,4 @@
-//! Menu and toolbar tooltips resolved from engine [`CommandSpec`] and front-end [`UiCommandSpec`].
+//! Menu and toolbar tooltips resolved from engine [`CommandSpec`](curvebook_engine::cmd::CommandSpec) and front-end [`UiCommandSpec`](crate::menus::ui_commands::UiCommandSpec).
 
 use curvebook_engine::cmd;
 

@@ -613,7 +613,7 @@ pub enum WebChromeAction {
     DismissContextMenu,
 }
 
-/// Hit-testable chrome widget node sharing geometry with [`WebTextDrawOp`]s.
+/// Hit-testable chrome widget node sharing geometry with [`WebTextDrawOp`](crate::text_bridge::WebTextDrawOp)s.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WebChromeNode {
     pub id: String,
