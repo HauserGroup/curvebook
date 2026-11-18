@@ -50,7 +50,7 @@ When invoking an engine command ID directly on the command line (for example `cu
 | `2` | `EXIT_USAGE_OR_POLICY` | Invalid CLI syntax, unknown flag/command, malformed batch schema, or `--workdir` containment violation. |
 | `130` | `EXIT_INTERRUPTED` | Cancelled or interrupted (`SIGINT` / `ErrorCode::Cancelled`). |
 
-Passing `--json` before `--` guarantees that failures write a structured JSON error payload (`code`, `category`, `message`, `recoverable`, `remediation`) to standard output rather than plain text on standard error.
+Passing `--json` before `--` guarantees that failures write a structured JSON `CliErrorEnvelope` (`{"error":{"code","category","message","retryable","remediation","details"}}`) to standard output rather than plain text on standard error.
 
 ## Format and PDF Options
 

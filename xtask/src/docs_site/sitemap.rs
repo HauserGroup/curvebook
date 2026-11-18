@@ -143,6 +143,7 @@ struct RepoLinkResolver<'a> {
     repo_root: &'a Path,
     meta: &'a SiteMeta,
     known_site_targets: &'a BTreeMap<&'static str, &'static str>,
+    broken_links: std::cell::RefCell<Vec<String>>,
 }
 
 impl LinkResolver for RepoLinkResolver<'_> {
@@ -213,6 +214,13 @@ impl LinkResolver for RepoLinkResolver<'_> {
         }
 
         let trimmed = normalized.trim_end_matches('/');
+        if self.source_repo_rel.starts_with("docs/reference/")
+            && (trimmed.ends_with(".html") || (trimmed.starts_with("docs/reference/") && !self.repo_root.join(trimmed).exists()))
+        {
+            self.broken_links
+                .borrow_mut()
+                .push(format!("{}: broken relative link `{raw_href}` (resolved repo path `{trimmed}` does not exist)", self.source_repo_rel));
+        }
         let is_dir = target_part.ends_with('/') || self.repo_root.join(trimmed).is_dir();
         let kind = if is_dir { "tree" } else { "blob" };
         format!("{GITHUB_REPO_BASE}/{kind}/main/{trimmed}{}", frag_suffix(frag_part))
@@ -396,8 +404,14 @@ pub fn assemble_site(root: &Path, meta: SiteMeta) -> Result<GeneratedSite, Strin
                         repo_root: root,
                         meta: &meta,
                         known_site_targets: &known_targets,
+                        broken_links: std::cell::RefCell::new(Vec::new()),
                     };
-                    render_markdown(&md_src, &resolver)
+                    let out = render_markdown(&md_src, &resolver);
+                    let broken = resolver.broken_links.into_inner();
+                    if let Some(first) = broken.first() {
+                        return Err(first.clone());
+                    }
+                    out
                 } else {
                     render_fallback_page(*fallback_kind, &item.rel_path)?
                 };

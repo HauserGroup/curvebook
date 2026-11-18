@@ -304,7 +304,7 @@ pub const CLI_COMMANDS: &[CliCommandSpec] = &[
                 short: None,
                 value_placeholder: None,
                 default_value: "false",
-                description: "Expose strictly the 8 human-equivalent `gui` MCP tools (`GuiOnlyPolicy::Strict`).",
+                description: "Expose strictly the human-equivalent `gui` MCP tools (`GuiOnlyPolicy::Strict`).",
             },
             FLAG_WORKDIR,
             CliFlagSpec {
