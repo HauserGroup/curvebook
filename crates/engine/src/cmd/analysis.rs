@@ -2,13 +2,13 @@
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CoxTieMethod, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec,
-    HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
+    CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
+    GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
     MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
     OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec,
     PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance,
     ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme,
+    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, XyTable,
 };
 use curvebook_fit::get_builtin_model;
 use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
@@ -823,6 +823,8 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         )
         .with_remediation("Choose an analysis kind compatible with the source table archetype."));
     }
+    let source_ds = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
+    validate_xy_analysis_spec(source_ds, &updated)?;
 
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
@@ -873,6 +875,8 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
 
     updated.retarget_source(new_source.clone(), new_table_kind, next_selected)?;
+    let new_source_ds = require_analyzable_data_sheet(doc, &new_source)?;
+    validate_xy_analysis_spec(new_source_ds, &updated)?;
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
@@ -1074,6 +1078,8 @@ fn build_analysis_spec(
     if matches!(spec.kind, AnalysisKind::Multivariate(_)) && spec.selected_data_sets.is_empty() {
         spec.selected_data_sets = default_multivariate_numeric_columns(doc, &spec.source_sheet_id);
     }
+    let source_ds = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?;
+    validate_xy_analysis_spec(source_ds, &spec)?;
     Ok(spec)
 }
 
@@ -1134,6 +1140,95 @@ fn validate_domain_and_compat(kind: &AnalysisKind, domain: AnalysisDomain, table
             format!("analysis `{}` is incompatible with `{}` tables", kind.derive_auto_title(), table_kind.label()),
         )
         .with_remediation("Select a compatible data table or analysis kind."));
+    }
+    Ok(())
+}
+
+fn validate_xy_analysis_spec(ds: &DataSheet, spec: &AnalysisSpec) -> Result<(), EngineError> {
+    let TableArchetype::Xy(xy) = &ds.archetype else {
+        return Ok(());
+    };
+    if xy.data_sets.is_empty() {
+        return Ok(());
+    }
+    match &spec.kind {
+        AnalysisKind::BlandAltman(ba) => validate_xy_bland_altman_params(xy, ba),
+        AnalysisKind::GeneralizedLinearModel(glm) => validate_xy_glm_params(xy, &spec.selected_data_sets, glm),
+        _ => Ok(()),
+    }
+}
+
+fn validate_xy_bland_altman_params(xy: &XyTable, ba: &BlandAltmanSpec) -> Result<(), EngineError> {
+    if ba.column_a == ba.column_b {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("Bland-Altman requires two distinct columns (`column_a` = {}, `column_b` = {})", ba.column_a, ba.column_b),
+        ));
+    }
+    if xy.data_sets.len() == 1 {
+        if ba.column_a != 0 || ba.column_b != 1 {
+            let missing = if ba.column_a != 0 { ba.column_a } else { ba.column_b };
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("single-dataset XY Bland-Altman compares X (0) vs Y0 (1); invalid column index {missing}"),
+            ));
+        }
+        return Ok(());
+    }
+    if ba.column_a >= xy.data_sets.len() || ba.column_b >= xy.data_sets.len() {
+        let missing = if ba.column_a >= xy.data_sets.len() { ba.column_a } else { ba.column_b };
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("Bland-Altman column index {missing} out of range for XY table with {} Y data sets", xy.data_sets.len()),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_xy_glm_params(xy: &XyTable, selected_data_sets: &[usize], glm: &GlmSpec) -> Result<(), EngineError> {
+    if xy.y_subcolumn_mode.is_pre_summarized() {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "XY GLM requires raw replicate or single-Y values rather than pre-summarized statistics",
+        ));
+    }
+    for &idx in selected_data_sets {
+        if idx >= xy.data_sets.len() {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("selected dataset index {idx} out of range for XY table with {} Y data sets", xy.data_sets.len()),
+            ));
+        }
+    }
+    if glm.response_column >= xy.data_sets.len() {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("GLM `response_column` {} out of range for XY table with {} Y data sets", glm.response_column, xy.data_sets.len()),
+        ));
+    }
+    if selected_data_sets.len() == 1 && glm.response_column != 0 && glm.response_column != selected_data_sets[0] {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("GLM `response_column` {} does not match selected XY dataset {}", glm.response_column, selected_data_sets[0]),
+        ));
+    }
+    if selected_data_sets.len() > 1 && !selected_data_sets.contains(&glm.response_column) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("GLM `response_column` {} must be included in `selected_data_sets`", glm.response_column),
+        ));
+    }
+    if glm.predictor_columns.is_empty() {
+        return Err(EngineError::with_code(ErrorCode::InsufficientData, "XY GLM requires one X predictor column in `predictor_columns`"));
+    }
+    let max_pred_space = xy.data_sets.len().max(2);
+    for &pc in &glm.predictor_columns {
+        if pc >= max_pred_space {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("GLM predictor column {pc} out of range for XY table")));
+        }
+    }
+    if glm.predictor_columns.len() != 1 || glm.predictor_columns[0] >= 2 {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "XY GLM supports a single X predictor (`predictor_columns: [0]` or `[1]`)"));
     }
     Ok(())
 }
@@ -3006,5 +3101,89 @@ mod tests {
         let res99 = session.document().result_sheet(&anova_id).expect("result sheet exists");
         let mc_tab = res99.tabs.iter().find(|t| t.id == "multiple-comparisons").expect("post-hoc tab present");
         assert!(mc_tab.column_headers.iter().any(|h| h.contains("99% CI")), "headers must advertise 99% CI: {:?}", mc_tab.column_headers);
+    }
+
+    #[test]
+    fn xy_bland_altman_and_glm_parameter_validation_matches_stats_contract() {
+        use curvebook_doc::SubcolumnMode;
+
+        let mut doc = ProjectDocument::new("XY BA and GLM").unwrap();
+
+        let mut xy1 = XyTable::new(SubcolumnMode::Single, 1, 5).unwrap();
+        let mut xy2 = XyTable::new(SubcolumnMode::Single, 2, 5).unwrap();
+        for r in 0..5 {
+            let x = (r + 1) as f64;
+            xy1.x_cells[r][0] = Cell::number(x);
+            xy1.data_sets[0].cells[r][0] = Cell::number(x + 0.5 * ((r % 2) as f64));
+            xy2.x_cells[r][0] = Cell::number(x);
+            xy2.data_sets[0].cells[r][0] = Cell::number(1.0 + 2.0 * x + ((r % 2) as f64) * 0.1);
+            xy2.data_sets[1].cells[r][0] = Cell::number(10.0 + 3.0 * x - ((r % 2) as f64) * 0.1);
+        }
+        let xy_sum = XyTable::new(SubcolumnMode::MeanSdN, 1, 5).unwrap();
+
+        doc.add_data_sheet(DataSheet::new("xy1", "Single XY", TableArchetype::Xy(xy1)).unwrap()).unwrap();
+        doc.add_data_sheet(DataSheet::new("xy2", "Multi XY", TableArchetype::Xy(xy2)).unwrap()).unwrap();
+        doc.add_data_sheet(DataSheet::new("xysum", "Summary XY", TableArchetype::Xy(xy_sum)).unwrap()).unwrap();
+        let mut session = Session::from_document(doc);
+
+        // Audit #4: Bland-Altman on 1-dataset XY keeps (0, 1) valid and rejects invalid pairs.
+        session
+            .execute("analysis.run", json!({ "source_sheet": "xy1", "sheet_id": "ba1", "kind": "bland_altman" }))
+            .expect("single-dataset XY Bland-Altman (0, 1) must succeed");
+        for bad in [json!({"column_a": 99, "column_b": 99}), json!({"column_a": 0, "column_b": 0}), json!({"column_a": 0, "column_b": 2})] {
+            let mut req = json!({ "source_sheet": "xy1", "kind": "bland_altman" });
+            req.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            let err = session.execute("analysis.run", req).expect_err("invalid single-XY Bland-Altman must fail");
+            assert_eq!(err.code, ErrorCode::BadInput);
+        }
+
+        // Audit #4: Bland-Altman on 2-dataset XY accepts (0, 1) and rejects equal or out-of-range indices.
+        session
+            .execute("analysis.run", json!({ "source_sheet": "xy2", "sheet_id": "ba2", "kind": "bland_altman", "column_a": 0, "column_b": 1 }))
+            .expect("2-dataset XY Bland-Altman (0, 1) must succeed");
+        for bad in [json!({"column_a": 1, "column_b": 1}), json!({"column_a": 0, "column_b": 2})] {
+            let mut req = json!({ "source_sheet": "xy2", "kind": "bland_altman" });
+            req.as_object_mut().unwrap().extend(bad.as_object().unwrap().clone());
+            let err = session.execute("analysis.run", req).expect_err("invalid multi-XY Bland-Altman must fail");
+            assert_eq!(err.code, ErrorCode::BadInput);
+        }
+
+        // Audit #13: XY GLM rejects pre-summarized XY tables and invalid column selections.
+        let sum_err =
+            session.execute("analysis.run", json!({ "source_sheet": "xysum", "kind": "linear_glm" })).expect_err("pre-summarized XY GLM must fail");
+        assert_eq!(sum_err.code, ErrorCode::BadInput);
+
+        session
+            .execute(
+                "analysis.run",
+                json!({ "source_sheet": "xy2", "sheet_id": "glm-ok", "kind": "linear_glm", "selected_data_sets": [1], "response_column": 1, "predictor_columns": [0] }),
+            )
+            .expect("valid XY GLM with dataset 1 and X predictor 0 must succeed");
+        session
+            .execute("analysis.run", json!({ "source_sheet": "xy2", "sheet_id": "glm-default", "kind": "linear_glm", "selected_data_sets": [1] }))
+            .expect("default_glm placeholder [1] + selected_data_sets [1] must remain valid");
+
+        let bad_pred = session
+            .execute(
+                "analysis.run",
+                json!({ "source_sheet": "xy2", "kind": "linear_glm", "selected_data_sets": [1], "response_column": 1, "predictor_columns": [99] }),
+            )
+            .expect_err("impossible predictor [99] on XY GLM must fail");
+        assert_eq!(bad_pred.code, ErrorCode::BadInput);
+
+        let empty_pred = session
+            .execute("analysis.run", json!({ "source_sheet": "xy2", "kind": "linear_glm", "predictor_columns": [] }))
+            .expect_err("empty predictor_columns must fail with InsufficientData");
+        assert_eq!(empty_pred.code, ErrorCode::InsufficientData);
+
+        let mismatch_resp = session
+            .execute("analysis.run", json!({ "source_sheet": "xy2", "kind": "linear_glm", "selected_data_sets": [0], "response_column": 1 }))
+            .expect_err("mismatched response_column must fail");
+        assert_eq!(mismatch_resp.code, ErrorCode::BadInput);
+
+        let update_err = session
+            .execute("analysis.updateParams", json!({ "sheet_id": "glm-ok", "params": { "predictor_columns": [99] } }))
+            .expect_err("updateParams with invalid predictor_columns must fail cleanly");
+        assert_eq!(update_err.code, ErrorCode::BadInput);
     }
 }

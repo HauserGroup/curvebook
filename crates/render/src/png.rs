@@ -6,7 +6,7 @@ use crc32fast::Hasher;
 use flate2::Compression;
 use flate2::write::ZlibEncoder;
 
-use crate::rasterizer::{MAX_RASTER_DIM_PX, RasterImage, RenderError};
+use crate::rasterizer::{RasterImage, RenderError, validate_raster_target_dims};
 
 const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 
@@ -16,14 +16,7 @@ const PNG_SIGNATURE: &[u8; 8] = b"\x89PNG\r\n\x1a\n";
 /// Returns [`RenderError`] on invalid target dimensions/DPI, pixel buffer mismatch, or DEFLATE
 /// compression failure.
 pub fn encode_png(image: &RasterImage) -> Result<Vec<u8>, RenderError> {
-    if image.width_px == 0 || image.height_px == 0 || image.dpi == 0 {
-        return Err(RenderError::InvalidTarget { message: String::from("PNG dimensions and DPI must be positive") });
-    }
-    if image.width_px > MAX_RASTER_DIM_PX || image.height_px > MAX_RASTER_DIM_PX {
-        return Err(RenderError::InvalidTarget {
-            message: format!("PNG dimensions {}x{} exceed maximum {MAX_RASTER_DIM_PX}x{MAX_RASTER_DIM_PX}", image.width_px, image.height_px),
-        });
-    }
+    let _ = validate_raster_target_dims(image.width_px, image.height_px, image.dpi, "PNG")?;
     let expected = image.expected_byte_len().ok_or_else(|| RenderError::InvalidTarget { message: String::from("image byte length overflow") })?;
     if image.rgba.len() != expected {
         return Err(RenderError::BufferSizeMismatch { expected, actual: image.rgba.len() });

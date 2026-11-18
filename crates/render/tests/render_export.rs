@@ -796,3 +796,54 @@ fn cld_compiled_graph_rasterizes_deterministically_into_rgba_annotation_band() {
         assert!(ink_pixels >= 4, "expected rasterized glyph ink around CLD label `{label}` in [{x0}..={x1}, {y0}..={y1}], got {ink_pixels}");
     }
 }
+
+#[test]
+fn dpi_sizing_preserves_aspect_ratio_and_rejects_oversized_targets() {
+    // Wide banner scene (2000 x 60 pt) at 360 DPI must scale uniformly to 10,000 x 300 px
+    // without clamping width independently to 8,192 px, and encode honest 360 DPI metadata.
+    let mut wide_scene = ChartScene::new("wide", "Wide Layout", 2000.0, 60.0, Some(Rgba8::WHITE));
+    wide_scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(RectPt::new(100.0, 10.0, 1800.0, 40.0)),
+        fill: Some(FillPaint::solid(OKABE_ITO_BLUE)),
+        stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.0)),
+        clip: None,
+    });
+
+    let target = RenderTargetSpec::from_scene_dpi(&wide_scene, 360).expect("10000x300 fits MAX_RASTER_DIM_PX and MAX_RASTER_PIXELS");
+    assert_eq!(target, RenderTargetSpec { width_px: 10_000, height_px: 300, dpi: 360 });
+    let img = render_scene(&wide_scene, target).expect("render wide 360 DPI scene");
+    assert_eq!(img.width_px, 10_000);
+    assert_eq!(img.height_px, 300);
+    assert_eq!(img.dpi, 360);
+
+    let png = encode_png(&img).expect("encode wide PNG");
+    let decoded_png = decode_and_verify_png(&png);
+    assert_eq!(decoded_png.width, 10_000);
+    assert_eq!(decoded_png.height, 300);
+    let expected_ppm = (360.0_f64 / 0.0254).round() as u32;
+    assert_eq!(decoded_png.phys_x_ppm, expected_ppm);
+    assert_eq!(decoded_png.phys_y_ppm, expected_ppm);
+
+    let tiff = encode_tiff(&img, TiffCompression::Deflate).expect("encode wide TIFF");
+    let decoded_tiff = decode_and_verify_tiff(&tiff);
+    assert_eq!(decoded_tiff.width, 10_000);
+    assert_eq!(decoded_tiff.height, 300);
+    assert_eq!(decoded_tiff.x_res_num, 360);
+    assert_eq!(decoded_tiff.x_res_den, 1);
+    assert_eq!(decoded_tiff.y_res_num, 360);
+    assert_eq!(decoded_tiff.y_res_den, 1);
+
+    // Exceeding MAX_RASTER_DIM_PX (16,384) at 720 DPI must fail cleanly instead of clamping.
+    let err_dim = RenderTargetSpec::from_scene_dpi(&wide_scene, 720).expect_err("20000x600 exceeds MAX_RASTER_DIM_PX");
+    assert!(matches!(err_dim, RenderError::InvalidTarget { .. }));
+
+    // Exceeding MAX_RASTER_PIXELS (67,108,864) even with each axis <= 16,384 must fail cleanly.
+    let square_scene = ChartScene::new("sq", "Large Square", 1000.0, 1000.0, Some(Rgba8::WHITE));
+    let err_pixels = RenderTargetSpec::from_scene_dpi(&square_scene, 600).expect_err("8333x8333 exceeds MAX_RASTER_PIXELS");
+    assert!(matches!(err_pixels, RenderError::InvalidTarget { .. }));
+
+    // Sub-pixel scaled output (< 1 px) must fail cleanly instead of clamping up to 16 px.
+    let thin_scene = ChartScene::new("thin", "Thin", 1.0, 100.0, Some(Rgba8::WHITE));
+    let err_subpx = RenderTargetSpec::from_scene_dpi(&thin_scene, 10).expect_err("1x100 pt at 10 DPI rounds width below 1 px");
+    assert!(matches!(err_subpx, RenderError::InvalidTarget { .. }));
+}

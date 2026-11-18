@@ -857,7 +857,7 @@ fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message:
     target.pairwise_comparisons.clear();
     target.fitted_curves.clear();
     target.checklist.clear();
-    target.floating_notes.clear();
+    // Preserve user-authored annotations (`floating_notes`, `color_tag`) across transient recomputation failures.
     target.status = ResultStatus::Failed { code, message };
 }
 
@@ -1323,11 +1323,15 @@ mod tests {
         r_data.analyzable_data = Some(DataSheet::new("res-nf-out", "Out", TableArchetype::Xy(xy)).expect("ds"));
         assert!(validate_result_sheet_finite(&r_data, &id).is_err());
 
+        let note =
+            curvebook_doc::FloatingNote::new("note-keep", curvebook_doc::RectPt::new(10.0, 10.0, 120.0, 40.0), "Keep across transient failure");
+        r_curve.floating_notes.push(note.clone());
         clear_failed_result_sheet(&mut r_curve, ErrorCode::SolverFailed, String::from("non-finite"));
         assert!(matches!(r_curve.status, ResultStatus::Failed { code: ErrorCode::SolverFailed, .. }));
         assert!(r_curve.fitted_curves.is_empty());
         assert!(r_curve.scalars.is_empty());
         assert!(r_curve.tabs.is_empty());
         assert!(r_curve.analyzable_data.is_none());
+        assert_eq!(r_curve.floating_notes, vec![note]);
     }
 }
