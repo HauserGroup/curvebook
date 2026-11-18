@@ -3,6 +3,34 @@
 //! scree, Kaiser, Horn's parallel analysis, scores, loadings, biplot contributions), *k*-means++,
 //! Hierarchical Clustering (Single, Complete, Average/UPGMA, Ward.D2 dendrogram linkage), and
 //! Multiple Imputation by Chained Equations (MICE PMM) with Rubin (1987) / Barnard–Rubin (1999) pooling.
+//!
+//! References (D1 citation pass 2026-11-18; MICE and parallel-analysis sources are cited inline):
+//! - Pearson, K. (1896). Mathematical contributions to the theory of evolution. III. Regression,
+//!   heredity, and panmixia. *Philosophical Transactions of the Royal Society A*, 187, 253-318.
+//!   `doi:10.1098/rsta.1896.0007`.
+//! - Fisher, R. A. (1921). On the "probable error" of a coefficient of correlation deduced from a
+//!   small sample. *Metron*, 1, 3-32.
+//! - Spearman, C. (1904). The proof and measurement of association between two things. *American
+//!   Journal of Psychology*, 15(1), 72-101. `doi:10.2307/1412159`.
+//! - Kendall, M. G. (1938). A new measure of rank correlation. *Biometrika*, 30(1-2), 81-93.
+//!   `doi:10.1093/biomet/30.1-2.81`.
+//! - Kendall, M. G. (1945). The treatment of ties in ranking problems. *Biometrika*, 33(3), 239-251.
+//!   `doi:10.1093/biomet/33.3.239`.
+//! - Jolliffe, I. T. (2002). *Principal Component Analysis* (2nd ed.). New York: Springer.
+//! - Lloyd, S. P. (1982). Least squares quantization in PCM. *IEEE Transactions on Information
+//!   Theory*, 28(2), 129-137. `doi:10.1109/tit.1982.1056489`.
+//! - Arthur, D., & Vassilvitskii, S. (2007). k-means++: The advantages of careful seeding.
+//!   *Proceedings of the 18th Annual ACM-SIAM Symposium on Discrete Algorithms (SODA)*, 1027-1035.
+//! - Rousseeuw, P. J. (1987). Silhouettes: A graphical aid to the interpretation and validation of
+//!   cluster analysis. *Journal of Computational and Applied Mathematics*, 20, 53-65.
+//!   `doi:10.1016/0377-0427(87)90125-7`.
+//! - Lance, G. N., & Williams, W. T. (1967). A general theory of classificatory sorting strategies:
+//!   1. Hierarchical systems. *The Computer Journal*, 9(4), 373-380. `doi:10.1093/comjnl/9.4.373`.
+//! - Ward, J. H. (1963). Hierarchical grouping to optimize an objective function. *Journal of the
+//!   American Statistical Association*, 58(301), 236-244. `doi:10.1080/01621459.1963.10500845`.
+//! - Murtagh, F., & Legendre, P. (2014). Ward's hierarchical agglomerative clustering method: Which
+//!   algorithms implement Ward's criterion? *Journal of Classification*, 31(3), 274-295.
+//!   `doi:10.1007/s00357-014-9161-z`.
 
 use std::cmp::Ordering;
 use std::collections::BinaryHeap;
@@ -161,6 +189,9 @@ pub struct MultipleImputationResult {
 // ============================================================================
 
 /// Pearson product-moment correlation with Fisher-*z* confidence interval and exact *t*-test *p*.
+///
+/// Pearson (1896) *r*; *t* = `r sqrt((n - 2) / (1 - r^2))` on `n - 2` df; CI from Fisher's (1921)
+/// `z = atanh(r)` with standard error `1 / sqrt(n - 3)`.
 pub fn pearson_correlation(x: &[f64], y: &[f64], confidence: ConfidenceLevel) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
@@ -191,6 +222,9 @@ pub fn pearson_correlation(x: &[f64], y: &[f64], confidence: ConfidenceLevel) ->
 }
 
 /// Spearman rank-order correlation (`O(n log n)` with exact average tie handling).
+///
+/// Spearman (1904) *rho* computed as the Pearson correlation of mid-ranks, with the *t*
+/// approximation on `n - 2` df for the two-sided *P* (no exact permutation *P*).
 pub fn spearman_correlation(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
@@ -213,6 +247,8 @@ pub fn spearman_correlation(x: &[f64], y: &[f64]) -> Result<CorrelationPairResul
 }
 
 /// Kendall's *tau_b* rank correlation with tie-adjusted asymptotic normal *p*-value.
+///
+/// Kendall (1938) *tau*, with the *tau_b* tie adjustment of Kendall (1945).
 pub fn kendall_tau_b(x: &[f64], y: &[f64]) -> Result<CorrelationPairResult, StatsError> {
     if x.len() != y.len() {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: x.len(), actual: y.len() }));
@@ -347,7 +383,8 @@ pub fn correlation_matrix(columns: &[(&str, &[Option<f64>])], spearman: bool) ->
 // Principal Component Analysis (SVD + Kaiser + Horn Parallel Analysis)
 // ============================================================================
 
-/// Principal Component Analysis via SVD of centered (and optionally standardized) `n x p` matrix.
+/// Principal Component Analysis via SVD of centered (and optionally standardized) `n x p` matrix
+/// (Jolliffe 2002).
 ///
 /// Guarantees `sum_k eigenvalue_k == trace(Cov)` (or `trace(Corr) = p` when `standardize = true`).
 pub fn pca_analysis(
@@ -538,6 +575,9 @@ fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, 
 
 /// *k*-means++ clustering (`DeterministicRng::from_seed`) returning cluster assignments,
 /// centroids, total within-cluster sum of squares (WCSS), and mean silhouette score.
+///
+/// `D^2` seeding of Arthur & Vassilvitskii (2007), Lloyd (1982) assignment/update iterations, and
+/// the mean silhouette of Rousseeuw (1987).
 pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult, StatsError> {
     let n = rows.len();
     let d = rows.first().map_or(0, Vec::len);
@@ -931,6 +971,9 @@ const fn map_legacy_linkage(linkage: LinkageMethod) -> ClusterLinkage {
 
 /// Agglomerative hierarchical clustering supporting Euclidean Single, Complete, Average (UPGMA),
 /// and Ward.D2 linkage via Lance–Williams dissimilarity updates.
+///
+/// Lance & Williams (1967) recurrence; Ward (1963) minimum-variance criterion in the Ward.D2 form
+/// of Murtagh & Legendre (2014).
 pub fn hierarchical_clustering(rows: &[Vec<f64>], linkage: LinkageMethod) -> Result<Vec<DendrogramMerge>, StatsError> {
     hierarchical_clustering_with_metrics(rows, ClusterDistance::Euclidean, map_legacy_linkage(linkage))
 }

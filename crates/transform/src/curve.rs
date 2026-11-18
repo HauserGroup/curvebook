@@ -1,5 +1,16 @@
 //! Curve calculus: Area Under the Curve (AUC) with peak detection and SE propagation,
 //! Savitzky-Golay / moving-average / LOWESS smoothing, differentiation, and integration.
+//!
+//! References (D1 citation pass 2026-11-18; Savitzky–Golay sources are cited inline):
+//! - Yeh, K. C., & Kwan, K. C. (1978). A comparison of numerical integrating algorithms by
+//!   trapezoidal, Lagrange, and spline approximation. *Journal of Pharmacokinetics and
+//!   Biopharmaceutics*, 6(1), 79-98. `doi:10.1007/bf01066064`.
+//! - Bailer, A. J. (1988). Testing for the equality of area under the curves when using destructive
+//!   measurement techniques. *Journal of Pharmacokinetics and Biopharmaceutics*, 16(3), 303-309.
+//!   `doi:10.1007/bf01062139`.
+//! - Cleveland, W. S. (1979). Robust locally weighted regression and smoothing scatterplots.
+//!   *Journal of the American Statistical Association*, 74(368), 829-836.
+//!   `doi:10.1080/01621459.1979.10481038`.
 
 use curvebook_doc::{Cell, DataSheet, SubcolumnMode, TableArchetype, XColumnMode, XyTable};
 use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
@@ -71,13 +82,18 @@ struct CurvePoint {
     se: Option<f64>,
 }
 
-/// Compute trapezoidal Area Under the Curve and peak summaries from `(x, y)` pairs.
+/// Compute linear trapezoidal Area Under the Curve (Yeh & Kwan 1978) and peak summaries from
+/// `(x, y)` pairs.
 pub fn compute_auc(points: &[(f64, f64)], opts: &AucOptions) -> Result<AucResult, TransformError> {
     let pts: Vec<(f64, f64, Option<f64>)> = points.iter().map(|&(x, y)| (x, y, None)).collect();
     compute_auc_internal(&pts, opts)
 }
 
 /// Compute trapezoidal AUC with analytical standard-error propagation from `(x, y, se)` tuples.
+///
+/// `Var(AUC) = sum_i w_i^2 SE_i^2` with trapezoid weights `w_i` (Bailer 1988). This assumes the
+/// point estimates are independent (separate subjects per time point); it understates the SE for
+/// repeated measurements on the same subjects.
 pub fn compute_auc_with_se(points: &[(f64, f64, f64)], opts: &AucOptions) -> Result<AucResult, TransformError> {
     let pts: Vec<(f64, f64, Option<f64>)> = points.iter().map(|&(x, y, se)| (x, y, Some(se))).collect();
     compute_auc_internal(&pts, opts)
@@ -413,6 +429,8 @@ fn moving_average(ys: &[f64], window: usize) -> Result<Vec<f64>, TransformError>
     Ok(out)
 }
 
+/// LOWESS of Cleveland (1979): tricube-weighted local linear fits over the nearest
+/// `round(span * n)` points, with bisquare robustness weights from residuals scaled by `6 * MAD`.
 fn lowess(xs: &[f64], ys: &[f64], span: f64, robustness_iters: usize) -> Result<Vec<f64>, TransformError> {
     if !span.is_finite() || span <= 0.0 || span > 1.0 {
         return Err(TransformError::InvalidSpec { message: format!("LOWESS span must be in (0, 1], got {span}") });

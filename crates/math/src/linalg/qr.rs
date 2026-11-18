@@ -10,6 +10,8 @@
 //! References:
 //! - Golub, G. H., & Van Loan, C. F. (2013). *Matrix Computations* (4th ed., §5.2 & §5.4.2).
 //! - Bjorck, A. (1996). *Numerical Methods for Least Squares Problems*. SIAM.
+//! - Bjorck, A. (1967). Iterative refinement of linear least squares solutions I. *BIT*, 7(4),
+//!   257-278. `doi:10.1007/bf01939321`.
 
 use crate::error::MathError;
 use crate::linalg::matrix::DenseMatrix;
