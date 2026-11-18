@@ -78,6 +78,9 @@ jobs:
       - name: Check licences, advisories, yanked crates, bans and sources
         if: matrix.stage == 'policy'
         run: cargo deny check
+      - name: Fetch locked dependencies for offline audit tests
+        if: matrix.stage == 'tests'
+        run: cargo fetch --locked
       - name: Download and verify the full NIST StRD corpus
         if: matrix.stage == 'tests'
         run: cargo run --locked -p xtask -- corpus --fetch-only

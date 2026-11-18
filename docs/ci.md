@@ -37,6 +37,8 @@ archive extractions do not exhaust runner disk space. Uploaded archives are
 removed before the build cache is saved, avoiding a second cached copy.
 Artifacts are retained for two days.
 
+The hosted correctness job fetches the locked workspace dependencies for audit
+tests that call Cargo metadata offline, including dependencies for other targets.
 Before the native correctness stage, hosted CI runs
 `cargo xtask corpus --fetch-only` to download and verify the pinned NIST StRD
 datasets. It runs the archived tests with `CURVEBOOK_REQUIRE_CORPUS=1` and
