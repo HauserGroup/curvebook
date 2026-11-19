@@ -11,8 +11,8 @@ use std::process::ExitCode;
 use std::time::{Duration, Instant};
 
 use curvebook::desktop_host::{
-    DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, allocate_fresh_isolated_journal_dir,
-    dir_has_active_lease, dir_has_unrecovered_crash, open_document_from_files,
+    DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput,
+    allocate_fresh_isolated_journal_dir, dir_has_active_lease, dir_has_unrecovered_crash, open_document_from_files,
 };
 use curvebook::gui_window::{LiveControlChannel, LiveControlPostHook, run_native_desktop_with_control};
 use curvebook::live_control::{
@@ -27,11 +27,13 @@ use curvebook_render::RenderTargetSpec;
 use curvebook_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use curvebook_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
 use curvebook_ui_egui::dialogs_canvas::render_workspace_frame_png;
+use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::install_fonts;
 use curvebook_ui_egui::{
-    ControlAuth, ControlPostRequestContext, UiApp, UiThemeMode, bind_control_tcp_listener, normalize_locale, parse_control_port,
-    serve_control_listener_with_hook, validate_loopback_addr,
+    ControlAuth, ControlPostRequestContext, DEFAULT_UI_SCALE, UiApp, UiThemeMode, bind_control_tcp_listener, extract_ui_scale_from_preferences_extra,
+    normalize_beta_gui_locale, normalize_locale, parse_control_port, serve_control_listener_with_hook, validate_loopback_addr,
+    write_ui_scale_to_preferences_extra,
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
@@ -46,6 +48,7 @@ options:
   --control-token <token>  bearer token for --control authentication (prefer CURVEBOOK_CONTROL_TOKEN on multi-user systems; CLI args are visible in ps)
   --window                 attach a visible desktop window to --control <port> or CURVEBOOK_CONTROL_PORT
   --gui-only               restrict automation (--control) to interactive GUI actions only
+  --ui-backend <name>      select UI backend (`legacy` default, or `egui`; overrides CURVEBOOK_UI_BACKEND)
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
   --headless-once       render one software compositor frame and exit
@@ -71,6 +74,7 @@ struct LaunchConfig {
     control_token: Option<String>,
     window: bool,
     gui_only: bool,
+    ui_backend: UiBackend,
     in_window_menus: bool,
     new_instance: bool,
     headless_once: bool,
@@ -126,7 +130,12 @@ fn run_with_process_env_and_stderr(
     env_get: impl Fn(&str) -> Option<OsString>,
     stderr: &mut dyn Write,
 ) -> Result<(), String> {
-    let action = parse_args_with_env(args, env_port, env_token)?;
+    let env_backend_os = env_get("CURVEBOOK_UI_BACKEND");
+    let env_backend = match env_backend_os {
+        Some(raw) => Some(raw.into_string().map_err(|_| String::from("non-UTF-8 CURVEBOOK_UI_BACKEND environment variable"))?),
+        None => None,
+    };
+    let action = parse_args_with_env_and_backend(args, env_port, env_token, env_backend.as_deref())?;
     match action {
         CliAction::PrintVersion => {
             println!("CurveBook {}", env!("CARGO_PKG_VERSION"));
@@ -193,8 +202,19 @@ fn parse_args(args: &[String], env_port: Option<&str>) -> Result<CliAction, Stri
     parse_args_with_env(args, env_port, None)
 }
 
+#[cfg(test)]
 fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Option<&str>) -> Result<CliAction, String> {
+    parse_args_with_env_and_backend(args, env_port, env_token, None)
+}
+
+fn parse_args_with_env_and_backend(
+    args: &[String],
+    env_port: Option<&str>,
+    env_token: Option<&str>,
+    env_ui_backend: Option<&str>,
+) -> Result<CliAction, String> {
     let mut cfg = LaunchConfig::default();
+    let mut cli_ui_backend: Option<String> = None;
     let mut i = 0usize;
     while let Some(arg) = args.get(i) {
         match arg.as_str() {
@@ -217,6 +237,16 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
             }
             "--gui-only" => {
                 cfg.gui_only = true;
+                i += 1;
+            }
+            "--ui-backend" => {
+                let raw = args.get(i + 1).ok_or_else(|| String::from("--ui-backend requires `legacy` or `egui`"))?;
+                cli_ui_backend = Some(raw.clone());
+                i += 2;
+            }
+            flag if flag.starts_with("--ui-backend=") => {
+                let raw = flag.trim_start_matches("--ui-backend=");
+                cli_ui_backend = Some(raw.to_owned());
                 i += 1;
             }
             "--in-window-menus" => {
@@ -275,6 +305,7 @@ fn parse_args_with_env(args: &[String], env_port: Option<&str>, env_token: Optio
         }
     }
 
+    cfg.ui_backend = UiBackend::from_env_and_args(env_ui_backend, cli_ui_backend.as_deref())?;
     apply_env_control_overrides(&mut cfg, env_port, env_token)?;
     validate_launch_config(&cfg)?;
 
@@ -418,6 +449,7 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
         in_window_menus: cfg.in_window_menus,
         new_instance: cfg.new_instance,
         gui_only: cfg.gui_only,
+        ui_backend: cfg.ui_backend,
         locale_override: None,
         theme_override: None,
         recovery_root: recovery_root.clone(),
@@ -565,8 +597,8 @@ fn write_control_token_file(path: &Path, auth: &ControlAuth) -> Result<(), Strin
     .map_err(|err| format!("failed to write control token file `{}`: {err}", path.display()))
 }
 
-fn capture_control_pref_fingerprint(app: &UiApp) -> (String, UiThemeMode, Option<String>) {
-    (normalize_locale(&app.locale).to_owned(), app.theme.mode, app.shortcuts.export_overrides_json().ok())
+fn capture_control_pref_fingerprint(app: &UiApp) -> (String, UiThemeMode, u32, Option<String>) {
+    (normalize_locale(&app.locale).to_owned(), app.theme.mode, app.ui_scale().to_bits(), app.shortcuts.export_overrides_json().ok())
 }
 
 fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
@@ -580,7 +612,7 @@ fn theme_mode_pref_str(mode: UiThemeMode) -> &'static str {
 fn maybe_persist_changed_control_prefs(
     app: &UiApp,
     ctx: &ControlPostRequestContext<'_>,
-    prev_prefs: &mut Option<(String, UiThemeMode, Option<String>)>,
+    prev_prefs: &mut Option<(String, UiThemeMode, u32, Option<String>)>,
     app_paths: &AppPaths,
     no_prefs: bool,
 ) {
@@ -613,7 +645,7 @@ fn serve_control_with_pref_persistence<F>(win: &mut DesktopWindowSession, app_pa
 where
     F: FnMut(&mut UiApp, &mut dyn FnMut(&UiApp, &ControlPostRequestContext<'_>) -> Result<(), String>) -> std::io::Result<()>,
 {
-    let mut prev_prefs: Option<(String, UiThemeMode, Option<String>)> = None;
+    let mut prev_prefs: Option<(String, UiThemeMode, u32, Option<String>)> = None;
     win.with_control_journal_hook(|app, on_post_request| {
         if !no_prefs && prev_prefs.is_none() {
             prev_prefs = Some(capture_control_pref_fingerprint(app));
@@ -641,7 +673,28 @@ fn run_authenticated_control_server(
     let listener = bind_control_tcp_listener(checked).map_err(|err| format!("failed to bind control socket {checked}: {err}"))?;
     let token_path = control_token_file_path(&app_paths.config_dir, port);
     write_control_token_file(&token_path, &auth)?;
-    let _token_guard = ControlTokenFileGuard { path: token_path };
+    let token_guard = ControlTokenFileGuard { path: token_path };
+    if win.app().ui_backend() == UiBackend::Egui {
+        let (_guards, mut channel) = start_live_window_control_on_listener(listener, auth.clone(), app_paths, no_prefs, token_guard)?;
+        let mut post_hook = channel.post_hook.take();
+        while let Ok(req) = channel.request_rx.recv() {
+            let res: Result<LiveControlFrameOutput, String> =
+                win.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |app, hook_ctx| {
+                    if let Some(ref mut hook) = post_hook {
+                        hook(app, hook_ctx)?;
+                    }
+                    Ok(())
+                });
+            let quit = res.as_ref().is_ok_and(|out| out.quit);
+            let _ = req.reply_tx.send(res);
+            if quit {
+                channel.shutdown.store(true, std::sync::atomic::Ordering::Release);
+                break;
+            }
+        }
+        return Ok(());
+    }
+    let _token_guard = token_guard;
     serve_control_with_pref_persistence(win, app_paths, no_prefs, |app, hook| serve_control_listener_with_hook(app, &listener, &auth, hook))
 }
 
@@ -725,7 +778,7 @@ fn should_persist_preferences(app: &UiApp, paths: &AppPaths) -> Result<bool, Str
     if paths.preferences_file.is_file() {
         return Ok(true);
     }
-    if normalize_locale(&app.locale) != "en" || app.theme.mode != UiThemeMode::default() {
+    if normalize_locale(&app.locale) != "en" || app.theme.mode != UiThemeMode::default() || (app.ui_scale() - DEFAULT_UI_SCALE).abs() > 0.001 {
         return Ok(true);
     }
     let raw = app.shortcuts.export_overrides_json()?;
@@ -1041,7 +1094,7 @@ fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize,
         if let Some(ref raw_locale) = prefs.locale {
             let trimmed = raw_locale.trim();
             if !trimmed.is_empty() {
-                app.set_locale(trimmed);
+                app.set_locale(normalize_beta_gui_locale(trimmed));
             }
         }
         if let Some(ref raw_theme) = prefs.theme {
@@ -1050,6 +1103,15 @@ fn load_shortcut_preferences(app: &mut UiApp, paths: &AppPaths) -> Result<usize,
                 Err(err) => {
                     eprintln!("curvebook preferences warning: ignoring invalid theme in `{}`: {err}", paths.preferences_file.display());
                 }
+            }
+        }
+        match extract_ui_scale_from_preferences_extra(&prefs.extra) {
+            Ok(Some(scale)) => {
+                let _ = app.set_ui_scale(scale);
+            }
+            Ok(None) => {}
+            Err(err) => {
+                eprintln!("curvebook preferences warning: ignoring invalid ui_scale in `{}`: {err}", paths.preferences_file.display());
             }
         }
         if prefs.shortcuts.is_empty() {
@@ -1093,6 +1155,7 @@ fn save_shortcut_preferences(app: &UiApp, paths: &AppPaths) -> Result<(), String
     let shortcuts: BTreeMap<String, String> = serde_json::from_str(&raw_shortcuts).map_err(|err| err.to_string())?;
     prefs.version = CURRENT_PREFERENCES_VERSION;
     prefs.shortcuts = shortcuts;
+    write_ui_scale_to_preferences_extra(&mut prefs.extra, app.ui_scale());
     save_preferences_file(&paths.preferences_file, &prefs)
         .map_err(|err| format!("failed to write preferences `{}`: {err}", paths.preferences_file.display()))
 }
@@ -1112,7 +1175,9 @@ mod tests {
     use curvebook_doc::{DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
     use curvebook_format::save_project_file;
 
-    use super::{CliAction, LaunchConfig, load_startup_session, parse_args, parse_port, run};
+    use super::{
+        CURRENT_PREFERENCES_VERSION, CliAction, LaunchConfig, UiApp, UiBackend, UiThemeMode, load_startup_session, parse_args, parse_port, run,
+    };
 
     #[test]
     fn cli_version_and_help_and_flags() {
@@ -1139,6 +1204,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
+                ui_backend: UiBackend::Legacy,
                 in_window_menus: true,
                 new_instance: true,
                 headless_once: false,
@@ -1158,6 +1224,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: true,
+                ui_backend: UiBackend::Legacy,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: true,
@@ -1179,6 +1246,7 @@ mod tests {
                 control_token: None,
                 window: true,
                 gui_only: true,
+                ui_backend: UiBackend::Legacy,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -1210,6 +1278,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
+                ui_backend: UiBackend::Legacy,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -2059,6 +2128,7 @@ mod tests {
             in_window_menus: true,
             new_instance: false,
             gui_only: false,
+            ui_backend: UiBackend::Legacy,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -2169,6 +2239,55 @@ mod tests {
             &mut help_stderr,
         )?;
         assert!(help_stderr.is_empty(), "--help must keep stderr empty");
+
+        let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r15_1_ui_backend_flag_env_and_preferences_ui_scale_migration() -> Result<(), Box<dyn std::error::Error>> {
+        let env_egui = super::parse_args_with_env_and_backend(&[], None, None, Some("egui"))?;
+        assert!(matches!(env_egui, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+
+        let cli_overrides_env = super::parse_args_with_env_and_backend(&[String::from("--ui-backend=legacy")], None, None, Some("egui"))?;
+        assert!(matches!(cli_overrides_env, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Legacy));
+
+        let cli_split_flag = super::parse_args_with_env_and_backend(&[String::from("--ui-backend"), String::from("egui")], None, None, None)?;
+        assert!(matches!(cli_split_flag, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+
+        assert!(super::parse_args_with_env_and_backend(&[String::from("--ui-backend=bogus")], None, None, None).is_err());
+
+        // Preferences migration for `ui_scale`, RTL locale fallback (`ar` -> `en`), and newer version refusal.
+        let unique = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map_or(0, |d| d.as_nanos());
+        let dir = std::env::temp_dir().join(format!("cb-r15-prefs-{}-{unique}", std::process::id()));
+        std::fs::create_dir_all(&dir)?;
+        let paths = super::resolve_app_paths(None, Some(&dir))?;
+        if let Some(parent) = paths.preferences_file.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+
+        // Legacy v0 file with `"scale": 1.35` and `"locale": "ar"` migrates safely.
+        std::fs::write(&paths.preferences_file, r#"{"locale":"ar","theme":"dark","scale":1.35}"#)?;
+        let mut app = UiApp::new();
+        super::load_shortcut_preferences(&mut app, &paths)?;
+        assert_eq!(app.locale, "en", "RTL locale `ar` must normalize to `en` on Beta desktop host load");
+        assert_eq!(app.theme.mode, UiThemeMode::Dark);
+        assert!((app.ui_scale() - 1.35).abs() < 1e-4);
+
+        app.zoom_ui_scale_in();
+        super::save_shortcut_preferences(&app, &paths)?;
+        let saved: serde_json::Value = serde_json::from_str(&std::fs::read_to_string(&paths.preferences_file)?)?;
+        assert_eq!(saved["version"], serde_json::json!(CURRENT_PREFERENCES_VERSION));
+        assert_eq!(saved["ui_scale"], serde_json::json!(1.45));
+        assert!(saved.get("scale").is_none());
+
+        // Newer version file must be refused cleanly without overwriting.
+        let future_body = r#"{"version":999,"locale":"en","theme":"light","ui_scale":2.0}"#;
+        std::fs::write(&paths.preferences_file, future_body)?;
+        let mut future_app = UiApp::new();
+        assert!(super::load_shortcut_preferences(&mut future_app, &paths).is_err());
+        assert!(super::save_shortcut_preferences(&future_app, &paths).is_err());
+        assert_eq!(std::fs::read_to_string(&paths.preferences_file)?, future_body);
 
         let _ = std::fs::remove_dir_all(&dir);
         Ok(())
