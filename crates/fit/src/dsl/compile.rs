@@ -71,10 +71,10 @@ pub(in crate::dsl) enum CompileTask<'a> {
     AndAfterLhs { rhs: &'a Expr },
     AndAfterRhs { jz_idx: usize },
     OrAfterLhs { rhs: &'a Expr },
-    OrAfterRhs { jmp_end: usize },
+    OrAfterRhs { jump_end: usize },
     IfAfterCond { then_br: &'a Expr, else_br: &'a Expr },
     IfAfterThen { else_br: &'a Expr, jz_idx: usize },
-    IfAfterElse { jmp_end: usize },
+    IfAfterElse { jump_end: usize },
 }
 
 pub(in crate::dsl) fn binary_op_to_kind(op: BinaryOp) -> BinaryKind {
@@ -184,30 +184,30 @@ pub(in crate::dsl) fn compile_expr_resolved(
             CompileTask::AndAfterRhs { jz_idx } => {
                 code.push(OpCode::PushConst(0.0));
                 code.push(OpCode::Binary(BinaryKind::Ne));
-                let jmp_end = code.len();
+                let jump_end = code.len();
                 code.push(OpCode::Jump(0));
                 let false_target = code.len();
                 code.push(OpCode::PushConst(0.0));
                 let end_target = code.len();
                 code[jz_idx] = OpCode::JumpIfZero(false_target);
-                code[jmp_end] = OpCode::Jump(end_target);
+                code[jump_end] = OpCode::Jump(end_target);
             }
             CompileTask::OrAfterLhs { rhs } => {
                 let jz_idx = code.len();
                 code.push(OpCode::JumpIfZero(0));
                 code.push(OpCode::PushConst(1.0));
-                let jmp_end = code.len();
+                let jump_end = code.len();
                 code.push(OpCode::Jump(0));
                 let rhs_target = code.len();
                 code[jz_idx] = OpCode::JumpIfZero(rhs_target);
-                tasks.push(CompileTask::OrAfterRhs { jmp_end });
+                tasks.push(CompileTask::OrAfterRhs { jump_end });
                 tasks.push(CompileTask::Eval(rhs));
             }
-            CompileTask::OrAfterRhs { jmp_end } => {
+            CompileTask::OrAfterRhs { jump_end } => {
                 code.push(OpCode::PushConst(0.0));
                 code.push(OpCode::Binary(BinaryKind::Ne));
                 let end_target = code.len();
-                code[jmp_end] = OpCode::Jump(end_target);
+                code[jump_end] = OpCode::Jump(end_target);
             }
             CompileTask::IfAfterCond { then_br, else_br } => {
                 let jz_idx = code.len();
@@ -216,16 +216,16 @@ pub(in crate::dsl) fn compile_expr_resolved(
                 tasks.push(CompileTask::Eval(then_br));
             }
             CompileTask::IfAfterThen { else_br, jz_idx } => {
-                let jmp_end = code.len();
+                let jump_end = code.len();
                 code.push(OpCode::Jump(0));
                 let else_target = code.len();
                 code[jz_idx] = OpCode::JumpIfZero(else_target);
-                tasks.push(CompileTask::IfAfterElse { jmp_end });
+                tasks.push(CompileTask::IfAfterElse { jump_end });
                 tasks.push(CompileTask::Eval(else_br));
             }
-            CompileTask::IfAfterElse { jmp_end } => {
+            CompileTask::IfAfterElse { jump_end } => {
                 let end_target = code.len();
-                code[jmp_end] = OpCode::Jump(end_target);
+                code[jump_end] = OpCode::Jump(end_target);
             }
         }
     }
