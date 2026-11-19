@@ -9,6 +9,8 @@ use crate::TableKind;
 use crate::error::{ConfidenceLevel, DocError, validate_confidence_level, validate_title};
 use crate::ids::{HookSource, SheetId};
 
+mod finite;
+
 const fn default_col_b() -> usize {
     1
 }
