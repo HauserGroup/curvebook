@@ -1,16 +1,19 @@
 //! Scientific transform, statistical test, curve fit, and result reporting/export commands.
 
+use std::collections::HashSet;
+
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
+    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
     CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
     GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec,
-    PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument, RepeatedMeasuresDesign, ResidualCovariance,
-    ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype, TableKind,
-    TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, XyTable,
+    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
+    RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType,
+    SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole,
+    WeightingScheme, XyTable,
 };
-use curvebook_fit::get_builtin_model;
+use curvebook_fit::{get_builtin_model, resolve_model_from_spec};
 use curvebook_format::{CsvOptions, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
 use curvebook_math::PValueFormat;
 use serde::{Deserialize, Serialize};
@@ -19,8 +22,8 @@ use serde_json::{Map, Value, json};
 use super::export::{de_opt_usize, write_atomic_output_file};
 use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_analyzable_data_sheet, require_result_sheet};
 use super::params::{
-    any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
-    str_schema,
+    any_json_schema, array_schema, bool_schema, deserialize_strict, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::dag;
@@ -740,6 +743,10 @@ fn run_analysis_with_domain(
     let doc = &mut ctx.session.doc;
 
     if command_id == "analysis.run" && !has_creation_fields(&parsed) {
+        if let Some(pct) = parsed.confidence_percent {
+            validate_confidence_percent(pct)?;
+        }
+        reject_extra_keys_without_creation(&parsed)?;
         return run_existing_or_project_analysis(doc, command_id, parsed.sheet_id.as_deref());
     }
 
@@ -807,10 +814,13 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         parsed.p_value_format.as_ref(),
     )?;
 
+    let cleaned_patch_map = extract_clean_patch_map(&mut updated, parsed.params.as_ref())?;
+    let cleaned_patch_val = cleaned_patch_map.as_ref().map(|m| Value::Object(m.clone()));
+
+    let kind_replaced = parsed.kind.is_some();
     if let Some(ref kind_val) = parsed.kind {
         let mut new_kind = if kind_val.is_object() {
-            serde_json::from_value(kind_val.clone())
-                .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid typed `kind` object: {err}")))?
+            deserialize_strict(kind_val, "/kind")?
         } else {
             let name = kind_val
                 .as_str()
@@ -820,15 +830,22 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
             resolve_kind_shorthand(&name, &combined)?
         };
         apply_kind_patch_and_overrides(&mut new_kind, &combined)?;
+        if let Some(ref patch_val) = cleaned_patch_val {
+            apply_kind_patch_and_overrides(&mut new_kind, patch_val)?;
+        }
         updated.update_kind(new_kind);
-    } else if let Some(ref patch_obj) = parsed.params {
-        let mut kind_copy = updated.kind.clone();
-        apply_kind_patch_and_overrides(&mut kind_copy, patch_obj)?;
-        updated.update_kind(kind_copy);
     } else {
         let mut kind_copy = updated.kind.clone();
         apply_kind_patch_and_overrides(&mut kind_copy, &combined)?;
+        if let Some(ref patch_val) = cleaned_patch_val {
+            apply_kind_patch_and_overrides(&mut kind_copy, patch_val)?;
+        }
         updated.update_kind(kind_copy);
+    }
+
+    validate_map_keys_for_kind(&updated.kind, &parsed.extra, false, "parameter")?;
+    if let Some(ref patch_map) = cleaned_patch_map {
+        validate_map_keys_for_kind(&updated.kind, patch_map, false, "parameter in `params`")?;
     }
 
     if !updated.kind.is_compatible_with(source_kind) {
@@ -839,7 +856,14 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         .with_remediation("Choose an analysis kind compatible with the source table archetype."));
     }
     let source_ds = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
+    validate_selected_data_sets_for_sheet(source_ds, &updated)?;
+    if kind_replaced {
+        persist_default_mv_columns(source_ds, &mut updated);
+    }
+    resolve_xy_bland_altman_mode(source_ds, &mut updated);
+    validate_analysis_spec_semantics(&updated)?;
     validate_xy_analysis_spec(source_ds, &updated)?;
+    validate_multiple_row_tests_spec(source_ds, &updated)?;
 
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
@@ -876,6 +900,7 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let new_source = parse_sheet_id(&parsed.source_sheet_id)?;
     let new_table_kind = require_analyzable_data_sheet(doc, &new_source)?.kind();
     let mut updated = require_result_sheet(doc, &id)?.analysis.clone();
+    let source_changed = updated.source_sheet_id != new_source;
 
     let next_selected = if parsed.clear_selected_data_sets == Some(true) {
         Vec::new()
@@ -890,8 +915,15 @@ fn run_analysis_retarget_data(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     };
 
     updated.retarget_source(new_source.clone(), new_table_kind, next_selected)?;
+    if source_changed && let AnalysisKind::BlandAltman(ref mut ba) = updated.kind {
+        ba.xy_compare_x_vs_y = None;
+    }
     let new_source_ds = require_analyzable_data_sheet(doc, &new_source)?;
+    validate_selected_data_sets_for_sheet(new_source_ds, &updated)?;
+    resolve_xy_bland_altman_mode(new_source_ds, &mut updated);
+    validate_analysis_spec_semantics(&updated)?;
     validate_xy_analysis_spec(new_source_ds, &updated)?;
+    validate_multiple_row_tests_spec(new_source_ds, &updated)?;
     if let Some(res) = doc.result_sheet_mut(&id) {
         res.analysis = updated;
     }
@@ -994,8 +1026,11 @@ fn run_result_generate_report(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
 
 fn ensure_result_succeeded(res: &ResultSheet) -> Result<(), EngineError> {
     match &res.status {
-        ResultStatus::Failed { code, message } => Err(EngineError::with_code(*code, format!("analysis `{}` failed ({code}): {message}", res.id))
-            .with_details(json!({ "sheet_id": res.id.as_str(), "error_code": code }))),
+        ResultStatus::Failed { code, message } => {
+            let mapped = if *code == ErrorCode::SolverFailed && message.contains("paired_selected_columns") { ErrorCode::BadInput } else { *code };
+            Err(EngineError::with_code(mapped, format!("analysis `{}` failed ({mapped}): {message}", res.id))
+                .with_details(json!({ "sheet_id": res.id.as_str(), "error_code": mapped })))
+        }
         ResultStatus::Dirty | ResultStatus::UpToDate => Ok(()),
     }
 }
@@ -1030,13 +1065,26 @@ fn result_summary_payload(res: &ResultSheet, recalculated: usize) -> Value {
 fn try_raw_analysis_spec(
     doc: &ProjectDocument,
     parsed: &RunAnalysisParams,
-    combined: &Value,
+    _combined: &Value,
     domain: AnalysisDomain,
 ) -> Result<Option<AnalysisSpec>, EngineError> {
     if let Some(ref spec_val) = parsed.spec {
-        let spec: AnalysisSpec = serde_json::from_value(spec_val.clone()).map_err(|err| {
-            EngineError::with_code(ErrorCode::BadInput, format!("invalid `spec` object: {err}")).with_details(json!({ "pointer": "/spec" }))
-        })?;
+        if parsed.kind.is_some() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "cannot specify both `spec` and `kind`"));
+        }
+        if !parsed.extra.is_empty() {
+            let extra_keys: Vec<&str> = parsed.extra.keys().map(String::as_str).collect();
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unrecognized parameter(s) {} alongside `spec`", extra_keys.join(", "))));
+        }
+        let mut spec: AnalysisSpec = deserialize_strict(spec_val, "/spec")?;
+        validate_confidence_percent(spec.confidence_level.percent())?;
+        apply_metadata_updates(
+            &mut spec,
+            parsed.title.as_ref().map(Option::as_deref),
+            parsed.confidence_percent,
+            parsed.selected_data_sets.as_deref(),
+            parsed.p_value_format.as_ref(),
+        )?;
         let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
         validate_domain_and_compat(&spec.kind, domain, table_kind)?;
         return Ok(Some(spec));
@@ -1044,15 +1092,29 @@ fn try_raw_analysis_spec(
 
     if let (Some(id_str), Some(src_str), Some(kind_val)) = (parsed.sheet_id.as_deref(), parsed.source_sheet_id.as_deref(), parsed.kind.as_ref())
         && kind_val.is_object()
+        && parsed.extra.contains_key("auto_title")
     {
-        let mut obj = combined.as_object().cloned().unwrap_or_default();
+        let mut obj = parsed.extra.clone();
         obj.insert(String::from("id"), Value::String(id_str.to_owned()));
         obj.insert(String::from("source_sheet_id"), Value::String(src_str.to_owned()));
-        if let Ok(spec) = serde_json::from_value::<AnalysisSpec>(Value::Object(obj)) {
-            let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
-            validate_domain_and_compat(&spec.kind, domain, table_kind)?;
-            return Ok(Some(spec));
+        obj.insert(String::from("kind"), kind_val.clone());
+        if let Some(ref t_opt) = parsed.title {
+            obj.insert(String::from("custom_title"), t_opt.as_ref().map_or(Value::Null, |t| Value::String(t.clone())));
         }
+        if let Some(c) = parsed.confidence_percent {
+            obj.insert(String::from("confidence_level"), json!(c));
+        }
+        if let Some(ref sel) = parsed.selected_data_sets {
+            obj.insert(String::from("selected_data_sets"), Value::Array(sel.clone()));
+        }
+        if let Some(ref pv) = parsed.p_value_format {
+            obj.insert(String::from("p_value_format"), pv.clone());
+        }
+        let spec: AnalysisSpec = deserialize_strict(&Value::Object(obj), "")?;
+        validate_confidence_percent(spec.confidence_level.percent())?;
+        let table_kind = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?.kind();
+        validate_domain_and_compat(&spec.kind, domain, table_kind)?;
+        return Ok(Some(spec));
     }
     Ok(None)
 }
@@ -1063,48 +1125,52 @@ fn build_analysis_spec(
     combined: &Value,
     domain: AnalysisDomain,
 ) -> Result<AnalysisSpec, EngineError> {
-    if let Some(spec) = try_raw_analysis_spec(doc, parsed, combined, domain)? {
-        return Ok(spec);
-    }
+    let mut spec = if let Some(spec) = try_raw_analysis_spec(doc, parsed, combined, domain)? {
+        spec
+    } else {
+        let raw_source = parsed.source_sheet_id.as_deref().ok_or_else(|| {
+            EngineError::with_code(ErrorCode::BadInput, "missing required parameter `source_sheet_id`")
+                .with_remediation("Supply `source_sheet` / `source_sheet_id` referencing an existing data sheet.")
+                .with_details(json!({ "pointer": "/source_sheet_id" }))
+        })?;
+        let source_sheet_id = parse_sheet_id(raw_source)?;
+        let table_kind = require_analyzable_data_sheet(doc, &source_sheet_id)?.kind();
+        let id = match parsed.sheet_id.as_deref() {
+            Some(raw) => parse_sheet_id(raw)?,
+            None => next_unique_sheet_id(doc, domain_prefix(domain))?,
+        };
 
-    let raw_source = parsed.source_sheet_id.as_deref().ok_or_else(|| {
-        EngineError::with_code(ErrorCode::BadInput, "missing required parameter `source_sheet_id`")
-            .with_remediation("Supply `source_sheet` / `source_sheet_id` referencing an existing data sheet.")
-            .with_details(json!({ "pointer": "/source_sheet_id" }))
-    })?;
-    let source_sheet_id = parse_sheet_id(raw_source)?;
-    let table_kind = require_analyzable_data_sheet(doc, &source_sheet_id)?.kind();
-    let id = match parsed.sheet_id.as_deref() {
-        Some(raw) => parse_sheet_id(raw)?,
-        None => next_unique_sheet_id(doc, domain_prefix(domain))?,
+        let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, &parsed.extra, domain, table_kind)?;
+        validate_domain_and_compat(&kind, domain, table_kind)?;
+
+        let mut spec = AnalysisSpec::new(id, source_sheet_id, kind)?;
+        apply_metadata_updates(
+            &mut spec,
+            parsed.title.as_ref().map(Option::as_deref),
+            parsed.confidence_percent,
+            parsed.selected_data_sets.as_deref(),
+            parsed.p_value_format.as_ref(),
+        )?;
+        spec
     };
 
-    let kind = parse_analysis_kind(parsed.kind.as_ref(), combined, domain, table_kind)?;
-    validate_domain_and_compat(&kind, domain, table_kind)?;
-
-    let mut spec = AnalysisSpec::new(id, source_sheet_id, kind)?;
-    apply_metadata_updates(
-        &mut spec,
-        parsed.title.as_ref().map(Option::as_deref),
-        parsed.confidence_percent,
-        parsed.selected_data_sets.as_deref(),
-        parsed.p_value_format.as_ref(),
-    )?;
-    if matches!(spec.kind, AnalysisKind::Multivariate(_)) && spec.selected_data_sets.is_empty() {
-        spec.selected_data_sets = default_multivariate_numeric_columns(doc, &spec.source_sheet_id);
-    }
-    let source_ds = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?;
-    validate_xy_analysis_spec(source_ds, &spec)?;
+    finalize_built_analysis_spec(doc, &mut spec)?;
     Ok(spec)
 }
 
-fn default_multivariate_numeric_columns(doc: &ProjectDocument, sheet_id: &SheetId) -> Vec<usize> {
-    let Ok(sheet) = require_analyzable_data_sheet(doc, sheet_id) else {
-        return Vec::new();
-    };
-    let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
-        return Vec::new();
-    };
+fn finalize_built_analysis_spec(doc: &ProjectDocument, spec: &mut AnalysisSpec) -> Result<(), EngineError> {
+    validate_confidence_percent(spec.confidence_level.percent())?;
+    let source_ds = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?;
+    validate_selected_data_sets_for_sheet(source_ds, spec)?;
+    persist_default_mv_columns(source_ds, spec);
+    resolve_xy_bland_altman_mode(source_ds, spec);
+    validate_analysis_spec_semantics(spec)?;
+    validate_xy_analysis_spec(source_ds, spec)?;
+    validate_multiple_row_tests_spec(source_ds, spec)?;
+    Ok(())
+}
+
+fn default_multivariate_numeric_columns(mv: &curvebook_doc::MultipleVariablesTable) -> Vec<usize> {
     let continuous: Vec<usize> = mv
         .variables
         .iter()
@@ -1112,17 +1178,20 @@ fn default_multivariate_numeric_columns(doc: &ProjectDocument, sheet_id: &SheetI
         .filter(|(_, v)| v.role == VariableRole::Continuous && v.cells.iter().any(|c| c.active_number().is_some_and(f64::is_finite)))
         .map(|(i, _)| i)
         .collect();
-    if continuous.len() >= 2 && continuous.len() < mv.variables.len() {
+    if continuous.len() >= 2 {
         return continuous;
     }
     let numeric: Vec<usize> = mv
         .variables
         .iter()
         .enumerate()
-        .filter(|(_, v)| v.cells.iter().any(|c| c.active_number().is_some_and(f64::is_finite)))
+        .filter(|(_, v)| {
+            !matches!(v.role, VariableRole::Categorical | VariableRole::Label)
+                && v.cells.iter().any(|c| c.active_number().is_some_and(f64::is_finite))
+        })
         .map(|(i, _)| i)
         .collect();
-    if numeric.len() >= 2 && numeric.len() < mv.variables.len() {
+    if numeric.len() >= 2 {
         return numeric;
     }
     Vec::new()
@@ -1180,12 +1249,13 @@ fn validate_xy_bland_altman_params(xy: &XyTable, ba: &BlandAltmanSpec) -> Result
             format!("Bland-Altman requires two distinct columns (`column_a` = {}, `column_b` = {})", ba.column_a, ba.column_b),
         ));
     }
-    if xy.data_sets.len() == 1 {
+    let compare_x_vs_y = ba.xy_compare_x_vs_y.unwrap_or(xy.data_sets.len() == 1);
+    if compare_x_vs_y {
         if ba.column_a != 0 || ba.column_b != 1 {
             let missing = if ba.column_a != 0 { ba.column_a } else { ba.column_b };
             return Err(EngineError::with_code(
                 ErrorCode::BadInput,
-                format!("single-dataset XY Bland-Altman compares X (0) vs Y0 (1); invalid column index {missing}"),
+                format!("X-vs-Y XY Bland-Altman compares X (0) vs Y0 (1); invalid column index {missing}"),
             ));
         }
         return Ok(());
@@ -1198,6 +1268,885 @@ fn validate_xy_bland_altman_params(xy: &XyTable, ba: &BlandAltmanSpec) -> Result
         ));
     }
     Ok(())
+}
+
+fn validate_confidence_percent(pct: f64) -> Result<(), EngineError> {
+    if !pct.is_finite() || pct <= 1.0 || pct > 99.99 {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!(
+                "`confidence_percent` ({pct}) must be a percentage strictly greater than 1.0 in (1.0, 99.99], such as 95.0 for 95% confidence (not a decimal fraction like 0.95)"
+            ),
+        )
+        .with_remediation("Supply `confidence_percent` on a percentage scale (for example 90.0, 95.0, or 99.0), not as a fraction in [0, 1].")
+        .with_details(json!({ "pointer": "/confidence_percent", "confidence_percent": pct })));
+    }
+    Ok(())
+}
+
+fn reject_extra_keys_without_creation(parsed: &RunAnalysisParams) -> Result<(), EngineError> {
+    if !parsed.extra.is_empty() {
+        let keys: Vec<&str> = parsed.extra.keys().map(String::as_str).collect();
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unrecognized parameter(s) {} for `analysis.run` without `source_sheet_id` and `kind`", keys.join(", ")),
+        )
+        .with_remediation("Supply `source_sheet_id` and `kind` to create an analysis, or pass only `sheet_id` to recalculate."));
+    }
+    if parsed.overwrite.is_some()
+        || parsed.title.is_some()
+        || parsed.confidence_percent.is_some()
+        || parsed.selected_data_sets.is_some()
+        || parsed.p_value_format.is_some()
+    {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "analysis configuration options require `source_sheet_id` and `kind` (use `analysis.updateParams` to modify an existing sheet)",
+        ));
+    }
+    Ok(())
+}
+
+fn extract_clean_patch_map(spec: &mut AnalysisSpec, params_val: Option<&Value>) -> Result<Option<Map<String, Value>>, EngineError> {
+    let Some(val) = params_val else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let Value::Object(map) = val else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`params` must be a JSON object or null"));
+    };
+    let mut cleaned = map.clone();
+    if let Some(conf_val) = cleaned.remove("confidence_percent").or_else(|| cleaned.remove("confidence_level")) {
+        let _ = cleaned.remove("confidence_level");
+        let pct = conf_val
+            .as_f64()
+            .filter(|v| v.is_finite())
+            .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`confidence_percent` must be a finite percentage in (1.0, 99.99]"))?;
+        apply_metadata_updates(spec, None, Some(pct), None, None)?;
+    }
+    if let Some(title_val) = cleaned.remove("title").or_else(|| cleaned.remove("custom_title")) {
+        let _ = cleaned.remove("custom_title");
+        match title_val {
+            Value::Null => apply_metadata_updates(spec, Some(None), None, None, None)?,
+            Value::String(ref s) => apply_metadata_updates(spec, Some(Some(s.as_str())), None, None, None)?,
+            _ => return Err(EngineError::with_code(ErrorCode::BadInput, "`title` must be a string or null")),
+        }
+    }
+    if let Some(sel_val) = cleaned.remove("selected_data_sets").or_else(|| cleaned.remove("selected_columns")).or_else(|| cleaned.remove("columns")) {
+        let _ = cleaned.remove("selected_columns");
+        let _ = cleaned.remove("columns");
+        let Value::Array(arr) = sel_val else {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`selected_data_sets` must be an array of dataset indices"));
+        };
+        apply_metadata_updates(spec, None, None, Some(&arr), None)?;
+    }
+    if let Some(pv_val) = cleaned.remove("p_value_format") {
+        apply_metadata_updates(spec, None, None, None, Some(&pv_val))?;
+    }
+    Ok(Some(cleaned))
+}
+
+fn resolve_xy_bland_altman_mode(source_ds: &DataSheet, spec: &mut AnalysisSpec) {
+    if let AnalysisKind::BlandAltman(ref mut ba) = spec.kind {
+        match &source_ds.archetype {
+            TableArchetype::Xy(xy) => {
+                if ba.xy_compare_x_vs_y.is_none() {
+                    ba.xy_compare_x_vs_y = Some(xy.data_sets.len() == 1);
+                }
+            }
+            _ => {
+                ba.xy_compare_x_vs_y = None;
+            }
+        }
+    }
+}
+
+fn validate_selected_data_sets_for_sheet(source_ds: &DataSheet, spec: &AnalysisSpec) -> Result<(), EngineError> {
+    let mut seen = HashSet::with_capacity(spec.selected_data_sets.len());
+    for &idx in &spec.selected_data_sets {
+        if !seen.insert(idx) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("duplicate index {idx} in `selected_data_sets`")));
+        }
+    }
+    if spec.selected_data_sets.is_empty() {
+        return Ok(());
+    }
+    if let AnalysisKind::NonlinearRegression(nl) = &spec.kind
+        && let TableArchetype::MultipleVariables(mv) = &source_ds.archetype
+        && !nl.mv_x_columns.is_empty()
+        && nl.mv_y_column.is_some()
+    {
+        return validate_nl_mv_group_selection(source_ds, mv, nl, &spec.selected_data_sets);
+    }
+    let col_count = source_ds.archetype.column_count();
+    for &idx in &spec.selected_data_sets {
+        if idx >= col_count {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("selected dataset index {idx} out of range for `{}` table with {col_count} columns", source_ds.archetype.kind().label()),
+            ));
+        }
+    }
+    Ok(())
+}
+
+fn validate_nl_mv_group_selection(
+    source_ds: &DataSheet,
+    mv: &MultipleVariablesTable,
+    nl: &NonlinearFitSpec,
+    selected: &[usize],
+) -> Result<(), EngineError> {
+    let n_vars = mv.variables.len();
+    for &gc in &nl.mv_group_columns {
+        if gc >= n_vars {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_group_columns` index {gc} out of range")));
+        }
+    }
+    for &xc in &nl.mv_x_columns {
+        if xc >= n_vars {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_x_columns` index {xc} out of range")));
+        }
+    }
+    if let Some(yc) = nl.mv_y_column
+        && yc >= n_vars
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("`mv_y_column` index {yc} out of range")));
+    }
+    let has_cat_fallback = mv
+        .variables
+        .iter()
+        .enumerate()
+        .any(|(idx, v)| Some(idx) != nl.mv_y_column && !nl.mv_x_columns.contains(&idx) && v.role == VariableRole::Categorical);
+    if nl.mv_group_columns.is_empty() && !has_cat_fallback {
+        for &idx in selected {
+            if idx >= n_vars {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("selected dataset index {idx} out of range for Multivariate table with {n_vars} columns"),
+                ));
+            }
+        }
+        return Ok(());
+    }
+    let mv_spec =
+        curvebook_fit::MultivarExtractionSpec { group_columns: &nl.mv_group_columns, x_columns: &nl.mv_x_columns, y_column: nl.mv_y_column };
+    match curvebook_fit::extract_datasets_from_sheet_with_options(source_ds, &[], &mv_spec) {
+        Ok(groups) => {
+            for &idx in selected {
+                if idx >= groups.len() {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("selected group index {idx} out of range for Multivariate fit with {} groups", groups.len()),
+                    ));
+                }
+            }
+            Ok(())
+        }
+        Err(curvebook_fit::FitError::InvalidParameter { name, reason }) => {
+            Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `{name}`: {reason}")))
+        }
+        Err(_) => {
+            for &idx in selected {
+                if idx >= n_vars {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("selected dataset index {idx} out of range for Multivariate table with {n_vars} columns"),
+                    ));
+                }
+            }
+            Ok(())
+        }
+    }
+}
+
+fn validate_multiple_row_tests_spec(source_ds: &DataSheet, spec: &AnalysisSpec) -> Result<(), EngineError> {
+    let AnalysisKind::MultipleRowTTests(mr) = &spec.kind else {
+        return Ok(());
+    };
+    match &source_ds.archetype {
+        TableArchetype::Grouped(g) => validate_grouped_or_xy_row_tests("Grouped", g.data_sets.len(), &spec.selected_data_sets, mr.paired),
+        TableArchetype::Xy(xy) => validate_grouped_or_xy_row_tests("XY", xy.data_sets.len(), &spec.selected_data_sets, mr.paired),
+        TableArchetype::Column(col) => {
+            let count = if spec.selected_data_sets.is_empty() { col.data_sets.len() } else { spec.selected_data_sets.len() };
+            if mr.paired && !count.is_multiple_of(2) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("paired row-wise tests on Column tables require an even number of selected columns (got {count})"),
+                ));
+            }
+            Ok(())
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let count = if spec.selected_data_sets.is_empty() {
+                mv.variables.iter().filter(|v| !matches!(v.role, VariableRole::Categorical | VariableRole::Label)).count()
+            } else {
+                spec.selected_data_sets.iter().filter(|&&i| mv.variables.get(i).is_some_and(|v| v.role != VariableRole::Categorical)).count()
+            };
+            if mr.paired && !count.is_multiple_of(2) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("paired row-wise tests on Multiple Variables tables require an even number of numeric columns (got {count})"),
+                ));
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn validate_grouped_or_xy_row_tests(label: &str, total: usize, selected: &[usize], paired: bool) -> Result<(), EngineError> {
+    let count = if selected.is_empty() { total } else { selected.len() };
+    if paired && count != 2 {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("paired row-wise tests on {label} tables require exactly 2 data sets (`selected_data_sets`), got {count}"),
+        ));
+    }
+    if !selected.is_empty() && count != 2 {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("explicit `selected_data_sets` for multiple row tests on {label} tables must select 2 data sets, got {count}"),
+        ));
+    }
+    Ok(())
+}
+
+fn validate_analysis_spec_semantics(spec: &AnalysisSpec) -> Result<(), EngineError> {
+    match &spec.kind {
+        AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent }) => {
+            if !fdr_q_percent.is_finite() || *fdr_q_percent <= 0.0 || *fdr_q_percent > 100.0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("ROUT `fdr_q_percent` ({fdr_q_percent}) must lie in (0, 100]")));
+            }
+        }
+        AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, .. }) => {
+            if !alpha.is_finite() || *alpha <= 0.0 || *alpha >= 1.0 {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("Grubbs `alpha` ({alpha}) must lie strictly in (0, 1)")));
+            }
+        }
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { imputations_m, max_iters, .. }) => {
+            if !(2..=50).contains(imputations_m) {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("multiple imputation `imputations_m` ({imputations_m}) must be in 2..=50"),
+                ));
+            }
+            if !(1..=100).contains(max_iters) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("multiple imputation `max_iters` ({max_iters}) must be in 1..=100")));
+            }
+        }
+        AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_means_k, k_sweep_max, .. }) => {
+            if let Some(k) = k_means_k
+                && *k < 2
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`k_means_k` must be >= 2"));
+            }
+            if let Some(k_max) = k_sweep_max
+                && *k_max < 2
+            {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`k_sweep_max` must be >= 2"));
+            }
+        }
+        AnalysisKind::NonlinearRegression(nl) => validate_nonlinear_spec_semantics(nl)?,
+        _ => {}
+    }
+    Ok(())
+}
+
+fn validate_nonlinear_spec_semantics(nl: &NonlinearFitSpec) -> Result<(), EngineError> {
+    if let FitMethod::RoutOutlierElimination { fdr_q_percent } = nl.method
+        && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
+    {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("nonlinear ROUT `fdr_q_percent` ({fdr_q_percent}) must lie in (0, 50]")));
+    }
+    if nl.parameter_rules.is_empty() {
+        return Ok(());
+    }
+    let model = resolve_model_from_spec(nl)
+        .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid nonlinear model `{}`: {err}", nl.equation_id)))?;
+    let param_names = model.param_names();
+    let mut seen: Vec<&str> = Vec::with_capacity(nl.parameter_rules.len());
+    for rule in &nl.parameter_rules {
+        if !param_names.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)) {
+            return Err(EngineError::with_code(
+                ErrorCode::BadInput,
+                format!("unknown parameter rule `{}` for `{}` (expected one of: {})", rule.name, nl.equation_id, param_names.join(", ")),
+            ));
+        }
+        if seen.iter().any(|prev| prev.eq_ignore_ascii_case(&rule.name)) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("duplicate `parameter_rules` entry for `{}`", rule.name)));
+        }
+        seen.push(&rule.name);
+    }
+    Ok(())
+}
+
+fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec) {
+    let TableArchetype::MultipleVariables(mv) = &source_ds.archetype else {
+        return;
+    };
+    match &mut spec.kind {
+        AnalysisKind::Multivariate(_) => {
+            if spec.selected_data_sets.is_empty() {
+                spec.selected_data_sets = default_multivariate_numeric_columns(mv);
+            }
+        }
+        AnalysisKind::TwoGroupComparison(tg) => persist_mv_two_group_defaults(mv, &mut spec.selected_data_sets, tg),
+        AnalysisKind::NonlinearRegression(nl) => persist_mv_nonlinear_defaults(mv, &spec.selected_data_sets, nl),
+        AnalysisKind::LinearRegression(_) => persist_mv_linear_defaults(mv, &mut spec.selected_data_sets),
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column, mv_status_column, mv_group_column, .. }) => {
+            persist_mv_km_defaults(mv, &spec.selected_data_sets, mv_time_column, mv_status_column, mv_group_column);
+        }
+        AnalysisKind::DescriptiveStats(_)
+        | AnalysisKind::OneWayAnova(_)
+        | AnalysisKind::MultipleRowTTests(_)
+        | AnalysisKind::OutlierDetection(_)
+        | AnalysisKind::RocCurve(_)
+        | AnalysisKind::PValueStack(_)
+            if spec.selected_data_sets.is_empty() =>
+        {
+            let numeric_cols: Vec<usize> = mv.variables.iter().enumerate().filter(|(_, v)| is_mv_numeric_var(v)).map(|(i, _)| i).collect();
+            if !numeric_cols.is_empty() {
+                spec.selected_data_sets = numeric_cols;
+            }
+        }
+        _ => {}
+    }
+}
+
+fn is_mv_numeric_var(var: &VariableColumn) -> bool {
+    !matches!(var.role, VariableRole::Categorical | VariableRole::Label)
+}
+
+fn select_default_mv_response_col(mv: &MultipleVariablesTable, candidates: &[usize]) -> Option<usize> {
+    if candidates.len() <= 1 {
+        return candidates.first().copied();
+    }
+    let active: Vec<usize> = candidates
+        .iter()
+        .copied()
+        .filter(|&idx| mv.variables.get(idx).is_some_and(|v| v.cells.iter().any(|c| c.active_number().is_some())))
+        .collect();
+    active
+        .iter()
+        .copied()
+        .rfind(|&idx| mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Calculated))
+        .or_else(|| active.last().copied())
+        .or_else(|| candidates.last().copied())
+}
+
+fn persist_mv_two_group_defaults(mv: &MultipleVariablesTable, selected: &mut Vec<usize>, tg: &mut TwoGroupSpec) {
+    let n_vars = mv.variables.len();
+    let pool: Vec<usize> = if selected.is_empty() { (0..n_vars).collect() } else { selected.iter().copied().filter(|&i| i < n_vars).collect() };
+    if matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. }) {
+        if tg.mv_response_column.is_none() && selected.is_empty() {
+            let num_cols: Vec<usize> = pool.into_iter().filter(|&i| is_mv_numeric_var(&mv.variables[i])).collect();
+            if !num_cols.is_empty() {
+                *selected = num_cols;
+            }
+        }
+        return;
+    }
+    if tg.mv_group_column.is_some() || tg.mv_response_column.is_some() {
+        if tg.mv_group_column.is_some_and(|g| g >= n_vars) || tg.mv_response_column.is_some_and(|r| r >= n_vars) {
+            return;
+        }
+        if tg.mv_group_column.is_none() {
+            let cat_cands: Vec<usize> =
+                pool.iter().copied().filter(|&i| Some(i) != tg.mv_response_column && mv.variables[i].role == VariableRole::Categorical).collect();
+            if let [only] = cat_cands.as_slice() {
+                tg.mv_group_column = Some(*only);
+            }
+        }
+        if tg.mv_response_column.is_none()
+            && let Some(g_col) = tg.mv_group_column
+        {
+            let num_cands: Vec<usize> = pool.into_iter().filter(|&i| i != g_col && is_mv_numeric_var(&mv.variables[i])).collect();
+            tg.mv_response_column = select_default_mv_response_col(mv, &num_cands);
+        }
+        return;
+    }
+    let cat_cols: Vec<usize> = pool.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
+    let num_cols: Vec<usize> = pool.iter().copied().filter(|&i| is_mv_numeric_var(&mv.variables[i])).collect();
+    if cat_cols.len() == 1
+        && let Some(r_col) = select_default_mv_response_col(mv, &num_cols)
+    {
+        tg.mv_group_column = Some(cat_cols[0]);
+        tg.mv_response_column = Some(r_col);
+    } else if selected.is_empty() && !num_cols.is_empty() {
+        *selected = num_cols;
+    }
+}
+
+fn pick_default_mv_fit_col(mv: &MultipleVariablesTable, candidates: impl Iterator<Item = usize>) -> Option<usize> {
+    let mut role_match = None;
+    for idx in candidates {
+        let Some(var) = mv.variables.get(idx) else { continue };
+        if !is_mv_numeric_var(var) {
+            continue;
+        }
+        if var.cells.iter().any(|c| c.active_number().is_some()) {
+            return Some(idx);
+        }
+        if role_match.is_none() {
+            role_match = Some(idx);
+        }
+    }
+    role_match
+}
+
+fn resolve_mv_fit_columns_default(
+    mv: &MultipleVariablesTable,
+    selected: &[usize],
+    group_cols_in: &[usize],
+    x_cols_in: &[usize],
+    y_col_in: Option<usize>,
+) -> Option<(Vec<usize>, usize, Vec<usize>)> {
+    let n_vars = mv.variables.len();
+    if n_vars < 2 || group_cols_in.iter().any(|&c| c >= n_vars) || x_cols_in.iter().any(|&c| c >= n_vars) || y_col_in.is_some_and(|c| c >= n_vars) {
+        return None;
+    }
+    let group_set: HashSet<usize> = group_cols_in.iter().copied().collect();
+    let x_set: HashSet<usize> = x_cols_in.iter().copied().collect();
+    let selected_numeric: Vec<usize> =
+        selected.iter().copied().filter(|&i| i < n_vars && !group_set.contains(&i) && is_mv_numeric_var(&mv.variables[i])).collect();
+
+    let y_col = if let Some(yc) = y_col_in {
+        yc
+    } else if let Some(&sel) = selected_numeric.iter().rev().find(|i| !x_set.contains(i)) {
+        sel
+    } else {
+        pick_default_mv_fit_col(mv, (0..n_vars).rev().filter(|i| !x_set.contains(i) && !group_set.contains(i)))
+            .or_else(|| (0..n_vars).rev().find(|i| !x_set.contains(i) && !group_set.contains(i)))
+            .unwrap_or_else(|| selected.first().copied().unwrap_or(1))
+    };
+
+    let selected_x: Vec<usize> = selected_numeric.iter().copied().filter(|&i| i != y_col).collect();
+    let x_cols = if !x_cols_in.is_empty() {
+        x_cols_in.to_vec()
+    } else if !selected_x.is_empty() {
+        selected_x
+    } else {
+        let fallback = pick_default_mv_fit_col(mv, (0..n_vars).filter(|&i| i != y_col && !group_set.contains(&i)))
+            .or_else(|| (0..n_vars).find(|&i| i != y_col && !group_set.contains(&i)))
+            .unwrap_or(usize::from(y_col == 0));
+        vec![fallback]
+    };
+
+    let x_used: HashSet<usize> = x_cols.iter().copied().collect();
+    let selected_categorical: Vec<usize> = selected
+        .iter()
+        .copied()
+        .filter(|&i| i < n_vars && i != y_col && !x_used.contains(&i) && mv.variables[i].role == VariableRole::Categorical)
+        .collect();
+    let group_cols = if !group_cols_in.is_empty() {
+        group_cols_in.to_vec()
+    } else if !selected_categorical.is_empty() {
+        selected_categorical
+    } else if selected.len() < 2 {
+        mv.variables
+            .iter()
+            .enumerate()
+            .find(|(i, v)| *i != y_col && !x_used.contains(i) && v.role == VariableRole::Categorical)
+            .map(|(i, _)| vec![i])
+            .unwrap_or_default()
+    } else {
+        Vec::new()
+    };
+    Some((x_cols, y_col, group_cols))
+}
+
+fn persist_mv_nonlinear_defaults(mv: &MultipleVariablesTable, selected: &[usize], nl: &mut NonlinearFitSpec) {
+    let Some((x_cols, y_col, group_cols)) = resolve_mv_fit_columns_default(mv, selected, &nl.mv_group_columns, &nl.mv_x_columns, nl.mv_y_column)
+    else {
+        return;
+    };
+    if selected.is_empty() {
+        if nl.mv_x_columns.is_empty() {
+            nl.mv_x_columns = x_cols;
+        }
+        if nl.mv_y_column.is_none() {
+            nl.mv_y_column = Some(y_col);
+        }
+        if nl.mv_group_columns.is_empty() {
+            nl.mv_group_columns = group_cols;
+        }
+        return;
+    }
+    if nl.mv_x_columns.is_empty() && nl.mv_y_column.is_none() {
+        if group_cols.is_empty() {
+            nl.mv_x_columns = x_cols;
+            nl.mv_y_column = Some(y_col);
+        } else if selected.len() < 2 {
+            nl.mv_x_columns = x_cols;
+            if nl.mv_group_columns.is_empty() {
+                nl.mv_group_columns = group_cols;
+            }
+        }
+    }
+}
+
+fn persist_mv_linear_defaults(mv: &MultipleVariablesTable, selected: &mut Vec<usize>) {
+    if !selected.is_empty() {
+        return;
+    }
+    let Some((x_cols, y_col, group_cols)) = resolve_mv_fit_columns_default(mv, &[], &[], &[], None) else {
+        return;
+    };
+    if !is_mv_numeric_var(&mv.variables[y_col]) || x_cols.is_empty() || x_cols.iter().any(|&c| !is_mv_numeric_var(&mv.variables[c])) {
+        return;
+    }
+    let mut pinned = Vec::new();
+    for c in group_cols {
+        if c != y_col && !pinned.contains(&c) {
+            pinned.push(c);
+        }
+    }
+    for c in x_cols {
+        if c != y_col && !pinned.contains(&c) {
+            pinned.push(c);
+        }
+    }
+    if !pinned.is_empty() && !pinned.contains(&y_col) {
+        pinned.push(y_col);
+    }
+    if pinned.len() >= 2 {
+        *selected = pinned;
+    }
+}
+
+fn is_binary_status_col(mv: &MultipleVariablesTable, col_idx: usize) -> bool {
+    let Some(var) = mv.variables.get(col_idx) else { return false };
+    let mut count = 0_usize;
+    for cell in &var.cells {
+        if cell.excluded || cell.is_empty() {
+            continue;
+        }
+        match cell.value {
+            CellValue::Number(v) if v.is_finite() && (v == 0.0 || v == 1.0) => count += 1,
+            _ => return false,
+        }
+    }
+    count > 0
+}
+
+fn persist_mv_km_defaults(
+    mv: &MultipleVariablesTable,
+    selected: &[usize],
+    mv_time_column: &mut Option<usize>,
+    mv_status_column: &mut Option<usize>,
+    mv_group_column: &mut Option<usize>,
+) {
+    let n_vars = mv.variables.len();
+    if mv_time_column.is_some_and(|t| t >= n_vars) || mv_status_column.is_some_and(|s| s >= n_vars) || mv_group_column.is_some_and(|g| g >= n_vars) {
+        return;
+    }
+    let was_time_none = mv_time_column.is_none();
+    let was_status_none = mv_status_column.is_none();
+    let pool: Vec<usize> = if selected.is_empty() { (0..n_vars).collect() } else { selected.iter().copied().filter(|&i| i < n_vars).collect() };
+    let status_col = match *mv_status_column {
+        Some(s) => s,
+        None => {
+            let candidates: Vec<usize> =
+                pool.iter().copied().filter(|&i| Some(i) != *mv_time_column && Some(i) != *mv_group_column && is_binary_status_col(mv, i)).collect();
+            let preferred = candidates.iter().copied().find(|&i| {
+                let lower = mv.variables[i].title.to_ascii_lowercase();
+                ["status", "event", "censor", "death"].iter().any(|h| lower.contains(h))
+            });
+            let Some(chosen) = preferred.or_else(|| candidates.first().copied()) else { return };
+            *mv_status_column = Some(chosen);
+            chosen
+        }
+    };
+    let time_col = match *mv_time_column {
+        Some(t) => t,
+        None => {
+            let candidates: Vec<usize> = pool
+                .iter()
+                .copied()
+                .filter(|&i| {
+                    i != status_col
+                        && Some(i) != *mv_group_column
+                        && mv.variables.get(i).is_some_and(|v| {
+                            v.role != VariableRole::Categorical && v.cells.iter().filter_map(|c| c.active_number()).any(|x| x >= 0.0)
+                        })
+                })
+                .collect();
+            let preferred = candidates.iter().copied().find(|&i| {
+                let lower = mv.variables[i].title.to_ascii_lowercase();
+                ["time", "surv", "follow", "dur", "day", "month", "year"].iter().any(|h| lower.contains(h))
+            });
+            let Some(chosen) = preferred.or_else(|| candidates.first().copied()) else { return };
+            *mv_time_column = Some(chosen);
+            chosen
+        }
+    };
+    if time_col == status_col {
+        return;
+    }
+    if mv_group_column.is_none() && (was_time_none || was_status_none || !selected.is_empty()) {
+        *mv_group_column = pool.iter().copied().find(|&i| i != time_col && i != status_col && mv.variables[i].role == VariableRole::Categorical);
+    }
+}
+
+fn validate_map_keys_for_kind(
+    kind: &AnalysisKind,
+    map: &Map<String, Value>,
+    allow_simulate_params: bool,
+    context_label: &str,
+) -> Result<(), EngineError> {
+    let invalid: Vec<&str> = map.keys().map(String::as_str).filter(|k| !is_key_allowed_for_kind(kind, k, allow_simulate_params)).collect();
+    if invalid.is_empty() {
+        return Ok(());
+    }
+    Err(EngineError::with_code(
+        ErrorCode::BadInput,
+        format!("unrecognized or inapplicable {context_label}(s) {} for `{}`", invalid.join(", "), kind.derive_auto_title()),
+    )
+    .with_remediation("Remove parameters that do not apply to the resolved analysis kind or check field spelling.")
+    .with_details(json!({ "invalid_keys": invalid, "analysis": kind.derive_auto_title() })))
+}
+
+fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, allow_simulate_params: bool) -> bool {
+    match kind {
+        AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key, allow_simulate_params),
+        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key),
+        _ => is_key_allowed_for_stats(kind, key),
+    }
+}
+
+fn is_key_allowed_for_transform(tr: &TransformAnalysisSpec, key: &str, allow_simulate_params: bool) -> bool {
+    match tr {
+        TransformAnalysisSpec::Math { .. } => {
+            matches!(key, "x_transform" | "y_transform" | "preset" | "operation" | "error_propagation" | "propagate_error")
+        }
+        TransformAnalysisSpec::Normalize { .. } => {
+            matches!(key, "zero_anchor" | "zero" | "hundred_anchor" | "hundred" | "output_percent" | "as_fraction" | "per_data_set")
+        }
+        TransformAnalysisSpec::RemoveBaseline { .. } => matches!(key, "baseline_columns" | "operation"),
+        TransformAnalysisSpec::Transpose { .. } => key == "swap_row_and_column_titles",
+        TransformAnalysisSpec::PruneRows { .. } => matches!(key, "every_k_rows" | "step" | "average_window" | "average_dropped"),
+        TransformAnalysisSpec::SelectAndTransform { .. } => {
+            matches!(key, "filter_formula" | "target_archetype" | "derived_columns" | "derived" | "column_formulas" | "formulas")
+        }
+        TransformAnalysisSpec::Simulate { .. } => {
+            matches!(key, "seed" | "row_count" | "n_points" | "replicates" | "x_min" | "x_max" | "equation_id" | "parameters" | "noise")
+                || (allow_simulate_params && key == "params")
+        }
+        TransformAnalysisSpec::RandomSample { .. } => {
+            matches!(key, "seed" | "sample_size" | "n_samples" | "stratify_column" | "proportional_allocation")
+        }
+    }
+}
+
+fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str) -> bool {
+    matches!(key, "multiplicity" | "post_hoc" | "multiplicity_method" | "report_confidence_intervals" | "alpha" | "threshold")
+        || (matches!(mult.method, MultiplicityMethod::Dunnett { .. }) && key == "control_column")
+}
+
+fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str) -> bool {
+    match kind {
+        AnalysisKind::LinearRegression(_) => matches!(
+            key,
+            "deming"
+                | "deming_model_ii"
+                | "force_through_origin"
+                | "confidence_bands"
+                | "prediction_bands"
+                | "interpolate_unknowns"
+                | "x_range_filter"
+                | "plot_x_min"
+                | "plot_x_max"
+                | "plot_segments"
+        ),
+        AnalysisKind::NonlinearRegression(nl) => {
+            matches!(
+                key,
+                "equation_id"
+                    | "custom_dsl"
+                    | "method"
+                    | "fit_method"
+                    | "weighting"
+                    | "parameter_rules"
+                    | "profile_likelihood_ci"
+                    | "identify_unstable_parameters"
+                    | "flag_r_squared_below"
+                    | "comparison"
+                    | "model_comparison"
+                    | "confidence_bands"
+                    | "prediction_bands"
+                    | "interpolate_unknowns"
+                    | "replicates_lack_of_fit_test"
+                    | "normality_of_residuals"
+                    | "normality_tests"
+                    | "max_iters"
+                    | "x_range_filter"
+                    | "y_range_filter"
+                    | "plot_function_only"
+                    | "plot_x_min"
+                    | "plot_x_max"
+                    | "homoscedasticity_test"
+                    | "emit_residuals_tab"
+                    | "emit_covariance_tab"
+                    | "band_log_spacing"
+                    | "mv_group_columns"
+                    | "mv_x_columns"
+                    | "mv_y_column"
+            ) || (matches!(nl.method, FitMethod::RoutOutlierElimination { .. }) && matches!(key, "q_percent" | "fdr_q_percent"))
+                || (nl.comparison.is_some() && matches!(key, "alternative_equation_id" | "alternative_model"))
+        }
+        _ => false,
+    }
+}
+
+fn is_key_allowed_for_stats(kind: &AnalysisKind, key: &str) -> bool {
+    match kind {
+        AnalysisKind::DescriptiveStats(_) => {
+            matches!(key, "aggregation" | "custom_upper_percentile" | "run_normality_battery" | "hypothetical_value")
+        }
+        AnalysisKind::OutlierDetection(OutlierSpec::Rout { .. }) => matches!(key, "q_percent" | "fdr_q_percent"),
+        AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { .. }) => matches!(key, "alpha" | "iterative"),
+        AnalysisKind::TwoGroupComparison(tg) => {
+            matches!(
+                key,
+                "two_tailed" | "one_tailed" | "compute_effect_sizes" | "mv_group_column" | "group_column" | "mv_response_column" | "response_column"
+            ) || (matches!(tg.method, TwoGroupMethod::OneSampleT { .. } | TwoGroupMethod::OneSampleWilcoxon { .. })
+                && matches!(key, "hypothetical" | "hypothetical_mean"))
+        }
+        AnalysisKind::BlandAltman(_) => matches!(key, "column_a" | "column_b" | "percent_difference" | "xy_compare_x_vs_y"),
+        AnalysisKind::PassingBablok(_) => matches!(key, "x_column" | "y_column"),
+        AnalysisKind::MultipleRowTTests(mr) => {
+            matches!(key, "paired" | "nonparametric" | "assume_equal_sd") || is_key_allowed_for_multiplicity(&mr.multiplicity, key)
+        }
+        AnalysisKind::OneWayAnova(spec) => {
+            matches!(key, "mixed_effects_reml" | "df_method" | "residual_covariance" | "compute_effect_sizes")
+                || (matches!(spec.method, OneWayMethod::RepeatedMeasures { .. }) && key == "geisser_greenhouse")
+                || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+        }
+        AnalysisKind::FactorialAnova(spec) => {
+            matches!(
+                key,
+                "three_way"
+                    | "multifactor_columns"
+                    | "response_column"
+                    | "max_interaction_order"
+                    | "ss_type"
+                    | "repeated_measures"
+                    | "mixed_effects_reml"
+                    | "df_method"
+                    | "residual_covariance"
+                    | "fit_reml_on_missing"
+                    | "compute_effect_sizes"
+            ) || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+        }
+        AnalysisKind::NestedComparison(spec) => {
+            matches!(key, "two_group_t_test" | "df_method") || is_key_allowed_for_multiplicity(&spec.multiplicity, key)
+        }
+        AnalysisKind::Contingency(c) => {
+            matches!(
+                key,
+                "method"
+                    | "contingency_method"
+                    | "compute_odds_and_risk_ratios"
+                    | "compute_sensitivity_specificity"
+                    | "compute_phi_and_cramers_v"
+                    | "expected_proportions"
+                    | "null_proportion"
+            ) || (matches!(c.method, ContingencyMethod::PearsonChiSquare { .. }) && matches!(key, "yates" | "yates_continuity"))
+                || (matches!(c.method, ContingencyMethod::CohenKappa { .. }) && matches!(key, "weighting" | "kappa_weighting"))
+        }
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { multiplicity, .. }) => {
+            matches!(
+                key,
+                "log_rank_mantel_cox"
+                    | "log_rank"
+                    | "gehan_breslow_wilcoxon"
+                    | "gehan"
+                    | "trend_test"
+                    | "asymmetrical_greenwood_ci"
+                    | "mv_time_column"
+                    | "time_column"
+                    | "mv_status_column"
+                    | "status_column"
+                    | "mv_group_column"
+                    | "group_column"
+            ) || is_key_allowed_for_multiplicity(multiplicity, key)
+        }
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { .. }) => {
+            matches!(key, "time_column" | "status_column" | "predictor_columns" | "cox_covariate_columns" | "reference_levels" | "tie_method")
+        }
+        AnalysisKind::RocCurve(_) => key == "ci_method",
+        AnalysisKind::GeneralizedLinearModel(_) => {
+            matches!(key, "family" | "glm_family" | "response_column" | "predictor_columns" | "reference_levels" | "compute_vif")
+        }
+        AnalysisKind::Multivariate(mv) => is_key_allowed_for_multivariate(mv, key),
+        AnalysisKind::PValueStack(_) => matches!(
+            key,
+            "method"
+                | "pvalue_stack_method"
+                | "multiplicity_method"
+                | "multiplicity"
+                | "threshold"
+                | "pvalue_stack_threshold"
+                | "alpha"
+                | "q"
+                | "fdr_q"
+                | "column"
+                | "pvalue_stack_column"
+        ),
+        AnalysisKind::PowerAnalysis(_) => matches!(
+            key,
+            "family"
+                | "solve_target"
+                | "tail_mode"
+                | "two_tailed"
+                | "alpha"
+                | "target_power"
+                | "sample_size"
+                | "n"
+                | "sample_size_group2"
+                | "n2"
+                | "allocation_ratio"
+                | "effect"
+                | "effect_size"
+                | "standardized_effect"
+                | "chi_square_df"
+                | "df"
+                | "two_proportions_mode"
+                | "continuity_correction"
+                | "correlation_method"
+                | "info_sheet_id"
+                | "num_groups"
+                | "anova_groups"
+        ),
+        AnalysisKind::Transform(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => false,
+    }
+}
+
+fn is_key_allowed_for_multivariate(mv: &MultivariateSpec, key: &str) -> bool {
+    match mv {
+        MultivariateSpec::Pca { .. } => matches!(key, "standardize" | "parallel_analysis_seed" | "pcr_outcome_column"),
+        MultivariateSpec::CorrelationMatrix { .. } => {
+            matches!(key, "spearman" | "spearman_rank" | "correlation_all_pairs" | "correlation_heatmap")
+        }
+        MultivariateSpec::Clustering { .. } => {
+            matches!(key, "k_means_k" | "k_clusters" | "distance" | "distance_metric" | "linkage" | "linkage_method" | "k_sweep_max")
+        }
+        MultivariateSpec::MultipleImputation { .. } => matches!(
+            key,
+            "imputations_m"
+                | "m"
+                | "num_imputations"
+                | "max_iters"
+                | "iterations"
+                | "seed"
+                | "response_column"
+                | "target_column"
+                | "predictor_columns"
+                | "predictors"
+        ),
+    }
 }
 
 fn validate_xy_glm_params(xy: &XyTable, selected_data_sets: &[usize], glm: &GlmSpec) -> Result<(), EngineError> {
@@ -1265,6 +2214,7 @@ fn apply_metadata_updates(
         }
     }
     if let Some(pct) = confidence_percent {
+        validate_confidence_percent(pct)?;
         spec.set_confidence_percent(pct)?;
     }
     if let Some(vals) = selected_data_sets {
@@ -1280,22 +2230,30 @@ fn apply_metadata_updates(
     Ok(())
 }
 
-fn parse_analysis_kind(kind_val: Option<&Value>, params: &Value, domain: AnalysisDomain, table_kind: TableKind) -> Result<AnalysisKind, EngineError> {
-    if let Some(kv) = kind_val
+fn parse_analysis_kind(
+    kind_val: Option<&Value>,
+    params: &Value,
+    extra: &Map<String, Value>,
+    domain: AnalysisDomain,
+    table_kind: TableKind,
+) -> Result<AnalysisKind, EngineError> {
+    let mut kind = if let Some(kv) = kind_val
         && kv.is_object()
     {
-        let mut kind: AnalysisKind =
-            serde_json::from_value(kv.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `kind` object: {err}")))?;
+        let mut kind: AnalysisKind = deserialize_strict(kv, "/kind")?;
         apply_shorthand_kind_overrides(&mut kind, params)?;
-        return Ok(kind);
-    }
-
-    let raw_kind = kind_val.and_then(Value::as_str).map(|s| s.trim().to_ascii_lowercase());
-    let mut kind = match raw_kind.as_deref() {
-        None => infer_default_kind(params, domain, table_kind)?,
-        Some(name) => resolve_kind_shorthand(name, params)?,
+        kind
+    } else {
+        let raw_kind = kind_val.and_then(Value::as_str).map(|s| s.trim().to_ascii_lowercase());
+        let mut kind = match raw_kind.as_deref() {
+            None => infer_default_kind(params, domain, table_kind)?,
+            Some(name) => resolve_kind_shorthand(name, params)?,
+        };
+        apply_kind_patch_and_overrides(&mut kind, params)?;
+        kind
     };
-    apply_kind_patch_and_overrides(&mut kind, params)?;
+    validate_map_keys_for_kind(&kind, extra, true, "parameter")?;
+    let _ = &mut kind;
     Ok(kind)
 }
 
@@ -1355,12 +2313,12 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
         "math" | "transform.math" | "math_transform" => return resolve_transform_math(params).map(Some),
         "normalize" | "transform.normalize" => TransformAnalysisSpec::Normalize {
             zero_anchor: match params.get("zero_anchor").or_else(|| params.get("zero")) {
-                None | Some(Value::Null) => parse_normalize_anchor("smallest"),
-                Some(v) => parse_serde_or_str(v, |s| Ok(parse_normalize_anchor(s)), "`zero_anchor` must be a normalize anchor string or object")?,
+                None | Some(Value::Null) => NormalizeAnchor::ColumnMin,
+                Some(v) => parse_serde_or_str(v, parse_normalize_anchor, "`zero_anchor` must be a normalize anchor string or object")?,
             },
             hundred_anchor: match params.get("hundred_anchor").or_else(|| params.get("hundred")) {
-                None | Some(Value::Null) => parse_normalize_anchor("largest"),
-                Some(v) => parse_serde_or_str(v, |s| Ok(parse_normalize_anchor(s)), "`hundred_anchor` must be a normalize anchor string or object")?,
+                None | Some(Value::Null) => NormalizeAnchor::ColumnMax,
+                Some(v) => parse_serde_or_str(v, parse_normalize_anchor, "`hundred_anchor` must be a normalize anchor string or object")?,
             },
             output_percent: !opt_bool_checked(params, &["as_fraction"])?.unwrap_or(false),
             per_data_set: opt_bool_checked(params, &["per_data_set"])?.unwrap_or(true),
@@ -1368,8 +2326,8 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
         "remove_baseline" | "baseline" | "transform.remove_baseline" => TransformAnalysisSpec::RemoveBaseline {
             baseline_columns: parse_usize_list(params.get("baseline_columns"))?.unwrap_or_else(|| vec![0]),
             operation: match params.get("operation") {
-                None | Some(Value::Null) => parse_baseline_op("difference"),
-                Some(v) => parse_serde_or_str(v, |s| Ok(parse_baseline_op(s)), "`operation` must be a baseline operation string or object")?,
+                None | Some(Value::Null) => BaselineOperation::Difference,
+                Some(v) => parse_serde_or_str(v, parse_baseline_op, "`operation` must be a baseline operation string or object")?,
             },
         },
         "transpose" | "transform.transpose" => TransformAnalysisSpec::Transpose {
@@ -1464,9 +2422,9 @@ fn resolve_two_group_or_anova_shorthand(name: &str, params: &Value) -> Result<Op
 fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<AnalysisKind>, EngineError> {
     let kind = match name {
         "descriptive" | "descriptive_stats" | "column_stats" => AnalysisKind::DescriptiveStats(DescriptiveSpec::default()),
-        "outliers" | "outlier" | "rout" => {
-            AnalysisKind::OutlierDetection(OutlierSpec::Rout { fdr_q_percent: opt_f64_checked(params, &["q_percent"])?.unwrap_or(1.0) })
-        }
+        "outliers" | "outlier" | "rout" => AnalysisKind::OutlierDetection(OutlierSpec::Rout {
+            fdr_q_percent: opt_f64_checked(params, &["q_percent", "fdr_q_percent"])?.unwrap_or(1.0),
+        }),
         "grubbs" => AnalysisKind::OutlierDetection(OutlierSpec::Grubbs {
             alpha: opt_f64_checked(params, &["alpha"])?.unwrap_or(0.05),
             iterative: opt_bool_checked(params, &["iterative"])?.unwrap_or(false),
@@ -1675,6 +2633,13 @@ fn apply_bland_altman_overrides(spec: &mut BlandAltmanSpec, params: &Value) -> R
     apply_usize_field(params, &["column_a"], &mut spec.column_a)?;
     apply_usize_field(params, &["column_b"], &mut spec.column_b)?;
     apply_bool_opt_checked(params, &["percent_difference"], &mut spec.percent_difference)?;
+    if let Some(xy_val) = params.get("xy_compare_x_vs_y") {
+        spec.xy_compare_x_vs_y = if xy_val.is_null() {
+            None
+        } else {
+            Some(xy_val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`xy_compare_x_vs_y` must be boolean or null"))?)
+        };
+    }
     Ok(())
 }
 
@@ -1877,6 +2842,9 @@ fn parse_serde_or_str<T: serde::de::DeserializeOwned>(
     parse_str: impl FnOnce(&str) -> Result<T, EngineError>,
     err_msg: &str,
 ) -> Result<T, EngineError> {
+    if val.is_object() {
+        return deserialize_strict(val, "");
+    }
     if let Ok(parsed) = serde_json::from_value::<T>(val.clone()) {
         return Ok(parsed);
     }
@@ -1913,12 +2881,12 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             if let Some(zv) = params.get("zero_anchor").or_else(|| params.get("zero"))
                 && !zv.is_null()
             {
-                *zero_anchor = parse_serde_or_str(zv, |s| Ok(parse_normalize_anchor(s)), "`zero_anchor` must be a normalize anchor")?;
+                *zero_anchor = parse_serde_or_str(zv, parse_normalize_anchor, "`zero_anchor` must be a normalize anchor")?;
             }
             if let Some(hv) = params.get("hundred_anchor").or_else(|| params.get("hundred"))
                 && !hv.is_null()
             {
-                *hundred_anchor = parse_serde_or_str(hv, |s| Ok(parse_normalize_anchor(s)), "`hundred_anchor` must be a normalize anchor")?;
+                *hundred_anchor = parse_serde_or_str(hv, parse_normalize_anchor, "`hundred_anchor` must be a normalize anchor")?;
             }
             apply_bool_opt_checked(params, &["output_percent"], output_percent)?;
             if let Some(as_frac) = opt_bool_checked(params, &["as_fraction"])? {
@@ -1933,7 +2901,7 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             if let Some(ov) = params.get("operation")
                 && !ov.is_null()
             {
-                *operation = parse_serde_or_str(ov, |s| Ok(parse_baseline_op(s)), "`operation` must be a baseline operation")?;
+                *operation = parse_serde_or_str(ov, parse_baseline_op, "`operation` must be a baseline operation")?;
             }
         }
         TransformAnalysisSpec::Transpose { swap_row_and_column_titles } => {
@@ -1984,11 +2952,34 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             apply_opt_usize_field(params, &["stratify_column"], stratify_column)?;
             apply_bool_opt_checked(params, &["proportional_allocation"], proportional_allocation)?;
         }
-        TransformAnalysisSpec::Simulate { seed, .. } => {
+        TransformAnalysisSpec::Simulate { seed, row_count, replicates, x_min, x_max, equation_id, parameters, .. } => {
             if let Some(seed_val) = params.get("seed")
                 && !seed_val.is_null()
             {
                 *seed = parse_u64_json_value(seed_val, "seed")?;
+            }
+            apply_usize_field(params, &["row_count", "n_points"], row_count)?;
+            if *row_count < 2 {
+                *row_count = 2;
+            }
+            apply_usize_field(params, &["replicates"], replicates)?;
+            if *replicates == 0 {
+                *replicates = 1;
+            }
+            if let Some(xmin) = opt_f64_checked(params, &["x_min"])? {
+                *x_min = xmin;
+            }
+            if let Some(xmax) = opt_f64_checked(params, &["x_max"])? {
+                *x_max = xmax;
+            }
+            if let Some(eq) = opt_str_checked(params, &["equation_id"])? {
+                *equation_id = eq.to_owned();
+            }
+            if let Some(p_val) = params.get("parameters").or_else(|| params.get("params"))
+                && !p_val.is_null()
+                && p_val.is_object()
+            {
+                *parameters = parse_named_params_vec(Some(p_val))?;
             }
         }
     }
@@ -1997,13 +2988,7 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
 
 fn apply_contingency_overrides(spec: &mut ContingencySpec, params: &Value) -> Result<(), EngineError> {
     if let Some(m_val) = params.get("method").or_else(|| params.get("contingency_method")) {
-        if let Ok(parsed) = serde_json::from_value::<ContingencyMethod>(m_val.clone()) {
-            spec.method = parsed;
-        } else if let Some(raw) = m_val.as_str() {
-            spec.method = parse_contingency_method(raw)?;
-        } else {
-            return Err(EngineError::with_code(ErrorCode::BadInput, "contingency `method` must be a string or method object"));
-        }
+        spec.method = parse_serde_or_str(m_val, parse_contingency_method, "contingency `method` must be a string or method object")?;
     }
     if let ContingencyMethod::PearsonChiSquare { yates_continuity } = &mut spec.method {
         apply_bool_opt_checked(params, &["yates_continuity", "yates"], yates_continuity)?;
@@ -2026,10 +3011,16 @@ fn apply_contingency_overrides(spec: &mut ContingencySpec, params: &Value) -> Re
 }
 
 fn apply_multiplicity_override(mult: &mut MultiplicitySpec, params: &Value) -> Result<(), EngineError> {
-    if let Some(m_val) = params.get("multiplicity").or_else(|| params.get("post_hoc"))
+    if let Some(m_val) = params.get("multiplicity").or_else(|| params.get("post_hoc")).or_else(|| params.get("multiplicity_method"))
         && !m_val.is_null()
     {
-        if let Ok(parsed) = serde_json::from_value::<MultiplicitySpec>(m_val.clone()) {
+        if m_val.is_object() {
+            if m_val.as_object().is_some_and(|o| o.contains_key("method")) {
+                *mult = deserialize_strict(m_val, "/multiplicity")?;
+            } else {
+                mult.method = deserialize_strict(m_val, "/multiplicity")?;
+            }
+        } else if let Ok(parsed) = serde_json::from_value::<MultiplicitySpec>(m_val.clone()) {
             *mult = parsed;
         } else if let Ok(parsed_method) = serde_json::from_value::<MultiplicityMethod>(m_val.clone()) {
             mult.method = parsed_method;
@@ -2156,12 +3147,12 @@ fn apply_multivariate_overrides(spec: &mut MultivariateSpec, params: &Value) -> 
         }
         MultivariateSpec::MultipleImputation { imputations_m, max_iters, seed, response_column, predictor_columns } => {
             apply_usize_field(params, &["imputations_m", "m", "num_imputations"], imputations_m)?;
-            if *imputations_m == 0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`imputations_m` must be >= 1"));
+            if !(2..=50).contains(imputations_m) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`imputations_m` must be in 2..=50"));
             }
             apply_usize_field(params, &["max_iters", "iterations"], max_iters)?;
-            if *max_iters == 0 {
-                return Err(EngineError::with_code(ErrorCode::BadInput, "`max_iters` must be >= 1"));
+            if !(1..=100).contains(max_iters) {
+                return Err(EngineError::with_code(ErrorCode::BadInput, "`max_iters` must be in 1..=100"));
             }
             if let Some(seed_val) = params.get("seed")
                 && !seed_val.is_null()
@@ -2191,8 +3182,15 @@ fn apply_nonlinear_overrides(spec: &mut NonlinearFitSpec, params: &Value) -> Res
     if let Some(w) = opt_str_checked(params, &["weighting"])? {
         spec.weighting = parse_weighting_scheme(w)?;
     }
-    if let Some(m) = opt_str_checked(params, &["method", "fit_method"])? {
-        spec.method = parse_fit_method(m)?;
+    if let Some(m_val) = params.get("method").or_else(|| params.get("fit_method"))
+        && !m_val.is_null()
+    {
+        spec.method = parse_serde_or_str(m_val, parse_fit_method, "`method` must be a valid fit method string or object")?;
+    }
+    if let Some(q) = opt_f64_checked(params, &["q_percent", "fdr_q_percent"])?
+        && let FitMethod::RoutOutlierElimination { ref mut fdr_q_percent } = spec.method
+    {
+        *fdr_q_percent = q;
     }
     apply_nonlinear_flag_and_mv_overrides(spec, params)?;
     if let Some(rules_val) = params.get("parameter_rules") {
@@ -2225,6 +3223,7 @@ fn apply_nonlinear_flag_and_mv_overrides(spec: &mut NonlinearFitSpec, params: &V
     apply_bool_opt_checked(params, &["homoscedasticity_test"], &mut spec.homoscedasticity_test)?;
     apply_bool_opt_checked(params, &["emit_residuals_tab"], &mut spec.emit_residuals_tab)?;
     apply_bool_opt_checked(params, &["emit_covariance_tab"], &mut spec.emit_covariance_tab)?;
+    let _ = opt_bool_checked(params, &["band_log_spacing"])?;
     apply_usize_field(params, &["max_iters"], &mut spec.max_iters)?;
     if spec.max_iters == 0 {
         return Err(EngineError::with_code(ErrorCode::BadInput, "`max_iters` must be >= 1"));
@@ -2245,6 +3244,7 @@ const SHORTHAND_OVERRIDDEN_PATCH_KEYS: &[&str] = &[
     "fit_method",
     "multiplicity",
     "post_hoc",
+    "multiplicity_method",
     "tie_method",
     "reference_levels",
     "seed",
@@ -2705,22 +3705,30 @@ fn parse_error_prop(raw: Option<&str>) -> Result<ErrorPropagationMode, EngineErr
     }
 }
 
-fn parse_normalize_anchor(raw: &str) -> NormalizeAnchor {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "first" | "first_row" => NormalizeAnchor::FirstRow,
-        "last" | "last_row" => NormalizeAnchor::LastRow,
-        "sum" | "column_sum" => NormalizeAnchor::ColumnSum,
-        "largest" | "max" | "column_max" => NormalizeAnchor::ColumnMax,
-        _ => NormalizeAnchor::ColumnMin,
+fn parse_normalize_anchor(raw: &str) -> Result<NormalizeAnchor, EngineError> {
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "smallest" | "min" | "column_min" | "columnmin" => Ok(NormalizeAnchor::ColumnMin),
+        "largest" | "max" | "column_max" | "columnmax" => Ok(NormalizeAnchor::ColumnMax),
+        "first" | "first_row" | "firstrow" => Ok(NormalizeAnchor::FirstRow),
+        "last" | "last_row" | "lastrow" => Ok(NormalizeAnchor::LastRow),
+        "sum" | "column_sum" | "columnsum" => Ok(NormalizeAnchor::ColumnSum),
+        _ => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unknown normalize anchor `{raw}` (expected smallest, largest, first, last, or sum)"),
+        )),
     }
 }
 
-fn parse_baseline_op(raw: &str) -> BaselineOperation {
-    match raw.trim().to_ascii_lowercase().as_str() {
-        "ratio" | "divide" => BaselineOperation::Ratio,
-        "percent" | "percent_change" => BaselineOperation::PercentChange,
-        "fraction" | "fractional_change" => BaselineOperation::FractionalChange,
-        _ => BaselineOperation::Difference,
+fn parse_baseline_op(raw: &str) -> Result<BaselineOperation, EngineError> {
+    match raw.trim().to_ascii_lowercase().replace(['-', ' '], "_").as_str() {
+        "difference" | "subtract" => Ok(BaselineOperation::Difference),
+        "ratio" | "divide" => Ok(BaselineOperation::Ratio),
+        "percent" | "percent_change" | "pct_change" | "pctchange" | "percentchange" => Ok(BaselineOperation::PercentChange),
+        "fraction" | "fractional_change" | "fractionalchange" => Ok(BaselineOperation::FractionalChange),
+        _ => Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("unknown baseline operation `{raw}` (expected difference, ratio, percent_change, or fractional_change)"),
+        )),
     }
 }
 
@@ -2871,7 +3879,12 @@ fn parse_opt_range_filter(val: &Value, key: &str) -> Result<Option<AxisRangeFilt
         let max_v = parse_nullable_finite_f64(&arr[1], key)?;
         return Ok(Some((min_v, max_v)));
     }
-    if val.is_object() {
+    if let Some(obj) = val.as_object() {
+        for k in obj.keys() {
+            if !matches!(k.as_str(), "min" | "max") {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{k}` in `{key}`")));
+            }
+        }
         let min_v = val.get("min").map(|v| parse_nullable_finite_f64(v, key)).transpose()?.flatten();
         let max_v = val.get("max").map(|v| parse_nullable_finite_f64(v, key)).transpose()?.flatten();
         return Ok(Some((min_v, max_v)));
@@ -2883,14 +3896,22 @@ fn parse_model_comparison(val: &Value, params: &Value) -> Result<Option<ModelCom
     if val.is_null() {
         return Ok(None);
     }
-    if let Ok(parsed) = serde_json::from_value::<ModelComparisonSpec>(val.clone()) {
-        return Ok(Some(parsed));
+    if let Some(obj) = val.as_object()
+        && !obj.contains_key("method")
+        && !obj.contains_key("kind")
+    {
+        return deserialize_strict(val, "/comparison").map(Some);
     }
     let (method_raw, alt_id) = if let Some(s) = val.as_str() {
         let alt = opt_str_checked(params, &["alternative_equation_id", "alternative_model"])?
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`comparison` shorthand string requires `alternative_equation_id`"))?;
         (s, alt.to_owned())
-    } else if val.is_object() {
+    } else if let Some(obj) = val.as_object() {
+        for k in obj.keys() {
+            if !matches!(k.as_str(), "method" | "kind" | "alternative_equation_id" | "alternative_model" | "equation_id") {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{k}` in `comparison`")));
+            }
+        }
         let m = opt_str_checked(val, &["method", "kind"])?
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`comparison` object missing `method`"))?;
         let alt = match opt_str_checked(val, &["alternative_equation_id", "alternative_model", "equation_id"])? {
@@ -2921,9 +3942,56 @@ fn parse_parameter_rules(val: &Value) -> Result<Vec<ParameterRule>, EngineError>
     Ok(rules)
 }
 
+fn is_shorthand_parameter_rule_obj(map: &Map<String, Value>) -> bool {
+    map.contains_key("parameter")
+        || map.contains_key("value")
+        || map.contains_key("values")
+        || map.contains_key("constants")
+        || map.contains_key("per_dataset_constants")
+        || map.contains_key("hook")
+        || map.contains_key("source")
+        || map.get("scope").and_then(Value::as_str).is_some_and(|s| {
+            matches!(
+                s.trim().to_ascii_lowercase().as_str(),
+                "local"
+                    | "shared"
+                    | "shared_global"
+                    | "column_title_constant"
+                    | "column_title"
+                    | "constant"
+                    | "per_dataset_constant"
+                    | "per_dataset"
+                    | "hooked_constant"
+                    | "hooked"
+            )
+        })
+}
+
 fn parse_parameter_rule(item: &Value) -> Result<ParameterRule, EngineError> {
-    if let Ok(parsed) = serde_json::from_value::<ParameterRule>(item.clone()) {
-        return Ok(parsed);
+    let Value::Object(map) = item else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "each `parameter_rules` item must be an object"));
+    };
+    for k in map.keys() {
+        if !matches!(
+            k.as_str(),
+            "name"
+                | "parameter"
+                | "scope"
+                | "initial_override"
+                | "lower_bound"
+                | "upper_bound"
+                | "value"
+                | "values"
+                | "constants"
+                | "per_dataset_constants"
+                | "hook"
+                | "source"
+        ) {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown field `{k}` in `parameter_rules` entry")));
+        }
+    }
+    if !is_shorthand_parameter_rule_obj(map) {
+        return deserialize_strict(item, "/parameter_rules");
     }
     let name = opt_str_checked(item, &["name", "parameter"])?
         .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "parameter rule missing string `name`"))?
@@ -2939,6 +4007,9 @@ fn parse_parameter_scope(item: &Value) -> Result<ParameterScope, EngineError> {
     let Some(scope_val) = item.get("scope") else {
         return Ok(ParameterScope::Local);
     };
+    if scope_val.is_object() {
+        return deserialize_strict(scope_val, "/parameter_rules/scope");
+    }
     if let Ok(parsed) = serde_json::from_value::<ParameterScope>(scope_val.clone()) {
         return Ok(parsed);
     }
@@ -2970,8 +4041,7 @@ fn parse_parameter_scope(item: &Value) -> Result<ParameterScope, EngineError> {
                 .get("hook")
                 .or_else(|| item.get("source"))
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "`hooked_constant` scope requires `hook` or `source`"))?;
-            let hook: HookSource = serde_json::from_value(hook_val.clone())
-                .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `hook` source: {err}")))?;
+            let hook: HookSource = deserialize_strict(hook_val, "/parameter_rules/hook")?;
             Ok(ParameterScope::HookedConstant(hook))
         }
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown parameter scope `{other}`"))),
