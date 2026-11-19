@@ -8,7 +8,7 @@ use curvebook_doc::{CiBound, FitMethod};
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::NeumaierSum;
 
-use crate::diagnostics::{CovarianceDiagnostics, compute_rsdr};
+use crate::diagnostics::{CovarianceDiagnostics, compute_rsdr, runs_test};
 use crate::error::{FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::curves::{CurveOverlayContext, build_curve_overlay, interpolate_x_from_y, interpolate_y_from_x, inverse_targets};
@@ -127,6 +127,7 @@ pub(in crate::solver) fn assemble_dataset_results(
 
         let mut ds_y_hat = Vec::new();
         let mut ds_res = Vec::new();
+        let mut ds_x_res: Vec<(f64, f64)> = Vec::new();
         let mut ds_base_w_abs_res = Vec::new();
         let mut ds_w_res = Vec::new();
         let mut ds_stud_res = Vec::new();
@@ -151,6 +152,7 @@ pub(in crate::solver) fn assemble_dataset_results(
                 let w_rep = rec.rep_n as f64;
                 ds_y_hat.push(yh);
                 ds_res.push(r);
+                ds_x_res.push((rec.point.x0(), r));
                 ds_base_w_abs_res.push((r * rec.sqrt_weight).abs());
                 ds_w_res.push(lm_out.weighted_res[i]);
                 if cfg.solver.method != FitMethod::RobustCauchy {
@@ -265,6 +267,14 @@ pub(in crate::solver) fn assemble_dataset_results(
             }
         }
 
+        let ds_runs_test = if cfg.solver.compute_runs_test {
+            ds_x_res.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let ordered_ds_res: Vec<f64> = ds_x_res.into_iter().map(|(_, r)| r).collect();
+            Some(runs_test(&ordered_ds_res))
+        } else {
+            None
+        };
+
         ds_results.push(FittedDatasetResult {
             data_set_index: ds.data_set_index,
             label: ds.label.clone(),
@@ -279,6 +289,7 @@ pub(in crate::solver) fn assemble_dataset_results(
             r_squared: ds_r2,
             sy_x: ds_sy_x,
             rsdr: ds_rsdr,
+            runs_test: ds_runs_test,
             curve_overlay,
         });
     }

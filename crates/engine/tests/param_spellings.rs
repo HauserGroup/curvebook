@@ -46,7 +46,7 @@ const GROUPS: &[(&str, &[&str])] = &[
     ("PVALUE_STACK_METHOD", &["method", "pvalue_stack_method", "multiplicity_method", "multiplicity"]),
     ("PVALUE_STACK_THRESHOLD", &["threshold", "pvalue_stack_threshold", "alpha", "q", "fdr_q"]),
     ("PVALUE_STACK_COLUMN", &["column", "pvalue_stack_column"]),
-    ("MULTIPLICITY", &["multiplicity", "post_hoc"]),
+    ("MULTIPLICITY", &["multiplicity", "post_hoc", "multiplicity_method"]),
     ("MULTIPLICITY_ALPHA", &["alpha", "threshold"]),
     ("COX_PREDICTOR_COLUMNS", &["predictor_columns", "cox_covariate_columns"]),
     ("SURVIVAL_LOG_RANK", &["log_rank_mantel_cox", "log_rank"]),

@@ -16,14 +16,14 @@ use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, HomoscedasticityResult, InformationCriteria, LackOfFitResult, NormalityTestResult,
-    RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test,
-    lilliefors_ks_test, runs_test, shapiro_wilk_test,
+    RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, combine_runs_tests, compute_rsdr, dagostino_pearson_test,
+    homoscedasticity_spearman_test, lilliefors_ks_test, shapiro_wilk_test,
 };
 use crate::error::FitError;
 use crate::solver::irls::compute_unscaled_cov;
 use crate::solver::layout::ObsRecord;
 use crate::solver::lm::{mat_get, mat_set};
-use crate::solver::results::SolverConfig;
+use crate::solver::results::{FittedDatasetResult, SolverConfig};
 use crate::types::DataPoint;
 
 pub(in crate::solver) fn obs_y_ss(obs: &[ObsRecord]) -> f64 {
@@ -292,8 +292,8 @@ pub(in crate::solver) fn rout_detect_outliers_mb2006(
     if n <= k_free {
         return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
     }
-    if !fdr_q_percent.is_finite() || !(0.0..=100.0).contains(&fdr_q_percent) {
-        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in [0, 100], got {fdr_q_percent}") });
+    if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0 {
+        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
     }
 
     let df = n - k_free;
@@ -318,7 +318,7 @@ pub(in crate::solver) fn rout_detect_outliers_mb2006(
     // Motulsky & Brown (2006): test only top ~30% furthest points (ranks 1..=m_test out of N).
     let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
     let m_test = n - start;
-    let q_alpha = (fdr_q_percent / 100.0).clamp(1e-6, 0.5);
+    let q_alpha = fdr_q_percent / 100.0;
 
     let mut q_values = vec![1.0_f64; n];
     let mut running_min = 1.0_f64;
@@ -379,7 +379,7 @@ pub(in crate::solver) struct ResidualDiagnosticsBundle {
 
 pub(in crate::solver) fn compute_residual_diagnostics(
     obs: &[ObsRecord],
-    points: &[DataPoint],
+    ds_results: &[FittedDatasetResult],
     y_hat_all: &[f64],
     raw_residuals_all: &[f64],
     weighted_ss: f64,
@@ -387,10 +387,8 @@ pub(in crate::solver) fn compute_residual_diagnostics(
     config: &SolverConfig,
 ) -> ResidualDiagnosticsBundle {
     let runs_res = if config.compute_runs_test {
-        let mut pairs: Vec<(f64, f64)> = points.iter().zip(raw_residuals_all.iter()).map(|(p, &r)| (p.x0(), r)).collect();
-        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let ordered_res: Vec<f64> = pairs.into_iter().map(|(_, r)| r).collect();
-        Some(runs_test(&ordered_res))
+        let per_ds_runs: Vec<RunsTestResult> = ds_results.iter().filter_map(|d| d.runs_test.clone()).collect();
+        combine_runs_tests(&per_ds_runs)
     } else {
         None
     };
@@ -401,18 +399,28 @@ pub(in crate::solver) fn compute_residual_diagnostics(
         None
     };
 
+    let diag_residuals: Vec<f64> = if config.method == FitMethod::PoissonDeviance {
+        obs.iter()
+            .zip(y_hat_all.iter())
+            .zip(raw_residuals_all.iter())
+            .map(|((o, &yh), &r)| if yh.is_finite() && yh > 0.0 { r / yh.sqrt() } else { r * o.sqrt_weight })
+            .collect()
+    } else {
+        obs.iter().zip(raw_residuals_all.iter()).map(|(o, &r)| r * o.sqrt_weight).collect()
+    };
+
     let (norm_main, norm_ad, norm_ks) = if config.compute_normality {
         (
-            shapiro_wilk_test(raw_residuals_all).or_else(|| dagostino_pearson_test(raw_residuals_all)),
-            anderson_darling_test(raw_residuals_all),
-            lilliefors_ks_test(raw_residuals_all),
+            shapiro_wilk_test(&diag_residuals).or_else(|| dagostino_pearson_test(&diag_residuals)),
+            anderson_darling_test(&diag_residuals),
+            lilliefors_ks_test(&diag_residuals),
         )
     } else {
         (None, None, None)
     };
 
     let homo_res =
-        if config.compute_homoscedasticity { homoscedasticity_spearman_test(y_hat_all, raw_residuals_all, config.confidence.alpha()) } else { None };
+        if config.compute_homoscedasticity { homoscedasticity_spearman_test(y_hat_all, &diag_residuals, config.confidence.alpha()) } else { None };
 
     ResidualDiagnosticsBundle {
         runs_test: runs_res,

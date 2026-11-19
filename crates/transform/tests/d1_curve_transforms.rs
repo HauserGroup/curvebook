@@ -5,7 +5,7 @@
 
 use curvebook_doc::{Cell, CellCoord, DataSheet, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_testkit::assert_approx_eq;
-use curvebook_transform::{AucOptions, AucResult, SmoothMethod, TransformError, compute_auc_with_se, compute_sheet_auc, smooth_xy};
+use curvebook_transform::{AucOptions, AucResult, SmoothMethod, TransformError, compute_auc, compute_auc_with_se, compute_sheet_auc, smooth_xy};
 
 // Geometry is exact for piecewise-linear curves. The allowance covers binary64 rounding of
 // crossing coordinates and sums over a few short segments.
@@ -18,6 +18,7 @@ fn assert_irregular_auc(result: &AucResult) {
     // Baseline-relative ordinates at x = [0, 2, 5, 9] are [-2, 3, -1, 2].
     // The three crossings are 4/5, 17/4, and 19/3. Summing triangle areas gives
     // positive 9/5 + 27/8 + 8/3 and negative 4/5 + 3/8 + 2/3.
+    assert_approx_eq(result.total_area, 941.0 / 120.0 + 221.0 / 120.0, AUC_ABS_TOL, 0.0, "total unsigned area");
     assert_approx_eq(result.positive_area, 941.0 / 120.0, AUC_ABS_TOL, 0.0, "positive area");
     assert_approx_eq(result.negative_area, 221.0 / 120.0, AUC_ABS_TOL, 0.0, "negative area");
     assert_approx_eq(result.net_area, 6.0, AUC_ABS_TOL, 0.0, "signed net area");
@@ -191,5 +192,71 @@ fn lowess_matches_local_robust_regression_with_an_outlier() {
         ),
     ] {
         assert_smoothed(&points, SmoothMethod::Lowess { span, robustness_iters }, expected).unwrap();
+    }
+}
+
+#[test]
+fn auc_central_only_meanlowhigh_order_independent_ties_and_total_area() {
+    // 1. MeanLowHigh uses central subcolumn 0 only (ignoring +/-Error subcolumns 1..3),
+    //    and reports total_area = positive_area + negative_area.
+    let mut xy_lh = XyTable::new(SubcolumnMode::MeanLowHigh, 1, 3).unwrap();
+    for (r, (x, m, lo, hi)) in [(0.0, 0.0, 99.0, 200.0), (2.0, 4.0, 100.0, 500.0), (4.0, 0.0, 50.0, 75.0)].into_iter().enumerate() {
+        xy_lh.set_x_cell(r, Cell::number(x)).unwrap();
+        xy_lh.data_sets[0].cells[r] = vec![Cell::number(m), Cell::number(lo), Cell::number(hi)];
+    }
+    let sheet_lh = DataSheet::new("xy-lh-auc", "LH AUC", TableArchetype::Xy(xy_lh)).unwrap();
+    let auc_lh = compute_sheet_auc(&sheet_lh, 0, &AucOptions { baseline: 2.0, ..AucOptions::default() }).unwrap();
+    // Curve goes (0,0) -> (2,4) -> (4,0) vs baseline=2: crossings at X=1 and X=3.
+    // Positive triangle: base 2 (1..3), height 2 -> area = 2.0.
+    // Negative triangles: two triangles of base 1 and height 2 -> area = 1.0 + 1.0 = 2.0.
+    assert_approx_eq(auc_lh.positive_area, 2.0, AUC_ABS_TOL, 0.0, "lh pos area");
+    assert_approx_eq(auc_lh.negative_area, 2.0, AUC_ABS_TOL, 0.0, "lh neg area");
+    assert_approx_eq(auc_lh.net_area, 0.0, AUC_ABS_TOL, 0.0, "lh net area");
+    assert_approx_eq(auc_lh.total_area, 4.0, AUC_ABS_TOL, 0.0, "lh total unsigned area");
+    assert_eq!(auc_lh.standard_error, None);
+
+    // 2. Tied X values collapse order-independently across raw points, SE points, and XY sheets.
+    let pts_a = [(0.0, 0.0), (1.0, 2.0), (1.0, 10.0), (3.0, 0.0)];
+    let pts_b = [(3.0, 0.0), (1.0, 10.0), (1.0, 2.0), (0.0, 0.0)];
+    let res_a = compute_auc(&pts_a, &AucOptions::default()).unwrap();
+    let res_b = compute_auc(&pts_b, &AucOptions::default()).unwrap();
+    // Collapsed knot at X=1 has Y=6.0 -> area = 0.5*1*6 + 0.5*2*6 = 9.0.
+    assert_approx_eq(res_a.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied auc order A");
+    assert_approx_eq(res_b.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied auc order B");
+    assert_approx_eq(res_a.positive_area, res_b.positive_area, AUC_ABS_TOL, 0.0, "tied auc pos symmetry");
+
+    let se_a = compute_auc_with_se(&[(0.0, 0.0, 0.2), (1.0, 2.0, 0.3), (1.0, 10.0, 0.4), (3.0, 0.0, 0.1)], &AucOptions::default()).unwrap();
+    let se_b = compute_auc_with_se(&[(3.0, 0.0, 0.1), (1.0, 10.0, 0.4), (1.0, 2.0, 0.3), (0.0, 0.0, 0.2)], &AucOptions::default()).unwrap();
+    assert_approx_eq(se_a.total_area, 9.0, AUC_ABS_TOL, 0.0, "tied se auc");
+    assert_approx_eq(se_a.standard_error.unwrap(), se_b.standard_error.unwrap(), AUC_ABS_TOL, 0.0, "tied se symmetry");
+
+    // Raw XyTable with tied X rows matches collapsed replicate mean identically regardless of order.
+    let mut xy_tied = XyTable::new(SubcolumnMode::Single, 1, 4).unwrap();
+    for (r, &(x, y)) in pts_b.iter().enumerate() {
+        xy_tied.set_x_cell(r, Cell::number(x)).unwrap();
+        xy_tied.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let tied_sheet = DataSheet::new("xy-tied", "Tied XY", TableArchetype::Xy(xy_tied)).unwrap();
+    let sheet_auc = compute_sheet_auc(&tied_sheet, 0, &AucOptions::default()).unwrap();
+    assert_approx_eq(sheet_auc.total_area, 9.0, AUC_ABS_TOL, 0.0, "sheet tied auc");
+
+    // 3. Only 1 distinct finite X rejects cleanly rather than emitting 0.
+    assert!(matches!(compute_auc(&[(1.0, 2.0), (1.0, 10.0)], &AucOptions::default()), Err(TransformError::InvalidInput { .. })));
+}
+
+#[test]
+fn savitzky_golay_nanoscale_non_uniform_uses_relative_grid_tolerance() {
+    // Abscissas on 1e-9 scale are strictly non-uniform (step changes from 1e-9 to 40e-9),
+    // so relative tolerance classifies them non-uniform and Vandermonde SG reproduces y = a*x + b exactly.
+    let xs_nm = [0.0_f64, 1.0, 2.0, 10.0, 50.0, 60.0, 70.0, 80.0, 90.0];
+    let slope = 2.5e9_f64;
+    let intercept = 1.5_f64;
+    let pts: Vec<(f64, f64)> = xs_nm.iter().map(|&nm| (nm * 1e-9, slope * (nm * 1e-9) + intercept)).collect();
+    for method in [SmoothMethod::SavitzkyGolay5, SmoothMethod::SavitzkyGolay7, SmoothMethod::SavitzkyGolay9] {
+        let smoothed = smooth_xy(&pts, method).unwrap();
+        for ((x, y_exp), (sx, sy)) in pts.iter().zip(smoothed.iter()) {
+            assert_approx_eq(*sx, *x, 1e-24, 0.0, "nanoscale x preserved");
+            assert_approx_eq(*sy, *y_exp, 1e-9, 1e-11, &format!("{method:?} nanoscale linear exactness"));
+        }
     }
 }

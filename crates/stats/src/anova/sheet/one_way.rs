@@ -13,7 +13,9 @@ use curvebook_doc::{
     PValueFormat, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
 };
 use curvebook_math::ConfidenceLevel;
-use curvebook_math::dist::f_sf;
+use curvebook_math::dist::{
+    dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_sf, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p,
+};
 use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::SummaryMoments;
 
@@ -21,8 +23,8 @@ use crate::anova::factorial::{build_xtx_pinv_and_proj, collect_index_combination
 use crate::anova::nonparametric::{friedman_test, kruskal_wallis_test};
 use crate::anova::one_way::{ordinary_one_way_anova, ordinary_one_way_from_summary, rm_one_way_anova, unequal_variance_one_way_anova};
 use crate::anova::posthoc::{
-    ContrastFamilyEval, RemlContrastModel, collect_factor_pairs, compare_contrast_family, factorial_design_vector,
-    push_pairwise_outputs_with_footnote,
+    ContrastFamilyEval, NamedSliceContrast, RemlContrastModel, collect_factor_pairs, compare_contrast_family, compare_independent_contrast_family,
+    factorial_design_vector, mark_pair_significance, push_pairwise_outputs_with_footnote, zero_se_pair,
 };
 use crate::anova::reml::{
     RemlContrastCore, cluster_ids_to_g_matrix, fit_multi_vc_reml_with_method_and_core, fit_random_intercept_reml_with_method_and_core,
@@ -33,13 +35,13 @@ use crate::anova::sheet::factorial::push_reml_df_scalars;
 use crate::column::shapiro_wilk;
 use crate::common::{
     append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, extract_numeric_columns,
-    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, rank_with_ties, resolve_selected_indices,
-    sanitize_result_sheet_floats,
+    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, rank_with_ties, sanitize_result_sheet_floats,
+    try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, compare_dunn_ranks, compare_groups_pairwise_with_confidence,
-    compare_groups_with_confidence, linear_trend_test,
+    compare_groups_with_confidence, linear_trend_test, try_adjust_p_values,
 };
 
 /// Execute a [`OneWayAnovaSpec`] against a `Column` or `MultipleVariables` [`DataSheet`].
@@ -53,7 +55,9 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     }
 
     // Handle pre-summarized ColumnTable (`MeanSdN`, `MeanSemN`, `MeanCvN`) vs raw replicates.
-    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) = extract_one_way_inputs(sheet, &spec.selected_data_sets)?;
+    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) =
+        extract_one_way_inputs(sheet, &spec.selected_data_sets, anova_spec.method, confidence)?;
+    let is_summary = raw_slices_owned.is_empty();
 
     match anova_spec.method {
         OneWayMethod::OrdinaryAnova => {
@@ -67,12 +71,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
 
             let mut main_tab = build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt);
             if !res.variance_tests.available {
-                main_tab.footnotes.push(String::from(
-                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
-                ));
+                main_tab.footnotes.push(String::from(if is_summary {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data."
+                } else {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+                }));
             }
             out.tabs.push(main_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, is_summary, p_fmt));
             append_one_way_multiplicity(
                 &mut out,
                 &group_inputs,
@@ -106,29 +112,16 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             ];
             let mut uv_tab = build_tab("unequal-var-anova", "Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable, headers, labels, rows);
             if !base.variance_tests.available {
-                uv_tab.footnotes.push(String::from(
-                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
-                ));
+                uv_tab.footnotes.push(String::from(if is_summary {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data."
+                } else {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+                }));
             }
             out.tabs.push(uv_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, is_summary, p_fmt));
 
-            let proc_eff = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
-                MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3 => {
-                    MultiplicityProcedure::from(anova_spec.multiplicity.method)
-                }
-                _ => MultiplicityProcedure::GamesHowell,
-            };
-            let details = compare_groups_with_confidence(
-                &group_inputs,
-                base.ms_within,
-                base.df_within,
-                proc_eff,
-                anova_spec.multiplicity.threshold,
-                anova_spec.multiplicity.report_confidence_intervals,
-                confidence,
-            )?;
-            push_pairwise_outputs(&mut out, &details, "Multiple comparisons (Games-Howell / T2 / T3)", p_fmt, confidence);
+            append_welch_multiplicity(&mut out, &group_inputs, &base, &anova_spec.multiplicity, p_fmt, confidence)?;
             append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
         }
         OneWayMethod::KruskalWallis => {
@@ -323,15 +316,50 @@ pub(in crate::anova) fn emit_random_intercept_reml(
         ],
         vec![ResultCell::Text(String::from("Residual")), num_cell(reml.sigma2_error), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
     ];
-    out.tabs.push(build_tab(
+    let mut vc_tab = build_tab(
         "mixed-reml",
         "Mixed-effects REML variance components",
         ResultTabKind::ParametersAndConfidenceIntervals,
         reml_headers,
         vec![String::from("Subject"), String::from("Residual")],
         reml_rows,
-    ));
+    );
+    if !reml.converged {
+        vc_tab.footnotes.push(String::from(
+            "Warning: random-intercept REML optimization hit the upper variance-ratio boundary or did not converge to an interior optimum.",
+        ));
+    } else if reml.at_boundary {
+        vc_tab.footnotes.push(String::from("Random-intercept variance component converged at the lower constraint boundary (sigma^2_random = 0)."));
+    }
+    out.tabs.push(vc_tab);
+    out.checklist.push(append_reml_boundary_checklist(reml.converged, reml.at_boundary, reml.sigma2_random, reml.sigma2_error));
     Ok((reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, core))
+}
+
+pub(in crate::anova) fn append_reml_boundary_checklist(converged: bool, at_boundary: bool, sigma2_random: f64, sigma2_error: f64) -> ChecklistItem {
+    let metric = Some(format!("sigma^2_random = {sigma2_random:.6}, sigma^2_error = {sigma2_error:.6}"));
+    if !converged {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Warn,
+            metric,
+            "Random-intercept REML profile likelihood reached the upper variance-ratio limit without an interior stationary point.",
+        )
+    } else if at_boundary {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Info,
+            metric,
+            "Random-intercept variance estimate lies on the non-negativity boundary (sigma^2_random = 0); mixed model reduces to ordinary residual variance.",
+        )
+    } else {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Pass,
+            metric,
+            "Random-intercept REML variance-component optimization converged to an interior stationary point.",
+        )
+    }
 }
 
 pub(in crate::anova) fn emit_multi_vc_rm_reml(
@@ -624,6 +652,7 @@ pub(in crate::anova) fn run_rm_one_way_reml(
         observed_cells,
     };
 
+    validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
     if anova_spec.multiplicity.method != MultiplicityMethod::None {
         if anova_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
             let kf = k as f64;
@@ -721,10 +750,11 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
     let TableArchetype::Column(col_tab) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "RM one-way ANOVA", actual: sheet.archetype.kind() });
     };
-    let indices = resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len());
+    let indices = try_resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len())?;
     let scan = scan_rm_one_way_column_table(col_tab, &indices);
 
     if let OneWayMethod::RepeatedMeasures { .. } = anova_spec.method {
+        validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
         if scan.y_vec.is_empty() {
             return Err(StatsError::EmptyInput);
         }
@@ -822,7 +852,22 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                     sd: m.sample_sd().unwrap_or(0.0),
                 });
             }
-            append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
+            if geisser_greenhouse
+                && matches!(
+                    anova_spec.multiplicity.method,
+                    MultiplicityMethod::Bonferroni
+                        | MultiplicityMethod::Sidak
+                        | MultiplicityMethod::HolmSidak
+                        | MultiplicityMethod::FisherLsd
+                        | MultiplicityMethod::BenjaminiHochbergFdr
+                        | MultiplicityMethod::BenjaminiYekutieliFdr
+                        | MultiplicityMethod::TwoStageBkyFdr
+                )
+            {
+                append_rm_paired_contrast_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
+            } else {
+                append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
+            }
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
             let mauchly_p_lbl = if rm.sphericity.mauchly_p.is_finite() { format!("{:.4}", rm.sphericity.mauchly_p) } else { String::from("n/a") };
@@ -867,6 +912,7 @@ pub(in crate::anova) fn run_rm_one_way_anova_sheet(
                 num_cell(fr.n_blocks as f64),
             ]];
             out.tabs.push(build_tab("friedman", "Friedman test", ResultTabKind::AnovaTable, headers, vec![String::from("Friedman")], rows));
+            append_friedman_multiplicity(out, col_tab, &indices, blocks, &anova_spec.multiplicity, p_fmt, confidence)?;
             out.checklist.push(checklist_item(
                 "Matched nonparametric blocks",
                 ChecklistStatus::Pass,
@@ -890,11 +936,25 @@ pub(in crate::anova) fn spec_selected_from_sheet(sheet: &ResultSheet) -> Vec<usi
 
 pub(in crate::anova) type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>, Vec<(String, usize)>);
 
-pub(in crate::anova) fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<ExtractedOneWayInputs, StatsError> {
+pub(in crate::anova) fn extract_one_way_inputs(
+    sheet: &DataSheet,
+    selected: &[usize],
+    method: OneWayMethod,
+    confidence: ConfidenceLevel,
+) -> Result<ExtractedOneWayInputs, StatsError> {
+    match &sheet.archetype {
+        TableArchetype::Column(col_tab) => {
+            let _ = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let _ = try_resolve_selected_indices(selected, mv.variables.len())?;
+        }
+        other => return Err(StatsError::IncompatibleTable { analysis: "one-way ANOVA", actual: other.kind() }),
+    }
     if let TableArchetype::Column(col_tab) = &sheet.archetype
         && col_tab.subcolumn_mode.supports_parametric_moments()
     {
-        let indices = resolve_selected_indices(selected, col_tab.data_sets.len());
+        let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
         let mut inputs = Vec::with_capacity(indices.len());
         for idx in indices {
             let ds = &col_tab.data_sets[idx];
@@ -902,6 +962,15 @@ pub(in crate::anova) fn extract_one_way_inputs(sheet: &DataSheet, selected: &[us
             let mut err_val = None;
             let mut n_val = None;
             for subs in &ds.cells {
+                if let (Some(c0), Some(c1), Some(c2)) = (subs.first(), subs.get(1), subs.get(2))
+                    && !c0.excluded
+                    && !c1.excluded
+                    && !c2.excluded
+                    && let curvebook_doc::CellValue::Number(raw_n) = c2.value
+                    && !raw_n.is_finite()
+                {
+                    return Err(StatsError::InvalidParameter { name: "group_n", value: raw_n });
+                }
                 if let (Some(m), Some(e), Some(n)) = (
                     subs.first().and_then(|c| c.active_number()),
                     subs.get(1).and_then(|c| c.active_number()),
@@ -916,6 +985,9 @@ pub(in crate::anova) fn extract_one_way_inputs(sheet: &DataSheet, selected: &[us
             let (Some(mean), Some(err), Some(n)) = (mean_val, err_val, n_val) else {
                 return Err(StatsError::InsufficientSampleSize { context: "pre-summarized group", required: 2, actual: 0 });
             };
+            if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
+                return Err(StatsError::InvalidParameter { name: "group_n", value: n });
+            }
             let sd = match col_tab.subcolumn_mode {
                 SubcolumnMode::MeanSdN => err,
                 SubcolumnMode::MeanSemN => err * n.sqrt(),
@@ -932,7 +1004,25 @@ pub(in crate::anova) fn extract_one_way_inputs(sheet: &DataSheet, selected: &[us
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
     let raw_slices: Vec<Vec<f64>> = cols.iter().map(|c| c.values.clone()).collect();
     let paired: Vec<(&str, &[f64])> = cols.iter().map(|c| (c.label.as_str(), c.values.as_slice())).collect();
-    let res = ordinary_one_way_anova(&paired, ConfidenceLevel::DEFAULT_95)?;
+    if matches!(method, OneWayMethod::KruskalWallis) {
+        if cols.len() < 2 {
+            return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: cols.len() });
+        }
+        let mut inputs = Vec::with_capacity(cols.len());
+        for col in &cols {
+            validate_finite_slice(&col.values)?;
+            let m = SummaryMoments::from_slice(&col.values)?;
+            inputs.push(GroupComparisonInput {
+                index: col.index,
+                label: col.label.clone(),
+                n: col.values.len() as f64,
+                mean: m.mean,
+                sd: m.sample_sd().unwrap_or(0.0),
+            });
+        }
+        return Ok((inputs, None, raw_slices, ignored_non_numeric));
+    }
+    let res = ordinary_one_way_anova(&paired, confidence)?;
     let inputs = cols
         .iter()
         .enumerate()
@@ -947,7 +1037,7 @@ pub(in crate::anova) fn extract_one_way_inputs(sheet: &DataSheet, selected: &[us
     Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
 }
 
-pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, p_fmt: PValueFormat) -> ResultTab {
+pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, is_summary: bool, p_fmt: PValueFormat) -> ResultTab {
     let headers = vec![String::from("Statistic"), String::from("DFn / df"), String::from("DFd"), String::from("P value"), String::from("Status")];
     let labels = vec![String::from("Brown-Forsythe"), String::from("Bartlett")];
     let mut tab = if vt.available && vt.brown_forsythe_p.is_finite() {
@@ -973,28 +1063,27 @@ pub(in crate::anova) fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityR
         ];
         build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
     } else {
+        let unavail_status =
+            if is_summary { String::from("Not computable from summary statistics") } else { String::from("Not computable (group n < 2)") };
         let rows = vec![
             vec![
                 ResultCell::Empty,
                 num_cell(vt.brown_forsythe_df1),
                 num_cell(vt.brown_forsythe_df2),
                 ResultCell::Empty,
-                ResultCell::Text(String::from("Not computable from summary statistics")),
+                ResultCell::Text(unavail_status.clone()),
             ],
-            vec![
-                ResultCell::Empty,
-                num_cell(vt.bartlett_df),
-                ResultCell::Empty,
-                ResultCell::Empty,
-                ResultCell::Text(String::from("Not computable from summary statistics")),
-            ],
+            vec![ResultCell::Empty, num_cell(vt.bartlett_df), ResultCell::Empty, ResultCell::Empty, ResultCell::Text(unavail_status)],
         ];
         build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
     };
     if !vt.available {
-        tab.footnotes.push(String::from(
-            "Brown-Forsythe and Bartlett variance homogeneity tests cannot be computed from pre-summarized Mean/SD/N data; raw replicate observations are required.",
-        ));
+        let note = if is_summary {
+            "Brown-Forsythe and Bartlett variance homogeneity tests cannot be computed from pre-summarized Mean/SD/N data; raw replicate observations are required."
+        } else {
+            "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+        };
+        tab.footnotes.push(String::from(note));
     }
     tab
 }
@@ -1063,6 +1152,453 @@ pub(in crate::anova) fn append_one_way_multiplicity(
     Ok(())
 }
 
+fn validate_rm_parametric_multiplicity(method: MultiplicityMethod) -> Result<(), StatsError> {
+    if matches!(
+        method,
+        MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3 | MultiplicityMethod::DunnRankSum
+    ) {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "repeated-measures parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+        });
+    }
+    Ok(())
+}
+
+fn welch_group_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
+    let va = (ga.sd * ga.sd) / ga.n;
+    let vb = (gb.sd * gb.sd) / gb.n;
+    let v_sum = va + vb;
+    if v_sum <= 0.0 {
+        return (0.0, (ga.n + gb.n - 2.0).max(1.0));
+    }
+    let denom = (va * va) / (ga.n - 1.0).max(1.0) + (vb * vb) / (gb.n - 1.0).max(1.0);
+    let df = if denom > 0.0 { (v_sum * v_sum) / denom } else { (ga.n + gb.n - 2.0).max(1.0) };
+    (v_sum.sqrt(), df.max(1.0))
+}
+
+/// Pairwise unequal-variance Welch–Satterthwaite comparisons against a designated control arm
+/// using Dunnett's (1955) multivariate-*t* with heteroscedastic variance-ratio correlation loadings.
+fn append_welch_dunnett_vs_control(
+    out: &mut ResultSheet,
+    inputs: &[GroupComparisonInput],
+    control_column: usize,
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    if !mult.threshold.is_finite() || mult.threshold <= 0.0 || mult.threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: mult.threshold });
+    }
+    let ctrl_pos = inputs
+        .iter()
+        .position(|g| g.index == control_column)
+        .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+    let ctrl = &inputs[ctrl_pos];
+    let treats: Vec<&GroupComparisonInput> = inputs.iter().enumerate().filter(|&(i, _)| i != ctrl_pos).map(|(_, g)| g).collect();
+    if treats.is_empty() {
+        return Ok(());
+    }
+    let v0 = (ctrl.sd * ctrl.sd) / ctrl.n;
+    let loadings: Vec<f64> = treats
+        .iter()
+        .map(|tr| {
+            let vi = (tr.sd * tr.sd) / tr.n;
+            let sum_v = v0 + vi;
+            if sum_v > 0.0 && v0 > 0.0 { (v0 / sum_v).sqrt().clamp(0.0, 0.999_999) } else { std::f64::consts::FRAC_1_SQRT_2 }
+        })
+        .collect();
+    let ci_alpha = confidence.alpha();
+    let mut details = Vec::with_capacity(treats.len());
+    for tr in treats {
+        let diff = tr.mean - ctrl.mean;
+        let (se, df) = welch_group_pair_se_df(tr, ctrl);
+        let (t_stat, raw_p, adj_p) = if se > 0.0 {
+            let t = diff / se;
+            let rp = student_t_two_sided_p(t, df)?;
+            let ap = if loadings.len() == 1 { rp } else { dunnett_two_sided_p_loadings(t.abs(), df, &loadings)? };
+            (t, rp, ap)
+        } else {
+            let (st, p) = zero_se_pair(diff, false);
+            (st, p, p)
+        };
+        let ci = if mult.report_confidence_intervals {
+            let crit = if loadings.len() == 1 {
+                student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), df)?
+            } else {
+                dunnett_two_sided_crit_loadings(ci_alpha, df, &loadings)?
+            };
+            Some((diff - crit * se, diff + crit * se))
+        } else {
+            None
+        };
+        details.push(mark_pair_significance(
+            PairwiseComparisonDetail {
+                group_a: tr.index,
+                group_b: ctrl.index,
+                label_a: tr.label.clone(),
+                label_b: ctrl.label.clone(),
+                mean_diff: diff,
+                se_diff: se,
+                statistic: t_stat,
+                df,
+                raw_p,
+                adjusted_p_or_q: adj_p,
+                is_fdr_q: false,
+                ci,
+                significant: false,
+            },
+            mult.threshold,
+        ));
+    }
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (Welch Dunnett vs. control)",
+        p_fmt,
+        confidence,
+        Some(String::from("Unequal-variance Welch t comparisons versus control column with heteroscedastic Dunnett loadings and Satterthwaite df.")),
+    );
+    Ok(())
+}
+
+/// Heteroscedastic polynomial linear-trend contrast with Welch–Satterthwaite denominator df.
+fn append_welch_linear_trend(out: &mut ResultSheet, inputs: &[GroupComparisonInput], p_fmt: PValueFormat) -> Result<(), StatsError> {
+    let k = inputs.len();
+    if k < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "linear trend groups", required: 2, actual: k });
+    }
+    let kf = k as f64;
+    let mut est = 0.0_f64;
+    let mut var_l = 0.0_f64;
+    let mut satt_denom = 0.0_f64;
+    for (j, g) in inputs.iter().enumerate() {
+        let c = (j as f64) - 0.5 * (kf - 1.0);
+        let vj = (g.sd * g.sd) / g.n;
+        let term = c * c * vj;
+        est += c * g.mean;
+        var_l += term;
+        satt_denom += (term * term) / (g.n - 1.0).max(1.0);
+    }
+    let se = var_l.sqrt();
+    let df = if satt_denom > 0.0 { (var_l * var_l) / satt_denom } else { 1.0 };
+    let f_stat = if se > 0.0 {
+        (est / se).powi(2)
+    } else if est.abs() > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let p_val = if f_stat.is_infinite() { 0.0 } else { f_sf(f_stat, 1.0, df)? };
+    push_scalar(out, "Linear trend F", None, f_stat);
+    push_scalar(out, "Linear trend P", None, p_val);
+    let mut tab = build_tab(
+        "linear-trend",
+        "Test for linear trend (Welch)",
+        ResultTabKind::MultipleComparisons,
+        vec![String::from("Contrast"), String::from("SE"), String::from("DFd"), String::from("F"), String::from("P value")],
+        vec![String::from("Linear trend")],
+        vec![vec![num_cell(est), num_cell(se), num_cell(df), num_cell(f_stat), p_cell(p_val, p_fmt)]],
+    );
+    tab.footnotes.push(String::from("Heteroscedastic linear-trend contrast using per-group variances and Welch-Satterthwaite denominator df."));
+    out.tabs.push(tab);
+    Ok(())
+}
+
+fn append_welch_multiplicity(
+    out: &mut ResultSheet,
+    inputs: &[GroupComparisonInput],
+    base: &OneWayAnovaResult,
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let proc_req = MultiplicityProcedure::from(mult.method);
+    match proc_req {
+        MultiplicityProcedure::None => Ok(()),
+        MultiplicityProcedure::DunnRankSum => Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "parametric unequal-variance or familywise/FDR post-hoc procedure (None, GamesHowell, TamhaneT2, DunnettT3, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+        }),
+        MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3 => {
+            let title = match proc_req {
+                MultiplicityProcedure::GamesHowell => "Multiple comparisons (Games-Howell)",
+                MultiplicityProcedure::TamhaneT2 => "Multiple comparisons (Tamhane's T2)",
+                _ => "Multiple comparisons (Dunnett's T3)",
+            };
+            let details = compare_groups_with_confidence(
+                inputs,
+                base.ms_within,
+                base.df_within,
+                proc_req,
+                mult.threshold,
+                mult.report_confidence_intervals,
+                confidence,
+            )?;
+            push_pairwise_outputs(out, &details, title, p_fmt, confidence);
+            Ok(())
+        }
+        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls => {
+            let details = compare_groups_with_confidence(
+                inputs,
+                base.ms_within,
+                base.df_within,
+                MultiplicityProcedure::GamesHowell,
+                mult.threshold,
+                mult.report_confidence_intervals,
+                confidence,
+            )?;
+            let note = String::from(
+                "Pooled equal-variance studentized-range post-hoc procedure is invalid for Welch/Brown-Forsythe ANOVA; mapped to Games-Howell unequal-variance comparisons.",
+            );
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons",
+                "Multiple comparisons (Games-Howell fallback)",
+                p_fmt,
+                confidence,
+                Some(note.clone()),
+            );
+            out.checklist.push(checklist_item(
+                "Post-hoc multiplicity procedure",
+                ChecklistStatus::Info,
+                Some(String::from("Games-Howell unequal-variance fallback")),
+                note,
+            ));
+            Ok(())
+        }
+        MultiplicityProcedure::Dunnett { control_column } => append_welch_dunnett_vs_control(out, inputs, control_column, mult, p_fmt, confidence),
+        MultiplicityProcedure::LinearTrend => append_welch_linear_trend(out, inputs, p_fmt),
+        MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => {
+            let k = inputs.len();
+            let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    let ga = &inputs[i];
+                    let gb = &inputs[j];
+                    let (se, df) = welch_group_pair_se_df(ga, gb);
+                    entries.push(NamedSliceContrast {
+                        id_a: ga.index,
+                        id_b: gb.index,
+                        label_a: ga.label.as_str(),
+                        label_b: gb.label.as_str(),
+                        diff: ga.mean - gb.mean,
+                        se,
+                        df,
+                    });
+                }
+            }
+            let details =
+                compare_independent_contrast_family(&entries, proc_req, mult.threshold, confidence.alpha(), mult.report_confidence_intervals)?;
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons",
+                "Multiple comparisons (Welch t tests)",
+                p_fmt,
+                confidence,
+                Some(String::from(
+                    "Per-pair Welch unequal-variance t tests with Welch-Satterthwaite degrees of freedom and requested multiplicity adjustment.",
+                )),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Matched-pair difference *t* contrasts across complete RM subject blocks (`df = n - 1`), used when
+/// sphericity is not assumed (`geisser_greenhouse = true`).
+fn append_rm_paired_contrast_multiplicity(
+    out: &mut ResultSheet,
+    blocks: &[Vec<f64>],
+    inputs: &[GroupComparisonInput],
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let k = inputs.len();
+    let n = blocks.len() as f64;
+    let df = (blocks.len() - 1) as f64;
+    let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
+            let moments = SummaryMoments::from_slice(&diffs)?;
+            let se = moments.sample_sd().unwrap_or(0.0) / n.sqrt();
+            entries.push(NamedSliceContrast {
+                id_a: inputs[i].index,
+                id_b: inputs[j].index,
+                label_a: inputs[i].label.as_str(),
+                label_b: inputs[j].label.as_str(),
+                diff: moments.mean,
+                se,
+                df,
+            });
+        }
+    }
+    let details = compare_independent_contrast_family(
+        &entries,
+        MultiplicityProcedure::from(mult.method),
+        mult.threshold,
+        confidence.alpha(),
+        mult.report_confidence_intervals,
+    )?;
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (paired contrasts)",
+        p_fmt,
+        confidence,
+        Some(String::from("Paired-difference t tests across matched subjects without assuming sphericity (df = n - 1).")),
+    );
+    Ok(())
+}
+
+/// Dunn's post-hoc comparisons for Friedman's test across within-block mean ranks (Zar 2010, ch. 12).
+fn append_friedman_multiplicity(
+    out: &mut ResultSheet,
+    col_tab: &curvebook_doc::ColumnTable,
+    indices: &[usize],
+    blocks: &[Vec<f64>],
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let proc_req = MultiplicityProcedure::from(mult.method);
+    match proc_req {
+        MultiplicityProcedure::None => return Ok(()),
+        MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::TamhaneT2
+        | MultiplicityProcedure::LinearTrend => {
+            let note = String::from("Parametric or linear-trend post-hoc comparisons were not computed for the nonparametric Friedman rank test.");
+            if let Some(tab) = out.tabs.iter_mut().find(|t| t.id == "friedman") {
+                tab.footnotes.push(note.clone());
+            }
+            out.checklist.push(checklist_item(
+                "Post-hoc multiple comparisons",
+                ChecklistStatus::Info,
+                Some(String::from("Not computed for Friedman test")),
+                note,
+            ));
+            return Ok(());
+        }
+        MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::Dunnett { .. }
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => {}
+    }
+
+    if !mult.threshold.is_finite() || mult.threshold <= 0.0 || mult.threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: mult.threshold });
+    }
+    let n = blocks.len();
+    let k = indices.len();
+    if k < 2 || n == 0 {
+        return Ok(());
+    }
+    let mut rank_sums = vec![0.0_f64; k];
+    let mut tie_sum = 0.0_f64;
+    for row in blocks {
+        let ranked = rank_with_ties(row)?;
+        for (c, &rk) in ranked.ranks.iter().enumerate() {
+            rank_sums[c] += rk;
+        }
+        tie_sum += ranked.tie_sum_t3_minus_t;
+    }
+    let nf = n as f64;
+    let kf = k as f64;
+    let mean_ranks: Vec<f64> = rank_sums.iter().map(|&s| s / nf).collect();
+    let var_diff = ((nf * kf * (kf + 1.0) - tie_sum / (kf - 1.0).max(1.0)) / (6.0 * nf * nf)).max(0.0);
+    let se = var_diff.sqrt();
+
+    let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
+        let ctrl_pos = indices
+            .iter()
+            .position(|&idx| idx == control_column)
+            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
+    } else {
+        let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                pairs.push((i, j));
+            }
+        }
+        pairs
+    };
+
+    let mut raw_p = Vec::with_capacity(pair_indices.len());
+    let mut raw_entries = Vec::with_capacity(pair_indices.len());
+    for &(i, j) in &pair_indices {
+        let diff = mean_ranks[i] - mean_ranks[j];
+        let (z_stat, p_val) = if se > 0.0 {
+            let z = diff / se;
+            (z, norm_two_sided_p(z.abs()))
+        } else {
+            zero_se_pair(diff, false)
+        };
+        raw_p.push(p_val);
+        raw_entries.push((i, j, diff, z_stat, p_val));
+    }
+    let adj_proc = match proc_req {
+        MultiplicityProcedure::DunnRankSum | MultiplicityProcedure::Dunnett { .. } => MultiplicityProcedure::Bonferroni,
+        MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
+        other => other,
+    };
+    let (adj, is_fdr) = try_adjust_p_values(&raw_p, adj_proc, mult.threshold)?;
+    let details: Vec<PairwiseComparisonDetail> = raw_entries
+        .into_iter()
+        .zip(adj)
+        .map(|((i, j, diff, z_stat, p_val), adj_p)| {
+            mark_pair_significance(
+                PairwiseComparisonDetail {
+                    group_a: indices[i],
+                    group_b: indices[j],
+                    label_a: col_tab.data_sets[indices[i]].title.clone(),
+                    label_b: col_tab.data_sets[indices[j]].title.clone(),
+                    mean_diff: diff,
+                    se_diff: se,
+                    statistic: z_stat,
+                    df: f64::INFINITY,
+                    raw_p: p_val,
+                    adjusted_p_or_q: adj_p,
+                    is_fdr_q: is_fdr,
+                    ci: None,
+                    significant: false,
+                },
+                mult.threshold,
+            )
+        })
+        .collect();
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (Dunn's test for Friedman)",
+        p_fmt,
+        confidence,
+        Some(String::from("Dunn's nonparametric pairwise rank comparisons on within-block Friedman mean ranks with tie-corrected SE.")),
+    );
+    Ok(())
+}
+
 pub(in crate::anova) fn push_pairwise_outputs(
     out: &mut ResultSheet,
     details: &[PairwiseComparisonDetail],
@@ -1124,12 +1660,19 @@ pub(in crate::anova) fn append_one_way_checklist(
             Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
             var_explanation,
         ));
-    } else {
+    } else if raw_slices.is_empty() {
         out.checklist.push(checklist_item(
             "Homogeneity of variances (Brown-Forsythe / Bartlett)",
             ChecklistStatus::Info,
             Some(String::from("Not computable from summary statistics")),
             "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data; raw replicate observations are required.",
+        ));
+    } else {
+        out.checklist.push(checklist_item(
+            "Homogeneity of variances (Brown-Forsythe / Bartlett)",
+            ChecklistStatus::Info,
+            Some(String::from("Not computable (group n < 2)")),
+            "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations.",
         ));
     }
     append_group_normality_checklist(&mut out.checklist, raw_slices, alpha, "Group normality (Shapiro-Wilk)");

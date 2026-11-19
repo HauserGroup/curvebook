@@ -125,17 +125,36 @@ impl PValueFormat {
         }
     }
 
-    /// Return the asterisk summary (`"ns"`, `"*"`, `"**"`, `"***"`, or `"****"`) for raw `p in [0, 1]`.
+    /// Return the asterisk summary (`"ns"`, `"*"`, `"**"`, `"***"`, or `"****"`) for raw `p in [0, 1]`
+    /// using the fixed `alpha = 0.05` publication cut-off (`p <= 0.05` -> `*`, `p <= 0.01` -> `**`,
+    /// `p <= 0.001` -> `***`, `p <= 0.0001` -> `****` when [`Self::star_ceiling`] is `4`).
+    ///
+    /// Use [`Self::stars_at_alpha`] when thresholds should match a non-default analysis `alpha`
+    /// (`1.0 - confidence_level`).
     #[must_use]
     pub fn stars(self, p: f64) -> &'static str {
-        if !p.is_finite() || !(0.0..=1.0).contains(&p) || p > 0.05 {
+        self.stars_at_alpha(p, 0.05)
+    }
+
+    /// Return the asterisk summary (`"ns"`, `"*"`, `"**"`, `"***"`, or `"****"`) for raw `p in [0, 1]`
+    /// evaluated against an explicit significance threshold `alpha in (0, 1)` (Zar 2010).
+    ///
+    /// Uses the inclusive significance boundary `p <= alpha` consistent with `curvebook-stats`
+    /// rejection flags (`p > alpha` or invalid `p`/`alpha` returns `"ns"`). For `alpha >= 0.05`,
+    /// higher star tiers preserve the standard publication cut-offs (`0.01`, `0.001`, `0.0001`);
+    /// for `alpha < 0.05`, star tiers scale proportionally (`alpha`, `alpha / 5`, `alpha / 50`,
+    /// `alpha / 500`) so every star tier remains strictly finer than `alpha`.
+    #[must_use]
+    pub fn stars_at_alpha(self, p: f64, alpha: f64) -> &'static str {
+        if !p.is_finite() || !alpha.is_finite() || !(0.0..=1.0).contains(&p) || !(alpha > 0.0 && alpha < 1.0) || p > alpha {
             return "ns";
         }
-        if p <= 0.0001 && self.star_ceiling() >= 4 {
+        let (t2, t3, t4) = if alpha >= 0.05 { (0.01, 0.001, 0.0001) } else { (alpha / 5.0, alpha / 50.0, alpha / 500.0) };
+        if p <= t4 && self.star_ceiling() >= 4 {
             "****"
-        } else if p <= 0.001 {
+        } else if p <= t3 {
             "***"
-        } else if p <= 0.01 {
+        } else if p <= t2 {
             "**"
         } else {
             "*"
@@ -146,6 +165,12 @@ impl PValueFormat {
     #[must_use]
     pub fn summary_stars(self, p: f64) -> &'static str {
         self.stars(p)
+    }
+
+    /// Alias for [`Self::stars_at_alpha`] used by document/result-sheet summary helpers.
+    #[must_use]
+    pub fn summary_stars_at_alpha(self, p: f64, alpha: f64) -> &'static str {
+        self.stars_at_alpha(p, alpha)
     }
 
     /// Format a raw `p`-value in `[0.0, 1.0]` according to the selected publication style.
@@ -211,6 +236,20 @@ impl PValueFormat {
     pub fn format(self, p: f64) -> String {
         self.format_p(p)
     }
+}
+
+/// Standalone fixed-`0.05` significance-star helper matching [`PValueFormat::FourDecimal`] (`stars`).
+#[must_use]
+pub fn p_value_stars(p: f64) -> &'static str {
+    PValueFormat::FourDecimal.stars(p)
+}
+
+/// Alpha-aware significance-star helper matching [`PValueFormat::FourDecimal`] (`stars_at_alpha`).
+///
+/// Uses the consistent inclusive boundary `p <= alpha` (`p > alpha` returns `"ns"`).
+#[must_use]
+pub fn p_value_stars_at_alpha(p: f64, alpha: f64) -> &'static str {
+    PValueFormat::FourDecimal.stars_at_alpha(p, alpha)
 }
 
 #[cfg(test)]

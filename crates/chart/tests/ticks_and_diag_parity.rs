@@ -455,12 +455,12 @@ fn bland_altman_plot_consumes_bland_altman_result_sheet_absolute_and_percent() -
     let ds = DataSheet::new(SheetId::new("ba-ds"), "Methods", TableArchetype::Column(col))?;
 
     // Absolute difference on cols (0, 1)
-    let ba_abs = BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false };
+    let ba_abs = BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() };
     let an_abs = AnalysisSpec::new(SheetId::new("ba-abs-res"), ds.id.clone(), AnalysisKind::BlandAltman(ba_abs))?;
     let res_abs = run_bland_altman_analysis(&ds, &an_abs, &ba_abs)?;
 
     // Percent difference on cols (1, 2)
-    let ba_pct = BlandAltmanSpec { column_a: 1, column_b: 2, percent_difference: true };
+    let ba_pct = BlandAltmanSpec { column_a: 1, column_b: 2, percent_difference: true, ..BlandAltmanSpec::default() };
     let an_pct = AnalysisSpec::new(SheetId::new("ba-pct-res"), ds.id.clone(), AnalysisKind::BlandAltman(ba_pct))?;
     let res_pct = run_bland_altman_analysis(&ds, &an_pct, &ba_pct)?;
 

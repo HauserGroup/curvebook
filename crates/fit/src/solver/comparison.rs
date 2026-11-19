@@ -33,6 +33,16 @@ pub fn ordered_nested_roles<'a>(
     if primary.df >= alt.df { (primary, alt, false) } else { (alt, primary, true) }
 }
 
+/// Filter `config.parameter_rules` down to parameter names defined on `alt_model`,
+/// preserving strict `#114` validation in [`ParameterLayout::build`](crate::solver::layout::ParameterLayout::build) while allowing
+/// model comparisons across models with different parameter sets (e.g. 4PL vs 3PL).
+fn filter_config_rules_for_alt_model(config: &SolverConfig, alt_model: &dyn ParametricModel) -> SolverConfig {
+    let alt_params = alt_model.param_names();
+    let mut alt_config = config.clone();
+    alt_config.parameter_rules.retain(|rule| alt_params.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)));
+    alt_config
+}
+
 /// Compare primary fitted model against an alternative nested/non-nested model via Extra-SS *F*,
 /// $\text{AIC}_c$, or Likelihood Ratio Test (`ModelComparisonSpec`).
 ///
@@ -80,7 +90,8 @@ pub fn compare_models(
             reason: "Extra sum-of-squares F test is undefined for PoissonDeviance fits; use LikelihoodRatioTest or Aicc instead".to_owned(),
         });
     }
-    let alt = fit_nonlinear(alt_model, datasets, hooks, config)?;
+    let alt_config = filter_config_rules_for_alt_model(config, alt_model);
+    let alt = fit_nonlinear(alt_model, datasets, hooks, &alt_config)?;
     if alt.is_robust_cauchy() {
         return Err(FitError::InvalidParameter {
             name: "comparison",
@@ -166,7 +177,8 @@ pub fn compare_models_checked(
     spec: &ModelComparisonSpec,
 ) -> Result<ModelComparisonResult, FitError> {
     if primary.is_robust_cauchy() || config.method == FitMethod::RobustCauchy {
-        let alternative_fit = fit_nonlinear(alt_model, datasets, hooks, config)?;
+        let alt_config = filter_config_rules_for_alt_model(config, alt_model);
+        let alternative_fit = fit_nonlinear(alt_model, datasets, hooks, &alt_config)?;
         return Ok(ModelComparisonResult {
             inference_availability: InferenceAvailability::NotApplicableInRobustMode,
             outcome: ModelComparisonOutcome::NotApplicableInRobustMode {

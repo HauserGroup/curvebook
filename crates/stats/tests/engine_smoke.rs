@@ -132,7 +132,7 @@ fn two_group_and_bland_altman_suite() {
 #[test]
 fn all_14_multiplicity_procedures_and_anova_family() {
     let raw = [0.001, 0.012, 0.039, 0.045, 0.21, 0.85];
-    let procs = [
+    let non_adaptive = [
         MultiplicityProcedure::None,
         MultiplicityProcedure::Bonferroni,
         MultiplicityProcedure::Sidak,
@@ -140,15 +140,16 @@ fn all_14_multiplicity_procedures_and_anova_family() {
         MultiplicityProcedure::HolmSidak,
         MultiplicityProcedure::BenjaminiHochbergFdr,
         MultiplicityProcedure::BenjaminiYekutieliFdr,
-        MultiplicityProcedure::TwoStageBkyFdr,
     ];
-    for p in procs {
+    for p in non_adaptive {
         let (adj, _) = adjust_p_values(&raw, p, 0.05);
         assert_eq!(adj.len(), raw.len());
-        for (&r, &a) in raw.iter().zip(adj.iter()) {
-            assert!(a >= r - 1e-12 && a <= 1.0);
-        }
+        assert!(raw.iter().zip(adj.iter()).all(|(&r, &a)| a >= r - 1e-12 && a <= 1.0));
     }
+    // BKY (2006) Def. 6 scales Stage-2 decision values by m0_hat * (1 + q) / i, which can fall below raw_p.
+    let (bky_adj, bky_is_fdr) = adjust_p_values(&raw, MultiplicityProcedure::TwoStageBkyFdr, 0.05);
+    assert!(bky_is_fdr && bky_adj.len() == raw.len() && bky_adj.iter().all(|&a| (0.0..=1.0).contains(&a)));
+    assert!(bky_adj.iter().take(4).all(|&a| a <= 0.05));
 
     let groups = vec![
         GroupComparisonInput { index: 0, label: "Ctrl".into(), n: 6.0, mean: 10.0, sd: 1.1 },

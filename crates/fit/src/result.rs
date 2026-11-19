@@ -53,6 +53,18 @@ fn ci_cell(lower: CiBound, upper: CiBound) -> ResultCell {
     ResultCell::ConfidenceInterval { lower: sanitize(lower), upper: sanitize(upper) }
 }
 
+fn format_percent_label(pct: f64) -> String {
+    if !pct.is_finite() {
+        return pct.to_string();
+    }
+    if (pct - pct.round()).abs() < 1e-9 {
+        format!("{:.0}", pct.round())
+    } else {
+        let rounded = (pct * 1e9).round() / 1e9;
+        format!("{rounded}")
+    }
+}
+
 /// Execute either a [`AnalysisKind::LinearRegression`] or [`AnalysisKind::NonlinearRegression`]
 /// [`AnalysisSpec`] against a [`DataSheet`] and return a populated [`ResultSheet`].
 pub fn execute_analysis(spec: &AnalysisSpec, sheet: &DataSheet, hooks: &HookContext) -> Result<ResultSheet, FitError> {
@@ -160,13 +172,14 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     }
 
     // Main summary tab across datasets.
+    let conf_pct = format_percent_label(options.confidence_level.percent());
     let col_headers: Vec<String> = fits.iter().map(|(_, lbl, _)| lbl.clone()).collect();
     let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE of Slope".to_owned(),
         "SE of Intercept".to_owned(),
-        "95% CI Slope".to_owned(),
+        format!("{conf_pct}% CI Slope"),
         "R squared".to_owned(),
         "Sy.x".to_owned(),
         "F".to_owned(),
@@ -305,13 +318,14 @@ fn build_deming_result_sheet(
     let has_range = options.x_range_filter.is_some();
     let (plot_min, plot_max) = options.plot_x_range.unwrap_or_default();
     let emit_overlay = has_range || plot_min.is_some() || plot_max.is_some() || has_explicit_segments;
+    let conf_pct = format_percent_label(options.confidence_level.percent());
     let mut row_labels = vec![
         "Slope".to_owned(),
         "Y-intercept".to_owned(),
         "SE Slope (Jackknife)".to_owned(),
         "SE Intercept (Jackknife)".to_owned(),
-        "CI Slope".to_owned(),
-        "CI Intercept".to_owned(),
+        format!("{conf_pct}% CI Slope"),
+        format!("{conf_pct}% CI Intercept"),
         "Sy.x".to_owned(),
     ];
     let mut rows = vec![Vec::with_capacity(datasets.len()); row_labels.len()];
@@ -625,12 +639,20 @@ fn populate_nonlinear_result_sheet(result: &mut ResultSheet, fit: &NonlinearFitR
         gof_labels.push(if is_poisson { "Poisson Deviance".to_owned() } else { "Weighted Sum of Squares".to_owned() });
         gof_vals.push(vec![num_cell(fit.weighted_ss)]);
         gof_footnotes.push(String::from(
-            "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective.",
+            "R squared, Sum of Squares (RSS), and Sy.x are computed from unweighted residuals in original Y units; parameter SEs, confidence intervals, AICc/BIC, and model comparisons use the weighted / deviance objective; residual normality and homoscedasticity checks use weighted / deviance-standardized residuals.",
         ));
     }
     if let Some(r) = &fit.runs_test {
         gof_labels.push("Runs test P value".to_owned());
         gof_vals.push(vec![p_cell(p_fmt, r.p_too_few_runs)]);
+    }
+    if fit.datasets.len() > 1 {
+        for ds in &fit.datasets {
+            if let Some(ds_runs) = &ds.runs_test {
+                gof_labels.push(format!("Runs test ({}) P value", ds.label));
+                gof_vals.push(vec![p_cell(p_fmt, ds_runs.p_too_few_runs)]);
+            }
+        }
     }
     for norm in [&fit.normality, &fit.normality_anderson_darling, &fit.normality_lilliefors_ks].into_iter().flatten() {
         gof_labels.push(format!("Normality ({}) P value", norm.test_name));
@@ -796,9 +818,32 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
         });
     }
 
+    if fit.datasets.len() > 1 {
+        for ds in &fit.datasets {
+            if let Some(ds_runs) = &ds.runs_test {
+                result.checklist.push(ChecklistItem {
+                    assumption: format!("Runs test for systematic deviation ({})", ds.label),
+                    status: if ds_runs.deviates_significantly { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+                    diagnostic_metric: Some(format!("p = {:.4}, runs = {}", ds_runs.p_too_few_runs, ds_runs.runs)),
+                    explanation: if ds_runs.deviates_significantly {
+                        "Residuals show non-random runs along X within this dataset.".to_owned()
+                    } else {
+                        "Residuals do not systematically deviate from the fitted curve within this dataset.".to_owned()
+                    },
+                    remediation: None,
+                });
+            }
+        }
+    }
+
     if let Some(runs) = &fit.runs_test {
+        let assumption = if fit.datasets.len() > 1 {
+            "Runs test for systematic deviation (combined across datasets)".to_owned()
+        } else {
+            "Runs test for systematic deviation".to_owned()
+        };
         result.checklist.push(ChecklistItem {
-            assumption: "Runs test for systematic deviation".to_owned(),
+            assumption,
             status: if runs.deviates_significantly { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
             diagnostic_metric: Some(format!("p = {:.4}, runs = {}", runs.p_too_few_runs, runs.runs)),
             explanation: if runs.deviates_significantly {
@@ -853,15 +898,11 @@ fn append_nonlinear_checklist(result: &mut ResultSheet, fit: &NonlinearFitResult
     }
 
     if let Some(rout) = &fit.rout {
+        let q_label = format_percent_label(rout.q_threshold_percent);
         result.checklist.push(ChecklistItem {
             assumption: "ROUT outlier detection".to_owned(),
             status: ChecklistStatus::Info,
-            diagnostic_metric: Some(format!(
-                "Q = {:.2}%, RSDR = {:.4}, outliers = {}",
-                rout.q_threshold_percent,
-                rout.rsdr,
-                rout.outlier_indices.len()
-            )),
+            diagnostic_metric: Some(format!("Q = {q_label}%, RSDR = {:.4}, outliers = {}", rout.rsdr, rout.outlier_indices.len())),
             explanation: format!("{} outlier(s) identified and excluded before ordinary least-squares refit.", rout.outlier_indices.len()),
             remediation: None,
         });

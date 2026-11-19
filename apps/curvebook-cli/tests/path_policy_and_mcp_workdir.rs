@@ -316,3 +316,31 @@ fn r1_x1_04_mcp_workdir_enforces_containment_across_all_surfaces() -> Result<(),
     mcp.finish()?;
     Ok(())
 }
+
+#[test]
+fn audit_23_cli_mcp_rejects_combining_control_port_with_workdir() -> Result<(), Box<dyn std::error::Error>> {
+    let bin = env!("CARGO_BIN_EXE_curvebook-cli");
+    let dirs = TempDirPair::new("audit23-cli-exclusive");
+    let wd_str = dirs.workdir.display().to_string();
+
+    for args in [
+        vec!["mcp", "--control-port", "49154", "--workdir", &wd_str],
+        vec!["mcp", "--workdir", &wd_str, "--control-port=49154", "--gui-only"],
+        vec!["mcp", "--gui-only", "--control-port=49154", "--workdir", &wd_str],
+    ] {
+        let out = Command::new(bin).args(&args).stdin(Stdio::null()).output()?;
+        assert_eq!(out.status.code(), Some(2), "expected exit 2 for {args:?}, got {:?}", out.status.code());
+        let stderr = String::from_utf8_lossy(&out.stderr);
+        assert!(stderr.contains("--control-port") && stderr.contains("--workdir"), "expected explanatory stderr for {args:?}, got: {stderr}");
+    }
+
+    let env_out =
+        Command::new(bin).args(["mcp", "--workdir", &wd_str, "--json"]).env("CURVEBOOK_CONTROL_PORT", "49154").stdin(Stdio::null()).output()?;
+    assert_eq!(env_out.status.code(), Some(2), "expected exit 2 when combining CURVEBOOK_CONTROL_PORT and --workdir");
+    let env_stdout = String::from_utf8_lossy(&env_out.stdout);
+    assert!(
+        env_stdout.contains("--control-port") && env_stdout.contains("--workdir"),
+        "expected JSON error mentioning both flags, got: {env_stdout}"
+    );
+    Ok(())
+}

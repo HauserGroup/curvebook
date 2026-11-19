@@ -267,16 +267,18 @@ fn multiplicity_unbalanced_dunnett_raw_p_and_multiple_row_bonferroni_adjustment(
         assert!(row.raw_p < row.adjusted_p_or_q);
     }
 
-    // Multiple row t-tests with LinearTrend / DunnRankSum apply Bonferroni rather than raw pass-through.
+    // Multiple row t-tests reject ANOVA-only procedures cleanly (#81) while applying Bonferroni directly.
     let row_labels = vec![String::from("R1"), String::from("R2"), String::from("R3")];
     let ga = vec![vec![10.0, 11.0, 12.0, 13.0], vec![10.0, 10.5, 11.0, 11.5], vec![1.0, 2.0, 3.0, 4.0]];
     let gb = vec![vec![14.0, 15.0, 16.0, 17.0], vec![10.1, 10.6, 11.1, 11.6], vec![2.0, 3.0, 4.0, 5.0]];
     for proc in [MultiplicityProcedure::LinearTrend, MultiplicityProcedure::DunnRankSum] {
-        let mr = multiple_row_t_tests(&row_labels, &ga, &gb, false, proc, 0.05).unwrap();
-        assert_eq!(mr.len(), 3);
-        for r in mr {
-            assert_approx_eq(r.adjusted_p_or_q, (r.raw_p * 3.0).min(1.0), 1e-12, 1e-12, "Multiple row t-test Bonferroni fallback");
-        }
+        let err = multiple_row_t_tests(&row_labels, &ga, &gb, false, proc, 0.05).unwrap_err();
+        assert!(matches!(err, StatsError::IncompatibleAnalysisSpec { .. }), "expected IncompatibleAnalysisSpec for {proc:?}, got {err:?}");
+    }
+    let mr_bonf = multiple_row_t_tests(&row_labels, &ga, &gb, false, MultiplicityProcedure::Bonferroni, 0.05).unwrap();
+    assert_eq!(mr_bonf.len(), 3);
+    for r in mr_bonf {
+        assert_approx_eq(r.adjusted_p_or_q, (r.raw_p * 3.0).min(1.0), 1e-12, 1e-12, "Multiple row t-test Bonferroni");
     }
 }
 

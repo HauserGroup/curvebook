@@ -79,7 +79,7 @@ mod independent_oracle {
             let rank = (pos + 1) as f64;
             let cand = ((raw[orig] * (m as f64) * factor) / rank).min(1.0);
             run_min = run_min.min(cand);
-            out[orig] = run_min.max(raw[orig]).min(1.0);
+            out[orig] = run_min.clamp(0.0, 1.0);
         }
         out
     }
@@ -157,13 +157,8 @@ fn hand_calculated_oracle_unsorted_with_ties_all_seven_methods() {
     // rank 4 is 0.05 > q', so r1 = 2, m0_hat = 3, scale = (1 + 0.05) * (3 / 5) = 0.63.
     let bky = analyze_pvalue_stack(&raw, PValueStackMethod::TwoStageBky, threshold).unwrap();
     let scale = (1.0 + threshold) * (3.0 / 5.0);
-    let exp_bky = [
-        (5.0 * scale * 0.04 / 4.0).max(0.04),
-        (5.0 * scale * 0.002).max(0.002),
-        (5.0 * scale * 0.04 / 4.0).max(0.04),
-        (5.0 * scale * 0.80 / 5.0).max(0.80),
-        (5.0 * scale * 0.015 / 2.0).max(0.015),
-    ];
+    // Notice rank 4 (p=0.04) = 0.0315 < 0.04 and rank 3 (p=0.04) = 0.042 clamped by running_min to 0.0315.
+    let exp_bky = [5.0 * scale * 0.04 / 4.0, 5.0 * scale * 0.002, 5.0 * scale * 0.04 / 4.0, 5.0 * scale * 0.80 / 5.0, 5.0 * scale * 0.015 / 2.0];
     for (r, &e) in bky.rows.iter().zip(&exp_bky) {
         assert_close(r.adjusted_p_or_q, e, "bky");
     }
@@ -244,8 +239,9 @@ fn boundary_zero_and_one_inputs_across_all_methods() {
         assert_close(res.rows[1].raw_p, 1.0, &format!("{method:?} raw 1"));
         assert_close(res.rows[0].adjusted_p_or_q, 0.0, &format!("{method:?} adj 0"));
         assert_close(res.rows[2].adjusted_p_or_q, 0.0, &format!("{method:?} adj 0 tie"));
-        assert_close(res.rows[1].adjusted_p_or_q, 1.0, &format!("{method:?} adj 1"));
-        assert_close(res.rows[3].adjusted_p_or_q, 1.0, &format!("{method:?} adj 1 tie"));
+        let expected_adj1 = if method == PValueStackMethod::TwoStageBky { 0.525 } else { 1.0 };
+        assert_close(res.rows[1].adjusted_p_or_q, expected_adj1, &format!("{method:?} adj 1"));
+        assert_close(res.rows[3].adjusted_p_or_q, expected_adj1, &format!("{method:?} adj 1 tie"));
         assert_eq!(res.rows.iter().map(|r| r.discovery).collect::<Vec<_>>(), vec![true, false, true, false]);
     }
 

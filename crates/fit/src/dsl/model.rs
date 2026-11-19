@@ -9,18 +9,20 @@ use std::sync::atomic::Ordering;
 
 use curvebook_math::roots::{RootOptions, brent_root};
 
-use crate::dsl::ast::{CompiledInitRule, CompiledProgram, DatasetFilter, DslEquationKind, Expr, OpCode};
+use crate::dsl::ast::{CompiledInitRule, CompiledOdeInit, CompiledProgram, DatasetFilter, DslCompileWarning, DslEquationKind, Expr, OpCode};
 use crate::dsl::compile::compile_program_refs;
 use crate::dsl::implicit::{implicit_newton_fallback, implicit_probes_and_scale};
-use crate::dsl::limits::{MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_ODE_STEPS, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES};
+use crate::dsl::limits::{MAX_DSL_LINES, MAX_DSL_SOURCE_BYTES, MAX_ODE_VM_OPS_PER_EVAL, MAX_TOTAL_DATASET_INDICES, MAX_TOTAL_OPCODES};
 use crate::dsl::ode::{
-    NEXT_ODE_MODEL_ID, OdeKnot, Rk45Outcome, integrate_rk45_segment, ode_fit_budget_exceeded, store_cached_ode_trajectory, take_cached_ode_trajectory,
+    NEXT_ODE_MODEL_ID, OdeRhsSource, consume_ode_fit_rk_step, consume_ode_fit_vm_ops, eval_ode_on_side, ode_fit_budget_exceeded,
+    store_cached_ode_trajectory, take_cached_ode_trajectory,
 };
 use crate::dsl::statements::{
-    DslSection, ParsedStatement, ResolvedEquationBody, collect_free_idents, compile_initial_rules, compile_transforms, compute_dataset_stats,
-    parse_dataset_prefix, parse_section_header, parse_statement, resolve_equation_branches, strip_comment,
+    DslSection, ParsedStatement, ResolvedEquationBody, byte_offset_in_line, collect_free_idents, compile_initial_rules, compile_transforms,
+    compute_dataset_stats, is_builtin_constant_or_var, parse_dataset_prefix, parse_section_header, parse_statement, parse_statement_with_locs,
+    resolve_equation_branches, strip_comment,
 };
-use crate::dsl::vm::{eval_bytecode, eval_bytecode_with_bufs, eval_bytecode_with_locals};
+use crate::dsl::vm::{eval_bytecode, eval_bytecode_counted, eval_bytecode_with_locals};
 use crate::error::FitError;
 use crate::library::ParametricModel;
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
@@ -36,13 +38,15 @@ pub struct CompiledDslModel {
     pub(in crate::dsl) programs: Vec<(DatasetFilter, CompiledProgram)>,
     pub(in crate::dsl) program_by_ds: HashMap<usize, usize>,
     pub(in crate::dsl) default_program_idx: Option<usize>,
-    pub(in crate::dsl) ode_init_program: Option<CompiledProgram>,
-    pub(in crate::dsl) ode_t0: f64,
+    pub(in crate::dsl) ode_inits: Vec<(DatasetFilter, CompiledOdeInit)>,
+    pub(in crate::dsl) ode_init_by_ds: HashMap<usize, usize>,
+    pub(in crate::dsl) default_ode_init_idx: Option<usize>,
     pub(in crate::dsl) initial_hints: HashMap<String, f64>,
     pub(in crate::dsl) initial_rules: Vec<CompiledInitRule>,
     pub(in crate::dsl) init_local_count: usize,
     pub(in crate::dsl) transforms: Vec<(String, usize, CompiledProgram)>,
     pub(in crate::dsl) transform_local_count: usize,
+    pub(in crate::dsl) warnings: Vec<DslCompileWarning>,
 }
 
 impl CompiledDslModel {
@@ -73,7 +77,7 @@ impl CompiledDslModel {
         let mut raw_init_lines: Vec<(usize, DatasetFilter, String, Expr)> = Vec::new();
         let mut raw_transform_lines: Vec<(usize, String, Expr)> = Vec::new();
         let mut initial_hints = HashMap::new();
-        let mut ode_t0 = 0.0_f64;
+        let mut ident_locs: HashMap<String, (usize, usize)> = HashMap::new();
         let mut total_dataset_indices = 0_usize;
 
         for (idx, raw_line) in source.lines().enumerate() {
@@ -85,7 +89,7 @@ impl CompiledDslModel {
                     column: 1,
                 });
             }
-            let trimmed = strip_comment(raw_line, &mut initial_hints, &mut ode_t0);
+            let trimmed = strip_comment(raw_line, line_no, &mut initial_hints)?;
             if trimmed.is_empty() {
                 continue;
             }
@@ -109,13 +113,21 @@ impl CompiledDslModel {
             if rest.is_empty() {
                 continue;
             }
+            let col_offset = byte_offset_in_line(raw_line, rest);
             match section {
                 DslSection::Equation => {
-                    let stmt = parse_statement(rest, line_no)?;
+                    let stmt = parse_statement_with_locs(rest, line_no, col_offset, Some(&mut ident_locs))?;
                     parsed_lines.push((line_no, filter, stmt));
                 }
                 DslSection::InitialValues => match parse_statement(rest, line_no)? {
                     ParsedStatement::Assign { name, rhs } | ParsedStatement::OdeInitial { lhs_name: Some(name), rhs, .. } => {
+                        if is_builtin_constant_or_var(&name) {
+                            return Err(FitError::DslCompileError {
+                                message: format!("Cannot assign initial value rule to reserved identifier `{name}`"),
+                                line: line_no,
+                                column: col_offset + 1,
+                            });
+                        }
                         raw_init_lines.push((line_no, filter, name, rhs));
                     }
                     _ => {
@@ -154,7 +166,7 @@ impl CompiledDslModel {
             return Err(FitError::DslCompileError { message: "Empty custom equation".to_owned(), line: 1, column: 1 });
         }
 
-        let ResolvedEquationBody { kind, body_stmts, init_stmts, ode_t0 } = resolve_equation_branches(parsed_lines, ode_t0)?;
+        let ResolvedEquationBody { kind, body_stmts, ode_init_branches, warnings } = resolve_equation_branches(parsed_lines, &ident_locs)?;
         if body_stmts.is_empty() {
             return Err(FitError::DslCompileError { message: "No target expression (`Y = ...` or expression) found".to_owned(), line: 1, column: 1 });
         }
@@ -171,11 +183,15 @@ impl CompiledDslModel {
             }
             collect_free_idents(target, &bound_locals, &mut seen_params, &mut param_order);
         }
-        let empty_locals = BTreeSet::new();
-        for (_, rhs) in &init_stmts {
-            collect_free_idents(rhs, &empty_locals, &mut seen_params, &mut param_order);
+        for (_, _, locals, rhs) in &ode_init_branches {
+            let mut bound_locals: BTreeSet<String> = BTreeSet::new();
+            for (lname, lrhs) in locals {
+                collect_free_idents(lrhs, &bound_locals, &mut seen_params, &mut param_order);
+                bound_locals.insert(lname.clone());
+            }
+            collect_free_idents(rhs, &bound_locals, &mut seen_params, &mut param_order);
         }
-        if kind == DslEquationKind::OdeFirstOrder && init_stmts.is_empty() && !seen_params.contains("Y0") {
+        if kind == DslEquationKind::OdeFirstOrder && ode_init_branches.is_empty() && !seen_params.contains("Y0") {
             param_order.push("Y0".to_owned());
             seen_params.insert("Y0".to_owned());
         }
@@ -211,26 +227,50 @@ impl CompiledDslModel {
             programs.push((filter, prog));
         }
 
-        let ode_init_program = if kind == DslEquationKind::OdeFirstOrder {
-            let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
-            let prog = if let Some((_, init_expr)) = init_stmts.last() {
-                compile_program_refs(&[], init_expr, &param_map, remaining)?
-            } else {
+        let mut ode_inits = Vec::new();
+        let mut ode_init_by_ds = HashMap::new();
+        let mut default_ode_init_idx = None;
+        if kind == DslEquationKind::OdeFirstOrder {
+            if ode_init_branches.is_empty() {
                 let y0_idx = *param_map.get("Y0").unwrap_or(&0);
-                CompiledProgram { code: vec![OpCode::LoadParam(y0_idx), OpCode::Halt], local_count: 0 }
-            };
-            total_opcodes = total_opcodes.saturating_add(prog.code.len());
-            if total_opcodes > MAX_TOTAL_OPCODES {
-                return Err(FitError::DslCompileError {
-                    message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
-                    line: 1,
-                    column: 1,
-                });
+                let prog = CompiledProgram { code: vec![OpCode::LoadParam(y0_idx), OpCode::Halt], local_count: 0 };
+                total_opcodes = total_opcodes.saturating_add(prog.code.len());
+                if total_opcodes > MAX_TOTAL_OPCODES {
+                    return Err(FitError::DslCompileError {
+                        message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                        line: 1,
+                        column: 1,
+                    });
+                }
+                ode_inits.push((DatasetFilter::Any, CompiledOdeInit { t0: 0.0, prog }));
+                default_ode_init_idx = Some(0);
+            } else {
+                for (filter, t0, locals, init_expr) in ode_init_branches {
+                    let remaining = MAX_TOTAL_OPCODES.saturating_sub(total_opcodes);
+                    let prog = compile_program_refs(&locals, &init_expr, &param_map, remaining)?;
+                    total_opcodes = total_opcodes.saturating_add(prog.code.len());
+                    if total_opcodes > MAX_TOTAL_OPCODES {
+                        return Err(FitError::DslCompileError {
+                            message: format!("Compiled equation exceeds total bytecode budget ({MAX_TOTAL_OPCODES} opcodes)"),
+                            line: 1,
+                            column: 1,
+                        });
+                    }
+                    let init_idx = ode_inits.len();
+                    match &filter {
+                        DatasetFilter::Include(v) => {
+                            for &ds in v {
+                                ode_init_by_ds.insert(ds, init_idx);
+                            }
+                        }
+                        DatasetFilter::Exclude(_) | DatasetFilter::Any => {
+                            default_ode_init_idx = Some(init_idx);
+                        }
+                    }
+                    ode_inits.push((filter, CompiledOdeInit { t0, prog }));
+                }
             }
-            Some(prog)
-        } else {
-            None
-        };
+        }
 
         let (initial_rules, init_local_count) = compile_initial_rules(raw_init_lines, &param_order, &param_map, &mut total_opcodes)?;
         let (transforms, transform_local_count) = compile_transforms(raw_transform_lines, &param_map, &mut total_opcodes)?;
@@ -244,13 +284,15 @@ impl CompiledDslModel {
             programs,
             program_by_ds,
             default_program_idx,
-            ode_init_program,
-            ode_t0,
+            ode_inits,
+            ode_init_by_ds,
+            default_ode_init_idx,
             initial_hints,
             initial_rules,
             init_local_count,
             transforms,
             transform_local_count,
+            warnings,
         })
     }
 
@@ -260,9 +302,20 @@ impl CompiledDslModel {
         self.kind
     }
 
+    /// Return non-fatal compile warnings (such as reserved identifier usage) emitted during compilation.
+    #[must_use]
+    pub fn warnings(&self) -> &[DslCompileWarning] {
+        &self.warnings
+    }
+
     pub(in crate::dsl) fn select_program(&self, ds_idx: usize) -> Option<&CompiledProgram> {
         let idx = self.program_by_ds.get(&ds_idx).copied().or(self.default_program_idx)?;
-        self.programs.get(idx).map(|(_, p)| p)
+        self.programs.get(idx).filter(|(f, _)| f.matches(ds_idx)).map(|(_, p)| p)
+    }
+
+    pub(in crate::dsl) fn select_ode_init(&self, ds_idx: usize) -> Option<&CompiledOdeInit> {
+        let idx = self.ode_init_by_ds.get(&ds_idx).copied().or(self.default_ode_init_idx)?;
+        self.ode_inits.get(idx).filter(|(f, _)| f.matches(ds_idx)).map(|(_, init)| init)
     }
 
     /// Solve the implicit equation `F(x, y; theta) = 0` for `y`: bracket a sign change over a
@@ -394,110 +447,110 @@ impl CompiledDslModel {
     }
 
     /// Integrate ODE `dy/dt = f(t, y; theta)` from `t0` to target `t_end` using adaptive Dormand–Prince RK45
-    /// with per-trajectory continuation caching so sweeps reuse work across points.
+    /// with scale-invariant tolerances, VM-operation budget accounting, and order-independent frontier caching.
     pub(in crate::dsl) fn eval_ode_single(&self, t_end: f64, x_tail: &[f64], params: &[f64], ds_idx: usize) -> Option<f64> {
         if ode_fit_budget_exceeded().is_some() {
             return None;
         }
         let prog = self.select_program(ds_idx)?;
-        let init_prog = self.ode_init_program.as_ref()?;
-        if !self.ode_t0.is_finite() || !t_end.is_finite() {
+        let init = self.select_ode_init(ds_idx)?;
+        let t0 = init.t0;
+        if !t0.is_finite() || !t_end.is_finite() {
             return None;
         }
 
+        let mut budget = OdeEvalBudget { remaining_ops: MAX_ODE_VM_OPS_PER_EVAL, exceeded: false, stack: Vec::with_capacity(32) };
         let mut xv = Vec::with_capacity(1 + x_tail.len());
-        xv.push(self.ode_t0);
+        xv.push(t0);
         xv.extend_from_slice(x_tail);
-        let mut stack = Vec::with_capacity(32);
-        let mut init_locals = vec![None; init_prog.local_count];
-        let y0 = eval_bytecode_with_bufs(init_prog, &xv, 0.0, params, ds_idx, &mut init_locals, &mut stack)?;
+        let mut init_locals = vec![None; init.prog.local_count];
+        let y0 = budget.eval(&init.prog, &xv, 0.0, params, ds_idx, &mut init_locals)?;
         if !y0.is_finite() {
             return None;
         }
-        if (t_end - self.ode_t0).abs() < 1e-15 {
+
+        let dir = if t_end >= t0 { 1.0 } else { -1.0 };
+        let target_dist = (t_end - t0) * dir;
+        if target_dist <= 4.0 * f64::EPSILON * t_end.abs().max(t0.abs()) {
             return Some(y0);
         }
-
-        let dir = if t_end >= self.ode_t0 { 1.0 } else { -1.0 };
-        let target_dist = (t_end - self.ode_t0) * dir;
-        if target_dist <= 0.0 || !target_dist.is_finite() {
+        if !target_dist.is_finite() {
             return None;
         }
 
-        let mut traj = take_cached_ode_trajectory(self.model_id, ds_idx, self.ode_t0, y0, params, x_tail);
+        let mut traj = take_cached_ode_trajectory(self.model_id, ds_idx, t0, y0, params, x_tail);
         let side = if dir > 0.0 { &mut traj.pos } else { &mut traj.neg };
 
+        if let Some(cached) = side.lookup_point(t_end.to_bits()) {
+            store_cached_ode_trajectory(traj);
+            return Some(cached);
+        }
         if side.failed_beyond_dist.is_some_and(|fail_d| target_dist > fail_d) {
             store_cached_ode_trajectory(traj);
             return None;
         }
 
-        let idx = side.knots.partition_point(|k| k.dist <= target_dist);
-        let cached_y = [idx.checked_sub(1).and_then(|i| side.knots.get(i)), side.knots.get(idx)]
-            .into_iter()
-            .flatten()
-            .find(|c| (target_dist - c.dist).abs() <= 1e-14 * target_dist || (t_end - c.t).abs() <= 4.0 * f64::EPSILON * t_end.abs())
-            .map(|c| c.y);
-        if let Some(y) = cached_y {
-            store_cached_ode_trajectory(traj);
-            return Some(y);
-        }
-
-        let start_knot = idx.checked_sub(1).and_then(|i| side.knots.get(i).cloned()).unwrap_or(OdeKnot { dist: 0.0, t: self.ode_t0, y: y0, h: 0.0 });
-        let advancing_frontier = idx == side.knots.len();
-        let rem_steps = if advancing_frontier { MAX_ODE_STEPS.saturating_sub(side.steps) } else { MAX_ODE_STEPS.saturating_sub(side.steps).max(64) };
-        if rem_steps == 0 {
-            if advancing_frontier {
-                side.failed_beyond_dist = Some(side.failed_beyond_dist.map_or(start_knot.dist, |prev| prev.min(start_knot.dist)));
-            }
-            store_cached_ode_trajectory(traj);
-            return None;
-        }
-
         let mut rhs_locals = vec![None; prog.local_count];
-        let mut collected = Vec::new();
-        let outcome =
-            integrate_rk45_segment(start_knot.t, t_end, start_knot.y, start_knot.h, target_dist, rem_steps, true, &mut collected, |t, y| {
-                xv[0] = t;
-                rhs_locals.fill(None);
-                stack.clear();
-                eval_bytecode_with_bufs(prog, &xv, y, params, ds_idx, &mut rhs_locals, &mut stack)
-            });
-
-        let mut last_kd = start_knot.dist;
-        let mut new_knots = Vec::with_capacity(collected.len() + 1);
-        for (kt, ky, kh) in collected {
-            let kd = (kt - self.ode_t0) * dir;
-            if kd > last_kd && kd < target_dist {
-                new_knots.push(OdeKnot { dist: kd, t: kt, y: ky, h: kh });
-                last_kd = kd;
-            }
-        }
-
-        let result = match outcome {
-            Rk45Outcome::Reached { y, h, steps_taken } => {
-                side.steps = side.steps.saturating_add(steps_taken);
-                new_knots.push(OdeKnot { dist: target_dist, t: t_end, y, h });
-                side.insert_knots(idx, new_knots);
-                Some(y)
-            }
-            Rk45Outcome::IntrinsicFailed { last_t, steps_taken } => {
-                side.steps = side.steps.saturating_add(steps_taken);
-                let last_accepted_dist = new_knots.last().map_or(start_knot.dist, |k| k.dist).max((last_t - self.ode_t0) * dir);
-                side.insert_knots(idx, new_knots);
-                if advancing_frontier {
-                    side.failed_beyond_dist = Some(side.failed_beyond_dist.map_or(last_accepted_dist, |prev| prev.min(last_accepted_dist)));
-                }
-                None
-            }
-            Rk45Outcome::BudgetExceeded { steps_taken } => {
-                side.steps = side.steps.saturating_add(steps_taken);
-                side.insert_knots(idx, new_knots);
-                None
-            }
-        };
+        let mut rhs_src = VmOdeRhs { prog, xv: &mut xv, params, ds_idx, rhs_locals: &mut rhs_locals, budget: &mut budget };
+        let result = eval_ode_on_side(side, t0, t_end, dir, target_dist, &mut rhs_src);
         store_cached_ode_trajectory(traj);
         result
+    }
+}
+
+struct OdeEvalBudget {
+    remaining_ops: usize,
+    exceeded: bool,
+    stack: Vec<f64>,
+}
+
+impl OdeEvalBudget {
+    fn is_exceeded(&self) -> bool {
+        self.exceeded || ode_fit_budget_exceeded().is_some()
+    }
+
+    fn eval(&mut self, prog: &CompiledProgram, x: &[f64], y: f64, params: &[f64], ds_idx: usize, locals: &mut [Option<f64>]) -> Option<f64> {
+        if self.is_exceeded() || self.remaining_ops == 0 {
+            self.exceeded = true;
+            return None;
+        }
+        self.stack.clear();
+        let (res, ops) = eval_bytecode_counted(prog, x, y, params, ds_idx, locals, &mut self.stack);
+        if ops > self.remaining_ops {
+            self.remaining_ops = 0;
+            self.exceeded = true;
+            let _ = consume_ode_fit_vm_ops(ops);
+            return None;
+        }
+        self.remaining_ops -= ops;
+        if !consume_ode_fit_vm_ops(ops) {
+            self.exceeded = true;
+            return None;
+        }
+        res
+    }
+}
+
+struct VmOdeRhs<'a> {
+    prog: &'a CompiledProgram,
+    xv: &'a mut [f64],
+    params: &'a [f64],
+    ds_idx: usize,
+    rhs_locals: &'a mut [Option<f64>],
+    budget: &'a mut OdeEvalBudget,
+}
+
+impl OdeRhsSource for VmOdeRhs<'_> {
+    fn eval_rhs(&mut self, t: f64, y: f64) -> Option<f64> {
+        self.xv[0] = t;
+        self.rhs_locals.fill(None);
+        self.budget.eval(self.prog, self.xv, y, self.params, self.ds_idx, self.rhs_locals)
+    }
+    fn budget_exceeded(&self) -> bool {
+        self.budget.is_exceeded()
+    }
+    fn charge_fit_step(&self) -> bool {
+        consume_ode_fit_rk_step()
     }
 }
 

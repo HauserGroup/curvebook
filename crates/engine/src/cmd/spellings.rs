@@ -86,7 +86,7 @@ pub const PVALUE_STACK_THRESHOLD: &[&str] = &["threshold", "pvalue_stack_thresho
 pub const PVALUE_STACK_COLUMN: &[&str] = &["column", "pvalue_stack_column"];
 
 /// Multiple-comparison specification for an analysis.
-pub const MULTIPLICITY: &[&str] = &["multiplicity", "post_hoc"];
+pub const MULTIPLICITY: &[&str] = &["multiplicity", "post_hoc", "multiplicity_method"];
 
 /// Family-wise alpha for multiple comparisons.
 pub const MULTIPLICITY_ALPHA: &[&str] = &["alpha", "threshold"];

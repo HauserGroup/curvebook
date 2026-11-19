@@ -499,6 +499,11 @@ fn build_arrive_constants(config: &SubjectRandomizationConfig, total_subjects: u
     ]
 }
 
+/// Largest-remainder (Hamilton) integer apportionment of `total` units across `weights`.
+///
+/// Assigns base quotas `floor(total * w_i / sum(weights))` and distributes remaining units to
+/// entries with largest exact remainders `(total * w_i) mod sum(weights)`, breaking ties deterministically
+/// in **ascending index order** (`0, 1, ...`).
 fn hamilton_apportion(total: usize, weights: &[usize]) -> Vec<usize> {
     let k = weights.len();
     let mut alloc = vec![0_usize; k];
@@ -606,6 +611,11 @@ fn sample_stratified_indices(source: &DataSheet, col_idx: usize, config: &RowSam
     Ok(selected)
 }
 
+/// Iterative constrained Hamilton allocation for stratified proportional sampling (`sum n_h = S`, `l_h <= n_h <= N_h`).
+///
+/// Enforces minimum-one clamping (`l_h = 1` when `sample_size >= stratum_sizes.len()` and `N_h >= 1`)
+/// and stratum-capacity capping (`n_h <= N_h`), freezing any clamped strata and re-running largest-remainder
+/// apportionment (with ascending stratum-index tie-breaks) on the residual `remaining` budget across active strata.
 fn apportion_stratified_proportional(sample_size: usize, stratum_sizes: &[usize]) -> Vec<usize> {
     let s_count = stratum_sizes.len();
     let mut alloc = vec![0_usize; s_count];
@@ -654,6 +664,10 @@ fn apportion_stratified_proportional(sample_size: usize, stratum_sizes: &[usize]
     alloc
 }
 
+/// Equal-size stratified water-filling allocation subject to per-stratum capacity (`0 <= n_h <= N_h`).
+///
+/// Repeatedly distributes `remaining / |unsaturated|` evenly across strata with `n_h < N_h`, allocating
+/// residual units (`remaining < |unsaturated|`) one-by-one in **ascending stratum-index order**.
 fn apportion_stratified_equal(sample_size: usize, stratum_sizes: &[usize]) -> Vec<usize> {
     let s_count = stratum_sizes.len();
     let mut alloc = vec![0_usize; s_count];
@@ -693,7 +707,7 @@ fn partial_fisher_yates(pool: &mut [usize], k: usize, rng: &mut DeterministicRng
     }
 }
 
-fn remap_exclusion_notes(notes: &[CellExclusionNote], selected_rows: &[usize]) -> Vec<CellExclusionNote> {
+pub(crate) fn remap_exclusion_notes(notes: &[CellExclusionNote], selected_rows: &[usize]) -> Vec<CellExclusionNote> {
     if notes.is_empty() {
         return Vec::new();
     }

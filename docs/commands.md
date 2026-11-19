@@ -679,7 +679,7 @@ Registered commands: 97
 - **Menu:** `Format/Data on Graph...`
 - **Summary:** Style one or all data series: colors, markers, connecting lines, error bars, right-Y binding, or multivariate encoding.
 - **Beginner note:** Customizes markers, connecting lines, error bars, and colors for curves or bars.
-- **Parameters:** `data_set_index` (any), `multivariate` (any), `series` (any), `series_index` (any), `sheet_id*` (string)
+- **Parameters:** `all_series` (any), `data_set_index` (any), `mode` (any), `multivariate` (any), `series` (any), `series_index` (any), `sheet_id*` (string)
 
 ### `graph.setSpec` — Update Graph Specification
 

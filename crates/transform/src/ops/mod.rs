@@ -9,8 +9,8 @@ pub use normalize_baseline::{BaselineKind, execute_normalize, execute_remove_bas
 pub use reshape_select::{PruneMethod, SelectRule, execute_prune, execute_select, execute_select_with_derived, execute_transpose};
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, DataSheet, HookSource, InfoSheet, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
-    TableArchetype, TransformAnalysisSpec,
+    AnalysisKind, AnalysisSpec, Cell, CellExclusionNote, DataSheet, HookSource, InfoSheet, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus,
+    ResultTab, ResultTabKind, TableArchetype, TransformAnalysisSpec, parse_column_title_numeric_hook,
 };
 
 use crate::error::TransformError;
@@ -89,12 +89,7 @@ impl<'a> TransformContext<'a> {
                 let title = column_title_at(&target.archetype, *data_set_index).ok_or_else(|| TransformError::MissingHook {
                     description: format!("column {data_set_index} not found on DataSheet `{data_sheet_id}`"),
                 })?;
-                title
-                    .trim()
-                    .parse::<f64>()
-                    .ok()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| TransformError::MissingHook { description: format!("column title `{title}` is not a finite number") })
+                parse_column_title_numeric_hook(title).map_err(|err| TransformError::MissingHook { description: err.to_string() })
             }
         }
     }
@@ -251,6 +246,31 @@ pub(crate) fn build_summary_tab(title: &str, entries: Vec<(&str, ResultCell)>, f
         row_labels,
         rows,
         footnotes,
+    }
+}
+
+pub(crate) fn swap_error_bound_cells(row_cells: &mut [Cell]) -> bool {
+    if row_cells.len() >= 3 {
+        row_cells.swap(1, 2);
+        true
+    } else {
+        false
+    }
+}
+
+pub(crate) fn remap_swapped_error_notes(notes: &mut [CellExclusionNote], swapped_rows: &[usize], col: usize) {
+    if notes.is_empty() || swapped_rows.is_empty() {
+        return;
+    }
+    let mut changed = false;
+    for note in notes.iter_mut() {
+        if note.coord.col == col && (note.coord.subcol == 1 || note.coord.subcol == 2) && swapped_rows.contains(&note.coord.row) {
+            note.coord.subcol = if note.coord.subcol == 1 { 2 } else { 1 };
+            changed = true;
+        }
+    }
+    if changed {
+        notes.sort_by_key(|n| n.coord);
     }
 }
 

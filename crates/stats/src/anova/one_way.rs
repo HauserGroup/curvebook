@@ -42,7 +42,10 @@ pub fn ordinary_one_way_anova(groups: &[(&str, &[f64])], confidence: ConfidenceL
     let labels: Vec<String> = groups.iter().map(|(l, _)| (*l).to_owned()).collect();
     let mut res = ordinary_one_way_anova_slices(&slices, confidence)?;
     res.group_labels = labels;
-    res.variance_tests = variance_homogeneity_tests(&slices)?;
+    // Variance homogeneity tests (Bartlett and Brown-Forsythe) require n >= 2 in every group.
+    if slices.iter().all(|s| s.len() >= 2) {
+        res.variance_tests = variance_homogeneity_tests(&slices)?;
+    }
     Ok(res)
 }
 
@@ -151,8 +154,11 @@ pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence
     let mut grand_sum = NeumaierSum::new();
     let mut ss_within = NeumaierSum::new();
     for g in groups {
-        if g.n < 1.0 || !g.mean.is_finite() || !g.sd.is_finite() || g.sd < 0.0 {
-            return Err(StatsError::InvalidParameter { name: "group_summary", value: g.n });
+        if !g.n.is_finite() || g.n < 1.0 || g.n.fract() != 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() || !g.sd.is_finite() || g.sd < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_summary", value: g.sd });
         }
         total_n_f += g.n;
         grand_sum.add(g.n * g.mean);
@@ -243,7 +249,10 @@ pub fn unequal_variance_one_way_anova(groups: &[GroupComparisonInput]) -> Result
     let mut bf_satt_denom = 0.0_f64;
 
     for g in groups {
-        if g.n < 2.0 || !g.sd.is_finite() || g.sd <= 0.0 {
+        if !g.n.is_finite() || g.n < 2.0 || g.n.fract() != 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() || !g.sd.is_finite() || g.sd <= 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_sd", value: g.sd });
         }
         let v = g.sd * g.sd;

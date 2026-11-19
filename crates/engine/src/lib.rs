@@ -709,15 +709,16 @@ pub const MAX_UNDO_CHECKPOINT_BYTES_BUDGET: usize = 16 * 1024 * 1024;
 #[derive(Debug, Clone, PartialEq)]
 struct UndoEntry {
     doc: ProjectDocument,
+    file_path: Option<PathBuf>,
     cell_slots: usize,
     checkpoint_bytes: usize,
 }
 
 impl UndoEntry {
-    fn from_document(doc: ProjectDocument) -> Self {
+    fn from_snapshot(doc: ProjectDocument, file_path: Option<PathBuf>) -> Self {
         let cell_slots = document_allocated_cell_slots(&doc);
         let checkpoint_bytes = document_checkpoint_bytes(&doc);
-        Self { doc, cell_slots, checkpoint_bytes }
+        Self { doc, file_path, cell_slots, checkpoint_bytes }
     }
 }
 
@@ -788,7 +789,7 @@ pub struct Session {
     gui_only: GuiOnlyPolicy,
     path_policy: ExternalPathPolicy,
     undo_stack: VecDeque<UndoEntry>,
-    redo_stack: Vec<ProjectDocument>,
+    redo_stack: Vec<UndoEntry>,
 }
 
 /// Optional crash-recovery WAL journal hooks backed by `curvebook_format::recovery`.
@@ -1156,8 +1157,8 @@ impl Session {
         self.undo_stack.iter().fold(0usize, |acc, entry| acc.saturating_add(entry.checkpoint_bytes))
     }
 
-    fn push_undo_snapshot(&mut self, doc: ProjectDocument) {
-        self.undo_stack.push_back(UndoEntry::from_document(doc));
+    fn push_undo_snapshot(&mut self, doc: ProjectDocument, file_path: Option<PathBuf>) {
+        self.undo_stack.push_back(UndoEntry::from_snapshot(doc, file_path));
         let mut total_cells = self.undo_cell_slots();
         let mut total_cp_bytes = self.undo_checkpoint_bytes();
         while self.undo_stack.len() > 1
@@ -1317,13 +1318,15 @@ impl Session {
         if let Err(hook_err) = after_commit(self, &res) {
             if res.mutated {
                 if spec.id == "edit.undo" {
-                    if let Some(before_doc) = self.redo_stack.pop() {
-                        let undone_doc = std::mem::replace(&mut self.doc, before_doc);
-                        self.undo_stack.push_back(UndoEntry::from_document(undone_doc));
+                    if let Some(before_entry) = self.redo_stack.pop() {
+                        let undone_doc = std::mem::replace(&mut self.doc, before_entry.doc);
+                        let undone_path = std::mem::replace(&mut self.file_path, before_entry.file_path);
+                        self.undo_stack.push_back(UndoEntry::from_snapshot(undone_doc, undone_path));
                     }
                 } else if let Some(prev_entry) = self.undo_stack.pop_back() {
                     let redone_doc = std::mem::replace(&mut self.doc, prev_entry.doc);
-                    self.redo_stack.push(redone_doc);
+                    let redone_path = std::mem::replace(&mut self.file_path, prev_entry.file_path);
+                    self.redo_stack.push(UndoEntry::from_snapshot(redone_doc, redone_path));
                     if let Some(full_undo) = undo_backup {
                         self.undo_stack = full_undo;
                     }
@@ -1348,7 +1351,13 @@ impl Session {
     {
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
-            || (spec.id == "project.open" && !params.get("path").and_then(Value::as_str).is_some_and(|s| !s.trim().is_empty()));
+            || (spec.id == "project.open"
+                && !params
+                    .get("path")
+                    .or_else(|| params.get("file_path"))
+                    .or_else(|| params.get("filePath"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|s| !s.trim().is_empty()));
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
         let before_dirty = self.dirty;
@@ -1376,7 +1385,7 @@ impl Session {
                         self.dirty = before_dirty;
                         return Err(hook_err);
                     }
-                    self.push_undo_snapshot(before);
+                    self.push_undo_snapshot(before, before_path);
                     self.redo_stack.clear();
                 } else {
                     after_commit(self, &res)?;
@@ -1392,34 +1401,48 @@ impl Session {
         }
     }
 
-    /// Restore the previous document snapshot onto the active document.
+    /// Restore the previous document snapshot onto the active document (along with its paired file path).
     pub fn undo(&mut self) -> Result<bool, EngineError> {
         let Some(prev) = self.undo_stack.pop_back() else {
             return Ok(false);
         };
-        let current = std::mem::replace(&mut self.doc, prev.doc);
-        self.redo_stack.push(current);
+        let current_doc = std::mem::replace(&mut self.doc, prev.doc);
+        let current_path = std::mem::replace(&mut self.file_path, prev.file_path);
+        self.redo_stack.push(UndoEntry::from_snapshot(current_doc, current_path));
         self.dirty = true;
         Ok(true)
     }
 
-    /// Re-apply the most recently undone document snapshot.
+    /// Re-apply the most recently undone document snapshot (along with its paired file path).
     pub fn redo(&mut self) -> Result<bool, EngineError> {
         let Some(next) = self.redo_stack.pop() else {
             return Ok(false);
         };
-        let current = std::mem::replace(&mut self.doc, next);
-        self.push_undo_snapshot(current);
+        let current_doc = std::mem::replace(&mut self.doc, next.doc);
+        let current_path = std::mem::replace(&mut self.file_path, next.file_path);
+        self.push_undo_snapshot(current_doc, current_path);
         self.dirty = true;
         Ok(true)
     }
 
+    /// Re-evaluate all upstream-to-downstream dependencies in topological order, returning the full report.
+    pub fn recalculate_all_with_report(&mut self) -> Result<dag::RecalcReport, EngineError> {
+        guard::run_guarded("project.recalculate", || {
+            let (report, _) = dag::recalculate_project_sanitized_with_report(&mut self.doc)?;
+            Ok(report)
+        })
+    }
+
     /// Re-evaluate all upstream-to-downstream dependencies in topological order.
     pub fn recalculate_all(&mut self) -> Result<(), EngineError> {
-        guard::run_guarded("project.recalculate", || {
-            let _ = dag::recalculate_project_sanitized(&mut self.doc)?;
-            Ok(())
-        })
+        let _ = self.recalculate_all_with_report()?;
+        Ok(())
+    }
+
+    /// Return structured failure details for any result sheets currently in [`curvebook_doc::ResultStatus::Failed`].
+    #[must_use]
+    pub fn failed_result_sheets(&self) -> Vec<dag::FailedResultSheet> {
+        dag::collect_failed_result_sheets(&self.doc)
     }
 
     /// Compile a graph or layout sheet into a resolution-independent [`ChartScene`].

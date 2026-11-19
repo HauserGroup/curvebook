@@ -95,19 +95,21 @@ proptest! {
         raw_p in prop::collection::vec(0.0_f64..=1.0_f64, 1..=30),
     ) {
         let adjusted_sets = [
-            adjust_bonferroni(&raw_p),
-            adjust_sidak(&raw_p),
-            adjust_holm_bonferroni(&raw_p),
-            adjust_holm_sidak(&raw_p),
-            adjust_benjamini_hochberg(&raw_p),
-            adjust_benjamini_yekutieli(&raw_p),
-            adjust_two_stage_bky(&raw_p, 0.05),
+            (adjust_bonferroni(&raw_p), true),
+            (adjust_sidak(&raw_p), true),
+            (adjust_holm_bonferroni(&raw_p), true),
+            (adjust_holm_sidak(&raw_p), true),
+            (adjust_benjamini_hochberg(&raw_p), true),
+            (adjust_benjamini_yekutieli(&raw_p), true),
+            (adjust_two_stage_bky(&raw_p, 0.05), false),
         ];
-        for adj in &adjusted_sets {
+        for (adj, enforce_ge_raw) in &adjusted_sets {
             prop_assert_eq!(adj.len(), raw_p.len());
             for (&r, &a) in raw_p.iter().zip(adj.iter()) {
                 prop_assert!((0.0..=1.0).contains(&a), "adjusted p out of [0,1]: {a}");
-                prop_assert!(a + 1e-15 >= r, "adjusted p {a} < raw p {r}");
+                if *enforce_ge_raw {
+                    prop_assert!(a + 1e-15 >= r, "adjusted p {a} < raw p {r}");
+                }
             }
             for i in 0..raw_p.len() {
                 for j in 0..raw_p.len() {

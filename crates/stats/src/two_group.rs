@@ -81,14 +81,14 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::column::{
-    OneSampleTResult, exact_binomial_median_ci, hedges_g_with_ci, hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk,
-    summarize_pre_summarized_points, wilcoxon_exact_p,
+    OneSampleTResult, exact_binomial_median_ci, hedges_g_with_ci, hedges_j_factor, hodges_lehmann_one_sample_with_coverage, ks_asymptotic_p,
+    shapiro_wilk, summarize_pre_summarized_points, wilcoxon_exact_p, wilcoxon_max_achievable_coverage_percent,
 };
 use crate::common::{
     append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, ci_cell,
     extract_numeric_columns, extract_paired_values_with_report, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell, opt_num_cell,
-    p_cell, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices, sanitize_result_sheet_floats,
-    select_kth_pairwise_sum, sorted_finite, t_crit_two_sided, validate_finite_slice,
+    p_cell_at_alpha, push_scalar, quantile_type6_sorted, quartiles_hinge, rank_with_ties, sanitize_result_sheet_floats, select_kth_pairwise_sum,
+    sorted_finite, t_crit_two_sided, try_resolve_selected_indices, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
@@ -221,7 +221,7 @@ pub struct TwoGroupEffectSizes {
     pub hedges_g: f64,
     /// Exact noncentral-*t* CI for `hedges_g` scaled by `J(df)` at configured `ConfidenceLevel` (`None` when `cohens_d_ci` is `None`).
     pub hedges_g_ci: Option<(f64, f64)>,
-    /// Glass's $\Delta = (\bar{x}_a - \bar{x}_b) / s_{\text{control}}$ (`None` when control SD is zero or unavailable).
+    /// Glass's $\Delta = (\bar{x}_a - \bar{x}_b) / s_a$ (`None` when group A SD `s_a` is zero or unavailable; never substitutes `s_b`).
     pub glass_delta: Option<f64>,
     /// Approximate/noncentral CI for Glass's $\Delta$ (`None` when unavailable).
     pub glass_delta_ci: Option<(f64, f64)>,
@@ -310,8 +310,8 @@ fn f_test_from_summary(sd_a: f64, n_a: f64, sd_b: f64, n_b: f64) -> Result<Varia
 ///   Cumming & Finch 2001; Steiger 2004). Because `d` standardizes by `s_pooled`, the pivot
 ///   follows noncentral `t(df = n_a + n_b - 2)` even when paired with Welch's `t` test. The `g`
 ///   interval scales the `d` limits by `J(n_a + n_b - 2)`.
-/// - Glass's `Delta = diff / s_a` (falling back to `s_b` when `s_a = 0`) (Glass 1976), with a
-///   noncentral-*t* interval on `n - 1` df of the standardizing group (Hedges 1981).
+/// - Glass's `Delta = diff / s_a` (Glass 1976), with a noncentral-*t* interval on `n_a - 1` df
+///   of the standardizing group A (Hedges 1981); returns `None` when `s_a == 0` without substituting `s_b`.
 /// - `r^2 = t^2 / (t^2 + df)` using the test's own `t` statistic and `df` (Rosenthal 1991).
 fn compute_unpaired_effect_sizes_f(
     diff: f64,
@@ -319,7 +319,7 @@ fn compute_unpaired_effect_sizes_f(
     n_pair: (f64, f64),
     t_df_conf: (f64, f64, ConfidenceLevel),
 ) -> Result<TwoGroupEffectSizes, StatsError> {
-    let (sd_a, sd_b, sd_pooled) = sds;
+    let (sd_a, _sd_b, sd_pooled) = sds;
     let (na, nb) = n_pair;
     let (t_stat, df_test, confidence) = t_df_conf;
     let n_eff = ((na * nb) / (na + nb)).sqrt();
@@ -345,11 +345,6 @@ fn compute_unpaired_effect_sizes_f(
         let gd = diff / sd_a;
         let t_glass = gd * n_eff;
         let g_ci = noncentral_t_ci(t_glass, (na - 1.0).max(1.0), confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
-        (Some(gd), g_ci)
-    } else if sd_b > 0.0 {
-        let gd = diff / sd_b;
-        let t_glass = gd * n_eff;
-        let g_ci = noncentral_t_ci(t_glass, (nb - 1.0).max(1.0), confidence.percent()).ok().map(|(lo, hi)| (lo / n_eff, hi / n_eff));
         (Some(gd), g_ci)
     } else {
         (None, None)
@@ -848,6 +843,9 @@ pub struct MannWhitneyResult {
     pub hodges_lehmann_diff: f64,
     /// Two-sided distribution-free order-statistic CI `(lower, upper)` on pairwise differences `a_i - b_j` at configured `ConfidenceLevel` (`None` if normal/exact rank boundary unavailable).
     pub hodges_lehmann_ci: Option<(f64, f64)>,
+    /// Exact achieved confidence percentage when small-sample (`na <= 30 && nb <= 30`, untied) exact Mann–Whitney critical values were used (`None` for asymptotic normal or unavailable CIs).
+    #[serde(default)]
+    pub ci_actual_confidence_percent: Option<f64>,
     /// Cliff's dominance effect size `delta = (u_a - u_b) / (n_a * n_b)` in `[-1, 1]` (Cliff 1993).
     pub cliffs_delta: f64,
     /// Rank-biserial correlation `r = 1 - 2 * u_min / (n_a * n_b)` / Kerby (2014) signed rank effect size in `[-1, 1]`.
@@ -974,7 +972,7 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
         (p.clamp(0.0, 1.0), false)
     };
 
-    let (hodges_lehmann_diff, hodges_lehmann_ci) = hodges_lehmann_two_sample(a, b, confidence)?;
+    let (hodges_lehmann_diff, hodges_lehmann_ci, ci_actual_confidence_percent) = hodges_lehmann_two_sample(a, b, confidence)?;
     let cliffs_delta = (u_a - u_b) / (naf * nbf);
     let rank_biserial_r = cliffs_delta;
 
@@ -991,26 +989,90 @@ pub fn mann_whitney_u(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confid
         two_tailed,
         hodges_lehmann_diff,
         hodges_lehmann_ci,
+        ci_actual_confidence_percent,
         cliffs_delta,
         rank_biserial_r,
     })
 }
 
+/// Exact distribution-free two-sided Mann–Whitney order-statistic index `k` (1-based) and achieved
+/// coverage fraction for untied samples of sizes `na, nb <= 30` (Hollander, Wolfe & Chicken 2014, Ch. 4.3).
+fn mann_whitney_exact_hl_ci_rank(na: usize, nb: usize, confidence: ConfidenceLevel) -> (usize, f64) {
+    let (n1, n2) = if na <= nb { (na, nb) } else { (nb, na) };
+    let m = n1 * n2;
+    let half_m = m / 2;
+    let mut dp = vec![vec![0_u128; half_m + 1]; n1 + 1];
+    dp[0][0] = 1;
+    for total in 1..=(n1 + n2) {
+        let i_max = total.min(n1);
+        for i in (1..=i_max).rev() {
+            let j = total - i;
+            if j > n2 {
+                continue;
+            }
+            for u in j..=half_m {
+                dp[i][u] += dp[i - 1][u - j];
+            }
+        }
+    }
+    let mut total_ways = 1_u128;
+    for k in 1..=n1 {
+        total_ways = total_ways * ((n2 + k) as u128) / (k as u128);
+    }
+    let total_f = total_ways as f64;
+    let target = confidence.percent() / 100.0;
+    let mut cum = dp[n1][0];
+    let mut best_k = 1_usize;
+    let mut best_cov = (1.0 - 2.0 * (cum as f64) / total_f).clamp(0.0, 1.0);
+    if best_cov + 1e-14 < target {
+        return (1, best_cov);
+    }
+    for k in 2..=half_m {
+        cum += dp[n1][k - 1];
+        let cov = (1.0 - 2.0 * (cum as f64) / total_f).clamp(0.0, 1.0);
+        if cov + 1e-14 >= target {
+            best_k = k;
+            best_cov = cov;
+        } else {
+            break;
+        }
+    }
+    (best_k, best_cov)
+}
+
+/// Upper bound on achievable two-sided Mann–Whitney CI coverage (%) for sample sizes `na, nb <= 30`.
+fn mann_whitney_max_achievable_coverage_percent(na: usize, nb: usize) -> Option<f64> {
+    if na >= 1 && nb >= 1 && na <= 30 && nb <= 30 {
+        let (n1, n2) = if na <= nb { (na, nb) } else { (nb, na) };
+        let mut total_ways = 1_u128;
+        for k in 1..=n1 {
+            total_ways = total_ways * ((n2 + k) as u128) / (k as u128);
+        }
+        Some(100.0 * (1.0 - 2.0 / (total_ways as f64)).clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+/// Point estimate, two-sided Hodges–Lehmann CI, and achieved small-sample confidence percentage.
+type HodgesLehmannShiftWithCoverage = (f64, Option<(f64, f64)>, Option<f64>);
+
 /// Hodges & Lehmann (1963) two-sample shift estimator (median of all `a_i - b_j`) with the Moses
 /// distribution-free interval `[D_(k), D_(mn + 1 - k)]` (Hollander, Wolfe & Chicken 2014, ch. 4).
 ///
-/// Uses exact sorted differences when `m * n <= 40_000` and exact `O((m + n) log(m + n))`
+/// Uses exact Mann–Whitney DP critical values for small untied samples (`na <= 30 && nb <= 30`),
+/// exact sorted differences when `m * n <= 40_000`, and exact `O((m + n) log(m + n))`
 /// monotone-matrix selection (`select_kth_pairwise_sum`, cf. Monahan 1984) for both the shift
 /// median and the large-sample normal-approximated Moses CI (`floor(mn/2 - z sqrt(mn(m+n+1)/12))`)
 /// when `m * n > 40_000`.
-fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
+fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) -> Result<HodgesLehmannShiftWithCoverage, StatsError> {
     let na = a.len();
     let nb = b.len();
     let m = na.saturating_mul(nb);
     if na == 0 || nb == 0 {
         return Err(StatsError::EmptyInput);
     }
-    let (hl, lo_ci_val, hi_ci_val) = if m > 40_000 {
+    let (hl, lo_ci_val, hi_ci_val, actual_conf_pct) = if m > 40_000 {
         let sa = sorted_finite(a);
         let mut neg_b: Vec<f64> = b.iter().map(|&v| -v).collect();
         neg_b.sort_by(f64::total_cmp);
@@ -1026,7 +1088,7 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
             return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
         }
         if na + nb < 4 {
-            return Ok((hl, None));
+            return Ok((hl, None, None));
         }
         let z = norm_two_sided_isf(confidence.alpha())?;
         let naf = na as f64;
@@ -1038,7 +1100,7 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
         let hi_idx = (m_u64 - k).min(m_u64 - 1);
         let ci_lo = select_kth_pairwise_sum(&sa, &neg_b, lo_idx)?;
         let ci_hi = select_kth_pairwise_sum(&sa, &neg_b, hi_idx)?;
-        (hl, ci_lo, ci_hi)
+        (hl, ci_lo, ci_hi, None)
     } else {
         let mut diffs = Vec::with_capacity(m);
         for &va in a {
@@ -1052,20 +1114,28 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
             return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "hodges_lehmann", value: hl }));
         }
         if na + nb < 4 {
-            return Ok((hl, None));
+            return Ok((hl, None, None));
         }
-        let z = norm_two_sided_isf(confidence.alpha())?;
-        let naf = na as f64;
-        let nbf = nb as f64;
-        let mu = 0.5 * naf * nbf;
-        let sd = (naf * nbf * (naf + nbf + 1.0) / 12.0).sqrt();
-        let k = (mu - z * sd).floor().max(1.0) as usize;
+        let sa = sorted_finite(a);
+        let sb = sorted_finite(b);
+        let untied = sa.windows(2).all(|w| w[0] < w[1]) && sb.windows(2).all(|w| w[0] < w[1]) && !has_cross_ties(&sa, &sb);
+        let (k, actual_conf_pct) = if na <= 30 && nb <= 30 && untied {
+            let (exact_k, cov) = mann_whitney_exact_hl_ci_rank(na, nb, confidence);
+            (exact_k, Some(100.0 * cov))
+        } else {
+            let z = norm_two_sided_isf(confidence.alpha())?;
+            let naf = na as f64;
+            let nbf = nb as f64;
+            let mu = 0.5 * naf * nbf;
+            let sd = (naf * nbf * (naf + nbf + 1.0) / 12.0).sqrt();
+            ((mu - z * sd).floor().max(1.0) as usize, None)
+        };
         let lo_idx = k.saturating_sub(1).min(m - 1);
         let hi_idx = (m - k).min(m - 1);
-        (hl, diffs[lo_idx], diffs[hi_idx])
+        (hl, diffs[lo_idx], diffs[hi_idx], actual_conf_pct)
     };
     let ci = if lo_ci_val.is_finite() && hi_ci_val.is_finite() { Some((lo_ci_val, hi_ci_val)) } else { None };
-    Ok((hl, ci))
+    Ok((hl, ci, actual_conf_pct))
 }
 
 /// Output of Wilcoxon matched-pairs signed-rank test (Wilcoxon 1945; Pratt 1959).
@@ -1091,6 +1161,9 @@ pub struct WilcoxonMatchedResult {
     pub hodges_lehmann_pseudomedian: f64,
     /// Two-sided order-statistic CI `(lower, upper)` over pairwise Walsh averages `(d_i + d_j)/2` at configured `ConfidenceLevel` (`None` if insufficient pairs).
     pub hodges_lehmann_ci: Option<(f64, f64)>,
+    /// Exact achieved confidence percentage when small-sample (`n_pairs <= 30`, untied) exact signed-rank critical values were used (`None` for asymptotic normal or unavailable CIs).
+    #[serde(default)]
+    pub ci_actual_confidence_percent: Option<f64>,
     /// Kerby (2014) matched-pairs rank-biserial correlation `(W+ - W-) / (W+ + W-)` in `[-1, 1]`.
     pub rank_biserial_r: f64,
 }
@@ -1135,6 +1208,7 @@ pub fn wilcoxon_matched_pairs(
             two_tailed,
             hodges_lehmann_pseudomedian: 0.0,
             hodges_lehmann_ci: None,
+            ci_actual_confidence_percent: None,
             rank_biserial_r: 0.0,
         });
     }
@@ -1182,7 +1256,7 @@ pub fn wilcoxon_matched_pairs(
         }
     };
 
-    let (hl, hl_ci) = hodges_lehmann_one_sample(&diffs_all, confidence)?;
+    let (hl, hl_ci, ci_actual_confidence_percent) = hodges_lehmann_one_sample_with_coverage(&diffs_all, confidence)?;
     let total_rank_sum = w_plus + w_minus;
     let rank_biserial_r = if total_rank_sum > 0.0 { (w_plus - w_minus) / total_rank_sum } else { 0.0 };
 
@@ -1197,6 +1271,7 @@ pub fn wilcoxon_matched_pairs(
         two_tailed,
         hodges_lehmann_pseudomedian: hl,
         hodges_lehmann_ci: hl_ci,
+        ci_actual_confidence_percent,
         rank_biserial_r,
     })
 }
@@ -1441,9 +1516,12 @@ pub fn bland_altman(
     let mut diffs = Vec::with_capacity(n);
     for (&a, &b) in method_a.iter().zip(method_b.iter()) {
         let avg = if (a + b).is_finite() { 0.5 * (a + b) } else { 0.5 * a + 0.5 * b };
+        if !avg.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "bland_altman_overflow", value: avg });
+        }
         let d = if percent_difference {
-            if avg == 0.0 {
-                return Err(StatsError::InvalidParameter { name: "average", value: 0.0 });
+            if avg <= 0.0 {
+                return Err(StatsError::InvalidParameter { name: "average", value: avg });
             }
             if (a - b).is_finite() {
                 (100.0 / avg) * (a - b)
@@ -1454,8 +1532,8 @@ pub fn bland_altman(
         } else {
             a - b
         };
-        if !avg.is_finite() || !d.is_finite() {
-            return Err(StatsError::InvalidParameter { name: "bland_altman_overflow", value: if !avg.is_finite() { avg } else { d } });
+        if !d.is_finite() {
+            return Err(StatsError::InvalidParameter { name: "bland_altman_overflow", value: d });
         }
         points.push((avg, d));
         diffs.push(d);
@@ -1520,11 +1598,38 @@ pub struct MultipleRowTestEntry {
     pub significant: bool,
 }
 
+/// Reject ANOVA-specific pairwise/post-hoc procedures that are undefined for raw-P row families.
+fn validate_raw_p_multiplicity_procedure(procedure: MultiplicityProcedure) -> Result<(), StatsError> {
+    match procedure {
+        MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Dunnett { .. }
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::LinearTrend
+        | MultiplicityProcedure::TamhaneT2 => Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "raw p-value multiplicity procedure (None, Bonferroni, Sidak, HolmBonferroni, HolmSidak, BenjaminiHochbergFdr, BenjaminiYekutieliFdr, or TwoStageBkyFdr)",
+        }),
+        MultiplicityProcedure::None
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => Ok(()),
+    }
+}
+
 /// Run one unpaired or Welch *t*-test per row across two replicate groups and apply multiplicity.
 ///
 /// Each row uses [`unpaired_t_test`] (Student 1908) or [`welch_t_test`] (Welch 1947); the adjustment
 /// is delegated to `crate::multiplicity`, which carries its own references. Rows whose test fails
 /// (e.g. fewer than two values or zero variance) are omitted from the output and from the adjustment.
+/// ANOVA-only procedures (`TukeyKramer`, `NewmanKeuls`, `Dunnett`, `DunnettT3`, `GamesHowell`,
+/// `DunnRankSum`, `LinearTrend`, `TamhaneT2`) are rejected with [`StatsError::IncompatibleAnalysisSpec`].
 pub fn multiple_row_t_tests(
     row_labels: &[String],
     group_a_rows: &[Vec<f64>],
@@ -1533,6 +1638,7 @@ pub fn multiple_row_t_tests(
     procedure: MultiplicityProcedure,
     threshold: f64,
 ) -> Result<Vec<MultipleRowTestEntry>, StatsError> {
+    validate_raw_p_multiplicity_procedure(procedure)?;
     if group_a_rows.len() != group_b_rows.len() {
         return Err(StatsError::DimensionMismatch { expected: group_a_rows.len(), actual: group_b_rows.len() });
     }
@@ -1620,7 +1726,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         }
         match tg.method {
             TwoGroupMethod::OneSampleT { hypothetical } => {
-                let indices = resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len());
+                let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len())?;
                 let &first_idx = indices.first().ok_or(StatsError::EmptyInput)?;
                 let (label, mean, sd, n) = extract_pre_summarized_group(col_tab, first_idx, conf)?;
                 let out = one_sample_t_test_from_summary(mean, sd, n, hypothetical, tg.two_tailed, conf)?;
@@ -1628,7 +1734,7 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
                 return Ok(res);
             }
             TwoGroupMethod::UnpairedT | TwoGroupMethod::WelchT => {
-                let indices = resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len());
+                let indices = try_resolve_selected_indices(&spec.selected_data_sets, col_tab.data_sets.len())?;
                 if indices.len() < 2 {
                     return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
                 }
@@ -1717,11 +1823,18 @@ fn run_two_group_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, tg: &Two
         return Ok(res);
     }
 
-    let indices = resolve_selected_indices(&spec.selected_data_sets, sheet.archetype.column_count());
-    if indices.len() < 2 {
-        return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
+    let cols = if spec.selected_data_sets.is_empty() {
+        extract_numeric_columns(sheet, &[])?
+    } else {
+        let indices = try_resolve_selected_indices(&spec.selected_data_sets, sheet.archetype.column_count())?;
+        if indices.len() < 2 {
+            return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: indices.len() });
+        }
+        extract_numeric_columns(sheet, &indices[..2])?
+    };
+    if cols.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "two-group comparison columns", required: 2, actual: cols.len() });
     }
-    let cols = extract_numeric_columns(sheet, &indices[..2])?;
     let (ca, cb) = (&cols[0], &cols[1]);
     let unpaired_ignored = |cols: &[crate::common::ExtractedColumn]| -> Vec<(String, usize)> {
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect()
@@ -1904,9 +2017,10 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
     if !threshold.is_finite() || threshold <= 0.0 || threshold >= 1.0 {
         return Err(StatsError::InvalidParameter { name: "multiplicity_threshold", value: threshold });
     }
+    let proc_eff = MultiplicityProcedure::from(mr.multiplicity.method);
+    validate_raw_p_multiplicity_procedure(proc_eff)?;
 
     let (lbl_a, lbl_b, row_labels, group_a_rows, group_b_rows) = extract_multiple_row_inputs(sheet, spec, mr.paired)?;
-    let proc_eff = MultiplicityProcedure::from(mr.multiplicity.method);
     let mut raw_p = Vec::new();
     let mut staged = Vec::new();
     let mut skipped_rows = 0_usize;
@@ -1974,8 +2088,8 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
         vec![ResultCell::Text(String::from(variant_label))],
         vec![ResultCell::Text(format!("{:?}", mr.multiplicity.method))],
         vec![num_cell(threshold)],
-        vec![p_cell(min_raw_p, p_fmt)],
-        vec![p_cell(min_adj_p, p_fmt)],
+        vec![p_cell_at_alpha(min_raw_p, p_fmt, conf.alpha())],
+        vec![p_cell_at_alpha(min_adj_p, p_fmt, threshold)],
     ];
     res.tabs.push(build_tab(
         "multiple-row-summary",
@@ -2007,8 +2121,8 @@ pub fn run_multiple_row_t_tests_analysis(sheet: &DataSheet, spec: &AnalysisSpec,
             num_cell(e.difference),
             num_cell(e.statistic),
             num_cell(e.df),
-            p_cell(e.raw_p, p_fmt),
-            p_cell(e.adjusted_p_or_q, p_fmt),
+            p_cell_at_alpha(e.raw_p, p_fmt, conf.alpha()),
+            p_cell_at_alpha(e.adjusted_p_or_q, p_fmt, threshold),
             ResultCell::Boolean(e.significant),
         ]);
         res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -2060,13 +2174,14 @@ struct MvTwoGroupExtraction {
 }
 
 fn resolve_mv_one_sample_selection(sheet: &DataSheet, selected: &[usize], mv_response: Option<usize>) -> Result<Vec<usize>, StatsError> {
-    if let TableArchetype::MultipleVariables(mv) = &sheet.archetype
-        && let Some(r_col) = mv_response
-    {
-        if r_col >= mv.variables.len() {
-            return Err(StatsError::MissingColumn { index: r_col });
+    if let TableArchetype::MultipleVariables(mv) = &sheet.archetype {
+        let _ = try_resolve_selected_indices(selected, mv.variables.len())?;
+        if let Some(r_col) = mv_response {
+            if r_col >= mv.variables.len() {
+                return Err(StatsError::MissingColumn { index: r_col });
+            }
+            return Ok(vec![r_col]);
         }
-        return Ok(vec![r_col]);
     }
     Ok(selected.to_vec())
 }
@@ -2087,7 +2202,7 @@ fn mv_cell_token(cell: &Cell) -> Option<String> {
 }
 
 fn infer_mv_group_column(mv: &MultipleVariablesTable, response_col: Option<usize>, selected: &[usize]) -> Result<usize, StatsError> {
-    let pool = resolve_selected_indices(selected, mv.variables.len());
+    let pool = try_resolve_selected_indices(selected, mv.variables.len())?;
     let candidates: Vec<usize> = pool
         .into_iter()
         .filter(|&idx| Some(idx) != response_col && mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical))
@@ -2122,7 +2237,7 @@ fn select_default_mv_response_column(mv: &MultipleVariablesTable, candidates: &[
 }
 
 fn infer_mv_response_column(mv: &MultipleVariablesTable, group_col: usize, selected: &[usize]) -> Result<usize, StatsError> {
-    let pool = resolve_selected_indices(selected, mv.variables.len());
+    let pool = try_resolve_selected_indices(selected, mv.variables.len())?;
     let candidates: Vec<usize> =
         pool.into_iter().filter(|&idx| idx != group_col && mv.variables.get(idx).is_some_and(is_mv_numeric_response_candidate)).collect();
     select_default_mv_response_column(mv, &candidates)
@@ -2133,6 +2248,7 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
     let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
         return Ok(None);
     };
+    let selected = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
     let explicit_mode = tg.mv_group_column.is_some() || tg.mv_response_column.is_some();
     let (g_col, r_col) = if explicit_mode {
         let g = match tg.mv_group_column {
@@ -2145,7 +2261,6 @@ fn resolve_mv_two_group_inputs(sheet: &DataSheet, spec: &AnalysisSpec, tg: &TwoG
         };
         (g, r)
     } else {
-        let selected = resolve_selected_indices(&spec.selected_data_sets, mv.variables.len());
         let cat_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables[i].role == VariableRole::Categorical).collect();
         let num_cols: Vec<usize> = selected.iter().copied().filter(|&i| mv.variables.get(i).is_some_and(is_mv_numeric_response_candidate)).collect();
         if cat_cols.len() == 1
@@ -2268,7 +2383,30 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
             if ba.column_a == ba.column_b {
                 return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
             }
-            if xy.data_sets.len() >= 2 {
+            let compare_x_vs_y = ba.xy_compare_x_vs_y.unwrap_or(xy.data_sets.len() == 1);
+            if compare_x_vs_y {
+                // X vs Y[0] mode: require canonical indices (0, 1) regardless of additional Y datasets.
+                if ba.column_a != 0 {
+                    return Err(StatsError::MissingColumn { index: ba.column_a });
+                }
+                if ba.column_b != 1 {
+                    return Err(StatsError::MissingColumn { index: ba.column_b });
+                }
+                let ds = xy.data_sets.first().ok_or(StatsError::EmptyInput)?;
+                let pairs = xy.active_xy_pairs(0);
+                if pairs.is_empty() {
+                    return Err(StatsError::EmptyInput);
+                }
+                let (xs, ys) = pairs.into_iter().unzip();
+                Ok(BlandAltmanExtractedPairs {
+                    label_a: xy.x_title.clone(),
+                    label_b: ds.title.clone(),
+                    xs,
+                    ys,
+                    skipped_incomplete_rows: 0,
+                    non_numeric_cells: 0,
+                })
+            } else {
                 let dsa = xy.data_sets.get(ba.column_a).ok_or(StatsError::MissingColumn { index: ba.column_a })?;
                 let dsb = xy.data_sets.get(ba.column_b).ok_or(StatsError::MissingColumn { index: ba.column_b })?;
                 let mut xs = Vec::new();
@@ -2303,29 +2441,6 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     skipped_incomplete_rows,
                     non_numeric_cells,
                 })
-            } else {
-                // Single Y dataset: retain only the canonical default X (`0`) vs Y[0] (`1`) mode;
-                // reject explicit out-of-range indices rather than silently falling back to dataset 0.
-                if ba.column_a != 0 {
-                    return Err(StatsError::MissingColumn { index: ba.column_a });
-                }
-                if ba.column_b != 1 {
-                    return Err(StatsError::MissingColumn { index: ba.column_b });
-                }
-                let ds = xy.data_sets.first().ok_or(StatsError::EmptyInput)?;
-                let pairs = xy.active_xy_pairs(0);
-                if pairs.is_empty() {
-                    return Err(StatsError::EmptyInput);
-                }
-                let (xs, ys) = pairs.into_iter().unzip();
-                Ok(BlandAltmanExtractedPairs {
-                    label_a: xy.x_title.clone(),
-                    label_b: ds.title.clone(),
-                    xs,
-                    ys,
-                    skipped_incomplete_rows: 0,
-                    non_numeric_cells: 0,
-                })
             }
         }
         other => Err(StatsError::IncompatibleTable { analysis: "Bland-Altman", actual: other.kind() }),
@@ -2334,70 +2449,83 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
 
 type MultipleRowInputs = (String, String, Vec<String>, Vec<Vec<f64>>, Vec<Vec<f64>>);
 
+fn extract_dataset_pair_multiple_row_inputs<F>(
+    data_sets: &[curvebook_doc::DataSetColumn],
+    spec: &AnalysisSpec,
+    paired: bool,
+    n_rows: usize,
+    row_label: F,
+) -> Result<MultipleRowInputs, StatsError>
+where
+    F: Fn(usize) -> String,
+{
+    let indices = try_resolve_selected_indices(&spec.selected_data_sets, data_sets.len())?;
+    if paired && indices.len() != 2 {
+        return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
+    }
+    if !spec.selected_data_sets.is_empty() && indices.len() != 2 {
+        return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: indices.len() as f64 });
+    }
+    if indices.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "multiple row t-tests groups", required: 2, actual: indices.len() });
+    }
+    let (ia, ib) = (indices[0], indices[1]);
+    let dsa = &data_sets[ia];
+    let dsb = &data_sets[ib];
+    if paired && dsa.subcolumn_count() != dsb.subcolumn_count() {
+        return Err(StatsError::DimensionMismatch { expected: dsa.subcolumn_count(), actual: dsb.subcolumn_count() });
+    }
+    let mut labels = Vec::with_capacity(n_rows);
+    let mut rows_a = Vec::with_capacity(n_rows);
+    let mut rows_b = Vec::with_capacity(n_rows);
+    for r in 0..n_rows {
+        let (ra, rb) = (dsa.cells.get(r), dsb.cells.get(r));
+        if paired
+            && let (Some(sa), Some(sb)) = (ra, rb)
+            && sa.len() != sb.len()
+        {
+            return Err(StatsError::DimensionMismatch { expected: sa.len(), actual: sb.len() });
+        }
+        let (va, vb) = extract_paired_or_unpaired_subcolumns(ra, rb, paired);
+        labels.push(row_label(r));
+        rows_a.push(va);
+        rows_b.push(vb);
+    }
+    Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+}
+
 fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: bool) -> Result<MultipleRowInputs, StatsError> {
     match &sheet.archetype {
         TableArchetype::Grouped(grp) => {
             if grp.subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            let indices = resolve_selected_indices(&spec.selected_data_sets, grp.data_sets.len());
-            if indices.len() < 2 {
-                return Err(StatsError::InsufficientSampleSize { context: "multiple row t-tests groups", required: 2, actual: indices.len() });
-            }
-            let (ia, ib) = (indices[0], indices[1]);
-            let dsa = &grp.data_sets[ia];
-            let dsb = &grp.data_sets[ib];
-            let n_rows = grp.row_count();
-            let mut labels = Vec::with_capacity(n_rows);
-            let mut rows_a = Vec::with_capacity(n_rows);
-            let mut rows_b = Vec::with_capacity(n_rows);
-            for r in 0..n_rows {
-                let lbl = grp.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1));
-                let (va, vb) = extract_paired_or_unpaired_subcolumns(dsa.cells.get(r), dsb.cells.get(r), paired);
-                labels.push(lbl);
-                rows_a.push(va);
-                rows_b.push(vb);
-            }
-            Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+            extract_dataset_pair_multiple_row_inputs(&grp.data_sets, spec, paired, grp.row_count(), |r| {
+                grp.row_titles.get(r).filter(|s| !s.trim().is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))
+            })
         }
         TableArchetype::Xy(xy) => {
             if xy.y_subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            let indices = resolve_selected_indices(&spec.selected_data_sets, xy.data_sets.len());
-            if indices.len() < 2 {
-                return Err(StatsError::InsufficientSampleSize { context: "multiple row t-tests groups", required: 2, actual: indices.len() });
-            }
-            let (ia, ib) = (indices[0], indices[1]);
-            let dsa = &xy.data_sets[ia];
-            let dsb = &xy.data_sets[ib];
-            let n_rows = xy.row_count();
-            let mut labels = Vec::with_capacity(n_rows);
-            let mut rows_a = Vec::with_capacity(n_rows);
-            let mut rows_b = Vec::with_capacity(n_rows);
-            for r in 0..n_rows {
-                let lbl = xy.x_value_at(r).map_or_else(|| format!("Row {}", r + 1), |x| format!("{x}"));
-                let (va, vb) = extract_paired_or_unpaired_subcolumns(dsa.cells.get(r), dsb.cells.get(r), paired);
-                labels.push(lbl);
-                rows_a.push(va);
-                rows_b.push(vb);
-            }
-            Ok((dsa.title.clone(), dsb.title.clone(), labels, rows_a, rows_b))
+            extract_dataset_pair_multiple_row_inputs(&xy.data_sets, spec, paired, xy.row_count(), |r| {
+                xy.x_value_at(r).map_or_else(|| format!("Row {}", r + 1), |x| format!("{x}"))
+            })
         }
         TableArchetype::Column(col) => {
             if col.subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            let indices = resolve_selected_indices(&spec.selected_data_sets, col.data_sets.len());
+            let indices = try_resolve_selected_indices(&spec.selected_data_sets, col.data_sets.len())?;
+            if paired && !indices.len().is_multiple_of(2) {
+                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
+            }
             if indices.len() < 4 {
                 return Err(StatsError::InsufficientSampleSize {
                     context: "multiple row t-tests replicate columns per group",
                     required: 4,
                     actual: indices.len(),
                 });
-            }
-            if paired && !indices.len().is_multiple_of(2) {
-                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
             }
             let mid = indices.len() / 2;
             let (left, right) = (&indices[..mid], &indices[mid..]);
@@ -2433,10 +2561,21 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
             Ok((String::from("Group A"), String::from("Group B"), labels, rows_a, rows_b))
         }
         TableArchetype::MultipleVariables(mv) => {
-            let indices: Vec<usize> = resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())
+            let indices: Vec<usize> = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?
                 .into_iter()
-                .filter(|&i| mv.variables.get(i).is_some_and(|v| v.role != VariableRole::Categorical))
+                .filter(|&i| {
+                    mv.variables.get(i).is_some_and(|v| {
+                        if spec.selected_data_sets.is_empty() {
+                            !matches!(v.role, VariableRole::Categorical | VariableRole::Label)
+                        } else {
+                            v.role != VariableRole::Categorical
+                        }
+                    })
+                })
                 .collect();
+            if paired && !indices.len().is_multiple_of(2) {
+                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
+            }
             if indices.len() < 4 {
                 return Err(StatsError::InsufficientSampleSize {
                     context: "multiple row t-tests numeric replicate columns",
@@ -2444,12 +2583,13 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
                     actual: indices.len(),
                 });
             }
-            if paired && !indices.len().is_multiple_of(2) {
-                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
-            }
             let mid = indices.len() / 2;
             let (left, right) = (&indices[..mid], &indices[mid..]);
-            let label_col = mv.variables.iter().position(|v| v.role == VariableRole::Categorical);
+            let label_col = mv
+                .variables
+                .iter()
+                .position(|v| v.role == VariableRole::Label)
+                .or_else(|| mv.variables.iter().position(|v| v.role == VariableRole::Categorical));
             let n_rows = mv.row_count();
             let mut labels = Vec::with_capacity(n_rows);
             let mut rows_a = Vec::with_capacity(n_rows);
@@ -2556,20 +2696,37 @@ fn populate_unpaired_t_sheet_impl(
     p_fmt: PValueFormat,
     has_raw_replicates: bool,
 ) {
-    let mut row_labels = vec![
-        String::from("P value"),
-        String::from("t statistic"),
-        String::from("df"),
-        format!("Mean ({lbl_a})"),
-        format!("Mean ({lbl_b})"),
-        String::from("Difference between means (A - B)"),
-        String::from("SE of difference"),
-        format!("{}% CI of difference", conf.percent()),
-        String::from("F-test to compare variances (F)"),
-        String::from("F-test P value"),
-    ];
+    let is_lognormal = out.geometric_mean_ratio.is_some();
+    let alpha = conf.alpha();
+    let mut row_labels = if is_lognormal {
+        vec![
+            String::from("P value"),
+            String::from("t statistic"),
+            String::from("df"),
+            format!("Mean of ln({lbl_a})"),
+            format!("Mean of ln({lbl_b})"),
+            String::from("Difference of ln means (ln A - ln B)"),
+            String::from("SE of ln difference"),
+            format!("{}% CI of ln difference", conf.percent()),
+            String::from("F-test to compare ln variances (F)"),
+            String::from("F-test P value (ln scale)"),
+        ]
+    } else {
+        vec![
+            String::from("P value"),
+            String::from("t statistic"),
+            String::from("df"),
+            format!("Mean ({lbl_a})"),
+            format!("Mean ({lbl_b})"),
+            String::from("Difference between means (A - B)"),
+            String::from("SE of difference"),
+            format!("{}% CI of difference", conf.percent()),
+            String::from("F-test to compare variances (F)"),
+            String::from("F-test P value"),
+        ]
+    };
     let mut rows = vec![
-        vec![p_cell(out.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
         vec![num_cell(out.t_statistic)],
         vec![num_cell(out.df)],
         vec![num_cell(out.mean_a)],
@@ -2578,7 +2735,7 @@ fn populate_unpaired_t_sheet_impl(
         vec![num_cell(out.se_difference)],
         vec![ci_cell(out.ci.0, out.ci.1)],
         vec![num_cell(out.f_test.f_statistic)],
-        vec![p_cell(out.f_test.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.f_test.p_value, p_fmt, alpha)],
     ];
     if let Some(gmr) = out.geometric_mean_ratio {
         row_labels.push(String::from("Geometric mean ratio (A / B)"));
@@ -2587,24 +2744,56 @@ fn populate_unpaired_t_sheet_impl(
         rows.push(vec![opt_ci_cell(out.geometric_mean_ratio_ci)]);
     }
     if include_es {
-        row_labels.extend([
-            String::from("Cohen's d"),
-            format!("{}% CI of Cohen's d", conf.percent()),
-            String::from("Hedges' g"),
-            format!("{}% CI of Hedges' g", conf.percent()),
-            String::from("Glass's Delta"),
-            String::from("R squared"),
-        ]);
+        if is_lognormal {
+            row_labels.extend([
+                String::from("Cohen's d (ln scale)"),
+                format!("{}% CI of Cohen's d (ln scale)", conf.percent()),
+                String::from("Hedges' g (ln scale)"),
+                format!("{}% CI of Hedges' g (ln scale)", conf.percent()),
+                String::from("Glass's Delta (ln scale)"),
+                String::from("Glass's Delta standardizing group"),
+                String::from("R squared (ln scale)"),
+            ]);
+        } else {
+            row_labels.extend([
+                String::from("Cohen's d"),
+                format!("{}% CI of Cohen's d", conf.percent()),
+                String::from("Hedges' g"),
+                format!("{}% CI of Hedges' g", conf.percent()),
+                String::from("Glass's Delta"),
+                String::from("Glass's Delta standardizing group"),
+                String::from("R squared"),
+            ]);
+        }
+        let std_grp = if is_lognormal { format!("ln({lbl_a})") } else { lbl_a.to_owned() };
         rows.extend([
             vec![num_cell(out.effect_sizes.cohens_d)],
             vec![opt_ci_cell(out.effect_sizes.cohens_d_ci)],
             vec![num_cell(out.effect_sizes.hedges_g)],
             vec![opt_ci_cell(out.effect_sizes.hedges_g_ci)],
             vec![opt_num_cell(out.effect_sizes.glass_delta)],
+            vec![ResultCell::Text(std_grp)],
             vec![num_cell(out.effect_sizes.r_squared)],
         ]);
     }
-    res.tabs.push(build_tab("two-group", out.method_label, ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows));
+    let mut tab = build_tab("two-group", out.method_label, ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows);
+    if is_lognormal {
+        tab.footnotes.push(String::from(
+            "Lognormal unpaired t-test evaluates Student's t on ln(Y); log-scale means, differences, CIs, and effect sizes are on the natural-log scale alongside the back-transformed geometric mean ratio.",
+        ));
+    }
+    if include_es {
+        if out.effect_sizes.glass_delta.is_none() {
+            let msg = format!(
+                "Glass's Delta standardizes by group \"{lbl_a}\" SD and is unavailable because \"{lbl_a}\" has zero SD (group \"{lbl_b}\" SD is not substituted)."
+            );
+            tab.footnotes.push(msg.clone());
+            res.checklist.push(checklist_item("Glass's Delta standardizing SD", ChecklistStatus::Info, Some(format!("SD({lbl_a}) = 0")), msg));
+        } else {
+            tab.footnotes.push(format!("Glass's Delta standardizes by group \"{lbl_a}\" SD."));
+        }
+    }
+    res.tabs.push(tab);
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "t", None, out.t_statistic);
     push_scalar(res, "CohensD", None, out.effect_sizes.cohens_d);
@@ -2617,9 +2806,9 @@ fn populate_unpaired_t_sheet_impl(
         estimate_diff: Some(out.difference),
         raw_p_or_q: out.p_value,
         is_fdr_q: false,
-        significant: out.p_value <= conf.alpha(),
+        significant: out.p_value <= alpha,
     });
-    append_unpaired_checklist(&mut res.checklist, out, conf.alpha(), has_raw_replicates);
+    append_unpaired_checklist(&mut res.checklist, out, alpha, has_raw_replicates);
 }
 
 fn append_unpaired_checklist(checklist: &mut Vec<ChecklistItem>, out: &UnpairedTResult, alpha: f64, has_raw_replicates: bool) {
@@ -2758,8 +2947,9 @@ fn populate_paired_t_sheet(
         String::from("Pairing correlation (r)"),
         String::from("Pairing effectiveness P"),
     ];
+    let alpha = conf.alpha();
     let mut rows = vec![
-        vec![p_cell(out.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
         vec![num_cell(out.t_statistic)],
         vec![num_cell(out.df)],
         vec![num_cell(out.n_pairs as f64)],
@@ -2767,7 +2957,7 @@ fn populate_paired_t_sheet(
         vec![num_cell(out.sd_of_differences)],
         vec![ci_cell(out.ci.0, out.ci.1)],
         vec![opt_num_cell(out.pairing_r)],
-        vec![out.pairing_p.map_or(ResultCell::Empty, |p| p_cell(p, p_fmt))],
+        vec![out.pairing_p.map_or(ResultCell::Empty, |p| p_cell_at_alpha(p, p_fmt, alpha))],
     ];
     if let Some(gmr) = out.geometric_mean_ratio {
         row_labels.push(String::from("Geometric mean of ratios (A / B)"));
@@ -2806,6 +2996,54 @@ fn populate_paired_t_sheet(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn format_hl_ci_row_and_warn(
+    row_labels: &mut Vec<String>,
+    rows: &mut Vec<Vec<ResultCell>>,
+    checklist: &mut Vec<ChecklistItem>,
+    target_desc: &str,
+    ci: Option<(f64, f64)>,
+    actual_conf_pct: Option<f64>,
+    max_bound_pct: Option<f64>,
+    conf: ConfidenceLevel,
+) -> Option<String> {
+    let nominal = conf.percent();
+    let unattainable =
+        actual_conf_pct.is_some_and(|a| a + 1e-9 < nominal) || (actual_conf_pct.is_none() && max_bound_pct.is_some_and(|m| m + 1e-9 < nominal));
+    let ci_label = match actual_conf_pct {
+        Some(actual) if actual + 1e-9 < nominal => format!("{actual:.2}% CI of {target_desc} (requested {nominal}%)"),
+        _ => format!("{nominal}% CI of {target_desc}"),
+    };
+    row_labels.push(ci_label);
+    rows.push(vec![opt_ci_cell(ci)]);
+    row_labels.push(String::from("HL CI actual confidence (%)"));
+    rows.push(vec![opt_num_cell(actual_conf_pct)]);
+
+    if unattainable {
+        let (metric, msg) = if let Some(actual) = actual_conf_pct {
+            (
+                Some(format!("achieved = {actual:.2}% (requested {nominal}%)")),
+                format!(
+                    "Requested {nominal}% Hodges-Lehmann confidence level is unattainable at this sample size; exact achieved coverage is {actual:.2}%."
+                ),
+            )
+        } else if let Some(bound) = max_bound_pct {
+            (
+                Some(format!("max achievable <= {bound:.2}% (requested {nominal}%)")),
+                format!(
+                    "Requested {nominal}% Hodges-Lehmann confidence level is unattainable at this sample size (maximum distribution-free coverage <= {bound:.2}%)."
+                ),
+            )
+        } else {
+            (None, format!("Requested {nominal}% Hodges-Lehmann confidence level is unattainable at this sample size."))
+        };
+        checklist.push(checklist_item("Hodges-Lehmann CI achieved coverage", ChecklistStatus::Warn, metric, msg.clone()));
+        Some(msg)
+    } else {
+        None
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn populate_mann_whitney_sheet(
     res: &mut ResultSheet,
     idx_a: usize,
@@ -2816,25 +3054,32 @@ fn populate_mann_whitney_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let row_labels = vec![
-        String::from("P value"),
-        String::from("Exact P used"),
-        String::from("Mann-Whitney U"),
-        String::from("Hodges-Lehmann median diff."),
-        format!("{}% CI of median diff.", conf.percent()),
-        String::from("Cliff's delta"),
-        String::from("Rank-biserial r"),
-    ];
-    let rows = vec![
-        vec![p_cell(out.p_value, p_fmt)],
+    let alpha = conf.alpha();
+    let mut row_labels =
+        vec![String::from("P value"), String::from("Exact P used"), String::from("Mann-Whitney U"), String::from("Hodges-Lehmann median diff.")];
+    let mut rows = vec![
+        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
         vec![ResultCell::Boolean(out.exact_p_used)],
         vec![num_cell(out.u_min)],
         vec![num_cell(out.hodges_lehmann_diff)],
-        vec![opt_ci_cell(out.hodges_lehmann_ci)],
-        vec![num_cell(out.cliffs_delta)],
-        vec![num_cell(out.rank_biserial_r)],
     ];
-    res.tabs.push(build_tab("mann-whitney", "Mann-Whitney test", ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows));
+    let hl_warn = format_hl_ci_row_and_warn(
+        &mut row_labels,
+        &mut rows,
+        &mut res.checklist,
+        "median diff.",
+        out.hodges_lehmann_ci,
+        out.ci_actual_confidence_percent,
+        mann_whitney_max_achievable_coverage_percent(out.n_a, out.n_b),
+        conf,
+    );
+    row_labels.extend([String::from("Cliff's delta"), String::from("Rank-biserial r")]);
+    rows.extend([vec![num_cell(out.cliffs_delta)], vec![num_cell(out.rank_biserial_r)]]);
+    let mut tab = build_tab("mann-whitney", "Mann-Whitney test", ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows);
+    if let Some(msg) = hl_warn {
+        tab.footnotes.push(msg);
+    }
+    res.tabs.push(tab);
     push_scalar(res, "PValue", None, out.p_value);
     push_scalar(res, "MannWhitneyU", None, out.u_min);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
@@ -2845,7 +3090,7 @@ fn populate_mann_whitney_sheet(
         estimate_diff: Some(out.hodges_lehmann_diff),
         raw_p_or_q: out.p_value,
         is_fdr_q: false,
-        significant: out.p_value <= conf.alpha(),
+        significant: out.p_value <= alpha,
     });
     res.checklist.push(checklist_item(
         "Nonparametric rank comparison",
@@ -2870,32 +3115,45 @@ fn populate_wilcoxon_paired_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let row_labels = vec![
+    let alpha = conf.alpha();
+    let mut row_labels = vec![
         String::from("P value"),
         String::from("Exact P used"),
         String::from("Sum of positive ranks (W+)"),
         String::from("Sum of negative ranks (W-)"),
         String::from("Hodges-Lehmann pseudomedian"),
-        format!("{}% CI of pseudomedian", conf.percent()),
-        String::from("Rank-biserial r"),
     ];
-    let rows = vec![
-        vec![p_cell(out.p_value, p_fmt)],
+    let mut rows = vec![
+        vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)],
         vec![ResultCell::Boolean(out.exact_p_used)],
         vec![num_cell(out.w_plus)],
         vec![num_cell(out.w_minus)],
         vec![num_cell(out.hodges_lehmann_pseudomedian)],
-        vec![opt_ci_cell(out.hodges_lehmann_ci)],
-        vec![num_cell(out.rank_biserial_r)],
     ];
-    res.tabs.push(build_tab(
+    let hl_warn = format_hl_ci_row_and_warn(
+        &mut row_labels,
+        &mut rows,
+        &mut res.checklist,
+        "pseudomedian",
+        out.hodges_lehmann_ci,
+        out.ci_actual_confidence_percent,
+        wilcoxon_max_achievable_coverage_percent(out.n_pairs),
+        conf,
+    );
+    row_labels.push(String::from("Rank-biserial r"));
+    rows.push(vec![num_cell(out.rank_biserial_r)]);
+    let mut tab = build_tab(
         "wilcoxon-paired",
         "Wilcoxon matched-pairs test",
         ResultTabKind::MainSummary,
         vec![format!("{lbl_a} vs. {lbl_b}")],
         row_labels,
         rows,
-    ));
+    );
+    if let Some(msg) = hl_warn {
+        tab.footnotes.push(msg);
+    }
+    res.tabs.push(tab);
     push_scalar(res, "PValue", None, out.p_value);
     res.pairwise_comparisons.push(PairwiseComparisonRecord {
         group_a: idx_a,
@@ -2905,7 +3163,7 @@ fn populate_wilcoxon_paired_sheet(
         estimate_diff: Some(out.hodges_lehmann_pseudomedian),
         raw_p_or_q: out.p_value,
         is_fdr_q: false,
-        significant: out.p_value <= conf.alpha(),
+        significant: out.p_value <= alpha,
     });
     res.checklist.push(checklist_item(
         "Symmetry of paired differences",
@@ -2925,8 +3183,9 @@ fn populate_ks_sheet(
 ) {
     let (idx_a, idx_b) = indices;
     let (lbl_a, lbl_b) = labels;
+    let alpha = conf.alpha();
     let row_labels = vec![String::from("P value"), String::from("Kolmogorov-Smirnov D"), String::from("Exact P used")];
-    let rows = vec![vec![p_cell(out.p_value, p_fmt)], vec![num_cell(out.d_statistic)], vec![ResultCell::Boolean(out.exact_p_used)]];
+    let rows = vec![vec![p_cell_at_alpha(out.p_value, p_fmt, alpha)], vec![num_cell(out.d_statistic)], vec![ResultCell::Boolean(out.exact_p_used)]];
     res.tabs.push(build_tab(
         "ks-two-sample",
         "Kolmogorov-Smirnov test",
@@ -2979,7 +3238,7 @@ fn populate_one_sample_t_sheet_impl(
         vec![num_cell(out.discrepancy)],
         vec![num_cell(out.t_statistic)],
         vec![num_cell(out.df)],
-        vec![p_cell(out.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
         vec![ci_cell(out.ci.0, out.ci.1)],
         vec![opt_num_cell(out.hedges_g)],
     ];
@@ -3042,7 +3301,7 @@ fn populate_paired_sign_sheet(
         String::from("Effective pairs (n+ + n-)"),
     ];
     let rows = vec![
-        vec![p_cell(out.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
         vec![num_cell(out.median_difference)],
         vec![opt_ci_cell(out.ci)],
         vec![opt_num_cell(out.ci_actual_confidence_percent)],
@@ -3117,23 +3376,35 @@ fn populate_one_sample_w_sheet(
     conf: ConfidenceLevel,
     p_fmt: PValueFormat,
 ) {
-    let row_labels = vec![
+    let mut row_labels = vec![
         String::from("Hypothetical median"),
         String::from("Sample median"),
         String::from("W statistic (W+ - W-)"),
         String::from("P value"),
         String::from("Hodges-Lehmann pseudomedian"),
-        format!("{}% CI of pseudomedian", conf.percent()),
     ];
-    let rows = vec![
+    let mut rows = vec![
         vec![num_cell(out.hypothetical_median)],
         vec![num_cell(out.sample_median)],
         vec![num_cell(out.w_stat)],
-        vec![p_cell(out.p_value, p_fmt)],
+        vec![p_cell_at_alpha(out.p_value, p_fmt, conf.alpha())],
         vec![num_cell(out.pseudomedian_hl)],
-        vec![opt_ci_cell(out.pseudomedian_ci)],
     ];
-    res.tabs.push(build_tab("one-sample-w", "One-sample Wilcoxon test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows));
+    let hl_warn = format_hl_ci_row_and_warn(
+        &mut row_labels,
+        &mut rows,
+        &mut res.checklist,
+        "pseudomedian",
+        out.pseudomedian_ci,
+        out.ci_actual_confidence_percent,
+        wilcoxon_max_achievable_coverage_percent(out.n_total),
+        conf,
+    );
+    let mut tab = build_tab("one-sample-w", "One-sample Wilcoxon test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows);
+    if let Some(msg) = hl_warn {
+        tab.footnotes.push(msg);
+    }
+    res.tabs.push(tab);
     push_scalar(res, "PValue", None, out.p_value);
     res.checklist.push(checklist_item(
         "One-sample symmetry",

@@ -292,6 +292,10 @@ pub struct FactorialAnovaResult {
     pub ss_type: SumOfSquaresType,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// Linear mixed-effects REML fit for one-way / nested hierarchical or unbalanced RM data
 /// (Laird & Ware 1982; Kenward & Roger 1997).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -314,6 +318,12 @@ pub struct MixedRemlResult {
     pub satterthwaite_df: Vec<f64>,
     /// Kenward & Roger (1997) small-sample bias-corrected denominator df aligned 1-to-1 with `fixed_terms`.
     pub kenward_roger_df: Vec<f64>,
+    /// Whether the profile likelihood search located a converged REML optimum (false if the variance-ratio optimization hit the upper search ceiling or failed to evaluate).
+    #[serde(default = "default_true")]
+    pub converged: bool,
+    /// Whether the variance-ratio estimate lies on a constraint boundary ($\hat{\sigma}_{\text{random}}^2 = 0$ or upper search ceiling).
+    #[serde(default)]
+    pub at_boundary: bool,
 }
 
 /// Multi-variance-component linear mixed-effects REML fit (`V = sigma_e^2 I + sum_k sigma_k^2 G_k`).

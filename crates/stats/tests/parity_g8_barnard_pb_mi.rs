@@ -194,7 +194,8 @@ fn passing_bablok_oracle_benchmark_and_collinear_baseline() {
     assert_approx_eq(pb.intercept_ci.0, 0.787499999999997, 1e-11, 1e-11, "PB16 intercept CI lower");
     assert_approx_eq(pb.intercept_ci.1, 1.383333333333331, 1e-11, 1e-11, "PB16 intercept CI upper");
     assert_approx_eq(pb.cusum_h, 1.0, 1e-12, 1e-12, "PB16 CUSUM H");
-    assert_approx_eq(pb.cusum_p_value, 0.999999704128472, 1e-9, 1e-9, "PB16 CUSUM P");
+    assert_approx_eq(pb.cusum_statistic, 1.0 / 8.0_f64.sqrt(), 1e-12, 1e-12, "PB16 CUSUM statistic H / sqrt(L + 1)");
+    assert_approx_eq(pb.cusum_p_value, 0.999_633_292_157_727_7, 1e-9, 1e-9, "PB16 CUSUM P");
     assert!(pb.linearity_passed);
 
     // Exact noiseless line y = 2.5*x - 3.0 -> zero CUSUM H and P = 1.0.
@@ -238,13 +239,13 @@ fn passing_bablok_k_offset_symmetry_permutation_and_nonlinear_cusum() {
     assert_approx_eq(pb_perm.intercept, pb_xy.intercept, 1e-12, 1e-12, "row permutation intercept invariance");
     assert_approx_eq(pb_perm.cusum_p_value, pb_xy.cusum_p_value, 1e-12, 1e-12, "row permutation CUSUM invariance");
 
-    // Nonlinear quadratic curve (x = 1..=36): CUSUM H = 9, lambda = 1.5, P ~ 0.0222 < 0.05.
+    // Nonlinear quadratic curve (x = 1..=36): CUSUM H = 9, L = 18, H / sqrt(19) ~ 2.0647, P < 0.001.
     let qx: Vec<f64> = (1..=36).map(f64::from).collect();
     let qy: Vec<f64> = qx.iter().map(|&x| 0.25 * x * x + 0.5 * x + 1.0).collect();
     let pb_quad = passing_bablok_regression(&qx, &qy, ConfidenceLevel::DEFAULT_95).unwrap();
     assert_approx_eq(pb_quad.cusum_h, 9.0, 1e-9, 1e-9, "quadratic CUSUM H");
-    assert_approx_eq(pb_quad.cusum_statistic, 1.5, 1e-9, 1e-9, "quadratic CUSUM statistic");
-    assert!(pb_quad.cusum_p_value < 0.03, "expected nonlinear rejection P < 0.03, got {}", pb_quad.cusum_p_value);
+    assert_approx_eq(pb_quad.cusum_statistic, 9.0 / 19.0_f64.sqrt(), 1e-9, 1e-9, "quadratic CUSUM statistic");
+    assert!(pb_quad.cusum_p_value < 0.001, "expected nonlinear rejection P < 0.001, got {}", pb_quad.cusum_p_value);
     assert!(!pb_quad.linearity_passed);
 
     // Input error guards.
@@ -359,15 +360,20 @@ fn mice_pmm_deterministic_reproducibility_recovery_and_zero_missingness() {
         y.push(Some(2.0 + 1.5 * f1 - 0.8 * f2 + eps));
     }
 
-    // Complete case (zero missingness).
-    let cfg_zero = MultipleImputationConfig {
-        imputations_m: 1, // clamps to 2
+    // Complete case (zero missingness). Out-of-bounds m / max_iters return typed errors instead of clamping.
+    let cfg_invalid_m = MultipleImputationConfig {
+        imputations_m: 1,
         max_iters: 5,
         seed: 101,
         response_col: Some(2),
         predictor_cols: vec![0, 1],
         confidence: ConfidenceLevel::DEFAULT_95,
     };
+    assert!(matches!(
+        mice_predictive_mean_matching(&labels, &[x1.clone(), x2.clone(), y.clone()], &cfg_invalid_m),
+        Err(StatsError::InvalidParameter { name: "imputations_m", .. })
+    ));
+    let cfg_zero = MultipleImputationConfig { imputations_m: 2, ..cfg_invalid_m };
     let res_zero = mice_predictive_mean_matching(&labels, &[x1.clone(), x2.clone(), y.clone()], &cfg_zero).unwrap();
     assert_eq!(res_zero.m, 2);
     assert_eq!(res_zero.total_missing, 0);
@@ -402,10 +408,15 @@ fn mice_pmm_deterministic_reproducibility_recovery_and_zero_missingness() {
     assert_eq!(res_a.pooled_means, res_a_repeat.pooled_means);
     assert_eq!(res_a.total_missing, 7);
 
-    // Different seed produces distinct imputation chains while recovering the same linear model.
-    let cfg_b = MultipleImputationConfig { seed: 9090, imputations_m: 80, ..cfg_a };
+    // Out-of-bounds upper m rejects instead of clamping, while different valid seeds produce distinct chains.
+    let cfg_over_m = MultipleImputationConfig { seed: 9090, imputations_m: 80, ..cfg_a.clone() };
+    assert!(matches!(
+        mice_predictive_mean_matching(&labels, &[x1.clone(), x2_mis.clone(), y_mis.clone()], &cfg_over_m),
+        Err(StatsError::InvalidParameter { name: "imputations_m", .. })
+    ));
+    let cfg_b = MultipleImputationConfig { seed: 9090, imputations_m: 50, ..cfg_a };
     let res_b = mice_predictive_mean_matching(&labels, &[x1.clone(), x2_mis.clone(), y_mis.clone()], &cfg_b).unwrap();
-    assert_eq!(res_b.m, 50, "imputations_m must clamp upper bound to 50");
+    assert_eq!(res_b.m, 50);
     assert_ne!(res_a.imputed_datasets[0], res_b.imputed_datasets[0]);
 
     // Observed cells must remain bit-exact; missing cells must draw plausible observed donors.

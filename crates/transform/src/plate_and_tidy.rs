@@ -1357,6 +1357,11 @@ fn build_grouped_row_index(has_x_col: bool, records: &[TidyRecord]) -> (Vec<Stri
                 lookup.insert(k, idx);
             }
         }
+        if records.iter().any(|r| r.x_token.is_none() && r.x_num.is_none()) {
+            let idx = titles.len();
+            titles.push(String::from("(Missing)"));
+            lookup.insert(String::from("(Missing)"), idx);
+        }
         return (titles, lookup);
     }
 

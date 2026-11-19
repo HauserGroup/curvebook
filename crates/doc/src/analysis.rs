@@ -316,7 +316,7 @@ pub enum SubcolumnAggregation {
 pub struct DescriptiveSpec {
     /// How multi-subcolumn replicates are collapsed prior to computing moments and quantiles.
     pub aggregation: SubcolumnAggregation,
-    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-6 percentiles); `None` reports standard quartiles/extrema only.
+    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-7 percentiles); `None` reports standard quartiles/extrema only.
     pub custom_upper_percentile: Option<f64>,
     /// When `true`, runs Shapiro–Wilk (`3 <= n <= 5000`; Royston 1995), D'Agostino–Pearson omnibus `K^2` (`n >= 8`), Anderson–Darling `A^2*`, and Lilliefors KS normality & lognormality tests.
     pub run_normality_battery: bool,
@@ -419,11 +419,14 @@ pub struct BlandAltmanSpec {
     /// When `false`, evaluates absolute differences `A - B` vs pair averages `(A + B) / 2`; when `true`, evaluates percentage differences `100 * (A - B) / ((A + B) / 2)`. Limits of agreement are `bias ± z_{1 - alpha/2} * SD_diff` at [`AnalysisSpec::confidence_level`].
     #[serde(default)]
     pub percent_difference: bool,
+    /// Explicit comparison mode on [`TableKind::Xy`] tables: `Some(true)` locks comparison to `X` versus `Y[0]` regardless of whether additional `Y` data sets are added later, `Some(false)` compares `Y[column_a]` versus `Y[column_b]`, and `None` preserves legacy auto-selection (`X` vs `Y[0]` when one `Y` data set exists, `Y[column_a]` vs `Y[column_b]` otherwise).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub xy_compare_x_vs_y: Option<bool>,
 }
 
 impl Default for BlandAltmanSpec {
     fn default() -> Self {
-        Self { column_a: 0, column_b: 1, percent_difference: false }
+        Self { column_a: 0, column_b: 1, percent_difference: false, xy_compare_x_vs_y: None }
     }
 }
 
@@ -650,7 +653,7 @@ pub struct FactorialAnovaSpec {
     pub residual_covariance: ResidualCovariance,
     /// When `true` (default), automatically upgrades repeated-measures designs with missing replicate cells (`has_missing_replicates()`) to REML mixed-effects estimation rather than dropping incomplete subjects.
     pub fit_reml_on_missing: bool,
-    /// When `true`, reports partial `eta_p^2`, generalized `eta_G^2` (Olejnik & Algina 2003), `omega_p^2`, and percentage of total variation per term.
+    /// When `true`, reports partial `eta_p^2` and (for classical OLS/RM factorial ANOVA) total `eta^2` per term (`eta^2` is omitted on REML mixed-effects fits).
     pub compute_effect_sizes: bool,
     /// Post-hoc cell/simple-effect/main-effect multiple-comparisons configuration.
     pub multiplicity: MultiplicitySpec,
@@ -740,9 +743,9 @@ impl Default for ContingencyMethod {
 pub struct ContingencySpec {
     /// Primary contingency, exact, trend, paired, or agreement test method.
     pub method: ContingencyMethod,
-    /// When `true` on `2 × 2` tables, reports Odds Ratio (Baptista–Pike exact mid-*p* and Woolf logit CIs), Relative Risk (Koopman asymptotic score CI; Koopman 1984), Difference in Proportions (Newcombe Wilson score CI; Newcombe 1998), and Number Needed to Treat (`NNT = 1 / |RD|`).
+    /// When `true` on `2 × 2` tables, reports Odds Ratio (Baptista–Pike exact conditional mid-*p* / Fisher CI; Baptista & Pike 1977), Relative Risk (Koopman asymptotic score CI; Koopman 1984), Difference in Proportions (Newcombe Wilson score CI; Newcombe 1998), and Number Needed to Treat (`NNT = 1 / |RD|`).
     pub compute_odds_and_risk_ratios: bool,
-    /// When `true` on `2 × 2` tables, reports diagnostic Sensitivity, Specificity, Positive/Negative Predictive Values (`PPV`/`NPV`), and Likelihood Ratios (`LR+`/`LR-`) with Wilson score CIs (Wilson 1927).
+    /// When `true` on `2 × 2` tables, reports diagnostic Sensitivity, Specificity, and Positive/Negative Predictive Values (`PPV`/`NPV`) with Wilson score CIs (Wilson 1927).
     pub compute_sensitivity_specificity: bool,
     /// When `true`, reports Pearson's `phi` (`2 × 2`) and Cramér's `V = sqrt(X^2 / (N * min(r - 1, c - 1)))` association coefficients (Cramér 1946).
     pub compute_phi_and_cramers_v: bool,
@@ -2102,4 +2105,146 @@ impl AnalysisSpec {
         self.selected_data_sets = selected_data_sets;
         Ok(())
     }
+}
+
+// ============================================================================
+// Column-Title Numeric Hook Parser
+// ============================================================================
+
+/// Failure returned by [`parse_column_title_numeric_hook`] when a data-set column
+/// title does not specify an unambiguous finite numeric scalar.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ColumnTitleHookError {
+    /// Column title was empty or whitespace-only.
+    EmptyTitle,
+    /// Explicit `lhs = rhs` assignment syntax was malformed or missing a valid identifier on the left-hand side.
+    InvalidAssignment {
+        /// Original column title.
+        title: String,
+    },
+    /// Column title did not begin with an unambiguous numeric literal (for example, embedded digits or hyphens inside identifiers such as `"Inhibitor-10 nM"`, `"IL-6 10 ng/mL"`, or `"CO2 5%"`).
+    MissingNumericValue {
+        /// Original column title.
+        title: String,
+    },
+    /// Parsed numeric literal was `NaN`, `±Inf`, or overflowed `f64`.
+    NonFiniteValue {
+        /// Original column title.
+        title: String,
+    },
+    /// Trailing text after the numeric scalar was not a valid unit token.
+    InvalidTrailingUnit {
+        /// Original column title.
+        title: String,
+    },
+}
+
+impl std::fmt::Display for ColumnTitleHookError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::EmptyTitle => f.write_str("column title is empty and has no numeric hook value"),
+            Self::InvalidAssignment { title } => {
+                write!(f, "column title `{title}` contains an invalid numeric hook assignment")
+            }
+            Self::MissingNumericValue { title } => {
+                write!(f, "column title `{title}` does not start with an unambiguous finite numeric value")
+            }
+            Self::NonFiniteValue { title } => {
+                write!(f, "column title `{title}` contains a non-finite numeric value")
+            }
+            Self::InvalidTrailingUnit { title } => {
+                write!(f, "column title `{title}` has an invalid or ambiguous trailing unit")
+            }
+        }
+    }
+}
+
+impl std::error::Error for ColumnTitleHookError {}
+
+/// Strictly parse an unambiguous finite numeric scalar from a column header title
+/// (`HookSource::ColumnTitleValue` and `ParameterScope::ColumnTitleConstant`).
+///
+/// Accepts:
+/// - Standalone finite numbers (`"10"`, `"-2.5"`, `"1e-7"`),
+/// - Finite numbers followed by a trailing unit (`"10 nM"`, `"25.0 uM"`, `"5%"`), and
+/// - Explicit assignments (`"[I] = 10 nM"`, `"Conc = 2.5 uM"`).
+///
+/// Rejects embedded hyphens or digits inside un-assigned identifiers and ranges
+/// (`"Inhibitor-10 nM"`, `"IL-6 10 ng/mL"`, `"CO2 5%"`, `"Hot1.5"`, `"10-20 nM"`),
+/// multiple numeric tokens (`"10 20"`), empty titles, and non-finite literals (`"NaN"`, `"inf"`).
+///
+/// # Errors
+/// Returns [`ColumnTitleHookError`] if `title` is empty, malformed, ambiguous, or non-finite.
+pub fn parse_column_title_numeric_hook(title: &str) -> Result<f64, ColumnTitleHookError> {
+    let trimmed = title.trim();
+    if trimmed.is_empty() {
+        return Err(ColumnTitleHookError::EmptyTitle);
+    }
+
+    let value_part = if let Some((lhs, rhs)) = trimmed.split_once('=') {
+        if rhs.contains('=') || !is_valid_hook_assignment_lhs(lhs) {
+            return Err(ColumnTitleHookError::InvalidAssignment { title: title.to_owned() });
+        }
+        let rhs_trimmed = rhs.trim();
+        if rhs_trimmed.is_empty() {
+            return Err(ColumnTitleHookError::MissingNumericValue { title: title.to_owned() });
+        }
+        rhs_trimmed
+    } else {
+        trimmed
+    };
+
+    parse_strict_number_with_unit(value_part, title)
+}
+
+fn is_valid_hook_assignment_lhs(lhs: &str) -> bool {
+    let l = lhs.trim();
+    if l.is_empty() || l.parse::<f64>().is_ok() || !l.chars().any(char::is_alphabetic) {
+        return false;
+    }
+    let Some(first) = l.chars().next() else {
+        return false;
+    };
+    if first != '[' && !first.is_alphabetic() {
+        return false;
+    }
+    let mut bracket_depth: i32 = 0;
+    for ch in l.chars() {
+        match ch {
+            '[' => bracket_depth += 1,
+            ']' => {
+                bracket_depth -= 1;
+                if bracket_depth < 0 {
+                    return false;
+                }
+            }
+            _ => {}
+        }
+    }
+    bracket_depth == 0
+}
+
+fn parse_strict_number_with_unit(expr: &str, original_title: &str) -> Result<f64, ColumnTitleHookError> {
+    let (head, tail_opt) = match expr.split_once(char::is_whitespace) {
+        Some((h, t)) => (h, Some(t.trim())),
+        None => (expr, None),
+    };
+    let num_token = head.strip_suffix('%').unwrap_or(head);
+    let Ok(val) = num_token.parse::<f64>() else {
+        return Err(ColumnTitleHookError::MissingNumericValue { title: original_title.to_owned() });
+    };
+    if !val.is_finite() {
+        return Err(ColumnTitleHookError::NonFiniteValue { title: original_title.to_owned() });
+    }
+    if let Some(tail) = tail_opt
+        && !tail.is_empty()
+    {
+        for tok in tail.split_whitespace() {
+            let first_ok = tok.chars().next().is_some_and(|c| c.is_alphabetic() || matches!(c, '%' | '°'));
+            if !first_ok || tok.contains('=') || tok.chars().any(|c| c.is_ascii_digit()) {
+                return Err(ColumnTitleHookError::InvalidTrailingUnit { title: original_title.to_owned() });
+            }
+        }
+    }
+    Ok(if val == 0.0 { 0.0 } else { val })
 }

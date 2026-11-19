@@ -990,7 +990,8 @@ fn resolve_two_proportions_effect(req: &PowerAnalysisRequest, k: f64) -> Result<
             Ok(ResolvedEffect::TwoProportions { p1: None, p2: None, h: 0.0 })
         }
         PowerEffectSpec::Standardized(h) => {
-            if !h.is_finite() {
+            // Cohen's h = 2 asin(sqrt(p1)) - 2 asin(sqrt(p2)) is strictly bounded by |h| <= pi (Cohen 1988, ch. 6).
+            if !h.is_finite() || h.abs() > std::f64::consts::PI {
                 return Err(StatsError::InvalidParameter { name: "cohens_h", value: *h });
             }
             Ok(ResolvedEffect::TwoProportions { p1: None, p2: None, h: *h })
@@ -1883,8 +1884,13 @@ fn solve_two_proportions_p2(
     Ok((p2_val, cohens_h(p1, p2_val)?))
 }
 
+/// Solve minimum detectable Cohen's `h` in `[-pi, pi]` (Cohen 1988, ch. 6), returning
+/// [`StatsError::InvalidParameter`] when `target_power` cannot be achieved within `|h| <= pi`.
 fn solve_two_proportions_h(ctx: &ResolvedContext, n1: f64, n2: f64, target_power: f64) -> Result<f64, StatsError> {
     let p_zero = two_proportions_h_power(n1, n2, 0.0, ctx.alpha, ctx.tail_mode)?.power;
+    if (target_power - p_zero).abs() <= 1e-13 && matches!(ctx.tail_mode, TailMode::OneSided(_)) {
+        return Ok(0.0);
+    }
     if matches!(ctx.tail_mode, TailMode::TwoSided) && target_power <= p_zero {
         return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
     }
@@ -1893,28 +1899,14 @@ fn solve_two_proportions_h(ctx: &ResolvedContext, n1: f64, n2: f64, target_power
         TailMode::OneSided(OneSidedDirection::Less) => target_power < p_zero,
     };
     let eval = |h: f64| -> f64 { two_proportions_h_power(n1, n2, h, ctx.alpha, ctx.tail_mode).map_or(f64::NAN, |e| e.power - target_power) };
-    if search_positive {
-        let mut lo = 0.0_f64;
-        let mut hi = 2.0_f64;
-        for _ in 0..32 {
-            if eval(hi) >= 0.0 {
-                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
-            }
-            lo = hi;
-            hi *= 2.0;
-        }
-    } else {
-        let mut hi = 0.0_f64;
-        let mut lo = -2.0_f64;
-        for _ in 0..32 {
-            if eval(lo) >= 0.0 {
-                return Ok(brent_root(eval, lo, hi, ROOT_TOL)?);
-            }
-            hi = lo;
-            lo *= 2.0;
-        }
+    let max_h = std::f64::consts::PI;
+    let (lo, hi) = if search_positive { (0.0, max_h) } else { (-max_h, 0.0) };
+    let f_lo = eval(lo);
+    let f_hi = eval(hi);
+    if !f_lo.is_finite() || !f_hi.is_finite() || f_lo * f_hi > 0.0 {
+        return Err(StatsError::InvalidParameter { name: "target_power", value: target_power });
     }
-    Err(StatsError::NotConverged { algorithm: "solve_two_proportions_h" })
+    Ok(brent_root(eval, lo, hi, ROOT_TOL)?)
 }
 
 fn solve_detectable_effect(ctx: &mut ResolvedContext, n1: f64, n2_explicit: Option<f64>) -> Result<(), StatsError> {

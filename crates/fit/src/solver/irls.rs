@@ -12,11 +12,13 @@ use curvebook_math::special::deviance_bd0;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::compute_rsdr;
-use crate::error::FitError;
+use crate::dsl::ode_fit_budget_exceeded;
+use crate::error::{FitError, FitStatus};
 use crate::library::ParametricModel;
-use crate::solver::layout::{ObsRecord, ParameterLayout};
+use crate::solver::layout::{ObsRecord, ParameterLayout, ode_budget_error, project_theta};
 use crate::solver::lm::{
-    LmRunOutput, compute_jacobian, eval_residuals_with_domain, run_trust_region_lm, run_trust_region_lm_with_domain, solve_with_warm_start,
+    LmRunOutput, compute_jacobian, eval_residuals_with_domain, nelder_mead_optimize, nelder_mead_poisson_feasibility_rescue, run_trust_region_lm,
+    run_trust_region_lm_with_domain, solve_with_warm_start, solve_with_warm_start_with_domain,
 };
 use crate::solver::results::SolverConfig;
 
@@ -67,7 +69,50 @@ pub(in crate::solver) fn fit_poisson_irls(
     }
     let mut theta = init_theta.to_vec();
     let mut work_obs = obs.to_vec();
-    let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
+    let mut last_out = if eval_residuals_with_domain(model, layout, &work_obs, &theta, true).is_some() {
+        solve_with_warm_start_with_domain(model, layout, &work_obs, &theta, config, true)?
+    } else if layout.k_free() == 0 {
+        return Err(FitError::ImpossibleWeights {
+            reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+        });
+    } else if !config.use_simplex_warm_start {
+        if eval_residuals_with_domain(model, layout, &work_obs, &theta, false).is_some() {
+            return Err(FitError::BadInitialValues {
+                reason: "Starting parameters produce non-positive Poisson predicted means (mu <= 0)".to_owned(),
+            });
+        }
+        return Err(FitError::BadInitialValues { reason: "Starting parameters evaluate outside model domain".to_owned() });
+    } else {
+        // When initial parameters give mu <= 0, rescue via unconstrained LS pre-fit and/or a
+        // feasibility-barrier Nelder-Mead search inside parameter bounds before rejecting as impossible.
+        let mut ls_cand = None;
+        if eval_residuals_with_domain(model, layout, &work_obs, &theta, false).is_some() {
+            match solve_with_warm_start_with_domain(model, layout, &work_obs, &theta, config, false) {
+                Ok(out) => ls_cand = Some(out),
+                Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                Err(_) => {}
+            }
+        }
+        let ls_outcome = ls_cand
+            .map(|out| if eval_residuals_with_domain(model, layout, &work_obs, &out.theta, true).is_some() { Ok(out) } else { Err(out.theta) });
+        match ls_outcome {
+            Some(Ok(feasible_ls)) => feasible_ls,
+            other => {
+                let ls_seed = other.as_ref().and_then(|res| res.as_ref().err().map(Vec::as_slice));
+                let feasible = nelder_mead_poisson_feasibility_rescue(model, layout, &work_obs, &theta)
+                    .or_else(|| ls_seed.and_then(|s| nelder_mead_poisson_feasibility_rescue(model, layout, &work_obs, s)));
+                if let Some(start_pos) = feasible {
+                    solve_with_warm_start_with_domain(model, layout, &work_obs, &start_pos, config, true)?
+                } else if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                } else {
+                    return Err(FitError::ImpossibleWeights {
+                        reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+                    });
+                }
+            }
+        }
+    };
     let mut prev_dev = poisson_deviance(&work_obs, &last_out.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
         reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
     })?;
@@ -128,19 +173,29 @@ pub(in crate::solver) fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> O
 /// `z_i = |r_{w,i}| / RSDR` (Holland & Welsch 1977), each weighted subproblem solved by
 /// Levenberg–Marquardt. For a fixed scale both reach the same stationary point. Standard
 /// errors from this fit are not robust-theory SEs and are not used by ROUT.
-pub(in crate::solver) fn fit_cauchy_irls(
+pub(in crate::solver) fn cauchy_marginal_nll(obs: &[ObsRecord], y_hat: &[f64], k_free: usize, w_y_scale: f64) -> f64 {
+    let abs_res: Vec<f64> = obs.iter().zip(y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
+    let s = compute_rsdr(&abs_res, k_free).max(1e-6 * w_y_scale);
+    let penalty: f64 = abs_res
+        .iter()
+        .map(|&r| {
+            let z = r / s;
+            (1.0 + z * z).ln()
+        })
+        .sum();
+    (obs.len() as f64) * s.ln() + penalty
+}
+
+pub(in crate::solver) fn run_cauchy_irls_loop(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
-    init_theta: &[f64],
+    mut last_out: LmRunOutput,
     config: &SolverConfig,
+    w_y_scale: f64,
 ) -> Result<LmRunOutput, FitError> {
-    let mut theta = init_theta.to_vec();
-    let mut work_obs = obs.to_vec();
-    let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
     let k_free = layout.k_free();
-    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
-
+    let mut work_obs = obs.to_vec();
     for _ in 0..15 {
         let prev_theta = last_out.theta.clone();
         let abs_res: Vec<f64> = obs.iter().zip(last_out.y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
@@ -150,8 +205,7 @@ pub(in crate::solver) fn fit_cauchy_irls(
             let cauchy_w = 1.0 / (1.0 + z * z);
             rec.sqrt_weight = obs[i].sqrt_weight * cauchy_w.sqrt();
         }
-        theta = prev_theta.clone();
-        last_out = run_trust_region_lm(model, layout, &work_obs, &theta, config.max_iters, 10.0)?;
+        last_out = run_trust_region_lm(model, layout, &work_obs, &prev_theta, config.max_iters, 10.0)?;
         let max_step = prev_theta
             .iter()
             .zip(last_out.theta.iter())
@@ -162,6 +216,49 @@ pub(in crate::solver) fn fit_cauchy_irls(
         }
     }
     Ok(last_out)
+}
+
+pub(in crate::solver) fn fit_cauchy_irls(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    init_theta: &[f64],
+    config: &SolverConfig,
+) -> Result<LmRunOutput, FitError> {
+    let k_free = layout.k_free();
+    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+    let ols_seed = solve_with_warm_start(model, layout, obs, init_theta, config)?;
+    let mut best = run_cauchy_irls_loop(model, layout, obs, ols_seed, config, w_y_scale)?;
+
+    // If L2 OLS warm start chased an outlier into an unrepresentative steep step, also launch
+    // Cauchy IRLS directly from a Lorentzian-merit simplex search seeded at `init_theta`.
+    if k_free > 0 && config.use_simplex_warm_start {
+        let bounds = layout.bounds();
+        let nm_seed = nelder_mead_optimize(layout, init_theta, 500, 0.05, |th| {
+            if ode_fit_budget_exceeded().is_some() {
+                return f64::INFINITY;
+            }
+            let mut clamped = th.to_vec();
+            project_theta(&mut clamped, &bounds);
+            eval_residuals_with_domain(model, layout, obs, &clamped, false)
+                .map_or(f64::INFINITY, |(_, y_hat, _)| cauchy_marginal_nll(obs, &y_hat, k_free, w_y_scale))
+        });
+        if let Some(seed_th) = nm_seed
+            && let Some((w_res, y_hat, ss)) = eval_residuals_with_domain(model, layout, obs, &seed_th, false)
+            && let Ok(j_mat) = DenseMatrix::zeros(obs.len(), k_free)
+        {
+            let seed_out =
+                LmRunOutput { theta: seed_th, weighted_res: w_res, y_hat, weighted_ss: ss, j_mat, status: FitStatus::Converged, iterations: 0 };
+            if let Ok(alt) = run_cauchy_irls_loop(model, layout, obs, seed_out, config, w_y_scale) {
+                let best_nll = cauchy_marginal_nll(obs, &best.y_hat, k_free, w_y_scale);
+                let alt_nll = cauchy_marginal_nll(obs, &alt.y_hat, k_free, w_y_scale);
+                if alt_nll + 1e-6 < best_nll {
+                    best = alt;
+                }
+            }
+        }
+    }
+    Ok(best)
 }
 
 pub(in crate::solver) fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {

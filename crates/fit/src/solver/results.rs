@@ -364,6 +364,9 @@ pub struct FittedDatasetResult {
     /// Robust Standard Deviation of Residuals (`RSDR`) when `RobustCauchy` or `RoutOutlierElimination` is active (`None` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
+    /// Within-dataset Wald–Wolfowitz runs test computed in this dataset's own X order (`None` when disabled or plot-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_test: Option<RunsTestResult>,
     /// Sampled fitted curve polyline and optional two-sided confidence/prediction bands (`None` when `compute_bands` is `false` and overlay omitted).
     pub curve_overlay: Option<FittedCurveOverlay>,
 }

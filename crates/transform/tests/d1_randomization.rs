@@ -11,15 +11,20 @@
 //!
 //! # Family-Wise False-Positive Budget
 //!
-//! Across the 11 stochastic distribution columns (`N = 25_000` draws per column, `seed = 2026_1118`),
-//! there are `M = 66` planned stochastic comparisons (`44` empirical CDF cutoffs + `11` sample
-//! means + `11` sample variances). Each check uses `z = 5.6` standard errors:
+//! Across `M = 260` planned stochastic comparisons (`44` empirical CDF cutoffs, `11` sample means,
+//! and `11` sample variances across 11 distribution columns at `N = 25_000`, `seed = 2026_1118`,
+//! `z = 5.6`, plus `194` multi-seed randomization & row-sampling uniformity checks across
+//! `K = 12_000` / `6_000` seeds at `z = 6.0`):
 //! - Exact discrete two-sided `Binomial(25_000, F(k))` tail sum over all 44 CDF checks: `9.9925e-7`.
 //! - Exact discrete two-sided `Binomial(25_000 * n, p)` / `Poisson(25_000 * lambda)` tail sum over
 //!   all 11 mean checks: `2.3612e-7`.
 //! - Asymptotic two-sided normal tail at `z = 5.6` is `2.144e-8` per variance check; budgeting
-//!   `1.0e-7` per variance check (`1.1000e-6` total across 11 checks) for finite-sample margin gives
-//!   a Bonferroni family-wise upper bound of `2.3354e-6 <= 1.0e-5`.
+//!   `1.0e-7` per variance check (`1.1000e-6` total across 11 checks) for finite-sample margin.
+//! - Exact discrete two-sided Binomial tail sum across all `194` multi-seed uniformity & inclusion
+//!   checks (`complete-balanced` and `permuted-block` multiset permutations, truncated-tail arm
+//!   marginals, variable block-size selection, and unstratified/stratified per-row inclusion
+//!   frequencies): `9.7364e-7`.
+//! - Combined Bonferroni family-wise upper bound: `3.3090e-6 <= 1.0e-5`.
 //!
 //! Deterministic schedule, stratified-quota, support, and endpoint assertions (`p = 0`, `p = 1`,
 //! `trials = 0`, `lambda = 0`) have zero random false-positive probability.
@@ -707,5 +712,173 @@ fn binomial_and_poisson_endpoint_distributions_are_exact_constants() {
             assert_eq!(vals.len(), ENDPOINT_DRAWS);
             assert!(vals.iter().all(|&x| x == expected && x.is_sign_positive()), "{name} (mv={use_multiple_variables}) expected constant {expected}");
         }
+    }
+}
+
+#[test]
+fn multi_seed_multiset_permutation_uniformity() {
+    // 1. CompleteBalanced & PermutedBlock multiset permutations: N = 6, weights [1, 2, 3]
+    //    -> 6! / (1! * 2! * 3!) = 60 distinct permutations across K = 12_000 consecutive seeds.
+    let ids_6: Vec<String> = (1..=6).map(|i| format!("S{i}")).collect();
+    let groups_123 =
+        vec![GroupAllocationWeight::with_weight("A", 1), GroupAllocationWeight::with_weight("B", 2), GroupAllocationWeight::with_weight("C", 3)];
+    for (label, scheme) in
+        [("CompleteBalanced", AllocationScheme::CompleteBalanced), ("PermutedBlock6", AllocationScheme::PermutedBlock { block_sizes: vec![6] })]
+    {
+        let mut perm_counts: BTreeMap<[u8; 6], usize> = BTreeMap::new();
+        for seed in 1..=12_000_u64 {
+            let cfg = SubjectRandomizationConfig {
+                sheet_id: String::from("unif-6"),
+                title: String::from("Unif 6"),
+                subject_ids: ids_6.clone(),
+                groups: groups_123.clone(),
+                scheme: scheme.clone(),
+                seed,
+            };
+            let mv = match &randomize_subjects_to_groups(&cfg).unwrap().data_sheet.archetype {
+                TableArchetype::MultipleVariables(m) => m.clone(),
+                _ => panic!("expected MV"),
+            };
+            let mut key = [0_u8; 6];
+            for (r, slot) in key.iter_mut().enumerate() {
+                *slot = match mv.variables[4].cells[r].active_text() {
+                    Some("A") => 0,
+                    Some("B") => 1,
+                    Some("C") => 2,
+                    other => panic!("unexpected arm {other:?}"),
+                };
+            }
+            *perm_counts.entry(key).or_insert(0) += 1;
+        }
+        assert_eq!(perm_counts.len(), 60, "{label} must visit all 60 multiset permutations");
+        for (perm, count) in perm_counts {
+            assert!((116..=284).contains(&count), "{label} permutation {perm:?} count {count} outside z=6.0 bounds [116, 284]");
+        }
+    }
+}
+
+#[test]
+fn multi_seed_permuted_block_marginals_and_variable_blocks() {
+    let groups_123 =
+        vec![GroupAllocationWeight::with_weight("A", 1), GroupAllocationWeight::with_weight("B", 2), GroupAllocationWeight::with_weight("C", 3)];
+    // PermutedBlock marginal arm frequencies across ALL 8 positions (including truncated tail 6..8):
+    // block_size = 6, weights = [1, 2, 3], K = 12_000 seeds.
+    let ids_8: Vec<String> = (1..=8).map(|i| format!("T{i}")).collect();
+    let mut pos_arm_counts = [[0_usize; 3]; 8];
+    for seed in 1..=12_000_u64 {
+        let cfg = SubjectRandomizationConfig {
+            sheet_id: String::from("unif-trunc"),
+            title: String::from("Unif Truncated"),
+            subject_ids: ids_8.clone(),
+            groups: groups_123.clone(),
+            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![6] },
+            seed,
+        };
+        let mv = match &randomize_subjects_to_groups(&cfg).unwrap().data_sheet.archetype {
+            TableArchetype::MultipleVariables(m) => m.clone(),
+            _ => panic!("expected MV"),
+        };
+        for (pos, row_counts) in pos_arm_counts.iter_mut().enumerate() {
+            let arm_idx = match mv.variables[4].cells[pos].active_text() {
+                Some("A") => 0,
+                Some("B") => 1,
+                Some("C") => 2,
+                other => panic!("unexpected arm {other:?}"),
+            };
+            row_counts[arm_idx] += 1;
+        }
+    }
+    let marginal_bounds = [(1756, 2244), (3691, 4309), (5672, 6328)];
+    for (pos, counts) in pos_arm_counts.iter().enumerate() {
+        for (arm, &cnt) in counts.iter().enumerate() {
+            let (lo, hi) = marginal_bounds[arm];
+            assert!((lo..=hi).contains(&cnt), "pos {pos} arm {arm} count {cnt} outside z=6.0 bounds [{lo}, {hi}]");
+        }
+    }
+
+    // Variable block sizes [6, 12] on N = 12: P(first block size == 6) = 1/2 across 12_000 seeds.
+    let ids_12: Vec<String> = (1..=12).map(|i| format!("V{i}")).collect();
+    let mut block6_first_count = 0_usize;
+    for seed in 1..=12_000_u64 {
+        let cfg = SubjectRandomizationConfig {
+            sheet_id: String::from("unif-varblk"),
+            title: String::from("Unif VarBlk"),
+            subject_ids: ids_12.clone(),
+            groups: groups_123.clone(),
+            scheme: AllocationScheme::PermutedBlock { block_sizes: vec![6, 12] },
+            seed,
+        };
+        let mv = match &randomize_subjects_to_groups(&cfg).unwrap().data_sheet.archetype {
+            TableArchetype::MultipleVariables(m) => m.clone(),
+            _ => panic!("expected MV"),
+        };
+        if mv.variables[3].cells[0].active_number() == Some(6.0) {
+            block6_first_count += 1;
+        }
+    }
+    assert!((5672..=6328).contains(&block6_first_count), "variable first-block size=6 count {block6_first_count} outside z=6.0 bounds [5672, 6328]");
+}
+
+#[test]
+fn multi_seed_unstratified_and_stratified_inclusion_uniformity() {
+    // 1. Unstratified row sampling (k = 3 from 10 rows) across 6_000 seeds.
+    let mut mv_unstrat = MultipleVariablesTable::new(1, 10).unwrap();
+    mv_unstrat.variables[0].title = String::from("Measure");
+    for r in 0..10 {
+        mv_unstrat.variables[0].cells[r] = Cell::number((r + 1) as f64);
+    }
+    let unstrat_sheet = DataSheet::new("unif-unstrat", "Unstrat", TableArchetype::MultipleVariables(mv_unstrat)).unwrap();
+    let mut unstrat_incl = [0_usize; 10];
+    let mut distinct_unstrat = BTreeSet::new();
+    for seed in 1..=6_000_u64 {
+        let picked = sample_row_indices(
+            &unstrat_sheet,
+            &RowSampleConfig { seed, sample_size: 3, stratify_column: None, proportional_allocation: true, output_id: None, output_title: None },
+        )
+        .unwrap();
+        assert_eq!(picked.len(), 3);
+        distinct_unstrat.insert(picked.clone());
+        for r in picked {
+            unstrat_incl[r] += 1;
+        }
+    }
+    assert!(distinct_unstrat.len() >= 115, "expected broad distinct sample coverage, got {}", distinct_unstrat.len());
+    for (r, &cnt) in unstrat_incl.iter().enumerate() {
+        assert!((1588..=2012).contains(&cnt), "unstrat eligible row {r} inclusion count {cnt} outside z=6.0 bounds [1588, 2012]");
+    }
+
+    // 2. Stratified proportional sampling (S = 13 on [20, 12, 5, 2] + 4 ineligible rows) across 6_000 seeds.
+    let (strat_sheet, ineligible) = build_stratified_fixture().unwrap();
+    let mut strat_incl = [0_usize; 43];
+    let mut distinct_strat = BTreeSet::new();
+    for seed in 1..=6_000_u64 {
+        let picked = sample_row_indices(
+            &strat_sheet,
+            &RowSampleConfig { seed, sample_size: 13, stratify_column: Some(0), proportional_allocation: true, output_id: None, output_title: None },
+        )
+        .unwrap();
+        assert_eq!(picked.len(), 13);
+        distinct_strat.insert(picked.clone());
+        for r in picked {
+            strat_incl[r] += 1;
+        }
+    }
+    assert!(distinct_strat.len() >= 5_000, "expected distinct stratified seeds to explore distinct samples, got {}", distinct_strat.len());
+    let TableArchetype::MultipleVariables(smv) = &strat_sheet.archetype else {
+        panic!("expected MV");
+    };
+    for (r, &cnt) in strat_incl.iter().enumerate() {
+        if ineligible.contains(&r) {
+            assert_eq!(cnt, 0, "ineligible row {r} must never be sampled");
+            continue;
+        }
+        let (lo, hi) = match smv.variables[0].cells[r].active_text() {
+            Some("Alpha") => (1588, 2012),
+            Some("Beta") => (1781, 2219),
+            Some("Gamma") => (2173, 2627),
+            Some("Tiny") => (2768, 3232),
+            other => panic!("unexpected stratum {other:?}"),
+        };
+        assert!((lo..=hi).contains(&cnt), "stratified eligible row {r} inclusion count {cnt} outside z=6.0 bounds [{lo}, {hi}]");
     }
 }

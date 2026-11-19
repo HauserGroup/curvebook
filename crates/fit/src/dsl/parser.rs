@@ -293,8 +293,20 @@ impl<'a> Parser<'a> {
     }
 }
 
-pub(in crate::dsl) fn parse_expr(input: &str, line: usize) -> Result<Expr, FitError> {
+pub(in crate::dsl) fn parse_expr_collecting_locs(
+    input: &str,
+    line: usize,
+    col_offset: usize,
+    ident_locs: Option<&mut HashMap<String, (usize, usize)>>,
+) -> Result<Expr, FitError> {
     let tokens = tokenize(input, line)?;
+    if let Some(locs) = ident_locs {
+        for (idx, tok) in tokens.iter().enumerate() {
+            if tok.kind == TokenKind::Ident && !tokens.get(idx + 1).is_some_and(|next| next.kind == TokenKind::LParen) {
+                locs.entry(tok.text.clone()).or_insert((tok.line, col_offset + tok.col));
+            }
+        }
+    }
     let mut parser = Parser { tokens: &tokens, pos: 0, line, depth: 0, nodes: 0 };
     let expr = parser.parse_or()?;
     if let Some(rem) = parser.peek() {

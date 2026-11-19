@@ -49,7 +49,11 @@ fn audit_04_bland_altman_xy_rejects_invalid_and_equal_indices() {
     let direct = bland_altman(&a, &b, false, ConfidenceLevel::DEFAULT_95).unwrap();
     let ok_res = run_analysis(
         &sheet1,
-        &spec_for("r-ok", "xy1", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false })),
+        &spec_for(
+            "r-ok",
+            "xy1",
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() }),
+        ),
     )
     .unwrap();
     let bias = ok_res.scalars.iter().find(|s| s.key == "Bias").unwrap().value;
@@ -58,21 +62,33 @@ fn audit_04_bland_altman_xy_rejects_invalid_and_equal_indices() {
     // Out-of-range explicit indices must fail cleanly with MissingColumn instead of falling back to Y[0].
     let err_99_98 = run_analysis(
         &sheet1,
-        &spec_for("r-bad1", "xy1", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 99, column_b: 98, percent_difference: false })),
+        &spec_for(
+            "r-bad1",
+            "xy1",
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 99, column_b: 98, percent_difference: false, ..BlandAltmanSpec::default() }),
+        ),
     )
     .unwrap_err();
     assert!(matches!(err_99_98, StatsError::MissingColumn { .. }), "got {err_99_98:?}");
 
     let err_0_98 = run_analysis(
         &sheet1,
-        &spec_for("r-bad2", "xy1", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 98, percent_difference: false })),
+        &spec_for(
+            "r-bad2",
+            "xy1",
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 98, percent_difference: false, ..BlandAltmanSpec::default() }),
+        ),
     )
     .unwrap_err();
     assert!(matches!(err_0_98, StatsError::MissingColumn { index: 98 }), "got {err_0_98:?}");
 
     let err_same_1ds = run_analysis(
         &sheet1,
-        &spec_for("r-same1", "xy1", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 0, percent_difference: false })),
+        &spec_for(
+            "r-same1",
+            "xy1",
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 0, percent_difference: false, ..BlandAltmanSpec::default() }),
+        ),
     )
     .unwrap_err();
     assert!(matches!(err_same_1ds, StatsError::InvalidParameter { name: "column_b", .. }), "got {err_same_1ds:?}");
@@ -90,7 +106,11 @@ fn audit_04_bland_altman_xy_rejects_invalid_and_equal_indices() {
 
     let ok2 = run_analysis(
         &sheet2,
-        &spec_for("r-ok2", "xy2", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false })),
+        &spec_for(
+            "r-ok2",
+            "xy2",
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() }),
+        ),
     )
     .unwrap();
     let bias2 = ok2.scalars.iter().find(|s| s.key == "Bias").unwrap().value;
@@ -99,14 +119,22 @@ fn audit_04_bland_altman_xy_rejects_invalid_and_equal_indices() {
     assert!(matches!(
         run_analysis(
             &sheet2,
-            &spec_for("r-same2", "xy2", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 0, percent_difference: false })),
+            &spec_for(
+                "r-same2",
+                "xy2",
+                AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 0, percent_difference: false, ..BlandAltmanSpec::default() })
+            ),
         ),
         Err(StatsError::InvalidParameter { name: "column_b", .. })
     ));
     assert!(matches!(
         run_analysis(
             &sheet2,
-            &spec_for("r-oob2", "xy2", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 5, percent_difference: false })),
+            &spec_for(
+                "r-oob2",
+                "xy2",
+                AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 5, percent_difference: false, ..BlandAltmanSpec::default() })
+            ),
         ),
         Err(StatsError::MissingColumn { index: 5 })
     ));

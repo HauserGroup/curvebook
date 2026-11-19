@@ -48,6 +48,15 @@ pub(in crate::anova) fn nested_one_way_anova_selected(
     two_group_t_test: bool,
     df_method: MixedModelDfMethod,
 ) -> Result<NestedAnovaResult, StatsError> {
+    nested_one_way_anova_with_reml_status(table, selected_groups, two_group_t_test, df_method).map(|(res, _, _)| res)
+}
+
+pub(in crate::anova) fn nested_one_way_anova_with_reml_status(
+    table: &curvebook_doc::NestedTable,
+    selected_groups: &[usize],
+    two_group_t_test: bool,
+    df_method: MixedModelDfMethod,
+) -> Result<(NestedAnovaResult, bool, bool), StatsError> {
     let g_count = selected_groups.len();
     if two_group_t_test && g_count != 2 {
         return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
@@ -169,27 +178,31 @@ pub(in crate::anova) fn nested_one_way_anova_selected(
         None
     };
 
-    Ok(NestedAnovaResult {
-        group_labels,
-        f_among_groups: f_g,
-        df1_groups: df1_g,
-        df2_groups_satterthwaite: df2_satt,
-        df2_groups_kenward_roger: df2_kr,
-        p_among_groups: p_g,
-        t_nested,
-        f_among_subclusters: f_sub,
-        df1_subclusters: df1_sub,
-        df2_error: df2_err,
-        p_among_subclusters: p_sub,
-        ss_groups: ssg,
-        ss_subclusters: sss,
-        ss_error: sse,
-        ms_groups: msg,
-        ms_subclusters: mss,
-        ms_error: mse,
-        variance_subclusters: reml.sigma2_random,
-        variance_error: reml.sigma2_error,
-        icc_subclusters: reml.icc,
-        total_observations: total_obs,
-    })
+    Ok((
+        NestedAnovaResult {
+            group_labels,
+            f_among_groups: f_g,
+            df1_groups: df1_g,
+            df2_groups_satterthwaite: df2_satt,
+            df2_groups_kenward_roger: df2_kr,
+            p_among_groups: p_g,
+            t_nested,
+            f_among_subclusters: f_sub,
+            df1_subclusters: df1_sub,
+            df2_error: df2_err,
+            p_among_subclusters: p_sub,
+            ss_groups: ssg,
+            ss_subclusters: sss,
+            ss_error: sse,
+            ms_groups: msg,
+            ms_subclusters: mss,
+            ms_error: mse,
+            variance_subclusters: reml.sigma2_random,
+            variance_error: reml.sigma2_error,
+            icc_subclusters: reml.icc,
+            total_observations: total_obs,
+        },
+        reml.converged,
+        reml.at_boundary,
+    ))
 }

@@ -3,20 +3,21 @@
 use std::collections::{BTreeSet, HashMap, HashSet};
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode,
-    GraphAnnotation, GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
-    LayoutItem, LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, ParameterScope, PartsOfWholeTable, PlacementMode, ProjectDocument,
-    ResultCell, ResultSheet, ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable,
-    TableArchetype, TableKind, VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows,
-    validate_sheet_cells, validate_subcolumns, validate_title,
+    AnalysisKind, CellCoord, CloneDataSheetOptions, ColumnDesignHint, ColumnTable, ContingencyTable, DataSheet, DocError, ErrorCode, GraphAnnotation,
+    GraphSheet, GroupedTable, HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LayoutItem,
+    LayoutSheet, LinkSource, MultipleVariablesTable, NestedTable, PartsOfWholeTable, PlacementMode, ProjectDocument, ResultCell, ResultSheet,
+    ResultStatus, ResultTab, SheetCellRange, SheetFolderKind, SheetId, SheetSection, SubcolumnMode, SurvivalTable, TableArchetype, TableKind,
+    VariableRole, XColumnMode, XyTable, validate_cell_grid, validate_data_sets, validate_project_cells, validate_rows, validate_sheet_cells,
+    validate_subcolumns, validate_title,
 };
 use curvebook_transform::{ImportPipelineOptions, ImportSourcePayload, apply_import_link_pipeline};
 use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::cmd::helpers::{
-    ensure_sheet_not_frozen, link_data_sheet_to_info, parse_sheet_id, require_data_sheet_mut, require_result_sheet, select_result_tab,
-    sheet_id_exists, sync_info_linked_data_sheets,
+    apply_result_tab_metadata_to_sheet, clip_safe_title, ensure_sheet_not_frozen, link_data_sheet_to_info, parse_sheet_id, remap_analysis_hooks,
+    remap_graph_spec_references, remap_layout_spec_references, require_data_sheet_mut, require_result_sheet, sanitize_title_controls,
+    select_result_tab, sheet_id_exists, sync_info_linked_data_sheets,
 };
 use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
@@ -1417,6 +1418,12 @@ fn clone_downstream_results(
             break;
         }
     }
+    for created_id_str in &created {
+        let created_id = SheetId::new(created_id_str.as_str());
+        if let Some(rs) = doc.result_sheets.iter_mut().find(|r| r.id == created_id) {
+            remap_analysis_hooks(&mut rs.analysis, id_map);
+        }
+    }
     Ok(created)
 }
 
@@ -1461,37 +1468,6 @@ fn remap_result_sheet(
     Ok(res)
 }
 
-fn remap_analysis_hooks(spec: &mut AnalysisSpec, id_map: &HashMap<SheetId, SheetId>) {
-    if let AnalysisKind::NonlinearRegression(nl) = &mut spec.kind {
-        for rule in &mut nl.parameter_rules {
-            if let ParameterScope::HookedConstant(source) = &mut rule.scope {
-                remap_hook_source(source, id_map);
-            }
-        }
-    }
-}
-
-fn remap_hook_source(source: &mut HookSource, id_map: &HashMap<SheetId, SheetId>) {
-    match source {
-        HookSource::InfoConstant { info_sheet_id: Some(iid), .. } => {
-            if let Some(mapped) = id_map.get(iid) {
-                *iid = mapped.clone();
-            }
-        }
-        HookSource::ResultScalar { result_sheet_id, .. } => {
-            if let Some(mapped) = id_map.get(result_sheet_id) {
-                *result_sheet_id = mapped.clone();
-            }
-        }
-        HookSource::ColumnTitleValue { data_sheet_id, .. } => {
-            if let Some(mapped) = id_map.get(data_sheet_id) {
-                *data_sheet_id = mapped.clone();
-            }
-        }
-        HookSource::InfoConstant { info_sheet_id: None, .. } => {}
-    }
-}
-
 fn clone_downstream_graphs(
     doc: &mut ProjectDocument,
     id_map: &mut HashMap<SheetId, SheetId>,
@@ -1502,8 +1478,12 @@ fn clone_downstream_graphs(
     let mut created = Vec::new();
     let original_graphs = doc.graph_sheets.clone();
     for gs in &original_graphs {
-        let references_family =
-            id_map.contains_key(&gs.spec.primary_source_sheet_id) || gs.spec.series.iter().any(|s| id_map.contains_key(&s.source_sheet_id));
+        let references_family = id_map.contains_key(&gs.spec.primary_source_sheet_id)
+            || gs.spec.series.iter().any(|s| {
+                id_map.contains_key(&s.source_sheet_id) || s.regression_overlay.as_ref().is_some_and(|ov| id_map.contains_key(&ov.result_sheet_id))
+            })
+            || gs.spec.compact_letter_display.as_ref().is_some_and(|cld| id_map.contains_key(&cld.result_sheet_id))
+            || gs.spec.comparisons.iter().any(|cmp| id_map.contains_key(&cmp.result_sheet_id));
         if !references_family {
             continue;
         }
@@ -1514,26 +1494,7 @@ fn clone_downstream_graphs(
         let next_title = format!("{} ({suffix_label})", gs.title);
         validate_title(&next_title)?;
         cloned.title = next_title;
-        if let Some(mapped) = id_map.get(&gs.spec.primary_source_sheet_id) {
-            cloned.spec.primary_source_sheet_id = mapped.clone();
-        }
-        for s in &mut cloned.spec.series {
-            if let Some(mapped) = id_map.get(&s.source_sheet_id) {
-                s.source_sheet_id = mapped.clone();
-            }
-        }
-        for cmp in &mut cloned.spec.comparisons {
-            if let Some(mapped) = id_map.get(&cmp.result_sheet_id) {
-                cmp.result_sheet_id = mapped.clone();
-            }
-        }
-        for ann in &mut cloned.spec.annotations {
-            if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann
-                && let Some(mapped) = id_map.get(result_sheet_id)
-            {
-                *result_sheet_id = mapped.clone();
-            }
-        }
+        remap_graph_spec_references(&mut cloned.spec, id_map);
         id_map.insert(gs.id.clone(), new_graph_id.clone());
         created.push(new_graph_id.as_str().to_owned());
         doc.add_graph_sheet(cloned)?;
@@ -1551,11 +1512,13 @@ fn clone_downstream_layouts(
     let mut created = Vec::new();
     let original_layouts = doc.layout_sheets.clone();
     for ls in &original_layouts {
-        if !ls.spec.items.iter().any(|item| match item {
+        let references_items = ls.spec.items.iter().any(|item| match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => id_map.contains_key(graph_sheet_id),
             LayoutItem::LiveTable { source_sheet_id, .. } => id_map.contains_key(source_sheet_id),
             LayoutItem::TextCallout { .. } => false,
-        }) {
+        });
+        let references_hooks = ls.spec.inline_hooks().iter().any(|hook| hook.upstream_sheet_id().is_some_and(|id| id_map.contains_key(id)));
+        if !references_items && !references_hooks {
             continue;
         }
         let new_layout_id = next_unique_id_with_reserved(doc, &format!("{id_prefix}-layout"), reserved)?;
@@ -1565,21 +1528,7 @@ fn clone_downstream_layouts(
         let next_title = format!("{} ({suffix_label})", ls.title);
         validate_title(&next_title)?;
         cloned.title = next_title;
-        for item in &mut cloned.spec.items {
-            match item {
-                LayoutItem::LiveGraph { graph_sheet_id, .. } => {
-                    if let Some(mapped) = id_map.get(graph_sheet_id) {
-                        *graph_sheet_id = mapped.clone();
-                    }
-                }
-                LayoutItem::LiveTable { source_sheet_id, .. } => {
-                    if let Some(mapped) = id_map.get(source_sheet_id) {
-                        *source_sheet_id = mapped.clone();
-                    }
-                }
-                LayoutItem::TextCallout { .. } => {}
-            }
-        }
+        remap_layout_spec_references(&mut cloned.spec, id_map);
         created.push(new_layout_id.as_str().to_owned());
         doc.add_layout_sheet(cloned)?;
     }
@@ -1963,74 +1912,6 @@ fn resolve_extracted_table_kind(tab: &ResultTab, raw: Option<&str>) -> Result<Ta
     }
 }
 
-fn sanitize_title_controls(raw: &str) -> String {
-    let mut out = String::with_capacity(raw.len());
-    for ch in raw.chars() {
-        if matches!(ch, '\n' | '\r' | '\t') {
-            out.push(' ');
-        } else if !ch.is_control() {
-            out.push(ch);
-        }
-    }
-    out
-}
-
-fn clip_safe_title(raw: &str) -> String {
-    let cleaned = sanitize_title_controls(raw);
-    if validate_title(&cleaned).is_ok() {
-        return cleaned;
-    }
-    let mut clipped = String::new();
-    for ch in cleaned.chars() {
-        if clipped.len() + ch.len_utf8() > 180 {
-            break;
-        }
-        clipped.push(ch);
-    }
-    clipped
-}
-
-fn apply_row_labels(row_titles: &mut [String], tab: &ResultTab) {
-    for (r, slot) in row_titles.iter_mut().enumerate() {
-        if let Some(lbl) = tab.row_labels.get(r).filter(|s| !s.is_empty()) {
-            let safe = clip_safe_title(lbl);
-            if !safe.is_empty() {
-                *slot = safe;
-            }
-        }
-    }
-}
-
-fn apply_tab_metadata_to_sheet(sheet: &mut DataSheet, tab: &ResultTab) {
-    match &mut sheet.archetype {
-        TableArchetype::Column(curvebook_doc::ColumnTable { data_sets, row_titles, .. })
-        | TableArchetype::Grouped(curvebook_doc::GroupedTable { data_sets, row_titles, .. }) => {
-            for (idx, ds) in data_sets.iter_mut().enumerate() {
-                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    ds.title = clip_safe_title(hdr);
-                }
-            }
-            apply_row_labels(row_titles, tab);
-        }
-        TableArchetype::MultipleVariables(mv) => {
-            for (idx, var) in mv.variables.iter_mut().enumerate() {
-                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()).filter(|s| !s.is_empty()) {
-                    var.title = clip_safe_title(hdr);
-                }
-                let col_has_text = tab
-                    .rows
-                    .iter()
-                    .any(|row| matches!(row.get(idx), Some(ResultCell::Text(_) | ResultCell::Boolean(_) | ResultCell::ConfidenceInterval { .. })));
-                if col_has_text {
-                    var.lock_role(VariableRole::Label);
-                }
-            }
-            apply_row_labels(&mut mv.row_titles, tab);
-        }
-        _ => {}
-    }
-}
-
 fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, EngineError> {
     let parsed: ExtractResultTabParams = parse_params(&extract_result_tab_schema(), params)?;
     let res_id = parse_sheet_id(&parsed.result_sheet_id)?;
@@ -2080,7 +1961,7 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
             sheet_id: res_id.clone(),
             kind: link_kind,
             tab_id: Some(tab.id.clone()),
-            range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1_000_000, col_count.saturating_sub(1), 0)),
+            range: SheetCellRange::new(CellCoord::new(0, 0, 0), CellCoord::new(1_000_000, 1_000_000, 0)),
         },
         filter: ImportFilterSpec { parse_asterisk_exclusions: false, ..ImportFilterSpec::default() },
         placement: ImportPlacementSpec {
@@ -2099,7 +1980,7 @@ fn run_sheet_extract_result_tab(ctx: &mut Ctx<'_>, params: Value) -> Result<Comm
     let report = apply_import_link_pipeline(&mut sheet, &link_spec, ImportSourcePayload::InternalResult(&res), &opts, None)?;
     sheet.prune_stale_exclusion_notes();
     crate::dag::backfill_confidence_interval_cells(&mut sheet, &res, &link_spec, report.target_range);
-    apply_tab_metadata_to_sheet(&mut sheet, &tab);
+    apply_result_tab_metadata_to_sheet(&mut sheet, &tab);
 
     let mut reserved = HashSet::new();
     reserved.insert(target_id.as_str().to_owned());

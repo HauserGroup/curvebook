@@ -6,7 +6,7 @@ use curvebook_doc::{
     ResultTab, SheetId,
 };
 
-use crate::csv::{CsvOptions, write_delimited_records};
+use crate::csv::{CsvOptions, neutralize_csv_formula_text, write_delimited_records};
 use crate::error::FormatError;
 
 /// Structured JSON representation of a [`ResultSheet`] for external pipeline consumption.
@@ -23,6 +23,18 @@ pub struct ResultSheetExportJson<'a> {
     pub checklist: &'a [ChecklistItem],
 }
 
+/// Validate that `sheet` has not recorded [`ResultStatus::Failed`] before CSV export.
+///
+/// Failed analyses produce empty tabs and must not be silently written as header-only CSV files.
+pub fn ensure_result_sheet_csv_exportable(sheet: &ResultSheet) -> Result<(), FormatError> {
+    if let ResultStatus::Failed { code, message } = &sheet.status {
+        return Err(FormatError::InvalidPipeline {
+            reason: format!("cannot export failed result sheet `{}` ({}): {message}", sheet.id, code.as_str()),
+        });
+    }
+    Ok(())
+}
+
 /// Export a single [`ResultTab`] as a wide RFC-4180 CSV/TSV table.
 #[must_use]
 pub fn export_result_tab_csv(tab: &ResultTab, opts: &CsvOptions) -> String {
@@ -32,13 +44,14 @@ pub fn export_result_tab_csv(tab: &ResultTab, opts: &CsvOptions) -> String {
     if include_row_labels {
         header.push(String::from("Row"));
     }
-    header.extend(tab.column_headers.iter().cloned());
+    header.extend(tab.column_headers.iter().map(|h| neutralize_csv_formula_text(h)));
     rows.push(header);
 
     for (r_idx, row) in tab.rows.iter().enumerate() {
         let mut out_row = Vec::new();
         if include_row_labels {
-            out_row.push(tab.row_labels.get(r_idx).cloned().unwrap_or_default());
+            let label = tab.row_labels.get(r_idx).map(String::as_str).unwrap_or("");
+            out_row.push(neutralize_csv_formula_text(label));
         }
         for cell in row {
             out_row.push(format_result_cell_display(cell, opts));
@@ -49,6 +62,12 @@ pub fn export_result_tab_csv(tab: &ResultTab, opts: &CsvOptions) -> String {
     write_delimited_records(&rows, opts)
 }
 
+/// Export a single [`ResultTab`] belonging to `sheet` as CSV/TSV, refusing failed result sheets.
+pub fn try_export_result_tab_csv(sheet: &ResultSheet, tab: &ResultTab, opts: &CsvOptions) -> Result<String, FormatError> {
+    ensure_result_sheet_csv_exportable(sheet)?;
+    Ok(export_result_tab_csv(tab, opts))
+}
+
 /// Export all tabs, hooked scalars, pairwise comparisons, fitted curve coordinates, and
 /// assumption checklist items from a [`ResultSheet`] into a unified tidy RFC-4180 CSV dataframe.
 #[must_use]
@@ -56,8 +75,8 @@ pub fn export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> S
     let mut rows: Vec<Vec<String>> = Vec::new();
     rows.push(tidy_header());
 
-    let res_id = sheet.id.as_str().to_owned();
-    let title = sheet.title().to_owned();
+    let res_id = neutralize_csv_formula_text(sheet.id.as_str());
+    let title = neutralize_csv_formula_text(sheet.title());
 
     append_tab_tidy_rows(&mut rows, &res_id, &title, &sheet.tabs, opts);
     append_scalar_tidy_rows(&mut rows, &res_id, &title, &sheet.scalars, opts);
@@ -66,6 +85,12 @@ pub fn export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> S
     append_checklist_tidy_rows(&mut rows, &res_id, &title, &sheet.checklist);
 
     write_delimited_records(&rows, opts)
+}
+
+/// Export a [`ResultSheet`] as a tidy RFC-4180 CSV dataframe, refusing failed result sheets.
+pub fn try_export_result_sheet_tidy_csv(sheet: &ResultSheet, opts: &CsvOptions) -> Result<String, FormatError> {
+    ensure_result_sheet_csv_exportable(sheet)?;
+    Ok(export_result_sheet_tidy_csv(sheet, opts))
 }
 
 /// Export a [`ResultSheet`] to structured JSON (`serde_json`), validating that no non-finite
@@ -114,16 +139,18 @@ fn tidy_header() -> Vec<String> {
 fn append_tab_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str, tabs: &[ResultTab], opts: &CsvOptions) {
     for tab in tabs {
         let kind_str = format!("{:?}", tab.kind);
+        let safe_tab_id = neutralize_csv_formula_text(&tab.id);
+        let safe_tab_title = neutralize_csv_formula_text(&tab.title);
         for (r_idx, row) in tab.rows.iter().enumerate() {
-            let row_label = tab.row_labels.get(r_idx).cloned().unwrap_or_else(|| format!("row_{r_idx}"));
+            let row_label = tab.row_labels.get(r_idx).map_or_else(|| format!("row_{r_idx}"), |s| neutralize_csv_formula_text(s));
             for (c_idx, cell) in row.iter().enumerate() {
-                let col_header = tab.column_headers.get(c_idx).cloned().unwrap_or_else(|| format!("col_{c_idx}"));
+                let col_header = tab.column_headers.get(c_idx).map_or_else(|| format!("col_{c_idx}"), |s| neutralize_csv_formula_text(s));
                 let mut rec = vec![
                     res_id.to_owned(),
                     title.to_owned(),
                     String::from("tab_cell"),
-                    tab.id.clone(),
-                    tab.title.clone(),
+                    safe_tab_id.clone(),
+                    safe_tab_title.clone(),
                     kind_str.clone(),
                     row_label.clone(),
                     col_header,
@@ -148,8 +175,8 @@ fn append_cell_columns(rec: &mut Vec<String>, cell: &ResultCell, opts: &CsvOptio
             rec.extend([
                 display,
                 format_float_opt(Some(*value), opts),
-                prefix.clone().unwrap_or_default(),
-                units.clone().unwrap_or_default(),
+                prefix.as_deref().map_or_else(String::new, neutralize_csv_formula_text),
+                units.as_deref().map_or_else(String::new, neutralize_csv_formula_text),
                 String::new(),
                 String::new(),
                 String::new(),
@@ -175,13 +202,13 @@ fn append_cell_columns(rec: &mut Vec<String>, cell: &ResultCell, opts: &CsvOptio
                 String::new(),
                 String::new(),
                 format_float_opt(Some(*raw), opts),
-                stars.clone(),
+                neutralize_csv_formula_text(stars),
                 String::new(),
                 String::new(),
             ]);
         }
-        ResultCell::Text(s) => {
-            rec.extend([s.clone(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()]);
+        ResultCell::Text(_) => {
+            rec.extend([display, String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()]);
         }
         ResultCell::Boolean(b) => {
             rec.extend([b.to_string(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new(), String::new()]);
@@ -200,12 +227,12 @@ fn append_scalar_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &st
             String::new(),
             String::new(),
             String::new(),
-            entry.key.clone(),
+            neutralize_csv_formula_text(&entry.key),
             ds_label,
             val_str.clone(),
             val_str,
             String::new(),
-            entry.units.clone().unwrap_or_default(),
+            entry.units.as_deref().map_or_else(String::new, neutralize_csv_formula_text),
             String::new(),
             String::new(),
             String::new(),
@@ -219,7 +246,7 @@ fn append_scalar_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &st
 
 fn append_comparison_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str, comparisons: &[PairwiseComparisonRecord], opts: &CsvOptions) {
     for cmp in comparisons {
-        let pair_label = format!("{} vs {}", cmp.label_a, cmp.label_b);
+        let pair_label = neutralize_csv_formula_text(&format!("{} vs {}", cmp.label_a, cmp.label_b));
         let metric_kind = if cmp.is_fdr_q { "FDR q" } else { "FWER p" };
         let diff_str = format_float_opt(cmp.estimate_diff, opts);
         let p_str = format_float_opt(Some(cmp.raw_p_or_q), opts);
@@ -250,6 +277,7 @@ fn append_comparison_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title:
 fn append_curve_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str, curves: &[FittedCurveOverlay], opts: &CsvOptions) {
     for curve in curves {
         let diag = format!("converged={},ambiguous={}", curve.converged, curve.ambiguous);
+        let safe_eq_id = neutralize_csv_formula_text(&curve.equation_id);
         for pt in &curve.points {
             let x_str = format_float_opt(Some(pt.x), opts);
             let y_str = format_float_opt(Some(pt.y), opts);
@@ -257,7 +285,7 @@ fn append_curve_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: &str
                 res_id.to_owned(),
                 title.to_owned(),
                 String::from("curve_point"),
-                curve.equation_id.clone(),
+                safe_eq_id.clone(),
                 format!("data_set_{}", curve.data_set_index),
                 String::from("CurveCoordinates"),
                 x_str,
@@ -287,9 +315,9 @@ fn append_checklist_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: 
             String::new(),
             String::new(),
             String::from("Diagnostics"),
-            item.assumption.clone(),
+            neutralize_csv_formula_text(&item.assumption),
             String::from("explanation"),
-            item.explanation.clone(),
+            neutralize_csv_formula_text(&item.explanation),
             String::new(),
             String::new(),
             String::new(),
@@ -299,7 +327,7 @@ fn append_checklist_tidy_rows(rows: &mut Vec<Vec<String>>, res_id: &str, title: 
             String::new(),
             String::new(),
             format!("{:?}", item.status),
-            item.diagnostic_metric.clone().unwrap_or_default(),
+            item.diagnostic_metric.as_deref().map_or_else(String::new, neutralize_csv_formula_text),
         ]);
     }
 }
@@ -309,6 +337,11 @@ fn format_result_cell_display(cell: &ResultCell, opts: &CsvOptions) -> String {
         ResultCell::Empty => String::new(),
         ResultCell::Number { value, prefix, units } => {
             let num = format_float_opt(Some(*value), opts);
+            let has_prefix = prefix.as_deref().is_some_and(|p| !p.is_empty());
+            let has_units = units.as_deref().is_some_and(|u| !u.is_empty());
+            if !has_prefix && !has_units {
+                return num;
+            }
             let mut out = String::new();
             if let Some(p) = prefix {
                 out.push_str(p);
@@ -320,19 +353,16 @@ fn format_result_cell_display(cell: &ResultCell, opts: &CsvOptions) -> String {
                 out.push(' ');
                 out.push_str(u);
             }
-            out
+            neutralize_csv_formula_text(&out)
         }
         ResultCell::ConfidenceInterval { lower, upper } => {
             format!("[{}, {}]", format_ci_bound(*lower, opts), format_ci_bound(*upper, opts))
         }
         ResultCell::PValue { formatted, stars, .. } => {
-            if stars.is_empty() {
-                formatted.clone()
-            } else {
-                format!("{formatted} ({stars})")
-            }
+            let raw = if stars.is_empty() { formatted.clone() } else { format!("{formatted} ({stars})") };
+            neutralize_csv_formula_text(&raw)
         }
-        ResultCell::Text(s) => s.clone(),
+        ResultCell::Text(s) => neutralize_csv_formula_text(s),
         ResultCell::Boolean(b) => b.to_string(),
     }
 }

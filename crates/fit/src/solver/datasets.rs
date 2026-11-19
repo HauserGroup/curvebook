@@ -25,7 +25,7 @@ use crate::solver::layout::{
 };
 use crate::solver::lm::solve_with_warm_start;
 use crate::solver::results::{FittedDatasetResult, InferenceAvailability, InterpolatedUnknown, NonlinearFitResult, SolverConfig};
-use crate::types::{DataPoint, DatasetSeries, DerivedScalar, HookContext};
+use crate::types::{DatasetSeries, DerivedScalar, HookContext};
 
 pub(in crate::solver) fn fit_single_or_shared(
     model: &dyn ParametricModel,
@@ -117,8 +117,7 @@ pub(in crate::solver) fn fit_single_or_shared(
     } else {
         None
     };
-    let clean_points: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-    let res_diag = compute_residual_diagnostics(&obs, &clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&obs, &assembled.ds_results, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -494,7 +493,7 @@ pub(in crate::solver) fn fit_independent_datasets(
         compute_information_criteria(weighted_ss, n_obs, k_free).ok()
     };
 
-    let res_diag = compute_residual_diagnostics(&all_obs, &all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&all_obs, &ds_results, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),

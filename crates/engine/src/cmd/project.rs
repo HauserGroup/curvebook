@@ -20,10 +20,25 @@ use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ExternalPathPolicy, Session, dag};
 
 /// Summary returned by project link/recalculation helpers.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(super) struct RecalcSummary {
     pub recalculated_sheets: usize,
     pub refreshed_links: usize,
+    pub failed_result_sheets: Vec<dag::FailedResultSheet>,
+}
+
+impl RecalcSummary {
+    pub fn failed_json(&self) -> Vec<Value> {
+        self.failed_result_sheets.iter().map(dag::FailedResultSheet::to_json).collect()
+    }
+
+    pub fn failure_note(&self) -> Option<String> {
+        if self.failed_result_sheets.is_empty() {
+            return None;
+        }
+        let ids: Vec<&str> = self.failed_result_sheets.iter().map(|f| f.sheet_id.as_str()).collect();
+        Some(format!(" with {} failed result sheet(s): {}", self.failed_result_sheets.len(), ids.join(", ")))
+    }
 }
 
 fn always_enabled(_session: &Session) -> bool {
@@ -39,7 +54,8 @@ pub(super) fn recalculate_with_links_under_policy(
     let external_policy = include_external_links.then_some(policy);
     let (report, refreshed_links) = dag::recalculate_project_with_links_report(doc, external_policy)?;
     prune_out_of_bounds_point_overrides(doc);
-    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
+    let failed_result_sheets = dag::collect_failed_result_sheets_for_ids(doc, &report.failed_result_sheets);
+    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links, failed_result_sheets })
 }
 
 /// Incrementally recalculate the dirty transitive closure of `dirty_seeds` (plus any pending
@@ -52,7 +68,8 @@ pub(super) fn recalculate_dirty_with_links(
     let external_policy = include_external_links.then_some(&ExternalPathPolicy::Unconstrained);
     let (report, refreshed_links) = dag::recalculate_dirty_with_links_report(doc, dirty_seeds, external_policy)?;
     prune_out_of_bounds_point_overrides(doc);
-    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links })
+    let failed_result_sheets = dag::collect_failed_result_sheets_for_ids(doc, &report.failed_result_sheets);
+    Ok(RecalcSummary { recalculated_sheets: report.total_updated(), refreshed_links, failed_result_sheets })
 }
 
 /// Format current system wall-clock time as `"unix:<seconds>"`.
@@ -488,12 +505,18 @@ fn run_project_recalculate(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOu
     let include_external = parsed.include_external_links.unwrap_or(true);
     let recalc_policy = ctx.session.path_policy.clone();
     let summary = recalculate_with_links_under_policy(&mut ctx.session.doc, include_external, &recalc_policy)?;
+    let message = match summary.failure_note() {
+        Some(note) => format!("recalculated project{note}"),
+        None => String::from("recalculated project"),
+    };
     Ok(CommandOutcome::mutated(
         "project.recalculate",
-        "recalculated project",
+        message,
         json!({
             "recalculated_sheets": summary.recalculated_sheets,
             "refreshed_links": summary.refreshed_links,
+            "failed_count": summary.failed_result_sheets.len(),
+            "failed_result_sheets": summary.failed_json(),
         }),
     ))
 }

@@ -379,9 +379,37 @@ fn compute_covariance_from_scale(j_mat: &DenseMatrix, sigma2: f64, crit: f64, th
         let amb = deps.iter().any(|&d| !d.is_finite() || d > 0.9999);
         (inv, deps, amb)
     } else {
-        let sv = svd(j_mat)?;
-        let inv = sv.ata_pseudoinverse(None)?;
-        (inv, vec![1.0; p], true)
+        let sv_scaled = svd(&j_scaled)?;
+        let r_sv = sv_scaled.rank();
+        let inv_scaled = sv_scaled.ata_pseudoinverse(None)?;
+        let mut inv = DenseMatrix::zeros(p, p)?;
+        let mut deps = Vec::with_capacity(p);
+        for i in 0..p {
+            let di = col_norms[i];
+            let range_norm_sq: f64 = (0..r_sv)
+                .map(|m| {
+                    let v = sv_scaled.v.get(i, m).unwrap_or(0.0);
+                    v * v
+                })
+                .sum();
+            let null_proj_sq = (1.0 - range_norm_sq).max(0.0);
+            let diag_prod = inv_scaled.get(i, i).unwrap_or(f64::NAN);
+            let dep = if di == 0.0 || !di.is_finite() || null_proj_sq > 1e-8 || !diag_prod.is_finite() {
+                1.0
+            } else if diag_prod <= 1.0 {
+                0.0
+            } else {
+                (1.0 - 1.0 / diag_prod).clamp(0.0, 1.0)
+            };
+            deps.push(dep);
+            for j in 0..p {
+                let dj = col_norms[j];
+                if let Some(slot) = inv.get_mut(i, j) {
+                    *slot = if di > 0.0 && dj > 0.0 { (inv_scaled.get(i, j).unwrap_or(0.0) / di) / dj } else { 0.0 };
+                }
+            }
+        }
+        (inv, deps, true)
     };
 
     let mut se = Vec::with_capacity(p);
@@ -648,6 +676,23 @@ where
 /// system. Each side is bracketed by geometric step expansion from the Wald half-width and then
 /// refined with Brent (1973) root-finding on `S~(theta_k) - SS_crit`. Nuisance parameters are
 /// warm-started by the linear covariance regression `theta_j + (C_jk / C_kk) * delta`.
+/// Outcome of a single profile-likelihood subproblem solve at a fixed parameter value.
+#[derive(Debug, Clone)]
+pub(crate) struct ProfileStep {
+    pub(crate) objective: f64,
+    pub(crate) theta: Vec<f64>,
+    pub(crate) converged: bool,
+}
+
+/// Trace Venzon–Moolgavkar–style asymmetrical profile-likelihood confidence intervals across all
+/// free parameters using the F-criterion `SS_crit = SS_min * (1 + t^2 / df)`.
+///
+/// Matches the `SS_crit` threshold and Bates & Watts (1988) signed square-root `tau` framing of
+/// profile-likelihood endpoints targeted by Venzon & Moolgavkar (1988).
+///
+/// Deviation: endpoints are not found with Venzon & Moolgavkar's modified Newton–Raphson
+/// system. Each side is bracketed by geometric step expansion from the Wald half-width and then
+/// refined with Brent (1973) root-finding on `S~(theta_k) - SS_crit`.
 pub fn compute_profile_likelihood_cis<F>(
     theta_hat: &[f64],
     ss_min: f64,
@@ -655,16 +700,18 @@ pub fn compute_profile_likelihood_cis<F>(
     cov_diag: &CovarianceDiagnostics,
     bounds: &[(Option<f64>, Option<f64>)],
     confidence: ConfidenceLevel,
-    profile_solve: F,
+    mut profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
 {
-    compute_profile_likelihood_cis_scaled(theta_hat, ss_min, None, df, cov_diag, bounds, confidence, profile_solve)
+    compute_profile_likelihood_cis_checked(theta_hat, ss_min, None, df, cov_diag, bounds, confidence, |k, val, seed| {
+        profile_solve(k, val, seed).map(|(objective, theta)| ProfileStep { objective, theta, converged: true })
+    })
 }
 
 #[allow(clippy::too_many_arguments)]
-pub(crate) fn compute_profile_likelihood_cis_scaled<F>(
+pub(crate) fn compute_profile_likelihood_cis_checked<F>(
     theta_hat: &[f64],
     ss_min: f64,
     ss_scale: Option<f64>,
@@ -675,7 +722,7 @@ pub(crate) fn compute_profile_likelihood_cis_scaled<F>(
     profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
-    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
 {
     let p = theta_hat.len();
     if p == 0 || df == 0 || !ss_min.is_finite() {
@@ -711,10 +758,26 @@ pub fn compute_deviance_profile_likelihood_cis<F>(
     cov_diag: &CovarianceDiagnostics,
     bounds: &[(Option<f64>, Option<f64>)],
     confidence: ConfidenceLevel,
-    profile_solve: F,
+    mut profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
     F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+{
+    compute_deviance_profile_likelihood_cis_checked(theta_hat, dev_min, cov_diag, bounds, confidence, |k, val, seed| {
+        profile_solve(k, val, seed).map(|(objective, theta)| ProfileStep { objective, theta, converged: true })
+    })
+}
+
+pub(crate) fn compute_deviance_profile_likelihood_cis_checked<F>(
+    theta_hat: &[f64],
+    dev_min: f64,
+    cov_diag: &CovarianceDiagnostics,
+    bounds: &[(Option<f64>, Option<f64>)],
+    confidence: ConfidenceLevel,
+    profile_solve: F,
+) -> Vec<(CiBound, CiBound)>
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
 {
     let p = theta_hat.len();
     if p == 0 || !dev_min.is_finite() || dev_min < 0.0 {
@@ -738,7 +801,7 @@ fn trace_all_profile_bounds<F>(
     mut profile_solve: F,
 ) -> Vec<(CiBound, CiBound)>
 where
-    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
 {
     let p = theta_hat.len();
     let mut out = Vec::with_capacity(p);
@@ -747,11 +810,24 @@ where
         let se_k = cov_diag.standard_errors.get(k).copied().unwrap_or(f64::NAN);
         let base_step = if se_k.is_finite() && se_k > 0.0 { step_crit * se_k } else { 0.1 * theta_hat[k].abs().max(1e-12) };
         let (lb, ub) = bounds.get(k).copied().unwrap_or((None, None));
-        let lo = trace_profile_endpoint(k, -1.0, theta_hat, ss_min, ss_crit, base_step, lb, &cov_diag.covariance_matrix, &mut profile_solve);
-        let hi = trace_profile_endpoint(k, 1.0, theta_hat, ss_min, ss_crit, base_step, ub, &cov_diag.covariance_matrix, &mut profile_solve);
+        let lo_ctx = ProfileRayCtx { k, dir: -1.0, theta_hat, ss_min, ss_crit, base_step, box_limit: lb, cov: &cov_diag.covariance_matrix };
+        let hi_ctx = ProfileRayCtx { k, dir: 1.0, theta_hat, ss_min, ss_crit, base_step, box_limit: ub, cov: &cov_diag.covariance_matrix };
+        let lo = trace_profile_endpoint(&lo_ctx, &mut profile_solve);
+        let hi = trace_profile_endpoint(&hi_ctx, &mut profile_solve);
         out.push((lo, hi));
     }
     out
+}
+
+struct ProfileRayCtx<'a> {
+    k: usize,
+    dir: f64,
+    theta_hat: &'a [f64],
+    ss_min: f64,
+    ss_crit: f64,
+    base_step: f64,
+    box_limit: Option<f64>,
+    cov: &'a [Vec<f64>],
 }
 
 struct ProfileBracket {
@@ -763,13 +839,48 @@ struct ProfileBracket {
     w_pos: Vec<f64>,
 }
 
-fn refine_profile_bracket<F>(k: usize, ss_crit: f64, base_step: f64, br: &ProfileBracket, profile_solve: &mut F) -> CiBound
+fn verify_profile_root<F>(ctx: &ProfileRayCtx<'_>, br: &ProfileBracket, root: f64, profile_solve: &mut F) -> CiBound
 where
-    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
+{
+    let Some(verified) = profile_solve(ctx.k, root, &br.w_neg) else {
+        return CiBound::Open;
+    };
+    if !verified.converged || !verified.objective.is_finite() {
+        return CiBound::Open;
+    }
+    let target_rise = (ctx.ss_crit - ctx.ss_min).max(0.0);
+    let scale = target_rise.max(1e-12 * ctx.ss_crit.max(1.0));
+    if (verified.objective - ctx.ss_crit).abs() > 1e-3 * scale {
+        return CiBound::Open;
+    }
+    let span = (br.x_pos - br.x_neg).abs();
+    let (a, b) = if br.x_neg <= br.x_pos { (br.x_neg, br.x_pos) } else { (br.x_pos, br.x_neg) };
+    let h = 1e-5 * span;
+    if span > 0.0 && target_rise > 0.0 && root - h >= a && root + h <= b {
+        let Some(left) = profile_solve(ctx.k, root - h, &verified.theta) else {
+            return CiBound::Open;
+        };
+        let Some(right) = profile_solve(ctx.k, root + h, &verified.theta) else {
+            return CiBound::Open;
+        };
+        if !left.converged || !right.converged || !left.objective.is_finite() || !right.objective.is_finite() {
+            return CiBound::Open;
+        }
+        if (right.objective - left.objective).abs() > 0.25 * target_rise {
+            return CiBound::Open;
+        }
+    }
+    CiBound::Finite(root)
+}
+
+fn refine_profile_bracket<F>(ctx: &ProfileRayCtx<'_>, br: &ProfileBracket, profile_solve: &mut F) -> CiBound
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
 {
     let (a, b) = if br.x_neg <= br.x_pos { (br.x_neg, br.x_pos) } else { (br.x_pos, br.x_neg) };
     let span = br.x_pos - br.x_neg;
-    let tol = (1e-7 * base_step).max(f64::MIN_POSITIVE);
+    let tol = (1e-7 * ctx.base_step).max(f64::MIN_POSITIVE);
     let opts = RootOptions { rel_tol: 1e-7, abs_tol: tol, max_iters: 48 };
     let mut interp_w = Vec::with_capacity(br.w_pos.len());
     let root = brent_root(
@@ -783,87 +894,100 @@ where
             let t = if span.abs() > 0.0 { ((val - br.x_neg) / span).clamp(0.0, 1.0) } else { 0.5 };
             interp_w.clear();
             for (j, (&wn, &wp)) in br.w_neg.iter().zip(br.w_pos.iter()).enumerate() {
-                interp_w.push(if j == k { val } else { wn + t * (wp - wn) });
+                interp_w.push(if j == ctx.k { val } else { wn + t * (wp - wn) });
             }
-            profile_solve(k, val, &interp_w).map_or(f64::NAN, |(ss_v, _)| ss_v - ss_crit)
+            match profile_solve(ctx.k, val, &interp_w) {
+                Some(s) if s.converged && s.objective.is_finite() => s.objective - ctx.ss_crit,
+                _ => f64::NAN,
+            }
         },
         a,
         b,
         opts,
     );
     match root {
-        Ok(r) if r.is_finite() => CiBound::Finite(r),
+        Ok(r) if r.is_finite() => verify_profile_root(ctx, br, r, profile_solve),
         _ => CiBound::Open,
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn trace_profile_endpoint<F>(
-    k: usize,
-    dir: f64,
-    theta_hat: &[f64],
-    ss_min: f64,
-    ss_crit: f64,
-    base_step: f64,
-    box_limit: Option<f64>,
-    cov: &[Vec<f64>],
-    profile_solve: &mut F,
-) -> CiBound
-where
-    F: FnMut(usize, f64, &[f64]) -> Option<(f64, Vec<f64>)>,
-{
-    let target_rise = (ss_crit - ss_min).max(0.0);
-    let mut prev_val = theta_hat[k];
-    let mut prev_diff = ss_min - ss_crit;
-    let mut prev_warm = theta_hat.to_vec();
-    let mut warm_theta = theta_hat.to_vec();
-    let cov_kk = cov.get(k).and_then(|r| r.get(k)).copied().unwrap_or(0.0);
-
-    let min_step = if theta_hat[k] != 0.0 { 1e-12 * theta_hat[k].abs() } else { f64::MIN_POSITIVE };
-    let mut step = base_step.max(min_step);
-    let mut bracket: Option<ProfileBracket> = None;
-    let mut last_ss = ss_min;
-
-    for iter in 0..24 {
-        let mut cand = theta_hat[k] + dir * step;
-        let hit_box = match (dir < 0.0, box_limit) {
-            (true, Some(b)) if cand <= b => {
-                cand = b;
-                true
-            }
-            (false, Some(b)) if cand >= b => {
-                cand = b;
-                true
-            }
-            _ => false,
-        };
-        if (cand - prev_val).abs() <= 1e-15 * prev_val.abs().max(base_step).max(f64::MIN_POSITIVE) && hit_box {
-            return CiBound::Open;
-        }
-        // Linear (covariance-regression) warm start for the nuisance parameters.
-        let delta = cand - theta_hat[k];
-        if cov_kk > 0.0 {
-            for (j, slot) in warm_theta.iter_mut().enumerate() {
-                if j != k {
-                    let cov_jk = cov.get(j).and_then(|r| r.get(k)).copied().unwrap_or(0.0);
-                    *slot = theta_hat[j] + (cov_jk / cov_kk) * delta;
+fn tangent_warm_start(ctx: &ProfileRayCtx<'_>, cand: f64, base: &[f64]) -> Vec<f64> {
+    let mut warm = base.to_vec();
+    let cov_kk = ctx.cov.get(ctx.k).and_then(|r| r.get(ctx.k)).copied().unwrap_or(0.0);
+    let delta = cand - ctx.theta_hat[ctx.k];
+    if cov_kk > 0.0 && cov_kk.is_finite() {
+        for (j, slot) in warm.iter_mut().enumerate() {
+            if j != ctx.k {
+                let cov_jk = ctx.cov.get(j).and_then(|r| r.get(ctx.k)).copied().unwrap_or(0.0);
+                let extrapolated = ctx.theta_hat[j] + (cov_jk / cov_kk) * delta;
+                if extrapolated.is_finite() {
+                    *slot = extrapolated;
                 }
             }
         }
-        let Some((ss_cand, best_nuisance)) = profile_solve(k, cand, &warm_theta) else {
+    }
+    warm
+}
+
+fn clamp_to_box(cand: f64, dir: f64, box_limit: Option<f64>) -> (f64, bool) {
+    match (dir < 0.0, box_limit) {
+        (true, Some(b)) if cand <= b => (b, true),
+        (false, Some(b)) if cand >= b => (b, true),
+        _ => (cand, false),
+    }
+}
+
+fn trace_profile_endpoint<F>(ctx: &ProfileRayCtx<'_>, profile_solve: &mut F) -> CiBound
+where
+    F: FnMut(usize, f64, &[f64]) -> Option<ProfileStep>,
+{
+    let k = ctx.k;
+    let target_rise = (ctx.ss_crit - ctx.ss_min).max(0.0);
+    let mono_tol = 1e-4 * target_rise.max(1e-12 * ctx.ss_min.max(1.0));
+    let mut prev_val = ctx.theta_hat[k];
+    let mut prev_diff = ctx.ss_min - ctx.ss_crit;
+    let mut prev_warm = ctx.theta_hat.to_vec();
+    let min_step = if ctx.theta_hat[k] != 0.0 { 1e-12 * ctx.theta_hat[k].abs() } else { f64::MIN_POSITIVE };
+    let mut step = ctx.base_step.max(min_step);
+    let mut bracket: Option<ProfileBracket> = None;
+    let mut last_ss = ctx.ss_min;
+    let mut flat_streak = 0_usize;
+
+    for iter in 0..24 {
+        let (cand, hit_box) = clamp_to_box(ctx.theta_hat[k] + ctx.dir * step, ctx.dir, ctx.box_limit);
+        if (cand - prev_val).abs() <= 1e-15 * prev_val.abs().max(ctx.base_step).max(f64::MIN_POSITIVE) && hit_box {
+            return CiBound::Open;
+        }
+        let solved = if iter == 0 {
+            let tangent = tangent_warm_start(ctx, cand, &prev_warm);
+            match profile_solve(k, cand, &tangent) {
+                Some(s) if s.converged && s.objective.is_finite() => Some(s),
+                _ => profile_solve(k, cand, &prev_warm).filter(|s| s.converged && s.objective.is_finite()),
+            }
+        } else {
+            profile_solve(k, cand, &prev_warm).filter(|s| s.converged && s.objective.is_finite())
+        };
+        let Some(sub) = solved else {
             return CiBound::Open;
         };
-        warm_theta = best_nuisance;
-        let diff = ss_cand - ss_crit;
+        if sub.objective + mono_tol < last_ss {
+            return CiBound::Open;
+        }
+        let diff = sub.objective - ctx.ss_crit;
         if target_rise > 0.0 && diff.abs() <= 1e-11 * target_rise {
             return CiBound::Finite(cand);
         }
         if diff >= 0.0 {
-            bracket = Some(ProfileBracket { x_neg: prev_val, f_neg: prev_diff, w_neg: prev_warm, x_pos: cand, f_pos: diff, w_pos: warm_theta });
+            bracket = Some(ProfileBracket { x_neg: prev_val, f_neg: prev_diff, w_neg: prev_warm, x_pos: cand, f_pos: diff, w_pos: sub.theta });
             break;
         }
-        // Detect flat asymptote plateau below ss_crit after expanding far beyond 16x SE.
-        if iter >= 8 && (ss_cand - last_ss).abs() <= 1e-8 * ss_crit && ss_cand < ss_crit * 0.99 {
+        let below_crit = sub.objective < ctx.ss_crit - 0.01 * target_rise;
+        if below_crit && step >= 10.0 * ctx.base_step && (sub.objective - last_ss).abs() <= 1e-7 * ctx.ss_crit.max(1e-30) {
+            flat_streak += 1;
+        } else {
+            flat_streak = 0;
+        }
+        if below_crit && (flat_streak >= 2 || (iter >= 8 && (sub.objective - last_ss).abs() <= 1e-8 * ctx.ss_crit)) {
             return CiBound::Open;
         }
         if hit_box {
@@ -871,15 +995,15 @@ where
         }
         prev_val = cand;
         prev_diff = diff;
-        prev_warm = warm_theta.clone();
-        last_ss = ss_cand;
+        prev_warm = sub.theta;
+        last_ss = sub.objective;
         step *= if iter < 4 { 1.8 } else { 2.5 };
     }
 
     let Some(br) = bracket else {
         return CiBound::Open;
     };
-    refine_profile_bracket(k, ss_crit, base_step, &br, profile_solve)
+    refine_profile_bracket(ctx, &br, profile_solve)
 }
 
 /// Compare two nested regression models using the Extra-Sum-of-Squares *F*-test (`model_1` simpler
@@ -1093,6 +1217,103 @@ pub fn runs_test(residuals: &[f64]) -> RunsTestResult {
         p_two_sided,
         deviates_significantly: p_too_few < 0.05,
     }
+}
+
+/// Combine per-curve Wald–Wolfowitz runs tests across independent curves by summing the
+/// within-curve runs counts ($R_{\text{tot}} = \sum_j R_j$) conditional on each curve's positive
+/// and negative sign counts $(n_{1,j}, n_{2,j})$ (Wald & Wolfowitz 1940; Swed & Eisenhart 1943).
+///
+/// When total active sign count is at most 400 and every non-degenerate curve has at most 200
+/// signs, the null PMF is obtained by exact discrete convolution of the per-curve runs
+/// distributions; otherwise it uses the continuity-corrected normal approximation from the sum
+/// of exact stratum expectations and variances.
+pub(crate) fn combine_runs_tests(per_dataset: &[RunsTestResult]) -> Option<RunsTestResult> {
+    if per_dataset.is_empty() {
+        return None;
+    }
+    if per_dataset.len() == 1 {
+        return Some(per_dataset[0].clone());
+    }
+
+    let total_runs: usize = per_dataset.iter().map(|t| t.runs).sum();
+    let total_above: usize = per_dataset.iter().map(|t| t.n_above).sum();
+    let total_below: usize = per_dataset.iter().map(|t| t.n_below).sum();
+    let total_signs = total_above + total_below;
+    if total_signs == 0 {
+        return Some(RunsTestResult {
+            runs: 0,
+            n_above: 0,
+            n_below: 0,
+            expected_runs: 0.0,
+            p_too_few_runs: 1.0,
+            p_two_sided: 1.0,
+            deviates_significantly: false,
+        });
+    }
+
+    let expected_total: f64 = per_dataset.iter().map(|t| t.expected_runs).sum();
+    let can_convolve = total_signs <= 400 && per_dataset.iter().all(|t| t.n_above + t.n_below <= 200);
+    let (p_too_few, p_two_sided) = if can_convolve {
+        let pmf = stratified_runs_pmf(per_dataset);
+        let p_obs = pmf.get(total_runs).copied().unwrap_or(0.0);
+        let p_few: f64 = pmf.iter().take(total_runs.saturating_add(1)).sum();
+        let p_two: f64 = pmf.iter().copied().filter(|&p| p <= p_obs + 1e-12).sum();
+        (p_few.clamp(0.0, 1.0), p_two.clamp(0.0, 1.0))
+    } else {
+        let total_var: f64 = per_dataset
+            .iter()
+            .filter_map(|t| {
+                let n1 = t.n_above as f64;
+                let n2 = t.n_below as f64;
+                let n = n1 + n2;
+                (t.n_above > 0 && t.n_below > 0 && n > 1.0).then_some((2.0 * n1 * n2 * (2.0 * n1 * n2 - n)) / (n * n * (n - 1.0)))
+            })
+            .sum();
+        if total_var <= 0.0 {
+            (1.0, 1.0)
+        } else {
+            let sd = total_var.sqrt();
+            let z_few = ((total_runs as f64) + 0.5 - expected_total) / sd;
+            let z_two = (((total_runs as f64) - expected_total).abs() - 0.5).max(0.0) / sd;
+            ((1.0 - norm_sf(z_few)).clamp(0.0, 1.0), (2.0 * norm_sf(z_two)).clamp(0.0, 1.0))
+        }
+    };
+
+    Some(RunsTestResult {
+        runs: total_runs,
+        n_above: total_above,
+        n_below: total_below,
+        expected_runs: expected_total,
+        p_too_few_runs: p_too_few,
+        p_two_sided,
+        deviates_significantly: p_too_few < 0.05,
+    })
+}
+
+fn stratified_runs_pmf(per_dataset: &[RunsTestResult]) -> Vec<f64> {
+    let mut dist = vec![1.0_f64];
+    for t in per_dataset {
+        if t.n_above == 0 && t.n_below == 0 {
+            continue;
+        }
+        let stratum = if t.n_above == 0 || t.n_below == 0 {
+            vec![0.0, 1.0]
+        } else {
+            let max_r = 2 * t.n_above.min(t.n_below) + usize::from(t.n_above != t.n_below);
+            (0..=max_r).map(|r| exact_runs_prob(r, t.n_above, t.n_below)).collect()
+        };
+        let mut next = vec![0.0_f64; dist.len() + stratum.len() - 1];
+        for (i, &pa) in dist.iter().enumerate() {
+            if pa == 0.0 {
+                continue;
+            }
+            for (j, &pb) in stratum.iter().enumerate() {
+                next[i + j] += pa * pb;
+            }
+        }
+        dist = next;
+    }
+    dist
 }
 
 fn exact_runs_prob(r: usize, n1: usize, n2: usize) -> f64 {
@@ -1469,7 +1690,10 @@ pub fn anderson_darling_test(values: &[f64]) -> Option<NormalityTestResult> {
     let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
 
     let p_value = if a2_star >= 0.6 {
-        (1.2937 - 5.709 * a2_star + 0.0186 * a2_star * a2_star).exp()
+        // Clamp at the quadratic vertex (5.709 / (2 * 0.0186) ~= 153.468) so the D'Agostino &
+        // Stephens (1986) tail approximation stays strictly non-increasing for large A*^2.
+        let a_clamped = a2_star.min(5.709 / (2.0 * 0.0186));
+        (1.2937 - 5.709 * a_clamped + 0.0186 * a_clamped * a_clamped).exp()
     } else if a2_star > 0.34 {
         (0.9177 - 4.279 * a2_star - 1.38 * a2_star * a2_star).exp()
     } else if a2_star > 0.20 {
@@ -1598,8 +1822,8 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     if residuals.len() != n {
         return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("length mismatch") });
     }
-    if !q_percent.is_finite() || !(0.0..=100.0).contains(&q_percent) {
-        return Err(FitError::InvalidParameter { name: "q_percent", reason: format!("FDR Q% must lie in [0, 100], got {q_percent}") });
+    if !q_percent.is_finite() || q_percent <= 0.0 || q_percent > 50.0 {
+        return Err(FitError::InvalidParameter { name: "q_percent", reason: format!("FDR Q% must lie in (0, 50], got {q_percent}") });
     }
     if residuals.iter().any(|r| !r.is_finite()) {
         return Err(FitError::InvalidParameter { name: "residuals", reason: String::from("ROUT residuals must all be finite") });
@@ -1608,7 +1832,7 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
     let abs_res: Vec<f64> = residuals.iter().map(|r| r.abs()).collect();
     let y_scale = points.iter().map(|p| p.y.abs()).fold(0.0_f64, f64::max).max(1e-12);
     let rsdr = compute_rsdr(&abs_res, k_free).max(1e-10 * y_scale);
-    let q_fdr = (q_percent / 100.0).clamp(1e-6, 0.5);
+    let q_fdr = q_percent / 100.0;
 
     let mut p_vals = Vec::with_capacity(n);
     for &ar in &abs_res {

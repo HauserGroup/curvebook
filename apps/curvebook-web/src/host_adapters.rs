@@ -5,7 +5,7 @@
 //! and JSON bridge message handling remain 100% local and free of network calls.
 #![forbid(unsafe_code)]
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::error::Error;
 use std::fmt;
 
@@ -14,8 +14,8 @@ use curvebook_format::{CURRENT_PREFERENCES_VERSION, CsvOptions, PreferencesFile,
 use curvebook_ui_egui::layout::WidgetAction;
 use curvebook_ui_egui::serde_json::{self, Map, Value, json};
 use curvebook_ui_egui::{
-    ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiEventOutcome, UiInputEvent, ViewportMetrics,
-    dispatch_ui_command, execute_widget_action,
+    ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiApp, UiEventOutcome, UiInputEvent,
+    ViewportMetrics, dispatch_ui_command, execute_widget_action,
 };
 
 use crate::chrome_bridge::{
@@ -221,6 +221,29 @@ pub struct AutosaveSaveOutcome {
     pub evicted_keys: Vec<String>,
 }
 
+/// Summary returned after persisting user preferences under quota management.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreferencesSaveOutcome {
+    pub storage_key: String,
+    pub encoded: String,
+    pub evicted_keys: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+struct EvictedBackup {
+    key: String,
+    value: String,
+    recency: Option<(u64, u64)>,
+}
+
+#[derive(Debug, Clone)]
+struct StorageRollbackOp {
+    target_key: String,
+    prev_target_value: Option<String>,
+    prev_target_recency: Option<(u64, u64)>,
+    evicted_backups: Vec<EvictedBackup>,
+}
+
 /// High-level storage manager handling key prefixing, schema checks, and 5 MiB LRU eviction.
 #[derive(Debug, Clone)]
 pub struct WebStorageManager<B: WebStorageBackend = MemoryWebStorage> {
@@ -318,6 +341,22 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
     /// Returns [`WebAdapterError::ForwardVersionPreferences`] if either `prefs.version` or any
     /// already-stored payload has a schema version newer than [`CURRENT_PREFERENCES_VERSION`].
     pub fn save_preferences(&mut self, prefs: &PreferencesFile) -> Result<String, WebAdapterError> {
+        let outcome = self.save_preferences_with_evictions(prefs)?;
+        Ok(outcome.encoded)
+    }
+
+    /// Persist [`PreferencesFile`] under `curvebook.v1.preferences` and report any evicted
+    /// autosave keys so the browser host can retry and mirror evictions consistently.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::ForwardVersionPreferences`] if schema versions are newer than
+    /// supported, or [`WebAdapterError::QuotaExceeded`] if storage cannot accommodate preferences.
+    pub fn save_preferences_with_evictions(&mut self, prefs: &PreferencesFile) -> Result<PreferencesSaveOutcome, WebAdapterError> {
+        let (outcome, _rollback) = self.save_preferences_tracked(prefs)?;
+        Ok(outcome)
+    }
+
+    fn save_preferences_tracked(&mut self, prefs: &PreferencesFile) -> Result<(PreferencesSaveOutcome, StorageRollbackOp), WebAdapterError> {
         if prefs.version > CURRENT_PREFERENCES_VERSION {
             return Err(WebAdapterError::ForwardVersionPreferences { found: prefs.version, supported: CURRENT_PREFERENCES_VERSION });
         }
@@ -333,8 +372,8 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
                 budget_bytes: self.quota_budget_bytes,
             });
         }
-        let _evicted = self.write_with_safe_eviction(PREFERENCES_STORAGE_KEY, &encoded)?;
-        Ok(encoded)
+        let (evicted_keys, rollback) = self.write_with_safe_eviction_tracked(PREFERENCES_STORAGE_KEY, &encoded)?;
+        Ok((PreferencesSaveOutcome { storage_key: String::from(PREFERENCES_STORAGE_KEY), encoded, evicted_keys }, rollback))
     }
 
     /// Validate raw JSON preferences text and persist it without clobbering newer schemas.
@@ -356,6 +395,16 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
     /// Returns [`WebAdapterError::Validation`] for invalid `doc_id` or [`WebAdapterError::QuotaExceeded`]
     /// if the snapshot cannot fit even after evicting all other autosave entries.
     pub fn save_autosave_snapshot(&mut self, doc_id: &str, snapshot: &str, timestamp_ms: u64) -> Result<AutosaveSaveOutcome, WebAdapterError> {
+        let (outcome, _rollback) = self.save_autosave_snapshot_tracked(doc_id, snapshot, timestamp_ms)?;
+        Ok(outcome)
+    }
+
+    fn save_autosave_snapshot_tracked(
+        &mut self,
+        doc_id: &str,
+        snapshot: &str,
+        timestamp_ms: u64,
+    ) -> Result<(AutosaveSaveOutcome, StorageRollbackOp), WebAdapterError> {
         let key = Self::autosave_key(doc_id)?;
         let entry_bytes = key.len().saturating_add(snapshot.len());
         let non_autosave_bytes = self.non_autosave_used_bytes();
@@ -366,16 +415,17 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
             });
         }
 
-        let evicted_keys = self.write_with_safe_eviction(&key, snapshot)?;
+        let (evicted_keys, rollback) = self.write_with_safe_eviction_tracked(&key, snapshot)?;
         self.touch_autosave_recency(&key, timestamp_ms);
 
-        Ok(AutosaveSaveOutcome {
+        let outcome = AutosaveSaveOutcome {
             storage_key: key,
             doc_id: doc_id.trim().to_owned(),
             entry_bytes,
             total_used_bytes: self.backend.used_bytes(),
             evicted_keys,
-        })
+        };
+        Ok((outcome, rollback))
     }
 
     /// Load an autosave snapshot for `doc_id`, refreshing its LRU recency timestamp if present.
@@ -428,7 +478,21 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
         self.autosave_recency.insert(key.to_owned(), (now_ms, self.access_seq));
     }
 
-    fn evict_autosaves_to_fit(&mut self, protected_key: &str, additional_delta: isize) -> Result<Vec<String>, WebAdapterError> {
+    fn evict_oldest_autosave_into(&mut self, protected_key: &str, evicted_backups: &mut Vec<EvictedBackup>) -> Option<String> {
+        let victim_key = self.oldest_autosave_key(protected_key)?;
+        let backup_val = self.backend.get_item(&victim_key).unwrap_or_default();
+        let backup_recency = self.autosave_recency.remove(&victim_key);
+        let _ = self.backend.remove_item(&victim_key);
+        evicted_backups.push(EvictedBackup { key: victim_key.clone(), value: backup_val, recency: backup_recency });
+        Some(victim_key)
+    }
+
+    fn evict_autosaves_to_fit(
+        &mut self,
+        protected_key: &str,
+        additional_delta: isize,
+        evicted_backups: &mut Vec<EvictedBackup>,
+    ) -> Result<Vec<String>, WebAdapterError> {
         let mut evicted = Vec::new();
         loop {
             let current = isize::try_from(self.backend.used_bytes()).unwrap_or(isize::MAX);
@@ -438,53 +502,78 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
                 return Ok(evicted);
             }
 
-            let Some(victim_key) = self.oldest_autosave_key(protected_key) else {
+            let Some(victim_key) = self.evict_oldest_autosave_into(protected_key, evicted_backups) else {
                 let req = usize::try_from(projected.max(0)).unwrap_or(usize::MAX);
                 return Err(WebAdapterError::QuotaExceeded { required_bytes: req, budget_bytes: self.quota_budget_bytes });
             };
-            let _ = self.backend.remove_item(&victim_key);
-            self.autosave_recency.remove(&victim_key);
             evicted.push(victim_key);
         }
     }
 
-    /// Write `value` under `target_key` BEFORE evicting older autosave snapshots (`RV-80`),
-    /// rolling back any victims removed during quota retry if writing still fails.
-    fn write_with_safe_eviction(&mut self, target_key: &str, value: &str) -> Result<Vec<String>, WebAdapterError> {
-        struct EvictedBackup {
-            key: String,
-            value: String,
-            recency: Option<(u64, u64)>,
+    fn rollback_storage_op(&mut self, op: StorageRollbackOp) {
+        if let Some(prev_val) = op.prev_target_value {
+            let _ = self.backend.set_item(&op.target_key, &prev_val);
+        } else {
+            let _ = self.backend.remove_item(&op.target_key);
         }
+        if op.target_key.starts_with(AUTOSAVE_KEY_PREFIX) {
+            if let Some(rec) = op.prev_target_recency {
+                self.autosave_recency.insert(op.target_key.clone(), rec);
+            } else {
+                self.autosave_recency.remove(&op.target_key);
+            }
+        }
+        for backup in op.evicted_backups.into_iter().rev() {
+            let _ = self.backend.set_item(&backup.key, &backup.value);
+            if let Some(rec) = backup.recency {
+                self.autosave_recency.insert(backup.key, rec);
+            }
+        }
+    }
 
-        let prev_value = self.backend.get_item(target_key);
-        let mut evicted_backups: Vec<EvictedBackup> = Vec::new();
-        let mut evicted_keys: Vec<String> = Vec::new();
-        let restore_all = |mgr: &mut Self, backups: Vec<EvictedBackup>, prev: Option<String>| {
-            for backup in backups.into_iter().rev() {
-                let _ = mgr.backend.set_item(&backup.key, &backup.value);
+    fn reconcile_confirmed_storage(&mut self, op: StorageRollbackOp, removed_keys: &[String], succeeded: bool) {
+        if !succeeded {
+            self.rollback_storage_op(op);
+            return;
+        }
+        let removed_set: BTreeSet<&str> = removed_keys.iter().map(String::as_str).collect();
+        for backup in op.evicted_backups.into_iter().rev() {
+            if !removed_set.contains(backup.key.as_str()) {
+                let _ = self.backend.set_item(&backup.key, &backup.value);
                 if let Some(rec) = backup.recency {
-                    mgr.autosave_recency.insert(backup.key, rec);
+                    self.autosave_recency.insert(backup.key, rec);
                 }
             }
-            if let Some(prev_val) = prev {
-                let _ = mgr.backend.set_item(target_key, &prev_val);
-            } else {
-                let _ = mgr.backend.remove_item(target_key);
+        }
+        for key in removed_keys {
+            if key != &op.target_key && (key == PREFERENCES_STORAGE_KEY || key.starts_with(AUTOSAVE_KEY_PREFIX)) {
+                self.autosave_recency.remove(key);
+                let _ = self.backend.remove_item(key);
             }
-        };
+        }
+    }
+
+    /// Write `value` under `target_key` BEFORE evicting older autosave snapshots (`RV-80`),
+    /// rolling back any victims removed during quota retry if writing still fails, and returning
+    /// a [`StorageRollbackOp`] so browser quota failures can also be rolled back cleanly.
+    fn write_with_safe_eviction_tracked(&mut self, target_key: &str, value: &str) -> Result<(Vec<String>, StorageRollbackOp), WebAdapterError> {
+        let prev_value = self.backend.get_item(target_key);
+        let prev_recency = self.autosave_recency.get(target_key).copied();
+        let mut evicted_backups: Vec<EvictedBackup> = Vec::new();
+        let mut evicted_keys: Vec<String> = Vec::new();
 
         if let Err(first_err) = self.backend.set_item(target_key, value) {
             let mut write_err = first_err;
             loop {
-                let Some(victim_key) = self.oldest_autosave_key(target_key) else {
-                    restore_all(self, evicted_backups, prev_value);
+                let Some(victim_key) = self.evict_oldest_autosave_into(target_key, &mut evicted_backups) else {
+                    self.rollback_storage_op(StorageRollbackOp {
+                        target_key: target_key.to_owned(),
+                        prev_target_value: prev_value,
+                        prev_target_recency: prev_recency,
+                        evicted_backups,
+                    });
                     return Err(write_err);
                 };
-                let backup_val = self.backend.get_item(&victim_key).unwrap_or_default();
-                let backup_recency = self.autosave_recency.remove(&victim_key);
-                let _ = self.backend.remove_item(&victim_key);
-                evicted_backups.push(EvictedBackup { key: victim_key.clone(), value: backup_val, recency: backup_recency });
                 evicted_keys.push(victim_key);
                 match self.backend.set_item(target_key, value) {
                     Ok(()) => break,
@@ -493,15 +582,28 @@ impl<B: WebStorageBackend> WebStorageManager<B> {
             }
         }
 
-        let trimmed = match self.evict_autosaves_to_fit(target_key, 0) {
+        let trimmed = match self.evict_autosaves_to_fit(target_key, 0, &mut evicted_backups) {
             Ok(keys) => keys,
             Err(err) => {
-                restore_all(self, evicted_backups, prev_value);
+                self.rollback_storage_op(StorageRollbackOp {
+                    target_key: target_key.to_owned(),
+                    prev_target_value: prev_value,
+                    prev_target_recency: prev_recency,
+                    evicted_backups,
+                });
                 return Err(err);
             }
         };
         evicted_keys.extend(trimmed);
-        Ok(evicted_keys)
+        Ok((
+            evicted_keys,
+            StorageRollbackOp {
+                target_key: target_key.to_owned(),
+                prev_target_value: prev_value,
+                prev_target_recency: prev_recency,
+                evicted_backups,
+            },
+        ))
     }
 
     fn oldest_autosave_key(&self, protected_key: &str) -> Option<String> {
@@ -730,6 +832,21 @@ impl WebLockCoordinator {
         Ok(LockReleaseOutcome { doc_id: doc.to_owned(), released_tab_id: tab.to_owned(), was_holder: true, promoted_tab_id: None })
     }
 
+    /// Record an authoritative browser lock grant (such as `navigator.locks` or fallback storage
+    /// acquisition), replacing any cached external holder observation even within `lease_ttl_ms`.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] if `doc_id` or `tab_id` is empty.
+    pub fn grant_browser_lock(&mut self, doc_id: &str, tab_id: &str, now_ms: u64) -> Result<LockAcquisition, WebAdapterError> {
+        let doc = require_non_empty(doc_id, "doc_id")?;
+        let tab = require_non_empty(tab_id, "tab_id")?;
+        self.records.insert(
+            doc.to_owned(),
+            DocumentLockRecord { holder_tab_id: tab.to_owned(), acquired_at_ms: now_ms, last_heartbeat_ms: now_ms, contenders: VecDeque::new() },
+        );
+        Ok(LockAcquisition { doc_id: doc.to_owned(), tab_id: tab.to_owned(), mode: TabAccessMode::ExclusiveReadWrite, stale_takeover: false })
+    }
+
     /// Record an externally observed `navigator.locks` lock holder for `doc_id`.
     ///
     /// # Errors
@@ -812,11 +929,21 @@ impl DirectorySyncPlan {
     }
 }
 
+#[derive(Debug, Clone, Default)]
+struct PendingDirectorySync {
+    root_name: String,
+    target_tree: BTreeMap<String, Vec<u8>>,
+    planned_writes: BTreeSet<String>,
+    planned_removals: BTreeSet<String>,
+}
+
 /// Pure-Rust File System Access & HTML5 drag-and-drop bridge for archives and `.curvebook.d/`.
 #[derive(Debug, Clone, Default)]
 pub struct FileSystemAccessBridge {
     last_synced_root: Option<String>,
     last_synced_tree: BTreeMap<String, Vec<u8>>,
+    last_attempted_root: Option<String>,
+    pending_sync: Option<PendingDirectorySync>,
 }
 
 impl FileSystemAccessBridge {
@@ -838,6 +965,12 @@ impl FileSystemAccessBridge {
         &self.last_synced_tree
     }
 
+    /// Root folder name for an in-flight directory sync plan awaiting browser persistence confirmation.
+    #[must_use]
+    pub fn pending_sync_root(&self) -> Option<&str> {
+        self.pending_sync.as_ref().map(|p| p.root_name.as_str())
+    }
+
     /// Import a single picked or dropped file (`curvebook`, `cbtemplate`, `pzfx`, `prism`, `csv`, `tsv`).
     ///
     /// # Errors
@@ -846,6 +979,8 @@ impl FileSystemAccessBridge {
         let summary = host.open_bytes_for_name(file_name, bytes).map_err(WebAdapterError::Workspace)?;
         self.last_synced_root = None;
         self.last_synced_tree.clear();
+        self.last_attempted_root = None;
+        self.pending_sync = None;
         Ok(summary)
     }
 
@@ -869,14 +1004,16 @@ impl FileSystemAccessBridge {
             host.load_virtual_folder_entries(root, normalized.iter().map(|(k, v)| (k.clone(), v.clone()))).map_err(WebAdapterError::Workspace)?;
         self.last_synced_root = Some(root.to_owned());
         self.last_synced_tree = normalized;
+        self.last_attempted_root = None;
+        self.pending_sync = None;
         Ok(summary)
     }
 
     /// Import HTML5 drag-and-drop entries (either a single file or an unpacked `.curvebook.d/` folder).
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Validation`] if `files` is empty, or [`WebAdapterError::Workspace`]
-    /// if the dropped payload cannot be decoded.
+    /// Returns [`WebAdapterError::Validation`] if `files` is empty or contains duplicate normalized
+    /// paths, or [`WebAdapterError::Workspace`] if the dropped payload cannot be decoded.
     pub fn import_dropped_files(&mut self, host: &mut WebWorkspaceHost, files: Vec<(String, Vec<u8>)>) -> Result<WorkspaceSummary, WebAdapterError> {
         if files.is_empty() {
             return Err(WebAdapterError::Validation(String::from("no dropped files supplied")));
@@ -890,6 +1027,9 @@ impl FileSystemAccessBridge {
         let mut tree = BTreeMap::new();
         for (raw_path, bytes) in files {
             let rel = normalize_relative_entry_path(&raw_path, detected_root.as_deref())?;
+            if tree.contains_key(&rel) {
+                return Err(WebAdapterError::Validation(format!("duplicate normalized directory entry path `{rel}`")));
+            }
             tree.insert(rel, bytes);
         }
         if !tree.contains_key("document.json") && !tree.contains_key("manifest.json") {
@@ -909,7 +1049,8 @@ impl FileSystemAccessBridge {
         host.export_curvebook_bytes().map_err(WebAdapterError::Workspace)
     }
 
-    /// Materialize the current workspace as a deterministic `.curvebook.d/` relative file tree.
+    /// Materialize the current workspace as a deterministic `.curvebook.d/` relative file tree
+    /// without altering the session dirty flag or save baseline.
     ///
     /// # Errors
     /// Returns [`WebAdapterError::Workspace`] if exporting unpacked entries fails.
@@ -944,27 +1085,91 @@ impl FileSystemAccessBridge {
         DirectorySyncPlan { writes, removals, unchanged_count }
     }
 
-    /// Export the active workspace to `.curvebook.d/` entries, diff against the last synced tree,
-    /// and advance the tracked snapshot so only changed files are emitted.
+    /// Prepare an incremental `.curvebook.d/` write/removal plan against [`Self::last_synced_tree`]
+    /// without advancing the baseline or clearing the dirty flag until browser persistence confirms.
     ///
     /// # Errors
     /// Returns [`WebAdapterError::Workspace`] if virtual snapshot serialization fails.
     pub fn sync_directory_from_host(&mut self, host: &mut WebWorkspaceHost, root_name: Option<&str>) -> Result<DirectorySyncPlan, WebAdapterError> {
         let resolved_root = if let Some(explicit) = root_name.map(str::trim).filter(|s| !s.is_empty()) {
-            host.virtual_workspace_mut().root_name = explicit.to_owned();
             explicit.to_owned()
         } else if let Some(prev) = &self.last_synced_root {
-            host.virtual_workspace_mut().root_name = prev.clone();
             prev.clone()
+        } else if let Some(attempted) = &self.last_attempted_root {
+            attempted.clone()
         } else {
             host.virtual_workspace().root_name.clone()
         };
 
-        let next = self.export_directory_tree(host)?;
+        let entries = host.snapshot_virtual_entries_with_root(Some(&resolved_root)).map_err(WebAdapterError::Workspace)?;
+        let next: BTreeMap<String, Vec<u8>> = entries.into_iter().collect();
         let plan = Self::plan_directory_sync(&self.last_synced_tree, &next);
-        self.last_synced_root = Some(resolved_root);
-        self.last_synced_tree = next;
+        self.last_attempted_root = Some(resolved_root.clone());
+        self.pending_sync = Some(PendingDirectorySync {
+            root_name: resolved_root,
+            planned_writes: plan.writes.iter().map(|(p, _)| p.clone()).collect(),
+            planned_removals: plan.removals.iter().cloned().collect(),
+            target_tree: next,
+        });
         Ok(plan)
+    }
+
+    /// Commit confirmed browser directory persistence outcomes into `last_synced_tree` and `host`.
+    ///
+    /// Partial or failed syncs advance `last_synced_tree` only for confirmed writes/removals and
+    /// leave the workspace dirty so retries re-emit any remaining changes.
+    ///
+    /// # Errors
+    /// Returns [`WebAdapterError::Validation`] if no matching pending directory sync exists.
+    pub fn confirm_directory_sync(
+        &mut self,
+        host: &mut WebWorkspaceHost,
+        root_name: &str,
+        written_paths: &[String],
+        removed_paths: &[String],
+        succeeded: bool,
+    ) -> Result<bool, WebAdapterError> {
+        let trimmed_root = require_non_empty(root_name, "root_name")?;
+        let Some(pending) = self.pending_sync.take() else {
+            return Err(WebAdapterError::Validation(String::from("no pending directory sync to confirm")));
+        };
+        if trimmed_root != pending.root_name {
+            let expected = pending.root_name.clone();
+            self.pending_sync = Some(pending);
+            return Err(WebAdapterError::Validation(format!("confirm_directory_sync root `{trimmed_root}` does not match pending `{expected}`")));
+        }
+
+        let mut applied_any = false;
+        let mut written_set = BTreeSet::new();
+        for path in written_paths {
+            if let Some(bytes) = pending.target_tree.get(path) {
+                self.last_synced_tree.insert(path.clone(), bytes.clone());
+                written_set.insert(path.clone());
+                applied_any = true;
+            }
+        }
+        let mut removed_set = BTreeSet::new();
+        for path in removed_paths {
+            if pending.planned_removals.contains(path) {
+                self.last_synced_tree.remove(path);
+                removed_set.insert(path.clone());
+                applied_any = true;
+            }
+        }
+
+        let all_writes_done = pending.planned_writes.iter().all(|p| written_set.contains(p));
+        let all_removals_done = pending.planned_removals.iter().all(|p| removed_set.contains(p));
+        let fully_persisted = succeeded && all_writes_done && all_removals_done;
+
+        if applied_any || fully_persisted {
+            self.last_synced_root = Some(pending.root_name.clone());
+        }
+        if fully_persisted {
+            self.last_synced_tree = pending.target_tree.clone();
+            let doc_json = pending.target_tree.get("document.json").map(Vec::as_slice);
+            host.confirm_virtual_directory_persisted(&pending.root_name, &pending.target_tree, doc_json);
+        }
+        Ok(fully_persisted)
     }
 
     /// Export the active document or sheet as downloadable bytes for File System Access / Blob fallback (`R10.7`).
@@ -1034,11 +1239,18 @@ pub fn sanitize_download_stem(raw: &str) -> String {
 
 fn export_csv_artifact(host: &WebWorkspaceHost, sheet_id: Option<&str>, project_stem: &str) -> Result<WebExportArtifact, WebAdapterError> {
     let doc = host.app().document();
-    let ds = sheet_id
-        .and_then(|raw| doc.data_sheets.iter().find(|s| s.id.as_str() == raw))
-        .or_else(|| doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)))
-        .or_else(|| doc.data_sheets.first())
-        .ok_or_else(|| WebAdapterError::Validation(String::from("no data sheet available to export as CSV")))?;
+    let ds = if let Some(raw) = sheet_id {
+        doc.data_sheets
+            .iter()
+            .find(|s| s.id.as_str() == raw)
+            .ok_or_else(|| WebAdapterError::Validation(format!("data sheet `{raw}` not found for CSV export")))?
+    } else {
+        doc.active_sheet_id
+            .as_ref()
+            .and_then(|id| doc.data_sheet(id))
+            .or_else(|| doc.data_sheets.first())
+            .ok_or_else(|| WebAdapterError::Validation(String::from("no data sheet available to export as CSV")))?
+    };
 
     let dec = host.app().locale_preset.decimal_separator;
     let mut opts = if dec == ',' { CsvOptions::european_csv() } else { CsvOptions::csv() };
@@ -1064,18 +1276,22 @@ fn export_figure_artifact(
 ) -> Result<WebExportArtifact, WebAdapterError> {
     let target_id = {
         let doc = host.app().document();
-        sheet_id
-            .and_then(|raw| {
-                doc.graph_sheets
-                    .iter()
-                    .find(|s| s.id.as_str() == raw)
-                    .map(|s| s.id.clone())
-                    .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
-            })
-            .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned())
-            .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
-            .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
-            .ok_or_else(|| WebAdapterError::Validation(String::from("no graph or layout sheet available to export")))?
+        if let Some(raw) = sheet_id {
+            doc.graph_sheets
+                .iter()
+                .find(|s| s.id.as_str() == raw)
+                .map(|s| s.id.clone())
+                .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
+                .ok_or_else(|| WebAdapterError::Validation(format!("printable graph or layout sheet `{raw}` not found for export")))?
+        } else {
+            doc.active_sheet_id
+                .as_ref()
+                .filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some())
+                .cloned()
+                .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
+                .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
+                .ok_or_else(|| WebAdapterError::Validation(String::from("no graph or layout sheet available to export")))?
+        }
     };
 
     let (cmd_id, params) = match format {
@@ -1177,6 +1393,7 @@ pub struct TouchGestureRecognizer {
     last_distance: Option<f64>,
     two_finger_active: bool,
     moved_two_finger: bool,
+    primary_pointer_down: Option<(f64, f64)>,
 }
 
 impl TouchGestureRecognizer {
@@ -1198,9 +1415,16 @@ impl TouchGestureRecognizer {
         self.two_finger_active
     }
 
+    /// Whether a single-finger primary pointer press is currently armed.
+    #[must_use]
+    pub const fn has_primary_pointer_down(&self) -> bool {
+        self.primary_pointer_down.is_some()
+    }
+
     /// Process browser `touchstart` contacts.
     pub fn touch_start(&mut self, points: &[TouchPoint], _dt_sec: f64) -> Vec<UiInputEvent> {
         let prev_count = self.active.len();
+        let was_two_finger = self.two_finger_active;
         for pt in points {
             if pt.x.is_finite() && pt.y.is_finite() {
                 self.active.insert(pt.id, (pt.x, pt.y));
@@ -1212,12 +1436,21 @@ impl TouchGestureRecognizer {
                 self.last_midpoint = Some(mid);
                 self.last_distance = Some(dist);
             }
+            if !was_two_finger && self.primary_pointer_down.take().is_some() {
+                return vec![UiInputEvent::PointerUp {
+                    x: -1.0,
+                    y: -1.0,
+                    button: curvebook_ui_egui::PointerButton::Primary,
+                    modifiers: curvebook_ui_egui::KeyModifiers::default(),
+                }];
+            }
             return Vec::new();
         }
         if prev_count == 0
             && self.active.len() == 1
             && let Some(&(x, y)) = self.active.values().next()
         {
+            self.primary_pointer_down = Some((x, y));
             return vec![UiInputEvent::PointerDown {
                 x,
                 y,
@@ -1238,12 +1471,23 @@ impl TouchGestureRecognizer {
         }
         if self.active.len() >= 2 {
             self.two_finger_active = true;
-            return self.process_two_finger_move(clamped_dt);
+            let mut events = Vec::new();
+            if self.primary_pointer_down.take().is_some() {
+                events.push(UiInputEvent::PointerUp {
+                    x: -1.0,
+                    y: -1.0,
+                    button: curvebook_ui_egui::PointerButton::Primary,
+                    modifiers: curvebook_ui_egui::KeyModifiers::default(),
+                });
+            }
+            events.extend(self.process_two_finger_move(clamped_dt));
+            return events;
         }
         if !self.two_finger_active
             && self.active.len() == 1
             && let Some(&(x, y)) = self.active.values().next()
         {
+            self.primary_pointer_down = Some((x, y));
             return vec![UiInputEvent::PointerMove { x, y, modifiers: curvebook_ui_egui::KeyModifiers::default() }];
         }
         Vec::new()
@@ -1274,7 +1518,11 @@ impl TouchGestureRecognizer {
             self.moved_two_finger = false;
         }
         if self.active.is_empty() {
-            if !was_two_finger && let Some((x, y)) = last_single_pos {
+            let had_primary = self.primary_pointer_down.take().is_some();
+            if !was_two_finger
+                && had_primary
+                && let Some((x, y)) = last_single_pos
+            {
                 events.push(UiInputEvent::PointerUp {
                     x,
                     y,
@@ -1290,12 +1538,23 @@ impl TouchGestureRecognizer {
 
     /// Cancel all tracked touches and reset gesture state.
     pub fn touch_cancel(&mut self) -> Vec<UiInputEvent> {
+        let had_primary = self.primary_pointer_down.take().is_some();
         self.active.clear();
         self.last_midpoint = None;
         self.last_distance = None;
         self.two_finger_active = false;
         self.moved_two_finger = false;
-        vec![UiInputEvent::CancelInlineEdit]
+        let mut events = Vec::new();
+        if had_primary {
+            events.push(UiInputEvent::PointerUp {
+                x: -1.0,
+                y: -1.0,
+                button: curvebook_ui_egui::PointerButton::Primary,
+                modifiers: curvebook_ui_egui::KeyModifiers::default(),
+            });
+        }
+        events.push(UiInputEvent::CancelInlineEdit);
+        events
     }
 
     /// Produce an animation-frame coasting step [`UiInputEvent::InertialPan`].
@@ -1444,6 +1703,8 @@ pub enum WebBridgeEvent {
     ExportFile { format: WebExportFormat, sheet_id: Option<String>, dpi: u16 },
     HydrateLocalStorage { entries: Vec<(String, String)> },
     ClickChromeNode { node_id: String, button: PointerButton, modifiers: KeyModifiers },
+    ConfirmDirectorySync { root_name: String, written_paths: Vec<String>, removed_paths: Vec<String>, succeeded: bool, error: Option<String> },
+    ConfirmLocalStorage { writes: Vec<String>, removals: Vec<String>, succeeded: bool },
 }
 
 impl WebBridgeEvent {
@@ -1564,6 +1825,20 @@ impl WebBridgeEvent {
                 "button": pointer_button_as_str(*button),
                 "modifiers": modifiers_to_json(*modifiers),
             }),
+            Self::ConfirmDirectorySync { root_name, written_paths, removed_paths, succeeded, error } => json!({
+                "kind": "confirm_directory_sync",
+                "root_name": root_name,
+                "written_paths": written_paths,
+                "removed_paths": removed_paths,
+                "succeeded": succeeded,
+                "error": error,
+            }),
+            Self::ConfirmLocalStorage { writes, removals, succeeded } => json!({
+                "kind": "confirm_local_storage",
+                "writes": writes,
+                "removals": removals,
+                "succeeded": succeeded,
+            }),
         };
         Ok(value)
     }
@@ -1624,10 +1899,12 @@ impl WebBridgeEvent {
                 bytes: decode_base64_field(obj, "bytes_base64", "bytes")?,
             }),
             "import_dropped_files" => Ok(Self::ImportDroppedFiles { files: parse_named_bytes_vec(obj, "files")? }),
-            "import_directory_entries" => Ok(Self::ImportDirectoryEntries {
-                root_name: require_str_field(obj, "root_name")?.to_owned(),
-                entries: parse_named_bytes_vec(obj, "entries")?.into_iter().collect(),
-            }),
+            "import_directory_entries" => {
+                let root_name = require_str_field(obj, "root_name")?.to_owned();
+                let pairs = parse_named_bytes_vec(obj, "entries")?;
+                let entries = collect_unique_directory_entries(&root_name, pairs)?;
+                Ok(Self::ImportDirectoryEntries { root_name, entries })
+            }
             "sync_directory" => Ok(Self::SyncDirectory { root_name: optional_str_field(obj, "root_name") }),
             "save_preferences" => {
                 let raw = obj.get("preferences").ok_or_else(|| WebAdapterError::Serialization(String::from("missing `preferences` field")))?;
@@ -1703,6 +1980,18 @@ fn decode_extended_bridge_event(kind: &str, obj: &Map<String, Value>) -> Result<
             node_id: require_str_field(obj, "node_id")?.to_owned(),
             button: parse_pointer_button(obj.get("button")),
             modifiers: parse_modifiers_field(obj, "modifiers"),
+        }),
+        "confirm_directory_sync" => Ok(WebBridgeEvent::ConfirmDirectorySync {
+            root_name: require_str_field(obj, "root_name")?.to_owned(),
+            written_paths: parse_string_array_or_empty(obj, "written_paths")?,
+            removed_paths: parse_string_array_or_empty(obj, "removed_paths")?,
+            succeeded: obj.get("succeeded").and_then(Value::as_bool).unwrap_or(false),
+            error: optional_str_field(obj, "error"),
+        }),
+        "confirm_local_storage" => Ok(WebBridgeEvent::ConfirmLocalStorage {
+            writes: parse_string_array_or_empty(obj, "writes")?,
+            removals: parse_string_array_or_empty(obj, "removals")?,
+            succeeded: obj.get("succeeded").and_then(Value::as_bool).unwrap_or(false),
         }),
         other => Err(WebAdapterError::Serialization(format!("unknown bridge event kind `{other}`"))),
     }
@@ -1963,6 +2252,7 @@ pub struct WebBridgeSession {
     tab_id: String,
     access_mode: TabAccessMode,
     render_dpi: u16,
+    pending_storage_ops: VecDeque<StorageRollbackOp>,
 }
 
 impl Default for WebBridgeSession {
@@ -1995,6 +2285,7 @@ impl WebBridgeSession {
             tab_id: tab,
             access_mode: TabAccessMode::ExclusiveReadWrite,
             render_dpi: 96,
+            pending_storage_ops: VecDeque::new(),
         }
     }
 
@@ -2079,106 +2370,21 @@ impl WebBridgeSession {
     /// Build a multi-flavor clipboard payload (`PDF`/`SVG`/`PNG`/`HTML`/`TSV`), allowed in read-only mode.
     ///
     /// # Errors
-    /// Returns [`WebAdapterError::Clipboard`] if `dpi` is invalid or no sheet can be exported.
+    /// Returns [`WebAdapterError::Clipboard`] if `dpi` is invalid, an explicit `sheet_id` does not
+    /// exist, or no sheet can be exported.
     pub fn build_clipboard_payload(&mut self, sheet_id: Option<&str>, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
         if !(MIN_CLIPBOARD_DPI..=MAX_CLIPBOARD_DPI).contains(&dpi) {
             return Err(WebAdapterError::Clipboard(format!("clipboard DPI {dpi} out of supported range {MIN_CLIPBOARD_DPI}..={MAX_CLIPBOARD_DPI}")));
         }
 
-        let decimal_sep = self.host.app().locale_preset.decimal_separator;
-        let selection_bounds = self.host.app().grid.tool.selection_bounds();
-        let session = self.host.app_mut().session_mut();
-        let doc = session.document();
-
-        let active_is_data_sheet = sheet_id.is_none() && doc.active_sheet_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some());
-        let render_sheet_id = if active_is_data_sheet {
-            None
-        } else {
-            sheet_id
-                .and_then(|raw| {
-                    doc.graph_sheets
-                        .iter()
-                        .find(|s| s.id.as_str() == raw)
-                        .map(|s| s.id.clone())
-                        .or_else(|| doc.layout_sheets.iter().find(|s| s.id.as_str() == raw).map(|s| s.id.clone()))
-                })
-                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()).cloned())
-                .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
-                .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
-        };
-
-        let data_sheet = sheet_id
-            .and_then(|raw| doc.data_sheets.iter().find(|s| s.id.as_str() == raw))
-            .or_else(|| doc.active_sheet_id.as_ref().and_then(|id| doc.data_sheet(id)))
-            .or_else(|| doc.data_sheets.first());
-
-        let tsv = match data_sheet {
-            Some(ds) => {
-                let selected_tsv = if active_is_data_sheet
-                    && let Some((lo, hi)) = selection_bounds
-                    && let Ok(range) = serde_json::from_value(json!({
-                        "start": { "row": lo.row, "col": lo.col, "subcol": lo.subcol },
-                        "end": { "row": hi.row, "col": hi.col, "subcol": hi.subcol },
-                    })) {
-                    let block = ClipboardBundle::tsv_from_datasheet_range(ds, range, decimal_sep);
-                    (!block.is_empty()).then_some(block)
-                } else {
-                    None
-                };
-                Some(match selected_tsv {
-                    Some(block) => block,
-                    None => ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?,
-                })
-            }
-            None => None,
-        };
-
-        if let Some(target_id) = render_sheet_id {
-            let bundle = ClipboardBundle::from_sheet(session, &target_id, dpi).map_err(WebAdapterError::Clipboard)?;
-            let mut flavors: Vec<String> = bundle.available_flavors().into_iter().filter(|f| *f != "emf").map(str::to_owned).collect();
-            if tsv.as_ref().is_some_and(|s| !s.is_empty()) {
-                flavors.push(String::from("tsv"));
-            }
-            return Ok(WebClipboardPayload {
-                pdf_bytes: bundle.pdf_bytes,
-                svg: bundle.svg,
-                html: bundle.html,
-                png_bytes: bundle.png_bytes,
-                plain_text: tsv.clone(),
-                tsv,
-                width_pt: bundle.width_pt,
-                height_pt: bundle.height_pt,
-                width_px: bundle.width_px,
-                height_px: bundle.height_px,
-                dpi: bundle.dpi,
-                flavors,
-            });
+        let target = resolve_clipboard_target(self.host.app(), sheet_id)?;
+        match target {
+            ClipboardTarget::Data(target_id) => build_data_clipboard_payload(self.host.app(), &target_id, dpi),
+            ClipboardTarget::Graph(target_id) => build_graph_clipboard_payload(self.host.app_mut(), &target_id, dpi),
+            ClipboardTarget::Layout(target_id) => build_layout_clipboard_payload(self.host.app_mut(), &target_id, dpi),
+            ClipboardTarget::Result(target_id) => build_result_clipboard_payload(self.host.app(), &target_id, dpi),
+            ClipboardTarget::Info(target_id) => build_info_clipboard_payload(self.host.app(), &target_id, dpi),
         }
-
-        if let Some(tsv_text) = tsv {
-            let escaped = escape_html_text(&tsv_text);
-            let html = format!("<!DOCTYPE html><html><body><pre>{escaped}</pre></body></html>");
-            let mut flavors = vec![String::from("html")];
-            if !tsv_text.is_empty() {
-                flavors.push(String::from("tsv"));
-            }
-            return Ok(WebClipboardPayload {
-                pdf_bytes: Vec::new(),
-                svg: String::new(),
-                html,
-                png_bytes: Vec::new(),
-                plain_text: Some(tsv_text.clone()),
-                tsv: Some(tsv_text),
-                width_pt: 0.0,
-                height_pt: 0.0,
-                width_px: 0,
-                height_px: 0,
-                dpi,
-                flavors,
-            });
-        }
-
-        Err(WebAdapterError::Clipboard(String::from("no printable graph/layout or data sheet available for clipboard export")))
     }
 
     /// Build a scaled publication print command targeting the requested or active printable sheet (`R2-S11-13`).
@@ -2256,11 +2462,19 @@ impl WebBridgeSession {
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("viewport.resize")), None)?])
             }
             WebBridgeEvent::TouchStart { points, dt_sec } => {
+                let was_single_press = !self.touch.is_two_finger_gesture() && self.touch.has_primary_pointer_down();
                 let events = self.touch.touch_start(&points, dt_sec);
+                if was_single_press && self.touch.is_two_finger_gesture() {
+                    cancel_armed_pointer_and_drags(self.host.app_mut());
+                }
                 self.dispatch_touch_events(events)
             }
             WebBridgeEvent::TouchMove { points, dt_sec } => {
+                let was_single_press = !self.touch.is_two_finger_gesture() && self.touch.has_primary_pointer_down();
                 let events = self.touch.touch_move(&points, dt_sec);
+                if was_single_press && self.touch.is_two_finger_gesture() {
+                    cancel_armed_pointer_and_drags(self.host.app_mut());
+                }
                 self.dispatch_touch_events(events)
             }
             WebBridgeEvent::TouchEnd { released_ids, dt_sec } => {
@@ -2268,6 +2482,7 @@ impl WebBridgeSession {
                 self.dispatch_touch_events(events)
             }
             WebBridgeEvent::TouchCancel => {
+                cancel_armed_pointer_and_drags(self.host.app_mut());
                 let events = self.touch.touch_cancel();
                 self.dispatch_touch_events(events)
             }
@@ -2309,21 +2524,18 @@ impl WebBridgeSession {
             WebBridgeEvent::SyncDirectory { root_name } => {
                 self.require_write_lock("sync_directory")?;
                 let plan = self.fs.sync_directory_from_host(&mut self.host, root_name.as_deref())?;
-                let resolved_root = self.fs.last_synced_root().unwrap_or("workspace.curvebook.d").to_owned();
+                let resolved_root = self.fs.pending_sync_root().unwrap_or("workspace.curvebook.d").to_owned();
                 Ok(vec![WebBridgeCommand::ApplyDirectorySync { root_name: resolved_root, plan }])
             }
             WebBridgeEvent::SavePreferences { preferences } => {
-                let encoded = self.storage.save_preferences(&preferences)?;
-                Ok(vec![WebBridgeCommand::PersistLocalStorage {
-                    writes: vec![(String::from(PREFERENCES_STORAGE_KEY), encoded)],
-                    removals: Vec::new(),
-                }])
+                let cmd = self.persist_preferences_command(&preferences)?;
+                Ok(vec![cmd])
             }
             WebBridgeEvent::SaveAutosave { now_ms } => self.handle_save_autosave(now_ms),
             WebBridgeEvent::AcquireLock { doc_id, tab_id, now_ms } => {
                 self.doc_id = require_non_empty(&doc_id, "doc_id")?.to_owned();
                 self.tab_id = require_non_empty(&tab_id, "tab_id")?.to_owned();
-                let acq = self.locks.acquire_document_lock(&self.doc_id, &self.tab_id, now_ms)?;
+                let acq = self.locks.grant_browser_lock(&self.doc_id, &self.tab_id, now_ms)?;
                 let banner = self.apply_access_mode(acq.mode);
                 Ok(vec![banner])
             }
@@ -2528,6 +2740,13 @@ impl WebBridgeSession {
             }
             WebBridgeEvent::HydrateLocalStorage { entries } => self.handle_hydrate_local_storage(entries),
             WebBridgeEvent::ClickChromeNode { node_id, button, modifiers } => self.handle_click_chrome_node(&node_id, button, modifiers),
+            WebBridgeEvent::ConfirmDirectorySync { root_name, written_paths, removed_paths, succeeded, error } => {
+                self.handle_confirm_directory_sync(&root_name, &written_paths, &removed_paths, succeeded, error)
+            }
+            WebBridgeEvent::ConfirmLocalStorage { writes, removals, succeeded } => {
+                self.handle_confirm_local_storage(&writes, &removals, succeeded);
+                Ok(Vec::new())
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -2935,6 +3154,19 @@ impl WebBridgeSession {
         }
     }
 
+    fn record_pending_storage_op(&mut self, op: StorageRollbackOp) {
+        if self.pending_storage_ops.len() >= 64 {
+            let _ = self.pending_storage_ops.pop_front();
+        }
+        self.pending_storage_ops.push_back(op);
+    }
+
+    fn persist_preferences_command(&mut self, prefs: &PreferencesFile) -> Result<WebBridgeCommand, WebAdapterError> {
+        let (outcome, rollback) = self.storage.save_preferences_tracked(prefs)?;
+        self.record_pending_storage_op(rollback);
+        Ok(WebBridgeCommand::PersistLocalStorage { writes: vec![(outcome.storage_key, outcome.encoded)], removals: outcome.evicted_keys })
+    }
+
     fn maybe_append_preferences_persist(
         &mut self,
         before: &(String, curvebook_ui_egui::theme::UiThemeMode, String),
@@ -2944,13 +3176,8 @@ impl WebBridgeSession {
             return;
         }
         let prefs = self.build_preferences_file();
-        match self.storage.save_preferences(&prefs) {
-            Ok(encoded) => {
-                cmds.push(WebBridgeCommand::PersistLocalStorage {
-                    writes: vec![(String::from(PREFERENCES_STORAGE_KEY), encoded)],
-                    removals: Vec::new(),
-                });
-            }
+        match self.persist_preferences_command(&prefs) {
+            Ok(cmd) => cmds.push(cmd),
             Err(err) => {
                 cmds.push(WebBridgeCommand::NotifyStatus {
                     level: WebNoticeLevel::Warning,
@@ -2958,6 +3185,41 @@ impl WebBridgeSession {
                     message: err.to_string(),
                 });
             }
+        }
+    }
+
+    fn handle_confirm_directory_sync(
+        &mut self,
+        root_name: &str,
+        written_paths: &[String],
+        removed_paths: &[String],
+        succeeded: bool,
+        error: Option<String>,
+    ) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
+        let fully_persisted = self.fs.confirm_directory_sync(&mut self.host, root_name, written_paths, removed_paths, succeeded)?;
+        let action = if fully_persisted { "sync_directory.confirmed" } else { "sync_directory.failed" };
+        let mut cmds = vec![self.render_frame_command(
+            self.render_dpi,
+            Some(String::from(action)),
+            Some(json!({ "root_name": root_name, "fully_persisted": fully_persisted })),
+        )?];
+        if !fully_persisted {
+            let message = error.unwrap_or_else(|| String::from("directory sync did not complete; workspace remains dirty"));
+            cmds.push(WebBridgeCommand::NotifyStatus { level: WebNoticeLevel::Warning, code: String::from("directory_sync_incomplete"), message });
+        }
+        Ok(cmds)
+    }
+
+    fn handle_confirm_local_storage(&mut self, writes: &[String], removals: &[String], succeeded: bool) {
+        let pos = if writes.is_empty() {
+            self.pending_storage_ops.len().checked_sub(1)
+        } else {
+            self.pending_storage_ops.iter().rposition(|op| writes.iter().any(|w| w == &op.target_key))
+        };
+        if let Some(idx) = pos
+            && let Some(op) = self.pending_storage_ops.remove(idx)
+        {
+            self.storage.reconcile_confirmed_storage(op, removals, succeeded);
         }
     }
 
@@ -3104,7 +3366,8 @@ impl WebBridgeSession {
     fn handle_save_autosave(&mut self, now_ms: u64) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         self.require_write_lock("save_autosave")?;
         let snapshot = serde_json::to_string(self.host.app().document()).map_err(|err| WebAdapterError::Serialization(err.to_string()))?;
-        let outcome = self.storage.save_autosave_snapshot(&self.doc_id, &snapshot, now_ms)?;
+        let (outcome, rollback) = self.storage.save_autosave_snapshot_tracked(&self.doc_id, &snapshot, now_ms)?;
+        self.record_pending_storage_op(rollback);
         Ok(vec![WebBridgeCommand::PersistLocalStorage { writes: vec![(outcome.storage_key, snapshot)], removals: outcome.evicted_keys }])
     }
 
@@ -3145,6 +3408,233 @@ impl WebBridgeSession {
         let holder = self.access_mode.holder_tab_id().unwrap_or("unknown").to_owned();
         WebAdapterError::ReadOnlyContended { doc_id: self.doc_id.clone(), holder_tab_id: holder, operation: operation.to_owned() }
     }
+}
+
+enum ClipboardTarget {
+    Data(String),
+    Graph(String),
+    Layout(String),
+    Result(String),
+    Info(String),
+}
+
+fn resolve_clipboard_target(app: &UiApp, sheet_id: Option<&str>) -> Result<ClipboardTarget, WebAdapterError> {
+    let doc = app.document();
+    if let Some(raw) = sheet_id {
+        if let Some(s) = doc.data_sheets.iter().find(|s| s.id.as_str() == raw) {
+            return Ok(ClipboardTarget::Data(s.id.as_str().to_owned()));
+        }
+        if let Some(s) = doc.graph_sheets.iter().find(|s| s.id.as_str() == raw) {
+            return Ok(ClipboardTarget::Graph(s.id.as_str().to_owned()));
+        }
+        if let Some(s) = doc.layout_sheets.iter().find(|s| s.id.as_str() == raw) {
+            return Ok(ClipboardTarget::Layout(s.id.as_str().to_owned()));
+        }
+        if let Some(s) = doc.result_sheets.iter().find(|s| s.id.as_str() == raw) {
+            return Ok(ClipboardTarget::Result(s.id.as_str().to_owned()));
+        }
+        if let Some(s) = doc.info_sheets.iter().find(|s| s.id.as_str() == raw) {
+            return Ok(ClipboardTarget::Info(s.id.as_str().to_owned()));
+        }
+        return Err(WebAdapterError::Clipboard(format!("sheet `{raw}` not found for clipboard export")));
+    }
+
+    if let Some(active) = doc.active_sheet_id.as_ref() {
+        let id = active.as_str().to_owned();
+        if doc.data_sheet(active).is_some() {
+            return Ok(ClipboardTarget::Data(id));
+        }
+        if doc.graph_sheet(active).is_some() {
+            return Ok(ClipboardTarget::Graph(id));
+        }
+        if doc.layout_sheet(active).is_some() {
+            return Ok(ClipboardTarget::Layout(id));
+        }
+        if doc.result_sheet(active).is_some() {
+            return Ok(ClipboardTarget::Result(id));
+        }
+        if doc.info_sheet(active).is_some() {
+            return Ok(ClipboardTarget::Info(id));
+        }
+    }
+
+    if let Some(s) = doc.graph_sheets.first() {
+        return Ok(ClipboardTarget::Graph(s.id.as_str().to_owned()));
+    }
+    if let Some(s) = doc.layout_sheets.first() {
+        return Ok(ClipboardTarget::Layout(s.id.as_str().to_owned()));
+    }
+    if let Some(s) = doc.data_sheets.first() {
+        return Ok(ClipboardTarget::Data(s.id.as_str().to_owned()));
+    }
+    if let Some(s) = doc.result_sheets.first() {
+        return Ok(ClipboardTarget::Result(s.id.as_str().to_owned()));
+    }
+    if let Some(s) = doc.info_sheets.first() {
+        return Ok(ClipboardTarget::Info(s.id.as_str().to_owned()));
+    }
+
+    Err(WebAdapterError::Clipboard(String::from("no printable graph/layout or data sheet available for clipboard export")))
+}
+
+fn build_data_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
+    let doc = app.document();
+    let ds = doc
+        .data_sheets
+        .iter()
+        .find(|s| s.id.as_str() == target_id)
+        .ok_or_else(|| WebAdapterError::Clipboard(format!("data sheet `{target_id}` not found for clipboard export")))?;
+    let is_active = doc.active_sheet_id.as_ref().is_some_and(|id| id.as_str() == target_id);
+    let decimal_sep = app.locale_preset.decimal_separator;
+    let selected_tsv = if is_active
+        && let Some((lo, hi)) = app.grid.tool.selection_bounds()
+        && let Ok(range) = serde_json::from_value(json!({
+            "start": { "row": lo.row, "col": lo.col, "subcol": lo.subcol },
+            "end": { "row": hi.row, "col": hi.col, "subcol": hi.subcol },
+        })) {
+        let block = ClipboardBundle::tsv_from_datasheet_range(ds, range, decimal_sep);
+        (!block.is_empty()).then_some(block)
+    } else {
+        None
+    };
+    let tsv = match selected_tsv {
+        Some(block) => block,
+        None => ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?,
+    };
+    Ok(text_only_clipboard_payload(tsv, dpi))
+}
+
+fn build_graph_clipboard_payload(app: &mut UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
+    let decimal_sep = app.locale_preset.decimal_separator;
+    let session = app.session_mut();
+    let (render_id, tsv) = {
+        let doc = session.document();
+        let gs = doc
+            .graph_sheets
+            .iter()
+            .find(|s| s.id.as_str() == target_id)
+            .ok_or_else(|| WebAdapterError::Clipboard(format!("graph sheet `{target_id}` not found for clipboard export")))?;
+        let tsv = match doc.data_sheet(&gs.spec.primary_source_sheet_id) {
+            Some(ds) => Some(ClipboardBundle::tsv_from_datasheet(ds, decimal_sep).map_err(WebAdapterError::Clipboard)?),
+            None => None,
+        };
+        (gs.id.clone(), tsv)
+    };
+    let bundle = ClipboardBundle::from_sheet(session, &render_id, dpi).map_err(WebAdapterError::Clipboard)?;
+    Ok(clipboard_payload_from_bundle(bundle, tsv))
+}
+
+fn build_layout_clipboard_payload(app: &mut UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
+    let session = app.session_mut();
+    let render_id = session
+        .document()
+        .layout_sheets
+        .iter()
+        .find(|s| s.id.as_str() == target_id)
+        .map(|s| s.id.clone())
+        .ok_or_else(|| WebAdapterError::Clipboard(format!("layout sheet `{target_id}` not found for clipboard export")))?;
+    let bundle = ClipboardBundle::from_sheet(session, &render_id, dpi).map_err(WebAdapterError::Clipboard)?;
+    Ok(clipboard_payload_from_bundle(bundle, None))
+}
+
+fn build_result_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
+    let rs = app
+        .document()
+        .result_sheets
+        .iter()
+        .find(|s| s.id.as_str() == target_id)
+        .ok_or_else(|| WebAdapterError::Clipboard(format!("result sheet `{target_id}` not found for clipboard export")))?;
+    let mut lines = Vec::new();
+    if let Some(tab) = rs.tabs.first() {
+        if !tab.column_headers.is_empty() {
+            lines.push(tab.column_headers.join("\t"));
+        }
+        for row in &tab.rows {
+            let cols: Vec<String> = row
+                .iter()
+                .map(|cell| curvebook_ui_egui::dialogs_canvas::ResultSheetViewState::format_result_cell(cell, rs.analysis.p_value_format))
+                .collect();
+            lines.push(cols.join("\t"));
+        }
+    } else {
+        lines.push(rs.title().to_owned());
+    }
+    Ok(text_only_clipboard_payload(lines.join("\n"), dpi))
+}
+
+fn build_info_clipboard_payload(app: &UiApp, target_id: &str, dpi: u16) -> Result<WebClipboardPayload, WebAdapterError> {
+    let info = app
+        .document()
+        .info_sheets
+        .iter()
+        .find(|s| s.id.as_str() == target_id)
+        .ok_or_else(|| WebAdapterError::Clipboard(format!("info sheet `{target_id}` not found for clipboard export")))?;
+    let mut lines = vec![info.title.clone()];
+    if !info.notes_markdown.is_empty() {
+        lines.push(info.notes_markdown.clone());
+    }
+    for c in &info.constants {
+        lines.push(format!("{}\t{:?}", c.name, c.value));
+    }
+    Ok(text_only_clipboard_payload(lines.join("\n"), dpi))
+}
+
+fn clipboard_payload_from_bundle(bundle: ClipboardBundle, tsv: Option<String>) -> WebClipboardPayload {
+    let mut flavors: Vec<String> = bundle.available_flavors().into_iter().filter(|f| *f != "emf").map(str::to_owned).collect();
+    if tsv.as_ref().is_some_and(|s| !s.is_empty()) {
+        flavors.push(String::from("tsv"));
+    }
+    WebClipboardPayload {
+        pdf_bytes: bundle.pdf_bytes,
+        svg: bundle.svg,
+        html: bundle.html,
+        png_bytes: bundle.png_bytes,
+        plain_text: tsv.clone(),
+        tsv,
+        width_pt: bundle.width_pt,
+        height_pt: bundle.height_pt,
+        width_px: bundle.width_px,
+        height_px: bundle.height_px,
+        dpi: bundle.dpi,
+        flavors,
+    }
+}
+
+fn text_only_clipboard_payload(tsv_text: String, dpi: u16) -> WebClipboardPayload {
+    let escaped = escape_html_text(&tsv_text);
+    let html = format!("<!DOCTYPE html><html><body><pre>{escaped}</pre></body></html>");
+    let mut flavors = vec![String::from("html")];
+    if !tsv_text.is_empty() {
+        flavors.push(String::from("tsv"));
+    }
+    WebClipboardPayload {
+        pdf_bytes: Vec::new(),
+        svg: String::new(),
+        html,
+        png_bytes: Vec::new(),
+        plain_text: Some(tsv_text.clone()),
+        tsv: Some(tsv_text),
+        width_pt: 0.0,
+        height_pt: 0.0,
+        width_px: 0,
+        height_px: 0,
+        dpi,
+        flavors,
+    }
+}
+
+fn cancel_armed_pointer_and_drags(app: &mut UiApp) {
+    app.interaction.pointer_down = false;
+    app.interaction.dragging_grid_sheet = None;
+    app.interaction.dragging_split_divider = false;
+    app.split.dragging_divider = false;
+    app.interaction.dragging_navigator_sheet = None;
+    app.nav.cancel_sheet_drag();
+    app.interaction.canvas_drag = None;
+    app.interaction.active_drag_handle = None;
+    app.interaction.pressed_widget_id = None;
+    app.canvas_dialogs.canvas.drag_start_pt = None;
+    app.canvas_dialogs.canvas.active_snap_guides.clear();
 }
 
 fn ui_input_requires_write_lock(event: &UiInputEvent) -> bool {
@@ -3401,6 +3891,38 @@ fn parse_named_bytes_vec(obj: &Map<String, Value>, key: &str) -> Result<Vec<(Str
         out.push((path, bytes));
     }
     Ok(out)
+}
+
+fn collect_unique_directory_entries(root_name: &str, pairs: Vec<(String, Vec<u8>)>) -> Result<BTreeMap<String, Vec<u8>>, WebAdapterError> {
+    let mut map = BTreeMap::new();
+    let mut seen_normalized = BTreeSet::new();
+    let trimmed_root = root_name.trim();
+    let root_opt = (!trimmed_root.is_empty()).then_some(trimmed_root);
+    for (path, bytes) in pairs {
+        if map.contains_key(&path) {
+            return Err(WebAdapterError::Validation(format!("duplicate directory entry path `{path}`")));
+        }
+        if let Ok(norm) = normalize_relative_entry_path(&path, root_opt)
+            && !seen_normalized.insert(norm.clone())
+        {
+            return Err(WebAdapterError::Validation(format!("duplicate normalized directory entry path `{norm}`")));
+        }
+        map.insert(path, bytes);
+    }
+    Ok(map)
+}
+
+fn parse_string_array_or_empty(obj: &Map<String, Value>, key: &str) -> Result<Vec<String>, WebAdapterError> {
+    let Some(raw) = obj.get(key) else {
+        return Ok(Vec::new());
+    };
+    if raw.is_null() {
+        return Ok(Vec::new());
+    }
+    let arr = raw.as_array().ok_or_else(|| WebAdapterError::Serialization(format!("field `{key}` must be a string array")))?;
+    arr.iter()
+        .map(|v| v.as_str().map(str::to_owned).ok_or_else(|| WebAdapterError::Serialization(format!("array `{key}` entries must be strings"))))
+        .collect()
 }
 
 fn parse_string_pairs(obj: &Map<String, Value>, key: &str) -> Result<Vec<(String, String)>, WebAdapterError> {

@@ -4,14 +4,14 @@
 //! - Motulsky, H. & Christopoulos, A. (2004). *Fitting Models to Biological Data Using Linear and Nonlinear Regression*. Oxford University Press.
 //! - Seber, G. A. F. & Wild, C. J. (1989). *Nonlinear Regression*. Wiley.
 
-use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_doc::{FitMethod, ParameterRule, ParameterScope, WeightingScheme, parse_column_title_numeric_hook};
 use curvebook_math::sum::NeumaierSum;
 
 use crate::dsl::ode_fit_budget_exceeded;
 use crate::error::{FitError, ParameterNote};
 use crate::library::ParametricModel;
 use crate::solver::results::SolverConfig;
-use crate::types::{DataPoint, DatasetSeries, HookContext, parse_leading_number, validated_replicate_moments};
+use crate::types::{DataPoint, DatasetSeries, HookContext, validated_replicate_moments};
 
 #[derive(Debug, Clone)]
 pub(in crate::solver) struct FreeSlot {
@@ -47,6 +47,19 @@ impl ParameterLayout {
         rules: &[ParameterRule],
     ) -> Result<Self, FitError> {
         let param_names = model.param_names();
+        let mut seen_rule_names: Vec<&str> = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if !param_names.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)) {
+                return Err(FitError::InvalidParameter {
+                    name: "parameter_rules",
+                    reason: format!("Unknown parameter rule `{}` (expected one of: {})", rule.name, param_names.join(", ")),
+                });
+            }
+            if seen_rule_names.iter().any(|prev| prev.eq_ignore_ascii_case(&rule.name)) {
+                return Err(FitError::InvalidParameter { name: "parameter_rules", reason: format!("Duplicate parameter rule for `{}`", rule.name) });
+            }
+            seen_rule_names.push(&rule.name);
+        }
         let p_model = param_names.len();
         let n_datasets = datasets.len();
         let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
@@ -137,11 +150,12 @@ impl ParameterLayout {
                 }
                 Some(ParameterScope::ColumnTitleConstant) => {
                     for (ds_idx, ds) in datasets.iter().enumerate() {
-                        let val = ds.column_title_value.or_else(|| parse_leading_number(&ds.label)).filter(|v| v.is_finite()).ok_or_else(|| {
-                            FitError::HookResolutionError {
-                                message: format!("Column title `{}` for `{pname}` has no finite numeric constant", ds.label),
-                            }
-                        })?;
+                        let val =
+                            ds.column_title_value.or_else(|| parse_column_title_numeric_hook(&ds.label).ok()).filter(|v| v.is_finite()).ok_or_else(
+                                || FitError::HookResolutionError {
+                                    message: format!("Column title `{}` for `{pname}` has no finite numeric constant", ds.label),
+                                },
+                            )?;
                         bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
                         let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
                         fixed_constants.push((label, val, vec![ParameterNote::Hooked]));

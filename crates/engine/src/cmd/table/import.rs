@@ -5,8 +5,8 @@
 use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::{
-    CellCoord, DataSheet, DocError, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_SHEETS_PER_PROJECT, ProjectDocument, ResultSheet,
-    SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource, validate_project_cells, validate_title,
+    CellCoord, DataSheet, DocError, ImportLinkSpec, InfoSheet, InternalLinkKind, LinkSource, MAX_SHEETS_PER_PROJECT, PlacementMode, ProjectDocument,
+    ResultSheet, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, VariableSource, validate_project_cells, validate_title,
 };
 use curvebook_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, import_csv_to_datasheet, import_prism_bytes, import_pzfx_bytes,
@@ -318,8 +318,29 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     let prev_ds = doc.data_sheets.get(target_idx).cloned();
     let prev_info = info_idx.and_then(|idx| doc.info_sheets.get(idx).cloned());
 
-    let link_seq = prev_ds.as_ref().map_or(1, |d| d.linked_regions.len().saturating_add(1));
-    let link_id = p.link_id.unwrap_or_else(|| format!("link-{}-{link_seq}", target_id.as_str()));
+    let existing_link_ids: HashSet<String> = prev_ds.as_ref().map(|d| d.linked_regions.iter().map(|r| r.id.clone()).collect()).unwrap_or_default();
+    let link_id = if let Some(raw_id) = p.link_id {
+        let trimmed = raw_id.trim();
+        if trimmed.is_empty() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`link_id` must not be empty"));
+        }
+        if existing_link_ids.contains(trimmed) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("live linked region `{trimmed}` already exists on `{}`", target_id.as_str()),
+            ));
+        }
+        trimmed.to_owned()
+    } else {
+        let mut seq = prev_ds.as_ref().map_or(1, |d| d.linked_regions.len().saturating_add(1));
+        loop {
+            let candidate = format!("link-{}-{seq}", target_id.as_str());
+            if !existing_link_ids.contains(&candidate) {
+                break candidate;
+            }
+            seq = seq.saturating_add(1);
+        }
+    };
     let provenance_summary = p.provenance.unwrap_or_else(|| summarize_link_source(&spec.source));
     let opts = ImportPipelineOptions {
         baseline: resolve_baseline_adjustment(p.baseline)?,
@@ -331,6 +352,19 @@ pub(super) fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
 
     let report = match (|| -> Result<ImportPipelineReport, EngineError> {
         let rep = apply_pipeline_with_split_info(doc, target_idx, info_idx, &spec, &payload, &opts)?;
+        if let Some(old_ds) = prev_ds.as_ref()
+            && rep.rows_placed > 0
+            && rep.cols_placed > 0
+        {
+            ensure_range_outside_linked_regions(old_ds, rep.target_range, "paste-link over")?;
+            if matches!(spec.placement.mode, PlacementMode::InsertRows) {
+                let shift_span = SheetCellRange::new(
+                    CellCoord::new(spec.placement.anchor.row, rep.target_range.start.col, rep.target_range.start.subcol),
+                    CellCoord::new(usize::MAX, rep.target_range.end.col, rep.target_range.end.subcol),
+                );
+                ensure_range_outside_linked_regions(old_ds, shift_span, "insert linked rows into")?;
+            }
+        }
         if let OwnedSourcePayload::Result(src_rs) = &payload
             && let Some(target_ds) = doc.data_sheets.get_mut(target_idx)
         {
@@ -604,13 +638,19 @@ pub(super) fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOut
     }
 
     let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    let message = match recalc.failure_note() {
+        Some(note) => format!("imported CSV into data sheet{note}"),
+        None => String::from("imported CSV into data sheet"),
+    };
     Ok(CommandOutcome::mutated(
         "table.importCsv",
-        "imported CSV into data sheet",
+        message,
         json!({
             "sheet_id": id.as_str(),
             "recalculated_sheets": recalc.recalculated_sheets,
             "refreshed_links": recalc.refreshed_links,
+            "failed_count": recalc.failed_result_sheets.len(),
+            "failed_result_sheets": recalc.failed_json(),
         }),
     ))
 }
@@ -881,10 +921,42 @@ pub(super) enum PlateValuesInput {
 }
 
 impl PlateValuesInput {
-    pub(super) fn flatten(self) -> Result<Vec<Option<f64>>, EngineError> {
+    pub(super) fn into_flat_checked(self, geometry: PlateGeometry) -> Result<Vec<Option<f64>>, EngineError> {
         let flat = match self {
-            Self::Flat(v) => v,
-            Self::Grid(rows) => rows.into_iter().flatten().collect(),
+            Self::Flat(v) => {
+                let expected = geometry.well_count();
+                if v.len() != expected {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("flat plate `values` length ({}) does not match {expected} wells for {geometry:?}", v.len()),
+                    ));
+                }
+                v
+            }
+            Self::Grid(rows) => {
+                let expected_rows = geometry.rows();
+                let expected_cols = geometry.cols();
+                if rows.len() != expected_rows {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("2D plate `values` row count ({}) does not match {expected_rows}x{expected_cols} plate geometry", rows.len()),
+                    ));
+                }
+                let mut flat = Vec::with_capacity(expected_rows * expected_cols);
+                for (row_idx, row) in rows.into_iter().enumerate() {
+                    if row.len() != expected_cols {
+                        return Err(EngineError::with_code(
+                            ErrorCode::BadInput,
+                            format!(
+                                "2D plate `values` row {row_idx} has {} column(s), expected {expected_cols} for {expected_rows}x{expected_cols} plate geometry",
+                                row.len()
+                            ),
+                        ));
+                    }
+                    flat.extend(row);
+                }
+                flat
+            }
         };
         for item in &flat {
             if let Some(num) = item
@@ -1074,7 +1146,7 @@ pub(super) fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<Comm
     let title = p.title.as_deref().unwrap_or("Plate Data");
     validate_title(title)?;
     let (geometry, template) = resolve_plate_template(&p, title)?;
-    let values = p.values.flatten()?;
+    let values = p.values.into_flat_checked(geometry)?;
     let target_kind = match p.target_kind.as_deref() {
         Some(raw_kind) => parse_target_archetype_kind(raw_kind)?,
         None => TargetArchetypeKind::Grouped,

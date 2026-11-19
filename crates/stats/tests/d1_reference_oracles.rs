@@ -899,8 +899,8 @@ fn oracle_contingency_fisher_chi2_mcnemar_kappa_and_ratios() {
 
     // 2x2 Ratios: Odds ratio, Baptista-Pike CI, Newcombe RD CI
     let ratios = analyze_2x2_ratios(14, 6, 5, 15, conf_95()).unwrap();
-    assert_approx_eq(ratios.odds_ratio, 7.0, 1e-12, 0.0, "OR");
-    assert_approx_eq(ratios.relative_risk, 2.8, 1e-12, 0.0, "RR");
+    assert_approx_eq(ratios.odds_ratio.unwrap(), 7.0, 1e-12, 0.0, "OR");
+    assert_approx_eq(ratios.relative_risk.unwrap(), 2.8, 1e-12, 0.0, "RR");
     assert_approx_eq(ratios.risk_difference, 0.45, 1e-12, 0.0, "RD");
     let rd_ci = ratios.rd_newcombe_ci.unwrap();
     assert_approx_eq(rd_ci.0, 0.140_517_901_892_704, 1e-10, 1e-10, "Newcombe RD lo");

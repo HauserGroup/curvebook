@@ -30,13 +30,18 @@ use crate::anova::results::{FactorialAnovaTerm, MixedRemlResult, MultiVcRemlResu
 use crate::common::validate_finite_slice;
 use crate::error::StatsError;
 
+/// Upper bound on $u = \ln(1 + \sigma_u^2 / \sigma_e^2)$ for random-intercept REML profile search
+/// ($\tau \le e^{36} - 1 \approx 4.3 \times 10^{15}$, supporting nested/clustered designs down to
+/// near-zero technical replicate error without truncating high ICC regimes).
+const REML_LOG1P_TAU_MAX: f64 = 36.0;
+
 pub(in crate::anova) struct RiClusterStats {
     pub(in crate::anova) m_c: f64,
-    pub(in crate::anova) sum_y: f64,
-    pub(in crate::anova) yy: f64,
-    pub(in crate::anova) sum_x: Vec<f64>,
-    pub(in crate::anova) xy: Vec<f64>,
-    pub(in crate::anova) xx: Vec<f64>,
+    pub(in crate::anova) y_bar: f64,
+    pub(in crate::anova) x_bar: Vec<f64>,
+    pub(in crate::anova) xy_within: Vec<f64>,
+    pub(in crate::anova) xx_within: Vec<f64>,
+    pub(in crate::anova) within_rows: Vec<(Vec<f64>, f64)>,
 }
 
 pub(in crate::anova) struct OwnedRemlFisherMats {
@@ -122,32 +127,67 @@ pub(in crate::anova) fn subblock_dense(m: &DenseMatrix, start: usize, len: usize
 
 pub(in crate::anova) fn invert_reml_info(info: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
     let sym = symmetrize_dense(info)?;
-    if let Ok(chol) = cholesky(&sym)
-        && let Ok(inv) = chol.inverse()
-    {
-        return Ok(inv);
-    }
-    // Near-singular or collinear strata: Moore-Penrose pseudoinverse on positive eigenmodes.
-    let eig = sym_eigen(&sym)?;
     let r = sym.nrows();
-    let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
-    let tol = 1e-12 * max_ev.max(1e-30);
-    let mut inv_data = vec![0.0_f64; r * r];
-    for (k, &ev) in eig.eigenvalues.iter().enumerate() {
-        if ev <= tol {
+    // Diagonal equilibration prevents ill-conditioned variance-component scaling (large tau)
+    // from triggering false singularity fallback or dropping small Fisher eigenvalues.
+    let diag_scale: Vec<f64> = (0..r)
+        .map(|i| {
+            let v = sym.get(i, i).unwrap_or(0.0);
+            if v > 0.0 { v.sqrt() } else { 0.0 }
+        })
+        .collect();
+    let mut scaled_data = vec![0.0_f64; r * r];
+    for i in 0..r {
+        if diag_scale[i] == 0.0 {
             continue;
         }
-        let inv_ev = 1.0 / ev;
-        for i in 0..r {
-            let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
-            for j in i..r {
-                let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
-                let delta = qi * qj * inv_ev;
-                inv_data[i * r + j] += delta;
-                if i != j {
-                    inv_data[j * r + i] += delta;
+        for j in 0..r {
+            if diag_scale[j] == 0.0 {
+                continue;
+            }
+            scaled_data[i * r + j] = sym.get(i, j).unwrap_or(0.0) / (diag_scale[i] * diag_scale[j]);
+        }
+    }
+    let scaled = DenseMatrix::from_row_major(r, r, scaled_data)?;
+    let scaled_inv = if let Ok(chol) = cholesky(&scaled)
+        && let Ok(inv) = chol.inverse()
+    {
+        inv
+    } else {
+        let eig = sym_eigen(&scaled)?;
+        let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+        let tol = 1e-12 * max_ev.max(1e-30);
+        let mut inv_data = vec![0.0_f64; r * r];
+        for (k, &ev) in eig.eigenvalues.iter().enumerate() {
+            if ev <= tol {
+                continue;
+            }
+            let inv_ev = 1.0 / ev;
+            for i in 0..r {
+                let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
+                for j in i..r {
+                    let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
+                    let delta = qi * qj * inv_ev;
+                    inv_data[i * r + j] += delta;
+                    if i != j {
+                        inv_data[j * r + i] += delta;
+                    }
                 }
             }
+        }
+        DenseMatrix::from_row_major(r, r, inv_data)?
+    };
+
+    let mut inv_data = vec![0.0_f64; r * r];
+    for i in 0..r {
+        if diag_scale[i] == 0.0 {
+            continue;
+        }
+        for j in 0..r {
+            if diag_scale[j] == 0.0 {
+                continue;
+            }
+            inv_data[i * r + j] = scaled_inv.get(i, j).unwrap_or(0.0) / (diag_scale[i] * diag_scale[j]);
         }
     }
     Ok(DenseMatrix::from_row_major(r, r, inv_data)?)
@@ -162,30 +202,41 @@ pub(in crate::anova) fn ri_precompute_clusters(x: &DenseMatrix, y: &[f64], clust
     let mut clusters = Vec::with_capacity(grouped.len());
     for rows in grouped.into_values() {
         let m_c = rows.len() as f64;
-        let mut sum_y = 0.0_f64;
-        let mut yy = 0.0_f64;
-        let mut sum_x = vec![0.0_f64; p];
-        let mut xy = vec![0.0_f64; p];
-        let mut xx = vec![0.0_f64; p * p];
-        for r in rows {
-            let yr = y[r];
-            sum_y += yr;
-            yy += yr * yr;
+        let mut sum_y = NeumaierSum::new();
+        let mut sum_x = vec![NeumaierSum::new(); p];
+        for &r in &rows {
+            sum_y.add(y[r]);
             for j in 0..p {
-                let xrj = x.get(r, j).unwrap_or(0.0);
-                sum_x[j] += xrj;
-                xy[j] += xrj * yr;
+                sum_x[j].add(x.get(r, j).unwrap_or(0.0));
+            }
+        }
+        let y_bar = sum_y.total() / m_c;
+        let x_bar: Vec<f64> = sum_x.iter().map(|s| s.total() / m_c).collect();
+
+        let mut xy_within = vec![0.0_f64; p];
+        let mut xx_within = vec![0.0_f64; p * p];
+        let mut within_rows = Vec::with_capacity(rows.len());
+        for r in rows {
+            let dy = y[r] - y_bar;
+            let mut dx = Vec::with_capacity(p);
+            for j in 0..p {
+                dx.push(x.get(r, j).unwrap_or(0.0) - x_bar[j]);
+            }
+            for j in 0..p {
+                let dxj = dx[j];
+                xy_within[j] += dxj * dy;
                 for k in j..p {
-                    xx[j * p + k] += xrj * x.get(r, k).unwrap_or(0.0);
+                    xx_within[j * p + k] += dxj * dx[k];
                 }
             }
+            within_rows.push((dx, dy));
         }
         for j in 0..p {
             for k in 0..j {
-                xx[j * p + k] = xx[k * p + j];
+                xx_within[j * p + k] = xx_within[k * p + j];
             }
         }
-        clusters.push(RiClusterStats { m_c, sum_y, yy, sum_x, xy, xx });
+        clusters.push(RiClusterStats { m_c, y_bar, x_bar, xy_within, xx_within, within_rows });
     }
     clusters
 }
@@ -196,17 +247,19 @@ pub(in crate::anova) fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n
     let tau = tau_raw.max(0.0);
     let mut xtvx = vec![0.0_f64; p * p];
     let mut xtvy = vec![0.0_f64; p];
-    let mut ytvy = 0.0_f64;
     let mut ln_det_v = 0.0_f64;
 
+    // Orthogonal within/between decomposition avoids catastrophic cancellation in V_c^{-1} = I - (tau / (1 + m_c * tau)) 1 1^T
+    // when cluster means dominate within-cluster spread and tau is very large.
     for cl in clusters {
-        let gamma = tau / (1.0 + cl.m_c * tau);
-        ln_det_v += (1.0 + cl.m_c * tau).ln();
-        ytvy += cl.yy - gamma * cl.sum_y * cl.sum_y;
+        let factor = 1.0 + cl.m_c * tau;
+        let a_c = 1.0 / factor;
+        let w_bet = cl.m_c * a_c;
+        ln_det_v += factor.ln();
         for r_row in 0..p {
-            xtvy[r_row] += cl.xy[r_row] - gamma * cl.sum_x[r_row] * cl.sum_y;
+            xtvy[r_row] += cl.xy_within[r_row] + w_bet * cl.x_bar[r_row] * cl.y_bar;
             for c_col in r_row..p {
-                xtvx[r_row * p + c_col] += cl.xx[r_row * p + c_col] - gamma * cl.sum_x[r_row] * cl.sum_x[c_col];
+                xtvx[r_row * p + c_col] += cl.xx_within[r_row * p + c_col] + w_bet * cl.x_bar[r_row] * cl.x_bar[c_col];
             }
         }
     }
@@ -220,8 +273,20 @@ pub(in crate::anova) fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n
     let ln_det_xtvx = chol_x.ln_det();
     let xtvx_inv = chol_x.inverse()?;
     let beta = chol_x.solve(&xtvy)?;
-    let quad_b: f64 = beta.iter().zip(xtvy.iter()).map(|(&b, &rhs)| b * rhs).sum();
-    let rss = (ytvy - quad_b).max(1e-30);
+
+    let mut rss_acc = NeumaierSum::new();
+    for cl in clusters {
+        let a_c = 1.0 / (1.0 + cl.m_c * tau);
+        let xb: f64 = cl.x_bar.iter().zip(beta.iter()).map(|(&x, &b)| x * b).sum();
+        let r_bar = cl.y_bar - xb;
+        rss_acc.add(cl.m_c * a_c * r_bar * r_bar);
+        for (dx, dy) in &cl.within_rows {
+            let dxb: f64 = dx.iter().zip(beta.iter()).map(|(&x, &b)| x * b).sum();
+            let r_in = *dy - dxb;
+            rss_acc.add(r_in * r_in);
+        }
+    }
+    let rss = rss_acc.total().max(1e-30);
     let sigma2_e = rss / n_minus_p;
     let ll = -0.5 * (n_minus_p * sigma2_e.ln() + ln_det_v + ln_det_xtvx + n_minus_p);
     Ok((ll, sigma2_e, xtvx_inv, beta))
@@ -248,21 +313,24 @@ pub(in crate::anova) fn ri_build_fisher_mats(
         let a_c = 1.0 / (1.0 + cl.m_c * tau);
         let a2 = a_c * a_c;
         let a3 = a2 * a_c;
-        let c_m0 = (1.0 - a2) / cl.m_c;
-        let c_q00 = (1.0 - a3) / cl.m_c;
+        let w_m0 = cl.m_c * a2;
+        let w_m1 = cl.m_c * cl.m_c * a2;
+        let w_q00 = cl.m_c * a3;
+        let w_q01 = cl.m_c * cl.m_c * a3;
+        let w_q11 = w_q01 * cl.m_c;
         sum_a2 += a2;
         sum_ma2 += cl.m_c * a2;
         sum_m2a2 += cl.m_c * cl.m_c * a2;
         for r in 0..p {
             for c in r..p {
                 let idx = r * p + c;
-                let xx_rc = cl.xx[idx];
-                let xplus_rc = cl.sum_x[r] * cl.sum_x[c];
-                m0[idx] += xx_rc - c_m0 * xplus_rc;
-                m1[idx] += a2 * xplus_rc;
-                q00[idx] += xx_rc - c_q00 * xplus_rc;
-                q01[idx] += a3 * xplus_rc;
-                q11[idx] += cl.m_c * a3 * xplus_rc;
+                let xx_in = cl.xx_within[idx];
+                let xbar_rc = cl.x_bar[r] * cl.x_bar[c];
+                m0[idx] += xx_in + w_m0 * xbar_rc;
+                m1[idx] += w_m1 * xbar_rc;
+                q00[idx] += xx_in + w_q00 * xbar_rc;
+                q01[idx] += w_q01 * xbar_rc;
+                q11[idx] += w_q11 * xbar_rc;
             }
         }
     }
@@ -601,12 +669,14 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     let (_, zero_eval) = eval_u(0.0)?;
     let ll_zero = zero_eval.0;
 
-    // Coarse search on u = ln(1 + tau) in [0, 12] + fine search in [0, 0.25].
+    // Coarse search on u = ln(1 + tau) in [0, REML_LOG1P_TAU_MAX] + fine search in [0, 0.25].
+    let n_coarse = 144_usize;
+    let coarse_step = REML_LOG1P_TAU_MAX / (n_coarse as f64);
     let mut best_u = 0.0_f64;
     let mut best_ll = ll_zero;
-    let mut best_step = 12.0 / 80.0;
-    for i in 1..=80 {
-        let u = (i as f64) * (12.0 / 80.0);
+    let mut best_step = coarse_step;
+    for i in 1..=n_coarse {
+        let u = (i as f64) * coarse_step;
         if let Ok((_, (ll, _, _, _))) = eval_u(u)
             && ll > best_ll
         {
@@ -626,13 +696,13 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     }
 
     let mut a_u = (best_u - best_step).max(0.0);
-    let mut b_u = (best_u + best_step).min(12.0);
+    let mut b_u = (best_u + best_step).min(REML_LOG1P_TAU_MAX);
     let phi_gold = 0.5 * (5.0_f64.sqrt() - 1.0);
     let mut c_u = b_u - phi_gold * (b_u - a_u);
     let mut d_u = a_u + phi_gold * (b_u - a_u);
     let mut f_c = eval_u(c_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
     let mut f_d = eval_u(d_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
-    for _ in 0..65 {
+    for _ in 0..80 {
         if f_c < f_d {
             a_u = c_u;
             c_u = d_u;
@@ -649,13 +719,16 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
     }
     let cand_u = 0.5 * (a_u + b_u);
     let (cand_tau, cand_eval) = eval_u(cand_u)?;
-    let (tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
-        (cand_tau, cand_eval)
+    let (u_hat, tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
+        (cand_u, cand_tau, cand_eval)
     } else if best_ll > ll_zero + 1e-12 {
-        eval_u(best_u)?
+        (best_u, best_u.exp_m1().max(0.0), eval_u(best_u)?.1)
     } else {
-        (0.0, zero_eval)
+        (0.0, 0.0, zero_eval)
     };
+    let hit_upper_bound = u_hat >= REML_LOG1P_TAU_MAX - 1e-4;
+    let at_boundary = tau_hat == 0.0 || hit_upper_bound;
+    let converged = !hit_upper_bound && (b_u - a_u).abs() <= 1e-8 && opt_ll.is_finite();
 
     let lrt_chi2 = (2.0 * (opt_ll - ll_zero)).max(0.0);
     let lrt_p = if tau_hat > 0.0 && lrt_chi2 > 0.0 { 0.5 * chi2_sf(lrt_chi2, 1.0)? } else { 1.0 };
@@ -681,6 +754,8 @@ pub(in crate::anova) fn fit_random_intercept_reml_with_method_and_core(
         fixed_terms,
         satterthwaite_df,
         kenward_roger_df,
+        converged,
+        at_boundary,
     };
     Ok((res, core))
 }

@@ -22,7 +22,8 @@ use crate::anova::sheet::one_way::{
     RemlEffectDesign, build_reml_effect_design, emit_multi_vc_rm_reml, emit_random_intercept_reml, emit_unstructured_rm_reml,
 };
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, resolve_selected_indices, sanitize_result_sheet_floats,
+    build_tab, checklist_item, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, sanitize_result_sheet_floats,
+    try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 
@@ -33,14 +34,17 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs, post_hoc, aux_tabs) = match &sheet.archetype {
+    let (mut result, obs, post_hoc, aux_tabs, estimator_note) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => {
             let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs)
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
         }
         TableArchetype::MultipleVariables(mv) => {
+            if !spec.selected_data_sets.is_empty() {
+                let _ = try_resolve_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
+            }
             let (res, obs, model) = run_multifactor_mv(mv, fac_spec)?;
-            (res, obs, FactorialPostHocContext::Ols(model), Vec::new())
+            (res, obs, FactorialPostHocContext::Ols(model), Vec::new(), None)
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -94,7 +98,11 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     rows.push(r_tot);
 
     let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
-    out.tabs.push(build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows));
+    let mut main_tab = build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows);
+    if let Some(note) = estimator_note {
+        main_tab.footnotes.push(note);
+    }
+    out.tabs.push(main_tab);
     out.tabs.extend(aux_tabs);
 
     run_factorial_multiplicity(&mut out, &obs, &post_hoc, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
@@ -117,15 +125,12 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     Ok(out)
 }
 
-pub(in crate::anova) fn grouped_row_levels(grouped: &curvebook_doc::GroupedTable, n_rows: usize) -> Vec<String> {
-    (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
-}
-
 pub(in crate::anova) struct GroupedFactorialOutcome {
     pub(in crate::anova) result: FactorialAnovaResult,
     pub(in crate::anova) observations: FactorialObservations,
     pub(in crate::anova) post_hoc: FactorialPostHocContext,
     pub(in crate::anova) aux_tabs: Vec<ResultTab>,
+    pub(in crate::anova) estimator_note: Option<String>,
 }
 
 pub(in crate::anova) fn build_rm_sphericity_tab(
@@ -222,6 +227,46 @@ pub(in crate::anova) fn push_rm_sphericity_outputs(
     build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt)
 }
 
+fn active_grouped_rows(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize]) -> Vec<usize> {
+    (0..grouped.row_count()).filter(|&r| selected_cols.iter().any(|&c| !grouped.active_replicates(r, c).is_empty())).collect()
+}
+
+fn active_grouped_cols(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize], active_rows: &[usize]) -> Vec<usize> {
+    selected_cols.iter().copied().filter(|&c| active_rows.iter().any(|&r| !grouped.active_replicates(r, c).is_empty())).collect()
+}
+
+fn active_grouped_subs(grouped: &curvebook_doc::GroupedTable, active_rows: &[usize], active_cols: &[usize], n_subs: usize) -> Vec<usize> {
+    (0..n_subs)
+        .filter(|&s| {
+            active_rows.iter().any(|&r| active_cols.iter().any(|&c| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_some()))
+        })
+        .collect()
+}
+
+fn grouped_row_levels_for(grouped: &curvebook_doc::GroupedTable, active_rows: &[usize]) -> Vec<String> {
+    active_rows.iter().map(|&r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
+}
+
+fn count_rm_active_cells(
+    grouped: &curvebook_doc::GroupedTable,
+    active_rows: &[usize],
+    active_cols: &[usize],
+    active_subs: &[usize],
+) -> (usize, usize) {
+    let total = active_rows.len() * active_cols.len() * active_subs.len();
+    let mut observed = 0_usize;
+    for &r in active_rows {
+        for &c in active_cols {
+            for &s in active_subs {
+                if grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_some() {
+                    observed += 1;
+                }
+            }
+        }
+    }
+    (observed, total)
+}
+
 pub(in crate::anova) fn run_grouped_factorial(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
@@ -232,40 +277,158 @@ pub(in crate::anova) fn run_grouped_factorial(
     if grouped.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
-    let n_rows = grouped.row_count();
-    let selected_cols = resolve_selected_indices(selected, grouped.data_sets.len());
-    let n_cols = selected_cols.len();
-    if fac_spec.three_way && n_cols != 4 {
-        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
+    let selected_cols = try_resolve_selected_indices(selected, grouped.data_sets.len())?;
+    if fac_spec.three_way && selected_cols.len() != 4 {
+        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: selected_cols.len() as f64 });
     }
-    if n_cols < 2 {
-        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: n_cols });
+    if selected_cols.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: selected_cols.len() });
     }
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
 
-    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
-    if !fac_spec.three_way && fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
-        let has_missing_selected = (0..n_rows).any(|r| {
-            selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
+    // Compact unobserved, blank, or excluded row/column factor levels before effect coding (#30).
+    let active_rows = active_grouped_rows(grouped, &selected_cols);
+    if active_rows.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+
+    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
+    if fac_spec.three_way && selected_cols.len() == 4 {
+        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+            let active_subs = active_grouped_subs(grouped, &active_rows, &selected_cols, n_subs);
+            if active_subs.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
+            let (observed_cells, total_cells) = count_rm_active_cells(grouped, &active_rows, &selected_cols, &active_subs);
+            let has_missing_selected = observed_cells < total_cells;
+            if has_missing_selected
+                && !fac_spec.fit_reml_on_missing
+                && fac_spec.residual_covariance != ResidualCovariance::Unstructured
+                && !fac_spec.mixed_effects_reml
+            {
+                return Err(StatsError::InsufficientSampleSize {
+                    context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                    required: total_cells,
+                    actual: observed_cells,
+                });
+            }
+            return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt);
+        }
+        let grouping = grouped.three_way_grouping.as_ref();
+        let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
+        let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
+        let f3_name = grouped.row_factor_title.clone();
+        let raw_f1 = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+        let raw_f2 = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+        let f3_levels = grouped_row_levels_for(grouped, &active_rows);
+
+        let mut raw_obs = Vec::new();
+        let mut obs_a = [false; 2];
+        let mut obs_b = [false; 2];
+        for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+                let l1 = c_pos / 2;
+                let l2 = c_pos % 2;
+                for y in grouped.active_replicates(orig_r, orig_c) {
+                    obs_a[l1] = true;
+                    obs_b[l2] = true;
+                    raw_obs.push((l1, l2, r_pos, y));
+                }
+            }
+        }
+        let (f1_levels, l1_remap) = compact_binary_levels(&raw_f1, &obs_a);
+        let (f2_levels, l2_remap) = compact_binary_levels(&raw_f2, &obs_b);
+        let obs = raw_obs.into_iter().map(|(l1, l2, r_pos, y)| (vec![l1_remap[l1], l2_remap[l2], r_pos], y)).collect();
+        let data =
+            FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
+        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
+        return Ok(GroupedFactorialOutcome {
+            result: res,
+            observations: data,
+            post_hoc: FactorialPostHocContext::Ols(model),
+            aux_tabs: Vec::new(),
+            estimator_note: Some(String::from("Estimator: Ordinary least-squares three-way factorial ANOVA.")),
         });
+    }
+
+    let active_cols = active_grouped_cols(grouped, &selected_cols, &active_rows);
+    if active_cols.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    if active_cols.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: active_cols.len() });
+    }
+
+    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
+    if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+        let active_subs = active_grouped_subs(grouped, &active_rows, &active_cols, n_subs);
+        if active_subs.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let (observed_cells, total_cells) = count_rm_active_cells(grouped, &active_rows, &active_cols, &active_subs);
+        let has_missing_selected = observed_cells < total_cells;
+        if has_missing_selected
+            && !fac_spec.fit_reml_on_missing
+            && fac_spec.residual_covariance != ResidualCovariance::Unstructured
+            && !fac_spec.mixed_effects_reml
+        {
+            return Err(StatsError::InsufficientSampleSize {
+                context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                required: total_cells,
+                actual: observed_cells,
+            });
+        }
         if (has_missing_selected && fac_spec.fit_reml_on_missing)
             || fac_spec.residual_covariance == ResidualCovariance::Unstructured
             || fac_spec.mixed_effects_reml
         {
-            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
+            let dropped_tp_labels = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
+                match fac_spec.repeated_measures {
+                    RepeatedMeasuresDesign::ColumnFactorMatched => {
+                        selected_cols.iter().filter(|c| !active_cols.contains(c)).map(|&c| grouped.data_sets[c].title.clone()).collect()
+                    }
+                    RepeatedMeasuresDesign::RowFactorMatched => (0..grouped.row_count())
+                        .filter(|r| !active_rows.contains(r))
+                        .map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1)))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            return run_rm_grouped_reml(
+                grouped,
+                out,
+                &active_cols,
+                &active_rows,
+                &active_subs,
+                fac_spec,
+                has_missing_selected,
+                &dropped_tp_labels,
+                p_fmt,
+            );
         }
-        let mut subject_data = vec![vec![vec![0.0_f64; n_cols]; n_rows]; n_subs];
-        let mut obs = Vec::with_capacity(n_subs * n_rows * n_cols);
-        for (s, subj) in subject_data.iter_mut().enumerate() {
-            for (r, row_vec) in subj.iter_mut().enumerate() {
-                for (c_pos, (&orig_c, slot)) in selected_cols.iter().zip(row_vec.iter_mut()).enumerate() {
-                    let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
-                        return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, true, p_fmt);
+
+        let n_eff_rows = active_rows.len();
+        let n_eff_cols = active_cols.len();
+        let n_eff_subs = active_subs.len();
+        let mut subject_data = vec![vec![vec![0.0_f64; n_eff_cols]; n_eff_rows]; n_eff_subs];
+        let mut obs = Vec::with_capacity(n_eff_subs * n_eff_rows * n_eff_cols);
+        for (s_pos, (&orig_s, subj)) in active_subs.iter().zip(subject_data.iter_mut()).enumerate() {
+            let _ = s_pos;
+            for (&orig_r, (r_pos, row_vec)) in active_rows.iter().zip(subj.iter_mut().enumerate()) {
+                for (&orig_c, (c_pos, slot)) in active_cols.iter().zip(row_vec.iter_mut().enumerate()) {
+                    let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
+                        return Err(StatsError::InsufficientSampleSize {
+                            context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                            required: total_cells,
+                            actual: observed_cells,
+                        });
                     };
                     *slot = v;
-                    obs.push((vec![r, c_pos], v));
+                    obs.push((vec![r_pos, c_pos], v));
                 }
             }
         }
@@ -277,9 +440,19 @@ pub(in crate::anova) fn run_grouped_factorial(
             RmSphericityCorrection::None,
         )?;
         let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt)?;
+        let estimator_desc = "Classical balanced repeated-measures ANOVA (OLS)";
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(String::from(estimator_desc)),
+            "All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA.",
+        ));
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
-            factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
+            factor_levels: vec![
+                grouped_row_levels_for(grouped, &active_rows),
+                active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect(),
+            ],
             rows: obs,
         };
         return Ok(GroupedFactorialOutcome {
@@ -287,49 +460,18 @@ pub(in crate::anova) fn run_grouped_factorial(
             observations: data,
             post_hoc: FactorialPostHocContext::RmBalanced(rm_post_hoc),
             aux_tabs: sph_tab.into_iter().collect(),
+            estimator_note: Some(format!("Estimator: {estimator_desc}.")),
         });
     }
 
-    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
-    if fac_spec.three_way && n_cols == 4 {
-        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
-            let has_missing_selected = (0..n_rows).any(|r| {
-                selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
-            });
-            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
-        }
-        let grouping = grouped.three_way_grouping.as_ref();
-        let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
-        let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
-        let f3_name = grouped.row_factor_title.clone();
-        let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
-        let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
-        let f3_levels = grouped_row_levels(grouped, n_rows);
-
-        let mut obs = Vec::new();
-        for r in 0..n_rows {
-            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-                let l1 = c_pos / 2;
-                let l2 = c_pos % 2;
-                for y in grouped.active_replicates(r, orig_c) {
-                    obs.push((vec![l1, l2, r], y));
-                }
-            }
-        }
-        let data =
-            FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
-        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
-        return Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() });
-    }
-
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
-    let row_levels = grouped_row_levels(grouped, n_rows);
-    let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+    let row_levels = grouped_row_levels_for(grouped, &active_rows);
+    let col_levels: Vec<String> = active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
     let mut obs = Vec::new();
-    for r in 0..n_rows {
-        for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-            for y in grouped.active_replicates(r, orig_c) {
-                obs.push((vec![r, c_pos], y));
+    for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+        for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+            for y in grouped.active_replicates(orig_r, orig_c) {
+                obs.push((vec![r_pos, c_pos], y));
             }
         }
     }
@@ -339,7 +481,27 @@ pub(in crate::anova) fn run_grouped_factorial(
         rows: obs,
     };
     let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
-    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() })
+    Ok(GroupedFactorialOutcome {
+        result: res,
+        observations: data,
+        post_hoc: FactorialPostHocContext::Ols(model),
+        aux_tabs: Vec::new(),
+        estimator_note: Some(String::from("Estimator: Ordinary least-squares two-way factorial ANOVA.")),
+    })
+}
+
+fn compact_binary_levels(levels: &[String], observed: &[bool; 2]) -> (Vec<String>, [usize; 2]) {
+    let mut out = Vec::new();
+    let mut remap = [0_usize; 2];
+    for i in 0..2 {
+        if observed[i] {
+            remap[i] = out.len();
+            if let Some(lbl) = levels.get(i) {
+                out.push(lbl.clone());
+            }
+        }
+    }
+    (out, remap)
 }
 
 pub(in crate::anova) fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], satt: &[f64], kr: &[f64]) {
@@ -353,42 +515,63 @@ pub(in crate::anova) fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[Fac
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(in crate::anova) fn run_rm_grouped_reml(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
-    selected_cols: &[usize],
+    active_cols: &[usize],
+    active_rows: &[usize],
+    active_subs: &[usize],
     fac_spec: &FactorialAnovaSpec,
     has_missing: bool,
+    dropped_tp_labels: &[String],
     p_fmt: PValueFormat,
 ) -> Result<GroupedFactorialOutcome, StatsError> {
-    let n_rows = grouped.row_count();
-    let n_cols = selected_cols.len();
+    let n_rows = active_rows.len();
+    let n_cols = active_cols.len();
     if fac_spec.three_way && n_cols != 4 {
         return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
     }
-    let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
-        return Err(StatsError::RequiresRawReplicates);
-    };
     let is_three_way = fac_spec.three_way && n_cols == 4;
 
+    let mut obs_a = [false; 2];
+    let mut obs_b = [false; 2];
+    if is_three_way {
+        for &orig_r in active_rows {
+            for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+                if active_subs.iter().any(|&s| grouped.observation(orig_r, orig_c, s).and_then(|cell| cell.active_number()).is_some()) {
+                    obs_a[c_pos / 2] = true;
+                    obs_b[c_pos % 2] = true;
+                }
+            }
+        }
+    }
+    let l1_remap: [usize; 2];
+    let l2_remap: [usize; 2];
     let (factor_names, factor_levels, max_order, ab_labels) = if is_three_way {
         let grouping = grouped.three_way_grouping.as_ref();
         let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
         let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
         let f3_name = grouped.row_factor_title.clone();
-        let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
-        let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
-        let f3_levels = grouped_row_levels(grouped, n_rows);
+        let raw_f1 = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+        let raw_f2 = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+        let (f1_levels, r1) = compact_binary_levels(&raw_f1, &obs_a);
+        let (f2_levels, r2) = compact_binary_levels(&raw_f2, &obs_b);
+        l1_remap = r1;
+        l2_remap = r2;
+        let f3_levels = grouped_row_levels_for(grouped, active_rows);
         let mut ab_lbls = Vec::with_capacity(4);
-        for a_l in &f1_levels {
-            for b_l in &f2_levels {
+        for a_l in &raw_f1 {
+            for b_l in &raw_f2 {
                 ab_lbls.push(format!("{a_l} × {b_l}"));
             }
         }
         (vec![f1_name, f2_name, f3_name], vec![f1_levels, f2_levels, f3_levels], fac_spec.max_interaction_order.clamp(1, 3), ab_lbls)
     } else {
-        let row_levels = grouped_row_levels(grouped, n_rows);
-        let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+        l1_remap = [0, 1];
+        l2_remap = [0, 1];
+        let row_levels = grouped_row_levels_for(grouped, active_rows);
+        let col_levels: Vec<String> = active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
         (
             vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
             vec![row_levels, col_levels],
@@ -413,32 +596,34 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     let mut row_ids = Vec::new();
     let mut col_ids = Vec::new();
 
-    for s in 0..n_subs {
-        for r in 0..n_rows {
-            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-                let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
+    for (s_pos, &orig_s) in active_subs.iter().enumerate() {
+        for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+            for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+                let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
                     continue;
                 };
-                let cell = if is_three_way { vec![c_pos / 2, c_pos % 2, r] } else { vec![r, c_pos] };
+                let cell = if is_three_way { vec![l1_remap[c_pos / 2], l2_remap[c_pos % 2], r_pos] } else { vec![r_pos, c_pos] };
                 obs_cells.push(cell.clone());
                 obs.push((cell, v));
                 y_vec.push(v);
-                subj_ids.push(s);
-                subj_row_ids.push(s * n_rows + r);
-                subj_col_ids.push(s * n_cols + c_pos);
-                row_ids.push(r);
+                subj_ids.push(s_pos);
+                subj_row_ids.push(s_pos * n_rows + r_pos);
+                subj_col_ids.push(s_pos * n_cols + c_pos);
+                row_ids.push(r_pos);
                 col_ids.push(c_pos);
                 if is_three_way {
-                    let l1 = c_pos / 2;
-                    let l2 = c_pos % 2;
-                    id_sa.push(s * 2 + l1);
-                    id_sb.push(s * 2 + l2);
-                    id_sab.push(s * 4 + c_pos);
-                    id_sac.push((s * 2 + l1) * n_rows + r);
-                    id_sbc.push((s * 2 + l2) * n_rows + r);
-                    let sr = s * n_rows + r;
-                    id_sr_a.push(sr * 2 + l1);
-                    id_sr_b.push(sr * 2 + l2);
+                    let l1 = l1_remap[c_pos / 2];
+                    let l2 = l2_remap[c_pos % 2];
+                    let n1 = factor_levels[0].len().max(1);
+                    let n2 = factor_levels[1].len().max(1);
+                    id_sa.push(s_pos * n1 + l1);
+                    id_sb.push(s_pos * n2 + l2);
+                    id_sab.push(s_pos * n_cols + c_pos);
+                    id_sac.push((s_pos * n1 + l1) * n_rows + r_pos);
+                    id_sbc.push((s_pos * n2 + l2) * n_rows + r_pos);
+                    let sr = s_pos * n_rows + r_pos;
+                    id_sr_a.push(sr * n1 + l1);
+                    id_sr_b.push(sr * n2 + l2);
                 }
             }
         }
@@ -456,7 +641,7 @@ pub(in crate::anova) fn run_rm_grouped_reml(
     }
     let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
 
-    let (fixed_terms, sigma2_e, df_residual, reml_core) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
+    let (fixed_terms, sigma2_e, df_residual, reml_core, estimator_desc) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
         let (cluster_ids, tp_ids, tp_labels): (&[usize], Vec<usize>, Vec<String>) = if is_three_way {
             match fac_spec.repeated_measures {
                 RepeatedMeasuresDesign::RowFactorMatched => (&id_sab, row_ids.clone(), factor_levels[2].clone()),
@@ -488,7 +673,31 @@ pub(in crate::anova) fn run_rm_grouped_reml(
                 }
             }
         };
-        emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?
+        let (terms, ms_e, df_r, core) =
+            emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?;
+        if !dropped_tp_labels.is_empty() {
+            let note = format!("Excluded all-missing timepoint(s): {}.", dropped_tp_labels.join(", "));
+            for tab in out.tabs.iter_mut().filter(|t| t.id == "unstructured-reml-covariance" || t.id == "unstructured-reml-correlation") {
+                tab.footnotes.push(note.clone());
+            }
+            if let Some(item) = out.checklist.iter_mut().find(|c| c.assumption == "Unstructured covariance REML") {
+                item.status = ChecklistStatus::Warn;
+                item.explanation.push(' ');
+                item.explanation.push_str(&note);
+            }
+        }
+        let df_lbl = match fac_spec.df_method {
+            MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+            MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+        };
+        let desc = format!("Linear mixed-effects REML (Unstructured, {df_lbl} df)");
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(desc.clone()),
+            format!("Fitted unstructured covariance REML with {df_lbl} degrees of freedom."),
+        ));
+        (terms, ms_e, df_r, core, desc)
     } else {
         let (fixed_terms, sigma2_e, reml_ll, icc_subj, core) = if is_three_way {
             match fac_spec.repeated_measures {
@@ -579,7 +788,14 @@ pub(in crate::anova) fn run_rm_grouped_reml(
             Some(format!("ICC = {icc_subj:.3}, REML logL = {reml_ll:.2}")),
             check_desc,
         ));
-        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core)
+        let desc = format!("Linear mixed-effects REML (Compound Symmetry, {df_lbl} df)");
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(desc.clone()),
+            format!("Fitted compound-symmetry linear mixed-effects REML with {df_lbl} degrees of freedom."),
+        ));
+        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core, desc)
     };
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
@@ -614,7 +830,13 @@ pub(in crate::anova) fn run_rm_grouped_reml(
         df_method: reml_core.df_method,
         observed_cells,
     };
-    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Reml(reml_model), aux_tabs: Vec::new() })
+    Ok(GroupedFactorialOutcome {
+        result: res,
+        observations: data,
+        post_hoc: FactorialPostHocContext::Reml(reml_model),
+        aux_tabs: Vec::new(),
+        estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+    })
 }
 
 pub(in crate::anova) fn run_multifactor_mv(
@@ -669,6 +891,36 @@ pub(in crate::anova) fn run_multifactor_mv(
         }
         if valid {
             obs.push((lvls, y));
+        }
+    }
+    if obs.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    // Drop unobserved/excluded factor levels after complete-case row filtering before effect coding (#30).
+    let n_factors = factor_levels.len();
+    let mut remaps = Vec::with_capacity(n_factors);
+    for (f_pos, levels) in factor_levels.iter_mut().enumerate() {
+        let mut seen = vec![false; levels.len()];
+        for (row_lvls, _) in &obs {
+            seen[row_lvls[f_pos]] = true;
+        }
+        let mut remap = vec![0_usize; levels.len()];
+        let mut compacted = Vec::with_capacity(levels.len());
+        for (orig_idx, lvl) in levels.drain(..).enumerate() {
+            if seen[orig_idx] {
+                remap[orig_idx] = compacted.len();
+                compacted.push(lvl);
+            }
+        }
+        if compacted.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        *levels = compacted;
+        remaps.push(remap);
+    }
+    for (row_lvls, _) in &mut obs {
+        for (f_pos, lvl) in row_lvls.iter_mut().enumerate() {
+            *lvl = remaps[f_pos][*lvl];
         }
     }
     let data = FactorialObservations { factor_names, factor_levels, rows: obs };

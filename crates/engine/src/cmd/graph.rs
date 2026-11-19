@@ -593,22 +593,50 @@ struct GraphSetSeriesParams {
     #[serde(default, deserialize_with = "de_opt_usize")]
     data_set_index: Option<usize>,
     series: Option<Vec<Value>>,
+    mode: Option<String>,
+    #[serde(default, alias = "allSeries")]
+    all_series: Option<bool>,
     multivariate: Option<Value>,
     #[serde(flatten)]
     patch_fields: Map<String, Value>,
 }
 
 fn schema_graph_set_series() -> Value {
+    let series_item_schema = json!({
+        "type": "object",
+        "description": "Series patch object; optionally includes `series_index` (or `data_set_index` when targeting a bound series) plus styling fields.",
+        "properties": {
+            "series_index": nullable_schema(int_schema("Optional zero-based target series slot index within `spec.series`", Some(0), None)),
+            "data_set_index": nullable_schema(int_schema("Data set column index to bind or match against an existing series", Some(0), None)),
+        },
+        "additionalProperties": true
+    });
     obj_schema_with_aliases(
         vec![
             ("sheet_id", non_empty_str_schema("Graph sheet ID to update")),
             ("series_index", nullable_schema(int_schema("Zero-based series slot index", Some(0), None))),
             ("data_set_index", nullable_schema(int_schema("Data set column index to match against bound series", Some(0), None))),
-            ("series", nullable_schema(array_schema("Batch series patch array", json!({ "type": "object" }), None, None))),
+            ("all_series", nullable_schema(bool_schema("When true, apply the single-series patch fields to every series on the graph"))),
+            (
+                "mode",
+                nullable_schema(enum_str_schema(
+                    "Array update mode when `series` is provided: `patch` (default; patches matching series slots in place and preserves trailing series) or `replace` (replaces the full series list)",
+                    &["patch", "replace"],
+                )),
+            ),
+            (
+                "series",
+                nullable_schema(array_schema(
+                    "Batch series patch array (patches existing `spec.series` slots in place by default; pass `mode: \"replace\"` to replace the full list)",
+                    series_item_schema,
+                    None,
+                    None,
+                )),
+            ),
             ("multivariate", nullable_schema(json!({ "type": "object", "description": "Multivariate 5-channel bubble/scatter encoding" }))),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
+        vec![("sheet_id", &["id"]), ("all_series", &["allSeries"])],
         true,
     )
 }
@@ -1538,15 +1566,31 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let id = parse_sheet_id(&params.sheet_id)?;
     let mut spec = require_graph_sheet(ctx.session.document(), &id)?.spec.clone();
     let old_series = spec.series.clone();
+    let replace_mode = parse_series_update_mode(params.mode.as_deref())?;
+    let all_series = params.all_series.unwrap_or(false);
+
+    if replace_mode && params.series.is_none() {
+        return Err(EngineError::with_code(ErrorCode::BadInput, "`mode: \"replace\"` requires a `series` array parameter")
+            .with_details(json!({ "pointer": "/mode" })));
+    }
+    if all_series && (params.series.is_some() || params.series_index.is_some() || params.data_set_index.is_some()) {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            "`all_series: true` cannot be combined with `series`, `series_index`, or `data_set_index`",
+        )
+        .with_details(json!({ "pointer": "/all_series" })));
+    }
 
     if let Some(ref series_list) = params.series {
-        let mut updated_vec = Vec::with_capacity(series_list.len());
-        for (idx, item) in series_list.iter().enumerate() {
-            let mut base = spec.series.get(idx).cloned().unwrap_or_else(|| default_series_like(&spec, idx));
-            apply_single_series_patch(&mut base, item)?;
-            updated_vec.push(base);
+        apply_series_array_update(&mut spec, series_list, replace_mode)?;
+    } else if all_series {
+        if spec.series.is_empty() {
+            return Err(EngineError::with_code(ErrorCode::Conflict, format!("graph `{id}` has no series configured")));
         }
-        spec.series = updated_vec;
+        let patch_val = Value::Object(params.patch_fields);
+        for s in &mut spec.series {
+            apply_single_series_patch(s, &patch_val)?;
+        }
     } else if params.series_index.is_some() || params.data_set_index.is_some() || has_series_patch_keys(&params.patch_fields) {
         let target_idx = resolve_series_target_index(&spec, params.series_index, params.data_set_index)?;
         let patch_val = Value::Object(params.patch_fields);
@@ -1571,6 +1615,100 @@ fn run_graph_set_series(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
         format!("updated series styling on `{id}`"),
         json!({ "sheet_id": id.as_str(), "series_count": count }),
     ))
+}
+
+fn parse_series_update_mode(raw: Option<&str>) -> Result<bool, EngineError> {
+    let Some(raw_mode) = raw else {
+        return Ok(false);
+    };
+    let norm = raw_mode.trim().to_ascii_lowercase();
+    match norm.as_str() {
+        "patch" | "merge" => Ok(false),
+        "replace" => Ok(true),
+        _ => Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid `graph.setSeries` mode `{raw_mode}`; expected `patch` or `replace`"))
+            .with_details(json!({ "pointer": "/mode" }))),
+    }
+}
+
+fn parse_item_usize_index(item: &Value, key: &str, pos: usize) -> Result<Option<usize>, EngineError> {
+    let Some(raw) = item.get(key) else {
+        return Ok(None);
+    };
+    if raw.is_null() {
+        return Ok(None);
+    }
+    let val = raw.as_u64().ok_or_else(|| {
+        EngineError::with_code(ErrorCode::BadInput, format!("`series[{pos}].{key}` must be a non-negative integer"))
+            .with_details(json!({ "pointer": format!("/series/{pos}/{key}") }))
+    })?;
+    let idx = usize::try_from(val).map_err(|_| {
+        EngineError::with_code(ErrorCode::BadInput, format!("`series[{pos}].{key}` is out of range"))
+            .with_details(json!({ "pointer": format!("/series/{pos}/{key}") }))
+    })?;
+    Ok(Some(idx))
+}
+
+fn apply_series_array_update(spec: &mut GraphSpec, series_list: &[Value], replace_mode: bool) -> Result<(), EngineError> {
+    if replace_mode {
+        let mut updated_vec = Vec::with_capacity(series_list.len());
+        for (pos, item) in series_list.iter().enumerate() {
+            if !item.is_object() {
+                return Err(EngineError::with_code(ErrorCode::BadInput, format!("`series[{pos}]` must be an object"))
+                    .with_details(json!({ "pointer": format!("/series/{pos}") })));
+            }
+            let src_idx = parse_item_usize_index(item, "series_index", pos)?.unwrap_or(pos);
+            let mut base = spec.series.get(src_idx).cloned().unwrap_or_else(|| default_series_like(spec, src_idx));
+            apply_single_series_patch(&mut base, item)?;
+            updated_vec.push(base);
+        }
+        spec.series = updated_vec;
+        return Ok(());
+    }
+
+    let existing_len = spec.series.len();
+    if series_list.len() > existing_len {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!(
+                "`series` patch array has {} entry/entries, which exceeds the graph's {existing_len} existing series; pass `mode: \"replace\"` to replace the series list",
+                series_list.len()
+            ),
+        )
+        .with_details(json!({ "pointer": "/series", "patch_len": series_list.len(), "series_count": existing_len })));
+    }
+
+    for (pos, item) in series_list.iter().enumerate() {
+        if !item.is_object() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, format!("`series[{pos}]` must be an object"))
+                .with_details(json!({ "pointer": format!("/series/{pos}") })));
+        }
+        let target_idx = if let Some(explicit_idx) = parse_item_usize_index(item, "series_index", pos)? {
+            if explicit_idx >= existing_len {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("`series[{pos}].series_index` ({explicit_idx}) out of bounds ({existing_len} series)"),
+                )
+                .with_details(json!({ "pointer": format!("/series/{pos}/series_index") })));
+            }
+            explicit_idx
+        } else if series_list.len() < existing_len
+            && let Some(ds_idx) = parse_item_usize_index(item, "data_set_index", pos)?
+        {
+            spec.series.iter().position(|s| s.data_set_index == ds_idx).ok_or_else(|| {
+                EngineError::with_code(
+                    ErrorCode::BadInput,
+                    format!("`series[{pos}].data_set_index` ({ds_idx}) does not match any existing series on this graph"),
+                )
+                .with_details(json!({ "pointer": format!("/series/{pos}/data_set_index") }))
+            })?
+        } else {
+            pos
+        };
+        if let Some(slot) = spec.series.get_mut(target_idx) {
+            apply_single_series_patch(slot, item)?;
+        }
+    }
+    Ok(())
 }
 
 fn run_graph_set_regression_overlay(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {

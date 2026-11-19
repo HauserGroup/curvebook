@@ -40,6 +40,18 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
     locals: &mut [Option<f64>],
     stack: &mut Vec<f64>,
 ) -> Option<f64> {
+    eval_bytecode_counted(prog, x, y, params, ds_idx, locals, stack).0
+}
+
+pub(in crate::dsl) fn eval_bytecode_counted(
+    prog: &CompiledProgram,
+    x: &[f64],
+    y: f64,
+    params: &[f64],
+    ds_idx: usize,
+    locals: &mut [Option<f64>],
+    stack: &mut Vec<f64>,
+) -> (Option<f64>, usize) {
     stack.clear();
     let mut ip = 0_usize;
     let mut steps = 0_usize;
@@ -47,24 +59,44 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
     while ip < prog.code.len() {
         steps += 1;
         if steps > MAX_VM_STEPS {
-            return None;
+            return (None, steps);
         }
         match prog.code[ip] {
             OpCode::PushConst(v) => stack.push(v),
             OpCode::LoadPredictor(idx) => {
-                stack.push(*x.get(idx)?);
+                let Some(&val) = x.get(idx) else {
+                    return (None, steps);
+                };
+                stack.push(val);
             }
             OpCode::LoadY => stack.push(y),
             OpCode::LoadDatasetIndex => stack.push(ds_idx as f64),
-            OpCode::LoadParam(idx) => stack.push(*params.get(idx)?),
-            OpCode::LoadLocal(slot) => stack.push(locals.get(slot).copied().flatten()?),
+            OpCode::LoadParam(idx) => {
+                let Some(&val) = params.get(idx) else {
+                    return (None, steps);
+                };
+                stack.push(val);
+            }
+            OpCode::LoadLocal(slot) => {
+                let Some(val) = locals.get(slot).copied().flatten() else {
+                    return (None, steps);
+                };
+                stack.push(val);
+            }
             OpCode::StoreLocal(slot) => {
-                let v = stack.pop()?;
-                *locals.get_mut(slot)? = Some(v);
+                let (Some(v), Some(dst)) = (stack.pop(), locals.get_mut(slot)) else {
+                    return (None, steps);
+                };
+                *dst = Some(v);
             }
             OpCode::Unary(kind) => {
-                let v = stack.pop()?;
-                stack.push(match kind {
+                let Some(v) = stack.pop() else {
+                    return (None, steps);
+                };
+                if v.is_nan() {
+                    return (None, steps);
+                }
+                let out = match kind {
                     UnaryKind::Neg => -v,
                     UnaryKind::Not => {
                         if v == 0.0 {
@@ -73,43 +105,26 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
                             0.0
                         }
                     }
-                });
+                };
+                stack.push(out);
             }
             OpCode::Binary(kind) => {
-                let b = stack.pop()?;
-                let a = stack.pop()?;
-                let v = match kind {
-                    BinaryKind::Add => a + b,
-                    BinaryKind::Sub => a - b,
-                    BinaryKind::Mul => a * b,
-                    BinaryKind::Div => {
-                        if b == 0.0 {
-                            return None;
-                        }
-                        a / b
-                    }
-                    BinaryKind::Rem => {
-                        if b == 0.0 {
-                            return None;
-                        }
-                        a % b
-                    }
-                    BinaryKind::Pow => a.powf(b),
-                    BinaryKind::Eq => f64::from((a - b).abs() == 0.0),
-                    BinaryKind::Ne => f64::from(a != b),
-                    BinaryKind::Lt => f64::from(a < b),
-                    BinaryKind::Le => f64::from(a <= b),
-                    BinaryKind::Gt => f64::from(a > b),
-                    BinaryKind::Ge => f64::from(a >= b),
+                let (Some(b), Some(a)) = (stack.pop(), stack.pop()) else {
+                    return (None, steps);
+                };
+                let Some(v) = eval_binary_op(kind, a, b) else {
+                    return (None, steps);
                 };
                 stack.push(v);
             }
             OpCode::CallBuiltin(bf, arity) => {
                 if stack.len() < arity {
-                    return None;
+                    return (None, steps);
                 }
                 let base = stack.len() - arity;
-                let res = eval_builtin(bf, &stack[base..])?;
+                let Some(res) = eval_builtin(bf, &stack[base..]) else {
+                    return (None, steps);
+                };
                 stack.truncate(base);
                 stack.push(res);
             }
@@ -118,24 +133,93 @@ pub(in crate::dsl) fn eval_bytecode_with_bufs(
                 continue;
             }
             OpCode::JumpIfZero(target) => {
-                let cond = stack.pop()?;
-                if cond == 0.0 || !cond.is_finite() {
+                let Some(cond) = stack.pop() else {
+                    return (None, steps);
+                };
+                if cond.is_nan() {
+                    return (None, steps);
+                }
+                if cond == 0.0 {
                     ip = target;
                     continue;
                 }
             }
             OpCode::Pop => {
-                stack.pop()?;
+                if stack.pop().is_none() {
+                    return (None, steps);
+                }
             }
             OpCode::Halt => break,
         }
         ip += 1;
     }
-    let out = stack.pop()?;
-    if out.is_finite() { Some(out) } else { None }
+    let Some(out) = stack.pop() else {
+        return (None, steps);
+    };
+    let final_val = if out.is_finite() { Some(out) } else { None };
+    (final_val, steps)
+}
+
+pub(in crate::dsl) fn eval_binary_op(kind: BinaryKind, a: f64, b: f64) -> Option<f64> {
+    if a.is_nan() || b.is_nan() {
+        return None;
+    }
+    let v = match kind {
+        BinaryKind::Add => a + b,
+        BinaryKind::Sub => a - b,
+        BinaryKind::Mul => a * b,
+        BinaryKind::Div => {
+            if b == 0.0 {
+                return None;
+            }
+            a / b
+        }
+        BinaryKind::Rem => {
+            if b == 0.0 {
+                return None;
+            }
+            a % b
+        }
+        BinaryKind::Pow => a.powf(b),
+        BinaryKind::Eq => f64::from(a == b),
+        BinaryKind::Ne => f64::from(a != b),
+        BinaryKind::Lt => f64::from(a < b),
+        BinaryKind::Le => f64::from(a <= b),
+        BinaryKind::Gt => f64::from(a > b),
+        BinaryKind::Ge => f64::from(a >= b),
+    };
+    if v.is_nan() { None } else { Some(v) }
 }
 
 pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
+    if a.iter().any(|v| v.is_nan()) {
+        return None;
+    }
+    let allow_inf = matches!(
+        bf,
+        BuiltinFn::Abs
+            | BuiltinFn::Sqrt
+            | BuiltinFn::Cbrt
+            | BuiltinFn::Exp
+            | BuiltinFn::Exp10
+            | BuiltinFn::Sinh
+            | BuiltinFn::Cosh
+            | BuiltinFn::Floor
+            | BuiltinFn::Ceil
+            | BuiltinFn::Round
+            | BuiltinFn::Trunc
+            | BuiltinFn::Sign
+            | BuiltinFn::Min
+            | BuiltinFn::Max
+            | BuiltinFn::Clamp
+            | BuiltinFn::Hypot
+            | BuiltinFn::PowFn
+            | BuiltinFn::Atan
+            | BuiltinFn::Tanh
+            | BuiltinFn::Erf
+            | BuiltinFn::Erfc
+            | BuiltinFn::NormCdf
+    );
     let val = match bf {
         BuiltinFn::Abs => a[0].abs(),
         BuiltinFn::Sqrt => {
@@ -145,32 +229,22 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
             a[0].sqrt()
         }
         BuiltinFn::Cbrt => a[0].cbrt(),
-        BuiltinFn::Exp => {
-            if a[0] > 709.0 {
-                return None;
-            }
-            a[0].exp()
-        }
-        BuiltinFn::Exp10 => {
-            if a[0] > 308.0 {
-                return None;
-            }
-            10.0_f64.powf(a[0])
-        }
+        BuiltinFn::Exp => a[0].exp(),
+        BuiltinFn::Exp10 => 10.0_f64.powf(a[0]),
         BuiltinFn::Ln => {
-            if a[0] <= 0.0 {
+            if a[0] <= 0.0 || !a[0].is_finite() {
                 return None;
             }
             a[0].ln()
         }
         BuiltinFn::Log10 => {
-            if a[0] <= 0.0 {
+            if a[0] <= 0.0 || !a[0].is_finite() {
                 return None;
             }
             a[0].log10()
         }
         BuiltinFn::Log2 => {
-            if a[0] <= 0.0 {
+            if a[0] <= 0.0 || !a[0].is_finite() {
                 return None;
             }
             a[0].log2()
@@ -193,9 +267,6 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Round => a[0].round(),
         BuiltinFn::Trunc => a[0].trunc(),
         BuiltinFn::Sign => {
-            if a[0].is_nan() {
-                return None;
-            }
             if a[0] > 0.0 {
                 1.0
             } else if a[0] < 0.0 {
@@ -204,26 +275,12 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
                 0.0
             }
         }
-        BuiltinFn::Min => {
-            if a[0].is_nan() || a[1].is_nan() {
-                return None;
-            }
-            a[0].min(a[1])
-        }
-        BuiltinFn::Max => {
-            if a[0].is_nan() || a[1].is_nan() {
-                return None;
-            }
-            a[0].max(a[1])
-        }
+        BuiltinFn::Min => a[0].min(a[1]),
+        BuiltinFn::Max => a[0].max(a[1]),
         BuiltinFn::Clamp => {
-            if a[0].is_nan() || a[1].is_nan() || a[2].is_nan() {
-                f64::NAN
-            } else {
-                let lo = a[1].min(a[2]);
-                let hi = a[1].max(a[2]);
-                if lo <= hi { a[0].clamp(lo, hi) } else { f64::NAN }
-            }
+            let lo = a[1].min(a[2]);
+            let hi = a[1].max(a[2]);
+            if lo <= hi { a[0].clamp(lo, hi) } else { return None }
         }
         BuiltinFn::Hypot => a[0].hypot(a[1]),
         BuiltinFn::PowFn => a[0].powf(a[1]),
@@ -255,5 +312,8 @@ pub(in crate::dsl) fn eval_builtin(bf: BuiltinFn, a: &[f64]) -> Option<f64> {
         BuiltinFn::Hyp2F1 => hyp2f1(a[0], a[1], a[2], a[3])?,
         BuiltinFn::ConfluentU => confluent_u(a[0], a[1], a[2])?,
     };
-    if val.is_finite() { Some(val) } else { None }
+    if val.is_nan() {
+        return None;
+    }
+    if allow_inf || val.is_finite() { Some(val) } else { None }
 }

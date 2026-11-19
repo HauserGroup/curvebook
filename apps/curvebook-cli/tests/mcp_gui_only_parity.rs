@@ -314,7 +314,9 @@ fn verify_live_attach_end_to_end(state: &mut McpServerState, workdir: &std::path
     assert!(!ui_run.is_error, "ui command failed: {ui_run:?}");
     assert_eq!(ui_run.structured_content.as_ref().and_then(|v| v.get("mutated")), Some(&json!(true)));
 
-    let opened = call(state, "open_file", json!({ "path": "live.csv", "format": "csv", "sheet_id": "live-data", "title": "LiveData" }))?;
+    let live_csv = workdir.join("live.csv");
+    let opened =
+        call(state, "open_file", json!({ "path": live_csv.display().to_string(), "format": "csv", "sheet_id": "live-data", "title": "LiveData" }))?;
     assert!(!opened.is_error, "open_file failed: {opened:?}");
     assert_eq!(opened.structured_content.as_ref().and_then(|v| v.get("mode")), Some(&json!("live_attach")));
     assert_eq!(state.session().document().total_sheet_count(), 0, "phantom local MCP session must remain untouched in live-attach mode");
@@ -356,16 +358,18 @@ fn verify_live_attach_end_to_end(state: &mut McpServerState, workdir: &std::path
     assert!(!preview.is_error, "render_preview failed: {preview:?}");
     assert!(preview.content.iter().any(|b| matches!(b, curvebook_mcp::ContentBlock::Image { mime_type, .. } if mime_type == "image/png")));
 
-    let exported = call(state, "export", json!({ "format": "csv", "sheet_id": "live-data", "path": "exported.csv" }))?;
+    let exported_csv_path = workdir.join("exported.csv");
+    let exported = call(state, "export", json!({ "format": "csv", "sheet_id": "live-data", "path": exported_csv_path.display().to_string() }))?;
     assert!(!exported.is_error, "export failed: {exported:?}");
-    let exported_csv = std::fs::read_to_string(workdir.join("exported.csv"))?;
+    let exported_csv = std::fs::read_to_string(&exported_csv_path)?;
     assert!(exported_csv.contains("GroupA") && exported_csv.contains("GroupB"), "unexpected exported CSV: {exported_csv}");
 
-    let saved = call(state, "save_file", json!({ "path": "live_project.curvebook" }))?;
+    let project_path = workdir.join("live_project.curvebook");
+    let saved = call(state, "save_file", json!({ "path": project_path.display().to_string() }))?;
     assert!(!saved.is_error, "save_file with path failed: {saved:?}");
-    assert!(workdir.join("live_project.curvebook").is_file());
+    assert!(project_path.is_file());
 
-    let reopened = call(state, "open_file", json!({ "path": "live_project.curvebook" }))?;
+    let reopened = call(state, "open_file", json!({ "path": project_path.display().to_string() }))?;
     assert!(!reopened.is_error, "reopen saved project failed: {reopened:?}");
 
     let saved_default = call(state, "save_file", json!({}))?;
@@ -398,7 +402,7 @@ fn r1_s12_09_live_attach_stream_dispatch_forwards_tools_and_resources() -> Resul
         let parsed: Value = serde_json::from_str(reply_line).map_err(|e| e.to_string())?;
         if parsed["ok"] == json!(true) { Ok(parsed["result"].clone()) } else { Err(parsed["error"].as_str().unwrap_or("control error").to_owned()) }
     });
-    state.set_workdir(Some(&workdir))?;
+    assert!(state.set_workdir(Some(&workdir)).is_err(), "combining control_port and workdir must be rejected");
 
     verify_live_attach_end_to_end(&mut state, &workdir)?;
     let _ = std::fs::remove_dir_all(&workdir);
@@ -449,7 +453,7 @@ fn r1_s12_09_live_attach_forwards_tools_and_resources() -> Result<(), Box<dyn st
     std::fs::write(workdir.join("live.csv"), "X,GroupA,GroupB\n1,10,20\n2,15,25\n")?;
 
     let mut state = McpServerState::with_control_port(port)?.with_control_token(token)?;
-    state.set_workdir(Some(&workdir))?;
+    assert!(state.set_workdir(Some(&workdir)).is_err(), "combining control_port and workdir must be rejected");
     let probe = curvebook_mcp::call_tool(&mut state, "command_run", json!({ "command_id": "ui.navigator.toggle", "params": {} }))
         .map_err(|e| format!("{e:?}"))?;
     if probe.is_error

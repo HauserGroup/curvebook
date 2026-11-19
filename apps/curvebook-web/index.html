@@ -257,7 +257,11 @@
       let activeLockDocId = "default";
       let lockChannel = null;
       let releaseCurrentWebLock = null;
+      let pendingLockAbort = null;
+      let lockGeneration = 0;
       let fallbackLockTimerId = null;
+      let fallbackRetryTimerId = null;
+      let storageListenerInstalled = false;
       let autosaveTimerId = null;
       let holdsCurrentWebLock = false;
       let documentDirty = false;
@@ -735,19 +739,33 @@
         if (!writesSucceeded) {
           rollbackStorage();
           showNotice("warning", "Local browser storage quota exceeded or restricted; state stays in memory.");
+          emitEvent({
+            kind: "confirm_local_storage",
+            writes: allowedWrites.map((entry) => entry.key),
+            removals: [],
+            succeeded: false
+          });
           return;
         }
 
+        const actuallyRemoved = new Set(removedDuringRetry.map(([k]) => k));
         for (const key of allowedRemovals) {
           if (!allowedWrites.some((entry) => entry.key === key)) {
             try {
               window.localStorage.removeItem(key);
+              actuallyRemoved.add(key);
             } catch (_rmErr) {}
           }
         }
         if (allowedWrites.some((entry) => entry.key.startsWith(AUTOSAVE_PREFIX))) {
           hasUnflushedAutosave = false;
         }
+        emitEvent({
+          kind: "confirm_local_storage",
+          writes: allowedWrites.map((entry) => entry.key),
+          removals: Array.from(actuallyRemoved),
+          succeeded: true
+        });
       }
 
       function applyReadOnlyBannerCommand(cmd) {
@@ -863,20 +881,51 @@
       }
 
       async function applyDirectorySyncCommand(cmd) {
+        const rootName = (cmd && cmd.root_name) ? String(cmd.root_name) : "workspace.curvebook.d";
         if (!activeDirectoryHandle) {
+          emitEvent({
+            kind: "confirm_directory_sync",
+            root_name: rootName,
+            written_paths: [],
+            removed_paths: [],
+            succeeded: false,
+            error: "no active directory handle selected"
+          });
           return;
         }
-        if (Array.isArray(cmd.writes)) {
-          for (const entry of cmd.writes) {
-            if (entry && entry.path && typeof entry.bytes_base64 === "string") {
-              await writePathToDirectory(activeDirectoryHandle, entry.path, base64ToBytes(entry.bytes_base64));
+        const writtenPaths = [];
+        const removedPaths = [];
+        try {
+          if (Array.isArray(cmd.writes)) {
+            for (const entry of cmd.writes) {
+              if (entry && entry.path && typeof entry.bytes_base64 === "string") {
+                await writePathToDirectory(activeDirectoryHandle, entry.path, base64ToBytes(entry.bytes_base64));
+                writtenPaths.push(entry.path);
+              }
             }
           }
-        }
-        if (Array.isArray(cmd.removals)) {
-          for (const relPath of cmd.removals) {
-            await removePathFromDirectory(activeDirectoryHandle, relPath);
+          if (Array.isArray(cmd.removals)) {
+            for (const relPath of cmd.removals) {
+              await removePathFromDirectory(activeDirectoryHandle, relPath);
+              removedPaths.push(relPath);
+            }
           }
+          emitEvent({
+            kind: "confirm_directory_sync",
+            root_name: rootName,
+            written_paths: writtenPaths,
+            removed_paths: removedPaths,
+            succeeded: true
+          });
+        } catch (err) {
+          emitEvent({
+            kind: "confirm_directory_sync",
+            root_name: rootName,
+            written_paths: writtenPaths,
+            removed_paths: removedPaths,
+            succeeded: false,
+            error: err && err.message ? String(err.message) : "directory write failed"
+          });
         }
       }
 
@@ -942,6 +991,7 @@
         }
         if (
           action === "storage.hydrated" ||
+          action.startsWith("sync_directory.") ||
           action.startsWith("viewport.") ||
           action.startsWith("view.") ||
           action.startsWith("clipboard.")
@@ -977,16 +1027,26 @@
       }
 
       function releaseLockOnExit() {
-        if (holdsCurrentWebLock) {
-          releaseFallbackLockEntry(activeLockDocId);
-          if (lockChannel) {
-            lockChannel.postMessage({ type: "release", docId: activeLockDocId, tabId });
-          }
-        }
+        const wasHolder = holdsCurrentWebLock;
+        const docToRelease = activeLockDocId;
         holdsCurrentWebLock = false;
+        if (pendingLockAbort) {
+          pendingLockAbort.abort();
+          pendingLockAbort = null;
+        }
+        if (fallbackRetryTimerId !== null) {
+          clearTimeout(fallbackRetryTimerId);
+          fallbackRetryTimerId = null;
+        }
         if (typeof releaseCurrentWebLock === "function") {
           releaseCurrentWebLock();
           releaseCurrentWebLock = null;
+        }
+        if (wasHolder) {
+          releaseFallbackLockEntry(docToRelease);
+          if (lockChannel) {
+            lockChannel.postMessage({ type: "release", docId: docToRelease, tabId });
+          }
         }
       }
 
@@ -1500,6 +1560,10 @@
       function tryAcquireFallbackStorageLock(docId) {
         const key = LOCK_KEY_PREFIX + docId;
         const now = Date.now();
+        if (fallbackRetryTimerId !== null) {
+          clearTimeout(fallbackRetryTimerId);
+          fallbackRetryTimerId = null;
+        }
         try {
           if (window.localStorage) {
             const raw = window.localStorage.getItem(key);
@@ -1513,6 +1577,13 @@
                   holder_tab_id: String(existing.tabId),
                   now_ms: now
                 });
+                const waitMs = Math.max(250, Math.min(LOCK_LEASE_TTL_MS, Number(existing.expiresAt) - now + 50));
+                fallbackRetryTimerId = setTimeout(() => {
+                  fallbackRetryTimerId = null;
+                  if (!holdsCurrentWebLock && activeLockDocId === docId) {
+                    coordinateDocumentLock(docId);
+                  }
+                }, waitMs);
                 return;
               }
             }
@@ -1538,16 +1609,56 @@
         }
       }
 
+      function holdGrantedWebLock(docId, reqGen) {
+        if (reqGen !== lockGeneration || activeLockDocId !== docId) {
+          return Promise.resolve();
+        }
+        holdsCurrentWebLock = true;
+        emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
+        if (lockChannel) {
+          lockChannel.postMessage({ type: "holder", docId: activeLockDocId, tabId });
+        }
+        return new Promise((resolve) => {
+          releaseCurrentWebLock = () => {
+            holdsCurrentWebLock = false;
+            resolve();
+          };
+        });
+      }
+
       function coordinateDocumentLock(docId) {
         const nextDocId = docId || "default";
-        if (holdsCurrentWebLock) {
-          releaseFallbackLockEntry(activeLockDocId);
+        const prevDocId = activeLockDocId;
+        const wasHolder = holdsCurrentWebLock;
+        lockGeneration += 1;
+        const reqGen = lockGeneration;
+        if (pendingLockAbort) {
+          pendingLockAbort.abort();
+          pendingLockAbort = null;
         }
-        activeLockDocId = nextDocId;
+        if (fallbackRetryTimerId !== null) {
+          clearTimeout(fallbackRetryTimerId);
+          fallbackRetryTimerId = null;
+        }
         holdsCurrentWebLock = false;
         if (typeof releaseCurrentWebLock === "function") {
           releaseCurrentWebLock();
           releaseCurrentWebLock = null;
+        }
+        if (wasHolder) {
+          releaseFallbackLockEntry(prevDocId);
+          if (lockChannel && prevDocId !== nextDocId) {
+            lockChannel.postMessage({ type: "release", docId: prevDocId, tabId });
+          }
+        }
+        activeLockDocId = nextDocId;
+        if (!storageListenerInstalled) {
+          storageListenerInstalled = true;
+          window.addEventListener("storage", (ev) => {
+            if (!holdsCurrentWebLock && ev.key === LOCK_KEY_PREFIX + activeLockDocId && !ev.newValue) {
+              coordinateDocumentLock(activeLockDocId);
+            }
+          });
         }
         if (typeof BroadcastChannel === "function") {
           if (!lockChannel) {
@@ -1558,12 +1669,14 @@
                 return;
               }
               if (data.type === "holder") {
-                emitEvent({
-                  kind: "observe_external_lock",
-                  doc_id: activeLockDocId,
-                  holder_tab_id: data.tabId,
-                  now_ms: Date.now()
-                });
+                if (!holdsCurrentWebLock) {
+                  emitEvent({
+                    kind: "observe_external_lock",
+                    doc_id: activeLockDocId,
+                    holder_tab_id: data.tabId,
+                    now_ms: Date.now()
+                  });
+                }
               } else if (data.type === "release" && !holdsCurrentWebLock) {
                 coordinateDocumentLock(activeLockDocId);
               }
@@ -1574,6 +1687,9 @@
         if (navigator.locks && typeof navigator.locks.request === "function") {
           const lockName = "curvebook.doc." + activeLockDocId;
           void navigator.locks.request(lockName, { ifAvailable: true }, (lock) => {
+            if (reqGen !== lockGeneration || activeLockDocId !== nextDocId) {
+              return Promise.resolve();
+            }
             if (!lock) {
               holdsCurrentWebLock = false;
               emitEvent({
@@ -1582,19 +1698,22 @@
                 holder_tab_id: "active-tab",
                 now_ms: Date.now()
               });
+              if (typeof AbortController === "function") {
+                const abortCtrl = new AbortController();
+                pendingLockAbort = abortCtrl;
+                void navigator.locks.request(lockName, { signal: abortCtrl.signal }, (queuedLock) => {
+                  if (!queuedLock || abortCtrl.signal.aborted || reqGen !== lockGeneration || activeLockDocId !== nextDocId) {
+                    return Promise.resolve();
+                  }
+                  if (pendingLockAbort === abortCtrl) {
+                    pendingLockAbort = null;
+                  }
+                  return holdGrantedWebLock(nextDocId, reqGen);
+                }).catch(() => {});
+              }
               return Promise.resolve();
             }
-            holdsCurrentWebLock = true;
-            emitEvent({ kind: "acquire_lock", doc_id: activeLockDocId, tab_id: tabId, now_ms: Date.now() });
-            if (lockChannel) {
-              lockChannel.postMessage({ type: "holder", docId: activeLockDocId, tabId });
-            }
-            return new Promise((resolve) => {
-              releaseCurrentWebLock = () => {
-                holdsCurrentWebLock = false;
-                resolve();
-              };
-            });
+            return holdGrantedWebLock(nextDocId, reqGen);
           });
         } else {
           tryAcquireFallbackStorageLock(activeLockDocId);

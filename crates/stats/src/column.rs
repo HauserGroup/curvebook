@@ -31,6 +31,10 @@
 //! - Yeh, K. C., & Kwan, K. C. (1978). A comparison of numerical integrating algorithms by
 //!   trapezoidal, Lagrange, and spline approximation. *Journal of Pharmacokinetics and
 //!   Biopharmaceutics*, 6(1), 79-98. `doi:10.1007/bf01066064`.
+//! - Stephens, M. A. (1986). Tests based on EDF statistics. In R. B. D'Agostino & M. A. Stephens
+//!   (Eds.), *Goodness-of-Fit Techniques*, Ch. 4, pp. 97-193. Marcel Dekker.
+//! - Hollander, M., Wolfe, D. A., & Chicken, E. (2014). *Nonparametric Statistical Methods* (3rd ed.).
+//!   Wiley. Ch. 3 (signed-rank Hodges–Lehmann pseudomedian & Walsh-average confidence intervals).
 
 use curvebook_doc::{
     AnalysisSpec, ChecklistItem, ChecklistStatus, DataSheet, DescriptiveSpec, OutlierSpec, PValueFormat, ResultCell, ResultSheet, ResultTab,
@@ -48,8 +52,9 @@ use serde::{Deserialize, Serialize};
 
 use crate::common::{
     append_ignored_text_checklist_and_footnote, build_tab, checklist_item, init_result_sheet, is_ignored_non_numeric_cell, num_cell, opt_ci_cell,
-    opt_num_cell, p_cell, push_scalar, quantile_sorted, quantile_type6_sorted, quartiles_hinge, rank_with_ties, resolve_selected_indices,
-    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, validate_finite_slice,
+    opt_num_cell, p_cell_at_alpha, push_scalar, quantile_sorted, quantile_type6_sorted, quartiles_hinge, rank_with_ties,
+    sanitize_result_sheet_floats, select_kth_upper_triangle_half_sum, sorted_finite, t_crit_two_sided, try_resolve_selected_indices,
+    validate_finite_slice,
 };
 use crate::error::StatsError;
 
@@ -145,9 +150,9 @@ pub struct DescriptiveSummary {
     pub iqr: f64,
     /// Full sample span `max - min` in original units.
     pub range: f64,
-    /// Lower symmetric custom percentile `(percentile_percent, value)` corresponding to `100 - upper` (`None` when `custom_upper_percentile` was omitted).
+    /// Lower symmetric custom percentile `(percentile_percent, value)` corresponding to `100 - upper`, computed via Hyndman & Fan (1996) Type 7 continuous linear interpolation (`None` when `custom_upper_percentile` was omitted).
     pub custom_lower_percentile: Option<(f64, f64)>,
-    /// Upper custom percentile `(percentile_percent, value)` (`None` when `custom_upper_percentile` was omitted).
+    /// Upper custom percentile `(percentile_percent, value)`, computed via Hyndman & Fan (1996) Type 7 continuous linear interpolation (`None` when `custom_upper_percentile` was omitted).
     pub custom_upper_percentile: Option<(f64, f64)>,
     /// Arithmetic sum of all active values.
     pub sum: f64,
@@ -190,8 +195,10 @@ pub struct DescriptiveSummary {
 
 /// Compute comprehensive descriptive statistics on raw finite observations.
 ///
-/// Moments use the compensated pairwise algorithm of Chan, Golub & LeVeque (1983); the mean CI is
-/// the Student (1908) *t* interval and the SD CI the chi-square interval on `n - 1` df.
+/// Moments use the compensated pairwise algorithm of Chan, Golub & LeVeque (1983); quartiles
+/// (`q1`, `median`, `q3`) use Hyndman & Fan (1996) Definition 6, optional custom symmetric
+/// percentiles use Hyndman & Fan (1996) Definition 7, the mean CI is the Student (1908) *t*
+/// interval, and the SD CI is the chi-square interval on `n - 1` df.
 pub fn summarize_column(
     label: impl Into<String>,
     values: &[f64],
@@ -516,7 +523,10 @@ fn extract_indexed_series_for_descriptive(
         TableArchetype::Xy(t) => extract_xy_table_for_desc(t, selected, aggregation),
         TableArchetype::Grouped(t) => extract_grouped_table_for_desc(t, selected, aggregation),
         TableArchetype::MultipleVariables(t) => {
-            let indices = resolve_selected_indices(selected, t.variables.len());
+            let mut indices = try_resolve_selected_indices(selected, t.variables.len())?;
+            if selected.is_empty() {
+                indices.retain(|&idx| !matches!(t.variables[idx].role, VariableRole::Categorical | VariableRole::Label));
+            }
             let mut raw = Vec::new();
             let mut ignored = Vec::new();
             for idx in indices {
@@ -556,7 +566,7 @@ fn extract_indexed_series_for_descriptive(
 }
 
 fn extract_column_table_for_desc(t: &curvebook_doc::ColumnTable, selected: &[usize]) -> Result<DescriptiveSeriesExtraction, StatsError> {
-    let indices = resolve_selected_indices(selected, t.data_sets.len());
+    let indices = try_resolve_selected_indices(selected, t.data_sets.len())?;
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
         for idx in indices {
@@ -618,7 +628,7 @@ fn extract_xy_table_for_desc(
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<DescriptiveSeriesExtraction, StatsError> {
-    let indices = resolve_selected_indices(selected, t.data_sets.len());
+    let indices = try_resolve_selected_indices(selected, t.data_sets.len())?;
     if t.y_subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
         for idx in indices {
@@ -648,7 +658,7 @@ fn extract_grouped_table_for_desc(
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<DescriptiveSeriesExtraction, StatsError> {
-    let indices = resolve_selected_indices(selected, t.data_sets.len());
+    let indices = try_resolve_selected_indices(selected, t.data_sets.len())?;
     if t.subcolumn_mode.supports_parametric_moments() {
         let mut pooled = Vec::new();
         for idx in indices {
@@ -805,7 +815,7 @@ pub struct NormalityBatteryResult {
     pub dagostino_pearson: Option<NormalityTestOutcome>,
     /// Royston (1992/1995) Shapiro–Wilk *W* test on raw values (`None` when `n < 3` or `n > 5000`).
     pub shapiro_wilk: Option<NormalityTestOutcome>,
-    /// Stephens (1986) Case 3 sample-size-adjusted Anderson–Darling $A^{2*}$ test on raw values (`None` when `n < 5`).
+    /// Stephens (1986) Case 3 sample-size-adjusted Anderson–Darling $A^{2*}$ test on raw values (`None` when `n < 8`).
     pub anderson_darling: Option<NormalityTestOutcome>,
     /// Dallal–Wilkinson (1986) / Lilliefors (1967) Kolmogorov–Smirnov *D* test with composite parameters on raw values (`None` when `n < 5`).
     pub kolmogorov_smirnov: Option<NormalityTestOutcome>,
@@ -813,7 +823,7 @@ pub struct NormalityBatteryResult {
     pub lognormal_dagostino_pearson: Option<NormalityTestOutcome>,
     /// Shapiro–Wilk *W* test evaluated on $\ln(x_i)$ (`None` when `n < 3`, `n > 5000`, or any value `<= 0.0`).
     pub lognormal_shapiro_wilk: Option<NormalityTestOutcome>,
-    /// Anderson–Darling $A^{2*}$ test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
+    /// Anderson–Darling $A^{2*}$ test evaluated on $\ln(x_i)$ (`None` when `n < 8` or any value `<= 0.0`).
     pub lognormal_anderson_darling: Option<NormalityTestOutcome>,
     /// Lilliefors KS *D* test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
     pub lognormal_kolmogorov_smirnov: Option<NormalityTestOutcome>,
@@ -1012,8 +1022,12 @@ pub fn anderson_darling(values: &[f64], alpha: f64) -> Result<NormalityTestOutco
     let a2 = (-nf - sum_acc.total() / nf).max(0.0);
     let a2_star = a2 * (1.0 + 0.75 / nf + 2.25 / (nf * nf));
 
+    // Stephens (1986) Case 3 approximation; clamp `a2*` at the upper quadratic's vertex
+    // `5.709 / (2 * 0.0186) ~ 153.4677` (`P ~ 2.02e-190`) so P stays non-increasing for large A*.
+    const AD_QUADRATIC_VERTEX: f64 = 5.709 / (2.0 * 0.0186);
     let p_value = if a2_star >= 0.6 {
-        (1.2937 - 5.709 * a2_star + 0.0186 * a2_star * a2_star).exp()
+        let a_eff = a2_star.min(AD_QUADRATIC_VERTEX);
+        (1.2937 - 5.709 * a_eff + 0.0186 * a_eff * a_eff).exp()
     } else if a2_star > 0.34 {
         (0.9177 - 4.279 * a2_star - 1.38 * a2_star * a2_star).exp()
     } else if a2_star > 0.20 {
@@ -1462,6 +1476,9 @@ pub struct OneSampleWilcoxonResult {
     pub pseudomedian_hl: f64,
     /// Two-sided Walsh-average confidence interval `(lower, upper)` for the pseudomedian at configured `ConfidenceLevel` (`None` if insufficient non-zero pairs).
     pub pseudomedian_ci: Option<(f64, f64)>,
+    /// Exact achieved confidence percentage when small-sample (`n <= 30`, untied) exact signed-rank critical values were used (`None` for asymptotic normal or unavailable CIs).
+    #[serde(default)]
+    pub ci_actual_confidence_percent: Option<f64>,
 }
 
 /// One-sample Wilcoxon signed-rank test against `hypothetical_median`.
@@ -1495,6 +1512,7 @@ pub fn one_sample_wilcoxon(
             two_tailed,
             pseudomedian_hl: sample_median,
             pseudomedian_ci: None,
+            ci_actual_confidence_percent: None,
         });
     }
 
@@ -1530,7 +1548,7 @@ pub fn one_sample_wilcoxon(
         (p.clamp(0.0, 1.0), false)
     };
 
-    let (pseudomedian_hl, pseudomedian_ci) = hodges_lehmann_one_sample(values, confidence)?;
+    let (pseudomedian_hl, pseudomedian_ci, ci_actual_confidence_percent) = hodges_lehmann_one_sample_with_coverage(values, confidence)?;
     Ok(OneSampleWilcoxonResult {
         n_total: values.len(),
         n_nonzero: n_nz,
@@ -1544,6 +1562,7 @@ pub fn one_sample_wilcoxon(
         two_tailed,
         pseudomedian_hl,
         pseudomedian_ci,
+        ci_actual_confidence_percent,
     })
 }
 
@@ -1563,12 +1582,58 @@ pub(crate) fn wilcoxon_exact_p(n: usize, w_plus: usize, max_sum: usize, two_tail
     if two_tailed { (2.0 * min_tail / total).clamp(0.0, 1.0) } else { (min_tail / total).clamp(0.0, 1.0) }
 }
 
-/// Hodges–Lehmann one-sample pseudomedian (median of Walsh averages `(x_i + x_j) / 2, i <= j`)
-/// and exact/normal confidence interval.
-pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
+/// Exact distribution-free two-sided Wilcoxon signed-rank order-statistic index `k` (1-based)
+/// and achieved coverage fraction for an untied sample of size `n <= 30` (Hollander, Wolfe & Chicken 2014, Ch. 3.3).
+pub(crate) fn wilcoxon_exact_hl_ci_rank(n: usize, confidence: ConfidenceLevel) -> (usize, f64) {
+    let m = n * (n + 1) / 2;
+    let half_m = m / 2;
+    let mut ways = vec![0_u64; half_m + 1];
+    ways[0] = 1;
+    for rank in 1..=n {
+        for s in (rank..=half_m).rev() {
+            ways[s] += ways[s - rank];
+        }
+    }
+    let total = (1_u64 << n) as f64;
+    let target = confidence.percent() / 100.0;
+    let mut cum = ways[0];
+    let mut best_k = 1_usize;
+    let mut best_cov = (1.0 - 2.0 * (cum as f64) / total).clamp(0.0, 1.0);
+    if best_cov + 1e-14 < target {
+        return (1, best_cov);
+    }
+    for k in 2..=half_m {
+        cum += ways[k - 1];
+        let cov = (1.0 - 2.0 * (cum as f64) / total).clamp(0.0, 1.0);
+        if cov + 1e-14 >= target {
+            best_k = k;
+            best_cov = cov;
+        } else {
+            break;
+        }
+    }
+    (best_k, best_cov)
+}
+
+/// Upper bound on achievable two-sided signed-rank CI coverage (%) for sample size `n <= 30`.
+pub(crate) fn wilcoxon_max_achievable_coverage_percent(n: usize) -> Option<f64> {
+    if (1..=30).contains(&n) {
+        let total = (1_u64 << n) as f64;
+        Some(100.0 * (1.0 - 2.0 / total).clamp(0.0, 1.0))
+    } else {
+        None
+    }
+}
+
+/// Point estimate, two-sided Hodges–Lehmann CI, and achieved small-sample confidence percentage.
+pub(crate) type HodgesLehmannWithCoverage = (f64, Option<(f64, f64)>, Option<f64>);
+
+/// Hodges–Lehmann one-sample pseudomedian (median of Walsh averages `(x_i + x_j) / 2, i <= j`),
+/// confidence interval, and exact achieved confidence percentage when `n <= 30` without ties.
+pub(crate) fn hodges_lehmann_one_sample_with_coverage(values: &[f64], confidence: ConfidenceLevel) -> Result<HodgesLehmannWithCoverage, StatsError> {
     validate_finite_slice(values)?;
     let n = values.len();
-    let (hl, m_u64, lo_ci_val, hi_ci_val) = if n > 2_000 {
+    if n > 2_000 {
         let sorted = sorted_finite(values);
         let m_u64 = (n as u64) * ((n as u64) + 1) / 2;
         let hl = if m_u64 % 2 == 1 {
@@ -1578,9 +1643,6 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
             let mid_hi = select_kth_upper_triangle_half_sum(&sorted, m_u64 / 2)?;
             0.5 * mid_lo + 0.5 * mid_hi
         };
-        if n < 4 {
-            return Ok((hl, None));
-        }
         let z = curvebook_math::dist::norm_two_sided_isf(confidence.alpha())?;
         let nf = n as f64;
         let mu = nf * (nf + 1.0) / 4.0;
@@ -1590,31 +1652,43 @@ pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLe
         let hi_idx = (m_u64 - k).min(m_u64 - 1);
         let ci_lo = select_kth_upper_triangle_half_sum(&sorted, lo_idx)?;
         let ci_hi = select_kth_upper_triangle_half_sum(&sorted, hi_idx)?;
-        (hl, m_u64, ci_lo, ci_hi)
+        return Ok((hl, Some((ci_lo, ci_hi)), None));
+    }
+
+    let m = n * (n + 1) / 2;
+    let mut walsh = Vec::with_capacity(m);
+    for i in 0..n {
+        for j in i..n {
+            walsh.push(0.5 * values[i] + 0.5 * values[j]);
+        }
+    }
+    walsh.sort_by(f64::total_cmp);
+    let hl = quantile_type6_sorted(&walsh, 0.5).or_else(|| walsh.first().copied()).ok_or(StatsError::EmptyInput)?;
+    if n < 4 {
+        return Ok((hl, None, None));
+    }
+    let sorted_vals = sorted_finite(values);
+    let untied = sorted_vals.windows(2).all(|w| w[0] < w[1]);
+    let (k, actual_conf_pct) = if n <= 30 && untied {
+        let (exact_k, cov) = wilcoxon_exact_hl_ci_rank(n, confidence);
+        (exact_k, Some(100.0 * cov))
     } else {
-        let m = n * (n + 1) / 2;
-        let mut walsh = Vec::with_capacity(m);
-        for i in 0..n {
-            for j in i..n {
-                walsh.push(0.5 * values[i] + 0.5 * values[j]);
-            }
-        }
-        walsh.sort_by(f64::total_cmp);
-        let hl = quantile_type6_sorted(&walsh, 0.5).or_else(|| walsh.first().copied()).ok_or(StatsError::EmptyInput)?;
-        if n < 4 {
-            return Ok((hl, None));
-        }
         let z = curvebook_math::dist::norm_two_sided_isf(confidence.alpha())?;
         let nf = n as f64;
         let mu = nf * (nf + 1.0) / 4.0;
         let sd = (nf * (nf + 1.0) * (2.0 * nf + 1.0) / 24.0).sqrt();
-        let k = (mu - z * sd).floor().max(1.0) as usize;
-        let lo_idx = k.saturating_sub(1).min(m - 1);
-        let hi_idx = (m - k).min(m - 1);
-        (hl, m as u64, walsh[lo_idx], walsh[hi_idx])
+        ((mu - z * sd).floor().max(1.0) as usize, None)
     };
-    let _ = m_u64;
-    Ok((hl, Some((lo_ci_val, hi_ci_val))))
+    let lo_idx = k.saturating_sub(1).min(m - 1);
+    let hi_idx = (m - k).min(m - 1);
+    Ok((hl, Some((walsh[lo_idx], walsh[hi_idx])), actual_conf_pct))
+}
+
+#[cfg(test)]
+#[allow(dead_code)]
+pub(crate) fn hodges_lehmann_one_sample(values: &[f64], confidence: ConfidenceLevel) -> Result<(f64, Option<(f64, f64)>), StatsError> {
+    let (hl, ci, _) = hodges_lehmann_one_sample_with_coverage(values, confidence)?;
+    Ok((hl, ci))
 }
 
 /// Kolmogorov–Smirnov one-sample test against a known theoretical `Normal(mean, sd^2)`.
@@ -1708,7 +1782,7 @@ pub fn run_descriptive_analysis(sheet: &DataSheet, spec: &AnalysisSpec, desc: &D
         for series in &raw_series {
             batteries.push(normality_battery(&series.values, conf.alpha())?);
         }
-        res.tabs.push(build_normality_tab(&summaries, &batteries, p_fmt));
+        res.tabs.push(build_normality_tab(&summaries, &batteries, p_fmt, conf.alpha()));
         append_normality_checklist(&mut res.checklist, &summaries, &batteries, conf.alpha());
     }
 
@@ -1751,7 +1825,7 @@ fn append_xy_trapezoidal_auc(res: &mut ResultSheet, sheet: &DataSheet, selected:
     let TableArchetype::Xy(xy) = &sheet.archetype else {
         return Ok(());
     };
-    let ds_indices = resolve_selected_indices(selected, xy.data_sets.len());
+    let ds_indices = try_resolve_selected_indices(selected, xy.data_sets.len())?;
     for ds_idx in ds_indices {
         let ds = &xy.data_sets[ds_idx];
         let mut raw_pts: Vec<(f64, f64, f64)> = Vec::new();
@@ -1823,7 +1897,7 @@ fn append_row_descriptive_stats(
 ) -> Result<(), StatsError> {
     let row_entries: Vec<(String, Vec<f64>)> = match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
-            let indices = resolve_selected_indices(selected, mv.variables.len());
+            let indices = try_resolve_selected_indices(selected, mv.variables.len())?;
             let active_cols: Vec<usize> = indices
                 .into_iter()
                 .filter(|&idx| {
@@ -1897,7 +1971,7 @@ fn collect_dataset_rows_for_desc(
     selected: &[usize],
     aggregation: SubcolumnAggregation,
 ) -> Result<Vec<(String, Vec<f64>)>, StatsError> {
-    let indices = resolve_selected_indices(selected, data_sets.len());
+    let indices = try_resolve_selected_indices(selected, data_sets.len())?;
     let active_cols: Vec<usize> =
         indices.into_iter().filter(|&idx| data_sets[idx].cells.iter().any(|row| row.iter().any(|c| c.active_number().is_some()))).collect();
     if active_cols.len() < 2 {
@@ -2017,7 +2091,11 @@ fn populate_pooled_descriptive_sheet(res: &mut ResultSheet, pooled_series: &[Ind
 
 fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel) -> ResultTab {
     let headers: Vec<String> = summaries.iter().map(|s| s.label.clone()).collect();
-    let row_labels = vec![
+    let custom_pair = summaries.iter().find_map(|s| match (s.custom_lower_percentile, s.custom_upper_percentile) {
+        (Some((p_lo, _)), Some((p_hi, _))) => Some((p_lo, p_hi)),
+        _ => None,
+    });
+    let mut row_labels = vec![
         String::from("Number of values"),
         String::from("Excluded values"),
         String::from("Minimum"),
@@ -2043,6 +2121,10 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
         String::from("Excess kurtosis"),
         String::from("Sum"),
     ];
+    if let Some((p_lo, p_hi)) = custom_pair {
+        row_labels.push(format!("{p_lo}% Percentile (Type 7)"));
+        row_labels.push(format!("{p_hi}% Percentile (Type 7)"));
+    }
     let mut rows = vec![Vec::with_capacity(summaries.len()); row_labels.len()];
     for s in summaries {
         rows[0].push(num_cell(s.n as f64));
@@ -2069,8 +2151,17 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
         rows[21].push(opt_num_cell(s.skewness));
         rows[22].push(opt_num_cell(s.excess_kurtosis));
         rows[23].push(num_cell(s.sum));
+        if custom_pair.is_some() {
+            rows[24].push(opt_num_cell(s.custom_lower_percentile.map(|(_, v)| v)));
+            rows[25].push(opt_num_cell(s.custom_upper_percentile.map(|(_, v)| v)));
+        }
     }
     let mut tab = build_tab("desc-summary", "Descriptive Statistics", ResultTabKind::DescriptiveSummary, headers, row_labels, rows);
+    if let Some((p_lo, p_hi)) = custom_pair {
+        tab.footnotes.push(format!(
+            "Standard quartiles (25%, Median, 75%) use Hyndman & Fan (1996) Type 6; custom percentiles ({p_lo}%, {p_hi}%) use Hyndman & Fan (1996) Type 7 continuous linear interpolation."
+        ));
+    }
     tab.footnotes.push(format!(
         "{}% CI of SD uses exact chi-square variance bounds under a normal-theory Gaussian assumption; skewed or heavy-tailed distributions are sensitive to non-normality.",
         conf.percent()
@@ -2078,7 +2169,7 @@ fn build_descriptive_tab(summaries: &[DescriptiveSummary], conf: ConfidenceLevel
     tab
 }
 
-fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityBatteryResult], p_fmt: PValueFormat) -> ResultTab {
+fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityBatteryResult], p_fmt: PValueFormat, alpha: f64) -> ResultTab {
     let headers: Vec<String> = summaries.iter().map(|s| s.label.clone()).collect();
     let row_labels = vec![
         String::from("D'Agostino-Pearson K2"),
@@ -2094,21 +2185,21 @@ fn build_normality_tab(summaries: &[DescriptiveSummary], batteries: &[NormalityB
     let mut rows = vec![Vec::with_capacity(batteries.len()); row_labels.len()];
     if let [r0, r1, r2, r3, r4, r5, r6, r7, r8] = rows.as_mut_slice() {
         for b in batteries {
-            push_norm_pair(r0, r1, b.dagostino_pearson.as_ref(), p_fmt);
-            push_norm_pair(r2, r3, b.shapiro_wilk.as_ref(), p_fmt);
-            push_norm_pair(r4, r5, b.anderson_darling.as_ref(), p_fmt);
-            push_norm_pair(r6, r7, b.kolmogorov_smirnov.as_ref(), p_fmt);
+            push_norm_pair(r0, r1, b.dagostino_pearson.as_ref(), p_fmt, alpha);
+            push_norm_pair(r2, r3, b.shapiro_wilk.as_ref(), p_fmt, alpha);
+            push_norm_pair(r4, r5, b.anderson_darling.as_ref(), p_fmt, alpha);
+            push_norm_pair(r6, r7, b.kolmogorov_smirnov.as_ref(), p_fmt, alpha);
             r8.push(opt_num_cell(b.normal_vs_lognormal_log_lr));
         }
     }
     build_tab("normality", "Normality & Lognormality Tests", ResultTabKind::Diagnostics, headers, row_labels, rows)
 }
 
-fn push_norm_pair(stat_row: &mut Vec<ResultCell>, p_row: &mut Vec<ResultCell>, out: Option<&NormalityTestOutcome>, p_fmt: PValueFormat) {
+fn push_norm_pair(stat_row: &mut Vec<ResultCell>, p_row: &mut Vec<ResultCell>, out: Option<&NormalityTestOutcome>, p_fmt: PValueFormat, alpha: f64) {
     match out {
         Some(o) => {
             stat_row.push(num_cell(o.statistic));
-            p_row.push(p_cell(o.p_value, p_fmt));
+            p_row.push(p_cell_at_alpha(o.p_value, p_fmt, alpha));
         }
         None => {
             stat_row.push(ResultCell::Empty);
@@ -2170,7 +2261,7 @@ fn append_one_sample_tab(
         if let Ok(t_res) = one_sample_t_test(vals, mu0, true, conf) {
             rows[1].push(num_cell(t_res.t_statistic));
             rows[2].push(num_cell(t_res.df));
-            rows[3].push(p_cell(t_res.p_value, p_fmt));
+            rows[3].push(p_cell_at_alpha(t_res.p_value, p_fmt, conf.alpha()));
         } else {
             rows[1].push(ResultCell::Empty);
             rows[2].push(ResultCell::Empty);
@@ -2178,7 +2269,7 @@ fn append_one_sample_tab(
         }
         if let Ok(w_res) = one_sample_wilcoxon(vals, mu0, true, conf) {
             rows[4].push(num_cell(w_res.w_stat));
-            rows[5].push(p_cell(w_res.p_value, p_fmt));
+            rows[5].push(p_cell_at_alpha(w_res.p_value, p_fmt, conf.alpha()));
         } else {
             rows[4].push(ResultCell::Empty);
             rows[5].push(ResultCell::Empty);

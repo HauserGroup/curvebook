@@ -439,7 +439,7 @@ pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
         let bh1 = step_up_fdr_finite(vals, 1.0);
         let r1 = bh1.iter().filter(|&&qv| qv <= q_stage1).count();
         if r1 == 0 || r1 == m {
-            return bh1.into_iter().zip(vals.iter()).map(|(qv, &p)| (qv * (1.0 + q)).max(p.clamp(0.0, 1.0)).min(1.0)).collect();
+            return bh1.into_iter().map(|qv| (qv * (1.0 + q)).clamp(0.0, 1.0)).collect();
         }
         let m0_hat = (m - r1) as f64;
         let mut order: Vec<(usize, f64)> = vals.iter().copied().enumerate().map(|(i, p)| (i, p.clamp(0.0, 1.0))).collect();
@@ -447,10 +447,12 @@ pub fn adjust_two_stage_bky(raw_p: &[f64], fdr_q: f64) -> Vec<f64> {
 
         let mut out = vec![1.0_f64; m];
         let mut running_min = 1.0_f64;
+        // BKY (2006) Definition 6 step-up threshold scaling m0_hat * (1 + q) / i may be < 1,
+        // so adjusted Stage-2 decision values can be strictly below raw_p without losing FDR control.
         for (rank, &(orig_idx, p)) in order.iter().enumerate().rev() {
             let cand = (p * m0_hat * (1.0 + q) / ((rank + 1) as f64)).min(1.0);
             running_min = running_min.min(cand);
-            out[orig_idx] = running_min.max(p).min(1.0);
+            out[orig_idx] = running_min.clamp(0.0, 1.0);
         }
         out
     })
@@ -478,6 +480,28 @@ pub fn adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshol
         MultiplicityProcedure::BenjaminiHochbergFdr => (adjust_benjamini_hochberg(raw_p), true),
         MultiplicityProcedure::BenjaminiYekutieliFdr => (adjust_benjamini_yekutieli(raw_p), true),
         MultiplicityProcedure::TwoStageBkyFdr => (adjust_two_stage_bky(raw_p, threshold), true),
+    }
+}
+
+/// Fallibly adjust a family of raw *p*-values, rejecting ANOVA-only comparison procedures.
+///
+/// Rejects `TukeyKramer`, `NewmanKeuls`, `Dunnett`, `DunnettT3`, `GamesHowell`, `DunnRankSum`,
+/// `LinearTrend`, and `TamhaneT2` with [`StatsError::IncompatibleAnalysisSpec`] because those
+/// procedures depend on group means, sample sizes, variance estimates, or rank sums rather than a
+/// standalone family of *p*-values (Hsu 1996; Benjamini, Krieger & Yekutieli 2006).
+pub fn try_adjust_p_values(raw_p: &[f64], procedure: MultiplicityProcedure, threshold: f64) -> Result<(Vec<f64>, bool), StatsError> {
+    match procedure {
+        MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::Dunnett { .. }
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::LinearTrend
+        | MultiplicityProcedure::TamhaneT2 => Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "raw p-value multiplicity procedure (None, Bonferroni, Sidak, HolmBonferroni, HolmSidak, BenjaminiHochbergFdr, BenjaminiYekutieliFdr, or TwoStageBkyFdr)",
+        }),
+        _ => Ok(adjust_p_values(raw_p, procedure, threshold)),
     }
 }
 

@@ -610,9 +610,12 @@ fn qol6_contingency_regression_and_multivariate_methods_reports() {
     .unwrap();
     ok_cmd(&mut session, "analysis.run", json!({ "spec": barnard_spec }));
 
-    let ba_spec =
-        AnalysisSpec::new("res-ba", "xy-method", AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false }))
-            .unwrap();
+    let ba_spec = AnalysisSpec::new(
+        "res-ba",
+        "xy-method",
+        AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() }),
+    )
+    .unwrap();
     ok_cmd(&mut session, "analysis.run", json!({ "spec": ba_spec }));
 
     let pb_spec = AnalysisSpec::new("res-pb", "xy-method", AnalysisKind::PassingBablok(PassingBablokSpec { x_column: 0, y_column: 1 })).unwrap();

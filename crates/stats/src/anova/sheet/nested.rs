@@ -9,11 +9,11 @@ use curvebook_doc::{
 };
 use curvebook_math::sum::SummaryMoments;
 
-use crate::anova::nested::nested_one_way_anova_selected;
+use crate::anova::nested::nested_one_way_anova_with_reml_status;
 use crate::anova::results::NestedAnovaResult;
-use crate::anova::sheet::one_way::push_pairwise_outputs;
+use crate::anova::sheet::one_way::{append_reml_boundary_checklist, push_pairwise_outputs};
 use crate::common::{
-    build_tab, checklist_item, init_result_sheet, num_cell, p_cell, push_scalar, resolve_selected_indices, sanitize_result_sheet_floats,
+    build_tab, checklist_item, init_result_sheet, num_cell, p_cell, push_scalar, sanitize_result_sheet_floats, try_resolve_selected_indices,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{GroupComparisonInput, MultiplicityProcedure, compare_groups_pairwise_with_confidence, linear_trend_test};
@@ -26,8 +26,9 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
 
-    let selected_groups = resolve_selected_indices(&spec.selected_data_sets, nested.groups.len());
-    let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
+    let selected_groups = try_resolve_selected_indices(&spec.selected_data_sets, nested.groups.len())?;
+    let (res, reml_converged, reml_at_boundary) =
+        nested_one_way_anova_with_reml_status(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
     let active_df2 = match nested_spec.df_method {
         MixedModelDfMethod::KenwardRoger => res.df2_groups_kenward_roger,
         MixedModelDfMethod::Satterthwaite => res.df2_groups_satterthwaite,
@@ -89,14 +90,20 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
             ResultCell::Empty,
         ],
     ];
-    out.tabs.push(build_tab(
+    let mut vc_tab = build_tab(
         "variance-components",
         "Variance components (REML)",
         ResultTabKind::ParametersAndConfidenceIntervals,
         vc_headers,
         vec![String::from("Subclusters (biological units)"), String::from("Residual (technical)")],
         vc_rows,
-    ));
+    );
+    if !reml_converged {
+        vc_tab.footnotes.push(String::from("Warning: REML variance-ratio optimization reached the upper search limit without an interior optimum."));
+    } else if reml_at_boundary {
+        vc_tab.footnotes.push(String::from("Subcluster variance component estimate is on the zero boundary (sigma^2_subcluster = 0)."));
+    }
+    out.tabs.push(vc_tab);
 
     // Optional group-level pairwise comparisons using hierarchical group-mean variances:
     // Var(mean_g) = sigma_u^2 * sum_j(n_{gj}^2) / N_g^2 + sigma_e^2 / N_g (Sokal & Rohlf / Montgomery).
@@ -114,6 +121,7 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         Some(format!("ICC = {:.3}, {df_lbl} df = {:.2}", res.icc_subclusters, active_df2)),
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
+    out.checklist.push(append_reml_boundary_checklist(reml_converged, reml_at_boundary, res.variance_subclusters, res.variance_error));
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }

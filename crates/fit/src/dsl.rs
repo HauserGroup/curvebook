@@ -46,7 +46,7 @@ mod statements;
 mod tests;
 mod vm;
 
-pub use ast::{BinaryKind, BuiltinFn, DatasetFilter, DslEquationKind, OpCode, UnaryKind};
+pub use ast::{BinaryKind, BuiltinFn, DatasetFilter, DslCompileWarning, DslEquationKind, DslWarningKind, OpCode, UnaryKind};
 pub(crate) use limits::DEFAULT_MAX_ODE_STEPS_PER_FIT;
 pub use model::CompiledDslModel;
 pub use ode::integrate_rk45;

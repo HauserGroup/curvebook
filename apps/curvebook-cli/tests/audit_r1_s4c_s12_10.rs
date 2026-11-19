@@ -367,3 +367,105 @@ fn r1_s12_10_rejects_legacy_manifest_keys_removed_subcommands_and_path_escape() 
 
     Ok(())
 }
+
+#[test]
+fn audit_71_batch_fails_on_failed_result_sheets_without_writing_exports() -> TestResult {
+    use std::sync::atomic::AtomicBool;
+
+    use curvebook_doc::{Cell, DataSheet, ProjectDocument, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_engine::Session;
+    use curvebook_engine::cmd::Caller;
+    use curvebook_format::save_template_file;
+
+    // Build a valid template with a Linear Regression ResultSheet via engine dispatch.
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4)?;
+    for (r, (x, y)) in [(1.0, 2.0), (2.0, 4.0), (3.0, 6.0), (4.0, 8.0)].into_iter().enumerate() {
+        xy.x_cells[r][0] = Cell::number(x);
+        xy.data_sets[0].cells[r][0] = Cell::number(y);
+    }
+    let mut doc = ProjectDocument::new("Template Base")?;
+    doc.add_data_sheet(DataSheet::new("plate", "Dose Plate", TableArchetype::Xy(xy))?)?;
+    let mut session = Session::from_document(doc);
+    session.execute_with_caller(
+        "analysis.run",
+        json!({
+            "source_sheet_id": "plate",
+            "sheet_id": "fit_blank_y",
+            "title": "Blank-Y Fit",
+            "kind": "linear_regression"
+        }),
+        Caller::Cli,
+        &AtomicBool::new(false),
+    )?;
+
+    // Scenario A: blank Y CSV loaded into a template whose existing ResultSheet fails recalculation.
+    let dir_a = TempDirGuard::create("audit71-blank-y")?;
+    let wd_a = dir_a.path.to_str().ok_or("non-UTF-8 temp dir")?;
+    save_template_file(&dir_a.child("linear.cbtemplate"), session.document())?;
+    fs::write(dir_a.child("blank_y.csv"), "X,Y\n1,\n2,\n3,\n4,\n")?;
+    let manifest_a = dir_a.child("manifest_a.json");
+    fs::write(
+        &manifest_a,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "curvebook.batch.v1",
+            "template": "linear.cbtemplate",
+            "inputs": [{ "sheet": "Dose Plate", "csv": "blank_y.csv", "kind": "xy" }],
+            "exports": [
+                { "format": "json", "sheet": "Blank-Y Fit", "out": "out/fit.json" },
+                { "format": "csv", "sheet": "Dose Plate", "out": "out/data.csv" },
+                { "format": "curvebook", "out": "out/project.curvebook" }
+            ]
+        }))?,
+    )?;
+    let out_a = run_cli(&["batch", manifest_a.to_str().ok_or("non-UTF-8 path")?, "--workdir", wd_a, "--json"])?;
+    assert_eq!(out_a.status.code(), Some(1), "batch with blank-Y failed result sheet must exit 1: {}", String::from_utf8_lossy(&out_a.stdout));
+    let err_a: Value = serde_json::from_slice(&out_a.stdout)?;
+    let msg_a = err_a["error"]["message"].as_str().unwrap_or("");
+    assert!(msg_a.contains("Blank-Y Fit") && msg_a.contains("fit_blank_y"), "error must name failed result sheet: {msg_a}");
+    assert_eq!(err_a["error"]["details"]["failed_count"], json!(1));
+    assert_eq!(err_a["error"]["details"]["failed_result_sheets"][0]["sheet_id"], json!("fit_blank_y"));
+    assert_eq!(err_a["error"]["details"]["failed_result_sheets"][0]["title"], json!("Blank-Y Fit"));
+    for rel in ["out/fit.json", "out/data.csv", "out/project.curvebook"] {
+        assert!(!dir_a.child(rel).exists(), "failed batch must write zero export files ({rel} exists)");
+    }
+
+    // Scenario B: manifest adds two analyses on valid data then overwrites Y cells with text -> both ResultSheets fail.
+    let dir_b = TempDirGuard::create("audit71-multi-fail")?;
+    let wd_b = dir_b.path.to_str().ok_or("non-UTF-8 temp dir")?;
+    fs::write(dir_b.child("valid.csv"), "X,Y\n1,2\n2,4\n3,6\n4,8\n")?;
+    let manifest_b = dir_b.child("manifest_b.json");
+    fs::write(
+        &manifest_b,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "curvebook.batch.v1",
+            "commands": [
+                { "cmd": "sheet.createData", "params": { "sheet_id": "d1", "title": "Assay", "kind": "xy", "rows": 7, "cols": 1 } },
+                { "cmd": "table.setXCells", "params": { "sheet_id": "d1", "values": [-9.0, -8.0, -7.0, -6.5, -6.0, -5.0, -4.0] } },
+                { "cmd": "table.setCells", "params": { "sheet_id": "d1", "rows": [[10.2], [12.5], [32.0], [55.0], [78.0], [96.5], [99.1]] } },
+                { "cmd": "analysis.run", "params": { "source_sheet_id": "d1", "sheet_id": "fit_alpha", "title": "Alpha Fit", "kind": "linear_regression" } },
+                { "cmd": "fit.run", "params": { "source_sheet_id": "d1", "sheet_id": "fit_beta", "title": "Beta Fit", "equation_id": "log_agonist_vs_response_4pl" } },
+                { "cmd": "table.setCells", "params": { "sheet_id": "d1", "rows": [["bad"], ["text"], ["n/a"], ["err"], ["bad"], ["bad"], ["bad"]] } }
+            ],
+            "exports": [
+                { "format": "json", "sheet": "Alpha Fit", "out": "out/alpha.json" },
+                { "format": "json", "sheet": "Beta Fit", "out": "out/beta.json" },
+                { "format": "csv", "sheet": "Assay", "out": "out/assay.csv" },
+                { "format": "curvebook", "out": "out/multi.curvebook" }
+            ]
+        }))?,
+    )?;
+    let out_b = run_cli(&["batch", manifest_b.to_str().ok_or("non-UTF-8 path")?, "--workdir", wd_b, "--json"])?;
+    assert_eq!(out_b.status.code(), Some(1), "batch with multiple failed result sheets must exit 1: {}", String::from_utf8_lossy(&out_b.stdout));
+    let err_b: Value = serde_json::from_slice(&out_b.stdout)?;
+    let msg_b = err_b["error"]["message"].as_str().unwrap_or("");
+    assert!(
+        msg_b.contains("Alpha Fit") && msg_b.contains("fit_alpha") && msg_b.contains("Beta Fit") && msg_b.contains("fit_beta"),
+        "error message must name every failed result sheet: {msg_b}"
+    );
+    assert_eq!(err_b["error"]["details"]["failed_count"], json!(2));
+    for rel in ["out/alpha.json", "out/beta.json", "out/assay.csv", "out/multi.curvebook"] {
+        assert!(!dir_b.child(rel).exists(), "failed batch must write zero export files ({rel} exists)");
+    }
+
+    Ok(())
+}

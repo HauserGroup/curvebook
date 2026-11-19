@@ -11,8 +11,8 @@ use curvebook_math::linalg::DenseMatrix;
 use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
-    CovarianceDiagnostics, RoutDetectionResult, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis,
-    compute_hougaard_skewness_into, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis_scaled,
+    CovarianceDiagnostics, RoutDetectionResult, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis_checked,
+    compute_hougaard_skewness_into, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis_checked,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget};
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
@@ -64,6 +64,11 @@ pub fn fit_nonlinear(
     }
     let active_datasets = filtered_storage.as_deref().unwrap_or(datasets);
 
+    if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method
+        && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
+    {
+        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
+    }
     if matches!(config.method, FitMethod::RobustCauchy | FitMethod::RoutOutlierElimination { .. })
         && active_datasets.iter().any(|d| d.is_pre_summarized)
     {
@@ -188,6 +193,7 @@ pub(in crate::solver) fn fit_plot_function_only(
             r_squared: 1.0,
             sy_x: if is_robust { f64::NAN } else { 0.0 },
             rsdr: None,
+            runs_test: None,
             curve_overlay: Some(overlay),
         });
     }
@@ -279,7 +285,13 @@ pub(in crate::solver) fn solve_lm_by_method(
             }
             let excluded = obs.len() - clean_obs.len();
             *obs = clean_obs;
-            let ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
+            let mut ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
+            if let Ok(alt) = solve_with_warm_start(model, layout, obs, init_theta, config)
+                && ((alt.status == FitStatus::Converged && ols.status != FitStatus::Converged)
+                    || (alt.status == FitStatus::Converged && alt.weighted_ss < ols.weighted_ss * (1.0 - 1e-12)))
+            {
+                ols = alt;
+            }
             Ok((ols, Some(rout), excluded))
         }
     }
@@ -381,7 +393,7 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
         FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
         FitMethod::PoissonDeviance => {
             if profile_computed {
-                compute_deviance_profile_likelihood_cis(
+                compute_deviance_profile_likelihood_cis_checked(
                     &lm_out.theta,
                     lm_out.weighted_ss,
                     &cov,
@@ -401,7 +413,7 @@ pub(in crate::solver) fn finalize_fit_uncertainty(
                     wy2_acc.add(wy * wy);
                 }
                 wy2_acc.add(ss_within_total);
-                compute_profile_likelihood_cis_scaled(
+                compute_profile_likelihood_cis_checked(
                     &lm_out.theta,
                     lm_out.weighted_ss,
                     Some(wy2_acc.total()),

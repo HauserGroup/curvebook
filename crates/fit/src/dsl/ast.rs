@@ -465,8 +465,38 @@ pub enum DslEquationKind {
     Explicit,
     /// Implicit algebraic relation `LHS(X, Y, theta) = RHS(X, Y, theta)` solved per point via Brent root-finding.
     Implicit,
-    /// First-order ordinary differential equation `dY/dX = f(X, Y, theta)` integrated via adaptive RK45 with optional `<0> Y = ...` initial rule.
+    /// First-order ordinary differential equation `dY/dX = f(X, Y, theta)` integrated via adaptive RK45 with optional `Y0 = ...` / `Y(t0) = ...` initial rule.
     OdeFirstOrder,
+}
+
+/// Classification of a non-fatal diagnostic emitted while compiling a custom DSL equation.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum DslWarningKind {
+    /// A reserved built-in constant or predictor alias (`E`, `PI`, `T`, `DS`, `DATASET`,
+    /// `INF`, `NAN`, `LN2`, `LN10`, `SQRT2`, `X1`, ...) resolved as a built-in symbol rather than a fitted parameter.
+    ReservedIdentifierUsed,
+    /// A reserved built-in identifier was written with non-canonical casing (e.g. `e`, `Pi`, `nan`),
+    /// which still resolves case-insensitively to the built-in symbol rather than a fitted parameter.
+    NonCanonicalReservedCase,
+    /// Both `T` and `X` appear in the same equation; `T` is a reserved alias for predictor `X` (`x[0]`).
+    AliasTWithPredictorX,
+}
+
+/// Typed non-fatal warning recorded during [`CompiledDslModel::compile`](crate::dsl::CompiledDslModel::compile).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DslCompileWarning {
+    /// Category of the compile diagnostic.
+    pub kind: DslWarningKind,
+    /// Source identifier token as written in the equation (for example `"e"`, `"Pi"`, `"T"`).
+    pub identifier: String,
+    /// Built-in symbol or constant meaning that the identifier resolves to.
+    pub resolves_to: &'static str,
+    /// One-based source line number where the identifier appeared.
+    pub line: usize,
+    /// One-based source column number where the identifier appeared.
+    pub column: usize,
+    /// Human-readable diagnostic message.
+    pub message: String,
 }
 
 /// Compiled statement/program chunk gated by a [`DatasetFilter`].
@@ -474,6 +504,12 @@ pub enum DslEquationKind {
 pub(in crate::dsl) struct CompiledProgram {
     pub(in crate::dsl) code: Vec<OpCode>,
     pub(in crate::dsl) local_count: usize,
+}
+
+#[derive(Debug, Clone)]
+pub(in crate::dsl) struct CompiledOdeInit {
+    pub(in crate::dsl) t0: f64,
+    pub(in crate::dsl) prog: CompiledProgram,
 }
 
 #[derive(Debug, Clone)]
