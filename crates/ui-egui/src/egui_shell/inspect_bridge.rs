@@ -10,23 +10,31 @@ use std::collections::BTreeMap;
 
 use curvebook_doc::TableArchetype;
 use curvebook_render::{RasterImage, RenderTargetSpec};
-use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, CornerRadius, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
 use crate::compositor::{WorkspacePixelRect, compute_workspace_layout_for_dpi, render_workspace_rgba};
 use crate::dialogs_canvas::ActiveDialog;
-use crate::egui_shell::data_grid::{ColumnGridRenderContext, render_column_grid};
+use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
+use crate::egui_shell::command_palette::render_command_palette;
+use crate::egui_shell::leading_dock::{LeadingDockContext, render_leading_dock};
 use crate::egui_shell::rasterizer::EguiScreenshotRegions;
 use crate::egui_shell::stat_anova_modal::{is_one_way_anova_dialog_active, render_one_way_anova_modal};
-use crate::egui_shell::{EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::status_footer::{StatusFooterContext, render_status_footer};
+use crate::egui_shell::top_chrome::{TopChromeContext, render_top_chrome};
+use crate::egui_shell::trailing_studio::{TrailingStudioContext, render_trailing_studio};
+use crate::egui_shell::{
+    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens,
+};
 use crate::inspect::{
     GridSelectionSnapshot, UiDialogSnapshot, UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, active_dialog_slug,
     inspect_ui_tree_for_metrics,
 };
-use crate::interaction::{ViewportMetrics, resolve_result_sheet_for_shortcut};
+use crate::interaction::ViewportMetrics;
 use crate::layout::ZLayer;
 use crate::tr;
+use crate::workspace_nav::ActiveWorkspacePane;
 
 /// Which center-stage sheet backend renders the current frame in `--ui-backend=egui` (`R15.2`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -37,13 +45,15 @@ pub enum HybridSheetSurface {
     LegacyPresenter,
 }
 
-/// Which modal surface currently holds focus & `ZLayer::ModalBackdrop` ownership (`R15.2`).
+/// Which modal surface currently holds focus & `ZLayer::ModalBackdrop` ownership (`R15.2+`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HybridModalSurface {
     /// No modal dialog open; center stage & chrome receive input normally.
     None,
     /// Standardized `egui` `Parameters: One-Way ANOVA` modal (`Case A`).
     EguiOneWayAnova,
+    /// `egui` `Cmd/Ctrl+K` Command Palette modal overlay (`R15.3`).
+    EguiCommandPalette,
     /// `egui` `About` modal (`R15.1` minimal shell parity).
     EguiAbout,
     /// Native host unsaved-changes confirmation dialog (`close_dialog_open`).
@@ -68,7 +78,7 @@ pub struct HybridCoexistenceDecision {
 }
 
 /// Pure, stateless arbiter controlling focus ownership, Z-order, and raw-input routing
-/// across coexisting `egui` and legacy presenter surfaces (`R15.2`).
+/// across coexisting `egui` and legacy presenter surfaces (`R15.2+`).
 pub struct HybridCoexistenceArbiter;
 
 impl HybridCoexistenceArbiter {
@@ -86,6 +96,7 @@ impl HybridCoexistenceArbiter {
             match &app.canvas_dialogs.active_dialog {
                 ActiveDialog::None => HybridModalSurface::None,
                 ActiveDialog::About => HybridModalSurface::EguiAbout,
+                ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
                 ActiveDialog::EditAnalysisParameters { .. } if is_one_way_anova_dialog_active(app) => HybridModalSurface::EguiOneWayAnova,
                 _ => HybridModalSurface::LegacyModal,
             }
@@ -93,8 +104,13 @@ impl HybridCoexistenceArbiter {
 
         let modal_backdrop_active = modal_surface != HybridModalSurface::None;
         let blocks_egui_grid = modal_backdrop_active;
-        let blocks_legacy_background =
-            matches!(modal_surface, HybridModalSurface::EguiOneWayAnova | HybridModalSurface::EguiAbout | HybridModalSurface::HostUnsavedClose);
+        let blocks_legacy_background = matches!(
+            modal_surface,
+            HybridModalSurface::EguiOneWayAnova
+                | HybridModalSurface::EguiCommandPalette
+                | HybridModalSurface::EguiAbout
+                | HybridModalSurface::HostUnsavedClose
+        );
 
         HybridCoexistenceDecision {
             sheet_surface,
@@ -112,7 +128,7 @@ impl HybridCoexistenceArbiter {
 
     /// Return `true` when pointer/wheel events at `pos` should be forwarded to the legacy presenter
     /// (either `Case B` clicks inside an unported legacy modal card, or direct interaction on a
-    /// legacy sheet such as `ResultSheet` when no modal blocks it).
+    /// legacy sheet when no modal blocks it).
     #[must_use]
     pub fn pointer_routes_to_legacy(
         decision: &HybridCoexistenceDecision,
@@ -126,7 +142,10 @@ impl HybridCoexistenceArbiter {
         }
         match decision.modal_surface {
             HybridModalSurface::LegacyModal => legacy_modal_rect.is_some_and(|r| r.contains(pos)),
-            HybridModalSurface::EguiOneWayAnova | HybridModalSurface::EguiAbout | HybridModalSurface::HostUnsavedClose => false,
+            HybridModalSurface::EguiOneWayAnova
+            | HybridModalSurface::EguiCommandPalette
+            | HybridModalSurface::EguiAbout
+            | HybridModalSurface::HostUnsavedClose => false,
             HybridModalSurface::None => decision.renders_legacy_canvas && canvas_rect.contains(pos),
         }
     }
@@ -134,12 +153,13 @@ impl HybridCoexistenceArbiter {
     /// Return `true` when `Cmd/Ctrl+T` is eligible to open `EditAnalysisParameters` on an active `ResultSheet`.
     #[must_use]
     pub fn allows_cmd_t_edit_params(app: &UiApp, decision: &HybridCoexistenceDecision, egui_wants_keyboard: bool) -> bool {
-        !decision.modal_backdrop_active && !egui_wants_keyboard && resolve_result_sheet_for_shortcut(app, true).is_some()
+        !decision.modal_backdrop_active && !egui_wants_keyboard && crate::interaction::resolve_result_sheet_for_shortcut(app, true).is_some()
     }
 }
 
 /// Optional host-provided legacy texture overlay passed from `CurveBookNativeApp` so 60 FPS desktop
 /// frames reuse GPU textures without re-running software rasterization inside `inspect_bridge`.
+#[derive(Debug)]
 pub struct HybridHostTextureFrame {
     /// Pre-rendered legacy canvas texture (`ResultSheet`, `ChartScene`, non-`Column` table) scaled for `canvas_rect`.
     pub canvas_texture: Option<egui::TextureId>,
@@ -162,6 +182,13 @@ pub struct ShellAboutFrameReport {
     pub legacy_canvas_widget_id: Option<egui::Id>,
     pub resolved_test_banner: String,
     pub decision: Option<HybridCoexistenceDecision>,
+    pub tier1_rect_pt: Option<egui::Rect>,
+    pub tier2_rect_pt: Option<egui::Rect>,
+    pub leading_dock_rect_pt: Option<egui::Rect>,
+    pub trailing_dock_rect_pt: Option<egui::Rect>,
+    pub footer_rect_pt: Option<egui::Rect>,
+    pub menu_popup_open: bool,
+    pub center_stage_handled_natively: bool,
 }
 
 /// Convert a logical coordinate `[x_pt, y_pt]` to physical pixels using `pixels_per_point`.
@@ -231,9 +258,14 @@ fn entry_belongs_to_scope(entry: &FrameInspectNodeMeta, scope_tag: &str) -> bool
         "toolbar" => wid.starts_with("toolbar."),
         "menus" => wid.starts_with("menu."),
         "tabs" => wid.starts_with("tab.") || wid.starts_with("sheet.tab.") || wid.starts_with("result.tab."),
-        "canvas" => wid.starts_with("canvas."),
+        "canvas" => {
+            wid.starts_with("canvas.") || wid.starts_with("result.diagnostic_banner") || wid.starts_with("info.") || wid.starts_with("welcome.")
+        }
         "grid" => wid.starts_with("grid."),
-        "dialog" => wid.starts_with("dialog.") || wid.starts_with("modal.") || wid.starts_with("edit."),
+        "dialog" => wid.starts_with("dialog.") || wid.starts_with("modal.") || wid.starts_with("edit.") || wid.starts_with("palette."),
+        "navigator" => wid.starts_with("nav."),
+        "inspector" => wid.starts_with("inspector."),
+        "status" => wid.starts_with("status."),
         _ => false,
     }
 }
@@ -481,7 +513,24 @@ pub fn build_ui_tree_snapshot_from_egui(
     };
 
     let menus: Option<Vec<UiMenuSnapshot>> = if scope_wants(scope, "menus") { baseline.menus.clone() } else { None };
-    let navigator_sheets: Option<Vec<UiNavigatorSheetNode>> = if scope_wants(scope, "navigator") { baseline.navigator_sheets.clone() } else { None };
+    let navigator_sheets: Option<Vec<UiNavigatorSheetNode>> = if scope_wants(scope, "navigator") {
+        let egui_nav = collect_scope("navigator");
+        match baseline.navigator_sheets.clone() {
+            Some(mut nodes) if include_bounds && !egui_nav.is_empty() => {
+                for node in &mut nodes {
+                    if let Some(hit) = egui_nav.iter().find(|n| n.widget_id == node.widget_id)
+                        && hit.bounds.is_some()
+                    {
+                        node.bounds = hit.bounds;
+                    }
+                }
+                Some(nodes)
+            }
+            other => other,
+        }
+    } else {
+        None
+    };
     let grid_selection: GridSelectionSnapshot = baseline.grid_selection;
     let dialog_out = if scope_wants(scope, "dialog") { dialog } else { None };
 
@@ -592,7 +641,7 @@ pub fn render_egui_shell_frame(
 }
 
 /// Full hybrid coexistence workspace/dialog frame entry point supporting optional pre-rendered GPU
-/// textures from `CurveBookNativeApp` (`R15.2`).
+/// textures from `CurveBookNativeApp` (`R15.2+`).
 #[allow(clippy::too_many_arguments)]
 pub fn render_egui_shell_frame_with_host(
     ui: &mut egui::Ui,
@@ -612,29 +661,102 @@ pub fn render_egui_shell_frame_with_host(
     let decision = HybridCoexistenceArbiter::evaluate(app, host_close_dialog_open);
     let mut report = ShellAboutFrameReport { decision: Some(decision), ..ShellAboutFrameReport::default() };
 
-    if HybridCoexistenceArbiter::allows_cmd_t_edit_params(app, &decision, ctx.egui_wants_keyboard_input())
-        && ctx.input_mut(|i| {
-            i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::CTRL, Key::T) || i.consume_key(Modifiers::MAC_CMD, Key::T)
-        })
-    {
-        intents.push_ui("ui.editParams.open", json!({}));
-    }
+    views.sync_history_with_document(app.document());
+    handle_shell_global_shortcuts(&ctx, app, &decision, intents);
 
-    render_wave2_top_chrome(ui, app, &decision, &tokens, meta, intents);
+    let content_rect = ctx.content_rect();
+    let layout = tokens.metrics.solve_shell_layout(ShellLayoutInput {
+        viewport_w_pt: content_rect.width(),
+        viewport_h_pt: content_rect.height(),
+        presentation_mode: app.presentation_mode,
+        empty_workspace: app.document().total_sheet_count() == 0,
+        navigator_open: app.nav.navigator_open,
+        inspector_open: app.nav.inspector_open,
+        family_open: app.family_open,
+        leading_user_collapsed: views.leading_collapsed_rail,
+        trailing_user_collapsed: views.trailing_collapsed_rail,
+        leading_width_override_pt: views.leading_width_pt,
+        trailing_width_override_pt: views.trailing_width_pt,
+        host_draws_menu_bar: app.host_draws_menu_bar,
+    });
+    views.last_shell_layout = Some(layout);
+
+    let enabled = !decision.modal_backdrop_active;
+    if !app.presentation_mode {
+        let project_title = app.session().file_path().and_then(|p| p.file_name()).and_then(|s| s.to_str()).unwrap_or("CurveBook Project");
+        let top_rep = render_top_chrome(
+            ui,
+            app,
+            &mut views.top_chrome,
+            TopChromeContext {
+                tokens: &tokens,
+                decision: &decision,
+                layout,
+                workspace_preset: views.workspace_preset,
+                launcher_open: views.launcher_open,
+                host_draws_menu_bar: app.host_draws_menu_bar,
+                project_title,
+                dirty: app.session().is_dirty(),
+            },
+            meta,
+            intents,
+        );
+        report.tier1_rect_pt = top_rep.tier1_rect_pt;
+        report.tier2_rect_pt = top_rep.tier2_rect_pt;
+        report.menu_popup_open = top_rep.menu_popup_open;
+
+        let history_can_back = views.can_go_back();
+        let history_can_forward = views.can_go_forward();
+        let hover_readout = views.canvas_view.hover_readout.clone();
+        let foot_rep = render_status_footer(
+            ui,
+            app,
+            views,
+            StatusFooterContext { tokens: &tokens, layout, history_can_back, history_can_forward, hover_readout: hover_readout.as_ref(), enabled },
+            meta,
+            intents,
+        );
+        report.footer_rect_pt = foot_rep.footer_rect_pt;
+
+        let lead_rep = render_leading_dock(
+            ui,
+            app,
+            &mut views.leading_dock,
+            LeadingDockContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Navigator },
+            meta,
+            intents,
+        );
+        report.leading_dock_rect_pt = lead_rep.dock_rect_pt;
+
+        let trail_rep = render_trailing_studio(
+            ui,
+            app,
+            &mut views.trailing_studio,
+            TrailingStudioContext { tokens: &tokens, layout, enabled, focused: app.nav.active_pane == ActiveWorkspacePane::Inspector },
+            meta,
+            intents,
+        );
+        report.trailing_dock_rect_pt = trail_rep.dock_rect_pt;
+    }
 
     egui::CentralPanel::default().frame(egui::Frame::NONE.fill(tokens.surface_bg)).show(ui, |ui| {
         let canvas_rect = ui.available_rect_before_wrap();
         report.regions.canvas_rect_pt = Some(canvas_rect);
-
-        if decision.renders_egui_column_grid {
-            let grid_rep =
-                render_column_grid(ui, app, &mut views.column_grid, ColumnGridRenderContext::new(&tokens, decision.blocks_egui_grid), meta, intents);
-            report.scrollbar_rect_pt = grid_rep.vertical_scrollbar_rect_pt.or(grid_rep.horizontal_scrollbar_rect_pt);
-        } else {
-            let canvas_resp = render_hybrid_legacy_canvas(ui, app, canvas_rect, host_textures);
-            report.legacy_canvas_texture_rect_pt = Some(canvas_rect);
-            report.legacy_canvas_widget_id = Some(canvas_resp.id);
+        let stage_rep = render_center_stage(
+            ui,
+            app,
+            views,
+            CenterStageContext { tokens: &tokens, decision: &decision, layout, host_textures, focused_pane: app.nav.active_pane, enabled },
+            meta,
+            intents,
+        );
+        if let Some(primary) = stage_rep.primary_rect_pt {
+            report.regions.canvas_rect_pt = Some(primary);
         }
+        report.scrollbar_rect_pt = stage_rep.scrollbar_rect_pt;
+        report.legacy_canvas_texture_rect_pt = stage_rep.legacy_canvas_texture_rect_pt;
+        report.legacy_canvas_widget_id = stage_rep.legacy_canvas_widget_id;
+        report.center_stage_handled_natively = stage_rep.handled_natively;
     });
 
     match decision.modal_surface {
@@ -648,6 +770,12 @@ pub fn render_egui_shell_frame_with_host(
             report.outside_wheel_captured = anova_rep.outside_wheel_captured;
             report.resolved_test_banner = anova_rep.resolved_test_banner;
         }
+        HybridModalSurface::EguiCommandPalette => {
+            let pal_rep = render_command_palette(&ctx, app, &mut views.command_palette, &tokens, meta, intents);
+            report.regions.dialog_rect_pt = pal_rep.dialog_rect_pt;
+            report.outside_click_captured = pal_rep.outside_click_captured;
+            report.outside_wheel_captured = pal_rep.outside_wheel_captured;
+        }
         HybridModalSurface::LegacyModal => {
             render_legacy_modal_overlay_with_backdrop(&ctx, app, &tokens, host_textures, meta, &mut report);
         }
@@ -658,6 +786,49 @@ pub fn render_egui_shell_frame_with_host(
     }
 
     report
+}
+
+fn handle_shell_global_shortcuts(ctx: &egui::Context, app: &UiApp, decision: &HybridCoexistenceDecision, intents: &mut PendingUiIntents) {
+    let egui_wants_kb = ctx.egui_wants_keyboard_input();
+    if HybridCoexistenceArbiter::allows_cmd_t_edit_params(app, decision, egui_wants_kb)
+        && ctx.input_mut(|i| {
+            i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::CTRL, Key::T) || i.consume_key(Modifiers::MAC_CMD, Key::T)
+        })
+    {
+        intents.push_ui("ui.editParams.open", json!({}));
+    }
+    if decision.modal_backdrop_active || egui_wants_kb {
+        return;
+    }
+    if ctx.input_mut(|i| {
+        i.consume_key(Modifiers::COMMAND, Key::K) || i.consume_key(Modifiers::CTRL, Key::K) || i.consume_key(Modifiers::MAC_CMD, Key::K)
+    }) {
+        intents.push_set_palette_open(true);
+    }
+    if ctx.input_mut(|i| {
+        i.consume_key(Modifiers::COMMAND, Key::Backslash)
+            || i.consume_key(Modifiers::CTRL, Key::Backslash)
+            || i.consume_key(Modifiers::MAC_CMD, Key::Backslash)
+    }) {
+        intents.push_ui("ui.split.toggle", json!({}));
+    }
+    let shift_cmd_p = Modifiers::COMMAND | Modifiers::SHIFT;
+    let shift_ctrl_p = Modifiers::CTRL | Modifiers::SHIFT;
+    let shift_mac_p = Modifiers::MAC_CMD | Modifiers::SHIFT;
+    let toggle_presentation = ctx.input_mut(|i| {
+        i.consume_key(Modifiers::NONE, Key::F11)
+            || i.consume_key(shift_cmd_p, Key::P)
+            || i.consume_key(shift_ctrl_p, Key::P)
+            || i.consume_key(shift_mac_p, Key::P)
+    }) || (app.presentation_mode && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)));
+    if toggle_presentation {
+        intents.push_ui("ui.presentation.toggle", json!({}));
+    }
+    if ctx.input_mut(|i| i.consume_key(Modifiers::SHIFT, Key::F6)) {
+        intents.push_ui("ui.pane.cycle", json!({ "reverse": true }));
+    } else if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::F6)) {
+        intents.push_ui("ui.pane.cycle", json!({ "reverse": false }));
+    }
 }
 
 fn render_top_about_only_bar(ui: &mut egui::Ui, app: &UiApp, modal_open: bool, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
@@ -688,280 +859,14 @@ fn render_top_about_only_bar(ui: &mut egui::Ui, app: &UiApp, modal_open: bool, m
     });
 }
 
-fn render_wave2_top_chrome(
+/// Render the legacy `UiApp` workspace/scene into `canvas_rect` via optional pre-uploaded host
+/// textures or on-demand software rasterization (used by deferred `R15.4` sheets and `canvas_view`).
+pub fn render_legacy_canvas_in_rect(
     ui: &mut egui::Ui,
     app: &UiApp,
-    decision: &HybridCoexistenceDecision,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let modal_blocked = decision.modal_backdrop_active;
-    let doc = app.document();
-    let on_result_sheet = resolve_result_sheet_for_shortcut(app, true).is_some();
-    let analyze_enabled = !modal_blocked
-        && doc.active_sheet_id.as_ref().is_some_and(|id| {
-            doc.data_sheet(id).is_some()
-                || doc.result_sheet(id).is_some_and(|rs| rs.analyzable_data.is_some() || rs.tabs.iter().any(|t| !t.rows.is_empty()))
-        });
-    let analyze_reason = if modal_blocked {
-        Some("modal dialog is active")
-    } else if !analyze_enabled {
-        Some("Select a DataSheet before analyzing")
-    } else {
-        None
-    };
-
-    let edit_enabled = !modal_blocked && on_result_sheet;
-    let edit_reason = if modal_blocked {
-        Some("modal dialog is active")
-    } else if !on_result_sheet {
-        Some("Open a ResultSheet to edit analysis parameters (Cmd+T)")
-    } else {
-        None
-    };
-
-    let analyze_label = tr(&app.locale, "menu.analyze.analyze");
-    let edit_label = tr(&app.locale, "toolbar.parameters");
-    let about_label = tr(&app.locale, "menu.help.about");
-
-    egui::Panel::top("egui_shell.top_chrome")
-        .frame(egui::Frame::NONE.fill(tokens.panel_bg).stroke(Stroke::new(1.0, tokens.divider)).inner_margin(egui::Margin::symmetric(8, 5)))
-        .show(ui, |ui| {
-            ui.horizontal(|ui| {
-                let analyze_resp = record_chrome_button(
-                    ui,
-                    tokens,
-                    meta,
-                    "toolbar.analyze",
-                    analyze_label,
-                    Some("ui.analyze.open"),
-                    false,
-                    analyze_enabled,
-                    analyze_reason,
-                );
-                if analyze_resp.clicked() && analyze_enabled {
-                    intents.push_ui("ui.analyze.open", json!({}));
-                }
-
-                let edit_resp = record_chrome_button(
-                    ui,
-                    tokens,
-                    meta,
-                    "toolbar.edit_params",
-                    edit_label,
-                    Some("ui.editParams.open"),
-                    false,
-                    edit_enabled,
-                    edit_reason,
-                );
-                if edit_resp.clicked() && edit_enabled {
-                    intents.push_ui("ui.editParams.open", json!({}));
-                }
-
-                let about_resp = record_chrome_button(
-                    ui,
-                    tokens,
-                    meta,
-                    "toolbar.help.about",
-                    about_label,
-                    Some("app.about"),
-                    false,
-                    !modal_blocked,
-                    modal_blocked.then_some("modal dialog is active"),
-                );
-                if about_resp.clicked() && !modal_blocked {
-                    intents.push_ui("app.about", json!({}));
-                }
-
-                if !doc.data_sheets.is_empty() || !doc.result_sheets.is_empty() {
-                    ui.separator();
-                    let active_id = doc.active_sheet_id.as_ref();
-                    let total_tabs = (doc.data_sheets.len() + doc.result_sheets.len()).max(1) as f32;
-                    let switcher_w = ui.available_width().max(40.0);
-                    let gap = 6.0 * (total_tabs - 1.0);
-                    let max_tab_w = ((switcher_w - gap) / total_tabs).clamp(36.0, 148.0);
-                    ui.allocate_ui(Vec2::new(switcher_w, 24.0), |ui| {
-                        ui.horizontal(|ui| {
-                            ui.spacing_mut().item_spacing.x = 6.0;
-                            for ds in &doc.data_sheets {
-                                let is_active = active_id == Some(&ds.id);
-                                let wid = format!("sheet.tab.{}", ds.id.as_str());
-                                let resp = record_chrome_tab(ui, tokens, meta, &wid, &ds.title, is_active, !modal_blocked, max_tab_w);
-                                if resp.clicked() && !modal_blocked && !is_active {
-                                    intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
-                                }
-                            }
-                            for rs in &doc.result_sheets {
-                                let is_active = active_id == Some(&rs.id);
-                                let wid = format!("sheet.tab.{}", rs.id.as_str());
-                                let resp = record_chrome_tab(ui, tokens, meta, &wid, rs.title(), is_active, !modal_blocked, max_tab_w);
-                                if resp.clicked() && !modal_blocked && !is_active {
-                                    intents.push_engine("sheet.select", json!({ "sheet_id": rs.id.as_str() }));
-                                }
-                            }
-                        });
-                    });
-                }
-            });
-        });
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_chrome_button(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    label: &str,
-    command_id: Option<&str>,
-    selected: bool,
-    enabled: bool,
-    disabled_reason: Option<&str>,
+    canvas_rect: Rect,
+    host_textures: Option<&HybridHostTextureFrame>,
 ) -> egui::Response {
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(12.0), tokens.text_primary));
-    job.wrap = egui::text::TextWrapping { max_width: 140.0, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let w = (galley.size().x + 14.0).clamp(44.0, 148.0);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.button_bg
-    };
-    let fg = if enabled { tokens.text_strong } else { tokens.text_disabled };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.button_border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
-        Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-        galley,
-        fg,
-    );
-
-    let ak_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Button, enabled, ak_label.clone()));
-    let resp = if let Some(reason) = disabled_reason {
-        resp.on_hover_text(reason)
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else {
-        resp
-    };
-
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "button",
-                label,
-                command_id,
-                value: None,
-                enabled,
-                disabled_reason,
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_chrome_tab(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    label: &str,
-    selected: bool,
-    enabled: bool,
-    max_w: f32,
-) -> egui::Response {
-    let text_max_w = (max_w - 12.0).max(16.0);
-    let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), tokens.text_primary));
-    job.wrap = egui::text::TextWrapping { max_width: text_max_w, max_rows: 1, break_anywhere: false, overflow_character: Some('…') };
-    let galley = ui.painter().layout_job(job);
-    let ellipsized = galley.elided;
-    let w = (galley.size().x + 14.0).clamp(32.0_f32.min(max_w), max_w);
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 22.0), if enabled { Sense::click() } else { Sense::hover() });
-    let bg = if !enabled {
-        tokens.panel_bg
-    } else if selected {
-        tokens.active_bg
-    } else if resp.hovered() {
-        tokens.hover_bg
-    } else {
-        tokens.surface_bg
-    };
-    let fg = if !enabled {
-        tokens.text_disabled
-    } else if selected {
-        tokens.text_strong
-    } else {
-        tokens.text_primary
-    };
-    let border = if !enabled {
-        tokens.divider
-    } else if selected {
-        tokens.accent_strong
-    } else {
-        tokens.border
-    };
-    ui.painter().rect_filled(rect, CornerRadius::same(4), bg);
-    ui.painter().rect_stroke(rect, CornerRadius::same(4), Stroke::new(1.0, border), StrokeKind::Inside);
-    ui.painter().with_clip_rect(rect.shrink(3.0)).galley(
-        Pos2::new(rect.center().x - galley.size().x * 0.5, rect.center().y - galley.size().y * 0.5),
-        galley,
-        fg,
-    );
-
-    let ak_label = label.to_owned();
-    resp.widget_info(move || egui::WidgetInfo::selected(egui::Role::Tab, enabled, selected, ak_label.clone()));
-    let resp = if !enabled {
-        resp.on_hover_text("modal dialog is active")
-    } else if ellipsized {
-        resp.on_hover_text(label)
-    } else {
-        resp
-    };
-
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "tab",
-                label,
-                command_id: None,
-                value: Some(json!(selected)),
-                enabled,
-                disabled_reason: (!enabled).then_some("modal dialog is active"),
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
-}
-
-fn render_hybrid_legacy_canvas(ui: &mut egui::Ui, app: &UiApp, canvas_rect: Rect, host_textures: Option<&HybridHostTextureFrame>) -> egui::Response {
     let resp = ui.allocate_rect(canvas_rect, Sense::click_and_drag());
     if !canvas_rect.is_positive() {
         return resp;

@@ -1,31 +1,243 @@
 //! Native desktop `egui 0.37` shell contracts, canonical layout/color tokens, single-commit
 //! intent buffer, AccessKit inspection metadata, and adapted pure-`egui` widget helpers (`R15`).
 
+use curvebook_doc::{SheetId, SheetSection};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
-use curvebook_palette::{CIVIDIS_STOPS, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
+use curvebook_palette::{CIVIDIS_STOPS, CanvasPreviewFilter, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
 use egui::{Color32, CornerRadius, FontId, Rect, Stroke, TextStyle, Visuals};
 use serde::{Deserialize, Serialize};
 
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
+use crate::dialogs_canvas::{ActiveDialog, ActiveInspector};
 use crate::i18n;
 use crate::layout::ZLayer;
 use crate::theme::{UiThemeMode, UiThemeSpec};
+use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
 
+pub mod canvas_view;
+pub mod center_stage;
+pub mod command_palette;
 pub mod data_grid;
 pub mod driver;
 pub mod fonts;
+pub mod info_view;
 pub mod inspect_bridge;
+pub mod leading_dock;
 pub mod rasterizer;
+pub mod results_view;
 pub mod stat_anova_modal;
+pub mod status_footer;
 pub mod top_bar_fit;
+pub mod top_chrome;
+pub mod trailing_studio;
+pub mod welcome_hub;
 pub mod widgets;
+
+/// Pre-configured dock visibility & width profiles surfaced by Tier 1's Workspace Preset Switcher (`R15.3`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum WorkspacePreset {
+    #[default]
+    Default,
+    DataPrep,
+    Modeling,
+    Publication,
+    Compact,
+}
+
+/// Dock configuration implied by applying a [`WorkspacePreset`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct PresetDockConfig {
+    pub navigator_open: bool,
+    pub family_open: bool,
+    pub inspector_open: bool,
+    pub leading_collapsed_rail: bool,
+    pub trailing_collapsed_rail: bool,
+    pub leading_width_pt: f32,
+    pub trailing_width_pt: f32,
+}
+
+impl WorkspacePreset {
+    /// Ordered list of workspace presets exposed in Tier 1 switcher controls.
+    pub const ALL: [Self; 5] = [Self::Default, Self::DataPrep, Self::Modeling, Self::Publication, Self::Compact];
+
+    /// Canonical identifier string for telemetry, intents, and persistence.
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Default => "default",
+            Self::DataPrep => "data_prep",
+            Self::Modeling => "modeling",
+            Self::Publication => "publication",
+            Self::Compact => "compact",
+        }
+    }
+
+    /// Parse a serialized preset slug case-insensitively.
+    #[must_use]
+    pub fn parse(raw: &str) -> Option<Self> {
+        match raw.trim().to_ascii_lowercase().as_str() {
+            "default" => Some(Self::Default),
+            "data_prep" | "dataprep" | "data prep" => Some(Self::DataPrep),
+            "modeling" => Some(Self::Modeling),
+            "publication" => Some(Self::Publication),
+            "compact" => Some(Self::Compact),
+            _ => None,
+        }
+    }
+
+    /// Concise localized-ready display label for Tier 1 pill UI.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Default => "Default",
+            Self::DataPrep => "Data Prep",
+            Self::Modeling => "Modeling",
+            Self::Publication => "Publication",
+            Self::Compact => "Compact",
+        }
+    }
+
+    /// Default dock visibility and width profile for this workspace preset.
+    #[must_use]
+    pub const fn default_dock_config(self) -> PresetDockConfig {
+        match self {
+            Self::Default => PresetDockConfig {
+                navigator_open: true,
+                family_open: true,
+                inspector_open: true,
+                leading_collapsed_rail: false,
+                trailing_collapsed_rail: false,
+                leading_width_pt: 240.0,
+                trailing_width_pt: 280.0,
+            },
+            Self::DataPrep => PresetDockConfig {
+                navigator_open: true,
+                family_open: false,
+                inspector_open: true,
+                leading_collapsed_rail: false,
+                trailing_collapsed_rail: true,
+                leading_width_pt: 220.0,
+                trailing_width_pt: 280.0,
+            },
+            Self::Modeling => PresetDockConfig {
+                navigator_open: true,
+                family_open: true,
+                inspector_open: true,
+                leading_collapsed_rail: false,
+                trailing_collapsed_rail: false,
+                leading_width_pt: 210.0,
+                trailing_width_pt: 320.0,
+            },
+            Self::Publication => PresetDockConfig {
+                navigator_open: true,
+                family_open: false,
+                inspector_open: true,
+                leading_collapsed_rail: true,
+                trailing_collapsed_rail: false,
+                leading_width_pt: 240.0,
+                trailing_width_pt: 300.0,
+            },
+            Self::Compact => PresetDockConfig {
+                navigator_open: true,
+                family_open: false,
+                inspector_open: true,
+                leading_collapsed_rail: true,
+                trailing_collapsed_rail: true,
+                leading_width_pt: 210.0,
+                trailing_width_pt: 260.0,
+            },
+        }
+    }
+}
 
 /// Persistent pure-UI `egui_shell` view states owned alongside [`UiApp`] (`R15.2+`).
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct EguiShellViewState {
     pub column_grid: data_grid::ColumnGridEguiState,
     pub anova_modal: stat_anova_modal::AnovaModalEguiState,
+    pub workspace_preset: WorkspacePreset,
+    pub top_chrome: top_chrome::TopChromeEguiState,
+    pub command_palette: command_palette::CommandPaletteEguiState,
+    pub welcome_hub: welcome_hub::WelcomeHubEguiState,
+    pub leading_dock: leading_dock::LeadingDockEguiState,
+    pub center_stage: center_stage::CenterStageEguiState,
+    pub info_view: info_view::InfoViewEguiState,
+    pub results_view: results_view::ResultsViewEguiState,
+    pub canvas_view: canvas_view::CanvasViewEguiState,
+    pub trailing_studio: trailing_studio::TrailingStudioEguiState,
+    pub status_footer: status_footer::StatusFooterEguiState,
+    pub launcher_open: bool,
+    pub leading_width_pt: Option<f32>,
+    pub trailing_width_pt: Option<f32>,
+    pub leading_collapsed_rail: bool,
+    pub trailing_collapsed_rail: bool,
+    pub leading_flyout_open: bool,
+    pub trailing_flyout_open: bool,
+    pub active_sheet_history: Vec<SheetId>,
+    pub history_cursor: usize,
+    pub quick_stats_cache: status_footer::QuickStatsCache,
+    pub progress_modal: Option<center_stage::ProgressModalState>,
+    pub last_shell_layout: Option<ResponsiveShellLayout>,
+}
+
+/// Resolve any sheet's display title by [`SheetId`] across all five folders.
+#[must_use]
+pub fn doc_sheet_title<'a>(doc: &'a curvebook_doc::ProjectDocument, id: &SheetId) -> Option<&'a str> {
+    if let Some(ds) = doc.data_sheet(id) {
+        return Some(ds.title.as_str());
+    }
+    if let Some(info) = doc.info_sheet(id) {
+        return Some(info.title.as_str());
+    }
+    if let Some(rs) = doc.result_sheet(id) {
+        return Some(rs.title());
+    }
+    if let Some(gs) = doc.graph_sheet(id) {
+        return Some(gs.title.as_str());
+    }
+    doc.layout_sheet(id).map(|ls| ls.title.as_str())
+}
+
+impl EguiShellViewState {
+    /// Record an active sheet visit onto `< >` navigation history unless already at the cursor.
+    pub fn record_active_sheet_visit(&mut self, sheet_id: &SheetId) {
+        if let Some(current) = self.active_sheet_history.get(self.history_cursor)
+            && current == sheet_id
+        {
+            return;
+        }
+        if self.history_cursor + 1 < self.active_sheet_history.len() {
+            self.active_sheet_history.truncate(self.history_cursor + 1);
+        }
+        self.active_sheet_history.push(sheet_id.clone());
+        self.history_cursor = self.active_sheet_history.len().saturating_sub(1);
+    }
+
+    /// Prune deleted sheets cleanly and record `active_sheet_id` when missing from cursor.
+    pub fn sync_history_with_document(&mut self, doc: &curvebook_doc::ProjectDocument) {
+        self.active_sheet_history.retain(|id| doc_sheet_title(doc, id).is_some());
+        if self.active_sheet_history.is_empty() {
+            self.history_cursor = 0;
+        } else if self.history_cursor >= self.active_sheet_history.len() {
+            self.history_cursor = self.active_sheet_history.len() - 1;
+        }
+        if let Some(active) = doc.active_sheet_id.as_ref() {
+            self.record_active_sheet_visit(active);
+        }
+    }
+
+    /// Return `true` when stepping Back (`<`) moves to an earlier visited sheet.
+    #[must_use]
+    pub const fn can_go_back(&self) -> bool {
+        self.history_cursor > 0 && !self.active_sheet_history.is_empty()
+    }
+
+    /// Return `true` when stepping Forward (`>`) moves to a newer visited sheet.
+    #[must_use]
+    pub const fn can_go_forward(&self) -> bool {
+        self.history_cursor + 1 < self.active_sheet_history.len()
+    }
 }
 
 /// Active desktop UI presentation backend (`--ui-backend=legacy|egui`, default `Legacy`).
@@ -180,6 +392,240 @@ impl LayoutMetrics {
     pub const fn grid_header_total_height(self) -> f32 {
         self.grid_header_tier_heights[0] + self.grid_header_tier_heights[1] + self.grid_header_tier_heights[2]
     }
+
+    /// Solve responsive dock collapse, splitter widths, and Center Stage budget (`gui-layout-spec.md` §2.3).
+    #[must_use]
+    pub fn solve_shell_layout(self, input: ShellLayoutInput) -> ResponsiveShellLayout {
+        let w = sanitize_nonneg(input.viewport_w_pt);
+        let h = sanitize_nonneg(input.viewport_h_pt);
+        let tier = if w >= self.wide_desktop_breakpoint_w {
+            ViewportTier::WideDesktop
+        } else if w >= self.inspector_collapse_breakpoint_w {
+            ViewportTier::StandardLaptop
+        } else if w >= self.min_window_w_pt {
+            ViewportTier::CompactTablet
+        } else {
+            ViewportTier::NarrowHeadless
+        };
+        let split_orientation = if w >= self.split_vertical_breakpoint_w { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
+
+        if input.presentation_mode {
+            return ResponsiveShellLayout {
+                tier,
+                top_chrome_h_pt: 0.0,
+                tier1_app_bar_h_pt: 0.0,
+                tier2_action_strip_h_pt: 0.0,
+                status_bar_h_pt: 0.0,
+                leading_dock_w_pt: 0.0,
+                leading_collapsed_to_rail: false,
+                leading_visible: false,
+                leading_splitter_w_pt: 0.0,
+                family_visible: false,
+                trailing_dock_w_pt: 0.0,
+                trailing_collapsed_to_rail: false,
+                trailing_visible: false,
+                trailing_splitter_w_pt: 0.0,
+                center_stage_w_pt: w,
+                center_stage_h_pt: h,
+                split_orientation,
+                rtl_mirrored: false,
+            };
+        }
+
+        let tier1_app_bar_h_pt = self.app_bar_h.min(h * 0.45).max(0.0);
+        let tier2_action_strip_h_pt = self.action_strip_h.min((h - tier1_app_bar_h_pt).max(0.0) * 0.65).max(0.0);
+        let top_chrome_h_pt = tier1_app_bar_h_pt + tier2_action_strip_h_pt;
+        let status_bar_h_pt = self.status_bar_h.min((h - top_chrome_h_pt).max(0.0)).max(0.0);
+        let center_stage_h_pt = (h - top_chrome_h_pt - status_bar_h_pt).max(0.0);
+
+        if w < 420.0 {
+            return ResponsiveShellLayout {
+                tier,
+                top_chrome_h_pt,
+                tier1_app_bar_h_pt,
+                tier2_action_strip_h_pt,
+                status_bar_h_pt,
+                leading_dock_w_pt: 0.0,
+                leading_collapsed_to_rail: false,
+                leading_visible: false,
+                leading_splitter_w_pt: 0.0,
+                family_visible: false,
+                trailing_dock_w_pt: 0.0,
+                trailing_collapsed_to_rail: false,
+                trailing_visible: false,
+                trailing_splitter_w_pt: 0.0,
+                center_stage_w_pt: w,
+                center_stage_h_pt,
+                split_orientation,
+                rtl_mirrored: false,
+            };
+        }
+
+        if input.empty_workspace {
+            let show_rails = w >= self.min_window_w_pt;
+            let lead_w = if show_rails && input.navigator_open { self.dock_collapsed_rail_w } else { 0.0 };
+            let trail_w = if show_rails && input.inspector_open { self.dock_collapsed_rail_w } else { 0.0 };
+            return ResponsiveShellLayout {
+                tier,
+                top_chrome_h_pt,
+                tier1_app_bar_h_pt,
+                tier2_action_strip_h_pt,
+                status_bar_h_pt,
+                leading_dock_w_pt: lead_w,
+                leading_collapsed_to_rail: lead_w > 0.0,
+                leading_visible: lead_w > 0.0,
+                leading_splitter_w_pt: 0.0,
+                family_visible: false,
+                trailing_dock_w_pt: trail_w,
+                trailing_collapsed_to_rail: trail_w > 0.0,
+                trailing_visible: trail_w > 0.0,
+                trailing_splitter_w_pt: 0.0,
+                center_stage_w_pt: (w - lead_w - trail_w).max(0.0),
+                center_stage_h_pt,
+                split_orientation,
+                rtl_mirrored: false,
+            };
+        }
+
+        let rail = self.dock_collapsed_rail_w;
+        let split = self.splitter_visual_w;
+        let mut lead_collapsed = !input.navigator_open || input.leading_user_collapsed || w < self.navigator_collapse_breakpoint_w;
+        let mut trail_collapsed = !input.inspector_open || input.trailing_user_collapsed || w < self.inspector_collapse_breakpoint_w;
+
+        let mut lead_w = if lead_collapsed {
+            rail
+        } else {
+            input.leading_width_override_pt.unwrap_or(self.navigator_default_w).clamp(self.navigator_min_w, self.navigator_max_w)
+        };
+        let mut trail_w = if trail_collapsed {
+            rail
+        } else {
+            input.trailing_width_override_pt.unwrap_or(self.inspector_default_w).clamp(self.inspector_min_w, self.inspector_max_w)
+        };
+        let mut lead_split = if lead_collapsed { 0.0 } else { split };
+        let mut trail_split = if trail_collapsed { 0.0 } else { split };
+
+        let target_center_min =
+            if !lead_collapsed && !trail_collapsed && w >= self.inspector_collapse_breakpoint_w { 480.0 } else { self.center_stage_min_w };
+
+        let mut center_w = w - lead_w - lead_split - trail_w - trail_split;
+        if center_w < target_center_min {
+            let deficit = target_center_min - center_w;
+            if !trail_collapsed && !lead_collapsed {
+                let lead_slack = (lead_w - self.navigator_min_w).max(0.0);
+                let trail_slack = (trail_w - self.inspector_min_w).max(0.0);
+                let total_slack = lead_slack + trail_slack;
+                if total_slack > 0.0 {
+                    let take = deficit.min(total_slack);
+                    lead_w -= take * (lead_slack / total_slack);
+                    trail_w -= take * (trail_slack / total_slack);
+                }
+            } else if !lead_collapsed {
+                let lead_slack = (lead_w - self.navigator_min_w).max(0.0);
+                lead_w -= deficit.min(lead_slack);
+            } else if !trail_collapsed {
+                let trail_slack = (trail_w - self.inspector_min_w).max(0.0);
+                trail_w -= deficit.min(trail_slack);
+            }
+            center_w = w - lead_w - lead_split - trail_w - trail_split;
+        }
+
+        if center_w < self.center_stage_min_w && !trail_collapsed {
+            trail_collapsed = true;
+            trail_w = rail;
+            trail_split = 0.0;
+            center_w = w - lead_w - lead_split - trail_w - trail_split;
+        }
+        if center_w < self.center_stage_min_w && !lead_collapsed {
+            lead_collapsed = true;
+            lead_w = rail;
+            lead_split = 0.0;
+            center_w = w - lead_w - lead_split - trail_w - trail_split;
+        }
+
+        ResponsiveShellLayout {
+            tier,
+            top_chrome_h_pt,
+            tier1_app_bar_h_pt,
+            tier2_action_strip_h_pt,
+            status_bar_h_pt,
+            leading_dock_w_pt: lead_w,
+            leading_collapsed_to_rail: lead_collapsed,
+            leading_visible: lead_w > 0.0,
+            leading_splitter_w_pt: lead_split,
+            family_visible: !lead_collapsed && input.family_open,
+            trailing_dock_w_pt: trail_w,
+            trailing_collapsed_to_rail: trail_collapsed,
+            trailing_visible: trail_w > 0.0,
+            trailing_splitter_w_pt: trail_split,
+            center_stage_w_pt: center_w.max(0.0),
+            center_stage_h_pt,
+            split_orientation,
+            rtl_mirrored: false,
+        }
+    }
+}
+
+const fn sanitize_nonneg(value: f32) -> f32 {
+    if value.is_finite() && value > 0.0 { value } else { 0.0 }
+}
+
+/// Responsive viewport width tier (`gui-layout-spec.md` §2.3).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum ViewportTier {
+    WideDesktop,
+    #[default]
+    StandardLaptop,
+    CompactTablet,
+    NarrowHeadless,
+}
+
+/// Center split orientation derived from window width (`< 720 pt` switches to Vertical).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
+pub enum SplitOrientation {
+    #[default]
+    Horizontal,
+    Vertical,
+}
+
+/// Pure input parameters evaluated by [`LayoutMetrics::solve_shell_layout`].
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ShellLayoutInput {
+    pub viewport_w_pt: f32,
+    pub viewport_h_pt: f32,
+    pub presentation_mode: bool,
+    pub empty_workspace: bool,
+    pub navigator_open: bool,
+    pub inspector_open: bool,
+    pub family_open: bool,
+    pub leading_user_collapsed: bool,
+    pub trailing_user_collapsed: bool,
+    pub leading_width_override_pt: Option<f32>,
+    pub trailing_width_override_pt: Option<f32>,
+    pub host_draws_menu_bar: bool,
+}
+
+/// Deterministic panel dimensions and collapse state computed once per frame for `egui_shell`.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ResponsiveShellLayout {
+    pub tier: ViewportTier,
+    pub top_chrome_h_pt: f32,
+    pub tier1_app_bar_h_pt: f32,
+    pub tier2_action_strip_h_pt: f32,
+    pub status_bar_h_pt: f32,
+    pub leading_dock_w_pt: f32,
+    pub leading_collapsed_to_rail: bool,
+    pub leading_visible: bool,
+    pub leading_splitter_w_pt: f32,
+    pub family_visible: bool,
+    pub trailing_dock_w_pt: f32,
+    pub trailing_collapsed_to_rail: bool,
+    pub trailing_visible: bool,
+    pub trailing_splitter_w_pt: f32,
+    pub center_stage_w_pt: f32,
+    pub center_stage_h_pt: f32,
+    pub split_orientation: SplitOrientation,
+    pub rtl_mirrored: bool,
 }
 
 impl Default for LayoutMetrics {
@@ -541,6 +987,28 @@ pub enum UiIntent {
     DialogWidgetClick { widget_id: String },
     DialogButtonAction { action: String },
     CustomViewAction { domain: String, payload: String },
+    SelectResultTab { index: usize },
+    SetActiveInspector { inspector: ActiveInspector },
+    SetFocusPane { pane: ActiveWorkspacePane },
+    SetCanvasZoom { zoom: f64 },
+    ToggleNavigatorSection { section: SheetSection },
+    SetNavigatorSearch { query: String },
+    SetNavigatorNesting { mode: NavigatorNestingMode },
+    SetSplitRatio { ratio: f64 },
+    SetPreviewFilter { filter: CanvasPreviewFilter },
+    SetPaletteOpen { open: bool },
+    SetLauncherOpen { open: bool },
+    ApplyWorkspacePreset { preset: WorkspacePreset },
+    SyncLeadingWidth { width_pt: f32 },
+    SyncTrailingWidth { width_pt: f32 },
+    ToggleLeadingCollapsedRail,
+    ToggleTrailingCollapsedRail,
+    HistoryBack,
+    HistoryForward,
+    DismissDiagnosticBanner { sheet_id: SheetId },
+    OpenRetargetDialog { result_sheet_id: SheetId, target_data_sheet_id: Option<SheetId> },
+    BrushPoint { sheet_id: SheetId, coord: curvebook_tools::GridCellCoord },
+    ClearBrush,
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -632,6 +1100,116 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::CustomViewAction { domain: domain.into(), payload: payload.into() });
     }
 
+    /// Select a `ResultSheet` tab index cleanly on settlement.
+    pub fn push_select_result_tab(&mut self, index: usize) {
+        self.queue.push(UiIntent::SelectResultTab { index });
+    }
+
+    /// Activate a specific [`ActiveInspector`] tab inside Trailing Studio Dock.
+    pub fn push_set_active_inspector(&mut self, inspector: ActiveInspector) {
+        self.queue.push(UiIntent::SetActiveInspector { inspector });
+    }
+
+    /// Update focused top-level workspace pane (`F6` / `Shift+F6` / click).
+    pub fn push_set_focus_pane(&mut self, pane: ActiveWorkspacePane) {
+        self.queue.push(UiIntent::SetFocusPane { pane });
+    }
+
+    /// Update canvas zoom percentage cleanly (`0.1 ..= 8.0`).
+    pub fn push_set_canvas_zoom(&mut self, zoom: f64) {
+        self.queue.push(UiIntent::SetCanvasZoom { zoom });
+    }
+
+    /// Toggle collapse/expand state of a Navigator folder section.
+    pub fn push_toggle_navigator_section(&mut self, section: SheetSection) {
+        self.queue.push(UiIntent::ToggleNavigatorSection { section });
+    }
+
+    /// Update Navigator instant substring filter query.
+    pub fn push_set_navigator_search(&mut self, query: impl Into<String>) {
+        self.queue.push(UiIntent::SetNavigatorSearch { query: query.into() });
+    }
+
+    /// Switch Navigator organization mode (`SeparateFolders` vs `NestedWithResults`).
+    pub fn push_set_navigator_nesting(&mut self, mode: NavigatorNestingMode) {
+        self.queue.push(UiIntent::SetNavigatorNesting { mode });
+    }
+
+    /// Persist Center Stage split divider ratio (`0.15 ..= 0.85`).
+    pub fn push_set_split_ratio(&mut self, ratio: f64) {
+        self.queue.push(UiIntent::SetSplitRatio { ratio });
+    }
+
+    /// Switch [`CanvasPreviewFilter`] simulation (`Normal` / CVD / `GrayscalePrint`).
+    pub fn push_set_preview_filter(&mut self, filter: CanvasPreviewFilter) {
+        self.queue.push(UiIntent::SetPreviewFilter { filter });
+    }
+
+    /// Open or close the `Cmd/Ctrl+K` Command Palette overlay.
+    pub fn push_set_palette_open(&mut self, open: bool) {
+        self.queue.push(UiIntent::SetPaletteOpen { open });
+    }
+
+    /// Open or dismiss the 3-pane Welcome & Workspace Hub launcher overlay.
+    pub fn push_set_launcher_open(&mut self, open: bool) {
+        self.queue.push(UiIntent::SetLauncherOpen { open });
+    }
+
+    /// Apply a saved [`WorkspacePreset`] dock configuration.
+    pub fn push_apply_workspace_preset(&mut self, preset: WorkspacePreset) {
+        self.queue.push(UiIntent::ApplyWorkspacePreset { preset });
+    }
+
+    /// Persist dragged Leading Dock width in logical `pt`.
+    pub fn push_sync_leading_width(&mut self, width_pt: f32) {
+        self.queue.push(UiIntent::SyncLeadingWidth { width_pt });
+    }
+
+    /// Persist dragged Trailing Studio width in logical `pt`.
+    pub fn push_sync_trailing_width(&mut self, width_pt: f32) {
+        self.queue.push(UiIntent::SyncTrailingWidth { width_pt });
+    }
+
+    /// Toggle Leading Dock between `240 pt` expanded and `36 pt` collapsed rail.
+    pub fn push_toggle_leading_collapsed_rail(&mut self) {
+        self.queue.push(UiIntent::ToggleLeadingCollapsedRail);
+    }
+
+    /// Toggle Trailing Studio between `280 pt` expanded and `36 pt` collapsed rail.
+    pub fn push_toggle_trailing_collapsed_rail(&mut self) {
+        self.queue.push(UiIntent::ToggleTrailingCollapsedRail);
+    }
+
+    /// Navigate Back (`<`) in sheet visit history.
+    pub fn push_history_back(&mut self) {
+        self.queue.push(UiIntent::HistoryBack);
+    }
+
+    /// Navigate Forward (`>`) in sheet visit history.
+    pub fn push_history_forward(&mut self) {
+        self.queue.push(UiIntent::HistoryForward);
+    }
+
+    /// Dismiss the non-blocking bottom diagnostic banner for `sheet_id`.
+    pub fn push_dismiss_diagnostic_banner(&mut self, sheet_id: SheetId) {
+        self.queue.push(UiIntent::DismissDiagnosticBanner { sheet_id });
+    }
+
+    /// Open `Change Data Analyzed...` retargeting `result_sheet_id` toward `target_data_sheet_id`.
+    pub fn push_open_retarget_dialog(&mut self, result_sheet_id: SheetId, target_data_sheet_id: Option<SheetId>) {
+        self.queue.push(UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id });
+    }
+
+    /// Brush a point/cell coordinate for two-way Split View & Data Point Drill-Back.
+    pub fn push_brush_point(&mut self, sheet_id: SheetId, coord: curvebook_tools::GridCellCoord) {
+        self.queue.push(UiIntent::BrushPoint { sheet_id, coord });
+    }
+
+    /// Clear any active single-point or row brushing highlight.
+    pub fn push_clear_brush(&mut self) {
+        self.queue.push(UiIntent::ClearBrush);
+    }
+
     /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
     ///
     /// When `will_discard` is `true`, clears the buffer without executing any mutations so
@@ -649,6 +1227,7 @@ impl PendingUiIntents {
             outcomes.push(apply_single_ui_intent(app, intent)?);
         }
         app.sync_views();
+        app.egui_views.sync_history_with_document(app.session.document());
         Ok(outcomes)
     }
 
@@ -734,7 +1313,145 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
                 result: outcome.command_result,
             })
         }
+        other => apply_shell_workspace_intent(app, other),
     }
+}
+
+fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::SelectResultTab { index } => {
+            let max_idx = app
+                .session
+                .document()
+                .active_sheet_id
+                .as_ref()
+                .and_then(|id| app.session.document().result_sheet(id))
+                .map_or(0, |rs| rs.tabs.len().saturating_sub(1));
+            app.canvas_dialogs.result_view.active_tab_index = index.min(max_idx);
+        }
+        UiIntent::SetActiveInspector { inspector } => {
+            app.canvas_dialogs.active_inspector = inspector;
+            if inspector != ActiveInspector::None {
+                app.nav.inspector_open = true;
+                app.egui_views.trailing_collapsed_rail = false;
+            }
+        }
+        UiIntent::SetFocusPane { pane } => {
+            app.nav.active_pane = pane;
+        }
+        UiIntent::SetCanvasZoom { zoom } => {
+            app.canvas_dialogs.canvas.zoom = if zoom.is_finite() { zoom.clamp(0.1, 8.0) } else { 1.0 };
+        }
+        UiIntent::ToggleNavigatorSection { section } => {
+            if let Some(pos) = app.nav.collapsed_sections.iter().position(|s| *s == section) {
+                app.nav.collapsed_sections.remove(pos);
+            } else {
+                app.nav.collapsed_sections.push(section);
+            }
+        }
+        UiIntent::SetNavigatorSearch { query } => {
+            app.nav.search_query = query;
+        }
+        UiIntent::SetNavigatorNesting { mode } => {
+            app.nav.nesting_mode = mode;
+        }
+        UiIntent::SetSplitRatio { ratio } => {
+            app.split.set_ratio(ratio);
+        }
+        UiIntent::SetPreviewFilter { filter } => {
+            app.preview_filter = filter;
+        }
+        UiIntent::SetPaletteOpen { open } => {
+            if open {
+                app.canvas_dialogs.open_command_palette();
+                app.canvas_dialogs.command_palette.sync_shortcuts(&app.shortcuts);
+                app.egui_views.command_palette.just_opened = true;
+            } else if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
+                app.canvas_dialogs.active_dialog = ActiveDialog::None;
+            }
+        }
+        UiIntent::SetLauncherOpen { open } => {
+            app.egui_views.launcher_open = open;
+        }
+        UiIntent::ApplyWorkspacePreset { preset } => {
+            let cfg = preset.default_dock_config();
+            app.nav.navigator_open = cfg.navigator_open;
+            app.family_open = cfg.family_open;
+            app.nav.inspector_open = cfg.inspector_open;
+            app.egui_views.workspace_preset = preset;
+            app.egui_views.leading_collapsed_rail = cfg.leading_collapsed_rail;
+            app.egui_views.trailing_collapsed_rail = cfg.trailing_collapsed_rail;
+            app.egui_views.leading_width_pt = Some(cfg.leading_width_pt);
+            app.egui_views.trailing_width_pt = Some(cfg.trailing_width_pt);
+        }
+        UiIntent::SyncLeadingWidth { width_pt } => {
+            let clamped = width_pt.clamp(LayoutMetrics::CANONICAL.navigator_min_w, LayoutMetrics::CANONICAL.navigator_max_w);
+            app.egui_views.leading_width_pt = Some(clamped);
+        }
+        UiIntent::SyncTrailingWidth { width_pt } => {
+            let clamped = width_pt.clamp(LayoutMetrics::CANONICAL.inspector_min_w, LayoutMetrics::CANONICAL.inspector_max_w);
+            app.egui_views.trailing_width_pt = Some(clamped);
+        }
+        UiIntent::ToggleLeadingCollapsedRail => {
+            app.egui_views.leading_collapsed_rail = !app.egui_views.leading_collapsed_rail;
+            if !app.egui_views.leading_collapsed_rail {
+                app.nav.navigator_open = true;
+            }
+        }
+        UiIntent::ToggleTrailingCollapsedRail => {
+            app.egui_views.trailing_collapsed_rail = !app.egui_views.trailing_collapsed_rail;
+            if !app.egui_views.trailing_collapsed_rail {
+                app.nav.inspector_open = true;
+            }
+        }
+        UiIntent::HistoryBack => return step_history_intent(app, false),
+        UiIntent::HistoryForward => return step_history_intent(app, true),
+        UiIntent::DismissDiagnosticBanner { sheet_id } => {
+            if !app.egui_views.center_stage.dismissed_banner_sheets.contains(&sheet_id) {
+                app.egui_views.center_stage.dismissed_banner_sheets.push(sheet_id);
+            }
+        }
+        UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id } => {
+            let doc = app.session.document();
+            if let Some(rs) = doc.result_sheet(&result_sheet_id) {
+                app.canvas_dialogs.change_data.open_for_result(rs, doc);
+                if let Some(target) = target_data_sheet_id {
+                    app.canvas_dialogs.change_data.selected_target_id = Some(target);
+                }
+                app.canvas_dialogs.active_dialog = ActiveDialog::ChangeDataAnalyzed { result_sheet_id };
+            }
+        }
+        UiIntent::BrushPoint { sheet_id, coord } => {
+            app.brush_from_grid_cell(&sheet_id, coord);
+        }
+        UiIntent::ClearBrush => {
+            app.clear_brush();
+        }
+        _ => {}
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn step_history_intent(app: &mut UiApp, forward: bool) -> Result<UiIntentOutcome, EngineError> {
+    let target = if forward {
+        if app.egui_views.can_go_forward() {
+            app.egui_views.history_cursor += 1;
+            app.egui_views.active_sheet_history.get(app.egui_views.history_cursor).cloned()
+        } else {
+            None
+        }
+    } else if app.egui_views.can_go_back() {
+        app.egui_views.history_cursor -= 1;
+        app.egui_views.active_sheet_history.get(app.egui_views.history_cursor).cloned()
+    } else {
+        None
+    };
+
+    if let Some(sheet_id) = target {
+        let outcome = app.execute_session_ui_cmd("sheet.select", serde_json::json!({ "sheet_id": sheet_id.as_str() }))?;
+        return Ok(UiIntentOutcome::Engine { command_id: String::from("sheet.select"), outcome });
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
 }
 
 /// Metadata recorded for a single rendered `egui` widget during a settled frame pass.
@@ -1026,5 +1743,64 @@ mod tests {
         assert_eq!(app.focus_widget_id.as_deref(), Some("grid.cell.2.1.0"));
         assert_eq!(app.grid.row_titles_collapsed_override, Some(true));
         Ok(())
+    }
+
+    #[test]
+    fn responsive_shell_layout_enforces_spec_breakpoints_and_presentation_mode() {
+        use super::{ShellLayoutInput, SplitOrientation, ViewportTier, WorkspacePreset};
+
+        let metrics = LayoutMetrics::CANONICAL;
+        let base_in = ShellLayoutInput {
+            viewport_w_pt: 1440.0,
+            viewport_h_pt: 900.0,
+            presentation_mode: false,
+            empty_workspace: false,
+            navigator_open: true,
+            inspector_open: true,
+            family_open: true,
+            leading_user_collapsed: false,
+            trailing_user_collapsed: false,
+            leading_width_override_pt: None,
+            trailing_width_override_pt: None,
+            host_draws_menu_bar: false,
+        };
+
+        let wide = metrics.solve_shell_layout(base_in);
+        assert_eq!(wide.tier, ViewportTier::WideDesktop);
+        assert!(!wide.leading_collapsed_to_rail);
+        assert!(!wide.trailing_collapsed_to_rail);
+        assert!(wide.center_stage_w_pt >= 900.0);
+        assert_eq!(wide.split_orientation, SplitOrientation::Horizontal);
+
+        let laptop = metrics.solve_shell_layout(ShellLayoutInput { viewport_w_pt: 960.0, ..base_in });
+        assert_eq!(laptop.tier, ViewportTier::StandardLaptop);
+        assert!(!laptop.leading_collapsed_to_rail);
+        assert!(!laptop.trailing_collapsed_to_rail);
+        assert!(laptop.center_stage_w_pt >= 480.0);
+
+        let tablet_900 = metrics.solve_shell_layout(ShellLayoutInput { viewport_w_pt: 900.0, ..base_in });
+        assert_eq!(tablet_900.tier, ViewportTier::CompactTablet);
+        assert!(!tablet_900.leading_collapsed_to_rail);
+        assert!(tablet_900.trailing_collapsed_to_rail);
+        assert_eq!(tablet_900.trailing_dock_w_pt, 36.0);
+        assert!(tablet_900.center_stage_w_pt >= 360.0);
+
+        let tablet_640 = metrics.solve_shell_layout(ShellLayoutInput { viewport_w_pt: 640.0, ..base_in });
+        assert!(tablet_640.leading_collapsed_to_rail);
+        assert!(tablet_640.trailing_collapsed_to_rail);
+        assert_eq!(tablet_640.split_orientation, SplitOrientation::Vertical);
+        assert!(tablet_640.center_stage_w_pt >= 360.0);
+
+        let present = metrics.solve_shell_layout(ShellLayoutInput { presentation_mode: true, ..base_in });
+        assert_eq!(present.top_chrome_h_pt, 0.0);
+        assert_eq!(present.status_bar_h_pt, 0.0);
+        assert!(!present.leading_visible);
+        assert!(!present.trailing_visible);
+        assert_eq!(present.center_stage_w_pt, 1440.0);
+        assert_eq!(present.center_stage_h_pt, 900.0);
+
+        for preset in WorkspacePreset::ALL {
+            assert_eq!(WorkspacePreset::parse(preset.as_str()), Some(preset));
+        }
     }
 }
