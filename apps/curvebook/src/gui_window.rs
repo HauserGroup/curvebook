@@ -14,7 +14,7 @@ use curvebook_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::inspect_bridge::{HybridCoexistenceArbiter, HybridHostTextureFrame, HybridModalSurface};
 use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
-use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiBackend, inspect_bridge};
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiBackend, UiIntent, inspect_bridge, top_chrome};
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
 use curvebook_ui_egui::{
     BETA_ACTIVE_LOCALES, ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, compute_workspace_layout_for_dpi, locale_picker_label,
@@ -231,6 +231,8 @@ pub struct CurveBookNativeApp {
     pending_synthetic_egui_batches: VecDeque<Vec<egui::Event>>,
     pending_live_gesture: Option<DeferredLivePointerGesture>,
     menu_popup_was_open: bool,
+    #[cfg(target_os = "macos")]
+    mac_menu_host: crate::mac_menu::MacNativeMenuHost,
     #[cfg(feature = "accessibility")]
     a11y_id_map: BTreeMap<egui::accesskit::NodeId, String>,
 }
@@ -273,8 +275,41 @@ impl CurveBookNativeApp {
             pending_synthetic_egui_batches: VecDeque::new(),
             pending_live_gesture: None,
             menu_popup_was_open: false,
+            #[cfg(target_os = "macos")]
+            mac_menu_host: crate::mac_menu::MacNativeMenuHost::new(),
             #[cfg(feature = "accessibility")]
             a11y_id_map: BTreeMap::new(),
+        }
+    }
+
+    /// Borrow the macOS native menu host mirror (for headless parity inspection and windowed sync).
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub const fn mac_menu_host(&self) -> &crate::mac_menu::MacNativeMenuHost {
+        &self.mac_menu_host
+    }
+
+    /// Synchronize macOS `muda` menu descriptors (and live `NSMenu` only if attached on main thread).
+    #[cfg(target_os = "macos")]
+    pub fn sync_macos_menu_for_window(&mut self, window_id: DesktopWindowId) {
+        if let Ok(win) = self.runtime.window(window_id) {
+            let chrome = win.chrome_state();
+            if let Err(err) = self.mac_menu_host.sync_from_chrome(&chrome) {
+                self.status_banner = Some(err);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn attach_macos_menus_on_windowed_startup(&mut self) {
+        let win_id = self.active_window_id();
+        if let Ok(win) = self.runtime.window(win_id) {
+            let chrome = win.chrome_state();
+            if !chrome.menu_bar_visible
+                && let Err(err) = self.mac_menu_host.attach_to_nsapp_for_windowed_host(&chrome)
+            {
+                self.status_banner = Some(err);
+            }
         }
     }
 
@@ -647,18 +682,38 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn commit_pending_intents(&mut self, window_id: DesktopWindowId, will_discard: bool) {
+    fn commit_pending_intents(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, will_discard: bool) {
         if self.pending_intents.is_empty() {
             return;
         }
-        let mut intents = std::mem::take(&mut self.pending_intents);
+        let mut raw_intents = std::mem::take(&mut self.pending_intents);
+        if will_discard {
+            if let Ok(win) = self.runtime.window_mut(window_id) {
+                let _ = raw_intents.commit_if_settled(win.app_mut(), true);
+            }
+            return;
+        }
+
+        let mut remaining_intents = PendingUiIntents::default();
+        let mut host_commands = Vec::new();
+        for intent in raw_intents.intents().iter().cloned() {
+            match &intent {
+                UiIntent::UiCommand { command_id, .. } | UiIntent::EngineCommand { command_id, .. } if is_host_routed_intent_command(command_id) => {
+                    host_commands.push(command_id.clone());
+                }
+                _ => remaining_intents.push(intent),
+            }
+        }
+
         let prev_scale = self.runtime.window(window_id).ok().map(|w| w.app().ui_scale());
         let prev_theme = self.runtime.window(window_id).ok().map(|w| w.app().theme.mode);
         let prev_locale = self.runtime.window(window_id).ok().map(|w| w.app().locale.clone());
-        if let Ok(win) = self.runtime.window_mut(window_id) {
-            if let Err(err) = intents.commit_if_settled(win.app_mut(), will_discard) {
+        if !remaining_intents.is_empty()
+            && let Ok(win) = self.runtime.window_mut(window_id)
+        {
+            if let Err(err) = remaining_intents.commit_if_settled(win.app_mut(), false) {
                 self.status_banner = Some(err.to_string());
-            } else if !will_discard {
+            } else {
                 let changed = Some(win.app().ui_scale()) != prev_scale
                     || Some(win.app().theme.mode) != prev_theme
                     || Some(win.app().locale.clone()) != prev_locale;
@@ -666,6 +721,9 @@ impl CurveBookNativeApp {
                     self.runtime.notify_preferences_changed(window_id);
                 }
             }
+        }
+        for cmd_id in host_commands {
+            self.execute_menu_command(Some(ctx), window_id, &cmd_id);
         }
     }
 
@@ -686,9 +744,26 @@ impl CurveBookNativeApp {
         self.handle_close_request(&ctx, initial_window_id);
         self.menu_popup_was_open = egui::Popup::is_any_open(&ctx);
         let bar_window_id = self.active_window_id();
-        let host_drew_menu_bar = self.render_top_menu_bar(ui, bar_window_id);
-        if let Ok(win) = self.runtime.window_mut(bar_window_id) {
-            win.app_mut().host_draws_menu_bar = host_drew_menu_bar;
+        #[cfg(target_os = "macos")]
+        {
+            self.sync_macos_menu_for_window(bar_window_id);
+            if self.mac_menu_host.is_installed_for_nsapp() {
+                while let Some(cmd_id) = self.mac_menu_host.poll_triggered_command_id() {
+                    self.execute_menu_command(Some(&ctx), bar_window_id, &cmd_id);
+                }
+            }
+        }
+        let bar_ui_backend = self.runtime.window(bar_window_id).map(|w| w.app().ui_backend()).unwrap_or(UiBackend::Legacy);
+        if bar_ui_backend == UiBackend::Egui {
+            if let Ok(win) = self.runtime.window_mut(bar_window_id) {
+                let in_window_menus = win.chrome_state().menu_bar_visible;
+                win.app_mut().host_draws_menu_bar = !in_window_menus;
+            }
+        } else {
+            let host_drew_menu_bar = self.render_top_menu_bar(ui, bar_window_id);
+            if let Ok(win) = self.runtime.window_mut(bar_window_id) {
+                win.app_mut().host_draws_menu_bar = host_drew_menu_bar;
+            }
         }
 
         let input_window_id = self.active_window_id();
@@ -795,6 +870,22 @@ impl CurveBookNativeApp {
             self.last_regions = report.regions;
             self.legacy_modal_rect_pt = report.legacy_modal_rect_pt;
             self.pending_intents = next_intents;
+            self.menu_popup_was_open |= report.menu_popup_open;
+
+            if let Ok(win) = self.runtime.window(input_window_id)
+                && win.app().presentation_mode
+                && self.inspect_meta.find_by_widget_id("toolbar.presentation.exit").is_none()
+            {
+                let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
+                let _ = top_chrome::render_presentation_exit_chip(
+                    &ctx,
+                    win.app(),
+                    &tokens,
+                    !decision.modal_backdrop_active,
+                    &mut self.inspect_meta,
+                    &mut self.pending_intents,
+                );
+            }
 
             let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_legacy_rect);
             if !decision.renders_legacy_modal_overlay {
@@ -835,7 +926,7 @@ impl CurveBookNativeApp {
         self.sync_window_title(&ctx, post_window_id);
 
         let will_discard = ctx.will_discard();
-        self.commit_pending_intents(post_window_id, will_discard);
+        self.commit_pending_intents(&ctx, post_window_id, will_discard);
         if will_discard {
             ctx.request_repaint();
         }
@@ -2062,13 +2153,13 @@ fn menu_item_tooltip(item: &DesktopMenuItem) -> String {
 }
 
 fn render_menu_item(ui: &mut egui::Ui, item: &DesktopMenuItem, pending_command: &mut Option<String>) {
-    if item.command_id == "ui.event.dispatch" {
+    if !top_chrome::is_menu_item_visible(&item.command_id) {
         return;
     }
     let tooltip = menu_item_tooltip(item);
-    let effective_enabled = item.enabled && item.command_id != "ui.result.applyRemediation";
+    let effective_enabled = top_chrome::effective_menu_item_enabled(&item.command_id, item.enabled);
 
-    if let Some(variants) = submenu_variants_for_command(&item.command_id) {
+    if let Some(variants) = top_chrome::submenu_variants_for_command(&item.command_id) {
         ui.menu_button(&item.localized_label, |ui| {
             for (label, variant) in variants {
                 let mut btn = egui::Button::new(*label);
@@ -2110,37 +2201,32 @@ fn render_menu_item(ui: &mut egui::Ui, item: &DesktopMenuItem, pending_command: 
     }
 }
 
-fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    match command_id {
-        "ui.theme.set" => Some(&[("Light", "light"), ("Dark", "dark"), ("High Contrast", "high_contrast")]),
-        "ui.previewFilter.set" => Some(&[
-            ("Normal Vision", "normal"),
-            ("Deuteranopia", "deuteranopia"),
-            ("Protanopia", "protanopia"),
-            ("Tritanopia", "tritanopia"),
-            ("Grayscale Print", "grayscale"),
-        ]),
-        "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => Some(&[
-            ("Single Column (88 mm)", "SingleColumn88mm"),
-            ("1.5 Column (130 mm)", "ColumnAndHalf130mm"),
-            ("Double Column (180 mm)", "DoubleColumn180mm"),
-            ("Full Page Portrait (180 × 240 mm)", "FullPagePortrait"),
-            ("Presentation Slide 16:9", "Slide16x9"),
-            ("Poster Panel (12 × 9 in)", "PosterPanel"),
-        ]),
-        _ => None,
-    }
+fn is_host_routed_intent_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "project.open"
+            | "project.save"
+            | "project.saveAs"
+            | "file.open"
+            | "file.open_unpacked_dir"
+            | "file.save_as"
+            | "export.pdf"
+            | "file.export_pdf"
+            | "export.png"
+            | "file.export_png"
+            | "window.new"
+            | "file.newWindow"
+            | "window.close"
+            | "file.close"
+            | "file.quit"
+            | "app.quit"
+            | "edit.copy"
+    )
 }
 
 fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[DesktopMenuItem], pending_command: &mut Option<String>) {
-    let extras = [
-        ("Open Unpacked Folder…", "file.open_unpacked_dir", &["file.open_unpacked_dir"][..]),
-        ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"][..]),
-        ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"][..]),
-        ("Export PNG…", "export.png", &["export.png", "file.export_png"][..]),
-    ];
     let mut added_separator = false;
-    for (label, cmd, aliases) in extras {
+    for &(label, cmd, aliases) in top_chrome::EXTRA_FILE_MENU_ACTIONS {
         if existing_items.iter().any(|item| aliases.contains(&item.command_id.as_str())) {
             continue;
         }
@@ -2276,6 +2362,8 @@ pub fn run_native_desktop_with_control(
             let fonts = build_egui_font_definitions(font_bytes.as_deref());
             cc.egui_ctx.set_fonts(fonts);
             let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup));
+            #[cfg(target_os = "macos")]
+            app.attach_macos_menus_on_windowed_startup();
             if let Some(ctrl) = control {
                 let _ = ctrl.egui_ctx_cell.set(cc.egui_ctx.clone());
                 cc.egui_ctx.request_repaint();
