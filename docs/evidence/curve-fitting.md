@@ -37,7 +37,7 @@
 - [x] **Enzyme Kinetics:** Michaelis–Menten, $k_{\text{cat}}$, allosteric sigmoidal, substrate inhibition, competitive / noncompetitive / uncompetitive / mixed-model inhibition, and Morrison tight-binding $K_i$
 - [x] **Exponential & Growth:** One-/two-/three-phase decay, one-phase association, plateau-then-exponential decay/association, Malthusian exponential growth, Logistic growth (with inflection-point transform), Gompertz growth, exponential plateau, Beta growth-and-decline
 - [x] **Peaks, Waves & Radiobiology:** Gaussian, Log-Gaussian, Cumulative Gaussian, two-Gaussian sum, Lorentzian, Weibull peak, baseline-parameterized sine / damped sine & sinc waves, and Linear–Quadratic surviving-fraction cell-survival (`linear_quadratic_survival`)
-- [x] **Custom Equation Bytecode VM (`crates/fit/src/dsl.rs`):** Multiline algebraic equations, `IF`/`AND`/`OR` piecewise segments, `<A>`..`<Z>`/`<0>`..`<9999>`/`<~A>`/`<B:D>` dataset-conditional selectors, implicit equations ($Y$ on both sides via `brent_root`), first-order RK45 differential equations ($dY/dX$), `[Transforms]` / `[InitialValues]` blocks, and Wave 5 `G9` `MAX_AST_NODES = 4_096` parser cap with iterative `Clone`/`Debug` on `Expr`
+- [x] **Custom Equation Bytecode VM (`crates/fit/src/dsl/`):** Multiline algebraic equations, `IF`/`AND`/`OR` piecewise segments, `<A>`..`<Z>`/`<0>`..`<9999>`/`<~A>`/`<B:D>` dataset-conditional selectors, implicit equations ($Y$ on both sides via `brent_root`), first-order RK45 differential equations ($dY/dX$), `[Transforms]` / `[InitialValues]` blocks, and Wave 5 `G9` `MAX_AST_NODES = 4_096` parser cap with iterative `Clone`/`Debug` on `Expr`
 
 ---
 

@@ -29,7 +29,7 @@ Given observations $(x_i, y_i)$ for $i = 1, \dots, N$ across $D \ge 1$ data sets
 2. **Poisson Regression (IRLS / Deviance minimization for count data $y_i \ge 0$):**
    Minimizes Poisson deviance $G^2(\theta) = 2 \sum_{i=1}^N \big[ y_i \ln(y_i / \hat{y}_i) - (y_i - \hat{y}_i) \big]$ (with $0 \ln 0 = 0$) where $\hat{y}_i = f(x_i; \theta) > 0$.
 3. **Robust Nonlinear Regression (Lorentzian / Cauchy $t_1$ distribution):**
-   Targets the heavy-tailed Cauchy objective (Motulsky & Brown 2006), implemented as iteratively reweighted least squares (`fit_cauchy_irls` in `crates/fit/src/solver.rs`, Cauchy weights $1/(1 + z_i^2)$ with $z_i = |r_i| / \text{RSDR}$, up to 15 reweighting passes):
+   Targets the heavy-tailed Cauchy objective (Motulsky & Brown 2006), implemented as iteratively reweighted least squares (`fit_cauchy_irls` in `crates/fit/src/solver/irls.rs`, Cauchy weights $1/(1 + z_i^2)$ with $z_i = |r_i| / \text{RSDR}$, up to 15 reweighting passes):
    $$\mathcal{L}_{\text{Cauchy}}(\theta, s) = \sum_{i=1}^N \ln\!\left(1 + \frac{w_i (y_i - f(x_i; \theta))^2}{s^2}\right)$$
    where scale $s$ is updated iteratively from the $68.27\text{th}$ percentile of weighted absolute residuals ($\text{RSDR}$). Pure Robust mode (`FitMethod::RobustCauchy`) requires raw replicates (`FitError::RequiresRawReplicates` on pre-summarized data) and suppresses least-squares inference (`InferenceAvailability::NotApplicableInRobustMode`, [`R4.5`](../history/roadmap/r4.md#r45-suppress-least-squares-inference-in-pure-robust-fit-mode): omits parameter SEs/CIs, covariance matrices, confidence/prediction bands, and *F*/LRT/$\text{AIC}_c$ comparisons while preserving best-fit estimates, `RSDR`, residuals, and point interpolation). Robust mode serves both for outlier-resistant curve estimation and as Stage 1 of **ROUT** automatic outlier elimination ($Q$ default $1\%$).
 
@@ -96,7 +96,7 @@ $$\text{SS}_{\text{crit}} = \text{SS}(\hat{\theta}) \left(1 + \frac{F_{1, \text{
 
 - **Confidence band** at grid point $x$: $\hat{y}(x) \pm t_{\alpha/2, \text{df}} \sqrt{g(x)^\top \operatorname{Cov}(\hat{\theta})\, g(x)}$ where $g(x) = \nabla_\theta f(x; \hat{\theta})$ (or propagated from profile bounds when exact).
 - **Prediction band:** $\hat{y}(x) \pm t_{\alpha/2, \text{df}} \sqrt{\hat{\sigma}^2 / w(x) + g(x)^\top \operatorname{Cov}(\hat{\theta})\, g(x)}$.
-- **Standard-curve interpolation (`Interpolate unknowns`):** Given rows with $Y$ entered and $X$ blank, solve $f(x; \hat{\theta}) = y_{\text{unk}}$ by a bracketing scan plus root refinement over the fitted $X$ range extended by $\pm 50\%$ of its span (`interpolate_x_from_y` in `crates/fit/src/solver.rs`), reporting $\hat{x}_{\text{unk}}$ in `InterpolatedUnknown`, mean-response and single-observation calibration intervals (`R4.6`), and an out-of-range `note` ("Target Y falls outside fitted curve range") instead of an estimate when no root exists; unpaired `(X, blank Y)` rows evaluate forward predictions $\hat{y}(x_{\text{unk}})$ with CIs/PIs.
+- **Standard-curve interpolation (`Interpolate unknowns`):** Given rows with $Y$ entered and $X$ blank, solve $f(x; \hat{\theta}) = y_{\text{unk}}$ by a bracketing scan plus root refinement over the fitted $X$ range extended by $\pm 50\%$ of its span (`interpolate_x_from_y` in `crates/fit/src/solver/curves.rs`), reporting $\hat{x}_{\text{unk}}$ in `InterpolatedUnknown`, mean-response and single-observation calibration intervals (`R4.6`), and an out-of-range `note` ("Target Y falls outside fitted curve range") instead of an estimate when no root exists; unpaired `(X, blank Y)` rows evaluate forward predictions $\hat{y}(x_{\text{unk}})$ with CIs/PIs.
 
 ### 2.4 Comparing Models (`Extra-Sum-of-Squares F`, `LikelihoodRatioTest` & `AICc`)
 
@@ -202,7 +202,7 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
 
 ---
 
-## 4. User-Defined Equation Language (`crates/fit/src/dsl.rs`)
+## 4. User-Defined Equation Language (`crates/fit/src/dsl/`)
 
 `curvebook-fit` compiles user-entered equations into a bounded, bounds-checked stack bytecode VM (`MAX_VM_STEPS`, parse-depth and AST-node caps; zero recursion at evaluation time, zero panics on division by zero or domain errors):
 - **Multiline intermediate assignments** ending in `Y = ...`,
@@ -210,11 +210,11 @@ Every built-in model implements `ParametricModel` (`crates/fit/src/library/mod.r
 - **Dataset-scoped lines:** `<A> Y = ...`, `<B> Y = ...`, `<~A> Y = ...`, `<B:D> Y = ...` enabling global mechanistic models across heterogeneous experimental readouts (e.g., total vs. nonspecific binding, wild-type vs. mutant),
 - **Column & multi-variable bindings:** Reading auxiliary independent variables from column titles or `MultipleVariables` predictors,
 - **Implicit equations** ($Y$ appearing on both sides solved via safeguarded Brent/Newton inner root-finder) and **first-order ODEs** ($dY/dX = g(X, Y; \theta)$ integrated with adaptive Dormand–Prince RK45 and step-count ceiling),
-- **Built-in scalar mathematical & special-function library** (`BuiltinFn` in `crates/fit/src/dsl.rs`; overlaps the in-table formula functions in Section 4 of [`data-tables-and-transforms.md`](data-tables-and-transforms.md)): elementary/trig/hyperbolic functions, `erf`/`erfc`, `normcdf`/`norminv`, Bessel (`besselj0`, `besselj1`, `besseljn`, `bessely0`, `bessely1`, `besselyn`, `besseli0`, `besseli1`, `besselk0`, `besselk1`), gamma/beta/digamma (`gamma`, `lngamma`, `beta`, `digamma`/`psi`), and hypergeometric functions (`hyp1f1`, `hyp2f1`, `confluent_u`).
+- **Built-in scalar mathematical & special-function library** (`BuiltinFn` in `crates/fit/src/dsl/ast.rs`; overlaps the in-table formula functions in Section 4 of [`data-tables-and-transforms.md`](data-tables-and-transforms.md)): elementary/trig/hyperbolic functions, `erf`/`erfc`, `normcdf`/`norminv`, Bessel (`besselj0`, `besselj1`, `besseljn`, `bessely0`, `bessely1`, `besselyn`, `besseli0`, `besseli1`, `besselk0`, `besselk1`), gamma/beta/digamma (`gamma`, `lngamma`, `beta`, `digamma`/`psi`), and hypergeometric functions (`hyp1f1`, `hyp2f1`, `confluent_u`).
 
 ### 4.1 Planned Custom-Equation Built-In Function Additions *(target specification — backed by `curvebook-math` primitives)*
 
-Expose the remaining probability, special, and unit-conversion functions in `crates/fit/src/dsl.rs`:
+Expose the remaining probability, special, and unit-conversion functions in `crates/fit/src/dsl/` (`BuiltinFn` in `ast.rs`, name resolution in `compile.rs`, evaluation in `vm.rs`):
 - **Regularized incomplete beta & gamma:** `ibeta(a, b, x)` ($I_x(a,b)$), `igamma(a, x)` ($P(a,x)$), `igammac(a, x)` ($Q(a,x)$),
 - **Continuous & discrete probability distributions (tail-safe via `curvebook-math::dist`):**
   - Normal: `zdist(z)` (one-tailed $\Phi(z)$), `zinv(p)` ($\Phi^{-1}(p)$), `zpdf(z)` ($\phi(z)$), and 3-argument `normdist(x, mean, sd)`, `norminv(p, mean, sd)`, `normpdf(x, mean, sd)`,
