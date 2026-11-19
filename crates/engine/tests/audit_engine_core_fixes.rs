@@ -696,13 +696,13 @@ fn audit_99_standalone_power_analysis_ignores_source_info_sheet() -> TestResult 
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "pow-standalone", "source_sheet": "col-1", "kind": "power_analysis", "test_family": "unpaired_t_two_group", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
+        json!({ "sheet_id": "pow-standalone", "source_sheet": "col-1", "kind": "power_analysis", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
     )?;
     // Explicitly linked to info-1 (alpha = 0.01) -> N per group = 96.
     ok_cmd(
         &mut session,
         "stats.run",
-        json!({ "sheet_id": "pow-linked", "source_sheet": "col-1", "kind": "power_analysis", "info_sheet_id": "info-1", "test_family": "unpaired_t_two_group", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
+        json!({ "sheet_id": "pow-linked", "source_sheet": "col-1", "kind": "power_analysis", "info_sheet_id": "info-1", "family": "unpaired_t", "alpha": 0.05, "target_power": 0.8, "effect_size": 0.5 }),
     )?;
     ok_cmd(&mut session, "project.recalculate", json!({}))?;
 
