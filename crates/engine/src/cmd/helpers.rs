@@ -6,8 +6,8 @@ use std::path::Path;
 use curvebook_chart::ChartScene;
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, DataSetColumn, DataSheet, GraphAnnotation, GraphKind, GraphSheet, GraphSpec, HookSource, InfoSheet, LayoutItem,
-    LayoutSheet, LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultSheet, ResultTab, SheetId, TableArchetype,
-    TransformAnalysisSpec,
+    LayoutSheet, LayoutSpec, LinkSource, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultTab, SheetId,
+    TableArchetype, TransformAnalysisSpec, VariableRole, validate_title,
 };
 use curvebook_palette::Rgba8;
 use serde_json::json;
@@ -551,6 +551,10 @@ fn rewrite_single_hook_token(token: &str, id_map: &HashMap<SheetId, SheetId>) ->
             let mapped = id_map.get(&SheetId::new(*sheet))?;
             Some(format!("result:{}:{}:{}", mapped.as_str(), ds_str, param))
         }
+        ["scalar", sheet, rest @ ..] if !sheet.is_empty() && !rest.is_empty() => {
+            let mapped = id_map.get(&SheetId::new(*sheet))?;
+            Some(format!("scalar:{}:{}", mapped.as_str(), rest.join(":")))
+        }
         _ => None,
     }
 }
@@ -563,9 +567,15 @@ pub(super) fn remap_graph_spec_references(spec: &mut GraphSpec, id_map: &HashMap
         if let Some(ov) = &mut series.regression_overlay {
             remap_sheet_id(&mut ov.result_sheet_id, id_map);
         }
+        if let Some(label) = &mut series.legend_label {
+            remap_inline_hook_tokens(label, id_map);
+        }
     }
     for cmp in &mut spec.comparisons {
         remap_sheet_id(&mut cmp.result_sheet_id, id_map);
+    }
+    if let Some(cld) = &mut spec.compact_letter_display {
+        remap_sheet_id(&mut cld.result_sheet_id, id_map);
     }
     for ann in &mut spec.annotations {
         match ann {
@@ -581,6 +591,88 @@ pub(super) fn remap_graph_spec_references(spec: &mut GraphSpec, id_map: &HashMap
     remap_inline_hook_tokens(&mut spec.y_axis.title, id_map);
     if let Some(y2) = &mut spec.y2_axis {
         remap_inline_hook_tokens(&mut y2.title, id_map);
+    }
+}
+
+/// Sanitize ASCII control characters into spaces or drop them for table titles and labels.
+pub(crate) fn sanitize_title_controls(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        if matches!(ch, '\n' | '\r' | '\t') {
+            out.push(' ');
+        } else if !ch.is_control() {
+            out.push(ch);
+        }
+    }
+    out
+}
+
+/// Clamp and sanitize a label/header string into a valid [`DataSetColumn`]/row title.
+pub(crate) fn clip_safe_title(raw: &str) -> String {
+    let cleaned = sanitize_title_controls(raw);
+    if validate_title(&cleaned).is_ok() {
+        return cleaned;
+    }
+    let mut clipped = String::new();
+    for ch in cleaned.chars() {
+        if clipped.len() + ch.len_utf8() > 180 {
+            break;
+        }
+        clipped.push(ch);
+    }
+    clipped
+}
+
+fn apply_row_labels(row_titles: &mut [String], tab: &ResultTab) {
+    for (r, slot) in row_titles.iter_mut().enumerate() {
+        let lbl = tab.row_labels.get(r).map(String::as_str).unwrap_or("").trim();
+        *slot = if lbl.is_empty() { String::new() } else { clip_safe_title(lbl) };
+    }
+}
+
+/// Apply column headers, row labels, and inferred text/label variable roles from `tab`
+/// onto `sheet`, clearing stale headers/labels if the refreshed tab shrank.
+pub(crate) fn apply_result_tab_metadata_to_sheet(sheet: &mut DataSheet, tab: &ResultTab) {
+    let has_headers = !tab.column_headers.is_empty();
+    let tab_cols = tab.rows.iter().map(Vec::len).max().unwrap_or(0).max(tab.column_headers.len());
+    match &mut sheet.archetype {
+        TableArchetype::Column(curvebook_doc::ColumnTable { data_sets, row_titles, .. })
+        | TableArchetype::Grouped(curvebook_doc::GroupedTable { data_sets, row_titles, .. }) => {
+            for (idx, ds) in data_sets.iter_mut().enumerate() {
+                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()) {
+                    if !hdr.is_empty() {
+                        ds.title = clip_safe_title(hdr);
+                    } else if has_headers {
+                        ds.title.clear();
+                    }
+                } else if has_headers || idx >= tab_cols {
+                    ds.title.clear();
+                }
+            }
+            apply_row_labels(row_titles, tab);
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            for (idx, var) in mv.variables.iter_mut().enumerate() {
+                if let Some(hdr) = tab.column_headers.get(idx).map(|s| s.trim()) {
+                    if !hdr.is_empty() {
+                        var.title = clip_safe_title(hdr);
+                    } else if has_headers {
+                        var.title.clear();
+                    }
+                } else if has_headers || idx >= tab_cols {
+                    var.title.clear();
+                }
+                let col_has_text = tab
+                    .rows
+                    .iter()
+                    .any(|row| matches!(row.get(idx), Some(ResultCell::Text(_) | ResultCell::Boolean(_) | ResultCell::ConfidenceInterval { .. })));
+                if col_has_text {
+                    var.lock_role(VariableRole::Label);
+                }
+            }
+            apply_row_labels(&mut mv.row_titles, tab);
+        }
+        _ => {}
     }
 }
 

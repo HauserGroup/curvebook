@@ -237,8 +237,8 @@ fn rv85_point_overrides_range_check_and_prune_on_series_and_row_shorten() -> Tes
     )?;
     assert_eq!(session.document().graph_sheet(&SheetId::new("g1")).map_or(0, |g| g.spec.point_overrides.len()), 3);
 
-    // Removing series 1 via graph.setSeries prunes override for series 1 immediately.
-    ok_cmd(&mut session, "graph.setSeries", json!({ "sheet_id": "g1", "series": [{ "data_set_index": 0 }] }))?;
+    // Removing series 1 via graph.setSeries (`mode: "replace"`) prunes override for series 1 immediately.
+    ok_cmd(&mut session, "graph.setSeries", json!({ "sheet_id": "g1", "mode": "replace", "series": [{ "data_set_index": 0 }] }))?;
     let overrides = &session.document().graph_sheet(&SheetId::new("g1")).ok_or("missing g1")?.spec.point_overrides;
     assert_eq!(overrides.len(), 2);
     assert!(overrides.iter().all(|ov| ov.series_index == 0));

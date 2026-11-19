@@ -41,9 +41,76 @@ impl RecalcReport {
     }
 }
 
+/// Summary of a [`ResultSheet`] whose evaluation ended in [`ResultStatus::Failed`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FailedResultSheet {
+    /// Failed result sheet identifier.
+    pub sheet_id: SheetId,
+    /// User-visible title of the failed result sheet.
+    pub title: String,
+    /// Structured engine error code recorded on the sheet.
+    pub code: ErrorCode,
+    /// Diagnostic failure reason recorded on the sheet.
+    pub message: String,
+}
+
+impl FailedResultSheet {
+    /// Format a compact JSON object describing this failed result sheet (`sheet_id`, `title`, `code`, `message`).
+    #[must_use]
+    pub fn to_json(&self) -> serde_json::Value {
+        serde_json::json!({
+            "sheet_id": self.sheet_id.as_str(),
+            "title": self.title,
+            "code": self.code.as_str(),
+            "message": self.message,
+        })
+    }
+}
+
+/// Collect structured diagnostics for every [`ResultSheet`] currently in [`ResultStatus::Failed`].
+#[must_use]
+pub fn collect_failed_result_sheets(doc: &ProjectDocument) -> Vec<FailedResultSheet> {
+    doc.result_sheets
+        .iter()
+        .filter_map(|rs| match &rs.status {
+            ResultStatus::Failed { code, message } => {
+                Some(FailedResultSheet { sheet_id: rs.id.clone(), title: rs.title().to_owned(), code: *code, message: message.clone() })
+            }
+            _ => None,
+        })
+        .collect()
+}
+
+pub(crate) fn collect_failed_result_sheets_for_ids(doc: &ProjectDocument, ids: &[SheetId]) -> Vec<FailedResultSheet> {
+    ids.iter()
+        .filter_map(|id| {
+            let rs = doc.result_sheet(id)?;
+            match &rs.status {
+                ResultStatus::Failed { code, message } => {
+                    Some(FailedResultSheet { sheet_id: rs.id.clone(), title: rs.title().to_owned(), code: *code, message: message.clone() })
+                }
+                _ => None,
+            }
+        })
+        .collect()
+}
+
 /// Break any circular `HookSource` loops in `doc` while preserving valid acyclic hooks.
 pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
     curvebook_format::sanitize_circular_hooks(doc)
+}
+
+/// Sanitize circular `HookSource` loops on a staged copy of `doc` and recalculate the reactive DAG atomically,
+/// returning the full [`RecalcReport`] (including any failed result sheet IDs).
+///
+/// # Errors
+/// Returns [`EngineError`] if a structural data-link, self-reference, or formula cycle remains after sanitization.
+pub fn recalculate_project_sanitized_with_report(doc: &mut ProjectDocument) -> Result<(RecalcReport, Vec<String>), EngineError> {
+    let mut working = doc.clone();
+    let diagnostics = curvebook_format::sanitize_circular_hooks(&mut working);
+    let report = recalculate_project_with_report(&mut working)?;
+    *doc = working;
+    Ok((report, diagnostics))
 }
 
 /// Sanitize circular `HookSource` loops on a staged copy of `doc` and recalculate the reactive DAG atomically.
@@ -51,11 +118,8 @@ pub fn sanitize_circular_hooks(doc: &mut ProjectDocument) -> Vec<String> {
 /// If a structural data-link, self-reference, or formula cycle remains after hook sanitization,
 /// `doc` is rolled back untouched and an [`EngineError`] is returned.
 pub fn recalculate_project_sanitized(doc: &mut ProjectDocument) -> Result<(usize, Vec<String>), EngineError> {
-    let mut working = doc.clone();
-    let diagnostics = curvebook_format::sanitize_circular_hooks(&mut working);
-    let recalculated = recalculate_project(&mut working)?;
-    *doc = working;
-    Ok((recalculated, diagnostics))
+    let (report, diagnostics) = recalculate_project_sanitized_with_report(doc)?;
+    Ok((report.total_updated(), diagnostics))
 }
 
 fn link_source_sheet_id(source: &LinkSource) -> Option<&SheetId> {
@@ -822,6 +886,12 @@ fn refresh_single_region(
         propagate_internal_source_titles(target, &refresh_spec, report.target_range.start.col, sheet);
     } else if let ResolvedRefreshSource::InternalResult(src_rs) = resolved {
         backfill_confidence_interval_cells(target, src_rs, &refresh_spec, report.target_range);
+        if region.id.starts_with("result-tab-")
+            && let LinkSource::InternalSheet { tab_id, .. } = &refresh_spec.source
+            && let Some(tab) = tab_id.as_ref().and_then(|tid| src_rs.tabs.iter().find(|t| &t.id == tid)).or_else(|| src_rs.tabs.first())
+        {
+            crate::cmd::helpers::apply_result_tab_metadata_to_sheet(target, tab);
+        }
     }
     target.linked_regions[reg_idx].target_range = report.target_range;
     target.linked_regions[reg_idx].provenance_summary = report.provenance_summary;
@@ -850,7 +920,7 @@ fn refresh_data_sheet_links(
     Ok(refreshed)
 }
 
-fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message: String) {
+pub(crate) fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message: String) {
     target.analyzable_data = None;
     target.tabs.clear();
     target.scalars.clear();
@@ -1055,8 +1125,10 @@ fn resolve_power_analysis_with_info_hooks(
     base: &curvebook_doc::PowerAnalysisSpec,
 ) -> Result<ResultSheet, String> {
     let mut patched = base.clone();
-    let info_opt =
-        base.info_sheet_id.as_ref().and_then(|id| doc.info_sheet(id)).or_else(|| source_ds.info_sheet_id.as_ref().and_then(|id| doc.info_sheet(id)));
+    let info_opt = match base.info_sheet_id.as_ref() {
+        Some(id) => Some(doc.info_sheet(id).ok_or_else(|| format!("referenced Info sheet `{id}` not found"))?),
+        None => None,
+    };
     if let Some(info) = info_opt {
         let info_f64 =
             |names: &[&str]| -> Option<f64> { names.iter().find_map(|name| info.get_constant(name).and_then(|c| c.value.as_finite_f64())) };
