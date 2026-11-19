@@ -359,3 +359,57 @@ fn dpi_roundtrip_geometry_stamp_and_preferences_ui_scale_migration() -> Result<(
     let _ = EguiSoftwareRasterizer::new();
     Ok(())
 }
+
+#[test]
+fn ui_scale_1_5_does_not_double_scale_offscreen_inspect_or_screenshot() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app_1x = UiApp::new().with_ui_backend(UiBackend::Egui);
+    let open_1x: serde_json::Value = serde_json::from_str(&app_1x.dispatch_control_line(r#"{"id":"a1","method":"app.about"}"#))?;
+    assert_eq!(open_1x["ok"], json!(true));
+    assert_eq!(app_1x.canvas_dialogs.active_dialog, ActiveDialog::About);
+
+    let mut app_15x = UiApp::new().with_ui_backend(UiBackend::Egui);
+    app_15x.set_ui_scale(1.5);
+    let open_15x: serde_json::Value = serde_json::from_str(&app_15x.dispatch_control_line(r#"{"id":"a2","method":"app.about"}"#))?;
+    assert_eq!(open_15x["ok"], json!(true));
+    assert_eq!(app_15x.canvas_dialogs.active_dialog, ActiveDialog::About);
+
+    let metrics = ViewportMetrics::new(800.0, 500.0, 1.5);
+    let (ctx, mut out_frame, meta, stamp) = app_15x.run_settled_egui_shell_frame([800.0, 500.0], 1.5, None, |ui, app_ref, m, intents| {
+        let _ = render_minimal_shell_and_about(ui, app_ref, m, intents);
+    })?;
+    out_frame.textures_delta.clear();
+    assert!((ctx.zoom_factor() - 1.5).abs() < 1e-3, "expected zoom_factor 1.5, got {}", ctx.zoom_factor());
+    assert!(
+        (out_frame.pixels_per_point - 1.5).abs() < 1e-3,
+        "expected pixels_per_point 1.5 (not double-scaled 2.25), got {}",
+        out_frame.pixels_per_point
+    );
+    assert!((meta.scale_factor - 1.5).abs() < 1e-3, "expected meta.scale_factor 1.5, got {}", meta.scale_factor);
+    assert!(stamp.matches_target(1200, 750, 1.5), "expected settled 1200x750 @ 1.5x stamp, got {stamp:?}");
+
+    let snap_1x = app_1x.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
+    let snap_15x = app_15x.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
+    let dlg_1x = snap_1x.dialog.as_ref().and_then(|d| d.bounds).ok_or("missing 1x dialog bounds")?;
+    let dlg_15x = snap_15x.dialog.as_ref().and_then(|d| d.bounds).ok_or("missing 1.5x dialog bounds")?;
+    assert!(
+        dlg_15x[0] >= 0.0 && dlg_15x[1] >= 0.0 && dlg_15x[0] + dlg_15x[2] <= 1202.0 && dlg_15x[1] + dlg_15x[3] <= 752.0,
+        "1.5x offscreen dialog bounds must fit 1200x750 viewport without double scaling: {dlg_15x:?}"
+    );
+    assert!(
+        (dlg_15x[2] - dlg_1x[2]).abs() <= 2.0 && (dlg_15x[3] - dlg_1x[3]).abs() <= 2.0,
+        "dialog bounds at 144 DPI should match between ui_scale=1.0 ({dlg_1x:?}) and ui_scale=1.5 ({dlg_15x:?})"
+    );
+
+    let (png_full_15, fw, fh) = app_15x
+        .render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 1200, height_px: 750, dpi: 144 }, ScreenshotRegionTarget::FullWindow)?;
+    assert_eq!((fw, fh), (1200, 750));
+    assert_eq!(png_dimensions(&png_full_15), Some((1200, 750)));
+
+    let (png_dlg_1x, d1w, d1h) =
+        app_1x.render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 1200, height_px: 750, dpi: 144 }, ScreenshotRegionTarget::Dialog)?;
+    let (png_dlg_15x, d15w, d15h) =
+        app_15x.render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 1200, height_px: 750, dpi: 144 }, ScreenshotRegionTarget::Dialog)?;
+    assert!(!png_dlg_1x.is_empty() && !png_dlg_15x.is_empty());
+    assert!((i64::from(d15w) - i64::from(d1w)).abs() <= 2 && (i64::from(d15h) - i64::from(d1h)).abs() <= 2);
+    Ok(())
+}

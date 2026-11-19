@@ -19,6 +19,7 @@ use curvebook::desktop_host::{
 };
 use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
 use curvebook::live_control::{LiveControlBridge, serve_live_control_io};
+use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::layout::LayoutTree;
@@ -459,5 +460,246 @@ fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Resul
     }
 
     let _ = std::fs::remove_dir_all(&dir);
+    Ok(())
+}
+
+#[test]
+fn step_ui_clears_discarded_pass_intents_without_double_or_stale_execution() -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = ViewportMetrics::new(960.0, 640.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        ui_backend: UiBackend::Egui,
+        initial_viewport: metrics,
+        ..DesktopHostConfig::default()
+    });
+    let win_id = rt.open_window(None, metrics)?;
+    let mut native = CurveBookNativeApp::new(rt, win_id, None);
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+
+    let raw_empty = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))), ..Default::default() };
+    let mut out_init = ctx.run_ui(raw_empty.clone(), |ui| native.step_ui(ui));
+    out_init.textures_delta.clear();
+
+    let about_center = native
+        .inspect_meta()
+        .find_by_widget_id("toolbar.help.about")
+        .map(|n| n.clipped_rect.center())
+        .ok_or("missing toolbar.help.about clipped_rect in egui_shell")?;
+
+    // Emulate an `egui` multi-pass frame where Pass 0 emits an intent (`toolbar.help.about` click)
+    // AND calls `request_discard`. Pass 0's discarded intent must NOT execute and must be cleared
+    // before Pass 1 (settled) and subsequent frames run.
+    let raw_click = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
+        events: vec![
+            egui::Event::PointerMoved(about_center),
+            egui::Event::PointerButton { pos: about_center, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: about_center, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+        ..Default::default()
+    };
+    let mut pass_records: Vec<(bool, ActiveDialog)> = Vec::new();
+    let mut out_discard = ctx.run_ui(raw_click.clone(), |ui| {
+        if pass_records.is_empty() {
+            ui.ctx().request_discard("simulated multi-pass resize discard");
+        }
+        native.step_ui(ui);
+        let settled = native.geometry_stamp().is_some_and(|s| s.settled);
+        let dialog = native.runtime().window(win_id).map_or(ActiveDialog::None, |w| w.app().canvas_dialogs.active_dialog.clone());
+        pass_records.push((settled, dialog));
+    });
+    out_discard.textures_delta.clear();
+    assert_eq!(pass_records.len(), 2, "expected Pass 0 discarded + Pass 1 settled, got {pass_records:?}");
+    assert_eq!(pass_records[0], (false, ActiveDialog::None), "discarded Pass 0 must not commit intent");
+    assert_eq!(pass_records[1], (true, ActiveDialog::None), "settled Pass 1 must not inherit discarded Pass 0 intent");
+
+    // Next separate frame with NO click must also not observe any carried-over discarded intent.
+    let mut out_after_discard = ctx.run_ui(raw_empty, |ui| native.step_ui(ui));
+    out_after_discard.textures_delta.clear();
+    assert_eq!(
+        native.runtime().window(win_id)?.app().canvas_dialogs.active_dialog,
+        ActiveDialog::None,
+        "discarded pass intent must be cleared and never execute on a later settled frame"
+    );
+    assert!(native.geometry_stamp().ok_or("missing GeometryStamp")?.settled);
+
+    // A genuinely settled click (no `request_discard`) must execute the intent cleanly once.
+    let mut out_settled = ctx.run_ui(raw_click, |ui| native.step_ui(ui));
+    out_settled.textures_delta.clear();
+    assert_eq!(native.runtime().window(win_id)?.app().canvas_dialogs.active_dialog, ActiveDialog::About);
+    Ok(())
+}
+
+#[test]
+fn egui_backend_suppresses_phantom_legacy_pointer_wheel_and_non_global_keys() -> Result<(), Box<dyn std::error::Error>> {
+    let metrics = ViewportMetrics::new(960.0, 640.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        ui_backend: UiBackend::Egui,
+        initial_viewport: metrics,
+        ..DesktopHostConfig::default()
+    });
+    let (adapter, dialog_rx) = RecordingFileDialogAdapter::new();
+    rt.set_file_dialog_adapter(Arc::new(adapter));
+    let win_id = rt.open_window(None, metrics)?;
+
+    let mut native = CurveBookNativeApp::new(rt, win_id, None);
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+
+    let raw_init = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))), ..Default::default() };
+    let mut out_init = ctx.run_ui(raw_init, |ui| native.step_ui(ui));
+    out_init.textures_delta.clear();
+
+    let (active_cell_before, zoom_before, inline_before) = {
+        let app = native.runtime().window(win_id)?.app();
+        let snap = inspect_ui_tree(app, None, false);
+        (snap.grid_selection.active_cell, snap.zoom, (app.inline_editor.active, app.inline_editor.buffer.clone()))
+    };
+
+    // Click inside central workspace, scroll wheel, and type arrows/text: must NOT mutate legacy grid/canvas.
+    let canvas_pt = egui::pos2(500.0, 340.0);
+    let raw_events = egui::RawInput {
+        screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
+        events: vec![
+            egui::Event::PointerMoved(canvas_pt),
+            egui::Event::PointerButton { pos: canvas_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: canvas_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            egui::Event::MouseWheel {
+                unit: egui::MouseWheelUnit::Point,
+                delta: egui::vec2(18.0, -72.0),
+                phase: egui::TouchPhase::Move,
+                source: egui::MouseWheelSource::Unknown,
+                modifiers: egui::Modifiers::NONE,
+            },
+            egui::Event::Key { key: egui::Key::ArrowDown, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+            egui::Event::Key { key: egui::Key::Num4, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+            egui::Event::Text(String::from("4")),
+            egui::Event::Ime(egui::ImeEvent::Commit(String::from("z"))),
+        ],
+        ..Default::default()
+    };
+    let mut out_ev = ctx.run_ui(raw_events, |ui| native.step_ui(ui));
+    out_ev.textures_delta.clear();
+
+    {
+        let app = native.runtime().window(win_id)?.app();
+        let snap = inspect_ui_tree(app, None, false);
+        assert_eq!(snap.grid_selection.active_cell, active_cell_before, "legacy grid selection must not change under UiBackend::Egui");
+        assert!((snap.zoom - zoom_before).abs() < 1e-9, "legacy canvas zoom must not change under UiBackend::Egui");
+        assert_eq!((app.inline_editor.active, app.inline_editor.buffer.clone()), inline_before, "legacy inline editor must not activate");
+    }
+
+    // Global `Cmd/Ctrl` shortcuts (`ui_scale` + `Cmd+O` native open) must remain functional.
+    let cmd_mods = egui::Modifiers { command: true, ctrl: true, ..Default::default() };
+    let mut out_cmd = ctx.run_ui(
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
+            events: vec![
+                egui::Event::Key { key: egui::Key::Plus, physical_key: None, pressed: true, repeat: false, modifiers: cmd_mods },
+                egui::Event::Key { key: egui::Key::O, physical_key: None, pressed: true, repeat: false, modifiers: cmd_mods },
+            ],
+            ..Default::default()
+        },
+        |ui| native.step_ui(ui),
+    );
+    out_cmd.textures_delta.clear();
+    assert!((native.runtime().window(win_id)?.app().ui_scale() - 1.1).abs() < 1e-4);
+    let opened_kind = dialog_rx.try_iter().next().map(|r| r.kind);
+    assert_eq!(opened_kind, Some(NativeFileDialogKind::OpenFile));
+    Ok(())
+}
+
+#[test]
+fn live_control_ui_scale_1_5_does_not_double_scale_inspect_or_screenshot() -> Result<(), Box<dyn std::error::Error>> {
+    let initial = ViewportMetrics::new(800.0, 500.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        ui_backend: UiBackend::Egui,
+        initial_viewport: initial,
+        ..DesktopHostConfig::default()
+    });
+    let win_id = rt.open_window(None, initial)?;
+    {
+        let app = rt.window_mut(win_id)?.app_mut();
+        app.set_ui_scale(1.5);
+        let _ = app.dispatch_control_line(r#"{"id":"open-about","method":"app.about"}"#);
+    }
+
+    let auth = ControlAuth::generate()?;
+    let (bridge, channel) = LiveControlBridge::new(auth.clone());
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+    let mut native = CurveBookNativeApp::new(rt, win_id, None).with_live_control(channel);
+
+    // Run with fixed 1200x750 physical px and native 1.0x DPI; match `egui-winit` by dividing
+    // physical pixel dimensions by `ctx.pixels_per_point()` once `zoom_factor = 1.5` activates,
+    // yielding `ctx.content_rect() = 800x500` pt and `ctx.pixels_per_point() = 1.5`.
+    let raw_for_ctx = |c: &egui::Context| -> egui::RawInput {
+        let cur_ppp = c.pixels_per_point().max(1.0);
+        egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1200.0 / cur_ppp, 750.0 / cur_ppp))),
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(1.0), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        }
+    };
+    for _ in 0..4 {
+        let raw = raw_for_ctx(&ctx);
+        let mut out = ctx.run_ui(raw, |ui| native.step_ui(ui));
+        out.textures_delta.clear();
+        if native.geometry_stamp().is_some_and(|s| s.matches_target(1200, 750, 1.5)) {
+            break;
+        }
+    }
+    let stamp = native.geometry_stamp().ok_or("missing settled GeometryStamp")?;
+    assert!(stamp.matches_target(1200, 750, 1.5), "expected settled 1200x750 @ 1.5x stamp, got {stamp:?}");
+
+    let token = auth.as_str().to_owned();
+    let bridge_bg = bridge.clone();
+    let client = std::thread::spawn(move || -> Result<Vec<u8>, String> {
+        let script = format!(
+            "{{\"id\":\"a\",\"method\":\"auth\",\"params\":{{\"token\":\"{token}\"}}}}\n\
+             {{\"id\":\"s\",\"method\":\"ui.screenshot\",\"params\":{{\"target\":\"full_window\"}}}}\n\
+             {{\"id\":\"i\",\"method\":\"ui.inspect\",\"params\":{{\"scope\":\"dialog\",\"include_bounds\":true}}}}\n"
+        );
+        let mut reader = BufReader::new(Cursor::new(script.into_bytes()));
+        let mut out_bytes = Vec::new();
+        serve_live_control_io(&mut reader, &mut out_bytes, &bridge_bg, |_| {}).map_err(|e| e.to_string())?;
+        Ok(out_bytes)
+    });
+
+    let start = Instant::now();
+    while !client.is_finished() && start.elapsed() < Duration::from_secs(5) {
+        let raw = raw_for_ctx(&ctx);
+        let mut out = ctx.run_ui(raw, |ui| native.step_ui(ui));
+        out.textures_delta.clear();
+        std::thread::sleep(Duration::from_millis(5));
+    }
+
+    bridge.signal_shutdown();
+    let replies = read_jsonl_outputs(&client.join().map_err(|_| "client thread panicked")??)?;
+    assert_eq!(replies.len(), 3, "expected 3 control replies, got {replies:?}");
+
+    let shot = &replies[1];
+    assert_eq!(shot["ok"], json!(true), "screenshot failed: {shot}");
+    assert_eq!(shot["result"]["width_px"], json!(1200));
+    assert_eq!(shot["result"]["height_px"], json!(750));
+    let png = decode_base64(shot["result"]["data_base64"].as_str().ok_or("missing data_base64")?)?;
+    assert_eq!(png_dimensions(&png), Some((1200, 750)));
+
+    let inspect = &replies[2];
+    assert_eq!(inspect["ok"], json!(true), "inspect failed: {inspect}");
+    let bounds = inspect["result"]["dialog"]["bounds"].as_array().ok_or("missing dialog.bounds")?;
+    let bx = bounds.first().and_then(Value::as_f64).ok_or("bad x")?;
+    let by = bounds.get(1).and_then(Value::as_f64).ok_or("bad y")?;
+    let bw = bounds.get(2).and_then(Value::as_f64).ok_or("bad w")?;
+    let bh = bounds.get(3).and_then(Value::as_f64).ok_or("bad h")?;
+    assert!(
+        bx >= 0.0 && by >= 0.0 && bx + bw <= 1202.0 && by + bh <= 752.0 && bw < 760.0,
+        "dialog bounds at ui_scale=1.5 must reflect 1.5x (not double-scaled 2.25x): {bounds:?}"
+    );
     Ok(())
 }

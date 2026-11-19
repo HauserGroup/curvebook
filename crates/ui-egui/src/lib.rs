@@ -903,6 +903,15 @@ impl UiApp {
         let w_pt = if logical_size_pt[0].is_finite() && logical_size_pt[0] > 0.0 { logical_size_pt[0] } else { 1024.0 };
         let h_pt = if logical_size_pt[1].is_finite() && logical_size_pt[1] > 0.0 { logical_size_pt[1] } else { 640.0 };
         let ppp = if pixels_per_point.is_finite() && pixels_per_point > 0.0 { pixels_per_point } else { 1.0 };
+        let zoom = self.ui_scale();
+        // `Tokens::apply_to_ctx` sets `zoom_factor = self.ui_scale` while `egui` computes
+        // `pixels_per_point = zoom_factor * native_pixels_per_point`. Pre-seed `zoom_factor` and
+        // pass `native_ppp = ppp / zoom` so callers' requested `pixels_per_point` does not double-scale.
+        let native_ppp = (ppp / zoom).max(0.05);
+        ctx.options_mut(|o| {
+            o.zoom_with_keyboard = false;
+            o.zoom_factor = zoom;
+        });
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let width_px = (w_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -912,7 +921,7 @@ impl UiApp {
         for pass in 0..8_u32 {
             let raw_input = egui::RawInput {
                 screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
-                viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp), ..Default::default() })]
+                viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
                     .into_iter()
                     .collect(),
                 ..Default::default()

@@ -478,7 +478,7 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn commit_pending_intents(&mut self, window_id: DesktopWindowId) {
+    fn commit_pending_intents(&mut self, window_id: DesktopWindowId, will_discard: bool) {
         if self.pending_intents.is_empty() {
             return;
         }
@@ -487,9 +487,9 @@ impl CurveBookNativeApp {
         let prev_theme = self.runtime.window(window_id).ok().map(|w| w.app().theme.mode);
         let prev_locale = self.runtime.window(window_id).ok().map(|w| w.app().locale.clone());
         if let Ok(win) = self.runtime.window_mut(window_id) {
-            if let Err(err) = intents.commit_if_settled(win.app_mut(), false) {
+            if let Err(err) = intents.commit_if_settled(win.app_mut(), will_discard) {
                 self.status_banner = Some(err.to_string());
-            } else {
+            } else if !will_discard {
                 let changed = Some(win.app().ui_scale()) != prev_scale
                     || Some(win.app().theme.mode) != prev_theme
                     || Some(win.app().locale.clone()) != prev_locale;
@@ -504,6 +504,7 @@ impl CurveBookNativeApp {
     pub fn step_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.frame_seq = self.frame_seq.wrapping_add(1);
+        self.pending_intents = PendingUiIntents::default();
         let _ = self.poll_live_control(&ctx);
         let initial_window_id = self.active_window_id();
 
@@ -533,9 +534,7 @@ impl CurveBookNativeApp {
             };
             self.inspect_meta = next_meta;
             self.last_regions = report.regions;
-            for intent in next_intents.intents() {
-                self.pending_intents.push(intent.clone());
-            }
+            self.pending_intents = next_intents;
             let canvas_rect = report.regions.canvas_rect_pt.unwrap_or_else(|| ctx.content_rect());
             let ppp = ctx.pixels_per_point().max(1.0);
             self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
@@ -564,13 +563,12 @@ impl CurveBookNativeApp {
         self.sync_window_title(&ctx, post_window_id);
 
         let will_discard = ctx.will_discard();
-        if !will_discard {
-            self.commit_pending_intents(post_window_id);
-        } else {
+        self.commit_pending_intents(post_window_id, will_discard);
+        if will_discard {
             ctx.request_repaint();
         }
         let content_rect = ctx.content_rect();
-        let ppp = ctx.pixels_per_point().max(1.0);
+        let ppp = ctx.pixels_per_point().clamp(0.5, 8.0);
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
         let phys_w = (content_rect.width() * ppp).round().max(1.0) as u32;
         #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
@@ -855,7 +853,9 @@ impl CurveBookNativeApp {
         self.dispatch_file_dnd(window_id, &raw_hovered, &raw_dropped);
         self.dispatch_egui_events(ui.ctx(), window_id, canvas_rect, hover_pos, modifiers, &events);
 
-        if (zoom_delta - 1.0).abs() > 1e-4
+        let is_egui_backend = self.runtime.window(window_id).is_ok_and(|w| w.app().ui_backend() == UiBackend::Egui);
+        if !is_egui_backend
+            && (zoom_delta - 1.0).abs() > 1e-4
             && let Some(pos) = hover_pos
             && canvas_rect.contains(pos)
         {
@@ -905,16 +905,22 @@ impl CurveBookNativeApp {
     ) {
         let mut suppressed_text_char: Option<String> = None;
         let popup_open = self.menu_popup_was_open || egui::Popup::is_any_open(ctx);
+        let is_egui_backend = self.runtime.window(window_id).is_ok_and(|w| w.app().ui_backend() == UiBackend::Egui);
+        let egui_wants_kb = ctx.egui_wants_keyboard_input();
         let egui_modal_blocking = self.close_dialog_open
             || self
                 .runtime
                 .window(window_id)
                 .is_ok_and(|w| w.app().ui_backend() == UiBackend::Egui && w.app().canvas_dialogs.active_dialog != ActiveDialog::None);
+        let suppress_legacy_pointer = is_egui_backend || egui_modal_blocking || popup_open;
+        if is_egui_backend {
+            self.pointer_captured = false;
+        }
 
         for event in events {
             match event {
                 egui::Event::PointerMoved(pos) => {
-                    if !egui_modal_blocking && !popup_open && (canvas_rect.contains(*pos) || self.pointer_captured) {
+                    if !suppress_legacy_pointer && (canvas_rect.contains(*pos) || self.pointer_captured) {
                         let (x_pt, y_pt) = to_canvas_pt(*pos, canvas_rect.min);
                         let _ = self.runtime.dispatch(DesktopHostEvent::PointerMoved {
                             window_id,
@@ -925,7 +931,7 @@ impl CurveBookNativeApp {
                     }
                 }
                 egui::Event::PointerButton { pos, button, pressed, modifiers } => {
-                    if !egui_modal_blocking && !popup_open {
+                    if !suppress_legacy_pointer {
                         self.dispatch_pointer_button(CanvasPointerButtonArgs {
                             window_id,
                             canvas_rect,
@@ -938,7 +944,7 @@ impl CurveBookNativeApp {
                 }
                 egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
                     let anchor = hover_pos.unwrap_or(canvas_rect.center());
-                    if !egui_modal_blocking && !popup_open && canvas_rect.contains(anchor) {
+                    if !suppress_legacy_pointer && canvas_rect.contains(anchor) {
                         let (x_pt, y_pt) = to_canvas_pt(anchor, canvas_rect.min);
                         let scale = wheel_unit_scale(*unit);
                         let _ = self.runtime.dispatch(DesktopHostEvent::MouseWheel {
@@ -966,7 +972,7 @@ impl CurveBookNativeApp {
                     if popup_open && is_menu_nav_key {
                         continue;
                     }
-                    if let Some(inserted) = self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers) {
+                    if let Some(inserted) = self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers, is_egui_backend) {
                         suppressed_text_char = Some(inserted);
                     }
                 }
@@ -975,27 +981,39 @@ impl CurveBookNativeApp {
                         suppressed_text_char = None;
                         continue;
                     }
+                    if is_egui_backend || egui_wants_kb {
+                        continue;
+                    }
                     let (inline_active, _) = self.inline_editor_snapshot(window_id);
                     if inline_active {
                         let _ = self.runtime.dispatch(DesktopHostEvent::ImeCommit { window_id, text: text.clone() });
                     }
                 }
                 egui::Event::Ime(ime) => {
-                    self.dispatch_ime_event(window_id, ime);
+                    if !is_egui_backend && !egui_wants_kb {
+                        self.dispatch_ime_event(window_id, ime);
+                    }
                 }
                 egui::Event::Copy => {
-                    self.dispatch_clipboard_copy(ctx, window_id);
+                    if !is_egui_backend && !egui_wants_kb {
+                        self.dispatch_clipboard_copy(ctx, window_id);
+                    }
                 }
                 egui::Event::Cut => {
-                    self.dispatch_clipboard_cut(ctx, window_id);
+                    if !is_egui_backend && !egui_wants_kb {
+                        self.dispatch_clipboard_cut(ctx, window_id);
+                    }
                 }
                 egui::Event::Paste(text) => {
-                    if let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: Some(text.clone()) }) {
+                    if !is_egui_backend
+                        && !egui_wants_kb
+                        && let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: Some(text.clone()) })
+                    {
                         self.status_banner = Some(err);
                     }
                 }
                 #[cfg(feature = "accessibility")]
-                egui::Event::AccessKitActionRequest(req) => {
+                egui::Event::AccessKitActionRequest(req) if !is_egui_backend => {
                     self.handle_accesskit_action_request(ctx, window_id, req);
                 }
                 _ => {}
@@ -1105,6 +1123,7 @@ impl CurveBookNativeApp {
         key: egui::Key,
         pressed: bool,
         modifiers: egui::Modifiers,
+        is_egui_backend: bool,
     ) -> Option<String> {
         let key_name = egui_key_to_name(key)?;
         let (inline_active_before, inline_text_before) = self.inline_editor_snapshot(window_id);
@@ -1135,7 +1154,8 @@ impl CurveBookNativeApp {
                 }
             }
         }
-        if pressed && !inline_active_before && dialog_inactive {
+        let allow_routed_shortcut = !is_egui_backend || (primary_cmd && !ctx.text_edit_focused());
+        if pressed && !inline_active_before && dialog_inactive && allow_routed_shortcut {
             if primary_cmd && !modifiers.alt {
                 if key == egui::Key::O && !modifiers.shift {
                     self.execute_menu_command(Some(ctx), window_id, "project.open");
@@ -1156,6 +1176,9 @@ impl CurveBookNativeApp {
                 self.execute_menu_command(Some(ctx), window_id, &cmd);
                 return None;
             }
+        }
+        if is_egui_backend || ctx.egui_wants_keyboard_input() {
+            return None;
         }
         let has_cmd_or_ctrl = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
         if pressed && !dialog_inactive && has_cmd_or_ctrl {
