@@ -640,7 +640,7 @@ Owner: open · Status: todo · Was: Core-crate maintainability review 2026-11-19
 - [ ] Optional follow-up PRs under this item: apply the same pattern to other oversized `curvebook-stats` modules (for example `categorical.rs` and `two_group.rs`), one module per PR.
 
 ### R16.2 Split the fit solver and model DSL modules
-Owner: open · Status: todo · Was: Core-crate maintainability review 2026-11-19 · Est. note: 10–16 h · Depends on: [`R13.1`](history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) (done) · Gate: none
+Owner: open · Status: in progress — claimed: jsture, branch `refactor/R16.2-fit-solver-dsl-split` · Was: Core-crate maintainability review 2026-11-19 · Est. note: 10–16 h · Depends on: [`R13.1`](history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) (done) · Gate: none
 
 - [ ] Fold `crates/fit/src/solver.rs` into the existing `crates/fit/src/solver/` directory (which already holds `identifiability.rs`): the trust-region Levenberg–Marquardt core, multi-dataset and shared-parameter orchestration, and per-dataset result assembly each get their own submodule.
 - [ ] Turn `crates/fit/src/dsl.rs` into `crates/fit/src/dsl/`: tokens and lexing, statement and section parsing, AST and bytecode compilation, the ODE integrator with its trajectory cache, and the implicit-equation root-finding fallback. Keep the `MAX_AST_NODES` limit and the iterative `Expr` evaluation intact.
