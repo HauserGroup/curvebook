@@ -185,6 +185,12 @@ pub fn parse_params<T: DeserializeOwned>(schema: &Value, mut raw: Value) -> Resu
     T::deserialize(de).map_err(StrictDeError::into_engine_error)
 }
 
+/// Strictly deserialize a JSON [`Value`] into `T`, rejecting unknown struct fields at any nesting depth.
+pub(super) fn deserialize_strict<T: DeserializeOwned>(value: &Value, pointer: &str) -> Result<T, EngineError> {
+    let de = StrictValueDeserializer { value, pointer: pointer.to_owned(), field_name: None, allow_ignored_fields: false };
+    T::deserialize(de).map_err(StrictDeError::into_engine_error)
+}
+
 fn is_open_catchall_schema(schema: &Value) -> bool {
     let Some(obj) = schema.as_object() else {
         return false;
