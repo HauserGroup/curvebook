@@ -387,3 +387,42 @@ fn audit_94_column_title_numeric_hook_uses_doc_parser() {
         assert!(matches!(err, TransformError::MissingHook { .. }), "title `{bad_title}` should reject");
     }
 }
+
+#[test]
+fn wave4_mv_to_contingency_with_zero_label_columns_does_not_panic() {
+    // Regression for `archetype_convert.rs:2684` eager `label_cols[0]` evaluation when `label_cols` is empty.
+    let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
+    mv.variables[0].title = String::from("Alive");
+    mv.variables[1].title = String::from("Dead");
+    mv.variables[0].cells[0] = Cell::number(12.0);
+    mv.variables[0].cells[1] = Cell::number(8.0);
+    mv.variables[1].cells[0] = Cell::number(3.0);
+    mv.variables[1].cells[1] = Cell::number(15.0);
+    let sheet = DataSheet::new("mv-cont-nolabel", "MV No Label", TableArchetype::MultipleVariables(mv)).unwrap();
+
+    let (converted, _) = convert_datasheet_archetype(&sheet, TargetArchetypeKind::Contingency, false).unwrap();
+    let TableArchetype::Contingency(cont) = &converted.archetype else {
+        panic!("expected Contingency");
+    };
+    assert_eq!(cont.data_sets.len(), 2);
+    assert_eq!(cont.row_count(), 2);
+    assert_eq!(cont.data_sets[0].cells[0][0].active_number(), Some(12.0));
+    assert_eq!(cont.data_sets[1].cells[1][0].active_number(), Some(15.0));
+
+    // Also verify non-crosstab 1 Categorical + 2 Numeric MV with 0 Label columns returns a typed error instead of panicking at `label_cols[0]`.
+    let mut mixed_mv = MultipleVariablesTable::new(3, 2).unwrap();
+    mixed_mv.variables[0].title = String::from("Group");
+    mixed_mv.variables[0].role = curvebook_doc::VariableRole::Categorical;
+    mixed_mv.variables[0].cells[0] = Cell::text("Control");
+    mixed_mv.variables[0].cells[1] = Cell::text("Treated");
+    mixed_mv.variables[1].title = String::from("CountA");
+    mixed_mv.variables[1].cells[0] = Cell::number(5.0);
+    mixed_mv.variables[1].cells[1] = Cell::number(9.0);
+    mixed_mv.variables[2].title = String::from("CountB");
+    mixed_mv.variables[2].cells[0] = Cell::number(7.0);
+    mixed_mv.variables[2].cells[1] = Cell::number(4.0);
+    let mixed_sheet = DataSheet::new("mv-cont-mixed-nolabel", "MV Mixed No Label", TableArchetype::MultipleVariables(mixed_mv)).unwrap();
+
+    let mixed_err = convert_datasheet_archetype(&mixed_sheet, TargetArchetypeKind::Contingency, false).unwrap_err();
+    assert!(matches!(mixed_err, TransformError::Doc(_)));
+}

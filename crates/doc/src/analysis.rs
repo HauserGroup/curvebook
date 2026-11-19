@@ -314,7 +314,7 @@ pub enum SubcolumnAggregation {
 pub struct DescriptiveSpec {
     /// How multi-subcolumn replicates are collapsed prior to computing moments and quantiles.
     pub aggregation: SubcolumnAggregation,
-    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-6 percentiles); `None` reports standard quartiles/extrema only.
+    /// Optional upper percentile `p_hi` in `[50.0, 100.0)` (percentage scale, e.g. `Some(90.0)` for the 10th and 90th Hyndman–Fan Type-7 percentiles); `None` reports standard quartiles/extrema only.
     pub custom_upper_percentile: Option<f64>,
     /// When `true`, runs Shapiro–Wilk (`3 <= n <= 5000`; Royston 1995), D'Agostino–Pearson omnibus `K^2` (`n >= 8`), Anderson–Darling `A^2*`, and Lilliefors KS normality & lognormality tests.
     pub run_normality_battery: bool,

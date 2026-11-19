@@ -2681,7 +2681,7 @@ fn convert_mv_to_contingency(mv: &MultipleVariablesTable) -> Result<BuiltArchety
     }
 
     let mv_has_empty_row_titles = mv.row_titles.iter().all(|s| s.trim().is_empty());
-    let label_col = (label_cols.len() == 1 && !num_cols.is_empty() && mv_has_empty_row_titles).then_some(label_cols[0]);
+    let label_col = label_cols.first().copied().filter(|_| label_cols.len() == 1 && !num_cols.is_empty() && mv_has_empty_row_titles);
     let data_indices: Vec<usize> = (0..mv.variables.len()).filter(|&i| Some(i) != label_col).collect();
     if data_indices.is_empty() {
         return Err(TransformError::InvalidSpec {
