@@ -655,7 +655,7 @@ Owner: open · Status: todo · Was: Core-crate maintainability review 2026-11-19
 - [ ] Verify that the compiled scenes stay identical: `cargo test -p curvebook-chart -p curvebook-svg -p curvebook-pdf -p curvebook-render` pass with their golden outputs unchanged.
 
 ### R16.4 Typed engine command parameters, wire-compatible
-Owner: open · Status: todo · Was: Core-crate maintainability review 2026-11-19 · Est. note: 16–24 h · Depends on: none · Gate: none
+Owner: open · Status: in progress — claimed: jsture, branch `refactor/R16.4-typed-engine-params` · Was: Core-crate maintainability review 2026-11-19 · Est. note: 16–24 h · Depends on: none · Gate: none
 
 - [ ] Inventory every parameter spelling that the handlers in `crates/engine/src/cmd/{graph,analysis,params,table}.rs` accept today, and pin it in a golden test (for example `crates/engine/tests/param_spellings.rs`) that runs each accepted spelling and asserts identical outcomes. This test is the contract that `R16.5` later changes on purpose.
 - [ ] Replace hand-written `Value::get("…")` chains with `#[derive(Deserialize)]` parameter structs parsed through `parse_params` (`serde_path_to_error`). Express today's alternative spellings as `#[serde(alias = …)]`, so every input accepted today is still accepted and every input rejected today is still rejected with the same `ErrorCode`.
