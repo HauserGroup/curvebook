@@ -56,7 +56,10 @@ mod identifiability;
 use std::collections::BTreeMap;
 use std::num::NonZeroUsize;
 
-use curvebook_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
+use curvebook_doc::{
+    CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme,
+    parse_column_title_numeric_hook,
+};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
 use curvebook_math::linalg::{DenseMatrix, qr, qr_col_pivoted};
@@ -66,18 +69,16 @@ use curvebook_math::sum::NeumaierSum;
 
 use crate::diagnostics::{
     AiccComparisonResult, CovarianceDiagnostics, ExtraSumOfSquaresResult, HomoscedasticityResult, InformationCriteria, LackOfFitResult,
-    LikelihoodRatioResult, NormalityTestResult, RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test, compare_models_aicc,
-    compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compute_covariance_diagnostics, compute_deviance_profile_likelihood_cis,
-    compute_hougaard_skewness_into, compute_information_criteria, compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis_scaled,
-    compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
+    LikelihoodRatioResult, NormalityTestResult, ProfileStep, RoutDetectionResult, RoutPointAudit, RunsTestResult, anderson_darling_test,
+    combine_runs_tests, compare_models_aicc, compare_models_f_test, compare_models_lrt, compare_models_lrt_deviance, compute_covariance_diagnostics,
+    compute_deviance_profile_likelihood_cis_checked, compute_hougaard_skewness_into, compute_information_criteria,
+    compute_poisson_covariance_diagnostics, compute_profile_likelihood_cis_checked, compute_rsdr, dagostino_pearson_test,
+    homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
-use crate::types::{
-    DataPoint, DatasetSeries, DerivedScalar, HookContext, UnknownResponse, filter_datasets_by_range, parse_leading_number,
-    validated_replicate_moments,
-};
+use crate::types::{DataPoint, DatasetSeries, DerivedScalar, HookContext, UnknownResponse, filter_datasets_by_range, validated_replicate_moments};
 use identifiability::Assessment;
 
 /// Configuration for executing nonlinear regression via [`fit_nonlinear`].
@@ -428,6 +429,9 @@ pub struct FittedDatasetResult {
     /// Robust Standard Deviation of Residuals (`RSDR`) when `RobustCauchy` or `RoutOutlierElimination` is active (`None` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
+    /// Within-dataset Wald–Wolfowitz runs test computed in this dataset's own X order (`None` when disabled or plot-only).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub runs_test: Option<RunsTestResult>,
     /// Sampled fitted curve polyline and optional two-sided confidence/prediction bands (`None` when `compute_bands` is `false` and overlay omitted).
     pub curve_overlay: Option<FittedCurveOverlay>,
 }
@@ -628,6 +632,19 @@ struct ParameterLayout {
 impl ParameterLayout {
     fn build(model: &dyn ParametricModel, datasets: &[DatasetSeries], hooks: &HookContext, rules: &[ParameterRule]) -> Result<Self, FitError> {
         let param_names = model.param_names();
+        let mut seen_rule_names: Vec<&str> = Vec::with_capacity(rules.len());
+        for rule in rules {
+            if !param_names.iter().any(|p| p.eq_ignore_ascii_case(&rule.name)) {
+                return Err(FitError::InvalidParameter {
+                    name: "parameter_rules",
+                    reason: format!("Unknown parameter rule `{}` (expected one of: {})", rule.name, param_names.join(", ")),
+                });
+            }
+            if seen_rule_names.iter().any(|prev| prev.eq_ignore_ascii_case(&rule.name)) {
+                return Err(FitError::InvalidParameter { name: "parameter_rules", reason: format!("Duplicate parameter rule for `{}`", rule.name) });
+            }
+            seen_rule_names.push(&rule.name);
+        }
         let p_model = param_names.len();
         let n_datasets = datasets.len();
         let all_points: Vec<DataPoint> = datasets.iter().flat_map(|d| d.points.iter().cloned()).collect();
@@ -718,11 +735,12 @@ impl ParameterLayout {
                 }
                 Some(ParameterScope::ColumnTitleConstant) => {
                     for (ds_idx, ds) in datasets.iter().enumerate() {
-                        let val = ds.column_title_value.or_else(|| parse_leading_number(&ds.label)).filter(|v| v.is_finite()).ok_or_else(|| {
-                            FitError::HookResolutionError {
-                                message: format!("Column title `{}` for `{pname}` has no finite numeric constant", ds.label),
-                            }
-                        })?;
+                        let val =
+                            ds.column_title_value.or_else(|| parse_column_title_numeric_hook(&ds.label).ok()).filter(|v| v.is_finite()).ok_or_else(
+                                || FitError::HookResolutionError {
+                                    message: format!("Column title `{}` for `{pname}` has no finite numeric constant", ds.label),
+                                },
+                            )?;
                         bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
                         let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
                         fixed_constants.push((label, val, vec![ParameterNote::Hooked]));
@@ -1340,26 +1358,8 @@ fn run_trust_region_lm_with_domain(
             let (step, lam_used) = solve_trust_region_subproblem(&j_mat, &w_res, &diag, &theta, delta, lambda, &mut damp_ws)?;
             lambda = lam_used;
 
-            let mut theta_trial: Vec<f64> = theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
-            project_theta(&mut theta_trial, &bounds);
-            let mut actual_step: Vec<f64> = theta_trial.iter().zip(theta.iter()).map(|(a, b)| a - b).collect();
-            let mut p_norm = scaled_l2_norm(&diag, &actual_step);
-            let needs_face_step = has_active_bound_step(&theta, &step, &bounds)
-                && (p_norm <= 1e-14 * delta.max(1.0) || quadratic_pred_num(&j_mat, &w_res, &actual_step) <= 0.0);
-            if needs_face_step
-                && let Some((face_step, face_lam)) = solve_active_face_subproblem(&j_mat, &w_res, &diag, &theta, &step, &bounds, delta, lambda)?
-            {
-                let mut face_trial: Vec<f64> = theta.iter().zip(face_step.iter()).map(|(a, b)| a + b).collect();
-                project_theta(&mut face_trial, &bounds);
-                let face_actual: Vec<f64> = face_trial.iter().zip(theta.iter()).map(|(a, b)| a - b).collect();
-                let face_norm = scaled_l2_norm(&diag, &face_actual);
-                if face_norm > 0.0 {
-                    theta_trial = face_trial;
-                    actual_step = face_actual;
-                    p_norm = face_norm;
-                    lambda = face_lam;
-                }
-            }
+            let ctx = LmStepContext { j_mat: &j_mat, w_res: &w_res, diag: &diag, theta: &theta };
+            let (theta_trial, actual_step, p_norm) = project_tr_trial(&ctx, &step, &bounds, delta, &mut lambda)?;
             if iter == 0 && p_norm > 0.0 {
                 delta = delta.min(p_norm);
             }
@@ -1389,32 +1389,9 @@ fn run_trust_region_lm_with_domain(
                 -1.0
             };
 
-            if rho < 0.25 {
-                let mut temp = 0.5_f64;
-                if let Some((_, _, ss_t)) = &trial_eval
-                    && ss_t > &ss_curr
-                {
-                    let jp = matvec(&j_mat, &actual_step);
-                    let r_dot_jp: f64 = w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
-                    let dir_deriv = -r_dot_jp;
-                    let ratio_t = 0.5 * dir_deriv / (dir_deriv + 0.5 * (ss_curr - ss_t));
-                    if ratio_t.is_finite() {
-                        temp = ratio_t.clamp(0.1, 0.5);
-                    }
-                }
-                let bound_scale = if lambda == 0.0 { p_norm } else { p_norm * 10.0 };
-                delta = temp * delta.min(bound_scale).max(delta * 0.1);
-                if lambda == 0.0 {
-                    // Rejecting an undamped Gauss–Newton step means the trust region must contract
-                    // strictly below ||D p_gn|| / 1.1 so the next trial applies nonzero damping.
-                    let raw_xnorm = scaled_l2_norm(&diag, &theta);
-                    let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
-                    delta = delta.min(0.8 * p_norm).max(1e-15 * x_norm);
-                }
-            } else if lambda == 0.0 || rho > 0.75 {
-                delta = delta.max(2.0 * p_norm);
-                lambda *= 0.5;
-            }
+            let ss_trial_val = trial_eval.as_ref().map(|(_, _, ss_t)| *ss_t);
+            let outcome = TrStepOutcome { actual_step: &actual_step, p_norm, ss_curr, ss_trial: ss_trial_val, rho };
+            update_tr_radius_more(&ctx, &outcome, &mut delta, &mut lambda);
 
             if rho >= 1e-4
                 && let Some((r_t, y_t, ss_t)) = trial_eval
@@ -1504,55 +1481,152 @@ fn stalled_lm_status(max_g_cos: f64, ss_curr: f64, y_norm: f64, stall_gtol: f64)
     if eff_g <= stall_gtol { FitStatus::Converged } else { FitStatus::Diverged }
 }
 
+struct LmStepContext<'a> {
+    j_mat: &'a DenseMatrix,
+    w_res: &'a [f64],
+    diag: &'a [f64],
+    theta: &'a [f64],
+}
+
+struct TrStepOutcome<'a> {
+    actual_step: &'a [f64],
+    p_norm: f64,
+    ss_curr: f64,
+    ss_trial: Option<f64>,
+    rho: f64,
+}
+
+fn project_tr_trial(
+    ctx: &LmStepContext<'_>,
+    step: &[f64],
+    bounds: &[(Option<f64>, Option<f64>)],
+    delta: f64,
+    lambda: &mut f64,
+) -> Result<(Vec<f64>, Vec<f64>, f64), FitError> {
+    let mut trial: Vec<f64> = ctx.theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
+    project_theta(&mut trial, bounds);
+    let mut actual_step: Vec<f64> = trial.iter().zip(ctx.theta.iter()).map(|(a, b)| a - b).collect();
+    let mut p_norm = scaled_l2_norm(ctx.diag, &actual_step);
+    let needs_face_step = has_active_bound_step(ctx.theta, step, bounds)
+        && (p_norm <= 1e-14 * delta.max(1.0) || quadratic_pred_num(ctx.j_mat, ctx.w_res, &actual_step) <= 0.0);
+    if needs_face_step
+        && let Some((face_step, face_lam)) = solve_active_face_subproblem(ctx.j_mat, ctx.w_res, ctx.diag, ctx.theta, step, bounds, delta, *lambda)?
+    {
+        let mut face_trial: Vec<f64> = ctx.theta.iter().zip(face_step.iter()).map(|(a, b)| a + b).collect();
+        project_theta(&mut face_trial, bounds);
+        let face_actual: Vec<f64> = face_trial.iter().zip(ctx.theta.iter()).map(|(a, b)| a - b).collect();
+        let face_norm = scaled_l2_norm(ctx.diag, &face_actual);
+        if face_norm > 0.0 {
+            trial = face_trial;
+            actual_step = face_actual;
+            p_norm = face_norm;
+            *lambda = face_lam;
+        }
+    }
+    Ok((trial, actual_step, p_norm))
+}
+
+fn update_tr_radius_more(ctx: &LmStepContext<'_>, outcome: &TrStepOutcome<'_>, delta: &mut f64, lambda: &mut f64) {
+    if outcome.rho < 0.25 {
+        let mut temp = 0.5_f64;
+        if let Some(ss_t) = outcome.ss_trial
+            && ss_t > outcome.ss_curr
+        {
+            let jp = matvec(ctx.j_mat, outcome.actual_step);
+            let r_dot_jp: f64 = ctx.w_res.iter().zip(jp.iter()).map(|(r, j)| r * j).sum();
+            let dir_deriv = -r_dot_jp;
+            let ratio_t = 0.5 * dir_deriv / (dir_deriv + 0.5 * (outcome.ss_curr - ss_t));
+            if ratio_t.is_finite() {
+                temp = ratio_t.clamp(0.1, 0.5);
+            }
+        }
+        let bound_scale = if *lambda == 0.0 { outcome.p_norm } else { outcome.p_norm * 10.0 };
+        *delta = temp * delta.min(bound_scale).max(*delta * 0.1);
+        if *lambda == 0.0 {
+            let raw_xnorm = scaled_l2_norm(ctx.diag, ctx.theta);
+            let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
+            *delta = delta.min(0.8 * outcome.p_norm).max(1e-15 * x_norm);
+        }
+    } else if *lambda == 0.0 || outcome.rho > 0.75 {
+        *delta = delta.max(2.0 * outcome.p_norm);
+        *lambda *= 0.5;
+    }
+}
+
 struct LmDampWorkspace {
     aug: DenseMatrix,
     rhs: Vec<f64>,
+    col_scales: Vec<f64>,
 }
 
 impl LmDampWorkspace {
     fn new(n: usize, k: usize) -> Result<Self, FitError> {
-        Ok(Self { aug: DenseMatrix::zeros(n + k, k)?, rhs: vec![0.0_f64; n + k] })
+        Ok(Self { aug: DenseMatrix::zeros(n + k, k)?, rhs: vec![0.0_f64; n + k], col_scales: vec![1.0_f64; k] })
     }
 }
 
+fn equilibrate_jacobian(j_mat: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>), FitError> {
+    let n = j_mat.nrows();
+    let k = j_mat.ncols();
+    let mut scales = vec![0.0_f64; k];
+    let mut j_eq = DenseMatrix::zeros(n, k)?;
+    for (j, sc) in scales.iter_mut().enumerate() {
+        let cn = j_mat.col_norm2(j);
+        *sc = cn;
+        if cn > 0.0 && cn.is_finite() {
+            let inv = 1.0 / cn;
+            for i in 0..n {
+                mat_set(&mut j_eq, i, j, mat_get(j_mat, i, j) * inv);
+            }
+        }
+    }
+    Ok((j_eq, scales))
+}
+
 /// Solve the Moré trust-region subproblem `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta`
-/// via QR decomposition of the augmented matrix `[J; sqrt(lambda) D]`.
-/// Solve the Moré (1978) / MINPACK-1 `lmpar` trust-region subproblem
-/// `(J^T J + lambda D^2) p = J^T r` with `||D p|| <= delta` via QR decomposition.
+/// via column-equilibrated QR decomposition of `J` and `[J; sqrt(lambda) D]`.
 ///
 /// Follows Moré (1978, *Numerical Analysis*, Lecture Notes in Math. 630) Algorithm 4.1 /
 /// MINPACK-1 `lmpar`:
-/// 1. Accepts the full-rank Gauss–Newton step (`lambda = 0`) whenever `||D p_gn|| <= 1.1 delta`.
-/// 2. Computes exact upper bound `paru = ||D^{-1} J^T r|| / delta` and lower bound `parl` via
-///    `R_gn^T s = P^T (D^2 p_gn / ||D p_gn||)` when `J` has full column rank (`0` otherwise).
-/// 3. Refines `lambda` using Moré's rational-model Newton update `parc = phi / (delta * ||s||^2)`
-///    where `R^T s = D^2 p / ||D p||` from the QR factor `R` of `[J; sqrt(lambda) D]`.
+/// 1. Equilibrates columns of `J` by Euclidean norm before `qr_col_pivoted` so mixed parameter
+///    units never trigger false rank deficiency (`pqr.rank() < k`).
+/// 2. Accepts the full-rank Gauss–Newton step (`lambda = 0`) whenever `||D p_gn|| <= 1.1 delta`.
+/// 3. Computes exact upper bound `paru = ||D^{-1} J^T r|| / delta` and lower bound `parl` via
+///    `R_eq^T s = P^T ((D^2 p_gn / ||D p_gn||) / col_scale)` when `J` has full column rank (`0` otherwise).
+/// 4. Refines `lambda` using Moré's rational-model Newton update `parc = phi / (delta * ||s||^2)`
+///    where `R_eq^T s = (D^2 p / ||D p||) / col_scale` from the equilibrated QR factor `R_eq` of `[J; sqrt(lambda) D]`.
 fn solve_trust_region_subproblem(
     j_mat: &DenseMatrix,
     r: &[f64],
     diag: &[f64],
-    theta: &[f64],
+    _theta: &[f64],
     delta: f64,
     lambda_hint: f64,
     ws: &mut LmDampWorkspace,
 ) -> Result<(Vec<f64>, f64), FitError> {
     let k = j_mat.ncols();
-    let pqr = qr_col_pivoted(j_mat)?;
+    let (j_eq, col_scales) = equilibrate_jacobian(j_mat)?;
+    let pqr = qr_col_pivoted(&j_eq)?;
     let mut parl = 0.0_f64;
     let mut gn_norm_for_init = 0.0_f64;
     if pqr.rank() == k
-        && let Ok(p_gn) = pqr.solve_basic(r)
-        && p_gn.iter().all(|v| v.is_finite())
+        && col_scales.iter().all(|&c| c > 0.0 && c.is_finite())
+        && let Ok(mut p_gn) = pqr.solve_basic(r)
     {
-        let p_norm = scaled_l2_norm(diag, &p_gn);
-        if p_norm <= 1.1 * delta {
-            return Ok((p_gn, 0.0));
+        for (pj, &cj) in p_gn.iter_mut().zip(col_scales.iter()) {
+            *pj /= cj;
         }
-        gn_norm_for_init = p_norm;
-        if let Ok(r_gn) = pqr.r()
-            && let Some(s_norm_sq) = more_r_inv_t_norm_sq(&r_gn, diag, &p_gn, p_norm, Some(pqr.permutation()))
-        {
-            parl = ((p_norm - delta) / (delta.max(f64::MIN_POSITIVE) * s_norm_sq)).max(0.0);
+        if p_gn.iter().all(|v| v.is_finite()) {
+            let p_norm = scaled_l2_norm(diag, &p_gn);
+            if p_norm <= 1.1 * delta {
+                return Ok((p_gn, 0.0));
+            }
+            gn_norm_for_init = p_norm;
+            if let Ok(r_gn) = pqr.r()
+                && let Some(s_norm_sq) = more_r_inv_t_norm_sq(&r_gn, diag, &p_gn, p_norm, Some(pqr.permutation()), Some(&col_scales))
+            {
+                parl = ((p_norm - delta) / (delta.max(f64::MIN_POSITIVE) * s_norm_sq)).max(0.0);
+            }
         }
     }
 
@@ -1585,14 +1659,14 @@ fn solve_trust_region_subproblem(
         if lam < lam_floor {
             lam = (0.001 * paru).max(parl).max(lam_floor).min(paru);
         }
-        let (p, r_mat) = solve_damped_qr_with_r(j_mat, r, diag, theta, lam, ws)?;
+        let (p, r_mat) = solve_damped_qr_with_r(j_mat, r, diag, lam, ws)?;
         let p_norm = scaled_l2_norm(diag, &p);
         let fp = p_norm - delta;
         best_p = p;
         if fp.abs() <= 0.1 * delta || (parl == 0.0 && fp <= fp_prev && fp_prev < 0.0) || iter == 9 {
             return Ok((best_p, lam));
         }
-        let parc = match more_r_inv_t_norm_sq(&r_mat, diag, &best_p, p_norm, None) {
+        let parc = match more_r_inv_t_norm_sq(&r_mat, diag, &best_p, p_norm, None, Some(&ws.col_scales)) {
             Some(s_norm_sq) => fp / (delta.max(f64::MIN_POSITIVE) * s_norm_sq),
             None => 0.0,
         };
@@ -1611,16 +1685,10 @@ fn solve_trust_region_subproblem(
     Ok((best_p, lam))
 }
 
-fn damped_param_unit_scale(theta_j: f64) -> f64 {
-    let a = theta_j.abs();
-    if a > 0.0 && a.is_finite() { a.clamp(1e-100, 1.0) } else { 1.0 }
-}
-
 fn solve_damped_qr_with_r(
     j_mat: &DenseMatrix,
     r: &[f64],
     diag: &[f64],
-    theta: &[f64],
     lambda: f64,
     ws: &mut LmDampWorkspace,
 ) -> Result<(Vec<f64>, DenseMatrix), FitError> {
@@ -1628,13 +1696,16 @@ fn solve_damped_qr_with_r(
     let k = j_mat.ncols();
     let sqrt_lam = lambda.sqrt();
     for j in 0..k {
-        let sj = damped_param_unit_scale(theta.get(j).copied().unwrap_or(1.0));
         let dj = diag.get(j).copied().unwrap_or(1.0);
+        let raw_sj = j_mat.col_norm2(j).hypot(sqrt_lam * dj);
+        let sj = if raw_sj > 0.0 && raw_sj.is_finite() { raw_sj } else { 1.0 };
+        ws.col_scales[j] = sj;
+        let inv_sj = 1.0 / sj;
         for i in 0..n {
-            mat_set(&mut ws.aug, i, j, mat_get(j_mat, i, j) * sj);
+            mat_set(&mut ws.aug, i, j, mat_get(j_mat, i, j) * inv_sj);
         }
         for i in 0..k {
-            mat_set(&mut ws.aug, n + i, j, if i == j { sqrt_lam * dj * sj } else { 0.0 });
+            mat_set(&mut ws.aug, n + i, j, if i == j { sqrt_lam * dj * inv_sj } else { 0.0 });
         }
     }
     ws.rhs[..n].copy_from_slice(r);
@@ -1642,20 +1713,21 @@ fn solve_damped_qr_with_r(
 
     let qr_res = qr(&ws.aug)?;
     let mut p = qr_res.solve_basic(&ws.rhs)?;
-    let mut r_mat = qr_res.r()?;
-    for j in 0..k {
-        let sj = damped_param_unit_scale(theta.get(j).copied().unwrap_or(1.0));
-        p[j] *= sj;
-        let inv_sj = 1.0 / sj;
-        for i in 0..=j {
-            let rij = mat_get(&r_mat, i, j);
-            mat_set(&mut r_mat, i, j, rij * inv_sj);
-        }
+    let r_mat = qr_res.r()?;
+    for (pj, &sj) in p.iter_mut().zip(ws.col_scales.iter()) {
+        *pj /= sj;
     }
     Ok((p, r_mat))
 }
 
-fn more_r_inv_t_norm_sq(r_mat: &DenseMatrix, diag: &[f64], p: &[f64], p_norm: f64, perm: Option<&[usize]>) -> Option<f64> {
+fn more_r_inv_t_norm_sq(
+    r_mat: &DenseMatrix,
+    diag: &[f64],
+    p: &[f64],
+    p_norm: f64,
+    perm: Option<&[usize]>,
+    col_scales: Option<&[f64]>,
+) -> Option<f64> {
     if p_norm <= 0.0 || !p_norm.is_finite() {
         return None;
     }
@@ -1664,6 +1736,13 @@ fn more_r_inv_t_norm_sq(r_mat: &DenseMatrix, diag: &[f64], p: &[f64], p_norm: f6
     for j in 0..k {
         let orig_j = perm.map_or(j, |pm| pm[j]);
         let mut sum = (diag[orig_j] * diag[orig_j] * p[orig_j]) / p_norm;
+        if let Some(cs) = col_scales {
+            let c = cs[orig_j];
+            if !c.is_finite() || c <= 0.0 {
+                return None;
+            }
+            sum /= c;
+        }
         for (i, &si) in s.iter().enumerate().take(j) {
             sum -= mat_get(r_mat, i, j) * si;
         }
@@ -1776,28 +1855,15 @@ fn run_trust_region_lm(
 /// Lagarias et al. (1998). Box constraints are enforced by projecting vertices before
 /// evaluation (a pragmatic extension, not part of either reference). Termination is on the
 /// relative spread of objective values or the evaluation budget only.
-fn nelder_mead_rescue_with_domain(
-    model: &dyn ParametricModel,
-    layout: &ParameterLayout,
-    obs: &[ObsRecord],
-    seed: &[f64],
-    max_evals: usize,
-    require_positive_mean: bool,
-) -> Option<Vec<f64>> {
+fn nelder_mead_optimize<F>(layout: &ParameterLayout, seed: &[f64], max_evals: usize, zero_step: f64, mut eval_obj: F) -> Option<Vec<f64>>
+where
+    F: FnMut(&[f64]) -> f64,
+{
     let k = layout.k_free();
     if k == 0 {
         return Some(Vec::new());
     }
     let bounds = layout.bounds();
-    let eval_obj = |th: &[f64]| -> f64 {
-        if ode_fit_budget_exceeded().is_some() {
-            return f64::INFINITY;
-        }
-        let mut clamped = th.to_vec();
-        project_theta(&mut clamped, &bounds);
-        eval_residuals_with_domain(model, layout, obs, &clamped, require_positive_mean).map_or(f64::INFINITY, |(_, _, ss)| ss)
-    };
-
     let mut simplex: Vec<(Vec<f64>, f64)> = Vec::with_capacity(k + 1);
     let mut v0 = seed.to_vec();
     project_theta(&mut v0, &bounds);
@@ -1809,7 +1875,7 @@ fn nelder_mead_rescue_with_domain(
 
     for j in 0..k {
         let mut vj = v0.clone();
-        let step = if vj[j].abs() > 1e-8 { 0.1 * vj[j] } else { 0.05 };
+        let step = if vj[j].abs() > 1e-8 { 0.1 * vj[j] } else { zero_step };
         vj[j] += step;
         project_theta(&mut vj, &bounds);
         let fj = eval_obj(&vj);
@@ -1887,6 +1953,68 @@ fn nelder_mead_rescue_with_domain(
     }
 }
 
+/// Nelder–Mead simplex warm-start / local rescue for difficult starts or non-finite initial points.
+///
+/// Nelder & Mead (1965) with standard coefficients (reflection 1, expansion 2, contraction 0.5,
+/// shrink 0.5) and the ordering, greedy-expansion, and outside/inside contraction rules of
+/// Lagarias et al. (1998). Box constraints are enforced by projecting vertices before
+/// evaluation (a pragmatic extension, not part of either reference). Termination is on the
+/// relative spread of objective values or the evaluation budget only.
+fn nelder_mead_rescue_with_domain(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    seed: &[f64],
+    max_evals: usize,
+    require_positive_mean: bool,
+) -> Option<Vec<f64>> {
+    let bounds = layout.bounds();
+    nelder_mead_optimize(layout, seed, max_evals, 0.05, |th| {
+        if ode_fit_budget_exceeded().is_some() {
+            return f64::INFINITY;
+        }
+        let mut clamped = th.to_vec();
+        project_theta(&mut clamped, &bounds);
+        eval_residuals_with_domain(model, layout, obs, &clamped, require_positive_mean).map_or(f64::INFINITY, |(_, _, ss)| ss)
+    })
+}
+
+fn nelder_mead_poisson_feasibility_rescue(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    seed: &[f64],
+) -> Option<Vec<f64>> {
+    let bounds = layout.bounds();
+    let y_scale = obs.iter().map(|o| o.point.y.abs()).fold(0.0_f64, f64::max).max(1e-6);
+    let eps_pos = 1e-4 * y_scale;
+    let cand = nelder_mead_optimize(layout, seed, 400, 1.0, |th| {
+        if ode_fit_budget_exceeded().is_some() {
+            return f64::INFINITY;
+        }
+        let mut clamped = th.to_vec();
+        project_theta(&mut clamped, &bounds);
+        match eval_residuals_with_domain(model, layout, obs, &clamped, false) {
+            Some((_, y_hat, ss)) => {
+                let mut penalty = 0.0_f64;
+                let mut all_pos = true;
+                for &mu in &y_hat {
+                    if mu <= 0.0 {
+                        all_pos = false;
+                    }
+                    if mu < eps_pos {
+                        let d = eps_pos - mu;
+                        penalty += d * d;
+                    }
+                }
+                if all_pos { ss } else { 1e50 + 1e30 * penalty + ss.min(1e20) }
+            }
+            None => f64::INFINITY,
+        }
+    })?;
+    eval_residuals_with_domain(model, layout, obs, &cand, true).map(|_| cand)
+}
+
 /// Multi-factor trust-region LM driver with optional simplex rescue for hard starts.
 fn solve_with_warm_start(
     model: &dyn ParametricModel,
@@ -1895,7 +2023,17 @@ fn solve_with_warm_start(
     theta_init: &[f64],
     config: &SolverConfig,
 ) -> Result<LmRunOutput, FitError> {
-    let require_positive_mean = config.method == FitMethod::PoissonDeviance;
+    solve_with_warm_start_with_domain(model, layout, obs, theta_init, config, config.method == FitMethod::PoissonDeviance)
+}
+
+fn solve_with_warm_start_with_domain(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta_init: &[f64],
+    config: &SolverConfig,
+    require_positive_mean: bool,
+) -> Result<LmRunOutput, FitError> {
     let mut start = theta_init.to_vec();
     if eval_residuals_with_domain(model, layout, obs, &start, require_positive_mean).is_none() {
         if let Some(err) = ode_budget_error() {
@@ -1908,6 +2046,11 @@ fn solve_with_warm_start(
         } else if let Some(err) = ode_budget_error() {
             return Err(err);
         } else if require_positive_mean && eval_residuals_with_domain(model, layout, obs, &start, false).is_some() {
+            if !config.use_simplex_warm_start && layout.k_free() > 0 {
+                return Err(FitError::BadInitialValues {
+                    reason: "Starting parameters produce non-positive Poisson fitted means (mu <= 0)".to_owned(),
+                });
+            }
             return Err(FitError::ImpossibleWeights {
                 reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
             });
@@ -2221,8 +2364,8 @@ fn rout_detect_outliers_mb2006(
     if n <= k_free {
         return Err(FitError::InsufficientData { required: k_free + 1, actual: n });
     }
-    if !fdr_q_percent.is_finite() || !(0.0..=100.0).contains(&fdr_q_percent) {
-        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in [0, 100], got {fdr_q_percent}") });
+    if !fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0 {
+        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
     }
 
     let df = n - k_free;
@@ -2247,7 +2390,7 @@ fn rout_detect_outliers_mb2006(
     // Motulsky & Brown (2006): test only top ~30% furthest points (ranks 1..=m_test out of N).
     let start = ((0.70 * (n as f64)).floor() as usize).min(n - 1);
     let m_test = n - start;
-    let q_alpha = (fdr_q_percent / 100.0).clamp(1e-6, 0.5);
+    let q_alpha = fdr_q_percent / 100.0;
 
     let mut q_values = vec![1.0_f64; n];
     let mut running_min = 1.0_f64;
@@ -2308,7 +2451,7 @@ struct ResidualDiagnosticsBundle {
 
 fn compute_residual_diagnostics(
     obs: &[ObsRecord],
-    points: &[DataPoint],
+    ds_results: &[FittedDatasetResult],
     y_hat_all: &[f64],
     raw_residuals_all: &[f64],
     weighted_ss: f64,
@@ -2316,10 +2459,8 @@ fn compute_residual_diagnostics(
     config: &SolverConfig,
 ) -> ResidualDiagnosticsBundle {
     let runs_res = if config.compute_runs_test {
-        let mut pairs: Vec<(f64, f64)> = points.iter().zip(raw_residuals_all.iter()).map(|(p, &r)| (p.x0(), r)).collect();
-        pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
-        let ordered_res: Vec<f64> = pairs.into_iter().map(|(_, r)| r).collect();
-        Some(runs_test(&ordered_res))
+        let per_ds_runs: Vec<RunsTestResult> = ds_results.iter().filter_map(|d| d.runs_test.clone()).collect();
+        combine_runs_tests(&per_ds_runs)
     } else {
         None
     };
@@ -2330,18 +2471,28 @@ fn compute_residual_diagnostics(
         None
     };
 
+    let diag_residuals: Vec<f64> = if config.method == FitMethod::PoissonDeviance {
+        obs.iter()
+            .zip(y_hat_all.iter())
+            .zip(raw_residuals_all.iter())
+            .map(|((o, &yh), &r)| if yh.is_finite() && yh > 0.0 { r / yh.sqrt() } else { r * o.sqrt_weight })
+            .collect()
+    } else {
+        obs.iter().zip(raw_residuals_all.iter()).map(|(o, &r)| r * o.sqrt_weight).collect()
+    };
+
     let (norm_main, norm_ad, norm_ks) = if config.compute_normality {
         (
-            shapiro_wilk_test(raw_residuals_all).or_else(|| dagostino_pearson_test(raw_residuals_all)),
-            anderson_darling_test(raw_residuals_all),
-            lilliefors_ks_test(raw_residuals_all),
+            shapiro_wilk_test(&diag_residuals).or_else(|| dagostino_pearson_test(&diag_residuals)),
+            anderson_darling_test(&diag_residuals),
+            lilliefors_ks_test(&diag_residuals),
         )
     } else {
         (None, None, None)
     };
 
     let homo_res =
-        if config.compute_homoscedasticity { homoscedasticity_spearman_test(y_hat_all, raw_residuals_all, config.confidence.alpha()) } else { None };
+        if config.compute_homoscedasticity { homoscedasticity_spearman_test(y_hat_all, &diag_residuals, config.confidence.alpha()) } else { None };
 
     ResidualDiagnosticsBundle {
         runs_test: runs_res,
@@ -2386,6 +2537,11 @@ pub fn fit_nonlinear(
     }
     let active_datasets = filtered_storage.as_deref().unwrap_or(datasets);
 
+    if let FitMethod::RoutOutlierElimination { fdr_q_percent } = config.method
+        && (!fdr_q_percent.is_finite() || fdr_q_percent <= 0.0 || fdr_q_percent > 50.0)
+    {
+        return Err(FitError::InvalidParameter { name: "fdr_q_percent", reason: format!("FDR Q% must lie in (0, 50], got {fdr_q_percent}") });
+    }
     if matches!(config.method, FitMethod::RobustCauchy | FitMethod::RoutOutlierElimination { .. })
         && active_datasets.iter().any(|d| d.is_pre_summarized)
     {
@@ -2510,6 +2666,7 @@ fn fit_plot_function_only(
             r_squared: 1.0,
             sy_x: if is_robust { f64::NAN } else { 0.0 },
             rsdr: None,
+            runs_test: None,
             curve_overlay: Some(overlay),
         });
     }
@@ -2601,7 +2758,13 @@ fn solve_lm_by_method(
             }
             let excluded = obs.len() - clean_obs.len();
             *obs = clean_obs;
-            let ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
+            let mut ols = solve_with_warm_start(model, layout, obs, &cauchy_out.theta, config)?;
+            if let Ok(alt) = solve_with_warm_start(model, layout, obs, init_theta, config)
+                && ((alt.status == FitStatus::Converged && ols.status != FitStatus::Converged)
+                    || (alt.status == FitStatus::Converged && alt.weighted_ss < ols.weighted_ss * (1.0 - 1e-12)))
+            {
+                ols = alt;
+            }
             Ok((ols, Some(rout), excluded))
         }
     }
@@ -2703,7 +2866,7 @@ fn finalize_fit_uncertainty(
         FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
         FitMethod::PoissonDeviance => {
             if profile_computed {
-                compute_deviance_profile_likelihood_cis(
+                compute_deviance_profile_likelihood_cis_checked(
                     &lm_out.theta,
                     lm_out.weighted_ss,
                     &cov,
@@ -2723,7 +2886,7 @@ fn finalize_fit_uncertainty(
                     wy2_acc.add(wy * wy);
                 }
                 wy2_acc.add(ss_within_total);
-                compute_profile_likelihood_cis_scaled(
+                compute_profile_likelihood_cis_checked(
                     &lm_out.theta,
                     lm_out.weighted_ss,
                     Some(wy2_acc.total()),
@@ -2837,8 +3000,7 @@ fn fit_single_or_shared(
     } else {
         None
     };
-    let clean_points: Vec<DataPoint> = obs.iter().map(|o| o.point.clone()).collect();
-    let res_diag = compute_residual_diagnostics(&obs, &clean_points, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&obs, &assembled.ds_results, &lm_out.y_hat, &raw_residuals_all, lm_out.weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -3214,7 +3376,7 @@ fn fit_independent_datasets(
         compute_information_criteria(weighted_ss, n_obs, k_free).ok()
     };
 
-    let res_diag = compute_residual_diagnostics(&all_obs, &all_points, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
+    let res_diag = compute_residual_diagnostics(&all_obs, &ds_results, &all_y_hat, &all_raw_residuals, weighted_ss, df, config);
 
     Ok(NonlinearFitResult {
         equation_id: model.id().to_owned(),
@@ -3362,6 +3524,7 @@ fn assemble_dataset_results(
 
         let mut ds_y_hat = Vec::new();
         let mut ds_res = Vec::new();
+        let mut ds_x_res: Vec<(f64, f64)> = Vec::new();
         let mut ds_base_w_abs_res = Vec::new();
         let mut ds_w_res = Vec::new();
         let mut ds_stud_res = Vec::new();
@@ -3386,6 +3549,7 @@ fn assemble_dataset_results(
                 let w_rep = rec.rep_n as f64;
                 ds_y_hat.push(yh);
                 ds_res.push(r);
+                ds_x_res.push((rec.point.x0(), r));
                 ds_base_w_abs_res.push((r * rec.sqrt_weight).abs());
                 ds_w_res.push(lm_out.weighted_res[i]);
                 if cfg.solver.method != FitMethod::RobustCauchy {
@@ -3500,6 +3664,14 @@ fn assemble_dataset_results(
             }
         }
 
+        let ds_runs_test = if cfg.solver.compute_runs_test {
+            ds_x_res.sort_by(|a, b| a.0.total_cmp(&b.0));
+            let ordered_ds_res: Vec<f64> = ds_x_res.into_iter().map(|(_, r)| r).collect();
+            Some(runs_test(&ordered_ds_res))
+        } else {
+            None
+        };
+
         ds_results.push(FittedDatasetResult {
             data_set_index: ds.data_set_index,
             label: ds.label.clone(),
@@ -3514,6 +3686,7 @@ fn assemble_dataset_results(
             r_squared: ds_r2,
             sy_x: ds_sy_x,
             rsdr: ds_rsdr,
+            runs_test: ds_runs_test,
             curve_overlay,
         });
     }
@@ -3734,7 +3907,50 @@ fn fit_poisson_irls(
     }
     let mut theta = init_theta.to_vec();
     let mut work_obs = obs.to_vec();
-    let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
+    let mut last_out = if eval_residuals_with_domain(model, layout, &work_obs, &theta, true).is_some() {
+        solve_with_warm_start_with_domain(model, layout, &work_obs, &theta, config, true)?
+    } else if layout.k_free() == 0 {
+        return Err(FitError::ImpossibleWeights {
+            reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+        });
+    } else if !config.use_simplex_warm_start {
+        if eval_residuals_with_domain(model, layout, &work_obs, &theta, false).is_some() {
+            return Err(FitError::BadInitialValues {
+                reason: "Starting parameters produce non-positive Poisson predicted means (mu <= 0)".to_owned(),
+            });
+        }
+        return Err(FitError::BadInitialValues { reason: "Starting parameters evaluate outside model domain".to_owned() });
+    } else {
+        // When initial parameters give mu <= 0, rescue via unconstrained LS pre-fit and/or a
+        // feasibility-barrier Nelder-Mead search inside parameter bounds before rejecting as impossible.
+        let mut ls_cand = None;
+        if eval_residuals_with_domain(model, layout, &work_obs, &theta, false).is_some() {
+            match solve_with_warm_start_with_domain(model, layout, &work_obs, &theta, config, false) {
+                Ok(out) => ls_cand = Some(out),
+                Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
+                Err(_) => {}
+            }
+        }
+        let ls_outcome = ls_cand
+            .map(|out| if eval_residuals_with_domain(model, layout, &work_obs, &out.theta, true).is_some() { Ok(out) } else { Err(out.theta) });
+        match ls_outcome {
+            Some(Ok(feasible_ls)) => feasible_ls,
+            other => {
+                let ls_seed = other.as_ref().and_then(|res| res.as_ref().err().map(Vec::as_slice));
+                let feasible = nelder_mead_poisson_feasibility_rescue(model, layout, &work_obs, &theta)
+                    .or_else(|| ls_seed.and_then(|s| nelder_mead_poisson_feasibility_rescue(model, layout, &work_obs, s)));
+                if let Some(start_pos) = feasible {
+                    solve_with_warm_start_with_domain(model, layout, &work_obs, &start_pos, config, true)?
+                } else if let Some(err) = ode_budget_error() {
+                    return Err(err);
+                } else {
+                    return Err(FitError::ImpossibleWeights {
+                        reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+                    });
+                }
+            }
+        }
+    };
     let mut prev_dev = poisson_deviance(&work_obs, &last_out.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
         reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
     })?;
@@ -3795,19 +4011,29 @@ fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> Option<f64> {
 /// `z_i = |r_{w,i}| / RSDR` (Holland & Welsch 1977), each weighted subproblem solved by
 /// Levenberg–Marquardt. For a fixed scale both reach the same stationary point. Standard
 /// errors from this fit are not robust-theory SEs and are not used by ROUT.
-fn fit_cauchy_irls(
+fn cauchy_marginal_nll(obs: &[ObsRecord], y_hat: &[f64], k_free: usize, w_y_scale: f64) -> f64 {
+    let abs_res: Vec<f64> = obs.iter().zip(y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
+    let s = compute_rsdr(&abs_res, k_free).max(1e-6 * w_y_scale);
+    let penalty: f64 = abs_res
+        .iter()
+        .map(|&r| {
+            let z = r / s;
+            (1.0 + z * z).ln()
+        })
+        .sum();
+    (obs.len() as f64) * s.ln() + penalty
+}
+
+fn run_cauchy_irls_loop(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
-    init_theta: &[f64],
+    mut last_out: LmRunOutput,
     config: &SolverConfig,
+    w_y_scale: f64,
 ) -> Result<LmRunOutput, FitError> {
-    let mut theta = init_theta.to_vec();
-    let mut work_obs = obs.to_vec();
-    let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
     let k_free = layout.k_free();
-    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
-
+    let mut work_obs = obs.to_vec();
     for _ in 0..15 {
         let prev_theta = last_out.theta.clone();
         let abs_res: Vec<f64> = obs.iter().zip(last_out.y_hat.iter()).map(|(o, yh)| ((o.point.y - yh) * o.sqrt_weight).abs()).collect();
@@ -3817,8 +4043,7 @@ fn fit_cauchy_irls(
             let cauchy_w = 1.0 / (1.0 + z * z);
             rec.sqrt_weight = obs[i].sqrt_weight * cauchy_w.sqrt();
         }
-        theta = prev_theta.clone();
-        last_out = run_trust_region_lm(model, layout, &work_obs, &theta, config.max_iters, 10.0)?;
+        last_out = run_trust_region_lm(model, layout, &work_obs, &prev_theta, config.max_iters, 10.0)?;
         let max_step = prev_theta
             .iter()
             .zip(last_out.theta.iter())
@@ -3829,6 +4054,49 @@ fn fit_cauchy_irls(
         }
     }
     Ok(last_out)
+}
+
+fn fit_cauchy_irls(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    init_theta: &[f64],
+    config: &SolverConfig,
+) -> Result<LmRunOutput, FitError> {
+    let k_free = layout.k_free();
+    let w_y_scale = obs.iter().map(|o| (o.point.y * o.sqrt_weight).abs()).fold(0.0_f64, f64::max).max(f64::MIN_POSITIVE);
+    let ols_seed = solve_with_warm_start(model, layout, obs, init_theta, config)?;
+    let mut best = run_cauchy_irls_loop(model, layout, obs, ols_seed, config, w_y_scale)?;
+
+    // If L2 OLS warm start chased an outlier into an unrepresentative steep step, also launch
+    // Cauchy IRLS directly from a Lorentzian-merit simplex search seeded at `init_theta`.
+    if k_free > 0 && config.use_simplex_warm_start {
+        let bounds = layout.bounds();
+        let nm_seed = nelder_mead_optimize(layout, init_theta, 500, 0.05, |th| {
+            if ode_fit_budget_exceeded().is_some() {
+                return f64::INFINITY;
+            }
+            let mut clamped = th.to_vec();
+            project_theta(&mut clamped, &bounds);
+            eval_residuals_with_domain(model, layout, obs, &clamped, false)
+                .map_or(f64::INFINITY, |(_, y_hat, _)| cauchy_marginal_nll(obs, &y_hat, k_free, w_y_scale))
+        });
+        if let Some(seed_th) = nm_seed
+            && let Some((w_res, y_hat, ss)) = eval_residuals_with_domain(model, layout, obs, &seed_th, false)
+            && let Ok(j_mat) = DenseMatrix::zeros(obs.len(), k_free)
+        {
+            let seed_out =
+                LmRunOutput { theta: seed_th, weighted_res: w_res, y_hat, weighted_ss: ss, j_mat, status: FitStatus::Converged, iterations: 0 };
+            if let Ok(alt) = run_cauchy_irls_loop(model, layout, obs, seed_out, config, w_y_scale) {
+                let best_nll = cauchy_marginal_nll(obs, &best.y_hat, k_free, w_y_scale);
+                let alt_nll = cauchy_marginal_nll(obs, &alt.y_hat, k_free, w_y_scale);
+                if alt_nll + 1e-6 < best_nll {
+                    best = alt;
+                }
+            }
+        }
+    }
+    Ok(best)
 }
 
 fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {
@@ -3873,6 +4141,7 @@ fn compute_unscaled_cov(j_mat: &DenseMatrix) -> Option<DenseMatrix> {
 struct ReducedLmState {
     y_hat: Vec<f64>,
     ss_curr: f64,
+    converged: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3891,46 +4160,40 @@ fn run_reduced_lm_with_domain(
     let mut sub_theta: Vec<f64> = map_indices.iter().map(|&i| work[i]).collect();
     project_theta(&mut sub_theta, &sub_bounds);
 
-    let mut diag = vec![1.0_f64; sub_k];
-    let mut delta = 1.0_f64;
+    let ftol = 1e-12_f64;
+    let xtol = 1e-12_f64;
+    let gtol = 1e-11_f64;
+    let stall_gtol = 1e-4_f64;
+    let y_norm = obs_y_ss(obs).sqrt();
+
+    let mut diag = vec![0.0_f64; sub_k];
+    let mut delta = 0.0_f64;
+    let mut iter = 0_usize;
+    let mut last_max_g_cos = f64::INFINITY;
     let mut lm_ws = LmDampWorkspace::new(obs.len(), sub_k).ok()?;
     for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
         work[orig] = v;
     }
     let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals_with_domain(model, layout, obs, work, require_positive_mean)?;
 
-    for iter in 0..max_iters {
+    while iter < max_iters {
         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
             work[orig] = v;
         }
         let j_full = compute_jacobian(model, layout, obs, work, &y_hat, full_bounds)?;
         let mut j_sub = DenseMatrix::zeros(obs.len(), sub_k).ok()?;
-        let mut max_g_cos = 0.0_f64;
-        let fnorm = ss_curr.sqrt();
         for (sub_j, &orig_j) in map_indices.iter().enumerate() {
-            let mut col_ss = NeumaierSum::new();
-            let mut col_dot = NeumaierSum::new();
-            for (i, &wr) in w_res.iter().enumerate().take(obs.len()) {
-                let val = mat_get(&j_full, i, orig_j);
-                mat_set(&mut j_sub, i, sub_j, val);
-                col_ss.add(val * val);
-                col_dot.add(val * wr);
+            for i in 0..obs.len() {
+                mat_set(&mut j_sub, i, sub_j, mat_get(&j_full, i, orig_j));
             }
-            let raw_cn = col_ss.total().sqrt();
-            if raw_cn > 0.0 && fnorm > 0.0 {
-                let grad_j = col_dot.total();
-                let xj = sub_theta[sub_j];
-                let at_lo = sub_bounds[sub_j].0.is_some_and(|l| (xj - l).abs() <= 1e-12 * l.abs().max(f64::MIN_POSITIVE) && grad_j < 0.0);
-                let at_hi = sub_bounds[sub_j].1.is_some_and(|u| (u - xj).abs() <= 1e-12 * u.abs().max(f64::MIN_POSITIVE) && grad_j > 0.0);
-                if !at_lo && !at_hi {
-                    max_g_cos = max_g_cos.max((grad_j / (raw_cn * fnorm)).abs());
-                }
-            }
-            let cn = if raw_cn > f64::MIN_POSITIVE.sqrt() { raw_cn } else { 1.0 };
-            diag[sub_j] = if iter == 0 { cn } else { diag[sub_j].max(cn) };
         }
-        if ss_curr == 0.0 || max_g_cos <= 1e-12 {
-            break;
+        if ss_curr == 0.0 {
+            return Some(ReducedLmState { y_hat, ss_curr, converged: true });
+        }
+        let max_g_cos = update_lm_diag_and_projected_grad(&j_sub, &w_res, &sub_theta, &sub_bounds, ss_curr, &mut diag);
+        last_max_g_cos = max_g_cos;
+        if max_g_cos <= gtol {
+            return Some(ReducedLmState { y_hat, ss_curr, converged: true });
         }
         if iter == 0 {
             let theta_scale = scaled_l2_norm(&diag, &sub_theta);
@@ -3939,41 +4202,71 @@ fn run_reduced_lm_with_domain(
 
         let mut accepted = false;
         let mut lam = 0.0_f64;
-        for _ in 0..15 {
+        for _ in 0..25 {
             let Ok((step, lam_u)) = solve_trust_region_subproblem(&j_sub, &w_res, &diag, &sub_theta, delta, lam, &mut lm_ws) else {
                 break;
             };
             lam = lam_u;
-            let mut trial: Vec<f64> = sub_theta.iter().zip(step.iter()).map(|(a, b)| a + b).collect();
-            project_theta(&mut trial, &sub_bounds);
-            let actual_step: Vec<f64> = trial.iter().zip(sub_theta.iter()).map(|(a, b)| a - b).collect();
-            let p_norm = scaled_l2_norm(&diag, &actual_step);
+            let ctx = LmStepContext { j_mat: &j_sub, w_res: &w_res, diag: &diag, theta: &sub_theta };
+            let Ok((trial, actual_step, p_norm)) = project_tr_trial(&ctx, &step, &sub_bounds, delta, &mut lam) else {
+                break;
+            };
+            if iter == 0 && p_norm > 0.0 {
+                delta = delta.min(p_norm);
+            }
+
+            let pred_num = quadratic_pred_num(&j_sub, &w_res, &actual_step).max(0.0);
+            let pred_red = if ss_curr > 0.0 { pred_num / ss_curr } else { 0.0 };
 
             for (&orig, &v) in map_indices.iter().zip(trial.iter()) {
                 work[orig] = v;
             }
-            if let Some((r_t, y_t, ss_t)) = eval_residuals_with_domain(model, layout, obs, work, require_positive_mean) {
-                let act = ss_curr - ss_t;
-                if act >= 0.0 {
-                    sub_theta = trial;
-                    w_res = r_t;
-                    y_hat = y_t;
-                    ss_curr = ss_t;
-                    accepted = true;
-                    delta = delta.max(2.0 * p_norm);
-                    let theta_norm = scaled_l2_norm(&diag, &sub_theta);
-                    let step_tol = 1e-10 * theta_norm.max(f64::MIN_POSITIVE);
-                    if act <= 1e-11 * ss_curr.max(f64::MIN_POSITIVE) || p_norm <= step_tol {
-                        for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
-                            work[orig] = v;
-                        }
-                        return Some(ReducedLmState { y_hat, ss_curr });
+            let trial_eval = eval_residuals_with_domain(model, layout, obs, work, require_positive_mean);
+            let act_red = match &trial_eval {
+                Some((_, _, ss_t)) if *ss_t < ss_curr => 1.0 - *ss_t / ss_curr,
+                _ => -1.0,
+            };
+            let rho = if pred_red > 0.0 && trial_eval.is_some() {
+                act_red / pred_red
+            } else if act_red > 0.0 {
+                1.0
+            } else {
+                -1.0
+            };
+
+            let ss_trial_val = trial_eval.as_ref().map(|(_, _, ss_t)| *ss_t);
+            let outcome = TrStepOutcome { actual_step: &actual_step, p_norm, ss_curr, ss_trial: ss_trial_val, rho };
+            update_tr_radius_more(&ctx, &outcome, &mut delta, &mut lam);
+
+            if rho >= 1e-4
+                && let Some((r_t, y_t, ss_t)) = trial_eval
+            {
+                sub_theta = trial;
+                w_res = r_t;
+                y_hat = y_t;
+                ss_curr = ss_t;
+                iter += 1;
+                accepted = true;
+                let raw_xnorm = scaled_l2_norm(&diag, &sub_theta);
+                let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
+                if (act_red.abs() <= ftol && pred_red <= ftol && rho <= 2.0) || p_norm <= xtol * x_norm {
+                    for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
+                        work[orig] = v;
                     }
-                    break;
+                    return Some(ReducedLmState { y_hat, ss_curr, converged: true });
                 }
+                break;
             }
-            delta *= 0.25;
-            lam = (lam * 4.0).max(1e-8);
+
+            let raw_xnorm = scaled_l2_norm(&diag, &sub_theta);
+            let x_norm = if raw_xnorm > 0.0 { raw_xnorm } else { 1.0 };
+            if p_norm <= xtol * x_norm || delta <= 1e-15 * x_norm {
+                for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
+                    work[orig] = v;
+                }
+                let converged = stalled_lm_status(max_g_cos, ss_curr, y_norm, stall_gtol) == FitStatus::Converged;
+                return Some(ReducedLmState { y_hat, ss_curr, converged });
+            }
         }
         if !accepted {
             break;
@@ -3982,7 +4275,8 @@ fn run_reduced_lm_with_domain(
     for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
         work[orig] = v;
     }
-    Some(ReducedLmState { y_hat, ss_curr })
+    let converged = iter < max_iters && stalled_lm_status(last_max_g_cos, ss_curr, y_norm, stall_gtol) == FitStatus::Converged;
+    Some(ReducedLmState { y_hat, ss_curr, converged })
 }
 
 fn check_profile_fixed_param(layout: &ParameterLayout, fixed_idx: usize, fixed_val: f64) -> Option<Vec<(Option<f64>, Option<f64>)>> {
@@ -4006,9 +4300,9 @@ fn check_profile_fixed_param(layout: &ParameterLayout, fixed_idx: usize, fixed_v
 
 /// Optimize the remaining `K - 1` nuisance parameters with `theta[fixed_idx] = fixed_val` held constant.
 ///
-/// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988). Delegates to
-/// `run_reduced_lm`, a simplified trust-region LM (Moré 1978 subproblem solver, accepting any
-/// non-increasing step and shrinking the radius by 4 otherwise, with no gain-ratio test).
+/// Returns the profile sum of squares `S~(theta_k)` of Bates & Watts (1988) along with
+/// reduced-LM convergence status via [`run_reduced_lm_with_domain`] (Moré 1978 trust-region
+/// gain-ratio step acceptance and `ftol`/`xtol`/`gtol` stopping).
 fn solve_profile_subproblem(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
@@ -4017,19 +4311,19 @@ fn solve_profile_subproblem(
     fixed_idx: usize,
     fixed_val: f64,
     ss_within: f64,
-) -> Option<(f64, Vec<f64>)> {
+) -> Option<ProfileStep> {
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();
     work[fixed_idx] = fixed_val;
     if k == 1 {
         let (_, _, ss) = eval_residuals(model, layout, obs, &work)?;
-        return Some((ss + ss_within, work));
+        return Some(ProfileStep { objective: ss + ss_within, theta: work, converged: true });
     }
 
     let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
-    let state = run_reduced_lm_with_domain(model, layout, obs, &mut work, &map_indices, &full_bounds, 40, false)?;
-    Some((state.ss_curr + ss_within, work))
+    let state = run_reduced_lm_with_domain(model, layout, obs, &mut work, &map_indices, &full_bounds, 200, false)?;
+    Some(ProfileStep { objective: state.ss_curr + ss_within, theta: work, converged: state.converged })
 }
 
 /// Optimize the remaining `K - 1` nuisance parameters under Poisson deviance with `theta[fixed_idx] = fixed_val`
@@ -4041,7 +4335,7 @@ fn solve_profile_subproblem_poisson(
     seed: &[f64],
     fixed_idx: usize,
     fixed_val: f64,
-) -> Option<(f64, Vec<f64>)> {
+) -> Option<ProfileStep> {
     let full_bounds = check_profile_fixed_param(layout, fixed_idx, fixed_val)?;
     let k = layout.k_free();
     let mut work = seed.to_vec();
@@ -4049,20 +4343,22 @@ fn solve_profile_subproblem_poisson(
     let (_, init_y_hat, _) = eval_residuals_with_domain(model, layout, obs, &work, true)?;
     if k == 1 {
         let dev = poisson_deviance(obs, &init_y_hat)?;
-        return Some((dev, work));
+        return Some(ProfileStep { objective: dev, theta: work, converged: true });
     }
 
     let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
     let mut work_obs = obs.to_vec();
     let mut curr_y_hat = init_y_hat;
     let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat)?;
+    let mut irls_converged = false;
 
-    for _ in 0..12 {
+    for _ in 0..20 {
         if assign_poisson_irls_weights(&mut work_obs, &curr_y_hat).is_err() {
             return None;
         }
         let mut trial = work.clone();
-        let Some(state) = run_reduced_lm_with_domain(model, layout, &work_obs, &mut trial, &map_indices, &full_bounds, 30, true) else {
+        let Some(state) = run_reduced_lm_with_domain(model, layout, &work_obs, &mut trial, &map_indices, &full_bounds, 80, true) else {
+            irls_converged = false;
             break;
         };
         if let Some(next_dev) = poisson_deviance(&work_obs, &state.y_hat)
@@ -4072,7 +4368,8 @@ fn solve_profile_subproblem_poisson(
             work = trial;
             curr_y_hat = state.y_hat;
             curr_dev = next_dev;
-            if rel_change < 1e-10 {
+            if rel_change < 1e-10 && state.converged {
+                irls_converged = true;
                 break;
             }
             continue;
@@ -4089,19 +4386,26 @@ fn solve_profile_subproblem_poisson(
                 && let Some(blend_dev) = poisson_deviance(&work_obs, &blend_yh)
                 && blend_dev < curr_dev
             {
+                let rel_change = (curr_dev - blend_dev).abs() / curr_dev.max(1.0);
                 work = blended;
                 curr_y_hat = blend_yh;
                 curr_dev = blend_dev;
                 improved = true;
+                if rel_change < 1e-10 && state.converged {
+                    irls_converged = true;
+                }
                 break;
             }
             alpha *= 0.5;
         }
-        if !improved {
+        if irls_converged || !improved {
+            if !improved && state.converged {
+                irls_converged = true;
+            }
             break;
         }
     }
-    poisson_deviance(&work_obs, &curr_y_hat).map(|dev| (dev, work))
+    poisson_deviance(&work_obs, &curr_y_hat).map(|dev| ProfileStep { objective: dev, theta: work, converged: irls_converged })
 }
 
 struct CurveOverlayContext<'a> {
