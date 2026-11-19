@@ -272,7 +272,7 @@ fn directory_bridge_roundtrip_and_incremental_sync_plan() {
         .execute_command("table.setCell", json!({ "sheet_id": sheet_beta_id, "row": 0, "col": 0, "value": 7.5 }))
         .expect("populate beta cell");
 
-    // Initial directory sync writes document.json, manifest.json, and both CSVs.
+    // Initial directory sync writes document.json, manifest.json, and both CSVs, leaving dirty=true until confirmed.
     let initial_cmds =
         session.handle_event(WebBridgeEvent::SyncDirectory { root_name: Some(String::from("assay.curvebook.d")) }).expect("initial directory sync");
     let Some(WebBridgeCommand::ApplyDirectorySync { root_name, plan: initial_plan }) = initial_cmds.into_iter().next() else {
@@ -288,11 +288,26 @@ fn directory_bridge_roundtrip_and_incremental_sync_plan() {
     assert!(initial_plan.written_paths().contains(&"manifest.json"));
     assert!(initial_plan.written_paths().contains(&expected_alpha_csv.as_str()));
     assert!(initial_plan.written_paths().contains(&expected_beta_csv.as_str()));
+    assert!(session.host.inspect_summary().dirty, "workspace must remain dirty before directory confirmation");
+
+    // Browser confirms initial writes -> dirty clears and noop sync becomes empty.
+    let initial_written: Vec<String> = initial_plan.written_paths().into_iter().map(str::to_owned).collect();
+    session
+        .handle_event(WebBridgeEvent::ConfirmDirectorySync {
+            root_name: root_name.clone(),
+            written_paths: initial_written,
+            removed_paths: Vec::new(),
+            succeeded: true,
+            error: None,
+        })
+        .expect("confirm initial directory sync");
+    assert!(!session.host.inspect_summary().dirty);
 
     // No edits -> zero writes, zero removals, all 4 unchanged.
     let noop_plan = session.fs.sync_directory_from_host(&mut session.host, None).expect("noop sync");
     assert!(noop_plan.is_empty_changes());
     assert_eq!(noop_plan.unchanged_count, 4);
+    let _ = session.fs.confirm_directory_sync(&mut session.host, "assay.curvebook.d", &[], &[], true).expect("confirm noop directory sync");
 
     // Import exported .curvebook.d tree into a fresh host via directory import AND HTML5 drop simulation.
     let exported_tree: BTreeMap<String, Vec<u8>> = initial_plan.writes.iter().cloned().collect();
@@ -316,11 +331,12 @@ fn directory_bridge_roundtrip_and_incremental_sync_plan() {
         .execute_command("table.setCell", json!({ "sheet_id": sheet_alpha_id, "row": 1, "col": 0, "value": 99.25 }))
         .expect("edit cell in sheet alpha");
     let inc_plan = session.fs.sync_directory_from_host(&mut session.host, None).expect("incremental sync");
-    let mut written_paths = inc_plan.written_paths();
+    let mut written_paths: Vec<String> = inc_plan.written_paths().into_iter().map(str::to_owned).collect();
     written_paths.sort_unstable();
-    assert_eq!(written_paths, vec!["document.json", expected_alpha_csv.as_str()]);
+    assert_eq!(written_paths, vec![String::from("document.json"), expected_alpha_csv]);
     assert!(inc_plan.removals.is_empty());
     assert_eq!(inc_plan.unchanged_count, 2);
+    assert!(session.fs.confirm_directory_sync(&mut session.host, "assay.curvebook.d", &written_paths, &[], true).expect("confirm incremental sync"));
 
     // Delete sheet beta -> incremental sync schedules sheets/<beta>.csv for removal.
     session.host.execute_command("sheet.delete", json!({ "sheet_id": sheet_beta_id, "cascade": true })).expect("delete sheet beta");
@@ -653,4 +669,504 @@ fn r8_web_duplicate_normalized_import_path_and_dpi_validation() {
 
     let clip_err = curvebook_web::WebClipboardPayload::from_json_value(&json!({ "dpi": 15 })).expect_err("out-of-range clipboard dpi must fail");
     assert!(matches!(clip_err, WebAdapterError::Validation(_)));
+}
+
+#[test]
+fn audit_123_1_browser_lock_grant_replaces_cached_lease_within_ttl_and_clears_banner() {
+    let (mut session, data_id, _graph_id) = build_populated_xy_session("doc-lock-handoff", "tab-b").expect("populated session");
+
+    // Browser initially observes tab-a holding the lock at t=1000ms -> tab-b enters read-only mode.
+    let obs_cmds = session
+        .handle_event(WebBridgeEvent::ObserveExternalLock {
+            doc_id: String::from("doc-lock-handoff"),
+            holder_tab_id: String::from("tab-a"),
+            now_ms: 1_000,
+        })
+        .expect("observe external lock");
+    assert_eq!(session.access_mode(), &TabAccessMode::ReadOnlyContended { holder_tab_id: String::from("tab-a") });
+    assert!(matches!(
+        obs_cmds.first(),
+        Some(WebBridgeCommand::SetReadOnlyBanner { read_only: true, holder_tab_id: Some(holder), .. }) if holder == "tab-a"
+    ));
+
+    // Mutating commands are refused while tab-a's cached lease is observed.
+    let err = session
+        .handle_event(WebBridgeEvent::ExecuteCommand {
+            command_id: String::from("table.setCell"),
+            params: json!({ "sheet_id": data_id, "row": 0, "col": 0, "value": 42.0 }),
+        })
+        .expect_err("contended tab must block edits");
+    assert!(matches!(err, WebAdapterError::ReadOnlyContended { .. }));
+
+    // 2 seconds later (well within the 15s lease TTL), the browser's Web Lock request resolves for tab-b.
+    // AcquireLock must immediately replace the cached lease and clear the read-only banner.
+    let acq_cmds = session
+        .handle_event(WebBridgeEvent::AcquireLock { doc_id: String::from("doc-lock-handoff"), tab_id: String::from("tab-b"), now_ms: 3_000 })
+        .expect("browser lock grant");
+    assert_eq!(session.access_mode(), &TabAccessMode::ExclusiveReadWrite);
+    assert!(matches!(acq_cmds.first(), Some(WebBridgeCommand::SetReadOnlyBanner { read_only: false, holder_tab_id: None, .. })));
+
+    // Editing and autosave immediately work for tab-b.
+    session
+        .handle_event(WebBridgeEvent::ExecuteCommand {
+            command_id: String::from("table.setCell"),
+            params: json!({ "sheet_id": data_id, "row": 0, "col": 0, "value": 42.5 }),
+        })
+        .expect("promoted tab edits");
+    let autosave_cmds = session.handle_event(WebBridgeEvent::SaveAutosave { now_ms: 3_500 }).expect("promoted tab saves autosave");
+    assert!(matches!(autosave_cmds.first(), Some(WebBridgeCommand::PersistLocalStorage { .. })));
+
+    // Shared in-memory lock coordinator directly enforces lease contention, while grant_browser_lock supersedes it.
+    let mut locks = WebLockCoordinator::default();
+    let tab_a = locks.acquire_document_lock("doc-shared", "tab-a", 1_000).expect("tab-a lock");
+    assert_eq!(tab_a.mode, TabAccessMode::ExclusiveReadWrite);
+    let contended = locks.acquire_document_lock("doc-shared", "tab-b", 3_000).expect("tab-b contended");
+    assert_eq!(contended.mode, TabAccessMode::ReadOnlyContended { holder_tab_id: String::from("tab-a") });
+    let granted = locks.grant_browser_lock("doc-shared", "tab-b", 3_100).expect("browser Web Lock grant");
+    assert_eq!(granted.mode, TabAccessMode::ExclusiveReadWrite);
+
+    // index.html enforces release-before-broadcast, waiting navigator.locks takeover, fallback retries, and stale holder guard.
+    let html = include_str!("../index.html");
+    let rel_pos = html.find("releaseCurrentWebLock();").expect("release resolves web lock before broadcast");
+    let post_pos = html[rel_pos..].find("type: \"release\"").expect("broadcast release after lock release");
+    assert!(post_pos > 0);
+    assert!(html.contains("holdGrantedWebLock"));
+    assert!(html.contains("navigator.locks.request(lockName, { signal: abortCtrl.signal }"));
+    assert!(html.contains("if (!holdsCurrentWebLock)"));
+    assert!(html.contains("window.addEventListener(\"storage\""));
+}
+
+#[test]
+fn audit_123_2_directory_sync_only_advances_on_confirmation_and_zip_export_preserves_dirty() {
+    let (mut session, data_id, _graph_id) = build_populated_xy_session("doc-dir-confirm", "tab-dir").expect("populated session");
+    let sheet_csv = format!("sheets/{data_id}.csv");
+
+    // 1. Export CurveBookDirectory ZIP and export_virtual_entries must NOT clear dirty or advance synced tree.
+    assert!(session.host.inspect_summary().dirty);
+    let zip_cmds = session
+        .handle_event(WebBridgeEvent::ExportFile { format: curvebook_web::WebExportFormat::CurveBookDirectory, sheet_id: None, dpi: 300 })
+        .expect("export directory zip");
+    assert!(matches!(zip_cmds.first(), Some(WebBridgeCommand::SaveOrDownloadFile { .. })));
+    assert!(session.host.inspect_summary().dirty, "ZIP export must leave document dirty");
+    let _entries = session.host.export_virtual_entries().expect("export virtual entries");
+    assert!(session.host.inspect_summary().dirty, "export_virtual_entries must leave document dirty");
+
+    // 2. SyncDirectory emits all files, but dirty stays true until browser confirms.
+    let cmds_1 = session.handle_event(WebBridgeEvent::SyncDirectory { root_name: Some(String::from("study.curvebook.d")) }).expect("sync emit 1");
+    let Some(WebBridgeCommand::ApplyDirectorySync { root_name, plan: plan_1 }) = cmds_1.into_iter().next() else {
+        panic!("expected ApplyDirectorySync");
+    };
+    assert_eq!(root_name, "study.curvebook.d");
+    assert!(plan_1.writes.len() >= 3);
+    assert!(session.host.inspect_summary().dirty);
+
+    // 3. Simulated complete failure (e.g. missing directory handle) leaves dirty=true and next SyncDirectory re-emits everything.
+    session
+        .handle_event(WebBridgeEvent::ConfirmDirectorySync {
+            root_name: root_name.clone(),
+            written_paths: Vec::new(),
+            removed_paths: Vec::new(),
+            succeeded: false,
+            error: Some(String::from("no active directory handle")),
+        })
+        .expect("confirm failure");
+    assert!(session.host.inspect_summary().dirty);
+
+    let cmds_retry_1 = session.handle_event(WebBridgeEvent::SyncDirectory { root_name: None }).expect("retry after total failure");
+    let Some(WebBridgeCommand::ApplyDirectorySync { plan: retry_plan_1, .. }) = cmds_retry_1.into_iter().next() else {
+        panic!("expected ApplyDirectorySync retry 1");
+    };
+    assert_eq!(retry_plan_1.writes.len(), plan_1.writes.len());
+    assert_eq!(retry_plan_1.unchanged_count, 0);
+
+    // 4. Partial write: only `manifest.json` written, remaining writes failed -> dirty stays true and retry writes only remaining files.
+    session
+        .handle_event(WebBridgeEvent::ConfirmDirectorySync {
+            root_name: root_name.clone(),
+            written_paths: vec![String::from("manifest.json")],
+            removed_paths: Vec::new(),
+            succeeded: false,
+            error: Some(String::from("disk full during sheet write")),
+        })
+        .expect("confirm partial failure");
+    assert!(session.host.inspect_summary().dirty, "partial failure must keep dirty=true");
+
+    let cmds_retry_2 = session.handle_event(WebBridgeEvent::SyncDirectory { root_name: None }).expect("retry after partial failure");
+    let Some(WebBridgeCommand::ApplyDirectorySync { plan: retry_plan_2, .. }) = cmds_retry_2.into_iter().next() else {
+        panic!("expected ApplyDirectorySync retry 2");
+    };
+    assert_eq!(retry_plan_2.unchanged_count, 1, "already-confirmed manifest.json must be unchanged");
+    assert!(!retry_plan_2.written_paths().contains(&"manifest.json"));
+    assert!(retry_plan_2.written_paths().contains(&"document.json"));
+    assert!(retry_plan_2.written_paths().contains(&sheet_csv.as_str()));
+
+    // 5. Full confirmation finally clears dirty and subsequent SyncDirectory has 0 changes (even after another ZIP download).
+    let remaining_paths: Vec<String> = retry_plan_2.written_paths().into_iter().map(str::to_owned).collect();
+    session
+        .handle_event(WebBridgeEvent::ConfirmDirectorySync {
+            root_name,
+            written_paths: remaining_paths,
+            removed_paths: Vec::new(),
+            succeeded: true,
+            error: None,
+        })
+        .expect("confirm full retry");
+    assert!(!session.host.inspect_summary().dirty, "full confirmation must clear dirty");
+
+    // Mutate cell -> ZIP export still keeps dirty=true -> SyncDirectory still emits delta for edited document/csv.
+    session.host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 0, "value": 88.5 })).expect("edit cell after sync");
+    let _zip_after = session
+        .handle_event(WebBridgeEvent::ExportFile { format: curvebook_web::WebExportFormat::CurveBookDirectory, sheet_id: None, dpi: 300 })
+        .expect("zip after edit");
+    assert!(session.host.inspect_summary().dirty, "ZIP download after edit must not clear dirty");
+    let cmds_delta = session.handle_event(WebBridgeEvent::SyncDirectory { root_name: None }).expect("delta after zip");
+    let Some(WebBridgeCommand::ApplyDirectorySync { plan: delta_plan, .. }) = cmds_delta.into_iter().next() else {
+        panic!("expected delta ApplyDirectorySync");
+    };
+    assert!(delta_plan.written_paths().contains(&"document.json"));
+    assert!(delta_plan.written_paths().contains(&sheet_csv.as_str()));
+
+    // Verify index.html emits confirm_directory_sync after writes and in the missing-handle/error paths.
+    let html = include_str!("../index.html");
+    assert!(html.contains("confirm_directory_sync"));
+}
+
+#[test]
+fn audit_123_3_preferences_near_quota_emit_evictions_and_reconcile_from_browser_outcome() {
+    // 1. Direct SavePreferences near quota must emit evicted autosave keys in `removals`.
+    let budget = 400;
+    let mut session = WebBridgeSession::with_ids("doc-pref-active", "tab-pref");
+    session.storage = WebStorageManager::with_budget(curvebook_web::MemoryWebStorage::default(), budget);
+    let _ = session.storage.save_autosave_snapshot("doc-old-1", &"x".repeat(120), 100).expect("seed old 1");
+    let _ = session.storage.save_autosave_snapshot("doc-old-2", &"y".repeat(120), 200).expect("seed old 2");
+    assert_eq!(session.storage.list_autosave_doc_ids().len(), 2, "both seeded autosaves must fit before prefs save");
+
+    let prefs = PreferencesFile {
+        version: CURRENT_PREFERENCES_VERSION,
+        locale: Some(String::from("fr-FR")),
+        theme: Some(String::from("dark")),
+        shortcuts: BTreeMap::from([(String::from("file.export"), String::from("Ctrl+Shift+E"))]),
+        ..PreferencesFile::default()
+    };
+    let cmds = session.handle_event(WebBridgeEvent::SavePreferences { preferences: prefs.clone() }).expect("save prefs near quota");
+    let Some(WebBridgeCommand::PersistLocalStorage { writes, removals }) = cmds.into_iter().next() else {
+        panic!("expected PersistLocalStorage");
+    };
+    assert!(writes.iter().any(|(k, _)| k == PREFERENCES_STORAGE_KEY));
+    assert!(!removals.is_empty(), "SavePreferences near quota must emit evicted autosave keys in removals");
+    let old_1_key = format!("{AUTOSAVE_KEY_PREFIX}doc-old-1");
+    assert!(removals.contains(&old_1_key));
+
+    // If the browser reports quota failure/rollback, the mirror restores doc-old-1 AND previous preferences state.
+    session
+        .handle_event(WebBridgeEvent::ConfirmLocalStorage { writes: Vec::new(), removals: Vec::new(), succeeded: false })
+        .expect("confirm storage rollback");
+    assert_eq!(session.storage.load_preferences().expect("prefs rolled back"), None);
+    assert!(
+        session.storage.backend().get_item(&old_1_key).is_some(),
+        "rolled-back autosave must remain available in mirror for future saves without altering LRU"
+    );
+
+    // Retry SavePreferences -> succeeds cleanly -> ConfirmLocalStorage commits eviction.
+    let retry_cmds = session.handle_event(WebBridgeEvent::SavePreferences { preferences: prefs.clone() }).expect("retry save prefs");
+    let Some(WebBridgeCommand::PersistLocalStorage { writes: w2, removals: r2 }) = retry_cmds.into_iter().next() else {
+        panic!("expected retry PersistLocalStorage");
+    };
+    assert!(r2.contains(&old_1_key), "retry should again pick oldest doc-old-1 for eviction");
+    let write_keys: Vec<String> = w2.into_iter().map(|(k, _)| k).collect();
+    session
+        .handle_event(WebBridgeEvent::ConfirmLocalStorage { writes: write_keys, removals: r2.clone(), succeeded: true })
+        .expect("confirm retry success");
+    assert_eq!(session.storage.load_preferences().expect("saved prefs"), Some(prefs));
+    assert_eq!(session.storage.load_autosave_snapshot("doc-old-1", 400).expect("evicted snapshot gone"), None);
+
+    // 2. UI-triggered preference change (ExecuteCommand ui.locale.set) near quota also emits removals.
+    let mut ui_session = WebBridgeSession::with_ids("doc-pref-ui", "tab-pref-ui");
+    ui_session.storage = WebStorageManager::with_budget(curvebook_web::MemoryWebStorage::default(), 250);
+    let _ = ui_session.storage.save_autosave_snapshot("doc-ui-old", &"z".repeat(130), 500).expect("seed old ui");
+    assert!(
+        ui_session.storage.list_autosave_doc_ids().contains(&String::from("doc-ui-old")),
+        "doc-ui-old must fit just below quota before UI preference update"
+    );
+    let ui_cmds = ui_session
+        .handle_event(WebBridgeEvent::ExecuteCommand {
+            command_id: String::from("ui.locale.set"),
+            params: json!({ "locale": "zh-Hant-TW-custom-extended-locale" }),
+        })
+        .expect("ui.locale.set emits preferences persist near quota");
+    let ui_persist = ui_cmds.into_iter().find_map(|cmd| match cmd {
+        WebBridgeCommand::PersistLocalStorage { writes, removals } => Some((writes, removals)),
+        _ => None,
+    });
+    let (ui_writes, ui_removals) = ui_persist.expect("UI preference change must emit PersistLocalStorage");
+    assert!(ui_writes.iter().any(|(k, _)| k == PREFERENCES_STORAGE_KEY));
+    assert!(ui_removals.contains(&format!("{AUTOSAVE_KEY_PREFIX}doc-ui-old")), "UI preference change near quota must emit evicted removals");
+
+    // 3. Partial browser outcome (e.g. write succeeded without needing removal) restores unused eviction candidate.
+    let ui_write_keys: Vec<String> = ui_writes.into_iter().map(|(k, _)| k).collect();
+    ui_session
+        .handle_event(WebBridgeEvent::ConfirmLocalStorage { writes: ui_write_keys, removals: Vec::new(), succeeded: true })
+        .expect("confirm without removals restores mirror candidate");
+    assert!(
+        ui_session.storage.list_autosave_doc_ids().contains(&String::from("doc-ui-old")),
+        "unremoved eviction candidate doc-ui-old should remain in mirror"
+    );
+
+    // Verify index.html sends confirm_local_storage.
+    let html = include_str!("../index.html");
+    assert!(html.contains("confirm_local_storage"));
+}
+
+#[test]
+fn audit_123_4_explicit_sheet_targeting_validation_and_clipboard_isolation() {
+    let (mut session, data_id, graph_id) = build_populated_xy_session("doc-sheet-target", "tab-target").expect("populated session");
+
+    // Create a second independent DataSheet (`data_2`) and GraphSheet (`graph_2`) plus a ResultSheet (`res_1`).
+    let created_2 = session
+        .host
+        .execute_command("sheet.createData", json!({ "kind": "xy", "title": "Second Sheet", "auto_family": true }))
+        .expect("create second xy sheet");
+    let data_2_id = created_2["payload"]["sheet_id"].as_str().expect("second data_id").to_owned();
+    let graph_2_id = created_2["payload"]["graph_sheet_id"].as_str().expect("second graph_id").to_owned();
+    let info_only_id = created_2["payload"]["info_sheet_id"].as_str().expect("second info_id").to_owned();
+    session.host.execute_command("table.setXCells", json!({ "sheet_id": data_2_id, "values": [10.0, 20.0] })).expect("set x2");
+    session.host.execute_command("table.setCell", json!({ "sheet_id": data_2_id, "row": 0, "col": 0, "value": 555.0 })).expect("set y2");
+    session.host.execute_command("info.setNote", json!({ "sheet_id": data_2_id, "note": "Study Notes Line" })).expect("set info note");
+    session.host.execute_command("layout.create", json!({ "sheet_id": "layout-only", "title": "Summary Layout" })).expect("create layout sheet");
+    session
+        .host
+        .execute_command("analysis.run", json!({ "source_sheet": data_id, "sheet_id": "res-only", "kind": "linear_regression" }))
+        .expect("create result sheet");
+
+    // 1. Export CSV with nonexistent or GraphSheet ID returns WebAdapterError::Validation (no silent fallback).
+    let bad_csv = session
+        .handle_event(WebBridgeEvent::ExportFile { format: curvebook_web::WebExportFormat::Csv, sheet_id: Some(graph_id.clone()), dpi: 300 })
+        .expect_err("CSV export targeting GraphSheet must fail");
+    assert!(matches!(bad_csv, WebAdapterError::Validation(_)));
+
+    let missing_csv = session
+        .handle_event(WebBridgeEvent::ExportFile {
+            format: curvebook_web::WebExportFormat::Csv,
+            sheet_id: Some(String::from("no-such-sheet")),
+            dpi: 300,
+        })
+        .expect_err("CSV export targeting unknown sheet must fail");
+    assert!(matches!(missing_csv, WebAdapterError::Validation(_)));
+
+    // Export figure (SVG / PNG) targeting DataSheet or unknown sheet returns WebAdapterError::Validation.
+    for fmt in [curvebook_web::WebExportFormat::Svg, curvebook_web::WebExportFormat::Png] {
+        let wrong_kind = session
+            .handle_event(WebBridgeEvent::ExportFile { format: fmt, sheet_id: Some(data_id.clone()), dpi: 300 })
+            .expect_err("figure export targeting DataSheet must fail");
+        assert!(matches!(wrong_kind, WebAdapterError::Validation(_)));
+
+        let missing_fig = session
+            .handle_event(WebBridgeEvent::ExportFile { format: fmt, sheet_id: Some(String::from("nonexistent")), dpi: 300 })
+            .expect_err("figure export targeting missing sheet must fail");
+        assert!(matches!(missing_fig, WebAdapterError::Validation(_)));
+    }
+
+    // Valid explicit target succeeds even when another sheet is active.
+    session.host.execute_command("sheet.select", json!({ "sheet_id": graph_2_id })).expect("select graph_2");
+    let valid_csv = session
+        .handle_event(WebBridgeEvent::ExportFile { format: curvebook_web::WebExportFormat::Csv, sheet_id: Some(data_id.clone()), dpi: 300 })
+        .expect("explicit DataSheet CSV succeeds");
+    let Some(WebBridgeCommand::SaveOrDownloadFile { bytes: csv_bytes, .. }) = valid_csv.into_iter().next() else {
+        panic!("expected CSV SaveOrDownloadFile");
+    };
+    let csv_text = String::from_utf8(csv_bytes).expect("utf8 csv");
+    assert!(csv_text.contains("49.5"));
+    assert!(!csv_text.contains("555"));
+
+    // 2. CopyClipboard validation & isolation.
+    let bad_clip = session
+        .handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(String::from("bogus-sheet")), dpi: 300 })
+        .expect_err("CopyClipboard with unknown sheet_id must return Clipboard error");
+    assert!(matches!(bad_clip, WebAdapterError::Clipboard(_)));
+
+    // Explicit DataSheet vs active DataSheet produce IDENTICAL payloads (including active selection bounds, and NO unrelated graph PNG).
+    session.host.execute_command("sheet.select", json!({ "sheet_id": data_id })).expect("select data_id");
+    session
+        .handle_event(WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("ArrowDown"), modifiers: KeyModifiers::default() } })
+        .expect("select single grid cell via ArrowDown");
+    assert!(session.host.app().grid.tool.selection_bounds().is_some(), "ArrowDown should arm grid selection bounds");
+    let active_data_cmds = session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: None, dpi: 300 }).expect("copy active data");
+    let explicit_data_cmds =
+        session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(data_id.clone()), dpi: 300 }).expect("copy explicit data");
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: active_data_clip }) = active_data_cmds.into_iter().next() else {
+        panic!("expected WriteClipboardItems");
+    };
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: explicit_data_clip }) = explicit_data_cmds.into_iter().next() else {
+        panic!("expected WriteClipboardItems");
+    };
+    assert_eq!(active_data_clip, explicit_data_clip, "Some(active_id) and None must align identically");
+    assert!(active_data_clip.tsv.is_some());
+    assert!(active_data_clip.svg.is_empty(), "DataSheet clipboard must not pull unrelated GraphSheet SVG");
+    assert!(active_data_clip.png_bytes.is_empty(), "DataSheet clipboard must not pull unrelated GraphSheet PNG");
+
+    // LayoutSheet, ResultSheet, and InfoSheet payloads reflect ONLY that sheet (never unrelated DataSheet/GraphSheet).
+    let layout_cmds =
+        session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(String::from("layout-only")), dpi: 150 }).expect("copy layout");
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: layout_clip }) = layout_cmds.into_iter().next() else {
+        panic!("expected layout WriteClipboardItems");
+    };
+    assert!(layout_clip.tsv.is_none(), "LayoutSheet clipboard must not include unrelated DataSheet TSV");
+    assert!(layout_clip.plain_text.is_none());
+    assert!(!layout_clip.svg.is_empty());
+
+    let result_cmds =
+        session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(String::from("res-only")), dpi: 150 }).expect("copy result");
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: result_clip }) = result_cmds.into_iter().next() else {
+        panic!("expected result WriteClipboardItems");
+    };
+    assert!(result_clip.tsv.is_some());
+    assert!(result_clip.svg.is_empty());
+    assert!(result_clip.png_bytes.is_empty());
+
+    let info_cmds = session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(info_only_id), dpi: 150 }).expect("copy info");
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: info_clip }) = info_cmds.into_iter().next() else {
+        panic!("expected info WriteClipboardItems");
+    };
+    assert!(info_clip.tsv.as_deref().is_some_and(|t| t.contains("Study Notes Line")));
+    assert!(info_clip.svg.is_empty());
+    assert!(info_clip.png_bytes.is_empty());
+
+    // Orphan GraphSheet (missing primary_source_sheet_id) does NOT fall back to an unrelated DataSheet for TSV.
+    let doc_bytes = session
+        .host
+        .snapshot_virtual_entries_with_root(Some("tmp.curvebook.d"))
+        .expect("snapshot entries")
+        .into_iter()
+        .find(|(path, _)| path == "document.json")
+        .map(|(_, bytes)| bytes)
+        .expect("document.json");
+    let mut doc_json: curvebook_ui_egui::serde_json::Value = curvebook_ui_egui::serde_json::from_slice(&doc_bytes).expect("parse document.json");
+    let mut cloned_graph = doc_json["graph_sheets"][0].clone();
+    cloned_graph["id"] = json!("graph-orphan");
+    cloned_graph["title"] = json!("Orphan Graph");
+    cloned_graph["spec"]["primary_source_sheet_id"] = json!("missing-source-id");
+    doc_json["graph_sheets"].as_array_mut().expect("graph_sheets array").push(cloned_graph);
+    let updated_doc_bytes = curvebook_ui_egui::serde_json::to_vec(&doc_json).expect("encode updated document.json");
+    session.host.open_project_json_bytes(&updated_doc_bytes).expect("load document with orphan graph");
+
+    let orphan_cmds =
+        session.handle_event(WebBridgeEvent::CopyClipboard { sheet_id: Some(String::from("graph-orphan")), dpi: 150 }).expect("copy orphan graph");
+    let Some(WebBridgeCommand::WriteClipboardItems { payload: orphan_clip }) = orphan_cmds.into_iter().next() else {
+        panic!("expected WriteClipboardItems");
+    };
+    assert!(orphan_clip.tsv.is_none(), "orphan GraphSheet must not borrow unrelated DataSheet TSV");
+    assert!(!orphan_clip.svg.is_empty());
+}
+
+#[test]
+fn audit_123_5_dropped_files_and_json_directory_import_reject_duplicate_paths() {
+    let mut session = WebBridgeSession::with_ids("web-dup-drop", "tab-dup");
+    let mut host_copy = WebWorkspaceHost::new();
+    let _ = host_copy.execute_command("sheet.createData", json!({ "kind": "xy", "title": "Clean" })).expect("create sheet");
+    let valid_entries: BTreeMap<String, Vec<u8>> =
+        host_copy.snapshot_virtual_entries_with_root(Some("assay.curvebook.d")).expect("snapshot entries").into_iter().collect();
+    let doc_bytes = valid_entries.get("document.json").expect("doc bytes").clone();
+
+    // 1. ImportDroppedFiles rejects duplicate normalized relative paths (`./assay.curvebook.d/...` vs `assay.curvebook.d/...`, backslashes, or root-stripped vs unstripped).
+    let dup_drop_err = session
+        .handle_event(WebBridgeEvent::ImportDroppedFiles {
+            files: vec![
+                (String::from("./assay.curvebook.d/document.json"), doc_bytes.clone()),
+                (String::from("assay.curvebook.d/document.json"), doc_bytes.clone()),
+            ],
+        })
+        .expect_err("dropped folder with duplicate normalized paths must fail");
+    assert!(matches!(dup_drop_err, WebAdapterError::Validation(ref msg) if msg.contains("duplicate normalized")), "got {dup_drop_err}");
+
+    let dup_slash_err = session
+        .handle_event(WebBridgeEvent::ImportDroppedFiles {
+            files: vec![
+                (String::from("assay.curvebook.d\\document.json"), doc_bytes.clone()),
+                (String::from("assay.curvebook.d/document.json"), doc_bytes),
+            ],
+        })
+        .expect_err("dropped folder with backslash/forward-slash duplicate must fail");
+    assert!(matches!(dup_slash_err, WebAdapterError::Validation(ref msg) if msg.contains("duplicate normalized")), "got {dup_slash_err}");
+
+    // Also test ImportDroppedFiles with `./manifest.json` vs `manifest.json` in a flat batch.
+    let dup_flat_err = session
+        .handle_event(WebBridgeEvent::ImportDroppedFiles {
+            files: vec![(String::from("./manifest.json"), b"{}".to_vec()), (String::from("manifest.json"), b"{}".to_vec())],
+        })
+        .expect_err("flat duplicate normalized paths must fail");
+    assert!(matches!(dup_flat_err, WebAdapterError::Validation(_)));
+
+    // 2. Raw JSON `import_directory_entries` with duplicate exact or normalized paths is rejected before map construction.
+    let raw_dup_exact = r#"{"kind":"import_directory_entries","root_name":"study.curvebook.d","entries":[{"path":"document.json","bytes":[123,125]},{"path":"document.json","bytes":[91,93]}]}"#;
+    let err_raw_exact = session.handle_event_json(raw_dup_exact).expect_err("raw JSON duplicate array entries must fail");
+    assert!(matches!(err_raw_exact, WebAdapterError::Validation(ref msg) if msg.contains("duplicate")), "got {err_raw_exact}");
+
+    let raw_dup_norm = r#"{"kind":"import_directory_entries","root_name":"study.curvebook.d","entries":[{"path":"./manifest.json","bytes":[123,125]},{"path":"manifest.json","bytes":[123,125]}]}"#;
+    let err_raw_norm = session.handle_event_json(raw_dup_norm).expect_err("raw JSON duplicate normalized paths must fail");
+    assert!(matches!(err_raw_norm, WebAdapterError::Validation(ref msg) if msg.contains("duplicate normalized")), "got {err_raw_norm}");
+
+    let raw_dup_root = r#"{"kind":"import_directory_entries","root_name":"study.curvebook.d","entries":[{"path":"study.curvebook.d/manifest.json","bytes":[123,125]},{"path":"manifest.json","bytes":[123,125]}]}"#;
+    let err_raw_root = session.handle_event_json(raw_dup_root).expect_err("raw JSON root-prefixed duplicate must fail");
+    assert!(matches!(err_raw_root, WebAdapterError::Validation(ref msg) if msg.contains("duplicate normalized")), "got {err_raw_root}");
+}
+
+#[test]
+fn audit_123_6_pinch_after_one_finger_press_cancels_armed_pointer_and_drags() {
+    let (mut session, data_id, _graph_id) = build_populated_xy_session("touch-pinch-cancel", "tab-pinch").expect("populated touch session");
+    session
+        .handle_event(WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 2.0 })
+        .expect("resize viewport");
+    session
+        .handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("sheet.select"), params: json!({ "sheet_id": data_id }) })
+        .expect("select data sheet");
+
+    // 1. One-finger press arms primary pointer and enters active drag states on the app.
+    let first_finger = vec![TouchPoint { id: 1, x: 420.0, y: 260.0 }];
+    session.handle_event(WebBridgeEvent::TouchStart { points: first_finger, dt_sec: 0.016 }).expect("1-finger touch start");
+    assert!(session.touch.has_primary_pointer_down());
+    assert!(session.host.app().interaction.pointer_down, "single-finger press should arm pointer_down");
+
+    // Simulate an in-flight drag armed during the 1-finger press (e.g., sheet drag / split divider / canvas drag).
+    session.host.app_mut().interaction.dragging_grid_sheet = Some(data_id.clone().into());
+    session.host.app_mut().interaction.dragging_split_divider = true;
+    session.host.app_mut().split.dragging_divider = true;
+    session.host.app_mut().interaction.pressed_widget_id = Some(String::from("toolbar.save"));
+    session.host.app_mut().canvas_dialogs.canvas.drag_start_pt = Some(curvebook_ui_egui::PointPt { x: 100.0, y: 100.0 });
+
+    // 2. Second finger lands (transition to 2-finger pinch) -> must cancel armed primary pointer + all drag states.
+    let two_fingers = vec![TouchPoint { id: 1, x: 420.0, y: 260.0 }, TouchPoint { id: 2, x: 520.0, y: 260.0 }];
+    let pinch_start_cmds = session.handle_event(WebBridgeEvent::TouchStart { points: two_fingers, dt_sec: 0.016 }).expect("2-finger touch start");
+    assert!(session.touch.is_two_finger_gesture());
+    assert!(!session.touch.has_primary_pointer_down());
+    assert!(!session.host.app().interaction.pointer_down, "2-finger pinch must clear pointer_down");
+    assert!(session.host.app().interaction.dragging_grid_sheet.is_none());
+    assert!(!session.host.app().interaction.dragging_split_divider);
+    assert!(!session.host.app().split.dragging_divider);
+    assert!(session.host.app().interaction.pressed_widget_id.is_none());
+    assert!(session.host.app().canvas_dialogs.canvas.drag_start_pt.is_none());
+    // Must not fire toolbar.save click or mutate selection/dirty via spurious click.
+    assert!(!pinch_start_cmds.iter().any(|c| matches!(c, WebBridgeCommand::ApplyDirectorySync { .. })));
+
+    // 3. Pinch move zooms viewport without re-arming pointer_down.
+    let spread = vec![TouchPoint { id: 1, x: 380.0, y: 260.0 }, TouchPoint { id: 2, x: 560.0, y: 260.0 }];
+    session.handle_event(WebBridgeEvent::TouchMove { points: spread, dt_sec: 0.016 }).expect("pinch spread");
+    assert!(!session.host.app().interaction.pointer_down);
+
+    // 4. Lift BOTH fingers (even sequentially) -> zero active touches, zero primary pointer down, zero drags.
+    session.handle_event(WebBridgeEvent::TouchEnd { released_ids: vec![2], dt_sec: 0.016 }).expect("lift second finger");
+    session.handle_event(WebBridgeEvent::TouchEnd { released_ids: vec![1], dt_sec: 0.016 }).expect("lift first finger");
+    assert_eq!(session.touch.active_count(), 0);
+    assert!(!session.touch.is_two_finger_gesture());
+    assert!(!session.touch.has_primary_pointer_down());
+    assert!(!session.host.app().interaction.pointer_down);
+    assert!(session.host.app().interaction.dragging_grid_sheet.is_none());
+    assert!(!session.host.app().interaction.dragging_split_divider);
+
+    // 5. Verify direct TouchGestureRecognizer cancellation unit sequence:
+    let mut rec = curvebook_web::TouchGestureRecognizer::new();
+    let down_ev = rec.touch_start(&[TouchPoint { id: 10, x: 200.0, y: 200.0 }], 0.0);
+    assert!(matches!(down_ev.as_slice(), [UiInputEvent::PointerDown { .. }]));
+    let pinch_ev = rec.touch_start(&[TouchPoint { id: 10, x: 200.0, y: 200.0 }, TouchPoint { id: 11, x: 260.0, y: 200.0 }], 0.016);
+    assert!(pinch_ev.iter().any(|ev| matches!(ev, UiInputEvent::PointerUp { x, y, .. } if *x < 0.0 && *y < 0.0)));
+    assert!(!rec.has_primary_pointer_down());
 }

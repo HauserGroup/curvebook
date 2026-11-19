@@ -29,8 +29,8 @@ pub use curvebook_ui_egui::{
 };
 pub use host_adapters::{
     AUTOSAVE_KEY_PREFIX, AutosaveSaveOutcome, DEFAULT_LOCK_LEASE_TTL_MS, DirectorySyncPlan, FileSystemAccessBridge, LockAcquisition,
-    LockReleaseOutcome, MemoryWebStorage, PREFERENCES_STORAGE_KEY, QUOTA_BUDGET_BYTES, TabAccessMode, TouchGestureRecognizer, TouchPoint,
-    WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebClipboardPayload, WebExportArtifact, WebLockCoordinator,
+    LockReleaseOutcome, MemoryWebStorage, PREFERENCES_STORAGE_KEY, PreferencesSaveOutcome, QUOTA_BUDGET_BYTES, TabAccessMode, TouchGestureRecognizer,
+    TouchPoint, WebAdapterError, WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebClipboardPayload, WebExportArtifact, WebLockCoordinator,
     WebStorageBackend, WebStorageManager,
 };
 pub use text_bridge::{
@@ -383,14 +383,45 @@ impl WebWorkspaceHost {
         save_project_bytes(self.app.document()).map_err(|err| err.to_string())
     }
 
-    /// Refresh the unpacked `.curvebook.d` virtual snapshot and return `(relative_path, bytes)`
-    /// entries for browser persistence or download.
+    /// Build unpacked `.curvebook.d` `(relative_path, bytes)` entries purely in memory without
+    /// clearing the session dirty flag or mutating save/format state.
+    ///
+    /// # Errors
+    /// Returns an error description if snapshot serialization fails.
+    pub fn snapshot_virtual_entries_with_root(&self, root_name_override: Option<&str>) -> Result<Vec<(String, Vec<u8>)>, String> {
+        let mut folder = self.app.virtual_workspace.clone();
+        if let Some(root) = root_name_override.map(str::trim).filter(|s| !s.is_empty()) {
+            folder.root_name = root.to_owned();
+        }
+        folder.save_unpacked_snapshot(self.app.document())?;
+        Ok(folder.files.into_iter().collect())
+    }
+
+    /// Record a confirmed `.curvebook.d` directory persistence, updating [`Self::virtual_workspace`]
+    /// and clearing the dirty flag only when the current document still matches `persisted_doc_json`.
+    pub fn confirm_virtual_directory_persisted(
+        &mut self,
+        root_name: &str,
+        persisted_files: &std::collections::BTreeMap<String, Vec<u8>>,
+        persisted_doc_json: Option<&[u8]>,
+    ) {
+        self.app.virtual_workspace.root_name = root_name.to_owned();
+        self.app.virtual_workspace.files = persisted_files.clone();
+        self.format_tag = String::from("curvebook.d");
+        let doc_unchanged = persisted_doc_json
+            .is_some_and(|persisted| serde_json::to_vec_pretty(self.app.document()).is_ok_and(|current| current.as_slice() == persisted));
+        if doc_unchanged {
+            self.app.session_mut().set_file_path(None, true);
+        }
+    }
+
+    /// Build unpacked `.curvebook.d` `(relative_path, bytes)` entries for browser persistence or
+    /// download without clearing the session dirty flag or mutating save state.
     ///
     /// # Errors
     /// Returns an error description if snapshot serialization fails.
     pub fn export_virtual_entries(&mut self) -> Result<Vec<(String, Vec<u8>)>, String> {
-        let _ = self.save_virtual_unpacked_snapshot()?;
-        Ok(self.app.virtual_workspace.files.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        self.snapshot_virtual_entries_with_root(None)
     }
 
     /// Execute a structured engine command and return its serialized payload.
