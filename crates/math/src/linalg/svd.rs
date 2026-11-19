@@ -62,21 +62,21 @@ fn svd_tall_or_square(a: &DenseMatrix) -> Result<Svd, MathError> {
     let m = a.nrows();
     let n = a.ncols();
     // When m >= 2 * n, precondition by pivoted Householder QR `A P = Q_1 R` (R is n x n),
-    // compute SVD of `R P^T = U_r Sigma V^T`, and form `U = Q_1 U_r` in O(m n^2)!
+    // compute SVD of `R = U_r Sigma V_r^T`, and form `U = Q_1 U_r`, `V = P V_r` in O(m n^2)!
     if m >= 2 * n && n > 0 {
         let pqr = qr_col_pivoted(a)?;
         let q1 = pqr.thin_q()?;
         let r = pqr.r()?;
         let perm = pqr.permutation();
-        let mut r_unperm = DenseMatrix::zeros(n, n)?;
-        for (j, &orig_col) in perm.iter().enumerate().take(n) {
-            for i in 0..n {
-                r_unperm.set_in_bounds(i, orig_col, r.entry(i, j));
+        let inner = one_sided_jacobi_svd(&r)?;
+        let u_full = q1.matmul(&inner.u)?;
+        let mut v_full = DenseMatrix::zeros(n, n)?;
+        for (piv_row, &orig_col) in perm.iter().enumerate().take(n) {
+            for col in 0..n {
+                v_full.set_in_bounds(orig_col, col, inner.v.entry(piv_row, col));
             }
         }
-        let inner = one_sided_jacobi_svd(&r_unperm)?;
-        let u_full = q1.matmul(&inner.u)?;
-        return Ok(Svd { nrows: m, ncols: n, u: u_full, singular_values: inner.singular_values, v: inner.v });
+        return Ok(Svd { nrows: m, ncols: n, u: u_full, singular_values: inner.singular_values, v: v_full });
     }
     one_sided_jacobi_svd(a)
 }
@@ -86,8 +86,10 @@ fn one_sided_jacobi_svd(a: &DenseMatrix) -> Result<Svd, MathError> {
     let n = a.ncols();
     let mut w = a.clone();
     let mut v = DenseMatrix::identity(n)?;
+    let frob_a = a.frobenius_norm();
+    let col_noise_tol = (f64::EPSILON * f64::EPSILON) * frob_a;
 
-    let mut converged = n <= 1;
+    let mut converged = n <= 1 || frob_a == 0.0;
     for _ in 0..MAX_JACOBI_SWEEPS {
         if converged {
             break;
@@ -95,7 +97,7 @@ fn one_sided_jacobi_svd(a: &DenseMatrix) -> Result<Svd, MathError> {
         let mut max_cosine = 0.0_f64;
         for p in 0..n {
             for q in (p + 1)..n {
-                let cos_pq = orthogonalize_column_pair(&mut w, &mut v, p, q);
+                let cos_pq = orthogonalize_column_pair(&mut w, &mut v, p, q, col_noise_tol);
                 max_cosine = max_cosine.max(cos_pq);
             }
         }
@@ -127,21 +129,21 @@ fn one_sided_jacobi_svd(a: &DenseMatrix) -> Result<Svd, MathError> {
         }
     }
 
-    // Complete any zero-singular-value columns of U so U^T U == I_n holds unconditionally!
-    complete_orthonormal_columns(&mut u, &sigmas);
+    // Complete any zero or noise-floor columns of U so U^T U == I_n holds unconditionally!
+    complete_orthonormal_columns(&mut u);
 
     Ok(Svd { nrows: m, ncols: n, u, singular_values: sigmas, v: v_sorted })
 }
 
 /// Apply one symmetric Jacobi rotation `(c, s)` to columns `(p, q)` of `w` and `v`, returning
 /// the pre-rotation normalized inner product `|gamma| / sqrt(alpha * beta)`.
-fn orthogonalize_column_pair(w: &mut DenseMatrix, v: &mut DenseMatrix, p: usize, q: usize) -> f64 {
+fn orthogonalize_column_pair(w: &mut DenseMatrix, v: &mut DenseMatrix, p: usize, q: usize, col_noise_tol: f64) -> f64 {
     let m = w.nrows();
     let n = v.nrows();
 
     let norm_p = w.col_norm2(p);
     let norm_q = w.col_norm2(q);
-    if norm_p == 0.0 || norm_q == 0.0 {
+    if norm_p <= col_noise_tol || norm_q <= col_noise_tol {
         return 0.0;
     }
     let inv_p = 1.0 / norm_p;
@@ -168,6 +170,9 @@ fn orthogonalize_column_pair(w: &mut DenseMatrix, v: &mut DenseMatrix, p: usize,
     let ap = (norm_p / scale) * (norm_p / scale);
     let bq = (norm_q / scale) * (norm_q / scale);
     let g = (norm_p / scale) * (norm_q / scale) * cos_pq;
+    if g == 0.0 || !g.is_finite() {
+        return 0.0;
+    }
 
     let zeta = (bq - ap) / (2.0 * g);
     let t = if zeta >= 0.0 { 1.0 / (zeta + zeta.hypot(1.0)) } else { -1.0 / (-zeta + zeta.hypot(1.0)) };
@@ -189,14 +194,27 @@ fn orthogonalize_column_pair(w: &mut DenseMatrix, v: &mut DenseMatrix, p: usize,
     abs_cos
 }
 
-fn complete_orthonormal_columns(u: &mut DenseMatrix, sigmas: &[f64]) {
+fn max_abs_dot_prefix(u: &DenseMatrix, col: usize) -> f64 {
+    let m = u.nrows();
+    let mut max_dot = 0.0_f64;
+    for prev in 0..col {
+        let mut acc = NeumaierSum::new();
+        for r in 0..m {
+            acc.add(u.entry(r, prev) * u.entry(r, col));
+        }
+        max_dot = max_dot.max(acc.total().abs());
+    }
+    max_dot
+}
+
+fn complete_orthonormal_columns(u: &mut DenseMatrix) {
     let m = u.nrows();
     let n = u.ncols();
-    let s_max = sigmas.first().copied().unwrap_or(0.0);
-    let zero_thresh = f64::EPSILON * s_max;
 
-    for (col, &sigma) in sigmas.iter().enumerate().take(n) {
-        if sigma > zero_thresh && (u.col_norm2(col) - 1.0).abs() < 1e-10 {
+    for col in 0..n {
+        let unit_norm_ok = (u.col_norm2(col) - 1.0).abs() < 1e-10;
+        let orth_ok = max_abs_dot_prefix(u, col) < 1e-11;
+        if unit_norm_ok && orth_ok {
             continue;
         }
         // Pick standard basis vector e_cand least aligned with existing columns `0..col`.

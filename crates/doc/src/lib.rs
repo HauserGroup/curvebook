@@ -33,14 +33,14 @@ pub mod result;
 pub mod schema;
 
 pub use analysis::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CorrelationPowerMethod, CoxTieMethod, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
-    GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod,
-    OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec, PowerAnalysisSpec,
-    PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign, ResidualCovariance,
-    RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec, TwoGroupMethod,
-    TwoGroupSpec, TwoProportionsMethod, WeightingScheme,
+    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, ClusterDistance, ClusterLinkage, ColumnTitleHookError, ContingencyMethod,
+    ContingencySpec, CorrelationPowerMethod, CoxTieMethod, DerivedColumnFormula, DescriptiveSpec, ErrorPropagationMode, FactorialAnovaSpec,
+    FitMethod, GlmFamily, GlmSpec, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
+    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
+    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, RepeatedMeasuresDesign,
+    ResidualCovariance, RocCiMethod, RocSpec, SimulationNoise, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TransformAnalysisSpec,
+    TwoGroupMethod, TwoGroupSpec, TwoProportionsMethod, WeightingScheme, parse_column_title_numeric_hook,
 };
 pub use archetypes::{
     CategoricalLevelSummary, CellCoord, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, GroupedTable, LevelOrderKind, LevelOrderSpec,

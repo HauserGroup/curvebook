@@ -360,7 +360,7 @@ fn r2_s08_03_bubble_and_diagnostic_plots_honor_point_overrides_brushing_and_subc
         col_ba.data_sets[2].cells[r][0] = Cell::number(vals.1);
     }
     let ds_ba = DataSheet::new(SheetId::new("ba-col-src"), "BA", TableArchetype::Column(col_ba))?;
-    let ba_spec = BlandAltmanSpec { column_a: 1, column_b: 2, percent_difference: false };
+    let ba_spec = BlandAltmanSpec { column_a: 1, column_b: 2, percent_difference: false, ..BlandAltmanSpec::default() };
     let an_ba = AnalysisSpec::new(SheetId::new("res-ba"), ds_ba.id.clone(), AnalysisKind::BlandAltman(ba_spec))?;
     let res_ba = run_bland_altman_analysis(&ds_ba, &an_ba, &ba_spec)?;
     let mut doc_ba = ProjectDocument::default();
@@ -430,7 +430,7 @@ fn r2_s08_04_residual_and_qq_never_consume_bland_altman_pair_coords() -> TestRes
         col.data_sets[1].cells[r][0] = Cell::number(b);
     }
     let ds = DataSheet::new(SheetId::new("ba-trap"), "Trap", TableArchetype::Column(col))?;
-    let ba_spec = BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false };
+    let ba_spec = BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() };
     let an_ba = AnalysisSpec::new(SheetId::new("res-ba-trap"), ds.id.clone(), AnalysisKind::BlandAltman(ba_spec))?;
     let res_ba = run_bland_altman_analysis(&ds, &an_ba, &ba_spec)?;
     assert!(res_ba.tabs.iter().any(|t| t.kind == ResultTabKind::Residuals), "BlandAltman emits Residuals-kind coord tab");
