@@ -71,7 +71,7 @@ These directly observed runs verified the native GPU desktop window presenter (`
 
 ---
 
-## `R0.20`, Pre-`R0.20` (`5429527`) & Wave 20–24 Workspace Verification Results
+## Workspace Verification Results
 
 These directly observed runs verified the workspace under `--offline` mode (`CARGO_NET_OFFLINE=true`):
 
@@ -93,52 +93,19 @@ These directly observed runs verified the workspace under `--offline` mode (`CAR
 
 ---
 
-## Wave 13–14 Targeted Verification Results (Historical Baseline)
-
-These directly observed runs verified the Wave 14 workspace (historical; superseded by the current results above) under `--offline` mode (`CARGO_NET_OFFLINE=true`):
-
-| Check / Suite (Wave 13–14) | Scope | Observed result |
-|---|---|---|
-| **Full workspace suite (Wave 14)** | `--workspace --all-targets` + `--doc` | `100` test targets: **`822 passed, 0 failed, 0 ignored`** + **`4 passed`** doctests = **`826 passed`** (`math` `50`, `palette` `14`, `platform` `11`, `doc` `34`, `chart` `40`, `fit` `87`, `stats` `72`, `text` `25`, `transform` `24`, `format` `57`, `pdf` `14`, `render` `12`, `svg` `11`, `tools` `21`, `engine` `115`, `mcp` `33`, `ui-egui` `83`, `lumencraft` `17`, `cli` `31`, `web` `13`, `xtask` `52`, `testkit` `6`) |
-| **Stats & i18n audit (Wave 14)** | `xtask stats --exact` & `i18n-report` | **`281`** files, **`192,535`** lines (`22` packages); **`16` locales × `287` keys = `4,592` translations** (`0` missing catalog/command keys) |
-| **Clean-room screenshots (`R0.14`)** | `cargo xtask screenshots [--check]` | Rendered `docs/images/workspace-split-fit.png` (`1440x900`, `color_type=6`, `idat=70612 B`) & `workspace-layout-dark.png` (`1440x900`, `color_type=6`, `idat=68437 B`); CRC-32 & `ASSETS.md` check exit `0` |
-| **Zero-Telemetry & CI hygiene (`R0.6`)** | `cargo xtask telemetry` & CI workflows | Zero network telemetry/analytics/crash-uploader egress, strict `packaging/web/{_headers,.htaccess}` CSP (`connect-src 'none'`) + COOP/COEP, `.github/workflows/*.yml` `permissions` & `${{ }}` hygiene |
-| **Wave 13 host/print/clipboard suites** | `ui-egui`, `lumencraft`, `lumencraft-web`, `mcp`, `cli` | `lumencraft-ui-egui` `83 passed` (incl. live macOS `NSPasteboard` `com.adobe.pdf` `%PDF-1.7` roundtrip + `cjk_rtl_hidpi_desktop_qa` `4`), `lumencraft` `17 passed` (`desktop_host_loop` `7`), `lumencraft-web` `13 passed` (`browser_host_adapters` `7`), `mcp` `33 passed`, `cli` `31 passed` |
-| **macOS packaging dry-run (`R8.5`/`R0.14`)** | `packaging/macos/package.sh --arch aarch64` | Compiled `arm64` release (`LumenCraft.app` `24M`: `lumencraft` `11,383,872` B, `lumencraft-cli` `11,948,448` B -> `lumencraft-cli 0.1.0`), `plutil -lint OK`, ad-hoc `codesign --verify --strict --deep` `valid on disk`; stopped at `hdiutil create` (`Operation not permitted` in macOS sandbox), so `.dmg`/`.zip` `verify.sh` awaits a non-sandboxed host |
-
----
-
-## Wave 5–7 Targeted Verification Results
-
-These observed runs verified the Wave 5–7 changes after final edits under `--offline` mode (`0` Clippy warnings across all verified crates):
-
-| Check / Suite | Scope | Observed result |
-|---|---|---|
-| **Wave 5 Verifier A** | `lumencraft-{palette,doc,chart,stats,fit}` | **`242 passed`** (`240` unit/integ + `2` doctests), `0 failed`: `palette` `15`, `doc` `31`, `chart` `40`, `stats` `69`, `fit` `87`; `clippy -D warnings` exit `0` |
-| **Wave 5 Verifier B** | `lumencraft-{transform,format,render,pdf}` | **`101 passed`**, `0 failed`: `transform` `24`, `format` `51`, `render` `12`, `pdf` `14`; `clippy -D warnings` exit `0` |
-| **Poppler + Ghostscript PDF 1.7 QA** | `crates/pdf/tests/external_viewer_qa.rs` | Executed live `pdftoppm` and `gs` (`1050x750` PPM) on `sci` (Latin/Greek/translucent ribbon/crop marks), `cjk` (`ja`/`zh-CN`/`ko` `/FontFile2`), and `rtl` (`ar`/`he`); `3 passed, 0 skipped`, `0` stderr errors |
-| **Wave 6 Verifier (`engine`)** | `lumencraft-engine` (`90` commands) | **`76 passed, 0 failed`** across unit + `9` integration suites (`command_sweep_props`, `data_qol_workflows`, `sci_qol_workflows`, `undo_and_methods_qol`, etc.); `fmt` & `clippy -D warnings` exit `0` |
-| **Wave 7 Verifier (UI, MCP, Apps, `xtask`)** | `ui-egui`, `mcp`, `web`, `cli`, `lumencraft`, `xtask` | **`153 passed, 0 failed`**: `ui-egui` `69` (default & `--no-default-features`), `mcp` `25`, `cli` `18`, `lumencraft` `9`, `web` `5`, `xtask` `27`; `ui-commands --check`, `layers`, `brands`, `cleanroom`, `./packaging/check-app-specific.sh` exit `0` |
-| **macOS live clipboard roundtrip** | `crates/ui-egui/tests/macos_clipboard_live.rs` | Executed live `/usr/bin/pbcopy` + `/usr/bin/pbpaste` (`EXECUTED_LIVE_ROUNDTRIP`) verifying `de-DE` decimal-comma + `=A1*2` formula + `emf_bytes` (`10232` bytes) |
-| **macOS bundle validation & signing** | `cargo run -p xtask --offline -- bundle` | Assembled `dist/LumenCraft.app`; `/usr/bin/plutil -lint` `OK`; `/usr/bin/codesign --verify --strict --deep` `valid on disk` (temporary `dist/` cleaned up after check) |
-
-All 6 defects previously tracked under [`gaps.md#known-defects`](history/legacy-ids-and-defects.md#known-defects) (`G2`, `G8`, `G9`, `G10`, `G11`, `G12`) were fixed with regression tests in Waves 5–6.
-
----
-
-## Parity Checklists (Evidence Index)
+## Evidence Checklists (Index)
 
 | Checklist | Scope covered |
 |---|---|
-| [`evidence/overview.md`](evidence/overview.md) | Weighted `10`-area parity score, methodology, and workspace crate evidence |
+| [`evidence/overview.md`](evidence/overview.md) | Weighted `10`-area capability score, methodology, and workspace crate evidence |
 | [`evidence/statistics.md`](evidence/statistics.md) | Descriptive stats, *t*-tests, 1/2/3-way & Multifactor ANOVA, REML, multiplicity, survival/Cox, contingency, ROC, GLMs, PCA, MICE |
 | [`fitting-parity.md`](fitting-parity.md) | Damped LM solver, weighting, Cauchy/ROUT, global fits, profile CIs, `117` built-in models, custom DSL/ODE VM |
 | [`evidence/graphing.md`](evidence/graphing.md) | `8` graph families, `7` axis scales, broken axes, live brackets, Page Layouts, SVG / `%PDF-1.7` / TIFF / `.emf` |
 | [`evidence/file-formats.md`](evidence/file-formats.md) | `.curvebook`, `.curvebook.d/`, `.cbtemplate`, WAL journal, CSV/TSV, `.prism`/`.pzfx`, publication vector/raster exports |
-| [`evidence/user-interface.md`](evidence/user-interface.md) | Human-operable status per UX area (`R10`), plus `UiApp` state shell, `S1` `1M`-cell grid, `47` `UI_COMMANDS`, `ActiveDialog::{PowerAndSampleSize, FormatSelectedPoints, RandomizeGroups, RandomSampleRows, SimulateDistributions, InsertModelEquation}`, `R1`–`R10` modal predicates, HiDPI/RTL interaction, `QOL-1`–`QOL-10`, `DesktopHostRuntime`, `WebWorkspaceHost`, `gui_wf_*.rs` |
+| [`evidence/user-interface.md`](evidence/user-interface.md) | Human-operable status per UX area (`R10`), plus `UiApp` state shell, `S1` `1M`-cell grid, synced `UI_COMMANDS` (live count in the headline table above), `ActiveDialog::{PowerAndSampleSize, FormatSelectedPoints, RandomizeGroups, RandomSampleRows, SimulateDistributions, InsertModelEquation}`, `R1`–`R10` modal predicates, HiDPI/RTL interaction, `QOL-1`–`QOL-10`, `DesktopHostRuntime`, `WebWorkspaceHost`, `gui_wf_*.rs` |
 | [`gui-workflows.md`](gui-workflows.md) | Human-path status & blockers `B1`–`B5` (`R10`), verified `gui_only` agent execution contract, `ui.inspect` & 8-tool `gui` MCP surface (`R8.6`), 4-stage/8-family Power & Sample Size wizard & 10 modal predicates (`R8.7`), 28-workflow Core `gui_wf_*.rs` acceptance matrix (`R8.8`), implemented 21-workflow extended multivariable/clustering/GLM/graphing matrix (`R9.17` / `QOL-17`, `WF-29`–`WF-49`) + `WF-50` CLD (`R10.11`), and planned `1.0`-gated 15-workflow advanced regression/graphing/layout matrix (`R13`, `WF-51`–`WF-65`) |
 | [`evidence/platforms.md`](evidence/platforms.md) | Target OS builds, CPU vs. `wgpu` rendering, native binary OS vector clipboard & macOS `NSPasteboard` `%PDF-1.7`, print dialog/spooling, bundle verification |
-| [`evidence/localization.md`](evidence/localization.md) | `16` locales × `779` keys (`12,464` translations), RTL mirroring, decimal/CSV presets, CJK/RTL PDF & `cjk_rtl_hidpi_desktop_qa` |
+| [`evidence/localization.md`](evidence/localization.md) | Locale and catalog coverage (live counts in the headline table above), RTL mirroring, decimal/CSV presets, CJK/RTL PDF & `cjk_rtl_hidpi_desktop_qa` |
 | [`qol-enhancements.md`](planning/qol-enhancements.md) | Active and deferred QoL scope, diagnostics-only `QOL-7`, equations-only `QOL-16`, extended `gui_only` `QOL-17`, and separate existing implementation evidence |
 | [`calculators-and-quick-stats.md`](planning/calculators-and-quick-stats.md) | Active table-analysis completions, randomization/sampling, and equation callouts; inactive reference designs for deferred statistical and bench calculators |
 

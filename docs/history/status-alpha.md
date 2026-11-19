@@ -20,3 +20,33 @@
 | **Pre-`R0.20` `main` workspace suite (`5429527`)** | `--workspace --offline` (incl. `--doc`, `LUMENCRAFT_REQUIRE_CORPUS=1`) | `187` non-doc test suites + `20` doc-test targets: **`1,646 passed, 0 failed, 0 ignored`** non-doc + **`4 passed`** doctests (`doc`, `math`, `palette`, `testkit`) = **`1,650 passed, 0 failed`** across all **`22`** packages (`math` `62`, `palette` `20`+`1`, `platform` `20`, `doc` `57`+`1`, `chart` `93`, `fit` `158`, `stats` `195`, `text` `50`, `transform` `76`, `format` `100`, `pdf` `19`, `render` `20`, `svg` `15`, `tools` `26`, `engine` `185`, `mcp` `67`, `ui-egui` `187`, `lumencraft` `69`, `cli` `77`, `web` `26`, `xtask` `116`, `testkit` `8`+`1`); `cargo xtask stats --exact` reports **`429`** `.rs` files, **`332,584`** lines; `clippy --workspace --all-targets -- -D warnings`, `cargo xtask r10-gate` (`6 passed`), `xtask {layers, telemetry, secrets, licenses, cleanroom, brands, status, workflows}` (`0/634`, `0` telemetry across `6` workflows / `2` header configs) exit `0` |
 | **Wave 20–24 baseline suite (historical)** | `--workspace --offline` (incl. `--doc`, pre-`R0.18`/`R0.19`) | `190` suites (`170` non-doc + `20` doc): **`1,316 passed, 0 failed, 0 ignored`** non-doc + **`4 passed`** doctests (`doc`, `math`, `palette`, `testkit`) = **`1,320 passed, 0 failed`** across all **`22`** workspace packages (`math` `60`, `palette` `19`, `platform` `15`, `doc` `48`, `chart` `77`, `fit` `114`, `stats` `127`, `text` `40`, `transform` `61`, `format` `84`, `pdf` `18`, `render` `17`, `svg` `14`, `tools` `25`, `engine` `162`, `mcp` `57`, `ui-egui` `176`, `lumencraft` `42`, `cli` `51`, `web` `13`, `xtask` `88`, `testkit` `8`) |
 
+## Wave 13–14 Targeted Verification Results (Historical Baseline)
+
+These directly observed runs verified the Wave 14 workspace (historical; superseded by the current results above) under `--offline` mode (`CARGO_NET_OFFLINE=true`):
+
+| Check / Suite (Wave 13–14) | Scope | Observed result |
+|---|---|---|
+| **Full workspace suite (Wave 14)** | `--workspace --all-targets` + `--doc` | `100` test targets: **`822 passed, 0 failed, 0 ignored`** + **`4 passed`** doctests = **`826 passed`** (`math` `50`, `palette` `14`, `platform` `11`, `doc` `34`, `chart` `40`, `fit` `87`, `stats` `72`, `text` `25`, `transform` `24`, `format` `57`, `pdf` `14`, `render` `12`, `svg` `11`, `tools` `21`, `engine` `115`, `mcp` `33`, `ui-egui` `83`, `lumencraft` `17`, `cli` `31`, `web` `13`, `xtask` `52`, `testkit` `6`) |
+| **Stats & i18n audit (Wave 14)** | `xtask stats --exact` & `i18n-report` | **`281`** files, **`192,535`** lines (`22` packages); **`16` locales × `287` keys = `4,592` translations** (`0` missing catalog/command keys) |
+| **Clean-room screenshots (`R0.14`)** | `cargo xtask screenshots [--check]` | Rendered `docs/images/workspace-split-fit.png` (`1440x900`, `color_type=6`, `idat=70612 B`) & `workspace-layout-dark.png` (`1440x900`, `color_type=6`, `idat=68437 B`); CRC-32 & `ASSETS.md` check exit `0` |
+| **Zero-Telemetry & CI hygiene (`R0.6`)** | `cargo xtask telemetry` & CI workflows | Zero network telemetry/analytics/crash-uploader egress, strict `packaging/web/{_headers,.htaccess}` CSP (`connect-src 'none'`) + COOP/COEP, `.github/workflows/*.yml` `permissions` & `${{ }}` hygiene |
+| **Wave 13 host/print/clipboard suites** | `ui-egui`, `lumencraft`, `lumencraft-web`, `mcp`, `cli` | `lumencraft-ui-egui` `83 passed` (incl. live macOS `NSPasteboard` `com.adobe.pdf` `%PDF-1.7` roundtrip + `cjk_rtl_hidpi_desktop_qa` `4`), `lumencraft` `17 passed` (`desktop_host_loop` `7`), `lumencraft-web` `13 passed` (`browser_host_adapters` `7`), `mcp` `33 passed`, `cli` `31 passed` |
+| **macOS packaging dry-run (`R8.5`/`R0.14`)** | `packaging/macos/package.sh --arch aarch64` | Compiled `arm64` release (`LumenCraft.app` `24M`: `lumencraft` `11,383,872` B, `lumencraft-cli` `11,948,448` B -> `lumencraft-cli 0.1.0`), `plutil -lint OK`, ad-hoc `codesign --verify --strict --deep` `valid on disk`; stopped at `hdiutil create` (`Operation not permitted` in macOS sandbox), so `.dmg`/`.zip` `verify.sh` awaits a non-sandboxed host |
+
+---
+
+## Wave 5–7 Targeted Verification Results
+
+These observed runs verified the Wave 5–7 changes after final edits under `--offline` mode (`0` Clippy warnings across all verified crates):
+
+| Check / Suite | Scope | Observed result |
+|---|---|---|
+| **Wave 5 Verifier A** | `lumencraft-{palette,doc,chart,stats,fit}` | **`242 passed`** (`240` unit/integ + `2` doctests), `0 failed`: `palette` `15`, `doc` `31`, `chart` `40`, `stats` `69`, `fit` `87`; `clippy -D warnings` exit `0` |
+| **Wave 5 Verifier B** | `lumencraft-{transform,format,render,pdf}` | **`101 passed`**, `0 failed`: `transform` `24`, `format` `51`, `render` `12`, `pdf` `14`; `clippy -D warnings` exit `0` |
+| **Poppler + Ghostscript PDF 1.7 QA** | `crates/pdf/tests/external_viewer_qa.rs` | Executed live `pdftoppm` and `gs` (`1050x750` PPM) on `sci` (Latin/Greek/translucent ribbon/crop marks), `cjk` (`ja`/`zh-CN`/`ko` `/FontFile2`), and `rtl` (`ar`/`he`); `3 passed, 0 skipped`, `0` stderr errors |
+| **Wave 6 Verifier (`engine`)** | `lumencraft-engine` (`90` commands) | **`76 passed, 0 failed`** across unit + `9` integration suites (`command_sweep_props`, `data_qol_workflows`, `sci_qol_workflows`, `undo_and_methods_qol`, etc.); `fmt` & `clippy -D warnings` exit `0` |
+| **Wave 7 Verifier (UI, MCP, Apps, `xtask`)** | `ui-egui`, `mcp`, `web`, `cli`, `lumencraft`, `xtask` | **`153 passed, 0 failed`**: `ui-egui` `69` (default & `--no-default-features`), `mcp` `25`, `cli` `18`, `lumencraft` `9`, `web` `5`, `xtask` `27`; `ui-commands --check`, `layers`, `brands`, `cleanroom`, `./packaging/check-app-specific.sh` exit `0` |
+| **macOS live clipboard roundtrip** | `crates/ui-egui/tests/macos_clipboard_live.rs` | Executed live `/usr/bin/pbcopy` + `/usr/bin/pbpaste` (`EXECUTED_LIVE_ROUNDTRIP`) verifying `de-DE` decimal-comma + `=A1*2` formula + `emf_bytes` (`10232` bytes) |
+| **macOS bundle validation & signing** | `cargo run -p xtask --offline -- bundle` | Assembled `dist/LumenCraft.app`; `/usr/bin/plutil -lint` `OK`; `/usr/bin/codesign --verify --strict --deep` `valid on disk` (temporary `dist/` cleaned up after check) |
+
+All 6 defects previously tracked under [`gaps.md#known-defects`](legacy-ids-and-defects.md#known-defects) (`G2`, `G8`, `G9`, `G10`, `G11`, `G12`) were fixed with regression tests in Waves 5–6.

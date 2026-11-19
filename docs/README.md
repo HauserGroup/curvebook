@@ -1,72 +1,82 @@
 # CurveBook documentation
 
-Start with the [README](../README.md) or the [online Get Started guide](https://hausergroup.github.io/curvebook/get-started.html) to install and use CurveBook, or the [beginner's guide](mcp-for-beginners.md) to connect your AI assistant, run an analysis, and save your work. For verified capabilities and current limitations, read [Status](STATUS.md) and [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues). Contributors should start with [Contributing](../CONTRIBUTING.md), [Development](development.md), and the [active roadmap](ROADMAP.md).
+Start with the [README](../README.md). People using CurveBook should read the [online documentation](https://hausergroup.github.io/curvebook/get-started.html), which is generated from the `reference/` pages below. Contributors should start with [Contributing](../CONTRIBUTING.md), the [agent and contributor rules](../AGENTS.md), and the [active roadmap](ROADMAP.md).
 
 ## Using CurveBook
 
-| Guide | Contents |
-|---|---|
-| [Get started & downloads](https://hausergroup.github.io/curvebook/get-started.html) | Installer guide (*Which file do I need?*), per-OS install steps, verification, and first steps |
-| [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) | Beta supported scope, `[Draft]` non-English locale note, platform caveats, and troubleshooting |
-| [Verifying downloads](release/verifying-downloads.md) | Checking release checksums (`SHA256SUMS.txt`) and Sigstore build provenance |
-| [Beginner's guide (MCP)](mcp-for-beginners.md) | Step-by-step AI assistant setup, first analysis, saving, and troubleshooting |
-| [MCP server](mcp.md) | Protocol, source builds, client configuration, Welch's *t*-test example, toolsets, and desktop connection |
-| [Command reference](commands.md) | Generated engine command catalog and parameters |
-| [Scripting and automation](implementation/scripting-and-automation.md) | CLI, templates, and batch recipes |
-| [Control protocol](control-protocol.md) | Local desktop JSONL interface and security boundaries |
-| [File formats](file-formats.md) | Persisted formats, versions, and migrations |
-
-## Contributing and implementation
-
-Read the [contributor guide](../CONTRIBUTING.md), [agent rules](../AGENTS.md), [known pitfalls](pitfalls.md), and [extension checklist](extending.md) before changing code.
+These pages are published on the documentation site by `cargo xtask docs-site`. Edit the Markdown here, not the generated HTML.
 
 | Guide | Contents |
 |---|---|
-| [Development](development.md) | Prerequisites, source build quick start, everyday commands, tests, coverage, and local configuration |
-| [Continuous integration](ci.md) | Quality stages, shared test binaries, deadlines, and local verification |
-| [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
+| [Get started](reference/get-started.md) | Which file to download, installing on each platform, verifying downloads, fonts, updating, and uninstalling |
+| [Beginner's guide (MCP)](mcp-for-beginners.md) | Connecting an AI assistant, a first analysis, and saving work |
+| [Concepts](reference/concepts.md), [tables](reference/tables.md), [graphs](reference/graphs.md), [files](reference/files.md), [settings](reference/settings.md), [quality-of-life tools](reference/qol.md) | What CurveBook does and how its parts fit together |
+| [Desktop app](reference/desktop-gui.md) | Getting started in the desktop GUI |
+| [Automation: MCP](reference/automation/mcp.md), [CLI](reference/automation/cli.md), [control protocol and batch](reference/automation/control-and-batch.md) | Reference for driving CurveBook from scripts and AI assistants |
+| [Troubleshooting & known issues](reference/troubleshooting.md) | Install problems, fonts, MCP connections, error codes, and the current release's known issues |
+| [Privacy & security](reference/privacy-security.md) and [glossary](reference/glossary.md) | Privacy, licences, security, and terms |
+
+## Contributing
+
+Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), and the [extension checklist](extending.md) before changing code. The documentation site links to these guides on GitHub, so keep their paths stable.
+
+| Guide | Contents |
+|---|---|
+| [Development](development.md) | Prerequisites, building from source, everyday commands, tests, coverage, and local configuration |
+| [Continuous integration](ci.md) | CI stages, shared test binaries, deadlines, and local verification |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
-| [Data tables and transforms](implementation/data-tables-and-transforms.md) | Table archetypes, formulas, reactive data, and engine contracts |
-| [Statistics](implementation/statistics-implementation.md) | Numerical methods, statistical tests, and oracle requirements |
-| [Curve fitting](implementation/curve-fitting-implementation.md) | Solvers, uncertainty, equation library, and expression language |
-| [Graphing and layouts](implementation/graphing-and-layouts.md) | Scene compilation, axes, typography, layouts, and exports |
-| [Command IDs](command-ids.md) | Naming and replay stability |
-| [Licences](licences.md) | Dependency and asset licence policy |
+| [Extending CurveBook](extending.md) | Where and how to add commands, analyses, models, formats, cursors, locales, migrations, and assets |
+| [Command IDs](command-ids.md) and [command reference](commands.md) | Naming and replay stability; generated engine command catalog (`cargo xtask commands`) |
+| [File formats](file-formats.md) and [schemas](schemas/) | Persisted formats, versions, and migrations; generated JSON schemas (`cargo xtask schemas`) |
+| [MCP server internals](mcp.md) and [control protocol specification](control-protocol.md) | Source builds, client presets, and implementation detail behind the published automation reference |
+| [Localization](localization.md) | Catalog entries, locales, fallback, fonts, and translation review |
+| [Licences](licences.md) and [contributor credits](contributors.md) | Dependency and asset licence policy; how contributors are credited |
+| Implementation specifications | [Data tables and transforms](implementation/data-tables-and-transforms.md), [statistics](implementation/statistics-implementation.md), [curve fitting](implementation/curve-fitting-implementation.md), [graphing and layouts](implementation/graphing-and-layouts.md), and [scripting and automation](implementation/scripting-and-automation.md) |
 
-## Status, planning, and evidence
+## Planning, status & evidence
 
-The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.md) records verified capabilities and known limits. The checklists below separate engine and agent-harness evidence from human GUI completion.
+[ROADMAP.md](ROADMAP.md) owns claims and pending work, and [STATUS.md](STATUS.md) records verified capabilities and known limits. The evidence checklists separate engine and agent-harness evidence from human GUI completion, and `cargo xtask status` checks the `[x]` claims in the user-interface checklist and the GUI workflow table.
 
-| Area | Evidence or planning document |
+| Area | Document |
 |---|---|
-| Overall assessment | [Feature parity](evidence/overview.md) |
-| Statistics | [Statistical parity](evidence/statistics.md) |
-| Curve fitting | [Fitting parity](fitting-parity.md) |
-| Graphing | [Graphing parity](evidence/graphing.md) |
-| Interchange | [File-format parity](evidence/file-formats.md) |
-| User interface | [UI parity](evidence/user-interface.md) and [GUI workflows](gui-workflows.md) |
-| Platforms | [Hardware parity](evidence/platforms.md) |
-| Localization | [Localization parity](evidence/localization.md) |
-| Scientific quality of life | [Enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
-| Historical progress | [Roadmap history](history/roadmap.md) |
-| Legacy tracking | [Gap mapping and known defects](history/legacy-ids-and-defects.md) |
-| Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](history/audit/round1-progress.md), [work log](audit/work-log.md), [Round 2 review](history/audit/round2-post-ebcc622.md), and [R0–R9 milestone review ledger](history/audit/review-2026-11-16-ledger.md) |
+| Overall assessment | [Capability evidence overview](evidence/overview.md) |
+| Statistics | [Statistics evidence](evidence/statistics.md) |
+| Curve fitting | [Curve-fitting evidence](fitting-parity.md) (moves to `evidence/` once its in-flight edits land) |
+| Graphing | [Graphing evidence](evidence/graphing.md) |
+| Interchange | [File-format evidence](evidence/file-formats.md) |
+| User interface | [User-interface evidence](evidence/user-interface.md) and [GUI workflows](gui-workflows.md) |
+| Platforms | [Platform evidence](evidence/platforms.md) |
+| Localization | [Localization evidence](evidence/localization.md) |
+| Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
+| Numerical oracles | Scope notes for independent `D1` reference tests: [curve transforms](planning/oracle-curve-transforms.md), [distribution tails](planning/oracle-distribution-tails.md), and [non-NIST fitting](planning/oracle-non-nist-fitting.md) |
+| Code audits | [Audit playbook](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), and [work log](audit/work-log.md) |
 
-## Releases and reference files
+## Releases & the website
 
-- [GitHub Pages site](index.html) and [Privacy policy](privacy.html): static entry point introducing CurveBook, complete-workspace sharing, downloads, and zero-telemetry privacy disclosures ([design decisions](release/website-design.md), [preview and publication checklist](release/github-pages.md)).
-- [Get Started](https://hausergroup.github.io/curvebook/get-started.html) and [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues): single canonical home for Beta installer selection, platform install steps, verification, supported surfaces, `[Draft]` non-English locale status, unsigned Windows / FreeBSD preview caveats, and known limits.
-- [Alpha known issues & release notes (historical)](history/release/alpha-known-issues.md): historical `v0.1.0-alpha.1` / Alpha prerelease scope, caveats, and release notes (`R0.20`).
-- [Alpha branding clearance](history/release/alpha-branding-clearance.md): strict `R0.21` / `R10.14` branding, clean-room, and asset-provenance verification records.
-- [Release guide](release/releasing.md): packaging, verification, and release gates.
-- [Verifying a download](release/verifying-downloads.md): checking a release file's checksum and Sigstore build provenance on every platform.
-- [Windows signing](release/windows-signing.md): test signing and distribution.
-- [Contributor credits](contributors.md), [asset inventory](../ASSETS.md), and [attribution](../ATTRIBUTION.md).
-- [Schemas](schemas/): generated JSON schemas for documents, archives, preferences, journals, and batches.
-- [Images](images/): clean-room workspace screenshots.
+| Document | Contents |
+|---|---|
+| [Release guide](release/releasing.md) | Packaging, verification, and release gates |
+| [Desktop smoke QA](release/desktop-smoke-qa.md) | Manual desktop walkthrough for each release |
+| [Windows signing](release/windows-signing.md) | Test signing and distribution |
+| [GitHub Pages site](release/github-pages.md) | Design decisions, preview, checks, and publication for [`index.html`](index.html), [`privacy.html`](privacy.html), and the generated manual |
+| [Images](images/) | Clean-room screenshots, attributed in [ASSETS.md](../ASSETS.md) |
+
+## History
+
+[`history/`](history/README.md) holds frozen records: completed roadmap items, legacy ID mappings and known defects, finished audit rounds, Alpha release records, and superseded status snapshots. Do not update their numbers; current facts belong in `ROADMAP.md` and `STATUS.md`.
 
 ## Directory conventions
 
-Keep shared entry points, governance references, and gate-checked documents at the top level. Put domain implementation guides in `implementation/`, release procedures in `release/`, and supporting plans and historical progress in `planning/`. Audit records, generated schemas, and screenshots have their own directories.
+| Folder | Holds |
+|---|---|
+| top level | Entry points, gate-checked governance files (`ROADMAP.md`, `STATUS.md`, `gui-workflows.md`), generated `commands.md`, contributor guides the documentation site links to, and the Pages files (`index.html`, `privacy.html`, `site.css`, `.nojekyll`) |
+| `reference/` | User documentation rendered to the documentation site |
+| `implementation/` | Domain implementation specifications |
+| `evidence/` | Capability evidence checklists |
+| `planning/` | Active plans, deferred scope, and oracle scope notes |
+| `release/` | Release and website procedures |
+| `audit/` | The reusable code-audit playbook |
+| `history/` | Frozen records (see above) |
+| `schemas/`, `images/`, `manual/` | Generated schemas, attributed screenshots, and documentation-site snapshots |
 
-Add new guides to this index and update repository links when moving a document. Regenerate command references and schemas through their `cargo xtask` commands.
+Add new guides to this index and update every repository link when moving a document. Regenerate command references and schemas through their `cargo xtask` commands.

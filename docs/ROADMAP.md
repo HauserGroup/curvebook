@@ -97,10 +97,11 @@ Owner: open · Status: in progress — claimed: jsture, branch `docs/R0.31-docs-
 
 `docs/` mixes user guides, contributor guides, gate-checked governance files, evidence checklists, and finished history at one level, and several topics have more than one home. Regroup it by audience without moving the gate-checked contributor guides. R13 documents and in-flight R13 edits are out of scope for this item.
 
-- [ ] Move the capability evidence checklists into `docs/evidence/` under neutral names, updating `xtask status`, the branding tests, and source comments that name them.
-- [ ] Archive finished audit rounds, roadmap history, and Alpha release records under `docs/history/`, keeping the reusable audit playbook in `docs/audit/`.
-- [ ] Give each duplicated topic (MCP setup, download verification, the Pages site, oracle follow-ups) one canonical home and replace the copies with links.
-- [ ] Rewrite `docs/README.md` by audience and replace stale hand-written counts with pointers to generated sources ([pitfalls §2](pitfalls.md#2-hardcoded-headline-counts-going-stale)).
+- [x] Move the capability evidence checklists into `docs/evidence/` under neutral names, updating `xtask status`, the branding tests, and source comments that name them. *(Done 2026-11-19 for seven checklists; `fitting-parity.md` and `gui-workflows.md` stay put while they carry in-flight edits.)*
+- [x] Archive finished audit rounds, roadmap history, and Alpha release records under `docs/history/`, keeping the reusable audit playbook in `docs/audit/`. *(Done 2026-11-19: [`history/`](history/README.md); `gaps.md` and the legacy milestone table became [`history/legacy-ids-and-defects.md`](history/legacy-ids-and-defects.md); `brands`, `cleanroom`, and release-bundle exemptions extended to `docs/history/audit/` with unit tests.)*
+- [x] Give each duplicated topic (MCP setup, download verification, the Pages site) one canonical home and replace the copies with links. *(Done 2026-11-19. The per-scope `planning/oracle-*.md` notes stay separate because open oracle branches add more files in the same pattern.)*
+- [x] Rewrite `docs/README.md` by audience and replace stale hand-written counts with pointers to generated sources ([pitfalls §2](pitfalls.md#2-hardcoded-headline-counts-going-stale)). *(Done 2026-11-19.)*
+- [ ] After the in-flight edits to `fitting-parity.md` and `implementation/{curve-fitting-implementation,data-tables-and-transforms,statistics-implementation}.md` land, move `fitting-parity.md` to `evidence/curve-fitting.md` and repoint their remaining links to moved files. Separately, repoint the R13 section's `ui-parity.md` link to `evidence/user-interface.md`.
 
 ---
 
