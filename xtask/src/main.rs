@@ -5,6 +5,7 @@ mod assets;
 mod brands;
 mod bundle;
 mod ci;
+mod ci_quick;
 mod citations;
 mod cleanroom;
 mod commands;
@@ -40,6 +41,7 @@ usage: cargo xtask <command> [args...]
 
 commands:
   ci [stage]            run all gates or build/policy/lint/tests/doctests/features/wasm/performance
+  ci quick [--base <ref>] policy gates + clippy/tests for packages changed since main and their dependents
   r10-gate              run R10 parity, Unicode, screenshot baseline, web parity & latency gates
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
   layers                verify L0..L7 dependency rules, UI-crate isolation, and source hygiene

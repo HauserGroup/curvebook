@@ -93,6 +93,15 @@ The 2026-11-18 audit found that nearly every public function, type, and module i
 - [x] Add an `xtask` check, run in the `cargo xtask ci policy` stage, that fails when a module in `crates/math`, `crates/stats`, `crates/fit`, or `crates/transform` defines a public numerical routine but neither its `//!` header nor the routine's `///` doc cites a published reference. Allow-list modules that only hold error types, shared plumbing, or re-exports, with a stated reason. Document it in [`ci.md`](ci.md) and [`development.md`](development.md). *(Done 2026-11-18: `cargo xtask citations` in `xtask/src/citations.rs` (`7` unit tests) wired into `cargo xtask ci policy` with fail-closed stale-path/reason allow-list validation, documented in [`ci.md`](ci.md) and [`development.md`](development.md).)*
 - [x] Add a short, compiled crate-level example (doctest) to the `lib.rs` of `curvebook-math`, `curvebook-stats`, `curvebook-fit`, and `curvebook-transform`. Each shows one typical call and how to read its result. *(Done 2026-11-18: compiled `//!` doctests in `crates/{math,stats,fit,transform}/src/lib.rs` verified via `cargo xtask ci doctests`.)*
 
+### R0.32 Fast local CI tier (`cargo xtask ci quick`)
+Owner: open · Status: in progress · Was: development-speed review 2026-11-19 · Depends on: none · Gate: none · Est. note: 4–8 h
+
+Every pull request already runs all hosted CI stages in parallel, yet the verification policy asked contributors and agents to repeat the full `cargo xtask ci` bundle locally, one stage after another, before opening each PR. This item adds a scoped local tier and makes hosted CI the full gate.
+
+- [x] Add `cargo xtask ci quick [--base <git-ref>]`: every `policy` gate, then Clippy and the `tests` stage filter for the workspace packages changed since the merge base with `main` plus their workspace reverse dependencies; workspace-wide build inputs select `--workspace`. *(Done 2026-11-19 in `xtask/src/ci_quick.rs` with `7` unit tests; `cargo xtask ci quick --base HEAD` passed locally.)*
+- [x] Update the `AGENTS.md` verification policy, [`ci.md`](ci.md), [`development.md`](development.md), and `CONTRIBUTING.md` so `ci quick` runs before a PR and full local `cargo xtask ci` runs only for broad changes, integration waves, or reproducing hosted failures. *(Done 2026-11-19.)*
+- [ ] Hosted CI passes on the pull request.
+
 ---
 
 ## R8 Desktop & WebAssembly live shell, localization & `1.0` hardening
