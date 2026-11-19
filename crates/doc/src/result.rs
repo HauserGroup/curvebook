@@ -505,6 +505,9 @@ pub struct ResultSheet {
     pub pairwise_comparisons: Vec<PairwiseComparisonRecord>,
     /// Sampled regression, survival, or ROC curves with optional confidence/prediction bands for graph overlays.
     pub fitted_curves: Vec<FittedCurveOverlay>,
+    /// Source observations excluded by ROUT when fitting the curves in this result.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub eliminated_outliers: Vec<crate::SourceCellId>,
     /// Plain-language assumption and data-hygiene diagnostics.
     pub checklist: Vec<ChecklistItem>,
     /// Sticky-note callouts attached to this result sheet.
@@ -528,6 +531,7 @@ impl ResultSheet {
             scalars: Vec::new(),
             pairwise_comparisons: Vec::new(),
             fitted_curves: Vec::new(),
+            eliminated_outliers: Vec::new(),
             checklist: Vec::new(),
             floating_notes: Vec::new(),
             color_tag: None,

@@ -13,7 +13,7 @@ fn build_dataset_series(ds: &NonlinearDataset) -> DatasetSeries {
     for row in 0..n {
         let predictors = ds.predictors[row].clone();
         let y_val = if is_nelson { ds.y[row].ln() } else { ds.y[row] };
-        points.push(DataPoint { x: predictors, y: y_val, sd: None, n: None, explicit_weight: None, data_set_index: 0, row });
+        points.push(DataPoint { x: predictors, y: y_val, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row });
     }
     DatasetSeries {
         data_set_index: 0,

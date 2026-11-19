@@ -692,6 +692,20 @@ fn info_sheet_schema() -> SchemaNode {
     .with_title("InfoSheet")
 }
 
+fn source_cell_id_schema() -> SchemaNode {
+    object_schema(
+        vec![
+            ("sheet_id", ref_schema(SheetId::schema_name())),
+            ("row", integer_schema().with_minimum_i64(0)),
+            ("col", integer_schema().with_minimum_i64(0)),
+            ("subcol", integer_schema().with_minimum_i64(0)),
+        ],
+        &["sheet_id", "row", "col", "subcol"],
+        false,
+    )
+    .with_title("SourceCellId")
+}
+
 fn result_sheet_schema() -> SchemaNode {
     object_schema(
         vec![
@@ -703,6 +717,7 @@ fn result_sheet_schema() -> SchemaNode {
             ("scalars", array_schema(any_json_schema())),
             ("pairwise_comparisons", array_schema(any_json_schema())),
             ("fitted_curves", array_schema(any_json_schema())),
+            ("eliminated_outliers", array_schema(ref_schema("SourceCellId"))),
             ("checklist", array_schema(ref_schema(ChecklistItem::schema_name()))),
             ("floating_notes", array_schema(any_json_schema())),
             ("color_tag", nullable_schema(any_json_schema())),
@@ -815,6 +830,7 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def(NamedCheckpoint::schema_name(), NamedCheckpoint::json_schema())
     .with_def("DataSheet", data_sheet_schema())
     .with_def("InfoSheet", info_sheet_schema())
+    .with_def("SourceCellId", source_cell_id_schema())
     .with_def("ResultSheet", result_sheet_schema())
     .with_def("GraphSheet", graph_sheet_schema())
     .with_def("LayoutSheet", layout_sheet_schema())

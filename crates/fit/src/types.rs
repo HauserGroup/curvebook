@@ -43,6 +43,9 @@ pub struct DataPoint {
     pub n: Option<f64>,
     /// Explicit caller-supplied weight (overrides formulaic `WeightingScheme` when present and requested).
     pub explicit_weight: Option<f64>,
+    /// Zero-based raw Y replicate subcolumn of the source observation.
+    #[serde(default)]
+    pub source_subcolumn: usize,
     /// Originating dataset column index (`0 = A`, `1 = B`, ...).
     pub data_set_index: usize,
     /// Originating table row index.
@@ -53,13 +56,13 @@ impl DataPoint {
     /// Construct a simple unweighted 1D `(x, y)` observation.
     #[must_use]
     pub fn xy(x: f64, y: f64) -> Self {
-        Self { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 0 }
+        Self { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 }
     }
 
     /// Construct a multivariate `(predictors, y)` observation.
     #[must_use]
     pub fn multi(predictors: Vec<f64>, y: f64) -> Self {
-        Self { x: predictors, y, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 0 }
+        Self { x: predictors, y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 }
     }
 
     /// Primary scalar predictor `x[0]`.
@@ -95,6 +98,32 @@ pub(crate) fn validated_replicate_moments(pt: &DataPoint) -> Result<(f64, usize,
     Ok((n_f, n_usize, ss_within))
 }
 
+/// Observed response for inverse calibration from a row where X is blank.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(untagged)]
+pub enum UnknownResponse {
+    /// A single response or a response already summarized on the input sheet.
+    Single((usize, f64)),
+    /// A raw response in a specific replicate subcolumn.
+    Replicate { row: usize, subcol: usize, value: f64 },
+}
+
+impl From<(usize, f64)> for UnknownResponse {
+    fn from(value: (usize, f64)) -> Self {
+        Self::Single(value)
+    }
+}
+
+impl UnknownResponse {
+    /// Return the observed response value.
+    #[must_use]
+    pub const fn value(self) -> f64 {
+        match self {
+            Self::Single((_, value)) | Self::Replicate { value, .. } => value,
+        }
+    }
+}
+
 /// Extracted dataset series ready for linear or nonlinear regression.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DatasetSeries {
@@ -105,7 +134,7 @@ pub struct DatasetSeries {
     /// Active included `(x, y)` observations.
     pub points: Vec<DataPoint>,
     /// Rows where `X` is blank and `Y` is active, queued for standard-curve inverse interpolation.
-    pub unknowns_y: Vec<(usize, f64)>,
+    pub unknowns_y: Vec<UnknownResponse>,
     /// Rows where `Y` is blank and `X` is active, queued for forward prediction.
     pub unknowns_x: Vec<(usize, f64)>,
     /// Whether observations came from pre-summarized `(Mean, SD/SEM/%CV, N)` subcolumns.
@@ -353,27 +382,52 @@ fn populate_xy_column(xy: &curvebook_doc::XyTable, ds: &DataSetColumn, ds_idx: u
                         sd: Some(pt.sd),
                         n: Some(pt.n),
                         explicit_weight: None,
+                        source_subcolumn: 0,
                         data_set_index: ds_idx,
                         row,
                     });
                 }
-                (None, Some(pt)) if x_blank => series.unknowns_y.push((row, pt.mean)),
+                (None, Some(pt)) if x_blank => series.unknowns_y.push((row, pt.mean).into()),
                 (Some(x), None) if y_cells_are_blank_unknown(subcells) => series.unknowns_x.push((row, x)),
                 _ => {}
             }
         } else if xy.y_subcolumn_mode.is_pre_summarized() {
             if let (Some(x), Some(y)) = (x_opt, subcells.first().and_then(Cell::active_number)) {
-                series.points.push(DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: ds_idx, row });
+                series.points.push(DataPoint {
+                    x: vec![x],
+                    y,
+                    sd: None,
+                    n: None,
+                    explicit_weight: None,
+                    source_subcolumn: 0,
+                    data_set_index: ds_idx,
+                    row,
+                });
             }
         } else {
             let mut had_y = false;
-            for cell in subcells {
+            let multiple_replicates = matches!(xy.y_subcolumn_mode, curvebook_doc::SubcolumnMode::RawReplicates(k) if k > 1);
+            for (subcol, cell) in subcells.iter().enumerate() {
                 if let Some(y) = cell.active_number() {
                     had_y = true;
                     if let Some(x) = x_opt {
-                        series.points.push(DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: ds_idx, row });
+                        series.points.push(DataPoint {
+                            x: vec![x],
+                            y,
+                            sd: None,
+                            n: None,
+                            explicit_weight: None,
+                            source_subcolumn: subcol,
+                            data_set_index: ds_idx,
+                            row,
+                        });
                     } else if x_blank {
-                        series.unknowns_y.push((row, y));
+                        let response = if multiple_replicates {
+                            UnknownResponse::Replicate { row, subcol, value: y }
+                        } else {
+                            UnknownResponse::Single((row, y))
+                        };
+                        series.unknowns_y.push(response);
                     }
                 }
             }
@@ -413,14 +467,24 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                         sd: Some(pt.sd),
                         n: Some(pt.n),
                         explicit_weight: None,
+                        source_subcolumn: 0,
                         data_set_index: ds_idx,
                         row,
                     });
                 }
             } else {
-                for cell in subcells {
+                for (subcol, cell) in subcells.iter().enumerate() {
                     if let Some(y) = cell.active_number() {
-                        points.push(DataPoint { x: vec![x_val], y, sd: None, n: None, explicit_weight: None, data_set_index: ds_idx, row });
+                        points.push(DataPoint {
+                            x: vec![x_val],
+                            y,
+                            sd: None,
+                            n: None,
+                            explicit_weight: None,
+                            source_subcolumn: subcol,
+                            data_set_index: ds_idx,
+                            row,
+                        });
                     }
                 }
             }
@@ -481,7 +545,7 @@ fn pick_default_mv_numeric_col(mv: &curvebook_doc::MultipleVariablesTable, candi
     role_match
 }
 
-fn resolve_mv_columns(
+pub(crate) fn resolve_mv_columns(
     mv: &curvebook_doc::MultipleVariablesTable,
     selected_data_sets: &[usize],
     mv_spec: &MultivarExtractionSpec<'_>,
@@ -600,7 +664,16 @@ fn extract_from_multivar(
         if !all_groups {
             continue;
         }
-        grouped.entry(key_tokens).or_default().push(DataPoint { x: xs, y: y_val, sd: None, n: None, explicit_weight: None, data_set_index: 0, row });
+        grouped.entry(key_tokens).or_default().push(DataPoint {
+            x: xs,
+            y: y_val,
+            sd: None,
+            n: None,
+            explicit_weight: None,
+            source_subcolumn: 0,
+            data_set_index: 0,
+            row,
+        });
     }
 
     let level_ranks: Vec<HashMap<String, usize>> = group_cols

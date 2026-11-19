@@ -22,7 +22,16 @@ fn ds(idx: usize, xs: &[f64], ys: &[f64]) -> DatasetSeries {
             .iter()
             .zip(ys)
             .enumerate()
-            .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: idx, row })
+            .map(|(row, (&x, &y))| DataPoint {
+                x: vec![x],
+                y,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: idx,
+                row,
+            })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -315,7 +324,16 @@ fn r1_x2_02_mean_sd_sem_cv_n_match_raw_replicates_linear_and_nonlinear() {
         .zip(reps.iter())
         .enumerate()
         .flat_map(|(r, (&x, v))| {
-            v.iter().map(move |&y| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: r })
+            v.iter().map(move |&y| DataPoint {
+                x: vec![x],
+                y,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row: r,
+            })
         })
         .collect();
     let raw_pts_b: Vec<DataPoint> = raw_pts_a.iter().map(|p| DataPoint { y: p.y + 3.0, data_set_index: 1, ..p.clone() }).collect();
@@ -325,7 +343,7 @@ fn r1_x2_02_mean_sd_sem_cv_n_match_raw_replicates_linear_and_nonlinear() {
         .enumerate()
         .map(|(r, (&x, v))| {
             let (m, sd, n) = mean_sd_n(v);
-            DataPoint { x: vec![x], y: m, sd: Some(sd), n: Some(n), explicit_weight: None, data_set_index: 0, row: r }
+            DataPoint { x: vec![x], y: m, sd: Some(sd), n: Some(n), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: r }
         })
         .collect();
     let sum_pts_b: Vec<DataPoint> = sum_pts_a.iter().map(|p| DataPoint { y: p.y + 3.0, data_set_index: 1, ..p.clone() }).collect();
@@ -345,13 +363,13 @@ fn r1_x2_02_mean_sd_sem_cv_n_match_raw_replicates_linear_and_nonlinear() {
 
     // Hostile non-integer / invalid n rejects safely rather than panicking or silently wrapping.
     let bad_n = vec![
-        DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1.5), explicit_weight: None, data_set_index: 0, row: 0 },
-        DataPoint { x: vec![2.0], y: 4.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+        DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1.5), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+        DataPoint { x: vec![2.0], y: 4.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
     ];
     assert!(simple_linear_regression(&bad_n, &SimpleLinearOptions::default()).is_err());
     let bad_sd = vec![
-        DataPoint { x: vec![1.0], y: 2.0, sd: Some(-0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 0 },
-        DataPoint { x: vec![2.0], y: 4.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+        DataPoint { x: vec![1.0], y: 2.0, sd: Some(-0.5), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+        DataPoint { x: vec![2.0], y: 4.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
     ];
     assert!(simple_linear_regression(&bad_sd, &SimpleLinearOptions::default()).is_err());
 }

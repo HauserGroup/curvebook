@@ -3,7 +3,7 @@
 use curvebook_chart::{ScenePrimitive, compile_graph};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CiBound, DataSheet, FitMethod, GraphSheet, ModelComparisonSpec, NonlinearFitSpec, ProjectDocument,
-    RegressionOverlaySpec, ResultCell, SheetId, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
+    RegressionOverlaySpec, ResultCell, SheetId, SourceCellId, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
 use curvebook_engine::{CommandOutcome, Session};
 use curvebook_fit::{
@@ -65,7 +65,7 @@ fn r45_versioned_serde_roundtrip_and_legacy_compatibility() {
         data_set_index: 0,
         label: "Dose".to_owned(),
         points: xs.iter().zip(ys.iter()).enumerate().map(|(row, (&x, &y))| DataPoint { row, ..DataPoint::xy(x, y) }).collect(),
-        unknowns_y: vec![(11, 55.0)],
+        unknowns_y: vec![(11, 55.0).into()],
         unknowns_x: vec![(12, -6.5)],
         is_pre_summarized: false,
         column_title_value: None,
@@ -289,4 +289,66 @@ fn r45_chart_xy_suppresses_robust_bands_even_on_tampered_overlay_and_keeps_rout_
     let filled_ribbons = scene_rout_on.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Path { fill: Some(_), stroke: None, .. })).count();
     let baseline_ribbons = scene_rout_off.primitives.iter().filter(|p| matches!(p, ScenePrimitive::Path { fill: Some(_), stroke: None, .. })).count();
     assert!(filled_ribbons >= baseline_ribbons + 2, "ROUT Stage 2 must draw CI and prediction ribbons");
+}
+
+#[test]
+fn rout_overlay_marks_the_exact_raw_replicate_and_follows_recalculation() {
+    let mut session = Session::new();
+    let sheet_id = SheetId::new("replicated");
+    exec_ok(
+        &mut session,
+        "sheet.createData",
+        json!({
+            "sheet_id": sheet_id, "title": "Replicated calibration", "archetype": "xy",
+            "rows": 10, "cols": 1, "replicates": 3, "auto_graph": false
+        }),
+    );
+    let mut x_cells = Vec::new();
+    let mut y_cells = Vec::new();
+    let injected_row = 5;
+    for row in 0..10 {
+        let x = f64::from(row);
+        let baseline = 3.0 + 2.0 * x;
+        x_cells.push(json!({"row": row, "value": x}));
+        y_cells.push(json!({"row": row, "col": 0, "subcol": 0, "value": baseline - 0.2}));
+        let y = baseline + if row == injected_row { 50.0 } else { 0.2 };
+        y_cells.push(json!({"row": row, "col": 0, "subcol": 2, "value": y}));
+    }
+    exec_ok(&mut session, "table.setXCells", json!({"sheet_id": sheet_id, "cells": x_cells}));
+    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "cells": y_cells}));
+    let result_id = SheetId::new("replicated-fit");
+    exec_ok(&mut session, "fit.run", json!({"sheet_id": result_id, "source_sheet_id": sheet_id, "equation_id": "straight_line", "method": "rout"}));
+    let source = SourceCellId { sheet_id: sheet_id.clone(), row: 5, col: 0, subcol: 2 };
+    let result = session.document().result_sheet(&result_id).unwrap();
+    assert_eq!(result.eliminated_outliers.as_slice(), std::slice::from_ref(&source));
+
+    let sheet = session.document().data_sheet(&sheet_id).unwrap();
+    let TableArchetype::Xy(xy) = &sheet.archetype else { panic!("expected XY data") };
+    assert_eq!(xy.data_sets[0].cells[5][2].active_number(), Some(63.0));
+    let mut graph = GraphSheet::new_uninitialized_for_data("rout-graph", sheet).unwrap();
+    let baseline = compile_graph(&graph, session.document()).unwrap();
+    assert!(baseline.plotted_points.iter().all(|pt| !pt.value_summary.starts_with("ROUT outlier")));
+    graph.spec.series[0].regression_overlay = Some(RegressionOverlaySpec {
+        result_sheet_id: result_id.clone(),
+        sample_segments: 64,
+        show_confidence_band: false,
+        show_prediction_band: false,
+        shaded_ribbon: false,
+    });
+
+    let scene = compile_graph(&graph, session.document()).unwrap();
+    let outliers: Vec<_> = scene.plotted_points.iter().filter(|pt| pt.value_summary.starts_with("ROUT outlier")).collect();
+    assert_eq!(outliers.len(), 1);
+    let outlier = outliers[0];
+    assert_eq!(outlier.source_cell, source);
+    assert_eq!(scene.hit_test_point(outlier.center_pt, 0.0), Some(outlier));
+    assert!(scene.primitives.iter().any(|p| matches!(
+        p,
+        ScenePrimitive::Path { fill: None, stroke: Some(stroke), clip: Some(_), .. } if (stroke.width_pt - 1.5).abs() < 1e-12
+    )));
+
+    exec_ok(&mut session, "table.setCells", json!({"sheet_id": sheet_id, "cells": [{"row": injected_row, "col": 0, "subcol": 2, "value": 13.2}]}));
+    assert!(session.document().result_sheet(&result_id).unwrap().eliminated_outliers.is_empty());
+    let refreshed = compile_graph(&graph, session.document()).unwrap();
+    assert!(refreshed.plotted_points.iter().all(|pt| !pt.value_summary.starts_with("ROUT outlier")));
 }

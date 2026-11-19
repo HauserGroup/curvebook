@@ -242,3 +242,16 @@ fn parse_single_hook_token(token: &str) -> Option<HookSource> {
         _ => None,
     }
 }
+
+/// Coordinate provenance pointing back to the originating data sheet cell.
+#[derive(Debug, Clone, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
+pub struct SourceCellId {
+    /// Originating table.
+    pub sheet_id: SheetId,
+    /// Zero-based row.
+    pub row: usize,
+    /// Zero-based dataset or table column.
+    pub col: usize,
+    /// Zero-based replicate subcolumn within that column.
+    pub subcol: usize,
+}

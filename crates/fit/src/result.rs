@@ -16,7 +16,7 @@ use std::collections::HashSet;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
-    NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind,
+    NonlinearFitSpec, ResultCell, ResultScalarEntry, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SourceCellId, TableArchetype,
 };
 use curvebook_math::PValueFormat;
 use curvebook_math::dist::norm_ppf;
@@ -29,7 +29,9 @@ use crate::linear::{
     DemingOptions, SimpleLinearOptions, SimpleLinearResult, compare_linear_lines, deming_regression, fit_linear_points, linear_grid,
     prepare_linear_points, resolve_linear_grid_bounds,
 };
-use crate::solver::{ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles};
+use crate::solver::{
+    InterpolatedUnknown, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models_checked, fit_nonlinear, ordered_nested_roles,
+};
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
     filter_datasets_by_range,
@@ -104,7 +106,7 @@ pub fn execute_linear_analysis(spec: &AnalysisSpec, lin_spec: &LinearRegressionS
     for (ds, n_excluded) in datasets.iter().zip(excluded) {
         let mut opts = options.clone();
         if lin_spec.interpolate_unknowns {
-            opts.unknown_y_values = ds.unknowns_y.iter().map(|&(_, y)| y).collect();
+            opts.unknown_y_values = ds.unknowns_y.iter().map(|value| value.value()).collect();
             opts.unknown_x_values = ds.unknowns_x.iter().map(|&(_, x)| x).collect();
         }
         let mut fit = fit_linear_points(&ds.points, &opts, n_excluded)?;
@@ -430,6 +432,23 @@ pub fn execute_nonlinear_analysis(
 
     let fit = fit_nonlinear(model.as_ref(), &datasets, hooks, &config)?;
     populate_nonlinear_result_sheet(&mut result, &fit, nl_spec, spec.p_value_format);
+    if let Some(rout) = &fit.rout {
+        let response_column = match &sheet.archetype {
+            TableArchetype::MultipleVariables(mv) => Some(crate::types::resolve_mv_columns(mv, &spec.selected_data_sets, &mv_spec)?.1),
+            _ => None,
+        };
+        result.eliminated_outliers = rout
+            .audit
+            .iter()
+            .filter(|point| point.is_outlier)
+            .map(|point| SourceCellId {
+                sheet_id: sheet.id.clone(),
+                row: point.row,
+                col: response_column.unwrap_or(point.data_set_index),
+                subcol: point.source_subcolumn,
+            })
+            .collect();
+    }
 
     if let Some(comp_spec) = &nl_spec.comparison {
         let alt_id = match comp_spec {
@@ -1056,41 +1075,83 @@ fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitR
 }
 
 fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFitResult) {
-    if fit.interpolated_x.is_empty() && fit.interpolated_y.is_empty() {
-        return;
-    }
-    let total = fit.interpolated_x.len() + fit.interpolated_y.len();
-    let mut interp_rows = Vec::with_capacity(total);
-    let mut interp_labels = Vec::with_capacity(total);
+    let inverse = || fit.interpolated_x.iter().map(|item| (item, "X from Y"));
+    append_interpolated_tab(
+        result,
+        fit,
+        "nonlinear_interpolated",
+        "Interpolated unknowns",
+        inverse()
+            .filter(|(item, _)| item.replicate_subcolumn.is_none() && item.replicate_mean_count.is_none())
+            .chain(fit.interpolated_y.iter().map(|item| (item, "Y from X"))),
+    );
+    append_interpolated_tab(
+        result,
+        fit,
+        "nonlinear_interpolated_mean_x",
+        "Interpolated Mean X",
+        inverse().filter(|(item, _)| item.replicate_mean_count.is_some()),
+    );
+    append_interpolated_tab(
+        result,
+        fit,
+        "nonlinear_interpolated_replicates",
+        "Interpolated Replicates",
+        inverse().filter(|(item, _)| item.replicate_subcolumn.is_some()),
+    );
+}
+
+fn append_interpolated_tab<'a>(
+    result: &mut ResultSheet,
+    fit: &NonlinearFitResult,
+    id: &str,
+    title: &str,
+    rows: impl Iterator<Item = (&'a InterpolatedUnknown, &'static str)>,
+) {
+    let mut interp_rows = Vec::new();
+    let mut interp_labels = Vec::new();
     let mut footnotes = Vec::new();
 
     let mut has_robust_ci_suppression = false;
-    for (items, direction) in [(&fit.interpolated_x, "X from Y"), (&fit.interpolated_y, "Y from X")] {
-        for item in items {
-            let lbl = fit
-                .datasets
-                .iter()
-                .find(|d| d.data_set_index == item.data_set_index)
-                .map_or_else(|| format!("DS{}", item.data_set_index + 1), |d| d.label.clone());
-            interp_labels.push(format!("{lbl} ({direction}={:.4})", item.input_value));
-            let suppress_ci = fit.is_robust_cauchy() || !item.inference_availability.is_available();
-            if suppress_ci {
-                has_robust_ci_suppression = true;
-            }
-            let ci_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.ci_lower, item.ci_upper) };
-            let pred_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.pred_lower, item.pred_upper) };
-            interp_rows.push(vec![
-                num_cell(item.input_value),
-                num_cell(item.output_estimate),
-                ci_rendered,
-                pred_rendered,
-                ResultCell::Text(direction.to_owned()),
-                ResultCell::Text(lbl.clone()),
-            ]);
-            if let Some(note) = &item.note {
-                footnotes.push(format!("{lbl} (row {}, {direction}): {note}", item.row + 1));
-            }
+    for (item, direction) in rows {
+        let lbl = fit
+            .datasets
+            .iter()
+            .find(|d| d.data_set_index == item.data_set_index)
+            .map_or_else(|| format!("DS{}", item.data_set_index + 1), |d| d.label.clone());
+        let source = if let Some(subcol) = item.replicate_subcolumn {
+            format!("row {}, replicate {}", item.row + 1, subcol + 1)
+        } else if let Some(count) = item.replicate_mean_count {
+            format!("row {}, mean of {count}", item.row + 1)
+        } else {
+            format!("{direction}={:.4}", item.input_value)
+        };
+        interp_labels.push(format!("{lbl} ({source})"));
+        let suppress_ci = fit.is_robust_cauchy() || !item.inference_availability.is_available();
+        if suppress_ci {
+            has_robust_ci_suppression = true;
         }
+        let ci_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.ci_lower, item.ci_upper) };
+        let pred_rendered = if suppress_ci { ResultCell::Text("Not applicable".to_owned()) } else { ci_cell(item.pred_lower, item.pred_upper) };
+        interp_rows.push(vec![
+            num_cell(item.input_value),
+            num_cell(item.output_estimate),
+            ci_rendered,
+            pred_rendered,
+            ResultCell::Text(direction.to_owned()),
+            ResultCell::Text(lbl.clone()),
+        ]);
+        if let Some(note) = &item.note {
+            let source = if item.replicate_subcolumn.is_some() || item.replicate_mean_count.is_some() {
+                source
+            } else {
+                format!("row {}, {direction}", item.row + 1)
+            };
+            footnotes.push(format!("{lbl} ({source}): {note}"));
+        }
+    }
+    if interp_rows.is_empty() {
+        return;
     }
     if has_robust_ci_suppression {
         footnotes.push(
@@ -1100,8 +1161,8 @@ fn append_nonlinear_interpolated_tab(result: &mut ResultSheet, fit: &NonlinearFi
     }
 
     result.tabs.push(ResultTab {
-        id: "nonlinear_interpolated".to_owned(),
-        title: "Interpolated unknowns".to_owned(),
+        id: id.to_owned(),
+        title: title.to_owned(),
         kind: ResultTabKind::InterpolatedUnknowns,
         column_headers: vec![
             "Input".to_owned(),
@@ -1525,6 +1586,49 @@ mod tests {
             let bracketed = execute_analysis(&make_spec(nl), &sheet, &HookContext::default()).unwrap();
             assert!(bracketed.checklist.iter().all(|c| !c.assumption.contains("outside observed X range")));
         }
+    }
+
+    #[test]
+    fn replicated_unknowns_use_mean_response_and_keep_actual_subcolumns() {
+        let xy = XyTable::new(SubcolumnMode::RawReplicates(4), 1, 6).unwrap();
+        let mut sheet = DataSheet::new("xy", "Standard Curve", TableArchetype::Xy(xy)).unwrap();
+        for row in 0..5 {
+            let x = row as f64;
+            sheet.set_x_or_time_cell(row, 0, Cell::number(x)).unwrap();
+            sheet.set_cell(CellCoord::new(row, 0, 0), Cell::number(3.0 + 2.0 * x - 0.25)).unwrap();
+            sheet.set_cell(CellCoord::new(row, 0, 2), Cell::number(3.0 + 2.0 * x + 0.25)).unwrap();
+        }
+        sheet.set_cell(CellCoord::new(5, 0, 0), Cell::number(6.0)).unwrap();
+        sheet.set_cell(CellCoord::new(5, 0, 2), Cell::number(8.0)).unwrap();
+        let mut excluded = Cell::number(1000.0);
+        excluded.excluded = true;
+        sheet.set_cell(CellCoord::new(5, 0, 3), excluded).unwrap();
+
+        let mut nl = NonlinearFitSpec::new("straight_line");
+        nl.interpolate_unknowns = true;
+        nl.profile_likelihood_ci = false;
+        let spec = AnalysisSpec::new("fit", "xy", AnalysisKind::NonlinearRegression(nl)).unwrap();
+        let result = execute_analysis(&spec, &sheet, &HookContext::default()).unwrap();
+        let mean = result.tabs.iter().find(|t| t.title == "Interpolated Mean X").unwrap();
+        let reps = result.tabs.iter().find(|t| t.title == "Interpolated Replicates").unwrap();
+        assert_eq!(mean.rows.len(), 1);
+        assert_eq!(reps.rows.len(), 2);
+        assert!(reps.row_labels[0].ends_with("replicate 1)"));
+        assert!(reps.row_labels[1].ends_with("replicate 3)"));
+        assert_num_cell_approx(&mean.rows[0][0], 7.0, 1e-12, "mean response");
+        assert_num_cell_approx(&mean.rows[0][1], 2.0, 1e-9, "inverse of mean response");
+        assert_num_cell_approx(&reps.rows[0][1], 1.5, 1e-9, "inverse replicate 1");
+        assert_num_cell_approx(&reps.rows[1][1], 2.5, 1e-9, "inverse replicate 3");
+
+        // NIST/SEMATECH e-Handbook 4.5.2.1 and Seber & Lee (2003), §6.1.3.
+        // For mean Y = ybar, invert the prediction band analytically:
+        // (b² - t²s²/Sxx)(X - xbar)² = t²s²(1/m + 1/n).
+        let t_squared_s_squared = 2.306_004_135_204_166_f64.powi(2) * (0.625 / 8.0);
+        let half = (t_squared_s_squared * (1.0 / 2.0 + 1.0 / 10.0) / (4.0 - t_squared_s_squared / 20.0)).sqrt();
+        let ResultCell::ConfidenceInterval { lower: CiBound::Finite(lower), upper: CiBound::Finite(upper) } = mean.rows[0][3] else {
+            panic!("expected finite inverse prediction interval for mean response");
+        };
+        assert!((lower - (2.0 - half)).abs() < 1e-7 && (upper - (2.0 + half)).abs() < 1e-7);
     }
 
     #[test]
