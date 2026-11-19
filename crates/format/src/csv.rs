@@ -148,11 +148,22 @@ enum CsvState {
 ///
 /// Strips optional UTF-8 BOM, handles `\r\n` / `\n` / `\r`, quoted delimiters/newlines, and
 /// doubled quote escapes (`""`).
-pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec<String>>, FormatError> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ParsedCsvField {
+    text: String,
+    quoted: bool,
+}
+
+fn csv_default_limits(input: &str) -> (usize, usize) {
     let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
     let slot_bytes = std::mem::size_of::<String>().max(1);
     let max_fields_by_bytes = input.len().saturating_mul(4).max(12 * 1024 * 1024) / slot_bytes;
     let max_fields = MAX_IMPORT_CELLS.saturating_add(65_536).min(max_fields_by_bytes);
+    (max_cols, max_fields)
+}
+
+pub fn parse_delimited_records(input: &str, opts: &CsvOptions) -> Result<Vec<Vec<String>>, FormatError> {
+    let (max_cols, max_fields) = csv_default_limits(input);
     parse_delimited_records_with_limits(input, opts, max_cols, max_fields)
 }
 
@@ -162,14 +173,25 @@ pub(crate) fn parse_delimited_records_with_limits(
     max_cols: usize,
     max_fields: usize,
 ) -> Result<Vec<Vec<String>>, FormatError> {
+    let rows = parse_delimited_records_with_quotes_and_limits(input, opts, max_cols, max_fields)?;
+    Ok(rows.into_iter().map(|r| r.into_iter().map(|f| f.text).collect()).collect())
+}
+
+fn parse_delimited_records_with_quotes_and_limits(
+    input: &str,
+    opts: &CsvOptions,
+    max_cols: usize,
+    max_fields: usize,
+) -> Result<Vec<Vec<ParsedCsvField>>, FormatError> {
     let text = input.strip_prefix('\u{FEFF}').unwrap_or(input);
     if text.is_empty() {
         return Ok(Vec::new());
     }
 
-    let mut records: Vec<Vec<String>> = Vec::new();
-    let mut current_row: Vec<String> = Vec::new();
+    let mut records: Vec<Vec<ParsedCsvField>> = Vec::new();
+    let mut current_row: Vec<ParsedCsvField> = Vec::new();
     let mut field = String::new();
+    let mut field_quoted = false;
     let mut state = CsvState::FieldStart;
     let mut line_no = 1_usize;
     let mut total_fields = 0_usize;
@@ -179,15 +201,16 @@ pub(crate) fn parse_delimited_records_with_limits(
         match state {
             CsvState::FieldStart => {
                 if ch == opts.quote_char {
+                    field_quoted = true;
                     state = CsvState::Quoted;
                 } else if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -198,13 +221,13 @@ pub(crate) fn parse_delimited_records_with_limits(
             }
             CsvState::Unquoted => {
                 if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -231,13 +254,13 @@ pub(crate) fn parse_delimited_records_with_limits(
             }
             CsvState::AfterQuote => {
                 if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     state = CsvState::FieldStart;
                 } else if ch == '\r' || ch == '\n' {
                     if ch == '\r' && chars.peek() == Some(&'\n') {
                         let _ = chars.next();
                     }
-                    push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                     push_record(&mut records, &mut current_row, line_no)?;
                     line_no += 1;
                     state = CsvState::FieldStart;
@@ -254,12 +277,12 @@ pub(crate) fn parse_delimited_records_with_limits(
         }
         CsvState::FieldStart => {
             if !current_row.is_empty() || !field.is_empty() {
-                push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+                push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
                 push_record(&mut records, &mut current_row, line_no)?;
             }
         }
         CsvState::Unquoted | CsvState::AfterQuote => {
-            push_field(&mut current_row, &mut field, max_cols, &mut total_fields, max_fields, line_no)?;
+            push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
             push_record(&mut records, &mut current_row, line_no)?;
         }
     }
@@ -268,8 +291,9 @@ pub(crate) fn parse_delimited_records_with_limits(
 }
 
 fn push_field(
-    row: &mut Vec<String>,
+    row: &mut Vec<ParsedCsvField>,
     field: &mut String,
+    field_quoted: &mut bool,
     max_cols: usize,
     total_fields: &mut usize,
     max_fields: usize,
@@ -283,11 +307,11 @@ fn push_field(
         return Err(FormatError::CsvParse { line: line_no, reason: format!("delimited field count exceeds limit {max_fields}") });
     }
     *total_fields = next_total;
-    row.push(std::mem::take(field));
+    row.push(ParsedCsvField { text: std::mem::take(field), quoted: std::mem::replace(field_quoted, false) });
     Ok(())
 }
 
-fn push_record(records: &mut Vec<Vec<String>>, row: &mut Vec<String>, line_no: usize) -> Result<(), FormatError> {
+fn push_record(records: &mut Vec<Vec<ParsedCsvField>>, row: &mut Vec<ParsedCsvField>, line_no: usize) -> Result<(), FormatError> {
     if records.len() >= MAX_ROWS + 16 {
         return Err(FormatError::CsvParse { line: line_no, reason: format!("row count exceeds maximum {MAX_ROWS}") });
     }
@@ -379,6 +403,46 @@ pub fn format_cell_token(cell: &Cell, opts: &CsvOptions) -> String {
     out
 }
 
+fn parse_csv_field_cell(field: &ParsedCsvField, opts: &CsvOptions) -> Cell {
+    if field.quoted { Cell::text(field.text.clone()) } else { parse_cell_token(&field.text, opts) }
+}
+
+/// Neutralize spreadsheet formula-injection prefixes (`=`, `+`, `-`, `@`, `\t`, `\r`) on text
+/// exported into CSV/TSV cells and labels while leaving finite numbers untouched.
+pub(crate) fn neutralize_csv_formula_text(raw: &str) -> String {
+    if raw.starts_with(['=', '+', '-', '@', '\t', '\r']) {
+        let mut out = String::with_capacity(raw.len() + 1);
+        out.push('\'');
+        out.push_str(raw);
+        out
+    } else {
+        raw.to_owned()
+    }
+}
+
+fn is_ambiguous_csv_text(safe: &str, opts: &CsvOptions) -> bool {
+    if safe.is_empty() || safe != safe.trim() || safe.starts_with('*') || safe.ends_with('*') {
+        return true;
+    }
+    if is_missing_sentinel(safe, &default_missing_sentinels()) {
+        return true;
+    }
+    parse_cell_token(safe, opts) != Cell::text(safe.to_owned())
+}
+
+fn quote_csv_field(field: &str, quote_char: char) -> String {
+    let mut out = String::with_capacity(field.len() + 2);
+    out.push(quote_char);
+    for ch in field.chars() {
+        if ch == quote_char {
+            out.push(quote_char);
+        }
+        out.push(ch);
+    }
+    out.push(quote_char);
+    out
+}
+
 /// Escape and quote a single CSV/TSV field per RFC-4180.
 #[must_use]
 pub fn format_csv_field(field: &str, opts: &CsvOptions) -> String {
@@ -386,16 +450,56 @@ pub fn format_csv_field(field: &str, opts: &CsvOptions) -> String {
     if !needs_quotes {
         return field.to_owned();
     }
-    let mut out = String::with_capacity(field.len() + 2);
-    out.push(opts.quote_char);
-    for ch in field.chars() {
-        if ch == opts.quote_char {
-            out.push(opts.quote_char);
-        }
-        out.push(ch);
+    quote_csv_field(field, opts.quote_char)
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CsvExportField {
+    text: String,
+    force_quote: bool,
+}
+
+impl CsvExportField {
+    fn unquoted(text: String) -> Self {
+        Self { text, force_quote: false }
     }
-    out.push(opts.quote_char);
-    out
+
+    fn label(raw: &str) -> Self {
+        let safe = neutralize_csv_formula_text(raw);
+        let force_quote = safe != safe.trim();
+        Self { text: safe, force_quote }
+    }
+
+    fn header(raw: &str) -> Self {
+        Self::label(raw)
+    }
+
+    fn header_with_suffix(raw_base: &str, suffix: &str) -> Self {
+        let safe_base = neutralize_csv_formula_text(raw_base);
+        let force_quote = safe_base != safe_base.trim();
+        Self { text: format!("{safe_base}:{suffix}"), force_quote }
+    }
+
+    fn cell(cell: &Cell, opts: &CsvOptions) -> Self {
+        match &cell.value {
+            CellValue::Empty | CellValue::Number(_) => Self::unquoted(format_cell_token(cell, opts)),
+            CellValue::Text(raw) => {
+                let safe = neutralize_csv_formula_text(raw);
+                if cell.excluded && opts.parse_asterisk_exclusions {
+                    let mut text = safe;
+                    text.push('*');
+                    Self::unquoted(text)
+                } else {
+                    let force_quote = is_ambiguous_csv_text(&safe, opts);
+                    Self { text: safe, force_quote }
+                }
+            }
+        }
+    }
+
+    fn format(&self, opts: &CsvOptions) -> String {
+        if self.force_quote { quote_csv_field(&self.text, opts.quote_char) } else { format_csv_field(&self.text, opts) }
+    }
 }
 
 /// Serialize string rows into RFC-4180 delimited text (`\n` line endings).
@@ -411,6 +515,22 @@ pub fn write_delimited_records(rows: &[Vec<String>], opts: &CsvOptions) -> Strin
                 out.push(opts.delimiter);
             }
             out.push_str(&format_csv_field(field, opts));
+        }
+    }
+    out
+}
+
+fn write_export_records(rows: &[Vec<CsvExportField>], opts: &CsvOptions) -> String {
+    let mut out = String::new();
+    for (r_idx, row) in rows.iter().enumerate() {
+        if r_idx > 0 {
+            out.push('\n');
+        }
+        for (c_idx, field) in row.iter().enumerate() {
+            if c_idx > 0 {
+                out.push(opts.delimiter);
+            }
+            out.push_str(&field.format(opts));
         }
     }
     out
@@ -453,34 +573,32 @@ pub fn export_datasheet_to_csv(sheet: &DataSheet, opts: &CsvOptions) -> Result<S
         TableArchetype::MultipleVariables(t) => export_multivar_rows(t, opts),
         TableArchetype::Nested(t) => export_nested_rows(t, opts),
     };
-    Ok(write_delimited_records(&rows, opts))
+    Ok(write_export_records(&rows, opts))
 }
 
-fn export_xy_rows(t: &XyTable, opts: &CsvOptions) -> Vec<Vec<String>> {
+fn export_xy_rows(t: &XyTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     let include_row_titles = t.row_titles_expanded || t.row_titles.iter().any(|s| !s.is_empty());
     let mut header = Vec::new();
     if include_row_titles {
-        header.push(String::from("Row Title"));
+        header.push(CsvExportField::header("Row Title"));
     }
     let x_subs = t.x_mode.subcolumn_count();
     for s in 0..x_subs {
-        header.push(if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) });
+        let raw = if s == 0 { t.x_title.clone() } else { format!("{}:{}", t.x_title, s + 1) };
+        header.push(CsvExportField::header(&raw));
     }
     push_dataset_headers(&mut header, &t.data_sets, t.y_subcolumn_mode);
     let mut rows = vec![header];
     for r in 0..t.row_count() {
         let mut row = Vec::new();
         if include_row_titles {
-            row.push(t.row_titles.get(r).cloned().unwrap_or_default());
+            row.push(CsvExportField::label(t.row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
         for s in 0..x_subs {
-            let token = t
-                .x_cells
-                .get(r)
-                .and_then(|subs| subs.get(s))
-                .map(|c| format_cell_token(c, opts))
-                .unwrap_or_else(|| t.x_value_at(r).map_or_else(String::new, |v| format_cell_token(&Cell::number(v), opts)));
-            row.push(token);
+            let field = t.x_cells.get(r).and_then(|subs| subs.get(s)).map(|c| CsvExportField::cell(c, opts)).unwrap_or_else(|| {
+                t.x_value_at(r).map_or_else(|| CsvExportField::unquoted(String::new()), |v| CsvExportField::cell(&Cell::number(v), opts))
+            });
+            row.push(field);
         }
         push_dataset_row(&mut row, &t.data_sets, r, opts);
         rows.push(row);
@@ -496,17 +614,17 @@ fn export_dataset_table_rows(
     mode: SubcolumnMode,
     row_count: usize,
     opts: &CsvOptions,
-) -> Vec<Vec<String>> {
+) -> Vec<Vec<CsvExportField>> {
     let mut header = Vec::new();
     if include_row_titles {
-        header.push(row_title_header.to_owned());
+        header.push(CsvExportField::header(row_title_header));
     }
     push_dataset_headers(&mut header, data_sets, mode);
     let mut rows = vec![header];
     for r in 0..row_count {
         let mut row = Vec::new();
         if include_row_titles {
-            row.push(row_titles.get(r).cloned().unwrap_or_default());
+            row.push(CsvExportField::label(row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
         push_dataset_row(&mut row, data_sets, r, opts);
         rows.push(row);
@@ -514,85 +632,85 @@ fn export_dataset_table_rows(
     rows
 }
 
-fn export_survival_rows(t: &SurvivalTable, opts: &CsvOptions) -> Vec<Vec<String>> {
+fn export_survival_rows(t: &SurvivalTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     let include_row_titles = t.row_titles_expanded || t.row_titles.iter().any(|s| !s.is_empty());
     let mut header = Vec::new();
     if include_row_titles {
-        header.push(String::from("Row Title"));
+        header.push(CsvExportField::header("Row Title"));
     }
-    header.push(t.time_title.clone());
+    header.push(CsvExportField::header(&t.time_title));
     push_dataset_headers(&mut header, &t.cohorts, SubcolumnMode::Single);
     let mut rows = vec![header];
     for r in 0..t.row_count() {
         let mut row = Vec::new();
         if include_row_titles {
-            row.push(t.row_titles.get(r).cloned().unwrap_or_default());
+            row.push(CsvExportField::label(t.row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
         let t_cell = t.times.get(r).cloned().unwrap_or_default();
-        row.push(format_cell_token(&t_cell, opts));
+        row.push(CsvExportField::cell(&t_cell, opts));
         push_dataset_row(&mut row, &t.cohorts, r, opts);
         rows.push(row);
     }
     rows
 }
 
-fn export_parts_of_whole_rows(t: &PartsOfWholeTable, opts: &CsvOptions) -> Vec<Vec<String>> {
-    let mut header = vec![String::from("Slice")];
+fn export_parts_of_whole_rows(t: &PartsOfWholeTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
+    let mut header = vec![CsvExportField::header("Slice")];
     push_dataset_headers(&mut header, &t.data_sets, SubcolumnMode::Single);
     let mut rows = vec![header];
     for r in 0..t.row_count() {
-        let mut row = vec![t.slice_labels.get(r).cloned().unwrap_or_default()];
+        let mut row = vec![CsvExportField::label(t.slice_labels.get(r).map(String::as_str).unwrap_or(""))];
         push_dataset_row(&mut row, &t.data_sets, r, opts);
         rows.push(row);
     }
     rows
 }
 
-fn export_multivar_rows(t: &MultipleVariablesTable, opts: &CsvOptions) -> Vec<Vec<String>> {
+fn export_multivar_rows(t: &MultipleVariablesTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     let include_row_titles = t.row_titles_expanded || t.row_titles.iter().any(|s| !s.is_empty());
     let mut header = Vec::new();
     if include_row_titles {
-        header.push(String::from("Row Title"));
+        header.push(CsvExportField::header("Row Title"));
     }
     for var in &t.variables {
-        header.push(var.title.clone());
+        header.push(CsvExportField::header(&var.title));
     }
     let mut rows = vec![header];
     for r in 0..t.row_count() {
         let mut row = Vec::new();
         if include_row_titles {
-            row.push(t.row_titles.get(r).cloned().unwrap_or_default());
+            row.push(CsvExportField::label(t.row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
         for var in &t.variables {
             let cell = var.cells.get(r).cloned().unwrap_or_default();
-            row.push(format_cell_token(&cell, opts));
+            row.push(CsvExportField::cell(&cell, opts));
         }
         rows.push(row);
     }
     rows
 }
 
-fn export_nested_rows(t: &NestedTable, opts: &CsvOptions) -> Vec<Vec<String>> {
+fn export_nested_rows(t: &NestedTable, opts: &CsvOptions) -> Vec<Vec<CsvExportField>> {
     let include_row_titles = t.row_titles_expanded || t.row_titles.iter().any(|s| !s.is_empty());
     let mut header = Vec::new();
     if include_row_titles {
-        header.push(String::from("Row Title"));
+        header.push(CsvExportField::header("Row Title"));
     }
     for g in &t.groups {
         for sub_title in &g.subcolumn_titles {
-            header.push(sub_title.clone());
+            header.push(CsvExportField::header(sub_title));
         }
     }
     let mut rows = vec![header];
     for r in 0..t.row_count() {
         let mut row = Vec::new();
         if include_row_titles {
-            row.push(t.row_titles.get(r).cloned().unwrap_or_default());
+            row.push(CsvExportField::label(t.row_titles.get(r).map(String::as_str).unwrap_or("")));
         }
         for g in &t.groups {
             for s in 0..g.biological_unit_count() {
                 let cell = g.cells.get(r).and_then(|subs| subs.get(s)).cloned().unwrap_or_default();
-                row.push(format_cell_token(&cell, opts));
+                row.push(CsvExportField::cell(&cell, opts));
             }
         }
         rows.push(row);
@@ -600,27 +718,27 @@ fn export_nested_rows(t: &NestedTable, opts: &CsvOptions) -> Vec<Vec<String>> {
     rows
 }
 
-fn push_dataset_headers(header: &mut Vec<String>, data_sets: &[DataSetColumn], mode: SubcolumnMode) {
+fn push_dataset_headers(header: &mut Vec<CsvExportField>, data_sets: &[DataSetColumn], mode: SubcolumnMode) {
     let sub_labels = mode.subcolumn_labels();
     let subs = mode.subcolumn_count();
     for ds in data_sets {
         if subs <= 1 {
-            header.push(ds.title.clone());
+            header.push(CsvExportField::header(&ds.title));
         } else {
             for idx in 0..subs {
                 let suffix = sub_labels.get(idx).map(String::as_str).unwrap_or("Y");
-                header.push(format!("{}:{suffix}", ds.title));
+                header.push(CsvExportField::header_with_suffix(&ds.title, suffix));
             }
         }
     }
 }
 
-fn push_dataset_row(row: &mut Vec<String>, data_sets: &[DataSetColumn], r: usize, opts: &CsvOptions) {
+fn push_dataset_row(row: &mut Vec<CsvExportField>, data_sets: &[DataSetColumn], r: usize, opts: &CsvOptions) {
     for ds in data_sets {
         let subs = ds.subcolumn_count();
         for s in 0..subs {
             let cell = ds.cell(r, s).cloned().unwrap_or_default();
-            row.push(format_cell_token(&cell, opts));
+            row.push(CsvExportField::cell(&cell, opts));
         }
     }
 }
@@ -663,7 +781,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
     let max_cols = prefix_cols.saturating_add(data_col_limit);
     let header_slack = opts.header_rows.saturating_mul(max_cols).min(65_536);
     let max_fields = max_cells.saturating_add(max_cells.min(MAX_ROWS).saturating_mul(prefix_cols)).saturating_add(header_slack).max(4_096);
-    let records = parse_delimited_records_with_limits(input, opts, max_cols, max_fields)?;
+    let records = parse_delimited_records_with_quotes_and_limits(input, opts, max_cols, max_fields)?;
 
     let header_count = opts.header_rows.min(records.len());
     let headers = if header_count > 0 { records[header_count - 1].clone() } else { Vec::new() };
@@ -678,7 +796,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
 
     let arch = match target_kind {
         TableKind::Xy => {
-            let x_title = headers.get(col_offset).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| String::from("X"));
+            let x_title_field = headers.get(col_offset).filter(|f| !f.text.trim().is_empty());
             let x_col_idx = col_offset;
             if raw_col_count > col_offset {
                 col_offset += 1;
@@ -689,12 +807,15 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             validate_data_sets(ds_count)?;
             validate_csv_cell_budget(row_count, ds_count, subs, 1, err_line, max_cells)?;
             let mut xy = XyTable::new(subcolumn_mode, ds_count, row_count)?;
-            xy.x_title = sanitize_title(&x_title)?;
+            xy.x_title = match x_title_field {
+                Some(f) => header_field_title(f)?,
+                None => String::from("X"),
+            };
             assign_row_titles(&mut xy.row_titles, data_rows, has_row_titles);
             xy.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
                 if let Some(tok) = rec.get(x_col_idx) {
-                    xy.set_x_cell(r, parse_cell_token(tok, opts))?;
+                    xy.set_x_cell(r, parse_csv_field_cell(tok, opts))?;
                 }
             }
             populate_datasets(&mut xy.data_sets, data_rows, &headers, col_offset, subs, opts)?;
@@ -732,7 +853,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             TableArchetype::Contingency(cont)
         }
         TableKind::Survival => {
-            let time_title = headers.get(col_offset).cloned().filter(|s| !s.is_empty()).unwrap_or_else(|| String::from("Elapsed Time"));
+            let time_title_field = headers.get(col_offset).filter(|f| !f.text.trim().is_empty());
             let time_col = col_offset;
             if raw_col_count > col_offset {
                 col_offset += 1;
@@ -741,12 +862,15 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             validate_data_sets(ds_count)?;
             validate_csv_cell_budget(row_count, ds_count, 1, 1, err_line, max_cells)?;
             let mut surv = SurvivalTable::new(ds_count, row_count)?;
-            surv.time_title = sanitize_title(&time_title)?;
+            surv.time_title = match time_title_field {
+                Some(f) => header_field_title(f)?,
+                None => String::from("Elapsed Time"),
+            };
             assign_row_titles(&mut surv.row_titles, data_rows, has_row_titles);
             surv.row_titles_expanded = opts.has_row_titles;
             for (r, rec) in data_rows.iter().enumerate() {
                 if let Some(tok) = rec.get(time_col) {
-                    surv.times[r] = parse_cell_token(tok, opts);
+                    surv.times[r] = parse_csv_field_cell(tok, opts);
                 }
             }
             populate_datasets(&mut surv.cohorts, data_rows, &headers, col_offset, 1, opts)?;
@@ -764,7 +888,7 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             if has_row_titles {
                 assign_row_titles(&mut pow.slice_labels, data_rows, true);
             } else if !opts.has_row_titles {
-                pow.slice_labels = data_rows.iter().map(|r| r.get(label_col).cloned().unwrap_or_default()).collect();
+                pow.slice_labels = data_rows.iter().map(|r| r.get(label_col).map(|f| f.text.clone()).unwrap_or_default()).collect();
             }
             populate_datasets(&mut pow.data_sets, data_rows, &headers, col_offset, 1, opts)?;
             TableArchetype::PartsOfWhole(pow)
@@ -778,69 +902,94 @@ pub(crate) fn import_csv_to_datasheet_with_budget(
             mv.row_titles_expanded = opts.has_row_titles;
             for (idx, var) in mv.variables.iter_mut().enumerate() {
                 let c = col_offset + idx;
-                if let Some(h) = headers.get(c).filter(|s| !s.trim().is_empty()) {
-                    var.title = sanitize_title(h)?;
+                if let Some(h) = headers.get(c).filter(|s| !s.text.trim().is_empty()) {
+                    var.title = header_field_title(h)?;
                 }
                 for (r, rec) in data_rows.iter().enumerate() {
                     if let Some(tok) = rec.get(c) {
-                        var.cells[r] = parse_cell_token(tok, opts);
+                        var.cells[r] = parse_csv_field_cell(tok, opts);
                     }
                 }
                 var.refresh_inferred_role();
             }
             TableArchetype::MultipleVariables(mv)
         }
-        TableKind::Nested => {
-            let value_headers = headers.get(col_offset..).unwrap_or(&[]);
-            let groups_spec = parse_nested_column_groups(value_headers, col_offset, subcolumn_mode);
-            let group_count = groups_spec.len();
-            validate_data_sets(group_count)?;
-            let mut total_units: usize = 0;
-            for spec in &groups_spec {
-                let units = spec.col_indices.len().max(1);
-                validate_subcolumns(units)?;
-                total_units = total_units
-                    .checked_add(units)
-                    .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
-            }
-            let total_cells = row_count
-                .checked_mul(total_units)
-                .ok_or_else(|| FormatError::CsvParse { line: err_line, reason: String::from("table cell count overflow") })?;
-            check_csv_cell_limit(total_cells, err_line, max_cells)?;
-
-            let mut nested = NestedTable::new(group_count, 1, row_count)?;
-            assign_row_titles(&mut nested.row_titles, data_rows, has_row_titles);
-            nested.row_titles_expanded = opts.has_row_titles;
-            for (g_idx, spec) in groups_spec.iter().enumerate() {
-                let title_str = if spec.group_title.trim().is_empty() { default_column_label(g_idx) } else { sanitize_title(&spec.group_title)? };
-                let units = spec.col_indices.len().max(1);
-                let mut grp = NestedGroupColumn::new(title_str, units, row_count)?;
-                for (u_idx, raw_sub) in spec.sub_titles.iter().enumerate() {
-                    if let Some(sub_title) = raw_sub.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
-                        && let Some(slot) = grp.subcolumn_titles.get_mut(u_idx)
-                    {
-                        *slot = sanitize_title(sub_title)?;
-                    }
-                }
-                for (r, rec) in data_rows.iter().enumerate() {
-                    for (u_idx, &col_idx) in spec.col_indices.iter().enumerate() {
-                        if let Some(tok) = rec.get(col_idx)
-                            && let Some(row_cells) = grp.cells.get_mut(r)
-                            && let Some(cell) = row_cells.get_mut(u_idx)
-                        {
-                            *cell = parse_cell_token(tok, opts);
-                        }
-                    }
-                }
-                if let Some(slot) = nested.groups.get_mut(g_idx) {
-                    *slot = grp;
-                }
-            }
-            TableArchetype::Nested(nested)
-        }
+        TableKind::Nested => import_csv_nested_table(&CsvNestedContext {
+            headers: &headers,
+            data_rows,
+            col_offset,
+            row_count,
+            has_row_titles,
+            subcolumn_mode,
+            opts,
+            err_line,
+            max_cells,
+        })?,
     };
 
     Ok(DataSheet::new(id.into(), title, arch)?)
+}
+
+struct CsvNestedContext<'a> {
+    headers: &'a [ParsedCsvField],
+    data_rows: &'a [Vec<ParsedCsvField>],
+    col_offset: usize,
+    row_count: usize,
+    has_row_titles: bool,
+    subcolumn_mode: SubcolumnMode,
+    opts: &'a CsvOptions,
+    err_line: usize,
+    max_cells: usize,
+}
+
+fn import_csv_nested_table(ctx: &CsvNestedContext<'_>) -> Result<TableArchetype, FormatError> {
+    let value_headers: Vec<String> = ctx.headers.get(ctx.col_offset..).unwrap_or(&[]).iter().map(|f| f.text.clone()).collect();
+    let groups_spec = parse_nested_column_groups(&value_headers, ctx.col_offset, ctx.subcolumn_mode);
+    let group_count = groups_spec.len();
+    validate_data_sets(group_count)?;
+    let mut total_units: usize = 0;
+    for spec in &groups_spec {
+        let units = spec.col_indices.len().max(1);
+        validate_subcolumns(units)?;
+        total_units = total_units
+            .checked_add(units)
+            .ok_or_else(|| FormatError::CsvParse { line: ctx.err_line, reason: String::from("table cell count overflow") })?;
+    }
+    let total_cells = ctx
+        .row_count
+        .checked_mul(total_units)
+        .ok_or_else(|| FormatError::CsvParse { line: ctx.err_line, reason: String::from("table cell count overflow") })?;
+    check_csv_cell_limit(total_cells, ctx.err_line, ctx.max_cells)?;
+
+    let mut nested = NestedTable::new(group_count, 1, ctx.row_count)?;
+    assign_row_titles(&mut nested.row_titles, ctx.data_rows, ctx.has_row_titles);
+    nested.row_titles_expanded = ctx.opts.has_row_titles;
+    for (g_idx, spec) in groups_spec.iter().enumerate() {
+        let title_str = if spec.group_title.trim().is_empty() { default_column_label(g_idx) } else { sanitize_title(&spec.group_title)? };
+        let units = spec.col_indices.len().max(1);
+        let mut grp = NestedGroupColumn::new(title_str, units, ctx.row_count)?;
+        for (u_idx, raw_sub) in spec.sub_titles.iter().enumerate() {
+            if let Some(sub_title) = raw_sub.as_ref().map(|s| s.trim()).filter(|s| !s.is_empty())
+                && let Some(slot) = grp.subcolumn_titles.get_mut(u_idx)
+            {
+                *slot = sanitize_title(sub_title)?;
+            }
+        }
+        for (r, rec) in ctx.data_rows.iter().enumerate() {
+            for (u_idx, &col_idx) in spec.col_indices.iter().enumerate() {
+                if let Some(tok) = rec.get(col_idx)
+                    && let Some(row_cells) = grp.cells.get_mut(r)
+                    && let Some(cell) = row_cells.get_mut(u_idx)
+                {
+                    *cell = parse_csv_field_cell(tok, ctx.opts);
+                }
+            }
+        }
+        if let Some(slot) = nested.groups.get_mut(g_idx) {
+            *slot = grp;
+        }
+    }
+    Ok(TableArchetype::Nested(nested))
 }
 
 struct NestedColumnGroupSpec {
@@ -944,13 +1093,13 @@ fn validate_csv_cell_budget(
     check_csv_cell_limit(total_cells, line, max_cells)
 }
 
-fn assign_row_titles(dst: &mut [String], data_rows: &[Vec<String>], has_row_titles: bool) {
+fn assign_row_titles(dst: &mut [String], data_rows: &[Vec<ParsedCsvField>], has_row_titles: bool) {
     if !has_row_titles {
         return;
     }
     for (slot, rec) in dst.iter_mut().zip(data_rows.iter()) {
         if let Some(first) = rec.first() {
-            *slot = first.clone();
+            *slot = first.text.clone();
         }
     }
 }
@@ -961,26 +1110,41 @@ fn sanitize_title(raw: &str) -> Result<String, FormatError> {
     Ok(trimmed)
 }
 
+fn header_field_title(field: &ParsedCsvField) -> Result<String, FormatError> {
+    if field.quoted {
+        validate_title(&field.text)?;
+        Ok(field.text.clone())
+    } else {
+        sanitize_title(&field.text)
+    }
+}
+
 fn populate_datasets(
     data_sets: &mut [DataSetColumn],
-    data_rows: &[Vec<String>],
-    headers: &[String],
+    data_rows: &[Vec<ParsedCsvField>],
+    headers: &[ParsedCsvField],
     col_offset: usize,
     subs: usize,
     opts: &CsvOptions,
 ) -> Result<(), FormatError> {
     for (ds_idx, ds) in data_sets.iter_mut().enumerate() {
         let base_col = col_offset + ds_idx * subs;
-        if let Some(raw_title) = headers.get(base_col).filter(|s| !s.trim().is_empty()) {
-            let base = if subs > 1 { raw_title.split(':').next().unwrap_or(raw_title.as_str()) } else { raw_title.as_str() };
-            ds.title = sanitize_title(base)?;
+        if let Some(raw_header) = headers.get(base_col).filter(|s| !s.text.trim().is_empty()) {
+            let base =
+                if subs > 1 { raw_header.text.rsplit_once(':').map_or(raw_header.text.as_str(), |(lhs, _)| lhs) } else { raw_header.text.as_str() };
+            ds.title = if raw_header.quoted {
+                validate_title(base)?;
+                base.to_owned()
+            } else {
+                sanitize_title(base)?
+            };
         }
         for (r, rec) in data_rows.iter().enumerate() {
             for s in 0..subs {
                 if let Some(tok) = rec.get(base_col + s)
                     && let Some(slot) = ds.cell_mut(r, s)
                 {
-                    *slot = parse_cell_token(tok, opts);
+                    *slot = parse_csv_field_cell(tok, opts);
                 }
             }
         }
@@ -1028,11 +1192,13 @@ pub fn filter_delimited_text(
         parse_asterisk_exclusions: filter.parse_asterisk_exclusions,
         ..CsvOptions::csv()
     };
-    let records = parse_delimited_records(input, &opts)?;
+    let (max_cols, max_fields) = csv_default_limits(input);
+    let records = parse_delimited_records_with_quotes_and_limits(input, &opts, max_cols, max_fields)?;
     if records.is_empty() {
         return Ok(FilteredDelimitedGrid { headers: Vec::new(), cells: Vec::new() });
     }
-    let (raw_headers, data_rows) = if has_header { (records[0].clone(), &records[1..]) } else { (Vec::new(), records.as_slice()) };
+    let (raw_headers, data_rows) =
+        if has_header { (records[0].iter().map(|f| f.text.clone()).collect(), &records[1..]) } else { (Vec::new(), records.as_slice()) };
 
     let (r_start, r_end) = match filter.row_window {
         Some((s, e)) if e < s => return Err(FormatError::InvalidPipeline { reason: String::from("row_window end < start") }),
@@ -1069,8 +1235,8 @@ pub fn filter_delimited_text(
             }
             let mut parsed_row = Vec::with_capacity(kept_cols);
             for c in c_start..=c_end {
-                let tok = row.get(c).map(String::as_str).unwrap_or("");
-                parsed_row.push(parse_cell_token(tok, &opts));
+                let cell = row.get(c).map_or_else(Cell::empty, |tok| parse_csv_field_cell(tok, &opts));
+                parsed_row.push(cell);
             }
             cells.push(parsed_row);
         }
