@@ -247,6 +247,9 @@ pub struct RoutPointAudit {
     pub data_set_index: usize,
     /// Originating zero-based table row index within `data_set_index`.
     pub row: usize,
+    /// Zero-based raw Y replicate subcolumn index within `data_set_index`.
+    #[serde(default)]
+    pub source_subcolumn: usize,
     /// Primary predictor coordinate $x_0$ at this observation.
     pub x0: f64,
     /// Observed response $y_i$ in original table units.
@@ -1660,6 +1663,7 @@ pub fn rout_detect_outliers(points: &[DataPoint], residuals: &[f64], k_free: usi
             index: i,
             data_set_index: points[i].data_set_index,
             row: points[i].row,
+            source_subcolumn: points[i].source_subcolumn,
             x0: points[i].x0(),
             y: points[i].y,
             residual: residuals[i],
@@ -1681,20 +1685,38 @@ mod tests {
     #[test]
     fn replicates_lack_of_fit_guards_non_finite_and_extreme_n() {
         let inf_pts = vec![
-            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(f64::INFINITY), explicit_weight: None, data_set_index: 0, row: 0 },
-            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(f64::INFINITY), explicit_weight: None, data_set_index: 0, row: 1 },
+            DataPoint {
+                x: vec![1.0],
+                y: 2.0,
+                sd: Some(0.5),
+                n: Some(f64::INFINITY),
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row: 0,
+            },
+            DataPoint {
+                x: vec![2.0],
+                y: 3.0,
+                sd: Some(0.5),
+                n: Some(f64::INFINITY),
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row: 1,
+            },
         ];
         assert!(replicates_lack_of_fit(&inf_pts, 10.0, 4).is_none());
 
         let huge_pts = vec![
-            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1e10), explicit_weight: None, data_set_index: 0, row: 0 },
-            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1e10), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
         ];
         assert!(replicates_lack_of_fit(&huge_pts, 10.0, 4).is_none());
 
         let valid_pts = vec![
-            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1.0), explicit_weight: None, data_set_index: 0, row: 0 },
-            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
+            DataPoint { x: vec![1.0], y: 2.0, sd: Some(0.5), n: Some(1.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 3.0, sd: Some(0.5), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
         ];
         let res = replicates_lack_of_fit(&valid_pts, 5.0, 4).unwrap();
         assert_eq!(res.df_pure_error, 2);

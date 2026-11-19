@@ -16,7 +16,7 @@ fn make_series(idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSeries
         .iter()
         .zip(ys.iter())
         .enumerate()
-        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: idx, row })
+        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: idx, row })
         .collect();
     DatasetSeries {
         data_set_index: idx,
@@ -449,6 +449,7 @@ fn replicates_lack_of_fit_extreme_n_does_not_overflow() {
             sd: Some(0.5),
             n: Some(n_val),
             explicit_weight: None,
+            source_subcolumn: 0,
             data_set_index: 0,
             row: i,
         });
@@ -825,7 +826,16 @@ fn arb_hostile_dataset() -> BoxedStrategy<DatasetSeries> {
                 1 => ys
                     .iter()
                     .enumerate()
-                    .map(|(row, &y)| DataPoint { x: vec![2.5], y, sd: Some(0.1), n: Some(2.0), explicit_weight: None, data_set_index: 0, row })
+                    .map(|(row, &y)| DataPoint {
+                        x: vec![2.5],
+                        y,
+                        sd: Some(0.1),
+                        n: Some(2.0),
+                        explicit_weight: None,
+                        source_subcolumn: 0,
+                        data_set_index: 0,
+                        row,
+                    })
                     .collect(),
                 // Constant Y vector.
                 2 => ys.iter().enumerate().map(|(i, _)| DataPoint::xy(i as f64 + 1.0, 3.25)).collect(),
@@ -841,6 +851,7 @@ fn arb_hostile_dataset() -> BoxedStrategy<DatasetSeries> {
                         sd: Some(if row % 2 == 0 { 0.5 } else { f64::NAN }),
                         n: Some(if row % 3 == 0 { f64::INFINITY } else { 3.0 }),
                         explicit_weight: if row % 4 == 0 { Some(-1.0) } else { None },
+                        source_subcolumn: 0,
                         data_set_index: 0,
                         row,
                     })

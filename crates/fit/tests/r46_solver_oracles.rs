@@ -201,7 +201,16 @@ fn r46_3_replicates_lack_of_fit_weighted_and_presummarized_oracles() {
         let n = ys.len() as f64;
         let mean = ys.iter().sum::<f64>() / n;
         let sd = (ys.iter().map(|y| (y - mean).powi(2)).sum::<f64>() / (n - 1.0)).sqrt();
-        sum_pts.push(DataPoint { x: vec![*x], y: mean, sd: Some(sd), n: Some(n), explicit_weight: None, data_set_index: 0, row: row_idx });
+        sum_pts.push(DataPoint {
+            x: vec![*x],
+            y: mean,
+            sd: Some(sd),
+            n: Some(n),
+            explicit_weight: None,
+            source_subcolumn: 0,
+            data_set_index: 0,
+            row: row_idx,
+        });
     }
     let ds_raw = vec![DatasetSeries {
         data_set_index: 0,
@@ -238,7 +247,16 @@ fn r46_3_replicates_lack_of_fit_weighted_and_presummarized_oracles() {
     let sum_unique_pts: Vec<DataPoint> = [(1.0, 4.0, 1.5, 3.0), (2.0, 9.0, 1.0, 3.0), (3.0, 14.0, 1.2, 3.0), (4.0, 19.0, 1.8, 3.0)]
         .into_iter()
         .enumerate()
-        .map(|(r, (x, y, sd, n))| DataPoint { x: vec![x], y, sd: Some(sd), n: Some(n), explicit_weight: None, data_set_index: 0, row: r })
+        .map(|(r, (x, y, sd, n))| DataPoint {
+            x: vec![x],
+            y,
+            sd: Some(sd),
+            n: Some(n),
+            explicit_weight: None,
+            source_subcolumn: 0,
+            data_set_index: 0,
+            row: r,
+        })
         .collect();
     let ds_obs_sd = vec![DatasetSeries {
         data_set_index: 0,
@@ -404,7 +422,7 @@ fn r46_6_inverse_interpolation_calibration_vs_mean_response_and_deming_note() {
         data_set_index: 0,
         label: "WlsCal".to_owned(),
         points: w_xs.iter().zip(w_ys.iter()).enumerate().map(|(r, (&x, &y))| DataPoint { row: r, ..DataPoint::xy(x, y) }).collect(),
-        unknowns_y: vec![(5, 30.0)],
+        unknowns_y: vec![(5, 30.0).into()],
         unknowns_x: Vec::new(),
         is_pre_summarized: false,
         column_title_value: None,

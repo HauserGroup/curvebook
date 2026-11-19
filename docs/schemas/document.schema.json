@@ -347,6 +347,12 @@
             }
           ]
         },
+        "eliminated_outliers": {
+          "items": {
+            "$ref": "#/$defs/SourceCellId"
+          },
+          "type": "array"
+        },
         "fitted_curves": {
           "items": {},
           "type": "array"
@@ -454,6 +460,34 @@
       "title": "SheetId",
       "type": "string"
     },
+    "SourceCellId": {
+      "additionalProperties": false,
+      "properties": {
+        "col": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "row": {
+          "minimum": 0,
+          "type": "integer"
+        },
+        "sheet_id": {
+          "$ref": "#/$defs/SheetId"
+        },
+        "subcol": {
+          "minimum": 0,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "sheet_id",
+        "row",
+        "col",
+        "subcol"
+      ],
+      "title": "SourceCellId",
+      "type": "object"
+    },
     "TableKind": {
       "enum": [
         "Xy",
@@ -531,7 +565,7 @@
       "type": "array"
     },
     "schema_version": {
-      "maximum": 5,
+      "maximum": 6,
       "minimum": 1,
       "type": "integer"
     },

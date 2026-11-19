@@ -53,6 +53,9 @@
 
 mod identifiability;
 
+use std::collections::BTreeMap;
+use std::num::NonZeroUsize;
+
 use curvebook_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
@@ -72,7 +75,8 @@ use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_bu
 use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::types::{
-    DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number, validated_replicate_moments,
+    DataPoint, DatasetSeries, DerivedScalar, HookContext, UnknownResponse, filter_datasets_by_range, parse_leading_number,
+    validated_replicate_moments,
 };
 use identifiability::Assessment;
 
@@ -339,6 +343,12 @@ pub struct InterpolatedUnknown {
     pub data_set_index: usize,
     /// Zero-based table row index of the unknown observation.
     pub row: usize,
+    /// Source zero-based replicate subcolumn for an individual raw replicate; `None` for single/summarized or row-mean targets.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_subcolumn: Option<usize>,
+    /// Count of active responses averaged for inverse calibration of a replicate row; `None` for individual replicate or non-replicate rows.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub replicate_mean_count: Option<NonZeroUsize>,
     /// Known coordinate (`Y` for inverse `X`-from-`Y` interpolation, or `X` for forward `Y`-from-`X` prediction).
     pub input_value: f64,
     /// Solved/evaluated point estimate (`NaN` when inversion fails or falls outside monotone bracket).
@@ -2274,6 +2284,7 @@ fn rout_detect_outliers_mb2006(
             index: idx,
             data_set_index: pt.data_set_index,
             row: pt.row,
+            source_subcolumn: pt.source_subcolumn,
             x0: pt.x0(),
             y: pt.y,
             residual: weighted_residuals[idx],
@@ -3454,7 +3465,7 @@ fn assemble_dataset_results(
             let interp_cov = if is_robust { None } else { cfg.cov_unscaled };
             let interp_sigma = if is_robust { f64::NAN } else { cfg.sigma_w };
             let interp_t = if is_robust { f64::NAN } else { cfg.t_crit };
-            for &(row, y_target) in &ds.unknowns_y {
+            for target in inverse_targets(&ds.unknowns_y) {
                 interpolated_x.push(interpolate_x_from_y(
                     model,
                     layout,
@@ -3462,8 +3473,7 @@ fn assemble_dataset_results(
                     &ds_params,
                     ds,
                     ds_local_idx,
-                    row,
-                    y_target,
+                    target,
                     interp_cov,
                     interp_sigma,
                     interp_t,
@@ -4431,6 +4441,32 @@ where
     }
 }
 
+#[derive(Clone, Copy)]
+struct InverseTarget {
+    response: UnknownResponse,
+    replicate_mean_count: Option<NonZeroUsize>,
+}
+
+/// Invert the average response of a replicate row once and also retain each active subcolumn.
+/// Seber & Wild (1989) describe inverse calibration from mean future measurements.
+fn inverse_targets(responses: &[UnknownResponse]) -> impl Iterator<Item = InverseTarget> + '_ {
+    let mut by_row: BTreeMap<usize, Vec<f64>> = BTreeMap::new();
+    for &response in responses {
+        if let UnknownResponse::Replicate { row, value, .. } = response {
+            by_row.entry(row).or_default().push(value);
+        }
+    }
+    let means = by_row.into_iter().filter_map(|(row, values)| {
+        let count = NonZeroUsize::new(values.len())?;
+        let mut sum = NeumaierSum::new();
+        for value in values {
+            sum.add(value / count.get() as f64);
+        }
+        Some(InverseTarget { response: UnknownResponse::Single((row, sum.total())), replicate_mean_count: Some(count) })
+    });
+    means.chain(responses.iter().copied().map(|response| InverseTarget { response, replicate_mean_count: None }))
+}
+
 /// Interpolate unknown `X` from target `Y` along the fitted curve using scan + `brent_root`,
 /// preferring roots within measured `[x_min, x_max]`, flagging out-of-range extrapolation and
 /// plateau violations (`AboveTopPlateau` / `BelowBottomPlateau`), and returning both:
@@ -4444,14 +4480,19 @@ fn interpolate_x_from_y(
     ds_params: &[f64],
     ds: &DatasetSeries,
     ds_local_idx: usize,
-    row: usize,
-    y_target: f64,
+    target: InverseTarget,
     cov_unscaled: Option<&DenseMatrix>,
     sigma: f64,
     t_crit: f64,
     inference_availability: InferenceAvailability,
     solver: &SolverConfig,
 ) -> InterpolatedUnknown {
+    let (row, replicate_subcolumn) = match target.response {
+        UnknownResponse::Single((row, _)) => (row, None),
+        UnknownResponse::Replicate { row, subcol, .. } => (row, Some(subcol)),
+    };
+    let y_target = target.response.value();
+    let observations = target.replicate_mean_count.map_or(1, NonZeroUsize::get) as f64;
     let xb = dataset_x_bounds(ds);
     let scan_lo = xb.scan_x_min - 0.5 * xb.span;
     let scan_hi = xb.scan_x_max + 0.5 * xb.span;
@@ -4503,6 +4544,8 @@ fn interpolate_x_from_y(
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
             row,
+            replicate_subcolumn,
+            replicate_mean_count: target.replicate_mean_count,
             input_value: y_target,
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
@@ -4542,9 +4585,12 @@ fn interpolate_x_from_y(
             };
             let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
             let quad = quadratic_form(cov_u, &g).max(0.0);
-            let inv_w = new_observation_inv_weight(solver.weighting, x, y);
-            let se_p =
-                if solver.method == FitMethod::PoissonDeviance { (y.max(0.0) + sigma * sigma * quad).sqrt() } else { sigma * (inv_w + quad).sqrt() };
+            let inv_w = new_observation_inv_weight(solver.weighting, x, y) / observations;
+            let se_p = if solver.method == FitMethod::PoissonDeviance {
+                (y.max(0.0) / observations + sigma * sigma * quad).sqrt()
+            } else {
+                sigma * (inv_w + quad).sqrt()
+            };
             (y - t_crit * se_p) - y_target
         };
         let pred_hi_fn = |x: f64| -> f64 {
@@ -4553,9 +4599,12 @@ fn interpolate_x_from_y(
             };
             let g = delta_grad_at_x(model, layout, theta, ds_params, ds_local_idx, ds, x);
             let quad = quadratic_form(cov_u, &g).max(0.0);
-            let inv_w = new_observation_inv_weight(solver.weighting, x, y);
-            let se_p =
-                if solver.method == FitMethod::PoissonDeviance { (y.max(0.0) + sigma * sigma * quad).sqrt() } else { sigma * (inv_w + quad).sqrt() };
+            let inv_w = new_observation_inv_weight(solver.weighting, x, y) / observations;
+            let se_p = if solver.method == FitMethod::PoissonDeviance {
+                (y.max(0.0) / observations + sigma * sigma * quad).sqrt()
+            } else {
+                sigma * (inv_w + quad).sqrt()
+            };
             (y + t_crit * se_p) - y_target
         };
         (
@@ -4575,6 +4624,8 @@ fn interpolate_x_from_y(
     InterpolatedUnknown {
         data_set_index: ds.data_set_index,
         row,
+        replicate_subcolumn,
+        replicate_mean_count: target.replicate_mean_count,
         input_value: y_target,
         output_estimate: x_hat,
         ci_lower,
@@ -4609,6 +4660,8 @@ fn interpolate_y_from_x(
         return InterpolatedUnknown {
             data_set_index: ds.data_set_index,
             row,
+            replicate_subcolumn: None,
+            replicate_mean_count: None,
             input_value: x_val,
             output_estimate: f64::NAN,
             ci_lower: CiBound::Open,
@@ -4640,6 +4693,8 @@ fn interpolate_y_from_x(
     InterpolatedUnknown {
         data_set_index: ds.data_set_index,
         row,
+        replicate_subcolumn: None,
+        replicate_mean_count: None,
         input_value: x_val,
         output_estimate: y_hat,
         ci_lower,

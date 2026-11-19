@@ -62,7 +62,7 @@ pub use graph::{
     PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec,
     SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
 };
-pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, extract_template_hooks};
+pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, SourceCellId, extract_template_hooks};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
 pub use layout::{
     CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS, PageOrientation,

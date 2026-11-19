@@ -1131,3 +1131,55 @@ fn r13_1_human_nonlinear_diagnostics_settings() -> Result<(), Box<dyn Error>> {
     assert_clean_parity_and_budget(&mut driver)?;
     Ok(())
 }
+
+#[test]
+fn r13_1_human_replicate_interpolation_tabs() -> Result<(), Box<dyn Error>> {
+    use curvebook_doc::{Cell, DataSheet, SubcolumnMode, TableArchetype, XyTable};
+    use curvebook_engine::Session;
+
+    // Preload a calibration table so the GUI path can focus on fitting and inspecting the unknowns.
+    let mut xy = XyTable::new(SubcolumnMode::RawReplicates(2), 1, 9)?;
+    for (row, x) in [-9.0, -8.0, -7.0, -6.8, -6.2, -5.5, -4.5, -4.0].into_iter().enumerate() {
+        xy.set_x_cell(row, Cell::number(x))?;
+        let y = 10.0 + 90.0 / (1.0 + 10_f64.powf(-6.5 - x));
+        let cells = xy.data_sets.first_mut().and_then(|ds| ds.cells.get_mut(row)).ok_or("missing calibration row")?;
+        *cells = vec![Cell::number(y - 0.25), Cell::number(y + 0.25)];
+    }
+    let unknowns = xy.data_sets.first_mut().and_then(|ds| ds.cells.last_mut()).ok_or("missing unknown row")?;
+    *unknowns = vec![Cell::number(45.0), Cell::number(65.0)];
+    let sheet = DataSheet::new("replicate-calibration", "Replicate calibration", TableArchetype::Xy(xy))?;
+    let mut doc = ProjectDocument::new("Replicate interpolation")?;
+    doc.add_data_sheet(sheet)?;
+    let app = UiApp::from_session(Session::from_document(doc));
+    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
+
+    switch_to_sheet_in_navigator(&mut driver, "replicate-calibration")?;
+    let fit_id = run_analysis_from_toolbar(&mut driver, "fit.nonlinear")?;
+    human_wf_common::press_cmd_shortcut(&mut driver, "t")?;
+    click(&mut driver, "fit.tab.weights_range")?;
+    click(&mut driver, "fit.wr.opt.interp")?;
+    assert!(widget_checked(&mut driver, "fit.wr.opt.interp")?);
+    click(&mut driver, "modal.ok")?;
+
+    for (tab_id, title, rows) in
+        [("nonlinear_interpolated_mean_x", "Interpolated Mean X", 1), ("nonlinear_interpolated_replicates", "Interpolated Replicates", 2)]
+    {
+        let widget_id = format!("result.tab.{tab_id}");
+        for _ in 0..12 {
+            if driver.layout_tree().node(&widget_id).is_some() {
+                break;
+            }
+            click(&mut driver, "result.tabs.next")?;
+        }
+        click(&mut driver, &widget_id)?;
+        let tree = driver.layout_tree();
+        let selected = tree.node(&widget_id).ok_or("missing selected interpolation tab")?;
+        assert_eq!(selected.a11y.selected, Some(true));
+        let result = result_sheet(driver.app().document(), &fit_id)?;
+        let tab = result.tabs.iter().find(|tab| tab.id == tab_id).ok_or("missing interpolation output")?;
+        assert_eq!(tab.title, title);
+        assert_eq!(tab.rows.len(), rows);
+    }
+    assert_clean_parity_and_budget(&mut driver)?;
+    Ok(())
+}

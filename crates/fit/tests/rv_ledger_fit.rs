@@ -39,7 +39,7 @@ fn series_xy(idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSeries {
         .iter()
         .zip(ys.iter())
         .enumerate()
-        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: idx, row })
+        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: idx, row })
         .collect();
     DatasetSeries {
         data_set_index: idx,

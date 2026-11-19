@@ -129,7 +129,16 @@ fn per_dataset_constant_and_column_title_constant_scopes() {
         points: xs
             .iter()
             .enumerate()
-            .map(|(r, &x)| DataPoint { x: vec![x], y: 2.0 * x + 10.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: r })
+            .map(|(r, &x)| DataPoint {
+                x: vec![x],
+                y: 2.0 * x + 10.0,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row: r,
+            })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -142,7 +151,16 @@ fn per_dataset_constant_and_column_title_constant_scopes() {
         points: xs
             .iter()
             .enumerate()
-            .map(|(r, &x)| DataPoint { x: vec![x], y: 4.0 * x + 25.0, sd: None, n: None, explicit_weight: None, data_set_index: 1, row: r })
+            .map(|(r, &x)| DataPoint {
+                x: vec![x],
+                y: 4.0 * x + 25.0,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 1,
+                row: r,
+            })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -330,7 +348,16 @@ fn plot_function_only_and_log_x_grid_sampling() {
         points: [1.0, 10.0, 25.0, 50.0]
             .iter()
             .enumerate()
-            .map(|(r, &x)| DataPoint { x: vec![x], y: 2.0 * x + 1.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: r })
+            .map(|(r, &x)| DataPoint {
+                x: vec![x],
+                y: 2.0 * x + 1.0,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: 0,
+                row: r,
+            })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -499,8 +526,8 @@ fn open_ci_bounds_on_zero_df_and_ambiguous_covariance() {
         data_set_index: 0,
         label: String::from("ZeroDF"),
         points: vec![
-            DataPoint { x: vec![1.0], y: 3.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 0 },
-            DataPoint { x: vec![2.0], y: 5.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 1 },
+            DataPoint { x: vec![1.0], y: 3.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+            DataPoint { x: vec![2.0], y: 5.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
         ],
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -533,6 +560,7 @@ fn open_ci_bounds_on_zero_df_and_ambiguous_covariance() {
                 sd: None,
                 n: None,
                 explicit_weight: None,
+                source_subcolumn: 0,
                 data_set_index: 0,
                 row: r,
             })

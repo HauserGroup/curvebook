@@ -1626,6 +1626,7 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         res.scalars.clear();
         res.pairwise_comparisons.clear();
         res.fitted_curves.clear();
+        res.eliminated_outliers.clear();
         res.checklist.clear();
     }
     Ok(out)
@@ -1637,6 +1638,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 2, apply: migrate_v2_to_v3 },
     VersionStep { from_version: 3, apply: migrate_v3_to_v4 },
     VersionStep { from_version: 4, apply: migrate_v4_to_v5 },
+    VersionStep { from_version: 5, apply: migrate_v5_to_v6 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -1687,6 +1689,11 @@ fn migrate_v3_to_v4(value: &mut serde_json::Value) -> Result<(), FormatError> {
 
 fn migrate_v4_to_v5(value: &mut serde_json::Value) -> Result<(), FormatError> {
     migrate_result_sheet_step(value, 5);
+    Ok(())
+}
+
+fn migrate_v5_to_v6(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 6);
     Ok(())
 }
 
@@ -1777,7 +1784,7 @@ fn backfill_result_sheet_defaults(res: &mut serde_json::Value) {
     };
     res_obj.entry(String::from("status")).or_insert_with(|| serde_json::Value::String(String::from("UpToDate")));
     res_obj.entry(String::from("analyzable_data")).or_insert(serde_json::Value::Null);
-    for arr_key in ["tabs", "scalars", "pairwise_comparisons", "fitted_curves", "checklist", "floating_notes"] {
+    for arr_key in ["tabs", "scalars", "pairwise_comparisons", "fitted_curves", "eliminated_outliers", "checklist", "floating_notes"] {
         res_obj.entry(String::from(arr_key)).or_insert_with(|| serde_json::Value::Array(Vec::new()));
     }
     res_obj.entry(String::from("color_tag")).or_insert(serde_json::Value::Null);

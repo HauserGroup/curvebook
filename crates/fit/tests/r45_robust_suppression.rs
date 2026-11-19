@@ -197,8 +197,8 @@ fn r45_robust_cauchy_typed_suppression_r1_s03_06_and_preserved_quantities() {
     ys[5] += 400.0;
 
     let mut ds = make_dataset(0, "DoseResponse", &xs, &ys);
-    ds.unknowns_y.push((11, 55.0));
-    ds.unknowns_y.push((12, 120.0));
+    ds.unknowns_y.push((11, 55.0).into());
+    ds.unknowns_y.push((12, 120.0).into());
     ds.unknowns_x.push((13, -6.5));
     ds.unknowns_x.push((14, -2.0));
 
@@ -339,7 +339,7 @@ fn r45_rout_stage2_preserves_full_least_squares_inference() {
     ys1[2] += 350.0;
 
     let mut ds1 = make_dataset(0, "Dose1", &xs, &ys1);
-    ds1.unknowns_y.push((20, 55.0));
+    ds1.unknowns_y.push((20, 55.0).into());
 
     let rout_cfg = SolverConfig {
         method: FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },

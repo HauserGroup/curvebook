@@ -597,6 +597,7 @@ fn r46_7_nist_nelson_fits_log_y_oracle() {
                 sd: None,
                 n: None,
                 explicit_weight: None,
+                source_subcolumn: 0,
                 data_set_index: 0,
                 row,
             })

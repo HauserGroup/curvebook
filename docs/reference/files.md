@@ -48,7 +48,7 @@ A `.curvebook` archive embeds all `DataSheet` values, exclusion notes, `InfoShee
 
 | Format / Record | Current Version Constant | Migration & Safety Rule |
 |---|---:|---|
-| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 5` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
+| Project / Template (`document.json`, `manifest.json`) | `CURRENT_SCHEMA_VERSION = 6` | Migrations (`migrate_document_json`, `VersionStep`) automatically upgrade schemas `0 -> 1 -> 2 -> 3 -> 4 -> 5 -> 6`. Files with `schema_version > CURRENT_SCHEMA_VERSION` fail on open with `UnsupportedSchemaVersion` (`unsupported_version`). |
 | User Preferences (`preferences.json`) | `CURRENT_PREFERENCES_VERSION = 1` | Unknown extension fields preserved via `additionalProperties`; `version > 1` triggers warning/refusal without silent overwrite. |
 | Recovery WAL (`ops.journal` & `curvebook.lock`) | `CURRENT_JOURNAL_VERSION = 1`<br>`CURRENT_LOCK_VERSION = 1` | Strict NDJSON line validation and per-record CRC-32 checking. |
 

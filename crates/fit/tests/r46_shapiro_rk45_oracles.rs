@@ -279,7 +279,16 @@ fn r46_3_replicates_lack_of_fit_presummarized_and_multidataset_oracles() {
     let expand_n3 = |x: f64, y_bar: f64, sd: f64, ds: usize| -> Vec<DataPoint> {
         [-1.0_f64, 0.0, 1.0]
             .into_iter()
-            .map(|offset| DataPoint { x: vec![x], y: y_bar + offset * sd, sd: None, n: None, explicit_weight: None, data_set_index: ds, row: 0 })
+            .map(|offset| DataPoint {
+                x: vec![x],
+                y: y_bar + offset * sd,
+                sd: None,
+                n: None,
+                explicit_weight: None,
+                source_subcolumn: 0,
+                data_set_index: ds,
+                row: 0,
+            })
             .collect()
     };
 
@@ -287,16 +296,25 @@ fn r46_3_replicates_lack_of_fit_presummarized_and_multidataset_oracles() {
     // Before R4.6 fix: `diagnostics::replicates_lack_of_fit` ignored between-row pure error when
     // `has_summarized` was true, falsely emitting df_pe=6, df_lof=1 instead of None!
     let two_x_summarized = vec![
-        DataPoint { x: vec![1.0], y: 10.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 0 },
-        DataPoint { x: vec![1.0], y: 12.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 1 },
-        DataPoint { x: vec![2.0], y: 15.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 2 },
+        DataPoint { x: vec![1.0], y: 10.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+        DataPoint { x: vec![1.0], y: 12.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
+        DataPoint { x: vec![2.0], y: 15.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 2 },
     ];
     let fit_2x = simple_linear_regression(&two_x_summarized, &SimpleLinearOptions::default()).unwrap();
     assert!(fit_2x.lack_of_fit.is_none(), "2 distinct X values in 2-parameter linear regression have df_lof = 0, got {:?}", fit_2x.lack_of_fit);
 
     // 2) Add a 3rd X level with quadratic curvature (x=3.0): compare pre-summarized vs exact expanded raw replicates.
     let mut three_x_summarized = two_x_summarized;
-    three_x_summarized.push(DataPoint { x: vec![3.0], y: 25.0, sd: Some(1.5), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 3 });
+    three_x_summarized.push(DataPoint {
+        x: vec![3.0],
+        y: 25.0,
+        sd: Some(1.5),
+        n: Some(3.0),
+        explicit_weight: None,
+        source_subcolumn: 0,
+        data_set_index: 0,
+        row: 3,
+    });
     let mut three_x_raw = Vec::new();
     three_x_raw.extend(expand_n3(1.0, 10.0, 1.0, 0));
     three_x_raw.extend(expand_n3(1.0, 12.0, 1.0, 0));
@@ -320,7 +338,16 @@ fn r46_3_replicates_lack_of_fit_presummarized_and_multidataset_oracles() {
     // 3) Mixed raw + pre-summarized points at same X (`n=1` raw + `n=3` summarized at x=1) and
     // multi-dataset separation (`ds=0` vs `ds=1` at identical X=1.0 must NOT be pooled as replicates!).
     let mut mixed_pts = expand_n3(1.0, 10.0, 1.0, 0);
-    mixed_pts.push(DataPoint { x: vec![1.0], y: 12.0, sd: Some(1.0), n: Some(3.0), explicit_weight: None, data_set_index: 0, row: 3 });
+    mixed_pts.push(DataPoint {
+        x: vec![1.0],
+        y: 12.0,
+        sd: Some(1.0),
+        n: Some(3.0),
+        explicit_weight: None,
+        source_subcolumn: 0,
+        data_set_index: 0,
+        row: 3,
+    });
     mixed_pts.extend(expand_n3(2.0, 15.0, 1.0, 0));
     mixed_pts.extend(expand_n3(3.0, 25.0, 1.5, 0));
     let lof_mixed = replicates_lack_of_fit(&mixed_pts, fit_raw.rss, fit_raw.df_residual).expect("mixed raw+summarized LOF");
@@ -328,10 +355,10 @@ fn r46_3_replicates_lack_of_fit_presummarized_and_multidataset_oracles() {
     assert_eq!(lof_mixed.df_pure_error, lof_raw.df_pure_error);
 
     let two_curves_no_reps = vec![
-        DataPoint { x: vec![1.0], y: 2.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 0 },
-        DataPoint { x: vec![2.0], y: 4.0, sd: None, n: None, explicit_weight: None, data_set_index: 0, row: 1 },
-        DataPoint { x: vec![1.0], y: 20.0, sd: None, n: None, explicit_weight: None, data_set_index: 1, row: 0 },
-        DataPoint { x: vec![2.0], y: 40.0, sd: None, n: None, explicit_weight: None, data_set_index: 1, row: 1 },
+        DataPoint { x: vec![1.0], y: 2.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 0 },
+        DataPoint { x: vec![2.0], y: 4.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row: 1 },
+        DataPoint { x: vec![1.0], y: 20.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 1, row: 0 },
+        DataPoint { x: vec![2.0], y: 40.0, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 1, row: 1 },
     ];
     assert!(replicates_lack_of_fit(&two_curves_no_reps, 1.0, 2).is_none(), "distinct datasets at the same X are not replicates");
 }

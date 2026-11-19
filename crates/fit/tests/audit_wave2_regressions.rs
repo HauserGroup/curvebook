@@ -81,7 +81,7 @@ fn audit_11_poisson_irls_rejects_infeasible_non_positive_means() {
             .iter()
             .zip(ys)
             .enumerate()
-            .map(|(row, (&x, y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: 0, row })
+            .map(|(row, (&x, y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),
@@ -184,7 +184,7 @@ fn audit_12_equal_inclusive_bounds_behave_as_fixed_constant_zero_free_params() {
             .iter()
             .zip(ys)
             .enumerate()
-            .map(|(row, (&x, y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: 0, row })
+            .map(|(row, (&x, y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: 0, row })
             .collect(),
         unknowns_y: Vec::new(),
         unknowns_x: Vec::new(),

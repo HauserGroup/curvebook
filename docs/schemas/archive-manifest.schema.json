@@ -78,7 +78,7 @@
       "type": "string"
     },
     "schema_version": {
-      "maximum": 5,
+      "maximum": 6,
       "minimum": 0,
       "type": "integer"
     },

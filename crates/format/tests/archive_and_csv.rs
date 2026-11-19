@@ -3,7 +3,7 @@ use curvebook_doc::{
     DocError, FloatingNote, GraphSheet, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind,
     JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LinkBorderColor, LinkSource, LinkedDataRegion, MAX_SUBCOLUMNS, MAX_TITLE_BYTES,
     MultipleVariablesTable, NestedTable, NonlinearFitSpec, OneWayAnovaSpec, ParameterRule, ParameterScope, PartsOfWholeTable, PlacementMode,
-    ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetCellRange, SheetId, SubcolumnMode,
+    ProjectDocument, RectPt, ResultScalarEntry, ResultSheet, ResultStatus, SequenceProgression, SheetCellRange, SheetId, SourceCellId, SubcolumnMode,
     SurvivalTable, TableArchetype, TableKind, XColumnMode, XyTable,
 };
 use curvebook_format::{
@@ -770,4 +770,21 @@ fn nonlinear_fit_diagnostics_migrate_v4_and_round_trip() {
 
     let reopened = open_project_bytes(&save_project_bytes(&migrated).unwrap()).unwrap();
     assert_eq!(reopened.result_sheets[0].analysis.kind, AnalysisKind::NonlinearRegression(expected));
+}
+
+#[test]
+fn rout_outlier_cells_migrate_v5_and_round_trip() {
+    let mut doc = build_sample_project().unwrap();
+    let mut legacy = serde_json::to_value(&doc).unwrap();
+    legacy["schema_version"] = serde_json::json!(5);
+    assert!(legacy["result_sheets"][0].get("eliminated_outliers").is_none());
+    let migrated = curvebook_format::migrate_document_json(legacy, 5).unwrap();
+    let migrated: ProjectDocument = serde_json::from_value(migrated).unwrap();
+    assert_eq!(migrated.schema_version, CURRENT_SCHEMA_VERSION);
+    assert!(migrated.result_sheets[0].eliminated_outliers.is_empty());
+
+    let source = SourceCellId { sheet_id: SheetId::new("data-xy"), row: 1, col: 0, subcol: 1 };
+    doc.result_sheets[0].eliminated_outliers.push(source.clone());
+    let reopened = open_project_bytes(&save_project_bytes(&doc).unwrap()).unwrap();
+    assert_eq!(reopened.result_sheets[0].eliminated_outliers, [source]);
 }

@@ -42,7 +42,16 @@ fn series_idx(idx: usize, label: &str, x: Vec<f64>, y: Vec<f64>) -> DatasetSerie
         .into_iter()
         .zip(y)
         .enumerate()
-        .map(|(row, (xv, yv))| DataPoint { x: vec![xv], y: yv, sd: None, n: None, explicit_weight: None, data_set_index: idx, row })
+        .map(|(row, (xv, yv))| DataPoint {
+            x: vec![xv],
+            y: yv,
+            sd: None,
+            n: None,
+            explicit_weight: None,
+            source_subcolumn: 0,
+            data_set_index: idx,
+            row,
+        })
         .collect();
     DatasetSeries {
         data_set_index: idx,
@@ -186,6 +195,7 @@ fn verify_nist_tier(difficulty: NistDifficulty, expected_count: usize) {
                 sd: None,
                 n: None,
                 explicit_weight: None,
+                source_subcolumn: 0,
                 data_set_index: 0,
                 row,
             })

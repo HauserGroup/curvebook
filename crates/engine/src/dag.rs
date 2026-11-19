@@ -856,6 +856,7 @@ fn clear_failed_result_sheet(target: &mut ResultSheet, code: ErrorCode, message:
     target.scalars.clear();
     target.pairwise_comparisons.clear();
     target.fitted_curves.clear();
+    target.eliminated_outliers.clear();
     target.checklist.clear();
     // Preserve user-authored annotations (`floating_notes`, `color_tag`) across transient recomputation failures.
     target.status = ResultStatus::Failed { code, message };

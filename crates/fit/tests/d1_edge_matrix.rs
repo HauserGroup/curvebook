@@ -25,7 +25,7 @@ fn series_from_xy(idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSer
         .iter()
         .zip(ys)
         .enumerate()
-        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, data_set_index: idx, row })
+        .map(|(row, (&x, &y))| DataPoint { x: vec![x], y, sd: None, n: None, explicit_weight: None, source_subcolumn: 0, data_set_index: idx, row })
         .collect();
     DatasetSeries {
         data_set_index: idx,
@@ -246,6 +246,7 @@ fn edge_03a_multi_decade_1e_minus_12_to_1e_minus_2_weighting_1y2_and_1sd2() {
             sd: Some(y_true[i].abs() * sd_mult[i]),
             n: Some(3.0),
             explicit_weight: None,
+            source_subcolumn: 0,
             data_set_index: 0,
             row: i,
         })

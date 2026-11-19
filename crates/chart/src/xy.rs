@@ -1233,6 +1233,14 @@ struct ExtractedXySeries {
     label: String,
     default_color: Rgba8,
     fitted_overlay: Option<FittedOverlayData>,
+    rout_outliers: Vec<RoutOutlier>,
+}
+
+#[derive(Debug, Clone)]
+struct RoutOutlier {
+    source: SourceCellId,
+    x: f64,
+    y: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -1345,7 +1353,13 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             }
         }
 
-        let fitted_overlay = resolve_fitted_overlay(doc, series_spec, warnings);
+        let (fitted_overlay, rout_outliers) = match resolve_fitted_overlay(doc, series_spec, warnings) {
+            Some((overlay, outliers)) => {
+                let markers = sheet_opt.map_or_else(Vec::new, |sheet| resolve_rout_outliers(sheet, series_spec.data_set_index, outliers));
+                (Some(overlay), markers)
+            }
+            None => (None, Vec::new()),
+        };
         out.push(ExtractedXySeries {
             sheet_id,
             col_index: series_spec.data_set_index,
@@ -1356,6 +1370,7 @@ fn extract_all_xy_series(graph: &GraphSheet, doc: &ProjectDocument, warnings: &m
             label: series_spec.legend_label.clone().unwrap_or(fallback_label),
             default_color: color,
             fitted_overlay,
+            rout_outliers,
         });
     }
     out
@@ -1419,7 +1434,11 @@ fn extract_xy_x_row(
     }
 }
 
-fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: &mut Vec<ChartWarning>) -> Option<FittedOverlayData> {
+fn resolve_fitted_overlay<'a>(
+    doc: &'a ProjectDocument,
+    series: &SeriesSpec,
+    warnings: &mut Vec<ChartWarning>,
+) -> Option<(FittedOverlayData, &'a [SourceCellId])> {
     let spec = series.regression_overlay.as_ref()?;
     let Some(res) = doc.result_sheet(&spec.result_sheet_id) else {
         warnings.push(ChartWarning::new("missing_regression_result", format!("regression result sheet '{}' not found", spec.result_sheet_id)));
@@ -1462,7 +1481,26 @@ fn resolve_fitted_overlay(doc: &ProjectDocument, series: &SeriesSpec, warnings: 
             pt.pred_upper = None;
         }
     }
-    Some(FittedOverlayData { spec: effective_spec, curve: effective_curve })
+    let outliers = if matches!(res.status, ResultStatus::UpToDate) { res.eliminated_outliers.as_slice() } else { &[] };
+    Some((FittedOverlayData { spec: effective_spec, curve: effective_curve }, outliers))
+}
+
+fn resolve_rout_outliers(sheet: &DataSheet, col: usize, outliers: &[SourceCellId]) -> Vec<RoutOutlier> {
+    let TableArchetype::Xy(xy) = &sheet.archetype else {
+        return Vec::new();
+    };
+    let Some(ds) = xy.data_sets.get(col) else {
+        return Vec::new();
+    };
+    outliers
+        .iter()
+        .filter(|source| source.sheet_id == sheet.id && source.col == col)
+        .filter_map(|source| {
+            let x = xy.x_value_at(source.row)?;
+            let y = ds.cells.get(source.row)?.get(source.subcol)?.active_number()?;
+            Some(RoutOutlier { source: source.clone(), x, y })
+        })
+        .collect()
 }
 
 fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -> (Vec<f64>, Vec<f64>, Vec<f64>) {
@@ -1486,6 +1524,10 @@ fn collect_xy_domain_values(spec: &GraphSpec, extracted: &[ExtractedXySeries]) -
         for &(rx, ry, _, _) in &item.replicates {
             x_vals.push(rx);
             target_y.push(ry);
+        }
+        for point in &item.rout_outliers {
+            x_vals.push(point.x);
+            target_y.push(point.y);
         }
         if let Some(ov) = &item.fitted_overlay {
             for cp in &ov.curve.points {
@@ -1630,6 +1672,7 @@ fn render_xy_series(
         }
     }
 
+    let first_series_point = scene.plotted_points.len();
     // 6. Markers (either raw individual replicates when y_error_bars is None, or summarized centers)
     if let Some(marker) = marker_opt {
         let ctx = XyMarkerCtx {
@@ -1643,6 +1686,36 @@ fn render_xy_series(
             warned_y_domain,
         };
         emit_xy_markers(scene, data, &summary_markers, &ctx);
+    }
+    emit_rout_outlier_markers(scene, data, x_axis, y_axis, first_series_point);
+}
+
+fn emit_rout_outlier_markers(
+    scene: &mut ChartScene,
+    data: &ExtractedXySeries,
+    x_axis: &SegmentedAxis,
+    y_axis: &SegmentedAxis,
+    first_series_point: usize,
+) {
+    let marker = MarkerStyle { shape: MarkerShape::Cross, size_pt: 10.0, stroke_color: Rgba8::BLACK, stroke_width_pt: 1.5, ..MarkerStyle::default() };
+    let first_outlier = scene.plotted_points.len();
+    for point in &data.rout_outliers {
+        let (Some((_, px)), Some((_, py))) = (x_axis.map_value(point.x), y_axis.map_value(point.y)) else {
+            continue;
+        };
+        let center_pt = PointPt::new(px, py);
+        emit_marker(&mut scene.primitives, center_pt, &marker, Some(scene.plot_rect_pt));
+        scene.plotted_points.push(PlottedPointMeta {
+            center_pt,
+            radius_pt: marker.size_pt * 0.5,
+            source_cell: point.source.clone(),
+            series_label: data.label.clone(),
+            value_summary: format!("ROUT outlier — X={}, Y={}", format_point_value(point.x), format_point_value(point.y)),
+        });
+    }
+    // Outlier badges take hover precedence over coincident markers in the same series.
+    if let Some(series_points) = scene.plotted_points.get_mut(first_series_point..) {
+        series_points.rotate_left(first_outlier - first_series_point);
     }
 }
 

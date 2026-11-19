@@ -1441,6 +1441,11 @@ fn remap_result_sheet(
     validate_title(&next_title)?;
     res.analysis.custom_title = Some(next_title);
     remap_analysis_hooks(&mut res.analysis, id_map);
+    for outlier in &mut res.eliminated_outliers {
+        if let Some(mapped) = id_map.get(&outlier.sheet_id) {
+            outlier.sheet_id = mapped.clone();
+        }
+    }
     if clear_results {
         res.status = ResultStatus::Dirty;
         res.analyzable_data = None;
@@ -1448,6 +1453,7 @@ fn remap_result_sheet(
         res.scalars.clear();
         res.pairwise_comparisons.clear();
         res.fitted_curves.clear();
+        res.eliminated_outliers.clear();
         res.checklist.clear();
     } else if let Some(analyzable) = &mut res.analyzable_data {
         analyzable.id = res.id.clone();

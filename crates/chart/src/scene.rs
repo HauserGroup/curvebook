@@ -246,14 +246,7 @@ impl fmt::Display for ChartError {
 
 impl std::error::Error for ChartError {}
 
-/// Coordinate provenance pointing back to the originating [`curvebook_doc::DataSheet`] cell (`QOL-5`).
-#[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
-pub struct SourceCellId {
-    pub sheet_id: curvebook_doc::SheetId,
-    pub row: usize,
-    pub col: usize,
-    pub subcol: usize,
-}
+pub use curvebook_doc::SourceCellId;
 
 /// Interactive metadata for an individual plotted marker/point inside [`ChartScene`] (`QOL-5`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

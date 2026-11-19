@@ -161,15 +161,15 @@ fn r1_s03_12_extrapolated_and_plateau_unknowns_are_flagged_cleanly() {
 
     let mut ds = make_dataset(0, "4PL", &xs, &ys);
     // In-range unknown Y (within [y(-9), y(-5)]): no warning expected.
-    ds.unknowns_y.push((99, 50.0));
+    ds.unknowns_y.push((99, 50.0).into());
     // Above highest standard's Y (y(-5)=99.0099, so y=99.5 -> x_hat ~ -4.70 > -5.0 = x_max): must flag extrapolation.
-    ds.unknowns_y.push((100, 99.5));
+    ds.unknowns_y.push((100, 99.5).into());
     // Below lowest standard's Y (y(-9)=0.9901, so y=0.5 -> x_hat ~ -9.30 < -9.0 = x_min): must flag extrapolation.
-    ds.unknowns_y.push((101, 0.5));
+    ds.unknowns_y.push((101, 0.5).into());
     // Above fitted Top plateau (~100): must flag with AboveTopPlateau.
-    ds.unknowns_y.push((102, 150.0));
+    ds.unknowns_y.push((102, 150.0).into());
     // Below fitted Bottom plateau (~0): must flag with BelowBottomPlateau.
-    ds.unknowns_y.push((103, -25.0));
+    ds.unknowns_y.push((103, -25.0).into());
 
     // Forward unknown X: one in-range, two extrapolated outside [-9, -5].
     ds.unknowns_x.push((200, -7.0));
@@ -222,7 +222,7 @@ fn r1_s03_12_non_monotone_curve_warns_and_prefers_in_range_root() {
     let ys: Vec<f64> = xs.iter().map(|&x| x * x + 1.0).collect();
 
     let mut ds = make_dataset(0, "Quad", &xs, &ys);
-    ds.unknowns_y.push((10, 5.0)); // Roots inside [-5, 5] at X=-2 and X=+2.
+    ds.unknowns_y.push((10, 5.0).into()); // Roots inside [-5, 5] at X=-2 and X=+2.
 
     let cfg = SolverConfig {
         interpolate_unknowns: true,
