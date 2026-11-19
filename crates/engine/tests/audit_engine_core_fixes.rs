@@ -793,3 +793,242 @@ fn audit_122_graph_set_series_patches_in_place_by_default() -> TestResult {
     assert_eq!(session.document().graph_sheet(&SheetId::new("g")).ok_or("missing g")?.spec.series.len(), 1);
     Ok(())
 }
+
+#[test]
+fn audit_74_identity_conversion_preserves_single_link_copy() -> TestResult {
+    let mut up = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3)?;
+    let mut dst = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3)?;
+    for r in 0..3 {
+        up.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+    }
+    dst.data_sets[0].cells[0][0] = Cell::number(0.0);
+    let mut doc_id = ProjectDocument::new("Identity Link")?;
+    doc_id.add_data_sheet(DataSheet::new("up", "Up", TableArchetype::Column(up))?)?;
+    doc_id.add_data_sheet(DataSheet::new("dst", "Dst", TableArchetype::Column(dst))?)?;
+    let mut sess_id = Session::from_document(doc_id);
+    ok_cmd(
+        &mut sess_id,
+        "table.pasteLink",
+        json!({ "source_sheet_id": "up", "target_sheet_id": "dst", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 0 } }, "row": 0, "col": 0, "link_id": "id-link" }),
+    )?;
+    let id_preview = ok_cmd(&mut sess_id, "table.convertArchetype", json!({ "sheet_id": "dst", "target_kind": "Column", "preview_only": true }))?;
+    assert_eq!(id_preview["preview"]["lossy"], json!(false));
+    ok_cmd(&mut sess_id, "table.convertArchetype", json!({ "sheet_id": "dst", "target_kind": "Column" }))?;
+    let dst_after = sess_id.document().data_sheet(&SheetId::new("dst")).ok_or("missing dst")?;
+    assert_eq!(dst_after.linked_regions.len(), 1, "identity conversion duplicated linked_regions: {:?}", dst_after.linked_regions);
+    assert_eq!(dst_after.linked_regions[0].id, "id-link");
+    Ok(())
+}
+
+#[test]
+fn audit_74_grouped_replicates_expands_by_rows_and_detaches_transposed_link() -> TestResult {
+    let mut grp = curvebook_doc::GroupedTable::new(SubcolumnMode::RawReplicates(2), 2, 3)?;
+    grp.row_titles = vec![String::from("R0"), String::from("R1"), String::from("R2")];
+    for r in 0..3 {
+        for s in 0..2 {
+            grp.data_sets[0].cells[r][s] = Cell::number((r * 2 + s + 1) as f64);
+            grp.data_sets[1].cells[r][s] = Cell::number((100 + r * 2 + s) as f64);
+        }
+    }
+    let mut doc_grp = ProjectDocument::new("Grouped Expand")?;
+    doc_grp.add_data_sheet(DataSheet::new("grp", "Grouped", TableArchetype::Grouped(grp))?)?;
+    doc_grp.add_data_sheet(DataSheet::new(
+        "grp_copy",
+        "Copy",
+        TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?),
+    )?)?;
+    let mut sess_grp = Session::from_document(doc_grp);
+    ok_cmd(
+        &mut sess_grp,
+        "table.pasteLink",
+        json!({ "source_sheet_id": "grp", "target_sheet_id": "grp_copy", "source_range": { "start": { "row": 0, "col": 0 }, "end": { "row": 2, "col": 1 } }, "row": 0, "col": 0, "link_id": "grp-out" }),
+    )?;
+    ok_cmd(
+        &mut sess_grp,
+        "stats.run",
+        json!({ "sheet_id": "grp_desc", "source_sheet": "grp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
+    )?;
+    ok_cmd(&mut sess_grp, "table.convertArchetype", json!({ "sheet_id": "grp", "target_kind": "Column", "allow_lossy": true }))?;
+    let grp_conv = sess_grp.document().data_sheet(&SheetId::new("grp")).ok_or("missing grp")?;
+    assert_eq!(grp_conv.archetype.column_count(), 6);
+    let grp_desc = sess_grp.document().result_sheet(&SheetId::new("grp_desc")).ok_or("missing grp_desc")?;
+    assert_eq!(grp_desc.status, ResultStatus::UpToDate);
+    assert_eq!(grp_desc.analysis.selected_data_sets, vec![3, 4, 5]);
+    assert!(sess_grp.document().data_sheet(&SheetId::new("grp_copy")).ok_or("missing grp_copy")?.linked_regions.is_empty());
+    Ok(())
+}
+
+#[test]
+fn audit_74_xy_nonmatching_parametric_keeps_y_column_indices() -> TestResult {
+    let mut xy_param =
+        XyTable::new_with_x_mode(curvebook_doc::XColumnMode::Numbers { subcolumn_mode: SubcolumnMode::Single }, SubcolumnMode::MeanSdN, 2, 3)?;
+    for r in 0..3 {
+        xy_param.x_cells[r][0] = Cell::number((r + 1) as f64);
+        xy_param.data_sets[0].cells[r][0] = Cell::number(10.0 + r as f64);
+        xy_param.data_sets[0].cells[r][1] = Cell::number(1.0);
+        xy_param.data_sets[0].cells[r][2] = Cell::number(3.0);
+        xy_param.data_sets[1].cells[r][0] = Cell::number(50.0 + r as f64);
+        xy_param.data_sets[1].cells[r][1] = Cell::number(2.0);
+        xy_param.data_sets[1].cells[r][2] = Cell::number(3.0);
+    }
+    let mut doc_xy = ProjectDocument::new("XY Param")?;
+    doc_xy.add_data_sheet(DataSheet::new("xyp", "XY Param", TableArchetype::Xy(xy_param))?)?;
+    doc_xy.add_data_sheet(DataSheet::new(
+        "xyp_copy",
+        "Copy",
+        TableArchetype::Column(ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3)?),
+    )?)?;
+    let mut sess_xy = Session::from_document(doc_xy);
+    ok_cmd(
+        &mut sess_xy,
+        "table.pasteLink",
+        json!({ "source_sheet_id": "xyp", "target_sheet_id": "xyp_copy", "source_range": { "start": { "row": 0, "col": 1 }, "end": { "row": 2, "col": 1 } }, "row": 0, "col": 0, "link_id": "xyp-out" }),
+    )?;
+    ok_cmd(
+        &mut sess_xy,
+        "stats.run",
+        json!({ "sheet_id": "xyp_desc", "source_sheet": "xyp", "kind": "descriptive_stats", "selected_data_sets": [1] }),
+    )?;
+    ok_cmd(&mut sess_xy, "graph.create", json!({ "sheet_id": "g_xyp", "data_sheet_id": "xyp", "kind": "xy" }))?;
+    ok_cmd(&mut sess_xy, "table.convertArchetype", json!({ "sheet_id": "xyp", "target_kind": "Column", "allow_lossy": true }))?;
+    assert_eq!(sess_xy.document().data_sheet(&SheetId::new("xyp")).ok_or("missing xyp")?.archetype.column_count(), 2);
+    let xyp_desc = sess_xy.document().result_sheet(&SheetId::new("xyp_desc")).ok_or("missing xyp_desc")?;
+    assert_eq!(xyp_desc.status, ResultStatus::UpToDate);
+    assert_eq!(xyp_desc.analysis.selected_data_sets, vec![1]);
+    let g_xyp = sess_xy.document().graph_sheet(&SheetId::new("g_xyp")).ok_or("missing g_xyp")?;
+    assert_eq!(g_xyp.spec.series[0].data_set_index, 0);
+    assert_eq!(g_xyp.spec.series[1].data_set_index, 1);
+    let xyp_link = &sess_xy.document().data_sheet(&SheetId::new("xyp_copy")).ok_or("missing xyp_copy")?.linked_regions[0];
+    assert!(matches!(xyp_link.spec.source, LinkSource::InternalSheet { range, .. } if range.start.col == 1 && range.end.col == 1));
+    Ok(())
+}
+
+#[test]
+fn audit_74_mv_contingency_non_crosstab_maps_sequential_data_indices() -> TestResult {
+    let mut mv = MultipleVariablesTable::new(3, 2)?;
+    mv.variables[0].role = VariableRole::Label;
+    mv.variables[0].title = String::from("Strain");
+    mv.variables[0].cells = vec![Cell::text("WT"), Cell::text("KO")];
+    mv.variables[1].role = VariableRole::Categorical;
+    mv.variables[1].title = String::from("Dose");
+    mv.variables[1].cells = vec![Cell::number(1.0), Cell::number(2.0)];
+    mv.variables[2].role = VariableRole::Continuous;
+    mv.variables[2].title = String::from("Count");
+    mv.variables[2].cells = vec![Cell::number(15.0), Cell::number(25.0)];
+    let mut mv_non_crosstab = MultipleVariablesTable::new(4, 2)?;
+    mv_non_crosstab.variables[0].role = VariableRole::Label;
+    mv_non_crosstab.variables[1].role = VariableRole::Label;
+    mv_non_crosstab.variables[2].role = VariableRole::Categorical;
+    mv_non_crosstab.variables[2].cells = vec![Cell::number(1.0), Cell::number(2.0)];
+    mv_non_crosstab.variables[3].role = VariableRole::Continuous;
+    mv_non_crosstab.variables[3].cells = vec![Cell::number(10.0), Cell::number(20.0)];
+    let mut doc_mv = ProjectDocument::new("MV Contingency")?;
+    doc_mv.add_data_sheet(DataSheet::new("mv", "MV", TableArchetype::MultipleVariables(mv))?)?;
+    doc_mv.add_data_sheet(DataSheet::new("mv2", "MV2", TableArchetype::MultipleVariables(mv_non_crosstab))?)?;
+    doc_mv.add_result_sheet(ResultSheet::new(AnalysisSpec {
+        selected_data_sets: vec![1, 2],
+        ..AnalysisSpec::new(
+            "mv_norm",
+            "mv",
+            AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+                zero_anchor: NormalizeAnchor::FixedValue(0.0),
+                hundred_anchor: NormalizeAnchor::FixedValue(100.0),
+                output_percent: true,
+                per_data_set: false,
+            }),
+        )?
+    })?)?;
+    doc_mv.add_result_sheet(ResultSheet::new(AnalysisSpec {
+        selected_data_sets: vec![2, 3],
+        ..AnalysisSpec::new(
+            "mv2_norm",
+            "mv2",
+            AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+                zero_anchor: NormalizeAnchor::FixedValue(0.0),
+                hundred_anchor: NormalizeAnchor::FixedValue(100.0),
+                output_percent: true,
+                per_data_set: false,
+            }),
+        )?
+    })?)?;
+    let mut sess_mv = Session::from_document(doc_mv);
+    ok_cmd(&mut sess_mv, "table.convertArchetype", json!({ "sheet_id": "mv", "target_kind": "Contingency", "allow_lossy": true }))?;
+    ok_cmd(&mut sess_mv, "table.convertArchetype", json!({ "sheet_id": "mv2", "target_kind": "Contingency", "allow_lossy": true }))?;
+    let mv_norm = sess_mv.document().result_sheet(&SheetId::new("mv_norm")).ok_or("missing mv_norm")?;
+    assert_eq!(mv_norm.status, ResultStatus::UpToDate);
+    assert_eq!(mv_norm.analysis.selected_data_sets, vec![0, 1]);
+    let mv2_norm = sess_mv.document().result_sheet(&SheetId::new("mv2_norm")).ok_or("missing mv2_norm")?;
+    assert_eq!(mv2_norm.status, ResultStatus::UpToDate);
+    assert_eq!(mv2_norm.analysis.selected_data_sets, vec![2, 3]);
+    Ok(())
+}
+
+#[test]
+fn audit_74_broken_dependents_and_cross_sheet_hooks_stay_failed_on_recalc() -> TestResult {
+    let mut ds_a = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 3)?;
+    ds_a.data_sets[0].title = String::from("10");
+    ds_a.data_sets[1].title = String::from("20");
+    ds_a.data_sets[2].title = String::from("30");
+    let mut ds_b = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3)?;
+    for r in 0..3 {
+        ds_a.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+        ds_a.data_sets[1].cells[r][0] = Cell::number(20.0 + r as f64);
+        ds_a.data_sets[2].cells[r][0] = Cell::number(30.0 + r as f64);
+        ds_b.data_sets[0].cells[r][0] = Cell::number(5.0 + r as f64);
+        ds_b.data_sets[1].cells[r][0] = Cell::number(10.0 + r as f64);
+    }
+    let mut doc_fail = ProjectDocument::new("Stay Failed")?;
+    doc_fail.add_data_sheet(DataSheet::new("ds_a", "A", TableArchetype::Column(ds_a))?)?;
+    doc_fail.add_data_sheet(DataSheet::new("ds_b", "B", TableArchetype::Column(ds_b))?)?;
+    doc_fail.add_result_sheet(ResultSheet::new(AnalysisSpec {
+        selected_data_sets: vec![0, 1],
+        ..AnalysisSpec::new(
+            "hook_b",
+            "ds_b",
+            AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+                zero_anchor: NormalizeAnchor::Hooked(HookSource::ColumnTitleValue { data_sheet_id: SheetId::new("ds_a"), data_set_index: 0 }),
+                hundred_anchor: NormalizeAnchor::ColumnMax,
+                output_percent: true,
+                per_data_set: false,
+            }),
+        )?
+    })?)?;
+    doc_fail.add_result_sheet(ResultSheet::new(AnalysisSpec::new(
+        "ctrl_a",
+        "ds_a",
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize {
+            zero_anchor: NormalizeAnchor::ControlColumnMean { column: 0 },
+            hundred_anchor: NormalizeAnchor::ColumnMax,
+            output_percent: true,
+            per_data_set: false,
+        }),
+    )?)?)?;
+    doc_fail.add_result_sheet(ResultSheet::new(AnalysisSpec::new(
+        "base_a",
+        "ds_a",
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline {
+            baseline_columns: vec![0],
+            operation: curvebook_doc::BaselineOperation::Difference,
+        }),
+    )?)?)?;
+    let mut sess_fail = Session::from_document(doc_fail);
+    ok_cmd(&mut sess_fail, "project.recalculate", json!({}))?;
+    ok_cmd(&mut sess_fail, "table.convertArchetype", json!({ "sheet_id": "ds_a", "target_kind": "XY", "allow_lossy": true }))?;
+
+    let hook_b = sess_fail.document().result_sheet(&SheetId::new("hook_b")).ok_or("missing hook_b")?;
+    assert!(matches!(hook_b.status, ResultStatus::Failed { .. }));
+    assert_eq!(hook_b.analysis.selected_data_sets, vec![0, 1], "cross-sheet hook failure corrupted ds_b selected_data_sets");
+    for rid in ["hook_b", "ctrl_a", "base_a"] {
+        assert!(matches!(sess_fail.document().result_sheet(&SheetId::new(rid)).ok_or("missing")?.status, ResultStatus::Failed { .. }));
+    }
+
+    let recalc = ok_cmd(&mut sess_fail, "project.recalculate", json!({}))?;
+    assert_eq!(recalc["failed_count"], json!(3));
+    for rid in ["hook_b", "ctrl_a", "base_a"] {
+        assert!(
+            matches!(sess_fail.document().result_sheet(&SheetId::new(rid)).ok_or("missing")?.status, ResultStatus::Failed { .. }),
+            "{rid} silently recovered with bogus column mapping on project.recalculate"
+        );
+    }
+    Ok(())
+}
