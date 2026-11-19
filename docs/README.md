@@ -49,7 +49,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitf
 | Platforms | [Platform evidence](evidence/platforms.md) |
 | Localization | [Localization evidence](evidence/localization.md) |
 | Quality of life | [Quality-of-life enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
-| Numerical oracles | Scope notes for independent `D1` reference tests: [curve transforms](planning/oracle-curve-transforms.md), [distribution tails](planning/oracle-distribution-tails.md), and [non-NIST fitting](planning/oracle-non-nist-fitting.md) |
+| Numerical oracles | Scope notes for independent `D1` reference tests: [curve transforms](planning/oracle-curve-transforms.md), [distribution tails](planning/oracle-distribution-tails.md), [non-NIST fitting](planning/oracle-non-nist-fitting.md), [fit uncertainty](planning/oracle-fit-uncertainty.md), [custom equations](planning/oracle-custom-equations.md), [normalization](planning/oracle-normalization.md), [randomization](planning/oracle-randomization.md), and [Poisson & Cox regression](planning/oracle-poisson-cox-regression.md) |
 | Code audits | [Audit playbook](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), and [work log](audit/work-log.md) |
 
 ## Releases & the website

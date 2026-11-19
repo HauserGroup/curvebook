@@ -107,7 +107,7 @@ $$\text{SS}_{\text{crit}} = \text{SS}(\hat{\theta}) \left(1 + \frac{F_{1, \text{
   $$\text{AIC}_c = N \ln\!\left(\frac{\text{SS}}{N}\right) + 2K + \frac{2K(K+1)}{N - K - 1}, \qquad w_{\text{Akaike}, m} = \frac{e^{-\frac{1}{2}\Delta_m}}{\sum_j e^{-\frac{1}{2}\Delta_j}}$$
 - **Residual diagnostics:** Replicates test for lack of fit, runs test, Spearman homoscedasticity test, D'Agostino–Pearson / Shapiro–Wilk / Anderson–Darling / Lilliefors KS normality of residuals, and residual plots.
 
-### 2.5 Planned Identifiability, Model-Comparison, Output & Quality-Flag Extensions *(target specification — partially scoped in [`R13.1`](../ROADMAP.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays))*
+### 2.5 Planned Identifiability, Model-Comparison, Output & Quality-Flag Extensions *(target specification — [`R13.1`](../history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) items done)*
 
 1. **Three-way parameter identifiability & greedy Hessian reduction (`IdentifiabilityMode`):**
    - Support three user-selectable modes on the `Confidence` tab:

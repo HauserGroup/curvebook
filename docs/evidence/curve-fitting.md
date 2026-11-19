@@ -26,8 +26,8 @@
 - [x] Replicates test for lack of fit, runs test, homoscedasticity test, and residual normality battery (D'Agostino–Pearson, Shapiro–Wilk, AD, KS) *(`homoscedasticity_spearman_test`, `anderson_darling_test`, and `lilliefors_ks_test` verified alongside lack-of-fit, runs test, Shapiro–Wilk, and D'Agostino–Pearson $K^2$)*
 - [x] Residual tables & plots (raw, weighted, studentized; vs. $X$, vs. $\hat{Y}$, Q–Q, column comparison) *(solver records residuals, `populate_nonlinear_result_sheet` emits `ResultTabKind::Residuals` when `emit_residuals_tab: true`, and `curvebook-chart` compiles `DiagnosticPlotKind::ResidualPlot`)*
 - [x] Confidence bands and prediction bands evaluated smoothly in linear and logarithmic axis coordinates *(`build_curve_overlay` uses log-grid spacing when `x_max / x_min >= 100.0` & `x_min > 0` alongside 101-point delta-method confidence & prediction bands)*
-- [x] Standard-curve inverse interpolation ("Interpolate unknowns from standard curve" with replicate side-by-side/stacked layouts and propagated CIs) *(verified across linear regression and nonlinear `populate_nonlinear_result_sheet` `ResultTabKind::InterpolatedUnknowns` tab)*
-- [x] Conditional range filtering ("Don't fit points when…", including generated X series) and Theoretical Curve Plotting (`Plot a function`) *(`x_range_filter`, `y_range_filter`, and `plot_function_only` implemented on `NonlinearFitSpec` alongside `TransformAnalysisSpec::Simulate`)*
+- [x] Standard-curve inverse interpolation ("Interpolate unknowns from standard curve" with dual `Interpolated Mean X` & `Interpolated Replicates` tabs on `RawReplicates(k)` tables and propagated CIs, `R13.1`) *(verified across linear regression, `populate_nonlinear_result_sheet`, `r13_1_d1_oracles`, `e2e_workflows`, and `human_wf_13_18`)*
+- [x] Conditional range filtering ("Don't fit points when…", including generated X series) and Theoretical Curve Plotting (`Plot a function`) *(`x_range_filter`, `y_range_filter`, and `plot_function_only` implemented on `NonlinearFitSpec` and `LinearRegressionSpec` alongside `TransformAnalysisSpec::Simulate`)*
 
 ## Built-In Equation Library & User-Defined Equation VM
 - [x] **Lines & Polynomials:** Simple linear & Deming Model II regression, line through origin, segmental linear, smooth hinge, semi-log/log-log/probit lines (`semi_log_line`, `log_log_line`, `probit_line`), centered (`centered_poly_1..6`) & standard polynomials
@@ -43,17 +43,17 @@
 
 ## Planned Curve-Fitting & Regression Completeness Scope
 
-Target specifications detailed in [`curve-fitting-implementation.md`](../implementation/curve-fitting-implementation.md) §§1.4, 2.5, 3.5, 4.1–4.2, 5, and 6 (partially scheduled under [`R13.1`](../ROADMAP.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays)):
+Target specifications detailed in [`curve-fitting-implementation.md`](../implementation/curve-fitting-implementation.md) §§1.4, 2.5, 3.5, 4.1–4.2, 5, and 6 ([`R13.1`](../history/roadmap/r13.md#r131-domain-restricted-regression-fit-identifiability-replicate-unknown-interpolation--outlier-overlays) items done):
 
 ### Solver, Weighting, Diagnostics & Comparison Extensions
 - [ ] Iteratively reweighted curve-predicted weighting (`1 / Y_curve^2`, `1 / |Y_curve|`, `1 / |Y_curve|^k`) from an initial unweighted pass, matching `(Mean, SD, n)` sufficient statistics (`§1.4`)
 - [ ] Three-way parameter identifiability (`IdentifyUnstableParameters` greedy Hessian $\kappa(H) > 10/\sqrt{\varepsilon_{\text{mach}}}$ reduction, `IdentifyAmbiguousFits` dependency $> 0.9999$, and `ReportAll`), midpoint extrapolation warnings, and SE suppression under profile-likelihood CI mode (`§2.5`, `R13.1`)
-- [ ] ROUT `"Identify & count only"` mode alongside elimination, analyzable `"Cleaned data"` output tab, union-of-outliers synchronization when comparing models, and graph outlier marker overlays (`§1.4`, `R13.1`)
+- [ ] ROUT `"Identify & count only"` mode alongside elimination, analyzable `"Cleaned data"` output tab, and union-of-outliers synchronization when comparing models (`§1.4`; graph ROUT outlier marker badges and `ResultSheet::eliminated_outliers` landed in `R13.1`)
 - [ ] Replicate independence toggle (`IndividualReplicates` vs. `RowMeansOnly` on replicate and `Mean/SD/N` tables) and `Quick` / `Medium` / `Strict` convergence presets (`§1.4`)
 - [ ] Full 4-question `ModelComparisonSpec` (two equations, selected parameter invariance across datasets, single global curve vs. separate curves, parameter vs. theoretical value) plus ambiguous/flagged pre-check (`§2.5`)
 - [ ] Parameter summary output table + linked secondary bar/XY graph, configurable output significant digits, and 6-rule `FitFlagRules` (`R²`, `N`, dependency, normality, runs/lack-of-fit, outlier count) (`§2.5`)
 - [ ] Multi-response `mv_y_columns` variable assignment on `MultipleVariables` nonlinear regression (`M` responses $\times G$ groups) (`§1.4`)
-- [ ] Dual `Interpolated Mean X` + `Interpolated Replicates` standard-curve tabs (`R13.1`) with analyzable output for $10^X$ / $e^X$ antilog concentration transforms (`§2.5`)
+- [ ] Analyzable output on dual `Interpolated Mean X` + `Interpolated Replicates` tabs (`R13.1` dual tabs landed) for $10^X$ / $e^X$ antilog concentration transforms (`§2.5`)
 
 ### Built-In Equation Library & Custom DSL Completeness
 - [ ] Linear-concentration (`X = [C]`) normalized 3PL/4PL stimulation & inhibition models (`agonist_vs_response_normalized[_var]`, `inhibitor_vs_response_normalized[_var]`) (`§3.5`)
