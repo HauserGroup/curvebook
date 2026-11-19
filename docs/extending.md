@@ -21,8 +21,20 @@ Follow the existing seams below whenever adding a capability. Every user-facing 
 
 ### Statistical / Scientific `AnalysisKind`
 
-- **Where:** `crates/doc/src/analysis.rs` (`AnalysisKind` & typed spec/result structs), `crates/stats` / `crates/fit` / `crates/transform`, `crates/engine`, `crates/ui-egui`
-- **How:** 1. Define typed parameter & result structs + `AnalysisKind` variant in `crates/doc/src/analysis.rs` (handling serde compatibility). 2. Implement pure-Rust math in `crates/stats` / `crates/transform` / `crates/fit` with peer-reviewed citations, edge-case coverage, and `D1` oracle checks (NIST StRD / verified reference values). 3. Wire execution/recalculation into `curvebook-engine` (`analyze.run` / typed runner). 4. Expose parameters & results views in `crates/ui-egui`, CLI, and MCP.
+- **Where:** `crates/doc/src/analysis.rs` (`AnalysisKind`, typed spec and result structs) and `crates/doc/src/analysis/finite.rs`; `crates/stats` / `crates/fit` / `crates/transform`; `crates/engine` (`dag.rs`, `cmd/analysis.rs`, `methods_report.rs`); `crates/chart` when the result is graphable; `crates/ui-egui`; `xtask/src/docs_site/registries.rs`.
+- **How:** Adding a variant makes the compiler stop at every *exhaustive* `match` listed below. The places marked *wildcard* have a catch-all arm, so they compile without changes and silently fall back to a default. Check each one by hand.
+  1. **Model (`curvebook-doc`).** Add the typed spec struct and variant in `analysis.rs`, keeping serde compatibility (follow [file-formats.md](file-formats.md) if a persisted shape changes). Compiler stops: `AnalysisKind::derive_auto_title` and `AnalysisKind::is_compatible_with` (`analysis.rs`), and `kind_first_non_finite_float` (`analysis/finite.rs`). Add a finiteness check there for every user-set float.
+  2. **References to other sheets or Info constants** (only if the spec holds hooks or sheet IDs). *Wildcard:* `ProjectDocument::upstream_dependencies` (`crates/doc/src/project.rs`); `validate_analysis_hooks_and_bounds`, `detect_dependency_cycles`, and `break_hook_edge_in_result_sheets` (`crates/format/src/archive.rs`); `remap_analysis_hooks` (`crates/engine/src/cmd/helpers.rs` and `cmd/sheet.rs`); `count_analysis_hooks` (`cmd/project.rs`).
+  3. **Math.** Implement it in `crates/stats`, `crates/transform`, or `crates/fit` with peer-reviewed citations, edge-case coverage, and `D1` oracle checks (NIST StRD or verified reference values).
+  4. **Routing.** `recompute_result_sheet` (`crates/engine/src/dag.rs`, *wildcard*) sends `Transform` to `execute_analysis_transform` (`crates/transform/src/ops/mod.rs`), linear and nonlinear regression to `curvebook_fit::execute_analysis` (`crates/fit/src/result.rs`), `PowerAnalysis` to its own path, and everything else to `curvebook_stats::run_analysis` (`crates/stats/src/lib.rs`).
+     - A new statistics kind only needs an arm in `run_analysis` (compiler stop).
+     - A new transform or fit kind also needs an explicit arm in `recompute_result_sheet`. Otherwise the wildcard routes it to `run_analysis`.
+  5. **Engine and automation.**
+     - Compiler stop: `describe_analysis_kind` (`crates/engine/src/methods_report.rs`) for the methods text.
+     - *Wildcard:* for `analysis.run` shorthand names and per-kind parameters, `resolve_kind_shorthand` and its helpers, `infer_default_kind`, `apply_shorthand_kind_overrides`, and `validate_domain_and_compat` (`crates/engine/src/cmd/analysis.rs`).
+     - Regenerate `docs/commands.md` and the schemas (`cargo xtask commands`, `cargo xtask schemas`) if any schema text changes.
+  6. **Graphs** (only if the result can be plotted). *Wildcard:* the extractors in `crates/chart/src/` (`multivariate_layout.rs`, `survival_cat.rs`, `xy.rs`, `equation_box.rs`, `column_grouped.rs`).
+  7. **GUI and documentation site.** Compiler stops: `collect_experimental_design_items` (`crates/ui-egui/src/views/stat_params.rs`) and `analysis_kind_slug` (`xtask/src/docs_site/registries.rs`). The parameter dialogs in `crates/ui-egui` use *wildcard* arms; expose the new parameters and result views there and document them for CLI and MCP users.
 
 ### Curve-fit `ParametricModel`
 
