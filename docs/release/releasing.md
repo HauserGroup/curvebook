@@ -67,7 +67,7 @@ Before tagging or publishing a release, verify both source invariants and packag
        dist/release
      ```
    - `release-scan` unpacks containers through bounded `curvebook-platform` subprocesses (`.zip`, `.tar.gz`/`.tgz`, `.AppImage`, `.dmg` on macOS, `.msi` on Windows, plus historical `.deb`/`.rpm`/`.flatpak`/`.zsync` for Alpha backfill), enforces zip-slip/tar-slip guards, fails closed on unknown or unextractable formats, checks `SHA256SUMS.txt`, and runs `brands`, `cleanroom`, and `assets` over every unpacked entry.
-   - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
+   - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](../history/release/alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
 3. **Cross-platform packaging integrity scripts:**
    - Shared packaging metadata / brand hygiene check:
      ```sh
@@ -192,7 +192,7 @@ gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag")
 Once the release build passes verification and is published:
 
 1. Confirm the release-gate table in [docs/ROADMAP.md](../ROADMAP.md) (`Legacy Milestone & Gate Mapping`).
-2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](../ROADMAP.md) (moving milestone archival notes to `docs/planning/roadmap-history.md` if retiring a milestone phase).
+2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](../ROADMAP.md) (moving milestone archival notes to `docs/history/roadmap.md` if retiring a milestone phase).
 3. Refresh and verify [docs/STATUS.md](../STATUS.md) and open-item summaries:
    ```sh
    cargo xtask status

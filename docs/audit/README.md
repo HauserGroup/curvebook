@@ -12,12 +12,14 @@ The [audit work log](work-log.md) records scope, people, timestamps, code commit
 
 ## Directory index & audit rounds
 
-| Round / Document | Baseline & Range | Status on `main` (`1e9dc59`) | Files |
+This folder holds the reusable playbook. Finished rounds are archived, read-only, under [`docs/history/audit/`](../history/audit/).
+
+| Round / Document | Baseline & Range | Status | Files |
 |---|---|---|---|
 | **Slice catalog** | `S01`–`S13`, `X1`, `X2` | Active reference | [`slices.md`](slices.md) |
-| **Round 1 full audit** | `ebcc622` -> Stage 1 re-check `fda1cc0` -> Stages 2–5 merged in `833e98d` | **Closed** — all **`156`** unique survivors (`32 S1, 60 S2, 58 S3, 6 S4`) + dup `R1-S07-02` fixed with permanent regression tests; `0` live defects in Stage 5 sweep | [`progress.md`](progress.md), [`findings/r1/`](findings/r1/) (`S01.md`–`S13.md`, `X1.md`, `X2.md`) |
-| **Round 2 delta audit** | `ebcc622..fda1cc0` (`38` commits), re-verified at `1e9dc59` (`2026-11-16`) | **Open (`149` surviving items)** — `154` audited (`138` `R2-*` + `16` companion): **`5` `FIXED_ON_MAIN`**, **`18` `PARTIAL_ON_MAIN`**, **`131` `LIVE_ON_MAIN`** -> **`135` `R2-*` survivors** (`36 S1, 66 S2, 31 S3, 2 S4`) + **`14` companion survivors** | [`round2-post-ebcc622.md`](round2-post-ebcc622.md), [`findings/r2/`](findings/r2/) (`R2-S01.md`–`R2-S13.md`, [`desktop_host.md`](findings/r2/desktop_host.md), [`interaction-gui_actions.md`](findings/r2/interaction-gui_actions.md)) |
-| **R0–R9 milestone review ledger (`R0.25`)** | `main` @ `2a948b0` (`2026-11-16`), remediated on `bugfix/R0.25-review-2026-11-16-ledger` | **`RV-01`–`RV-74` remediated** (`RV-28`, `RV-45` rejected) with `rv_ledger_*` regression suites; **third-pass `RV-75`–`RV-99` recorded open** ([`R0.25`](../planning/roadmap-history/r0.md#r025-r0r9-milestone-review-ledger-remediation-2026-11-16)) | [`review-2026-11-16-ledger.md`](review-2026-11-16-ledger.md) |
+| **Round 1 full audit** | `ebcc622` -> Stage 1 re-check `fda1cc0` -> Stages 2–5 merged in `833e98d` | **Closed** — all `156` unique survivors fixed with permanent regression tests | [`round1-progress.md`](../history/audit/round1-progress.md), [`findings/r1/`](../history/audit/findings/r1/) |
+| **Round 2 delta audit** | `ebcc622..fda1cc0` (`38` commits), re-verified at `1e9dc59` (`2026-11-16`) | **Closed** — all `149` surviving items remediated under [`R0.19`](../history/roadmap/r0.md#r019-round-2-delta-code-audit-remediation-ebcc622fda1cc0) | [`round2-post-ebcc622.md`](../history/audit/round2-post-ebcc622.md), [`findings/r2/`](../history/audit/findings/r2/) |
+| **R0–R9 milestone review ledger (`R0.25`)** | `main` @ `2a948b0` (`2026-11-16`) | **Closed** — `RV-01`–`RV-99` remediated (`RV-28`, `RV-45` rejected); third pass `RV-75`–`RV-99` closed in Wave 8 ([`R0.25`](../history/roadmap/r0.md#r025-r0r9-milestone-review-ledger-remediation-2026-11-16)) | [`review-2026-11-16-ledger.md`](../history/audit/review-2026-11-16-ledger.md) |
 
 ## Playbook baseline & git-worktree workflow
 
@@ -26,16 +28,16 @@ The [audit work log](work-log.md) records scope, people, timestamps, code commit
 | Round 1 base (completed) | `ebcc622b32fc526c545aad8439e3e580d04b478c` (`origin/main`, 2026-11-14; initial playbook draft `71f37d8`, closed via `833e98d`) |
 | Round 2 delta range | `ebcc622..fda1cc0` (re-verified against `main` `1e9dc59` on 2026-11-16) |
 | Scope | Every slice in [`slices.md`](slices.md) |
-| Already known | [Known defects in `docs/gaps.md`](../gaps.md#known-defects). Do not report these again. |
+| Already known | [Known defects in `docs/history/legacy-ids-and-defects.md`](../history/legacy-ids-and-defects.md#known-defects). Do not report these again. |
 | Tracking | Local slice files under `findings/r<n>/` (or one GitHub issue per slice titled `Audit R<n> <slice id>: <slice name>` when run distributed) |
 
-**Instructions come from `origin/main`. Code comes from your claimed base.** Read this playbook, [`slices.md`](slices.md) and [Known defects](../gaps.md#known-defects) on the current `origin/main`, not in your audit worktree. Your base may predate them, and the coordinator may update them during the round. Re-read them from `origin/main` each time you claim a slice or post findings:
+**Instructions come from `origin/main`. Code comes from your claimed base.** Read this playbook, [`slices.md`](slices.md) and [Known defects](../history/legacy-ids-and-defects.md#known-defects) on the current `origin/main`, not in your audit worktree. Your base may predate them, and the coordinator may update them during the round. Re-read them from `origin/main` each time you claim a slice or post findings:
 
 ```bash
 git fetch origin
 git show origin/main:docs/audit/README.md
 git show origin/main:docs/audit/slices.md
-git show origin/main:docs/gaps.md
+git show origin/main:docs/history/legacy-ids-and-defects.md
 ```
 
 **Each claim records its own base.** When you claim a slice, copy the current base SHA from the table above, as read on `origin/main`, into your claim comment, and audit exactly that commit, never the moving tip of `main`. Every finding and verdict then names the commit it was made at, so `path:line` references stay exact even when different claims use different bases:
@@ -52,8 +54,8 @@ git worktree add "../curvebook-audit-$BASE" "$BASE"
 
 | Role | Who | Does | Never |
 |---|---|---|---|
-| **Coordinator** | One named person | Creates the slice issues, moves the current base, assigns verifiers, settles disputes, removes duplicates, writes confirmed findings into `docs/gaps.md` | Reviews a slice they also verify |
-| **Reviewer** | Anyone who claims a slice | Reads the slice, reports findings in the [format below](#finding-format) | Edits `src/`, fixes bugs, edits `docs/gaps.md` |
+| **Coordinator** | One named person | Creates the slice issues, moves the current base, assigns verifiers, settles disputes, removes duplicates, writes confirmed findings into `docs/history/legacy-ids-and-defects.md` | Reviews a slice they also verify |
+| **Reviewer** | Anyone who claims a slice | Reads the slice, reports findings in the [format below](#finding-format) | Edits `src/`, fixes bugs, edits `docs/history/legacy-ids-and-defects.md` |
 | **Verifier** | A different person **and**, where possible, a different model family from the slice's reviewer | Tries to disprove each finding and records a verdict with evidence | Reads the reviewer's reasoning before forming their own view of the code |
 | **Fixer** (later round) | Anyone who claims a confirmed finding | Fixes it on its own branch with a regression test, through a pull request | Fixes more than one slice per branch |
 
@@ -66,7 +68,7 @@ A person is accountable for every agent they run (AGENTS.md rule 1). Each slice-
 3. **Report.** Post one comment on the slice issue containing all findings in the [finding format](#finding-format), most severe first, with IDs `R1-<slice>-<nn>` (for example `R1-S06-03`). If there are no findings, post `No findings` and list what you checked.
 4. **Verify.** The coordinator assigns a verifier. For each finding the verifier checks out the finding's **Base** commit, rereads the cited code on their own, tries to build the failure scenario, and replies with the [verdict format](#verdict-format). The strongest evidence is a failing test, pushed to a branch named `audit/r1/<finding id>` and never merged as is.
 5. **Settle.** If reviewer and verifier disagree, the coordinator decides, or asks a third verifier.
-6. **Record.** The coordinator adds `CONFIRMED` and `PLAUSIBLE` findings to [Known defects](../gaps.md#known-defects) in one pull request per round, and closes the slice issue.
+6. **Record.** The coordinator adds `CONFIRMED` and `PLAUSIBLE` findings to [Known defects](../history/legacy-ids-and-defects.md#known-defects) in one pull request per round, and closes the slice issue.
 
 If an agent cannot reach GitHub, it writes the same content to a file and its accountable person posts it.
 
@@ -142,4 +144,4 @@ Verdicts:
 
 ## Running this from one machine
 
-If one person does run several agents from one machine, the same protocol still applies. Give each agent its own worktree at its claimed base and its own `CARGO_TARGET_DIR`, and have a separate agent verify each slice's findings before they are recorded. Only the coordinator writes `docs/gaps.md`.
+If one person does run several agents from one machine, the same protocol still applies. Give each agent its own worktree at its claimed base and its own `CARGO_TARGET_DIR`, and have a separate agent verify each slice's findings before they are recorded. Only the coordinator writes `docs/history/legacy-ids-and-defects.md`.

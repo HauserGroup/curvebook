@@ -48,16 +48,16 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 | Platforms | [Hardware parity](evidence/platforms.md) |
 | Localization | [Localization parity](evidence/localization.md) |
 | Scientific quality of life | [Enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
-| Historical progress | [Roadmap history](planning/roadmap-history.md) |
-| Legacy tracking | [Gap mapping and known defects](gaps.md) |
-| Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](audit/progress.md), [work log](audit/work-log.md), [Round 2 review](audit/round2-post-ebcc622.md), and [R0–R9 milestone review ledger](audit/review-2026-11-16-ledger.md) |
+| Historical progress | [Roadmap history](history/roadmap.md) |
+| Legacy tracking | [Gap mapping and known defects](history/legacy-ids-and-defects.md) |
+| Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](history/audit/round1-progress.md), [work log](audit/work-log.md), [Round 2 review](history/audit/round2-post-ebcc622.md), and [R0–R9 milestone review ledger](history/audit/review-2026-11-16-ledger.md) |
 
 ## Releases and reference files
 
 - [GitHub Pages site](index.html) and [Privacy policy](privacy.html): static entry point introducing CurveBook, complete-workspace sharing, downloads, and zero-telemetry privacy disclosures ([design decisions](release/website-design.md), [preview and publication checklist](release/github-pages.md)).
 - [Get Started](https://hausergroup.github.io/curvebook/get-started.html) and [Beta known issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues): single canonical home for Beta installer selection, platform install steps, verification, supported surfaces, `[Draft]` non-English locale status, unsigned Windows / FreeBSD preview caveats, and known limits.
-- [Alpha known issues & release notes (historical)](release/alpha-known-issues.md): historical `v0.1.0-alpha.1` / Alpha prerelease scope, caveats, and release notes (`R0.20`).
-- [Alpha branding clearance](release/alpha-branding-clearance.md): strict `R0.21` / `R10.14` branding, clean-room, and asset-provenance verification records.
+- [Alpha known issues & release notes (historical)](history/release/alpha-known-issues.md): historical `v0.1.0-alpha.1` / Alpha prerelease scope, caveats, and release notes (`R0.20`).
+- [Alpha branding clearance](history/release/alpha-branding-clearance.md): strict `R0.21` / `R10.14` branding, clean-room, and asset-provenance verification records.
 - [Release guide](release/releasing.md): packaging, verification, and release gates.
 - [Verifying a download](release/verifying-downloads.md): checking a release file's checksum and Sigstore build provenance on every platform.
 - [Windows signing](release/windows-signing.md): test signing and distribution.

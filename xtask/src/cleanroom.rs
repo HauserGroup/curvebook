@@ -8,6 +8,7 @@ use curvebook_format::{ZipArchive, ZipLimits};
 
 const SELF: &str = "xtask/src/cleanroom.rs";
 const AUDIT_DIR_PREFIX: &str = "docs/audit/";
+const HISTORY_AUDIT_DIR_PREFIX: &str = "docs/history/audit/";
 const MAX_SAME_LINE_GAP: usize = 120;
 const MAX_ADJACENT_LINE_GAP: usize = 80;
 const MAX_ARCHIVE_DEPTH: usize = 2;
@@ -188,7 +189,11 @@ fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
 fn should_skip(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    trimmed == SELF || trimmed == "docs/audit" || trimmed.starts_with(AUDIT_DIR_PREFIX)
+    trimmed == SELF
+        || trimmed == "docs/audit"
+        || trimmed.starts_with(AUDIT_DIR_PREFIX)
+        || trimmed == "docs/history/audit"
+        || trimmed.starts_with(HISTORY_AUDIT_DIR_PREFIX)
 }
 
 fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
@@ -431,7 +436,7 @@ mod tests {
     use std::path::{Path, PathBuf};
     use std::process::Command;
 
-    use super::{run, scan};
+    use super::{run, scan, should_skip};
 
     fn temp_dir(label: &str) -> PathBuf {
         let dir = std::env::temp_dir().join(format!("cb-cleanroom-{}-{label}", std::process::id()));
@@ -617,5 +622,13 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(hits.len(), 1, "{hits:?}");
         assert!(hits[0].signature.contains("plan/prism"));
+    }
+
+    #[test]
+    fn archived_audit_history_is_skipped_like_live_audit_dir() {
+        assert!(should_skip("docs/audit/workflow.md"));
+        assert!(should_skip("docs/history/audit/round2-post-ebcc622.md"));
+        assert!(!should_skip("docs/history/roadmap.md"));
+        assert!(!should_skip("docs/evidence/statistics.md"));
     }
 }

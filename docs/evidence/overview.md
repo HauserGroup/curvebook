@@ -2,7 +2,7 @@
 
 > **Last reviewed:** 2026-11-15 · **Last updated:** 2026-11-15 · **Change:** Updated through Waves 20–24 + `R8.3`–`R8.4` presenters (`eframe 0.37` / `egui 0.37` / `wgpu` native desktop window `gui_window.rs` and `wasm32` + Trunk WebGL2 bundle `curvebook-web-0.1.0.zip`, both presenting a non-interactive RGBA chrome, `R5.4` native clipboard/print/layout drag, `R8.6`–`R8.8` & `R9.17` `49`-workflow `gui_only` agent-harness parity, active `R9` QoL suite, and local universal macOS `.dmg`/`.zip` `verify.sh` + `THIRD-PARTY-LICENSES.html` complete; external hosted CI runners, Apple Developer ID notarization, & Windows/Linux/FreeBSD VM QA stay in `R8.5`/`R0.6`/`R0.14`; 2026-11-15 human-GUI audit re-graded area 10 and opened `R10`) · **Target:** Scientific biostatistics, nonlinear regression, and publication-graphing workbench parity (through multifactor ANOVA, effect sizes, multivariate analyses, and arbitrary decimal confidence levels)
 
-Authoritative clean-room capability assessment for CurveBook. Active task queue in [`ROADMAP.md`](../ROADMAP.md) and [`STATUS.md`](../STATUS.md); legacy mapping stubs in [`gaps.md`](../gaps.md), [`ROADMAP.md#legacy-milestone--gate-mapping`](../ROADMAP.md#legacy-milestone--gate-mapping), and [`roadmap-history.md`](../planning/roadmap-history.md).
+Authoritative clean-room capability assessment for CurveBook. Active task queue in [`ROADMAP.md`](../ROADMAP.md) and [`STATUS.md`](../STATUS.md); legacy mapping stubs in [`gaps.md`](../history/legacy-ids-and-defects.md), [`ROADMAP.md#legacy-milestone--gate-mapping`](../ROADMAP.md#legacy-milestone--gate-mapping), and [`roadmap-history.md`](../history/roadmap.md).
 
 ## Methodology
 
