@@ -88,7 +88,7 @@ use curvebook_doc::{
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{
     chi2_sf, dunnett_two_sided_crit_loadings, dunnett_two_sided_p_loadings, f_sf, max_studentized_range_isf, max_studentized_range_sf,
-    noncentral_f_ci, student_t_two_sided_isf, student_t_two_sided_p,
+    noncentral_f_ci, norm_two_sided_p, student_t_two_sided_isf, student_t_two_sided_p,
 };
 use curvebook_math::linalg::{DenseMatrix, cholesky, qr_col_pivoted, solve_linear_least_squares, sym_eigen};
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
@@ -97,13 +97,13 @@ use serde::{Deserialize, Serialize};
 use crate::column::shapiro_wilk;
 use crate::common::{
     append_ignored_text_checklist_and_footnote, append_listwise_filtered_checklist_and_footnote, build_tab, checklist_item, extract_numeric_columns,
-    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, resolve_selected_indices,
-    sanitize_result_sheet_floats, sorted_finite, validate_finite_slice,
+    init_result_sheet, num_cell, opt_ci_cell, opt_num_cell, p_cell, push_scalar, quantile_type6_sorted, rank_with_ties, sanitize_result_sheet_floats,
+    sorted_finite, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, adjust_p_values, build_multiplicity_tab, compare_dunn_ranks,
-    compare_groups_pairwise_with_confidence, compare_groups_with_confidence, linear_trend_test,
+    compare_groups_pairwise_with_confidence, compare_groups_with_confidence, linear_trend_test, try_adjust_p_values,
 };
 
 // ============================================================================
@@ -419,6 +419,10 @@ pub struct FactorialAnovaResult {
     pub ss_type: SumOfSquaresType,
 }
 
+const fn default_true() -> bool {
+    true
+}
+
 /// Linear mixed-effects REML fit for one-way / nested hierarchical or unbalanced RM data
 /// (Laird & Ware 1982; Kenward & Roger 1997).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -441,6 +445,12 @@ pub struct MixedRemlResult {
     pub satterthwaite_df: Vec<f64>,
     /// Kenward & Roger (1997) small-sample bias-corrected denominator df aligned 1-to-1 with `fixed_terms`.
     pub kenward_roger_df: Vec<f64>,
+    /// Whether the profile likelihood search located a converged REML optimum (false if the variance-ratio optimization hit the upper search ceiling or failed to evaluate).
+    #[serde(default = "default_true")]
+    pub converged: bool,
+    /// Whether the variance-ratio estimate lies on a constraint boundary ($\hat{\sigma}_{\text{random}}^2 = 0$ or upper search ceiling).
+    #[serde(default)]
+    pub at_boundary: bool,
 }
 
 /// Multi-variance-component linear mixed-effects REML fit (`V = sigma_e^2 I + sum_k sigma_k^2 G_k`).
@@ -755,7 +765,10 @@ pub fn ordinary_one_way_anova(groups: &[(&str, &[f64])], confidence: ConfidenceL
     let labels: Vec<String> = groups.iter().map(|(l, _)| (*l).to_owned()).collect();
     let mut res = ordinary_one_way_anova_slices(&slices, confidence)?;
     res.group_labels = labels;
-    res.variance_tests = variance_homogeneity_tests(&slices)?;
+    // Variance homogeneity tests (Bartlett and Brown-Forsythe) require n >= 2 in every group.
+    if slices.iter().all(|s| s.len() >= 2) {
+        res.variance_tests = variance_homogeneity_tests(&slices)?;
+    }
     Ok(res)
 }
 
@@ -864,8 +877,11 @@ pub fn ordinary_one_way_from_summary(groups: &[GroupComparisonInput], confidence
     let mut grand_sum = NeumaierSum::new();
     let mut ss_within = NeumaierSum::new();
     for g in groups {
-        if g.n < 1.0 || !g.mean.is_finite() || !g.sd.is_finite() || g.sd < 0.0 {
-            return Err(StatsError::InvalidParameter { name: "group_summary", value: g.n });
+        if !g.n.is_finite() || g.n < 1.0 || g.n.fract() != 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() || !g.sd.is_finite() || g.sd < 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_summary", value: g.sd });
         }
         total_n_f += g.n;
         grand_sum.add(g.n * g.mean);
@@ -956,7 +972,10 @@ pub fn unequal_variance_one_way_anova(groups: &[GroupComparisonInput]) -> Result
     let mut bf_satt_denom = 0.0_f64;
 
     for g in groups {
-        if g.n < 2.0 || !g.sd.is_finite() || g.sd <= 0.0 {
+        if !g.n.is_finite() || g.n < 2.0 || g.n.fract() != 0.0 {
+            return Err(StatsError::InvalidParameter { name: "group_n", value: g.n });
+        }
+        if !g.mean.is_finite() || !g.sd.is_finite() || g.sd <= 0.0 {
             return Err(StatsError::InvalidParameter { name: "group_sd", value: g.sd });
         }
         let v = g.sd * g.sd;
@@ -2118,13 +2137,18 @@ pub fn fit_rm_two_way_anova(
     Ok((res.anova, primary_sph))
 }
 
+/// Upper bound on $u = \ln(1 + \sigma_u^2 / \sigma_e^2)$ for random-intercept REML profile search
+/// ($\tau \le e^{36} - 1 \approx 4.3 \times 10^{15}$, supporting nested/clustered designs down to
+/// near-zero technical replicate error without truncating high ICC regimes).
+const REML_LOG1P_TAU_MAX: f64 = 36.0;
+
 struct RiClusterStats {
     m_c: f64,
-    sum_y: f64,
-    yy: f64,
-    sum_x: Vec<f64>,
-    xy: Vec<f64>,
-    xx: Vec<f64>,
+    y_bar: f64,
+    x_bar: Vec<f64>,
+    xy_within: Vec<f64>,
+    xx_within: Vec<f64>,
+    within_rows: Vec<(Vec<f64>, f64)>,
 }
 
 struct OwnedRemlFisherMats {
@@ -2210,32 +2234,67 @@ fn subblock_dense(m: &DenseMatrix, start: usize, len: usize) -> Result<DenseMatr
 
 fn invert_reml_info(info: &DenseMatrix) -> Result<DenseMatrix, StatsError> {
     let sym = symmetrize_dense(info)?;
-    if let Ok(chol) = cholesky(&sym)
-        && let Ok(inv) = chol.inverse()
-    {
-        return Ok(inv);
-    }
-    // Near-singular or collinear strata: Moore-Penrose pseudoinverse on positive eigenmodes.
-    let eig = sym_eigen(&sym)?;
     let r = sym.nrows();
-    let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
-    let tol = 1e-12 * max_ev.max(1e-30);
-    let mut inv_data = vec![0.0_f64; r * r];
-    for (k, &ev) in eig.eigenvalues.iter().enumerate() {
-        if ev <= tol {
+    // Diagonal equilibration prevents ill-conditioned variance-component scaling (large tau)
+    // from triggering false singularity fallback or dropping small Fisher eigenvalues.
+    let diag_scale: Vec<f64> = (0..r)
+        .map(|i| {
+            let v = sym.get(i, i).unwrap_or(0.0);
+            if v > 0.0 { v.sqrt() } else { 0.0 }
+        })
+        .collect();
+    let mut scaled_data = vec![0.0_f64; r * r];
+    for i in 0..r {
+        if diag_scale[i] == 0.0 {
             continue;
         }
-        let inv_ev = 1.0 / ev;
-        for i in 0..r {
-            let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
-            for j in i..r {
-                let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
-                let delta = qi * qj * inv_ev;
-                inv_data[i * r + j] += delta;
-                if i != j {
-                    inv_data[j * r + i] += delta;
+        for j in 0..r {
+            if diag_scale[j] == 0.0 {
+                continue;
+            }
+            scaled_data[i * r + j] = sym.get(i, j).unwrap_or(0.0) / (diag_scale[i] * diag_scale[j]);
+        }
+    }
+    let scaled = DenseMatrix::from_row_major(r, r, scaled_data)?;
+    let scaled_inv = if let Ok(chol) = cholesky(&scaled)
+        && let Ok(inv) = chol.inverse()
+    {
+        inv
+    } else {
+        let eig = sym_eigen(&scaled)?;
+        let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+        let tol = 1e-12 * max_ev.max(1e-30);
+        let mut inv_data = vec![0.0_f64; r * r];
+        for (k, &ev) in eig.eigenvalues.iter().enumerate() {
+            if ev <= tol {
+                continue;
+            }
+            let inv_ev = 1.0 / ev;
+            for i in 0..r {
+                let qi = eig.eigenvectors.get(i, k).unwrap_or(0.0);
+                for j in i..r {
+                    let qj = eig.eigenvectors.get(j, k).unwrap_or(0.0);
+                    let delta = qi * qj * inv_ev;
+                    inv_data[i * r + j] += delta;
+                    if i != j {
+                        inv_data[j * r + i] += delta;
+                    }
                 }
             }
+        }
+        DenseMatrix::from_row_major(r, r, inv_data)?
+    };
+
+    let mut inv_data = vec![0.0_f64; r * r];
+    for i in 0..r {
+        if diag_scale[i] == 0.0 {
+            continue;
+        }
+        for j in 0..r {
+            if diag_scale[j] == 0.0 {
+                continue;
+            }
+            inv_data[i * r + j] = scaled_inv.get(i, j).unwrap_or(0.0) / (diag_scale[i] * diag_scale[j]);
         }
     }
     Ok(DenseMatrix::from_row_major(r, r, inv_data)?)
@@ -2250,30 +2309,41 @@ fn ri_precompute_clusters(x: &DenseMatrix, y: &[f64], cluster_ids: &[usize]) -> 
     let mut clusters = Vec::with_capacity(grouped.len());
     for rows in grouped.into_values() {
         let m_c = rows.len() as f64;
-        let mut sum_y = 0.0_f64;
-        let mut yy = 0.0_f64;
-        let mut sum_x = vec![0.0_f64; p];
-        let mut xy = vec![0.0_f64; p];
-        let mut xx = vec![0.0_f64; p * p];
-        for r in rows {
-            let yr = y[r];
-            sum_y += yr;
-            yy += yr * yr;
+        let mut sum_y = NeumaierSum::new();
+        let mut sum_x = vec![NeumaierSum::new(); p];
+        for &r in &rows {
+            sum_y.add(y[r]);
             for j in 0..p {
-                let xrj = x.get(r, j).unwrap_or(0.0);
-                sum_x[j] += xrj;
-                xy[j] += xrj * yr;
+                sum_x[j].add(x.get(r, j).unwrap_or(0.0));
+            }
+        }
+        let y_bar = sum_y.total() / m_c;
+        let x_bar: Vec<f64> = sum_x.iter().map(|s| s.total() / m_c).collect();
+
+        let mut xy_within = vec![0.0_f64; p];
+        let mut xx_within = vec![0.0_f64; p * p];
+        let mut within_rows = Vec::with_capacity(rows.len());
+        for r in rows {
+            let dy = y[r] - y_bar;
+            let mut dx = Vec::with_capacity(p);
+            for j in 0..p {
+                dx.push(x.get(r, j).unwrap_or(0.0) - x_bar[j]);
+            }
+            for j in 0..p {
+                let dxj = dx[j];
+                xy_within[j] += dxj * dy;
                 for k in j..p {
-                    xx[j * p + k] += xrj * x.get(r, k).unwrap_or(0.0);
+                    xx_within[j * p + k] += dxj * dx[k];
                 }
             }
+            within_rows.push((dx, dy));
         }
         for j in 0..p {
             for k in 0..j {
-                xx[j * p + k] = xx[k * p + j];
+                xx_within[j * p + k] = xx_within[k * p + j];
             }
         }
-        clusters.push(RiClusterStats { m_c, sum_y, yy, sum_x, xy, xx });
+        clusters.push(RiClusterStats { m_c, y_bar, x_bar, xy_within, xx_within, within_rows });
     }
     clusters
 }
@@ -2284,17 +2354,19 @@ fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n_minus_p: f64, tau_ra
     let tau = tau_raw.max(0.0);
     let mut xtvx = vec![0.0_f64; p * p];
     let mut xtvy = vec![0.0_f64; p];
-    let mut ytvy = 0.0_f64;
     let mut ln_det_v = 0.0_f64;
 
+    // Orthogonal within/between decomposition avoids catastrophic cancellation in V_c^{-1} = I - (tau / (1 + m_c * tau)) 1 1^T
+    // when cluster means dominate within-cluster spread and tau is very large.
     for cl in clusters {
-        let gamma = tau / (1.0 + cl.m_c * tau);
-        ln_det_v += (1.0 + cl.m_c * tau).ln();
-        ytvy += cl.yy - gamma * cl.sum_y * cl.sum_y;
+        let factor = 1.0 + cl.m_c * tau;
+        let a_c = 1.0 / factor;
+        let w_bet = cl.m_c * a_c;
+        ln_det_v += factor.ln();
         for r_row in 0..p {
-            xtvy[r_row] += cl.xy[r_row] - gamma * cl.sum_x[r_row] * cl.sum_y;
+            xtvy[r_row] += cl.xy_within[r_row] + w_bet * cl.x_bar[r_row] * cl.y_bar;
             for c_col in r_row..p {
-                xtvx[r_row * p + c_col] += cl.xx[r_row * p + c_col] - gamma * cl.sum_x[r_row] * cl.sum_x[c_col];
+                xtvx[r_row * p + c_col] += cl.xx_within[r_row * p + c_col] + w_bet * cl.x_bar[r_row] * cl.x_bar[c_col];
             }
         }
     }
@@ -2308,8 +2380,20 @@ fn ri_eval_profile(clusters: &[RiClusterStats], p: usize, n_minus_p: f64, tau_ra
     let ln_det_xtvx = chol_x.ln_det();
     let xtvx_inv = chol_x.inverse()?;
     let beta = chol_x.solve(&xtvy)?;
-    let quad_b: f64 = beta.iter().zip(xtvy.iter()).map(|(&b, &rhs)| b * rhs).sum();
-    let rss = (ytvy - quad_b).max(1e-30);
+
+    let mut rss_acc = NeumaierSum::new();
+    for cl in clusters {
+        let a_c = 1.0 / (1.0 + cl.m_c * tau);
+        let xb: f64 = cl.x_bar.iter().zip(beta.iter()).map(|(&x, &b)| x * b).sum();
+        let r_bar = cl.y_bar - xb;
+        rss_acc.add(cl.m_c * a_c * r_bar * r_bar);
+        for (dx, dy) in &cl.within_rows {
+            let dxb: f64 = dx.iter().zip(beta.iter()).map(|(&x, &b)| x * b).sum();
+            let r_in = *dy - dxb;
+            rss_acc.add(r_in * r_in);
+        }
+    }
+    let rss = rss_acc.total().max(1e-30);
     let sigma2_e = rss / n_minus_p;
     let ll = -0.5 * (n_minus_p * sigma2_e.ln() + ln_det_v + ln_det_xtvx + n_minus_p);
     Ok((ll, sigma2_e, xtvx_inv, beta))
@@ -2336,21 +2420,24 @@ fn ri_build_fisher_mats(
         let a_c = 1.0 / (1.0 + cl.m_c * tau);
         let a2 = a_c * a_c;
         let a3 = a2 * a_c;
-        let c_m0 = (1.0 - a2) / cl.m_c;
-        let c_q00 = (1.0 - a3) / cl.m_c;
+        let w_m0 = cl.m_c * a2;
+        let w_m1 = cl.m_c * cl.m_c * a2;
+        let w_q00 = cl.m_c * a3;
+        let w_q01 = cl.m_c * cl.m_c * a3;
+        let w_q11 = w_q01 * cl.m_c;
         sum_a2 += a2;
         sum_ma2 += cl.m_c * a2;
         sum_m2a2 += cl.m_c * cl.m_c * a2;
         for r in 0..p {
             for c in r..p {
                 let idx = r * p + c;
-                let xx_rc = cl.xx[idx];
-                let xplus_rc = cl.sum_x[r] * cl.sum_x[c];
-                m0[idx] += xx_rc - c_m0 * xplus_rc;
-                m1[idx] += a2 * xplus_rc;
-                q00[idx] += xx_rc - c_q00 * xplus_rc;
-                q01[idx] += a3 * xplus_rc;
-                q11[idx] += cl.m_c * a3 * xplus_rc;
+                let xx_in = cl.xx_within[idx];
+                let xbar_rc = cl.x_bar[r] * cl.x_bar[c];
+                m0[idx] += xx_in + w_m0 * xbar_rc;
+                m1[idx] += w_m1 * xbar_rc;
+                q00[idx] += xx_in + w_q00 * xbar_rc;
+                q01[idx] += w_q01 * xbar_rc;
+                q11[idx] += w_q11 * xbar_rc;
             }
         }
     }
@@ -2689,12 +2776,14 @@ fn fit_random_intercept_reml_with_method_and_core(
     let (_, zero_eval) = eval_u(0.0)?;
     let ll_zero = zero_eval.0;
 
-    // Coarse search on u = ln(1 + tau) in [0, 12] + fine search in [0, 0.25].
+    // Coarse search on u = ln(1 + tau) in [0, REML_LOG1P_TAU_MAX] + fine search in [0, 0.25].
+    let n_coarse = 144_usize;
+    let coarse_step = REML_LOG1P_TAU_MAX / (n_coarse as f64);
     let mut best_u = 0.0_f64;
     let mut best_ll = ll_zero;
-    let mut best_step = 12.0 / 80.0;
-    for i in 1..=80 {
-        let u = (i as f64) * (12.0 / 80.0);
+    let mut best_step = coarse_step;
+    for i in 1..=n_coarse {
+        let u = (i as f64) * coarse_step;
         if let Ok((_, (ll, _, _, _))) = eval_u(u)
             && ll > best_ll
         {
@@ -2714,13 +2803,13 @@ fn fit_random_intercept_reml_with_method_and_core(
     }
 
     let mut a_u = (best_u - best_step).max(0.0);
-    let mut b_u = (best_u + best_step).min(12.0);
+    let mut b_u = (best_u + best_step).min(REML_LOG1P_TAU_MAX);
     let phi_gold = 0.5 * (5.0_f64.sqrt() - 1.0);
     let mut c_u = b_u - phi_gold * (b_u - a_u);
     let mut d_u = a_u + phi_gold * (b_u - a_u);
     let mut f_c = eval_u(c_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
     let mut f_d = eval_u(d_u).map_or(f64::NEG_INFINITY, |(_, ev)| ev.0);
-    for _ in 0..65 {
+    for _ in 0..80 {
         if f_c < f_d {
             a_u = c_u;
             c_u = d_u;
@@ -2737,13 +2826,16 @@ fn fit_random_intercept_reml_with_method_and_core(
     }
     let cand_u = 0.5 * (a_u + b_u);
     let (cand_tau, cand_eval) = eval_u(cand_u)?;
-    let (tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
-        (cand_tau, cand_eval)
+    let (u_hat, tau_hat, (opt_ll, sigma2_e_scaled, xtvx_rel_inv, beta_scaled)) = if cand_eval.0 > best_ll && cand_eval.0 > ll_zero + 1e-12 {
+        (cand_u, cand_tau, cand_eval)
     } else if best_ll > ll_zero + 1e-12 {
-        eval_u(best_u)?
+        (best_u, best_u.exp_m1().max(0.0), eval_u(best_u)?.1)
     } else {
-        (0.0, zero_eval)
+        (0.0, 0.0, zero_eval)
     };
+    let hit_upper_bound = u_hat >= REML_LOG1P_TAU_MAX - 1e-4;
+    let at_boundary = tau_hat == 0.0 || hit_upper_bound;
+    let converged = !hit_upper_bound && (b_u - a_u).abs() <= 1e-8 && opt_ll.is_finite();
 
     let lrt_chi2 = (2.0 * (opt_ll - ll_zero)).max(0.0);
     let lrt_p = if tau_hat > 0.0 && lrt_chi2 > 0.0 { 0.5 * chi2_sf(lrt_chi2, 1.0)? } else { 1.0 };
@@ -2769,6 +2861,8 @@ fn fit_random_intercept_reml_with_method_and_core(
         fixed_terms,
         satterthwaite_df,
         kenward_roger_df,
+        converged,
+        at_boundary,
     };
     Ok((res, core))
 }
@@ -4017,6 +4111,15 @@ fn nested_one_way_anova_selected(
     two_group_t_test: bool,
     df_method: MixedModelDfMethod,
 ) -> Result<NestedAnovaResult, StatsError> {
+    nested_one_way_anova_with_reml_status(table, selected_groups, two_group_t_test, df_method).map(|(res, _, _)| res)
+}
+
+fn nested_one_way_anova_with_reml_status(
+    table: &curvebook_doc::NestedTable,
+    selected_groups: &[usize],
+    two_group_t_test: bool,
+    df_method: MixedModelDfMethod,
+) -> Result<(NestedAnovaResult, bool, bool), StatsError> {
     let g_count = selected_groups.len();
     if two_group_t_test && g_count != 2 {
         return Err(StatsError::InsufficientSampleSize { context: "nested ANOVA groups", required: 2, actual: g_count });
@@ -4138,29 +4241,33 @@ fn nested_one_way_anova_selected(
         None
     };
 
-    Ok(NestedAnovaResult {
-        group_labels,
-        f_among_groups: f_g,
-        df1_groups: df1_g,
-        df2_groups_satterthwaite: df2_satt,
-        df2_groups_kenward_roger: df2_kr,
-        p_among_groups: p_g,
-        t_nested,
-        f_among_subclusters: f_sub,
-        df1_subclusters: df1_sub,
-        df2_error: df2_err,
-        p_among_subclusters: p_sub,
-        ss_groups: ssg,
-        ss_subclusters: sss,
-        ss_error: sse,
-        ms_groups: msg,
-        ms_subclusters: mss,
-        ms_error: mse,
-        variance_subclusters: reml.sigma2_random,
-        variance_error: reml.sigma2_error,
-        icc_subclusters: reml.icc,
-        total_observations: total_obs,
-    })
+    Ok((
+        NestedAnovaResult {
+            group_labels,
+            f_among_groups: f_g,
+            df1_groups: df1_g,
+            df2_groups_satterthwaite: df2_satt,
+            df2_groups_kenward_roger: df2_kr,
+            p_among_groups: p_g,
+            t_nested,
+            f_among_subclusters: f_sub,
+            df1_subclusters: df1_sub,
+            df2_error: df2_err,
+            p_among_subclusters: p_sub,
+            ss_groups: ssg,
+            ss_subclusters: sss,
+            ss_error: sse,
+            ms_groups: msg,
+            ms_subclusters: mss,
+            ms_error: mse,
+            variance_subclusters: reml.sigma2_random,
+            variance_error: reml.sigma2_error,
+            icc_subclusters: reml.icc,
+            total_observations: total_obs,
+        },
+        reml.converged,
+        reml.at_boundary,
+    ))
 }
 
 // ============================================================================
@@ -4178,7 +4285,9 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
     }
 
     // Handle pre-summarized ColumnTable (`MeanSdN`, `MeanSemN`, `MeanCvN`) vs raw replicates.
-    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) = extract_one_way_inputs(sheet, &spec.selected_data_sets)?;
+    let (group_inputs, raw_res_opt, raw_slices_owned, ignored_non_numeric) =
+        extract_one_way_inputs(sheet, &spec.selected_data_sets, anova_spec.method, confidence)?;
+    let is_summary = raw_slices_owned.is_empty();
 
     match anova_spec.method {
         OneWayMethod::OrdinaryAnova => {
@@ -4192,12 +4301,14 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
 
             let mut main_tab = build_one_way_tab(&res, anova_spec.compute_effect_sizes, confidence, p_fmt);
             if !res.variance_tests.available {
-                main_tab.footnotes.push(String::from(
-                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
-                ));
+                main_tab.footnotes.push(String::from(if is_summary {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data."
+                } else {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+                }));
             }
             out.tabs.push(main_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&res.variance_tests, is_summary, p_fmt));
             append_one_way_multiplicity(
                 &mut out,
                 &group_inputs,
@@ -4231,29 +4342,16 @@ pub fn run_one_way_anova(sheet: &DataSheet, spec: &AnalysisSpec, anova_spec: &On
             ];
             let mut uv_tab = build_tab("unequal-var-anova", "Brown-Forsythe and Welch ANOVA", ResultTabKind::AnovaTable, headers, labels, rows);
             if !base.variance_tests.available {
-                uv_tab.footnotes.push(String::from(
-                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data.",
-                ));
+                uv_tab.footnotes.push(String::from(if is_summary {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data."
+                } else {
+                    "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+                }));
             }
             out.tabs.push(uv_tab);
-            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, p_fmt));
+            out.tabs.push(build_variance_homogeneity_tab(&base.variance_tests, is_summary, p_fmt));
 
-            let proc_eff = match MultiplicityProcedure::from(anova_spec.multiplicity.method) {
-                MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3 => {
-                    MultiplicityProcedure::from(anova_spec.multiplicity.method)
-                }
-                _ => MultiplicityProcedure::GamesHowell,
-            };
-            let details = compare_groups_with_confidence(
-                &group_inputs,
-                base.ms_within,
-                base.df_within,
-                proc_eff,
-                anova_spec.multiplicity.threshold,
-                anova_spec.multiplicity.report_confidence_intervals,
-                confidence,
-            )?;
-            push_pairwise_outputs(&mut out, &details, "Multiple comparisons (Games-Howell / T2 / T3)", p_fmt, confidence);
+            append_welch_multiplicity(&mut out, &group_inputs, &base, &anova_spec.multiplicity, p_fmt, confidence)?;
             append_one_way_checklist(&mut out, &base, &group_inputs, &raw_slices_owned, true, confidence.alpha());
         }
         OneWayMethod::KruskalWallis => {
@@ -4448,15 +4546,50 @@ fn emit_random_intercept_reml(
         ],
         vec![ResultCell::Text(String::from("Residual")), num_cell(reml.sigma2_error), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
     ];
-    out.tabs.push(build_tab(
+    let mut vc_tab = build_tab(
         "mixed-reml",
         "Mixed-effects REML variance components",
         ResultTabKind::ParametersAndConfidenceIntervals,
         reml_headers,
         vec![String::from("Subject"), String::from("Residual")],
         reml_rows,
-    ));
+    );
+    if !reml.converged {
+        vc_tab.footnotes.push(String::from(
+            "Warning: random-intercept REML optimization hit the upper variance-ratio boundary or did not converge to an interior optimum.",
+        ));
+    } else if reml.at_boundary {
+        vc_tab.footnotes.push(String::from("Random-intercept variance component converged at the lower constraint boundary (sigma^2_random = 0)."));
+    }
+    out.tabs.push(vc_tab);
+    out.checklist.push(append_reml_boundary_checklist(reml.converged, reml.at_boundary, reml.sigma2_random, reml.sigma2_error));
     Ok((reml.fixed_terms, reml.sigma2_error, reml.reml_log_lik, reml.icc, core))
+}
+
+fn append_reml_boundary_checklist(converged: bool, at_boundary: bool, sigma2_random: f64, sigma2_error: f64) -> ChecklistItem {
+    let metric = Some(format!("sigma^2_random = {sigma2_random:.6}, sigma^2_error = {sigma2_error:.6}"));
+    if !converged {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Warn,
+            metric,
+            "Random-intercept REML profile likelihood reached the upper variance-ratio limit without an interior stationary point.",
+        )
+    } else if at_boundary {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Info,
+            metric,
+            "Random-intercept variance estimate lies on the non-negativity boundary (sigma^2_random = 0); mixed model reduces to ordinary residual variance.",
+        )
+    } else {
+        checklist_item(
+            "REML convergence and variance boundaries",
+            ChecklistStatus::Pass,
+            metric,
+            "Random-intercept REML variance-component optimization converged to an interior stationary point.",
+        )
+    }
 }
 
 fn emit_multi_vc_rm_reml(
@@ -4749,6 +4882,7 @@ fn run_rm_one_way_reml(
         observed_cells,
     };
 
+    validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
     if anova_spec.multiplicity.method != MultiplicityMethod::None {
         if anova_spec.multiplicity.method == MultiplicityMethod::LinearTrend {
             let kf = k as f64;
@@ -4846,10 +4980,11 @@ fn run_rm_one_way_anova_sheet(
     let TableArchetype::Column(col_tab) = &sheet.archetype else {
         return Err(StatsError::IncompatibleTable { analysis: "RM one-way ANOVA", actual: sheet.archetype.kind() });
     };
-    let indices = resolve_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len());
+    let indices = validate_selected_indices(&spec_selected_from_sheet(out), col_tab.data_sets.len())?;
     let scan = scan_rm_one_way_column_table(col_tab, &indices);
 
     if let OneWayMethod::RepeatedMeasures { .. } = anova_spec.method {
+        validate_rm_parametric_multiplicity(anova_spec.multiplicity.method)?;
         if scan.y_vec.is_empty() {
             return Err(StatsError::EmptyInput);
         }
@@ -4947,7 +5082,22 @@ fn run_rm_one_way_anova_sheet(
                     sd: m.sample_sd().unwrap_or(0.0),
                 });
             }
-            append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
+            if geisser_greenhouse
+                && matches!(
+                    anova_spec.multiplicity.method,
+                    MultiplicityMethod::Bonferroni
+                        | MultiplicityMethod::Sidak
+                        | MultiplicityMethod::HolmSidak
+                        | MultiplicityMethod::FisherLsd
+                        | MultiplicityMethod::BenjaminiHochbergFdr
+                        | MultiplicityMethod::BenjaminiYekutieliFdr
+                        | MultiplicityMethod::TwoStageBkyFdr
+                )
+            {
+                append_rm_paired_contrast_multiplicity(out, blocks, &inputs, &anova_spec.multiplicity, p_fmt, confidence)?;
+            } else {
+                append_one_way_multiplicity(out, &inputs, rm.ms_residual, rm.df_residual, rm.ss_total, &anova_spec.multiplicity, p_fmt, confidence)?;
+            }
 
             let sph_status = if rm.sphericity.greenhouse_geisser_eps < 0.75 { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
             let mauchly_p_lbl = if rm.sphericity.mauchly_p.is_finite() { format!("{:.4}", rm.sphericity.mauchly_p) } else { String::from("n/a") };
@@ -4992,6 +5142,7 @@ fn run_rm_one_way_anova_sheet(
                 num_cell(fr.n_blocks as f64),
             ]];
             out.tabs.push(build_tab("friedman", "Friedman test", ResultTabKind::AnovaTable, headers, vec![String::from("Friedman")], rows));
+            append_friedman_multiplicity(out, col_tab, &indices, blocks, &anova_spec.multiplicity, p_fmt, confidence)?;
             out.checklist.push(checklist_item(
                 "Matched nonparametric blocks",
                 ChecklistStatus::Pass,
@@ -5013,13 +5164,43 @@ fn spec_selected_from_sheet(sheet: &ResultSheet) -> Vec<usize> {
     sheet.analysis.selected_data_sets.clone()
 }
 
+fn validate_selected_indices(selected: &[usize], total: usize) -> Result<Vec<usize>, StatsError> {
+    if selected.is_empty() {
+        return Ok((0..total).collect());
+    }
+    let mut seen = BTreeSet::new();
+    for &idx in selected {
+        if idx >= total {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+        if !seen.insert(idx) {
+            return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: idx as f64 });
+        }
+    }
+    Ok(selected.to_vec())
+}
+
 type ExtractedOneWayInputs = (Vec<GroupComparisonInput>, Option<OneWayAnovaResult>, Vec<Vec<f64>>, Vec<(String, usize)>);
 
-fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<ExtractedOneWayInputs, StatsError> {
+fn extract_one_way_inputs(
+    sheet: &DataSheet,
+    selected: &[usize],
+    method: OneWayMethod,
+    confidence: ConfidenceLevel,
+) -> Result<ExtractedOneWayInputs, StatsError> {
+    match &sheet.archetype {
+        TableArchetype::Column(col_tab) => {
+            let _ = validate_selected_indices(selected, col_tab.data_sets.len())?;
+        }
+        TableArchetype::MultipleVariables(mv) => {
+            let _ = validate_selected_indices(selected, mv.variables.len())?;
+        }
+        other => return Err(StatsError::IncompatibleTable { analysis: "one-way ANOVA", actual: other.kind() }),
+    }
     if let TableArchetype::Column(col_tab) = &sheet.archetype
         && col_tab.subcolumn_mode.supports_parametric_moments()
     {
-        let indices = resolve_selected_indices(selected, col_tab.data_sets.len());
+        let indices = validate_selected_indices(selected, col_tab.data_sets.len())?;
         let mut inputs = Vec::with_capacity(indices.len());
         for idx in indices {
             let ds = &col_tab.data_sets[idx];
@@ -5027,6 +5208,15 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
             let mut err_val = None;
             let mut n_val = None;
             for subs in &ds.cells {
+                if let (Some(c0), Some(c1), Some(c2)) = (subs.first(), subs.get(1), subs.get(2))
+                    && !c0.excluded
+                    && !c1.excluded
+                    && !c2.excluded
+                    && let curvebook_doc::CellValue::Number(raw_n) = c2.value
+                    && !raw_n.is_finite()
+                {
+                    return Err(StatsError::InvalidParameter { name: "group_n", value: raw_n });
+                }
                 if let (Some(m), Some(e), Some(n)) = (
                     subs.first().and_then(|c| c.active_number()),
                     subs.get(1).and_then(|c| c.active_number()),
@@ -5041,6 +5231,9 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
             let (Some(mean), Some(err), Some(n)) = (mean_val, err_val, n_val) else {
                 return Err(StatsError::InsufficientSampleSize { context: "pre-summarized group", required: 2, actual: 0 });
             };
+            if !n.is_finite() || n < 1.0 || n.fract() != 0.0 {
+                return Err(StatsError::InvalidParameter { name: "group_n", value: n });
+            }
             let sd = match col_tab.subcolumn_mode {
                 SubcolumnMode::MeanSdN => err,
                 SubcolumnMode::MeanSemN => err * n.sqrt(),
@@ -5057,7 +5250,25 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
         cols.iter().filter(|c| c.non_numeric_count > 0).map(|c| (c.label.clone(), c.non_numeric_count)).collect();
     let raw_slices: Vec<Vec<f64>> = cols.iter().map(|c| c.values.clone()).collect();
     let paired: Vec<(&str, &[f64])> = cols.iter().map(|c| (c.label.as_str(), c.values.as_slice())).collect();
-    let res = ordinary_one_way_anova(&paired, ConfidenceLevel::DEFAULT_95)?;
+    if matches!(method, OneWayMethod::KruskalWallis) {
+        if cols.len() < 2 {
+            return Err(StatsError::InsufficientSampleSize { context: "ANOVA groups", required: 2, actual: cols.len() });
+        }
+        let mut inputs = Vec::with_capacity(cols.len());
+        for col in &cols {
+            validate_finite_slice(&col.values)?;
+            let m = SummaryMoments::from_slice(&col.values)?;
+            inputs.push(GroupComparisonInput {
+                index: col.index,
+                label: col.label.clone(),
+                n: col.values.len() as f64,
+                mean: m.mean,
+                sd: m.sample_sd().unwrap_or(0.0),
+            });
+        }
+        return Ok((inputs, None, raw_slices, ignored_non_numeric));
+    }
+    let res = ordinary_one_way_anova(&paired, confidence)?;
     let inputs = cols
         .iter()
         .enumerate()
@@ -5072,7 +5283,7 @@ fn extract_one_way_inputs(sheet: &DataSheet, selected: &[usize]) -> Result<Extra
     Ok((inputs, Some(res), raw_slices, ignored_non_numeric))
 }
 
-fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, p_fmt: PValueFormat) -> ResultTab {
+fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, is_summary: bool, p_fmt: PValueFormat) -> ResultTab {
     let headers = vec![String::from("Statistic"), String::from("DFn / df"), String::from("DFd"), String::from("P value"), String::from("Status")];
     let labels = vec![String::from("Brown-Forsythe"), String::from("Bartlett")];
     let mut tab = if vt.available && vt.brown_forsythe_p.is_finite() {
@@ -5098,28 +5309,27 @@ fn build_variance_homogeneity_tab(vt: &VarianceHomogeneityResult, p_fmt: PValueF
         ];
         build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
     } else {
+        let unavail_status =
+            if is_summary { String::from("Not computable from summary statistics") } else { String::from("Not computable (group n < 2)") };
         let rows = vec![
             vec![
                 ResultCell::Empty,
                 num_cell(vt.brown_forsythe_df1),
                 num_cell(vt.brown_forsythe_df2),
                 ResultCell::Empty,
-                ResultCell::Text(String::from("Not computable from summary statistics")),
+                ResultCell::Text(unavail_status.clone()),
             ],
-            vec![
-                ResultCell::Empty,
-                num_cell(vt.bartlett_df),
-                ResultCell::Empty,
-                ResultCell::Empty,
-                ResultCell::Text(String::from("Not computable from summary statistics")),
-            ],
+            vec![ResultCell::Empty, num_cell(vt.bartlett_df), ResultCell::Empty, ResultCell::Empty, ResultCell::Text(unavail_status)],
         ];
         build_tab("variance-homogeneity", "Test for homogeneity of variances", ResultTabKind::Diagnostics, headers, labels, rows)
     };
     if !vt.available {
-        tab.footnotes.push(String::from(
-            "Brown-Forsythe and Bartlett variance homogeneity tests cannot be computed from pre-summarized Mean/SD/N data; raw replicate observations are required.",
-        ));
+        let note = if is_summary {
+            "Brown-Forsythe and Bartlett variance homogeneity tests cannot be computed from pre-summarized Mean/SD/N data; raw replicate observations are required."
+        } else {
+            "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations."
+        };
+        tab.footnotes.push(String::from(note));
     }
     tab
 }
@@ -5183,6 +5393,445 @@ fn append_one_way_multiplicity(
     Ok(())
 }
 
+fn validate_rm_parametric_multiplicity(method: MultiplicityMethod) -> Result<(), StatsError> {
+    if matches!(
+        method,
+        MultiplicityMethod::GamesHowell | MultiplicityMethod::TamhaneT2 | MultiplicityMethod::DunnettT3 | MultiplicityMethod::DunnRankSum
+    ) {
+        return Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "repeated-measures parametric post-hoc procedure (None, TukeyHsd, NewmanKeuls, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+        });
+    }
+    Ok(())
+}
+
+fn welch_group_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
+    let va = (ga.sd * ga.sd) / ga.n;
+    let vb = (gb.sd * gb.sd) / gb.n;
+    let v_sum = va + vb;
+    if v_sum <= 0.0 {
+        return (0.0, (ga.n + gb.n - 2.0).max(1.0));
+    }
+    let denom = (va * va) / (ga.n - 1.0).max(1.0) + (vb * vb) / (gb.n - 1.0).max(1.0);
+    let df = if denom > 0.0 { (v_sum * v_sum) / denom } else { (ga.n + gb.n - 2.0).max(1.0) };
+    (v_sum.sqrt(), df.max(1.0))
+}
+
+/// Pairwise unequal-variance Welch–Satterthwaite comparisons against a designated control arm
+/// using Dunnett's (1955) multivariate-*t* with heteroscedastic variance-ratio correlation loadings.
+fn append_welch_dunnett_vs_control(
+    out: &mut ResultSheet,
+    inputs: &[GroupComparisonInput],
+    control_column: usize,
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    if !mult.threshold.is_finite() || mult.threshold <= 0.0 || mult.threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: mult.threshold });
+    }
+    let ctrl_pos = inputs
+        .iter()
+        .position(|g| g.index == control_column)
+        .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+    let ctrl = &inputs[ctrl_pos];
+    let treats: Vec<&GroupComparisonInput> = inputs.iter().enumerate().filter(|&(i, _)| i != ctrl_pos).map(|(_, g)| g).collect();
+    if treats.is_empty() {
+        return Ok(());
+    }
+    let v0 = (ctrl.sd * ctrl.sd) / ctrl.n;
+    let loadings: Vec<f64> = treats
+        .iter()
+        .map(|tr| {
+            let vi = (tr.sd * tr.sd) / tr.n;
+            let sum_v = v0 + vi;
+            if sum_v > 0.0 && v0 > 0.0 { (v0 / sum_v).sqrt().clamp(0.0, 0.999_999) } else { std::f64::consts::FRAC_1_SQRT_2 }
+        })
+        .collect();
+    let ci_alpha = confidence.alpha();
+    let mut details = Vec::with_capacity(treats.len());
+    for tr in treats {
+        let diff = tr.mean - ctrl.mean;
+        let (se, df) = welch_group_pair_se_df(tr, ctrl);
+        let (t_stat, raw_p, adj_p) = if se > 0.0 {
+            let t = diff / se;
+            let rp = student_t_two_sided_p(t, df)?;
+            let ap = if loadings.len() == 1 { rp } else { dunnett_two_sided_p_loadings(t.abs(), df, &loadings)? };
+            (t, rp, ap)
+        } else {
+            let (st, p) = zero_se_pair(diff, false);
+            (st, p, p)
+        };
+        let ci = if mult.report_confidence_intervals {
+            let crit = if loadings.len() == 1 {
+                student_t_two_sided_isf(ci_alpha.clamp(1e-12, 0.9999), df)?
+            } else {
+                dunnett_two_sided_crit_loadings(ci_alpha, df, &loadings)?
+            };
+            Some((diff - crit * se, diff + crit * se))
+        } else {
+            None
+        };
+        details.push(build_pair_detail(
+            tr.index,
+            ctrl.index,
+            tr.label.clone(),
+            ctrl.label.clone(),
+            diff,
+            se,
+            df,
+            t_stat,
+            raw_p,
+            adj_p,
+            false,
+            ci,
+            mult.threshold,
+        ));
+    }
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (Welch Dunnett vs. control)",
+        p_fmt,
+        confidence,
+        Some(String::from("Unequal-variance Welch t comparisons versus control column with heteroscedastic Dunnett loadings and Satterthwaite df.")),
+    );
+    Ok(())
+}
+
+/// Heteroscedastic polynomial linear-trend contrast with Welch–Satterthwaite denominator df.
+fn append_welch_linear_trend(out: &mut ResultSheet, inputs: &[GroupComparisonInput], p_fmt: PValueFormat) -> Result<(), StatsError> {
+    let k = inputs.len();
+    if k < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "linear trend groups", required: 2, actual: k });
+    }
+    let kf = k as f64;
+    let mut est = 0.0_f64;
+    let mut var_l = 0.0_f64;
+    let mut satt_denom = 0.0_f64;
+    for (j, g) in inputs.iter().enumerate() {
+        let c = (j as f64) - 0.5 * (kf - 1.0);
+        let vj = (g.sd * g.sd) / g.n;
+        let term = c * c * vj;
+        est += c * g.mean;
+        var_l += term;
+        satt_denom += (term * term) / (g.n - 1.0).max(1.0);
+    }
+    let se = var_l.sqrt();
+    let df = if satt_denom > 0.0 { (var_l * var_l) / satt_denom } else { 1.0 };
+    let f_stat = if se > 0.0 {
+        (est / se).powi(2)
+    } else if est.abs() > 0.0 {
+        f64::INFINITY
+    } else {
+        0.0
+    };
+    let p_val = if f_stat.is_infinite() { 0.0 } else { f_sf(f_stat, 1.0, df)? };
+    push_scalar(out, "Linear trend F", None, f_stat);
+    push_scalar(out, "Linear trend P", None, p_val);
+    let mut tab = build_tab(
+        "linear-trend",
+        "Test for linear trend (Welch)",
+        ResultTabKind::MultipleComparisons,
+        vec![String::from("Contrast"), String::from("SE"), String::from("DFd"), String::from("F"), String::from("P value")],
+        vec![String::from("Linear trend")],
+        vec![vec![num_cell(est), num_cell(se), num_cell(df), num_cell(f_stat), p_cell(p_val, p_fmt)]],
+    );
+    tab.footnotes.push(String::from("Heteroscedastic linear-trend contrast using per-group variances and Welch-Satterthwaite denominator df."));
+    out.tabs.push(tab);
+    Ok(())
+}
+
+fn append_welch_multiplicity(
+    out: &mut ResultSheet,
+    inputs: &[GroupComparisonInput],
+    base: &OneWayAnovaResult,
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let proc_req = MultiplicityProcedure::from(mult.method);
+    match proc_req {
+        MultiplicityProcedure::None => Ok(()),
+        MultiplicityProcedure::DunnRankSum => Err(StatsError::IncompatibleAnalysisSpec {
+            expected: "parametric unequal-variance or familywise/FDR post-hoc procedure (None, GamesHowell, TamhaneT2, DunnettT3, Dunnett, Bonferroni, Sidak, HolmSidak, FisherLsd, LinearTrend, or FDR)",
+        }),
+        MultiplicityProcedure::GamesHowell | MultiplicityProcedure::TamhaneT2 | MultiplicityProcedure::DunnettT3 => {
+            let title = match proc_req {
+                MultiplicityProcedure::GamesHowell => "Multiple comparisons (Games-Howell)",
+                MultiplicityProcedure::TamhaneT2 => "Multiple comparisons (Tamhane's T2)",
+                _ => "Multiple comparisons (Dunnett's T3)",
+            };
+            let details = compare_groups_with_confidence(
+                inputs,
+                base.ms_within,
+                base.df_within,
+                proc_req,
+                mult.threshold,
+                mult.report_confidence_intervals,
+                confidence,
+            )?;
+            push_pairwise_outputs(out, &details, title, p_fmt, confidence);
+            Ok(())
+        }
+        MultiplicityProcedure::TukeyKramer | MultiplicityProcedure::NewmanKeuls => {
+            let details = compare_groups_with_confidence(
+                inputs,
+                base.ms_within,
+                base.df_within,
+                MultiplicityProcedure::GamesHowell,
+                mult.threshold,
+                mult.report_confidence_intervals,
+                confidence,
+            )?;
+            let note = String::from(
+                "Pooled equal-variance studentized-range post-hoc procedure is invalid for Welch/Brown-Forsythe ANOVA; mapped to Games-Howell unequal-variance comparisons.",
+            );
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons",
+                "Multiple comparisons (Games-Howell fallback)",
+                p_fmt,
+                confidence,
+                Some(note.clone()),
+            );
+            out.checklist.push(checklist_item(
+                "Post-hoc multiplicity procedure",
+                ChecklistStatus::Info,
+                Some(String::from("Games-Howell unequal-variance fallback")),
+                note,
+            ));
+            Ok(())
+        }
+        MultiplicityProcedure::Dunnett { control_column } => append_welch_dunnett_vs_control(out, inputs, control_column, mult, p_fmt, confidence),
+        MultiplicityProcedure::LinearTrend => append_welch_linear_trend(out, inputs, p_fmt),
+        MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => {
+            let k = inputs.len();
+            let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+            for i in 0..k {
+                for j in (i + 1)..k {
+                    let ga = &inputs[i];
+                    let gb = &inputs[j];
+                    let (se, df) = welch_group_pair_se_df(ga, gb);
+                    entries.push(NamedSliceContrast {
+                        id_a: ga.index,
+                        id_b: gb.index,
+                        label_a: ga.label.as_str(),
+                        label_b: gb.label.as_str(),
+                        diff: ga.mean - gb.mean,
+                        se,
+                        df,
+                    });
+                }
+            }
+            let details =
+                compare_independent_contrast_family(&entries, proc_req, mult.threshold, confidence.alpha(), mult.report_confidence_intervals)?;
+            push_pairwise_outputs_with_footnote(
+                out,
+                &details,
+                "multiple-comparisons",
+                "Multiple comparisons (Welch t tests)",
+                p_fmt,
+                confidence,
+                Some(String::from(
+                    "Per-pair Welch unequal-variance t tests with Welch-Satterthwaite degrees of freedom and requested multiplicity adjustment.",
+                )),
+            );
+            Ok(())
+        }
+    }
+}
+
+/// Matched-pair difference *t* contrasts across complete RM subject blocks (`df = n - 1`), used when
+/// sphericity is not assumed (`geisser_greenhouse = true`).
+fn append_rm_paired_contrast_multiplicity(
+    out: &mut ResultSheet,
+    blocks: &[Vec<f64>],
+    inputs: &[GroupComparisonInput],
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let k = inputs.len();
+    let n = blocks.len() as f64;
+    let df = (blocks.len() - 1) as f64;
+    let mut entries = Vec::with_capacity(k * k.saturating_sub(1) / 2);
+    for i in 0..k {
+        for j in (i + 1)..k {
+            let diffs: Vec<f64> = blocks.iter().map(|row| row[i] - row[j]).collect();
+            let moments = SummaryMoments::from_slice(&diffs)?;
+            let se = moments.sample_sd().unwrap_or(0.0) / n.sqrt();
+            entries.push(NamedSliceContrast {
+                id_a: inputs[i].index,
+                id_b: inputs[j].index,
+                label_a: inputs[i].label.as_str(),
+                label_b: inputs[j].label.as_str(),
+                diff: moments.mean,
+                se,
+                df,
+            });
+        }
+    }
+    let details = compare_independent_contrast_family(
+        &entries,
+        MultiplicityProcedure::from(mult.method),
+        mult.threshold,
+        confidence.alpha(),
+        mult.report_confidence_intervals,
+    )?;
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (paired contrasts)",
+        p_fmt,
+        confidence,
+        Some(String::from("Paired-difference t tests across matched subjects without assuming sphericity (df = n - 1).")),
+    );
+    Ok(())
+}
+
+/// Dunn's post-hoc comparisons for Friedman's test across within-block mean ranks (Zar 2010, ch. 12).
+fn append_friedman_multiplicity(
+    out: &mut ResultSheet,
+    col_tab: &curvebook_doc::ColumnTable,
+    indices: &[usize],
+    blocks: &[Vec<f64>],
+    mult: &MultiplicitySpec,
+    p_fmt: PValueFormat,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let proc_req = MultiplicityProcedure::from(mult.method);
+    match proc_req {
+        MultiplicityProcedure::None => return Ok(()),
+        MultiplicityProcedure::TukeyKramer
+        | MultiplicityProcedure::NewmanKeuls
+        | MultiplicityProcedure::GamesHowell
+        | MultiplicityProcedure::DunnettT3
+        | MultiplicityProcedure::TamhaneT2
+        | MultiplicityProcedure::LinearTrend => {
+            let note = String::from("Parametric or linear-trend post-hoc comparisons were not computed for the nonparametric Friedman rank test.");
+            if let Some(tab) = out.tabs.iter_mut().find(|t| t.id == "friedman") {
+                tab.footnotes.push(note.clone());
+            }
+            out.checklist.push(checklist_item(
+                "Post-hoc multiple comparisons",
+                ChecklistStatus::Info,
+                Some(String::from("Not computed for Friedman test")),
+                note,
+            ));
+            return Ok(());
+        }
+        MultiplicityProcedure::DunnRankSum
+        | MultiplicityProcedure::Bonferroni
+        | MultiplicityProcedure::Sidak
+        | MultiplicityProcedure::HolmBonferroni
+        | MultiplicityProcedure::HolmSidak
+        | MultiplicityProcedure::FisherLsd
+        | MultiplicityProcedure::Dunnett { .. }
+        | MultiplicityProcedure::BenjaminiHochbergFdr
+        | MultiplicityProcedure::BenjaminiYekutieliFdr
+        | MultiplicityProcedure::TwoStageBkyFdr => {}
+    }
+
+    if !mult.threshold.is_finite() || mult.threshold <= 0.0 || mult.threshold >= 1.0 {
+        return Err(StatsError::InvalidParameter { name: "threshold", value: mult.threshold });
+    }
+    let n = blocks.len();
+    let k = indices.len();
+    if k < 2 || n == 0 {
+        return Ok(());
+    }
+    let mut rank_sums = vec![0.0_f64; k];
+    let mut tie_sum = 0.0_f64;
+    for row in blocks {
+        let ranked = rank_with_ties(row)?;
+        for (c, &rk) in ranked.ranks.iter().enumerate() {
+            rank_sums[c] += rk;
+        }
+        tie_sum += ranked.tie_sum_t3_minus_t;
+    }
+    let nf = n as f64;
+    let kf = k as f64;
+    let mean_ranks: Vec<f64> = rank_sums.iter().map(|&s| s / nf).collect();
+    let var_diff = ((nf * kf * (kf + 1.0) - tie_sum / (kf - 1.0).max(1.0)) / (6.0 * nf * nf)).max(0.0);
+    let se = var_diff.sqrt();
+
+    let pair_indices: Vec<(usize, usize)> = if let MultiplicityProcedure::Dunnett { control_column } = proc_req {
+        let ctrl_pos = indices
+            .iter()
+            .position(|&idx| idx == control_column)
+            .ok_or(StatsError::InvalidParameter { name: "control_column", value: control_column as f64 })?;
+        (0..k).filter(|&i| i != ctrl_pos).map(|i| (i, ctrl_pos)).collect()
+    } else {
+        let mut pairs = Vec::with_capacity(k * (k - 1) / 2);
+        for i in 0..k {
+            for j in (i + 1)..k {
+                pairs.push((i, j));
+            }
+        }
+        pairs
+    };
+
+    let mut raw_p = Vec::with_capacity(pair_indices.len());
+    let mut raw_entries = Vec::with_capacity(pair_indices.len());
+    for &(i, j) in &pair_indices {
+        let diff = mean_ranks[i] - mean_ranks[j];
+        let (z_stat, p_val) = if se > 0.0 {
+            let z = diff / se;
+            (z, norm_two_sided_p(z.abs()))
+        } else {
+            zero_se_pair(diff, false)
+        };
+        raw_p.push(p_val);
+        raw_entries.push((i, j, diff, z_stat, p_val));
+    }
+    let adj_proc = match proc_req {
+        MultiplicityProcedure::DunnRankSum | MultiplicityProcedure::Dunnett { .. } => MultiplicityProcedure::Bonferroni,
+        MultiplicityProcedure::FisherLsd => MultiplicityProcedure::None,
+        other => other,
+    };
+    let (adj, is_fdr) = try_adjust_p_values(&raw_p, adj_proc, mult.threshold)?;
+    let details: Vec<PairwiseComparisonDetail> = raw_entries
+        .into_iter()
+        .zip(adj)
+        .map(|((i, j, diff, z_stat, p_val), adj_p)| PairwiseComparisonDetail {
+            group_a: indices[i],
+            group_b: indices[j],
+            label_a: col_tab.data_sets[indices[i]].title.clone(),
+            label_b: col_tab.data_sets[indices[j]].title.clone(),
+            mean_diff: diff,
+            se_diff: se,
+            statistic: z_stat,
+            df: f64::INFINITY,
+            raw_p: p_val,
+            adjusted_p_or_q: adj_p,
+            is_fdr_q: is_fdr,
+            ci: None,
+            significant: adj_p.is_finite() && adj_p <= mult.threshold,
+        })
+        .collect();
+    push_pairwise_outputs_with_footnote(
+        out,
+        &details,
+        "multiple-comparisons",
+        "Multiple comparisons (Dunn's test for Friedman)",
+        p_fmt,
+        confidence,
+        Some(String::from("Dunn's nonparametric pairwise rank comparisons on within-block Friedman mean ranks with tie-corrected SE.")),
+    );
+    Ok(())
+}
+
 fn push_pairwise_outputs(out: &mut ResultSheet, details: &[PairwiseComparisonDetail], title: &str, p_fmt: PValueFormat, confidence: ConfidenceLevel) {
     push_pairwise_outputs_with_id(out, details, "multiple-comparisons", title, p_fmt, confidence);
 }
@@ -5238,12 +5887,19 @@ fn append_one_way_checklist(
             Some(format!("F = {:.3}, P = {:.4}", res.variance_tests.brown_forsythe_f, res.variance_tests.brown_forsythe_p)),
             var_explanation,
         ));
-    } else {
+    } else if raw_slices.is_empty() {
         out.checklist.push(checklist_item(
             "Homogeneity of variances (Brown-Forsythe / Bartlett)",
             ChecklistStatus::Info,
             Some(String::from("Not computable from summary statistics")),
             "Brown-Forsythe and Bartlett variance homogeneity tests are not computable from pre-summarized Mean/SD/N data; raw replicate observations are required.",
+        ));
+    } else {
+        out.checklist.push(checklist_item(
+            "Homogeneity of variances (Brown-Forsythe / Bartlett)",
+            ChecklistStatus::Info,
+            Some(String::from("Not computable (group n < 2)")),
+            "Brown-Forsythe and Bartlett variance homogeneity tests are not computable when any group has fewer than 2 observations.",
         ));
     }
     append_group_normality_checklist(&mut out.checklist, raw_slices, alpha, "Group normality (Shapiro-Wilk)");
@@ -5263,14 +5919,17 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     let p_fmt = spec.p_value_format;
     let confidence = spec.confidence_level;
 
-    let (mut result, obs, post_hoc, aux_tabs) = match &sheet.archetype {
+    let (mut result, obs, post_hoc, aux_tabs, estimator_note) = match &sheet.archetype {
         TableArchetype::Grouped(grouped) => {
             let outcome = run_grouped_factorial(grouped, &mut out, &spec.selected_data_sets, fac_spec, p_fmt)?;
-            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs)
+            (outcome.result, outcome.observations, outcome.post_hoc, outcome.aux_tabs, outcome.estimator_note)
         }
         TableArchetype::MultipleVariables(mv) => {
+            if !spec.selected_data_sets.is_empty() {
+                let _ = validate_selected_indices(&spec.selected_data_sets, mv.variables.len())?;
+            }
             let (res, obs, model) = run_multifactor_mv(mv, fac_spec)?;
-            (res, obs, FactorialPostHocContext::Ols(model), Vec::new())
+            (res, obs, FactorialPostHocContext::Ols(model), Vec::new(), None)
         }
         other => return Err(StatsError::IncompatibleTable { analysis: "factorial ANOVA", actual: other.kind() }),
     };
@@ -5324,7 +5983,11 @@ pub fn run_factorial_anova(sheet: &DataSheet, spec: &AnalysisSpec, fac_spec: &Fa
     rows.push(r_tot);
 
     let tab_title = if fac_spec.three_way { "Three-way ANOVA" } else { "Factorial ANOVA" };
-    out.tabs.push(build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows));
+    let mut main_tab = build_tab("factorial-anova", tab_title, ResultTabKind::AnovaTable, headers, row_labels, rows);
+    if let Some(note) = estimator_note {
+        main_tab.footnotes.push(note);
+    }
+    out.tabs.push(main_tab);
     out.tabs.extend(aux_tabs);
 
     run_factorial_multiplicity(&mut out, &obs, &post_hoc, &result, &fac_spec.multiplicity, p_fmt, confidence)?;
@@ -6925,15 +7588,12 @@ fn run_factorial_multiplicity(
     Ok(())
 }
 
-fn grouped_row_levels(grouped: &curvebook_doc::GroupedTable, n_rows: usize) -> Vec<String> {
-    (0..n_rows).map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
-}
-
 struct GroupedFactorialOutcome {
     result: FactorialAnovaResult,
     observations: FactorialObservations,
     post_hoc: FactorialPostHocContext,
     aux_tabs: Vec<ResultTab>,
+    estimator_note: Option<String>,
 }
 
 fn build_rm_sphericity_tab(
@@ -7030,6 +7690,46 @@ fn push_rm_sphericity_outputs(
     build_rm_sphericity_tab(row_name, col_name, rm_res, p_fmt)
 }
 
+fn active_grouped_rows(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize]) -> Vec<usize> {
+    (0..grouped.row_count()).filter(|&r| selected_cols.iter().any(|&c| !grouped.active_replicates(r, c).is_empty())).collect()
+}
+
+fn active_grouped_cols(grouped: &curvebook_doc::GroupedTable, selected_cols: &[usize], active_rows: &[usize]) -> Vec<usize> {
+    selected_cols.iter().copied().filter(|&c| active_rows.iter().any(|&r| !grouped.active_replicates(r, c).is_empty())).collect()
+}
+
+fn active_grouped_subs(grouped: &curvebook_doc::GroupedTable, active_rows: &[usize], active_cols: &[usize], n_subs: usize) -> Vec<usize> {
+    (0..n_subs)
+        .filter(|&s| {
+            active_rows.iter().any(|&r| active_cols.iter().any(|&c| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_some()))
+        })
+        .collect()
+}
+
+fn grouped_row_levels_for(grouped: &curvebook_doc::GroupedTable, active_rows: &[usize]) -> Vec<String> {
+    active_rows.iter().map(|&r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1))).collect()
+}
+
+fn count_rm_active_cells(
+    grouped: &curvebook_doc::GroupedTable,
+    active_rows: &[usize],
+    active_cols: &[usize],
+    active_subs: &[usize],
+) -> (usize, usize) {
+    let total = active_rows.len() * active_cols.len() * active_subs.len();
+    let mut observed = 0_usize;
+    for &r in active_rows {
+        for &c in active_cols {
+            for &s in active_subs {
+                if grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_some() {
+                    observed += 1;
+                }
+            }
+        }
+    }
+    (observed, total)
+}
+
 fn run_grouped_factorial(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
@@ -7040,40 +7740,158 @@ fn run_grouped_factorial(
     if grouped.subcolumn_mode.is_pre_summarized() {
         return Err(StatsError::RequiresRawReplicates);
     }
-    let n_rows = grouped.row_count();
-    let selected_cols = resolve_selected_indices(selected, grouped.data_sets.len());
-    let n_cols = selected_cols.len();
-    if fac_spec.three_way && n_cols != 4 {
-        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
+    let selected_cols = validate_selected_indices(selected, grouped.data_sets.len())?;
+    if fac_spec.three_way && selected_cols.len() != 4 {
+        return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: selected_cols.len() as f64 });
     }
-    if n_cols < 2 {
-        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: n_cols });
+    if selected_cols.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: selected_cols.len() });
     }
     let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
         return Err(StatsError::RequiresRawReplicates);
     };
 
-    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
-    if !fac_spec.three_way && fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
-        let has_missing_selected = (0..n_rows).any(|r| {
-            selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
+    // Compact unobserved, blank, or excluded row/column factor levels before effect coding (#30).
+    let active_rows = active_grouped_rows(grouped, &selected_cols);
+    if active_rows.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+
+    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
+    if fac_spec.three_way && selected_cols.len() == 4 {
+        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+            let active_subs = active_grouped_subs(grouped, &active_rows, &selected_cols, n_subs);
+            if active_subs.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
+            let (observed_cells, total_cells) = count_rm_active_cells(grouped, &active_rows, &selected_cols, &active_subs);
+            let has_missing_selected = observed_cells < total_cells;
+            if has_missing_selected
+                && !fac_spec.fit_reml_on_missing
+                && fac_spec.residual_covariance != ResidualCovariance::Unstructured
+                && !fac_spec.mixed_effects_reml
+            {
+                return Err(StatsError::InsufficientSampleSize {
+                    context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                    required: total_cells,
+                    actual: observed_cells,
+                });
+            }
+            return run_rm_grouped_reml(grouped, out, &selected_cols, &active_rows, &active_subs, fac_spec, has_missing_selected, &[], p_fmt);
+        }
+        let grouping = grouped.three_way_grouping.as_ref();
+        let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
+        let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
+        let f3_name = grouped.row_factor_title.clone();
+        let raw_f1 = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+        let raw_f2 = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+        let f3_levels = grouped_row_levels_for(grouped, &active_rows);
+
+        let mut raw_obs = Vec::new();
+        let mut obs_a = [false; 2];
+        let mut obs_b = [false; 2];
+        for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
+                let l1 = c_pos / 2;
+                let l2 = c_pos % 2;
+                for y in grouped.active_replicates(orig_r, orig_c) {
+                    obs_a[l1] = true;
+                    obs_b[l2] = true;
+                    raw_obs.push((l1, l2, r_pos, y));
+                }
+            }
+        }
+        let (f1_levels, l1_remap) = compact_binary_levels(&raw_f1, &obs_a);
+        let (f2_levels, l2_remap) = compact_binary_levels(&raw_f2, &obs_b);
+        let obs = raw_obs.into_iter().map(|(l1, l2, r_pos, y)| (vec![l1_remap[l1], l2_remap[l2], r_pos], y)).collect();
+        let data =
+            FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
+        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
+        return Ok(GroupedFactorialOutcome {
+            result: res,
+            observations: data,
+            post_hoc: FactorialPostHocContext::Ols(model),
+            aux_tabs: Vec::new(),
+            estimator_note: Some(String::from("Estimator: Ordinary least-squares three-way factorial ANOVA.")),
         });
+    }
+
+    let active_cols = active_grouped_cols(grouped, &selected_cols, &active_rows);
+    if active_cols.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    if active_cols.len() < 2 {
+        return Err(StatsError::InsufficientSampleSize { context: "factorial column levels", required: 2, actual: active_cols.len() });
+    }
+
+    // Repeated-measures 2-way path (REML mixed-effects on missing replicates, unstructured covariance, or explicit REML mode).
+    if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
+        let active_subs = active_grouped_subs(grouped, &active_rows, &active_cols, n_subs);
+        if active_subs.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        let (observed_cells, total_cells) = count_rm_active_cells(grouped, &active_rows, &active_cols, &active_subs);
+        let has_missing_selected = observed_cells < total_cells;
+        if has_missing_selected
+            && !fac_spec.fit_reml_on_missing
+            && fac_spec.residual_covariance != ResidualCovariance::Unstructured
+            && !fac_spec.mixed_effects_reml
+        {
+            return Err(StatsError::InsufficientSampleSize {
+                context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                required: total_cells,
+                actual: observed_cells,
+            });
+        }
         if (has_missing_selected && fac_spec.fit_reml_on_missing)
             || fac_spec.residual_covariance == ResidualCovariance::Unstructured
             || fac_spec.mixed_effects_reml
         {
-            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
+            let dropped_tp_labels = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
+                match fac_spec.repeated_measures {
+                    RepeatedMeasuresDesign::ColumnFactorMatched => {
+                        selected_cols.iter().filter(|c| !active_cols.contains(c)).map(|&c| grouped.data_sets[c].title.clone()).collect()
+                    }
+                    RepeatedMeasuresDesign::RowFactorMatched => (0..grouped.row_count())
+                        .filter(|r| !active_rows.contains(r))
+                        .map(|r| grouped.row_titles.get(r).filter(|s| !s.is_empty()).cloned().unwrap_or_else(|| format!("Row {}", r + 1)))
+                        .collect(),
+                    _ => Vec::new(),
+                }
+            } else {
+                Vec::new()
+            };
+            return run_rm_grouped_reml(
+                grouped,
+                out,
+                &active_cols,
+                &active_rows,
+                &active_subs,
+                fac_spec,
+                has_missing_selected,
+                &dropped_tp_labels,
+                p_fmt,
+            );
         }
-        let mut subject_data = vec![vec![vec![0.0_f64; n_cols]; n_rows]; n_subs];
-        let mut obs = Vec::with_capacity(n_subs * n_rows * n_cols);
-        for (s, subj) in subject_data.iter_mut().enumerate() {
-            for (r, row_vec) in subj.iter_mut().enumerate() {
-                for (c_pos, (&orig_c, slot)) in selected_cols.iter().zip(row_vec.iter_mut()).enumerate() {
-                    let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
-                        return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, true, p_fmt);
+
+        let n_eff_rows = active_rows.len();
+        let n_eff_cols = active_cols.len();
+        let n_eff_subs = active_subs.len();
+        let mut subject_data = vec![vec![vec![0.0_f64; n_eff_cols]; n_eff_rows]; n_eff_subs];
+        let mut obs = Vec::with_capacity(n_eff_subs * n_eff_rows * n_eff_cols);
+        for (s_pos, (&orig_s, subj)) in active_subs.iter().zip(subject_data.iter_mut()).enumerate() {
+            let _ = s_pos;
+            for (&orig_r, (r_pos, row_vec)) in active_rows.iter().zip(subj.iter_mut().enumerate()) {
+                for (&orig_c, (c_pos, slot)) in active_cols.iter().zip(row_vec.iter_mut().enumerate()) {
+                    let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
+                        return Err(StatsError::InsufficientSampleSize {
+                            context: "complete repeated-measures cells (fit_reml_on_missing is false)",
+                            required: total_cells,
+                            actual: observed_cells,
+                        });
                     };
                     *slot = v;
-                    obs.push((vec![r, c_pos], v));
+                    obs.push((vec![r_pos, c_pos], v));
                 }
             }
         }
@@ -7085,9 +7903,19 @@ fn run_grouped_factorial(
             RmSphericityCorrection::None,
         )?;
         let sph_tab = push_rm_sphericity_outputs(out, &grouped.row_factor_title, &grouped.column_factor_title, &rm_res, p_fmt)?;
+        let estimator_desc = "Classical balanced repeated-measures ANOVA (OLS)";
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(String::from(estimator_desc)),
+            "All active repeated-measures cells are complete; fitted classical balanced repeated-measures ANOVA.",
+        ));
         let data = FactorialObservations {
             factor_names: vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
-            factor_levels: vec![grouped_row_levels(grouped, n_rows), selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect()],
+            factor_levels: vec![
+                grouped_row_levels_for(grouped, &active_rows),
+                active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect(),
+            ],
             rows: obs,
         };
         return Ok(GroupedFactorialOutcome {
@@ -7095,49 +7923,18 @@ fn run_grouped_factorial(
             observations: data,
             post_hoc: FactorialPostHocContext::RmBalanced(rm_post_hoc),
             aux_tabs: sph_tab.into_iter().collect(),
+            estimator_note: Some(format!("Estimator: {estimator_desc}.")),
         });
     }
 
-    // Three-way 2 x 2 x K path (mixed-effects REML when repeated-measures design is active; OLS otherwise).
-    if fac_spec.three_way && n_cols == 4 {
-        if fac_spec.repeated_measures != RepeatedMeasuresDesign::None {
-            let has_missing_selected = (0..n_rows).any(|r| {
-                selected_cols.iter().any(|&c| (0..n_subs).any(|s| grouped.observation(r, c, s).and_then(|cell| cell.active_number()).is_none()))
-            });
-            return run_rm_grouped_reml(grouped, out, &selected_cols, fac_spec, has_missing_selected, p_fmt);
-        }
-        let grouping = grouped.three_way_grouping.as_ref();
-        let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
-        let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
-        let f3_name = grouped.row_factor_title.clone();
-        let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
-        let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
-        let f3_levels = grouped_row_levels(grouped, n_rows);
-
-        let mut obs = Vec::new();
-        for r in 0..n_rows {
-            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-                let l1 = c_pos / 2;
-                let l2 = c_pos % 2;
-                for y in grouped.active_replicates(r, orig_c) {
-                    obs.push((vec![l1, l2, r], y));
-                }
-            }
-        }
-        let data =
-            FactorialObservations { factor_names: vec![f1_name, f2_name, f3_name], factor_levels: vec![f1_levels, f2_levels, f3_levels], rows: obs };
-        let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 3), fac_spec.ss_type)?;
-        return Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() });
-    }
-
     // Standard Two-Way ANOVA (Row Factor x Column Factor).
-    let row_levels = grouped_row_levels(grouped, n_rows);
-    let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+    let row_levels = grouped_row_levels_for(grouped, &active_rows);
+    let col_levels: Vec<String> = active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
     let mut obs = Vec::new();
-    for r in 0..n_rows {
-        for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-            for y in grouped.active_replicates(r, orig_c) {
-                obs.push((vec![r, c_pos], y));
+    for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+        for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+            for y in grouped.active_replicates(orig_r, orig_c) {
+                obs.push((vec![r_pos, c_pos], y));
             }
         }
     }
@@ -7147,7 +7944,27 @@ fn run_grouped_factorial(
         rows: obs,
     };
     let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order.clamp(1, 2), fac_spec.ss_type)?;
-    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Ols(model), aux_tabs: Vec::new() })
+    Ok(GroupedFactorialOutcome {
+        result: res,
+        observations: data,
+        post_hoc: FactorialPostHocContext::Ols(model),
+        aux_tabs: Vec::new(),
+        estimator_note: Some(String::from("Estimator: Ordinary least-squares two-way factorial ANOVA.")),
+    })
+}
+
+fn compact_binary_levels(levels: &[String], observed: &[bool; 2]) -> (Vec<String>, [usize; 2]) {
+    let mut out = Vec::new();
+    let mut remap = [0_usize; 2];
+    for i in 0..2 {
+        if observed[i] {
+            remap[i] = out.len();
+            if let Some(lbl) = levels.get(i) {
+                out.push(lbl.clone());
+            }
+        }
+    }
+    (out, remap)
 }
 
 fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], satt: &[f64], kr: &[f64]) {
@@ -7161,42 +7978,63 @@ fn push_reml_df_scalars(out: &mut ResultSheet, terms: &[FactorialAnovaTerm], sat
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn run_rm_grouped_reml(
     grouped: &curvebook_doc::GroupedTable,
     out: &mut ResultSheet,
-    selected_cols: &[usize],
+    active_cols: &[usize],
+    active_rows: &[usize],
+    active_subs: &[usize],
     fac_spec: &FactorialAnovaSpec,
     has_missing: bool,
+    dropped_tp_labels: &[String],
     p_fmt: PValueFormat,
 ) -> Result<GroupedFactorialOutcome, StatsError> {
-    let n_rows = grouped.row_count();
-    let n_cols = selected_cols.len();
+    let n_rows = active_rows.len();
+    let n_cols = active_cols.len();
     if fac_spec.three_way && n_cols != 4 {
         return Err(StatsError::InvalidParameter { name: "three_way_column_count", value: n_cols as f64 });
     }
-    let SubcolumnMode::RawReplicates(n_subs) = grouped.subcolumn_mode else {
-        return Err(StatsError::RequiresRawReplicates);
-    };
     let is_three_way = fac_spec.three_way && n_cols == 4;
 
+    let mut obs_a = [false; 2];
+    let mut obs_b = [false; 2];
+    if is_three_way {
+        for &orig_r in active_rows {
+            for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+                if active_subs.iter().any(|&s| grouped.observation(orig_r, orig_c, s).and_then(|cell| cell.active_number()).is_some()) {
+                    obs_a[c_pos / 2] = true;
+                    obs_b[c_pos % 2] = true;
+                }
+            }
+        }
+    }
+    let l1_remap: [usize; 2];
+    let l2_remap: [usize; 2];
     let (factor_names, factor_levels, max_order, ab_labels) = if is_three_way {
         let grouping = grouped.three_way_grouping.as_ref();
         let f1_name = grouping.map_or_else(|| String::from("Factor A"), |g| g.factor_1_name.clone());
         let f2_name = grouping.map_or_else(|| String::from("Factor B"), |g| g.factor_2_name.clone());
         let f3_name = grouped.row_factor_title.clone();
-        let f1_levels = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
-        let f2_levels = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
-        let f3_levels = grouped_row_levels(grouped, n_rows);
+        let raw_f1 = grouping.map_or_else(|| [String::from("A1"), String::from("A2")], |g| g.factor_1_levels.clone()).to_vec();
+        let raw_f2 = grouping.map_or_else(|| [String::from("B1"), String::from("B2")], |g| g.factor_2_levels.clone()).to_vec();
+        let (f1_levels, r1) = compact_binary_levels(&raw_f1, &obs_a);
+        let (f2_levels, r2) = compact_binary_levels(&raw_f2, &obs_b);
+        l1_remap = r1;
+        l2_remap = r2;
+        let f3_levels = grouped_row_levels_for(grouped, active_rows);
         let mut ab_lbls = Vec::with_capacity(4);
-        for a_l in &f1_levels {
-            for b_l in &f2_levels {
+        for a_l in &raw_f1 {
+            for b_l in &raw_f2 {
                 ab_lbls.push(format!("{a_l} × {b_l}"));
             }
         }
         (vec![f1_name, f2_name, f3_name], vec![f1_levels, f2_levels, f3_levels], fac_spec.max_interaction_order.clamp(1, 3), ab_lbls)
     } else {
-        let row_levels = grouped_row_levels(grouped, n_rows);
-        let col_levels: Vec<String> = selected_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
+        l1_remap = [0, 1];
+        l2_remap = [0, 1];
+        let row_levels = grouped_row_levels_for(grouped, active_rows);
+        let col_levels: Vec<String> = active_cols.iter().map(|&c| grouped.data_sets[c].title.clone()).collect();
         (
             vec![grouped.row_factor_title.clone(), grouped.column_factor_title.clone()],
             vec![row_levels, col_levels],
@@ -7221,32 +8059,34 @@ fn run_rm_grouped_reml(
     let mut row_ids = Vec::new();
     let mut col_ids = Vec::new();
 
-    for s in 0..n_subs {
-        for r in 0..n_rows {
-            for (c_pos, &orig_c) in selected_cols.iter().enumerate() {
-                let Some(v) = grouped.observation(r, orig_c, s).and_then(|cell| cell.active_number()) else {
+    for (s_pos, &orig_s) in active_subs.iter().enumerate() {
+        for (r_pos, &orig_r) in active_rows.iter().enumerate() {
+            for (c_pos, &orig_c) in active_cols.iter().enumerate() {
+                let Some(v) = grouped.observation(orig_r, orig_c, orig_s).and_then(|cell| cell.active_number()) else {
                     continue;
                 };
-                let cell = if is_three_way { vec![c_pos / 2, c_pos % 2, r] } else { vec![r, c_pos] };
+                let cell = if is_three_way { vec![l1_remap[c_pos / 2], l2_remap[c_pos % 2], r_pos] } else { vec![r_pos, c_pos] };
                 obs_cells.push(cell.clone());
                 obs.push((cell, v));
                 y_vec.push(v);
-                subj_ids.push(s);
-                subj_row_ids.push(s * n_rows + r);
-                subj_col_ids.push(s * n_cols + c_pos);
-                row_ids.push(r);
+                subj_ids.push(s_pos);
+                subj_row_ids.push(s_pos * n_rows + r_pos);
+                subj_col_ids.push(s_pos * n_cols + c_pos);
+                row_ids.push(r_pos);
                 col_ids.push(c_pos);
                 if is_three_way {
-                    let l1 = c_pos / 2;
-                    let l2 = c_pos % 2;
-                    id_sa.push(s * 2 + l1);
-                    id_sb.push(s * 2 + l2);
-                    id_sab.push(s * 4 + c_pos);
-                    id_sac.push((s * 2 + l1) * n_rows + r);
-                    id_sbc.push((s * 2 + l2) * n_rows + r);
-                    let sr = s * n_rows + r;
-                    id_sr_a.push(sr * 2 + l1);
-                    id_sr_b.push(sr * 2 + l2);
+                    let l1 = l1_remap[c_pos / 2];
+                    let l2 = l2_remap[c_pos % 2];
+                    let n1 = factor_levels[0].len().max(1);
+                    let n2 = factor_levels[1].len().max(1);
+                    id_sa.push(s_pos * n1 + l1);
+                    id_sb.push(s_pos * n2 + l2);
+                    id_sab.push(s_pos * n_cols + c_pos);
+                    id_sac.push((s_pos * n1 + l1) * n_rows + r_pos);
+                    id_sbc.push((s_pos * n2 + l2) * n_rows + r_pos);
+                    let sr = s_pos * n_rows + r_pos;
+                    id_sr_a.push(sr * n1 + l1);
+                    id_sr_b.push(sr * n2 + l2);
                 }
             }
         }
@@ -7264,7 +8104,7 @@ fn run_rm_grouped_reml(
     }
     let term_slices: Vec<(&str, usize, usize)> = term_ranges.iter().map(|(n, s, l)| (n.as_str(), *s, *l)).collect();
 
-    let (fixed_terms, sigma2_e, df_residual, reml_core) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
+    let (fixed_terms, sigma2_e, df_residual, reml_core, estimator_desc) = if fac_spec.residual_covariance == ResidualCovariance::Unstructured {
         let (cluster_ids, tp_ids, tp_labels): (&[usize], Vec<usize>, Vec<String>) = if is_three_way {
             match fac_spec.repeated_measures {
                 RepeatedMeasuresDesign::RowFactorMatched => (&id_sab, row_ids.clone(), factor_levels[2].clone()),
@@ -7296,7 +8136,31 @@ fn run_rm_grouped_reml(
                 }
             }
         };
-        emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?
+        let (terms, ms_e, df_r, core) =
+            emit_unstructured_rm_reml(out, &x_mat, &y_vec, cluster_ids, &tp_ids, &tp_labels, &term_slices, fac_spec.df_method)?;
+        if !dropped_tp_labels.is_empty() {
+            let note = format!("Excluded all-missing timepoint(s): {}.", dropped_tp_labels.join(", "));
+            for tab in out.tabs.iter_mut().filter(|t| t.id == "unstructured-reml-covariance" || t.id == "unstructured-reml-correlation") {
+                tab.footnotes.push(note.clone());
+            }
+            if let Some(item) = out.checklist.iter_mut().find(|c| c.assumption == "Unstructured covariance REML") {
+                item.status = ChecklistStatus::Warn;
+                item.explanation.push(' ');
+                item.explanation.push_str(&note);
+            }
+        }
+        let df_lbl = match fac_spec.df_method {
+            MixedModelDfMethod::KenwardRoger => "Kenward-Roger",
+            MixedModelDfMethod::Satterthwaite => "Satterthwaite",
+        };
+        let desc = format!("Linear mixed-effects REML (Unstructured, {df_lbl} df)");
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(desc.clone()),
+            format!("Fitted unstructured covariance REML with {df_lbl} degrees of freedom."),
+        ));
+        (terms, ms_e, df_r, core, desc)
     } else {
         let (fixed_terms, sigma2_e, reml_ll, icc_subj, core) = if is_three_way {
             match fac_spec.repeated_measures {
@@ -7387,7 +8251,14 @@ fn run_rm_grouped_reml(
             Some(format!("ICC = {icc_subj:.3}, REML logL = {reml_ll:.2}")),
             check_desc,
         ));
-        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core)
+        let desc = format!("Linear mixed-effects REML (Compound Symmetry, {df_lbl} df)");
+        out.checklist.push(checklist_item(
+            "Repeated-measures estimator",
+            ChecklistStatus::Info,
+            Some(desc.clone()),
+            format!("Fitted compound-symmetry linear mixed-effects REML with {df_lbl} degrees of freedom."),
+        ));
+        (fixed_terms, sigma2_e, (n_obs - p_total) as f64, core, desc)
     };
 
     let ym = SummaryMoments::from_slice(&y_vec)?;
@@ -7422,7 +8293,13 @@ fn run_rm_grouped_reml(
         df_method: reml_core.df_method,
         observed_cells,
     };
-    Ok(GroupedFactorialOutcome { result: res, observations: data, post_hoc: FactorialPostHocContext::Reml(reml_model), aux_tabs: Vec::new() })
+    Ok(GroupedFactorialOutcome {
+        result: res,
+        observations: data,
+        post_hoc: FactorialPostHocContext::Reml(reml_model),
+        aux_tabs: Vec::new(),
+        estimator_note: Some(format!("Estimator: {estimator_desc}.")),
+    })
 }
 
 fn run_multifactor_mv(
@@ -7479,6 +8356,36 @@ fn run_multifactor_mv(
             obs.push((lvls, y));
         }
     }
+    if obs.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    // Drop unobserved/excluded factor levels after complete-case row filtering before effect coding (#30).
+    let n_factors = factor_levels.len();
+    let mut remaps = Vec::with_capacity(n_factors);
+    for (f_pos, levels) in factor_levels.iter_mut().enumerate() {
+        let mut seen = vec![false; levels.len()];
+        for (row_lvls, _) in &obs {
+            seen[row_lvls[f_pos]] = true;
+        }
+        let mut remap = vec![0_usize; levels.len()];
+        let mut compacted = Vec::with_capacity(levels.len());
+        for (orig_idx, lvl) in levels.drain(..).enumerate() {
+            if seen[orig_idx] {
+                remap[orig_idx] = compacted.len();
+                compacted.push(lvl);
+            }
+        }
+        if compacted.is_empty() {
+            return Err(StatsError::EmptyInput);
+        }
+        *levels = compacted;
+        remaps.push(remap);
+    }
+    for (row_lvls, _) in &mut obs {
+        for (f_pos, lvl) in row_lvls.iter_mut().enumerate() {
+            *lvl = remaps[f_pos][*lvl];
+        }
+    }
     let data = FactorialObservations { factor_names, factor_levels, rows: obs };
     let (res, model) = fit_factorial_anova_with_model(&data, fac_spec.max_interaction_order, fac_spec.ss_type)?;
     Ok((res, data, model))
@@ -7492,8 +8399,9 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
     let mut out = init_result_sheet(spec)?;
     let p_fmt = spec.p_value_format;
 
-    let selected_groups = resolve_selected_indices(&spec.selected_data_sets, nested.groups.len());
-    let res = nested_one_way_anova_selected(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
+    let selected_groups = validate_selected_indices(&spec.selected_data_sets, nested.groups.len())?;
+    let (res, reml_converged, reml_at_boundary) =
+        nested_one_way_anova_with_reml_status(nested, &selected_groups, nested_spec.two_group_t_test, nested_spec.df_method)?;
     let active_df2 = match nested_spec.df_method {
         MixedModelDfMethod::KenwardRoger => res.df2_groups_kenward_roger,
         MixedModelDfMethod::Satterthwaite => res.df2_groups_satterthwaite,
@@ -7555,14 +8463,20 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
             ResultCell::Empty,
         ],
     ];
-    out.tabs.push(build_tab(
+    let mut vc_tab = build_tab(
         "variance-components",
         "Variance components (REML)",
         ResultTabKind::ParametersAndConfidenceIntervals,
         vc_headers,
         vec![String::from("Subclusters (biological units)"), String::from("Residual (technical)")],
         vc_rows,
-    ));
+    );
+    if !reml_converged {
+        vc_tab.footnotes.push(String::from("Warning: REML variance-ratio optimization reached the upper search limit without an interior optimum."));
+    } else if reml_at_boundary {
+        vc_tab.footnotes.push(String::from("Subcluster variance component estimate is on the zero boundary (sigma^2_subcluster = 0)."));
+    }
+    out.tabs.push(vc_tab);
 
     // Optional group-level pairwise comparisons using hierarchical group-mean variances:
     // Var(mean_g) = sigma_u^2 * sum_j(n_{gj}^2) / N_g^2 + sigma_e^2 / N_g (Sokal & Rohlf / Montgomery).
@@ -7580,6 +8494,7 @@ pub fn run_nested_analysis(sheet: &DataSheet, spec: &AnalysisSpec, nested_spec: 
         Some(format!("ICC = {:.3}, {df_lbl} df = {:.2}", res.icc_subclusters, active_df2)),
         "Nested REML prevents pseudoreplication by separating biological-unit variance from technical replicate variance.",
     ));
+    out.checklist.push(append_reml_boundary_checklist(reml_converged, reml_at_boundary, res.variance_subclusters, res.variance_error));
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
 }

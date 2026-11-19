@@ -42,10 +42,7 @@ use crate::common::{
     sanitize_result_sheet_floats,
 };
 use crate::error::StatsError;
-use crate::multiplicity::{
-    adjust_benjamini_hochberg, adjust_benjamini_yekutieli, adjust_bonferroni, adjust_holm_bonferroni, adjust_holm_sidak, adjust_sidak,
-    adjust_two_stage_bky,
-};
+use crate::multiplicity::{MultiplicityProcedure, try_adjust_p_values};
 
 /// Result for a single row in an analyzed stack of raw *P* values, preserving input row order.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,16 +129,18 @@ pub fn analyze_pvalue_stack(raw_p: &[f64], method: PValueStackMethod, threshold:
     compute_column_result(0, String::from("P values"), &normalized, &table_rows, &labels, method, threshold, 0, 0)
 }
 
-fn dispatch_multiplicity(raw_p: &[f64], method: PValueStackMethod, threshold: f64) -> Vec<f64> {
-    match method {
-        PValueStackMethod::Bonferroni => adjust_bonferroni(raw_p),
-        PValueStackMethod::HolmBonferroni => adjust_holm_bonferroni(raw_p),
-        PValueStackMethod::Sidak => adjust_sidak(raw_p),
-        PValueStackMethod::HolmSidak => adjust_holm_sidak(raw_p),
-        PValueStackMethod::BenjaminiHochberg => adjust_benjamini_hochberg(raw_p),
-        PValueStackMethod::TwoStageBky => adjust_two_stage_bky(raw_p, threshold),
-        PValueStackMethod::BenjaminiYekutieli => adjust_benjamini_yekutieli(raw_p),
-    }
+fn dispatch_multiplicity(raw_p: &[f64], method: PValueStackMethod, threshold: f64) -> Result<Vec<f64>, StatsError> {
+    let procedure = match method {
+        PValueStackMethod::Bonferroni => MultiplicityProcedure::Bonferroni,
+        PValueStackMethod::HolmBonferroni => MultiplicityProcedure::HolmBonferroni,
+        PValueStackMethod::Sidak => MultiplicityProcedure::Sidak,
+        PValueStackMethod::HolmSidak => MultiplicityProcedure::HolmSidak,
+        PValueStackMethod::BenjaminiHochberg => MultiplicityProcedure::BenjaminiHochbergFdr,
+        PValueStackMethod::TwoStageBky => MultiplicityProcedure::TwoStageBkyFdr,
+        PValueStackMethod::BenjaminiYekutieli => MultiplicityProcedure::BenjaminiYekutieliFdr,
+    };
+    let (adjusted, _) = try_adjust_p_values(raw_p, procedure, threshold)?;
+    Ok(adjusted)
 }
 
 fn compute_ranks(raw_p: &[f64]) -> (Vec<usize>, Vec<usize>) {
@@ -191,7 +190,7 @@ fn compute_column_result(
     if raw_p.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    let adjusted = dispatch_multiplicity(raw_p, method, threshold);
+    let adjusted = dispatch_multiplicity(raw_p, method, threshold)?;
     if adjusted.len() != raw_p.len() {
         return Err(StatsError::DimensionMismatch { expected: raw_p.len(), actual: adjusted.len() });
     }

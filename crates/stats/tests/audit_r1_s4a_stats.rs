@@ -75,7 +75,12 @@ fn r1_s02_07_zero_residual_rm_anova_and_multiplicity() {
             } else {
                 assert_eq!(r.statistic, 0.0, "{proc:?}: equal means stat must be 0");
                 assert_eq!(r.raw_p, 1.0, "{proc:?}: equal means raw_p must be 1");
-                assert_eq!(r.adjusted_p_or_q, 1.0, "{proc:?}: equal means adj_p must be 1");
+                if matches!(proc, MultiplicityProcedure::TwoStageBkyFdr) {
+                    // BKY (2006) Def. 6 Stage 2 with r1 = 2, m = 3 yields 1.0 * 1 * 1.05 / 3 = 0.35.
+                    assert!((r.adjusted_p_or_q - 0.35).abs() < 1e-12, "TwoStageBkyFdr equal means adj_p");
+                } else {
+                    assert_eq!(r.adjusted_p_or_q, 1.0, "{proc:?}: equal means adj_p must be 1");
+                }
                 assert!(!r.significant, "{proc:?}: equal means must not be significant");
             }
         }
