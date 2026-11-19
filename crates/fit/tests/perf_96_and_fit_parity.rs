@@ -7,9 +7,9 @@ use curvebook_doc::{
     ParameterRule, ParameterScope, ResultCell, ResultStatus, ResultTab, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, VariableRole, XyTable,
 };
 use curvebook_fit::{
-    DataPoint, DatasetSeries, FitError, FitStatus, HookContext, ModelComparisonOutcome, MultivarExtractionSpec, SolverConfig, anderson_darling_test,
-    compare_models, compare_models_lrt, execute_analysis, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options, fit_nonlinear,
-    get_builtin_model, homoscedasticity_spearman_test, lilliefors_ks_test,
+    CompiledDslModel, DataPoint, DatasetSeries, FitError, FitStatus, HookContext, ModelComparisonOutcome, MultivarExtractionSpec, SolverConfig,
+    anderson_darling_test, compare_models, compare_models_lrt, execute_analysis, extract_datasets_from_sheet,
+    extract_datasets_from_sheet_with_options, fit_nonlinear, get_builtin_model, homoscedasticity_spearman_test, lilliefors_ks_test,
 };
 
 fn build_96_curve_xy_sheet() -> Result<(DataSheet, Vec<[f64; 4]>), String> {
@@ -743,6 +743,59 @@ fn residuals_and_covariance_matrix_tabs_emitted_with_qq_and_studentized_columns(
     };
     assert!(find_tab(&res_off.tabs, ResultTabKind::Residuals).is_none());
     assert!(find_tab(&res_off.tabs, ResultTabKind::CovarianceMatrix).is_none());
+}
+
+#[test]
+fn r1_s03_09_dsl_compilation_scales_linearly_wall_clock() {
+    // Runs in the serial `CI / performance` stage (`binary(*perf*)`) and takes the minimum
+    // of 5 warm runs so a single OS scheduling pause on shared runners does not flake while
+    // any true O(n^2) (~16x) regression still fails the 8x bound decisively.
+    let best_compile_ns = |src: &str| -> Result<f64, String> {
+        // Warm up once before timing.
+        CompiledDslModel::compile("scale", src).map_err(|e| format!("warmup compile failed: {e:?}"))?;
+        let mut best = f64::INFINITY;
+        for _ in 0..5 {
+            let t0 = Instant::now();
+            let _ = CompiledDslModel::compile("scale", src).map_err(|e| format!("timed compile failed: {e:?}"))?;
+            best = best.min(t0.elapsed().as_nanos() as f64);
+        }
+        Ok(best)
+    };
+
+    let build_transforms = |n: usize| {
+        let mut s = String::from("[Equation]\nY = A*X + B\n[Transforms]\nT0 = A + B\n");
+        for i in 1..n {
+            s.push_str(&format!("T{i} = T{} + 1\n", i - 1));
+        }
+        s
+    };
+    let Ok(t1000) = best_compile_ns(&build_transforms(1_000)) else {
+        panic_free_fail("transforms 1000 compile failed");
+        return;
+    };
+    let Ok(t4000) = best_compile_ns(&build_transforms(4_000)) else {
+        panic_free_fail("transforms 4000 compile failed");
+        return;
+    };
+    assert!(t4000 / t1000.max(1_000_000.0) < 8.0, "transforms 4x scaling too slow: t1000={t1000}ns, t4000={t4000}ns");
+
+    let build_inits = |n: usize| {
+        let mut s = String::from("[Equation]\nY = A*X + B\n[InitialValues]\nL0 = YMIN\n");
+        for i in 1..n {
+            s.push_str(&format!("L{i} = L{} + 0.1\n", i - 1));
+        }
+        s.push_str(&format!("A = L{}\nB = YMAX\n", n - 1));
+        s
+    };
+    let Ok(init_t1000) = best_compile_ns(&build_inits(1_000)) else {
+        panic_free_fail("init rules 1000 compile failed");
+        return;
+    };
+    let Ok(init_t4000) = best_compile_ns(&build_inits(4_000)) else {
+        panic_free_fail("init rules 4000 compile failed");
+        return;
+    };
+    assert!(init_t4000 / init_t1000.max(1_000_000.0) < 8.0, "init rules 4x scaling too slow: t1000={init_t1000}ns, t4000={init_t4000}ns");
 }
 
 fn panic_free_fail(msg: &str) {
