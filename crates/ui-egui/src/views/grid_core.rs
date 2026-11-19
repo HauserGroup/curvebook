@@ -304,11 +304,12 @@ pub fn handle_grid_double_click(app: &UiApp, state: &mut GridCoreViewState, coor
 /// Update hovered cell coordinate and `GridViewState::hover_exclusion_tooltip` provenance text.
 pub fn handle_grid_pointer_hover(app: &mut UiApp, state: &mut GridCoreViewState, coord: Option<GridCellCoord>) {
     state.hovered_cell = coord;
-    let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|sid| app.document().data_sheet(sid)).cloned() else {
+    let doc = app.session.document();
+    let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
         app.grid.hover_exclusion_tooltip = None;
         return;
     };
-    app.grid.update_hover_exclusion_tooltip(&ds, coord);
+    app.grid.update_hover_exclusion_tooltip(ds, coord);
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -320,60 +321,117 @@ enum GridNavEvent {
 }
 
 fn apply_grid_nav_event(app: &mut UiApp, state: &mut GridCoreViewState, event: GridNavEvent) -> Result<UiEventOutcome, String> {
-    let Some(ds) = active_data_sheet(app).cloned() else {
-        return Ok(UiEventOutcome::default());
-    };
     let mut outcome = UiEventOutcome { handled: true, action: String::from("grid_core.nav"), ..UiEventOutcome::default() };
 
-    match event {
-        GridNavEvent::Arrow { dir, extend, jump } => {
-            app.grid.navigate(&ds, dir, extend, jump);
-            let cur = app.grid.tool.active.unwrap_or_default();
-            if extend {
-                sync_extended_selection(&mut app.grid, &ds);
-            } else {
-                app.grid.select_single_sync(cur);
-            }
-            let summary = format!("arrow:{dir:?}:extend={extend}:jump={jump}->({},{},{})", cur.row, cur.col, cur.subcol);
-            outcome.action = format!("grid_core.{summary}");
-            state.last_nav_summary = Some(summary);
-        }
-        GridNavEvent::Tab { backward } => {
-            step_tab_cell(&mut app.grid, &ds, backward);
-            let cur = app.grid.tool.active.unwrap_or_default();
-            app.grid.select_single_sync(cur);
-            let summary = format!("tab:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
-            outcome.action = format!("grid_core.{summary}");
-            state.last_nav_summary = Some(summary);
-        }
-        GridNavEvent::Enter { backward } => {
-            let dir = if backward { MoveDirection::Up } else { MoveDirection::Down };
-            app.grid.navigate(&ds, dir, false, false);
-            let cur = app.grid.tool.active.unwrap_or_default();
-            app.grid.select_single_sync(cur);
-            let summary = format!("enter:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
-            outcome.action = format!("grid_core.{summary}");
-            state.last_nav_summary = Some(summary);
-        }
-        GridNavEvent::ClearSelection => {
-            if ds.frozen {
+    if matches!(event, GridNavEvent::ClearSelection) {
+        let prepared = {
+            let doc = app.session.document();
+            let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
+                return Ok(UiEventOutcome::default());
+            };
+            prepare_clear_selected_cells(ds, &app.grid, state)
+        };
+        match prepared {
+            ClearSelectionPlan::Frozen => {
                 outcome.action = String::from("grid_core.frozen_read_only");
                 state.last_nav_summary = Some(String::from("edit:clear_blocked_frozen"));
-            } else if let Some((cmd_id, val)) = clear_selected_cells(app, &ds, state)? {
-                outcome.action = String::from("grid_core.clear_selection");
-                outcome.command_id = Some(cmd_id);
-                outcome.command_result = Some(val);
-                state.last_nav_summary = Some(String::from("edit:clear"));
-            } else {
+            }
+            ClearSelectionPlan::LinkBlocked | ClearSelectionPlan::NothingToClear => {
                 outcome.action = String::from("grid_core.link_read_only_prompt");
                 state.last_nav_summary = Some(String::from("edit:clear"));
             }
+            ClearSelectionPlan::Execute { sheet_id, cells_json } => {
+                let out = app.execute_command("table.clearCells", json!({ "sheet_id": sheet_id, "cells": cells_json })).map_err(|e| e.to_string())?;
+                outcome.action = String::from("grid_core.clear_selection");
+                outcome.command_id = Some(out.command_id);
+                outcome.command_result = Some(out.payload);
+                state.last_nav_summary = Some(String::from("edit:clear"));
+            }
         }
+        app.grid.refresh_selection_stats(app.session.document());
+        return Ok(outcome);
     }
 
-    let doc_clone = app.document().clone();
-    app.grid.refresh_selection_stats(&doc_clone);
+    // Borrow `app.session` and `&mut app.grid` as disjoint fields so 1M-cell navigation never clones `DataSheet` or `ProjectDocument`.
+    {
+        let doc = app.session.document();
+        let Some(ds) = doc.active_sheet_id.as_ref().and_then(|sid| doc.data_sheet(sid)) else {
+            return Ok(UiEventOutcome::default());
+        };
+        match event {
+            GridNavEvent::Arrow { dir, extend, jump } => {
+                app.grid.navigate(ds, dir, extend, jump);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                if extend {
+                    sync_extended_selection(&mut app.grid, ds);
+                } else {
+                    app.grid.select_single_sync(cur);
+                }
+                let summary = format!("arrow:{dir:?}:extend={extend}:jump={jump}->({},{},{})", cur.row, cur.col, cur.subcol);
+                outcome.action = format!("grid_core.{summary}");
+                state.last_nav_summary = Some(summary);
+            }
+            GridNavEvent::Tab { backward } => {
+                step_tab_cell(&mut app.grid, ds, backward);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                app.grid.select_single_sync(cur);
+                let summary = format!("tab:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
+                outcome.action = format!("grid_core.{summary}");
+                state.last_nav_summary = Some(summary);
+            }
+            GridNavEvent::Enter { backward } => {
+                let dir = if backward { MoveDirection::Up } else { MoveDirection::Down };
+                app.grid.navigate(ds, dir, false, false);
+                let cur = app.grid.tool.active.unwrap_or_default();
+                app.grid.select_single_sync(cur);
+                let summary = format!("enter:backward={backward}->({},{},{})", cur.row, cur.col, cur.subcol);
+                outcome.action = format!("grid_core.{summary}");
+                state.last_nav_summary = Some(summary);
+            }
+            GridNavEvent::ClearSelection => {}
+        }
+        app.grid.refresh_selection_stats(doc);
+    }
+
     Ok(outcome)
+}
+
+enum ClearSelectionPlan {
+    Frozen,
+    LinkBlocked,
+    NothingToClear,
+    Execute { sheet_id: String, cells_json: Vec<serde_json::Value> },
+}
+
+fn prepare_clear_selected_cells(ds: &DataSheet, grid: &crate::grid_view::GridViewState, state: &mut GridCoreViewState) -> ClearSelectionPlan {
+    if ds.frozen {
+        return ClearSelectionPlan::Frozen;
+    }
+    let mut coords = grid.all_selected_coords(ds);
+    if coords.is_empty()
+        && let Some(active) = grid.tool.active
+    {
+        coords.push(active);
+    }
+    if coords.is_empty() {
+        return ClearSelectionPlan::NothingToClear;
+    }
+    for coord in &coords {
+        if check_edit_blocked_by_link(ds, state, coord.row, coord.col, coord.subcol) {
+            return ClearSelectionPlan::LinkBlocked;
+        }
+    }
+    let cells_json: Vec<serde_json::Value> = coords
+        .iter()
+        .map(|c| {
+            json!({
+                "row": c.row,
+                "col": c.col,
+                "subcol": c.subcol,
+            })
+        })
+        .collect();
+    ClearSelectionPlan::Execute { sheet_id: ds.id.to_string(), cells_json }
 }
 
 fn sync_extended_selection(grid: &mut crate::grid_view::GridViewState, ds: &DataSheet) {
@@ -417,46 +475,6 @@ fn step_tab_cell(grid: &mut crate::grid_view::GridViewState, ds: &DataSheet, bac
             grid.select_single_sync(GridCellCoord::new(before.row - 1, last_col, last_sub));
         }
     }
-}
-
-fn clear_selected_cells(app: &mut UiApp, ds: &DataSheet, state: &mut GridCoreViewState) -> Result<Option<(String, serde_json::Value)>, String> {
-    if ds.frozen {
-        return Ok(None);
-    }
-    let mut coords = app.grid.all_selected_coords(ds);
-    if coords.is_empty()
-        && let Some(active) = app.grid.tool.active
-    {
-        coords.push(active);
-    }
-    if coords.is_empty() {
-        return Ok(None);
-    }
-    for coord in &coords {
-        if check_edit_blocked_by_link(ds, state, coord.row, coord.col, coord.subcol) {
-            return Ok(None);
-        }
-    }
-    let cells_json: Vec<serde_json::Value> = coords
-        .iter()
-        .map(|c| {
-            json!({
-                "row": c.row,
-                "col": c.col,
-                "subcol": c.subcol,
-            })
-        })
-        .collect();
-    let out = app
-        .execute_command(
-            "table.clearCells",
-            json!({
-                "sheet_id": ds.id.to_string(),
-                "cells": cells_json,
-            }),
-        )
-        .map_err(|e| e.to_string())?;
-    Ok(Some((out.command_id, out.payload)))
 }
 
 /// Dispatch custom `WidgetAction::Custom` events targeting the `grid_core` domain.
@@ -626,22 +644,25 @@ fn handle_title_editor_action(app: &mut UiApp, state: &mut GridCoreViewState, pa
         return Ok(Some(UiEventOutcome { handled: true, action: String::from("grid_core.title:commit"), command_id: cmd_id, command_result: None }));
     }
     if payload == "title:begin:x" {
-        let Some(ds) = active_data_sheet(app).cloned() else {
+        let Some((sid, draft)) = active_data_sheet(app)
+            .map(|ds| (ds.id.to_string(), archetype_x_title(&ds.archetype).map(ToOwned::to_owned).unwrap_or_else(|| String::from("X"))))
+        else {
             return Ok(Some(UiEventOutcome::default()));
         };
-        let draft = archetype_x_title(&ds.archetype).map(ToOwned::to_owned).unwrap_or_else(|| String::from("X"));
-        open_title_editor(app, state, &ds.id.to_string(), GridTitleTarget::XColumn, draft);
+        open_title_editor(app, state, &sid, GridTitleTarget::XColumn, draft);
         return Ok(Some(UiEventOutcome { handled: true, action: String::from("grid_core.title:begin:x"), ..UiEventOutcome::default() }));
     }
     if let Some(raw) = payload.strip_prefix("title:begin:col:")
         && let Ok(col) = raw.parse::<usize>()
     {
-        let Some(ds) = active_data_sheet(app).cloned() else {
+        let Some((sid, draft)) = active_data_sheet(app).map(|ds| {
+            let d =
+                crate::dialogs_canvas::data_column_title(ds, col).map(ToOwned::to_owned).unwrap_or_else(|| curvebook_doc::default_column_label(col));
+            (ds.id.to_string(), d)
+        }) else {
             return Ok(Some(UiEventOutcome::default()));
         };
-        let draft =
-            crate::dialogs_canvas::data_column_title(&ds, col).map(ToOwned::to_owned).unwrap_or_else(|| curvebook_doc::default_column_label(col));
-        open_title_editor(app, state, &ds.id.to_string(), GridTitleTarget::DataColumn { col }, draft);
+        open_title_editor(app, state, &sid, GridTitleTarget::DataColumn { col }, draft);
         return Ok(Some(UiEventOutcome { handled: true, action: format!("grid_core.{payload}"), ..UiEventOutcome::default() }));
     }
     if let Some(rest) = payload.strip_prefix("title:begin:subcol:") {
@@ -649,22 +670,25 @@ fn handle_title_editor_action(app: &mut UiApp, state: &mut GridCoreViewState, pa
         if let (Some(c), Some(s)) = (parts.next(), parts.next())
             && let (Ok(col), Ok(subcol)) = (c.parse::<usize>(), s.parse::<usize>())
         {
-            let Some(ds) = active_data_sheet(app).cloned() else {
+            let Some((sid, draft)) = active_data_sheet(app).map(|ds| {
+                let d = nested_subcolumn_title(ds, col, subcol).unwrap_or_else(|| subcolumn_header_label(ds, col, subcol, &app.locale_preset));
+                (ds.id.to_string(), d)
+            }) else {
                 return Ok(Some(UiEventOutcome::default()));
             };
-            let draft = nested_subcolumn_title(&ds, col, subcol).unwrap_or_else(|| subcolumn_header_label(&ds, col, subcol, &app.locale_preset));
-            open_title_editor(app, state, &ds.id.to_string(), GridTitleTarget::Subcolumn { col, subcol }, draft);
+            open_title_editor(app, state, &sid, GridTitleTarget::Subcolumn { col, subcol }, draft);
             return Ok(Some(UiEventOutcome { handled: true, action: format!("grid_core.{payload}"), ..UiEventOutcome::default() }));
         }
     }
     if let Some(raw) = payload.strip_prefix("title:begin:row:")
         && let Ok(row) = raw.parse::<usize>()
     {
-        let Some(ds) = active_data_sheet(app).cloned() else {
+        let Some((sid, draft)) =
+            active_data_sheet(app).map(|ds| (ds.id.to_string(), archetype_row_title(&ds.archetype, row).unwrap_or_default().to_owned()))
+        else {
             return Ok(Some(UiEventOutcome::default()));
         };
-        let draft = archetype_row_title(&ds.archetype, row).unwrap_or_default().to_owned();
-        open_title_editor(app, state, &ds.id.to_string(), GridTitleTarget::RowTitle { row }, draft);
+        open_title_editor(app, state, &sid, GridTitleTarget::RowTitle { row }, draft);
         return Ok(Some(UiEventOutcome { handled: true, action: format!("grid_core.{payload}"), ..UiEventOutcome::default() }));
     }
     Ok(None)
