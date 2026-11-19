@@ -3,16 +3,19 @@
 //! #51, #52, #53, #80, #93, #94, #100, #114, #115, #116, and #121 (issue #11).
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, DataSheet, FitMethod, HookSource, LinearRegressionSpec, MultipleVariablesTable,
-    NonlinearFitSpec, ParameterRule, ParameterScope, ResultCell, SheetId, SubcolumnMode, TableArchetype, VariableRole, WeightingScheme, XColumnMode,
-    XyTable,
+    AnalysisKind, AnalysisSpec, Cell, ChecklistStatus, CiBound, DataSheet, FitMethod, HookSource, LinearRegressionSpec, ModelComparisonSpec,
+    MultipleVariablesTable, NonlinearFitSpec, ParameterRule, ParameterScope, ResultCell, SheetId, SubcolumnMode, TableArchetype, VariableRole,
+    WeightingScheme, XColumnMode, XyTable,
 };
 use curvebook_fit::diagnostics::{anderson_darling_test, compute_profile_likelihood_cis, rout_detect_outliers};
 use curvebook_fit::dsl::CompiledDslModel;
 use curvebook_fit::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use curvebook_fit::library::get_builtin_model;
 use curvebook_fit::result::execute_analysis;
-use curvebook_fit::solver::{FittedParameterSummary, NonlinearFitResult, SolverConfig, fit_nonlinear};
+use curvebook_fit::solver::{
+    FittedParameterSummary, InferenceAvailability, ModelComparisonOutcome, NonlinearFitResult, SolverConfig, compare_models, compare_models_checked,
+    fit_nonlinear,
+};
 use curvebook_fit::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet_with_options, parse_leading_number,
 };
@@ -409,6 +412,74 @@ fn audit_114_parameter_rules_reject_unknown_and_duplicate() {
     let cfg_dup = SolverConfig { parameter_rules: vec![rule_const("Slope", 2.0), rule_const("slope", 3.0)], ..SolverConfig::default() };
     let err_d = fit_nonlinear(model.as_ref(), std::slice::from_ref(&ds), &HookContext::default(), &cfg_dup).unwrap_err();
     assert!(matches!(err_d, FitError::InvalidParameter { name: "parameter_rules", .. }), "got {err_d:?}");
+}
+
+// ============================================================================
+// #87 (follow-up to #114): compare_models / compare_models_checked filter primary-only parameter_rules
+// ============================================================================
+
+#[test]
+fn audit_87_compare_models_filters_primary_only_parameter_rules_for_alt_model() {
+    let model_4pl = get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let model_3pl = get_builtin_model("log_agonist_vs_response_3pl").unwrap();
+    let xs = [-9.5_f64, -8.5, -8.0, -7.5, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
+    let ys_a: Vec<f64> =
+        xs.iter().enumerate().map(|(i, &x)| 10.0 + 90.0 / (1.0 + 10.0_f64.powf((-6.5 - x) * 1.3)) + if i % 2 == 0 { 0.4 } else { -0.4 }).collect();
+    let ys_b: Vec<f64> =
+        xs.iter().enumerate().map(|(i, &x)| 10.0 + 85.0 / (1.0 + 10.0_f64.powf((-5.8 - x) * 1.3)) + if i % 2 == 0 { -0.4 } else { 0.4 }).collect();
+    let datasets = vec![series_from_xy(0, "WT", &xs, &ys_a), series_from_xy(1, "Mutant", &xs, &ys_b)];
+
+    let cfg = SolverConfig {
+        parameter_rules: vec![
+            ParameterRule {
+                name: String::from("HillSlope"),
+                scope: ParameterScope::SharedGlobal,
+                initial_override: None,
+                lower_bound: Some(0.1),
+                upper_bound: Some(10.0),
+            },
+            rule_const("Bottom", 10.0),
+        ],
+        ..SolverConfig::default()
+    };
+
+    let primary = fit_nonlinear(model_4pl.as_ref(), &datasets, &HookContext::default(), &cfg).unwrap();
+    assert_eq!(primary.k_free, 5);
+
+    let comp_spec = ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: String::from("log_agonist_vs_response_3pl") };
+
+    let (alt_direct, outcome_direct) = compare_models(&primary, model_3pl.as_ref(), &datasets, &HookContext::default(), &cfg, &comp_spec).unwrap();
+    assert_eq!(alt_direct.equation_id, "log_agonist_vs_response_3pl");
+    assert_eq!(alt_direct.k_free, 4);
+    assert!(
+        alt_direct.fixed_constants.iter().any(|(name, val, _)| name == "Bottom" && (*val - 10.0).abs() < 1e-12),
+        "shared parameter rule `Bottom` must still apply to alt_model: {:?}",
+        alt_direct.fixed_constants
+    );
+    assert!(matches!(outcome_direct, ModelComparisonOutcome::ExtraSumOfSquaresF(_)));
+
+    let checked = compare_models_checked(&primary, model_3pl.as_ref(), &datasets, &HookContext::default(), &cfg, &comp_spec).unwrap();
+    assert_eq!(checked.inference_availability, InferenceAvailability::Available);
+    assert_eq!(checked.alternative_fit.equation_id, "log_agonist_vs_response_3pl");
+    assert_eq!(checked.alternative_fit.k_free, 4);
+    assert!(matches!(checked.outcome, ModelComparisonOutcome::ExtraSumOfSquaresF(_)));
+
+    // RobustCauchy early-return branch in compare_models_checked must also filter alt_model rules.
+    let robust_cfg = SolverConfig { method: FitMethod::RobustCauchy, ..cfg.clone() };
+    let primary_robust = fit_nonlinear(model_4pl.as_ref(), &datasets, &HookContext::default(), &robust_cfg).unwrap();
+    let checked_robust =
+        compare_models_checked(&primary_robust, model_3pl.as_ref(), &datasets, &HookContext::default(), &robust_cfg, &comp_spec).unwrap();
+    assert_eq!(checked_robust.inference_availability, InferenceAvailability::NotApplicableInRobustMode);
+    assert_eq!(checked_robust.alternative_fit.equation_id, "log_agonist_vs_response_3pl");
+    assert_eq!(checked_robust.alternative_fit.k_free, 4);
+
+    // Primary / standalone fits still strictly reject unknown parameter names (#114).
+    let err_standalone_3pl = fit_nonlinear(model_3pl.as_ref(), &datasets, &HookContext::default(), &cfg).unwrap_err();
+    assert!(matches!(err_standalone_3pl, FitError::InvalidParameter { name: "parameter_rules", .. }), "got {err_standalone_3pl:?}");
+
+    let cfg_unknown = SolverConfig { parameter_rules: vec![rule_const("NotAParam", 1.0)], ..SolverConfig::default() };
+    let err_primary_4pl = fit_nonlinear(model_4pl.as_ref(), &datasets, &HookContext::default(), &cfg_unknown).unwrap_err();
+    assert!(matches!(err_primary_4pl, FitError::InvalidParameter { name: "parameter_rules", .. }), "got {err_primary_4pl:?}");
 }
 
 // ============================================================================
