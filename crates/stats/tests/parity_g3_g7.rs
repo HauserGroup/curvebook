@@ -478,7 +478,7 @@ fn bland_altman_absolute_and_percent_difference_sheets() {
         let spec = spec_for(
             if percent_difference { "r-ba-pct" } else { "r-ba-abs" },
             "ba-src",
-            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference }),
+            AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference, ..BlandAltmanSpec::default() }),
         );
         let res = run_analysis(&sheet, &spec).unwrap();
         let summary = tab_by_kind(&res, ResultTabKind::MainSummary);
@@ -883,7 +883,11 @@ fn bland_altman_on_mv_and_xy_archetypes() {
         let sheet = DataSheet::new(SheetId::new(id), id, arch).unwrap();
         let res = run_analysis(
             &sheet,
-            &spec_for("r-ba-other", id, AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false })),
+            &spec_for(
+                "r-ba-other",
+                id,
+                AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, ..BlandAltmanSpec::default() }),
+            ),
         )
         .unwrap();
         assert_approx_eq(scalar_by_key(&res, "Bias"), direct.bias, 1e-12, 1e-12, id);

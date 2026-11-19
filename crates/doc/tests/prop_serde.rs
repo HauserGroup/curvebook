@@ -541,7 +541,7 @@ fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
     assert_copy_spec::<MultipleRowTestsSpec>();
     assert_copy_spec::<PassingBablokSpec>();
 
-    assert_eq!(BlandAltmanSpec::default(), BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false });
+    assert_eq!(BlandAltmanSpec::default(), BlandAltmanSpec { column_a: 0, column_b: 1, percent_difference: false, xy_compare_x_vs_y: None });
     assert_eq!(PassingBablokSpec::default(), PassingBablokSpec { x_column: 0, y_column: 1 });
     assert!(MultipleRowTestsSpec::default().assume_equal_sd);
     assert!(NonlinearFitSpec::new("four_pl").emit_residuals_tab);
@@ -556,7 +556,7 @@ fn new_analysis_specs_compatibility_auto_titles_and_copy_traits() {
     );
 
     // BlandAltman compatibility & auto-title
-    let ba = AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 2, percent_difference: true });
+    let ba = AnalysisKind::BlandAltman(BlandAltmanSpec { column_a: 0, column_b: 2, percent_difference: true, xy_compare_x_vs_y: Some(false) });
     assert_eq!(ba.derive_auto_title(), "Bland-Altman method comparison");
     assert!(ba.is_compatible_with(TableKind::Column));
     assert!(ba.is_compatible_with(TableKind::Xy));
