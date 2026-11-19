@@ -46,6 +46,51 @@ If running `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or `App
 - **`--control` binding errors:** `--control <port>` accepts `1..=65535` (port `0` is rejected) and binds strictly to `127.0.0.1`. Set `CURVEBOOK_CONTROL_TOKEN` in the environment instead of `--control-token` CLI flags.
 - **`gui_only_violation`:** When `--gui-only` is active, direct engine tools (`analyze.run`, `table.setCell`, `project.save`, etc.) are blocked by policy; drive interactions via `ui.*` / GUI action primitives.
 
+### MCP client cannot connect {#mcp-connection}
+
+Start by checking whether the MCP client can launch the configured server process, then check the protocol handshake.
+
+1. **Use absolute paths for the binary and for `--workdir`.** Set `"command"` to the full path of `curvebook-cli` (for example `./target/release/curvebook-cli` after running `cargo build --release -p curvebook-cli`, or `/Applications/CurveBook.app/Contents/MacOS/curvebook-cli` on macOS) and pass `--workdir` as a full path to a directory that already exists (`mkdir -p /path/to/your/data-folder`). Relative paths resolve against whatever working directory the client happens to start the process in, which is usually not your project folder. A missing or unreadable `--workdir` makes the server exit before the handshake with `usage error: --workdir ... is inaccessible` (exit status `2`).
+2. **Do not rely on `PATH` (fixes `command not found` / `ENOENT`).** Applications started from the macOS Dock or Finder, or from a desktop launcher on Linux or Windows, do not inherit the `PATH` of your interactive shell, so a bare `curvebook-cli` that works in a terminal can fail to start from the client. Use the full path (for example the output of `command -v curvebook-cli`, or the absolute path to `target/release/curvebook-cli` from a checkout build). The same applies to wrappers such as `cargo run`; prefer the built binary.
+3. **Add `"type": "stdio"` if your client asks for it.** Some clients require an explicit transport on each server entry and ignore or reject entries without one:
+
+   ```json
+   {
+     "mcpServers": {
+       "curvebook": {
+         "type": "stdio",
+         "command": "/absolute/path/to/curvebook-cli",
+         "args": ["mcp", "--workdir", "/path/to/workspace"]
+       }
+     }
+   }
+   ```
+
+4. **"No tools available" or a missing server usually means the process did not start.** Run the exact configured command by hand in a terminal, with the same arguments, and read its standard error. A usage or `--workdir` error prints one line to stderr and exits non-zero; a healthy server prints nothing and waits for input. Then confirm the handshake by sending the requests below (output abbreviated):
+
+   ```sh
+   printf '%s\n' \
+     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
+     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
+     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
+     | /absolute/path/to/curvebook-cli mcp --workdir /path/to/workspace
+   ```
+
+   Expect two JSON lines: the `initialize` result (`serverInfo.name` is `"curvebook"`) and a `tools/list` result containing the tool list. These responses confirm that the configured binary starts and handles basic discovery. Next check the client configuration, its protocol logs, and whether it needs restarting after a configuration change.
+5. **Keep stdout clean.** Stdout carries the protocol. Wrappers must send banners and diagnostics to stderr. Normal Cargo progress messages already use stderr; `cargo run -q` reduces that noise but cannot repair a wrapper that writes to stdout. Prefer the built binary for a stable launch command.
+6. **Source build fails on older Rust versions.** Run `rustc --version` and `cargo --version` inside the repository to verify both report `1.99.1` or newer ([development prerequisites](../development.md#prerequisites)).
+
+Errors that appear after a successful connection:
+
+| Symptom | Cause and fix |
+|---|---|
+| Tool result with `code: "path_escape"` (`category: "policy"`) | `--workdir` is set and the requested path is outside it (absolute path elsewhere, `..`, or a symlink out). Move the file inside the workdir or widen `--workdir`. |
+| Tool result with `code: "gui_only_violation"` | The server was started with `--gui-only`, which exposes only the `gui` tools (`ui_*`); every other tool, and `resources/read`, is rejected. Remove `--gui-only` for engine, file, and export tools ([strict `--gui-only` policy](automation/mcp.md#gui-only)). |
+| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Start with `--gui-only`, or attach with `--control-port` ([attachment modes](automation/mcp.md#attachment-modes-and-filesystem-policy)). |
+| Tool result with `code: "io_error"` and `failed to connect to desktop control port` | `--control-port` (or `CURVEBOOK_CONTROL_PORT`) is set but no `curvebook --control <port>` instance is listening on `127.0.0.1:<port>`. Start the desktop side first, or drop the flag. The server itself still starts; the error appears on each tool call. |
+| Tool result with `code: "bad_input"` and `invalid or missing control authentication token` | The attached desktop rejected the control authentication token (the raw control error `unauthorized` is mapped to MCP `bad_input`). Check `--control-token`, `CURVEBOOK_CONTROL_TOKEN`, and the per-user token file described in the [control protocol reference](automation/control-and-batch.md#loopback-desktop-control-protocol---control). Use the token for the running desktop instance; do not disable authentication. |
+| `usage error: invalid --control-port` / `invalid CURVEBOOK_CONTROL_PORT` | The port must be an integer in `1..=65535`. |
+
 ---
 
 ## Crash Recovery & File Loading {#recovery-and-files}

@@ -2,7 +2,7 @@
 
 How CurveBook's interface strings, locales, text direction, and fonts work today, and how to extend them. Everything here describes code that exists in the repository; planned work is labelled **planned**. Mutable totals (locale count, key count) are deliberately not repeated here: read them from `LOCALES` / `catalog_len()` in [`crates/ui-egui/src/i18n.rs`](../crates/ui-egui/src/i18n.rs), from the `cargo xtask i18n-report` output, or from [STATUS.md](STATUS.md) (see [pitfalls.md](pitfalls.md), item 2).
 
-Related: [extending.md](extending.md) (extension matrix), [evidence/localization.md](evidence/localization.md) (parity checklist and the human-GUI caveat), [licences.md](licences.md) and [../ASSETS.md](../ASSETS.md) (font and asset rules).
+Related: [extending.md](extending.md) (extension matrix), [evidence/localization.md](evidence/localization.md) (evidence checklist and the human-GUI caveat), [licences.md](licences.md) and [../ASSETS.md](../ASSETS.md) (font and asset rules).
 
 ---
 
@@ -52,7 +52,7 @@ A locale is a new column in the catalog, so the change touches every entry. In `
 5. If it is a right-to-left language, check `is_rtl_locale` (section 6). If it needs a different number or CSV convention, extend `LocalePreset::for_locale`.
 6. If it uses a script that no installed font may cover, add per-script handling in `curvebook-text` font selection (section 7) and, for CJK-style fallbacks, `system_cjk_font_candidates` in `crates/text/src/metrics.rs`.
 7. Update the hard-coded expectations in the `untranslated_report` test (it pins the expected locale list and totals) and in the locale-normalization tests. The test file is the authority on which assertions exist; read it before editing.
-8. Update [evidence/localization.md](evidence/localization.md) and the extension row in [extending.md](extending.md) if the process changes. Do not add a count to prose.
+8. Update [evidence/localization.md](evidence/localization.md) and the locale entry in [extending.md](extending.md#locale--ui-string) if the process changes. Do not add a count to prose.
 
 Fallback behaviour for an incomplete locale is described in section 5, but note that the `untranslated_report` test currently requires **zero** missing or empty entries in every registered locale, so a new locale cannot land partially translated.
 

@@ -1,5 +1,7 @@
 # Live TCP Control Protocol (`--control`)
 
+> **Who this page is for.** This is the contributor specification, and its strings are asserted by tests. The published [control protocol and batch reference](reference/automation/control-and-batch.md) is the user-facing page; the documentation site links there in place of this file.
+
 When launched with `curvebook --control <port>` (or with `CURVEBOOK_CONTROL_PORT=<port>`), the desktop application binds strictly to loopback (`127.0.0.1:<port>`) and serves a line-delimited JSON (`JSONL`) automation channel (`crates/ui-egui/src/control_io.rs`) backed by the same typed command registries as `curvebook-cli` and `curvebook-mcp` ([`commands.md`](commands.md), [`mcp.md`](mcp.md), [`STATUS.md`](STATUS.md)). By default both `--control <port>` and `CURVEBOOK_CONTROL_PORT=<port>` run headless without opening a GUI window; pass the opt-in `--window` flag (`curvebook --control <port> --window` or `CURVEBOOK_CONTROL_PORT=<port> curvebook --window`) to attach a visible `eframe`/`egui` desktop window sharing the same live `UiApp` / `Session` (`apps/curvebook/src/main.rs`; cannot be combined with `--headless-once`).
 
 ## Framing

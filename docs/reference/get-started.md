@@ -76,7 +76,7 @@ tar -xzf curvebook-<version>-freebsd-x86_64.tar.gz
 
 ## Verifying Checksums & Build Attestations {#verifying-downloads}
 
-This page is the complete user guide for verifying Beta downloads. Download both your installer package and `SHA256SUMS.txt` from the same release tag into the same working directory before running the checks below:
+This section is the complete user guide for verifying Beta downloads. Download both your installer package and `SHA256SUMS.txt` from the same release tag into the same working directory before running the checks below:
 
 - **Checksum (`SHA256SUMS.txt`):** Confirms the downloaded archive was not corrupted in transit.
 - **Sigstore Build Provenance (`gh attestation verify`):** Confirms `SHA256SUMS.txt` (and every individual release file) was built by CurveBook's GitHub Actions release workflow from a recorded commit (requires the [GitHub CLI](https://cli.github.com/) `gh`, signed in via `gh auth login`). Verify provenance at least once, because a checksum alone cannot protect against a tampered file paired with a tampered `SHA256SUMS.txt`.
@@ -130,6 +130,17 @@ gh attestation verify <downloaded-file> \
 
 > [!NOTE]
 > Linux `.AppImage` and FreeBSD `.tar.gz` assets ship without separate GPG/Minisign signature files because every release asset (and `SHA256SUMS.txt`) carries a public Sigstore provenance attestation (`R8.10`). If any verification step fails, do **not** run the installer — delete the file, re-download from [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases), and report persistent mismatches via [Privacy & Security](privacy-security.md#security-reporting).
+
+
+### What a Passing Check Means {#verification-meaning}
+
+- The file's SHA-256 hash matches an attestation signed by `.github/workflows/release.yml` in `HauserGroup/curvebook`. The attestation names the commit and ref the release was built from.
+- Without `--signer-workflow`, `gh` accepts an attestation from *any* workflow in the repository, so keep that option.
+- It does not mean an operating system trusts the file. OS trust signing is separate (`R8.10` and `R8.11` in the [roadmap](../ROADMAP.md)): from Beta onward, macOS `.dmg` downloads are Developer ID signed and notarized, whereas Windows `.msi` (`x64` and `arm64`, following `R0.28` retirement of `x86` and `-portable.zip`) ships unsigned until `R8.11`.
+
+### If a Check Fails {#verification-fails}
+
+Do not open or install the file. Download it again from the release page and repeat the check. If it still fails, report it as described in [SECURITY.md](../../SECURITY.md).
 
 ---
 
