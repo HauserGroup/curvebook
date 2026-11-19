@@ -9,16 +9,19 @@
 //! 4. Context menus & navigator / workspace slots, HiDPI, and RTL mirroring.
 #![forbid(unsafe_code)]
 
+mod web_parity_common;
+
 use std::error::Error;
 use std::fmt;
 
 use curvebook_ui_egui::compositor::FramePalette;
-use curvebook_ui_egui::layout::verify::verify_tree_invariants;
-use curvebook_ui_egui::layout::{FocusScope, LayoutTree};
+use curvebook_ui_egui::layout::verify::{ParityViolation, verify_tree_invariants};
+use curvebook_ui_egui::layout::{FocusScope, LayoutTree, WidgetAction};
 use curvebook_ui_egui::serde_json::json;
 use curvebook_ui_egui::text_bridge::DesktopTextMeasurer;
+use curvebook_ui_egui::theme::FontBook;
 use curvebook_ui_egui::views::build_workspace_layout_tree;
-use curvebook_ui_egui::{ActiveDialog, KeyModifiers, PointerButton, UiInputEvent};
+use curvebook_ui_egui::{ActiveDialog, KeyModifiers, PointerButton, UiInputEvent, execute_widget_action};
 use curvebook_web::{
     WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebChromeLayout, WebExportFormat, WebTextAlign, WebTextDirection, ZLayer, ZLayerBand,
 };
@@ -51,8 +54,9 @@ fn current_layout(session: &WebBridgeSession) -> WebChromeLayout {
 fn verify_shared_tree_clean(session: &WebBridgeSession, context: &str) -> TestRes<LayoutTree> {
     let layout = current_layout(session);
     let report = verify_tree_invariants(&layout.tree);
-    if !report.is_clean() {
-        return fail(format!("LayoutTree invariants failed at {context}: {:?}", report.violations));
+    let filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs(&layout.tree, report.violations);
+    if !filtered.is_empty() {
+        return fail(format!("LayoutTree invariants failed at {context}: {filtered:?}"));
     }
     Ok(layout.tree)
 }
@@ -570,6 +574,7 @@ fn shared_tree_context_menus_navigator_workspace_slots_hidpi_and_rtl() -> TestRe
         text_ops.iter().any(|op| op.direction == WebTextDirection::Rtl && op.align == WebTextAlign::Left),
         "HiDPI RTL text ops keep Rtl + Left origin anchor",
     )?;
+    let _ = verify_shared_tree_clean(&session, "rtl_2x_open_menu")?;
 
     Ok(())
 }
@@ -603,5 +608,97 @@ fn web_chrome_snapshot_projects_aria_tree_and_modal_hidden_parity() -> TestRes {
         .ok_or_else(|| TestMsg(String::from("missing background toolbar.analyze")))?;
     check(analyze_bg["attributes"]["aria-hidden"].as_str() == Some("true"), "background toolbar.analyze must project aria-hidden=\"true\"")?;
 
+    Ok(())
+}
+
+#[test]
+fn shared_tree_fontless_rtl_and_language_picker_autonyms_preserve_ascii_and_geometry() -> TestRes {
+    let fallback_measurer = DesktopTextMeasurer::with_font_book(FontBook::with_embedded_fallback());
+    let (mut session, _d1, _g1, _rs_id) = build_populated_session()?;
+
+    // 1. Arabic RTL workspace + open menu under embedded fallback only misses Arabic glyphs.
+    let _ = session.handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("ui.locale.set"), params: json!({ "locale": "ar" }) })?;
+    let _ = pointer_click_node(&mut session, "menu.file")?;
+    let palette = FramePalette::from_theme(&session.host.app().theme);
+    let rtl_tree = build_workspace_layout_tree(session.host.app(), session.host.viewport(), &fallback_measurer, &palette);
+    let rtl_report = verify_tree_invariants(&rtl_tree);
+    check(rtl_report.violations.iter().any(|v| v.check == "text_glyphs"), "fontless RTL tree should trigger text_glyphs for Arabic strings")?;
+    let rtl_filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &rtl_tree,
+        rtl_report.violations.clone(),
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    check(rtl_filtered.is_empty(), format!("expected fontless Arabic RTL tree to filter cleanly, got {rtl_filtered:?}"))?;
+    let rtl_backed = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &rtl_tree,
+        rtl_report.violations,
+        web_parity_common::HostScriptCoverage::all(),
+    );
+    check(!rtl_backed.is_empty(), "expected Arabic text_glyphs violations to stay when host claims full coverage")?;
+
+    // 2. Open language picker (`popup.menu.ui.locale.set`) in English with CJK/RTL autonyms under embedded fallback.
+    let _ = session.handle_event(WebBridgeEvent::ExecuteCommand { command_id: String::from("ui.locale.set"), params: json!({ "locale": "en" }) })?;
+    let viewport = session.host.viewport();
+    let _ = execute_widget_action(
+        session.host.app_mut(),
+        &WidgetAction::InvokeCommand { command_id: String::from("ui.locale.set"), params: json!({}) },
+        viewport,
+    )
+    .map_err(TestMsg)?;
+    let picker_tree = build_workspace_layout_tree(session.host.app(), viewport, &fallback_measurer, &palette);
+    check(
+        picker_tree.node("popup.menu.ui.locale.set").is_some_and(|n| n.drawn_in_frame),
+        "language picker popup must render cleanly in shared LayoutTree",
+    )?;
+    let picker_report = verify_tree_invariants(&picker_tree);
+    check(
+        picker_report.violations.iter().any(|v| v.check == "text_glyphs" && v.widget_id.starts_with("popup.menu.ui.locale.set.opt.")),
+        "fontless language picker should report missing glyphs for CJK/RTL autonyms",
+    )?;
+    let picker_filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &picker_tree,
+        picker_report.violations,
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    check(picker_filtered.is_empty(), format!("expected fontless language picker to filter only CJK/RTL autonym glyphs, got {picker_filtered:?}"))?;
+
+    // 3. Preserve ASCII `text_glyphs` (both inside real `text_runs` and standalone) and non-`text_glyphs` violations even when CJK/RTL is unbacked.
+    let mut ascii_broken_tree = picker_tree.clone();
+    let en_run = ascii_broken_tree
+        .text_runs
+        .iter_mut()
+        .find(|r| r.owner_widget_id.as_str() == "popup.menu.ui.locale.set.opt.0")
+        .ok_or_else(|| TestMsg(String::from("missing popup.menu.ui.locale.set.opt.0 text run")))?;
+    if let Some(first_glyph) = en_run.shaped.glyphs.first_mut() {
+        first_glyph.missing_glyph = true;
+    }
+    en_run.shaped.missing_glyph_count = 1;
+    let ascii_broken_filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &ascii_broken_tree,
+        verify_tree_invariants(&ascii_broken_tree).violations,
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    check(
+        ascii_broken_filtered.iter().any(|v| v.widget_id == "popup.menu.ui.locale.set.opt.0" && v.check == "text_glyphs"),
+        format!("expected real ASCII `text_glyphs` failure to remain preserved, got {ascii_broken_filtered:?}"),
+    )?;
+
+    let kept = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &picker_tree,
+        vec![
+            ParityViolation {
+                widget_id: String::from("popup.menu.ui.locale.set.opt.0"),
+                check: String::from("text_glyphs"),
+                detail: String::from("text run `English (en)` has 1 missing glyph(s)"),
+            },
+            ParityViolation {
+                widget_id: String::from("popup.menu.ui.locale.set"),
+                check: String::from("parent_containment"),
+                detail: String::from("synthetic bounds violation"),
+            },
+        ],
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    check(kept.len() == 2, format!("expected ASCII and geometric violations to be preserved, got {kept:?}"))?;
     Ok(())
 }
