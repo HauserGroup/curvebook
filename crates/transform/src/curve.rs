@@ -12,7 +12,7 @@
 //!   *Journal of the American Statistical Association*, 74(368), 829-836.
 //!   `doi:10.1080/01621459.1979.10481038`.
 
-use curvebook_doc::{Cell, DataSheet, SubcolumnMode, TableArchetype, XColumnMode, XyTable};
+use curvebook_doc::{Cell, DataSheet, SubcolumnMode, SummarizedPoint, TableArchetype, XColumnMode, XyTable};
 use curvebook_math::{DenseMatrix, solve_linear_least_squares, sum};
 
 use crate::error::TransformError;
@@ -137,43 +137,127 @@ pub fn compute_sheet_auc(sheet: &DataSheet, data_set: usize, opts: &AucOptions) 
         return Err(TransformError::InvalidInput { message: format!("dataset index {data_set} out of bounds") });
     };
 
-    let mut pts = Vec::new();
+    let pts = if xy.y_subcolumn_mode.supports_parametric_moments() {
+        collect_parametric_auc_points(xy, data_set)?
+    } else if xy.y_subcolumn_mode.is_pre_summarized() {
+        let mut central = Vec::new();
+        for row in 0..xy.row_count() {
+            let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+                continue;
+            };
+            let Some(subcells) = ds.cells.get(row) else {
+                continue;
+            };
+            if let Some(center) = subcells.first().and_then(Cell::active_number) {
+                let x = if x_raw == 0.0 { 0.0 } else { x_raw };
+                central.push((x, center, None));
+            }
+        }
+        central
+    } else {
+        collect_replicate_auc_points(xy, ds)?
+    };
+    compute_auc_internal(&pts, opts)
+}
+
+fn collect_parametric_auc_points(xy: &XyTable, data_set: usize) -> Result<Vec<(f64, f64, Option<f64>)>, TransformError> {
+    let mut rows: Vec<(f64, SummarizedPoint)> = Vec::new();
     for row in 0..xy.row_count() {
-        let Some(x) = xy.x_value_at(row) else {
+        let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
+            continue;
+        };
+        if let Some(pt) = xy.summarized_y_point(row, data_set)?
+            && pt.mean.is_finite()
+            && pt.n.is_finite()
+            && pt.n > 0.0
+        {
+            let x = if x_raw == 0.0 { 0.0 } else { x_raw };
+            rows.push((x, pt));
+        }
+    }
+    rows.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut out = Vec::new();
+    let mut i = 0_usize;
+    while i < rows.len() {
+        let x_k = rows[i].0;
+        let mut j = i + 1;
+        while j < rows.len() && rows[j].0 == x_k {
+            j += 1;
+        }
+        if j - i == 1 {
+            let pt = &rows[i].1;
+            out.push((x_k, pt.mean, Some(pt.sd / pt.n.sqrt())));
+        } else {
+            let mut n_acc = sum::NeumaierSum::new();
+            let mut wmean_acc = sum::NeumaierSum::new();
+            let mut ssw_acc = sum::NeumaierSum::new();
+            for &(_, pt) in &rows[i..j] {
+                n_acc.add(pt.n);
+                wmean_acc.add(pt.n * pt.mean);
+                ssw_acc.add(pt.ss_within);
+            }
+            let n_tot = n_acc.total();
+            let mean_p = wmean_acc.total() / n_tot;
+            let mut ssb_acc = sum::NeumaierSum::new();
+            for &(_, pt) in &rows[i..j] {
+                let d = pt.mean - mean_p;
+                ssb_acc.add(pt.n * d * d);
+            }
+            let sd_p = if n_tot > 1.0 { ((ssw_acc.total() + ssb_acc.total()) / (n_tot - 1.0)).max(0.0).sqrt() } else { 0.0 };
+            out.push((x_k, mean_p, Some(sd_p / n_tot.sqrt())));
+        }
+        i = j;
+    }
+    Ok(out)
+}
+
+fn collect_replicate_auc_points(xy: &XyTable, ds: &curvebook_doc::DataSetColumn) -> Result<Vec<(f64, f64, Option<f64>)>, TransformError> {
+    let mut obs: Vec<(f64, f64)> = Vec::new();
+    for row in 0..xy.row_count() {
+        let Some(x_raw) = xy.x_value_at(row).filter(|v| v.is_finite()) else {
             continue;
         };
         let Some(subcells) = ds.cells.get(row) else {
             continue;
         };
-        if xy.y_subcolumn_mode.supports_parametric_moments() {
-            if let Some(pt) = xy.summarized_y_point(row, data_set)? {
-                let se = pt.sd / pt.n.sqrt();
-                pts.push((x, pt.mean, Some(se)));
-            }
-        } else {
-            let active: Vec<f64> = subcells.iter().filter_map(Cell::active_number).collect();
-            if active.is_empty() {
-                continue;
-            }
-            let mean = sum::mean(&active)?;
-            let se = if active.len() >= 2 { Some(sum::SummaryMoments::from_slice(&active)?.sem()?) } else { None };
-            pts.push((x, mean, se));
+        let x = if x_raw == 0.0 { 0.0 } else { x_raw };
+        for y in subcells.iter().filter_map(Cell::active_number) {
+            obs.push((x, y));
         }
     }
-    compute_auc_internal(&pts, opts)
+    obs.sort_by(|a, b| a.0.total_cmp(&b.0));
+
+    let mut out = Vec::new();
+    let mut i = 0_usize;
+    while i < obs.len() {
+        let x_k = obs[i].0;
+        let mut j = i + 1;
+        while j < obs.len() && obs[j].0 == x_k {
+            j += 1;
+        }
+        let ys: Vec<f64> = obs[i..j].iter().map(|&(_, y)| y).collect();
+        let mean = sum::mean(&ys)?;
+        let se = if ys.len() >= 2 { Some(sum::SummaryMoments::from_slice(&ys)?.sem()?) } else { None };
+        out.push((x_k, mean, se));
+        i = j;
+    }
+    Ok(out)
 }
 
 fn compute_auc_internal(raw: &[(f64, f64, Option<f64>)], opts: &AucOptions) -> Result<AucResult, TransformError> {
     if !opts.baseline.is_finite() {
         return Err(TransformError::InvalidSpec { message: String::from("AUC baseline must be finite") });
     }
-    let mut pts = prepare_sorted_points(raw)?;
+    let sorted = prepare_sorted_points(raw)?;
+    let mut pts = collapse_tied_auc_points(&sorted)?;
     if pts.len() < 2 {
-        return Err(TransformError::InvalidInput { message: String::from("AUC requires at least 2 finite points") });
+        return Err(TransformError::InvalidInput { message: String::from("AUC requires at least 2 distinct finite X points") });
     }
 
     let (pos_area, neg_area, raw_peaks) = integrate_segments_and_peaks(&pts, opts.baseline);
     let net_area = pos_area - neg_area;
+    let total_area = pos_area + neg_area;
     let se = propagate_trapezoidal_se(&mut pts);
 
     let qualifying: Vec<PeakSummary> = raw_peaks
@@ -187,21 +271,47 @@ fn compute_auc_internal(raw: &[(f64, f64, Option<f64>)], opts: &AucOptions) -> R
         .collect();
     let total_peak_area = sum::sum(&qualifying.iter().map(|p| p.area).collect::<Vec<_>>());
 
-    Ok(AucResult {
-        total_area: net_area,
-        positive_area: pos_area,
-        negative_area: neg_area,
-        net_area,
-        total_peak_area,
-        standard_error: se,
-        peaks: qualifying,
-    })
+    Ok(AucResult { total_area, positive_area: pos_area, negative_area: neg_area, net_area, total_peak_area, standard_error: se, peaks: qualifying })
+}
+
+fn collapse_tied_auc_points(pts: &[CurvePoint]) -> Result<Vec<CurvePoint>, TransformError> {
+    let mut knots = Vec::with_capacity(pts.len());
+    let mut i = 0_usize;
+    while i < pts.len() {
+        let x_k = pts[i].x;
+        let mut j = i + 1;
+        while j < pts.len() && pts[j].x == x_k {
+            j += 1;
+        }
+        if j - i == 1 {
+            knots.push(pts[i]);
+        } else {
+            let slice = &pts[i..j];
+            let ys: Vec<f64> = slice.iter().map(|p| p.y).collect();
+            let mean_y = sum::mean(&ys)?;
+            let se = if slice.iter().all(|p| p.se.is_some()) {
+                let mut var_acc = sum::NeumaierSum::new();
+                for p in slice {
+                    let s = p.se.unwrap_or(0.0);
+                    var_acc.add(s * s);
+                }
+                #[allow(clippy::cast_precision_loss)]
+                let m = slice.len() as f64;
+                Some(var_acc.total().max(0.0).sqrt() / m)
+            } else {
+                None
+            };
+            knots.push(CurvePoint { x: x_k, y: mean_y, se });
+        }
+        i = j;
+    }
+    Ok(knots)
 }
 
 fn prepare_sorted_points(raw: &[(f64, f64, Option<f64>)]) -> Result<Vec<CurvePoint>, TransformError> {
     let mut pts = Vec::with_capacity(raw.len());
-    for &(x, y, se) in raw {
-        if !x.is_finite() || !y.is_finite() {
+    for &(x_raw, y, se) in raw {
+        if !x_raw.is_finite() || !y.is_finite() {
             return Err(TransformError::InvalidInput { message: String::from("curve points must have finite x and y") });
         }
         if let Some(s) = se
@@ -209,6 +319,7 @@ fn prepare_sorted_points(raw: &[(f64, f64, Option<f64>)]) -> Result<Vec<CurvePoi
         {
             return Err(TransformError::InvalidInput { message: format!("curve standard error must be finite and >= 0, got {s}") });
         }
+        let x = if x_raw == 0.0 { 0.0 } else { x_raw };
         pts.push(CurvePoint { x, y, se });
     }
     pts.sort_by(|a, b| a.x.total_cmp(&b.x));
@@ -353,7 +464,7 @@ fn is_uniform_grid(xs: &[f64]) -> bool {
     if h0 <= 0.0 {
         return false;
     }
-    xs.windows(2).all(|w| ((w[1] - w[0]) - h0).abs() <= 1e-7 * h0.abs().max(1.0))
+    xs.windows(2).all(|w| ((w[1] - w[0]) - h0).abs() <= 1e-7 * h0.abs())
 }
 
 /// Polynomial order (`d = 3`, quadratic/cubic family) for Savitzky–Golay smoothing.

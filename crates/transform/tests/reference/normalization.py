@@ -9,7 +9,10 @@ working decimal precision (default 120, minimum 80) and cross-checks against an
 from fractions import Fraction
 import sys
 
-from mpmath import mp
+try:
+    from mpmath import mp
+except ImportError:
+    mp = None
 
 DPS_HIGH = int(sys.argv[1]) if len(sys.argv) > 1 else 120
 if DPS_HIGH < 80:
@@ -114,12 +117,9 @@ def normalize_table():
 def baseline_removal():
     print("\n=== Baseline Removal (FirstAndLastLinear first_k=2, last_k=4, N=9) ===")
     row_count, first_k, last_k = 9, 2, 4
-    x_start = Fraction(first_k - 1, 2)
-    x_end = Fraction(row_count - last_k) + Fraction(last_k - 1, 2)
-    span = x_end - x_start  # exact 6
 
     cols = [
-        # Col 0: trailing window has excluded 100* at row 6; row 4 is blank; row 2 has B(2)=0
+        # Col 0: trailing window has excluded 100* at row 6 -> active trailing rows (5, 7, 8), x_end=20/3
         [
             (Fraction(-4), False),
             (Fraction(-2), False),
@@ -131,7 +131,7 @@ def baseline_removal():
             (Fraction(9), False),
             (Fraction(12), False),
         ],
-        # Col 1: leading window has missing row 1; non-integer rational slope 5/3
+        # Col 1: leading window has missing row 1 -> active leading row (0,), x_start=0
         [
             (Fraction(1), False),
             (None, False),
@@ -143,15 +143,40 @@ def baseline_removal():
             (Fraction(13), False),
             (Fraction(15), False),
         ],
+        # Col 3: excluded 100* at row 6 with active trailing [6, 10, 12] -> x_end=20/3, y_end=28/3, B(r)=2r-4 -> B(2)=0
+        [
+            (Fraction(-4), False),
+            (Fraction(-2), False),
+            (Fraction(5), False),
+            (Fraction(8), False),
+            (None, False),
+            (Fraction(6), False),
+            (Fraction(100), True),
+            (Fraction(10), False),
+            (Fraction(12), False),
+        ],
     ]
 
-    for c, col in enumerate(cols):
-        first_active = [v for v, excl in col[:first_k] if v is not None and not excl]
-        last_active = [v for v, excl in col[row_count - last_k :] if v is not None and not excl]
-        y_start = sum(first_active) / len(first_active)
-        y_end = sum(last_active) / len(last_active)
-        baselines = [y_start + (Fraction(r) - x_start) * (y_end - y_start) / span for r in range(row_count)]
-        show(f"Baseline Linear col{c} [y_start, y_end]", [y_start, y_end])
+    for idx, col in enumerate(cols):
+        c = idx if idx < 2 else 3
+        first_pts = [(Fraction(r), v) for r, (v, excl) in enumerate(col[:first_k]) if v is not None and not excl]
+        last_pts = [
+            (Fraction(row_count - last_k + dr), v)
+            for dr, (v, excl) in enumerate(col[row_count - last_k :])
+            if v is not None and not excl
+        ]
+        x_start = sum(r for r, _ in first_pts) / len(first_pts)
+        y_start = sum(v for _, v in first_pts) / len(first_pts)
+        x_end = sum(r for r, _ in last_pts) / len(last_pts)
+        y_end = sum(v for _, v in last_pts) / len(last_pts)
+        span = x_end - x_start
+        baselines = [
+            Fraction(1, 2) * (y_start + y_end)
+            if span == 0
+            else y_start + (Fraction(r) - x_start) * (y_end - y_start) / span
+            for r in range(row_count)
+        ]
+        show(f"Baseline Linear col{c} [x_start, y_start, x_end, y_end]", [x_start, y_start, x_end, y_end])
         show(f"Baseline Linear col{c} B(r)", baselines)
         diff = [None if v is None else v - b for (v, _), b in zip(col, baselines)]
         ratio = [None if (v is None or b == 0) else v / b for (v, _), b in zip(col, baselines)]
@@ -161,6 +186,31 @@ def baseline_removal():
         show(f"Baseline Linear col{c} Ratio", ratio)
         show(f"Baseline Linear col{c} PercentChange", pct)
         show(f"Baseline Linear col{c} FractionalChange", frac)
+
+    # Unbalanced replicate noiseless affine cancellation invariance (R = 8 rows, first_k = 3, last_k = 3)
+    # y(r) = -5 + 3*r with blanks, exclusions, and replicate counts [1, 3, 2, 0, 2, 2, 1, 3]
+    rep_rows = [
+        (0, [Fraction(-5)], []),
+        (1, [Fraction(-2), Fraction(-2), Fraction(-2)], [Fraction(999)]),
+        (2, [Fraction(1), Fraction(1)], []),
+        (3, [], []),
+        (4, [Fraction(7), Fraction(7)], []),
+        (5, [Fraction(10), Fraction(10)], [Fraction(500)]),
+        (6, [Fraction(13)], []),
+        (7, [Fraction(16), Fraction(16), Fraction(16)], []),
+    ]
+    first_obs = [(Fraction(r), v) for r, act, _ in rep_rows[:3] for v in act]
+    last_obs = [(Fraction(r), v) for r, act, _ in rep_rows[5:] for v in act]
+    ux_start = sum(r for r, _ in first_obs) / len(first_obs)
+    uy_start = sum(v for _, v in first_obs) / len(first_obs)
+    ux_end = sum(r for r, _ in last_obs) / len(last_obs)
+    uy_end = sum(v for _, v in last_obs) / len(last_obs)
+    assert ux_start == Fraction(7, 6) and uy_start == Fraction(-3, 2)
+    assert ux_end == Fraction(37, 6) and uy_end == Fraction(27, 2)
+    assert (uy_end - uy_start) / (ux_end - ux_start) == Fraction(3)
+    print(
+        f"Unbalanced Affine Anchors: x_start={ux_start} y_start={uy_start} x_end={ux_end} y_end={uy_end} slope={(uy_end - uy_start) / (ux_end - ux_start)}"
+    )
 
     print("\n=== Baseline Removal (ColumnsRowWise on MeanSemN) ===")
     # Baseline col rows: 4, 0, None, 10*, -2; Treated rows: (10, 0.8), (5, 0.5), (12, 0.6), (20, 1.0), (7, 0.5)
@@ -322,7 +372,10 @@ def eval_transform_suite():
 def main():
     normalize_table()
     baseline_removal()
-    eval_transform_suite()
+    if mp is not None:
+        eval_transform_suite()
+    else:
+        print("\n[info] mpmath not installed; skipped nonlinear eval_transform_suite()")
 
 
 if __name__ == "__main__":

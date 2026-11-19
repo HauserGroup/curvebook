@@ -682,6 +682,12 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
     }
     if mode == PlacementMode::InsertRows && start_row < existing_rows {
         shift_archetype_rows_down(&mut target.archetype, start_row, grid.len(), existing_rows);
+        for note in &mut target.exclusion_notes {
+            if note.coord.row >= start_row {
+                note.coord.row += grid.len();
+            }
+        }
+        target.exclusion_notes.sort_by_key(|n| n.coord);
     }
 
     let mut max_col = start_col;
@@ -708,6 +714,7 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
             }
         }
     }
+    target.prune_stale_exclusion_notes();
 
     Ok(SheetCellRange::new(CellCoord::new(start_row, start_col, anchor.subcol), CellCoord::new(start_row + grid.len() - 1, max_col, max_sub)))
 }

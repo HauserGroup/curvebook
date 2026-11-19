@@ -1,6 +1,22 @@
 //! Mathematical transforms on X and/or Y series with analytical and endpoint error
 //! propagation (`TransformAnalysisSpec::Math`, `docs/implementation/data-tables-and-transforms.md` §5.1).
 //!
+//! ## Subcolumn Error Propagation Contract
+//! - `MeanSdN`, `MeanSemN`, and `MeanCvN` preserve their `[Mean, Spread, N]` 3-subcolumn schema:
+//!   `FirstOrderDeltaMethod` scales spread by `|g'(mean)|` (converting `MeanCvN` via
+//!   `SD = (CV / 100) * |mean|` before and `100 * SD_out / |mean_out|` after); `ReplicateEndpoints`
+//!   evaluates `[mean - SD, mean + SD]` and stores the symmetric half-width
+//!   `0.5 * |g(mean + SD) - g(mean - SD)|` (complementing the endpoint-interval description on
+//!   [`ErrorPropagationMode::ReplicateEndpoints`]).
+//! - `MeanLowHigh` retains `[Mean, -Error, +Error]` (`ReplicateEndpoints` maps `[mean - (-Err),
+//!   mean + (+Err)]` to sorted `[lo_end, hi_end]` offsets; `FirstOrderDeltaMethod` scales each
+//!   offset by `|g'(mean)|` and swaps `-Error <-> +Error` when `g'(mean) < 0`).
+//! - `UpperLowerLimits` and `MedianIqr` transform center and bounds independently and reorder (or
+//!   swap when `g' < 0`) lower/upper limits.
+//! - Whenever an endpoint, derivative, zero CV denominator (`mean_out == 0`), or explicit bound
+//!   falls outside the transform domain and blanks an active spread/error cell, a non-fatal warning
+//!   is emitted.
+//!
 //! References:
 //! - Joint Committee for Guides in Metrology (2008). *Evaluation of measurement data — Guide to
 //!   the expression of uncertainty in measurement* (JCGM 100:2008 / GUM §5.1.2).
@@ -16,7 +32,7 @@ use curvebook_math::dist;
 
 use crate::error::TransformError;
 use crate::formula::{Expr, ScalarEnv, eval_scalar_expr, parse_formula};
-use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
+use crate::ops::{TransformContext, TransformOutput, build_summary_tab, remap_swapped_error_notes, swap_error_bound_cells};
 
 /// Extended mathematical transform operation supporting presets, constant arithmetic, arbitrary
 /// antilogs, and custom user expressions.
@@ -301,7 +317,7 @@ pub fn execute_math_transform(
     if let Some(ref cy) = compiled_y {
         let col_count = out.archetype.column_count();
         let selected = ctx.active_columns(col_count)?;
-        transform_archetype_y(
+        let swapped = transform_archetype_y(
             &mut out.archetype,
             &selected,
             cy,
@@ -311,6 +327,9 @@ pub fn execute_math_transform(
             &mut transformed_cells,
             &mut warnings,
         )?;
+        for &(row, col) in &swapped {
+            remap_swapped_error_notes(&mut out.exclusion_notes, &[row], col);
+        }
     }
 
     let summary_tab = build_summary_tab(
@@ -364,8 +383,8 @@ fn transform_archetype_y(
     info: Option<&InfoSheet>,
     count: &mut usize,
     warnings: &mut Vec<String>,
-) -> Result<(), TransformError> {
-    match arch {
+) -> Result<Vec<(usize, usize)>, TransformError> {
+    let swapped = match arch {
         TableArchetype::Xy(t) => transform_dataset_vec(&mut t.data_sets, t.y_subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
         TableArchetype::Column(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
         TableArchetype::Grouped(t) => transform_dataset_vec(&mut t.data_sets, t.subcolumn_mode, selected, op, err_mode, x_ctx, info, count, warnings),
@@ -387,6 +406,7 @@ fn transform_archetype_y(
                     }
                 }
             }
+            Vec::new()
         }
         TableArchetype::MultipleVariables(mv) => {
             for &c in selected {
@@ -398,9 +418,10 @@ fn transform_archetype_y(
                     }
                 }
             }
+            Vec::new()
         }
-    }
-    Ok(())
+    };
+    Ok(swapped)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -414,16 +435,20 @@ fn transform_dataset_vec(
     info: Option<&InfoSheet>,
     count: &mut usize,
     warnings: &mut Vec<String>,
-) {
+) -> Vec<(usize, usize)> {
+    let mut swapped = Vec::new();
     for &c in selected {
         let Some(ds) = data_sets.get_mut(c) else {
             continue;
         };
         for (r, row_cells) in ds.cells.iter_mut().enumerate() {
             let x_val = x_ctx.get(r).copied().flatten();
-            transform_row_slice(row_cells, mode, op, err_mode, x_val, false, info, r, c, count, warnings);
+            if transform_row_slice(row_cells, mode, op, err_mode, x_val, false, info, r, c, count, warnings) {
+                swapped.push((r, c));
+            }
         }
     }
+    swapped
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -439,21 +464,21 @@ fn transform_row_slice(
     col_idx: usize,
     count: &mut usize,
     warnings: &mut Vec<String>,
-) {
+) -> bool {
     match mode {
         SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
             for cell in row_cells.iter_mut() {
                 transform_single_cell(cell, op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
             }
+            false
         }
         SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
             transform_parametric_summary(row_cells, mode, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
+            false
         }
-        SubcolumnMode::MeanLowHigh => {
-            transform_mean_low_high(row_cells, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
-        }
+        SubcolumnMode::MeanLowHigh => transform_mean_low_high(row_cells, op, err_mode, x_val, is_x_axis, info, row_idx, col_idx, count, warnings),
         SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
-            transform_explicit_limits(row_cells, op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
+            transform_explicit_limits(row_cells, op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings)
         }
     }
 }
@@ -540,17 +565,34 @@ fn transform_parametric_summary(
     let final_spread = match (mode, abs_spread_out) {
         (SubcolumnMode::MeanCvN, Some(sd_out)) => {
             if mean_out != 0.0 {
-                Some(100.0 * sd_out / mean_out.abs())
+                let cv = 100.0 * sd_out / mean_out.abs();
+                if cv.is_finite() {
+                    Some(cv)
+                } else {
+                    if !spread_excluded {
+                        warnings.push(format!("row {row_idx} col {col_idx}: transformed CV% overflowed; spread blanked"));
+                    }
+                    None
+                }
             } else {
+                if !spread_excluded {
+                    warnings.push(format!("row {row_idx} col {col_idx}: transformed mean is zero; CV% spread blanked"));
+                }
                 None
             }
         }
-        (_, other) => other,
+        (_, Some(s)) if s.is_finite() => Some(s),
+        (_, _) => {
+            if !spread_excluded {
+                warnings.push(format!("row {row_idx} col {col_idx}: spread endpoint or derivative outside transform domain; spread blanked"));
+            }
+            None
+        }
     };
 
     row_cells[1] = match final_spread {
-        Some(s) if s.is_finite() => Cell { value: CellValue::Number(s), excluded: spread_excluded },
-        _ => Cell { value: CellValue::Empty, excluded: spread_excluded },
+        Some(s) => Cell { value: CellValue::Number(s), excluded: spread_excluded },
+        None => Cell { value: CellValue::Empty, excluded: spread_excluded },
     };
 }
 
@@ -566,12 +608,12 @@ fn transform_mean_low_high(
     col_idx: usize,
     count: &mut usize,
     warnings: &mut Vec<String>,
-) {
+) -> bool {
     if row_cells.len() < 3 {
-        return;
+        return false;
     }
     let Some(mean_in) = row_cells[0].value.finite_f64() else {
-        return;
+        return false;
     };
     let mean_excluded = row_cells[0].excluded;
     let Some(mean_out) = op.eval(mean_in, x_val, is_x_axis, info) else {
@@ -581,38 +623,78 @@ fn transform_mean_low_high(
         if !mean_excluded {
             warnings.push(format!("row {row_idx} col {col_idx}: mean {mean_in} outside transform domain"));
         }
-        return;
+        return false;
     };
     row_cells[0] = Cell { value: CellValue::Number(mean_out), excluded: mean_excluded };
     *count += 1;
 
     let low_in = row_cells[1].value.finite_f64();
     let high_in = row_cells[2].value.finite_f64();
+    let low_excluded = row_cells[1].excluded;
+    let high_excluded = row_cells[2].excluded;
     match err_mode {
         ErrorPropagationMode::FirstOrderDeltaMethod => {
             let deriv = op.derivative(mean_in, x_val, is_x_axis, info);
-            // A locally decreasing transform (g'(mean) < 0) reverses lower and upper asymmetric offsets.
-            let (eff_lo, eff_hi) = if deriv.is_some_and(|d| d < 0.0) { (high_in, low_in) } else { (low_in, high_in) };
+            let reverses = deriv.is_some_and(|d| d < 0.0);
             let slope = deriv.map(f64::abs);
-            row_cells[1].value = match (eff_lo, slope) {
-                (Some(d), Some(s)) => CellValue::from_finite_or_empty(d * s),
-                _ => CellValue::Empty,
+            let out_lo = match (low_in, slope) {
+                (Some(d), Some(s)) => {
+                    let v = d * s;
+                    v.is_finite().then_some(v)
+                }
+                _ => None,
             };
-            row_cells[2].value = match (eff_hi, slope) {
-                (Some(u), Some(s)) => CellValue::from_finite_or_empty(u * s),
-                _ => CellValue::Empty,
+            let out_hi = match (high_in, slope) {
+                (Some(u), Some(s)) => {
+                    let v = u * s;
+                    v.is_finite().then_some(v)
+                }
+                _ => None,
             };
+            if (!low_excluded && low_in.is_some() && out_lo.is_none()) || (!high_excluded && high_in.is_some() && out_hi.is_none()) {
+                warnings.push(format!("row {row_idx} col {col_idx}: derivative outside transform domain; error bounds blanked"));
+            }
+            row_cells[1].value = out_lo.map_or(CellValue::Empty, CellValue::Number);
+            row_cells[2].value = out_hi.map_or(CellValue::Empty, CellValue::Number);
+            reverses && swap_error_bound_cells(row_cells)
         }
         ErrorPropagationMode::ReplicateEndpoints => {
             let t_lo = low_in.and_then(|d| op.eval(mean_in - d, x_val, is_x_axis, info));
             let t_hi = high_in.and_then(|u| op.eval(mean_in + u, x_val, is_x_axis, info));
-            if let (Some(a), Some(b)) = (t_lo, t_hi) {
-                let (lo_end, hi_end) = if a <= b { (a, b) } else { (b, a) };
-                row_cells[1].value = CellValue::from_finite_or_empty((mean_out - lo_end).max(0.0));
-                row_cells[2].value = CellValue::from_finite_or_empty((hi_end - mean_out).max(0.0));
-            } else {
+            let lo_failed = low_in.is_some() && t_lo.is_none();
+            let hi_failed = high_in.is_some() && t_hi.is_none();
+            if lo_failed || hi_failed {
                 row_cells[1].value = CellValue::Empty;
                 row_cells[2].value = CellValue::Empty;
+                if (!low_excluded && lo_failed) || (!high_excluded && hi_failed) {
+                    warnings.push(format!("row {row_idx} col {col_idx}: error endpoint outside transform domain; error bounds blanked"));
+                }
+                return false;
+            }
+            match (t_lo, t_hi) {
+                (Some(a), Some(b)) => {
+                    let swapped = a > b;
+                    let (lo_end, hi_end) = if swapped { (b, a) } else { (a, b) };
+                    if swapped {
+                        let tmp = row_cells[1].excluded;
+                        row_cells[1].excluded = row_cells[2].excluded;
+                        row_cells[2].excluded = tmp;
+                    }
+                    row_cells[1].value = CellValue::from_finite_or_empty((mean_out - lo_end).max(0.0));
+                    row_cells[2].value = CellValue::from_finite_or_empty((hi_end - mean_out).max(0.0));
+                    swapped
+                }
+                (Some(a), None) => {
+                    row_cells[1].value = CellValue::from_finite_or_empty((mean_out - a).abs());
+                    row_cells[2].value = CellValue::Empty;
+                    if a > mean_out { swap_error_bound_cells(row_cells) } else { false }
+                }
+                (None, Some(b)) => {
+                    row_cells[1].value = CellValue::Empty;
+                    row_cells[2].value = CellValue::from_finite_or_empty((b - mean_out).abs());
+                    if b < mean_out { swap_error_bound_cells(row_cells) } else { false }
+                }
+                (None, None) => false,
             }
         }
     }
@@ -629,24 +711,34 @@ fn transform_explicit_limits(
     col_idx: usize,
     count: &mut usize,
     warnings: &mut Vec<String>,
-) {
+) -> bool {
     if row_cells.len() < 3 {
-        return;
+        return false;
     }
-    let reverses = row_cells[0].value.finite_f64().and_then(|m| op.derivative(m, x_val, is_x_axis, info)).is_some_and(|d| d < 0.0);
+    let reverses =
+        row_cells.iter().take(3).find_map(|c| c.value.finite_f64().and_then(|v| op.derivative(v, x_val, is_x_axis, info))).is_some_and(|d| d < 0.0);
     transform_single_cell(&mut row_cells[0], op, x_val, is_x_axis, info, row_idx, col_idx, count, warnings);
-    let t1 = row_cells[1].value.finite_f64().and_then(|v| op.eval(v, x_val, is_x_axis, info));
-    let t2 = row_cells[2].value.finite_f64().and_then(|v| op.eval(v, x_val, is_x_axis, info));
-    match (t1, t2) {
-        (Some(a), Some(b)) => {
-            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-            row_cells[1].value = CellValue::from_finite_or_empty(lo);
-            row_cells[2].value = CellValue::from_finite_or_empty(hi);
-        }
-        _ => {
-            let (lo, hi) = if reverses { (t2, t1) } else { (t1, t2) };
-            row_cells[1].value = lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-            row_cells[2].value = hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-        }
+    let v1 = row_cells[1].value.finite_f64();
+    let v2 = row_cells[2].value.finite_f64();
+    let t1 = v1.and_then(|v| op.eval(v, x_val, is_x_axis, info));
+    let t2 = v2.and_then(|v| op.eval(v, x_val, is_x_axis, info));
+    if let Some(in1) = v1
+        && t1.is_none()
+        && !row_cells[1].excluded
+    {
+        warnings.push(format!("row {row_idx} col {col_idx}: lower bound {in1} outside transform domain; bound blanked"));
     }
+    if let Some(in2) = v2
+        && t2.is_none()
+        && !row_cells[2].excluded
+    {
+        warnings.push(format!("row {row_idx} col {col_idx}: upper bound {in2} outside transform domain; bound blanked"));
+    }
+    row_cells[1].value = t1.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+    row_cells[2].value = t2.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+    let should_swap = match (t1, t2) {
+        (Some(a), Some(b)) => a > b || (a == b && reverses),
+        _ => reverses,
+    };
+    should_swap && swap_error_bound_cells(row_cells)
 }

@@ -20,8 +20,8 @@ use std::f64::consts::{FRAC_PI_2, FRAC_PI_6, LN_2, LOG10_2};
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, ErrorPropagationMode,
-    HookSource, InfoSheet, MathTransformPreset, NormalizeAnchor, ResultCell, ResultScalarEntry, ResultStatus, ResultTabKind, SheetId, SubcolumnMode,
-    TableArchetype, TransformAnalysisSpec, XColumnMode, XyTable,
+    GroupedTable, HookSource, InfoSheet, MathTransformPreset, NormalizeAnchor, ResultCell, ResultScalarEntry, ResultStatus, ResultTabKind, SheetId,
+    SubcolumnMode, TableArchetype, TransformAnalysisSpec, XColumnMode, XyTable,
 };
 use curvebook_testkit::assert_approx_eq;
 use curvebook_transform::{
@@ -87,7 +87,7 @@ fn assert_col_cells(sheet: &DataSheet, col: usize, expected: &[(Option<f64>, boo
                 let actual = cell.value.finite_f64();
                 assert!(actual.is_some(), "{label} col {col} row {r} expected finite {v}, got {cell:?}");
                 if let Some(val) = actual {
-                    assert_approx_eq(val, *v, LINEAR_TOL, 0.0, &format!("{label} col {col} row {r}"));
+                    assert_approx_eq(val, *v, LINEAR_TOL, LINEAR_TOL, &format!("{label} col {col} row {r}"));
                 }
             }
             None => assert_eq!(cell.value, CellValue::Empty, "{label} col {col} row {r} expected Empty"),
@@ -367,15 +367,20 @@ fn normalization_coincident_anchors_return_invalid_spec_and_hooked_summary_scale
 
 #[test]
 fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() {
-    // 9 rows, first_k = 2 (rows 0..2, center 0.5), last_k = 4 (rows 5..9, center 6.5), span = 6.0.
-    // Col 0: leading {-4, -2} -> y_start=-3; trailing {6, 100*(excl), 9, 12} -> y_end=9; B(r)=2r-4 so B(2)=0.
-    // Col 1: leading {1, Empty} -> y_start=1; trailing {7, 9, 13, 15} -> y_end=11; B(r)=1/6 + 5r/3.
+    // 9 rows, first_k = 2 (rows 0..2), last_k = 4 (rows 5..9). Anchors use exact active
+    // observation row-index centroids (x_start, y_start) and (x_end, y_end):
+    // Col 0: leading {(0,-4),(1,-2)} -> (0.5,-3); trailing active {(5,6),(7,9),(8,12)} (100* excl)
+    //   -> x_end=20/3, y_end=9, B(r) = -3 + 72*(r - 1/2)/37.
+    // Col 1: leading {(0,1)} (row 1 Empty) -> (0,1); trailing {(5,7),(6,9),(7,13),(8,15)}
+    //   -> (6.5,11), B(r) = 1 + 20*r/13.
     // Col 2: leading {Empty, 50*(excl)} -> no active leading anchor -> all active cells blanked + warnings.
+    // Col 3: leading {(0,-4),(1,-2)} -> (0.5,-3); trailing active {(5,6),(7,10),(8,12)} (100* excl)
+    //   -> x_end=20/3, y_end=28/3, B(r) = 2r - 4 so B(2) = 0 (zero-denominator under true centroid).
     let sheet = make_col_sheet(
         "base-lin",
         &[
             (
-                "LinearZeroCrossing",
+                "ExcludedTrailingCentroid",
                 &[
                     Cell::number(-4.0),
                     Cell::number(-2.0),
@@ -416,6 +421,20 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
                     Cell::number(60.0),
                 ],
             ),
+            (
+                "LinearZeroCrossingCentroid",
+                &[
+                    Cell::number(-4.0),
+                    Cell::number(-2.0),
+                    Cell::number(5.0),
+                    Cell::number(8.0),
+                    Cell::empty(),
+                    Cell::number(6.0),
+                    Cell::excluded_number(100.0),
+                    Cell::number(10.0),
+                    Cell::number(12.0),
+                ],
+            ),
         ],
     )
     .unwrap();
@@ -430,6 +449,44 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
         &diff_out.data_sheet,
         0,
         &[
+            (Some(-0.027_027_027_027_027_03), false),
+            (Some(0.027_027_027_027_027_03), false),
+            (Some(5.081_081_081_081_081), false),
+            (Some(6.135_135_135_135_135), false),
+            (None, false),
+            (Some(0.243_243_243_243_243_26), false),
+            (Some(92.297_297_297_297_29), true),
+            (Some(-0.648_648_648_648_648_7), false),
+            (Some(0.405_405_405_405_405_43), false),
+        ],
+        "lin diff col0",
+    );
+    assert_col_cells(
+        &diff_out.data_sheet,
+        1,
+        &[
+            (Some(0.0), false),
+            (None, false),
+            (Some(-0.076_923_076_923_076_93), false),
+            (Some(1.384_615_384_615_384_6), false),
+            (Some(2.846_153_846_153_846_3), false),
+            (Some(-1.692_307_692_307_692_3), false),
+            (Some(-1.230_769_230_769_230_8), false),
+            (Some(1.230_769_230_769_230_8), false),
+            (Some(1.692_307_692_307_692_3), false),
+        ],
+        "lin diff col1",
+    );
+    assert_col_cells(
+        &diff_out.data_sheet,
+        2,
+        &[(None, false), (None, true), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false)],
+        "lin diff col2",
+    );
+    assert_col_cells(
+        &diff_out.data_sheet,
+        3,
+        &[
             (Some(0.0), false),
             (Some(0.0), false),
             (Some(5.0), false),
@@ -437,41 +494,57 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
             (None, false),
             (Some(0.0), false),
             (Some(92.0), true),
-            (Some(-1.0), false),
+            (Some(0.0), false),
             (Some(0.0), false),
         ],
-        "lin diff",
-    );
-    assert_col_cells(
-        &diff_out.data_sheet,
-        1,
-        &[
-            (Some(0.833_333_333_333_333_4), false),
-            (None, false),
-            (Some(0.5), false),
-            (Some(1.833_333_333_333_333_3), false),
-            (Some(3.166_666_666_666_666_5), false),
-            (Some(-1.5), false),
-            (Some(-1.166_666_666_666_666_7), false),
-            (Some(1.166_666_666_666_666_7), false),
-            (Some(1.5), false),
-        ],
-        "lin diff",
-    );
-    assert_col_cells(
-        &diff_out.data_sheet,
-        2,
-        &[(None, false), (None, true), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false)],
-        "lin diff",
+        "lin diff col3",
     );
 
-    // 2b. Ratio (zero-denominator row 2 in col 0 blanks + warns)
+    // 2b. Ratio (zero-denominator row 2 in col 3 blanks + warns)
     let ratio_out = execute_remove_baseline_kind(&sheet, &kind, BaselineOperation::Ratio, &ctx).unwrap();
-    assert_eq!(ratio_out.warnings.len(), 7, "expected 1 zero-denominator warning (row 2 col 0) + 6 missing warnings: {:?}", ratio_out.warnings);
-    assert!(ratio_out.warnings.iter().any(|w| w.contains("row 2 col 0") && w.contains("baseline=0")));
+    assert_eq!(ratio_out.warnings.len(), 7, "expected 1 zero-denominator warning (row 2 col 3) + 6 missing warnings: {:?}", ratio_out.warnings);
+    assert!(ratio_out.warnings.iter().any(|w| w.contains("row 2 col 3") && w.contains("baseline=0")));
     assert_col_cells(
         &ratio_out.data_sheet,
         0,
+        &[
+            (Some(1.006_802_721_088_435_4), false),
+            (Some(0.986_666_666_666_666_7), false),
+            (Some(-61.666_666_666_666_664), false),
+            (Some(4.289_855_072_463_768_5), false),
+            (None, false),
+            (Some(1.042_253_521_126_760_5), false),
+            (Some(12.982_456_140_350_877), true),
+            (Some(0.932_773_109_243_697_5), false),
+            (Some(1.034_965_034_965_035), false),
+        ],
+        "lin ratio col0",
+    );
+    assert_col_cells(
+        &ratio_out.data_sheet,
+        1,
+        &[
+            (Some(1.0), false),
+            (None, false),
+            (Some(0.981_132_075_471_698_1), false),
+            (Some(1.246_575_342_465_753_5), false),
+            (Some(1.397_849_462_365_591_5), false),
+            (Some(0.805_309_734_513_274_4), false),
+            (Some(0.879_699_248_120_300_8), false),
+            (Some(1.104_575_163_398_692_9), false),
+            (Some(1.127_167_630_057_803_5), false),
+        ],
+        "lin ratio col1",
+    );
+    assert_col_cells(
+        &ratio_out.data_sheet,
+        2,
+        &[(None, false), (None, true), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false)],
+        "lin ratio col2",
+    );
+    assert_col_cells(
+        &ratio_out.data_sheet,
+        3,
         &[
             (Some(1.0), false),
             (Some(1.0), false),
@@ -480,41 +553,51 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
             (None, false),
             (Some(1.0), false),
             (Some(12.5), true),
-            (Some(0.9), false),
+            (Some(1.0), false),
             (Some(1.0), false),
         ],
-        "lin ratio",
-    );
-    assert_col_cells(
-        &ratio_out.data_sheet,
-        1,
-        &[
-            (Some(6.0), false),
-            (None, false),
-            (Some(1.142_857_142_857_142_8), false),
-            (Some(1.354_838_709_677_419_3), false),
-            (Some(1.463_414_634_146_341_4), false),
-            (Some(0.823_529_411_764_705_8), false),
-            (Some(0.885_245_901_639_344_2), false),
-            (Some(1.098_591_549_295_774_7), false),
-            (Some(1.111_111_111_111_111_2), false),
-        ],
-        "lin ratio",
-    );
-    assert_col_cells(
-        &ratio_out.data_sheet,
-        2,
-        &[(None, false), (None, true), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false)],
-        "lin ratio",
+        "lin ratio col3",
     );
 
     // 2c. PercentChange
     let pct_out = execute_remove_baseline_kind(&sheet, &kind, BaselineOperation::PercentChange, &ctx).unwrap();
     assert_eq!(pct_out.warnings.len(), 7);
-    assert!(pct_out.warnings.iter().any(|w| w.contains("row 2 col 0") && w.contains("baseline=0")));
+    assert!(pct_out.warnings.iter().any(|w| w.contains("row 2 col 3") && w.contains("baseline=0")));
     assert_col_cells(
         &pct_out.data_sheet,
         0,
+        &[
+            (Some(0.680_272_108_843_537_4), false),
+            (Some(-1.333_333_333_333_333_3), false),
+            (Some(-6_266.666_666_666_667), false),
+            (Some(328.985_507_246_376_8), false),
+            (None, false),
+            (Some(4.225_352_112_676_056), false),
+            (Some(1_198.245_614_035_087_8), true),
+            (Some(-6.722_689_075_630_252), false),
+            (Some(3.496_503_496_503_496_7), false),
+        ],
+        "lin pct col0",
+    );
+    assert_col_cells(
+        &pct_out.data_sheet,
+        1,
+        &[
+            (Some(0.0), false),
+            (None, false),
+            (Some(-1.886_792_452_830_188_7), false),
+            (Some(24.657_534_246_575_34), false),
+            (Some(39.784_946_236_559_136), false),
+            (Some(-19.469_026_548_672_566), false),
+            (Some(-12.030_075_187_969_924), false),
+            (Some(10.457_516_339_869_281), false),
+            (Some(12.716_763_005_780_347), false),
+        ],
+        "lin pct col1",
+    );
+    assert_col_cells(
+        &pct_out.data_sheet,
+        3,
         &[
             (Some(0.0), false),
             (Some(0.0), false),
@@ -523,41 +606,51 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
             (None, false),
             (Some(0.0), false),
             (Some(1150.0), true),
-            (Some(-10.0), false),
+            (Some(0.0), false),
             (Some(0.0), false),
         ],
-        "lin pct",
-    );
-    assert_col_cells(
-        &pct_out.data_sheet,
-        1,
-        &[
-            (Some(500.0), false),
-            (None, false),
-            (Some(14.285_714_285_714_286), false),
-            (Some(35.483_870_967_741_936), false),
-            (Some(46.341_463_414_634_15), false),
-            (Some(-17.647_058_823_529_413), false),
-            (Some(-11.475_409_836_065_573), false),
-            (Some(9.859_154_929_577_464), false),
-            (Some(11.111_111_111_111_11), false),
-        ],
-        "lin pct",
-    );
-    assert_col_cells(
-        &pct_out.data_sheet,
-        2,
-        &[(None, false), (None, true), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false), (None, false)],
-        "lin pct",
+        "lin pct col3",
     );
 
     // 2d. FractionalChange
     let frac_out = execute_remove_baseline_kind(&sheet, &kind, BaselineOperation::FractionalChange, &ctx).unwrap();
     assert_eq!(frac_out.warnings.len(), 7);
-    assert!(frac_out.warnings.iter().any(|w| w.contains("row 2 col 0") && w.contains("baseline=0")));
+    assert!(frac_out.warnings.iter().any(|w| w.contains("row 2 col 3") && w.contains("baseline=0")));
     assert_col_cells(
         &frac_out.data_sheet,
         0,
+        &[
+            (Some(0.006_802_721_088_435_374), false),
+            (Some(-0.013_333_333_333_333_334), false),
+            (Some(-62.666_666_666_666_664), false),
+            (Some(3.289_855_072_463_768), false),
+            (None, false),
+            (Some(0.042_253_521_126_760_56), false),
+            (Some(11.982_456_140_350_877), true),
+            (Some(-0.067_226_890_756_302_52), false),
+            (Some(0.034_965_034_965_034_97), false),
+        ],
+        "lin frac col0",
+    );
+    assert_col_cells(
+        &frac_out.data_sheet,
+        1,
+        &[
+            (Some(0.0), false),
+            (None, false),
+            (Some(-0.018_867_924_528_301_886), false),
+            (Some(0.246_575_342_465_753_4), false),
+            (Some(0.397_849_462_365_591_4), false),
+            (Some(-0.194_690_265_486_725_66), false),
+            (Some(-0.120_300_751_879_699_24), false),
+            (Some(0.104_575_163_398_692_81), false),
+            (Some(0.127_167_630_057_803_46), false),
+        ],
+        "lin frac col1",
+    );
+    assert_col_cells(
+        &frac_out.data_sheet,
+        3,
         &[
             (Some(0.0), false),
             (Some(0.0), false),
@@ -566,26 +659,10 @@ fn baseline_first_and_last_linear_windows_zero_denominator_and_missing_anchor() 
             (None, false),
             (Some(0.0), false),
             (Some(11.5), true),
-            (Some(-0.1), false),
+            (Some(0.0), false),
             (Some(0.0), false),
         ],
-        "lin frac",
-    );
-    assert_col_cells(
-        &frac_out.data_sheet,
-        1,
-        &[
-            (Some(5.0), false),
-            (None, false),
-            (Some(0.142_857_142_857_142_85), false),
-            (Some(0.354_838_709_677_419_4), false),
-            (Some(0.463_414_634_146_341_5), false),
-            (Some(-0.176_470_588_235_294_13), false),
-            (Some(-0.114_754_098_360_655_74), false),
-            (Some(0.098_591_549_295_774_64), false),
-            (Some(0.111_111_111_111_111_1), false),
-        ],
-        "lin frac",
+        "lin frac col3",
     );
 }
 
@@ -748,7 +825,8 @@ fn math_transform_uncertainty_propagation_delta_and_endpoints_match_mpmath() {
     assert_eq!(ld_xy.data_sets[0].cells[3][1].value, CellValue::Empty);
 
     let ln_ep = execute_math_op(&pos_sheet, &MathTransformOp::Ln, ErrorPropagationMode::ReplicateEndpoints, &ctx).unwrap();
-    assert_eq!(ln_ep.warnings.len(), 1);
+    assert_eq!(ln_ep.warnings.len(), 2);
+    assert!(ln_ep.warnings[0].contains("spread blanked"));
     let le_xy = extract_xy_table(&ln_ep.data_sheet, "ln endpoints").unwrap();
     assert_approx_eq(
         le_xy.data_sets[0].cells[0][0].active_number().unwrap(),
@@ -841,7 +919,11 @@ fn math_transform_uncertainty_propagation_delta_and_endpoints_match_mpmath() {
         NONLINEAR_REL_TOL,
         "cv ep %CV",
     );
+}
 
+#[test]
+fn math_transform_proportion_uncertainty_and_result_sheet() {
+    let ctx = TransformContext::default();
     // 3c. Unit-proportion transforms (Logit, Probit, ArcsinSqrt) on (0.25, 0.08, N=9) plus OOD row (1.0, 0.05, N=4)
     let prop_sheet = make_xy_3sub(
         "xy-math-prop",
@@ -926,9 +1008,11 @@ fn math_transform_uncertainty_propagation_delta_and_endpoints_match_mpmath() {
             assert_eq!(e_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
             assert_approx_eq(e_xy.data_sets[0].cells[1][2].active_number().unwrap(), 4.0, LINEAR_TOL, 0.0, "OOD N preserved");
         } else {
-            // ArcsinSqrt(1.0) = pi/2, derivative undefined at boundary -> spread Empty
-            assert!(d_out.warnings.is_empty());
-            assert!(e_out.warnings.is_empty());
+            // ArcsinSqrt(1.0) = pi/2, derivative undefined at boundary -> spread Empty + warning (#55)
+            assert_eq!(d_out.warnings.len(), 1);
+            assert_eq!(e_out.warnings.len(), 1);
+            assert!(d_out.warnings[0].contains("spread blanked"));
+            assert!(e_out.warnings[0].contains("spread blanked"));
             assert_approx_eq(d_xy.data_sets[0].cells[1][0].active_number().unwrap(), FRAC_PI_2, NONLINEAR_ABS_TOL, NONLINEAR_REL_TOL, "arcsin(1)");
             assert_eq!(d_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
             assert_eq!(e_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
@@ -1004,9 +1088,10 @@ fn math_transform_decreasing_monotone_endpoints_preserve_lower_upper_ordering() 
         assert_eq!((bounds.lower, bounds.center, bounds.upper), (lo, m, hi));
     }
 
-    // Out-of-domain lower limit (-1.0) under Ln blanks Lower while keeping Mean & Upper.
+    // Out-of-domain lower limit (-1.0) under Ln blanks Lower while keeping Mean & Upper and emitting a warning (#55).
     let ln_ul = execute_math_op(&ul_sheet, &MathTransformOp::Ln, ErrorPropagationMode::ReplicateEndpoints, &ctx).unwrap();
-    assert!(ln_ul.warnings.is_empty());
+    assert_eq!(ln_ul.warnings.len(), 1);
+    assert!(ln_ul.warnings[0].contains("lower bound -1 outside transform domain"));
     let ln_xy = extract_xy_table(&ln_ul.data_sheet, "ln ul").unwrap();
     assert_approx_eq(ln_xy.data_sets[0].cells[1][0].active_number().unwrap(), LN_2, NONLINEAR_ABS_TOL, NONLINEAR_REL_TOL, "ln ul mean");
     assert_eq!(ln_xy.data_sets[0].cells[1][1].value, CellValue::Empty);
@@ -1049,7 +1134,8 @@ fn math_transform_decreasing_monotone_endpoints_preserve_lower_upper_ordering() 
     let lh_ood_ep = execute_math_op(&lh_ood_sheet, &MathTransformOp::Ln, ErrorPropagationMode::ReplicateEndpoints, &ctx).unwrap();
     assert_eq!(lh_ood_delta.warnings.len(), 1);
     assert!(lh_ood_delta.warnings[0].contains("row 1 col 0") && lh_ood_delta.warnings[0].contains("outside transform domain"));
-    assert_eq!(lh_ood_ep.warnings.len(), 1);
+    assert_eq!(lh_ood_ep.warnings.len(), 2);
+    assert!(lh_ood_ep.warnings[0].contains("row 0 col 0") && lh_ood_ep.warnings[0].contains("error bounds blanked"));
     let lh_d_xy = extract_xy_table(&lh_ood_delta.data_sheet, "lh ood delta").unwrap();
     let lh_e_xy = extract_xy_table(&lh_ood_ep.data_sheet, "lh ood ep").unwrap();
     assert_approx_eq(lh_d_xy.data_sets[0].cells[0][0].active_number().unwrap(), -LN_2, NONLINEAR_ABS_TOL, NONLINEAR_REL_TOL, "lh half-OOD mean");
@@ -1129,4 +1215,69 @@ fn math_transform_decreasing_monotone_endpoints_preserve_lower_upper_ordering() 
             &format!("{label} lh delta +Err"),
         );
     }
+}
+
+#[test]
+fn baseline_first_and_last_linear_affine_invariance_unbalanced_and_equal_anchor() {
+    // Noiseless affine series y(r) = -5 + 3*r across 8 rows with blanks, excluded outliers,
+    // and unbalanced replicate counts [1, 3, 2, 0, 2, 2, 1, 3].
+    let mut rep_grp = GroupedTable::new(SubcolumnMode::RawReplicates(3), 1, 8).unwrap();
+    rep_grp.data_sets[0].title = String::from("UnbalancedAffine");
+    rep_grp.data_sets[0].cells = vec![
+        vec![Cell::number(-5.0), Cell::empty(), Cell::empty()],
+        vec![Cell::number(-2.0), Cell::number(-2.0), Cell::number(-2.0)],
+        vec![Cell::number(1.0), Cell::excluded_number(999.0), Cell::number(1.0)],
+        vec![Cell::empty(), Cell::empty(), Cell::empty()],
+        vec![Cell::number(7.0), Cell::number(7.0), Cell::empty()],
+        vec![Cell::number(10.0), Cell::excluded_number(500.0), Cell::number(10.0)],
+        vec![Cell::number(13.0), Cell::empty(), Cell::empty()],
+        vec![Cell::number(16.0), Cell::number(16.0), Cell::number(16.0)],
+    ];
+    let rep_sheet = DataSheet::new("aff-unbal", "Affine Unbalanced", TableArchetype::Grouped(rep_grp)).unwrap();
+    let ctx = TransformContext::default();
+    let kind = BaselineKind::FirstAndLastLinear { first_k: 3, last_k: 3 };
+
+    let diff = execute_remove_baseline_kind(&rep_sheet, &kind, BaselineOperation::Difference, &ctx).unwrap();
+    let TableArchetype::Grouped(diff_tbl) = &diff.data_sheet.archetype else {
+        panic!("expected Grouped");
+    };
+    for r in 0..8 {
+        for cell in &diff_tbl.data_sets[0].cells[r] {
+            if let Some(v) = cell.active_number() {
+                assert_approx_eq(v, 0.0, LINEAR_TOL, 0.0, &format!("affine Difference invariance row {r}"));
+            }
+        }
+    }
+
+    let ratio = execute_remove_baseline_kind(&rep_sheet, &kind, BaselineOperation::Ratio, &ctx).unwrap();
+    let TableArchetype::Grouped(ratio_tbl) = &ratio.data_sheet.archetype else {
+        panic!("expected Grouped");
+    };
+    for r in 0..8 {
+        for cell in &ratio_tbl.data_sets[0].cells[r] {
+            if let Some(v) = cell.active_number() {
+                assert_approx_eq(v, 1.0, LINEAR_TOL, 0.0, &format!("affine Ratio invariance row {r}"));
+            }
+        }
+    }
+
+    // Overlapping windows collapsing to identical active row coordinate (r = 2, B = 10.0):
+    // must avoid 0/0 NaN and yield flat baseline B(r) = 10.0.
+    let overlap_sheet =
+        make_col_sheet("base-equal-anchor", &[("SingleShared", &[Cell::empty(), Cell::empty(), Cell::number(10.0), Cell::empty(), Cell::empty()])])
+            .unwrap();
+    let overlap_diff = execute_remove_baseline_kind(
+        &overlap_sheet,
+        &BaselineKind::FirstAndLastLinear { first_k: 3, last_k: 3 },
+        BaselineOperation::Difference,
+        &ctx,
+    )
+    .unwrap();
+    assert!(overlap_diff.warnings.is_empty());
+    assert_col_cells(
+        &overlap_diff.data_sheet,
+        0,
+        &[(None, false), (None, false), (Some(0.0), false), (None, false), (None, false)],
+        "overlapping identical anchor row",
+    );
 }
