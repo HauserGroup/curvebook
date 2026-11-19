@@ -11,7 +11,7 @@
 
 use curvebook_doc::{
     AnalysisSpec, Cell, ChecklistItem, ChecklistStatus, CiBound, DataSheet, PValueFormat, RemediationKind, ResultCell, ResultScalarEntry,
-    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype,
+    ResultSheet, ResultStatus, ResultTab, ResultTabKind, SubcolumnMode, TableArchetype, VariableRole,
 };
 use curvebook_math::ConfidenceLevel;
 
@@ -190,6 +190,22 @@ pub fn p_cell(raw_p: f64, format: PValueFormat) -> ResultCell {
     ResultCell::PValue { raw: clamped, formatted: format.format_p(clamped), stars: format.stars(clamped).to_owned() }
 }
 
+/// Build a [`ResultCell::PValue`] storing unrounded `raw` probability, formatted strings, and
+/// significance stars evaluated against the analysis threshold `alpha` (`p <= alpha`).
+#[must_use]
+pub fn p_cell_at_alpha(raw_p: f64, format: PValueFormat, alpha: f64) -> ResultCell {
+    if !raw_p.is_finite() {
+        return ResultCell::Empty;
+    }
+    let clamped = raw_p.clamp(0.0, 1.0);
+    let stars = if matches!(format, PValueFormat::FourDecimal | PValueFormat::Custom { .. }) {
+        curvebook_math::pvalue::p_value_stars_at_alpha(clamped, alpha)
+    } else {
+        format.stars_at_alpha(clamped, alpha)
+    };
+    ResultCell::PValue { raw: clamped, formatted: format.format_p(clamped), stars: stars.to_owned() }
+}
+
 /// Construct a [`ChecklistItem`] with an optional structured [`RemediationKind`].
 #[must_use]
 pub fn checklist_item_with_remediation(
@@ -233,6 +249,26 @@ pub fn resolve_selected_indices(selected: &[usize], total: usize) -> Vec<usize> 
     if selected.is_empty() { (0..total).collect() } else { selected.iter().copied().filter(|&i| i < total).collect() }
 }
 
+/// Resolve selected dataset column indices (`empty` in `selected` means all `0..total`),
+/// rejecting out-of-range indices with [`StatsError::MissingColumn`] and duplicate indices with
+/// [`StatsError::InvalidParameter`].
+pub fn try_resolve_selected_indices(selected: &[usize], total: usize) -> Result<Vec<usize>, StatsError> {
+    if selected.is_empty() {
+        return Ok((0..total).collect());
+    }
+    let mut resolved = Vec::with_capacity(selected.len());
+    for &idx in selected {
+        if idx >= total {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+        if resolved.contains(&idx) {
+            return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: idx as f64 });
+        }
+        resolved.push(idx);
+    }
+    Ok(resolved)
+}
+
 /// Return `true` when an unexcluded, non-empty cell in a numeric column contains non-numeric
 /// (e.g. `CellValue::Text`) or non-finite content and is ignored by numeric extraction.
 #[must_use]
@@ -256,13 +292,16 @@ pub struct ExtractedColumn {
 }
 
 /// Extract active numeric columns from `Column` or `MultipleVariables` sheets.
+///
+/// When `selected` is empty on a `MultipleVariables` sheet, columns with [`VariableRole::Categorical`]
+/// or [`VariableRole::Label`] are excluded from the default numeric selection.
 pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Vec<ExtractedColumn>, StatsError> {
     match &sheet.archetype {
         TableArchetype::Column(col_tab) => {
             if col_tab.subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            let indices = resolve_selected_indices(selected, col_tab.data_sets.len());
+            let indices = try_resolve_selected_indices(selected, col_tab.data_sets.len())?;
             let mut out = Vec::with_capacity(indices.len());
             for idx in indices {
                 let ds = &col_tab.data_sets[idx];
@@ -285,7 +324,10 @@ pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<
             Ok(out)
         }
         TableArchetype::MultipleVariables(mv) => {
-            let indices = resolve_selected_indices(selected, mv.variables.len());
+            let mut indices = try_resolve_selected_indices(selected, mv.variables.len())?;
+            if selected.is_empty() {
+                indices.retain(|&idx| !matches!(mv.variables[idx].role, VariableRole::Categorical | VariableRole::Label));
+            }
             let mut out = Vec::with_capacity(indices.len());
             for idx in indices {
                 let var = &mv.variables[idx];
