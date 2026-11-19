@@ -1725,6 +1725,14 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> (O
 // ============================================================================
 
 /// Execute a [`SurvivalAnalysisSpec`] against a `Survival` or `MultipleVariables` [`DataSheet`].
+///
+/// # Edge cases (Kaplan–Meier)
+///
+/// A selected cohort with no included observations (every cell blank or excluded) is left out of
+/// the analysis and listed in an `Info` checklist item and footnote; the remaining cohorts are
+/// analysed as if it were not selected. Excluding one arm of a three-arm table therefore yields the
+/// two-arm comparison and hazard ratios rather than an error. If no cohort has any included
+/// observation the analysis returns [`StatsError::EmptyInput`].
 pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: &SurvivalAnalysisSpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
@@ -1741,7 +1749,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             mv_status_column,
             mv_group_column,
         } => {
-            let (cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
+            let (mut cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
                 TableArchetype::Survival(table) => {
                     let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
                     if indices.is_empty() {
@@ -1762,6 +1770,21 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     return Err(StatsError::IncompatibleTable { analysis: "Kaplan-Meier survival", actual: other.kind() });
                 }
             };
+
+            // Cohorts whose cells are all blank or excluded carry no information; drop them so a
+            // fully excluded arm reduces the comparison instead of failing the whole analysis.
+            let mut omitted_cohorts: Vec<String> = Vec::new();
+            cohorts.retain(|(_, label, obs)| {
+                if obs.is_empty() {
+                    omitted_cohorts.push(label.clone());
+                    false
+                } else {
+                    true
+                }
+            });
+            if cohorts.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
 
             let indices: Vec<usize> = cohorts.iter().map(|(idx, _, _)| *idx).collect();
             let mut cohort_obs = Vec::with_capacity(cohorts.len());
@@ -1915,6 +1938,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 Some(format!("min cohort events = {min_events}")),
                 "Kaplan-Meier assumes non-informative censoring; medians cannot be estimated if survival remains above 0.5.",
             ));
+            append_omitted_cohorts_checklist_and_footnote(&mut out, &omitted_cohorts);
             append_listwise_filtered_checklist_and_footnote(&mut out, "Kaplan-Meier survival", skipped_mv_rows, total_kept);
             append_ignored_text_checklist_and_footnote(&mut out, "Kaplan-Meier survival", &ignored_non_numeric);
         }
@@ -1936,6 +1960,24 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
+}
+
+/// Disclose Kaplan–Meier cohorts left out because none of their cells are included.
+fn append_omitted_cohorts_checklist_and_footnote(out: &mut ResultSheet, omitted: &[String]) {
+    if omitted.is_empty() {
+        return;
+    }
+    let names = omitted.iter().map(|l| if l.is_empty() { "(untitled)" } else { l.as_str() }).collect::<Vec<_>>().join(", ");
+    let msg = format!("{} selected group(s) left out of the analysis because every value is blank or excluded: {names}.", omitted.len());
+    out.checklist.push(checklist_item(
+        "Groups without data",
+        ChecklistStatus::Info,
+        Some(format!("{} group(s) left out", omitted.len())),
+        msg.clone(),
+    ));
+    if let Some(tab) = out.tabs.first_mut() {
+        tab.footnotes.push(msg);
+    }
 }
 
 fn append_cox_ph_scalars_and_tabs(out: &mut ResultSheet, cox: &CoxPhResult, confidence: ConfidenceLevel, p_fmt: PValueFormat) {
