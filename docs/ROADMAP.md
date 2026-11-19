@@ -674,7 +674,7 @@ Owner: maintainers · Status: todo · Was: Core-crate maintainability review 202
 - [ ] Regenerate `docs/commands.md` and `docs/schemas/*.schema.json`, update [`mcp.md`](mcp.md), and pass `cargo xtask commands --check`, `cargo xtask schemas --check`, and the journal-replay and batch fixtures.
 
 ### R16.6 One home for analysis-spec validation and an accurate extension checklist
-Owner: open · Status: in progress — claimed: jsture, branch `refactor/R16.6-analysis-spec-validation` — in PR (pending) · Was: Core-crate maintainability review 2026-11-19 · Est. note: 6–10 h · Depends on: none · Gate: none
+Owner: open · Status: in progress — claimed: jsture, branch `refactor/R16.6-analysis-spec-validation` — in PR #49 · Was: Core-crate maintainability review 2026-11-19 · Est. note: 6–10 h · Depends on: none · Gate: none
 
 - [x] Move the per-`AnalysisKind` finiteness checks (`validate_analysis_kind_floats`, `validate_transform_floats`, and `validate_nonlinear_fit_floats` in `crates/format/src/archive.rs`) into `curvebook-doc` as an additive validation method on `AnalysisSpec` that returns `DocError`. `archive.rs` calls it and maps the error, so existing tests still see the same error codes and messages. Keep `curvebook_format::archive::validate_project_document`, which the GUI imports, unchanged. *(Done 2026-11-19: `AnalysisSpec::first_non_finite_float` in `crates/doc/src/analysis/finite.rs` follows the existing `first_non_finite_float` convention and returns a location path instead of a `DocError`, so `FormatError::NonFiniteFloat` messages stay byte-identical; all 41 checks keep their order and locations.)*
 - [x] Do not change the shape of `AnalysisKind` or its spec structs; the `R15.2` and `R15.4` modals match on them. *(Done: unchanged.)*
