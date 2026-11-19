@@ -153,20 +153,8 @@ enum DecodedFile {
 
 pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
-    let mut hits = scan_repo_checked(root, &files)?;
+    let (mut hits, dist_stats) = scan_tree(root, &files)?;
     hits.extend(check_ui_surfaces()?);
-    let web_pkg = root.join("packaging/web");
-    if web_pkg.exists() {
-        hits.extend(scan_dist_artefacts(&web_pkg)?);
-    }
-    let dist_dir = root.join("dist");
-    let dist_stats = if dist_dir.exists() {
-        let (stats, dist_hits) = scan_dist_artefacts_with_stats(&dist_dir)?;
-        hits.extend(dist_hits);
-        Some(stats)
-    } else {
-        None
-    };
     if hits.is_empty() {
         let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
         if let Some(stats) = dist_stats {
@@ -190,6 +178,26 @@ pub fn run(root: &Path) -> Result<(), String> {
         hits.len(),
         lines.join("\n  ")
     ))
+}
+
+/// Everything [`run`] checks that depends on `root`: tracked paths and contents, then the
+/// `packaging/web` and `dist/` artefacts. The live UI, MCP, and catalog sweep
+/// ([`check_ui_surfaces`]) is independent of `root`, so fixture-tree tests call this directly.
+fn scan_tree(root: &Path, files: &[String]) -> Result<(Vec<BrandHit>, Option<DistScanStats>), String> {
+    let mut hits = scan_repo_checked(root, files)?;
+    let web_pkg = root.join("packaging/web");
+    if web_pkg.exists() {
+        hits.extend(scan_dist_artefacts(&web_pkg)?);
+    }
+    let dist_dir = root.join("dist");
+    let dist_stats = if dist_dir.exists() {
+        let (stats, dist_hits) = scan_dist_artefacts_with_stats(&dist_dir)?;
+        hits.extend(dist_hits);
+        Some(stats)
+    } else {
+        None
+    };
+    Ok((hits, dist_stats))
 }
 
 pub fn scan_repo_checked(root: &Path, files: &[String]) -> Result<Vec<BrandHit>, String> {
@@ -4420,8 +4428,8 @@ mod tests {
 
     use super::{
         BrandHit, check_html_metadata, check_i18n_catalog, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata,
-        check_pdf_metadata, check_svg_metadata, check_text_runs, check_text_runs_strict, check_ui_surfaces, check_window_title, run, scan_file,
-        scan_repo_checked, skip_path,
+        check_pdf_metadata, check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked,
+        skip_path,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -4972,16 +4980,6 @@ pub fn status_line() -> &'static str {
     }
 
     #[test]
-    fn checks_live_ui_surfaces_clean() {
-        assert_eq!(check_ui_surfaces(), Ok(Vec::new()));
-    }
-
-    #[test]
-    fn checks_live_layout_tree_across_all_16_locales_and_5_sheets() {
-        assert_eq!(super::check_live_layout_tree_surfaces(), Ok(Vec::new()));
-    }
-
-    #[test]
     fn detects_compound_camel_snake_kebab_brands_without_false_statistical_hits() {
         let mut hits = Vec::new();
         let src = r#"
@@ -5165,20 +5163,20 @@ it: "Copia Statistica report",
         write_f(&pos, "packaging/linux/org.curvebook.CurveBook.desktop", b"[Desktop Entry]\nName=CurveBook\nMimeType=application/vnd.curvebook.project;application/x-prism-project;application/x-prism-xml;\nKeywords=biostatistics;fitting;\n");
         write_f(&pos, "packaging/web/index.html", b"<!doctype html><title>CurveBook</title><input accept=\".prism,.pzfx\">");
         init_git(&pos);
-        assert_eq!(run(&pos), Ok(()));
+        // `run` would also repeat the root-independent live UI sweep that `cargo xtask brands`
+        // already gates; this fixture only exercises the narrow path/content boundaries.
+        let pos_files = crate::repo_files(&pos).unwrap();
+        assert_eq!(super::scan_tree(&pos, &pos_files).map(|(hits, _)| hits), Ok(Vec::new()));
         assert_eq!(crate::cleanroom::run(&pos), Ok(()));
         assert_eq!(crate::assets::run(&pos), Ok(()));
         let _ = std::fs::remove_dir_all(&pos);
 
         // 2. Negative leak probes across source, identifiers, waivers, tests, docs, paths, and dist
         // (uses file + path + web/dist artefact scanning directly so 12 probes finish in milliseconds).
-        let scan_repo_and_dist = |root: &PathBuf| -> Result<Vec<BrandHit>, String> {
-            let files = crate::repo_files(root)?;
-            let mut hits = scan_repo_checked(root, &files)?;
-            if root.join("packaging/web").exists() {
-                hits.extend(super::scan_dist_artefacts(&root.join("packaging/web"))?);
-            }
-            Ok(hits)
+        // Each probe lists its own few files instead of initialising a git repository per probe.
+        let scan_repo_and_dist = |root: &PathBuf, files: &[&str]| -> Result<Vec<BrandHit>, String> {
+            let files: Vec<String> = files.iter().map(|&f| f.to_owned()).collect();
+            super::scan_tree(root, &files).map(|(hits, _)| hits)
         };
         for (name, rel, content) in [
             ("title", "crates/ui-egui/src/title.rs", b"pub const T: &str = \"Prism Studio\";\n".as_slice()),
@@ -5199,16 +5197,10 @@ it: "Copia Statistica report",
             write_f(&neg, "ATTRIBUTION.md", b"# Attributions\n");
             write_f(&neg, "NOTICE", b"CurveBook Contributors\n");
             write_f(&neg, rel, content);
-            init_git(&neg);
-            let hits = scan_repo_and_dist(&neg).unwrap();
+            let hits = scan_repo_and_dist(&neg, &["ASSETS.md", "ATTRIBUTION.md", "NOTICE", rel]).unwrap();
             let _ = std::fs::remove_dir_all(&neg);
             assert!(!hits.is_empty(), "negative probe `{name}` (`{rel}`) returned 0 brand hits");
         }
-    }
-
-    #[test]
-    fn checks_live_mcp_headless_and_gui_only_surfaces_clean() {
-        assert_eq!(super::check_mcp_surfaces(), Ok(Vec::new()));
     }
 
     #[test]

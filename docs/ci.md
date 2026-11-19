@@ -8,6 +8,7 @@ cancelled or skipped dependencies fail that gate.
 
 | Stage | Checks |
 |---|---|
+| `cargo xtask ci quick [--base <git-ref>]` | Local pre-PR tier, not a hosted stage: every `policy` gate (the i18n report only when `curvebook-ui-egui` is affected), then Clippy (`-D warnings`, all targets) and the `tests` stage filter for the packages changed since the merge base with `main` plus their workspace reverse dependencies. Staged, unstaged, and untracked files count as changed. Root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, or `.cargo/` edits select the whole workspace; documentation-only changes run `policy` alone. It skips `doctests`, `features`, `wasm`, and `performance`, which hosted CI runs on every pull request. |
 | `cargo xtask ci build` | Build and archive every native workspace test target, without running tests. |
 | `cargo xtask ci policy` | Formatting, assets, brands, cleanroom, cursors, exact i18n report, UI/engine command and schema sync, layers, secrets, licences, telemetry, workflow lint, screenshot integrity, web bundle readiness, numerical `D1` literature citations (`cargo xtask citations`), pending items, and status. Hosted CI also runs the full `cargo deny check`. |
 | `cargo xtask ci lint` | Workspace Clippy, every target, with warnings denied. |

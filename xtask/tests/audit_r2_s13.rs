@@ -31,6 +31,18 @@ fn workspace_root() -> Result<PathBuf, String> {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
 }
 
+fn collect_rs_files(dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    for entry in fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))? {
+        let path = entry.map_err(|e| format!("read_dir entry in {}: {e}", dir.display()))?.path();
+        if path.is_dir() {
+            collect_rs_files(&path, out)?;
+        } else if path.extension().is_some_and(|ext| ext == "rs") {
+            out.push(path);
+        }
+    }
+    Ok(())
+}
+
 fn run_xtask(args: &[&str], extra_env: &[(&str, Option<&str>)]) -> Result<std::process::Output, String> {
     let root = workspace_root()?;
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_xtask"));
@@ -182,16 +194,22 @@ fn r2_s13_05_and_r2_s11_11_web_headers_coop_coep_csp_and_subpath_rules() {
 
 #[test]
 fn r2_s13_08_09_10_11_xtask_cli_gates_and_ci_falsiness() {
-    for gate in ["layers", "secrets", "licenses", "telemetry", "cleanroom", "status"] {
-        let out = run_xtask(&[gate], &[("CI", Some("false")), ("CARGO_NET_OFFLINE", Some("true"))]).unwrap();
-        assert!(out.status.success(), "`xtask {gate}` with CI=false failed: {}", String::from_utf8_lossy(&out.stderr));
+    // The live-tree success runs of `layers`, `secrets`, `licenses`, `telemetry`, `cleanroom`, and
+    // `status` belong to `cargo xtask ci policy`, which gates the same revision. Here the real
+    // binary proves strict `CI` truthiness end to end: `workflows` with an empty PATH (zero
+    // external linters) fails either way, but only a truthy `CI` demands the linters.
+    let no_linter_path = ("PATH", Some("/nonexistent-empty-bin"));
+    for ci in [None, Some("false"), Some("0")] {
+        let out = run_xtask(&["workflows"], &[("CI", ci), no_linter_path]).unwrap();
+        assert!(!out.status.success(), "expected `xtask workflows` without linters to fail (CI={ci:?})");
+        let err_txt = String::from_utf8_lossy(&out.stderr);
+        assert!(err_txt.contains("neither `actionlint` nor `shellcheck` is installed"), "CI={ci:?} must take the non-CI path: {err_txt}");
+        assert!(!err_txt.contains("is not installed in PATH (required when CI=true)"), "CI={ci:?} must not be treated as CI: {err_txt}");
     }
-
-    // With empty PATH (zero external linters), `xtask workflows` must fail even when CI is unset.
-    let no_linters = run_xtask(&["workflows"], &[("CI", None), ("PATH", Some("/nonexistent-empty-bin"))]).unwrap();
-    assert!(!no_linters.status.success(), "expected `xtask workflows` without linters to fail");
-    let err_txt = String::from_utf8_lossy(&no_linters.stderr);
-    assert!(err_txt.contains("actionlint") && err_txt.contains("shellcheck"), "{err_txt}");
+    let in_ci = run_xtask(&["workflows"], &[("CI", Some("true")), no_linter_path]).unwrap();
+    assert!(!in_ci.status.success(), "expected `xtask workflows` without linters to fail when CI=true");
+    let err_txt = String::from_utf8_lossy(&in_ci.stderr);
+    assert!(err_txt.contains("`actionlint` is not installed in PATH (required when CI=true)"), "{err_txt}");
 
     let root = workspace_root().unwrap();
     let control_proto = fs::read_to_string(root.join("docs/control-protocol.md")).unwrap();
@@ -209,6 +227,16 @@ fn r2_s13_08_09_10_11_xtask_cli_gates_and_ci_falsiness() {
     assert!(ci_rs.contains("workflows::is_ci_env()"), "R2-S13-09: CI must use workflows::is_ci_env()");
     for source in [&main_rs, &ci_rs] {
         assert!(!source.contains("var_os(\"CI\")"), "R2-S13-09: raw var_os(\"CI\") checks must not replace strict truthiness parsing");
+    }
+    // Every other gate must read `CI` through `workflows::is_ci_env()`, never directly.
+    let mut sources = Vec::new();
+    collect_rs_files(&root.join("xtask/src"), &mut sources).unwrap();
+    assert!(sources.len() > 1, "expected xtask sources under xtask/src");
+    for path in sources.iter().filter(|p| !p.ends_with("workflows.rs")) {
+        let text = fs::read_to_string(path).unwrap();
+        for raw in ["var_os(\"CI\")", "var(\"CI\")"] {
+            assert!(!text.contains(raw), "R2-S13-09: {} reads `{raw}` instead of workflows::is_ci_env()", path.display());
+        }
     }
 }
 

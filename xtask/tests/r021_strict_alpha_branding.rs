@@ -4,7 +4,6 @@
 
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::process::Command;
 
 use curvebook_chart::compile_graph;
 use curvebook_doc::{AnalysisKind, AnalysisSpec, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, ResultSheet, SheetId};
@@ -27,14 +26,6 @@ fn workspace_root() -> Result<PathBuf, String> {
 
 fn join(parts: &[&str]) -> String {
     parts.concat()
-}
-
-fn run_xtask_in(dir: &Path, args: &[&str]) -> Result<std::process::Output, String> {
-    Command::new(env!("CARGO_BIN_EXE_xtask"))
-        .current_dir(dir)
-        .args(args)
-        .output()
-        .map_err(|e| format!("run xtask {args:?} in {}: {e}", dir.display()))
 }
 
 fn crc32_ieee(data: &[u8]) -> u32 {
@@ -118,24 +109,6 @@ fn assert_clean_ui_string(ctx: &str, text: &str, locale: &str, allow_palette_cmd
     for probe in banned_probe_tokens() {
         if contains_ascii_word(&check_str, &probe) {
             return Err(format!("{ctx}: UI surface leaked `{probe}` in `{text}`"));
-        }
-    }
-    Ok(())
-}
-
-#[test]
-fn r021_xtask_cli_brands_cleanroom_assets_and_doc_checks_pass_zero_hits() -> Result<(), String> {
-    let root = workspace_root()?;
-    for subcmd in [&["brands"][..], &["cleanroom"][..], &["assets"][..], &["commands", "--check"][..], &["ui-commands", "--check"][..]] {
-        let out = run_xtask_in(&root, subcmd)?;
-        if !out.status.success() {
-            return Err(format!(
-                "`cargo xtask {}` failed ({}):\nstdout:\n{}\nstderr:\n{}",
-                subcmd.join(" "),
-                out.status,
-                String::from_utf8_lossy(&out.stdout),
-                String::from_utf8_lossy(&out.stderr)
-            ));
         }
     }
     Ok(())
