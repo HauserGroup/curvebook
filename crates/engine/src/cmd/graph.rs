@@ -23,6 +23,7 @@ use super::params::{
     any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
+use super::spellings::{self, first_present};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, Session};
 
@@ -1101,7 +1102,7 @@ fn parse_point_style_patch(obj: &Map<String, Value>) -> Result<PointStylePatch, 
 }
 
 fn parse_opt_subcol(obj: &Map<String, Value>) -> Result<Option<usize>, EngineError> {
-    let Some(val) = obj.get("subcol").or_else(|| obj.get("subcolumn")).or_else(|| obj.get("replicate")) else {
+    let Some(val) = first_present(obj, spellings::POINT_SUBCOLUMN) else {
         return Ok(None);
     };
     if val.is_null() {
@@ -2282,21 +2283,21 @@ fn apply_single_series_patch(series: &mut SeriesSpec, val: &Value) -> Result<(),
     if let Some(y2) = val.get("bind_to_right_y2").and_then(Value::as_bool) {
         series.bind_to_right_y2 = y2;
     }
-    if let Some(gdo_val) = val.get("gdo").or_else(|| val.get("graphical_object")) {
+    if let Some(gdo_val) = first_present(val, spellings::SERIES_GRAPHICAL_OBJECT) {
         series.gdo =
             serde_json::from_value(gdo_val.clone()).map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `gdo`: {err}")))?;
     }
-    if let Some(color_val) = val.get("color").or_else(|| val.get("fill_color")) {
+    if let Some(color_val) = first_present(val, spellings::SERIES_COLOR) {
         let rgba = parse_rgba8(color_val)?;
         recolor_gdo(&mut series.gdo, rgba);
     }
-    if let Some(m_val) = val.get("marker").or_else(|| val.get("markers")) {
+    if let Some(m_val) = first_present(val, spellings::SERIES_MARKER) {
         apply_marker_to_gdo(&mut series.gdo, m_val)?;
     }
-    if let Some(l_val) = val.get("connecting_line").or_else(|| val.get("line")) {
+    if let Some(l_val) = first_present(val, spellings::SERIES_CONNECTING_LINE) {
         apply_line_to_gdo(&mut series.gdo, l_val)?;
     }
-    if let Some(eb_val) = val.get("y_error_bars").or_else(|| val.get("error_bars")) {
+    if let Some(eb_val) = first_present(val, spellings::SERIES_Y_ERROR_BARS) {
         series.y_error_bars = patch_error_bars(series.y_error_bars, eb_val)?;
     }
     if let Some(xeb_val) = val.get("x_error_bars") {
@@ -2376,10 +2377,10 @@ fn apply_line_to_gdo(gdo: &mut GraphicalDataObject, val: &Value) -> Result<(), E
         if let Some(k) = val.get("kind") {
             style.kind = parse_line_connection_kind(k)?;
         }
-        if let Some(d) = val.get("dash_style").or_else(|| val.get("dash")) {
+        if let Some(d) = first_present(val, spellings::LINE_DASH_STYLE) {
             style.dash_style = parse_line_dash_style(d)?;
         }
-        if let Some(w) = val.get("stroke_width_pt").or_else(|| val.get("width_pt")).and_then(Value::as_f64) {
+        if let Some(w) = first_present(val, spellings::LINE_STROKE_WIDTH).and_then(Value::as_f64) {
             style.stroke_width_pt = w;
         }
         if let Some(c) = val.get("color") {
@@ -2407,7 +2408,7 @@ fn apply_marker_patch(marker: &mut MarkerStyle, val: &Value) -> Result<(), Engin
     if let Some(size) = val.get("size_pt").and_then(Value::as_f64) {
         marker.size_pt = size;
     }
-    if let Some(fc) = val.get("fill_color").or_else(|| val.get("color")) {
+    if let Some(fc) = first_present(val, spellings::MARKER_FILL_COLOR) {
         marker.fill_color = parse_rgba8(fc)?;
     }
     if let Some(sc) = val.get("stroke_color") {
@@ -2597,15 +2598,14 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                     params.get("height_pt").and_then(Value::as_f64).unwrap_or(28.0),
                 ),
             )?;
-            let bordered = params.get("bordered").or_else(|| params.get("boxed")).and_then(Value::as_bool).unwrap_or(false);
+            let bordered = first_present(params, spellings::ANNOTATION_BORDERED).and_then(Value::as_bool).unwrap_or(false);
             Ok(GraphAnnotation::TextBox { bounds_pt, markdown, bordered })
         }
         "line" | "arrow" => {
             let start_pt = parse_pair_f64(params.get("start_pt"), (40.0, 40.0))?;
             let end_pt = parse_pair_f64(params.get("end_pt"), (140.0, 40.0))?;
             let arrowhead = params.get("arrowhead").and_then(Value::as_bool).unwrap_or(kind == "arrow");
-            let dash =
-                params.get("dash").or_else(|| params.get("dash_style")).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let dash = first_present(params, spellings::ANNOTATION_DASH).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
             let color = params.get("color").map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             Ok(GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color })
         }
@@ -2616,8 +2616,8 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
                     "rounded_rectangle" | "rounded" => AnnotationShapeKind::RoundedRectangle,
                     _ => AnnotationShapeKind::Rectangle,
                 };
-            let bounds_pt = parse_rect_pt(params.get("bounds_pt").or_else(|| params.get("rect_pt")), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
-            let stroke_color = params.get("stroke_color").or_else(|| params.get("color")).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
+            let bounds_pt = parse_rect_pt(first_present(params, spellings::ANNOTATION_BOUNDS), RectPt::new(60.0, 60.0, 80.0, 40.0))?;
+            let stroke_color = first_present(params, spellings::ANNOTATION_STROKE_COLOR).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             let fill_color = params.get("fill_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?;
             let stroke_width_pt = params.get("stroke_width_pt").and_then(Value::as_f64).unwrap_or(1.0);
             let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
@@ -2665,7 +2665,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             if !font_size_pt.is_finite() || font_size_pt <= 0.0 {
                 return Err(EngineError::with_code(ErrorCode::BadInput, "`font_size_pt` must be positive and finite"));
             }
-            let bordered = params.get("bordered").or_else(|| params.get("boxed")).and_then(Value::as_bool).unwrap_or(true);
+            let bordered = first_present(params, spellings::ANNOTATION_BORDERED).and_then(Value::as_bool).unwrap_or(true);
             Ok(GraphAnnotation::ModelEquation { result_sheet_id: res_id, data_set_index, mode, bounds_pt, font_size_pt, bordered })
         }
         other => Err(EngineError::with_code(ErrorCode::BadInput, format!("unknown annotation kind `{other}`"))),
