@@ -1,4 +1,4 @@
-//! R3.5 failing reproducers and D1 primary-literature oracle tests for `crates/stats/src/anova.rs`.
+//! R3.5 failing reproducers and D1 primary-literature oracle tests for `crates/stats/src/anova/`.
 //!
 //! Covers R3.5 checkboxes 1, 2, 3, 4, and 8:
 //! - Genuine Fai & Cornelius (1996) Satterthwaite and Kenward & Roger (1997) REML df, adjusted covariance, and scaled F.
