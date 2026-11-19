@@ -263,6 +263,73 @@ fn build_cleanroom_prism_zip_bytes() -> Vec<u8> {
 //    .curvebook round-trip + edit.undo/edit.redo + multi-hop analyzable DAG
 // ---------------------------------------------------------------------------
 
+fn assert_4pl_replicate_interpolation(session: &Session, fit_res: &ResultSheet) {
+    let mean_tab = fit_res
+        .tabs
+        .iter()
+        .find(|t| t.id == "nonlinear_interpolated_mean_x")
+        .unwrap_or_else(|| panic!("missing nonlinear_interpolated_mean_x tab in `{}`", fit_res.id));
+    assert_eq!(mean_tab.title, "Interpolated Mean X");
+    assert_eq!(mean_tab.kind, ResultTabKind::InterpolatedUnknowns);
+    assert_eq!(mean_tab.rows.len(), 2, "expected 2 mean-X interpolated rows in `{}`", fit_res.id);
+    let rep_tab = fit_res
+        .tabs
+        .iter()
+        .find(|t| t.id == "nonlinear_interpolated_replicates")
+        .unwrap_or_else(|| panic!("missing nonlinear_interpolated_replicates tab in `{}`", fit_res.id));
+    assert_eq!(rep_tab.title, "Interpolated Replicates");
+    assert_eq!(rep_tab.kind, ResultTabKind::InterpolatedUnknowns);
+    assert_eq!(rep_tab.rows.len(), 2, "expected 2 replicate interpolated rows in `{}`", fit_res.id);
+    for (idx, expected_lx) in [-6.2_f64, -5.4_f64].iter().enumerate() {
+        let ResultCell::Number { value: mean_est, .. } = mean_tab.rows[idx][1] else {
+            panic!("expected numeric interpolated mean X in row {idx}");
+        };
+        assert!((mean_est - expected_lx).abs() < 0.05, "4PL mean interpolated X row {idx}: got {mean_est}, expected {expected_lx}");
+        let ResultCell::Number { value: rep_est, .. } = rep_tab.rows[idx][1] else {
+            panic!("expected numeric interpolated replicate X in row {idx}");
+        };
+        assert!((rep_est - expected_lx).abs() < 0.05, "4PL replicate interpolated X row {idx}: got {rep_est}, expected {expected_lx}");
+    }
+
+    // Verify 4PL inverse unknown-X interpolation directly from `curvebook_fit::fit_nonlinear`
+    // alongside the `Session`-emitted result tabs and linear standard curve (`fit-lin-std`).
+    let doc_ref = session.document();
+    let dose_log_ds = doc_ref.data_sheet(&SheetId::new("dose-log")).unwrap();
+    let ds_vec = curvebook_fit::extract_datasets_from_sheet(dose_log_ds, &[]).unwrap();
+    let model_4pl = curvebook_fit::get_builtin_model("log_agonist_vs_response_4pl").unwrap();
+    let hooks = curvebook_fit::HookContext {
+        info_sheets: &doc_ref.info_sheets,
+        result_sheets: &doc_ref.result_sheets,
+        data_sheets: &doc_ref.data_sheets,
+        primary_info_sheet_id: None,
+        visited_sheets: std::collections::HashSet::new(),
+    };
+    let nl_res = curvebook_fit::fit_nonlinear(
+        model_4pl.as_ref(),
+        &ds_vec,
+        &hooks,
+        &curvebook_fit::SolverConfig { interpolate_unknowns: true, ..curvebook_fit::SolverConfig::default() },
+    )
+    .unwrap();
+    assert_eq!(nl_res.interpolated_x.len(), 4, "expected 4 interpolated unknown 4PL entries (2 means + 2 replicates)");
+    let mean_items: Vec<_> = nl_res.interpolated_x.iter().filter(|item| item.replicate_mean_count.is_some()).collect();
+    let rep_items: Vec<_> = nl_res.interpolated_x.iter().filter(|item| item.replicate_subcolumn == Some(0)).collect();
+    assert_eq!(mean_items.len(), 2, "expected 2 replicate-mean interpolated entries");
+    assert_eq!(rep_items.len(), 2, "expected 2 single-replicate interpolated entries");
+    for (idx, expected_lx) in [-6.2_f64, -5.4_f64].iter().enumerate() {
+        assert!(
+            (mean_items[idx].output_estimate - expected_lx).abs() < 0.05,
+            "4PL interpolated mean X row {idx}: got {}, expected {expected_lx}",
+            mean_items[idx].output_estimate
+        );
+        assert!(
+            (rep_items[idx].output_estimate - expected_lx).abs() < 0.05,
+            "4PL interpolated replicate X row {idx}: got {}, expected {expected_lx}",
+            rep_items[idx].output_estimate
+        );
+    }
+}
+
 #[test]
 fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip() {
     let mut session = Session::new();
@@ -335,36 +402,7 @@ fn alpha_workflows_1_to_3_xy_transform_4pl_interpolation_exports_and_roundtrip()
     let log_ec50 = scalar_val(fit_res, "LogEC50", Some(0));
     assert!((log_ec50 - (-6.0)).abs() < 0.08, "expected LogEC50 near -6.0, got {log_ec50}");
     assert!(scalar_val(fit_res, "R2", None) > 0.99);
-
-    // Verify 4PL inverse unknown-X interpolation directly from the fit solver alongside
-    // `ResultTabKind::InterpolatedUnknowns` via `Session` on a linear standard curve (`fit-lin-std`),
-    // because `crates/fit/src/result.rs::populate_nonlinear_result_sheet` omits pushing that tab.
-    let doc_ref = session.document();
-    let dose_log_ds = doc_ref.data_sheet(&SheetId::new("dose-log")).unwrap();
-    let ds_vec = curvebook_fit::extract_datasets_from_sheet(dose_log_ds, &[]).unwrap();
-    let model_4pl = curvebook_fit::get_builtin_model("log_agonist_vs_response_4pl").unwrap();
-    let hooks = curvebook_fit::HookContext {
-        info_sheets: &doc_ref.info_sheets,
-        result_sheets: &doc_ref.result_sheets,
-        data_sheets: &doc_ref.data_sheets,
-        primary_info_sheet_id: None,
-        visited_sheets: std::collections::HashSet::new(),
-    };
-    let nl_res = curvebook_fit::fit_nonlinear(
-        model_4pl.as_ref(),
-        &ds_vec,
-        &hooks,
-        &curvebook_fit::SolverConfig { interpolate_unknowns: true, ..curvebook_fit::SolverConfig::default() },
-    )
-    .unwrap();
-    assert_eq!(nl_res.interpolated_x.len(), 2, "expected 2 interpolated unknown 4PL rows");
-    for (idx, expected_lx) in [-6.2_f64, -5.4_f64].iter().enumerate() {
-        assert!(
-            (nl_res.interpolated_x[idx].output_estimate - expected_lx).abs() < 0.05,
-            "4PL interpolated X row {idx}: got {}, expected {expected_lx}",
-            nl_res.interpolated_x[idx].output_estimate
-        );
-    }
+    assert_4pl_replicate_interpolation(&session, fit_res);
 
     exec_ok(
         &mut session,

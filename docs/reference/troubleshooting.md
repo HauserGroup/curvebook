@@ -52,7 +52,7 @@ If running `.AppImage` fails with `dlopen(): error loading libfuse.so.2` or `App
 
 - **Recovery journal replay warnings:** On launch after an unexpected crash, CurveBook replays `snapshot.curvebook` + valid lines of `ops.journal` cleanly up to the last intact CRC-32 record (`RecoveryReport`), logging `JournalRecoveryWarning` diagnostics for any torn final line.
 - **Parallel desktop instances & `curvebook.lock`:** Active locks isolate additional windows into fresh per-instance recovery directories automatically; expired leases from dead local processes are reclaimed safely (`is_dead_same_host_owner`). Set `CURVEBOOK_NO_PREFS=1` to launch cleanly without touching preferences or recovery state.
-- **`unsupported_version` on open or save:** Occurs when opening or targeting a file written with `schema_version > 3` (`project.save` / `save_project_unpacked_dir` refuses to overwrite newer files to prevent data loss). Open and edit with the newer release, or save to a new destination path.
+- **`unsupported_version` on open or save:** Occurs when opening or targeting a file written with `schema_version > CURRENT_SCHEMA_VERSION` (`project.save` / `save_project_unpacked_dir` refuses to overwrite newer files to prevent data loss). Open and edit with the newer release, or save to a new destination path.
 - **`corrupt_data` / CRC mismatch:** Indicates truncated ZIP bytes or manual edits to `.curvebook.d/document.json` without updating `manifest.json` CRCs.
 
 ---
@@ -70,7 +70,7 @@ Every validation, format, policy, solver, and system error maps deterministicall
 | `frozen_sheet` | `State` | Mutation attempted on a `DataSheet` locked with `frozen == true` (`sheet.unfreeze` first). |
 | `cycle_detected` | `State` | Circular dependency in `=` Calculated Variables, `HookSource` parameters, or `LinkedDataRegion`s. |
 | `unsupported_format` | `Format` | Unrecognized file header, unsupported archive kind, or incompatible legacy container. |
-| `unsupported_version` | `Format` | File/preferences schema version exceeds this release's supported maximum (`CURRENT_SCHEMA_VERSION = 5`, `CURRENT_PREFERENCES_VERSION = 1`). |
+| `unsupported_version` | `Format` | File/preferences schema version exceeds this release's supported maximum (`CURRENT_SCHEMA_VERSION = 6`, `CURRENT_PREFERENCES_VERSION = 1`). |
 | `corrupt_data` | `Format` | Malformed UTF-8/JSON/XML/ZIP structure or CRC-32 mismatch in archives or WAL journals. |
 | `io_error` | `Io` | OS file read/write/rename failure, missing input file, or permission denied. |
 | `path_escape` | `Policy` | Path traversal (`..`), absolute external path, or escaping symlink rejected under `--workdir` or ZIP extraction. |
@@ -91,6 +91,6 @@ Every validation, format, policy, solver, and system error maps deterministicall
 - **Draft Non-English Translations (`[Draft]`):** All non-English UI locales (`de`, `es`, `fr`, `ja`, `ko`, `pt-BR`, `zh-CN`, `zh-TW`, `it`, `nl`, `pl`, `ru`, `tr`, `ar`, `he`) carry `[Draft]` suffix labels in **View › Language** (`ui.locale.set`) pending native-speaker scientific review (`R10.23`).
 - **Browser App (`curvebook-web`) Deferred to `1.0`:** The browser WebAssembly bundle (`curvebook-web`) is deferred until CurveBook `1.0` (`R0.28`, `R11`) and is not published in Beta releases.
 - **Zero Bundled Binary Fonts:** International CJK, RTL, and special technical glyph rendering depends on OS system TrueType/OpenType fonts or user-provided `.ttf`/`.otf` faces via `CURVEBOOK_FONTS_DIR` / `--ttf-font` ([Get Started: Fonts](get-started.md#fonts)).
-- **Pre-`R0.20` Legacy Archive Rejection:** Pre-`R0.20` containers stamped with the legacy `lumencraft-archive` magic are rejected with `unsupported_format`; only current `.curvebook` / `.curvebook.d/` containers (`schema_version <= CURRENT_SCHEMA_VERSION`, currently `5`) and documented import formats (`.csv`, `.tsv`, `.pzfx`, `.prism`) are supported.
+- **Pre-`R0.20` Legacy Archive Rejection:** Pre-`R0.20` containers stamped with the legacy `lumencraft-archive` magic are rejected with `unsupported_format`; only current `.curvebook` / `.curvebook.d/` containers (`schema_version <= CURRENT_SCHEMA_VERSION`, currently `6`) and documented import formats (`.csv`, `.tsv`, `.pzfx`, `.prism`) are supported.
 - **Formula Evaluator & `1.0`-Deferred Capabilities:** `=` Calculated Variables support numeric, boolean/3-valued logic, conditional aggregates, and window functions, and omit text-manipulation and date-arithmetic functions in Beta. Post-Beta `1.0` scope (remaining `R13` `WF-51`–`WF-65` workflows beyond landed `R13.1` domain-restricted regression and identifiability diagnostics, `QOL-10` browser collaborator viewer extensions, `QOL-11` additional unpacked-directory QoL extensions, `QOL-13` instant statistical/Bayesian calculators, and `QOL-15` bench molarity/dilution/radiochemical calculators) is deferred beyond Beta.
 - **Release Notes & Downloads:** Inspect [CurveBook Releases](https://github.com/HauserGroup/curvebook/releases) for per-tag Beta release notes, checksums, and build provenance attestations.
