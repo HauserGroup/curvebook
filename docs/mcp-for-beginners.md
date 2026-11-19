@@ -153,7 +153,7 @@ A saved CurveBook project lets you continue later. To reopen it, ask:
 | A file-access error appears | Check that the **Data** folder exists and that you have permission to use it. |
 | No CurveBook window opens | This is expected when using the AI connection. |
 
-For more detailed connection checks, see [MCP client cannot connect](reference/troubleshooting.md#mcp-connection). For help, report your operating system, AI application, and exact error message through [GitHub Issues](https://github.com/HauserGroup/curvebook/issues). Avoid attaching private research data.
+For more detailed connection checks, see the "MCP client cannot connect" section of the [troubleshooting page](reference/troubleshooting.md). For help, report your operating system, AI application, and exact error message through [GitHub Issues](https://github.com/HauserGroup/curvebook/issues). Avoid attaching private research data.
 
 ## Privacy
 
