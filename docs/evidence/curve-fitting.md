@@ -47,7 +47,7 @@ Target specifications detailed in [`curve-fitting-implementation.md`](../impleme
 
 ### Solver, Weighting, Diagnostics & Comparison Extensions
 - [ ] Iteratively reweighted curve-predicted weighting (`1 / Y_curve^2`, `1 / |Y_curve|`, `1 / |Y_curve|^k`) from an initial unweighted pass, matching `(Mean, SD, n)` sufficient statistics (`§1.4`)
-- [ ] Three-way parameter identifiability (`IdentifyUnstableParameters` greedy Hessian $\kappa(H) > 10/\sqrt{\varepsilon_{\text{mach}}}$ reduction, `IdentifyAmbiguousFits` dependency $> 0.9999$, and `ReportAll`), midpoint extrapolation warnings, and SE suppression under profile-likelihood CI mode (`§2.5`, `R13.1`)
+- [ ] Three-way parameter identifiability (`IdentifyUnstableParameters` greedy Hessian $\kappa(H) > 10/\sqrt{\varepsilon_{\text{mach}}}$ reduction, `IdentifyAmbiguousFits` dependency $> 0.9999$, and `ReportAll`) and SE suppression under profile-likelihood CI mode (`§2.5`; `identify_unstable_parameters`, `FitIdentifiability::Ambiguous`, `(Unstable)`/`~` marking, and midpoint extrapolation warnings landed in `R13.1`)
 - [ ] ROUT `"Identify & count only"` mode alongside elimination, analyzable `"Cleaned data"` output tab, and union-of-outliers synchronization when comparing models (`§1.4`; graph ROUT outlier marker badges and `ResultSheet::eliminated_outliers` landed in `R13.1`)
 - [ ] Replicate independence toggle (`IndividualReplicates` vs. `RowMeansOnly` on replicate and `Mean/SD/N` tables) and `Quick` / `Medium` / `Strict` convergence presets (`§1.4`)
 - [ ] Full 4-question `ModelComparisonSpec` (two equations, selected parameter invariance across datasets, single global curve vs. separate curves, parameter vs. theoretical value) plus ambiguous/flagged pre-check (`§2.5`)
@@ -64,7 +64,7 @@ Target specifications detailed in [`curve-fitting-implementation.md`](../impleme
 - [ ] Reusable user-defined `[InitialValues]` rule multipliers (`YMIN`/`YMID`/`YMAX`, `XatYmid`, `SIGN(YatXmax - YatXmin)`, column-title mean/log-mean, and `SlopeAtXmin`/`Xmid`/`Xmax` + reciprocals) (`§4.2`)
 
 ### Linear, Deming, Logistic, Multivariable GLM & Spline/LOWESS Extensions
-- [ ] Simple linear regression arbitrary fixed-point `(X0, Y0)` constraint, domain-restricted `[X_min, X_max]` fitting (`R13.1`), and **Standard Addition Method** negated $X$-intercept Fieller CI + line extension to $Y = 0$ (`§5.1`)
+- [ ] Simple linear regression arbitrary fixed-point `(X0, Y0)` constraint and **Standard Addition Method** negated $X$-intercept Fieller CI + line extension to $Y = 0$ (`§5.1`; domain-restricted `[X_min, X_max]` fitting via `x_range_filter` + `Range` tab landed in `R13.1`)
 - [ ] Persist unequal Deming measurement-error $(\text{SD}_X, \text{SD}_Y)$ / $\lambda = \sigma_X^2 / \sigma_Y^2$ on `LinearRegressionSpec` with duplicate-pair repeatability helper (`§5.2`)
 - [ ] Standalone XY **`SimpleLogisticRegression`** (`X at 50%`, odds ratios + profile CIs, LRT & Wald tests, Tjur & Cox–Snell $R^2$, ROC + AUC, automatic `(X, blank Y)` `Row Classification` prediction, sigmoid curve overlay, and separation detection) (`§5.3`)
 - [ ] Multivariable `GlmSpec` extensions: 2-/3-way interactions, polynomial terms, `include_intercept: bool`, nested GLM comparison (*F* / LRT / $\Delta\text{AIC}_c$), linear weights & Poisson overdispersion, Cook's distance / leverage / DFBETAs / residual plots, out-of-sample row prediction, and configurable logistic cutoff (`§5.4`)
