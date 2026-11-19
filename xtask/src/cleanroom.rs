@@ -115,7 +115,7 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
             hits.push(CleanroomHit { path: path.clone(), line: 1, signature: "unreadable file" });
             continue;
         };
-        scan_bytes_recursive(path, &bytes, 0, &mut archive_entries, &mut hits);
+        scan_bytes_recursive(path, &bytes, 0, false, &mut archive_entries, &mut hits);
     }
     hits
 }
@@ -126,7 +126,7 @@ pub fn scan(root: &Path, files: &[String]) -> Vec<CleanroomHit> {
 pub(crate) fn scan_compliance_bytes(display_path: &str, bytes: &[u8]) -> Vec<CleanroomHit> {
     let mut archive_entries = 0usize;
     let mut hits = Vec::new();
-    scan_bytes_recursive(display_path, bytes, 0, &mut archive_entries, &mut hits);
+    scan_bytes_recursive(display_path, bytes, 0, true, &mut archive_entries, &mut hits);
     hits
 }
 
@@ -158,7 +158,7 @@ pub fn scan_dist_artefacts_with_stats(dist_dir: &Path) -> Result<(usize, usize, 
             hits.push(CleanroomHit { path: rel, line: 1, signature: "unreadable file" });
             continue;
         };
-        scan_bytes_recursive(&rel, &bytes, 0, &mut archive_entries, &mut hits);
+        scan_bytes_recursive(&rel, &bytes, 0, true, &mut archive_entries, &mut hits);
     }
     Ok((file_count, archive_entries, hits))
 }
@@ -203,7 +203,14 @@ fn has_extension_ci(path: &str, exts: &[&str]) -> bool {
     exts.iter().any(|candidate| ext.eq_ignore_ascii_case(candidate))
 }
 
-fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, archive_entries: &mut usize, hits: &mut Vec<CleanroomHit>) {
+fn scan_bytes_recursive(
+    display_path: &str,
+    bytes: &[u8],
+    depth: usize,
+    allow_packaged: bool,
+    archive_entries: &mut usize,
+    hits: &mut Vec<CleanroomHit>,
+) {
     let is_vendor_archive = has_extension_ci(display_path, &["prism", "pzf"]);
     let is_zip = bytes.starts_with(b"PK\x03\x04") || bytes.starts_with(b"PK\x05\x06");
 
@@ -219,45 +226,45 @@ fn scan_bytes_recursive(display_path: &str, bytes: &[u8], depth: usize, archive_
                 *archive_entries += 1;
                 let entry_path = format!("{display_path}!{entry_name}");
                 let mut name_seen = HashSet::new();
-                scan_text(&entry_path, entry_name, hits, &mut name_seen);
-                scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, archive_entries, hits);
+                scan_text(&entry_path, entry_name, allow_packaged, hits, &mut name_seen);
+                scan_bytes_recursive(&entry_path, entry_bytes, depth + 1, allow_packaged, archive_entries, hits);
             }
             return;
         }
         let before = hits.len();
-        scan_text_bytes(display_path, bytes, hits);
+        scan_text_bytes(display_path, bytes, allow_packaged, hits);
         if is_vendor_archive && hits.len() == before {
             hits.push(CleanroomHit { path: display_path.to_owned(), line: 1, signature: "uninspectable .prism/.pzf archive" });
         }
         return;
     }
 
-    scan_text_bytes(display_path, bytes, hits);
+    scan_text_bytes(display_path, bytes, allow_packaged, hits);
 }
 
-fn scan_text_bytes(display_path: &str, bytes: &[u8], hits: &mut Vec<CleanroomHit>) {
+fn scan_text_bytes(display_path: &str, bytes: &[u8], allow_packaged: bool, hits: &mut Vec<CleanroomHit>) {
     let mut seen_lines = HashSet::new();
     if bytes.starts_with(&[0xFF, 0xFE]) {
         let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), true);
-        scan_text(display_path, &decoded, hits, &mut seen_lines);
+        scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
         return;
     }
     if bytes.starts_with(&[0xFE, 0xFF]) {
         let decoded = decode_utf16(bytes.get(2..).unwrap_or_default(), false);
-        scan_text(display_path, &decoded, hits, &mut seen_lines);
+        scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
         return;
     }
     if let Some(stripped) = bytes.strip_prefix(&[0xEF, 0xBB, 0xBF]) {
         let text = String::from_utf8_lossy(stripped);
-        scan_text(display_path, &text, hits, &mut seen_lines);
+        scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
         return;
     }
     if let Some(little_endian) = detect_bomless_utf16(bytes) {
         let decoded = decode_utf16(bytes, little_endian);
-        scan_text(display_path, &decoded, hits, &mut seen_lines);
+        scan_text(display_path, &decoded, allow_packaged, hits, &mut seen_lines);
     }
     let text = String::from_utf8_lossy(bytes);
-    scan_text(display_path, &text, hits, &mut seen_lines);
+    scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
 }
 
 fn detect_bomless_utf16(bytes: &[u8]) -> Option<bool> {
@@ -297,11 +304,41 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
     out
 }
 
-fn scan_text(display_path: &str, text: &str, hits: &mut Vec<CleanroomHit>, seen_lines: &mut HashSet<usize>) {
-    let normalized: Vec<String> = text.lines().map(normalize_line).collect();
+fn compute_attributed_section_lines(display_path: &str, text: &str, allow_packaged: bool) -> Vec<bool> {
+    if !crate::brands::is_attribution_or_notice_path(display_path, allow_packaged) {
+        return Vec::new();
+    }
+    let mut flags = Vec::new();
+    let mut in_attributed_source = false;
+    for line in text.lines() {
+        if crate::brands::is_attributed_source_section_heading(line) {
+            in_attributed_source = true;
+        } else if crate::brands::closes_attributed_source_section(line) {
+            in_attributed_source = false;
+        }
+        flags.push(in_attributed_source);
+    }
+    flags
+}
+
+fn line_forbids_vectorcraft(display_path: &str, line_idx: usize, attributed_lines: &[bool]) -> bool {
+    if crate::brands::is_crates_or_apps_path(display_path) {
+        return true;
+    }
+    if crate::brands::is_legal_policy_doc_path(display_path) {
+        return false;
+    }
+    !attributed_lines.get(line_idx).copied().unwrap_or(false)
+}
+
+fn scan_text(display_path: &str, text: &str, allow_packaged: bool, hits: &mut Vec<CleanroomHit>, seen_lines: &mut HashSet<usize>) {
+    let masked = crate::brands::mask_attributed_upstream_url(display_path, text, allow_packaged);
+    let attributed_lines = compute_attributed_section_lines(display_path, &masked, allow_packaged);
+    let normalized: Vec<String> = masked.lines().map(normalize_line).collect();
     for (idx, norm) in normalized.iter().enumerate() {
         let line_no = idx + 1;
-        if let Some(sig) = match_single_line(norm)
+        let check_vectorcraft = line_forbids_vectorcraft(display_path, idx, &attributed_lines);
+        if let Some(sig) = match_single_line(norm, check_vectorcraft)
             && seen_lines.insert(line_no)
         {
             hits.push(CleanroomHit { path: display_path.to_owned(), line: line_no, signature: sig });
@@ -314,7 +351,9 @@ fn scan_text(display_path: &str, text: &str, hits: &mut Vec<CleanroomHit>, seen_
         }
         if let (Some(first), Some(second)) = (normalized.get(idx), normalized.get(idx + 1)) {
             let joined = format!("{first} {second}");
-            if let Some(sig) = match_created_or_notice(&joined, MAX_ADJACENT_LINE_GAP)
+            let check_vectorcraft =
+                line_forbids_vectorcraft(display_path, idx, &attributed_lines) || line_forbids_vectorcraft(display_path, idx + 1, &attributed_lines);
+            if let Some(sig) = match_created_or_notice(&joined, MAX_ADJACENT_LINE_GAP, check_vectorcraft)
                 && seen_lines.insert(line_no)
             {
                 hits.push(CleanroomHit { path: display_path.to_owned(), line: line_no, signature: sig });
@@ -340,28 +379,35 @@ fn normalize_line(line: &str) -> String {
     out
 }
 
-fn match_single_line(norm: &str) -> Option<&'static str> {
+fn match_single_line(norm: &str, check_vectorcraft: bool) -> Option<&'static str> {
     if norm.contains("<graphpadprismfile") {
         return Some("<GraphPadPrismFile");
     }
-    match_created_or_notice(norm, MAX_SAME_LINE_GAP)
+    match_created_or_notice(norm, MAX_SAME_LINE_GAP, check_vectorcraft)
 }
 
-fn match_created_or_notice(norm: &str, max_gap: usize) -> Option<&'static str> {
+fn match_created_or_notice(norm: &str, max_gap: usize, check_vectorcraft: bool) -> Option<&'static str> {
     for prefix in CREATOR_PREFIXES {
         for &(vendor, sig) in CREATOR_VENDORS {
-            let phrase = format!("{prefix} {vendor}");
-            let mut created = Vec::new();
-            collect_spans(norm, &phrase, Boundary::Alnum, Boundary::Alnum, &mut created);
-            if !created.is_empty() {
+            if has_creator_phrase(norm, prefix, vendor) {
                 return Some(sig);
             }
         }
+        if check_vectorcraft && has_creator_phrase(norm, prefix, crate::brands::ADAPTED_UPSTREAM_BRAND) {
+            return Some("adapted upstream creator notice (vectorcraft)");
+        }
     }
-    has_nearby_vendor_notice(norm, max_gap)
+    has_nearby_vendor_notice(norm, max_gap, check_vectorcraft)
 }
 
-fn has_nearby_vendor_notice(norm: &str, max_gap: usize) -> Option<&'static str> {
+fn has_creator_phrase(norm: &str, prefix: &str, vendor: &str) -> bool {
+    let phrase = format!("{prefix} {vendor}");
+    let mut created = Vec::new();
+    collect_spans(norm, &phrase, Boundary::Alnum, Boundary::Alnum, &mut created);
+    !created.is_empty()
+}
+
+fn has_nearby_vendor_notice(norm: &str, max_gap: usize, check_vectorcraft: bool) -> Option<&'static str> {
     let indicators = find_indicator_spans(norm);
     if indicators.is_empty() {
         return None;
@@ -371,6 +417,13 @@ fn has_nearby_vendor_notice(norm: &str, max_gap: usize) -> Option<&'static str> 
         collect_spans(norm, vendor, Boundary::Alnum, Boundary::Alnum, &mut vendor_spans);
         if has_nearby_pair(&vendor_spans, &indicators, max_gap) {
             return Some(sig);
+        }
+    }
+    if check_vectorcraft {
+        let mut vendor_spans = Vec::new();
+        collect_spans(norm, crate::brands::ADAPTED_UPSTREAM_BRAND, Boundary::Alnum, Boundary::Alnum, &mut vendor_spans);
+        if has_nearby_pair(&vendor_spans, &indicators, max_gap) {
+            return Some("adapted upstream copyright notice (vectorcraft)");
         }
     }
     None
@@ -630,5 +683,64 @@ mod tests {
         assert!(should_skip("docs/history/audit/round2-post-ebcc622.md"));
         assert!(!should_skip("docs/history/roadmap.md"));
         assert!(!should_skip("docs/evidence/statistics.md"));
+    }
+
+    #[test]
+    fn r15_1_provenance_permits_only_exact_upstream_url_inside_attributed_section() {
+        let dir = temp_dir("r15-cleanroom-provenance");
+        let attr_ok = "\
+# Attribution
+
+## Attributed Source Code
+
+CurveBook adapts pure-egui widget helpers from VectorCraft (`https://github.com/storytold/vectorcraft`) at commit `deadbeef`.
+Copyright (c) 2026 VectorCraft contributors (upstream repository linked above).
+";
+        let notice_ok = "\
+CurveBook
+
+## Attributed Source Code
+
+Adapted from VectorCraft (https://github.com/storytold/vectorcraft, commit abc):
+Copyright (c) 2026 VectorCraft contributors.
+";
+        std::fs::write(dir.join("ATTRIBUTION.md"), attr_ok).unwrap();
+        std::fs::write(dir.join("NOTICE"), notice_ok).unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "Verify copyright, licence, and upstream notices for VectorCraft GUI source reuse.\n").unwrap();
+
+        let ok_hits = scan(&dir, &[String::from("ATTRIBUTION.md"), String::from("NOTICE"), String::from("AGENTS.md")]);
+        assert!(ok_hits.is_empty(), "expected clean attribution/notice/policy files, got {ok_hits:?}");
+
+        let packaged_hits = super::scan_compliance_bytes("curvebook-web-0.1.0/NOTICE", notice_ok.as_bytes());
+        assert!(packaged_hits.is_empty(), "expected clean packaged NOTICE, got {packaged_hits:?}");
+
+        std::fs::create_dir_all(dir.join("crates/ui-egui/src")).unwrap();
+        std::fs::write(dir.join("crates/ui-egui/src/bad_notice.rs"), "// Copyright (c) 2026 VectorCraft contributors\n").unwrap();
+        std::fs::write(dir.join("crates/ui-egui/src/bad_storytold.rs"), "// Copyright (c) 2026 storytold contributors\n").unwrap();
+        std::fs::write(dir.join("ATTRIBUTION.md"), "## Other\nCopyright (c) 2026 https://github.com/storytold/vectorcraft\n").unwrap();
+        std::fs::write(
+            dir.join("NOTICE"),
+            "## Attributed Source Code\nCopyright (c) 2026 Contributors https://github.com/storytold/vectorcraft/blob/main/lib.rs\n",
+        )
+        .unwrap();
+        std::fs::write(dir.join("AGENTS.md"), "Copyright (c) 2026 Storytold contributors\n").unwrap();
+
+        let bad_hits = scan(
+            &dir,
+            &[
+                String::from("crates/ui-egui/src/bad_notice.rs"),
+                String::from("crates/ui-egui/src/bad_storytold.rs"),
+                String::from("ATTRIBUTION.md"),
+                String::from("NOTICE"),
+                String::from("AGENTS.md"),
+            ],
+        );
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(bad_hits.len(), 5, "expected 5 cleanroom provenance hits, got {bad_hits:?}");
+        assert!(bad_hits[0].signature.contains("vectorcraft"));
+        assert!(bad_hits[1].signature.contains("storytold"));
+        assert!(bad_hits[2].signature.contains("storytold"));
+        assert!(bad_hits[3].signature.contains("storytold"));
+        assert!(bad_hits[4].signature.contains("storytold"));
     }
 }
