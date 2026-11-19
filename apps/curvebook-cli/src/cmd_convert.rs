@@ -412,12 +412,18 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         }
 
         let registry = FormatRegistry::default_registry();
-        if req.format == ExportFormat::CurveBookDir {
+        if matches!(req.format, ExportFormat::CurveBook | ExportFormat::CurveBookDir) {
             let exporter = registry
-                .exporter_by_format("curvebook.d")
-                .ok_or_else(|| CliError::Runtime(String::from("missing `curvebook.d` exporter in FormatRegistry")))?;
+                .exporter_by_format(req.format.as_str())
+                .ok_or_else(|| CliError::Runtime(format!("missing `{}` exporter in FormatRegistry", req.format.as_str())))?;
             exporter.export_path(ExportSource::Document(req.doc), req.out_path, &ExportOptions::default())?;
-            let bytes_written = dir_size_bytes(req.out_path)?;
+            let bytes_written = if req.format == ExportFormat::CurveBookDir {
+                dir_size_bytes(req.out_path)?
+            } else {
+                let meta = fs::metadata(req.out_path)
+                    .map_err(|err| CliError::Runtime(format!("failed to stat exported archive `{}`: {err}", req.out_path.display())))?;
+                usize::try_from(meta.len()).unwrap_or(usize::MAX)
+            };
             return Ok(ExportOutcomeSummary {
                 out_path: req.out_path.to_string_lossy().into_owned(),
                 format: req.format.as_str(),
@@ -427,13 +433,7 @@ pub fn export_from_document(req: &ExportRequest<'_>) -> Result<ExportOutcomeSumm
         }
 
         let (bytes, sheet_id) = match req.format {
-            ExportFormat::CurveBook => {
-                let exporter = registry
-                    .exporter_by_format("curvebook")
-                    .ok_or_else(|| CliError::Runtime(String::from("missing `curvebook` exporter in FormatRegistry")))?;
-                (exporter.export_bytes(ExportSource::Document(req.doc), &ExportOptions::default())?, None)
-            }
-            ExportFormat::CurveBookDir => (Vec::new(), None),
+            ExportFormat::CurveBook | ExportFormat::CurveBookDir => (Vec::new(), None),
             ExportFormat::Svg => {
                 let (id, scene) = compile_visual_target(req.doc, req.sheet)?;
                 let svg = render_svg(&scene, &SvgExportOptions::default())?;

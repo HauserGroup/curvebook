@@ -241,6 +241,11 @@ fn parse_mcp_args_with_env(args: &[String], env_lookup: &dyn Fn(&str) -> Option<
             cfg.control_port = Some(parse_control_port_value(raw).map_err(|err| CliError::Usage(format!("invalid CURVEBOOK_CONTROL_PORT: {err}")))?);
         }
     }
+    if cfg.control_port.is_some() && cfg.workdir.is_some() {
+        return Err(CliError::Usage(String::from(
+            "cannot combine --control-port (or CURVEBOOK_CONTROL_PORT) with --workdir: `--workdir` cannot confine file operations on a live-attached desktop host",
+        )));
+    }
     Ok(cfg)
 }
 
@@ -320,15 +325,14 @@ mod tests {
             parse_mcp_args(&[String::from("--workdir"), String::from("/tmp/ws")]).unwrap(),
             super::McpCliConfig { control_port: None, gui_only: false, workdir: Some(std::path::PathBuf::from("/tmp/ws")), control_token: None }
         );
-        assert_eq!(
-            parse_mcp_args(&[String::from("--gui-only"), String::from("--workdir=/tmp/ws"), String::from("--control-port=49154")]).unwrap(),
-            super::McpCliConfig {
-                control_port: Some(49154),
-                gui_only: true,
-                workdir: Some(std::path::PathBuf::from("/tmp/ws")),
-                control_token: None,
-            }
-        );
+        let combined_flags_err =
+            parse_mcp_args(&[String::from("--gui-only"), String::from("--workdir=/tmp/ws"), String::from("--control-port=49154")]).unwrap_err();
+        assert!(matches!(combined_flags_err, CliError::Usage(ref msg) if msg.contains("--workdir") && msg.contains("--control-port")));
+        let combined_env_err = super::parse_mcp_args_with_env(&[String::from("--workdir=/tmp/ws")], &|key| {
+            if key == "CURVEBOOK_CONTROL_PORT" { Some(std::ffi::OsString::from("49154")) } else { None }
+        })
+        .unwrap_err();
+        assert!(matches!(combined_env_err, CliError::Usage(ref msg) if msg.contains("--workdir") && msg.contains("--control-port")));
         assert_eq!(
             parse_mcp_args(&[String::from("--control-token"), String::from("secret-tok")]).unwrap(),
             super::McpCliConfig { control_port: None, gui_only: false, workdir: None, control_token: Some(String::from("secret-tok")) }

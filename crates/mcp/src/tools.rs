@@ -266,6 +266,9 @@ impl McpServerState {
 
     /// Construct an MCP server state attached to a running desktop window listening on
     /// `127.0.0.1:<port>`.
+    ///
+    /// Live-attached server states cannot subsequently enable `--workdir` confinement because
+    /// `--workdir` cannot confine file operations inside the external desktop host process.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_control_port(port: u16) -> Result<Self, String> {
         if port == 0 {
@@ -278,6 +281,9 @@ impl McpServerState {
 
     /// Construct an MCP server state attached to a running desktop `--control <port>` with explicit
     /// `--gui-only` policy state.
+    ///
+    /// Live-attached server states cannot subsequently enable `--workdir` confinement because
+    /// `--workdir` cannot confine file operations inside the external desktop host process.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_control_port_and_gui_only(port: u16, gui_only: bool) -> Result<Self, String> {
         let mut state = Self::with_control_port(port)?;
@@ -299,6 +305,9 @@ impl McpServerState {
     }
 
     /// Construct a headless MCP server state whose file operations are confined strictly inside `workdir`.
+    ///
+    /// Confined server states cannot subsequently attach a live `control_port` because `--workdir`
+    /// cannot confine file operations inside an external desktop host process.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn with_workdir(workdir: &Path) -> Result<Self, PlatformError> {
         let guard = WorkdirGuard::new(workdir)?;
@@ -327,8 +336,19 @@ impl McpServerState {
     }
 
     /// Attach or clear a canonical [`WorkdirGuard`] confinement root on this server state.
+    ///
+    /// Returns [`PlatformError::InvalidPath`] when a live desktop `control_port` is configured,
+    /// because `--workdir` cannot confine file operations executed inside a live-attached desktop
+    /// host process.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_workdir(&mut self, workdir: Option<&Path>) -> Result<(), PlatformError> {
+        if workdir.is_some() && self.control_port.is_some() {
+            return Err(PlatformError::InvalidPath {
+                reason: String::from(
+                    "cannot combine --workdir with --control-port: `--workdir` cannot confine file operations on a live-attached desktop host",
+                ),
+            });
+        }
         let policy = match workdir {
             Some(dir) => {
                 let guard = WorkdirGuard::new(dir)?;
@@ -450,10 +470,19 @@ impl McpServerState {
     }
 
     /// Attach or detach a live desktop control port on `127.0.0.1`.
+    ///
+    /// Rejects port `0` and rejects attaching a live `control_port` when `--workdir` confinement
+    /// is configured, because `--workdir` cannot confine file operations executed inside a
+    /// live-attached desktop host process.
     #[cfg(not(target_arch = "wasm32"))]
     pub fn set_control_port(&mut self, port: Option<u16>) -> Result<(), String> {
         if port == Some(0) {
             return Err(String::from("control port must be in 1..=65535"));
+        }
+        if port.is_some() && (self.workdir_guard.is_some() || self.session().path_policy().workdir_guard().is_some()) {
+            return Err(String::from(
+                "cannot combine --control-port with --workdir: `--workdir` cannot confine file operations on a live-attached desktop host",
+            ));
         }
         self.control_port = port;
         self.control_policy_synced = false;
@@ -865,7 +894,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("save_file"),
             description: String::from(concat!(
-                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template (atomically overwrites any existing destination target). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -874,7 +903,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
             input_schema: json!({
                 "type": "object",
                 "properties": {
-                    "path": { "type": "string", "description": "Destination file path (defaults to current project path when available)." },
+                    "path": { "type": "string", "description": "Destination file path (atomically overwrites any existing target; defaults to current project path when available)." },
                     "format": { "type": "string", "enum": ["curvebook", "curvebook.d", "cbtemplate"] }
                 },
                 "additionalProperties": false
@@ -921,7 +950,12 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
             annotations: ToolAnnotations::from_effects(
-                Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA).with(Effects::READS_FILESYSTEM).with(Effects::WRITES_FILESYSTEM),
+                Effects::MUTATES_DOCUMENT
+                    .with(Effects::CHANGES_UI_STATE)
+                    .with(Effects::MAY_DISCARD_DATA)
+                    .with(Effects::READS_FILESYSTEM)
+                    .with(Effects::WRITES_FILESYSTEM)
+                    .with(Effects::LAUNCHES_PROCESS),
             ),
         },
         ToolDefinition {
@@ -953,7 +987,12 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "additionalProperties": false
             }),
             annotations: ToolAnnotations::from_effects(
-                Effects::MUTATES_DOCUMENT.with(Effects::MAY_DISCARD_DATA).with(Effects::READS_FILESYSTEM).with(Effects::WRITES_FILESYSTEM),
+                Effects::MUTATES_DOCUMENT
+                    .with(Effects::CHANGES_UI_STATE)
+                    .with(Effects::MAY_DISCARD_DATA)
+                    .with(Effects::READS_FILESYSTEM)
+                    .with(Effects::WRITES_FILESYSTEM)
+                    .with(Effects::LAUNCHES_PROCESS),
             ),
         },
         ToolDefinition {
@@ -980,7 +1019,7 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         ToolDefinition {
             name: String::from("export"),
             description: String::from(concat!(
-                "Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                "Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk, atomically overwriting any existing file, or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
                 env!("CARGO_PKG_VERSION_MAJOR"),
                 ".",
                 env!("CARGO_PKG_VERSION_MINOR"),
@@ -992,8 +1031,8 @@ pub fn list_tools() -> Vec<ToolDefinition> {
                 "properties": {
                     "format": { "type": "string", "enum": ["svg", "pdf", "png", "tiff", "csv", "json"] },
                     "sheet_id": { "type": "string" },
-                    "output_path": { "type": "string" },
-                    "path": { "type": "string", "description": "Alias for output_path." },
+                    "output_path": { "type": "string", "description": "Optional destination path (atomically overwrites any existing file)." },
+                    "path": { "type": "string", "description": "Alias for output_path (atomically overwrites any existing file)." },
                     "width_px": { "type": "integer", "minimum": 1, "maximum": 8192 },
                     "height_px": { "type": "integer", "minimum": 1, "maximum": 8192 },
                     "dpi": { "type": "integer", "minimum": 18, "maximum": 2400 },

@@ -528,3 +528,43 @@ fn r020_legacy_lumencraft_formats_are_rejected_without_aliases() -> TestResult {
     }
     Ok(())
 }
+
+#[test]
+fn audit_23_mcp_server_state_rejects_combining_control_port_and_workdir() -> TestResult {
+    let dir = TempDir::new("audit23-exclusive")?;
+
+    // 1. Live control_port configured first -> set_workdir(Some(..)) must fail without mutating guard.
+    let mut live_state = McpServerState::with_control_port(49291)?;
+    let err = live_state.set_workdir(Some(&dir.path)).expect_err("set_workdir must fail when control_port is active");
+    let msg = err.to_string();
+    assert!(msg.contains("--workdir") && msg.contains("--control-port"), "unexpected error: {msg}");
+    assert!(live_state.workdir_guard().is_none(), "failed set_workdir must not attach workdir_guard");
+
+    let mut gui_only_live = McpServerState::with_control_port_and_gui_only(49292, true)?;
+    assert!(gui_only_live.set_workdir(Some(&dir.path)).is_err());
+    assert!(gui_only_live.workdir_guard().is_none());
+
+    // 2. Workdir configured first -> set_control_port(Some(..)) must fail without attaching control_port.
+    let mut confined = McpServerState::with_workdir(&dir.path).map_err(|e| e.to_string())?;
+    let err = confined.set_control_port(Some(49293)).expect_err("set_control_port must fail when workdir is active");
+    assert!(err.contains("--control-port") && err.contains("--workdir"), "unexpected error: {err}");
+    assert_eq!(confined.control_port(), None);
+
+    // 3. GuiSessionHost with WorkdirGuard -> set_control_port(Some(..)) must also fail.
+    let (host, _sync_count) = OwnedSessionHost::new(true);
+    let mut hosted_state = McpServerState::with_gui_host(Box::new(host));
+    hosted_state.set_workdir(Some(&dir.path)).map_err(|e| e.to_string())?;
+    let host_err = hosted_state.set_control_port(Some(49294)).expect_err("set_control_port must fail on workdir-confined GuiSessionHost");
+    assert!(host_err.contains("--control-port") && host_err.contains("--workdir"), "unexpected host error: {host_err}");
+    assert_eq!(hosted_state.control_port(), None);
+
+    // 4. Detaching one side cleanly permits attaching the other.
+    live_state.set_control_port(None)?;
+    live_state.set_workdir(Some(&dir.path)).map_err(|e| e.to_string())?;
+    assert!(live_state.workdir_guard().is_some());
+
+    confined.set_workdir(None).map_err(|e| e.to_string())?;
+    confined.set_control_port(Some(49295))?;
+    assert_eq!(confined.control_port(), Some(49295));
+    Ok(())
+}

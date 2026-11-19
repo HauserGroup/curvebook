@@ -474,3 +474,83 @@ fn r020_cli_rejects_legacy_lumencraft_batch_and_archive_inputs() -> TestResult {
     assert!(!conv_out.status.success(), "convert on .lctemplate file must fail");
     Ok(())
 }
+
+#[test]
+fn audit_70_cli_convert_export_and_batch_refuse_future_version_archive_targets() -> TestResult {
+    let dir = TempDir::new("audit70-future-target")?;
+    let wd = dir.path.join("wd");
+    fs::create_dir_all(&wd)?;
+
+    let future_ver = u64::from(curvebook_doc::CURRENT_SCHEMA_VERSION) + 1;
+    let build_future_archive = |title: &str| -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+        let mut w = curvebook_format::zip::ZipWriter::new();
+        let manifest = format!(
+            r#"{{"format":"curvebook-archive","schema_version":{future_ver},"kind":"project","title":"{title}","document_crc32":0,"sheets":[]}}"#
+        );
+        let doc = format!(r#"{{"schema_version":{future_ver},"title":"{title}"}}"#);
+        w.add_file("manifest.json", manifest.into_bytes())?;
+        w.add_file("document.json", doc.into_bytes())?;
+        Ok(w.finish()?)
+    };
+
+    let csv_in = wd.join("input.csv");
+    fs::write(&csv_in, "X,Y\n1,2\n3,4\n")?;
+
+    let mut current_doc = ProjectDocument::new("Current Source")?;
+    let mut table = curvebook_doc::XyTable::new(curvebook_doc::SubcolumnMode::Single, 1, 2)?;
+    table.x_cells[0][0] = curvebook_doc::Cell::number(1.0);
+    table.data_sets[0].cells[0][0] = curvebook_doc::Cell::number(10.0);
+    table.x_cells[1][0] = curvebook_doc::Cell::number(2.0);
+    table.data_sets[0].cells[1][0] = curvebook_doc::Cell::number(20.0);
+    current_doc.add_data_sheet(DataSheet::new("d1", "Source Data", TableArchetype::Xy(table))?)?;
+    let current_proj = wd.join("source.curvebook");
+    save_project_file(&current_proj, &current_doc)?;
+
+    let target_convert = wd.join("target_convert.curvebook");
+    let convert_bytes = build_future_archive("Future Convert")?;
+    fs::write(&target_convert, &convert_bytes)?;
+
+    let target_export = wd.join("target_export.curvebook");
+    let export_bytes = build_future_archive("Future Export")?;
+    fs::write(&target_export, &export_bytes)?;
+
+    let target_batch = wd.join("target_batch.curvebook");
+    let batch_bytes = build_future_archive("Future Batch")?;
+    fs::write(&target_batch, &batch_bytes)?;
+
+    // 1. `convert` writing `.curvebook` refuses future-version existing target and keeps bytes intact.
+    let conv_out =
+        Command::new(cli_bin()).args(["convert", &csv_in.display().to_string(), &target_convert.display().to_string(), "--json"]).output()?;
+    assert_eq!(conv_out.status.code(), Some(1), "convert against future archive must exit 1: {}", String::from_utf8_lossy(&conv_out.stdout));
+    let conv_json: Value = serde_json::from_slice(&conv_out.stdout)?;
+    assert_eq!(conv_json["error"]["code"], json!("unsupported_version"));
+    assert_eq!(fs::read(&target_convert)?, convert_bytes, "convert must leave future-version archive byte-for-byte intact");
+
+    // 2. `export` writing `.curvebook` refuses future-version existing target and keeps bytes intact.
+    let exp_out = Command::new(cli_bin())
+        .args(["export", &current_proj.display().to_string(), "--out", &target_export.display().to_string(), "--json"])
+        .output()?;
+    assert_eq!(exp_out.status.code(), Some(1), "export against future archive must exit 1: {}", String::from_utf8_lossy(&exp_out.stdout));
+    let exp_json: Value = serde_json::from_slice(&exp_out.stdout)?;
+    assert_eq!(exp_json["error"]["code"], json!("unsupported_version"));
+    assert_eq!(fs::read(&target_export)?, export_bytes, "export must leave future-version archive byte-for-byte intact");
+
+    // 3. `batch` writing `.curvebook` refuses future-version existing target and keeps bytes intact.
+    let manifest_path = wd.join("manifest.json");
+    fs::write(
+        &manifest_path,
+        serde_json::to_vec_pretty(&json!({
+            "schema": "curvebook.batch.v1",
+            "project": "source.curvebook",
+            "exports": [{ "format": "curvebook", "out": "target_batch.curvebook" }]
+        }))?,
+    )?;
+    let batch_out =
+        Command::new(cli_bin()).args(["batch", &manifest_path.display().to_string(), "--workdir", &wd.display().to_string(), "--json"]).output()?;
+    assert_eq!(batch_out.status.code(), Some(1), "batch against future archive must exit 1: {}", String::from_utf8_lossy(&batch_out.stdout));
+    let batch_json: Value = serde_json::from_slice(&batch_out.stdout)?;
+    assert_eq!(batch_json["error"]["code"], json!("unsupported_version"));
+    assert_eq!(fs::read(&target_batch)?, batch_bytes, "batch must leave future-version archive byte-for-byte intact");
+
+    Ok(())
+}

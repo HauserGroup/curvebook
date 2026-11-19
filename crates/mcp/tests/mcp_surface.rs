@@ -670,3 +670,59 @@ fn rv95_resources_read_caps_csv_preview_rows_and_bytes_and_surfaces_export_error
     let err = read_resource(&bad_doc, "sheet://xy-bad").expect_err("corrupt sheet export must surface error instead of empty csv_preview");
     assert!(matches!(err, ResourceError::Internal(msg) if msg.contains("CSV preview export failed")));
 }
+
+#[test]
+fn ui_state_and_filesystem_write_tools_report_worst_case_annotations() {
+    let mut state = McpServerState::new();
+    let res = call_tool(&mut state, "enable_toolset", json!({ "group": "all" })).expect("enable all toolsets");
+    assert!(!res.is_error, "enable_toolset all failed: {res:?}");
+
+    let tools = list_tools_for_state(&state);
+    let by_name: std::collections::BTreeMap<&str, ToolAnnotations> = tools.iter().map(|t| (t.name.as_str(), t.annotations)).collect();
+
+    // Audit #24: CHANGES_UI_STATE tools are not read-only.
+    for tool_name in ["enable_toolset", "sheet_select"] {
+        let ann = by_name.get(tool_name).copied().unwrap_or_else(|| panic!("missing tool {tool_name}"));
+        assert!(!ann.read_only_hint, "{tool_name} modifies UI/session state and must report readOnlyHint=false");
+    }
+
+    // Audit #25: tools that write/overwrite files on disk must report destructiveHint=true and readOnlyHint=false.
+    for tool_name in [
+        "export",
+        "save_file",
+        "project_save",
+        "project_save_template",
+        "table_export_csv",
+        "export_svg",
+        "export_pdf",
+        "export_png",
+        "export_tiff",
+        "analysis_export_csv",
+        "analysis_export_json",
+    ] {
+        let ann = by_name.get(tool_name).copied().unwrap_or_else(|| panic!("missing tool {tool_name}"));
+        assert!(ann.destructive_hint, "{tool_name} can overwrite destination files and must report destructiveHint=true");
+        assert!(!ann.read_only_hint, "{tool_name} writes filesystem and must report readOnlyHint=false");
+        assert!(ann.open_world_hint, "{tool_name} interacts with external filesystem paths");
+    }
+
+    // Read-only introspection tools stay readOnlyHint=true, destructiveHint=false.
+    for tool_name in ["doc_inspect", "command_list", "render_preview", "list_toolsets"] {
+        let ann = by_name.get(tool_name).copied().unwrap_or_else(|| panic!("missing tool {tool_name}"));
+        assert!(ann.read_only_hint, "{tool_name} must remain readOnlyHint=true");
+        assert!(!ann.destructive_hint, "{tool_name} must remain destructiveHint=false");
+    }
+
+    // Exhaustive invariant across every engine CommandSpec mapped into MCP tools.
+    for spec in registry().specs() {
+        let name = command_id_to_mcp_tool_name(spec.id);
+        let ann = by_name.get(name.as_str()).copied().unwrap_or_else(|| panic!("missing mapped tool {name}"));
+        if spec.effects.contains(Effects::WRITES_FILESYSTEM) {
+            assert!(ann.destructive_hint, "command `{}` ({name}) has WRITES_FILESYSTEM -> destructiveHint=true", spec.id);
+            assert!(!ann.read_only_hint, "command `{}` ({name}) has WRITES_FILESYSTEM -> readOnlyHint=false", spec.id);
+        }
+        if spec.effects.contains(Effects::CHANGES_UI_STATE) {
+            assert!(!ann.read_only_hint, "command `{}` ({name}) has CHANGES_UI_STATE -> readOnlyHint=false", spec.id);
+        }
+    }
+}

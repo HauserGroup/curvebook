@@ -24,6 +24,28 @@ pub const GUI_TOOL_NAMES: [&str; 8] =
 const VALID_INSPECT_SCOPES: [&str; 9] = ["all", "workspace", "dialog", "grid", "navigator", "canvas", "menus", "toolbar", "tabs"];
 const VALID_SCREENSHOT_TARGETS: [&str; 5] = ["full_window", "workspace", "viewport", "canvas", "dialog"];
 
+/// Worst-case effects for GUI tools that can dispatch arbitrary menu items, shortcuts, or modal actions.
+const GUI_DISPATCH_WORST_CASE_EFFECTS: Effects = Effects::MUTATES_DOCUMENT
+    .with(Effects::CHANGES_UI_STATE)
+    .with(Effects::MAY_DISCARD_DATA)
+    .with(Effects::READS_FILESYSTEM)
+    .with(Effects::WRITES_FILESYSTEM)
+    .with(Effects::LAUNCHES_PROCESS);
+
+/// Worst-case effects for text entry that can overwrite cells, paste tables, or trigger palette commands.
+const GUI_TYPE_TEXT_WORST_CASE_EFFECTS: Effects = Effects::MUTATES_DOCUMENT
+    .with(Effects::CHANGES_UI_STATE)
+    .with(Effects::MAY_DISCARD_DATA)
+    .with(Effects::READS_FILESYSTEM)
+    .with(Effects::WRITES_FILESYSTEM);
+
+/// Worst-case effects for modal dialog updates/commits (including lossy conversion, export, or OS print).
+const GUI_DIALOG_WORST_CASE_EFFECTS: Effects = Effects::MUTATES_DOCUMENT
+    .with(Effects::CHANGES_UI_STATE)
+    .with(Effects::MAY_DISCARD_DATA)
+    .with(Effects::WRITES_FILESYSTEM)
+    .with(Effects::LAUNCHES_PROCESS);
+
 /// Return `true` when `name` identifies one of the 8 `gui` MCP tools.
 #[must_use]
 pub fn is_gui_tool_name(name: &str) -> bool {
@@ -84,7 +106,7 @@ fn def_ui_screenshot() -> ToolDefinition {
     ToolDefinition {
         name: String::from("ui_screenshot"),
         description: String::from(
-            "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata.",
+            "Capture a deterministic PNG screenshot of the live CurveBook UI, returning inline PNG image content alongside pixel/DPI metadata (or atomically writing/overwriting an optional host output path outside --gui-only).",
         ),
         input_schema: json!({
             "type": "object",
@@ -114,12 +136,12 @@ fn def_ui_screenshot() -> ToolDefinition {
                 },
                 "path": {
                     "type": "string",
-                    "description": "Optional host output path (rejected with gui_only_violation when --gui-only is active)."
+                    "description": "Optional host output path (overwrites existing file; rejected with gui_only_violation when --gui-only is active)."
                 }
             },
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT)),
+        annotations: ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT)),
     }
 }
 
@@ -174,7 +196,7 @@ fn def_ui_pointer_gesture() -> ToolDefinition {
             "required": ["action"],
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE),
+        annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
 
@@ -195,7 +217,7 @@ fn def_ui_type_text() -> ToolDefinition {
             "required": ["text"],
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE)),
+        annotations: ToolAnnotations::from_effects(GUI_TYPE_TEXT_WORST_CASE_EFFECTS),
     }
 }
 
@@ -212,7 +234,7 @@ fn def_ui_press_key() -> ToolDefinition {
             "required": ["key"],
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE),
+        annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
 
@@ -235,7 +257,7 @@ fn def_ui_invoke_menu() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE),
+        annotations: ToolAnnotations::from_effects(GUI_DISPATCH_WORST_CASE_EFFECTS),
     }
 }
 
@@ -265,7 +287,7 @@ fn def_ui_switch_tab() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT)),
+        annotations: ToolAnnotations::from_effects(Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE).with(Effects::IDEMPOTENT)),
     }
 }
 
@@ -287,7 +309,7 @@ fn def_ui_answer_dialog() -> ToolDefinition {
             },
             "additionalProperties": false
         }),
-        annotations: ToolAnnotations::from_effects(Effects::MUTATES_DOCUMENT.with(Effects::CHANGES_UI_STATE)),
+        annotations: ToolAnnotations::from_effects(GUI_DIALOG_WORST_CASE_EFFECTS),
     }
 }
 
