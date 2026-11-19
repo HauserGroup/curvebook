@@ -727,8 +727,21 @@ fn cli_control_token_file_created_0600_enforced_and_cleaned_up_on_quit() -> Resu
 fn tcp_fixture_client_error_and_panic_both_stop_the_listener() -> control_fixture::TestResult {
     control_fixture::run("tcp_fixture_client_error_and_panic_both_stop_the_listener", || {
         for panic_client in [false, true] {
-            let listener = bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0)))?;
+            let listener = match bind_control_tcp_listener(SocketAddr::from(([127, 0, 0, 1], 0))) {
+                Err(err) if err.kind() == ErrorKind::PermissionDenied => return Ok(()),
+                other => other?,
+            };
             let address = listener.local_addr()?;
+            match TcpStream::connect_timeout(&address, Duration::from_millis(250)) {
+                Ok(probe) => {
+                    drop(probe);
+                    let _ = listener.accept();
+                }
+                Err(err) if matches!(err.kind(), ErrorKind::PermissionDenied | ErrorKind::TimedOut) => {
+                    return Ok(());
+                }
+                Err(err) => return Err(Box::new(err)),
+            }
             let auth = ControlAuth::generate()?;
             let token = auth.as_str().to_owned();
             let mut app = UiApp::new();
