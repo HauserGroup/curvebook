@@ -263,16 +263,17 @@ fn collect_subcells(data_sets: &[DataSetColumn], col: usize, row: usize, mode: S
 
 fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hundred: f64, scale: f64) {
     let factor = scale / (hundred - zero);
+    let reverses = factor < 0.0;
     let map_val = |v: f64| (v - zero) * factor;
     let map_spread = |s: f64| s * factor.abs();
 
     match arch {
-        TableArchetype::Xy(t) => normalize_dataset_col(&mut t.data_sets, col, t.y_subcolumn_mode, map_val, map_spread),
-        TableArchetype::Column(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, map_val, map_spread),
-        TableArchetype::Grouped(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, map_val, map_spread),
-        TableArchetype::Contingency(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, map_val, map_spread),
-        TableArchetype::Survival(t) => normalize_dataset_col(&mut t.cohorts, col, SubcolumnMode::Single, map_val, map_spread),
-        TableArchetype::PartsOfWhole(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, map_val, map_spread),
+        TableArchetype::Xy(t) => normalize_dataset_col(&mut t.data_sets, col, t.y_subcolumn_mode, reverses, map_val, map_spread),
+        TableArchetype::Column(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread),
+        TableArchetype::Grouped(t) => normalize_dataset_col(&mut t.data_sets, col, t.subcolumn_mode, reverses, map_val, map_spread),
+        TableArchetype::Contingency(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread),
+        TableArchetype::Survival(t) => normalize_dataset_col(&mut t.cohorts, col, SubcolumnMode::Single, reverses, map_val, map_spread),
+        TableArchetype::PartsOfWhole(t) => normalize_dataset_col(&mut t.data_sets, col, SubcolumnMode::Single, reverses, map_val, map_spread),
         TableArchetype::MultipleVariables(mv) => {
             if let Some(var) = mv.variables.get_mut(col) {
                 for cell in &mut var.cells {
@@ -300,6 +301,7 @@ fn normalize_dataset_col(
     data_sets: &mut [DataSetColumn],
     col: usize,
     mode: SubcolumnMode,
+    reverses: bool,
     map_val: impl Fn(f64) -> f64,
     map_spread: impl Fn(f64) -> f64,
 ) {
@@ -341,21 +343,31 @@ fn normalize_dataset_col(
                 let lo = row_cells.get(1).and_then(|c| c.value.finite_f64()).map(&map_spread);
                 let hi = row_cells.get(2).and_then(|c| c.value.finite_f64()).map(&map_spread);
                 if row_cells.len() >= 3 {
-                    row_cells[1].value = lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-                    row_cells[2].value = hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                    // Decreasing linear normalization (zero > hundred) reverses -Error and +Error.
+                    let (eff_lo, eff_hi) = if reverses { (hi, lo) } else { (lo, hi) };
+                    row_cells[1].value = eff_lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                    row_cells[2].value = eff_hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
                 }
             }
             SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
                     row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
                 }
-                if let (Some(a), Some(b)) = (
-                    row_cells.get(1).and_then(|c| c.value.finite_f64()).map(&map_val),
-                    row_cells.get(2).and_then(|c| c.value.finite_f64()).map(&map_val),
-                ) {
-                    let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                    row_cells[1].value = CellValue::from_finite_or_empty(lo);
-                    row_cells[2].value = CellValue::from_finite_or_empty(hi);
+                if row_cells.len() >= 3 {
+                    let t1 = row_cells[1].value.finite_f64().map(&map_val);
+                    let t2 = row_cells[2].value.finite_f64().map(&map_val);
+                    match (t1, t2) {
+                        (Some(a), Some(b)) => {
+                            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
+                            row_cells[1].value = CellValue::from_finite_or_empty(lo);
+                            row_cells[2].value = CellValue::from_finite_or_empty(hi);
+                        }
+                        _ => {
+                            let (lo, hi) = if reverses { (t2, t1) } else { (t1, t2) };
+                            row_cells[1].value = lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                            row_cells[2].value = hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                        }
+                    }
                 }
             }
         }
@@ -551,6 +563,13 @@ fn apply_baseline_datasets(
                     if let Some(spread_cell) = row_cells.get_mut(idx) {
                         apply_baseline_spread_cell(spread_cell, b_opt, operation, r, col, warnings);
                     }
+                }
+                if b_opt.is_some_and(|b| b < 0.0)
+                    && matches!(operation, BaselineOperation::Ratio | BaselineOperation::PercentChange | BaselineOperation::FractionalChange)
+                    && let [_, lo_cell, hi_cell, ..] = row_cells.as_mut_slice()
+                    && lo_cell.excluded == hi_cell.excluded
+                {
+                    std::mem::swap(lo_cell, hi_cell);
                 }
             }
         }
