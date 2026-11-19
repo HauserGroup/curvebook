@@ -3,10 +3,12 @@
 use std::collections::{BTreeMap, HashMap, HashSet};
 
 use curvebook_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, ConstantValue, DataSetColumn, DataSheet, DocError, GraphSheet, ImportFilterSpec, ImportLinkSpec,
-    ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource, MAX_SHEETS_PER_PROJECT, MultipleVariablesTable,
-    NestedGroupColumn, NestedTable, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise,
-    SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole, VariableSource, validate_project_cells, validate_rows, validate_title,
+    AnalysisKind, BaselineOperation, Cell, CellCoord, CellValue, ColorChannelMapping, ConstantValue, DataSetColumn, DataSheet, DocError, GraphSheet,
+    HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource,
+    MAX_DATA_SETS, MAX_SHEETS_PER_PROJECT, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable,
+    NormalizeAnchor, ParameterScope, PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SheetSection, SimulationNoise,
+    SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole,
+    VariableSource, XColumnMode, validate_project_cells, validate_rows, validate_title,
 };
 use curvebook_format::{
     CsvOptions, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, MAX_XML_BYTES, export_datasheet_to_csv, export_result_sheet_tidy_csv,
@@ -2797,8 +2799,29 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     let prev_ds = doc.data_sheets.get(target_idx).cloned();
     let prev_info = info_idx.and_then(|idx| doc.info_sheets.get(idx).cloned());
 
-    let link_seq = prev_ds.as_ref().map_or(1, |d| d.linked_regions.len().saturating_add(1));
-    let link_id = p.link_id.unwrap_or_else(|| format!("link-{}-{link_seq}", target_id.as_str()));
+    let existing_link_ids: HashSet<String> = prev_ds.as_ref().map(|d| d.linked_regions.iter().map(|r| r.id.clone()).collect()).unwrap_or_default();
+    let link_id = if let Some(raw_id) = p.link_id {
+        let trimmed = raw_id.trim();
+        if trimmed.is_empty() {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`link_id` must not be empty"));
+        }
+        if existing_link_ids.contains(trimmed) {
+            return Err(EngineError::with_code(
+                ErrorCode::Conflict,
+                format!("live linked region `{trimmed}` already exists on `{}`", target_id.as_str()),
+            ));
+        }
+        trimmed.to_owned()
+    } else {
+        let mut seq = prev_ds.as_ref().map_or(1, |d| d.linked_regions.len().saturating_add(1));
+        loop {
+            let candidate = format!("link-{}-{seq}", target_id.as_str());
+            if !existing_link_ids.contains(&candidate) {
+                break candidate;
+            }
+            seq = seq.saturating_add(1);
+        }
+    };
     let provenance_summary = p.provenance.unwrap_or_else(|| summarize_link_source(&spec.source));
     let opts = ImportPipelineOptions {
         baseline: resolve_baseline_adjustment(p.baseline)?,
@@ -2810,6 +2833,19 @@ fn run_paste_link(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
 
     let report = match (|| -> Result<ImportPipelineReport, EngineError> {
         let rep = apply_pipeline_with_split_info(doc, target_idx, info_idx, &spec, &payload, &opts)?;
+        if let Some(old_ds) = prev_ds.as_ref()
+            && rep.rows_placed > 0
+            && rep.cols_placed > 0
+        {
+            ensure_range_outside_linked_regions(old_ds, rep.target_range, "paste-link over")?;
+            if matches!(spec.placement.mode, PlacementMode::InsertRows) {
+                let shift_span = SheetCellRange::new(
+                    CellCoord::new(spec.placement.anchor.row, rep.target_range.start.col, rep.target_range.start.subcol),
+                    CellCoord::new(usize::MAX, rep.target_range.end.col, rep.target_range.end.subcol),
+                );
+                ensure_range_outside_linked_regions(old_ds, shift_span, "insert linked rows into")?;
+            }
+        }
         if let OwnedSourcePayload::Result(src_rs) = &payload
             && let Some(target_ds) = doc.data_sheets.get_mut(target_idx)
         {
@@ -3083,13 +3119,19 @@ fn run_import_csv(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     }
 
     let recalc = recalculate_dirty_with_links(doc, &dirty_seeds, false)?;
+    let message = match recalc.failure_note() {
+        Some(note) => format!("imported CSV into data sheet{note}"),
+        None => String::from("imported CSV into data sheet"),
+    };
     Ok(CommandOutcome::mutated(
         "table.importCsv",
-        "imported CSV into data sheet",
+        message,
         json!({
             "sheet_id": id.as_str(),
             "recalculated_sheets": recalc.recalculated_sheets,
             "refreshed_links": recalc.refreshed_links,
+            "failed_count": recalc.failed_result_sheets.len(),
+            "failed_result_sheets": recalc.failed_json(),
         }),
     ))
 }
@@ -3672,6 +3714,7 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
     for gs in &mut doc.graph_sheets {
         gs.spec.recode_variable_levels(&id, col_idx, &pairs);
     }
+    let updated_reference_levels = recode_analysis_reference_levels(&mut doc.result_sheets, &id, col_idx, &pairs);
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
     Ok(CommandOutcome::mutated(
         "table.recodeLevels",
@@ -3680,9 +3723,55 @@ fn run_recode_levels(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, En
             "sheet_id": id.as_str(),
             "column": col_idx,
             "recoded_count": recoded_count,
+            "updated_reference_levels": updated_reference_levels,
             "recalculated_sheets": recalc.recalculated_sheets,
         }),
     ))
+}
+
+fn recode_reference_pairs(reference_levels: &mut [(usize, String)], col_idx: usize, mappings: &[(String, String)]) -> usize {
+    let mut updated = 0;
+    for (ref_col, level) in reference_levels.iter_mut() {
+        if *ref_col != col_idx {
+            continue;
+        }
+        for (from, to) in mappings {
+            if (*level == *from || level.trim() == from.trim()) && from != to {
+                let canonical = to.trim();
+                *level = if canonical.is_empty() { to.clone() } else { canonical.to_owned() };
+                updated += 1;
+                break;
+            }
+        }
+    }
+    updated
+}
+
+fn recode_analysis_reference_levels(
+    result_sheets: &mut [ResultSheet],
+    source_sheet_id: &SheetId,
+    col_idx: usize,
+    mappings: &[(String, String)],
+) -> usize {
+    if mappings.is_empty() {
+        return 0;
+    }
+    let mut updated = 0;
+    for rs in result_sheets {
+        if rs.analysis.source_sheet_id != *source_sheet_id {
+            continue;
+        }
+        match &mut rs.analysis.kind {
+            AnalysisKind::GeneralizedLinearModel(spec) => {
+                updated += recode_reference_pairs(&mut spec.reference_levels, col_idx, mappings);
+            }
+            AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards { reference_levels, .. }) => {
+                updated += recode_reference_pairs(reference_levels, col_idx, mappings);
+            }
+            _ => {}
+        }
+    }
+    updated
 }
 
 #[derive(Debug, Deserialize)]
@@ -4214,35 +4303,1075 @@ fn run_convert_archetype(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome
         .ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("data sheet `{}` not found", sheet_id.as_str())))?;
 
     if preview_only {
-        let preview = preview_datasheet_conversion(&doc.data_sheets[idx], target_kind)?;
+        let base_preview = preview_datasheet_conversion(&doc.data_sheets[idx], target_kind)?;
+        let impact = plan_conversion_impacts(doc, &doc.data_sheets[idx], target_kind);
+        let preview_val = build_enriched_conversion_preview(&base_preview, &impact);
         return Ok(CommandOutcome::read_only(
             "table.convertArchetype",
             format!("previewed conversion of `{}`", sheet_id.as_str()),
             json!({
                 "sheet_id": sheet_id.as_str(),
                 "preview_only": true,
-                "preview": preview,
+                "preview": preview_val,
             }),
         ));
     }
 
     ensure_sheet_not_frozen(&doc.data_sheets[idx])?;
-    let (mut converted, preview) = convert_datasheet_archetype(&doc.data_sheets[idx], target_kind, allow_lossy)?;
+    let old_ds = doc.data_sheets[idx].clone();
+    let impact = plan_conversion_impacts(doc, &old_ds, target_kind);
+    let (mut converted, base_preview) = convert_datasheet_archetype(&old_ds, target_kind, allow_lossy)?;
+    if impact.incoming_links_lost && !allow_lossy {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!(
+                "lossy conversion of `{}` drops {} live incoming link(s); pass `allow_lossy: true` to detach them",
+                sheet_id.as_str(),
+                impact.incoming_links_dropped
+            ),
+        ));
+    }
     converted.id = sheet_id.clone();
+    preserve_mappable_incoming_links(&old_ds, &mut converted, &impact.col_plan);
     converted.prune_stale_exclusion_notes();
     doc.data_sheets[idx] = converted;
-    let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
+    apply_conversion_dependents(doc, &sheet_id, &impact);
+    let mut recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&sheet_id), false)?;
+    finalize_broken_dependents(doc, &impact, &mut recalc);
+    let preview_val = build_enriched_conversion_preview(&base_preview, &impact);
     Ok(CommandOutcome::mutated(
         "table.convertArchetype",
         format!("converted `{}` to {:?}", sheet_id.as_str(), target_kind),
         json!({
             "sheet_id": sheet_id.as_str(),
             "preview_only": false,
-            "preview": preview,
+            "preview": preview_val,
             "recalculated_sheets": recalc.recalculated_sheets,
             "refreshed_links": recalc.refreshed_links,
+            "failed_count": recalc.failed_result_sheets.len(),
+            "failed_result_sheets": recalc.failed_json(),
         }),
     ))
+}
+
+#[derive(Debug, Clone)]
+enum ColMapTarget {
+    Exact(usize),
+    Expanded(Vec<usize>),
+    MovedToX,
+    Unmappable,
+}
+
+#[derive(Debug, Clone)]
+struct ConversionColPlan {
+    cols: Vec<ColMapTarget>,
+    x_injected_at_col0: bool,
+    preserves_cell_shape: bool,
+    transposes_row_subcol: bool,
+    target_table_kind: TableKind,
+    converted_col_count: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MvColClass {
+    Categorical,
+    Label,
+    Numeric,
+}
+
+fn classify_mv_cols_for_plan(mv: &MultipleVariablesTable) -> (Vec<usize>, Vec<usize>, Vec<usize>) {
+    let mut cat = Vec::new();
+    let mut label = Vec::new();
+    let mut num = Vec::new();
+    for (i, var) in mv.variables.iter().enumerate() {
+        let cls = if var.role == VariableRole::Categorical {
+            MvColClass::Categorical
+        } else if var.role == VariableRole::Label {
+            MvColClass::Label
+        } else if var.role_inferred && var.cells.iter().any(|c| !c.is_empty() && matches!(c.value, CellValue::Text(_))) {
+            MvColClass::Categorical
+        } else {
+            MvColClass::Numeric
+        };
+        match cls {
+            MvColClass::Categorical => cat.push(i),
+            MvColClass::Label => label.push(i),
+            MvColClass::Numeric => num.push(i),
+        }
+    }
+    (cat, label, num)
+}
+
+const fn target_table_kind_from(target: TargetArchetypeKind) -> TableKind {
+    match target {
+        TargetArchetypeKind::Column => TableKind::Column,
+        TargetArchetypeKind::Grouped => TableKind::Grouped,
+        TargetArchetypeKind::Xy => TableKind::Xy,
+        TargetArchetypeKind::MultipleVariables => TableKind::MultipleVariables,
+        TargetArchetypeKind::Contingency => TableKind::Contingency,
+    }
+}
+
+impl ConversionColPlan {
+    fn build(old_ds: &DataSheet, target: TargetArchetypeKind) -> Self {
+        let old_cols = old_ds.archetype.column_count();
+        let target_table_kind = target_table_kind_from(target);
+        if old_ds.kind() == target_table_kind {
+            return Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            };
+        }
+        match (&old_ds.archetype, target) {
+            (TableArchetype::Column(_), TargetArchetypeKind::Grouped) => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            (TableArchetype::Grouped(grp), TargetArchetypeKind::Column) => Self::from_grouped_to_column(grp, target_table_kind),
+            (TableArchetype::Column(_), TargetArchetypeKind::Xy) => {
+                let cols = if old_cols == 1 {
+                    vec![ColMapTarget::Exact(0)]
+                } else {
+                    std::iter::once(ColMapTarget::MovedToX).chain((0..old_cols.saturating_sub(1)).map(ColMapTarget::Exact)).collect()
+                };
+                Self {
+                    cols,
+                    x_injected_at_col0: false,
+                    preserves_cell_shape: true,
+                    transposes_row_subcol: false,
+                    target_table_kind,
+                    converted_col_count: if old_cols == 1 { 1 } else { old_cols.saturating_sub(1) },
+                }
+            }
+            (TableArchetype::Xy(xy), TargetArchetypeKind::Column) => Self::from_xy_to_column(xy, target_table_kind),
+            (TableArchetype::Grouped(_), TargetArchetypeKind::MultipleVariables) => Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 3,
+            },
+            (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Grouped) => Self::from_mv_to_grouped(mv, target_table_kind),
+            (TableArchetype::Xy(xy), TargetArchetypeKind::MultipleVariables) => Self::from_xy_to_mv(xy, target_table_kind),
+            (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Xy) => Self::from_mv_to_xy(mv, target_table_kind),
+            (TableArchetype::Column(col), TargetArchetypeKind::MultipleVariables) => {
+                let subs = col.subcolumn_mode.subcolumn_count();
+                let cols = if subs <= 1 {
+                    (0..old_cols).map(ColMapTarget::Exact).collect()
+                } else {
+                    (0..old_cols).map(|c| ColMapTarget::Expanded((c * subs..(c + 1) * subs).collect())).collect()
+                };
+                Self {
+                    cols,
+                    x_injected_at_col0: false,
+                    preserves_cell_shape: subs <= 1,
+                    transposes_row_subcol: false,
+                    target_table_kind,
+                    converted_col_count: old_cols.saturating_mul(subs),
+                }
+            }
+            (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Column) => Self::from_mv_to_column(mv, target_table_kind),
+            (TableArchetype::Grouped(_), TargetArchetypeKind::Xy) | (TableArchetype::Xy(_), TargetArchetypeKind::Grouped) => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            (TableArchetype::Column(_), TargetArchetypeKind::Contingency) => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            (TableArchetype::Grouped(grp), TargetArchetypeKind::Contingency) => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: grp.subcolumn_mode.subcolumn_count() <= 1,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            (TableArchetype::Xy(xy), TargetArchetypeKind::Contingency) => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: xy.y_subcolumn_mode.subcolumn_count() <= 1,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            (TableArchetype::MultipleVariables(mv), TargetArchetypeKind::Contingency) => Self::from_mv_to_contingency(mv, target_table_kind),
+            _ => Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+        }
+    }
+
+    fn from_grouped_to_column(grp: &curvebook_doc::GroupedTable, target_table_kind: TableKind) -> Self {
+        let old_cols = grp.data_sets.len();
+        let rows = grp.data_sets.iter().map(DataSetColumn::row_count).max().unwrap_or(grp.row_titles.len()).max(grp.row_titles.len());
+        match grp.subcolumn_mode {
+            SubcolumnMode::Single | SubcolumnMode::RawReplicates(1) | SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN | SubcolumnMode::MeanCvN => {
+                Self {
+                    cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                    x_injected_at_col0: false,
+                    preserves_cell_shape: true,
+                    transposes_row_subcol: false,
+                    target_table_kind,
+                    converted_col_count: old_cols,
+                }
+            }
+            SubcolumnMode::RawReplicates(n) if n >= 2 && rows <= 1 => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: true,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+            SubcolumnMode::RawReplicates(n) if n >= 2 => {
+                if let Some(total_cols) = old_cols.checked_mul(rows)
+                    && total_cols <= MAX_DATA_SETS
+                {
+                    Self {
+                        cols: (0..old_cols).map(|c| ColMapTarget::Expanded((c * rows..(c + 1) * rows).collect())).collect(),
+                        x_injected_at_col0: false,
+                        preserves_cell_shape: false,
+                        transposes_row_subcol: true,
+                        target_table_kind,
+                        converted_col_count: total_cols,
+                    }
+                } else {
+                    Self {
+                        cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                        x_injected_at_col0: false,
+                        preserves_cell_shape: false,
+                        transposes_row_subcol: false,
+                        target_table_kind,
+                        converted_col_count: old_cols,
+                    }
+                }
+            }
+            _ => Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            },
+        }
+    }
+
+    fn from_xy_to_column(xy: &curvebook_doc::XyTable, target_table_kind: TableKind) -> Self {
+        let old_cols = xy.data_sets.len();
+        if matches!(xy.y_subcolumn_mode, SubcolumnMode::MeanLowHigh | SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr) {
+            return Self {
+                cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
+                x_injected_at_col0: true,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1 + old_cols,
+            };
+        }
+        if let SubcolumnMode::RawReplicates(n) = xy.y_subcolumn_mode
+            && n >= 2
+        {
+            let needed = old_cols.checked_mul(n).and_then(|v| v.checked_add(1));
+            if needed.is_some_and(|tot| tot <= MAX_DATA_SETS) {
+                return Self {
+                    cols: (0..old_cols).map(|c| ColMapTarget::Expanded((1 + c * n..1 + (c + 1) * n).collect())).collect(),
+                    x_injected_at_col0: true,
+                    preserves_cell_shape: false,
+                    transposes_row_subcol: false,
+                    target_table_kind,
+                    converted_col_count: 1 + old_cols * n,
+                };
+            }
+            return Self {
+                cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
+                x_injected_at_col0: true,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1 + old_cols,
+            };
+        }
+        if xy.y_subcolumn_mode.supports_parametric_moments() {
+            let matching_parametric = matches!(&xy.x_mode, XColumnMode::Numbers { subcolumn_mode } if *subcolumn_mode == xy.y_subcolumn_mode);
+            if matching_parametric {
+                return Self {
+                    cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
+                    x_injected_at_col0: true,
+                    preserves_cell_shape: true,
+                    transposes_row_subcol: false,
+                    target_table_kind,
+                    converted_col_count: 1 + old_cols,
+                };
+            }
+            return Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            };
+        }
+        Self {
+            cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
+            x_injected_at_col0: true,
+            preserves_cell_shape: true,
+            transposes_row_subcol: false,
+            target_table_kind,
+            converted_col_count: 1 + old_cols,
+        }
+    }
+
+    fn from_mv_to_grouped(mv: &MultipleVariablesTable, target_table_kind: TableKind) -> Self {
+        let old_cols = mv.variables.len();
+        let (cat_cols, _, _) = classify_mv_cols_for_plan(mv);
+        if cat_cols.is_empty() {
+            Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            }
+        } else {
+            Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1,
+            }
+        }
+    }
+
+    fn from_xy_to_mv(xy: &curvebook_doc::XyTable, target_table_kind: TableKind) -> Self {
+        let old_cols = xy.data_sets.len();
+        let x_subs = xy.x_mode.subcolumn_count();
+        let y_subs = xy.y_subcolumn_mode.subcolumn_count();
+        if xy.y_subcolumn_mode == SubcolumnMode::Single && x_subs <= 1 {
+            return Self {
+                cols: (0..old_cols).map(|c| ColMapTarget::Exact(1 + c)).collect(),
+                x_injected_at_col0: true,
+                preserves_cell_shape: true,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1 + old_cols,
+            };
+        }
+        if matches!(xy.y_subcolumn_mode, SubcolumnMode::RawReplicates(n) if n >= 2) && x_subs <= 1 {
+            return Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 4,
+            };
+        }
+        let x_vars = if matches!(xy.x_mode, XColumnMode::GeneratedSequence { .. }) { 1 } else { x_subs };
+        let cols = (0..old_cols)
+            .map(|c| {
+                let start = x_vars + c * y_subs;
+                if y_subs <= 1 { ColMapTarget::Exact(start) } else { ColMapTarget::Expanded((start..start + y_subs).collect()) }
+            })
+            .collect();
+        Self {
+            cols,
+            x_injected_at_col0: x_vars > 0,
+            preserves_cell_shape: false,
+            transposes_row_subcol: false,
+            target_table_kind,
+            converted_col_count: x_vars + old_cols * y_subs,
+        }
+    }
+
+    fn from_mv_to_xy(mv: &MultipleVariablesTable, target_table_kind: TableKind) -> Self {
+        let old_cols = mv.variables.len();
+        let (cat_cols, label_cols, num_cols) = classify_mv_cols_for_plan(mv);
+        if cat_cols.len() == 1 && num_cols.len() >= 2 {
+            return Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1,
+            };
+        }
+        let mut cols = vec![ColMapTarget::Unmappable; old_cols];
+        if num_cols.len() == 1 {
+            cols[num_cols[0]] = ColMapTarget::Exact(0);
+            return Self {
+                cols,
+                x_injected_at_col0: false,
+                preserves_cell_shape: cat_cols.is_empty() && label_cols.is_empty(),
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1,
+            };
+        }
+        if num_cols.len() >= 2 {
+            cols[num_cols[0]] = ColMapTarget::MovedToX;
+            for (yi, &nc) in num_cols[1..].iter().enumerate() {
+                cols[nc] = ColMapTarget::Exact(yi);
+            }
+            return Self {
+                cols,
+                x_injected_at_col0: false,
+                preserves_cell_shape: cat_cols.is_empty() && label_cols.is_empty(),
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: num_cols.len() - 1,
+            };
+        }
+        Self { cols, x_injected_at_col0: false, preserves_cell_shape: false, transposes_row_subcol: false, target_table_kind, converted_col_count: 1 }
+    }
+
+    fn from_mv_to_column(mv: &MultipleVariablesTable, target_table_kind: TableKind) -> Self {
+        let old_cols = mv.variables.len();
+        let (cat_cols, label_cols, num_cols) = classify_mv_cols_for_plan(mv);
+        if cat_cols.len() == 1 && num_cols.len() == 1 && old_cols == 2 {
+            Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 1,
+            }
+        } else {
+            Self {
+                cols: (0..old_cols).map(ColMapTarget::Exact).collect(),
+                x_injected_at_col0: false,
+                preserves_cell_shape: cat_cols.is_empty() && label_cols.is_empty(),
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: old_cols,
+            }
+        }
+    }
+
+    fn from_mv_to_contingency(mv: &MultipleVariablesTable, target_table_kind: TableKind) -> Self {
+        let old_cols = mv.variables.len();
+        let (cat_cols, label_cols, num_cols) = classify_mv_cols_for_plan(mv);
+        let is_cross_tab = cat_cols.len() == 2
+            && mv.variables[cat_cols[0]].role == VariableRole::Categorical
+            && mv.variables[cat_cols[1]].role == VariableRole::Categorical
+            && (num_cols.is_empty() || (num_cols.len() == 1 && old_cols == 3 + label_cols.len()));
+        if is_cross_tab {
+            return Self {
+                cols: vec![ColMapTarget::Unmappable; old_cols],
+                x_injected_at_col0: false,
+                preserves_cell_shape: false,
+                transposes_row_subcol: false,
+                target_table_kind,
+                converted_col_count: 2,
+            };
+        }
+        let mv_has_empty_row_titles = mv.row_titles.iter().all(|s| s.trim().is_empty());
+        let label_col = label_cols.first().copied().filter(|_| label_cols.len() == 1 && !num_cols.is_empty() && mv_has_empty_row_titles);
+        let data_indices: Vec<usize> = (0..old_cols).filter(|&i| Some(i) != label_col).collect();
+        let mut cols = vec![ColMapTarget::Unmappable; old_cols];
+        for (dst_c, &src_c) in data_indices.iter().enumerate() {
+            cols[src_c] = ColMapTarget::Exact(dst_c);
+        }
+        Self {
+            cols,
+            x_injected_at_col0: false,
+            preserves_cell_shape: false,
+            transposes_row_subcol: false,
+            target_table_kind,
+            converted_col_count: data_indices.len().max(1),
+        }
+    }
+
+    const fn oob_index(&self) -> usize {
+        self.converted_col_count.saturating_add(1)
+    }
+
+    fn all_unmappable(&self) -> bool {
+        !self.cols.is_empty() && self.cols.iter().all(|c| matches!(c, ColMapTarget::Unmappable))
+    }
+
+    fn map_one(&self, old_col: usize, role_desc: &str) -> Result<usize, String> {
+        match self.cols.get(old_col) {
+            Some(ColMapTarget::Exact(new_c)) => Ok(*new_c),
+            Some(ColMapTarget::Expanded(vec)) => vec.first().copied().ok_or_else(|| format!("{role_desc} (col {old_col}) mapped to empty expansion")),
+            Some(ColMapTarget::MovedToX) => Err(format!("{role_desc} (col {old_col}) moved into X/row-factor column")),
+            Some(ColMapTarget::Unmappable) | None => Err(format!("{role_desc} (col {old_col}) cannot be mapped after conversion")),
+        }
+    }
+
+    fn map_one_or_oob(&self, col: &mut usize, role_desc: &str, err: &mut Option<String>) {
+        match self.map_one(*col, role_desc) {
+            Ok(nc) => *col = nc,
+            Err(reason) => {
+                *col = self.oob_index();
+                if err.is_none() {
+                    *err = Some(reason);
+                }
+            }
+        }
+    }
+
+    fn map_opt_or_oob(&self, opt: &mut Option<usize>, role_desc: &str, err: &mut Option<String>) {
+        if let Some(col) = opt.as_mut() {
+            self.map_one_or_oob(col, role_desc, err);
+        }
+    }
+
+    fn map_col_list(&self, cols: &[usize], role_desc: &str) -> Result<Vec<usize>, String> {
+        let mut out = Vec::with_capacity(cols.len());
+        let mut seen = HashSet::new();
+        for &c in cols {
+            match self.cols.get(c) {
+                Some(ColMapTarget::Exact(new_c)) => {
+                    if seen.insert(*new_c) {
+                        out.push(*new_c);
+                    }
+                }
+                Some(ColMapTarget::Expanded(vec)) => {
+                    for &nc in vec {
+                        if seen.insert(nc) {
+                            out.push(nc);
+                        }
+                    }
+                }
+                Some(ColMapTarget::MovedToX) => return Err(format!("{role_desc} (col {c}) moved into X/row-factor column")),
+                Some(ColMapTarget::Unmappable) | None => return Err(format!("{role_desc} (col {c}) cannot be mapped after conversion")),
+            }
+        }
+        Ok(out)
+    }
+
+    fn map_col_list_or_oob(&self, cols: &[usize], role_desc: &str, err: &mut Option<String>) -> Vec<usize> {
+        let mut out = Vec::with_capacity(cols.len());
+        let mut seen = HashSet::new();
+        for &c in cols {
+            match self.cols.get(c) {
+                Some(ColMapTarget::Exact(new_c)) => {
+                    if seen.insert(*new_c) {
+                        out.push(*new_c);
+                    }
+                }
+                Some(ColMapTarget::Expanded(vec)) => {
+                    for &nc in vec {
+                        if seen.insert(nc) {
+                            out.push(nc);
+                        }
+                    }
+                }
+                Some(ColMapTarget::MovedToX) => {
+                    if err.is_none() {
+                        *err = Some(format!("{role_desc} (col {c}) moved into X/row-factor column"));
+                    }
+                    out.push(self.oob_index());
+                }
+                Some(ColMapTarget::Unmappable) | None => {
+                    if err.is_none() {
+                        *err = Some(format!("{role_desc} (col {c}) cannot be mapped after conversion"));
+                    }
+                    out.push(self.oob_index());
+                }
+            }
+        }
+        out
+    }
+
+    fn map_selected_data_sets(&self, selected: &[usize]) -> Result<(Vec<usize>, Option<String>), String> {
+        if self.all_unmappable() {
+            return Err(String::from("all source columns were pivoted/restructured by conversion"));
+        }
+        if selected.is_empty() {
+            if self.x_injected_at_col0 {
+                let expanded = self.map_col_list(&(0..self.cols.len()).collect::<Vec<_>>(), "selected_data_sets")?;
+                return Ok((expanded, None));
+            }
+            let moved_x: Vec<usize> = self.cols.iter().enumerate().filter_map(|(i, m)| matches!(m, ColMapTarget::MovedToX).then_some(i)).collect();
+            let note = if moved_x.is_empty() {
+                None
+            } else {
+                Some(format!("column(s) {moved_x:?} moved to X and are excluded from downstream `selected_data_sets: []`"))
+            };
+            return Ok((Vec::new(), note));
+        }
+        Ok((self.map_col_list(selected, "selected_data_sets")?, None))
+    }
+
+    fn map_source_range(&self, range: SheetCellRange) -> Result<SheetCellRange, String> {
+        let old_cols = self.cols.len();
+        if range.start.col >= old_cols {
+            return Err(format!("linked source start column {} is out of bounds", range.start.col));
+        }
+        if self.transposes_row_subcol {
+            return Err(String::from("conversion transposed replicate subcolumns and rows; linked source range cannot preserve 2D layout"));
+        }
+        if range.start.col == 0 && range.end.col >= old_cols.saturating_sub(1) && range.end.col >= 1_000_000 {
+            if self.all_unmappable() {
+                return Err(String::from("open column range cannot survive pivoted table conversion"));
+            }
+            if self.cols.iter().any(|c| matches!(c, ColMapTarget::MovedToX | ColMapTarget::Unmappable)) {
+                return Err(String::from("open column range included column dropped or moved to X"));
+            }
+            let start_col = usize::from(self.x_injected_at_col0);
+            return Ok(SheetCellRange::new(
+                CellCoord::new(range.start.row, start_col, range.start.subcol),
+                CellCoord::new(range.end.row, range.end.col, range.end.subcol),
+            ));
+        }
+        let end_c = range.end.col.min(old_cols.saturating_sub(1));
+        if range.start.col == end_c
+            && let Some(ColMapTarget::Expanded(vec)) = self.cols.get(range.start.col)
+            && range.start.subcol == range.end.subcol
+            && let Some(&single_col) = vec.get(range.start.subcol)
+        {
+            return Ok(SheetCellRange::new(CellCoord::new(range.start.row, single_col, 0), CellCoord::new(range.end.row, single_col, 0)));
+        }
+        let mapped = self.map_col_list(&(range.start.col..=end_c).collect::<Vec<_>>(), "linked source range")?;
+        let min_c = *mapped.iter().min().ok_or_else(|| String::from("linked source range mapped to zero columns"))?;
+        let max_c = *mapped.iter().max().ok_or_else(|| String::from("linked source range mapped to zero columns"))?;
+        let contiguous = mapped.len() == max_c - min_c + 1;
+        if !contiguous {
+            return Err(String::from("linked source column range became non-contiguous after conversion"));
+        }
+        Ok(SheetCellRange::new(CellCoord::new(range.start.row, min_c, range.start.subcol), CellCoord::new(range.end.row, max_c, range.end.subcol)))
+    }
+
+    fn map_incoming_region_range(&self, range: SheetCellRange, old_cols: usize) -> Option<SheetCellRange> {
+        if !self.preserves_cell_shape || range.start.col > range.end.col || range.start.col >= old_cols {
+            return None;
+        }
+        let end_bound = range.end.col.min(old_cols.saturating_sub(1));
+        let mut mapped = Vec::with_capacity(end_bound - range.start.col + 1);
+        for c in range.start.col..=end_bound {
+            match self.cols.get(c) {
+                Some(ColMapTarget::Exact(new_c)) => mapped.push(*new_c),
+                _ => return None,
+            }
+        }
+        let first = *mapped.first()?;
+        for (offset, &nc) in mapped.iter().enumerate() {
+            if nc != first + offset {
+                return None;
+            }
+        }
+        let new_end_col = if range.end.col >= old_cols && range.end.col >= 1_000_000 {
+            range.end.col
+        } else if range.end.col >= old_cols {
+            return None;
+        } else {
+            *mapped.last()?
+        };
+        Some(SheetCellRange::new(
+            CellCoord::new(range.start.row, first, range.start.subcol),
+            CellCoord::new(range.end.row, new_end_col, range.end.subcol),
+        ))
+    }
+}
+
+struct ConversionImpact {
+    col_plan: ConversionColPlan,
+    warnings: Vec<String>,
+    incoming_links_lost: bool,
+    incoming_links_dropped: usize,
+    broken_result_reasons: Vec<(SheetId, String)>,
+    broken_link_ids: Vec<(SheetId, String)>,
+}
+
+fn remap_analysis_spec_for_conversion(
+    spec: &mut curvebook_doc::AnalysisSpec,
+    target_sheet_id: &SheetId,
+    plan: &ConversionColPlan,
+    warnings: &mut Vec<String>,
+) -> Result<(), String> {
+    let mut err: Option<String> = None;
+    remap_analysis_kind_column_hooks(&mut spec.kind, target_sheet_id, plan, warnings, &mut err);
+    if spec.source_sheet_id != *target_sheet_id {
+        return match err {
+            Some(reason) => Err(reason),
+            None => Ok(()),
+        };
+    }
+    if !spec.kind.is_compatible_with(plan.target_table_kind) {
+        return Err(format!(
+            "analysis `{}` is incompatible with converted {:?} table `{target_sheet_id}`",
+            spec.effective_title(),
+            plan.target_table_kind
+        ));
+    }
+    match plan.map_selected_data_sets(&spec.selected_data_sets) {
+        Ok((new_sel, sel_note)) => {
+            spec.selected_data_sets = new_sel;
+            if let Some(note) = sel_note {
+                warnings.push(format!("Result sheet `{}`: {note}", spec.effective_title()));
+            }
+        }
+        Err(reason) => {
+            spec.selected_data_sets = vec![plan.oob_index()];
+            if err.is_none() {
+                err = Some(reason);
+            }
+        }
+    }
+    remap_analysis_kind_columns(&mut spec.kind, plan, &mut err);
+    if let Some(reason) = err {
+        spec.selected_data_sets = vec![plan.oob_index()];
+        return Err(reason);
+    }
+    Ok(())
+}
+
+fn remap_hook_col_title(
+    hook: &mut HookSource,
+    target_sheet_id: &SheetId,
+    plan: &ConversionColPlan,
+    warnings: &mut Vec<String>,
+    err: &mut Option<String>,
+) {
+    if let HookSource::ColumnTitleValue { data_sheet_id, data_set_index } = hook
+        && data_sheet_id == target_sheet_id
+    {
+        if matches!(plan.cols.get(*data_set_index), Some(ColMapTarget::Expanded(_))) {
+            warnings.push(format!(
+                "Column-title hook on `{target_sheet_id}` col {} targets split replicate columns; verify header numeric value",
+                *data_set_index
+            ));
+        }
+        plan.map_one_or_oob(data_set_index, "ColumnTitleValue hook", err);
+    }
+}
+
+fn remap_analysis_kind_column_hooks(
+    kind: &mut AnalysisKind,
+    target_sheet_id: &SheetId,
+    plan: &ConversionColPlan,
+    warnings: &mut Vec<String>,
+    err: &mut Option<String>,
+) {
+    match kind {
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+            if let NormalizeAnchor::Hooked(hook) = zero_anchor {
+                remap_hook_col_title(hook, target_sheet_id, plan, warnings, err);
+            }
+            if let NormalizeAnchor::Hooked(hook) = hundred_anchor {
+                remap_hook_col_title(hook, target_sheet_id, plan, warnings, err);
+            }
+        }
+        AnalysisKind::NonlinearRegression(nl) => {
+            for rule in &mut nl.parameter_rules {
+                if let ParameterScope::HookedConstant(hook) = &mut rule.scope {
+                    remap_hook_col_title(hook, target_sheet_id, plan, warnings, err);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_analysis_kind_columns(kind: &mut AnalysisKind, plan: &ConversionColPlan, err: &mut Option<String>) {
+    match kind {
+        AnalysisKind::OneWayAnova(spec) => {
+            if let MultiplicityMethod::Dunnett { control_column } = &mut spec.multiplicity.method {
+                plan.map_one_or_oob(control_column, "Dunnett control_column", err);
+            }
+        }
+        AnalysisKind::Transform(TransformAnalysisSpec::Normalize { zero_anchor, hundred_anchor, .. }) => {
+            if let NormalizeAnchor::ControlColumnMean { column } = zero_anchor {
+                plan.map_one_or_oob(column, "Normalize zero_anchor control column", err);
+            }
+            if let NormalizeAnchor::ControlColumnMean { column } = hundred_anchor {
+                plan.map_one_or_oob(column, "Normalize hundred_anchor control column", err);
+            }
+        }
+        AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, .. }) => {
+            *baseline_columns = plan.map_col_list_or_oob(baseline_columns, "RemoveBaseline baseline_columns", err);
+        }
+        AnalysisKind::TwoGroupComparison(spec) => {
+            plan.map_opt_or_oob(&mut spec.mv_group_column, "mv_group_column", err);
+            plan.map_opt_or_oob(&mut spec.mv_response_column, "mv_response_column", err);
+        }
+        AnalysisKind::BlandAltman(spec) => {
+            plan.map_one_or_oob(&mut spec.column_a, "BlandAltman column_a", err);
+            plan.map_one_or_oob(&mut spec.column_b, "BlandAltman column_b", err);
+        }
+        AnalysisKind::PassingBablok(spec) => {
+            plan.map_one_or_oob(&mut spec.x_column, "PassingBablok x_column", err);
+            plan.map_one_or_oob(&mut spec.y_column, "PassingBablok y_column", err);
+        }
+        AnalysisKind::PValueStack(spec) => plan.map_opt_or_oob(&mut spec.column, "PValueStack column", err),
+        AnalysisKind::FactorialAnova(spec) => {
+            spec.multifactor_columns = plan.map_col_list_or_oob(&spec.multifactor_columns, "FactorialAnova multifactor_columns", err);
+            plan.map_opt_or_oob(&mut spec.response_column, "FactorialAnova response_column", err);
+            if let MultiplicityMethod::Dunnett { control_column } = &mut spec.multiplicity.method {
+                plan.map_one_or_oob(control_column, "FactorialAnova Dunnett control_column", err);
+            }
+        }
+        AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { mv_time_column, mv_status_column, mv_group_column, .. }) => {
+            plan.map_opt_or_oob(mv_time_column, "KaplanMeier mv_time_column", err);
+            plan.map_opt_or_oob(mv_status_column, "KaplanMeier mv_status_column", err);
+            plan.map_opt_or_oob(mv_group_column, "KaplanMeier mv_group_column", err);
+        }
+        AnalysisKind::Survival(SurvivalAnalysisSpec::CoxProportionalHazards {
+            time_column,
+            status_column,
+            predictor_columns,
+            reference_levels,
+            ..
+        }) => {
+            plan.map_one_or_oob(time_column, "Cox time_column", err);
+            plan.map_one_or_oob(status_column, "Cox status_column", err);
+            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "Cox predictor_columns", err);
+            for (ref_col, _) in reference_levels.iter_mut() {
+                plan.map_one_or_oob(ref_col, "Cox reference_levels column", err);
+            }
+        }
+        AnalysisKind::GeneralizedLinearModel(spec) => {
+            plan.map_one_or_oob(&mut spec.response_column, "GLM response_column", err);
+            spec.predictor_columns = plan.map_col_list_or_oob(&spec.predictor_columns, "GLM predictor_columns", err);
+            for (ref_col, _) in &mut spec.reference_levels {
+                plan.map_one_or_oob(ref_col, "GLM reference_levels column", err);
+            }
+        }
+        AnalysisKind::Multivariate(MultivariateSpec::MultipleImputation { response_column, predictor_columns, .. }) => {
+            plan.map_opt_or_oob(response_column, "MultipleImputation response_column", err);
+            *predictor_columns = plan.map_col_list_or_oob(predictor_columns, "MultipleImputation predictor_columns", err);
+        }
+        AnalysisKind::NonlinearRegression(nl) => {
+            nl.mv_group_columns = plan.map_col_list_or_oob(&nl.mv_group_columns, "NonlinearRegression mv_group_columns", err);
+            nl.mv_x_columns = plan.map_col_list_or_oob(&nl.mv_x_columns, "NonlinearRegression mv_x_columns", err);
+            plan.map_opt_or_oob(&mut nl.mv_y_column, "NonlinearRegression mv_y_column", err);
+            for rule in &mut nl.parameter_rules {
+                if let ParameterScope::PerDatasetConstant(pairs) = &mut rule.scope {
+                    for (col, _) in pairs.iter_mut() {
+                        plan.map_one_or_oob(col, "PerDatasetConstant column", err);
+                    }
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn remap_graph_spec_for_conversion(
+    spec: &mut curvebook_doc::GraphSpec,
+    target_sheet_id: &SheetId,
+    plan: &ConversionColPlan,
+    warnings: &mut Vec<String>,
+    graph_id: &SheetId,
+) {
+    let mut kept_series = Vec::with_capacity(spec.series.len());
+    for mut s in std::mem::take(&mut spec.series) {
+        if s.source_sheet_id == *target_sheet_id {
+            match plan.map_one(s.data_set_index, "graph series") {
+                Ok(new_col) => {
+                    s.data_set_index = new_col;
+                    kept_series.push(s);
+                }
+                Err(reason) => {
+                    warnings.push(format!("Graph `{graph_id}` dropped series binding: {reason}"));
+                }
+            }
+        } else {
+            kept_series.push(s);
+        }
+    }
+    spec.series = kept_series;
+    if spec.primary_source_sheet_id == *target_sheet_id
+        && let Some(mv) = &mut spec.multivariate
+    {
+        if let Ok(xc) = plan.map_one(mv.x_column, "graph multivariate x_column") {
+            mv.x_column = xc;
+        }
+        if let Ok(yc) = plan.map_one(mv.y_column, "graph multivariate y_column") {
+            mv.y_column = yc;
+        }
+        if let Some(lc) = mv.label_column.as_mut()
+            && let Ok(nlc) = plan.map_one(*lc, "graph multivariate label_column")
+        {
+            *lc = nlc;
+        }
+        match &mut mv.color {
+            ColorChannelMapping::Categorical { column, .. } | ColorChannelMapping::Continuous { column, .. } => {
+                if let Ok(nc) = plan.map_one(*column, "graph multivariate color column") {
+                    *column = nc;
+                }
+            }
+            ColorChannelMapping::Constant(_) => {}
+        }
+        if let SizeChannelMapping::Variable { column, .. } = &mut mv.size
+            && let Ok(nc) = plan.map_one(*column, "graph multivariate size column")
+        {
+            *column = nc;
+        }
+    }
+}
+
+fn plan_conversion_impacts(doc: &ProjectDocument, old_ds: &DataSheet, target_kind: TargetArchetypeKind) -> ConversionImpact {
+    let col_plan = ConversionColPlan::build(old_ds, target_kind);
+    let old_cols = old_ds.archetype.column_count();
+    let mut warnings = Vec::new();
+    let mut incoming_links_dropped = 0usize;
+    if old_ds.kind() != col_plan.target_table_kind {
+        for region in &old_ds.linked_regions {
+            if col_plan.map_incoming_region_range(region.target_range, old_cols).is_none() {
+                incoming_links_dropped += 1;
+                warnings.push(format!(
+                    "Incoming live link `{}` (col {}..={}) on `{}` cannot be mapped after {:?}->{target_kind:?} conversion and will be detached",
+                    region.id,
+                    region.target_range.start.col,
+                    region.target_range.end.col,
+                    old_ds.id,
+                    old_ds.kind()
+                ));
+            }
+        }
+    }
+
+    let mut broken_result_reasons = Vec::new();
+    for rs in &doc.result_sheets {
+        let mut staged = rs.analysis.clone();
+        if let Err(reason) = remap_analysis_spec_for_conversion(&mut staged, &old_ds.id, &col_plan, &mut warnings) {
+            warnings.push(format!("Result sheet `{}` will be marked failed: {reason}", rs.id));
+            broken_result_reasons.push((rs.id.clone(), reason));
+        }
+    }
+
+    let mut broken_link_ids = Vec::new();
+    for ds in &doc.data_sheets {
+        if ds.id == old_ds.id {
+            continue;
+        }
+        for region in &ds.linked_regions {
+            if let LinkSource::InternalSheet { sheet_id, kind: InternalLinkKind::DataSheet, range, .. } = &region.spec.source
+                && *sheet_id == old_ds.id
+                && let Err(reason) = col_plan.map_source_range(*range)
+            {
+                warnings.push(format!("Outgoing live link `{}` on `{}` referencing `{}` will be detached: {reason}", region.id, ds.id, old_ds.id));
+                broken_link_ids.push((ds.id.clone(), region.id.clone()));
+            }
+        }
+    }
+
+    for gs in &doc.graph_sheets {
+        let mut staged_gs = gs.spec.clone();
+        remap_graph_spec_for_conversion(&mut staged_gs, &old_ds.id, &col_plan, &mut warnings, &gs.id);
+    }
+
+    ConversionImpact {
+        col_plan,
+        warnings,
+        incoming_links_lost: incoming_links_dropped > 0,
+        incoming_links_dropped,
+        broken_result_reasons,
+        broken_link_ids,
+    }
+}
+
+fn build_enriched_conversion_preview(base: &curvebook_transform::ConversionPreview, impact: &ConversionImpact) -> Value {
+    let mut val = serde_json::to_value(base).unwrap_or_else(|_| json!({}));
+    if let Some(obj) = val.as_object_mut() {
+        if impact.incoming_links_lost {
+            obj.insert(String::from("lossy"), Value::Bool(true));
+        }
+        let mut merged_warnings = base.warnings.clone();
+        merged_warnings.extend(impact.warnings.iter().cloned());
+        obj.insert(String::from("warnings"), Value::Array(merged_warnings.into_iter().map(Value::String).collect()));
+    }
+    val
+}
+
+fn preserve_mappable_incoming_links(old_ds: &DataSheet, converted: &mut DataSheet, plan: &ConversionColPlan) {
+    if old_ds.kind() == plan.target_table_kind {
+        return;
+    }
+    converted.linked_regions.clear();
+    let old_cols = old_ds.archetype.column_count();
+    for region in &old_ds.linked_regions {
+        if let Some(mapped_range) = plan.map_incoming_region_range(region.target_range, old_cols) {
+            let mut preserved = region.clone();
+            preserved.target_range = mapped_range;
+            preserved.spec.placement.anchor.col = mapped_range.start.col;
+            converted.linked_regions.push(preserved);
+        }
+    }
+}
+
+fn apply_conversion_dependents(doc: &mut ProjectDocument, target_sheet_id: &SheetId, impact: &ConversionImpact) {
+    let mut scratch_warnings = Vec::new();
+    for rs in &mut doc.result_sheets {
+        let _ = remap_analysis_spec_for_conversion(&mut rs.analysis, target_sheet_id, &impact.col_plan, &mut scratch_warnings);
+        for outlier in &mut rs.eliminated_outliers {
+            if outlier.sheet_id == *target_sheet_id
+                && let Ok(new_c) = impact.col_plan.map_one(outlier.col, "outlier reference")
+            {
+                outlier.col = new_c;
+            }
+        }
+    }
+    for ds in &mut doc.data_sheets {
+        if ds.id == *target_sheet_id {
+            continue;
+        }
+        ds.linked_regions.retain(|region| {
+            let is_broken = impact.broken_link_ids.iter().any(|(sid, rid)| sid == &ds.id && rid == &region.id);
+            !is_broken
+        });
+        for region in &mut ds.linked_regions {
+            if let LinkSource::InternalSheet { sheet_id, kind: InternalLinkKind::DataSheet, range, .. } = &mut region.spec.source
+                && *sheet_id == *target_sheet_id
+                && let Ok(mapped) = impact.col_plan.map_source_range(*range)
+            {
+                *range = mapped;
+            }
+        }
+    }
+    for gs in &mut doc.graph_sheets {
+        let mut graph_warnings = Vec::new();
+        remap_graph_spec_for_conversion(&mut gs.spec, target_sheet_id, &impact.col_plan, &mut graph_warnings, &gs.id);
+    }
+}
+
+fn finalize_broken_dependents(doc: &mut ProjectDocument, impact: &ConversionImpact, recalc: &mut super::project::RecalcSummary) {
+    for (rid, reason) in &impact.broken_result_reasons {
+        if let Some(rs) = doc.result_sheet_mut(rid) {
+            dag::clear_failed_result_sheet(rs, ErrorCode::Conflict, reason.clone());
+        }
+    }
+    if !impact.broken_result_reasons.is_empty() {
+        let mut all_ids: Vec<SheetId> = recalc.failed_result_sheets.iter().map(|f| f.sheet_id.clone()).collect();
+        for (rid, _) in &impact.broken_result_reasons {
+            if !all_ids.contains(rid) {
+                all_ids.push(rid.clone());
+            }
+        }
+        recalc.failed_result_sheets = dag::collect_failed_result_sheets_for_ids(doc, &all_ids);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -4279,10 +5408,42 @@ enum PlateValuesInput {
 }
 
 impl PlateValuesInput {
-    fn flatten(self) -> Result<Vec<Option<f64>>, EngineError> {
+    fn into_flat_checked(self, geometry: PlateGeometry) -> Result<Vec<Option<f64>>, EngineError> {
         let flat = match self {
-            Self::Flat(v) => v,
-            Self::Grid(rows) => rows.into_iter().flatten().collect(),
+            Self::Flat(v) => {
+                let expected = geometry.well_count();
+                if v.len() != expected {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("flat plate `values` length ({}) does not match {expected} wells for {geometry:?}", v.len()),
+                    ));
+                }
+                v
+            }
+            Self::Grid(rows) => {
+                let expected_rows = geometry.rows();
+                let expected_cols = geometry.cols();
+                if rows.len() != expected_rows {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("2D plate `values` row count ({}) does not match {expected_rows}x{expected_cols} plate geometry", rows.len()),
+                    ));
+                }
+                let mut flat = Vec::with_capacity(expected_rows * expected_cols);
+                for (row_idx, row) in rows.into_iter().enumerate() {
+                    if row.len() != expected_cols {
+                        return Err(EngineError::with_code(
+                            ErrorCode::BadInput,
+                            format!(
+                                "2D plate `values` row {row_idx} has {} column(s), expected {expected_cols} for {expected_rows}x{expected_cols} plate geometry",
+                                row.len()
+                            ),
+                        ));
+                    }
+                    flat.extend(row);
+                }
+                flat
+            }
         };
         for item in &flat {
             if let Some(num) = item
@@ -4472,7 +5633,7 @@ fn run_import_plate_map(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome,
     let title = p.title.as_deref().unwrap_or("Plate Data");
     validate_title(title)?;
     let (geometry, template) = resolve_plate_template(&p, title)?;
-    let values = p.values.flatten()?;
+    let values = p.values.into_flat_checked(geometry)?;
     let target_kind = match p.target_kind.as_deref() {
         Some(raw_kind) => parse_target_archetype_kind(raw_kind)?,
         None => TargetArchetypeKind::Grouped,
@@ -4794,8 +5955,6 @@ fn upsert_info_constants(
         }
     } else if let Some(fid) = fallback_info_id.filter(|id| doc.info_sheet(id).is_some()) {
         fid.clone()
-    } else if let Some(first) = doc.info_sheets.first() {
-        first.id.clone()
     } else if create_if_missing {
         let iid = next_unique_sheet_id(doc, "info")?;
         doc.add_info_sheet(InfoSheet::new_preseeded(iid.clone(), default_title)?)?;
@@ -5061,7 +6220,10 @@ fn run_random_sample_rows(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcom
         provenance.push((String::from("sample.allocation"), String::from(if proportional { "proportional" } else { "equal" })));
     }
 
-    let info_id = upsert_info_constants(doc, p.info_sheet_id.as_deref(), src_info_id.as_ref(), false, &format!("{title} Info"), &provenance)?;
+    let reusable_src_info_id = src_info_id.filter(|iid| {
+        doc.info_sheet(iid).is_some_and(|info| !info.constants.iter().any(|c| c.name.starts_with("sample.") || c.name.starts_with("randomization.")))
+    });
+    let info_id = upsert_info_constants(doc, p.info_sheet_id.as_deref(), reusable_src_info_id.as_ref(), true, &format!("{title} Info"), &provenance)?;
     if let Some(ref iid) = info_id {
         sampled.info_sheet_id = Some(iid.clone());
     }
