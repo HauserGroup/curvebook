@@ -63,7 +63,7 @@ For MCP framing details, attaching to a shared desktop window (`curvebook --cont
 
 - **Online Manual & Reference:** [hausergroup.github.io/curvebook/manual/](https://hausergroup.github.io/curvebook/manual/)
 - **Repository Documentation Index:** [`docs/README.md`](docs/README.md)
-- **Known Issues & Release Notes:** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) (historical Alpha notes: [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md))
+- **Known Issues & Release Notes:** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) (historical Alpha notes: [`docs/history/release/alpha-known-issues.md`](docs/history/release/alpha-known-issues.md))
 - **Report a Bug or Numerical Issue:** Open a [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml), [Numerical Result Report](.github/ISSUE_TEMPLATE/numerical_result.yml), or [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) via GitHub Issues (avoid attaching unpublished or confidential research data).
 - **Security Vulnerabilities:** Report privately following [`SECURITY.md`](SECURITY.md).
 

@@ -623,7 +623,7 @@ pub(crate) fn load_repo_asset_catalog(root: &Path) -> Result<RepoAssetCatalog, S
 
 /// Recursively verify an unpacked release container directory against `catalog`:
 /// - forbids bundled font files (`.ttf`, `.otf`, `.woff`, `.woff2`, ...)
-/// - forbids bundled `plan/prism` or `docs/audit` trees
+/// - forbids bundled `plan/prism`, `docs/audit`, or `docs/history/audit` trees
 /// - verifies prose and table rows of any bundled `ASSETS.md`, `ATTRIBUTION.md`, or `NOTICE`
 /// - verifies binary/SVG metadata and cryptographic `ASSETS.md` provenance of every packaged asset
 pub(crate) fn scan_dist_artefacts(catalog: &RepoAssetCatalog, dist_dir: &Path) -> Result<(usize, Vec<String>), String> {
@@ -678,6 +678,9 @@ fn is_forbidden_bundled_dir(rel: &str) -> bool {
         || norm == "docs/audit"
         || norm.starts_with("docs/audit/")
         || norm.contains("/docs/audit/")
+        || norm == "docs/history/audit"
+        || norm.starts_with("docs/history/audit/")
+        || norm.contains("/docs/history/audit/")
 }
 
 struct DistAssetScanState<'a> {
@@ -801,7 +804,7 @@ fn is_flatpak_appstream_icon_cache(catalog: &RepoAssetCatalog, dist_dir: &Path, 
 mod tests {
     use std::path::PathBuf;
 
-    use super::{is_asset, is_font_file, is_original_only_visual_asset, missing, verify_assets};
+    use super::{is_asset, is_font_file, is_forbidden_bundled_dir, is_original_only_visual_asset, missing, verify_assets};
 
     #[test]
     fn detects_unattributed_assets() {
@@ -990,5 +993,12 @@ See also `assets/prose.png` in prose.
         assert!(err_svg.contains("originpro"), "{err_svg}");
 
         let _ = std::fs::remove_dir_all(&root);
+    }
+
+    #[test]
+    fn archived_audit_history_is_forbidden_in_bundles() {
+        assert!(is_forbidden_bundled_dir("docs/history/audit"));
+        assert!(is_forbidden_bundled_dir("web/docs/history/audit/findings"));
+        assert!(!is_forbidden_bundled_dir("docs/history/roadmap"));
     }
 }

@@ -1,5 +1,5 @@
 //! Project Navigator tree state, anchored Family dependency pane model, and Welcome / New Table
-//! + Clone Pipeline wizard state (`docs/ui-parity.md`).
+//! + Clone Pipeline wizard state (`docs/evidence/user-interface.md`).
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
@@ -14,7 +14,7 @@ use curvebook_tools::{NavigatorDragState, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
-/// Display mode for the five-folder Project Navigator tree (`docs/ui-parity.md`).
+/// Display mode for the five-folder Project Navigator tree (`docs/evidence/user-interface.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum NavigatorNestingMode {
     /// Five independent top-level folders (`Data Tables`, `Info`, `Results`, `Graphs`, `Layouts`).
@@ -145,7 +145,7 @@ pub struct FamilyPaneNode {
     pub is_dirty: bool,
 }
 
-/// Active tab inside the Welcome / Project Initialization dialog (`docs/ui-parity.md`).
+/// Active tab inside the Welcome / Project Initialization dialog (`docs/evidence/user-interface.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum WelcomeMode {
     #[default]
@@ -300,7 +300,7 @@ impl TableCreationDraft {
     }
 }
 
-/// Curated self-guided tutorial / sample dataset descriptor (`docs/ui-parity.md`).
+/// Curated self-guided tutorial / sample dataset descriptor (`docs/evidence/user-interface.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct SampleFixtureDescriptor {
     pub id: &'static str,
@@ -419,7 +419,7 @@ pub fn instantiate_sample_fixture(fixture_id: &str, sheet_id: impl Into<SheetId>
     Ok(sheet)
 }
 
-/// Configuration draft for `sheet.clonePipeline` ("Clone a Graph / Pipeline"; `docs/ui-parity.md`).
+/// Configuration draft for `sheet.clonePipeline` ("Clone a Graph / Pipeline"; `docs/evidence/user-interface.md`).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClonePipelineDraft {
     pub source_sheet_id: Option<SheetId>,

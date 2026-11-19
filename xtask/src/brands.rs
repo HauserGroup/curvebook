@@ -69,6 +69,9 @@ const ALLOW_MARKER: &str = "brand-ok";
 /// Legacy historical audit directory preserved read-only (`R0.21` / `AGENTS.md`).
 const AUDIT_PREFIX: &str = "docs/audit/";
 
+/// Archived audit rounds moved under `docs/history/` (`R0.31`); same read-only treatment as `AUDIT_PREFIX`.
+const HISTORY_AUDIT_PREFIX: &str = "docs/history/audit/";
+
 /// Xtask gate implementation modules that intentionally embed the scanner definitions and unit probes.
 const SELF_SCANNER_PATHS: &[&str] =
     &["xtask/src/brands.rs", "xtask/src/cleanroom.rs", "xtask/src/assets.rs", "xtask/src/bundle.rs", "xtask/src/layers.rs"];
@@ -317,7 +320,11 @@ fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
 fn skip_path(path: &str) -> bool {
     let norm = path.replace('\\', "/");
     let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
-    trimmed == "docs/audit" || trimmed.starts_with(AUDIT_PREFIX) || SELF_SCANNER_PATHS.contains(&trimmed)
+    trimmed == "docs/audit"
+        || trimmed.starts_with(AUDIT_PREFIX)
+        || trimmed == "docs/history/audit"
+        || trimmed.starts_with(HISTORY_AUDIT_PREFIX)
+        || SELF_SCANNER_PATHS.contains(&trimmed)
 }
 
 fn scan_file(path: &str, text: &str, out: &mut Vec<BrandHit>) {
@@ -4277,6 +4284,8 @@ fn collect_dist_files(root: &Path, dir: &Path, out: &mut Vec<String>) -> Result<
 fn scan_dist_path_and_file(dist_dir: &Path, rel: &str, stats: &mut DistScanStats, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     if rel.starts_with(AUDIT_PREFIX)
         || rel.contains("/docs/audit/")
+        || rel.starts_with(HISTORY_AUDIT_PREFIX)
+        || rel.contains("/docs/history/audit/")
         || rel == PLAN_PRISM_SCOPE
         || rel.starts_with("plan/prism/")
         || rel.contains("/plan/prism/")
@@ -4412,7 +4421,7 @@ mod tests {
     use super::{
         BrandHit, check_html_metadata, check_i18n_catalog, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata,
         check_pdf_metadata, check_svg_metadata, check_text_runs, check_text_runs_strict, check_ui_surfaces, check_window_title, run, scan_file,
-        scan_repo_checked,
+        scan_repo_checked, skip_path,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -5423,5 +5432,14 @@ it: "Copia Statistica report",
         let mut stub_hits = Vec::new();
         scan_file("docs/manual/index.html", "<p>table.importPrism</p>\n", &mut stub_hits);
         assert!(stub_hits.iter().any(|h| h.brand == "prism"), "stub index.html must stay strict: {stub_hits:?}");
+    }
+
+    #[test]
+    fn archived_audit_history_is_skipped_like_live_audit_dir() {
+        assert!(skip_path("docs/audit/README.md"));
+        assert!(skip_path("docs/history/audit/findings/r1/S02.md"));
+        assert!(skip_path("./docs/history/audit"));
+        assert!(!skip_path("docs/history/roadmap/r0.md"));
+        assert!(!skip_path("docs/evidence/overview.md"));
     }
 }

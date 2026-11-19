@@ -1,6 +1,6 @@
 # Data Tables, Calculated Variables & Transforms — Implementation Guidelines
 
-Governing specification for `crates/doc` (`L1`), `crates/transform` (`L2`), and data-sheet commands in `crates/engine` (`L5`). Parity checklist: [`file-format-parity.md`](../file-format-parity.md) and [`ui-parity.md`](../ui-parity.md).
+Governing specification for `crates/doc` (`L1`), `crates/transform` (`L2`), and data-sheet commands in `crates/engine` (`L5`). Parity checklist: [`evidence/file-formats.md`](../evidence/file-formats.md) and [`evidence/user-interface.md`](../evidence/user-interface.md).
 
 Clean-room data-model & interchange specifications:
 - [`crates/doc`](../../crates/doc): Eight typed table archetypes (`TableArchetype`), `SubcolumnMode`, non-destructive cell exclusions, and freeze state.
@@ -119,6 +119,8 @@ Transforms never overwrite a `DataSheet` in place; they execute as pure function
    - Swap rows $\leftrightarrow$ data sets while preserving titles; decimate every $k$-th row or average $k$-row windows for high-frequency time-series traces; Select & Transform row filtering (`filter_formula`), custom derived column-transform formulas (`derived_columns` using the shared windowed/conditional formula engine), and archetype subsetting/projection (`MultipleVariables` $\to$ `XY` / `Column` / `Grouped` / `Survival`, etc.).
 5. **Simulate XY / Column / Contingency Data (`TransformAnalysisSpec::Simulate`):**
    - Deterministic seeded PRNG (`curvebook_math::rng::DeterministicRng`) parameterized by `seed`, `row_count`, `replicates`, `x_min`, `x_max`, `equation_id`, `parameters`, and `noise` (`SimulationNoise`: `None`, `Gaussian`, `RelativePercent`, or `Poisson`) to generate synthetic curves or distributions for Monte Carlo validation, power exploration, and teaching workflows.
+6. **Curve Calculus, Smoothing & Planned Spline/LOWESS Curve Fitting (`crates/transform/src/curve.rs`):**
+   - `curve.rs` provides trapezoidal AUC (`compute_auc`, `compute_auc_with_se`), numerical differentiation/integration (`differentiate_xy`, `integrate_xy`), and smoothing (`SmoothMethod`: Savitzky–Golay 5/7/9-point, moving average, and Cleveland 1979 LOWESS). Planned first-class XY `FitSplineLowess` analysis (Natural Cubic Spline, Akima subspline, knot-controlled Smoothing Spline, Coarse/Medium/Fine LOWESS, log-aware point-to-point curves, and nonparametric standard-curve unknown interpolation) and Info-hooked theoretical distribution plotting (`Plot a function`) are specified in [`curve-fitting-implementation.md`](curve-fitting-implementation.md#6-planned-model-free-curve-fitting-spline--lowess--theoretical-distribution-plotting-target-specification) §6.
 
 ---
 

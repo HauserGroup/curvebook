@@ -617,7 +617,7 @@ jobs:
         with:
           subject-path: 'dist/release/*'
       # Fail closed: before anything is uploaded, check every file with the same command
-      # docs/release/verifying-downloads.md gives users, pinned to this workflow and ref.
+      # docs/reference/get-started.md#verifying-downloads gives users, pinned to this workflow and ref.
       # Retries cover the short delay before a new attestation can be looked up.
       - name: Verify attestations the way a downloader would
         env:

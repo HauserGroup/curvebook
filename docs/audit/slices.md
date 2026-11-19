@@ -7,16 +7,16 @@ Slices `S01`–`S13` follow the crate layering. `X1` and `X2` cross crates on pu
 | ID | Slice | Paths | Size | Governing guide |
 |---|---|---|---:|---|
 | `S01` | Numerical foundations | `crates/math`, `crates/palette` | 8.5k | [statistics-implementation.md §1](../implementation/statistics-implementation.md) |
-| `S02` | Statistics | `crates/stats` | 12k | [statistics-implementation.md](../implementation/statistics-implementation.md), [stats-parity.md](../stats-parity.md) |
+| `S02` | Statistics | `crates/stats` | 12k | [statistics-implementation.md](../implementation/statistics-implementation.md), [evidence/statistics.md](../evidence/statistics.md) |
 | `S03` | Curve fitting and equation language | `crates/fit` | 11k | [curve-fitting-implementation.md](../implementation/curve-fitting-implementation.md) |
 | `S04` | Transforms and calculated variables | `crates/transform` | 6k | [data-tables-and-transforms.md](../implementation/data-tables-and-transforms.md) |
 | `S05` | Document model | `crates/doc` | 5.5k | [data-tables-and-transforms.md](../implementation/data-tables-and-transforms.md), [architecture.md](../architecture.md) |
-| `S06` | File formats and import | `crates/format` | 6k | [file-format-parity.md](../file-format-parity.md) |
+| `S06` | File formats and import | `crates/format` | 6k | [evidence/file-formats.md](../evidence/file-formats.md) |
 | `S07` | Engine: commands, DAG, undo | `crates/engine` | 7.5k | [architecture.md](../architecture.md), [scripting-and-automation.md](../implementation/scripting-and-automation.md) |
 | `S08` | Chart compiler and scales | `crates/chart` | 12k | [graphing-and-layouts.md](../implementation/graphing-and-layouts.md) |
 | `S09` | Text, raster, SVG and PDF output | `crates/text`, `crates/render`, `crates/svg`, `crates/pdf` | 9k | [graphing-and-layouts.md](../implementation/graphing-and-layouts.md) |
-| `S10` | UI shell | `crates/ui-egui` | 12k | [ui-parity.md](../ui-parity.md), [control-protocol.md](../control-protocol.md) |
-| `S11` | Interactive tools and app entry points | `crates/tools`, `apps/curvebook`, `apps/curvebook-web` | 3.5k | [ui-parity.md](../ui-parity.md) |
+| `S10` | UI shell | `crates/ui-egui` | 12k | [evidence/user-interface.md](../evidence/user-interface.md), [control-protocol.md](../control-protocol.md) |
+| `S11` | Interactive tools and app entry points | `crates/tools`, `apps/curvebook`, `apps/curvebook-web` | 3.5k | [evidence/user-interface.md](../evidence/user-interface.md) |
 | `S12` | Headless CLI and MCP server | `apps/curvebook-cli`, `crates/mcp` | 4.5k | [scripting-and-automation.md](../implementation/scripting-and-automation.md), [mcp.md](../mcp.md) |
 | `S13` | Build guards and test kit | `xtask`, `crates/testkit` | 5.5k | [development.md](../development.md) |
 | `X1` | Untrusted input, end to end | Entry points in `S10`–`S12` through `S07` to file I/O and allocation in `S06`/`S09` | — | [control-protocol.md](../control-protocol.md), [mcp.md](../mcp.md) |

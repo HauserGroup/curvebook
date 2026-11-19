@@ -122,6 +122,7 @@ const CONTRIBUTOR_GITHUB_GUIDES: &[(&str, &str, &str)] = &[
     ("Developer Setup & Commands", "docs/development.md", "Building, testing, coverage reporting, font env vars, and verification workflows."),
     ("Extending CurveBook", "docs/extending.md", "How to add new engine commands, statistical analyses, equations, and UI menus."),
     ("Engineering Pitfalls", "docs/pitfalls.md", "Recurring pitfalls prevented by repository gates and review checklists."),
+    ("General Engineering Pitfalls", "docs/pitfalls-engineering.md", "General Rust, tooling, persistence, and process rules adopted for CurveBook."),
     (
         "Command ID Stability Contract",
         "docs/command-ids.md",

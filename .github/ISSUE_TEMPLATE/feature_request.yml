@@ -1,11 +1,11 @@
-name: Feature or parity gap
+name: Feature or capability gap
 description: An analysis, equation, graph type, file format, or workflow that is missing or incomplete.
 labels: ["enhancement"]
 body:
   - type: markdown
     attributes:
       value: |
-        Check [`docs/gaps.md`](https://github.com/HauserGroup/curvebook/blob/main/docs/gaps.md) first. Most missing features are already listed there with a gap id and a gate.
+        Check [`docs/ROADMAP.md`](https://github.com/HauserGroup/curvebook/blob/main/docs/ROADMAP.md) first. Most missing features are already listed there with a roadmap id and a gate.
         Work is done in the order set out in the roadmap, so a request outside the current gate may wait.
   - type: textarea
     id: need
@@ -23,9 +23,9 @@ body:
   - type: input
     id: gap
     attributes:
-      label: Related gap id
-      description: The id from docs/gaps.md if there is one, for example G3 or G8.
-      placeholder: G3
+      label: Related roadmap id
+      description: The roadmap item id from docs/ROADMAP.md if there is one, for example R12.3.
+      placeholder: R12.3
   - type: textarea
     id: spec
     attributes:
@@ -45,5 +45,5 @@ body:
     attributes:
       label: Before submitting
       options:
-        - label: I searched existing issues and docs/gaps.md.
+        - label: I searched existing issues and docs/ROADMAP.md.
           required: true

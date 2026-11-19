@@ -1,5 +1,5 @@
 //! `cargo xtask status`: verify unique first-column keys in `docs/STATUS.md` and `docs/ROADMAP.md`,
-//! and enforce test-evidence gates across `docs/ui-parity.md` and `docs/gui-workflows.md` §6.2
+//! and enforce test-evidence gates across `docs/evidence/user-interface.md` and `docs/gui-workflows.md` §6.2
 //! (Pitfall #6: semantic agent-harness tests/flags never prove human GUI parity).
 
 use std::collections::BTreeSet;
@@ -8,7 +8,7 @@ use std::path::Path;
 
 const STATUS_REL: &str = "docs/STATUS.md";
 const ROADMAP_REL: &str = "docs/ROADMAP.md";
-const UI_PARITY_REL: &str = "docs/ui-parity.md";
+const UI_EVIDENCE_REL: &str = "docs/evidence/user-interface.md";
 const GUI_WORKFLOWS_REL: &str = "docs/gui-workflows.md";
 const AGENT_HARNESS_TAG: &str = "*(agent harness)*";
 
@@ -91,7 +91,7 @@ impl WorkspaceTests {
 }
 
 /// Validate Column-1 key uniqueness across `docs/STATUS.md` and `docs/ROADMAP.md`
-/// and enforce `[x]` / human-path evidence across `docs/ui-parity.md` and `docs/gui-workflows.md`.
+/// and enforce `[x]` / human-path evidence across `docs/evidence/user-interface.md` and `docs/gui-workflows.md`.
 pub fn run(root: &Path) -> Result<(), String> {
     let mut total_tables = 0usize;
     let mut duplicates = Vec::new();
@@ -110,8 +110,8 @@ pub fn run(root: &Path) -> Result<(), String> {
     let mut violations = check_live_status_metrics(root, &status_text);
 
     let workspace_tests = collect_workspace_tests(root)?;
-    let ui_parity_text = fs::read_to_string(root.join(UI_PARITY_REL)).map_err(|e| format!("{UI_PARITY_REL}: {e}"))?;
-    violations.extend(check_ui_parity_evidence(UI_PARITY_REL, &ui_parity_text, Some(&workspace_tests)));
+    let ui_parity_text = fs::read_to_string(root.join(UI_EVIDENCE_REL)).map_err(|e| format!("{UI_EVIDENCE_REL}: {e}"))?;
+    violations.extend(check_ui_parity_evidence(UI_EVIDENCE_REL, &ui_parity_text, Some(&workspace_tests)));
 
     let workflows_text = fs::read_to_string(root.join(GUI_WORKFLOWS_REL)).map_err(|e| format!("{GUI_WORKFLOWS_REL}: {e}"))?;
     violations.extend(check_gui_workflows_human_path(GUI_WORKFLOWS_REL, &workflows_text, Some(&workspace_tests)));
@@ -119,7 +119,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     if duplicates.is_empty() && violations.is_empty() {
         println!(
             "status: verified {total_tables} Markdown table(s) across {STATUS_REL} and {ROADMAP_REL}, \
-             live metrics, [x] evidence in {UI_PARITY_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL}"
+             live metrics, [x] evidence in {UI_EVIDENCE_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL}"
         );
         return Ok(());
     }
@@ -295,7 +295,7 @@ fn extract_fn_name(trimmed: &str) -> Option<&str> {
     if !name.is_empty() && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') { Some(name) } else { None }
 }
 
-/// Enforce test or manual-run evidence on every `[x]` item/row in `docs/ui-parity.md`
+/// Enforce test or manual-run evidence on every `[x]` item/row in `docs/evidence/user-interface.md`
 /// excluding rows/items marked `*(agent harness)*`.
 #[must_use]
 pub fn check_ui_parity_evidence(path: &str, md: &str, known_tests: Option<&WorkspaceTests>) -> Vec<EvidenceViolation> {
@@ -679,14 +679,14 @@ A checkbox `[x]` in prose is ignored.
 - [x] *(agent harness)* Wizard suite (`gui_wf_foundations_and_data::wf01_t_test`, `--control`).
 - [ ] Pending dialog work (`dispatch_gui_action` only).
 ";
-        let violations = check_ui_parity_evidence("docs/ui-parity.md", md, Some(&tests));
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
         assert!(violations.is_empty(), "unexpected violations: {violations:?}");
     }
 
     #[test]
     fn ui_parity_rejects_missing_evidence_on_checked_item() {
         let md = "- [x] Interactive modal buttons work cleanly.\n";
-        let violations = check_ui_parity_evidence("docs/ui-parity.md", md, None);
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, None);
         assert_eq!(violations.len(), 1);
         assert_eq!(violations[0].line, 1);
         assert!(violations[0].reason.contains("missing passing human-path test"));
@@ -696,7 +696,7 @@ A checkbox `[x]` in prose is ignored.
     fn ui_parity_rejects_unknown_test_name_when_workspace_indexed() {
         let tests = WorkspaceTests::default();
         let md = "- [x] Modal dialog — verified by `ui_tests::invented_nonexistent_test`.\n";
-        let violations = check_ui_parity_evidence("docs/ui-parity.md", md, Some(&tests));
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
         assert_eq!(violations.len(), 1);
         assert!(violations[0].reason.contains("invented_nonexistent_test"));
     }
@@ -721,7 +721,7 @@ A checkbox `[x]` in prose is ignored.
             "- [x] Replay works via `gui_only_workflows::eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only`.\n",
         ];
         for md in cases {
-            let violations = check_ui_parity_evidence("docs/ui-parity.md", md, Some(&tests));
+            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, Some(&tests));
             assert_eq!(violations.len(), 1, "expected harness rejection for `{md}`, got {violations:?}");
             assert!(violations[0].reason.contains("agent-harness"), "got `{}`", violations[0].reason);
         }
@@ -784,7 +784,7 @@ A checkbox `[x]` in prose is ignored.
             "- [x] Open dialog — without computer-use (2026-11-18) verification.\n",
         ];
         for md in cases {
-            let violations = check_ui_parity_evidence("docs/ui-parity.md", md, None);
+            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", md, None);
             assert_eq!(violations.len(), 1, "expected rejection for `{md}`, got {violations:?}");
         }
     }
@@ -795,11 +795,11 @@ A checkbox `[x]` in prose is ignored.
 - [x] Native Save — computer-use: 2026-11-18 macOS desktop mouse+screen QA.
 - [x] Native Print — computer-use walkthrough (2026-11-18 macOS + Safari).
 ";
-        let violations = check_ui_parity_evidence("docs/ui-parity.md", valid_md, None);
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_md, None);
         assert!(violations.is_empty(), "unexpected violations: {violations:?}");
 
         let harness_mixed = "- [x] Save dialog — computer-use: 2026-11-18 driven via `--control` and `ui.click`.\n";
-        let bad = check_ui_parity_evidence("docs/ui-parity.md", harness_mixed, None);
+        let bad = check_ui_parity_evidence("docs/evidence/user-interface.md", harness_mixed, None);
         assert_eq!(bad.len(), 1, "expected agent-harness rejection, got {bad:?}");
         assert!(bad[0].reason.contains("agent-harness"), "got `{}`", bad[0].reason);
     }
@@ -847,7 +847,7 @@ fn active_human_test() {}
 - [x] WF-01 qualified (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`).
 - [x] WF-01 unqualified (`wf01_human_xy_dose_response_format_exclude_with_reason`).
 ";
-        let valid_parity = check_ui_parity_evidence("docs/ui-parity.md", valid_md, Some(&tests));
+        let valid_parity = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_md, Some(&tests));
         assert!(valid_parity.is_empty(), "unexpected violations: {valid_parity:?}");
 
         let valid_wf_table = "\
@@ -867,7 +867,7 @@ fn active_human_test() {}
             "- [x] Bad non-human wf (`other_suite::wf01_non_human_harness`).\n",
             "- [x] Bad unqualified (`wf01_one_sample_t_test`).\n",
         ] {
-            let violations = check_ui_parity_evidence("docs/ui-parity.md", bad_line, Some(&tests));
+            let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", bad_line, Some(&tests));
             assert_eq!(violations.len(), 1, "expected rejection for `{bad_line}`, got {violations:?}");
             assert!(violations[0].reason.contains("agent-harness"), "got `{}`", violations[0].reason);
         }

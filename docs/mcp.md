@@ -1,6 +1,8 @@
-# Model Context Protocol Server (`curvebook-mcp`)
+# MCP Server: Source Builds & Internals (`curvebook-mcp`)
 
-`curvebook-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory headless `curvebook-engine` session by default, or attached over loopback TCP (`127.0.0.1:<port>`) to a running `curvebook --control <port>` instance via `curvebook-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). By default `curvebook --control <port>` runs headless; pass the opt-in `--window` flag (`curvebook --control <port> --window`) to attach a visible desktop window sharing the same live `UiApp` / `Session` ([`R7.3`](planning/roadmap-history/r7.md#r73-mcp-workflow-parity-proof--shared-live-window)).
+> **Who this page is for.** Contributors and people running CurveBook from a source checkout. To connect an AI assistant to an installed release, follow the [beginner's guide](mcp-for-beginners.md). The published [MCP server reference](reference/automation/mcp.md) is the canonical description of transports, attachment modes, tools, resources, and error payloads, and the [troubleshooting page](reference/troubleshooting.md#mcp-connection) covers connection problems. This page adds source builds, client configuration presets, and implementation detail.
+
+`curvebook-cli mcp` runs a stdio [Model Context Protocol (MCP)](https://modelcontextprotocol.io/) server (`crates/mcp`) over an in-memory headless `curvebook-engine` session by default, or attached over loopback TCP (`127.0.0.1:<port>`) to a running `curvebook --control <port>` instance via `curvebook-cli mcp --control-port <port>` ([`control-protocol.md`](control-protocol.md)). By default `curvebook --control <port>` runs headless; pass the opt-in `--window` flag (`curvebook --control <port> --window`) to attach a visible desktop window sharing the same live `UiApp` / `Session` ([`R7.3`](history/roadmap/r7.md#r73-mcp-workflow-parity-proof--shared-live-window)).
 
 > Related specifications: [`commands.md`](commands.md), [`gui-workflows.md`](gui-workflows.md), [`control-protocol.md`](control-protocol.md), [`scripting-and-automation.md`](implementation/scripting-and-automation.md) · Beginner guide: [`mcp-for-beginners.md`](mcp-for-beginners.md) · Project overview: [`README.md`](../README.md) · Live test & command counts: [`STATUS.md`](STATUS.md)
 
@@ -57,7 +59,7 @@ EOF
 ```
 
 Expected output (three JSON lines on stdout; `notifications/initialized` produces no reply):
-1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"<package version>"}` (currently `"0.1.0-alpha.2"` in the Cargo workspace).
+1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"<package version>"}`.
 2. Line 2 (`"id":2`): exact pong `{"id":2,"jsonrpc":"2.0","result":{}}`.
 3. Line 3 (`"id":3`): `"tools"` array containing the default core tools: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`.
 
@@ -83,13 +85,15 @@ Expected output:
 
 ## Protocol & Wire Framing
 
-- **Transport (`crates/mcp/src/protocol.rs`):** JSON-RPC 2.0 over `stdin` / `stdout`. Default headless `curvebook-cli mcp` opens no network sockets; loopback TCP (`127.0.0.1`) is used only when `--control-port` or `CURVEBOOK_CONTROL_PORT` is supplied.
-- **Framing:** Auto-detects and mirrors both standard `Content-Length: N\r\n\r\n` framing and newline-delimited JSON-RPC (`<json>\n`), enforcing `MAX_REQUEST_BYTES = 16 MiB` (`MAX_DRAIN_BYTES = 64 MiB`), `MAX_HEADER_LINE_BYTES = 8 KiB`, `MAX_HEADER_COUNT = 32`, and `MAX_BATCH_LEN = 256`.
-- **Handshake & Capabilities:** `initialize` negotiates `protocolVersion` `"2024-11-05"` (and accepts `"2025-03-26"` when requested), identifies `serverInfo.name = "curvebook"`, advertises `capabilities.tools.listChanged: true`, `resources` (`subscribe: false`, `listChanged: false`), and `prompts` (`listChanged: false`), and emits `SERVER_INSTRUCTIONS` (or `GUI_ONLY_SERVER_INSTRUCTIONS` under `--gui-only`). Supports `notifications/initialized`, `notifications/cancelled`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`.
+Framing, handshake, and protocol revisions are documented in the [MCP server reference](reference/automation/mcp.md#transports-and-wire-framing). Implementation detail for contributors:
+
+- **Transport (`crates/mcp/src/protocol.rs`):** Default headless `curvebook-cli mcp` opens no network sockets; loopback TCP (`127.0.0.1`) is used only when `--control-port` or `CURVEBOOK_CONTROL_PORT` is supplied.
+- **Limits:** `MAX_REQUEST_BYTES = 16 MiB` (`MAX_DRAIN_BYTES = 64 MiB`), `MAX_HEADER_LINE_BYTES = 8 KiB`, `MAX_HEADER_COUNT = 32`, and `MAX_BATCH_LEN = 256`.
+- **Handshake:** `initialize` emits `SERVER_INSTRUCTIONS` (or `GUI_ONLY_SERVER_INSTRUCTIONS` under `--gui-only`). Supported methods: `notifications/initialized`, `notifications/cancelled`, `ping`, `tools/list`, `tools/call`, `resources/list`, `resources/read`, `prompts/list`, and `prompts/get`.
 
 ## Modes & Reach
 
-The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI ([`ui-parity.md`](ui-parity.md); Beta scope and platform notes in [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)), while `curvebook-cli mcp` exposes the full programmatic and AI-assistant automation surface over stdio (the WebAssembly browser bundle `curvebook-web` is deferred to `1.0`, [`R11`](ROADMAP.md#r11-usable-browser-app)).
+The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI ([`evidence/user-interface.md`](evidence/user-interface.md); Beta scope and platform notes in [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)), while `curvebook-cli mcp` exposes the full programmatic and AI-assistant automation surface over stdio (the WebAssembly browser bundle `curvebook-web` is deferred to `1.0`, [`R11`](ROADMAP.md#r11-usable-browser-app)).
 
 | Mode | Reach |
 |---|---|
@@ -100,10 +104,10 @@ The desktop application (`curvebook`) provides the interactive `LayoutTree` GUI 
 ## Status & Current Limitations
 
 - **Verified stdio parity (`R7.3`):** Interactive workflow parity (including standalone *P*-value stack adjustment `stats.pvalueStack` and Compact Letter Display `graph.setCompactLetterDisplay`) is verified end to end over spawned `curvebook-cli mcp --gui-only` stdio JSON-RPC subprocesses, alongside headless `command_run` / `command_batch` / `open_file` / `save_file` / `export` / `render_preview`, `WorkdirGuard` path containment, and opt-in `curvebook --control <port> --window` shared desktop sessions.
-- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the interactive `LayoutTree` workspace ([`ui-parity.md`](ui-parity.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](planning/roadmap-history/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
+- **Desktop GUI & live-attach (`R10`, [`Beta known issues`](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)):** The `curvebook` desktop application renders the interactive `LayoutTree` workspace ([`evidence/user-interface.md`](evidence/user-interface.md)), and `curvebook --control <port> --window` attaches a visible desktop window synchronized with loopback control/MCP requests on the same live `UiApp` / `Session`. In parallel, the `gui` MCP toolset drives `UiApp` through the semantic harness (`crates/ui-egui/src/{inspect.rs, gui_actions.rs}`). Browser WebAssembly support (`curvebook-web`) is deferred to `1.0` ([`R0.28`](history/roadmap/r0.md#r028-rein-in-the-number-of-release-install-files), [`R11`](ROADMAP.md#r11-usable-browser-app)).
 - **Headless UI commands:** In default headless `curvebook-cli mcp`, desktop `ui.*` commands report `"available": false` and require `--control-port <port>` attached to a running `curvebook --control <port>` process.
 - **Live-attach `command_batch` rollback:** In headless mode, `command_batch` with `"atomic": true` restores an exact session snapshot on failure; in `--control-port` live-attach mode, rollback replays `edit.undo` for completed mutating steps (`ping` and read-only `ui.*` commands excluded), so remote rollback follows the desktop session's undo stack.
-- **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-beyond-parity.md`](planning/qol-beyond-parity.md)).
+- **Deferred QoL items:** `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones ([`qol-enhancements.md`](planning/qol-enhancements.md)).
 
 ## CLI Flags & Advanced Configuration
 
@@ -116,18 +120,7 @@ curvebook-cli mcp [--control-port <1..=65535>] [--gui-only] [--workdir <dir>] [-
 
 ### Example Configurations
 
-Headless with strict `--workdir` confinement (recommended starting configuration):
-
-```json
-{
-  "mcpServers": {
-    "curvebook": {
-      "command": "/absolute/path/to/curvebook-cli",
-      "args": ["mcp", "--workdir", "/path/to/workspace"]
-    }
-  }
-}
-```
+The headless configuration with `--workdir` is shown in [Configure Your MCP Client](#2-configure-your-mcp-client). Two further presets:
 
 Live-attached to a shared visible desktop window (`curvebook --control 9123 --window`):
 
@@ -157,48 +150,7 @@ Strict `--gui-only` agent-harness mode (in-process `UiApp`):
 
 ## Troubleshooting the connection
 
-Start by checking whether the MCP client can launch the configured server process, then check the protocol handshake.
-
-1. **Use absolute paths for the binary and for `--workdir`.** Set `"command"` to the full path of `curvebook-cli` (for example `./target/release/curvebook-cli` after running `cargo build --release -p curvebook-cli`, or `/Applications/CurveBook.app/Contents/MacOS/curvebook-cli` on macOS) and pass `--workdir` as a full path to a directory that already exists (`mkdir -p /path/to/your/data-folder`). Relative paths resolve against whatever working directory the client happens to start the process in, which is usually not your project folder. A missing or unreadable `--workdir` makes the server exit before the handshake with `usage error: --workdir ... is inaccessible` (exit status `2`).
-2. **Do not rely on `PATH` (fixes `command not found` / `ENOENT`).** Applications started from the macOS Dock or Finder, or from a desktop launcher on Linux or Windows, do not inherit the `PATH` of your interactive shell, so a bare `curvebook-cli` that works in a terminal can fail to start from the client. Use the full path (for example the output of `command -v curvebook-cli`, or the absolute path to `target/release/curvebook-cli` from a checkout build). The same applies to wrappers such as `cargo run`; prefer the built binary.
-3. **Add `"type": "stdio"` if your client asks for it.** Some clients require an explicit transport on each server entry and ignore or reject entries without one:
-
-   ```json
-   {
-     "mcpServers": {
-       "curvebook": {
-         "type": "stdio",
-         "command": "/absolute/path/to/curvebook-cli",
-         "args": ["mcp", "--workdir", "/path/to/workspace"]
-       }
-     }
-   }
-   ```
-
-4. **"No tools available" or a missing server usually means the process did not start.** Run the exact configured command by hand in a terminal, with the same arguments, and read its standard error. A usage or `--workdir` error prints one line to stderr and exits non-zero; a healthy server prints nothing and waits for input. Then confirm the handshake by sending the requests below (output abbreviated):
-
-   ```sh
-   printf '%s\n' \
-     '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"check","version":"0"}}}' \
-     '{"jsonrpc":"2.0","method":"notifications/initialized"}' \
-     '{"jsonrpc":"2.0","id":2,"method":"tools/list"}' \
-     | /absolute/path/to/curvebook-cli mcp --workdir /path/to/workspace
-   ```
-
-   Expect two JSON lines: the `initialize` result (`serverInfo.name` is `"curvebook"`) and a `tools/list` result containing the tool list. These responses confirm that the configured binary starts and handles basic discovery. Next check the client configuration, its protocol logs, and whether it needs restarting after a configuration change.
-5. **Keep stdout clean.** Stdout carries the protocol. Wrappers must send banners and diagnostics to stderr. Normal Cargo progress messages already use stderr; `cargo run -q` reduces that noise but cannot repair a wrapper that writes to stdout. Prefer the built binary for a stable launch command.
-6. **Source build fails on older Rust versions.** Run `rustc --version` and `cargo --version` inside the repository to verify both report `1.99.1` or newer ([`development.md#prerequisites`](development.md#prerequisites)).
-
-Errors that appear after a successful connection:
-
-| Symptom | Cause and fix |
-|---|---|
-| Tool result with `code: "path_escape"` (`category: "policy"`) | `--workdir` is set and the requested path is outside it (absolute path elsewhere, `..`, or a symlink out). Move the file inside the workdir or widen `--workdir`. |
-| Tool result with `code: "gui_only_violation"` | The server was started with `--gui-only`, which exposes only the `gui` tools (`ui_*`); every other tool, and `resources/read`, is rejected. Remove `--gui-only` for engine, file, and export tools ([`--gui-only` behaviour](#3---gui-only-protocol-behavior)). |
-| Tool result with `code: "conflict"` when calling a `ui_*` tool | Default headless mode has no live window. Start with `--gui-only`, or attach with `--control-port` ([Live-Attach](#live-attach--shared-window-mode---control-port----window)). |
-| Tool result with `code: "io_error"` and `failed to connect to desktop control port` | `--control-port` (or `CURVEBOOK_CONTROL_PORT`) is set but no `curvebook --control <port>` instance is listening on `127.0.0.1:<port>`. Start the desktop side first, or drop the flag. The server itself still starts; the error appears on each tool call. |
-| Tool result with `code: "bad_input"` and `invalid or missing control authentication token` | The attached desktop rejected the control authentication token (the raw control error `unauthorized` is mapped to MCP `bad_input`). Check `--control-token`, `CURVEBOOK_CONTROL_TOKEN`, and the per-user token file described in [Live-Attach](#live-attach--shared-window-mode---control-port----window). Use the token for the running desktop instance; do not disable authentication. |
-| `usage error: invalid --control-port` / `invalid CURVEBOOK_CONTROL_PORT` | The port must be an integer in `1..=65535`. |
+Connection problems (paths, `PATH`, `"type": "stdio"`, clean stdout, and the errors that appear after connecting) are covered once, on the published [troubleshooting page](reference/troubleshooting.md#mcp-connection).
 
 ## Shipped Surface (`R7.1`, `R0.13`, `R7.3`)
 

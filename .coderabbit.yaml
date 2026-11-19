@@ -12,6 +12,6 @@ reviews:
     - path: "crates/fit/**"
       instructions: "Check Levenberg-Marquardt conditioning, weighting, Cauchy/ROUT outlier handling, parameter constraints, profile-likelihood CI edge cases, and NIST StRD coverage per docs/implementation/curve-fitting-implementation.md."
     - path: "crates/{doc,transform,format}/**"
-      instructions: "Check typed table invariants, non-destructive exclusions, DAG cycle safety, and bounded untrusted archive/CSV/XML parsing per docs/implementation/data-tables-and-transforms.md and docs/file-format-parity.md."
+      instructions: "Check typed table invariants, non-destructive exclusions, DAG cycle safety, and bounded untrusted archive/CSV/XML parsing per docs/implementation/data-tables-and-transforms.md and docs/evidence/file-formats.md."
     - path: "crates/{chart,text,palette,render,svg,pdf}/**"
       instructions: "Check deterministic ChartScene compilation, safe log/probit/broken-axis guards, and SVG/PDF/raster parity per docs/implementation/graphing-and-layouts.md."

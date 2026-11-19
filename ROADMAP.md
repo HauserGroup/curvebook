@@ -4,5 +4,5 @@ CurveBook's active task list, architectural milestones (`R0`–`R10`), and relea
 
 - Active claimable roadmap: [`docs/ROADMAP.md`](docs/ROADMAP.md)
 - Verified implementation status & known limits: [`docs/STATUS.md`](docs/STATUS.md)
-- Completed progress log & wave history: [`docs/planning/roadmap-history.md`](docs/planning/roadmap-history.md)
-- Feature parity assessment: [`docs/target-app-parity.md`](docs/target-app-parity.md)
+- Completed progress log & wave history: [`docs/history/roadmap.md`](docs/history/roadmap.md)
+- Feature parity assessment: [`docs/evidence/overview.md`](docs/evidence/overview.md)

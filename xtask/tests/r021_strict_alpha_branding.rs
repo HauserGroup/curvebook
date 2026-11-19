@@ -467,20 +467,20 @@ fn r021_asset_provenance_png_ico_crc_and_edited_docs_links_valid() -> Result<(),
 
     let dot_ext = join(&[".pr", "ism"]);
     let cmd_id = join(&["table.", "im", "port", "Pr", "ism"]);
-    let parity_doc = fs::read_to_string(root.join("docs/target-app-parity.md")).map_err(|e| e.to_string())?;
-    if !parity_doc.contains("../AGENTS.md#limited-local-jpg-reference-policy") || !parity_doc.contains("### Calibration") {
-        return Err(String::from("docs/target-app-parity.md missing required policy link or Calibration heading"));
+    let parity_doc = fs::read_to_string(root.join("docs/evidence/overview.md")).map_err(|e| e.to_string())?;
+    if !parity_doc.contains("../../AGENTS.md#limited-local-jpg-reference-policy") || !parity_doc.contains("### Calibration") {
+        return Err(String::from("docs/evidence/overview.md missing required policy link or Calibration heading"));
     }
     for doc_rel in [
-        "docs/target-app-parity.md",
-        "docs/fitting-parity.md",
-        "docs/stats-parity.md",
-        "docs/graphing-parity.md",
+        "docs/evidence/overview.md",
+        "docs/evidence/curve-fitting.md",
+        "docs/evidence/statistics.md",
+        "docs/evidence/graphing.md",
         "docs/implementation/curve-fitting-implementation.md",
         "docs/implementation/data-tables-and-transforms.md",
         "docs/implementation/graphing-and-layouts.md",
         "docs/implementation/statistics-implementation.md",
-        "docs/release/alpha-branding-clearance.md",
+        "docs/history/release/alpha-branding-clearance.md",
     ] {
         let content = fs::read_to_string(root.join(doc_rel)).map_err(|e| format!("read {doc_rel}: {e}"))?;
         let masked = content.replace(&dot_ext, ".fmt_ext").replace(&cmd_id, "table.import_ext");

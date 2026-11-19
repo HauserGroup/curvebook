@@ -604,7 +604,7 @@ pub enum AnalyzeDuplicateChoice {
     CreateNew,
 }
 
-/// Interactive state for the searchable `Analyze...` dialog (`docs/ui-parity.md`).
+/// Interactive state for the searchable `Analyze...` dialog (`docs/evidence/user-interface.md`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnalyzeDialogState {
     pub source_sheet_id: Option<SheetId>,

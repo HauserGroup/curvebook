@@ -67,7 +67,7 @@ Before tagging or publishing a release, verify both source invariants and packag
        dist/release
      ```
    - `release-scan` unpacks containers through bounded `curvebook-platform` subprocesses (`.zip`, `.tar.gz`/`.tgz`, `.AppImage`, `.dmg` on macOS, `.msi` on Windows, plus historical `.deb`/`.rpm`/`.flatpak`/`.zsync` for Alpha backfill), enforces zip-slip/tar-slip guards, fails closed on unknown or unextractable formats, checks `SHA256SUMS.txt`, and runs `brands`, `cleanroom`, and `assets` over every unpacked entry.
-   - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
+   - Backfilling `v0.1.0-alpha.1` requires downloading its published assets from GitHub (see [alpha-branding-clearance.md](../history/release/alpha-branding-clearance.md#6-hosted-release-asset-scan-r026)).
 3. **Cross-platform packaging integrity scripts:**
    - Shared packaging metadata / brand hygiene check:
      ```sh
@@ -130,7 +130,7 @@ Use this template when editing a drafted Beta GitHub Release (`v<version>`) befo
 
 ### Verifying Downloaded Release Artefacts
 
-User-facing verification steps and why Linux and FreeBSD downloads carry no separate signature file live in [verifying-downloads.md](verifying-downloads.md) and [Get Started](https://hausergroup.github.io/curvebook/get-started.html). The `publish` job runs `gh attestation verify` on every file in the `R0.28` Beta asset set before upload and stops the release if any file fails.
+User-facing verification steps live only in the [Get Started verification section](../reference/get-started.md#verifying-downloads), published as [Get Started](https://hausergroup.github.io/curvebook/get-started.html). The `publish` job runs `gh attestation verify` on every file in the `R0.28` Beta asset set before upload and stops the release if any file fails.
 
 1. **Verify Sigstore build provenance** with the GitHub CLI (`gh`):
    ```sh
@@ -147,6 +147,12 @@ User-facing verification steps and why Linux and FreeBSD downloads carry no sepa
    *(If you downloaded only one platform's files into the current directory, pass `sha256sum -c --ignore-missing SHA256SUMS.txt`; on macOS without GNU coreutils, use `shasum -a 256 -c SHA256SUMS.txt`.)*
 
 **CI-only provenance & zero binary egress:** Keyless OIDC/Sigstore attestation calls (`id-token: write` and `attestations: write`, scoped strictly to the `publish` job in `.github/workflows/release.yml`) run exclusively in GitHub Actions during release publishing. Shipped CurveBook binaries (`curvebook`, `curvebook-cli`) and the WASM web bundle gain **zero** network access, update checks, or telemetry (`cargo xtask telemetry`).
+
+### Why Linux and FreeBSD Downloads Have No Separate Signature File
+
+Neither the AppImage runtime nor FreeBSD checks a signature when you run a downloaded file, so a signature only helps people who check it by hand. The release attestation already gives that check. It ties each file to the release workflow, uses no long-lived signing key that could leak, and records every signature in a public log.
+
+A separate GPG or Minisign signature would only add protection if its key were kept off GitHub. Kept as a GitHub secret, it can be used by anyone who can run the release workflow, which is the same group that can produce an attestation. An offline key would need manual signing on every release and its own key management, and would add one more file per download. We will revisit this if a downstream packager needs a signing key, if an update channel that checks signatures is added, or if releases move off GitHub. This decision is recorded under `R8.10` in the [roadmap](../ROADMAP.md).
 
 ### Repository Settings That Protect Release Provenance
 
@@ -192,7 +198,7 @@ gh api repos/HauserGroup/curvebook/rulesets --jq '.[] | select(.target == "tag")
 Once the release build passes verification and is published:
 
 1. Confirm the release-gate table in [docs/ROADMAP.md](../ROADMAP.md) (`Legacy Milestone & Gate Mapping`).
-2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](../ROADMAP.md) (moving milestone archival notes to `docs/planning/roadmap-history.md` if retiring a milestone phase).
+2. Mark all shipped `R<m>.<n>` items **Done** in [docs/ROADMAP.md](../ROADMAP.md) (moving milestone archival notes to `docs/history/roadmap.md` if retiring a milestone phase).
 3. Refresh and verify [docs/STATUS.md](../STATUS.md) and open-item summaries:
    ```sh
    cargo xtask status
