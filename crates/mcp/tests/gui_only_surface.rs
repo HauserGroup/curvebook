@@ -150,14 +150,39 @@ fn gui_only_tools_list_shrinks_strictly_to_eight_gui_tools() {
     let wire_names: Vec<&str> = wire_tools.iter().map(|t| t["name"].as_str().expect("tool name")).collect();
     assert_eq!(wire_names, GUI_TOOL_NAMES);
 
-    // Ensure annotations match readOnlyHint expectations from docs/gui-workflows.md §2.2.
-    assert_eq!(wire_tools[0]["annotations"]["readOnlyHint"], json!(true));
-    assert_eq!(wire_tools[0]["annotations"]["idempotentHint"], json!(true));
-    assert_eq!(wire_tools[1]["annotations"]["readOnlyHint"], json!(true));
-    assert_eq!(wire_tools[2]["annotations"]["readOnlyHint"], json!(true));
-    assert_eq!(wire_tools[2]["annotations"]["idempotentHint"], json!(false));
-    assert_eq!(wire_tools[3]["annotations"]["readOnlyHint"], json!(false));
-    assert_eq!(wire_tools[7]["annotations"]["readOnlyHint"], json!(false));
+    // Ensure annotations match worst-case Effects across all 8 GUI tools.
+    assert_eq!(
+        wire_tools[0]["annotations"],
+        json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
+    );
+    assert_eq!(
+        wire_tools[1]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true })
+    );
+    assert_eq!(
+        wire_tools[2]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+    );
+    assert_eq!(
+        wire_tools[3]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+    );
+    assert_eq!(
+        wire_tools[4]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+    );
+    assert_eq!(
+        wire_tools[5]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+    );
+    assert_eq!(
+        wire_tools[6]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
+    );
+    assert_eq!(
+        wire_tools[7]["annotations"],
+        json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+    );
 
     // resources/list is empty and resources/read is refused under --gui-only.
     let res_list = rpc_roundtrip(&mut state, 3, "resources/list", json!({})).expect("resources/list");
@@ -567,4 +592,51 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
     assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
     assert_eq!(calls[8].1["force_create_new"], json!(true));
     assert_eq!(calls[8].1["choice"], json!("create_new"));
+}
+
+#[test]
+fn gui_tools_worst_case_annotations_cover_all_eight_tools() {
+    let expected = [
+        ("ui_inspect", true, false, true, false),
+        ("ui_screenshot", false, true, true, true),
+        ("ui_pointer_gesture", false, true, false, true),
+        ("ui_type_text", false, true, false, true),
+        ("ui_press_key", false, true, false, true),
+        ("ui_invoke_menu", false, true, false, true),
+        ("ui_switch_tab", false, false, true, false),
+        ("ui_answer_dialog", false, true, false, true),
+    ];
+
+    let gui_defs = curvebook_mcp::list_gui_tools();
+    assert_eq!(gui_defs.len(), GUI_TOOL_NAMES.len());
+
+    let mut gui_only_state = McpServerState::new().with_gui_only(true);
+    let gui_only_defs = list_tools_for_state(&gui_only_state);
+    assert_eq!(gui_only_defs.len(), GUI_TOOL_NAMES.len());
+
+    let wire_list = rpc_roundtrip(&mut gui_only_state, 10, "tools/list", json!({})).expect("tools/list");
+    let wire_tools = wire_list["result"]["tools"].as_array().expect("wire tools array");
+
+    let mut enabled_state = McpServerState::new();
+    call_tool(&mut enabled_state, "enable_toolset", json!({ "group": "gui" })).expect("enable gui toolset");
+    let full_defs = list_tools_for_state(&enabled_state);
+
+    for (idx, &(name, ro, destr, idemp, open_w)) in expected.iter().enumerate() {
+        assert_eq!(gui_defs[idx].name, name);
+        assert_eq!(gui_only_defs[idx].name, name);
+        assert_eq!(wire_tools[idx]["name"], json!(name));
+
+        let expected_json = json!({
+            "readOnlyHint": ro,
+            "destructiveHint": destr,
+            "idempotentHint": idemp,
+            "openWorldHint": open_w,
+        });
+        assert_eq!(serde_json::to_value(gui_defs[idx].annotations).unwrap(), expected_json, "list_gui_tools annotation mismatch for {name}");
+        assert_eq!(serde_json::to_value(gui_only_defs[idx].annotations).unwrap(), expected_json, "gui-only list_tools_for_state mismatch for {name}");
+        assert_eq!(wire_tools[idx]["annotations"], expected_json, "wire tools/list mismatch for {name}");
+
+        let exposed = full_defs.iter().find(|t| t.name == name).expect("enabled gui tool missing");
+        assert_eq!(serde_json::to_value(exposed.annotations).unwrap(), expected_json, "enabled gui toolset mismatch for {name}");
+    }
 }

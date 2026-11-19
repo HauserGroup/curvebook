@@ -10,6 +10,14 @@ use serde_json::{Map, Value, json};
 use crate::tools::{McpServerState, ToolCallError, ToolCallResult, ToolDefinition};
 
 /// MCP tool behavioral annotations derived directly from engine [`Effects`].
+///
+/// Matches engine [`Effects`] semantics cleanly:
+/// - `readOnlyHint`: `false` whenever the tool can mutate the document, alter UI/toolset state
+///   (`CHANGES_UI_STATE`), discard data, write the filesystem, or launch processes.
+/// - `destructiveHint`: `true` whenever `MAY_DISCARD_DATA` or `WRITES_FILESYSTEM` is set, because
+///   file-writing tools can overwrite existing targets on disk.
+/// - `idempotentHint`: mirrors `Effects::IDEMPOTENT`.
+/// - `openWorldHint`: `true` when touching external filesystem paths or launching subprocesses.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ToolAnnotations {
     #[serde(rename = "readOnlyHint")]
@@ -24,6 +32,10 @@ pub struct ToolAnnotations {
 
 impl ToolAnnotations {
     /// Derive canonical MCP tool annotations from engine [`Effects`] flags.
+    ///
+    /// Both `CHANGES_UI_STATE` (`readOnlyHint: false`) and `WRITES_FILESYSTEM`
+    /// (`destructiveHint: true` for potential overwrites) are propagated automatically via
+    /// [`Effects::read_only_hint`] and [`Effects::destructive_hint`].
     #[must_use]
     pub const fn from_effects(effects: Effects) -> Self {
         Self {
@@ -264,4 +276,76 @@ fn collect_requested_groups(args: &Map<String, Value>) -> Result<RequestedToolse
     }
 
     Ok(RequestedToolsets { groups: selected.into_iter().collect(), include_gui })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn from_effects_maps_ui_state_and_filesystem_writes_to_worst_case_annotations() {
+        let read_only = ToolAnnotations::from_effects(Effects::NONE.with(Effects::IDEMPOTENT));
+        assert!(read_only.read_only_hint);
+        assert!(!read_only.destructive_hint);
+        assert!(read_only.idempotent_hint);
+        assert!(!read_only.open_world_hint);
+
+        let ui_only = ToolAnnotations::from_effects(Effects::CHANGES_UI_STATE.with(Effects::IDEMPOTENT));
+        assert!(!ui_only.read_only_hint);
+        assert!(!ui_only.destructive_hint);
+        assert!(ui_only.idempotent_hint);
+        assert!(!ui_only.open_world_hint);
+
+        let fs_write = ToolAnnotations::from_effects(Effects::WRITES_FILESYSTEM.with(Effects::IDEMPOTENT));
+        assert!(!fs_write.read_only_hint);
+        assert!(fs_write.destructive_hint);
+        assert!(fs_write.idempotent_hint);
+        assert!(fs_write.open_world_hint);
+    }
+
+    #[test]
+    fn list_toolsets_exposes_accurate_worst_case_gui_tool_annotations() {
+        let state = McpServerState::new();
+        let res = handle_list_toolsets(&state).expect("list_toolsets");
+        let text = match res.content.first() {
+            Some(crate::tools::ContentBlock::Text { text }) => text,
+            other => panic!("unexpected list_toolsets content: {other:?}"),
+        };
+        let parsed: Value = serde_json::from_str(text).expect("list_toolsets JSON");
+        let gui_tools = parsed["gui_toolset"]["tools"].as_array().expect("gui tools array");
+        assert_eq!(gui_tools.len(), 8);
+
+        let by_name: std::collections::BTreeMap<&str, &Value> =
+            gui_tools.iter().map(|entry| (entry["name"].as_str().expect("gui tool name"), &entry["annotations"])).collect();
+
+        assert_eq!(by_name["ui_inspect"], &json!({ "readOnlyHint": true, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false }));
+        assert_eq!(
+            by_name["ui_screenshot"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": true, "openWorldHint": true })
+        );
+        assert_eq!(
+            by_name["ui_pointer_gesture"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+        );
+        assert_eq!(
+            by_name["ui_type_text"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+        );
+        assert_eq!(
+            by_name["ui_press_key"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+        );
+        assert_eq!(
+            by_name["ui_invoke_menu"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+        );
+        assert_eq!(
+            by_name["ui_switch_tab"],
+            &json!({ "readOnlyHint": false, "destructiveHint": false, "idempotentHint": true, "openWorldHint": false })
+        );
+        assert_eq!(
+            by_name["ui_answer_dialog"],
+            &json!({ "readOnlyHint": false, "destructiveHint": true, "idempotentHint": false, "openWorldHint": true })
+        );
+    }
 }

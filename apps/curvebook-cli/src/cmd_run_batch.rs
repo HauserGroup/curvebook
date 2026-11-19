@@ -5,9 +5,9 @@ use std::io::Read as _;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicBool;
 
-use curvebook_doc::ProjectDocument;
+use curvebook_doc::{ErrorCode, ProjectDocument, ResultStatus};
 use curvebook_engine::cmd::Caller;
-use curvebook_engine::{ExternalPathPolicy, Session};
+use curvebook_engine::{EngineError, ExternalPathPolicy, Session};
 use curvebook_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, instantiate_template_bytes};
 use curvebook_pdf::PdfVersion;
 use curvebook_platform::PlatformError;
@@ -151,6 +151,7 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
         load_manifest_inputs(&mut session, &manifest.inputs)?;
         let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
         session.recalculate_all()?;
+        ensure_no_failed_result_sheets(session.document())?;
 
         let mut export_summaries = Vec::with_capacity(manifest.exports.len());
         for exp in &manifest.exports {
@@ -192,6 +193,47 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
         }
         Ok(())
     })
+}
+
+fn ensure_no_failed_result_sheets(doc: &ProjectDocument) -> Result<(), CliError> {
+    let mut failed_entries = Vec::new();
+    let mut descriptions = Vec::new();
+    let mut first_code: Option<ErrorCode> = None;
+
+    for rs in &doc.result_sheets {
+        if let ResultStatus::Failed { code, message } = &rs.status {
+            if first_code.is_none() {
+                first_code = Some(*code);
+            }
+            let title = rs.title();
+            let label = if title.is_empty() { rs.id.to_string() } else { format!("{title} ({})", rs.id) };
+            descriptions.push(format!("{label}: [{}] {message}", code.as_str()));
+            failed_entries.push(json!({
+                "sheet_id": rs.id.to_string(),
+                "title": title,
+                "code": code.as_str(),
+                "message": message,
+            }));
+        }
+    }
+
+    if descriptions.is_empty() {
+        return Ok(());
+    }
+
+    // Batch failures must always map to exit code 1 (`EXIT_RUNTIME`); Cancelled/PathEscape would otherwise map to 130/2.
+    let outer_code = match first_code {
+        Some(ErrorCode::Cancelled | ErrorCode::PathEscape) | None => ErrorCode::SolverFailed,
+        Some(code) => code,
+    };
+    let err =
+        EngineError::with_code(outer_code, format!("batch failed with {} failed result sheet(s): {}", descriptions.len(), descriptions.join("; ")))
+            .with_remediation("Fix the input data, column types, or analysis settings for the failed result sheet(s) before exporting.")
+            .with_details(json!({
+                "failed_count": failed_entries.len(),
+                "failed_result_sheets": failed_entries,
+            }));
+    Err(CliError::Engine(err))
 }
 
 fn build_resolver(workdir: Option<&str>, fallback_base: &Path) -> Result<PathResolver, CliError> {

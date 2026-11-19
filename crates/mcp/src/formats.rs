@@ -8,14 +8,18 @@
 //! explicit path-policy modes configured on [`McpServerState`]:
 //!
 //! 1. **Unconstrained local-user mode (default when `--workdir` is omitted):** Intended for trusted
-//!    local automation running with the invoking OS user's full privileges. Relative and absolute
-//!    host paths anywhere readable/writable by that OS user are accepted (still enforcing non-empty
-//!    paths, NUL-byte rejection, regular-file checks, input size caps, refuse-newer archive guards,
-//!    and crash-safe atomic writes via `curvebook_platform::fs::write_atomic`). Because an MCP
-//!    client in unconstrained mode can atomically overwrite any user-writable file via `save_file`
-//!    or `export`, **only attach unconstrained MCP servers to trusted local agents**.
-//! 2. **Sandboxed workdir mode (`--workdir <dir>` / [`McpServerState::with_workdir`]):** Enforces a
-//!    hard containment boundary via `curvebook_platform::WorkdirGuard`. Every input, output,
+//!    local automation running with the invoking OS user's full privileges (including live-attached
+//!    `--control-port` sessions). Relative and absolute host paths anywhere readable/writable by
+//!    that OS user are accepted (still enforcing non-empty paths, NUL-byte rejection, regular-file
+//!    checks, input size caps, refuse-newer archive guards, and crash-safe atomic writes via
+//!    `curvebook_platform::fs::write_atomic`). Because an MCP client in unconstrained mode can
+//!    atomically overwrite any user-writable destination file via `save_file` or `export`, both
+//!    tools report `destructiveHint: true` and **only attach unconstrained MCP servers to trusted
+//!    local agents**.
+//! 2. **Sandboxed workdir mode (`--workdir <dir>` / [`McpServerState::with_workdir`]):** Applies
+//!    strictly to headless and in-process `GuiSessionHost` modes (cannot be combined with
+//!    `--control-port`, because `--workdir` cannot confine a live-attached desktop host). Enforces
+//!    a hard containment boundary via `curvebook_platform::WorkdirGuard`. Every input, output,
 //!    command parameter, and linked-file path must canonicalize strictly within `<dir>`; absolute
 //!    paths outside `<dir>`, `..` parent-directory traversals, and symlinks resolving outside
 //!    `<dir>` are rejected with `ErrorCode::PathEscape`. Untrusted or semi-trusted MCP clients
@@ -72,9 +76,10 @@ const DESC_JSON: FormatDescriptor = FormatDescriptor { id: "json", label: "JSON 
 /// - When [`McpServerState::workdir_guard`] is configured (`--workdir <dir>`), `raw_path` is
 ///   confined strictly inside that canonical root via `WorkdirGuard::resolve`, returning
 ///   [`ErrorCode::PathEscape`] if `raw_path`, `..` components, or symlinks escape `<dir>`.
-/// - When no `WorkdirGuard` is configured, `raw_path` may be any non-empty, NUL-free relative or
+/// - When no `WorkdirGuard` is configured (including live `--control-port` sessions, which
+///   cannot be combined with `--workdir`), `raw_path` may be any non-empty, NUL-free relative or
 ///   absolute path accessible to the current OS user; callers writing to the returned path (such as
-///   `save_file` and `export`) can atomically overwrite any user-writable destination file.
+///   `save_file` and `export`) atomically overwrite any user-writable destination file.
 pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result<PathBuf, EngineError> {
     if raw_path.trim().is_empty() {
         return Err(EngineError::with_code(ErrorCode::BadInput, "path must not be empty"));
@@ -98,8 +103,9 @@ pub(crate) fn resolve_mcp_path(state: &McpServerState, raw_path: &str) -> Result
 
 /// Sanitize recursive path keys inside engine command JSON payloads when a `WorkdirGuard` is active.
 ///
-/// Without `--workdir`, command path parameters remain unconstrained and execute with the local
-/// user's filesystem permissions.
+/// Applies to headless and in-process `GuiSessionHost` modes (`--workdir` cannot be combined with
+/// `--control-port`). Without `--workdir`, command path parameters remain unconstrained and execute
+/// with the local user's filesystem permissions.
 pub(crate) fn sanitize_command_params(state: &McpServerState, params: &mut Value) -> Result<(), EngineError> {
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(guard) = state.workdir_guard() {
