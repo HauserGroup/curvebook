@@ -557,6 +557,7 @@ fn check_accesskit_interactive_nodes(nodes: &[(AccessKitNodeId, AccessKitNode)],
 }
 
 type DriverUiFn<'a, State> = Box<dyn FnMut(&mut Ui, &mut FrameInspectMeta, &mut State) + 'a>;
+type PostFrameHook<'a, State> = Box<dyn FnMut(&mut State, bool) + 'a>;
 
 /// Human-path test and QA driver over real `egui 0.37` frames, raw [`egui::Event`] injection,
 /// AccessKit tree snapshots, and [`FrameInspectMeta`].
@@ -567,6 +568,7 @@ pub struct EguiHumanPathDriver<'a, State = ()> {
     bleed_policy: TextBleedPolicy,
     state: State,
     ui_fn: DriverUiFn<'a, State>,
+    post_frame_hook: Option<PostFrameHook<'a, State>>,
     meta: FrameInspectMeta,
     last_accesskit: Option<AccessKitTreeUpdate>,
     last_shapes: Vec<ClippedShape>,
@@ -608,6 +610,7 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
             bleed_policy: TextBleedPolicy::StrictAllEdges,
             state,
             ui_fn: Box::new(ui_fn),
+            post_frame_hook: None,
             meta: FrameInspectMeta::new(),
             last_accesskit: None,
             last_shapes: Vec::new(),
@@ -639,6 +642,12 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
     /// Mutably borrow user state owned by the driver.
     pub const fn state_mut(&mut self) -> &mut State {
         &mut self.state
+    }
+
+    /// Install a callback invoked after each frame pass with `(&mut state, settled)`, allowing
+    /// `PendingUiIntents::commit_if_settled` to run outside discardable `ctx.run_ui` layout passes.
+    pub fn set_post_frame_hook(&mut self, hook: impl FnMut(&mut State, bool) + 'a) {
+        self.post_frame_hook = Some(Box::new(hook));
     }
 
     /// Current viewport metrics.
@@ -802,6 +811,9 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         let phys_size = [self.metrics.physical_width_px(), self.metrics.physical_height_px()];
         self.stamp = GeometryStamp::from_context(self.frame_seq, &self.ctx, phys_size, settled);
         output.drop_without_applying_deltas();
+        if let Some(hook) = self.post_frame_hook.as_mut() {
+            hook(&mut self.state, settled);
+        }
     }
 
     /// Move pointer to logical `(pos.x, pos.y)` and dwell long enough for hover tooltips to open.

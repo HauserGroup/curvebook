@@ -548,6 +548,19 @@ pub fn check_accesskit_scrollbar_non_overlap(update: &egui::accesskit::TreeUpdat
     Ok(())
 }
 
+/// Top-level `egui_shell` workspace/dialog frame entry point routed by both `apps/curvebook` and
+/// headless `UiApp::inspect_egui_shell_snapshot` / `render_egui_shell_screenshot_png` (`R15.2+`).
+pub fn render_egui_shell_frame(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    views: &mut super::EguiShellViewState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> ShellAboutFrameReport {
+    let _ = views;
+    render_minimal_shell_and_about(ui, app, meta, intents)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

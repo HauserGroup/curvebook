@@ -233,6 +233,8 @@ pub(crate) struct UiShellSnapshot {
     pub host_draws_menu_bar: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub ui_backend: egui_shell::UiBackend,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub egui_views: egui_shell::EguiShellViewState,
     pub view_shards: views::ViewShardStates,
     pub clipboard_adapter: ClipboardAdapterSlot,
     #[cfg(not(target_arch = "wasm32"))]
@@ -365,6 +367,8 @@ pub struct UiApp {
     pub host_draws_menu_bar: bool,
     #[cfg(not(target_arch = "wasm32"))]
     pub ui_backend: egui_shell::UiBackend,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub egui_views: egui_shell::EguiShellViewState,
     pub view_shards: views::ViewShardStates,
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
     #[cfg(not(target_arch = "wasm32"))]
@@ -415,6 +419,8 @@ impl UiApp {
             host_draws_menu_bar: false,
             #[cfg(not(target_arch = "wasm32"))]
             ui_backend: egui_shell::UiBackend::Legacy,
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_views: egui_shell::EguiShellViewState::default(),
             view_shards: views::ViewShardStates::default(),
             clipboard_adapter: ClipboardAdapterSlot::default(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -454,6 +460,8 @@ impl UiApp {
             host_draws_menu_bar: self.host_draws_menu_bar,
             #[cfg(not(target_arch = "wasm32"))]
             ui_backend: self.ui_backend,
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_views: self.egui_views.clone(),
             view_shards: self.view_shards.clone(),
             clipboard_adapter: self.clipboard_adapter.clone(),
             #[cfg(not(target_arch = "wasm32"))]
@@ -488,6 +496,7 @@ impl UiApp {
         #[cfg(not(target_arch = "wasm32"))]
         {
             self.ui_backend = snap.ui_backend;
+            self.egui_views = snap.egui_views;
             self.egui_dispatch_hook = snap.egui_dispatch_hook;
         }
         self.view_shards = snap.view_shards;
@@ -955,7 +964,9 @@ impl UiApp {
         #[allow(clippy::cast_possible_truncation)]
         let ppp = metrics.clamped_scale_factor() as f32;
         if let Ok((_, mut output, meta, _stamp)) = self.run_settled_egui_shell_frame([w_pt, h_pt], ppp, None, |ui, app_ref, meta, intents| {
-            let _ = egui_shell::inspect_bridge::render_minimal_shell_and_about(ui, app_ref, meta, intents);
+            let mut views = std::mem::take(&mut app_ref.egui_views);
+            let _ = egui_shell::inspect_bridge::render_egui_shell_frame(ui, app_ref, &mut views, meta, intents);
+            app_ref.egui_views = views;
         }) {
             output.textures_delta.clear();
             egui_shell::inspect_bridge::build_ui_tree_snapshot_from_egui(
@@ -991,7 +1002,9 @@ impl UiApp {
         let mut rasterizer = egui_shell::rasterizer::EguiSoftwareRasterizer::new();
         let (ctx, mut output, _meta, _stamp) = self
             .run_settled_egui_shell_frame([w_pt, h_pt], ppp, Some(&mut rasterizer), |ui, app_ref, meta, intents| {
-                let rep = egui_shell::inspect_bridge::render_minimal_shell_and_about(ui, app_ref, meta, intents);
+                let mut views = std::mem::take(&mut app_ref.egui_views);
+                let rep = egui_shell::inspect_bridge::render_egui_shell_frame(ui, app_ref, &mut views, meta, intents);
+                app_ref.egui_views = views;
                 regions = rep.regions;
             })
             .map_err(|err| RenderError::InvalidTarget { message: err.to_string() })?;

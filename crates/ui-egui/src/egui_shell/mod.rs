@@ -12,12 +12,21 @@ use crate::i18n;
 use crate::layout::ZLayer;
 use crate::theme::{UiThemeMode, UiThemeSpec};
 
+pub mod data_grid;
 pub mod driver;
 pub mod fonts;
 pub mod inspect_bridge;
 pub mod rasterizer;
+pub mod stat_anova_modal;
 pub mod top_bar_fit;
 pub mod widgets;
+
+/// Persistent pure-UI `egui_shell` view states owned alongside [`UiApp`] (`R15.2+`).
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct EguiShellViewState {
+    pub column_grid: data_grid::ColumnGridEguiState,
+    pub anova_modal: stat_anova_modal::AnovaModalEguiState,
+}
 
 /// Active desktop UI presentation backend (`--ui-backend=legacy|egui`, default `Legacy`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
@@ -526,6 +535,12 @@ pub enum UiIntent {
     SetTheme(UiThemeMode),
     SetLocale(String),
     SetUiScale(f32),
+    SelectGridCell { coord: curvebook_tools::GridCellCoord },
+    ExtendGridSelection { coord: curvebook_tools::GridCellCoord },
+    SetRowTitlesCollapsed { collapsed: bool },
+    DialogWidgetClick { widget_id: String },
+    DialogButtonAction { action: String },
+    CustomViewAction { domain: String, payload: String },
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -587,6 +602,36 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::UiCommand { command_id: command_id.into(), params });
     }
 
+    /// Enqueue single-cell selection sync for `coord` without mutating `Session`.
+    pub fn push_select_grid_cell(&mut self, coord: curvebook_tools::GridCellCoord) {
+        self.queue.push(UiIntent::SelectGridCell { coord });
+    }
+
+    /// Enqueue O(1) rectangular selection extension to `coord` (`Shift+Click` / drag).
+    pub fn push_extend_grid_selection(&mut self, coord: curvebook_tools::GridCellCoord) {
+        self.queue.push(UiIntent::ExtendGridSelection { coord });
+    }
+
+    /// Enqueue Row Titles column collapse/expand state update.
+    pub fn push_set_row_titles_collapsed(&mut self, collapsed: bool) {
+        self.queue.push(UiIntent::SetRowTitlesCollapsed { collapsed });
+    }
+
+    /// Enqueue a dialog control click (`edit.assume_gaussian`, `edit.post_hoc.tukey`, etc.).
+    pub fn push_dialog_widget_click(&mut self, widget_id: impl Into<String>) {
+        self.queue.push(UiIntent::DialogWidgetClick { widget_id: widget_id.into() });
+    }
+
+    /// Enqueue a dialog footer button action (`"ok"`, `"cancel"`, `"apply"`, `"create"`).
+    pub fn push_dialog_button(&mut self, action: impl Into<String>) {
+        self.queue.push(UiIntent::DialogButtonAction { action: action.into() });
+    }
+
+    /// Enqueue a view-shard custom action (`"stat_params"`, `"grid_core"`, etc.).
+    pub fn push_custom_view_action(&mut self, domain: impl Into<String>, payload: impl Into<String>) {
+        self.queue.push(UiIntent::CustomViewAction { domain: domain.into(), payload: payload.into() });
+    }
+
     /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
     ///
     /// When `will_discard` is `true`, clears the buffer without executing any mutations so
@@ -601,31 +646,7 @@ impl PendingUiIntents {
         }
         let mut outcomes = Vec::with_capacity(pending.len());
         for intent in pending {
-            match intent {
-                UiIntent::EngineCommand { command_id, params } => {
-                    let outcome = app.execute_session_ui_cmd(&command_id, params)?;
-                    outcomes.push(UiIntentOutcome::Engine { command_id, outcome });
-                }
-                UiIntent::UiCommand { command_id, params } => {
-                    let result = dispatch_ui_command_as_ui(app, &command_id, &params)?;
-                    outcomes.push(UiIntentOutcome::Ui { command_id, result });
-                }
-                UiIntent::SetTheme(mode) => {
-                    let prev_scale = app.theme.ui_scale;
-                    app.set_theme_mode(mode);
-                    app.theme.ui_scale = prev_scale;
-                    outcomes.push(UiIntentOutcome::ShellUpdated);
-                }
-                UiIntent::SetLocale(locale) => {
-                    let _ = app.set_locale(&locale);
-                    outcomes.push(UiIntentOutcome::ShellUpdated);
-                }
-                UiIntent::SetUiScale(scale) => {
-                    let clamped = if scale.is_finite() { scale.clamp(0.75, 3.0) } else { 1.0 };
-                    app.theme.ui_scale = clamped;
-                    outcomes.push(UiIntentOutcome::ShellUpdated);
-                }
-            }
+            outcomes.push(apply_single_ui_intent(app, intent)?);
         }
         app.sync_views();
         Ok(outcomes)
@@ -647,6 +668,72 @@ impl PendingUiIntents {
             }
         }
         Ok(outcomes)
+    }
+}
+
+fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::EngineCommand { command_id, params } => {
+            let outcome = app.execute_session_ui_cmd(&command_id, params)?;
+            Ok(UiIntentOutcome::Engine { command_id, outcome })
+        }
+        UiIntent::UiCommand { command_id, params } => {
+            let result = dispatch_ui_command_as_ui(app, &command_id, &params)?;
+            Ok(UiIntentOutcome::Ui { command_id, result })
+        }
+        UiIntent::SetTheme(mode) => {
+            let prev_scale = app.theme.ui_scale;
+            app.set_theme_mode(mode);
+            app.theme.ui_scale = prev_scale;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetLocale(locale) => {
+            let _ = app.set_locale(&locale);
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetUiScale(scale) => {
+            let clamped = if scale.is_finite() { scale.clamp(0.75, 3.0) } else { 1.0 };
+            app.theme.ui_scale = clamped;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SelectGridCell { coord } => {
+            app.grid.select_single_sync(coord);
+            app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::ExtendGridSelection { coord } => {
+            let mut grid = std::mem::take(&mut app.grid);
+            if let Some(active_id) = app.document().active_sheet_id.as_ref()
+                && let Some(ds) = app.document().data_sheet(active_id)
+            {
+                grid.extend_shift_range(ds, coord);
+            }
+            app.grid = grid;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SetRowTitlesCollapsed { collapsed } => {
+            app.grid.row_titles_collapsed_override = Some(collapsed);
+            app.view_shards.grid_core.row_titles_collapsed = collapsed;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::DialogWidgetClick { widget_id } => {
+            let result = crate::gui_actions::apply_dialog_widget_click(app, &widget_id)?;
+            Ok(UiIntentOutcome::Ui { command_id: format!("dialog.widget:{widget_id}"), result })
+        }
+        UiIntent::DialogButtonAction { action } => {
+            let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
+        }
+        UiIntent::CustomViewAction { domain, payload } => {
+            let mut shards = std::mem::take(&mut app.view_shards);
+            let res = crate::views::dispatch_custom_view_action(app, &mut shards, &domain, &payload);
+            app.view_shards = shards;
+            let outcome = res.map_err(|msg| EngineError::with_code(curvebook_doc::ErrorCode::Conflict, msg))?;
+            Ok(UiIntentOutcome::Ui {
+                command_id: outcome.command_id.unwrap_or_else(|| format!("{domain}:{payload}")),
+                result: outcome.command_result,
+            })
+        }
     }
 }
 
@@ -925,5 +1012,19 @@ mod tests {
         let settled = GeometryStamp::from_context(2, &ctx, [1280, 840], true);
         assert!(settled.matches_target(1280, 840, 1.0));
         assert!(!settled.matches_target(640, 420, 1.0));
+    }
+
+    #[test]
+    fn pending_intents_route_grid_and_dialog_actions_once_settled() -> Result<(), Box<dyn std::error::Error>> {
+        let mut app = UiApp::new();
+        let mut intents = PendingUiIntents::new();
+        intents.push_select_grid_cell(curvebook_tools::GridCellCoord::new(2, 1, 0));
+        intents.push_set_row_titles_collapsed(true);
+        let outcomes = intents.commit_if_settled(&mut app, false)?;
+        assert_eq!(outcomes.len(), 2);
+        assert_eq!(app.grid.tool.active, Some(curvebook_tools::GridCellCoord::new(2, 1, 0)));
+        assert_eq!(app.focus_widget_id.as_deref(), Some("grid.cell.2.1.0"));
+        assert_eq!(app.grid.row_titles_collapsed_override, Some(true));
+        Ok(())
     }
 }
