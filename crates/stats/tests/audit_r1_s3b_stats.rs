@@ -197,7 +197,7 @@ fn proportion_kappa_and_ratio_overflow_guards() {
     let (r_bp_lo, r_bp_hi) = ratios_huge.or_baptista_pike_ci.expect("large-table Baptista-Pike CI in analyze_2x2_ratios");
     assert!(r_bp_lo > 0.999_8 && r_bp_lo < 1.0 && r_bp_hi > 1.0 && r_bp_hi < 1.000_2);
     assert!((r_bp_lo * r_bp_hi - 1.0).abs() < 1e-10);
-    assert!((ratios_huge.odds_ratio - 1.0).abs() < 1e-12);
+    assert!((ratios_huge.odds_ratio.unwrap() - 1.0).abs() < 1e-12);
 
     // Clopper-Pearson k > n and Exact Binomial total cap.
     assert!(clopper_pearson_ci(10, 5, ConfidenceLevel::DEFAULT_95).is_err());

@@ -37,6 +37,11 @@
 //! - Fleiss, J. L., Nee, J. C. M., & Landis, J. R. (1979). Large sample variance of kappa in the case
 //!   of different sets of raters. *Psychological Bulletin*, 86(5), 974-977.
 //!   `doi:10.1037/0033-2909.86.5.974`.
+//! - Fleiss, J. L., Levin, B., & Paik, M. C. (2003). *Statistical Methods for Rates and Proportions*
+//!   (3rd ed.). Wiley. (Non-null asymptotic standard errors for Fleiss's multi-rater kappa, ch. 18).
+//! - Gwet, K. L. (2008). Computing inter-rater reliability and its variance in the presence of high
+//!   agreement. *British Journal of Mathematical and Statistical Psychology*, 61(1), 29-48.
+//!   `doi:10.1348/000711006X126600`.
 
 pub use curvebook_doc::KappaWeighting;
 use curvebook_doc::{
@@ -100,6 +105,12 @@ pub struct ContingencyResult {
     pub min_expected_count: f64,
     /// Fraction of table cells in `[0, 1]` having expected count `< 5.0`.
     pub cells_lt5_fraction: f64,
+    /// Number of empty (all-zero) rows removed prior to testing (`0` when all input rows were active).
+    #[serde(default)]
+    pub dropped_empty_rows: usize,
+    /// Number of empty (all-zero) columns removed prior to testing (`0` when all input columns were active).
+    #[serde(default)]
+    pub dropped_empty_cols: usize,
 }
 
 /// Altman (1998) direction for Number Needed to Treat (`NNTB`, `NNTH`, or `Infinite` when `RD = 0`).
@@ -117,12 +128,12 @@ pub enum NntKind {
 /// Complete `2 x 2` risk, odds, and diagnostic accuracy ratios with score/exact CIs.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct TwoByTwoRatiosResult {
-    /// Sample odds ratio `(a * d) / (b * c)` (`0.5` Haldane–Anscombe correction only where applicable, or `f64::INFINITY`/`0.0`).
-    pub odds_ratio: f64,
+    /// Sample odds ratio `(a * d) / (b * c)` (`None` when `0 / 0`, `Some(f64::INFINITY)` when `a * d > 0` and `b * c == 0`).
+    pub odds_ratio: Option<f64>,
     /// Two-sided Baptista–Pike (1977) conditional/exact mid-P / Fisher odds-ratio CI at configured `ConfidenceLevel` (`None` if both ends undefined).
     pub or_baptista_pike_ci: Option<(f64, f64)>,
-    /// Sample relative risk / risk ratio `(a / (a + b)) / (c / (c + d))` (`f64::NAN` if baseline risk is undefined).
-    pub relative_risk: f64,
+    /// Sample relative risk / risk ratio `(a / (a + b)) / (c / (c + d))` (`None` when `a == 0 && c == 0`, `Some(f64::INFINITY)` when `a > 0 && c == 0`).
+    pub relative_risk: Option<f64>,
     /// Two-sided Koopman (1984) asymptotic score CI for relative risk (`None` if non-estimable).
     pub rr_koopman_ci: Option<(f64, f64)>,
     /// Signed difference of proportions `p1 - p2` in `[-1, 1]`.
@@ -146,19 +157,19 @@ pub struct TwoByTwoRatiosResult {
     /// Raw ordered numeric interval endpoints mapped from `rd_newcombe_ci` (`None` if RD CI crosses zero or unavailable).
     #[serde(default)]
     pub nnt_ci_bounds: Option<(f64, f64)>,
-    /// Diagnostic sensitivity `a / (a + c)` in `[0, 1]` (`0.0` if column 0 total is `0`).
-    pub sensitivity: f64,
-    /// Two-sided Wilson (1927) score CI for `sensitivity` in `[0, 1]`.
-    pub sensitivity_wilson_ci: (f64, f64),
-    /// Diagnostic specificity `d / (b + d)` in `[0, 1]` (`0.0` if column 1 total is `0`).
-    pub specificity: f64,
-    /// Two-sided Wilson (1927) score CI for `specificity` in `[0, 1]`.
-    pub specificity_wilson_ci: (f64, f64),
-    /// Positive predictive value `a / (a + b)` in `[0, 1]` (`0.0` if row 0 total is `0`).
+    /// Diagnostic sensitivity `a / (a + c)` in `[0, 1]` (`None` when column 0 total `a + c == 0`).
+    pub sensitivity: Option<f64>,
+    /// Two-sided Wilson (1927) score CI for `sensitivity` in `[0, 1]` (`None` when `a + c == 0`).
+    pub sensitivity_wilson_ci: Option<(f64, f64)>,
+    /// Diagnostic specificity `d / (b + d)` in `[0, 1]` (`None` when column 1 total `b + d == 0`).
+    pub specificity: Option<f64>,
+    /// Two-sided Wilson (1927) score CI for `specificity` in `[0, 1]` (`None` when `b + d == 0`).
+    pub specificity_wilson_ci: Option<(f64, f64)>,
+    /// Positive predictive value `a / (a + b)` in `[0, 1]`.
     pub ppv: f64,
     /// Two-sided Wilson (1927) score CI for `ppv` in `[0, 1]`.
     pub ppv_wilson_ci: (f64, f64),
-    /// Negative predictive value `d / (c + d)` in `[0, 1]` (`0.0` if row 1 total is `0`).
+    /// Negative predictive value `d / (c + d)` in `[0, 1]`.
     pub npv: f64,
     /// Two-sided Wilson (1927) score CI for `npv` in `[0, 1]`.
     pub npv_wilson_ci: (f64, f64),
@@ -996,6 +1007,62 @@ pub fn fisher_exact_rxc(counts: &[Vec<u64>]) -> Result<f64, StatsError> {
     Ok(((extreme + 1) as f64) / ((n_sims + 1) as f64))
 }
 
+struct ReducedContingencyTable {
+    counts: Vec<Vec<u64>>,
+    r_sums: Vec<u64>,
+    c_sums: Vec<u64>,
+    total_count: u64,
+    n_rows: usize,
+    n_cols: usize,
+    dropped_rows: usize,
+    dropped_cols: usize,
+}
+
+fn reduce_zero_margin_table(counts: &[Vec<u64>]) -> Result<ReducedContingencyTable, StatsError> {
+    let orig_rows = counts.len();
+    let orig_cols = counts.first().map_or(0, Vec::len);
+    if orig_rows == 0 || orig_cols == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+    let (r_sums_all, c_sums_all, total_count) = checked_table_margins(counts)?;
+    if total_count == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+
+    let active_rows: Vec<usize> = (0..orig_rows).filter(|&r| r_sums_all[r] > 0).collect();
+    let active_cols: Vec<usize> = (0..orig_cols).filter(|&c| c_sums_all[c] > 0).collect();
+    let n_rows = active_rows.len();
+    let n_cols = active_cols.len();
+    if n_rows < 2 || n_cols < 2 {
+        return Err(StatsError::InsufficientSampleSize {
+            context: "contingency table (after dropping all-zero rows/columns)",
+            required: 2,
+            actual: n_rows.min(n_cols),
+        });
+    }
+
+    let mut reduced = Vec::with_capacity(n_rows);
+    for &r in &active_rows {
+        let mut row = Vec::with_capacity(n_cols);
+        for &c in &active_cols {
+            row.push(counts[r][c]);
+        }
+        reduced.push(row);
+    }
+    let r_sums: Vec<u64> = active_rows.iter().map(|&r| r_sums_all[r]).collect();
+    let c_sums: Vec<u64> = active_cols.iter().map(|&c| c_sums_all[c]).collect();
+    Ok(ReducedContingencyTable {
+        counts: reduced,
+        r_sums,
+        c_sums,
+        total_count,
+        n_rows,
+        n_cols,
+        dropped_rows: orig_rows - n_rows,
+        dropped_cols: orig_cols - n_cols,
+    })
+}
+
 /// Pearson (1900) `X^2`, optionally with the Yates (1934) `2 x 2` continuity correction applied as
 /// `max(|O - E| - 0.5, 0)`, plus the likelihood-ratio `G^2 = 2 sum O ln(O / E)` (Wilks 1938), and the
 /// minimum expected count.
@@ -1014,6 +1081,9 @@ fn chi_square_stats_with_margins(
     if total == 0 {
         return Err(StatsError::EmptyInput);
     }
+    if r_sums.contains(&0) || c_sums.contains(&0) {
+        return Err(StatsError::ZeroVariance { context: "chi-square contingency zero margin" });
+    }
     let total_f = total as f64;
     let use_yates = yates && n_rows == 2 && n_cols == 2;
     let mut chi2 = 0.0_f64;
@@ -1026,13 +1096,11 @@ fn chi_square_stats_with_margins(
             let obs = o_u as f64;
             let exp = (rs_f * (c_sums[c] as f64)) / total_f;
             min_exp = min_exp.min(exp);
-            if exp > 0.0 {
-                let diff = (obs - exp).abs();
-                let adj_diff = if use_yates { (diff - 0.5).max(0.0) } else { diff };
-                chi2 += (adj_diff * adj_diff) / exp;
-                if obs > 0.0 {
-                    g2 += 2.0 * obs * (obs / exp).ln();
-                }
+            let diff = (obs - exp).abs();
+            let adj_diff = if use_yates { (diff - 0.5).max(0.0) } else { diff };
+            chi2 += (adj_diff * adj_diff) / exp;
+            if obs > 0.0 {
+                g2 += 2.0 * obs * (obs / exp).ln();
             }
         }
     }
@@ -1046,20 +1114,30 @@ fn chi_square_stats_with_margins(
 pub fn cochran_armitage_trend(counts: &[Vec<u64>]) -> Result<(f64, f64), StatsError> {
     let n_rows = counts.len();
     let n_cols = counts.first().map_or(0, Vec::len);
-    if !((n_cols == 2 && n_rows >= 3) || (n_rows == 2 && n_cols >= 3)) {
-        let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
-        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
-    }
     for row in counts {
         if row.len() != n_cols {
             return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n_cols, actual: row.len() }));
         }
     }
+    if !((n_cols == 2 && n_rows >= 3) || (n_rows == 2 && n_cols >= 3)) {
+        let bad = if n_rows == 2 || n_cols == 2 { n_rows.max(n_cols) } else { n_rows.min(n_cols) };
+        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
+    }
+    let reduced = reduce_zero_margin_table(counts).map_err(|err| match err {
+        StatsError::InsufficientSampleSize { actual, .. } => {
+            StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: actual as f64 }
+        }
+        other => other,
+    })?;
+    if !((reduced.n_cols == 2 && reduced.n_rows >= 3) || (reduced.n_rows == 2 && reduced.n_cols >= 3)) {
+        let bad = if reduced.n_rows == 2 || reduced.n_cols == 2 { reduced.n_rows.max(reduced.n_cols) } else { reduced.n_rows.min(reduced.n_cols) };
+        return Err(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: bad as f64 });
+    }
     // Orient as k ordered levels x 2 outcomes.
-    let oriented: Vec<[f64; 2]> = if n_cols == 2 {
-        counts.iter().map(|r| [r[0] as f64, r[1] as f64]).collect()
+    let oriented: Vec<[f64; 2]> = if reduced.n_cols == 2 {
+        reduced.counts.iter().map(|r| [r[0] as f64, r[1] as f64]).collect()
     } else {
-        (0..n_cols).map(|c| [counts[0][c] as f64, counts[1][c] as f64]).collect()
+        (0..reduced.n_cols).map(|c| [reduced.counts[0][c] as f64, reduced.counts[1][c] as f64]).collect()
     };
 
     let k = oriented.len();
@@ -1178,18 +1256,28 @@ pub fn mcnemar_detailed(b: u64, c: u64, confidence: ConfidenceLevel) -> Result<M
 
 /// Full contingency table analysis combining Pearson chi-square, `G^2`, Fisher/Freeman–Halton,
 /// Cochran–Armitage (when `R=2` or `C=2`), McNemar (when `2x2`), phi, and Cramér's `V`.
+///
+/// Empty (all-zero) rows and columns are dropped prior to computing degrees of freedom, test
+/// statistics, Cramér's *V*, and confidence intervals; tables falling below `2 x 2` are rejected
+/// (`InsufficientSampleSize`).
 pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confidence: ConfidenceLevel) -> Result<ContingencyResult, StatsError> {
-    let n_rows = counts.len();
-    let n_cols = counts.first().map_or(0, Vec::len);
-    if n_rows == 0 || n_cols == 0 {
-        return Err(StatsError::EmptyInput);
-    }
-    let (r_sums, c_sums, total_count) = checked_table_margins(counts)?;
-    if total_count == 0 {
-        return Err(StatsError::EmptyInput);
-    }
+    let reduced = reduce_zero_margin_table(counts)?;
+    analyze_reduced_contingency(&reduced, yates_continuity, confidence)
+}
 
-    let (chi2, g2, min_exp) = chi_square_stats_with_margins(counts, &r_sums, &c_sums, total_count, yates_continuity)?;
+fn analyze_reduced_contingency(
+    reduced: &ReducedContingencyTable,
+    yates_continuity: bool,
+    confidence: ConfidenceLevel,
+) -> Result<ContingencyResult, StatsError> {
+    let counts = &reduced.counts;
+    let r_sums = &reduced.r_sums;
+    let c_sums = &reduced.c_sums;
+    let total_count = reduced.total_count;
+    let n_rows = reduced.n_rows;
+    let n_cols = reduced.n_cols;
+
+    let (chi2, g2, min_exp) = chi_square_stats_with_margins(counts, r_sums, c_sums, total_count, yates_continuity)?;
     let df = ((n_rows - 1) * (n_cols - 1)) as f64;
     let chi2_p = chi2_sf(chi2, df)?;
     let g2_p = chi2_sf(g2, df)?;
@@ -1197,8 +1285,8 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
     // Count fraction of cells with expected count < 5.
     let total_f = total_count as f64;
     let mut lt5 = 0_usize;
-    for &rs in &r_sums {
-        for &cs in &c_sums {
+    for &rs in r_sums {
+        for &cs in c_sums {
             if ((rs as f64) * (cs as f64)) / total_f < 5.0 {
                 lt5 += 1;
             }
@@ -1235,8 +1323,11 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
     };
 
     // Uncorrected Pearson chi-square for phi and Cramer's V.
-    let (chi2_uncorr, _, _) =
-        if yates_continuity { chi_square_stats_with_margins(counts, &r_sums, &c_sums, total_count, false)? } else { (chi2, g2, min_exp) };
+    let (chi2_uncorr, _, _) = if yates_continuity && n_rows == 2 && n_cols == 2 {
+        chi_square_stats_with_margins(counts, r_sums, c_sums, total_count, false)?
+    } else {
+        (chi2, g2, min_exp)
+    };
     let phi = if n_rows == 2 && n_cols == 2 { Some((chi2_uncorr / total_f).sqrt()) } else { None };
     let k_min = (n_rows.min(n_cols) - 1) as f64;
     let cramers_v = (chi2_uncorr / (total_f * k_min)).sqrt().clamp(0.0, 1.0);
@@ -1265,6 +1356,8 @@ pub fn analyze_contingency(counts: &[Vec<u64>], yates_continuity: bool, confiden
         cramers_v_ci,
         min_expected_count: min_exp,
         cells_lt5_fraction,
+        dropped_empty_rows: reduced.dropped_rows,
+        dropped_empty_cols: reduced.dropped_cols,
     })
 }
 
@@ -1983,7 +2076,6 @@ fn koopman_solve_upper_a_zero<F: Fn(f64) -> f64>(score: &F) -> Option<f64> {
     koopman_bracket_and_solve(score, neg_pt, s_neg, 2.0, false)
 }
 
-/// Compute complete `2 x 2` risk/odds ratios (`[[a, b], [c, d]]`), Baptista-Pike OR CI, Koopman
 /// Compute Altman (1998) `NNTB` / `NNTH` point summary, CI label, and finite CI bounds (when CI
 /// excludes zero) from risk difference `rd` and its CI `(rd_low, rd_high)`.
 #[must_use]
@@ -2021,7 +2113,11 @@ fn rd_lo_abs(v: f64) -> f64 {
     v.abs().max(1e-300)
 }
 
+/// Compute complete `2 x 2` risk/odds ratios (`[[a, b], [c, d]]`), Baptista-Pike OR CI, Koopman
 /// RR CI, Newcombe risk-difference CI, NNT, and Wilson CIs for sensitivity/specificity/PPV/NPV.
+///
+/// Undefined `0 / 0` quantities (including zero-margin odds ratio, zero-risk relative risk, and
+/// zero-column sensitivity or specificity with its Wilson interval) are returned as `None`.
 pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: ConfidenceLevel) -> Result<TwoByTwoRatiosResult, StatsError> {
     let r1 = a.checked_add(b).ok_or(StatsError::InvalidParameter { name: "contingency_row_sum", value: f64::INFINITY })?;
     let r2 = c.checked_add(d).ok_or(StatsError::InvalidParameter { name: "contingency_row_sum", value: f64::INFINITY })?;
@@ -2034,14 +2130,19 @@ pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: Confidence
     let p1 = (a as f64) / (r1 as f64);
     let p2 = (c as f64) / (r2 as f64);
 
-    let or_val =
-        if b == 0 || c == 0 { if a == 0 && d == 0 { 1.0 } else { f64::INFINITY } } else { ((a as f64) * (d as f64)) / ((b as f64) * (c as f64)) };
-    let rr_val = if p2 > 0.0 {
-        p1 / p2
-    } else if p1 > 0.0 {
-        f64::INFINITY
+    let or_val = if b > 0 && c > 0 {
+        Some(((a as f64) * (d as f64)) / ((b as f64) * (c as f64)))
+    } else if a > 0 && d > 0 {
+        Some(f64::INFINITY)
     } else {
-        1.0
+        None
+    };
+    let rr_val = if c > 0 {
+        Some(p1 / p2)
+    } else if a > 0 {
+        Some(f64::INFINITY)
+    } else {
+        None
     };
     let rd = p1 - p2;
     let nnt = if rd.abs() > 1e-12 { Some(1.0 / rd) } else { None };
@@ -2053,8 +2154,8 @@ pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: Confidence
     let (nnt_kind, nnt_value, nnt_point_label, nnt_ci_label, nnt_ci_bounds) = altman_nnt_from_rd(rd, rd_lo, rd_hi);
 
     // Standard diagnostic 2x2 orientation: Rows = Test +/-, Cols = Disease +/- (TP=a, FP=b, FN=c, TN=d).
-    let sens = if c1 > 0 { (a as f64) / (c1 as f64) } else { 0.0 };
-    let spec = if c2 > 0 { (d as f64) / (c2 as f64) } else { 0.0 };
+    let (sens, sens_ci) = if c1 > 0 { (Some((a as f64) / (c1 as f64)), Some(wilson_score_ci(a, c1, confidence))) } else { (None, None) };
+    let (spec, spec_ci) = if c2 > 0 { (Some((d as f64) / (c2 as f64)), Some(wilson_score_ci(d, c2, confidence))) } else { (None, None) };
     let ppv = p1;
     let npv = (d as f64) / (r2 as f64);
 
@@ -2072,9 +2173,9 @@ pub fn analyze_2x2_ratios(a: u64, b: u64, c: u64, d: u64, confidence: Confidence
         nnt_ci_label,
         nnt_ci_bounds,
         sensitivity: sens,
-        sensitivity_wilson_ci: wilson_score_ci(a, c1, confidence),
+        sensitivity_wilson_ci: sens_ci,
         specificity: spec,
-        specificity_wilson_ci: wilson_score_ci(d, c2, confidence),
+        specificity_wilson_ci: spec_ci,
         ppv,
         ppv_wilson_ci: wilson_score_ci(a, r1, confidence),
         npv,
@@ -2179,7 +2280,9 @@ pub fn cohens_kappa(counts: &[Vec<u64>], weighting: KappaWeighting, confidence: 
 /// Fleiss' multi-rater kappa across `N` subjects (`rows`) and `K` categories (`cols`), where each
 /// row contains the integer counts of `m` raters assigning the subject into each category.
 ///
-/// Fleiss (1971) kappa with the null-hypothesis variance of Fleiss, Nee & Landis (1979).
+/// Fleiss (1971) point estimate, non-null subject-level asymptotic SE and CI (Fleiss, Levin & Paik
+/// 2003, ch. 18; Gwet 2008), and the null-hypothesis variance of Fleiss, Nee & Landis (1979)
+/// strictly for the *z*-test against $H_0: \kappa = 0$.
 pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> Result<KappaResult, StatsError> {
     let n = rater_counts.len();
     let k = rater_counts.first().map_or(0, Vec::len);
@@ -2199,7 +2302,8 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
     let nf = n as f64;
     let mf = m as f64;
     let mut col_sums = vec![0.0_f64; k];
-    let mut p_bar = 0.0_f64;
+    let mut p_i_vals = Vec::with_capacity(n);
+    let mut p_bar_sum = NeumaierSum::new();
     for row in rater_counts {
         let mut sq_sum = 0.0_f64;
         for (j, &c) in row.iter().enumerate() {
@@ -2207,9 +2311,11 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
             col_sums[j] += cf;
             sq_sum += cf * cf;
         }
-        p_bar += (sq_sum - mf) / (mf * (mf - 1.0));
+        let p_i = (sq_sum - mf) / (mf * (mf - 1.0));
+        p_i_vals.push(p_i);
+        p_bar_sum.add(p_i);
     }
-    p_bar /= nf;
+    let p_bar = p_bar_sum.total() / nf;
 
     let total_assignments = nf * mf;
     let p_j: Vec<f64> = col_sums.iter().map(|&s| s / total_assignments).collect();
@@ -2219,14 +2325,30 @@ pub fn fleiss_kappa(rater_counts: &[Vec<u64>], confidence: ConfidenceLevel) -> R
     }
     let kappa = (p_bar - pe) / (1.0 - pe);
 
-    // Fleiss exact asymptotic variance under H0.
-    let sum_pj3: f64 = p_j.iter().map(|&pj| pj * pj * pj).sum();
-    let denom = nf * mf * (mf - 1.0) * (1.0 - pe).powi(2);
-    let var0 = if denom > 0.0 { 2.0 * (pe - (2.0 * mf - 3.0) * pe * pe + 2.0 * (mf - 2.0) * sum_pj3) / denom } else { 0.0 };
-    let se = var0.max(0.0).sqrt();
+    // Non-null subject-level asymptotic SE (Fleiss, Levin & Paik 2003, ch. 18; Gwet 2008) for displayed SE & CI.
+    let v_bar = p_bar - 2.0 * pe * (1.0 - kappa);
+    let mut ss_v = NeumaierSum::new();
+    for (row, &p_i) in rater_counts.iter().zip(p_i_vals.iter()) {
+        let mut p_bar_i = 0.0_f64;
+        for (&c, &pj) in row.iter().zip(p_j.iter()) {
+            p_bar_i += pj * ((c as f64) / mf);
+        }
+        let v_i = p_i - 2.0 * (1.0 - kappa) * p_bar_i;
+        let dv = v_i - v_bar;
+        ss_v.add(dv * dv);
+    }
+    let one_minus_pe_sq = (1.0 - pe).powi(2);
+    let var_non_null = ss_v.total() / (nf * (nf - 1.0) * one_minus_pe_sq);
+    let se = var_non_null.max(0.0).sqrt();
     let z_crit = norm_two_sided_isf(confidence.alpha()).unwrap_or(1.959_963_984_540_054);
     let ci = ((kappa - z_crit * se).clamp(-1.0, 1.0), (kappa + z_crit * se).clamp(-1.0, 1.0));
-    let z_stat = if se > 0.0 { kappa / se } else { 0.0 };
+
+    // Fleiss, Nee & Landis (1979) asymptotic variance under H0: kappa = 0 strictly for z-test.
+    let sum_pj3: f64 = p_j.iter().map(|&pj| pj * pj * pj).sum();
+    let denom0 = nf * mf * (mf - 1.0) * one_minus_pe_sq;
+    let var0 = if denom0 > 0.0 { 2.0 * (pe - (2.0 * mf - 3.0) * pe * pe + 2.0 * (mf - 2.0) * sum_pj3) / denom0 } else { 0.0 };
+    let se0 = var0.max(0.0).sqrt();
+    let z_stat = if se0 > 0.0 { kappa / se0 } else { 0.0 };
     let p_val = 2.0 * norm_sf(z_stat.abs());
 
     Ok(KappaResult { kappa, observed_agreement: p_bar, expected_agreement: pe, se, ci, z_statistic: z_stat, p_value: p_val.clamp(0.0, 1.0) })
@@ -2275,13 +2397,14 @@ fn validate_and_run_barnard_if_requested(counts: &[Vec<u64>], method: Contingenc
 struct ContingencyPrimaryOutcome {
     name: &'static str,
     stat: Option<f64>,
+    df: Option<f64>,
     p_value: f64,
     footnote: Option<&'static str>,
 }
 
 impl ContingencyPrimaryOutcome {
-    fn plain(name: &'static str, stat: Option<f64>, p_value: f64) -> Self {
-        Self { name, stat, p_value, footnote: None }
+    fn plain(name: &'static str, stat: Option<f64>, df: Option<f64>, p_value: f64) -> Self {
+        Self { name, stat, df, p_value, footnote: None }
     }
 }
 
@@ -2297,14 +2420,22 @@ fn resolve_contingency_primary(
     let n_cols = counts.first().map_or(0, Vec::len);
     match method {
         ContingencyMethod::PearsonChiSquare { yates_continuity } => {
-            let lbl = if yates_continuity { "Chi-square (Yates)" } else { "Pearson chi-square" };
-            Ok(ContingencyPrimaryOutcome::plain(lbl, Some(res.chi_square), res.chi_square_p))
+            let yates_applied = yates_continuity && n_rows == 2 && n_cols == 2;
+            let lbl = if yates_applied { "Chi-square (Yates)" } else { "Pearson chi-square" };
+            let footnote = if yates_continuity && !yates_applied {
+                Some("Yates' continuity correction applies only to 2 x 2 tables; uncorrected Pearson chi-square is reported.")
+            } else {
+                None
+            };
+            Ok(ContingencyPrimaryOutcome { name: lbl, stat: Some(res.chi_square), df: Some(res.df), p_value: res.chi_square_p, footnote })
         }
-        ContingencyMethod::LikelihoodRatioG2 => Ok(ContingencyPrimaryOutcome::plain("Likelihood-ratio G2", Some(res.g_squared), res.g_squared_p)),
+        ContingencyMethod::LikelihoodRatioG2 => {
+            Ok(ContingencyPrimaryOutcome::plain("Likelihood-ratio G2", Some(res.g_squared), Some(res.df), res.g_squared_p))
+        }
         ContingencyMethod::FisherExact => {
             if n_rows == 2 && n_cols == 2 {
                 let fp = res.fisher_exact_p.ok_or(StatsError::InvalidParameter { name: "fisher_exact_max_total", value: res.total_count as f64 })?;
-                Ok(ContingencyPrimaryOutcome::plain("Fisher's exact test", None, fp))
+                Ok(ContingencyPrimaryOutcome::plain("Fisher's exact test", None, None, fp))
             } else {
                 let mc_p = match res.fisher_exact_p {
                     Some(fp) => fp,
@@ -2316,18 +2447,18 @@ fn resolve_contingency_primary(
                 };
                 push_scalar(out, "Fisher's exact Monte Carlo draws", None, 10_000.0);
                 let note = "R x C Fisher's exact test uses a deterministic Monte Carlo permutation test (10,000 draws; max N = 50,000).";
-                Ok(ContingencyPrimaryOutcome { name: "Fisher's exact test (Monte Carlo)", stat: None, p_value: mc_p, footnote: Some(note) })
+                Ok(ContingencyPrimaryOutcome { name: "Fisher's exact test (Monte Carlo)", stat: None, df: None, p_value: mc_p, footnote: Some(note) })
             }
         }
         ContingencyMethod::BarnardExact => {
             let br = barnard_res.ok_or(StatsError::InvalidParameter { name: "barnard_exact_dimensions", value: n_rows.max(n_cols) as f64 })?;
-            Ok(ContingencyPrimaryOutcome::plain("Barnard's exact test", Some(br.statistic), br.p_value))
+            Ok(ContingencyPrimaryOutcome::plain("Barnard's exact test", Some(br.statistic), None, br.p_value))
         }
         ContingencyMethod::CochranArmitageTrend => {
             let ca_p = res
                 .cochran_armitage_p
                 .ok_or(StatsError::InvalidParameter { name: "cochran_armitage_dimensions", value: n_rows.max(n_cols) as f64 })?;
-            Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, ca_p))
+            Ok(ContingencyPrimaryOutcome::plain("Cochran-Armitage trend", res.cochran_armitage_z, Some(1.0), ca_p))
         }
         ContingencyMethod::McNemarPaired => {
             let err = if n_rows == 2 && n_cols == 2 {
@@ -2336,7 +2467,7 @@ fn resolve_contingency_primary(
                 StatsError::InvalidParameter { name: "mcnemar_dimensions", value: n_rows.max(n_cols) as f64 }
             };
             let mc_p = res.mcnemar_exact_p.ok_or(err)?;
-            Ok(ContingencyPrimaryOutcome::plain("McNemar's test", res.mcnemar_chi2, mc_p))
+            Ok(ContingencyPrimaryOutcome::plain("McNemar's test", res.mcnemar_chi2, Some(1.0), mc_p))
         }
         ContingencyMethod::CohenKappa { .. } | ContingencyMethod::FleissKappa | ContingencyMethod::ExactBinomial => {
             Err(StatsError::IncompatibleTable { analysis: "contingency analysis", actual: sheet.archetype.kind() })
@@ -2351,6 +2482,124 @@ pub fn run_contingency_analysis(sheet: &DataSheet, spec: &AnalysisSpec, cont_spe
     Ok(result)
 }
 
+fn append_reduced_margins_note(out: &mut ResultSheet, reduced: &ReducedContingencyTable) {
+    if reduced.dropped_rows == 0 && reduced.dropped_cols == 0 {
+        return;
+    }
+    let msg = format!(
+        "Dropped {} empty (all-zero) row(s) and {} empty (all-zero) column(s); analysis evaluated on the reduced {} x {} table.",
+        reduced.dropped_rows, reduced.dropped_cols, reduced.n_rows, reduced.n_cols
+    );
+    if let Some(tab) = out.tabs.iter_mut().find(|t| t.id == "contingency-main") {
+        tab.footnotes.push(msg.clone());
+    }
+    out.checklist.push(checklist_item(
+        "Empty margin reduction",
+        ChecklistStatus::Info,
+        Some(format!("{} row(s), {} col(s) dropped -> {} x {}", reduced.dropped_rows, reduced.dropped_cols, reduced.n_rows, reduced.n_cols)),
+        msg,
+    ));
+}
+
+fn append_mcnemar_outputs(out: &mut ResultSheet, b: u64, c: u64, confidence: ConfidenceLevel, p_fmt: PValueFormat) -> Result<(), StatsError> {
+    let mc = mcnemar_detailed(b, c, confidence)?;
+    push_scalar(out, "McNemar chi-square", None, mc.chi_square_yates);
+    push_scalar(out, "McNemar exact P", None, mc.exact_p_value);
+    if let Some(or_val) = mc.discordant_odds_ratio {
+        push_scalar(out, "Discordant odds ratio", None, or_val);
+    }
+    if let Some((or_lo, or_hi)) = mc.discordant_or_ci {
+        push_scalar(out, "Discordant OR CI lower", None, or_lo);
+        push_scalar(out, "Discordant OR CI upper", None, or_hi);
+    }
+    let or_cell = match mc.discordant_odds_ratio {
+        Some(v) if v.is_finite() => num_cell(v),
+        Some(_) => ResultCell::Text(String::from("∞")),
+        None => ResultCell::Empty,
+    };
+    let disc_total = mc.b.checked_add(mc.c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
+    let disc_prop_cell = if disc_total > 0 { num_cell((mc.b as f64) / (disc_total as f64)) } else { ResultCell::Empty };
+    out.tabs.push(build_tab(
+        "contingency-mcnemar",
+        "McNemar discordant pairs & exact odds ratio",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        vec![String::from("Estimate"), format!("{}% exact CI", confidence.percent())],
+        vec![
+            String::from("Discordant pair ratio (b / c)"),
+            String::from("Discordant odds ratio (Clopper-Pearson)"),
+            String::from("Discordant proportion b / (b + c)"),
+            String::from("McNemar chi-square (Yates)"),
+            String::from("McNemar exact P value"),
+        ],
+        vec![
+            vec![ResultCell::Text(format!("{} / {}", mc.b, mc.c)), ResultCell::Empty],
+            vec![or_cell, opt_ci_cell(mc.discordant_or_ci)],
+            vec![disc_prop_cell, ci_cell(mc.discordant_p_ci.0, mc.discordant_p_ci.1)],
+            vec![num_cell(mc.chi_square_yates), ResultCell::Empty],
+            vec![p_cell(mc.exact_p_value, p_fmt), ResultCell::Empty],
+        ],
+    ));
+    Ok(())
+}
+
+fn append_2x2_ratios_tab(
+    out: &mut ResultSheet,
+    counts: &[Vec<u64>],
+    cont_spec: &ContingencySpec,
+    confidence: ConfidenceLevel,
+) -> Result<(), StatsError> {
+    let r2x2 = analyze_2x2_ratios(counts[0][0], counts[0][1], counts[1][0], counts[1][1], confidence)?;
+    if let Some(or_val) = r2x2.odds_ratio {
+        push_scalar(out, "Odds ratio", None, or_val);
+    }
+    if let Some(rr_val) = r2x2.relative_risk {
+        push_scalar(out, "Relative risk", None, rr_val);
+    }
+    push_scalar(out, "Risk difference", None, r2x2.risk_difference);
+    if let Some(nnt_v) = r2x2.nnt_value {
+        push_scalar(out, "NNT", None, nnt_v);
+    }
+
+    let r_headers = vec![String::from("Estimate"), format!("{}% CI", confidence.percent())];
+    let mut r_labels = Vec::new();
+    let mut r_rows = Vec::new();
+    if cont_spec.compute_odds_and_risk_ratios {
+        r_labels.extend([
+            String::from("Odds ratio (Baptista-Pike CI)"),
+            String::from("Relative risk (Koopman CI)"),
+            String::from("Risk difference (Newcombe CI)"),
+            String::from("Number needed to treat (NNT)"),
+            String::from("NNT magnitude (1 / |RD|)"),
+        ]);
+        r_rows.push(vec![opt_num_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)]);
+        r_rows.push(vec![opt_num_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)]);
+        r_rows.push(vec![num_cell(r2x2.risk_difference), opt_ci_cell(r2x2.rd_newcombe_ci)]);
+        r_rows.push(vec![ResultCell::Text(r2x2.nnt_point_label.clone()), ResultCell::Text(r2x2.nnt_ci_label.clone())]);
+        r_rows.push(vec![opt_num_cell(r2x2.nnt_value), opt_ci_cell(r2x2.nnt_ci_bounds)]);
+    }
+    if cont_spec.compute_sensitivity_specificity {
+        r_labels.extend([
+            String::from("Sensitivity (Wilson CI)"),
+            String::from("Specificity (Wilson CI)"),
+            String::from("PPV (Wilson CI)"),
+            String::from("NPV (Wilson CI)"),
+        ]);
+        r_rows.push(vec![opt_num_cell(r2x2.sensitivity), opt_ci_cell(r2x2.sensitivity_wilson_ci)]);
+        r_rows.push(vec![opt_num_cell(r2x2.specificity), opt_ci_cell(r2x2.specificity_wilson_ci)]);
+        r_rows.push(vec![num_cell(r2x2.ppv), ci_cell(r2x2.ppv_wilson_ci.0, r2x2.ppv_wilson_ci.1)]);
+        r_rows.push(vec![num_cell(r2x2.npv), ci_cell(r2x2.npv_wilson_ci.0, r2x2.npv_wilson_ci.1)]);
+    }
+    out.tabs.push(build_tab(
+        "contingency-ratios",
+        "Effect sizes & diagnostic proportions",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        r_headers,
+        r_labels,
+        r_rows,
+    ));
+    Ok(())
+}
+
 fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_spec: &ContingencySpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
@@ -2361,7 +2610,7 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
     }
 
     if let TableArchetype::PartsOfWhole(pow) = &sheet.archetype {
-        return run_parts_of_whole_gof(pow, cont_spec, &mut out, p_fmt);
+        return run_parts_of_whole_gof(pow, spec, cont_spec, &mut out, p_fmt);
     }
 
     let TableArchetype::Contingency(table) = &sheet.archetype else {
@@ -2391,10 +2640,11 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         _ => {}
     }
 
+    let reduced = reduce_zero_margin_table(&counts)?;
     let yates = matches!(cont_spec.method, ContingencyMethod::PearsonChiSquare { yates_continuity: true });
-    let barnard_res = validate_and_run_barnard_if_requested(&counts, cont_spec.method)?;
+    let barnard_res = validate_and_run_barnard_if_requested(&reduced.counts, cont_spec.method)?;
 
-    let res = analyze_contingency(&counts, yates, confidence)?;
+    let res = analyze_reduced_contingency(&reduced, yates, confidence)?;
     push_scalar(&mut out, "Chi-square", None, res.chi_square);
     push_scalar(&mut out, "Chi-square P value", None, res.chi_square_p);
     push_scalar(&mut out, "G-squared", None, res.g_squared);
@@ -2408,30 +2658,14 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
         push_scalar(&mut out, "Barnard Z-pooled", None, br.statistic);
     }
 
-    let mcnemar_res = if matches!(cont_spec.method, ContingencyMethod::McNemarPaired) {
-        let mc = mcnemar_detailed(counts[0][1], counts[1][0], confidence)?;
-        push_scalar(&mut out, "McNemar chi-square", None, mc.chi_square_yates);
-        push_scalar(&mut out, "McNemar exact P", None, mc.exact_p_value);
-        if let Some(or_val) = mc.discordant_odds_ratio {
-            push_scalar(&mut out, "Discordant odds ratio", None, or_val);
-        }
-        if let Some((or_lo, or_hi)) = mc.discordant_or_ci {
-            push_scalar(&mut out, "Discordant OR CI lower", None, or_lo);
-            push_scalar(&mut out, "Discordant OR CI upper", None, or_hi);
-        }
-        Some(mc)
-    } else {
-        None
-    };
-
-    let primary = resolve_contingency_primary(&mut out, sheet, &counts, &res, barnard_res.as_ref(), cont_spec.method)?;
+    let primary = resolve_contingency_primary(&mut out, sheet, &reduced.counts, &res, barnard_res.as_ref(), cont_spec.method)?;
 
     let mut headers = vec![String::from("Statistic"), String::from("df"), String::from("P value")];
     if cont_spec.compute_phi_and_cramers_v {
         headers.push(String::from("Cramer's V / Phi"));
         headers.push(format!("{}% CI", confidence.percent()));
     }
-    let mut row_main = vec![opt_num_cell(primary.stat), num_cell(res.df), p_cell(primary.p_value, p_fmt)];
+    let mut row_main = vec![opt_num_cell(primary.stat), opt_num_cell(primary.df), p_cell(primary.p_value, p_fmt)];
     if cont_spec.compute_phi_and_cramers_v {
         row_main.push(num_cell(res.phi.unwrap_or(res.cramers_v)));
         row_main.push(opt_ci_cell(res.cramers_v_ci));
@@ -2449,83 +2683,14 @@ fn run_contingency_analysis_inner(sheet: &DataSheet, spec: &AnalysisSpec, cont_s
     {
         tab.footnotes.push(String::from(note));
     }
+    append_reduced_margins_note(&mut out, &reduced);
 
-    if let Some(mc) = &mcnemar_res {
-        let or_cell = match mc.discordant_odds_ratio {
-            Some(v) if v.is_finite() => num_cell(v),
-            Some(_) => ResultCell::Text(String::from("∞")),
-            None => ResultCell::Empty,
-        };
-        let disc_total = mc.b.checked_add(mc.c).ok_or(StatsError::InvalidParameter { name: "mcnemar_discordant_total", value: f64::INFINITY })?;
-        let disc_prop_cell = if disc_total > 0 { num_cell((mc.b as f64) / (disc_total as f64)) } else { ResultCell::Empty };
-        out.tabs.push(build_tab(
-            "contingency-mcnemar",
-            "McNemar discordant pairs & exact odds ratio",
-            ResultTabKind::ParametersAndConfidenceIntervals,
-            vec![String::from("Estimate"), format!("{}% exact CI", confidence.percent())],
-            vec![
-                String::from("Discordant pair ratio (b / c)"),
-                String::from("Discordant odds ratio (Clopper-Pearson)"),
-                String::from("Discordant proportion b / (b + c)"),
-                String::from("McNemar chi-square (Yates)"),
-                String::from("McNemar exact P value"),
-            ],
-            vec![
-                vec![ResultCell::Text(format!("{} / {}", mc.b, mc.c)), ResultCell::Empty],
-                vec![or_cell, opt_ci_cell(mc.discordant_or_ci)],
-                vec![disc_prop_cell, ci_cell(mc.discordant_p_ci.0, mc.discordant_p_ci.1)],
-                vec![num_cell(mc.chi_square_yates), ResultCell::Empty],
-                vec![p_cell(mc.exact_p_value, p_fmt), ResultCell::Empty],
-            ],
-        ));
+    if matches!(cont_spec.method, ContingencyMethod::McNemarPaired) {
+        append_mcnemar_outputs(&mut out, reduced.counts[0][1], reduced.counts[1][0], confidence, p_fmt)?;
     }
 
-    if n_rows == 2 && n_cols == 2 && (cont_spec.compute_odds_and_risk_ratios || cont_spec.compute_sensitivity_specificity) {
-        let r2x2 = analyze_2x2_ratios(counts[0][0], counts[0][1], counts[1][0], counts[1][1], confidence)?;
-        push_scalar(&mut out, "Odds ratio", None, r2x2.odds_ratio);
-        push_scalar(&mut out, "Relative risk", None, r2x2.relative_risk);
-        push_scalar(&mut out, "Risk difference", None, r2x2.risk_difference);
-        if let Some(nnt_v) = r2x2.nnt_value {
-            push_scalar(&mut out, "NNT", None, nnt_v);
-        }
-
-        let r_headers = vec![String::from("Estimate"), format!("{}% CI", confidence.percent())];
-        let mut r_labels = Vec::new();
-        let mut r_rows = Vec::new();
-        if cont_spec.compute_odds_and_risk_ratios {
-            r_labels.extend([
-                String::from("Odds ratio (Baptista-Pike CI)"),
-                String::from("Relative risk (Koopman CI)"),
-                String::from("Risk difference (Newcombe CI)"),
-                String::from("Number needed to treat (NNT)"),
-                String::from("NNT magnitude (1 / |RD|)"),
-            ]);
-            r_rows.push(vec![num_cell(r2x2.odds_ratio), opt_ci_cell(r2x2.or_baptista_pike_ci)]);
-            r_rows.push(vec![num_cell(r2x2.relative_risk), opt_ci_cell(r2x2.rr_koopman_ci)]);
-            r_rows.push(vec![num_cell(r2x2.risk_difference), opt_ci_cell(r2x2.rd_newcombe_ci)]);
-            r_rows.push(vec![ResultCell::Text(r2x2.nnt_point_label.clone()), ResultCell::Text(r2x2.nnt_ci_label.clone())]);
-            r_rows.push(vec![opt_num_cell(r2x2.nnt_value), opt_ci_cell(r2x2.nnt_ci_bounds)]);
-        }
-        if cont_spec.compute_sensitivity_specificity {
-            r_labels.extend([
-                String::from("Sensitivity (Wilson CI)"),
-                String::from("Specificity (Wilson CI)"),
-                String::from("PPV (Wilson CI)"),
-                String::from("NPV (Wilson CI)"),
-            ]);
-            r_rows.push(vec![num_cell(r2x2.sensitivity), ci_cell(r2x2.sensitivity_wilson_ci.0, r2x2.sensitivity_wilson_ci.1)]);
-            r_rows.push(vec![num_cell(r2x2.specificity), ci_cell(r2x2.specificity_wilson_ci.0, r2x2.specificity_wilson_ci.1)]);
-            r_rows.push(vec![num_cell(r2x2.ppv), ci_cell(r2x2.ppv_wilson_ci.0, r2x2.ppv_wilson_ci.1)]);
-            r_rows.push(vec![num_cell(r2x2.npv), ci_cell(r2x2.npv_wilson_ci.0, r2x2.npv_wilson_ci.1)]);
-        }
-        out.tabs.push(build_tab(
-            "contingency-ratios",
-            "Effect sizes & diagnostic proportions",
-            ResultTabKind::ParametersAndConfidenceIntervals,
-            r_headers,
-            r_labels,
-            r_rows,
-        ));
+    if reduced.n_rows == 2 && reduced.n_cols == 2 && (cont_spec.compute_odds_and_risk_ratios || cont_spec.compute_sensitivity_specificity) {
+        append_2x2_ratios_tab(&mut out, &reduced.counts, cont_spec, confidence)?;
     }
 
     if let Some(br) = &barnard_res {
@@ -2691,22 +2856,44 @@ fn run_fleiss_kappa_sheet(
     Ok(out)
 }
 
+fn resolve_parts_of_whole_series_index(pow: &curvebook_doc::PartsOfWholeTable, selected: &[usize]) -> Result<usize, StatsError> {
+    let n_series = pow.data_sets.len();
+    if n_series == 0 {
+        return Err(StatsError::EmptyInput);
+    }
+    for &idx in selected {
+        if idx >= n_series {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+    }
+    if selected.is_empty() {
+        if n_series == 1 { Ok(0) } else { Err(StatsError::InvalidParameter { name: "selected_data_sets", value: n_series as f64 }) }
+    } else if selected.len() == 1 {
+        Ok(selected[0])
+    } else {
+        Err(StatsError::InvalidParameter { name: "selected_data_sets", value: selected.len() as f64 })
+    }
+}
+
+fn validate_integer_count(v: f64, name: &'static str) -> Result<u64, StatsError> {
+    const TWO_POW_64: f64 = 18_446_744_073_709_551_616.0;
+    if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v >= TWO_POW_64 {
+        return Err(StatsError::InvalidParameter { name, value: v });
+    }
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    Ok(v as u64)
+}
+
 fn extract_exact_binomial_counts(sheet: &DataSheet, spec: &AnalysisSpec) -> Result<(u64, u64), StatsError> {
     match &sheet.archetype {
         TableArchetype::PartsOfWhole(pow) => {
-            let slices = pow.fractions_for_series(0)?;
+            let series_idx = resolve_parts_of_whole_series_index(pow, &spec.selected_data_sets)?;
+            let slices = pow.fractions_for_series(series_idx)?;
             if slices.len() != 2 {
                 return Err(StatsError::DimensionMismatch { expected: 2, actual: slices.len() });
             }
-            let as_count = |v: f64| -> Result<u64, StatsError> {
-                if !v.is_finite() || v < 0.0 || v.fract() != 0.0 || v > (u64::MAX as f64) {
-                    return Err(StatsError::InvalidParameter { name: "binomial_count", value: v });
-                }
-                #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                Ok(v as u64)
-            };
-            let k = as_count(slices[0].value)?;
-            let f = as_count(slices[1].value)?;
+            let k = validate_integer_count(slices[0].value, "binomial_count")?;
+            let f = validate_integer_count(slices[1].value, "binomial_count")?;
             let n = k.checked_add(f).ok_or(StatsError::InvalidParameter { name: "exact_binomial_total", value: f64::INFINITY })?;
             if n == 0 {
                 return Err(StatsError::EmptyInput);
@@ -2865,19 +3052,26 @@ fn run_exact_binomial_analysis(
 
 fn run_parts_of_whole_gof(
     pow: &curvebook_doc::PartsOfWholeTable,
+    spec: &AnalysisSpec,
     cont_spec: &ContingencySpec,
     out: &mut ResultSheet,
     p_fmt: PValueFormat,
 ) -> Result<ResultSheet, StatsError> {
-    let slices = pow.fractions_for_series(0)?;
+    let series_idx = resolve_parts_of_whole_series_index(pow, &spec.selected_data_sets)?;
+    let slices = pow.fractions_for_series(series_idx)?;
     let k = slices.len();
     if k < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "parts-of-whole goodness-of-fit", required: 2, actual: k });
     }
-    let total: f64 = slices.iter().map(|s| s.value).sum();
-    if total <= 0.0 {
+    let mut total_u64 = 0_u64;
+    for slice in &slices {
+        let count = validate_integer_count(slice.value, "goodness_of_fit_count")?;
+        total_u64 = total_u64.checked_add(count).ok_or(StatsError::InvalidParameter { name: "goodness_of_fit_total", value: f64::INFINITY })?;
+    }
+    if total_u64 == 0 {
         return Err(StatsError::EmptyInput);
     }
+    let total = total_u64 as f64;
 
     let (proportions, is_custom) = if let Some(weights) = &cont_spec.expected_proportions {
         if weights.len() != k {
