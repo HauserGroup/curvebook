@@ -9,8 +9,8 @@ use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
     Cell, CellCoord, CellExclusionNote, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DocError, GroupedTable,
-    MAX_DATA_SETS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn, VariableRole,
-    VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    MAX_DATA_SETS, MAX_SUBCOLUMNS, MultipleVariablesTable, SequenceProgression, SubcolumnMode, TableArchetype, TableKind, VariableColumn,
+    VariableRole, VariableSource, XColumnMode, XyTable, default_column_label, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::error::TransformError;
@@ -985,17 +985,19 @@ fn convert_grouped_reps_to_mv(
         let row_cell = grouped_row_factor_cell(grp, r);
         for (c, ds) in grp.data_sets.iter().enumerate() {
             let col_cell = Cell::text(non_empty_or(&ds.title, &default_column_label(c)));
-            if let Some(row_cells) = ds.cells.get(r) {
+            if let Some(row_cells) = ds.cells.get(r)
+                && row_cells.iter().take(n).any(is_occupied)
+            {
                 for s in 0..n {
-                    if let Some(cell) = row_cells.get(s)
-                        && is_occupied(cell)
-                    {
-                        let rep = (n > 1).then(|| {
-                            #[allow(clippy::cast_precision_loss)]
-                            Cell::number((s + 1) as f64)
-                        });
-                        records.push((row_cell.clone(), col_cell.clone(), rep, cell.clone(), CellCoord::new(r, c, s)));
+                    let cell = row_cells.get(s).cloned().unwrap_or_default();
+                    if n == 1 && !is_occupied(&cell) {
+                        continue;
                     }
+                    let rep = (n > 1).then(|| {
+                        #[allow(clippy::cast_precision_loss)]
+                        Cell::number((s + 1) as f64)
+                    });
+                    records.push((row_cell.clone(), col_cell.clone(), rep, cell, CellCoord::new(r, c, s)));
                 }
             }
         }
@@ -1005,6 +1007,7 @@ fn convert_grouped_reps_to_mv(
     validate_rows(out_rows)?;
     let has_rep = n > 1;
     let var_count = if has_rep { 4 } else { 3 };
+    validate_cell_budget(out_rows, var_count, 1, 0, "Grouped-to-MultipleVariables replicate reshape")?;
     let val_col_idx = var_count - 1;
     let mut mv = MultipleVariablesTable::new(var_count, out_rows)?;
     mv.variables[0].title = row_title;
@@ -1017,11 +1020,15 @@ fn convert_grouped_reps_to_mv(
     mv.variables[val_col_idx].title = String::from("Value");
 
     let mut coord_map = BTreeMap::new();
+    let mut preserved = 0_usize;
     for (out_r, (rf, cf, rep, val, old_coord)) in records.into_iter().enumerate() {
         set_mv_cell(&mut mv, 0, out_r, rf);
         set_mv_cell(&mut mv, 1, out_r, cf);
         if let Some(rep_cell) = rep {
             set_mv_cell(&mut mv, 2, out_r, rep_cell);
+        }
+        if is_occupied(&val) {
+            preserved += 1;
         }
         set_mv_cell(&mut mv, val_col_idx, out_r, val);
         coord_map.insert(old_coord, CellCoord::new(out_r, val_col_idx, 0));
@@ -1030,13 +1037,22 @@ fn convert_grouped_reps_to_mv(
         var.refresh_inferred_role();
     }
 
+    let schema_lossy = grp.subcolumn_mode.is_pre_summarized();
+    let mut warnings = Vec::new();
+    if schema_lossy {
+        warnings.push(format!(
+            "Pre-summarized {:?} subcolumns flattened into independent Continuous variables; summary moment semantics lost",
+            grp.subcolumn_mode
+        ));
+    }
+
     Ok(BuiltArchetype {
         archetype: TableArchetype::MultipleVariables(mv),
         coord_map,
-        preserved_cells: out_rows,
+        preserved_cells: preserved,
         dropped_cells: 0,
-        warnings: Vec::new(),
-        schema_lossy: false,
+        warnings,
+        schema_lossy,
         keep_links: false,
     })
 }
@@ -1089,13 +1105,22 @@ fn convert_grouped_summary_to_mv(grp: &GroupedTable, rows: usize, row_title: Str
         var.refresh_inferred_role();
     }
 
+    let schema_lossy = grp.subcolumn_mode.is_pre_summarized();
+    let mut warnings = Vec::new();
+    if schema_lossy {
+        warnings.push(format!(
+            "Pre-summarized {:?} subcolumns flattened into independent Continuous variables; summary moment semantics lost",
+            grp.subcolumn_mode
+        ));
+    }
+
     Ok(BuiltArchetype {
         archetype: TableArchetype::MultipleVariables(mv),
         coord_map,
         preserved_cells: preserved,
         dropped_cells: 0,
-        warnings: Vec::new(),
-        schema_lossy: false,
+        warnings,
+        schema_lossy,
         keep_links: false,
     })
 }
@@ -1273,7 +1298,17 @@ fn pivot_mv_two_way_to_grouped(
     }
     validate_data_sets(n_cols)?;
     validate_rows(n_rows)?;
-    let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
+    let mapper =
+        rep_col.map(|_| ReplicateSlotMapper::from_values(buckets.values().flat_map(|entries| entries.iter().filter_map(|(rep_opt, _, _)| *rep_opt))));
+    let mut assigned_buckets: SlottedBucketMap<Cell> = BTreeMap::new();
+    let mut max_reps = 1_usize;
+    for (key, entries) in buckets {
+        let assigned = assign_bucket_slots(entries, mapper.as_ref());
+        if let Some(bucket_max) = assigned.iter().map(|(s, _, _)| s + 1).max() {
+            max_reps = max_reps.max(bucket_max);
+        }
+        assigned_buckets.insert(key, assigned);
+    }
     validate_subcolumns(max_reps)?;
     validate_title_slice(&row_levels)?;
     validate_title_slice(&col_levels)?;
@@ -1290,12 +1325,8 @@ fn pivot_mv_two_way_to_grouped(
 
     let mut coord_map = BTreeMap::new();
     let mut preserved = mapped_fac_cells;
-    for ((ri, ci), mut entries) in buckets {
-        entries.sort_by(|a, b| match (a.0, b.0) {
-            (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.1.cmp(&b.1)),
-            _ => a.1.cmp(&b.1),
-        });
-        for (s, (_, old_r, cell)) in entries.into_iter().enumerate() {
+    for ((ri, ci), assigned) in assigned_buckets {
+        for (s, old_r, cell) in assigned {
             set_dataset_cell(&mut grouped.data_sets, ci, ri, s, cell.clone());
             coord_map.insert(CellCoord::new(old_r, val_col, 0), CellCoord::new(ri, ci, s));
             if is_occupied(&cell) {
@@ -1313,6 +1344,73 @@ fn pivot_mv_two_way_to_grouped(
         schema_lossy,
         keep_links: false,
     })
+}
+
+type SlottedBucketMap<T> = BTreeMap<(usize, usize), Vec<(usize, usize, T)>>;
+
+struct ReplicateSlotMapper {
+    one_based_int: bool,
+    zero_based_int: bool,
+    rank_by_bits: BTreeMap<u64, usize>,
+}
+
+impl ReplicateSlotMapper {
+    fn from_values<I: IntoIterator<Item = f64>>(vals: I) -> Self {
+        let mut sorted: Vec<f64> = vals.into_iter().filter(|v| v.is_finite()).map(|v| if v == 0.0 { 0.0 } else { v }).collect();
+        sorted.sort_by(f64::total_cmp);
+        sorted.dedup_by(|a, b| a.to_bits() == b.to_bits());
+        let all_int = sorted.iter().all(|&v| v.fract() == 0.0 && v >= 0.0 && v <= (MAX_SUBCOLUMNS as f64));
+        let one_based_int = !sorted.is_empty() && all_int && sorted.iter().all(|&v| v >= 1.0);
+        let zero_based_int = !one_based_int && !sorted.is_empty() && all_int && sorted.iter().all(|&v| v < (MAX_SUBCOLUMNS as f64));
+        let rank_by_bits = sorted.into_iter().enumerate().map(|(idx, v)| (v.to_bits(), idx)).collect();
+        Self { one_based_int, zero_based_int, rank_by_bits }
+    }
+
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn slot_for(&self, v: f64) -> Option<usize> {
+        if !v.is_finite() {
+            return None;
+        }
+        let norm = if v == 0.0 { 0.0 } else { v };
+        if self.one_based_int {
+            return Some((norm as usize).saturating_sub(1));
+        }
+        if self.zero_based_int {
+            return Some(norm as usize);
+        }
+        self.rank_by_bits.get(&norm.to_bits()).copied()
+    }
+}
+
+fn assign_bucket_slots<T>(mut entries: Vec<(Option<f64>, usize, T)>, mapper: Option<&ReplicateSlotMapper>) -> Vec<(usize, usize, T)> {
+    entries.sort_by(|a, b| match (a.0, b.0) {
+        (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.1.cmp(&b.1)),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => a.1.cmp(&b.1),
+    });
+    let mut used = BTreeSet::new();
+    let mut placed = Vec::with_capacity(entries.len());
+    let mut overflow = Vec::new();
+    for (rep_opt, old_row, item) in entries {
+        if let (Some(rep), Some(m)) = (rep_opt, mapper)
+            && let Some(slot) = m.slot_for(rep)
+            && used.insert(slot)
+        {
+            placed.push((slot, old_row, item));
+            continue;
+        }
+        overflow.push((old_row, item));
+    }
+    let mut next_free = 0_usize;
+    for (old_row, item) in overflow {
+        while !used.insert(next_free) {
+            next_free += 1;
+        }
+        placed.push((next_free, old_row, item));
+    }
+    placed.sort_by_key(|(s, _, _)| *s);
+    placed
 }
 
 fn pivot_mv_summary_to_grouped(
@@ -1428,7 +1526,8 @@ fn pivot_mv_one_factor_to_grouped(
 
     let mut row_levels = Vec::new();
     let mut row_index = BTreeMap::new();
-    let mut buckets: BTreeMap<(usize, usize), Vec<(usize, Cell)>> = BTreeMap::new();
+    let mut row_slot_count: BTreeMap<usize, usize> = BTreeMap::new();
+    let mut buckets: SlottedBucketMap<Cell> = BTreeMap::new();
     let mut mapped_fac_cells = 0_usize;
 
     for r in 0..rows {
@@ -1450,11 +1549,16 @@ fn pivot_mv_one_factor_to_grouped(
         };
         mapped_fac_cells += 1;
         let ri = intern_level(&mut row_levels, &mut row_index, rk);
-        for (ci, &nc) in num_cols.iter().enumerate() {
-            if let Some(cell) = mv.variables[nc].cells.get(r)
-                && is_occupied(cell)
-            {
-                buckets.entry((ri, ci)).or_default().push((r, cell.clone()));
+        let has_any_val = num_cols.iter().any(|&nc| mv.variables[nc].cells.get(r).is_some_and(is_occupied));
+        if has_any_val {
+            let slot = *row_slot_count.get(&ri).unwrap_or(&0);
+            *row_slot_count.entry(ri).or_insert(0) += 1;
+            for (ci, &nc) in num_cols.iter().enumerate() {
+                if let Some(cell) = mv.variables[nc].cells.get(r)
+                    && is_occupied(cell)
+                {
+                    buckets.entry((ri, ci)).or_default().push((slot, r, cell.clone()));
+                }
             }
         }
     }
@@ -1463,7 +1567,7 @@ fn pivot_mv_one_factor_to_grouped(
     let n_cols = num_cols.len();
     validate_data_sets(n_cols)?;
     validate_rows(n_rows)?;
-    let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
+    let max_reps = row_slot_count.values().copied().max().unwrap_or(1).max(1);
     validate_subcolumns(max_reps)?;
     validate_title_slice(&row_levels)?;
     validate_cell_budget(n_rows, n_cols, max_reps, 0, "MultipleVariables one-factor Grouped pivot")?;
@@ -1480,7 +1584,7 @@ fn pivot_mv_one_factor_to_grouped(
     let mut preserved = mapped_fac_cells;
     for ((ri, ci), entries) in buckets {
         let old_col = num_cols[ci];
-        for (s, (old_r, cell)) in entries.into_iter().enumerate() {
+        for (s, old_r, cell) in entries {
             set_dataset_cell(&mut grouped.data_sets, ci, ri, s, cell);
             coord_map.insert(CellCoord::new(old_r, old_col, 0), CellCoord::new(ri, ci, s));
             preserved += 1;
@@ -1632,18 +1736,20 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
         };
         for (c, ds) in xy.data_sets.iter().enumerate() {
             let grp_cell = Cell::text(ds.title.clone());
-            if let Some(row_cells) = ds.cells.get(r) {
+            if let Some(row_cells) = ds.cells.get(r)
+                && row_cells.iter().take(n).any(is_occupied)
+            {
                 for s in 0..n {
-                    if let Some(cell) = row_cells.get(s)
-                        && is_occupied(cell)
-                    {
-                        if is_occupied(&x_cell) && seen_x_rows.insert(r) {
-                            preserved_x_occupied += 1;
-                        }
-                        #[allow(clippy::cast_precision_loss)]
-                        let rep_cell = Cell::number((s + 1) as f64);
-                        records.push((x_cell.clone(), grp_cell.clone(), rep_cell, cell.clone(), CellCoord::new(r, c, s)));
+                    let cell = row_cells.get(s).cloned().unwrap_or_default();
+                    if n == 1 && !is_occupied(&cell) {
+                        continue;
                     }
+                    if is_occupied(&x_cell) && seen_x_rows.insert(r) {
+                        preserved_x_occupied += 1;
+                    }
+                    #[allow(clippy::cast_precision_loss)]
+                    let rep_cell = Cell::number((s + 1) as f64);
+                    records.push((x_cell.clone(), grp_cell.clone(), rep_cell, cell, CellCoord::new(r, c, s)));
                 }
             }
         }
@@ -1663,6 +1769,7 @@ fn convert_xy_reps_to_mv(xy: &XyTable, rows: usize, n: usize) -> Result<BuiltArc
 
     let out_rows = records.len();
     validate_rows(out_rows)?;
+    validate_cell_budget(out_rows, 4, 1, 0, "XY-to-MultipleVariables replicate reshape")?;
     let mut mv = MultipleVariablesTable::new(4, out_rows)?;
     mv.variables[0].title = non_empty_or(&xy.x_title, "X");
     mv.variables[1].title = String::from("Group");
@@ -2042,7 +2149,17 @@ fn pivot_mv_grouped_xy(
     let n_cols = groups.len();
     validate_data_sets(n_cols)?;
     validate_rows(n_rows)?;
-    let max_reps = buckets.values().map(Vec::len).max().unwrap_or(1).max(1);
+    let mapper = rep_col.map(|_| ReplicateSlotMapper::from_values(buckets.values().flat_map(|entries| entries.iter().filter_map(|entry| entry.rep))));
+    let mut assigned_buckets: SlottedBucketMap<(Cell, bool)> = BTreeMap::new();
+    let mut max_reps = 1_usize;
+    for (key, entries) in buckets {
+        let packed: Vec<(Option<f64>, usize, (Cell, bool))> = entries.into_iter().map(|e| (e.rep, e.old_row, (e.cell, e.x_excluded))).collect();
+        let assigned = assign_bucket_slots(packed, mapper.as_ref());
+        if let Some(bucket_max) = assigned.iter().map(|(s, _, _)| s + 1).max() {
+            max_reps = max_reps.max(bucket_max);
+        }
+        assigned_buckets.insert(key, assigned);
+    }
     validate_subcolumns(max_reps)?;
     validate_title_slice(&groups)?;
     validate_cell_budget(n_rows, n_cols, max_reps, 1, "MultipleVariables XY pivot")?;
@@ -2060,14 +2177,10 @@ fn pivot_mv_grouped_xy(
 
     let mut coord_map = BTreeMap::new();
     let mut preserved = mapped_aux_cells;
-    for ((old_xi, gi), mut entries) in buckets {
+    for ((old_xi, gi), assigned) in assigned_buckets {
         let dst_r = remap_x[old_xi];
         let shared_x_excluded = row_x_excluded(old_xi);
-        entries.sort_by(|a, b| match (a.rep, b.rep) {
-            (Some(ra), Some(rb)) => ra.total_cmp(&rb).then_with(|| a.old_row.cmp(&b.old_row)),
-            _ => a.old_row.cmp(&b.old_row),
-        });
-        for (s, MvXyEntry { old_row: old_r, mut cell, x_excluded, .. }) in entries.into_iter().enumerate() {
+        for (s, old_r, (mut cell, x_excluded)) in assigned {
             let y_was_excluded = cell.excluded;
             if x_excluded && !shared_x_excluded {
                 cell.excluded = true;

@@ -8,7 +8,7 @@ use curvebook_doc::{
 use curvebook_math::sum;
 
 use crate::error::TransformError;
-use crate::ops::{TransformContext, TransformOutput, build_summary_tab};
+use crate::ops::{TransformContext, TransformOutput, build_summary_tab, remap_swapped_error_notes, swap_error_bound_cells};
 
 /// Generalized baseline source for [`execute_remove_baseline_kind`].
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
@@ -26,11 +26,13 @@ pub enum BaselineKind {
         /// Zero-based inclusive ending row index of the baseline window (`end_row >= start_row`).
         end_row: usize,
     },
-    /// Per-column linear baseline interpolated between mean of first `first_k` rows and last `last_k` rows.
+    /// Per-column linear baseline interpolated between active-observation centroids `(x_start, y_start)`
+    /// across rows `0..first_k` and `(x_end, y_end)` across rows `(row_count - last_k)..row_count`
+    /// (weighting each row by its active replicate count; falling back to `0.5 * (y_start + y_end)` when `x_end == x_start`).
     FirstAndLastLinear {
-        /// Number of leading rows (`>= 1`) averaged to anchor the initial baseline point.
+        /// Number of leading rows (`>= 1`) whose active observations define `(x_start, y_start)`.
         first_k: usize,
-        /// Number of trailing rows (`>= 1`) averaged to anchor the terminal baseline point.
+        /// Number of trailing rows (`>= 1`) whose active observations define `(x_end, y_end)`.
         last_k: usize,
     },
 }
@@ -68,7 +70,8 @@ pub fn execute_normalize(
             if (h - z).abs() == 0.0 {
                 return Err(TransformError::InvalidSpec { message: format!("normalization span is zero for column {c} (zero={z}, hundred={h})") });
             }
-            apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, c);
             scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: Some(c), value: z, units: None });
             scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: Some(c), value: h, units: None });
         }
@@ -79,7 +82,8 @@ pub fn execute_normalize(
             return Err(TransformError::InvalidSpec { message: format!("global normalization span is zero (zero={z}, hundred={h})") });
         }
         for &c in &selected {
-            apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            let swapped = apply_linear_norm_column(&mut out.archetype, c, z, h, scale);
+            remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, c);
         }
         scalars.push(ResultScalarEntry { key: String::from("ZeroAnchor"), data_set_index: None, value: z, units: None });
         scalars.push(ResultScalarEntry { key: String::from("HundredAnchor"), data_set_index: None, value: h, units: None });
@@ -138,7 +142,8 @@ pub fn execute_remove_baseline_kind(
     let mut warnings = Vec::new();
     for (idx_pos, &col) in selected.iter().enumerate() {
         let base_rows = &per_col_baselines[idx_pos];
-        apply_baseline_to_column(&mut out.archetype, col, base_rows, operation, &mut warnings);
+        let swapped = apply_baseline_to_column(&mut out.archetype, col, base_rows, operation, &mut warnings);
+        remap_swapped_error_notes(&mut out.exclusion_notes, &swapped, col);
     }
 
     let summary_tab = build_summary_tab(
@@ -261,7 +266,7 @@ fn collect_subcells(data_sets: &[DataSetColumn], col: usize, row: usize, mode: S
     }
 }
 
-fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hundred: f64, scale: f64) {
+fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hundred: f64, scale: f64) -> Vec<usize> {
     let factor = scale / (hundred - zero);
     let reverses = factor < 0.0;
     let map_val = |v: f64| (v - zero) * factor;
@@ -282,6 +287,7 @@ fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hu
                     }
                 }
             }
+            Vec::new()
         }
         TableArchetype::Nested(t) => {
             if let Some(grp) = t.groups.get_mut(col) {
@@ -293,6 +299,7 @@ fn apply_linear_norm_column(arch: &mut TableArchetype, col: usize, zero: f64, hu
                     }
                 }
             }
+            Vec::new()
         }
     }
 }
@@ -304,11 +311,12 @@ fn normalize_dataset_col(
     reverses: bool,
     map_val: impl Fn(f64) -> f64,
     map_spread: impl Fn(f64) -> f64,
-) {
+) -> Vec<usize> {
     let Some(ds) = data_sets.get_mut(col) else {
-        return;
+        return Vec::new();
     };
-    for row_cells in &mut ds.cells {
+    let mut swapped_rows = Vec::new();
+    for (r, row_cells) in ds.cells.iter_mut().enumerate() {
         match mode {
             SubcolumnMode::Single | SubcolumnMode::RawReplicates(_) => {
                 for cell in row_cells {
@@ -340,13 +348,17 @@ fn normalize_dataset_col(
                 if let Some(m) = row_cells.first().and_then(|c| c.value.finite_f64()) {
                     row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
                 }
-                let lo = row_cells.get(1).and_then(|c| c.value.finite_f64()).map(&map_spread);
-                let hi = row_cells.get(2).and_then(|c| c.value.finite_f64()).map(&map_spread);
                 if row_cells.len() >= 3 {
+                    if let Some(lo) = row_cells[1].value.finite_f64() {
+                        row_cells[1].value = CellValue::from_finite_or_empty(map_spread(lo));
+                    }
+                    if let Some(hi) = row_cells[2].value.finite_f64() {
+                        row_cells[2].value = CellValue::from_finite_or_empty(map_spread(hi));
+                    }
                     // Decreasing linear normalization (zero > hundred) reverses -Error and +Error.
-                    let (eff_lo, eff_hi) = if reverses { (hi, lo) } else { (lo, hi) };
-                    row_cells[1].value = eff_lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-                    row_cells[2].value = eff_hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
+                    if reverses && swap_error_bound_cells(row_cells) {
+                        swapped_rows.push(r);
+                    }
                 }
             }
             SubcolumnMode::UpperLowerLimits | SubcolumnMode::MedianIqr => {
@@ -354,24 +366,24 @@ fn normalize_dataset_col(
                     row_cells[0].value = CellValue::from_finite_or_empty(map_val(m));
                 }
                 if row_cells.len() >= 3 {
-                    let t1 = row_cells[1].value.finite_f64().map(&map_val);
-                    let t2 = row_cells[2].value.finite_f64().map(&map_val);
-                    match (t1, t2) {
-                        (Some(a), Some(b)) => {
-                            let (lo, hi) = if a <= b { (a, b) } else { (b, a) };
-                            row_cells[1].value = CellValue::from_finite_or_empty(lo);
-                            row_cells[2].value = CellValue::from_finite_or_empty(hi);
-                        }
-                        _ => {
-                            let (lo, hi) = if reverses { (t2, t1) } else { (t1, t2) };
-                            row_cells[1].value = lo.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-                            row_cells[2].value = hi.map_or(CellValue::Empty, CellValue::from_finite_or_empty);
-                        }
+                    if let Some(v1) = row_cells[1].value.finite_f64() {
+                        row_cells[1].value = CellValue::from_finite_or_empty(map_val(v1));
+                    }
+                    if let Some(v2) = row_cells[2].value.finite_f64() {
+                        row_cells[2].value = CellValue::from_finite_or_empty(map_val(v2));
+                    }
+                    let should_swap = match (row_cells[1].value.finite_f64(), row_cells[2].value.finite_f64()) {
+                        (Some(a), Some(b)) => a > b || (a == b && reverses),
+                        _ => reverses,
+                    };
+                    if should_swap && swap_error_bound_cells(row_cells) {
+                        swapped_rows.push(r);
                     }
                 }
             }
         }
     }
+    swapped_rows
 }
 
 fn compute_baselines(
@@ -452,20 +464,32 @@ fn validate_baseline_cols(cols: &[usize], col_count: usize) -> Result<(), Transf
 }
 
 #[allow(clippy::cast_precision_loss)]
+fn window_centroid(arch: &TableArchetype, col: usize, rows: std::ops::Range<usize>) -> Option<(f64, f64)> {
+    let mut xs = Vec::new();
+    let mut ys = Vec::new();
+    let mut row_vals = Vec::new();
+    for r in rows {
+        row_vals.clear();
+        collect_row_active_numbers(arch, col, r, &mut row_vals);
+        for &v in &row_vals {
+            xs.push(r as f64);
+            ys.push(v);
+        }
+    }
+    match (sum::mean(&xs), sum::mean(&ys)) {
+        (Ok(x), Ok(y)) => Some((x, y)),
+        _ => None,
+    }
+}
+
+#[allow(clippy::cast_precision_loss)]
 fn linear_baseline_for_col(arch: &TableArchetype, col: usize, row_count: usize, first_k: usize, last_k: usize) -> Vec<Option<f64>> {
-    let mut first_vals = Vec::new();
-    for r in 0..first_k {
-        collect_row_active_numbers(arch, col, r, &mut first_vals);
-    }
-    let mut last_vals = Vec::new();
-    for r in (row_count - last_k)..row_count {
-        collect_row_active_numbers(arch, col, r, &mut last_vals);
-    }
-    let (Ok(y_start), Ok(y_end)) = (sum::mean(&first_vals), sum::mean(&last_vals)) else {
+    let Some((x_start, y_start)) = window_centroid(arch, col, 0..first_k) else {
         return vec![None; row_count];
     };
-    let x_start = ((first_k - 1) as f64) * 0.5;
-    let x_end = ((row_count - last_k) as f64) + ((last_k - 1) as f64) * 0.5;
+    let Some((x_end, y_end)) = window_centroid(arch, col, (row_count - last_k)..row_count) else {
+        return vec![None; row_count];
+    };
     let span = x_end - x_start;
     (0..row_count)
         .map(|r| {
@@ -485,7 +509,7 @@ fn apply_baseline_to_column(
     baselines: &[Option<f64>],
     operation: BaselineOperation,
     warnings: &mut Vec<String>,
-) {
+) -> Vec<usize> {
     match arch {
         TableArchetype::Xy(t) => apply_baseline_datasets(&mut t.data_sets, col, t.y_subcolumn_mode, baselines, operation, warnings),
         TableArchetype::Column(t) => apply_baseline_datasets(&mut t.data_sets, col, t.subcolumn_mode, baselines, operation, warnings),
@@ -499,6 +523,7 @@ fn apply_baseline_to_column(
                     apply_baseline_cell(cell, baselines.get(r).copied().flatten(), operation, r, col, warnings);
                 }
             }
+            Vec::new()
         }
         TableArchetype::Nested(t) => {
             if let Some(grp) = t.groups.get_mut(col) {
@@ -509,6 +534,7 @@ fn apply_baseline_to_column(
                     }
                 }
             }
+            Vec::new()
         }
     }
 }
@@ -520,10 +546,11 @@ fn apply_baseline_datasets(
     baselines: &[Option<f64>],
     operation: BaselineOperation,
     warnings: &mut Vec<String>,
-) {
+) -> Vec<usize> {
     let Some(ds) = data_sets.get_mut(col) else {
-        return;
+        return Vec::new();
     };
+    let mut swapped_rows = Vec::new();
     for (r, row_cells) in ds.cells.iter_mut().enumerate() {
         let b_opt = baselines.get(r).copied().flatten();
         match mode {
@@ -536,12 +563,14 @@ fn apply_baseline_datasets(
                 for cell in row_cells.iter_mut() {
                     apply_baseline_cell(cell, b_opt, operation, r, col, warnings);
                 }
-                if let [_, lo_cell, hi_cell, ..] = row_cells.as_mut_slice()
-                    && lo_cell.excluded == hi_cell.excluded
-                    && let (Some(lo), Some(hi)) = (lo_cell.value.finite_f64(), hi_cell.value.finite_f64())
-                    && lo > hi
-                {
-                    std::mem::swap(lo_cell, hi_cell);
+                let reverses = b_opt.is_some_and(|b| b < 0.0)
+                    && matches!(operation, BaselineOperation::Ratio | BaselineOperation::PercentChange | BaselineOperation::FractionalChange);
+                let should_swap = match (row_cells.get(1).and_then(|c| c.value.finite_f64()), row_cells.get(2).and_then(|c| c.value.finite_f64())) {
+                    (Some(lo), Some(hi)) => lo > hi || (lo == hi && reverses),
+                    _ => reverses,
+                };
+                if should_swap && swap_error_bound_cells(row_cells) {
+                    swapped_rows.push(r);
                 }
             }
             SubcolumnMode::MeanSdN | SubcolumnMode::MeanSemN => {
@@ -566,14 +595,14 @@ fn apply_baseline_datasets(
                 }
                 if b_opt.is_some_and(|b| b < 0.0)
                     && matches!(operation, BaselineOperation::Ratio | BaselineOperation::PercentChange | BaselineOperation::FractionalChange)
-                    && let [_, lo_cell, hi_cell, ..] = row_cells.as_mut_slice()
-                    && lo_cell.excluded == hi_cell.excluded
+                    && swap_error_bound_cells(row_cells)
                 {
-                    std::mem::swap(lo_cell, hi_cell);
+                    swapped_rows.push(r);
                 }
             }
         }
     }
+    swapped_rows
 }
 
 fn apply_baseline_mean_cv_row(
