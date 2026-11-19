@@ -86,7 +86,7 @@ pub struct CorrelationMatrixResult {
     pub r_matrix: Vec<Vec<f64>>,
     /// Symmetric `p x p` unadjusted two-sided *P* value matrix (`0.0` on diagonal, `NaN` for unestimable pairs).
     pub p_matrix: Vec<Vec<f64>>,
-    /// Symmetric `p x p` Benjamini–Hochberg (1995) step-up FDR *q* value matrix adjusted over the `p*(p-1)/2` off-diagonal pairs (`0.0` on diagonal).
+    /// Symmetric `p x p` Benjamini–Hochberg (1995) step-up FDR *q* value matrix adjusted over the defined off-diagonal pairs (`0.0` on diagonal, `NaN` for unestimable pairs excluded from the family).
     pub fdr_q_matrix: Vec<Vec<f64>>,
     /// Symmetric `p x p` matrix of pairwise complete-case sample sizes `n_{ij}`.
     pub n_matrix: Vec<Vec<usize>>,
@@ -184,13 +184,13 @@ pub struct RubinPooledEstimate {
     pub total_variance: f64,
     /// Pooled standard error $\sqrt{T}$.
     pub pooled_se: f64,
-    /// Two-sided Wald *t* statistic $\bar{Q} / \sqrt{T}$ (`0.0` when `pooled_se == 0`).
+    /// Two-sided Wald *t* statistic $\bar{Q} / \sqrt{T}$ (`f64::NAN` when total variance `T <= 0`).
     pub t_statistic: f64,
     /// Barnard–Rubin (1999) adjusted *t* degrees of freedom accounting for finite `m` and complete-data df.
     pub df: f64,
-    /// Two-sided `t(df)` *P* value testing $H_0: Q = 0$.
+    /// Two-sided `t(df)` *P* value testing $H_0: Q = 0$ (`f64::NAN` when total variance `T <= 0`).
     pub p_value: f64,
-    /// Two-sided `t(df)` confidence interval `(lower, upper)` around `estimate` at configured `ConfidenceLevel`.
+    /// Two-sided `t(df)` confidence interval `(lower, upper)` around `estimate` at configured `ConfidenceLevel` (`(f64::NAN, f64::NAN)` when `T <= 0`).
     pub ci: (f64, f64),
     /// Relative increase in variance due to nonresponse $r = (1 + 1/m) B / \bar{U}$ (`0.0` when $\bar{U} = 0$).
     pub riv: f64,
@@ -416,7 +416,7 @@ pub fn correlation_matrix(columns: &[(&str, &[Option<f64>])], spearman: bool) ->
             };
             let (r_val, p_val) = match res {
                 Ok(c) => (c.r, c.p_value),
-                Err(_) => (0.0, 1.0),
+                Err(_) => (f64::NAN, f64::NAN),
             };
             r_mat[i][j] = r_val;
             r_mat[j][i] = r_val;
@@ -637,6 +637,171 @@ fn horn_parallel_analysis(n: usize, p: usize, k_comp: usize, standardize: bool, 
 // k-Means++ & Hierarchical Agglomerative Clustering
 // ============================================================================
 
+fn count_distinct_rows(rows: &[Vec<f64>]) -> usize {
+    let mut keys: Vec<Vec<u64>> = rows.iter().map(|row| row.iter().map(|&v| (if v == 0.0 { 0.0 } else { v }).to_bits()).collect()).collect();
+    keys.sort();
+    keys.dedup();
+    keys.len()
+}
+
+fn count_distinct_by_dist(dist_mat: &[Vec<f64>]) -> usize {
+    let n = dist_mat.len();
+    let mut visited = vec![false; n];
+    let mut classes = 0_usize;
+    for i in 0..n {
+        if visited[i] {
+            continue;
+        }
+        classes += 1;
+        for (j, slot) in visited.iter_mut().enumerate().skip(i) {
+            if !*slot && dist_mat[i][j] <= 0.0 {
+                *slot = true;
+            }
+        }
+    }
+    classes
+}
+
+fn pick_unassigned_furthest_point(
+    rows: &[Vec<f64>],
+    assignments: &[usize],
+    counts: &[usize],
+    centroids: &[Vec<f64>],
+    metric: ClusterDistance,
+) -> Option<usize> {
+    let mut best_idx = None;
+    let mut best_dist = -1.0_f64;
+    for (i, row) in rows.iter().enumerate() {
+        let cur_c = assignments[i];
+        if counts[cur_c] <= 1 {
+            continue;
+        }
+        let d = pairwise_distance_unchecked(row, &centroids[cur_c], metric);
+        if d > best_dist {
+            best_dist = d;
+            best_idx = Some(i);
+        }
+    }
+    best_idx
+}
+
+fn seed_kmeans_pp_centroids(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, seed: u64) -> Vec<Vec<f64>> {
+    let n = rows.len();
+    let mut rng = DeterministicRng::from_seed(seed);
+    let mut centroids = Vec::with_capacity(k);
+    let mut chosen_idx = Vec::with_capacity(k);
+    let first = rng.gen_index(n).unwrap_or(0);
+    chosen_idx.push(first);
+    centroids.push(rows[first].clone());
+
+    let mut min_d2 = vec![f64::INFINITY; n];
+    for _ in 1..k {
+        let last = centroids.last().map_or(&rows[0], |c| c);
+        let mut total_d2 = 0.0_f64;
+        for (i, r) in rows.iter().enumerate() {
+            let dv = pairwise_distance_unchecked(r, last, distance);
+            let d2 = dv * dv;
+            if d2 < min_d2[i] {
+                min_d2[i] = d2;
+            }
+            if chosen_idx.contains(&i) {
+                min_d2[i] = 0.0;
+            }
+            total_d2 += min_d2[i];
+        }
+        let chosen = if total_d2 <= 0.0 {
+            (0..n).find(|i| !chosen_idx.contains(i)).unwrap_or_else(|| rng.gen_index(n).unwrap_or(0))
+        } else {
+            let target = rng.next_open_f64() * total_d2;
+            let mut acc = 0.0_f64;
+            let mut pick = None;
+            for (i, &w) in min_d2.iter().enumerate() {
+                acc += w;
+                if w > 0.0 && acc >= target {
+                    pick = Some(i);
+                    break;
+                }
+            }
+            pick.or_else(|| (0..n).find(|i| min_d2[*i] > 0.0)).unwrap_or(n - 1)
+        };
+        chosen_idx.push(chosen);
+        centroids.push(rows[chosen].clone());
+    }
+    centroids
+}
+
+fn recompute_cluster_centroid(rows: &[Vec<f64>], assignments: &[usize], c_idx: usize, d: usize, distance: ClusterDistance) -> Vec<f64> {
+    let members: Vec<&Vec<f64>> = rows.iter().zip(assignments.iter()).filter(|(_, a)| **a == c_idx).map(|(r, _)| r).collect();
+    if members.is_empty() {
+        return vec![0.0; d];
+    }
+    match distance {
+        ClusterDistance::Manhattan => {
+            let mut cent = vec![0.0_f64; d];
+            for (j, slot) in cent.iter_mut().enumerate() {
+                let mut col: Vec<f64> = members.iter().map(|r| r[j]).collect();
+                col.sort_by(f64::total_cmp);
+                *slot = quantile_sorted(&col, 0.5).unwrap_or(0.0);
+            }
+            cent
+        }
+        ClusterDistance::Euclidean => {
+            let mut sum_vec = vec![0.0_f64; d];
+            for r in &members {
+                for j in 0..d {
+                    sum_vec[j] += r[j];
+                }
+            }
+            let count_f = members.len() as f64;
+            for slot in &mut sum_vec {
+                *slot /= count_f;
+            }
+            sum_vec
+        }
+        ClusterDistance::Cosine | ClusterDistance::Pearson => {
+            let mut sum_vec = vec![0.0_f64; d];
+            for r in &members {
+                let t = transform_row_for_centroid(r, distance);
+                for j in 0..d {
+                    sum_vec[j] += t[j];
+                }
+            }
+            let count_f = members.len() as f64;
+            for slot in &mut sum_vec {
+                *slot /= count_f;
+            }
+            sum_vec
+        }
+    }
+}
+
+fn repair_empty_clusters(rows: &[Vec<f64>], assignments: &mut [usize], centroids: &mut [Vec<f64>], distance: ClusterDistance) -> bool {
+    let k = centroids.len();
+    let d = rows.first().map_or(0, Vec::len);
+    let mut counts = vec![0_usize; k];
+    for &c_idx in assignments.iter() {
+        counts[c_idx] += 1;
+    }
+    let mut repaired = false;
+    for c_idx in 0..k {
+        if counts[c_idx] == 0
+            && let Some(donor_obs) = pick_unassigned_furthest_point(rows, assignments, &counts, centroids, distance)
+        {
+            let old_c = assignments[donor_obs];
+            counts[old_c] -= 1;
+            counts[c_idx] += 1;
+            assignments[donor_obs] = c_idx;
+            centroids[c_idx] = match distance {
+                ClusterDistance::Euclidean | ClusterDistance::Manhattan => rows[donor_obs].clone(),
+                ClusterDistance::Cosine | ClusterDistance::Pearson => transform_row_for_centroid(&rows[donor_obs], distance),
+            };
+            centroids[old_c] = recompute_cluster_centroid(rows, assignments, old_c, d, distance);
+            repaired = true;
+        }
+    }
+    repaired
+}
+
 /// *k*-means++ clustering (`DeterministicRng::from_seed`) returning cluster assignments,
 /// centroids, total within-cluster sum of squares (WCSS), and mean silhouette score.
 ///
@@ -654,42 +819,13 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
         }
         validate_finite_slice(r)?;
     }
-
-    let sq_dist = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum() };
-
-    let mut rng = DeterministicRng::from_seed(seed);
-    let mut centroids = Vec::with_capacity(k);
-    centroids.push(rows[rng.gen_index(n).unwrap_or(0)].clone());
-
-    let mut min_d2 = vec![f64::INFINITY; n];
-    for _ in 1..k {
-        let last = centroids.last().map_or(&rows[0], |c| c);
-        let mut total_d2 = 0.0_f64;
-        for (i, r) in rows.iter().enumerate() {
-            let d2 = sq_dist(r, last);
-            if d2 < min_d2[i] {
-                min_d2[i] = d2;
-            }
-            total_d2 += min_d2[i];
-        }
-        let chosen = if total_d2 <= 0.0 {
-            rng.gen_index(n).unwrap_or(0)
-        } else {
-            let target = rng.next_open_f64() * total_d2;
-            let mut acc = 0.0_f64;
-            let mut pick = n - 1;
-            for (i, &w) in min_d2.iter().enumerate() {
-                acc += w;
-                if acc >= target {
-                    pick = i;
-                    break;
-                }
-            }
-            pick
-        };
-        centroids.push(rows[chosen].clone());
+    let n_distinct = count_distinct_rows(rows);
+    if k > n_distinct {
+        return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
     }
 
+    let sq_dist = |a: &[f64], b: &[f64]| -> f64 { a.iter().zip(b.iter()).map(|(x, y)| (x - y).powi(2)).sum() };
+    let mut centroids = seed_kmeans_pp_centroids(rows, k, ClusterDistance::Euclidean, seed);
     let mut assignments = vec![0_usize; n];
     for _iter in 0..100 {
         let mut changed = false;
@@ -708,21 +844,11 @@ pub fn kmeans_pp(rows: &[Vec<f64>], k: usize, seed: u64) -> Result<KMeansResult,
                 changed = true;
             }
         }
-        let mut sums = vec![vec![0.0_f64; d]; k];
-        let mut counts = vec![0_usize; k];
-        for (r, &c_idx) in rows.iter().zip(assignments.iter()) {
-            counts[c_idx] += 1;
-            for j in 0..d {
-                sums[c_idx][j] += r[j];
-            }
+        if repair_empty_clusters(rows, &mut assignments, &mut centroids, ClusterDistance::Euclidean) {
+            changed = true;
         }
-        for c_idx in 0..k {
-            if counts[c_idx] > 0 {
-                let cf = counts[c_idx] as f64;
-                for j in 0..d {
-                    centroids[c_idx][j] = sums[c_idx][j] / cf;
-                }
-            }
+        for (c_idx, cent) in centroids.iter_mut().enumerate() {
+            *cent = recompute_cluster_centroid(rows, &assignments, c_idx, d, ClusterDistance::Euclidean);
         }
         if !changed {
             break;
@@ -870,44 +996,16 @@ fn kmeans_pp_from_dist(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, d
     if dist_mat.len() != n {
         return Err(StatsError::Math(curvebook_math::MathError::DimensionMismatch { expected: n, actual: dist_mat.len() }));
     }
+    let n_distinct = count_distinct_rows(rows).min(count_distinct_by_dist(dist_mat));
+    if k > n_distinct {
+        return Err(StatsError::InvalidParameter { name: "k_means_k", value: k as f64 });
+    }
     let sq_dist = |a: &[f64], b: &[f64]| -> f64 {
         let v = pairwise_distance_unchecked(a, b, distance);
         v * v
     };
 
-    let mut rng = DeterministicRng::from_seed(seed);
-    let mut centroids = Vec::with_capacity(k);
-    centroids.push(rows[rng.gen_index(n).unwrap_or(0)].clone());
-
-    let mut min_d2 = vec![f64::INFINITY; n];
-    for _ in 1..k {
-        let last = centroids.last().map_or(&rows[0], |c| c);
-        let mut total_d2 = 0.0_f64;
-        for (i, r) in rows.iter().enumerate() {
-            let d2 = sq_dist(r, last);
-            if d2 < min_d2[i] {
-                min_d2[i] = d2;
-            }
-            total_d2 += min_d2[i];
-        }
-        let chosen = if total_d2 <= 0.0 {
-            rng.gen_index(n).unwrap_or(0)
-        } else {
-            let target = rng.next_open_f64() * total_d2;
-            let mut acc = 0.0_f64;
-            let mut pick = n - 1;
-            for (i, &w) in min_d2.iter().enumerate() {
-                acc += w;
-                if acc >= target {
-                    pick = i;
-                    break;
-                }
-            }
-            pick
-        };
-        centroids.push(rows[chosen].clone());
-    }
-
+    let mut centroids = seed_kmeans_pp_centroids(rows, k, distance, seed);
     let mut assignments = vec![0_usize; n];
     for _iter in 0..100 {
         let mut changed = false;
@@ -926,34 +1024,11 @@ fn kmeans_pp_from_dist(rows: &[Vec<f64>], k: usize, distance: ClusterDistance, d
                 changed = true;
             }
         }
+        if repair_empty_clusters(rows, &mut assignments, &mut centroids, distance) {
+            changed = true;
+        }
         for (c_idx, cent) in centroids.iter_mut().enumerate() {
-            let members: Vec<&Vec<f64>> = rows.iter().zip(assignments.iter()).filter(|(_, a)| **a == c_idx).map(|(r, _)| r).collect();
-            if members.is_empty() {
-                continue;
-            }
-            match distance {
-                ClusterDistance::Manhattan => {
-                    for (j, slot) in cent.iter_mut().enumerate() {
-                        let mut col: Vec<f64> = members.iter().map(|r| r[j]).collect();
-                        col.sort_by(f64::total_cmp);
-                        *slot = quantile_sorted(&col, 0.5).unwrap_or(0.0);
-                    }
-                }
-                ClusterDistance::Cosine | ClusterDistance::Pearson | ClusterDistance::Euclidean => {
-                    let mut sum_vec = vec![0.0_f64; d];
-                    for r in &members {
-                        let t = transform_row_for_centroid(r, distance);
-                        for j in 0..d {
-                            sum_vec[j] += t[j];
-                        }
-                    }
-                    let count_f = members.len() as f64;
-                    for slot in &mut sum_vec {
-                        *slot /= count_f;
-                    }
-                    *cent = sum_vec;
-                }
-            }
+            *cent = recompute_cluster_centroid(rows, &assignments, c_idx, d, distance);
         }
         if !changed {
             break;
@@ -1392,7 +1467,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             let refs: Vec<(&str, &[Option<f64>])> = labels.iter().zip(opt_cols.iter()).map(|(l, v)| (l.as_str(), v.as_slice())).collect();
             let res = correlation_matrix(&refs, *spearman_rank)?;
 
-            let tab_r = build_tab(
+            let mut tab_r = build_tab(
                 "corr-matrix-r",
                 if *spearman_rank { "Spearman correlation matrix (rho)" } else { "Pearson correlation matrix (r)" },
                 ResultTabKind::MainSummary,
@@ -1400,7 +1475,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 res.labels.clone(),
                 res.r_matrix.iter().map(|row| row.iter().map(|&v| num_cell(v)).collect()).collect(),
             );
-            let tab_p = build_tab(
+            let mut tab_p = build_tab(
                 "corr-matrix-p",
                 "Correlation P values",
                 ResultTabKind::ParametersAndConfidenceIntervals,
@@ -1408,7 +1483,7 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 res.labels.clone(),
                 res.p_matrix.iter().map(|row| row.iter().map(|&v| p_cell(v, p_fmt)).collect()).collect(),
             );
-            let tab_q = build_tab(
+            let mut tab_q = build_tab(
                 "corr-matrix-fdr",
                 "BH FDR-adjusted q values",
                 ResultTabKind::MultipleComparisons,
@@ -1416,14 +1491,35 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
                 res.labels.clone(),
                 res.fdr_q_matrix.iter().map(|row| row.iter().map(|&v| p_cell(v, p_fmt)).collect()).collect(),
             );
+            let p_vars = res.labels.len();
+            let mut undefined_pairs = 0_usize;
+            for i in 0..p_vars {
+                for j in (i + 1)..p_vars {
+                    if !res.r_matrix[i][j].is_finite() {
+                        undefined_pairs += 1;
+                    }
+                }
+            }
+            if undefined_pairs > 0 {
+                let msg = format!(
+                    "{undefined_pairs} variable pair(s) had undefined correlation (constant column or < 3 complete pairs), omitted from display and excluded from Benjamini-Hochberg FDR adjustment."
+                );
+                tab_r.footnotes.push(msg.clone());
+                tab_p.footnotes.push(msg.clone());
+                tab_q.footnotes.push(msg);
+            }
             out.tabs.extend([tab_r, tab_p, tab_q]);
 
             let min_n = res.n_matrix.iter().flat_map(|r| r.iter()).copied().min().unwrap_or(0);
             out.checklist.push(checklist_item(
                 "Pairwise sample sizes & multiplicity",
-                if min_n >= 10 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                Some(format!("min pairwise n = {min_n}, {} variables", res.labels.len())),
-                "Upper-triangle P values are adjusted for false discovery rate via Benjamini-Hochberg.",
+                if min_n >= 10 && undefined_pairs == 0 { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+                Some(format!("min pairwise n = {min_n}, {} variables, {undefined_pairs} undefined pair(s)", res.labels.len())),
+                if undefined_pairs > 0 {
+                    "Defined upper-triangle P values are adjusted via Benjamini-Hochberg; undefined pairs (< 3 complete pairs or zero variance) were excluded from the FDR family."
+                } else {
+                    "Upper-triangle P values are adjusted for false discovery rate via Benjamini-Hochberg."
+                },
             ));
         }
         MultivariateSpec::Pca { standardize, parallel_analysis_seed } => {
@@ -1506,9 +1602,10 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             let coph_mat = cophenetic_distance_matrix(n, &merges)?;
             let cophenetic_r = cophenetic_correlation(&dist_mat, &coph_mat);
 
+            let n_distinct = count_distinct_rows(&rows).min(count_distinct_by_dist(&dist_mat));
             let k_max = match k_sweep_max {
-                Some(req) => (*req).min(n).min(MAX_CLUSTER_K_SWEEP).max(2.min(n)),
-                None => 6.min(n.saturating_sub(1)).max(2).min(n),
+                Some(req) => (*req).min(n_distinct).min(MAX_CLUSTER_K_SWEEP),
+                None => 6.min(n.saturating_sub(1)).min(n_distinct).max(2.min(n_distinct)),
             };
             let mut sweep_results: Vec<KMeansResult> = Vec::new();
             for k_try in 2..=k_max {
@@ -1526,12 +1623,18 @@ pub fn run_multivariate_analysis(sheet: &DataSheet, spec: &AnalysisSpec, mv_spec
             } else if let Some(best) = sweep_results
                 .iter()
                 .filter(|r| n < 3 || r.k < n)
-                .max_by(|a, b| a.mean_silhouette.total_cmp(&b.mean_silhouette))
+                .max_by(|a, b| {
+                    if (a.mean_silhouette - b.mean_silhouette).abs() <= 1.0e-12 {
+                        b.k.cmp(&a.k)
+                    } else {
+                        a.mean_silhouette.total_cmp(&b.mean_silhouette)
+                    }
+                })
                 .or_else(|| sweep_results.first())
             {
                 best.clone()
             } else {
-                kmeans_pp_from_dist(&rows, 2.min(n), dist_metric, &dist_mat, 0xC105_7E57)?
+                kmeans_pp_from_dist(&rows, n_distinct.clamp(1, 2), dist_metric, &dist_mat, 0xC105_7E57)?
             };
 
             push_scalar(&mut out, "Clusters (k)", None, km.k as f64);
@@ -1790,10 +1893,10 @@ pub fn rubin_pool_estimates(
             between_variance: 0.0,
             total_variance: 0.0,
             pooled_se: 0.0,
-            t_statistic: 0.0,
+            t_statistic: f64::NAN,
             df,
-            p_value: 1.0,
-            ci: (q_bar, q_bar),
+            p_value: f64::NAN,
+            ci: (f64::NAN, f64::NAN),
             riv: 0.0,
             lambda: 0.0,
             fmi: 0.0,
@@ -1890,8 +1993,14 @@ pub fn mice_predictive_mean_matching(
         mis_indices.push(mis);
     }
 
-    let m = config.imputations_m.clamp(2, 50);
-    let max_iters = config.max_iters.clamp(1, 100);
+    if !(2..=50).contains(&config.imputations_m) {
+        return Err(StatsError::InvalidParameter { name: "imputations_m", value: config.imputations_m as f64 });
+    }
+    if !(1..=100).contains(&config.max_iters) {
+        return Err(StatsError::InvalidParameter { name: "max_iters", value: config.max_iters as f64 });
+    }
+    let m = config.imputations_m;
+    let max_iters = config.max_iters;
     let mut rng = DeterministicRng::from_seed(config.seed);
 
     let mut base_rows = vec![vec![0.0_f64; p]; n_rows];
@@ -1971,22 +2080,20 @@ fn initialize_missing_cells(rows: &mut [Vec<f64>], obs_indices: &[Vec<usize>], m
 
 fn impute_single_variable(rows: &mut [Vec<f64>], obs_rows: &[usize], mis_rows: &[usize], rng: &mut DeterministicRng) {
     let n_obs = obs_rows.len();
-    let y_obs: Vec<f64> = obs_rows.iter().map(|&r| rows[r][0]).collect();
-    let Ok(m) = SummaryMoments::from_slice(&y_obs) else {
+    if n_obs == 0 {
         return;
-    };
-    let df = n_obs.saturating_sub(1).max(1);
-    let g = chi2_draw(df, rng);
-    let sigma_star = if m.css > 0.0 { (m.css / g).sqrt() } else { 0.0 };
-    let mu_star = m.mean + (sigma_star / (n_obs as f64).sqrt()) * rng.standard_normal();
-
-    let donors_k = if n_obs <= 3 { n_obs } else { (n_obs / 2).clamp(2, 5) };
-    let mut ranked: Vec<(usize, f64)> = y_obs.iter().enumerate().map(|(i, &yv)| (i, (yv - mu_star).abs())).collect();
-    ranked.sort_by(|a, b| a.1.total_cmp(&b.1).then_with(|| a.0.cmp(&b.0)));
-
+    }
+    // Approximate Bayesian Bootstrap / intercept-only full-donor PMM (Rubin & Schenker 1986;
+    // van Buuren 2018 §3.2 & §3.4): sample n_obs donors with replacement from y_obs, then draw
+    // each missing cell uniformly from that bootstrap donor pool.
+    let mut donor_pool = Vec::with_capacity(n_obs);
+    for _ in 0..n_obs {
+        let pick = rng.gen_index(n_obs).unwrap_or(0);
+        donor_pool.push(rows[obs_rows[pick]][0]);
+    }
     for &r_mis in mis_rows {
-        let pick = rng.gen_index(donors_k).unwrap_or(0);
-        rows[r_mis][0] = y_obs[ranked[pick].0];
+        let pick = rng.gen_index(n_obs).unwrap_or(0);
+        rows[r_mis][0] = donor_pool[pick];
     }
 }
 
@@ -2221,6 +2328,28 @@ fn pool_imputed_regression(
     let complete_df = fits[0].df_residual.max(1.0);
     let mut pooled = Vec::with_capacity(n_terms);
     for (t_idx, name) in term_names.iter().enumerate() {
+        let any_aliased = fits.iter().any(|fit| {
+            fit.aliased_columns.get(t_idx).copied().unwrap_or(false) || !fit.terms[t_idx].estimate.is_finite() || !fit.terms[t_idx].se.is_finite()
+        });
+        if any_aliased {
+            pooled.push(RubinPooledEstimate {
+                term: name.clone(),
+                m,
+                estimate: f64::NAN,
+                within_variance: f64::NAN,
+                between_variance: f64::NAN,
+                total_variance: f64::NAN,
+                pooled_se: f64::NAN,
+                t_statistic: f64::NAN,
+                df: complete_df,
+                p_value: f64::NAN,
+                ci: (f64::NAN, f64::NAN),
+                riv: f64::NAN,
+                lambda: f64::NAN,
+                fmi: f64::NAN,
+            });
+            continue;
+        }
         let mut qs = Vec::with_capacity(m);
         let mut us = Vec::with_capacity(m);
         for fit in &fits {
@@ -2346,6 +2475,7 @@ fn extract_mi_columns(
     if total_cols == 0 {
         return Err(StatsError::EmptyInput);
     }
+    validate_selected_data_sets(selected, total_cols)?;
 
     if let Some(resp) = response_column
         && resp >= total_cols
@@ -2401,6 +2531,10 @@ fn extract_mi_columns(
     Ok(ExtractedMiData { labels, cols: padded_cols, model_response_col, model_predictor_cols })
 }
 
+fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
+    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
+}
+
 fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResult, p_fmt: curvebook_doc::PValueFormat, confidence: ConfidenceLevel) {
     push_scalar(out, "Imputations (m)", None, res.m as f64);
     push_scalar(out, "Max iterations", None, res.max_iters as f64);
@@ -2432,7 +2566,7 @@ fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResul
             num_cell(pm.between_variance),
             num_cell(pm.total_variance),
             num_cell(pm.pooled_se),
-            ci_cell(pm.ci.0, pm.ci.1),
+            finite_ci_cell(pm.ci.0, pm.ci.1),
             num_cell(pm.df),
             num_cell(pm.riv),
             num_cell(pm.fmi),
@@ -2464,34 +2598,56 @@ fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResul
         ];
         let mut reg_labels = Vec::with_capacity(reg_terms.len());
         let mut reg_rows = Vec::with_capacity(reg_terms.len());
+        let mut aliased_terms = Vec::new();
         for term in reg_terms {
             push_scalar(out, format!("Reg {}: Pooled estimate", term.term), None, term.estimate);
             push_scalar(out, format!("Reg {}: Pooled SE", term.term), None, term.pooled_se);
             push_scalar(out, format!("Reg {}: P value", term.term), None, term.p_value);
             push_scalar(out, format!("Reg {}: FMI", term.term), None, term.fmi);
             reg_labels.push(term.term.clone());
-            reg_rows.push(vec![
-                num_cell(term.estimate),
-                num_cell(term.pooled_se),
-                ci_cell(term.ci.0, term.ci.1),
-                num_cell(term.t_statistic),
-                num_cell(term.df),
-                p_cell(term.p_value, p_fmt),
-                num_cell(term.within_variance),
-                num_cell(term.between_variance),
-                num_cell(term.total_variance),
-                num_cell(term.riv),
-                num_cell(term.fmi),
-            ]);
+            if !term.estimate.is_finite() {
+                aliased_terms.push(term.term.clone());
+                reg_rows.push(vec![
+                    ResultCell::Text(String::from("Aliased")),
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    num_cell(term.df),
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                    ResultCell::Empty,
+                ]);
+            } else {
+                reg_rows.push(vec![
+                    num_cell(term.estimate),
+                    num_cell(term.pooled_se),
+                    finite_ci_cell(term.ci.0, term.ci.1),
+                    num_cell(term.t_statistic),
+                    num_cell(term.df),
+                    p_cell(term.p_value, p_fmt),
+                    num_cell(term.within_variance),
+                    num_cell(term.between_variance),
+                    num_cell(term.total_variance),
+                    num_cell(term.riv),
+                    num_cell(term.fmi),
+                ]);
+            }
         }
-        out.tabs.push(build_tab(
+        let mut reg_tab = build_tab(
             "mi-pooled-regression",
             "Pooled regression parameters (Rubin 1987)",
             ResultTabKind::ParametersAndConfidenceIntervals,
             reg_headers,
             reg_labels,
             reg_rows,
-        ));
+        );
+        if !aliased_terms.is_empty() {
+            reg_tab.footnotes.push(format!("Aliased predictor(s) across imputed regression fits marked \"Aliased\": {}.", aliased_terms.join(", ")));
+        }
+        out.tabs.push(reg_tab);
     }
 
     let diag_headers = vec![
@@ -2520,7 +2676,13 @@ fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResul
         diag_rows,
     ));
 
-    let max_fmi = res.pooled_means.iter().map(|e| e.fmi).chain(res.pooled_regression.iter().flatten().map(|e| e.fmi)).fold(0.0_f64, f64::max);
+    let max_fmi = res
+        .pooled_means
+        .iter()
+        .map(|e| e.fmi)
+        .chain(res.pooled_regression.iter().flatten().map(|e| e.fmi))
+        .filter(|v| v.is_finite())
+        .fold(0.0_f64, f64::max);
     let adequacy_status = if res.total_missing == 0 {
         ChecklistStatus::Info
     } else if (res.m as f64) + 1.0e-9 >= (100.0 * max_fmi).ceil().min(50.0) || max_fmi <= 0.25 {
@@ -2559,11 +2721,26 @@ const fn cluster_linkage_label(linkage: ClusterLinkage) -> &'static str {
     }
 }
 
+fn validate_selected_data_sets(selected: &[usize], total: usize) -> Result<(), StatsError> {
+    let mut seen = Vec::with_capacity(selected.len());
+    for &idx in selected {
+        if idx >= total {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+        if seen.contains(&idx) {
+            return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: idx as f64 });
+        }
+        seen.push(idx);
+    }
+    Ok(())
+}
+
 type OptionalColumnsPair = (Vec<String>, Vec<Vec<Option<f64>>>);
 
 fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<OptionalColumnsPair, StatsError> {
     match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
+            validate_selected_data_sets(selected, mv.variables.len())?;
             let indices = if selected.is_empty() {
                 (0..mv.variables.len()).filter(|&idx| !matches!(mv.variables[idx].role, VariableRole::Categorical | VariableRole::Label)).collect()
             } else {
@@ -2579,6 +2756,7 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
             Ok((labels, cols))
         }
         TableArchetype::Column(col_tab) => {
+            validate_selected_data_sets(selected, col_tab.data_sets.len())?;
             let indices = resolve_selected_indices(selected, col_tab.data_sets.len());
             let mut labels = Vec::with_capacity(indices.len());
             let mut cols = Vec::with_capacity(indices.len());
@@ -2590,11 +2768,20 @@ fn extract_optional_columns(sheet: &DataSheet, selected: &[usize]) -> Result<Opt
             Ok((labels, cols))
         }
         TableArchetype::Xy(xy) => {
-            let mut labels = vec![xy.x_title.clone()];
-            let mut cols = vec![xy.x_cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect()];
-            for ds in &xy.data_sets {
-                labels.push(ds.title.clone());
-                cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+            let total_cols = 1 + xy.data_sets.len();
+            validate_selected_data_sets(selected, total_cols)?;
+            let indices = resolve_selected_indices(selected, total_cols);
+            let mut labels = Vec::with_capacity(indices.len());
+            let mut cols = Vec::with_capacity(indices.len());
+            for idx in indices {
+                if idx == 0 {
+                    labels.push(xy.x_title.clone());
+                    cols.push(xy.x_cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+                } else {
+                    let ds = &xy.data_sets[idx - 1];
+                    labels.push(ds.title.clone());
+                    cols.push(ds.cells.iter().map(|subs| subs.first().and_then(|c| c.active_number())).collect());
+                }
             }
             Ok((labels, cols))
         }

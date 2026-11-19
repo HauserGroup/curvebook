@@ -65,7 +65,7 @@ use curvebook_doc::{
 };
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{chi2_sf, norm_two_sided_isf, norm_two_sided_p};
-use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares};
+use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, sym_eigen};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
@@ -165,11 +165,11 @@ impl HazardRatioResult {
 pub struct SurvivalComparisonResult {
     /// Comparison test name (e.g. `"Log-rank (Mantel-Cox)"`, `"Gehan-Breslow-Wilcoxon"`, `"Log-rank test for trend"`).
     pub test_name: String,
-    /// Chi-square test statistic ($\ge 0$).
+    /// Chi-square test statistic ($\ge 0$, or `f64::NAN` when non-estimable due to zero events or zero covariance rank).
     pub chi_square: f64,
-    /// Asymptotic chi-square degrees of freedom (`k - 1` for homogeneity, `1` for log-rank trend).
+    /// Asymptotic chi-square degrees of freedom from covariance matrix rank (`<= k - 1` for homogeneity, `1` for log-rank trend; `f64::NAN` when non-estimable).
     pub df: f64,
-    /// Upper-tail $\chi^2(\text{df})$ *P* value testing identical survival curves across cohorts.
+    /// Upper-tail $\chi^2(\text{df})$ *P* value testing identical survival curves across cohorts (`f64::NAN` when non-estimable).
     pub p_value: f64,
 }
 
@@ -445,13 +445,17 @@ enum SurvivalWeight {
     GehanWilcoxon,
 }
 
+fn unavailable_survival_comparison(test_name: &str) -> SurvivalComparisonResult {
+    SurvivalComparisonResult { test_name: test_name.to_owned(), chi_square: f64::NAN, df: f64::NAN, p_value: f64::NAN }
+}
+
 /// Multi-cohort log-rank (Mantel–Cox) or Gehan–Breslow–Wilcoxon chi-square test using exact
 /// hypergeometric variance covariance matrix over distinct event times.
 ///
 /// Both tests are members of the weighted log-rank class: `U_g = sum_j w_j (d_gj - n_gj d_j / n_j)`
 /// with hypergeometric covariance `V_gh = sum_j w_j^2 d_j (n_j - d_j) / (n_j (n_j - 1)) * n_gj
-/// (delta_gh - n_hj / n_j)`, and `chi^2 = U' V^- U` on `K - 1` degrees of freedom computed from the
-/// first `K - 1` groups (Klein & Moeschberger 2003).
+/// (delta_gh - n_hj / n_j)`, and `chi^2 = U' V^- U` on effective covariance rank `<= K - 1` degrees of freedom
+/// (Klein & Moeschberger 2003).
 /// - `w_j = 1`: log-rank test (Mantel 1966; Peto & Peto 1972).
 /// - `w_j = n_j` (number at risk): Gehan (1965) generalized Wilcoxon test, extended to `K` samples by
 ///   Breslow (1970). The variance is the conditional hypergeometric weighted log-rank variance,
@@ -464,29 +468,70 @@ pub fn compare_survival_curves(cohorts: &[&[SurvivalObservation]], gehan_wilcoxo
     if k < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "survival curve comparison", required: 2, actual: k });
     }
+    let test_name = if gehan_wilcoxon { "Gehan-Breslow-Wilcoxon test" } else { "Log-rank (Mantel-Cox) test" };
     let weight_kind = if gehan_wilcoxon { SurvivalWeight::GehanWilcoxon } else { SurvivalWeight::LogRank };
-    let (u, cov, _, _) = weighted_log_rank_stats(cohorts, weight_kind)?;
+    let (u, cov, obs_tot, exp_tot) = weighted_log_rank_stats(cohorts, weight_kind)?;
 
-    // Solve generalized quadratic form u_{k-1}^T V_{k-1}^{-1} u_{k-1}.
-    let m = k - 1;
+    if obs_tot.iter().sum::<f64>() <= 0.0 {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
+
+    // Drop groups with zero expected events (e.g. completely censored before the first event)
+    // before forming the reduced covariance and computing its effective rank df.
+    let active: Vec<usize> = (0..k).filter(|&g| exp_tot[g] > 0.0).collect();
+    if active.len() < 2 {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
+    let m = active.len() - 1;
     let mut v_red = vec![0.0_f64; m * m];
-    for i in 0..m {
-        for j in 0..m {
-            v_red[i * m + j] = cov[i * k + j];
+    let mut u_red = Vec::with_capacity(m);
+    for (ri, &gi) in active.iter().take(m).enumerate() {
+        u_red.push(u[gi]);
+        for (cj, &gj) in active.iter().take(m).enumerate() {
+            v_red[ri * m + cj] = cov[gi * k + gj];
         }
     }
-    let u_red = &u[0..m];
+    let max_diag = (0..m).map(|i| v_red[i * m + i].abs()).fold(0.0_f64, f64::max);
+    if !max_diag.is_finite() || max_diag <= 0.0 {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
+
     let v_mat = DenseMatrix::from_row_major(m, m, v_red)?;
-    let chi2 = if let Ok(chol) = cholesky(&v_mat) {
-        let sol = chol.solve(u_red)?;
-        u_red.iter().zip(sol.iter()).map(|(a, b)| a * b).sum::<f64>().max(0.0)
+    let (chi2, rank) = if let Ok(chol) = cholesky(&v_mat)
+        && (0..m).all(|i| {
+            let piv = chol.l().get(i, i).unwrap_or(0.0);
+            piv.is_finite() && piv * piv > 1.0e-12 * max_diag
+        }) {
+        let sol = chol.solve(&u_red)?;
+        let qf = u_red.iter().zip(sol.iter()).map(|(a, b)| a * b).sum::<f64>().max(0.0);
+        (qf, m)
     } else {
-        let (ls, _) = solve_linear_least_squares(&v_mat, u_red)?;
-        u_red.iter().zip(ls.coefficients.iter()).map(|(a, b)| a * b).sum::<f64>().max(0.0)
+        let eig = sym_eigen(&v_mat)?;
+        let max_ev = eig.eigenvalues.iter().copied().fold(0.0_f64, f64::max);
+        if !max_ev.is_finite() || max_ev <= 0.0 {
+            return Ok(unavailable_survival_comparison(test_name));
+        }
+        let tol = 1.0e-11 * max_ev;
+        let mut qf = 0.0_f64;
+        let mut eff_rank = 0_usize;
+        for (col, &ev) in eig.eigenvalues.iter().enumerate() {
+            if ev > tol {
+                let mut proj = 0.0_f64;
+                for (row, &ur) in u_red.iter().enumerate() {
+                    proj += eig.eigenvectors.get(row, col).unwrap_or(0.0) * ur;
+                }
+                qf += (proj * proj) / ev;
+                eff_rank += 1;
+            }
+        }
+        (qf.max(0.0), eff_rank)
     };
-    let df = m as f64;
+
+    if rank == 0 || !chi2.is_finite() {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
+    let df = rank as f64;
     let p_value = chi2_sf(chi2, df)?;
-    let test_name = if gehan_wilcoxon { "Gehan-Breslow-Wilcoxon test" } else { "Log-rank (Mantel-Cox) test" };
     Ok(SurvivalComparisonResult { test_name: test_name.to_owned(), chi_square: chi2, df, p_value })
 }
 
@@ -501,18 +546,29 @@ pub fn log_rank_trend_test(cohorts: &[&[SurvivalObservation]]) -> Result<Surviva
     if k < 2 {
         return Err(StatsError::InsufficientSampleSize { context: "survival curve comparison", required: 2, actual: k });
     }
-    let (u, cov, _, _) = weighted_log_rank_stats(cohorts, SurvivalWeight::LogRank)?;
+    let test_name = "Log-rank test for trend";
+    let (u, cov, obs_tot, _) = weighted_log_rank_stats(cohorts, SurvivalWeight::LogRank)?;
+    if obs_tot.iter().sum::<f64>() <= 0.0 {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
     let scores: Vec<f64> = (1..=k).map(|i| i as f64).collect();
     let num: f64 = scores.iter().zip(u.iter()).map(|(s, ui)| s * ui).sum();
     let mut denom = 0.0_f64;
+    let mut max_cov = 0.0_f64;
     for i in 0..k {
         for j in 0..k {
-            denom += scores[i] * cov[i * k + j] * scores[j];
+            let v_ij = cov[i * k + j];
+            max_cov = max_cov.max(v_ij.abs());
+            denom += scores[i] * v_ij * scores[j];
         }
     }
-    let chi2 = if denom > 0.0 { (num * num) / denom } else { 0.0 };
+    let score_norm_sq: f64 = scores.iter().map(|s| s * s).sum();
+    if !denom.is_finite() || !max_cov.is_finite() || max_cov <= 0.0 || denom <= 1.0e-12 * max_cov * score_norm_sq {
+        return Ok(unavailable_survival_comparison(test_name));
+    }
+    let chi2 = ((num * num) / denom).max(0.0);
     let p_value = chi2_sf(chi2, 1.0)?;
-    Ok(SurvivalComparisonResult { test_name: String::from("Log-rank test for trend"), chi_square: chi2, df: 1.0, p_value })
+    Ok(SurvivalComparisonResult { test_name: String::from(test_name), chi_square: chi2, df: 1.0, p_value })
 }
 
 /// Observed/expected, genuine Mantel–Haenszel, and Peto one-step Hazard Ratio estimates with
@@ -1724,6 +1780,20 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> (O
 // ResultSheet Builder
 // ============================================================================
 
+fn validate_selected_data_sets(selected: &[usize], total: usize) -> Result<(), StatsError> {
+    let mut seen = Vec::with_capacity(selected.len());
+    for &idx in selected {
+        if idx >= total {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+        if seen.contains(&idx) {
+            return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: idx as f64 });
+        }
+        seen.push(idx);
+    }
+    Ok(())
+}
+
 /// Execute a [`SurvivalAnalysisSpec`] against a `Survival` or `MultipleVariables` [`DataSheet`].
 ///
 /// # Edge cases (Kaplan–Meier)
@@ -1751,6 +1821,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
         } => {
             let (mut cohorts, skipped_mv_rows, ignored_non_numeric) = match &sheet.archetype {
                 TableArchetype::Survival(table) => {
+                    validate_selected_data_sets(&spec.selected_data_sets, table.cohorts.len())?;
                     let indices = resolve_selected_indices(&spec.selected_data_sets, table.cohorts.len());
                     if indices.is_empty() {
                         return Err(StatsError::EmptyInput);
@@ -1884,10 +1955,14 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                 let refs: Vec<&[SurvivalObservation]> = cohort_obs.iter().map(Vec::as_slice).collect();
                 let mut cmp_rows = Vec::new();
                 let mut cmp_labels = Vec::new();
+                let mut non_estimable_tests = Vec::new();
                 if *log_rank_mantel_cox {
                     let lr = compare_survival_curves(&refs, false)?;
                     push_scalar(&mut out, "Log-rank chi-square", None, lr.chi_square);
                     push_scalar(&mut out, "Log-rank P value", None, lr.p_value);
+                    if !lr.chi_square.is_finite() {
+                        non_estimable_tests.push(lr.test_name.clone());
+                    }
                     cmp_labels.push(lr.test_name);
                     cmp_rows.push(vec![num_cell(lr.chi_square), num_cell(lr.df), p_cell(lr.p_value, p_fmt)]);
                 }
@@ -1895,23 +1970,43 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
                     let gbw = compare_survival_curves(&refs, true)?;
                     push_scalar(&mut out, "Gehan-Breslow-Wilcoxon chi-square", None, gbw.chi_square);
                     push_scalar(&mut out, "Gehan-Breslow-Wilcoxon P", None, gbw.p_value);
+                    if !gbw.chi_square.is_finite() {
+                        non_estimable_tests.push(gbw.test_name.clone());
+                    }
                     cmp_labels.push(gbw.test_name);
                     cmp_rows.push(vec![num_cell(gbw.chi_square), num_cell(gbw.df), p_cell(gbw.p_value, p_fmt)]);
                 }
                 if *trend_test && refs.len() >= 3 {
                     let tr = log_rank_trend_test(&refs)?;
+                    if !tr.chi_square.is_finite() {
+                        non_estimable_tests.push(tr.test_name.clone());
+                    }
                     cmp_labels.push(tr.test_name);
                     cmp_rows.push(vec![num_cell(tr.chi_square), num_cell(tr.df), p_cell(tr.p_value, p_fmt)]);
                 }
                 if !cmp_rows.is_empty() {
-                    out.tabs.push(build_tab(
+                    let mut cmp_tab = build_tab(
                         "curve-comparison",
                         "Comparison of survival curves",
                         ResultTabKind::ModelComparison,
                         vec![String::from("Chi-square"), String::from("df"), String::from("P value")],
                         cmp_labels,
                         cmp_rows,
-                    ));
+                    );
+                    if !non_estimable_tests.is_empty() {
+                        let msg = format!(
+                            "Survival comparison statistic unavailable for {} because no events were observed across overlapping risk sets (zero covariance rank).",
+                            non_estimable_tests.join(", ")
+                        );
+                        cmp_tab.footnotes.push(msg.clone());
+                        out.checklist.push(checklist_item(
+                            "Survival curve comparison estimability",
+                            ChecklistStatus::Info,
+                            Some(format!("{} test(s) unavailable", non_estimable_tests.len())),
+                            msg,
+                        ));
+                    }
+                    out.tabs.push(cmp_tab);
                 }
 
                 if refs.len() == 2 {
@@ -1946,6 +2041,7 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             let TableArchetype::MultipleVariables(mv) = &sheet.archetype else {
                 return Err(StatsError::IncompatibleTable { analysis: "Cox proportional hazards", actual: sheet.archetype.kind() });
             };
+            validate_selected_data_sets(&spec.selected_data_sets, mv.variables.len())?;
             let extraction = build_cox_design_subjects(mv, *time_column, *status_column, predictor_columns, reference_levels)?;
             let pred_names = extraction.pred_names;
             let subjects = extraction.subjects;
@@ -2165,6 +2261,59 @@ struct RetainedCoxRow {
     preds: Vec<RetainedCoxPred>,
 }
 
+type CoxCatLevels = Vec<Option<(String, Vec<String>)>>;
+
+fn resolve_cox_cat_levels(
+    mv: &MultipleVariablesTable,
+    predictor_columns: &[usize],
+    is_cat: &[bool],
+    retained_rows: &[RetainedCoxRow],
+    reference_levels: &[(usize, String)],
+) -> Result<CoxCatLevels, StatsError> {
+    let mut cat_levels = Vec::with_capacity(predictor_columns.len());
+    for (pos, &pc) in predictor_columns.iter().enumerate() {
+        let pv = &mv.variables[pc];
+        if !is_cat[pos] {
+            cat_levels.push(None);
+            continue;
+        }
+        let cells: Vec<Cell> = retained_rows
+            .iter()
+            .filter_map(|row| match &row.preds[pos] {
+                RetainedCoxPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
+                RetainedCoxPred::Numeric(_) => None,
+            })
+            .collect();
+        let retained_col = VariableColumn {
+            title: pv.title.clone(),
+            role: pv.role,
+            role_inferred: pv.role_inferred,
+            source: pv.source.clone(),
+            level_order: pv.level_order.clone(),
+            cells,
+        };
+        let mut lvls: Vec<String> =
+            retained_col.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();
+        let explicit_ref = reference_levels.iter().rev().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone());
+        let ref_lvl = match explicit_ref {
+            Some(req) => {
+                if !lvls.iter().any(|existing| existing == &req) {
+                    return Err(StatsError::InvalidParameter { name: "reference_levels", value: pc as f64 });
+                }
+                Some(req)
+            }
+            None => lvls.first().cloned(),
+        };
+        if let Some(rl) = ref_lvl {
+            lvls.retain(|l| l != &rl);
+            cat_levels.push(Some((rl, lvls)));
+        } else {
+            cat_levels.push(None);
+        }
+    }
+    Ok(cat_levels)
+}
+
 fn build_cox_design_subjects(
     mv: &MultipleVariablesTable,
     time_column: usize,
@@ -2178,6 +2327,11 @@ fn build_cox_design_subjects(
     for &pc in predictor_columns {
         let pv = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
         is_cat.push(pv.role == VariableRole::Categorical);
+    }
+    for &(ref_col, _) in reference_levels {
+        if ref_col >= mv.variables.len() {
+            return Err(StatsError::MissingColumn { index: ref_col });
+        }
     }
 
     let active_end = (0..mv.row_count()).rfind(|&r| {
@@ -2250,43 +2404,7 @@ fn build_cox_design_subjects(
 
     // Derive observed categorical levels and reference levels strictly from complete-case retained rows
     // so incomplete/excluded rows never introduce all-zero phantom dummy columns.
-    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(predictor_columns.len());
-    for (pos, &pc) in predictor_columns.iter().enumerate() {
-        let pv = &mv.variables[pc];
-        if is_cat[pos] {
-            let cells: Vec<Cell> = retained_rows
-                .iter()
-                .filter_map(|row| match &row.preds[pos] {
-                    RetainedCoxPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
-                    RetainedCoxPred::Numeric(_) => None,
-                })
-                .collect();
-            let retained_col = VariableColumn {
-                title: pv.title.clone(),
-                role: pv.role,
-                role_inferred: pv.role_inferred,
-                source: pv.source.clone(),
-                level_order: pv.level_order.clone(),
-                cells,
-            };
-            let mut lvls: Vec<String> =
-                retained_col.ordered_levels_with(&pv.level_order).into_iter().filter(|s| s.included_count > 0).map(|s| s.level).collect();
-            let ref_lvl = reference_levels
-                .iter()
-                .find(|(idx, _)| *idx == pc)
-                .map(|(_, l)| l.clone())
-                .filter(|l| lvls.iter().any(|existing| existing == l))
-                .or_else(|| lvls.first().cloned());
-            if let Some(rl) = ref_lvl {
-                lvls.retain(|l| l != &rl);
-                cat_levels.push(Some((rl, lvls)));
-            } else {
-                cat_levels.push(None);
-            }
-        } else {
-            cat_levels.push(None);
-        }
-    }
+    let cat_levels = resolve_cox_cat_levels(mv, predictor_columns, &is_cat, &retained_rows, reference_levels)?;
 
     let mut pred_names = Vec::new();
     for (pos, &pc) in predictor_columns.iter().enumerate() {
@@ -2475,6 +2593,7 @@ fn extract_mv_km_cohorts(
         return Err(StatsError::MissingColumn { index: g });
     }
 
+    validate_selected_data_sets(selected, mv.variables.len())?;
     let pool = resolve_selected_indices(selected, mv.variables.len());
     let status_col = match mv_status_column {
         Some(s) => s,
@@ -2710,9 +2829,6 @@ fn append_survival_pairwise(
     let mut raw_p = Vec::with_capacity(plan.pair_indices.len());
     for (i, j) in plan.pair_indices {
         let cmp = compare_survival_curves(&[&cohort_obs[i], &cohort_obs[j]], false)?;
-        if !cmp.p_value.is_finite() {
-            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "survival_pairwise_p", value: cmp.p_value }));
-        }
         let hr = two_cohort_hazard_ratio(&cohort_obs[i], &cohort_obs[j], confidence)?;
         raw_p.push(cmp.p_value);
         pairs.push((i, j, cmp.chi_square, cmp.p_value, hr));
@@ -2733,34 +2849,51 @@ fn append_survival_pairwise(
     ];
     let mut row_labels = Vec::with_capacity(pairs.len());
     let mut rows = Vec::with_capacity(pairs.len());
+    let mut non_estimable_pairs = Vec::new();
     for ((i, j, chi2, rp, hr), ap) in pairs.into_iter().zip(adj) {
-        if !ap.is_finite() {
-            return Err(StatsError::Math(curvebook_math::MathError::DomainError { name: "survival_pairwise_adjusted_p", value: ap }));
-        }
         let lbl_a = km_results[i].label.clone();
         let lbl_b = km_results[j].label.clone();
-        row_labels.push(format!("{lbl_a} vs. {lbl_b}"));
-        let sig = ap <= mult.threshold;
-        rows.push(vec![
-            num_cell(chi2),
-            p_cell(rp, p_fmt),
-            p_cell(ap, p_fmt),
-            opt_num_cell(hr.log_rank_hr_opt()),
-            opt_ci_cell(hr.log_rank_ci),
-            ResultCell::Boolean(sig),
-        ]);
-        out.pairwise_comparisons.push(PairwiseComparisonRecord {
-            group_a: indices[i],
-            group_b: indices[j],
-            label_a: lbl_a,
-            label_b: lbl_b,
-            estimate_diff: hr.log_rank_hr_opt(),
-            raw_p_or_q: ap,
-            is_fdr_q: is_fdr,
-            significant: sig,
-        });
+        let pair_label = format!("{lbl_a} vs. {lbl_b}");
+        row_labels.push(pair_label.clone());
+        if ap.is_finite() {
+            let sig = ap <= mult.threshold;
+            rows.push(vec![
+                num_cell(chi2),
+                p_cell(rp, p_fmt),
+                p_cell(ap, p_fmt),
+                opt_num_cell(hr.log_rank_hr_opt()),
+                opt_ci_cell(hr.log_rank_ci),
+                ResultCell::Boolean(sig),
+            ]);
+            out.pairwise_comparisons.push(PairwiseComparisonRecord {
+                group_a: indices[i],
+                group_b: indices[j],
+                label_a: lbl_a,
+                label_b: lbl_b,
+                estimate_diff: hr.log_rank_hr_opt(),
+                raw_p_or_q: ap,
+                is_fdr_q: is_fdr,
+                significant: sig,
+            });
+        } else {
+            non_estimable_pairs.push(pair_label);
+            rows.push(vec![
+                num_cell(chi2),
+                p_cell(rp, p_fmt),
+                p_cell(ap, p_fmt),
+                opt_num_cell(hr.log_rank_hr_opt()),
+                opt_ci_cell(hr.log_rank_ci),
+                ResultCell::Empty,
+            ]);
+        }
     }
     let mut pw_tab = build_tab("survival-pairwise", "Pairwise survival comparisons", ResultTabKind::MultipleComparisons, headers, row_labels, rows);
+    if !non_estimable_pairs.is_empty() {
+        pw_tab.footnotes.push(format!(
+            "Pairwise log-rank comparisons unavailable and excluded from multiplicity adjustment for {} due to zero observed events.",
+            non_estimable_pairs.join(", ")
+        ));
+    }
     if let Some(note) = plan.note {
         pw_tab.footnotes.push(note.clone());
         out.checklist.push(checklist_item("Pairwise survival multiplicity adjustment", ChecklistStatus::Info, None, note));
