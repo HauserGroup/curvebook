@@ -1,6 +1,6 @@
 # Biostatistics & Numerical Foundations — Implementation Guidelines
 
-Governing specification for `crates/math` (`L0`) and `crates/stats` (`L2`). Parity checklist: [`stats-parity.md`](../stats-parity.md).
+Governing specification for `crates/math` (`L0`) and `crates/stats` (`L2`). Parity checklist: [`evidence/statistics.md`](../evidence/statistics.md).
 
 Primary literature & numerical references (exact equations, polynomial approximations & test vectors):
 - **Oracle benchmarks & R cross-validation:** NIST Statistical Reference Datasets (StRD), Statistical Methods (`crates/stats/tests/nist_strd.rs`), and R `4.5.2` independent reference oracles (`crates/stats/tests/d1_edge_matrix.rs`).
@@ -99,7 +99,7 @@ Evaluated on raw values $x_i$ (normality) and $\ln(x_i)$ when $x_i > 0$ (lognorm
 
 ### 3.3 Linear Mixed-Effects Models (REML) & Nested Designs
 - When repeated-measures `Grouped` tables have missing values (or for `Nested` tables with unequal subcolumn sizes), fit the random-intercept linear mixed model $y = X\beta + Z u + \varepsilon$, $u \sim N(0, \sigma_u^2 I)$ (`fit_random_intercept_reml` in `crates/stats/src/anova.rs`) by **Restricted Maximum Likelihood (REML)**, profiling the exact log-REML over the variance ratio $\tau = \sigma_u^2 / \sigma_e^2$ (grid + golden-section search, Cholesky solves):
-  - Compound-symmetry covariance across repeated timepoints (implied by the random intercept); unstructured residual covariance is not implemented (planned in [`R3.4`](../planning/roadmap-history/r3.md#r34-unstructured-residual-covariance-for-reml-mixed-models), todo),
+  - Compound-symmetry covariance across repeated timepoints (implied by the random intercept); unstructured residual covariance is not implemented (planned in [`R3.4`](../history/roadmap/r3.md#r34-unstructured-residual-covariance-for-reml-mixed-models), todo),
   - Fixed-effect Wald *F*-tests with **Kenward–Roger** or **Satterthwaite** denominator degrees of freedom,
   - Variance-component estimates, intraclass correlation (ICC), and likelihood-ratio $\chi^2$ test for random subject effects.
 
@@ -144,7 +144,7 @@ Supports both classic `Survival` sheets and `MultipleVariables` variable assignm
 ### 5.3 ROC Curves, Method Comparison, Multiple Regression, Imputation, PCA & Clustering
 - **ROC:** Empirical step curve across all distinct cutoffs, trapezoidal AUC, **Hanley–McNeil** and **DeLong** non-parametric SE & CIs, sensitivity/specificity/likelihood-ratio table with Youden's $J = \text{Sens} + \text{Spec} - 1$.
 - **Method Comparison (`BlandAltman` & `PassingBablok`):** Bland–Altman difference / ratio / percent-difference bias and $95\%$ limits of agreement ($\bar{d} \pm 1.96 s_d$) with exact CIs; Passing–Bablok nonparametric median shifted slope and intercept regression with rank-order CIs and CUSUM linearity test.
-- **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with configurable categorical **Reference-level contrast coding** (selecting reference level $r$ for a $K$-level predictor emits $K - 1$ named indicator columns `Var[Level vs. Ref]` in parameter and VIF tables), full Type I / Type III omnibus ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves.
+- **Multiple Linear, Logistic & Poisson GLMs:** IRLS solver with configurable categorical **Reference-level contrast coding** (selecting reference level $r$ for a $K$-level predictor emits $K - 1$ named indicator columns `Var[Level vs. Ref]` in parameter and VIF tables), full Type I / Type III omnibus ANOVA / Deviance tables (including categorical $\times$ categorical interaction blocks), VIF multicollinearity diagnostics, AICc, pseudo-$R^2$ (Tjur, McFadden, Nagelkerke), Hosmer–Lemeshow goodness-of-fit, classification confusion matrices, and ROC curves. *(Planned XY `SimpleLogisticRegression` and multivariable `GlmSpec` extensions — interactions, polynomial terms, no-intercept models, nested GLM comparison, linear weights, Cook's distance/leverage/DFBETAs, out-of-sample row prediction, and configurable classification cutoffs — are specified in [`curve-fitting-implementation.md`](curve-fitting-implementation.md#53-planned-standalone-xy-simple-logistic-regression-target-specification--hosmer-lemeshow--sturdivant-2013-tjur-2009) §§5.3–5.4.)*
 - **Multiple Imputation (`MultipleImputation`):** Multivariate Imputation by Chained Equations (MICE) using Type-1 Predictive Mean Matching (PMM) seeded via `DeterministicRng`, pooled across $M$ completed datasets with Rubin's rules and Barnard–Rubin small-sample degrees of freedom.
 - **PCA & Clustering:** Mean-centered / standardized correlation or covariance SVD, Kaiser criterion ($\lambda > 1$), Horn's parallel analysis (Monte Carlo random eigenvalues via `curvebook_math::rng`), scree/loading/biplot coordinates, plus K-means++ and agglomerative hierarchical clustering (alphabetical cluster label normalization for deterministic palette mapping).
 

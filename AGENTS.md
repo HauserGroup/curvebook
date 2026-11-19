@@ -3,7 +3,8 @@
 This file is the binding engineering and governance specification for **CurveBook** (crate prefix `curvebook-*`, repository root `curvebook/`). Every contributor and AI coding agent must follow these rules.
 
 For concrete extension checklists, common past mistakes, and subsystem details, also read:
-- [docs/pitfalls.md](docs/pitfalls.md) — five documented CurveBook mistakes and the rules that prevent them
+- [docs/pitfalls.md](docs/pitfalls.md) — documented CurveBook mistakes and the rules that prevent them
+- [docs/pitfalls-engineering.md](docs/pitfalls-engineering.md) — general Rust, tooling, persistence, and process rules adopted for CurveBook
 - [docs/extending.md](docs/extending.md) — where and how to add commands, analyses, fit models, formats, cursors, locales, schema migrations, and assets
 - [docs/command-ids.md](docs/command-ids.md) — canonical command ID scheme, area prefixes, and replay stability rules
 - [docs/file-formats.md](docs/file-formats.md) — persisted formats, ownership, versioning policy, and migrations
@@ -86,7 +87,7 @@ One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came 
 ### Before You Write Code
 Read these before editing code:
 1. This file (`AGENTS.md`)
-2. [docs/pitfalls.md](docs/pitfalls.md)
+2. [docs/pitfalls.md](docs/pitfalls.md) and [docs/pitfalls-engineering.md](docs/pitfalls-engineering.md)
 3. [docs/extending.md](docs/extending.md)
 4. The relevant domain/reference guide (`docs/architecture.md`, `docs/development.md`, `docs/command-ids.md`, `docs/file-formats.md`, `docs/licences.md`, or `docs/ROADMAP.md`).
 

@@ -116,6 +116,7 @@ fn docs_site_check_passes_and_output_is_deterministic() -> Result<(), String> {
         "docs/development.md",
         "docs/extending.md",
         "docs/pitfalls.md",
+        "docs/pitfalls-engineering.md",
         "docs/command-ids.md",
         "docs/file-formats.md",
         "docs/licences.md",

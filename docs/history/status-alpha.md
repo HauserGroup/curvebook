@@ -1,6 +1,6 @@
 # Alpha-Era Status Snapshot (Archive)
 
-> **Archive.** Frozen 2026-11-19 by [`R0.31`](../ROADMAP.md#r031-docs-folder-consolidation). These paragraphs and verification rows describe the Alpha launch and pre-Beta workspace runs. They were moved out of [`STATUS.md`](../STATUS.md), which now records only the current state. Counts and branch names are historical and are not kept up to date.
+> **Archive.** Frozen 2026-11-19 by [`R0.31`](roadmap/r0.md#r031-docs-folder-consolidation). These paragraphs and verification rows describe the Alpha launch and pre-Beta workspace runs. They were moved out of [`STATUS.md`](../STATUS.md), which now records only the current state. Counts and branch names are historical and are not kept up to date.
 
 ## Alpha launch
 

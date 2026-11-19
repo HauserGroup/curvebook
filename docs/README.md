@@ -18,10 +18,11 @@ These pages are published on the documentation site by `cargo xtask docs-site`. 
 
 ## Contributing
 
-Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), and the [extension checklist](extending.md) before changing code. The documentation site links to these guides on GitHub, so keep their paths stable.
+Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), [engineering pitfalls](pitfalls-engineering.md), and the [extension checklist](extending.md) before changing code. The documentation site links to these guides on GitHub, so keep their paths stable.
 
 | Guide | Contents |
 |---|---|
+| [Known pitfalls](pitfalls.md) and [engineering pitfalls](pitfalls-engineering.md) | Documented CurveBook incidents and general Rust/tooling rules adopted across the codebase |
 | [Development](development.md) | Prerequisites, building from source, everyday commands, tests, coverage, and local configuration |
 | [Continuous integration](ci.md) | CI stages, shared test binaries, deadlines, and local verification |
 | [Architecture](architecture.md) | Crate layers and dependency boundaries |
@@ -41,7 +42,7 @@ Read [AGENTS.md](../AGENTS.md), [known pitfalls](pitfalls.md), and the [extensio
 |---|---|
 | Overall assessment | [Capability evidence overview](evidence/overview.md) |
 | Statistics | [Statistics evidence](evidence/statistics.md) |
-| Curve fitting | [Curve-fitting evidence](fitting-parity.md) (moves to `evidence/` once its in-flight edits land) |
+| Curve fitting | [Curve-fitting evidence](evidence/curve-fitting.md) |
 | Graphing | [Graphing evidence](evidence/graphing.md) |
 | Interchange | [File-format evidence](evidence/file-formats.md) |
 | User interface | [User-interface evidence](evidence/user-interface.md) and [GUI workflows](gui-workflows.md) |

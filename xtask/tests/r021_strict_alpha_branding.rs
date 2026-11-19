@@ -473,7 +473,7 @@ fn r021_asset_provenance_png_ico_crc_and_edited_docs_links_valid() -> Result<(),
     }
     for doc_rel in [
         "docs/evidence/overview.md",
-        "docs/fitting-parity.md",
+        "docs/evidence/curve-fitting.md",
         "docs/evidence/statistics.md",
         "docs/evidence/graphing.md",
         "docs/implementation/curve-fitting-implementation.md",
