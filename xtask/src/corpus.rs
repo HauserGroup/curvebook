@@ -5,7 +5,9 @@
 //! under `corpus/nist-strd/` (SHA-256 + byte size manifest + ASCII `.dat` structural parse) and
 //! runs the offline format, testkit, and `curvebook-math` NIST StRD test suites. Passing `--fetch`
 //! downloads the 58 public-domain NIST StRD `.dat` files via `curl -fsSL` into `corpus/nist-strd/`
-//! and records `corpus/nist-strd/sha256sums.txt`.
+//! and records `corpus/nist-strd/sha256sums.txt`. Files already present that pass the pinned
+//! SHA-256 + byte-size check are kept, so a restored CI cache only downloads missing or stale
+//! files, and transient HTTP 5xx/timeouts are retried by `curl --retry`.
 
 use std::collections::BTreeSet;
 use std::fs;
@@ -185,8 +187,12 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
 
     let nist_root = root.join("corpus").join("nist-strd");
     if opts.fetch || opts.fetch_only {
-        let fetched = fetch_nist_strd(&nist_root)?;
-        println!("corpus: fetched and recorded {fetched} NIST StRD .dat files in {}", nist_root.display());
+        let FetchSummary { reused, downloaded } = fetch_nist_strd(&nist_root)?;
+        println!(
+            "corpus: recorded {} NIST StRD .dat files in {} ({reused} already verified, {downloaded} downloaded)",
+            reused + downloaded,
+            nist_root.display()
+        );
     }
     if nist_root.exists() {
         let verified = verify_corpus_dir(&nist_root)?;
@@ -436,6 +442,12 @@ fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) 
             .arg("=https")
             .arg("--max-time")
             .arg("30")
+            .arg("--connect-timeout")
+            .arg("15")
+            // Retries only transient failures (timeouts and HTTP 408/429/500/502/503/504); a
+            // 404 still falls through to the next candidate URL immediately.
+            .arg("--retry")
+            .arg(CURL_RETRIES)
             .arg("--max-filesize")
             .arg(max_filesize)
             .arg("-o")
@@ -470,16 +482,41 @@ fn build_pinned_manifest_body() -> String {
     body
 }
 
-fn fetch_nist_strd(nist_root: &Path) -> Result<usize, String> {
+/// Attempts `curl --retry` makes after a transient failure, per candidate URL.
+const CURL_RETRIES: &str = "4";
+
+/// Outcome of [`fetch_nist_strd`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct FetchSummary {
+    /// Files already on disk that passed the pinned check and were kept.
+    reused: usize,
+    /// Files downloaded and verified in this run.
+    downloaded: usize,
+}
+
+/// `true` when `dest` already holds exactly the pinned bytes for `item` (SHA-256, byte size, and
+/// suite structure), so it can be kept instead of downloaded again. Any read or verification
+/// failure means "download it".
+fn is_verified_on_disk(item: StrdDatasetSpec, dest: &Path) -> bool {
+    fs::read(dest).is_ok_and(|bytes| verify_candidate_dat(item, &bytes).is_ok())
+}
+
+fn fetch_nist_strd(nist_root: &Path) -> Result<FetchSummary, String> {
     for suite in [StrdSuite::Univariate, StrdSuite::Anova, StrdSuite::LinearRegression, StrdSuite::NonlinearRegression] {
         let dir = nist_root.join(suite.subdir());
         fs::create_dir_all(&dir).map_err(|e| format!("create_dir_all {}: {e}", dir.display()))?;
     }
 
     let max_filesize = MAX_STRD_BYTES.to_string();
+    let mut summary = FetchSummary { reused: 0, downloaded: 0 };
     for item in CATALOG {
         let dest = nist_root.join(item.relative_path());
+        if is_verified_on_disk(*item, &dest) {
+            summary.reused += 1;
+            continue;
+        }
         fetch_single_dataset(*item, &dest, &max_filesize)?;
+        summary.downloaded += 1;
     }
 
     let manifest_path = nist_root.join(MANIFEST_FILENAME);
@@ -487,7 +524,7 @@ fn fetch_nist_strd(nist_root: &Path) -> Result<usize, String> {
     fs::write(&manifest_tmp, build_pinned_manifest_body()).map_err(|e| format!("write {}: {e}", manifest_tmp.display()))?;
     fs::rename(&manifest_tmp, &manifest_path).map_err(|e| format!("rename {} -> {}: {e}", manifest_tmp.display(), manifest_path.display()))?;
 
-    Ok(CATALOG.len())
+    Ok(summary)
 }
 
 #[cfg(test)]
@@ -498,7 +535,7 @@ mod tests {
 
     use super::{
         CATALOG, CorpusOptions, MANIFEST_FILENAME, MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, StrdSuite, build_pinned_manifest_body,
-        commit_verified_download, parse_args, verify_candidate_dat, verify_corpus_dir,
+        commit_verified_download, is_verified_on_disk, parse_args, verify_candidate_dat, verify_corpus_dir,
     };
 
     #[test]
@@ -646,6 +683,27 @@ Data:  y   x
         // Oversized buffer rejected before touching filesystem.
         let oversized = vec![b' '; MAX_STRD_BYTES + 1];
         assert!(verify_candidate_dat(CATALOG[5], &oversized).is_err());
+
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cached_files_are_reused_only_when_they_match_the_pinned_bytes() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+        let dir = std::env::temp_dir().join(format!("curvebook-xtask-cache-reuse-{}-{stamp}", std::process::id()));
+        fs::create_dir_all(dir.join("univ")).unwrap();
+        let item = CATALOG[5];
+        let dest = dir.join(item.relative_path());
+
+        assert!(!is_verified_on_disk(item, &dest), "a missing file must be downloaded");
+
+        // A stale or tampered cache entry (valid-looking header, wrong digest) must be downloaded again.
+        fs::write(&dest, b"Dataset Name:  NumAcc1\nData:  y\n 1\n 2\n").unwrap();
+        assert!(!is_verified_on_disk(item, &dest), "a tampered file must be downloaded again");
+
+        // An oversized cache entry is rejected without being trusted.
+        fs::write(&dest, vec![b' '; MAX_STRD_BYTES + 1]).unwrap();
+        assert!(!is_verified_on_disk(item, &dest), "an oversized file must be downloaded again");
 
         let _ = fs::remove_dir_all(&dir);
     }

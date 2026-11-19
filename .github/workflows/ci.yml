@@ -86,9 +86,27 @@ jobs:
       - name: Fetch locked dependencies for offline audit tests
         if: matrix.stage == 'tests'
         run: cargo fetch --locked
+      # The corpus is pinned by SHA-256 and byte size in curvebook-testkit, so a restored copy is
+      # verified exactly like a fresh download; `--fetch-only` keeps verified files and downloads
+      # only missing or stale ones. An older cache is still a useful partial restore.
+      - name: Restore the verified NIST StRD corpus
+        id: corpus-cache
+        if: matrix.stage == 'tests'
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus/nist-strd
+          key: nist-strd-${{ hashFiles('crates/testkit/src/nist_strd/corpus.rs') }}
+          restore-keys: nist-strd-
       - name: Download and verify the full NIST StRD corpus
         if: matrix.stage == 'tests'
         run: cargo run --locked -p xtask -- corpus --fetch-only
+      # Saved straight after verification, so a later test failure cannot discard a good corpus.
+      - name: Save the verified NIST StRD corpus
+        if: matrix.stage == 'tests' && steps.corpus-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: corpus/nist-strd
+          key: nist-strd-${{ hashFiles('crates/testkit/src/nist_strd/corpus.rs') }}
       - name: Install pinned Trunk for WebAssembly bundle check
         if: matrix.stage == 'wasm'
         run: |
