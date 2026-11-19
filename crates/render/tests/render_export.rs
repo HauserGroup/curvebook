@@ -815,6 +815,8 @@ fn dpi_sizing_preserves_aspect_ratio_and_rejects_oversized_targets() {
     assert_eq!(img.width_px, 10_000);
     assert_eq!(img.height_px, 300);
     assert_eq!(img.dpi, 360);
+    // RectPt(100, 10, 1800, 40) + 1 pt centered stroke spans [99.5..1900.5, 9.5..50.5] pt at 5 px/pt => ~9005x205 px.
+    assert_rendered_ink_bounds(&img, 9_000..=9_010, 200..=210);
 
     let png = encode_png(&img).expect("encode wide PNG");
     let decoded_png = decode_and_verify_png(&png);
@@ -846,4 +848,72 @@ fn dpi_sizing_preserves_aspect_ratio_and_rejects_oversized_targets() {
     let thin_scene = ChartScene::new("thin", "Thin", 1.0, 100.0, Some(Rgba8::WHITE));
     let err_subpx = RenderTargetSpec::from_scene_dpi(&thin_scene, 10).expect_err("1x100 pt at 10 DPI rounds width below 1 px");
     assert!(matches!(err_subpx, RenderError::InvalidTarget { .. }));
+}
+
+fn assert_rendered_ink_bounds(img: &RasterImage, expected_w: std::ops::RangeInclusive<u32>, expected_h: std::ops::RangeInclusive<u32>) {
+    let (mut min_x, mut max_x, mut min_y, mut max_y) = (u32::MAX, 0_u32, u32::MAX, 0_u32);
+    for y in 0..img.height_px {
+        for x in 0..img.width_px {
+            let off = ((y * img.width_px + x) * 4) as usize;
+            if img.rgba[off] < 250 || img.rgba[off + 1] < 250 || img.rgba[off + 2] < 250 {
+                min_x = min_x.min(x);
+                max_x = max_x.max(x);
+                min_y = min_y.min(y);
+                max_y = max_y.max(y);
+            }
+        }
+    }
+    let ink_w = max_x.saturating_sub(min_x) + 1;
+    let ink_h = max_y.saturating_sub(min_y) + 1;
+    assert!(expected_w.contains(&ink_w), "unexpected horizontal scale: ink width {ink_w} outside {expected_w:?}");
+    assert!(expected_h.contains(&ink_h), "unexpected vertical scale: ink height {ink_h} outside {expected_h:?}");
+}
+
+#[test]
+fn layout_2000x60_at_360_dpi_and_oversized_direct_rejections() {
+    // Compiled LayoutSheet (2000 x 60 pt) at 360 DPI renders 10,000 x 300 PNG/TIFF with 360 DPI metadata.
+    let doc = ProjectDocument::new("Wide Layout Project").expect("doc");
+    let layout_spec = LayoutSpec {
+        unit: curvebook_doc::PhysicalUnit::Points,
+        orientation: curvebook_doc::PageOrientation::Landscape,
+        width: 2000.0,
+        height: 60.0,
+        items: vec![LayoutItem::TextCallout {
+            id: String::from("banner"),
+            markdown: String::from("Wide Assay"),
+            bounds_pt: DocRectPt::new(100.0, 15.0, 1800.0, 30.0),
+            font_size_pt: 14.0,
+        }],
+        ..LayoutSpec::default()
+    };
+    let layout = LayoutSheet::new(SheetId::new("wide-layout"), "Wide 2000x60", layout_spec).expect("layout sheet");
+    let layout_scene = compile_layout(&layout, &doc).expect("compile layout");
+    let layout_target = RenderTargetSpec::from_scene_dpi(&layout_scene, 360).expect("layout 360 DPI target");
+    assert_eq!(layout_target, RenderTargetSpec { width_px: 10_000, height_px: 300, dpi: 360 });
+    let layout_img = render_scene(&layout_scene, layout_target).expect("render layout");
+    let expected_ppm = (360.0_f64 / 0.0254).round() as u32;
+    let layout_png = decode_and_verify_png(&encode_png(&layout_img).expect("encode layout PNG"));
+    assert_eq!((layout_png.width, layout_png.height, layout_png.phys_x_ppm, layout_png.phys_y_ppm), (10_000, 300, expected_ppm, expected_ppm));
+    let layout_tiff = decode_and_verify_tiff(&encode_tiff(&layout_img, TiffCompression::Deflate).expect("encode layout TIFF"));
+    assert_eq!((layout_tiff.width, layout_tiff.height, layout_tiff.x_res_num, layout_tiff.y_res_num), (10_000, 300, 360, 360));
+
+    // Boundary: 589 DPI fits MAX_RASTER_DIM_PX (16,361 px), while 590 DPI (16,389 px) rejects cleanly.
+    let boundary_ok = RenderTargetSpec::from_scene_dpi(&layout_scene, 589).expect("589 DPI fits 16384");
+    assert_eq!(boundary_ok.width_px, 16_361);
+    let err_590 = RenderTargetSpec::from_scene_dpi(&layout_scene, 590).expect_err("590 DPI exceeds MAX_RASTER_DIM_PX");
+    assert!(matches!(err_590, RenderError::InvalidTarget { ref message } if message.contains("16384")));
+
+    // Direct render_scene / encode_png / encode_tiff calls also reject oversized targets cleanly.
+    let forged_dim = RenderTargetSpec { width_px: 20_000, height_px: 600, dpi: 720 };
+    assert!(matches!(render_scene(&layout_scene, forged_dim).unwrap_err(), RenderError::InvalidTarget { ref message } if message.contains("16384")));
+    let forged_img = RasterImage { width_px: 20_000, height_px: 600, dpi: 720, rgba: Vec::new() };
+    assert!(matches!(encode_png(&forged_img).unwrap_err(), RenderError::InvalidTarget { ref message } if message.contains("16384")));
+    assert!(matches!(
+        encode_tiff(&forged_img, TiffCompression::Deflate).unwrap_err(),
+        RenderError::InvalidTarget { ref message } if message.contains("16384")
+    ));
+    let forged_px = RenderTargetSpec { width_px: 8_333, height_px: 8_333, dpi: 600 };
+    assert!(
+        matches!(render_scene(&layout_scene, forged_px).unwrap_err(), RenderError::InvalidTarget { ref message } if message.contains("67108864"))
+    );
 }

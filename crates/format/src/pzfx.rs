@@ -6,6 +6,7 @@
 
 use std::collections::HashSet;
 
+use curvebook_doc::error::MAX_SHEET_ID_BYTES;
 use curvebook_doc::{
     Cell, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, InfoConstant, InfoSheet,
     MAX_TITLE_BYTES, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, ProjectDocument, SequenceProgression, SheetId,
@@ -14,7 +15,6 @@ use curvebook_doc::{
 };
 
 use crate::archive::validate_project_document;
-use crate::csv::{CsvOptions, parse_cell_token};
 use crate::error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 use crate::xml::{XmlElement, parse_xml};
 
@@ -47,11 +47,8 @@ pub(crate) fn import_pzfx_str_with_used_cells(xml: &str, used_cells: &mut usize)
     }
 
     let mut warnings = Vec::new();
-    let title = root
-        .first_child("Title")
-        .map(|el| el.plain_text().trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| String::from("Imported Project"));
+    let title =
+        root.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| String::from("Imported Project"));
     let clamped_title = clamp_title(&title, "project", &mut warnings);
     let mut doc = ProjectDocument::new(clamped_title)?;
     let mut used_ids = HashSet::new();
@@ -77,15 +74,12 @@ fn import_info_sections(
     info_nodes.extend(root.children_named("Info"));
 
     for (idx, info_el) in info_nodes.iter().enumerate() {
-        let id = allocate_unique_id(info_el.attr("ID"), "info", idx + 1, used_ids);
-        let raw_title = info_el
-            .first_child("Title")
-            .map(|el| el.plain_text().trim().to_owned())
-            .filter(|s| !s.is_empty())
-            .unwrap_or_else(|| format!("Info {}", idx + 1));
-        let title = clamp_title(&raw_title, &id, warnings);
+        let id = allocate_valid_unique_sheet_id(info_el.attr("ID"), "info", idx + 1, used_ids, warnings);
+        let raw_title =
+            info_el.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Info {}", idx + 1));
+        let title = clamp_title(&raw_title, id.as_str(), warnings);
 
-        let mut sheet = InfoSheet::new_preseeded(id, title)?;
+        let mut sheet = InfoSheet::new_preseeded(id.as_str().to_owned(), title)?;
         sheet.constants.clear();
         for c_el in info_el.children_named("Constant") {
             let name_raw = c_el
@@ -170,36 +164,42 @@ fn parse_table_element(
     warnings: &mut Vec<ImportWarning>,
     used_cells: usize,
 ) -> Result<DataSheet, FormatError> {
-    let id = allocate_unique_id(table_el.attr("ID"), "data", one_based_idx, used_ids);
-    let raw_title = table_el
-        .first_child("Title")
-        .map(|el| el.plain_text().trim().to_owned())
-        .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| format!("Data {one_based_idx}"));
-    let title = clamp_title(&raw_title, &id, warnings);
+    let id = allocate_valid_unique_sheet_id(table_el.attr("ID"), "data", one_based_idx, used_ids, warnings);
+    let raw_title =
+        table_el.first_child("Title").map(XmlElement::plain_text).filter(|s| !s.trim().is_empty()).unwrap_or_else(|| format!("Data {one_based_idx}"));
+    let title = clamp_title(&raw_title, id.as_str(), warnings);
 
-    let kind = resolve_table_kind(table_el.attr("TableType"), &id, warnings);
+    let kind = resolve_table_kind(table_el.attr("TableType"), id.as_str(), warnings);
     let explicit_replicates = table_el.attr("Replicates").and_then(|s| s.trim().parse::<usize>().ok());
     let replicates = explicit_replicates.unwrap_or(1);
     if replicates > 0 {
         validate_subcolumns(replicates)?;
     }
     let y_format = table_el.attr("YFormat").or_else(|| table_el.attr("EVFormat"));
-    let initial_subcolumn_mode = resolve_subcolumn_mode(kind, y_format, replicates, &id, warnings)?;
+    let initial_subcolumn_mode = resolve_subcolumn_mode(kind, y_format, replicates, id.as_str(), warnings)?;
 
     let row_titles_el = table_el.first_child("RowTitlesColumn");
     let row_titles_declared_subs = row_titles_el.map(parse_subcolumns_attr).transpose()?.flatten();
-    let row_titles_cols = row_titles_el.map(extract_column_subcolumns).unwrap_or_default();
-    warn_discarded_subcolumns(warnings, (&id, &title), "RowTitlesColumn", row_titles_cols.len(), row_titles_declared_subs, 1, "row-title column");
+    let row_titles_cols = row_titles_el.map(extract_raw_subcolumn_strings).unwrap_or_default();
+    warn_discarded_subcolumns(
+        warnings,
+        (id.as_str(), &title),
+        "RowTitlesColumn",
+        row_titles_cols.len(),
+        row_titles_declared_subs,
+        1,
+        "row-title column",
+    );
     let row_titles_raw = row_titles_cols.into_iter().next().unwrap_or_default();
-    let row_titles: Vec<String> = row_titles_raw.iter().map(|c| cell_to_clamped_title(c, &format!("table `{title}` row title"), warnings)).collect();
+    let row_titles: Vec<String> = row_titles_raw.iter().map(|raw| clamp_title(raw, &format!("table `{title}` row title"), warnings)).collect();
 
     let x_el = table_el.first_child("XColumn");
     let x_declared_subs = x_el.map(parse_subcolumns_attr).transpose()?.flatten();
     let x_title = x_el
         .and_then(|el| el.first_child("Title"))
-        .map(|el| clamp_title(el.plain_text().trim(), &id, warnings))
-        .filter(|s| !s.is_empty())
+        .map(XmlElement::plain_text)
+        .filter(|s| !s.trim().is_empty())
+        .map(|raw| clamp_title(&raw, id.as_str(), warnings))
         .unwrap_or_else(|| String::from("X"));
     let x_cols = x_el.map(extract_column_subcolumns).unwrap_or_default();
     let x_mode = resolve_x_mode(table_el, &x_cols, x_declared_subs)?;
@@ -212,11 +212,12 @@ fn parse_table_element(
     for (c_idx, y_el) in y_elements.iter().enumerate() {
         let col_title = y_el
             .first_child("Title")
-            .map(|el| clamp_title(el.plain_text().trim(), &id, warnings))
-            .filter(|s| !s.is_empty())
+            .map(XmlElement::plain_text)
+            .filter(|s| !s.trim().is_empty())
+            .map(|raw| clamp_title(&raw, id.as_str(), warnings))
             .unwrap_or_else(|| default_column_label(c_idx));
         let declared_subcolumns = parse_subcolumns_attr(y_el)?;
-        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, &id, warnings);
+        let (sub_titles, subcolumns) = extract_labeled_subcolumns(y_el, id.as_str(), warnings);
         parsed_y.push(ParsedYColumn { title: col_title, declared_subcolumns, sub_titles, subcolumns });
     }
 
@@ -231,7 +232,7 @@ fn parse_table_element(
     padded_row_titles.resize(row_count, String::new());
     let has_row_titles = padded_row_titles.iter().any(|s| !s.is_empty());
 
-    warn_discarded_x_subcolumns(warnings, (&id, &title), kind, &x_mode, &x_title, &x_cols, x_declared_subs, has_row_titles);
+    warn_discarded_x_subcolumns(warnings, (id.as_str(), &title), kind, &x_mode, &x_title, &x_cols, x_declared_subs, has_row_titles);
     if kind != TableKind::Nested {
         let allowed_y_subs = match kind {
             TableKind::Contingency | TableKind::Survival | TableKind::PartsOfWhole | TableKind::MultipleVariables => 1,
@@ -239,7 +240,15 @@ fn parse_table_element(
         };
         let mode_desc = format!("{kind:?} mode {subcolumn_mode:?}");
         for col in &parsed_y {
-            warn_discarded_subcolumns(warnings, (&id, &title), &col.title, col.subcolumns.len(), col.declared_subcolumns, allowed_y_subs, &mode_desc);
+            warn_discarded_subcolumns(
+                warnings,
+                (id.as_str(), &title),
+                &col.title,
+                col.subcolumns.len(),
+                col.declared_subcolumns,
+                allowed_y_subs,
+                &mode_desc,
+            );
         }
     }
 
@@ -256,9 +265,9 @@ fn parse_table_element(
 
     let (effective_row_titles, effective_has_row_titles) = if kind == TableKind::PartsOfWhole
         && !has_row_titles
-        && let Some(first_x) = x_cols.first()
+        && let Some(first_x_raw) = x_el.and_then(|el| extract_raw_subcolumn_strings(el).into_iter().next())
     {
-        let mut labels: Vec<String> = first_x.iter().map(|c| cell_to_clamped_title(c, &format!("table `{title}` slice label"), warnings)).collect();
+        let mut labels: Vec<String> = first_x_raw.iter().map(|raw| clamp_title(raw, &format!("table `{title}` slice label"), warnings)).collect();
         labels.resize(row_count, String::new());
         (labels, true)
     } else {
@@ -271,7 +280,7 @@ fn parse_table_element(
         apply_nested_subcolumn_titles(nested, &nested_sub_titles);
     }
 
-    Ok(DataSheet::new(SheetId::new(id), title, arch)?)
+    Ok(DataSheet::new(id, title, arch)?)
 }
 
 struct ParsedYColumn {
@@ -485,16 +494,7 @@ fn build_table_archetype(
         }
         TableKind::PartsOfWhole => {
             let mut pow = PartsOfWholeTable::new(parsed_y.len(), row_count)?;
-            pow.slice_labels = if has_row_titles {
-                row_titles
-            } else if let Some(first_x) = x_cols.first() {
-                let mut discarded = Vec::new();
-                let mut labels: Vec<String> = first_x.iter().map(|c| cell_to_clamped_title(c, "PartsOfWhole slice label", &mut discarded)).collect();
-                labels.resize(row_count, String::new());
-                labels
-            } else {
-                vec![String::new(); row_count]
-            };
+            pow.slice_labels = if has_row_titles { row_titles } else { vec![String::new(); row_count] };
             fill_datasets(&mut pow.data_sets, parsed_y);
             Ok(TableArchetype::PartsOfWhole(pow))
         }
@@ -549,8 +549,8 @@ fn resolve_x_mode(table_el: &XmlElement, x_cols: &[Vec<Cell>], x_declared_subs: 
         let unit_label = table_el
             .first_child("XColumn")
             .and_then(|el| el.first_child("Title"))
-            .map(|el| el.plain_text().trim().to_owned())
-            .filter(|s| !s.is_empty())
+            .map(XmlElement::plain_text)
+            .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| String::from("Time"));
         return Ok(XColumnMode::DateOrElapsedTime { unit_label });
     }
@@ -595,32 +595,41 @@ fn fill_datasets(target: &mut [DataSetColumn], parsed_y: &[ParsedYColumn]) {
     }
 }
 
-fn extract_subcolumn_cells(sub_el: &XmlElement, csv_opts: &CsvOptions) -> Vec<Cell> {
-    let mut cells = Vec::new();
-    for d_el in sub_el.children_named("d") {
-        let excluded_attr = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
-        let raw = d_el.plain_text();
-        let mut cell = parse_cell_token(&raw, csv_opts);
-        if excluded_attr {
-            cell.excluded = true;
-        }
-        cells.push(cell);
+fn parse_pzfx_cell(d_el: &XmlElement) -> Cell {
+    let excluded = d_el.attr("Excluded").is_some_and(|v| v.trim() == "1" || v.trim().eq_ignore_ascii_case("true"));
+    let raw = d_el.plain_text();
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Cell { value: CellValue::Empty, excluded };
     }
-    cells
+    if let Ok(num) = trimmed.parse::<f64>()
+        && num.is_finite()
+    {
+        return Cell { value: CellValue::Number(num), excluded };
+    }
+    Cell { value: CellValue::Text(raw), excluded }
+}
+
+fn extract_subcolumn_cells(sub_el: &XmlElement) -> Vec<Cell> {
+    sub_el.children_named("d").map(parse_pzfx_cell).collect()
+}
+
+fn extract_raw_subcolumn_strings(col_el: &XmlElement) -> Vec<Vec<String>> {
+    col_el.children_named("Subcolumn").map(|sub_el| sub_el.children_named("d").map(XmlElement::plain_text).collect()).collect()
 }
 
 fn extract_labeled_subcolumns(col_el: &XmlElement, source_id: &str, warnings: &mut Vec<ImportWarning>) -> (Vec<Option<String>>, Vec<Vec<Cell>>) {
-    let csv_opts = CsvOptions::csv();
     let mut titles = Vec::new();
     let mut subcolumns = Vec::new();
     for sub_el in col_el.children_named("Subcolumn") {
         let sub_title = sub_el
             .first_child("Title")
-            .map(|el| clamp_title(el.plain_text().trim(), source_id, warnings))
-            .or_else(|| sub_el.attr("Title").map(|s| clamp_title(s.trim(), source_id, warnings)))
-            .filter(|s| !s.is_empty());
+            .map(XmlElement::plain_text)
+            .or_else(|| sub_el.attr("Title").map(str::to_owned))
+            .filter(|s| !s.trim().is_empty())
+            .map(|raw| clamp_title(&raw, source_id, warnings));
         titles.push(sub_title);
-        subcolumns.push(extract_subcolumn_cells(sub_el, &csv_opts));
+        subcolumns.push(extract_subcolumn_cells(sub_el));
     }
     (titles, subcolumns)
 }
@@ -641,8 +650,7 @@ fn apply_nested_subcolumn_titles(nested: &mut NestedTable, nested_sub_titles: &[
 }
 
 fn extract_column_subcolumns(col_el: &XmlElement) -> Vec<Vec<Cell>> {
-    let csv_opts = CsvOptions::csv();
-    col_el.children_named("Subcolumn").map(|sub_el| extract_subcolumn_cells(sub_el, &csv_opts)).collect()
+    col_el.children_named("Subcolumn").map(extract_subcolumn_cells).collect()
 }
 
 fn resolve_table_kind(raw: Option<&str>, id: &str, warnings: &mut Vec<ImportWarning>) -> TableKind {
@@ -746,23 +754,84 @@ fn warn_ignored_sections(root: &XmlElement, warnings: &mut Vec<ImportWarning>) {
     }
 }
 
-fn allocate_unique_id(raw: Option<&str>, prefix: &str, idx: usize, used: &mut HashSet<String>) -> String {
-    let base = raw.map(str::trim).filter(|s| !s.is_empty()).map(str::to_owned).unwrap_or_else(|| format!("{prefix}-{idx}"));
-    let mut candidate = base.clone();
-    let mut suffix = 1_usize;
-    while !used.insert(candidate.clone()) {
-        candidate = format!("{base}-{suffix}");
-        suffix += 1;
-    }
-    candidate
+const SHEET_ID_SANITIZE_HEADROOM_BYTES: usize = 24;
+
+pub(crate) fn allocate_valid_unique_sheet_id(
+    raw: Option<&str>,
+    prefix: &str,
+    idx: usize,
+    used: &mut HashSet<String>,
+    warnings: &mut Vec<ImportWarning>,
+) -> SheetId {
+    let fallback = || format!("{prefix}-{idx}");
+    let base = match raw {
+        None | Some("") => fallback(),
+        Some(raw_id) if SheetId::try_new(raw_id).is_ok() => raw_id.to_owned(),
+        Some(raw_id) => {
+            let sanitized = sanitize_sheet_id_candidate(raw_id, &fallback());
+            warnings.push(ImportWarning::new(
+                ImportWarningKind::CoercedValue,
+                raw_id,
+                format!("imported sheet ID `{raw_id}` is invalid and was sanitized to `{sanitized}`"),
+            ));
+            sanitized
+        }
+    };
+    let unique = reserve_unique_sheet_id(&base, used);
+    SheetId::try_new(&unique).unwrap_or_else(|_| SheetId::new(reserve_unique_sheet_id(&fallback(), used)))
 }
 
-fn cell_to_clamped_title(cell: &Cell, source: &str, warnings: &mut Vec<ImportWarning>) -> String {
-    match &cell.value {
-        CellValue::Empty => String::new(),
-        CellValue::Number(v) => clamp_title(&format!("{v}"), source, warnings),
-        CellValue::Text(s) => clamp_title(s, source, warnings),
+fn sanitize_sheet_id_candidate(raw: &str, fallback: &str) -> String {
+    let mut cleaned = String::with_capacity(raw.len());
+    let mut last_dash = false;
+    for ch in raw.chars() {
+        if ch.is_whitespace() || ch.is_control() || matches!(ch, ':' | '{' | '}') {
+            if !last_dash && !cleaned.is_empty() {
+                cleaned.push('-');
+                last_dash = true;
+            }
+        } else {
+            cleaned.push(ch);
+            last_dash = ch == '-';
+        }
     }
+    let trimmed = cleaned.trim_matches('-');
+    let max_base_bytes = MAX_SHEET_ID_BYTES.saturating_sub(SHEET_ID_SANITIZE_HEADROOM_BYTES);
+    let truncated = truncate_utf8_to_bytes(trimmed, max_base_bytes).trim_end_matches('-');
+    if truncated.is_empty() || SheetId::try_new(truncated).is_err() {
+        truncate_utf8_to_bytes(fallback, max_base_bytes).to_owned()
+    } else {
+        truncated.to_owned()
+    }
+}
+
+fn reserve_unique_sheet_id(base: &str, used: &mut HashSet<String>) -> String {
+    let initial = truncate_utf8_to_bytes(base, MAX_SHEET_ID_BYTES).to_owned();
+    if used.insert(initial.clone()) {
+        return initial;
+    }
+    let mut suffix = 1_usize;
+    loop {
+        let tag = format!("-{suffix}");
+        let budget = MAX_SHEET_ID_BYTES.saturating_sub(tag.len());
+        let stem = truncate_utf8_to_bytes(base, budget);
+        let candidate = format!("{stem}{tag}");
+        if used.insert(candidate.clone()) {
+            return candidate;
+        }
+        suffix += 1;
+    }
+}
+
+fn truncate_utf8_to_bytes(raw: &str, max_bytes: usize) -> &str {
+    if raw.len() <= max_bytes {
+        return raw;
+    }
+    let mut end = max_bytes;
+    while end > 0 && !raw.is_char_boundary(end) {
+        end -= 1;
+    }
+    &raw[..end]
 }
 
 fn clamp_title(raw: &str, source: &str, warnings: &mut Vec<ImportWarning>) -> String {

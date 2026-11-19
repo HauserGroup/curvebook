@@ -343,9 +343,22 @@ where
     })
 }
 
-fn save_project_unpacked_dir_driven<F>(doc: &ProjectDocument, dir: &Path, mut on_commit_entry: F) -> Result<(), FormatError>
+fn save_project_unpacked_dir_driven<F>(doc: &ProjectDocument, dir: &Path, on_commit_entry: F) -> Result<(), FormatError>
 where
     F: FnMut(&str) -> MidCommitDirective,
+{
+    save_project_unpacked_dir_driven_with_rollback(doc, dir, on_commit_entry, platform_write_atomic)
+}
+
+fn save_project_unpacked_dir_driven_with_rollback<F, R>(
+    doc: &ProjectDocument,
+    dir: &Path,
+    mut on_commit_entry: F,
+    restore_file: R,
+) -> Result<(), FormatError>
+where
+    F: FnMut(&str) -> MidCommitDirective,
+    R: FnMut(&Path, &[u8]) -> Result<(), FormatError>,
 {
     let entries = build_archive_entries(doc, ArchiveKind::Project)?;
     ensure_dir_exists(dir)?;
@@ -383,7 +396,7 @@ where
         return Err(err);
     }
 
-    if let Err(err) = commit_staged_unpacked_entries(&staged, &mut stage_guard, &mut tx_guard, &mut on_commit_entry) {
+    if let Err(err) = commit_staged_unpacked_entries_with_rollback(&staged, &mut stage_guard, &mut tx_guard, &mut on_commit_entry, restore_file) {
         drop(stage_guard);
         if !sheets_existed_before {
             let _ = std::fs::remove_dir(&sheets_dir);
@@ -516,20 +529,29 @@ struct DocumentSchemaPeek {
 struct JsonDomBudget {
     remaining_nodes: usize,
     remaining_bytes: usize,
+    budget_exceeded: bool,
 }
 
 impl JsonDomBudget {
     fn charge(&mut self, nodes: usize, bytes: usize) -> Result<(), String> {
         if nodes > self.remaining_nodes {
+            self.budget_exceeded = true;
             return Err(format!("JSON DOM node count exceeds migration limit {MAX_MIGRATION_JSON_NODES}"));
         }
         if bytes > self.remaining_bytes {
+            self.budget_exceeded = true;
             return Err(String::from("JSON DOM allocation exceeds migration memory budget"));
         }
         self.remaining_nodes -= nodes;
         self.remaining_bytes -= bytes;
         Ok(())
     }
+}
+
+pub(crate) enum BoundedJsonOutcome {
+    Value(serde_json::Value),
+    BudgetExceeded(FormatError),
+    SyntaxOrType(FormatError),
 }
 
 struct BoundedValueSeed<'a>(&'a mut JsonDomBudget);
@@ -619,13 +641,27 @@ impl<'de> serde::de::Visitor<'de> for BoundedValueVisitor<'_> {
     }
 }
 
-fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, FormatError> {
+pub(crate) fn parse_bounded_json_outcome(doc_bytes: &[u8]) -> BoundedJsonOutcome {
     let max_bytes = doc_bytes.len().saturating_mul(6).clamp(MIN_MIGRATION_JSON_BYTES, MAX_MIGRATION_JSON_BYTES);
-    let mut budget = JsonDomBudget { remaining_nodes: MAX_MIGRATION_JSON_NODES, remaining_bytes: max_bytes };
+    let mut budget = JsonDomBudget { remaining_nodes: MAX_MIGRATION_JSON_NODES, remaining_bytes: max_bytes, budget_exceeded: false };
     let mut de = serde_json::Deserializer::from_slice(doc_bytes);
-    let val = serde::de::DeserializeSeed::deserialize(BoundedValueSeed(&mut budget), &mut de)?;
-    de.end()?;
-    Ok(val)
+    match serde::de::DeserializeSeed::deserialize(BoundedValueSeed(&mut budget), &mut de) {
+        Ok(val) => match de.end() {
+            Ok(()) => BoundedJsonOutcome::Value(val),
+            Err(err) => BoundedJsonOutcome::SyntaxOrType(FormatError::from(err)),
+        },
+        Err(err) => {
+            let formatted = FormatError::from(err);
+            if budget.budget_exceeded { BoundedJsonOutcome::BudgetExceeded(formatted) } else { BoundedJsonOutcome::SyntaxOrType(formatted) }
+        }
+    }
+}
+
+pub(crate) fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::Value, FormatError> {
+    match parse_bounded_json_outcome(doc_bytes) {
+        BoundedJsonOutcome::Value(val) => Ok(val),
+        BoundedJsonOutcome::BudgetExceeded(err) | BoundedJsonOutcome::SyntaxOrType(err) => Err(err),
+    }
 }
 
 fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
@@ -1062,8 +1098,7 @@ impl TxDirGuard {
         Self { root_dir: root_dir.to_path_buf(), tx_dir, active: true }
     }
 
-    #[cfg(test)]
-    fn defuse(&mut self) {
+    fn preserve_for_recovery(&mut self) {
         self.active = false;
     }
 
@@ -1332,7 +1367,7 @@ impl UnpackedStageGuard {
     }
 
     #[cfg(test)]
-    fn defuse(&mut self) {
+    fn preserve_for_recovery(&mut self) {
         self.active = false;
     }
 }
@@ -1450,29 +1485,37 @@ fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], exist
     Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
 }
 
-fn commit_staged_unpacked_entries<F>(
+fn commit_staged_unpacked_entries_with_rollback<F, R>(
     staged: &[StagedWrite],
     guard: &mut UnpackedStageGuard,
     tx_guard: &mut TxDirGuard,
     on_commit_entry: &mut F,
+    mut restore_file: R,
 ) -> Result<(), FormatError>
 where
     F: FnMut(&str) -> MidCommitDirective,
+    R: FnMut(&Path, &[u8]) -> Result<(), FormatError>,
 {
-    let _ = tx_guard;
     for (idx, item) in staged.iter().enumerate() {
         let rename_res = match on_commit_entry(&item.rel) {
             MidCommitDirective::Proceed => std::fs::rename(&item.stage_path, &item.target_path),
             MidCommitDirective::FailRollback(err) => Err(err),
             #[cfg(test)]
             MidCommitDirective::SimulateCrash => {
-                guard.defuse();
-                tx_guard.defuse();
+                guard.preserve_for_recovery();
+                tx_guard.preserve_for_recovery();
                 return Err(FormatError::Io(String::from("simulated abrupt crash mid-commit")));
             }
         };
         if let Err(err) = rename_res {
-            rollback_unpacked_commits(&staged[..idx]);
+            if let Err(rollback_failures) = rollback_unpacked_commits(&staged[..idx], &mut restore_file) {
+                tx_guard.preserve_for_recovery();
+                return Err(FormatError::Io(format!(
+                    "unpacked commit failed at `{}` ({err}); rollback also failed ({}); preserved `{UNPACKED_TX_DIR}` recovery snapshot",
+                    item.rel,
+                    rollback_failures.join("; ")
+                )));
+            }
             return Err(FormatError::Io(err.to_string()));
         }
         guard.take(idx);
@@ -1480,17 +1523,28 @@ where
     Ok(())
 }
 
-fn rollback_unpacked_commits(committed: &[StagedWrite]) {
+fn rollback_unpacked_commits<R>(committed: &[StagedWrite], restore_file: &mut R) -> Result<(), Vec<String>>
+where
+    R: FnMut(&Path, &[u8]) -> Result<(), FormatError>,
+{
+    let mut failures = Vec::new();
     for item in committed.iter().rev() {
         match &item.prior {
             PriorSnapshot::Existed(bytes) => {
-                let _ = platform_write_atomic(&item.target_path, bytes);
+                if let Err(err) = restore_file(&item.target_path, bytes) {
+                    failures.push(format!("{}: {err}", item.rel));
+                }
             }
             PriorSnapshot::DidNotExist => {
-                let _ = std::fs::remove_file(&item.target_path);
+                if let Err(err) = std::fs::remove_file(&item.target_path)
+                    && err.kind() != std::io::ErrorKind::NotFound
+                {
+                    failures.push(format!("{}: {err}", item.rel));
+                }
             }
         }
     }
+    if failures.is_empty() { Ok(()) } else { Err(failures) }
 }
 
 fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expected_paths: &HashSet<String>) -> Result<(), FormatError> {
@@ -2731,8 +2785,9 @@ mod tests {
     use curvebook_doc::{CURRENT_SCHEMA_VERSION, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, TableArchetype};
 
     use super::{
-        DOCUMENT_PATH, MANIFEST_PATH, MidCommitDirective, UNPACKED_TX_COMMIT_MARKER, UNPACKED_TX_DIR, UNPACKED_TX_NEXT_DIR, is_unpacked_project_dir,
-        open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_driven, save_project_unpacked_dir_with_hook,
+        DOCUMENT_PATH, MANIFEST_PATH, MidCommitDirective, UNPACKED_TX_COMMIT_MARKER, UNPACKED_TX_DIR, UNPACKED_TX_NEXT_DIR, UNPACKED_TX_PREV_DIR,
+        is_unpacked_project_dir, open_project_unpacked_dir, save_project_unpacked_dir, save_project_unpacked_dir_driven,
+        save_project_unpacked_dir_driven_with_rollback, save_project_unpacked_dir_with_hook,
     };
 
     fn test_col_sheet(id: &str, title: &str, val: f64) -> DataSheet {
@@ -2877,6 +2932,103 @@ mod tests {
         // Removing the pending future tx leaves intact `doc_v1` (with only a benign non-COMMITTING folder ignored if removed).
         std::fs::remove_dir_all(dir.join(UNPACKED_TX_DIR)).unwrap();
         assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn unpacked_save_preserves_tx_snapshots_and_reports_error_when_rollback_fails() {
+        let dir = std::env::temp_dir().join(format!("cb-unpacked-rollback-fail-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut doc_v1 = ProjectDocument::new("Version One").unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-a", "A", 10.0)).unwrap();
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.title = String::from("Version Two");
+        doc_v2.add_data_sheet(test_col_sheet("sheet-b", "B", 20.0)).unwrap();
+
+        // Commit succeeds for `document.json`, then fails at `manifest.json`, and rollback fails when rewriting `document.json`.
+        let err = save_project_unpacked_dir_driven_with_rollback(
+            &doc_v2,
+            &dir,
+            |rel| {
+                if rel == MANIFEST_PATH {
+                    MidCommitDirective::FailRollback(std::io::Error::other("simulated manifest rename failure"))
+                } else {
+                    MidCommitDirective::Proceed
+                }
+            },
+            |path, _bytes| Err(crate::error::FormatError::Io(format!("simulated read-only rollback failure on {}", path.display()))),
+        )
+        .unwrap_err();
+
+        let msg = err.to_string();
+        assert!(msg.contains("simulated manifest rename failure"), "error must report commit failure: {msg}");
+        assert!(msg.contains("rollback also failed"), "error must report rollback failure: {msg}");
+        assert!(msg.contains("simulated read-only rollback failure"), "error must include rollback cause: {msg}");
+
+        // Commit marker and snapshots MUST remain preserved on disk so reopen recovers a complete generation cleanly.
+        assert!(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_COMMIT_MARKER).is_file());
+        assert!(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR).join(MANIFEST_PATH).is_file());
+        assert!(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_PREV_DIR).join(MANIFEST_PATH).is_file());
+        assert!(is_unpacked_project_dir(&dir));
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
+
+        // Even if `next/` were later unreadable, `prev/` recovery still yields complete `doc_v1`.
+        let orig_next_doc = std::fs::read(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR).join(DOCUMENT_PATH)).unwrap();
+        std::fs::write(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR).join(DOCUMENT_PATH), b"{corrupt").unwrap();
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v1);
+        std::fs::write(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_NEXT_DIR).join(DOCUMENT_PATH), orig_next_doc).unwrap();
+
+        // Subsequent save reconciles the pending transaction and cleans `.curvebook.tx/`.
+        let mut doc_v3 = doc_v2.clone();
+        doc_v3.title = String::from("Version Three");
+        save_project_unpacked_dir(&doc_v3, &dir).unwrap();
+        assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v3);
+        assert!(!dir.join(UNPACKED_TX_DIR).exists());
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unpacked_save_preserves_tx_when_root_becomes_readonly_after_document_publish() {
+        use std::os::unix::fs::PermissionsExt as _;
+
+        let dir = std::env::temp_dir().join(format!("cb-unpacked-ro-rollback-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+
+        let mut doc_v1 = ProjectDocument::new("Gen 1").unwrap();
+        doc_v1.add_data_sheet(test_col_sheet("sheet-a", "A", 1.0)).unwrap();
+        save_project_unpacked_dir(&doc_v1, &dir).unwrap();
+
+        let mut doc_v2 = doc_v1.clone();
+        doc_v2.title = String::from("Gen 2");
+        if let TableArchetype::Column(ref mut c) = doc_v2.data_sheets[0].archetype {
+            c.data_sets[0].cells[0] = vec![curvebook_doc::Cell::number(2.0)];
+        }
+
+        let dir_clone = dir.clone();
+        let res = save_project_unpacked_dir_driven(&doc_v2, &dir, move |rel| {
+            if rel == MANIFEST_PATH {
+                let _ = std::fs::set_permissions(&dir_clone, std::fs::Permissions::from_mode(0o555));
+            }
+            MidCommitDirective::Proceed
+        });
+
+        let _ = std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755));
+        if let Err(err) = res {
+            // Non-root UID: `manifest.json` rename AND `document.json` rollback both failed with PermissionDenied.
+            let msg = err.to_string();
+            assert!(msg.contains("rollback also failed"), "expected rollback failure in error, got: {msg}");
+            assert!(dir.join(UNPACKED_TX_DIR).join(UNPACKED_TX_COMMIT_MARKER).is_file());
+            assert!(is_unpacked_project_dir(&dir));
+            assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
+            save_project_unpacked_dir(&doc_v2, &dir).unwrap();
+            assert!(!dir.join(UNPACKED_TX_DIR).exists());
+        }
 
         let _ = std::fs::remove_dir_all(&dir);
     }

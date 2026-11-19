@@ -397,38 +397,38 @@ fn cleanroom_pzfx_and_prism_edge_archetypes_entities_info_and_exclusions_roundtr
       <RowTitlesColumn><Subcolumn><d>Rep &alpha;</d><d>Rep &beta;</d></Subcolumn></RowTitlesColumn>
       <YColumn>
         <Title>WT</Title>
-        <Subcolumn><Title>WT:1</Title><d>1.1</d><d>1.2*</d></Subcolumn>
+        <Subcolumn><Title>WT:1</Title><d>1.1</d><d Excluded="1">1.2</d></Subcolumn>
         <Subcolumn><Title>WT:2</Title><d Excluded="1">9.9</d><d>1.4</d></Subcolumn>
       </YColumn>
       <YColumn>
         <Title>KO</Title>
-        <Subcolumn><Title>KO:1</Title><d>*</d><d>2.2</d></Subcolumn>
-        <Subcolumn><Title>KO:2</Title><d>2.3</d><d>*2.4</d></Subcolumn>
+        <Subcolumn><Title>KO:1</Title><d Excluded="1"/><d>2.2</d></Subcolumn>
+        <Subcolumn><Title>KO:2</Title><d>2.3</d><d Excluded="1">2.4</d></Subcolumn>
       </YColumn>
     </Table>
     <Table ID="tbl-surv" TableType="Survival">
       <Title>Survival Curve (&tau; &le; 30d)</Title>
       <RowTitlesColumn><Subcolumn><d>Subject 1</d><d>Subject 2</d><d>Subject 3</d></Subcolumn></RowTitlesColumn>
-      <XColumn><Title>Time (days)</Title><Subcolumn><d>5</d><d Excluded="1">10</d><d>15*</d></Subcolumn></XColumn>
-      <YColumn><Title>Cohort &alpha;</Title><Subcolumn><d>1</d><d>0*</d><d>*</d></Subcolumn></YColumn>
+      <XColumn><Title>Time (days)</Title><Subcolumn><d>5</d><d Excluded="1">10</d><d Excluded="1">15</d></Subcolumn></XColumn>
+      <YColumn><Title>Cohort &alpha;</Title><Subcolumn><d>1</d><d Excluded="1">0</d><d Excluded="1"/></Subcolumn></YColumn>
       <YColumn><Title>Cohort &beta;</Title><Subcolumn><d>1</d><d>1</d><d>0</d></Subcolumn></YColumn>
     </Table>
     <Table ID="tbl-mv" TableType="MultipleVariables">
       <Title>Cohort Variables (10<Sup>-6</Sup> M)</Title>
       <RowTitlesColumn><Subcolumn><d>P1</d><d>P2</d><d>P3</d></Subcolumn></RowTitlesColumn>
       <YColumn><Title>Arm</Title><Subcolumn><d>&alpha;-Arm</d><d>&beta;-Arm</d><d>&alpha;-Arm</d></Subcolumn></YColumn>
-      <YColumn><Title>IC<Sub>50</Sub></Title><Subcolumn><d>12.5</d><d>99.0*</d><d>*</d></Subcolumn></YColumn>
+      <YColumn><Title>IC<Sub>50</Sub></Title><Subcolumn><d>12.5</d><d Excluded="1">99.0</d><d Excluded="1"/></Subcolumn></YColumn>
     </Table>
     <Table ID="tbl-cont" TableType="Contingency">
       <Title>Responder Matrix</Title>
       <RowTitlesColumn><Subcolumn><d>Exposed</d><d>Control</d></Subcolumn></RowTitlesColumn>
       <YColumn><Title>Positive</Title><Subcolumn><d>18</d><d>4</d></Subcolumn></YColumn>
-      <YColumn><Title>Negative</Title><Subcolumn><d>2*</d><d>16</d></Subcolumn></YColumn>
+      <YColumn><Title>Negative</Title><Subcolumn><d Excluded="1">2</d><d>16</d></Subcolumn></YColumn>
     </Table>
     <Table ID="tbl-pow" TableType="PartsOfWhole">
       <Title>Lineage Fractions (&Sigma;)</Title>
       <RowTitlesColumn><Subcolumn><d>CD4+</d><d>CD8+</d><d>B-cell</d></Subcolumn></RowTitlesColumn>
-      <YColumn><Title>Percent</Title><Subcolumn><d>45</d><d>35*</d><d>20</d></Subcolumn></YColumn>
+      <YColumn><Title>Percent</Title><Subcolumn><d>45</d><d Excluded="1">35</d><d>20</d></Subcolumn></YColumn>
     </Table>
   </TableSequence>
 </PrismFile>"#;
