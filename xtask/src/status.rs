@@ -47,6 +47,10 @@ const AGENT_HARNESS_MARKERS: &[&str] = &[
     "control_auth_and_panic",
 ];
 
+const HUMAN_DRIVER_TOKENS: &[&str] = &["humanpathdriver", "eguihumanpathdriver", "egui_kittest"];
+
+const KNOWN_BACKENDS: &[&str] = &["legacy", "egui"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateKey {
     pub path: String,
@@ -461,17 +465,63 @@ fn human_path_requires_evidence(cell: &str) -> bool {
     if matches!(lower.as_str(), "" | "—" | "-" | "–" | "n/a" | "no" | "none" | "todo" | "pending" | "untested" | "[ ]" | "0" | "0%") {
         return false;
     }
-    !is_zero_fraction(&lower)
+    if has_invalid_backend_fraction(&lower) {
+        return true;
+    }
+    !all_fractions_are_zero(&lower)
 }
 
-fn is_zero_fraction(text: &str) -> bool {
-    let Some((left, right)) = text.split_once('/') else {
-        return false;
-    };
-    let num = left.trim().trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    let den_tok = right.split_whitespace().next().unwrap_or("");
-    let den = den_tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    num == "0" && !den.is_empty() && den.chars().all(|c| c.is_ascii_digit()) && den != "0"
+fn parse_workflow_fractions(text: &str) -> Vec<(usize, usize, Option<&str>)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    for (slash_idx, &b) in bytes.iter().enumerate() {
+        if b != b'/' {
+            continue;
+        }
+        let mut left_end = slash_idx;
+        while left_end > 0 && bytes[left_end - 1].is_ascii_whitespace() {
+            left_end -= 1;
+        }
+        let mut left_start = left_end;
+        while left_start > 0 && bytes[left_start - 1].is_ascii_digit() {
+            left_start -= 1;
+        }
+        if left_start == left_end || (left_start > 0 && bytes[left_start - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+
+        let mut right_start = slash_idx + 1;
+        while right_start < bytes.len() && bytes[right_start].is_ascii_whitespace() {
+            right_start += 1;
+        }
+        let mut right_end = right_start;
+        while right_end < bytes.len() && bytes[right_end].is_ascii_digit() {
+            right_end += 1;
+        }
+        if right_start == right_end || (right_end < bytes.len() && bytes[right_end].is_ascii_alphanumeric()) {
+            continue;
+        }
+
+        let Ok(num) = text[left_start..left_end].parse::<usize>() else {
+            continue;
+        };
+        let Ok(den) = text[right_start..right_end].parse::<usize>() else {
+            continue;
+        };
+        let trailing = text[right_end..].trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+        let backend = KNOWN_BACKENDS.iter().copied().find(|&b_name| trailing.eq_ignore_ascii_case(b_name));
+        out.push((num, den, backend));
+    }
+    out
+}
+
+fn all_fractions_are_zero(text: &str) -> bool {
+    let fractions = parse_workflow_fractions(text);
+    !fractions.is_empty() && fractions.iter().all(|&(num, den, _)| num == 0 && den > 0)
+}
+
+fn has_invalid_backend_fraction(text: &str) -> bool {
+    parse_workflow_fractions(text).into_iter().any(|(num, den, backend)| backend.is_some() && (den == 0 || num > den))
 }
 
 fn validate_human_evidence(path: &str, line: usize, text: &str, known_tests: Option<&WorkspaceTests>) -> Option<EvidenceViolation> {
@@ -480,7 +530,18 @@ fn validate_human_evidence(path: &str, line: usize, text: &str, known_tests: Opt
     let mut valid_tests = Vec::new();
     let mut unknown_tests = Vec::new();
 
+    if has_invalid_backend_fraction(&text.to_ascii_lowercase()) {
+        return Some(EvidenceViolation {
+            path: path.to_owned(),
+            line,
+            reason: String::from("contains invalid per-backend workflow count fraction (expected `num/den legacy|egui` with 0 < den and num <= den)"),
+        });
+    }
+
     for tok in tokens {
+        if is_human_driver_token(&tok) {
+            continue;
+        }
         if is_agent_harness_token(&tok) {
             harness_hits.push(tok);
         } else if is_test_identifier(&tok) {
@@ -566,13 +627,23 @@ fn is_agent_harness_token(raw: &str) -> bool {
     })
 }
 
+fn is_human_driver_token(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    HUMAN_DRIVER_TOKENS.iter().any(|&marker| lower == marker || lower.ends_with(&format!("::{marker}")))
+}
+
 fn is_wf_harness_fn(seg: &str) -> bool {
     let Some(rest) = seg.strip_prefix("wf") else {
         return false;
     };
     let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
     let suffix = &rest[digit_count..];
-    digit_count > 0 && suffix.starts_with('_') && !suffix.starts_with("_human_") && suffix != "_human"
+    digit_count > 0
+        && suffix.starts_with('_')
+        && !suffix.starts_with("_human_")
+        && suffix != "_human"
+        && !suffix.starts_with("_egui_human_")
+        && suffix != "_egui_human"
 }
 
 fn is_test_identifier(tok: &str) -> bool {
@@ -883,6 +954,58 @@ fn active_human_test() {}
         let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
         assert_eq!(bad_wf.len(), 2, "expected 2 violations, got {bad_wf:?}");
         assert!(bad_wf.iter().all(|v| v.reason.contains("agent-harness")), "got {bad_wf:?}");
+    }
+
+    #[test]
+    fn r15_1_accepts_egui_driver_with_real_test_and_enforces_per_backend_counts() {
+        let mut tests = WorkspaceTests::default();
+        tests.qualified.insert(String::from("r15_1_driver_and_i18n::r15_1_smoke_human_path"));
+        tests.unqualified.insert(String::from("r15_1_smoke_human_path"));
+        tests.qualified.insert(String::from("human_wf_01_06::wf01_egui_human_xy_dose_response"));
+        tests.unqualified.insert(String::from("wf01_egui_human_xy_dose_response"));
+        tests.qualified.insert(String::from("human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason"));
+        tests.unqualified.insert(String::from("wf01_human_xy_dose_response_format_exclude_with_reason"));
+
+        let valid_parity = "\
+- [x] EgUi slice — verified by `r15_1_driver_and_i18n::r15_1_smoke_human_path` using `EguiHumanPathDriver` and `egui_kittest`.
+- [x] Workflows — `50/50 legacy, 1/50 egui`, verified by `human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason` and `human_wf_01_06::wf01_egui_human_xy_dose_response`.
+- [ ] Pending egui port (`0/50 egui`, `50/50 legacy`).
+";
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_parity, Some(&tests));
+        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
+
+        // Mentioning `EguiHumanPathDriver` or `egui_kittest` alone without a real passing test or manual run still fails (Pitfall #6).
+        let unbacked_driver = "- [x] Verified via `EguiHumanPathDriver` and `egui_kittest`.\n";
+        let unbacked_hits = check_ui_parity_evidence("docs/evidence/user-interface.md", unbacked_driver, Some(&tests));
+        assert_eq!(unbacked_hits.len(), 1, "{unbacked_hits:?}");
+        assert!(unbacked_hits[0].reason.contains("missing passing human-path test"));
+
+        // Per-backend counts in §6.2 accept both `0/6 legacy, 0/6 egui`, mixed backed counts, and reject unbacked non-zero `egui` or malformed fractions.
+        let valid_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | `0/6 legacy, 0/6 egui` | None | Pending |
+| Shard 2 | Pass | `0/9 legacy, 1/9 egui` (`human_wf_01_06::wf01_egui_human_xy_dose_response`) | None | Partial |
+";
+        let ok_wf = check_gui_workflows_human_path("docs/gui-workflows.md", valid_wf_table, Some(&tests));
+        assert!(ok_wf.is_empty(), "unexpected dual-backend violations: {ok_wf:?}");
+
+        let bad_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | `0/6 legacy, 2/6 egui` (`egui_kittest`) | None | Unbacked |
+| Shard 2 | Pass | `55/50 legacy, 0/50 egui` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | Out-of-bounds |
+| Shard 3 | Pass | `0/6 legacy, 1/6 egui` (`EguiHumanPathDriver` + `--control`) | None | Harness |
+";
+        let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
+        assert_eq!(bad_wf.len(), 3, "expected 3 dual-backend violations, got {bad_wf:?}");
+        assert!(bad_wf[0].reason.contains("missing passing human-path test"));
+        assert!(bad_wf[1].reason.contains("invalid per-backend workflow count"));
+        assert!(bad_wf[2].reason.contains("agent-harness"));
     }
 }
 

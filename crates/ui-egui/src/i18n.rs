@@ -16,6 +16,11 @@ use serde::{Deserialize, Serialize};
 /// Supported BCP-47 interface locale identifiers (`en` + 8 Tier-1 + 5 Tier-2 European + 2 RTL).
 pub const LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
 
+/// Beta-active LTR/CJK interface locale identifiers exposed in the Beta desktop GUI language
+/// picker (`R15.1`: 14 non-RTL registered locales, excluding RTL locales `ar`, `fa`, `he`, `ur`
+/// which are deferred until CurveBook `1.0`).
+pub const BETA_ACTIVE_LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr"];
+
 /// Single catalog entry containing translations for all 16 registered [`LOCALES`] in order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CatalogEntry {
@@ -5795,6 +5800,24 @@ pub fn normalize_locale(locale: &str) -> &'static str {
     }
 }
 
+/// Returns `true` when `locale` normalizes to one of the 14 non-RTL [`BETA_ACTIVE_LOCALES`]
+/// enabled for the Beta desktop GUI (`R15.1`).
+#[must_use]
+pub fn is_beta_active_locale(locale: &str) -> bool {
+    !is_rtl_locale(locale) && BETA_ACTIVE_LOCALES.contains(&normalize_locale(locale))
+}
+
+/// Normalize an arbitrary or saved `preferences.json` locale tag for the Beta desktop GUI,
+/// mapping RTL locales (`ar`, `fa`, `he`, `ur`, and legacy `iw`) cleanly to `"en"` until
+/// full RTL GUI support lands in CurveBook `1.0` (`R15.1`).
+#[must_use]
+pub fn normalize_beta_gui_locale(locale: &str) -> &'static str {
+    if is_rtl_locale(locale) {
+        return "en";
+    }
+    normalize_locale(locale)
+}
+
 fn exact_locale_index(locale: &str) -> Option<usize> {
     let trimmed = locale.trim();
     let lower = trimmed.replace('_', "-").to_ascii_lowercase();
@@ -6587,5 +6610,26 @@ mod tests {
         let err_parsed = verify_tr_keys_exist(&parsed).expect_err("extracted missing literal keys must fail validation");
         assert!(err_parsed.contains("bogus.missing.key"));
         assert!(err_parsed.contains("also.missing"));
+    }
+
+    #[test]
+    fn beta_active_locales_excludes_rtl_and_falls_back_saved_rtl_prefs_to_english() {
+        use super::{BETA_ACTIVE_LOCALES, LOCALES, is_beta_active_locale, is_draft_translation_locale, is_rtl_locale, normalize_beta_gui_locale};
+
+        assert_eq!(BETA_ACTIVE_LOCALES.len(), 14);
+        assert_eq!(BETA_ACTIVE_LOCALES, &LOCALES[..14]);
+        assert!(BETA_ACTIVE_LOCALES.iter().all(|loc| !is_rtl_locale(loc)));
+        assert_eq!(BETA_ACTIVE_LOCALES.iter().filter(|loc| is_draft_translation_locale(loc)).count(), 13);
+
+        for rtl_tag in ["ar", "ar-EG", "he", "he-IL", "iw", "iw-IL", "fa", "fa-IR", "ur", "ur-PK"] {
+            assert!(!is_beta_active_locale(rtl_tag), "{rtl_tag} must not be Beta-active");
+            assert_eq!(normalize_beta_gui_locale(rtl_tag), "en", "{rtl_tag} prefs must fall back to English in Beta");
+        }
+        for (input, expected) in
+            [("en", "en"), ("de-DE", "de"), ("pt", "pt-BR"), ("zh-Hant-TW", "zh-TW"), ("ru-RU", "ru"), ("tr-TR", "tr"), ("xx-unknown", "en")]
+        {
+            assert!(is_beta_active_locale(expected));
+            assert_eq!(normalize_beta_gui_locale(input), expected);
+        }
     }
 }

@@ -1309,16 +1309,42 @@ pub fn system_cjk_font_candidates(locale: &str) -> &'static [&'static str] {
 #[must_use]
 pub fn build_minimal_truetype_font() -> Vec<u8> {
     let glyphs = build_minimal_glyph_specs();
-    let num_glyphs = glyphs.len() as u16;
+    let cmap = build_minimal_cmap_table();
+    let name = build_sfnt_name_table("CurveBook Sans", "Regular", "CurveBook-Sans-Regular", "CurveBook Sans Regular", "CurveBookSans-Regular");
+    build_sfnt_from_specs(&glyphs, cmap, name, 0x0000_0083, 32, 0x03C3)
+}
 
-    let (glyf, loca, font_bbox, h_extents) = build_glyf_and_loca(&glyphs);
-    let hmtx = build_hmtx_table(&glyphs);
+/// Build an in-memory cleanroom TrueType fallback font containing CurveBook's mandatory UI and
+/// scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²` plus directional/math/statistical glyphs) (`R15.1`).
+///
+/// Used as a deterministic fallback SFNT layer after `CURVEBOOK_FONTS_DIR` and host OS system
+/// fonts so headless environments and primary faces lacking specific symbol glyphs never render
+/// missing-glyph placeholders.
+#[must_use]
+pub fn build_symbol_fallback_truetype_font() -> Vec<u8> {
+    let (glyphs, cmap) = build_symbol_fallback_glyphs_and_cmap();
+    let name =
+        build_sfnt_name_table("CurveBook Symbols", "Regular", "CurveBook-Symbols-Regular", "CurveBook Symbols Regular", "CurveBookSymbols-Regular");
+    // Unicode ranges: Latin-1 (bit 1), Greek (bit 7), General Punctuation (bit 31/upper),
+    // Arrows + Math Operators + Geometric Shapes + Dingbats.
+    build_sfnt_from_specs(&glyphs, cmap, name, 0x0000_0082, 0x00B0, 0x2717)
+}
+
+fn build_sfnt_from_specs(
+    glyphs: &[MinimalGlyphSpec],
+    cmap: Vec<u8>,
+    name: Vec<u8>,
+    unicode_range_1: u32,
+    first_char: u16,
+    last_char: u16,
+) -> Vec<u8> {
+    let num_glyphs = glyphs.len() as u16;
+    let (glyf, loca, font_bbox, h_extents) = build_glyf_and_loca(glyphs);
+    let hmtx = build_hmtx_table(glyphs);
     let head = build_head_table(font_bbox);
     let hhea = build_hhea_table(num_glyphs, h_extents);
     let maxp = build_maxp_table(num_glyphs);
-    let os2 = build_os2_table();
-    let cmap = build_minimal_cmap_table();
-    let name = build_minimal_name_table();
+    let os2 = build_os2_table(unicode_range_1, first_char, last_char);
     let post = build_minimal_post_table();
 
     assemble_sfnt_tables(&[
@@ -1922,8 +1948,70 @@ fn minimal_char_width_1000(ch: char) -> u16 {
         '\u{00C0}'..='\u{00C5}' | '\u{00C7}'..='\u{00CF}' => 667,
         '\u{00EC}'..='\u{00EF}' => 278,
         '\u{00E6}' | '\u{00FD}'..='\u{00FF}' => 611,
+        '\u{03C7}' => 540,
+        '\u{2013}' => 556,
+        '\u{2014}' => 1000,
+        '\u{2026}' => 800,
+        '\u{2190}'..='\u{2193}' => 720,
+        '\u{2212}' | '\u{00D7}' | '\u{00F7}' => 580,
+        '\u{221E}' | '\u{2248}' | '\u{2260}' => 600,
+        '\u{25B2}' | '\u{25B6}' | '\u{25B8}' | '\u{25BC}' | '\u{25BE}' | '\u{25C0}' => 560,
+        '\u{25CF}' => 600,
+        '\u{2713}' | '\u{2717}' => 700,
         _ => 556,
     }
+}
+
+/// Strictly sorted, non-overlapping BMP codepoint ranges covered by
+/// [`build_symbol_fallback_truetype_font`].
+const SYMBOL_FALLBACK_RANGES: &[(u16, u16)] = &[
+    (0x00B0, 0x00B3), // ° ± ² ³
+    (0x00B7, 0x00B7), // ·
+    (0x00D7, 0x00D7), // ×
+    (0x00F7, 0x00F7), // ÷
+    (0x0394, 0x0394), // Δ
+    (0x03B1, 0x03B3), // α β γ
+    (0x03BC, 0x03BC), // μ
+    (0x03C3, 0x03C3), // σ
+    (0x03C7, 0x03C7), // χ
+    (0x2013, 0x2014), // – —
+    (0x2026, 0x2026), // …
+    (0x2190, 0x2193), // ← ↑ → ↓
+    (0x2212, 0x2212), // −
+    (0x2219, 0x2219), // ∙
+    (0x221E, 0x221E), // ∞
+    (0x2248, 0x2248), // ≈
+    (0x2260, 0x2260), // ≠
+    (0x2264, 0x2265), // ≤ ≥
+    (0x25B2, 0x25B2), // ▲
+    (0x25B6, 0x25B6), // ▶
+    (0x25B8, 0x25B8), // ▸
+    (0x25BC, 0x25BC), // ▼
+    (0x25BE, 0x25BE), // ▾
+    (0x25C0, 0x25C0), // ◀
+    (0x25CF, 0x25CF), // ●
+    (0x2713, 0x2713), // ✓
+    (0x2717, 0x2717), // ✗
+];
+
+fn build_symbol_fallback_glyphs_and_cmap() -> (Vec<MinimalGlyphSpec>, Vec<u8>) {
+    let total_chars: usize = SYMBOL_FALLBACK_RANGES.iter().map(|&(s, e)| usize::from(e - s) + 1).sum();
+    let mut glyphs = Vec::with_capacity(total_chars + 1);
+    glyphs.push(MinimalGlyphSpec { advance: 556, lsb: 60, bbox: Some([60, 0, 496, 720]) });
+
+    let mut segments = Vec::with_capacity(SYMBOL_FALLBACK_RANGES.len() + 1);
+    let mut next_gid: i32 = 1;
+    for &(start, end) in SYMBOL_FALLBACK_RANGES {
+        let delta = i16::try_from(next_gid - i32::from(start)).unwrap_or(0);
+        segments.push((start, end, delta));
+        for code in start..=end {
+            let ch = char::from_u32(u32::from(code)).unwrap_or('?');
+            glyphs.push(glyph_spec_for_char(ch));
+            next_gid += 1;
+        }
+    }
+    segments.push((0xFFFF, 0xFFFF, 1));
+    (glyphs, build_bmp_cmap_table(&segments))
 }
 
 fn build_glyf_and_loca(glyphs: &[MinimalGlyphSpec]) -> (Vec<u8>, Vec<u8>, [i16; 4], HheaExtents) {
@@ -2034,7 +2122,7 @@ fn build_maxp_table(num_glyphs: u16) -> Vec<u8> {
     maxp
 }
 
-fn build_os2_table() -> Vec<u8> {
+fn build_os2_table(unicode_range_1: u32, first_char: u16, last_char: u16) -> Vec<u8> {
     let mut os2 = vec![0u8; 96];
     os2[0..2].copy_from_slice(&4u16.to_be_bytes()); // version 4
     os2[2..4].copy_from_slice(&556i16.to_be_bytes()); // xAvgCharWidth
@@ -2050,11 +2138,11 @@ fn build_os2_table() -> Vec<u8> {
     os2[28..30].copy_from_slice(&260i16.to_be_bytes());
     os2[30..32].copy_from_slice(&0x0800i16.to_be_bytes()); // Sans-serif
     os2[32..42].copy_from_slice(&[2, 11, 5, 2, 2, 2, 2, 2, 2, 4]); // PANOSE
-    os2[42..46].copy_from_slice(&0x0000_0083u32.to_be_bytes()); // Basic Latin + Latin-1 + Greek
+    os2[42..46].copy_from_slice(&unicode_range_1.to_be_bytes());
     os2[58..62].copy_from_slice(b"LCFT");
     os2[62..64].copy_from_slice(&0x0040u16.to_be_bytes()); // REGULAR
-    os2[64..66].copy_from_slice(&32u16.to_be_bytes()); // usFirstCharIndex
-    os2[66..68].copy_from_slice(&0x03C3u16.to_be_bytes()); // usLastCharIndex
+    os2[64..66].copy_from_slice(&first_char.to_be_bytes()); // usFirstCharIndex
+    os2[66..68].copy_from_slice(&last_char.to_be_bytes()); // usLastCharIndex
     os2[68..70].copy_from_slice(&800i16.to_be_bytes());
     os2[70..72].copy_from_slice(&(-200i16).to_be_bytes());
     os2[72..74].copy_from_slice(&100i16.to_be_bytes());
@@ -2070,31 +2158,45 @@ fn build_os2_table() -> Vec<u8> {
 fn build_minimal_cmap_table() -> Vec<u8> {
     // 7 sorted non-overlapping segments:
     // (32..=126)->gid 1..=95, (160..=255)->gid 96..=191, Δ->192, α..=γ->193..=195, μ->196, σ->197, 0xFFFF->0
-    const STARTS: [u16; 7] = [32, 160, 0x0394, 0x03B1, 0x03BC, 0x03C3, 0xFFFF];
-    const ENDS: [u16; 7] = [126, 255, 0x0394, 0x03B3, 0x03BC, 0x03C3, 0xFFFF];
-    const DELTAS: [i16; 7] = [-31, -64, -724, -752, -760, -766, 1];
+    const SEGMENTS: [(u16, u16, i16); 7] = [
+        (32, 126, -31),
+        (160, 255, -64),
+        (0x0394, 0x0394, -724),
+        (0x03B1, 0x03B3, -752),
+        (0x03BC, 0x03BC, -760),
+        (0x03C3, 0x03C3, -766),
+        (0xFFFF, 0xFFFF, 1),
+    ];
+    build_bmp_cmap_table(&SEGMENTS)
+}
+
+fn build_bmp_cmap_table(segments: &[(u16, u16, i16)]) -> Vec<u8> {
+    let seg_count = u16::try_from(segments.len()).unwrap_or(1);
+    let max_pow2 = 1u16 << (15u32.saturating_sub(seg_count.leading_zeros()));
+    let search_range = max_pow2 * 2;
+    let entry_selector = u16::try_from(max_pow2.trailing_zeros()).unwrap_or(0);
+    let range_shift = seg_count * 2 - search_range;
 
     let mut sub = Vec::new();
-    let seg_count = STARTS.len() as u16;
     let sub_len = 16u16 + seg_count * 8;
     push_u16_be(&mut sub, 4); // format
     push_u16_be(&mut sub, sub_len);
     push_u16_be(&mut sub, 0); // language
-    push_u16_be(&mut sub, seg_count * 2); // segCountX2 = 14
-    push_u16_be(&mut sub, 8); // searchRange = 2 * 2^2
-    push_u16_be(&mut sub, 2); // entrySelector = log2(4)
-    push_u16_be(&mut sub, seg_count * 2 - 8); // rangeShift = 6
-    for end in ENDS {
+    push_u16_be(&mut sub, seg_count * 2);
+    push_u16_be(&mut sub, search_range);
+    push_u16_be(&mut sub, entry_selector);
+    push_u16_be(&mut sub, range_shift);
+    for &(_, end, _) in segments {
         push_u16_be(&mut sub, end);
     }
     push_u16_be(&mut sub, 0); // reservedPad
-    for start in STARTS {
+    for &(start, _, _) in segments {
         push_u16_be(&mut sub, start);
     }
-    for delta in DELTAS {
+    for &(_, _, delta) in segments {
         push_i16_be(&mut sub, delta);
     }
-    for _ in 0..STARTS.len() {
+    for _ in 0..segments.len() {
         push_u16_be(&mut sub, 0);
     }
 
@@ -2112,12 +2214,11 @@ fn build_minimal_cmap_table() -> Vec<u8> {
     cmap
 }
 
-fn build_minimal_name_table() -> Vec<u8> {
-    const ENTRIES: [(u16, &str); 5] =
-        [(1, "CurveBook Sans"), (2, "Regular"), (3, "CurveBook-Sans-Regular"), (4, "CurveBook Sans Regular"), (6, "CurveBookSans-Regular")];
+fn build_sfnt_name_table(family: &str, style: &str, unique_id: &str, full_name: &str, ps_name: &str) -> Vec<u8> {
+    let entries: [(u16, &str); 5] = [(1, family), (2, style), (3, unique_id), (4, full_name), (6, ps_name)];
     let mut str_buf = Vec::new();
     let mut records = Vec::new();
-    for (name_id, text) in ENTRIES {
+    for (name_id, text) in entries {
         let start = str_buf.len() as u16;
         for unit in text.encode_utf16() {
             push_u16_be(&mut str_buf, unit);
@@ -2221,4 +2322,27 @@ fn push_i16_be(buf: &mut Vec<u8>, v: i16) {
 
 fn push_u32_be(buf: &mut Vec<u8>, v: u32) {
     buf.extend_from_slice(&v.to_be_bytes());
+}
+
+#[cfg(test)]
+mod symbol_fallback_tests {
+    use super::{TrueTypeFont, build_minimal_truetype_font, build_symbol_fallback_truetype_font};
+
+    #[test]
+    fn symbol_fallback_sfnt_maps_all_mandatory_r15_1_symbols() {
+        let bytes = build_symbol_fallback_truetype_font();
+        let parsed = TrueTypeFont::parse(&bytes).expect("parse symbol fallback SFNT");
+        for ch in ['→', '▾', '●', '✓', '±', '≤', '≥', 'μ', 'χ', '²'] {
+            let gid = parsed.glyph_id(ch);
+            assert!(gid.is_some(), "missing glyph for mandatory symbol {ch:?} (U+{:04X})", u32::from(ch));
+            assert!(parsed.advance_em(ch).is_some(), "missing advance width for {ch:?}");
+        }
+
+        // Preserve build_minimal_truetype_font contract: lacks '▾' (U+25BE) and '≤' (U+2264).
+        let minimal = build_minimal_truetype_font();
+        let min_parsed = TrueTypeFont::parse(&minimal).expect("parse minimal SFNT");
+        assert!(min_parsed.glyph_id('A').is_some());
+        assert!(min_parsed.glyph_id('▾').is_none());
+        assert!(min_parsed.glyph_id('≤').is_none());
+    }
 }

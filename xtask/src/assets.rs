@@ -483,8 +483,10 @@ pub fn verify_assets(files: &[String], assets_md: &str, attribution_md: &str) ->
     if errors.is_empty() { Ok(asset_count) } else { Err(format!("{} asset attribution error(s):\n  {}", errors.len(), errors.join("\n  "))) }
 }
 
-fn check_document_prose(doc_name: &str, text: &str) -> Result<(), String> {
-    for (idx, line) in text.lines().enumerate() {
+fn check_document_prose(doc_name: &str, text: &str, allow_packaged: bool) -> Result<(), String> {
+    let masked = crate::brands::mask_attributed_upstream_url(doc_name, text, allow_packaged);
+    let check_vectorcraft = !crate::brands::is_attribution_or_notice_path(doc_name, allow_packaged);
+    for (idx, line) in masked.lines().enumerate() {
         let line_no = idx + 1;
         let lower = line.to_ascii_lowercase();
         for phrase in FORBIDDEN_PROVENANCE_PHRASES {
@@ -496,6 +498,12 @@ fn check_document_prose(doc_name: &str, text: &str) -> Result<(), String> {
             if has_ascii_word(&lower, brand) {
                 return Err(format!("{doc_name}:{line_no}: references forbidden vendor or suite `{brand}`"));
             }
+        }
+        if check_vectorcraft && has_ascii_word(&lower, crate::brands::ADAPTED_UPSTREAM_BRAND) {
+            return Err(format!(
+                "{doc_name}:{line_no}: references adapted source brand `{}` outside ATTRIBUTION.md/NOTICE",
+                crate::brands::ADAPTED_UPSTREAM_BRAND
+            ));
         }
     }
     Ok(())
@@ -562,7 +570,7 @@ pub fn verify_repo_provenance(root: &Path, files: &[String], assets_md: &str, at
     }
 
     for (name, body) in [("ASSETS.md", assets_md), ("ATTRIBUTION.md", attribution_md), ("NOTICE", notice)] {
-        if let Err(err) = check_document_prose(name, body) {
+        if let Err(err) = check_document_prose(name, body, false) {
             errors.push(err);
         }
     }
@@ -598,7 +606,7 @@ pub(crate) fn load_repo_asset_catalog(root: &Path) -> Result<RepoAssetCatalog, S
     let notice = std::fs::read_to_string(root.join("NOTICE")).map_err(|e| format!("NOTICE: {e}"))?;
 
     for (name, body) in [("ASSETS.md", assets_md.as_str()), ("ATTRIBUTION.md", attr_md.as_str()), ("NOTICE", notice.as_str())] {
-        check_document_prose(name, body)?;
+        check_document_prose(name, body, false)?;
     }
 
     let asset_rows = parse_attribution_table(&assets_md, "ASSETS.md")?;
@@ -742,7 +750,7 @@ fn check_bundled_attribution_doc(display_path: &str, bytes: &[u8], violations: &
         violations.push(format!("{display_path}: bundled {file_name} is not valid UTF-8"));
         return;
     };
-    if let Err(err) = check_document_prose(display_path, text) {
+    if let Err(err) = check_document_prose(display_path, text, true) {
         violations.push(err);
     }
     if matches!(file_name, "ASSETS.md" | "ATTRIBUTION.md") {
@@ -1000,5 +1008,32 @@ See also `assets/prose.png` in prose.
         assert!(is_forbidden_bundled_dir("docs/history/audit"));
         assert!(is_forbidden_bundled_dir("web/docs/history/audit/findings"));
         assert!(!is_forbidden_bundled_dir("docs/history/roadmap"));
+    }
+
+    #[test]
+    fn r15_1_document_prose_permits_only_exact_upstream_url_in_attributed_section() {
+        let story = ["sto", "ry", "told"].concat();
+        let vc = ["vec", "tor", "craft"].concat();
+        let vc_title = ["Vec", "tor", "Cra", "ft"].concat();
+        let exact_url = format!("https://github.com/{story}/{vc}");
+
+        let valid_attr = format!("## Attributed Source Code\n\nAdapted helpers from {vc_title} (`{exact_url}`).\n");
+        let valid_notice = format!("CurveBook\n\n## Attributed Source Code\n\nFrom {vc_title} ({exact_url}, commit abc).\n");
+        assert_eq!(super::check_document_prose("ATTRIBUTION.md", &valid_attr, false), Ok(()));
+        assert_eq!(super::check_document_prose("NOTICE", &valid_notice, false), Ok(()));
+        assert_eq!(super::check_document_prose("curvebook-web-0.1.0/NOTICE", &valid_notice, true), Ok(()));
+
+        for (doc, allow_pkg, bad) in [
+            ("ASSETS.md", false, format!("Adapted from {exact_url}\n")),
+            ("ASSETS.md", false, format!("Adapted from {vc_title}\n")),
+            ("ATTRIBUTION.md", false, format!("## Other\n{exact_url}\n")),
+            ("ATTRIBUTION.md", false, format!("## Attributed Source Code\n{exact_url}/blob/main/foo.rs\n")),
+            ("ATTRIBUTION.md", false, format!("## Attributed Source Code\nhttp://github.com/{story}/{vc}\n")),
+            ("ATTRIBUTION.md", false, format!("## Attributed Source Code\n{story}\n")),
+            ("docs/ATTRIBUTION.md", false, format!("## Attributed Source Code\n{exact_url}\n")),
+            ("NOTICE", false, format!("Preamble {exact_url}\n")),
+        ] {
+            assert!(super::check_document_prose(doc, &bad, allow_pkg).is_err(), "expected failure for {doc} (allow_pkg={allow_pkg}): {bad:?}");
+        }
     }
 }
