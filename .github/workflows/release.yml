@@ -198,11 +198,27 @@ jobs:
       - name: Install Linux build & packaging dependencies
         run: |
           set -euo pipefail
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev \
-            libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
+          apt_opts=(
+            -o Acquire::Retries=5
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Dpkg::Use-Pty=0
+          )
+          pkgs=(
+            pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
+            libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
             libgl1-mesa-dev desktop-file-utils appstream fuse3 squashfs-tools
+          )
+          for attempt in 1 2 3 4; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get update -q "${apt_opts[@]}" \
+              && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing "${apt_opts[@]}" "${pkgs[@]}"; then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
@@ -535,8 +551,23 @@ jobs:
           persist-credentials: false
       - name: Install SquashFS tools for release-scan
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends squashfs-tools
+          set -euo pipefail
+          apt_opts=(
+            -o Acquire::Retries=5
+            -o Acquire::http::Timeout=30
+            -o Acquire::https::Timeout=30
+            -o Dpkg::Use-Pty=0
+          )
+          for attempt in 1 2 3 4; do
+            if sudo DEBIAN_FRONTEND=noninteractive apt-get update -q "${apt_opts[@]}" \
+              && sudo DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends --fix-missing "${apt_opts[@]}" squashfs-tools; then
+              break
+            fi
+            if [ "$attempt" -eq 4 ]; then
+              exit 1
+            fi
+            sleep $((attempt * 5))
+          done
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:

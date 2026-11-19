@@ -16,6 +16,7 @@ concurrency:
 env:
   CI: 'true'
   CARGO_INCREMENTAL: '0'
+  CARGO_NET_RETRY: '5'
 
 jobs:
   build:
@@ -31,6 +32,9 @@ jobs:
           save-cache: 'true'
           install-deny: 'true'
           reclaim-disk: 'true'
+          install-gui-libs: 'true'
+          install-linters: 'true'
+          install-nextest: 'true'
       - name: Check formatting and workflows before compilation
         run: |
           cargo fmt --all -- --check
@@ -63,6 +67,11 @@ jobs:
           persist-credentials: false
       - uses: ./.github/actions/ci-setup
         with:
+          install-gui-libs: ${{ matrix.stage != 'wasm' && 'true' || 'false' }}
+          install-linters: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
+          install-nextest: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
+          # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
+          install-libarchive: ${{ matrix.stage == 'tests' && 'true' || 'false' }}
           install-deny: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
           reclaim-disk: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
       - name: Restore the test binaries built for this revision
@@ -71,10 +80,6 @@ jobs:
         with:
           name: native-tests
           path: target
-      # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
-      - name: Install bsdtar for the release-scan tests
-        if: matrix.stage == 'tests'
-        run: sudo apt-get update -q && sudo apt-get install -y --no-install-recommends libarchive-tools
       - name: Check licences, advisories, yanked crates, bans and sources
         if: matrix.stage == 'policy'
         run: cargo deny check
