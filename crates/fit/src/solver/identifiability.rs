@@ -3,8 +3,8 @@ use std::collections::HashSet;
 use curvebook_doc::CiBound;
 use curvebook_math::linalg::{DenseMatrix, qr_col_pivoted, svd};
 
-use super::{ObsRecord, ParameterLayout};
 use crate::error::{FitError, FitIdentifiability};
+use crate::solver::layout::{ObsRecord, ParameterLayout};
 
 const MIN_SCALED_RCOND: f64 = 1e-12;
 // Dependency = 1 - 1 / VIF (Motulsky & Christopoulos, 2004).
@@ -156,7 +156,8 @@ mod tests {
     use crate::diagnostics::compute_covariance_diagnostics;
     use crate::error::{FitIdentifiability, ParameterNote};
     use crate::library::get_builtin_model;
-    use crate::solver::{SolverConfig, build_observations, fit_nonlinear};
+    use crate::solver::layout::build_observations;
+    use crate::solver::{SolverConfig, fit_nonlinear};
     use crate::types::{DataPoint, DatasetSeries, HookContext};
 
     fn line_data(xs: &[f64]) -> DatasetSeries {

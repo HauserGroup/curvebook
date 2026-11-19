@@ -220,7 +220,7 @@ A cap on the main parser does nothing if the path chosen for odd input has none.
 
 **A long computation has an overall budget, and running out of it is a reported failure.**
 A per-step limit does not bound a sequence of steps, and a computation that is cut off silently looks like a slow one.
-*In CurveBook:* `OdeFitBudgetGuard` in `crates/fit/src/dsl.rs` bounds total adaptive integration steps across one nonlinear fit; new iterative, resampling, or permutation routines need a comparable whole-run budget that surfaces as a typed error.
+*In CurveBook:* `OdeFitBudgetGuard` in `crates/fit/src/dsl/ode.rs` bounds total adaptive integration steps across one nonlinear fit; new iterative, resampling, or permutation routines need a comparable whole-run budget that surfaces as a typed error.
 
 **When a list is capped, say so and keep the full total beside it.**
 A reader takes a silently capped list, or counts computed from it, for the whole set.
@@ -312,7 +312,7 @@ Each writer can read, modify, and rename its own copy and silently drop the othe
 
 **Compare floats used as identities by their bits, and keep the original bits.**
 `==` treats `NaN` as unequal to itself and `+0.0` equal to `-0.0`, and widening or narrowing can change a `NaN`'s payload.
-*In CurveBook:* the ODE trajectory cache in `crates/fit/src/dsl.rs` compares keys with `slice_bits_eq`; cache keys, fingerprints, and deduplication use `f64::to_bits`, while numeric comparison and display use values.
+*In CurveBook:* the ODE trajectory cache in `crates/fit/src/dsl/ode.rs` compares keys with `slice_bits_eq`; cache keys, fingerprints, and deduplication use `f64::to_bits`, while numeric comparison and display use values.
 
 ---
 
