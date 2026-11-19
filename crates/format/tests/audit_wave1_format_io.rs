@@ -260,19 +260,19 @@ fn audit_29_pzfx_and_prism_validate_and_sanitize_invalid_sheet_ids() {
     assert!(pzfx_rep.warnings.iter().filter(|w| w.kind == ImportWarningKind::CoercedValue).count() >= 4);
 
     // 2. .prism manifest + CSV invalid IDs
-    let mut prism_zip = ZipWriter::new();
-    prism_zip
+    let mut archive_zip = ZipWriter::new();
+    archive_zip
         .add_file(
             "manifest.json",
-            br#"{"title":"Prism Invalid IDs","info_sheets":[{"id":"info : bad","title":"Info"}],"sheets":[{"id":"data {{1}}","kind":"Column","csv_path":"sheets/a.csv"}]}"#.to_vec(),
+            br#"{"title":"Archive Invalid IDs","info_sheets":[{"id":"info : bad","title":"Info"}],"sheets":[{"id":"data {{1}}","kind":"Column","csv_path":"sheets/a.csv"}]}"#.to_vec(),
         )
         .unwrap();
-    prism_zip.add_file("sheets/a.csv", b"A\n1\n".to_vec()).unwrap();
-    let prism_rep = import_prism_bytes(&prism_zip.finish().unwrap()).expect("prism with sanitized manifest/csv IDs");
-    assert!(SheetId::try_new(prism_rep.document.info_sheets[0].id.as_str()).is_ok());
-    assert!(SheetId::try_new(prism_rep.document.data_sheets[0].id.as_str()).is_ok());
-    assert_eq!(prism_rep.document.data_sheets[0].info_sheet_id.as_ref(), Some(&prism_rep.document.info_sheets[0].id));
-    assert!(prism_rep.warnings.iter().filter(|w| w.kind == ImportWarningKind::CoercedValue).count() >= 2);
+    archive_zip.add_file("sheets/a.csv", b"A\n1\n".to_vec()).unwrap();
+    let archive_rep = import_prism_bytes(&archive_zip.finish().unwrap()).expect("archive with sanitized manifest/csv IDs");
+    assert!(SheetId::try_new(archive_rep.document.info_sheets[0].id.as_str()).is_ok());
+    assert!(SheetId::try_new(archive_rep.document.data_sheets[0].id.as_str()).is_ok());
+    assert_eq!(archive_rep.document.data_sheets[0].info_sheet_id.as_ref(), Some(&archive_rep.document.info_sheets[0].id));
+    assert!(archive_rep.warnings.iter().filter(|w| w.kind == ImportWarningKind::CoercedValue).count() >= 2);
 
     // 3. Embedded document.json with invalid SheetIds and cross-sheet references remaps cleanly
     let bad_info_id = SheetId::new("info bad:id");
