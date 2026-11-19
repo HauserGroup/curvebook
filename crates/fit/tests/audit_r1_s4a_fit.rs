@@ -1,5 +1,3 @@
-use std::time::Instant;
-
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, ChecklistStatus, CiBound, DataSheet, FitMethod, LinearRegressionSpec, ModelComparisonSpec,
     NonlinearFitSpec, ResultCell, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
@@ -220,11 +218,11 @@ fn r1_s03_08_y0_assignment_in_non_ode_dsl_is_local_variable() {
 
 #[test]
 fn r1_s03_09_dsl_compilation_scales_linearly_across_transforms_initials_and_prefixes() {
-    let compile_ns = |src: &str| {
-        let t0 = Instant::now();
-        let m = CompiledDslModel::compile("scale", src).unwrap();
-        (m, t0.elapsed().as_nanos() as f64)
-    };
+    // Wall-clock scaling ratios run serially in `perf_96_and_fit_parity::r1_s03_09_dsl_compilation_scales_linearly_wall_clock`
+    // so parallel `CI / tests` CPU contention cannot trigger false failures; this correctness test
+    // still exercises the full 1,000/4,000-line transforms, initial-value chains, 2,000 prefix branches,
+    // and the oversized source byte cap.
+    let compile = |src: &str| CompiledDslModel::compile("scale", src).unwrap();
 
     // Chained transforms: each line references the prior local transform.
     let build_transforms = |n: usize| {
@@ -234,9 +232,8 @@ fn r1_s03_09_dsl_compilation_scales_linearly_across_transforms_initials_and_pref
         }
         s
     };
-    let (m1000, t1000) = compile_ns(&build_transforms(1_000));
-    let (m4000, t4000) = compile_ns(&build_transforms(4_000));
-    assert!(t4000 / t1000.max(1_000_000.0) < 8.0, "transforms 4x scaling too slow: t1000={t1000}ns, t4000={t4000}ns");
+    let m1000 = compile(&build_transforms(1_000));
+    let m4000 = compile(&build_transforms(4_000));
 
     let derived = m4000.derived_transforms(&[2.0, 3.0]);
     assert_eq!(derived.len(), 4_000);
@@ -252,9 +249,8 @@ fn r1_s03_09_dsl_compilation_scales_linearly_across_transforms_initials_and_pref
         s.push_str(&format!("A = L{}\nB = YMAX\n", n - 1));
         s
     };
-    let (_, init_t1000) = compile_ns(&build_inits(1_000));
-    let (m_init4000, init_t4000) = compile_ns(&build_inits(4_000));
-    assert!(init_t4000 / init_t1000.max(1_000_000.0) < 8.0, "init rules 4x scaling too slow: t1000={init_t1000}ns, t4000={init_t4000}ns");
+    let _ = compile(&build_inits(1_000));
+    let m_init4000 = compile(&build_inits(4_000));
 
     let pts = vec![DataPoint::xy(0.0, 10.0), DataPoint::xy(1.0, 20.0)];
     let g = m_init4000.initial_guess(&pts);
@@ -266,7 +262,7 @@ fn r1_s03_09_dsl_compilation_scales_linearly_across_transforms_initials_and_pref
     for i in 1..=2_000 {
         prefix_src.push_str(&format!("<{i}> Y = A*X + {i}\n"));
     }
-    let (m_pref, _) = compile_ns(&prefix_src);
+    let m_pref = compile(&prefix_src);
     assert!((m_pref.eval(&[2.0], &[3.0], 0).unwrap() - 6.0).abs() < 1e-12);
     assert!((m_pref.eval(&[2.0], &[3.0], 1_500).unwrap() - 1_506.0).abs() < 1e-12);
 
