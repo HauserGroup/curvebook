@@ -631,7 +631,7 @@ Owner: maintainers · Status: todo · Was: GUI overhaul Phase 3 (2026-11-19) · 
 - **`R13` overlap:** `crates/chart/src/{xy,column_grouped,survival_cat,multivariate_layout}.rs` and `crates/doc/src/graph.rs` are named by open [`R13.2`](#r132-composite-xy-series-nudging-subset-fit-overlays-survival-modes-forest-bounds-pyramids--spaghetti-plots)–[`R13.5`](#r135-page-layout-plot-scale-equalization-axis-free-transparent-overlays--inset-composition) work, so [`R16.3`](#r163-split-per-graph-family-chart-builders) waits for them.
 
 ### R16.1 Split the stats ANOVA module by method family
-Owner: open · Status: todo · Was: Core-crate maintainability review 2026-11-19 · Est. note: 8–14 h · Depends on: none · Gate: none
+Owner: open · Status: in progress — claimed: jsture, branch `refactor/R16.1-stats-anova-split` · Was: Core-crate maintainability review 2026-11-19 · Est. note: 8–14 h · Depends on: none · Gate: none
 
 - [ ] Turn `crates/stats/src/anova.rs` into `crates/stats/src/anova/`, with `mod.rs` re-exporting every current public item. Group the submodules by method family: shared result types; one-way and unequal-variance ANOVA; nonparametric (Kruskal–Wallis, Friedman); factorial and nested designs; repeated measures and sphericity; REML mixed models (variance components, unstructured covariance, Kenward–Roger and Satterthwaite degrees of freedom); post-hoc contrasts. Move code only: no renames, no signature changes.
 - [ ] Give each submodule a `//!` header carrying the references already cited for its routines.
