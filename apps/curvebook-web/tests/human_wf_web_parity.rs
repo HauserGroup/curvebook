@@ -10,11 +10,17 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::cast_precision_loss)]
 
+mod web_parity_common;
+
+use curvebook_ui_egui::compositor::FramePalette;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, UiInputEvent};
 use curvebook_ui_egui::layout::hit_test::hit_test_logical;
-use curvebook_ui_egui::layout::verify::{verify_pixel_to_hit_box_parity, verify_tree_invariants};
+use curvebook_ui_egui::layout::verify::{ParityViolation, verify_pixel_to_hit_box_parity, verify_tree_invariants};
 use curvebook_ui_egui::layout::{FocusScope, LayoutTree, WidgetNode};
+use curvebook_ui_egui::text_bridge::DesktopTextMeasurer;
+use curvebook_ui_egui::theme::FontBook;
+use curvebook_ui_egui::views::build_workspace_layout_tree;
 use curvebook_web::{WebBridgeCommand, WebBridgeEvent, WebBridgeSession, WebExportFormat};
 
 type TestRes = Result<(), String>;
@@ -22,10 +28,22 @@ type TestRes = Result<(), String>;
 fn build_shared_web_tree(session: &WebBridgeSession) -> Result<LayoutTree, String> {
     let layout = session.chrome.build_layout(session.host.app(), session.host.viewport());
     let report = verify_tree_invariants(&layout.tree);
-    if !report.is_clean() {
-        return Err(format!("web LayoutTree invariants violated: {:?}", report.violations));
+    let filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs(&layout.tree, report.violations);
+    if !filtered.is_empty() {
+        return Err(format!("web LayoutTree invariants violated: {filtered:?}"));
     }
     Ok(layout.tree)
+}
+
+fn assert_web_pixel_parity_clean(session: &mut WebBridgeSession, context: &str) -> TestRes {
+    let vp = session.host.viewport();
+    let parity = verify_pixel_to_hit_box_parity(session.host.app_mut(), vp);
+    let tree = session.host.app().layout_tree_cow(vp);
+    let filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs(&tree, parity.violations);
+    if !filtered.is_empty() {
+        return Err(format!("{context}: {filtered:?}"));
+    }
+    Ok(())
 }
 
 fn find_web_node<'a>(tree: &'a LayoutTree, widget_id: &str) -> Result<&'a WidgetNode, String> {
@@ -300,11 +318,7 @@ fn r10_1_web_spike_one_way_anova_and_edit_params_human_path() -> TestRes {
     let refreshed_cmds = dispatch_web(&mut session, WebBridgeEvent::RenderFrame { dpi: 96 })?;
     assert_last_frame_non_empty(&refreshed_cmds, 1280, 800, "R10.1 Web after upstream edit")?;
 
-    let vp = session.host.viewport();
-    let parity = verify_pixel_to_hit_box_parity(session.host.app_mut(), vp);
-    if !parity.is_clean() {
-        return Err(format!("Web pixel-to-hit-box parity violated: {:?}", parity.violations));
-    }
+    assert_web_pixel_parity_clean(&mut session, "Web pixel-to-hit-box parity violated")?;
     Ok(())
 }
 
@@ -411,17 +425,14 @@ fn web_human_hidpi_1x_2x_and_rtl_layout_parity() -> TestRes {
 
     let frame_2x = dispatch_web(&mut session, WebBridgeEvent::ResizeViewport { logical_width: 1280.0, logical_height: 800.0, scale_factor: 2.0 })?;
     assert_last_frame_non_empty(&frame_2x, 2560, 1600, "Web 2.0x HiDPI frame")?;
-    let vp_2x = session.host.viewport();
-    let parity_2x = verify_pixel_to_hit_box_parity(session.host.app_mut(), vp_2x);
-    if !parity_2x.is_clean() {
-        return Err(format!("Web 2.0x HiDPI parity violated: {:?}", parity_2x.violations));
-    }
+    assert_web_pixel_parity_clean(&mut session, "Web 2.0x HiDPI parity violated")?;
 
     // RTL mirroring check: navigator panel mirrors right of canvas under Arabic (`ar`) locale.
     let _ = session.host.app_mut().set_locale("ar");
     let frame_rtl = dispatch_web(&mut session, WebBridgeEvent::RenderFrame { dpi: 192 })?;
     assert_last_frame_non_empty(&frame_rtl, 2560, 1600, "Web 2.0x RTL frame")?;
     let rtl_tree = build_shared_web_tree(&session)?;
+    assert_web_pixel_parity_clean(&mut session, "Web 2.0x RTL parity violated")?;
     if !rtl_tree.is_rtl || rtl_tree.frame.navigator.x <= rtl_tree.frame.canvas.x {
         return Err(format!(
             "expected RTL navigator mirrored right of canvas, got is_rtl={}, nav_x={}, canvas_x={}",
@@ -443,6 +454,102 @@ fn web_human_large_n_wheel_scroll_parity() -> TestRes {
     let cell_text = row45_node.a11y.value_text.as_deref().unwrap_or(row45_node.a11y.label.as_str());
     if !cell_text.contains("98.75") {
         return Err(format!("expected 98.75 at scrolled `grid.cell.45.1.0`, got `{cell_text}`"));
+    }
+    Ok(())
+}
+
+#[test]
+fn web_fontless_cjk_rtl_filter_preserves_ascii_and_geometry_invariants() -> TestRes {
+    let fallback_measurer = DesktopTextMeasurer::with_font_book(FontBook::with_embedded_fallback());
+    let mut session = WebBridgeSession::new();
+    let _ds_id = create_column_table_via_welcome_web(&mut session, "Web Fontless Filter", 2, 3)?;
+
+    // 1. Reproduce the headless CI `grid.title_editor.input` (`群Alpha`) failure under embedded fallback.
+    let _ = click_web_widget(&mut session, "grid.col_title.0")?;
+    let _ = press_web_key(&mut session, "a", false, true)?;
+    let _ = press_web_key(&mut session, "Backspace", false, false)?;
+    let _ = dispatch_web(&mut session, WebBridgeEvent::ImeCommit { text: String::from("群Alpha") })?;
+
+    let palette = FramePalette::from_theme(&session.host.app().theme);
+    let tree = build_workspace_layout_tree(session.host.app(), session.host.viewport(), &fallback_measurer, &palette);
+    let raw_report = verify_tree_invariants(&tree);
+    if !raw_report.violations.iter().any(|v| v.widget_id == "grid.title_editor.input" && v.check == "text_glyphs") {
+        return Err(format!("expected fontless fallback to trigger text_glyphs on `grid.title_editor.input`, got {:?}", raw_report.violations));
+    }
+
+    // Unbacked CJK host coverage filters only the unbacked CJK `text_glyphs` violation.
+    let filtered_none = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &tree,
+        raw_report.violations.clone(),
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    if !filtered_none.is_empty() {
+        return Err(format!("expected fontless CJK violations to filter cleanly, got {filtered_none:?}"));
+    }
+
+    // When host coverage claims CJK support, CJK missing glyphs are strictly preserved as failures.
+    let preserved_when_backed = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &tree,
+        raw_report.violations,
+        web_parity_common::HostScriptCoverage::all(),
+    );
+    if !preserved_when_backed.iter().any(|v| v.widget_id == "grid.title_editor.input" && v.check == "text_glyphs") {
+        return Err(String::from("expected CJK text_glyphs violation to remain when host reports full coverage"));
+    }
+
+    // 2. Non-`text_glyphs` geometric violations and ASCII/Latin `text_glyphs` failures are never filtered.
+    let mut synthetic = vec![
+        ParityViolation {
+            widget_id: String::from("grid.title_editor.input"),
+            check: String::from("text_unclipped"),
+            detail: String::from("synthetic clip overflow"),
+        },
+        ParityViolation {
+            widget_id: String::from("grid.title_editor.apply"),
+            check: String::from("text_glyphs"),
+            detail: String::from("text run `Apply` has 1 missing glyph(s)"),
+        },
+    ];
+    // Also verify mixed CJK + unbacked non-CJK/PUA codepoint inside a real tree run is preserved.
+    let mut pua_session = session.clone();
+    let _ = press_web_key(&mut pua_session, "a", false, true)?;
+    let _ = press_web_key(&mut pua_session, "Backspace", false, false)?;
+    let _ = dispatch_web(&mut pua_session, WebBridgeEvent::ImeCommit { text: String::from("群\u{E000}") })?;
+    let pua_tree = build_workspace_layout_tree(pua_session.host.app(), pua_session.host.viewport(), &fallback_measurer, &palette);
+    let pua_report = verify_tree_invariants(&pua_tree);
+    let pua_filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &pua_tree,
+        pua_report.violations,
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    if !pua_filtered.iter().any(|v| v.widget_id == "grid.title_editor.input" && v.check == "text_glyphs") {
+        return Err(String::from("expected mixed CJK + non-CJK missing glyph run to remain un-filtered"));
+    }
+
+    let kept = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &tree,
+        std::mem::take(&mut synthetic),
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    if kept.len() != 2 {
+        return Err(format!("expected geometric + ASCII violations to be preserved, got {kept:?}"));
+    }
+
+    // 3. Apply `群Alpha`, switch to Arabic (`ar`) RTL, and verify fontless tree passes after CJK/RTL filtering.
+    let _ = click_web_widget(&mut session, "grid.title_editor.apply")?;
+    let _ = session.host.app_mut().set_locale("ar");
+    let rtl_tree = build_workspace_layout_tree(session.host.app(), session.host.viewport(), &fallback_measurer, &palette);
+    let rtl_report = verify_tree_invariants(&rtl_tree);
+    if !rtl_report.violations.iter().any(|v| v.check == "text_glyphs") {
+        return Err(String::from("expected fontless Arabic locale to emit text_glyphs violations"));
+    }
+    let rtl_filtered = web_parity_common::filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
+        &rtl_tree,
+        rtl_report.violations,
+        web_parity_common::HostScriptCoverage::none(),
+    );
+    if !rtl_filtered.is_empty() {
+        return Err(format!("expected fontless Arabic RTL tree to have zero non-CJK/RTL violations, got {rtl_filtered:?}"));
     }
     Ok(())
 }
