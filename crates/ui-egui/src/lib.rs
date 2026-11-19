@@ -57,7 +57,10 @@ pub use dialogs_canvas::{
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use human_driver::HumanPathDriver;
-pub use i18n::{LOCALES, LocalePreset, is_draft_translation_locale, locale_display_name, locale_picker_label, normalize_locale, tr};
+pub use i18n::{
+    BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
+    normalize_beta_gui_locale, normalize_locale, tr,
+};
 pub use inspect::{UiTreeSnapshot, inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
@@ -93,20 +96,6 @@ pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 #[must_use]
 pub const fn bundled_fonts_enabled() -> bool {
     cfg!(feature = "bundled-fonts")
-}
-
-/// Beta-active LTR/CJK GUI locales (`14` registered non-RTL locales; RTL `ar`/`he` deferred past 1.0).
-pub const BETA_ACTIVE_LOCALES: &[&str] = &["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr"];
-
-/// Normalize a locale tag for the Beta desktop GUI, falling back to `"en"` when RTL
-/// (`ar`, `he`, `fa`, `ur`, `iw`).
-#[must_use]
-pub fn normalize_beta_gui_locale(tag: &str) -> &'static str {
-    if i18n::is_rtl_locale(tag) {
-        return "en";
-    }
-    let norm = normalize_locale(tag);
-    if i18n::is_rtl_locale(norm) { "en" } else { norm }
 }
 
 /// Default interface zoom scale factor (`1.0x`).

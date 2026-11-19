@@ -1,20 +1,15 @@
 //! Native `egui` human-path driver (`EguiHumanPathDriver`), IME preedit/commit checks,
-//! AccessKit/`Role::ScrollBar` parity verification, and 12-locale ellipsis verification (`R15.1`).
+//! AccessKit/`Role::ScrollBar` parity verification, and 14-locale ellipsis verification (`R15.1`).
 
-use std::collections::BTreeSet;
 use std::ops::Range;
-use std::path::Path;
-use std::sync::Arc;
 use std::time::Duration;
 
-use curvebook_platform::fs::read_regular_file_bytes;
-use curvebook_text::{TrueTypeFont, build_minimal_truetype_font};
 use egui::accesskit::{Node as AccessKitNode, NodeId as AccessKitNodeId, Role as AccessKitRole, TreeUpdate as AccessKitTreeUpdate};
 use egui::epaint::{ClippedShape, Shape};
 use egui::output::IMEOutput;
 use egui::{
-    Context, Event, FontData, FontDefinitions, FontFamily, FullOutput, ImeEvent, Key, Modifiers, MouseWheelSource, MouseWheelUnit,
-    PointerButton as EguiPointerButton, Pos2, RawInput, Rect, Response, TouchPhase, Ui, Vec2, ViewportId, WidgetInfo,
+    Context, Event, FontDefinitions, FullOutput, ImeEvent, Key, Modifiers, MouseWheelSource, MouseWheelUnit, PointerButton as EguiPointerButton,
+    Pos2, RawInput, Rect, Response, TouchPhase, Ui, Vec2, ViewportId, WidgetInfo,
 };
 
 use super::{FrameInspectEntryInput, FrameInspectMeta, GeometryStamp, Tokens};
@@ -24,44 +19,9 @@ use crate::layout::{ParityReport, ParityViolation, ZLayer};
 /// All 14 Beta-active non-RTL BCP-47 locale identifiers (`docs/planning/gui-layout-spec.md` §1.1, §9.4).
 pub const BETA_LOCALE_CODES: [&str; 14] = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr"];
 
-const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
 const MAX_SETTLE_FRAMES: usize = 12;
 const BLEED_TOLERANCE_PT: f32 = 1.5;
 const SCROLLBAR_OVERLAP_TOLERANCE_PT: f32 = 0.5;
-
-const HOST_PROPORTIONAL_CANDIDATE_PATHS: &[&str] = &[
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-    "/System/Library/Fonts/SFNS.ttf",
-    "/System/Library/Fonts/Geneva.ttf",
-    "/System/Library/Fonts/Hiragino Sans GB.ttc",
-    "/System/Library/Fonts/AppleSDGothicNeo.ttc",
-    "/System/Library/Fonts/Supplemental/AppleGothic.ttf",
-    "/System/Library/Fonts/Apple Symbols.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSans-Regular.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/noto-cjk/NotoSansCJK-Regular.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/TTF/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "/usr/share/fonts/truetype/ubuntu/Ubuntu-R.ttf",
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "C:\\Windows\\Fonts\\segoeui.ttf",
-    "C:\\Windows\\Fonts\\meiryo.ttc",
-    "C:\\Windows\\Fonts\\malgun.ttf",
-    "C:\\Windows\\Fonts\\msyh.ttc",
-];
-
-const HOST_MONO_CANDIDATE_PATHS: &[&str] = &[
-    "/System/Library/Fonts/Menlo.ttc",
-    "/System/Library/Fonts/Monaco.ttf",
-    "/System/Library/Fonts/Supplemental/Courier New.ttf",
-    "/usr/share/fonts/truetype/noto/NotoSansMono-Regular.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/TTF/DejaVuSansMono.ttf",
-    "C:\\Windows\\Fonts\\consola.ttf",
-];
 
 /// Vertical clipping policy applied when checking rendered text runs for unclipped bleed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -172,91 +132,10 @@ pub fn accesskit_accessible_name(node: &AccessKitNode) -> Option<&str> {
 }
 
 /// Build [`egui::FontDefinitions`] from host OS fonts, `CURVEBOOK_FONTS_DIR`, and CurveBook's
-/// deterministic SFNT minimal fallback without bundling external font binaries or using `memmap`.
+/// deterministic SFNT sans + symbol fallback via [`super::fonts::build_egui_font_definitions`].
 #[must_use]
 pub fn build_driver_font_definitions() -> FontDefinitions {
-    let mut defs = FontDefinitions::empty();
-    let mut db = fontdb::Database::new();
-    let mut seen_paths = BTreeSet::new();
-    let mut prop_keys = Vec::new();
-    let mut mono_keys = Vec::new();
-
-    for path in HOST_PROPORTIONAL_CANDIDATE_PATHS {
-        register_font_file_into_defs(Path::new(path), &mut seen_paths, &mut db, &mut defs, &mut prop_keys);
-    }
-    for path in HOST_MONO_CANDIDATE_PATHS {
-        register_font_file_into_defs(Path::new(path), &mut seen_paths, &mut db, &mut defs, &mut mono_keys);
-    }
-    if let Some(dir_os) = std::env::var_os("CURVEBOOK_FONTS_DIR") {
-        let dir = Path::new(&dir_os);
-        if let Ok(entries) = std::fs::read_dir(dir) {
-            let mut env_paths: Vec<std::path::PathBuf> = entries.flatten().map(|e| e.path()).collect();
-            env_paths.sort();
-            for path in env_paths {
-                if has_supported_font_extension(&path) {
-                    register_font_file_into_defs(&path, &mut seen_paths, &mut db, &mut defs, &mut prop_keys);
-                }
-            }
-        }
-    }
-
-    let minimal_key = String::from("curvebook-minimal-fallback");
-    let minimal_bytes = build_minimal_truetype_font();
-    defs.font_data.insert(minimal_key.clone(), Arc::new(FontData::from_owned(minimal_bytes)));
-    prop_keys.push(minimal_key.clone());
-    mono_keys.extend(prop_keys.iter().cloned());
-    mono_keys.push(minimal_key);
-
-    defs.families.insert(FontFamily::Proportional, dedup_keys(prop_keys));
-    defs.families.insert(FontFamily::Monospace, dedup_keys(mono_keys));
-    defs
-}
-
-fn has_supported_font_extension(path: &Path) -> bool {
-    path.extension()
-        .and_then(|ext| ext.to_str())
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("ttf") || ext.eq_ignore_ascii_case("otf") || ext.eq_ignore_ascii_case("ttc"))
-}
-
-fn dedup_keys(keys: Vec<String>) -> Vec<String> {
-    let mut seen = BTreeSet::new();
-    let mut out = Vec::with_capacity(keys.len());
-    for key in keys {
-        if seen.insert(key.clone()) {
-            out.push(key);
-        }
-    }
-    out
-}
-
-fn register_font_file_into_defs(
-    path: &Path,
-    seen_paths: &mut BTreeSet<String>,
-    db: &mut fontdb::Database,
-    defs: &mut FontDefinitions,
-    family_keys: &mut Vec<String>,
-) {
-    let path_str = path.to_string_lossy().into_owned();
-    if !seen_paths.insert(path_str.clone()) {
-        return;
-    }
-    let Ok(bytes) = read_regular_file_bytes(path, MAX_HOST_FONT_BYTES) else {
-        return;
-    };
-    let face_count = TrueTypeFont::parse_collection(&bytes).len();
-    if face_count == 0 {
-        return;
-    }
-    db.load_font_data(bytes.clone());
-    let shared_blob: Arc<dyn AsRef<[u8]> + Send + Sync> = Arc::new(bytes);
-    for idx in 0..face_count {
-        let key = if face_count == 1 { path_str.clone() } else { format!("{path_str}#{idx}") };
-        let Ok(face_index) = u32::try_from(idx) else {
-            break;
-        };
-        defs.font_data.insert(key.clone(), Arc::new(FontData::from_blob(Arc::clone(&shared_blob), face_index)));
-        family_keys.push(key);
-    }
+    super::fonts::build_egui_font_definitions().definitions
 }
 
 /// Render an `egui::Label` with optional truncation (`…`), hover tooltip for full un-truncated
@@ -1157,6 +1036,7 @@ mod tests {
     #[test]
     fn key_parser_and_beta_locale_list_cover_expected_entries() {
         assert_eq!(BETA_LOCALE_CODES.len(), 14);
+        assert_eq!(BETA_LOCALE_CODES.as_slice(), crate::i18n::BETA_ACTIVE_LOCALES);
         assert!(BETA_LOCALE_CODES.contains(&"pt-BR"));
         assert!(BETA_LOCALE_CODES.contains(&"zh-CN"));
         assert!(BETA_LOCALE_CODES.contains(&"zh-TW"));
