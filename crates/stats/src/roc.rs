@@ -2,6 +2,16 @@
 //! trapezoidal AUC, DeLong (1988) exact structural-components SE/CI and two-curve comparison
 //! (correlated & uncorrelated), Hanley–McNeil SE, Youden's *J* optimal cutoff, PPV/NPV/LR+, and
 //! `ResultSheet` builders.
+//!
+//! References:
+//! - DeLong, E. R., DeLong, D. M., & Clarke-Pearson, D. L. (1988). Comparing the areas under two
+//!   or more correlated receiver operating characteristic curves: A nonparametric approach.
+//!   *Biometrics*, 44(3), 837-845. `doi:10.2307/2531595`.
+//! - Hanley, J. A., & McNeil, B. J. (1982). The meaning and use of the area under a receiver
+//!   operating characteristic (ROC) curve. *Radiology*, 143(1), 29-36.
+//!   `doi:10.1148/radiology.143.1.7063747`.
+//! - Youden, W. J. (1950). Index for rating diagnostic tests. *Cancer*, 3(1), 32-35.
+//!   `doi:10.1002/1097-0142(1950)3:1<32::aid-cncr2820030106>3.0.co;2-3`.
 
 pub use curvebook_doc::RocCiMethod;
 use curvebook_doc::{
@@ -94,11 +104,20 @@ pub struct RocComparisonResult {
 
 /// Compute empirical ROC curve, trapezoidal AUC, DeLong (1988) exact SE/CI (or Hanley–McNeil),
 /// and optimal Youden *J* cutoff assuming higher test values indicate `cases`.
+///
+/// DeLong's structural-components variance (`RocCiMethod::DeLong`) requires `controls.len() >= 2`
+/// and `cases.len() >= 2` because the component sample variances divide by `n - 1` (DeLong et al.
+/// 1988); single-subject groups return [`StatsError::InsufficientSampleSize`]. Under
+/// `RocCiMethod::HanleyMcNeil`, single-subject groups use the Hanley & McNeil (1982) SE together
+/// with a boundary-aware Wilson score CI and exact Mann–Whitney *U* rank-sum *P* value.
 pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMethod, confidence: ConfidenceLevel) -> Result<RocResult, StatsError> {
     validate_finite_slice(controls)?;
     validate_finite_slice(cases)?;
     let n0 = controls.len();
     let n1 = cases.len();
+    if matches!(ci_method, RocCiMethod::DeLong) && (n0 < 2 || n1 < 2) {
+        return Err(StatsError::InsufficientSampleSize { context: "DeLong ROC variance", required: 2, actual: n0.min(n1) });
+    }
     let n0f = n0 as f64;
     let n1f = n1 as f64;
 
@@ -179,8 +198,8 @@ pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMetho
 
     let se = match ci_method {
         RocCiMethod::DeLong => {
-            let s10 = if n1 > 1 { v10.iter().map(|&v| (v - auc).powi(2)).sum::<f64>() / ((n1 - 1) as f64) } else { 0.0 };
-            let s01 = if n0 > 1 { v01.iter().map(|&v| (v - auc).powi(2)).sum::<f64>() / ((n0 - 1) as f64) } else { 0.0 };
+            let s10 = v10.iter().map(|&v| (v - auc).powi(2)).sum::<f64>() / ((n1 - 1) as f64);
+            let s01 = v01.iter().map(|&v| (v - auc).powi(2)).sum::<f64>() / ((n0 - 1) as f64);
             ((s10 / n1f) + (s01 / n0f)).max(0.0).sqrt()
         }
         RocCiMethod::HanleyMcNeil => {
@@ -191,12 +210,13 @@ pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMetho
         }
     };
 
+    let single_subject_group = n0 < 2 || n1 < 2;
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let ci = if se > 0.0 {
+    let ci = if se > 0.0 && !single_subject_group {
         ((auc - z_crit * se).clamp(0.0, 1.0), (auc + z_crit * se).clamp(0.0, 1.0))
     } else {
-        // Complete separation or degenerate zero-variance ROC curve: Wald SE collapses to 0.0.
-        // Fall back to a boundary-aware Wilson score interval using n_eff = min(n0, n1).
+        // Complete separation, degenerate zero-variance ROC curve, or n == 1 small-sample group:
+        // avoid collapsing CI or invalid normal Wald on n == 1 by using a boundary-aware Wilson score interval.
         let n_eff = (n0.min(n1) as f64).max(1.0);
         let z2 = z_crit * z_crit;
         let denom = 1.0 + z2 / n_eff;
@@ -204,18 +224,17 @@ pub fn roc_curve_analysis(controls: &[f64], cases: &[f64], ci_method: RocCiMetho
         let half = (z_crit / denom) * ((auc * (1.0 - auc) / n_eff) + z2 / (4.0 * n_eff * n_eff)).sqrt();
         ((center - half).clamp(0.0, 1.0), (center + half).clamp(0.0, 1.0))
     };
-    let p_value_vs_05 = if se > 0.0 {
+    let p_value_vs_05 = if se > 0.0 && !single_subject_group {
         norm_two_sided_p((auc - 0.5) / se)
     } else if (auc - 0.5).abs() <= 1e-12 {
         1.0
     } else {
-        // Exact / tie-adjusted two-sided Mann-Whitney P against H0: AUC = 0.5 under separation.
+        // Exact / tie-adjusted two-sided Mann-Whitney P against H0: AUC = 0.5 under separation or single-subject group.
         match crate::two_group::mann_whitney_u(controls, cases, true, confidence) {
             Ok(mw) => mw.p_value,
             Err(_) => {
-                // If n0 == 1 or n1 == 1 and Mann-Whitney rejects small n, use exact rank-sum tail 2 / C(n0 + n1, n0).
                 let total = n0 + n1;
-                if n0 == 1 || n1 == 1 { (2.0 / (total as f64)).clamp(0.0, 1.0) } else { 1.0 }
+                if single_subject_group { (2.0 / (total as f64)).clamp(0.0, 1.0) } else { 1.0 }
             }
         }
     };
@@ -428,6 +447,14 @@ pub fn run_roc_analysis(sheet: &DataSheet, spec: &AnalysisSpec, roc_spec: &RocSp
             "AUC < 0.5 indicates lower values occur in the positive group or discrimination is below chance."
         },
     ));
+    if res.n_controls < 2 || res.n_cases < 2 {
+        out.checklist.push(checklist_item(
+            "ROC small-sample inference",
+            ChecklistStatus::Warn,
+            Some(format!("{} controls, {} cases", res.n_controls, res.n_cases)),
+            "Single-subject group prevents DeLong variance estimation and normal Wald inference; Hanley-McNeil SE, Wilson score CI, and exact Mann-Whitney U P value are reported.",
+        ));
+    }
 
     Ok(out)
 }
