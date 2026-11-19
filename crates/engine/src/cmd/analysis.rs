@@ -806,6 +806,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let source_kind = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?.kind();
 
     let combined = update_params_to_value(&parsed);
+    let explicit_empty_selection = parsed.selected_data_sets.as_ref().is_some_and(Vec::is_empty);
     apply_metadata_updates(
         &mut updated,
         parsed.title.as_ref().map(Option::as_deref),
@@ -843,9 +844,14 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
         updated.update_kind(kind_copy);
     }
 
-    validate_map_keys_for_kind(&updated.kind, &parsed.extra, false, "parameter")?;
+    validate_map_keys_for_kind(&updated.kind, &parsed.extra, KeyValidationMode::UpdateParamsTopLevel, "parameter")?;
     if let Some(ref patch_map) = cleaned_patch_map {
-        validate_map_keys_for_kind(&updated.kind, patch_map, false, "parameter in `params`")?;
+        validate_map_keys_for_kind(&updated.kind, patch_map, KeyValidationMode::UpdateParamsNested, "parameter in `params`")?;
+    }
+    if matches!(updated.kind, AnalysisKind::LinearRegression(_))
+        && let Some(rules_val) = parsed.extra.get("parameter_rules")
+    {
+        let _ = parse_parameter_rules(rules_val)?;
     }
 
     if !updated.kind.is_compatible_with(source_kind) {
@@ -858,7 +864,7 @@ fn run_analysis_update_params(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOu
     let source_ds = require_analyzable_data_sheet(doc, &updated.source_sheet_id)?;
     validate_selected_data_sets_for_sheet(source_ds, &updated)?;
     if kind_replaced {
-        persist_default_mv_columns(source_ds, &mut updated);
+        persist_default_mv_columns(source_ds, &mut updated, explicit_empty_selection);
     }
     resolve_xy_bland_altman_mode(source_ds, &mut updated);
     validate_analysis_spec_semantics(&updated)?;
@@ -1154,15 +1160,16 @@ fn build_analysis_spec(
         spec
     };
 
-    finalize_built_analysis_spec(doc, &mut spec)?;
+    let explicit_empty_selection = parsed.selected_data_sets.as_ref().is_some_and(Vec::is_empty);
+    finalize_built_analysis_spec(doc, &mut spec, explicit_empty_selection)?;
     Ok(spec)
 }
 
-fn finalize_built_analysis_spec(doc: &ProjectDocument, spec: &mut AnalysisSpec) -> Result<(), EngineError> {
+fn finalize_built_analysis_spec(doc: &ProjectDocument, spec: &mut AnalysisSpec, explicit_empty_selection: bool) -> Result<(), EngineError> {
     validate_confidence_percent(spec.confidence_level.percent())?;
     let source_ds = require_analyzable_data_sheet(doc, &spec.source_sheet_id)?;
     validate_selected_data_sets_for_sheet(source_ds, spec)?;
-    persist_default_mv_columns(source_ds, spec);
+    persist_default_mv_columns(source_ds, spec, explicit_empty_selection);
     resolve_xy_bland_altman_mode(source_ds, spec);
     validate_analysis_spec_semantics(spec)?;
     validate_xy_analysis_spec(source_ds, spec)?;
@@ -1582,14 +1589,19 @@ fn validate_nonlinear_spec_semantics(nl: &NonlinearFitSpec) -> Result<(), Engine
     Ok(())
 }
 
-fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec) {
+fn persist_default_mv_columns(source_ds: &DataSheet, spec: &mut AnalysisSpec, explicit_empty_selection: bool) {
     let TableArchetype::MultipleVariables(mv) = &source_ds.archetype else {
         return;
     };
     match &mut spec.kind {
-        AnalysisKind::Multivariate(_) => {
+        AnalysisKind::Multivariate(mv_spec) => {
             if spec.selected_data_sets.is_empty() {
-                spec.selected_data_sets = default_multivariate_numeric_columns(mv);
+                let defaults = default_multivariate_numeric_columns(mv);
+                let skip_all_continuous_explicit_pca =
+                    explicit_empty_selection && matches!(mv_spec, MultivariateSpec::Pca { .. }) && defaults.len() == mv.variables.len();
+                if !skip_all_continuous_explicit_pca {
+                    spec.selected_data_sets = defaults;
+                }
             }
         }
         AnalysisKind::TwoGroupComparison(tg) => persist_mv_two_group_defaults(mv, &mut spec.selected_data_sets, tg),
@@ -1890,13 +1902,30 @@ fn persist_mv_km_defaults(
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum KeyValidationMode {
+    Create,
+    UpdateParamsTopLevel,
+    UpdateParamsNested,
+}
+
+impl KeyValidationMode {
+    const fn allow_simulate_params(self) -> bool {
+        matches!(self, Self::Create)
+    }
+
+    const fn allow_linear_hook_compat(self) -> bool {
+        matches!(self, Self::UpdateParamsTopLevel)
+    }
+}
+
 fn validate_map_keys_for_kind(
     kind: &AnalysisKind,
     map: &Map<String, Value>,
-    allow_simulate_params: bool,
+    mode: KeyValidationMode,
     context_label: &str,
 ) -> Result<(), EngineError> {
-    let invalid: Vec<&str> = map.keys().map(String::as_str).filter(|k| !is_key_allowed_for_kind(kind, k, allow_simulate_params)).collect();
+    let invalid: Vec<&str> = map.keys().map(String::as_str).filter(|k| !is_key_allowed_for_kind(kind, k, mode)).collect();
     if invalid.is_empty() {
         return Ok(());
     }
@@ -1908,10 +1937,12 @@ fn validate_map_keys_for_kind(
     .with_details(json!({ "invalid_keys": invalid, "analysis": kind.derive_auto_title() })))
 }
 
-fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, allow_simulate_params: bool) -> bool {
+fn is_key_allowed_for_kind(kind: &AnalysisKind, key: &str, mode: KeyValidationMode) -> bool {
     match kind {
-        AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key, allow_simulate_params),
-        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => is_key_allowed_for_fit(kind, key),
+        AnalysisKind::Transform(tr) => is_key_allowed_for_transform(tr, key, mode.allow_simulate_params()),
+        AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_) => {
+            is_key_allowed_for_fit(kind, key, mode.allow_linear_hook_compat())
+        }
         _ => is_key_allowed_for_stats(kind, key),
     }
 }
@@ -1945,21 +1976,24 @@ fn is_key_allowed_for_multiplicity(mult: &MultiplicitySpec, key: &str) -> bool {
         || (matches!(mult.method, MultiplicityMethod::Dunnett { .. }) && key == "control_column")
 }
 
-fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str) -> bool {
+fn is_key_allowed_for_fit(kind: &AnalysisKind, key: &str, allow_linear_hook_compat: bool) -> bool {
     match kind {
-        AnalysisKind::LinearRegression(_) => matches!(
-            key,
-            "deming"
-                | "deming_model_ii"
-                | "force_through_origin"
-                | "confidence_bands"
-                | "prediction_bands"
-                | "interpolate_unknowns"
-                | "x_range_filter"
-                | "plot_x_min"
-                | "plot_x_max"
-                | "plot_segments"
-        ),
+        AnalysisKind::LinearRegression(_) => {
+            (allow_linear_hook_compat && key == "parameter_rules")
+                || matches!(
+                    key,
+                    "deming"
+                        | "deming_model_ii"
+                        | "force_through_origin"
+                        | "confidence_bands"
+                        | "prediction_bands"
+                        | "interpolate_unknowns"
+                        | "x_range_filter"
+                        | "plot_x_min"
+                        | "plot_x_max"
+                        | "plot_segments"
+                )
+        }
         AnalysisKind::NonlinearRegression(nl) => {
             matches!(
                 key,
@@ -2252,7 +2286,7 @@ fn parse_analysis_kind(
         apply_kind_patch_and_overrides(&mut kind, params)?;
         kind
     };
-    validate_map_keys_for_kind(&kind, extra, true, "parameter")?;
+    validate_map_keys_for_kind(&kind, extra, KeyValidationMode::Create, "parameter")?;
     let _ = &mut kind;
     Ok(kind)
 }

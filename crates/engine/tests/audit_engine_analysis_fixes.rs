@@ -410,6 +410,31 @@ fn audit_79_rejects_unknown_and_inapplicable_keys_per_kind() {
         "stats.run",
         json!({ "sheet_id": "dun-ok", "source_sheet": "col3", "kind": "one_way_anova", "multiplicity": "dunnett", "control_column": 0 }),
     );
+
+    // LinearRegression rejects `parameter_rules` on creation and nested `params`, while allowing
+    // top-level validated `parameter_rules` on `analysis.updateParams` for ConstantHookPicker compat.
+    let bad_hook_rule = json!([{
+        "name": "ConstraintA",
+        "scope": { "HookedConstant": { "InfoConstant": { "info_sheet_id": "info-1", "constant_name": "DoseRef" } } }
+    }]);
+    assert_eq!(
+        err_cmd(&mut session, "fit.run", json!({ "source_sheet": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
+        ErrorCode::BadInput
+    );
+    assert_eq!(
+        err_cmd(&mut session, "analysis.run", json!({ "source_sheet": "xy1", "kind": "linear", "parameter_rules": bad_hook_rule })).code,
+        ErrorCode::BadInput
+    );
+    ok_cmd(&mut session, "fit.run", json!({ "sheet_id": "lin-hook", "source_sheet": "xy1", "kind": "linear" }));
+    ok_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "lin-hook", "parameter_rules": bad_hook_rule }));
+    assert_eq!(
+        err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "lin-hook", "parameter_rules": "invalid" })).code,
+        ErrorCode::BadInput
+    );
+    assert_eq!(
+        err_cmd(&mut session, "analysis.updateParams", json!({ "sheet_id": "lin-hook", "params": { "parameter_rules": bad_hook_rule } })).code,
+        ErrorCode::BadInput
+    );
 }
 
 #[test]
@@ -505,6 +530,16 @@ fn audit_93_mv_default_columns_persisted_before_appending_calculated_var() {
     }
     doc.add_data_sheet(DataSheet::new("mv-km", "MV KM", TableArchetype::MultipleVariables(mv_km)).unwrap()).unwrap();
 
+    // MV table 4: 4 all-continuous columns (unchanged by Calculated var) for PCA/PCR UI compat check.
+    let mut mv_all_cont = MultipleVariablesTable::new(4, 6).unwrap();
+    for c in 0..4 {
+        mv_all_cont.variables[c].title = format!("V{c}");
+        for r in 0..6 {
+            mv_all_cont.variables[c].cells[r] = Cell::number((r + 1) as f64 * (c + 1) as f64);
+        }
+    }
+    doc.add_data_sheet(DataSheet::new("mv-all-cont", "MV All Cont", TableArchetype::MultipleVariables(mv_all_cont)).unwrap()).unwrap();
+
     let mut session = Session::from_document(doc);
 
     ok_cmd(&mut session, "stats.run", json!({ "sheet_id": "tg-mv", "source_sheet": "mv-bio", "kind": "unpaired_t" }));
@@ -558,6 +593,31 @@ fn audit_93_mv_default_columns_persisted_before_appending_calculated_var() {
     assert!((lin_after - lin_before).abs() < 1e-12, "linear MV retargeted after calculated var: before={lin_before}, after={lin_after}");
     assert_eq!(pca_vars_after, pca_vars_before, "PCA included new calculated var unexpectedly");
     assert_eq!(km_after, &km_before, "Kaplan-Meier MV retargeted after calculated var");
+
+    // Explicit `"selected_data_sets": []` on all-continuous MV PCA preserves `[]` (UI EditParams WF-23 compat),
+    // whereas mixed-role MV tables still persist continuous defaults.
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "pca-explicit-empty",
+            "source_sheet": "mv-all-cont",
+            "selected_data_sets": [],
+            "kind": { "Multivariate": { "Pca": { "standardize": true, "parallel_analysis_seed": 7 } } }
+        }),
+    );
+    assert!(session.document().result_sheet(&SheetId::new("pca-explicit-empty")).unwrap().analysis.selected_data_sets.is_empty());
+    ok_cmd(
+        &mut session,
+        "analysis.run",
+        json!({
+            "sheet_id": "pca-mixed-explicit-empty",
+            "source_sheet": "mv-bio",
+            "selected_data_sets": [],
+            "kind": { "Multivariate": { "Pca": { "standardize": true, "parallel_analysis_seed": 7 } } }
+        }),
+    );
+    assert_eq!(session.document().result_sheet(&SheetId::new("pca-mixed-explicit-empty")).unwrap().analysis.selected_data_sets, vec![1, 2]);
 }
 
 #[test]
