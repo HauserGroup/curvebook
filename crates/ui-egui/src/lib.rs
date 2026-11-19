@@ -10,6 +10,8 @@ pub mod compositor;
 pub mod control_io;
 pub mod dialogs_canvas;
 pub mod dialogs_r9;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod egui_shell;
 pub mod grid_view;
 mod gui_actions;
 pub mod human_driver;
@@ -117,6 +119,7 @@ pub(crate) struct UiShellSnapshot {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub host_draws_menu_bar: bool,
     pub view_shards: views::ViewShardStates,
     pub clipboard_adapter: ClipboardAdapterSlot,
     pub mutation_seq: MutationCounter,
@@ -244,6 +247,7 @@ pub struct UiApp {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub host_draws_menu_bar: bool,
     pub view_shards: views::ViewShardStates,
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
     pub(crate) retained_layout: CachedLayoutSlot,
@@ -289,6 +293,7 @@ impl UiApp {
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
             human_path_only: false,
+            host_draws_menu_bar: false,
             view_shards: views::ViewShardStates::default(),
             clipboard_adapter: ClipboardAdapterSlot::default(),
             retained_layout: CachedLayoutSlot::default(),
@@ -323,6 +328,7 @@ impl UiApp {
             focus_widget_id: self.focus_widget_id.clone(),
             power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
             human_path_only: self.human_path_only,
+            host_draws_menu_bar: self.host_draws_menu_bar,
             view_shards: self.view_shards.clone(),
             clipboard_adapter: self.clipboard_adapter.clone(),
             mutation_seq: self.mutation_seq,
@@ -351,6 +357,7 @@ impl UiApp {
         self.focus_widget_id = snap.focus_widget_id;
         self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
         self.human_path_only = snap.human_path_only;
+        self.host_draws_menu_bar = snap.host_draws_menu_bar;
         self.view_shards = snap.view_shards;
         self.clipboard_adapter = snap.clipboard_adapter;
         self.mutation_seq = snap.mutation_seq;
