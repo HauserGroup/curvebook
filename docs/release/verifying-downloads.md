@@ -5,7 +5,7 @@ Every file on a CurveBook GitHub Release can be checked in two ways:
 - **Checksum** — confirms the file arrived intact. `SHA256SUMS.txt` on the release lists a SHA-256 hash for every other file.
 - **Build provenance** — confirms the file was built by CurveBook's release workflow, from a recorded commit, on GitHub-hosted runners. Each release file, including `SHA256SUMS.txt`, carries a [Sigstore](https://www.sigstore.dev/) build attestation that GitHub stores and records in a public transparency log.
 
-A checksum on its own does not prove where a file came from: anyone able to replace a release file could replace `SHA256SUMS.txt` too. Check provenance at least once, either on `SHA256SUMS.txt` or on the file itself.
+A checksum on its own does not prove where a file came from: anyone able to replace a release file could replace `SHA256SUMS.txt` too. Check provenance at least once, either on `SHA256SUMS.txt` or on the file itself. For step-by-step installation, "which file do I need?" guidance (note `x86` Windows and retired Alpha formats are omitted from Beta onward), and macOS/Windows trust notes, see [Get Started](https://hausergroup.github.io/curvebook/get-started.html).
 
 ## What you need
 
@@ -65,7 +65,7 @@ gh attestation verify <downloaded-file> --repo HauserGroup/curvebook \
 
 - The file's SHA-256 hash matches an attestation signed by `.github/workflows/release.yml` in `HauserGroup/curvebook`. The attestation names the commit and ref the release was built from.
 - Without `--signer-workflow`, `gh` accepts an attestation from *any* workflow in the repository, so keep that option.
-- It does not mean an operating system trusts the file. macOS Developer ID signing and notarization and Windows Authenticode signing are separate (`R8.10` and `R8.11` in the [roadmap](../ROADMAP.md)).
+- It does not mean an operating system trusts the file. OS trust signing is separate (`R8.10` and `R8.11` in the [roadmap](../ROADMAP.md)): from Beta onward, macOS `.dmg` downloads are Developer ID signed and notarized, whereas Windows `.msi` (`x64` and `arm64`, following `R0.28` retirement of `x86` and `-portable.zip`) ships unsigned until `R8.11`.
 
 ## If a check fails
 

@@ -270,4 +270,18 @@ mod tests {
         assert!(check_web_bundle_readiness_with_env(&root, None).is_ok());
         assert!(check_web_bundle_readiness(&root).is_ok());
     }
+
+    #[test]
+    fn ci_and_release_workflows_enforce_web_bundle_budget() {
+        let root = crate::workspace_root().unwrap();
+        let ci = std::fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
+        assert!(ci.contains("trunk --version 0.22.1"));
+        assert!(ci.contains("./packaging/web/package.sh"));
+        assert!(ci.contains("CURVEBOOK_REQUIRE_WEB_BUNDLE"));
+
+        let release = std::fs::read_to_string(root.join(".github/workflows/release.yml")).unwrap();
+        assert!(release.contains("CURVEBOOK_REQUIRE_WEB_BUNDLE=1"));
+        assert!(release.contains("web-bundle"));
+        assert!(!release.contains("name: release-web"));
+    }
 }

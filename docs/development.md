@@ -1,10 +1,10 @@
 # Development
 
-> **Last updated:** 2026-11-18 · **Change:** added `cargo xtask citations` (`R0.30` `D1` literature-citation gate in `ci policy`) and extended `cargo xtask wasm` (`R11.1` `wasm32` Clippy `-D warnings`, `trunk build --cargo-profile web-release`, and `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` enforcement).
+> **Last updated:** 2026-11-18 · **Change:** migrated source quick-start build instructions from the root README (`R0.27`), added `cargo xtask citations` (`R0.30` `D1` literature-citation gate in `ci policy`), and extended `cargo xtask wasm` (`R11.1` `wasm32` Clippy `-D warnings`, `trunk build --cargo-profile web-release`, and `CURVEBOOK_REQUIRE_WEB_BUNDLE=1` enforcement).
 
 ## Prerequisites
 
-- **Rust 1.99.1+** (`edition = "2024"`, `resolver = "3"`), pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`profile = "minimal"`, components `rustfmt`, `clippy`).
+- **Rust 1.99.1+** (`edition = "2024"`, resolver = `"3"`), pinned in [`rust-toolchain.toml`](../rust-toolchain.toml) (`profile = "minimal"`, components `rustfmt`, `clippy`).
   - Run `rustc --version` and `cargo --version` (and `rustup show active-toolchain`) inside the repository to confirm rustup's proxy selects `1.99.1` (or newer) for both the compiler and Cargo.
   - **macOS Homebrew note:** If both Homebrew `rust` and `rustup` are installed, `/opt/homebrew/bin/{cargo,rustc}` link directly to Homebrew's formula and bypass `rust-toolchain.toml` and `+<toolchain>` selection. Prepend `rustup`'s proxy bin directory (`export PATH="/opt/homebrew/opt/rustup/bin:$PATH"`) ahead of `/opt/homebrew/bin` so `rust-toolchain.toml` takes effect.
 - Optional tools:
@@ -13,6 +13,27 @@
   - [`actionlint`](https://github.com/rhysd/actionlint) + [`shellcheck`](https://www.shellcheck.net/) — for `cargo xtask workflows`.
   - [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov) (`cargo install --locked cargo-llvm-cov`) + the `llvm-tools-preview` rustup component — for `cargo xtask coverage` ([Coverage reports](#coverage-reports)).
   - `resvg`, `rsvg-convert`, or ImageMagick (`magick`), plus `iconutil` (macOS) — only when regenerating `assets/app-icon/` via `packaging/icons.sh`.
+
+## Quick start (building from source)
+
+Build the CLI runner (`curvebook-cli`, which also hosts the `mcp` subcommand) and inspect registered commands:
+
+```sh
+# Build the CLI (which also provides the MCP server) and inspect available commands
+cargo build --release -p curvebook-cli
+./target/release/curvebook-cli --help
+./target/release/curvebook-cli commands --group analysis
+```
+
+To build or launch the native desktop application from source:
+
+```sh
+cargo build --release -p curvebook
+# Or run directly:
+cargo run --release -p curvebook
+```
+
+For stdio MCP server configuration, connection checks, and the end-to-end Welch's *t*-test example, see [`mcp.md`](mcp.md). For pull request guidelines and governance checks, see [`CONTRIBUTING.md`](../CONTRIBUTING.md) and [`AGENTS.md`](../AGENTS.md).
 
 ## Everyday commands
 
@@ -161,6 +182,7 @@ Untrusted boundaries carry `proptest` / fuzz suites that must never panic:
 
 Public-domain [NIST Statistical Reference Datasets (StRD)](https://www.itl.nist.gov/div898/strd/) ASCII `.dat` files across all **58 canonical datasets** (`9` Univariate, `11` ANOVA, `11` Linear Regression, and `27` Nonlinear Regression) are fetched on demand into the gitignored `corpus/nist-strd/` directory (`univ/`, `anova/`, `lls/`, `nls/`) and verified against `sha256sums.txt` (SHA-256 digest + exact byte size) and clean-room `.dat` structural parsers in `curvebook-testkit`:
 
-- `cargo xtask corpus` runs strictly offline (zero network I/O): if `corpus/nist-strd/` is present it verifies every cached `.dat` file and manifest entry, then runs `curvebook-format`, `curvebook-testkit`, and `curvebook-math --test nist_strd` with `CURVEBOOK_REQUIRE_CORPUS=1` so corpus-backed checks enforce the cached dataset set when populated; when `corpus/nist-strd/` is absent, it runs the offline test suites directly.
-- `cargo xtask corpus --fetch` (or `--fetch-only` to skip running tests afterwards) downloads all 58 NIST StRD `.dat` files into `corpus/nist-strd/`, writes `corpus/nist-strd/sha256sums.txt`, and verifies the downloaded corpus with `CURVEBOOK_REQUIRE_CORPUS=1`.
+- `cargo xtask corpus` runs offline. It runs the format and testkit suites and the `nist_strd` integration suites in math, stats, and fit. When the cache is present, it verifies the files and manifest and sets `CURVEBOOK_REQUIRE_CORPUS=1` for those tests.
+- `cargo xtask corpus --fetch` (or `--fetch-only` to skip running tests afterwards) downloads all 58 NIST StRD `.dat` files into `corpus/nist-strd/`, verifies them against the pinned checksums and sizes, and writes `corpus/nist-strd/sha256sums.txt`.
+- The [hosted CI correctness stage](ci.md#builds-caching-and-test-execution) fetches and verifies the pinned corpus, then runs the archived tests with `CURVEBOOK_REQUIRE_CORPUS=1`.
 - Small analytical and canonical stiffness benchmarks (`NumAcc1`–`NumAcc4`, `BinaryStiff1e8`, `Wampler1`–`2`, `WamplerOrtho1`–`3`, `NoInt1`–`2`, `FilipScaleVandermonde`, `SmLs` ANOVA) are generated directly in `curvebook-testkit` so offline `cargo xtask ci` requires zero network access.

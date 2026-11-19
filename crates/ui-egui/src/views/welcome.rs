@@ -12,7 +12,7 @@
 
 use curvebook_doc::{
     Cell, CellValue, ColumnDesignHint, DataSheet, GraphKind, GraphSheet, InfoSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, ProjectDocument,
-    SequenceProgression, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, VariableSource, XColumnMode,
+    SequenceProgression, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, VariableSource, XColumnMode,
 };
 use curvebook_format::save_template_bytes;
 use curvebook_palette::Rgba8;
@@ -224,6 +224,25 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut WelcomeViewState, paylo
     }
     if handle_clone_toggle_payload(app, state, payload) {
         return Ok(handled_outcome(format!("welcome.{payload}")));
+    }
+    if payload == "gallery:close" {
+        app.nav.gallery.open = false;
+        return Ok(handled_outcome(String::from("welcome.gallery:close")));
+    }
+    if let Some(slug) = payload.strip_prefix("gallery:filter:") {
+        let folder = match slug {
+            "all" => None,
+            "data" => Some(SheetFolderKind::Data),
+            "info" => Some(SheetFolderKind::Info),
+            "results" => Some(SheetFolderKind::Results),
+            "graphs" => Some(SheetFolderKind::Graphs),
+            "layouts" => Some(SheetFolderKind::Layouts),
+            _ => return Err(format!("unknown gallery folder filter `{slug}`")),
+        };
+        let doc = app.session.document().clone();
+        app.nav.set_gallery_filter(folder, &doc);
+        app.interaction.scroll_offsets.offsets.insert(String::from("scroll.gallery.cards"), [0.0, 0.0]);
+        return Ok(handled_outcome(format!("welcome.gallery:filter:{slug}")));
     }
 
     match payload {
@@ -916,52 +935,314 @@ pub fn build_portfolio_gallery(builder: &mut LayoutBuilder<'_>, rect: LayoutRect
 }
 
 fn build_populated_portfolio_cards(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
-    let cards = &builder.app.nav.gallery.cards;
-    builder.paint_fill(ZLayer::Workspace, None, rect, builder.palette.surface);
-    builder.push_clip(rect);
-    let cols = (rect.width / 190).max(1) as usize;
-    let cw = (rect.width.saturating_sub(24)) / (cols as u32).max(1);
-    let ch = 120u32;
-    let size_px = (12.0 * builder.scale()).clamp(9.0, 22.0);
-    for (idx, card) in cards.iter().enumerate() {
-        let col = idx % cols;
-        let row = idx / cols;
-        let cx = rect.x + 8 + i32::try_from(col as u32 * cw).unwrap_or(0);
-        let cy = rect.y + 8 + i32::try_from(row as u32 * (ch + 8)).unwrap_or(0);
-        if cy >= rect.bottom() {
+    if rect.width < 120 || rect.height < 80 {
+        return;
+    }
+    let scale = builder.scale();
+    let is_rtl = is_rtl_locale(&builder.tree.locale);
+    let cards = builder.app.nav.gallery.cards.clone();
+    let active_filter = builder.app.nav.gallery.filter_folder;
+    let total_sheets = builder.app.document().total_sheet_count();
+    let pad = s_u32(10, scale, 6);
+
+    let root_id = builder.push_node(NodeSpec {
+        id: WidgetId::from("gallery.root"),
+        parent: None,
+        z_layer: ZLayer::Workspace,
+        rect_px: rect,
+        a11y: labeled_meta(WidgetRole::Dialog, "Project Gallery", FocusScope::Workspace, "gallery.root"),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.paint_fill(ZLayer::Workspace, Some(&root_id), rect, builder.palette.surface);
+
+    let header_h = s_u32(34, scale, 26).min(rect.height / 3);
+    let header_rect = LayoutRectPx::new(
+        rect.x + i32::try_from(pad).unwrap_or(6),
+        rect.y + i32::try_from(pad / 2).unwrap_or(3),
+        rect.width.saturating_sub(pad * 2),
+        header_h,
+    );
+    let close_w = s_u32(64, scale, 52).min(header_rect.width / 4);
+    let title_w = s_u32(148, scale, 100).min(header_rect.width / 3);
+    let title_local_x = mirror_x_for_rtl(0, title_w, header_rect.width, is_rtl);
+    let close_local_x = mirror_x_for_rtl(header_rect.width.saturating_sub(close_w), close_w, header_rect.width, is_rtl);
+
+    let title_rect = LayoutRectPx::new(header_rect.x + i32::try_from(title_local_x).unwrap_or(0), header_rect.y, title_w, header_h);
+    let title_text = format!("Gallery ({total_sheets})");
+    let title_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("gallery.title"),
+        parent: Some(root_id.clone()),
+        z_layer: ZLayer::Workspace,
+        rect_px: title_rect,
+        a11y: AccessibilityMeta::new(WidgetRole::Label, title_text.clone(), FocusScope::Workspace),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    paint_text_fitted(
+        builder,
+        &title_wid,
+        FittedTextSpec {
+            z_layer: ZLayer::Workspace,
+            rect: title_rect,
+            pad_x: 4,
+            text: &title_text,
+            style: &UiTextStyle::ui_bold((13.0 * scale).clamp(10.0, 24.0)),
+            color: builder.palette.text,
+            scroll_container: None,
+        },
+    );
+
+    let close_rect =
+        LayoutRectPx::new(header_rect.x + i32::try_from(close_local_x).unwrap_or(0), header_rect.y + 2, close_w, header_h.saturating_sub(4).max(18));
+    emit_button(
+        builder,
+        ButtonWidgetSpec {
+            id: "gallery.close",
+            parent: Some(root_id.clone()),
+            z_layer: ZLayer::Workspace,
+            rect: close_rect,
+            label: "Close",
+            keyboard_path: "gallery.close",
+            focus_scope: FocusScope::Workspace,
+            tab_order: Some(15),
+            primary: false,
+            selected: false,
+            shortcut: Some("Escape"),
+            enablement: ControlEnablement::enabled(),
+            action: WidgetAction::Custom { domain: String::from("welcome"), payload: String::from("gallery:close") },
+        },
+    );
+
+    let filter_area_start = title_w + s_u32(8, scale, 4);
+    let filter_area_w = header_rect.width.saturating_sub(filter_area_start + close_w + s_u32(8, scale, 4));
+    let filters = [
+        ("gallery.filter.all", "All", None, "all"),
+        ("gallery.filter.data", "Data", Some(SheetFolderKind::Data), "data"),
+        ("gallery.filter.info", "Info", Some(SheetFolderKind::Info), "info"),
+        ("gallery.filter.results", "Results", Some(SheetFolderKind::Results), "results"),
+        ("gallery.filter.graphs", "Graphs", Some(SheetFolderKind::Graphs), "graphs"),
+        ("gallery.filter.layouts", "Layouts", Some(SheetFolderKind::Layouts), "layouts"),
+    ];
+    let f_gap = s_u32(4, scale, 2);
+    let chip_w = (filter_area_w.saturating_sub(f_gap * 5) / 6).max(s_u32(36, scale, 28));
+    for (idx, (id, lbl, target, slug)) in filters.iter().enumerate() {
+        let offset = (idx as u32) * (chip_w + f_gap);
+        if offset + chip_w > filter_area_w + 2 {
             break;
         }
-        let card_rect = LayoutRectPx::new(cx, cy, cw.saturating_sub(8), ch);
-        let cid = format!("gallery.card.{idx}");
-        let wid = builder.push_node(NodeSpec {
-            id: WidgetId::from(cid),
-            parent: None,
-            z_layer: ZLayer::Workspace,
-            rect_px: card_rect,
-            a11y: labeled_meta(WidgetRole::Button, card.title.clone(), FocusScope::Workspace, format!("gallery.{idx}")),
-            state: WidgetVisualState::default(),
-            action: WidgetAction::SwitchSheet { sheet_id: card.sheet_id.clone(), section: section_for_folder_kind(card.folder) },
-        });
-        let is_sel = builder.app.nav.gallery.selected_ids.contains(&card.sheet_id);
-        let fill_col = if is_sel { builder.palette.header } else { builder.palette.panel };
-        let stroke_col = if is_sel { builder.palette.accent } else { builder.palette.border };
-        builder.paint_fill(ZLayer::Workspace, Some(&wid), card_rect, fill_col);
-        builder.paint_stroke(ZLayer::Workspace, Some(&wid), card_rect, stroke_col, if is_sel { 2 } else { 1 });
-        paint_text_fitted(
+        let local_x = mirror_x_for_rtl(filter_area_start + offset, chip_w, header_rect.width, is_rtl);
+        emit_tab(
             builder,
-            &wid,
-            FittedTextSpec {
+            ButtonWidgetSpec {
+                id,
+                parent: Some(root_id.clone()),
                 z_layer: ZLayer::Workspace,
-                rect: card_rect,
-                pad_x: 8,
-                text: &card.title,
-                style: &UiTextStyle::ui_bold(size_px),
-                color: builder.palette.text,
-                scroll_container: None,
+                rect: LayoutRectPx::new(
+                    header_rect.x + i32::try_from(local_x).unwrap_or(0),
+                    header_rect.y + 2,
+                    chip_w,
+                    header_h.saturating_sub(4).max(18),
+                ),
+                label: lbl,
+                keyboard_path: id,
+                focus_scope: FocusScope::Workspace,
+                tab_order: Some(20 + idx as u32),
+                primary: false,
+                selected: active_filter == *target,
+                shortcut: None,
+                enablement: ControlEnablement::enabled(),
+                action: WidgetAction::Custom { domain: String::from("welcome"), payload: format!("gallery:filter:{slug}") },
             },
         );
     }
+
+    let grid_y = header_rect.bottom() + i32::try_from(s_u32(6, scale, 4)).unwrap_or(6);
+    let grid_h = u32::try_from((rect.bottom() - grid_y - i32::try_from(pad / 2).unwrap_or(3)).max(0)).unwrap_or(0);
+    if grid_h < 32 {
+        return;
+    }
+    let grid_rect = LayoutRectPx::new(header_rect.x, grid_y, header_rect.width, grid_h);
+    let scroll_id = String::from("scroll.gallery.cards");
+    let scroll_off = builder.scroll_offset(&scroll_id);
+    let sb_guess = scrollbar_thickness_px(scale).saturating_add(4);
+    let avail_w = grid_rect.width.saturating_sub(sb_guess);
+    let gap = s_u32(10, scale, 6);
+    let cols = (avail_w / s_u32(196, scale, 136)).max(1) as usize;
+    let cw = (avail_w.saturating_sub(gap.saturating_mul((cols as u32).saturating_add(1))) / (cols as u32).max(1)).max(s_u32(110, scale, 90));
+    let ch = s_u32(112, scale, 78);
+    let rows = cards.len().div_ceil(cols).max(1);
+    let content_h = (rows as u32).saturating_mul(ch + gap).saturating_add(gap);
+    let scroll_meta = ScrollMeta::new(scroll_id.clone(), grid_rect, [grid_rect.width, content_h], scroll_off, ScrollAxes::Vertical);
+
+    let grid_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("gallery.viewport"),
+        parent: Some(root_id),
+        z_layer: ZLayer::Workspace,
+        rect_px: grid_rect,
+        a11y: labeled_meta(WidgetRole::Label, "Portfolio Cards", FocusScope::Workspace, "gallery.viewport"),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.attach_scroll(&grid_wid, scroll_meta.clone());
+    builder.paint_fill(ZLayer::Workspace, Some(&grid_wid), grid_rect, builder.palette.surface);
+    builder.paint_stroke(ZLayer::Workspace, Some(&grid_wid), grid_rect, builder.palette.border, 1);
+
+    let sb_reserve = if scroll_meta.has_vertical_overflow() { scrollbar_thickness_px(scale).saturating_add(2) } else { 0 };
+    let grid_clip = LayoutRectPx::new(
+        grid_rect.x + 2,
+        grid_rect.y + 2,
+        grid_rect.width.saturating_sub(sb_reserve.saturating_add(4)),
+        grid_rect.height.saturating_sub(4),
+    );
+    let y_scroll = scroll_meta.scroll_offset_px[1].round() as i32;
+    let bold_px = (12.0 * scale).clamp(9.0, 22.0);
+    let sub_px = (10.5 * scale).clamp(8.5, 19.0);
+
+    builder.push_clip(grid_clip);
+    if cards.is_empty() {
+        let empty_rect = LayoutRectPx::new(grid_clip.x + 8, grid_clip.y + 12, grid_clip.width.saturating_sub(16), s_u32(28, scale, 20));
+        let ew = builder.push_node(NodeSpec {
+            id: WidgetId::from("gallery.empty"),
+            parent: Some(grid_wid.clone()),
+            z_layer: ZLayer::Workspace,
+            rect_px: empty_rect,
+            a11y: AccessibilityMeta::new(WidgetRole::Label, "No sheets in this folder.", FocusScope::Workspace),
+            state: WidgetVisualState::default(),
+            action: WidgetAction::NoOp,
+        });
+        paint_text_fitted(
+            builder,
+            &ew,
+            FittedTextSpec {
+                z_layer: ZLayer::Workspace,
+                rect: empty_rect,
+                pad_x: 6,
+                text: "No sheets match the selected folder filter.",
+                style: &UiTextStyle::ui_sans(sub_px),
+                color: builder.palette.muted,
+                scroll_container: Some(&scroll_id),
+            },
+        );
+    } else {
+        for (idx, card) in cards.iter().enumerate() {
+            let col = idx % cols;
+            let row = idx / cols;
+            let cy = grid_clip.y + i32::try_from(gap + (row as u32) * (ch + gap)).unwrap_or(0) - y_scroll;
+            if cy + i32::try_from(ch).unwrap_or(0) < grid_clip.y || cy > grid_clip.bottom() {
+                continue;
+            }
+            let local_x = gap + (col as u32) * (cw + gap);
+            let mirrored_x = mirror_x_for_rtl(local_x, cw, grid_clip.width, is_rtl);
+            let cx = grid_clip.x + i32::try_from(mirrored_x).unwrap_or(0);
+            let card_rect = LayoutRectPx::new(cx, cy, cw, ch);
+            let cid = format!("gallery.card.{idx}");
+            let a11y =
+                super::a11y::selectable_meta(WidgetRole::Button, card.title.clone(), FocusScope::Workspace, format!("gallery.{idx}"), card.selected);
+            let wid = builder.push_node(NodeSpec {
+                id: WidgetId::from(cid),
+                parent: Some(grid_wid.clone()),
+                z_layer: ZLayer::Workspace,
+                rect_px: card_rect,
+                a11y,
+                state: crate::layout::widgets::widget_state(builder, &format!("gallery.card.{idx}"), ControlEnablement::enabled()),
+                action: WidgetAction::SwitchSheet { sheet_id: card.sheet_id.clone(), section: section_for_folder_kind(card.folder) },
+            });
+            let fill_col = if card.selected { builder.palette.header } else { builder.palette.panel };
+            let stroke_col = if card.selected { builder.palette.accent } else { builder.palette.border };
+            builder.paint_fill(ZLayer::Workspace, Some(&wid), card_rect, fill_col);
+            builder.paint_stroke(ZLayer::Workspace, Some(&wid), card_rect, stroke_col, if card.selected { 2 } else { 1 });
+
+            let tag_col = card.color_tag.unwrap_or(builder.palette.accent);
+            let stripe_h = s_u32(4, scale, 3);
+            let stripe_rect = LayoutRectPx::new(card_rect.x + 1, card_rect.y + 1, card_rect.width.saturating_sub(2), stripe_h);
+            builder.paint_fill(ZLayer::Workspace, Some(&wid), stripe_rect, tag_col);
+
+            let badge_h = s_u32(18, scale, 15);
+            let badge_w = s_u32(54, scale, 42).min(card_rect.width.saturating_sub(16));
+            let badge_local = mirror_x_for_rtl(8, badge_w, card_rect.width, is_rtl);
+            let badge_rect = LayoutRectPx::new(
+                card_rect.x + i32::try_from(badge_local).unwrap_or(8),
+                card_rect.y + i32::try_from(stripe_h + 6).unwrap_or(10),
+                badge_w,
+                badge_h,
+            );
+            builder.paint_fill(ZLayer::Workspace, Some(&wid), badge_rect, builder.palette.surface);
+            builder.paint_stroke(ZLayer::Workspace, Some(&wid), badge_rect, tag_col, 1);
+            paint_text_fitted(
+                builder,
+                &wid,
+                FittedTextSpec {
+                    z_layer: ZLayer::Workspace,
+                    rect: badge_rect,
+                    pad_x: 3,
+                    text: &card.badge_label,
+                    style: &UiTextStyle::ui_bold((9.5 * scale).clamp(8.0, 17.0)),
+                    color: builder.palette.text,
+                    scroll_container: Some(&scroll_id),
+                },
+            );
+            if card.active && card_rect.width >= s_u32(120, scale, 90) {
+                let act_w = s_u32(36, scale, 28);
+                let act_local = mirror_x_for_rtl(card_rect.width.saturating_sub(act_w + 8), act_w, card_rect.width, is_rtl);
+                let act_rect = LayoutRectPx::new(card_rect.x + i32::try_from(act_local).unwrap_or(8), badge_rect.y, act_w, badge_h);
+                paint_text_fitted(
+                    builder,
+                    &wid,
+                    FittedTextSpec {
+                        z_layer: ZLayer::Workspace,
+                        rect: act_rect,
+                        pad_x: 2,
+                        text: "Active",
+                        style: &UiTextStyle::ui_sans((9.0 * scale).clamp(8.0, 15.0)),
+                        color: builder.palette.muted,
+                        scroll_container: Some(&scroll_id),
+                    },
+                );
+            }
+
+            let title_h = s_u32(24, scale, 18);
+            let card_title_rect = LayoutRectPx::new(card_rect.x + 6, badge_rect.bottom() + 4, card_rect.width.saturating_sub(12), title_h);
+            paint_text_fitted(
+                builder,
+                &wid,
+                FittedTextSpec {
+                    z_layer: ZLayer::Workspace,
+                    rect: card_title_rect,
+                    pad_x: 4,
+                    text: &card.title,
+                    style: &UiTextStyle::ui_bold(bold_px),
+                    color: builder.palette.text,
+                    scroll_container: Some(&scroll_id),
+                },
+            );
+
+            let sub_h = u32::try_from((card_rect.bottom() - card_title_rect.bottom() - 4).max(0)).unwrap_or(0);
+            if sub_h >= 12 && !card.subtitle.is_empty() {
+                let sub_rect = LayoutRectPx::new(
+                    card_rect.x + 6,
+                    card_title_rect.bottom() + 2,
+                    card_rect.width.saturating_sub(12),
+                    sub_h.min(s_u32(22, scale, 16)),
+                );
+                paint_text_fitted(
+                    builder,
+                    &wid,
+                    FittedTextSpec {
+                        z_layer: ZLayer::Workspace,
+                        rect: sub_rect,
+                        pad_x: 4,
+                        text: &card.subtitle,
+                        style: &UiTextStyle::ui_sans(sub_px),
+                        color: builder.palette.muted,
+                        scroll_container: Some(&scroll_id),
+                    },
+                );
+            }
+        }
+    }
     builder.pop_clip();
+    emit_scrollbars_for_meta(builder, ZLayer::Workspace, &scroll_meta, Some(grid_wid));
 }
 
 /// Render the full interactive two-pane Welcome & New Data Table Launcher inside `rect` (`R10.4`).

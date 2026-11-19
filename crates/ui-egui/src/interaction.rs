@@ -175,6 +175,7 @@ pub enum UiInputEvent {
 pub enum InlineEditorTarget {
     GridCell { sheet_id: SheetId, coord: GridCellCoord },
     GridXCell { sheet_id: SheetId, row: usize, subcol: usize },
+    SheetTitle { sheet_id: SheetId },
     InfoConstant { sheet_id: SheetId, name: String },
     InfoNotes { sheet_id: SheetId },
     GraphTitle { sheet_id: SheetId },
@@ -268,6 +269,19 @@ impl InlineEditorState {
                         "row": row,
                         "subcol": subcol,
                         "value": value,
+                    }),
+                ))
+            }
+            InlineEditorTarget::SheetTitle { sheet_id } => {
+                let next_title = text.trim();
+                if next_title.is_empty() {
+                    return None;
+                }
+                Some(ToolCommandIntent::new(
+                    "sheet.rename",
+                    json!({
+                        "sheet_id": sheet_id.as_str(),
+                        "title": next_title,
                     }),
                 ))
             }
@@ -1057,6 +1071,13 @@ pub fn clear_modal_text_buffers(app: &mut UiApp) {
     }
 }
 
+pub(crate) fn close_active_modal(app: &mut UiApp) {
+    if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+        crate::views::fit_params::clear_fit_parameter_inputs(app);
+    }
+    app.canvas_dialogs.close_dialog();
+}
+
 fn clear_context_menu_state(app: &mut UiApp) {
     app.interaction.context_menu_target = None;
     app.view_shards.toolbar_menus.active_context_menu_id = None;
@@ -1264,6 +1285,7 @@ fn handle_pointer_down(
         (Some(InlineEditorTarget::GridXCell { sheet_id: es, row: er, subcol: esc }), WorkspaceHitTarget::GridXCell { sheet_id, row, subcol }) => {
             es == sheet_id && *er == *row && *esc == *subcol
         }
+        (Some(InlineEditorTarget::SheetTitle { sheet_id: es }), WorkspaceHitTarget::NavigatorEntry { sheet_id, .. }) => es == sheet_id,
         _ => false,
     };
     if app.inline_editor.active && !clicking_active_inline_target {
@@ -1280,6 +1302,7 @@ fn handle_pointer_down(
             app.nav.active_pane = ActiveWorkspacePane::Navigator;
             commit_inline_edit_if_active(app)?;
             app.interaction.context_menu_target = None;
+            app.focus_widget_id = Some(format!("nav.sheet.{}", sheet_id.as_str()));
             let _ = app.execute_command("sheet.select", json!({ "sheet_id": sheet_id.as_str() }));
             app.nav.sync_from_document(app.session.document());
             sync_dialogs_on_sheet_switch(app, &sheet_id);
@@ -1313,6 +1336,7 @@ fn handle_pointer_down(
         }
         WorkspaceHitTarget::GridCell { sheet_id, coord, .. } => {
             app.nav.active_pane = ActiveWorkspacePane::MainCanvasOrGrid;
+            app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
             let doc_sheet = app.session.document().data_sheet(&sheet_id).cloned();
             if modifiers.ctrl || modifiers.meta {
                 if let Some(ref ds) = doc_sheet {
@@ -1969,6 +1993,23 @@ fn handle_double_click(app: &mut UiApp, metrics: ViewportMetrics, logical_pos: [
     };
     let layout = compute_workspace_layout_map(app, metrics);
     match layout.hit_test_logical(logical_pos[0], logical_pos[1]) {
+        WorkspaceHitTarget::NavigatorEntry { sheet_id, .. } => {
+            app.nav.cancel_sheet_drag();
+            app.interaction.dragging_navigator_sheet = None;
+            app.nav.active_pane = ActiveWorkspacePane::Navigator;
+            let initial_title = app
+                .document()
+                .data_sheet(&sheet_id)
+                .map(|s| s.title.clone())
+                .or_else(|| app.document().info_sheet(&sheet_id).map(|s| s.title.clone()))
+                .or_else(|| app.document().result_sheet(&sheet_id).map(|s| s.title().to_owned()))
+                .or_else(|| app.document().graph_sheet(&sheet_id).map(|s| s.title.clone()))
+                .or_else(|| app.document().layout_sheet(&sheet_id).map(|s| s.title.clone()))
+                .or_else(|| app.nav.entries.iter().find(|e| e.sheet_id == sheet_id).map(|e| e.title.clone()))
+                .unwrap_or_default();
+            app.inline_editor.begin(InlineEditorTarget::SheetTitle { sheet_id }, initial_title);
+            UiEventOutcome { handled: true, action: String::from("nav.sheet_title_inline_edit_begin"), ..Default::default() }
+        }
         WorkspaceHitTarget::GridXCell { sheet_id, row, subcol } => {
             app.grid.select_x_cell_sync(row, subcol);
             app.focus_widget_id = Some(format!("grid.xcell.{row}.{subcol}"));
@@ -2109,6 +2150,9 @@ fn should_handle_chrome_widget_click(node: &crate::layout::WidgetNode) -> bool {
     let id = node.id.as_str();
     if id == "result.diagnostic_banner" || id.starts_with("canvas.surface.") || id.starts_with("info.") {
         return false;
+    }
+    if id.starts_with("gallery.card.") {
+        return node.action != WidgetAction::NoOp;
     }
     !matches!(node.action, WidgetAction::NoOp | WidgetAction::SelectGridCell { .. } | WidgetAction::SwitchSheet { .. } | WidgetAction::SwapSplitPanes)
 }
@@ -2296,6 +2340,16 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
                     command_result: None,
                 });
             }
+            if matches!(command_id.as_str(), "file.save_as" | "project.saveAs")
+                && params.get("path").and_then(Value::as_str).is_none_or(|p| p.trim().is_empty())
+            {
+                return Ok(UiEventOutcome {
+                    handled: true,
+                    action: String::from("file.save_as_dialog_requested"),
+                    command_id: Some(String::from("file.save_as")),
+                    command_result: None,
+                });
+            }
             let res = if let Some(ui_val) = crate::control_io::dispatch_ui_command(app, command_id, params).map_err(|e| e.to_string())? {
                 UiEventOutcome {
                     handled: true,
@@ -2320,6 +2374,10 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
         WidgetAction::SwitchSheet { sheet_id, .. } => {
             commit_inline_edit_if_active(app)?;
             app.interaction.context_menu_target = None;
+            if app.nav.gallery.open {
+                app.nav.select_gallery_card(sheet_id, false);
+                app.nav.gallery.open = false;
+            }
             let res = execute_engine_value(app, "sheet.select", json!({ "sheet_id": sheet_id.as_str() }))?;
             app.nav.sync_from_document(app.session.document());
             sync_dialogs_on_sheet_switch(app, sheet_id);
@@ -2419,7 +2477,7 @@ pub fn execute_widget_action(app: &mut UiApp, action: &WidgetAction, metrics: Vi
         }
         WidgetAction::ClosePopupOrModal => {
             if app.interaction.open_dropdown.take().is_none() && app.interaction.open_menu.take().is_none() {
-                app.canvas_dialogs.close_dialog();
+                close_active_modal(app);
             }
             app.interaction.context_menu_target = None;
             Ok(UiEventOutcome { handled: true, action: String::from("popup_or_modal.closed"), ..Default::default() })
@@ -2521,7 +2579,7 @@ fn execute_dialog_widget_action(app: &mut UiApp, action: &WidgetAction, metrics:
             Ok(UiEventOutcome { handled: true, action: format!("slider.set:{field_id}"), ..Default::default() })
         }
         WidgetAction::DialogCancel => {
-            app.canvas_dialogs.close_dialog();
+            close_active_modal(app);
             app.interaction.open_dropdown = None;
             Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() })
         }
@@ -2801,6 +2859,49 @@ fn try_handle_workspace_copy_shortcut(app: &mut UiApp, metrics: ViewportMetrics)
     Ok(None)
 }
 
+fn read_clipboard_text_for_paste(app: &UiApp) -> Option<String> {
+    if let Ok(status) = app.read_clipboard_text()
+        && status.available
+        && let Some(text) = status.text
+        && !text.is_empty()
+    {
+        return Some(text);
+    }
+    app.interaction.last_clipboard_text.clone().filter(|t| !t.is_empty())
+}
+
+fn try_handle_workspace_paste_shortcut(app: &mut UiApp) -> Result<Option<UiEventOutcome>, String> {
+    if app.nav.welcome.open || app.nav.gallery.open {
+        return Ok(None);
+    }
+    let Some(ds_id) = app.document().active_sheet_id.as_ref().filter(|id| app.document().data_sheet(id).is_some_and(|ds| !ds.frozen)).cloned() else {
+        return Ok(None);
+    };
+    let Some(clip) = read_clipboard_text_for_paste(app) else {
+        return Ok(None);
+    };
+    let anchor = app.grid.tool.active.unwrap_or(GridCellCoord::new(0, 0, 0));
+    let res = execute_engine_value(
+        app,
+        "table.paste",
+        json!({
+            "sheet_id": ds_id.as_str(),
+            "text": clip,
+            "start_row": anchor.row,
+            "start_col": anchor.col,
+            "start_subcol": anchor.subcol,
+            "propagate_title_header": false,
+        }),
+    )?;
+    app.grid.refresh_selection_stats(app.session.document());
+    Ok(Some(UiEventOutcome {
+        handled: true,
+        action: String::from("shortcut:table.paste"),
+        command_id: Some(String::from("table.paste")),
+        command_result: Some(res),
+    }))
+}
+
 fn toggle_exclude_active_grid_cells(app: &mut UiApp) -> Result<Option<UiEventOutcome>, String> {
     let doc = app.document().clone();
     let Some(sid) = doc.active_sheet_id.as_ref() else {
@@ -2867,8 +2968,19 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
     let is_space = key == " " || trimmed.eq_ignore_ascii_case("space");
     let modal_open = app.canvas_dialogs.active_dialog != ActiveDialog::None;
 
-    if !modal_open && app.inline_editor.active && !modifiers.meta && !modifiers.ctrl {
-        return handle_inline_editor_key(app, metrics, trimmed, modifiers);
+    if !modal_open && app.inline_editor.active {
+        if (modifiers.meta || modifiers.ctrl) && !modifiers.shift && !modifiers.alt && trimmed.eq_ignore_ascii_case("v") {
+            if let Some(clip) = read_clipboard_text_for_paste(app) {
+                app.inline_editor.insert_text(&clip);
+                if matches!(app.inline_editor.target, Some(InlineEditorTarget::GridCell { .. } | InlineEditorTarget::GridXCell { .. })) {
+                    app.grid.tool.editing_buffer = Some(app.inline_editor.buffer.clone());
+                }
+            }
+            return Ok(UiEventOutcome { handled: true, action: String::from("inline_edit.paste"), ..Default::default() });
+        }
+        if !modifiers.meta && !modifiers.ctrl {
+            return handle_inline_editor_key(app, metrics, trimmed, modifiers);
+        }
     }
 
     if !modal_open
@@ -2942,6 +3054,16 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
         return Ok(out);
     }
 
+    if !text_focused
+        && (modifiers.meta || modifiers.ctrl)
+        && !modifiers.shift
+        && !modifiers.alt
+        && trimmed.eq_ignore_ascii_case("v")
+        && let Some(out) = try_handle_workspace_paste_shortcut(app)?
+    {
+        return Ok(out);
+    }
+
     if let Some(fid) = app.focus_widget_id.clone()
         && is_text_widget_id(&fid)
         && let Some(out) = handle_textbox_key(app, metrics, &fid, key, modifiers)?
@@ -2952,12 +3074,24 @@ fn handle_key_down(app: &mut UiApp, metrics: ViewportMetrics, key: &str, modifie
     if matches!(trimmed, "Escape" | "Esc") {
         clear_context_menu_state(app);
         app.view_shards.toolbar_menus.overflow_open = false;
+        if app.view_shards.grid_core.editing_title.is_some() {
+            app.view_shards.grid_core.editing_title = None;
+            app.interaction.text_field_buffers.remove("grid.title_editor.input");
+            if app.focus_widget_id.as_deref() == Some("grid.title_editor.input") {
+                app.focus_widget_id = None;
+            }
+            return Ok(UiEventOutcome { handled: true, action: String::from("grid_core.title_cancel"), ..Default::default() });
+        }
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
         }
         if app.nav.welcome.open {
             app.nav.welcome.open = false;
             return Ok(UiEventOutcome { handled: true, action: String::from("welcome.dismissed"), ..Default::default() });
+        }
+        if app.nav.gallery.open {
+            app.nav.gallery.open = false;
+            return Ok(UiEventOutcome { handled: true, action: String::from("gallery.dismissed"), ..Default::default() });
         }
     }
 
@@ -3034,7 +3168,7 @@ fn handle_modal_key_down(
         if app.interaction.open_dropdown.take().is_some() || app.interaction.open_menu.take().is_some() {
             return Ok(UiEventOutcome { handled: true, action: String::from("popup.dismissed"), ..Default::default() });
         }
-        app.canvas_dialogs.close_dialog();
+        close_active_modal(app);
         return Ok(UiEventOutcome { handled: true, action: String::from("dialog.cancelled"), ..Default::default() });
     }
 
@@ -3159,7 +3293,7 @@ fn handle_textbox_key(
         return Ok(Some(UiEventOutcome { handled: true, action: String::from("textbox.copy"), ..Default::default() }));
     }
     if (modifiers.ctrl || modifiers.meta) && key.eq_ignore_ascii_case("v") {
-        if let Some(clip) = app.interaction.last_clipboard_text.clone() {
+        if let Some(clip) = read_clipboard_text_for_paste(app) {
             if let Some(b) = app.interaction.text_field_buffers.get_mut(fid) {
                 b.insert_text(&clip);
             }

@@ -1,7 +1,0 @@
-CurveBook portable mode
-
-While this file sits next to curvebook.exe, CurveBook keeps its preferences, color palette and
-equation libraries, added fonts, crash-recovery files and logs in the curvebook-data folder beside
-it, and writes nothing to %APPDATA%. Copy the whole folder to move CurveBook with its settings.
-
-Delete this file to use the standard per-user settings folder (%APPDATA%\CurveBook) instead.

@@ -242,6 +242,7 @@ pub struct ControlPostRequestContext<'a> {
     pub prev_undo_depth: usize,
     pub prev_redo_depth: usize,
     pub prev_dirty: bool,
+    pub prev_mutation_seq: u64,
     pub rolled_back: bool,
     pub request_ok: bool,
 }
@@ -1322,6 +1323,7 @@ where
     let prev_undo_depth = app.session().undo_depth();
     let prev_redo_depth = app.session().redo_depth();
     let prev_dirty = app.session().is_dirty();
+    let prev_mutation_seq = app.mutation_seq();
     let method = req.method.clone();
     let id = req.id.clone();
     let mut steps = Vec::new();
@@ -1334,6 +1336,7 @@ where
             prev_undo_depth,
             prev_redo_depth,
             prev_dirty,
+            prev_mutation_seq,
             rolled_back,
             request_ok: response.ok,
         };
@@ -1416,7 +1419,13 @@ fn dispatch_command_by_id(
         .with_remediation("Interact via the 8 GUI actions (`ui.invoke_menu`, `ui.pointer_gesture`, `ui.press_key`, `ui.answer_dialog`).")
         .into());
     }
+    let seq_before = app.mutation_seq();
     if let Some(ui_value) = dispatch_ui_command_detailed(app, command_id, &params)? {
+        if let Some(steps) = recorded
+            && app.mutation_seq() != seq_before
+        {
+            steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params, mutated: true });
+        }
         return Ok(ui_value);
     }
     let outcome = app.execute_control_command(command_id, params.clone())?;
@@ -3324,7 +3333,7 @@ fn dispatch_ui_pane_cycle(app: &mut UiApp, params: &Value) -> Result<Value, Stri
         Some(Value::Bool(flag)) => *flag,
         Some(other) => return Err(format!("ui.pane.cycle 'reverse' must be a boolean, got {other}")),
     };
-    let active = app.nav.cycle_focus_pane(reverse);
+    let active = app.cycle_focus_pane(reverse);
     Ok(json!({
         "active_pane": active_pane_name(active),
         "reverse": reverse,

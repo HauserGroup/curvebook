@@ -81,7 +81,7 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::column::{
-    OneSampleTResult, exact_binomial_median_ci, hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk,
+    OneSampleTResult, exact_binomial_median_ci, hedges_g_with_ci, hedges_j_factor, hodges_lehmann_one_sample, ks_asymptotic_p, shapiro_wilk,
     summarize_pre_summarized_points, wilcoxon_exact_p,
 };
 use crate::common::{
@@ -100,9 +100,13 @@ use crate::multiplicity::{MultiplicityProcedure, adjust_p_values};
 /// Result of an *F*-test comparing two sample variances.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct VarianceFTestResult {
+    /// Variance ratio $s_{\max}^2 / s_{\min}^2 \ge 1.0$ (`f64::INFINITY` when smaller variance is zero; `1.0` when both are zero).
     pub f_statistic: f64,
+    /// Numerator degrees of freedom `n_max - 1` associated with the larger sample variance.
     pub df_num: f64,
+    /// Denominator degrees of freedom `n_min - 1` associated with the smaller sample variance.
     pub df_den: f64,
+    /// Two-sided *F* test *P* value `min(1, 2 * P(F >= f_statistic))` (`0.0` when ratio infinite, `1.0` when variances equal).
     pub p_value: f64,
 }
 
@@ -139,10 +143,15 @@ pub fn f_test_variances(a: &[f64], b: &[f64]) -> Result<VarianceFTestResult, Sta
 /// Output of Levene's (mean-centered) or Brown–Forsythe's (median-centered) test of equal variances.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LeveneTestResult {
+    /// True for Brown–Forsythe deviations from group medians; false for Levene deviations from group means.
     pub use_median: bool,
+    /// One-way ANOVA *F*-statistic computed on absolute within-group deviations `|x_ij - c_i|`.
     pub f_statistic: f64,
+    /// Numerator degrees of freedom `k - 1` (`1.0` for two groups).
     pub df_between: f64,
+    /// Denominator degrees of freedom `sum(n_i) - k`.
     pub df_within: f64,
+    /// Upper-tail $F(\text{df\_between}, \text{df\_within})$ *P* value testing equal population variances.
     pub p_value: f64,
 }
 
@@ -204,38 +213,62 @@ pub fn levene_variance_test(groups: &[&[f64]], use_median: bool) -> Result<Leven
 /// Standardized effect sizes and exact noncentral-*t* confidence intervals for two-group tests.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TwoGroupEffectSizes {
+    /// Standardized mean difference `(mean_a - mean_b) / s_pooled` (or `s_welch` / unpooled as specified; Cohen 1988).
     pub cohens_d: f64,
+    /// Exact noncentral-*t* confidence interval `(lower, upper)` for `cohens_d` at configured `ConfidenceLevel` (Steiger & Fouladi 1997; `None` if inversion fails or Welch summary lacks exact df).
     pub cohens_d_ci: Option<(f64, f64)>,
+    /// Small-sample bias-corrected standardized difference `J(df) * cohens_d` (Hedges 1981).
     pub hedges_g: f64,
+    /// Exact noncentral-*t* CI for `hedges_g` scaled by `J(df)` at configured `ConfidenceLevel` (`None` when `cohens_d_ci` is `None`).
     pub hedges_g_ci: Option<(f64, f64)>,
+    /// Glass's $\Delta = (\bar{x}_a - \bar{x}_b) / s_{\text{control}}$ (`None` when control SD is zero or unavailable).
     pub glass_delta: Option<f64>,
+    /// Approximate/noncentral CI for Glass's $\Delta$ (`None` when unavailable).
     pub glass_delta_ci: Option<(f64, f64)>,
+    /// Variance explained `eta^2 = t^2 / (t^2 + df)` in `[0, 1]`.
     pub r_squared: f64,
 }
 
 /// Complete output of an unpaired Student *t*, Welch *t*, or lognormal unpaired *t*-test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct UnpairedTResult {
+    /// Descriptive test method label (`"Unpaired Student t test"`, `"Welch's t test"`, or `"Lognormal unpaired t test"`).
     pub method_label: &'static str,
+    /// Sample size in group A (raw count or rounded `n_a` from summary inputs).
     pub n_a: usize,
+    /// Sample size in group B.
     pub n_b: usize,
+    /// Sample arithmetic mean of group A (`mean(ln A)` when lognormal).
     pub mean_a: f64,
+    /// Sample arithmetic mean of group B (`mean(ln B)` when lognormal).
     pub mean_b: f64,
+    /// Sample standard deviation (`n - 1` denominator) of group A.
     pub sd_a: f64,
+    /// Sample standard deviation (`n - 1` denominator) of group B.
     pub sd_b: f64,
+    /// Signed difference `mean_a - mean_b` (on raw scale, or log scale for lognormal *t*).
     pub difference: f64,
+    /// Standard error of `difference` (`s_p sqrt(1/n_a + 1/n_b)` for Student; `sqrt(s_a^2/n_a + s_b^2/n_b)` for Welch).
     pub se_difference: f64,
+    /// Two-sided `t(df)` confidence interval `(lower, upper)` for `difference` at configured `ConfidenceLevel`.
     pub ci: (f64, f64),
+    /// Two-sample *t* statistic `difference / se_difference`.
     pub t_statistic: f64,
+    /// Residual degrees of freedom (`n_a + n_b - 2` for Student; Welch–Satterthwaite effective *df* for Welch).
     pub df: f64,
+    /// Student *t*(df) *P* value (`two_tailed` two-sided vs directional one-sided matching `t_statistic` sign).
     pub p_value: f64,
+    /// True when `p_value` is two-sided; false when directional one-tailed.
     pub two_tailed: bool,
+    /// Variance-ratio *F*-test comparing `sd_a^2` and `sd_b^2` (Zar 2010).
     pub f_test: VarianceFTestResult,
     /// Brown–Forsythe (median-based Levene) test when raw replicates are available; `None` for summary inputs.
     pub levene_median: Option<LeveneTestResult>,
+    /// Standardized effect sizes (`cohens_d`, `hedges_g`, `glass_delta`, `r_squared`) and exact noncentral-*t* CIs.
     pub effect_sizes: TwoGroupEffectSizes,
     /// Present for `LognormalUnpairedT`: geometric mean ratio `exp(mean_ln_a - mean_ln_b)` and CI.
     pub geometric_mean_ratio: Option<f64>,
+    /// Present for `LognormalUnpairedT`: two-sided exponentiated *t*(df) CI `exp(ci)` for `geometric_mean_ratio`.
     pub geometric_mean_ratio_ci: Option<(f64, f64)>,
 }
 
@@ -486,10 +519,8 @@ pub fn one_sample_t_test_from_summary(
     let t_crit = t_crit_two_sided(confidence, df)?;
     let ci = (discrepancy - t_crit * sem, discrepancy + t_crit * sem);
     let d = discrepancy / sd;
-    let j = hedges_j_factor(df)?;
-    let g = j * d;
     let inv_sqrt_n = 1.0 / n.sqrt();
-    let g_ci = noncentral_t_ci(t_stat, df, confidence.percent()).ok().map(|(lo, hi)| (lo * inv_sqrt_n * j, hi * inv_sqrt_n * j));
+    let (g, g_ci) = hedges_g_with_ci(d, t_stat, df, inv_sqrt_n, confidence.percent())?;
 
     Ok(OneSampleTResult {
         n: n.round() as usize,
@@ -652,25 +683,42 @@ pub fn lognormal_unpaired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confide
     Ok(out)
 }
 
-/// Output of a paired *t*-test or ratio paired *t*-test.
+/// Complete output of a paired or ratio-paired Student *t*-test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairedTResult {
+    /// Descriptive method label (`"Paired t test"` or `"Ratio paired t test"`).
     pub method_label: &'static str,
+    /// Number of complete paired observations `(a_i, b_i)` (`n_pairs >= 2`).
     pub n_pairs: usize,
+    /// Arithmetic mean of paired differences `mean(a - b)` (or `mean(ln(a / b))` for ratio paired *t*).
     pub mean_of_differences: f64,
+    /// Sample standard deviation of paired differences (`n_pairs - 1` denominator).
     pub sd_of_differences: f64,
+    /// Standard error of the mean difference `sd_of_differences / sqrt(n_pairs)`.
     pub sem_of_differences: f64,
+    /// Two-sided `t(df)` confidence interval `(lower, upper)` for `mean_of_differences` at configured `ConfidenceLevel`.
     pub ci: (f64, f64),
+    /// Paired Student *t* statistic `mean_of_differences / sem_of_differences`.
     pub t_statistic: f64,
+    /// Degrees of freedom `n_pairs - 1` (`>= 1.0`).
     pub df: f64,
+    /// Student *t*(df) *P* value (`two_tailed` two-sided vs directional one-sided matching `t_statistic` sign).
     pub p_value: f64,
+    /// True when `p_value` is two-sided; false when directional one-tailed.
     pub two_tailed: bool,
+    /// Pearson correlation `r` assessing pairing effectiveness (`None` when `n_pairs < 3` or zero variance in either column).
     pub pairing_r: Option<f64>,
+    /// Two-sided *P* value testing $H_0: \rho_{\text{pairing}} = 0$ on `n_pairs - 2` df (`None` when `n_pairs < 3` or `pairing_r` unavailable).
     pub pairing_p: Option<f64>,
+    /// Standardized paired effect size `d_z = mean_of_differences / sd_of_differences` (Cohen 1988).
     pub cohens_dz: f64,
-    pub hedges_gz: f64,
+    /// Bias-corrected Hedges' `g_z = J(df) * d_z` (Hedges 1981); `None` when `df <= 1.0` (`n_pairs = 2`, gamma pole).
+    pub hedges_gz: Option<f64>,
+    /// Exact noncentral-*t* two-sided CI for `hedges_gz` (Steiger & Fouladi 1997); `None` when `hedges_gz` is `None` or inversion fails.
     pub hedges_gz_ci: Option<(f64, f64)>,
+    /// Present for `ratio_paired_t_test`: geometric mean of ratios `exp(mean(ln(a / b)))`; `None` for additive `paired_t_test`.
     pub geometric_mean_ratio: Option<f64>,
+    /// Present for `ratio_paired_t_test`: two-sided exponentiated `t(df)` CI `exp(ci)` for `geometric_mean_ratio`; `None` otherwise.
     pub geometric_mean_ratio_ci: Option<(f64, f64)>,
 }
 
@@ -723,10 +771,8 @@ pub fn paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Confide
     };
 
     let dz = md.mean / sd;
-    let j = hedges_j_factor(df)?;
-    let gz = j * dz;
     let inv_sqrt_n = 1.0 / (n as f64).sqrt();
-    let gz_ci = noncentral_t_ci(t_stat, df, confidence.percent()).ok().map(|(lo, hi)| (lo * inv_sqrt_n * j, hi * inv_sqrt_n * j));
+    let (gz, gz_ci) = hedges_g_with_ci(dz, t_stat, df, inv_sqrt_n, confidence.percent())?;
 
     Ok(PairedTResult {
         method_label: "Paired t test",
@@ -775,22 +821,36 @@ pub fn ratio_paired_t_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: C
 // Nonparametric Two-Group Tests
 // ============================================================================
 
-/// Result of a Mann–Whitney *U* test.
+/// Result of a Mann–Whitney *U* test (Mann & Whitney 1947; Wilcoxon 1945).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MannWhitneyResult {
+    /// Number of observations in group A.
     pub n_a: usize,
+    /// Number of observations in group B.
     pub n_b: usize,
+    /// Sample median of group A (Hyndman & Fan Type 6).
     pub median_a: f64,
+    /// Sample median of group B (Hyndman & Fan Type 6).
     pub median_b: f64,
+    /// Mann–Whitney *U* count of `(a > b)` pairs (with 0.5 for exact ties) for group A.
     pub u_a: f64,
+    /// Complementary Mann–Whitney *U* count `n_a * n_b - u_a` for group B.
     pub u_b: f64,
+    /// Smaller Mann–Whitney statistic `min(u_a, u_b)`.
     pub u_min: f64,
+    /// *P* value testing identical distributions (`two_tailed` doubles smaller tail vs directional observed-tail one-sided via exact DP when `n_a + n_b <= 40` and tie-free, else tie-/continuity-corrected normal).
     pub p_value: f64,
+    /// True if exact Mann–Whitney combinatorial DP distribution was used; false for normal approximation.
     pub exact_p_used: bool,
+    /// True for two-sided *P* value; false for directional one-sided test.
     pub two_tailed: bool,
+    /// Hodges–Lehmann (1963) shift location estimator `median(a_i - b_j)` across all pairwise differences.
     pub hodges_lehmann_diff: f64,
+    /// Two-sided distribution-free order-statistic CI `(lower, upper)` on pairwise differences `a_i - b_j` at configured `ConfidenceLevel` (`None` if normal/exact rank boundary unavailable).
     pub hodges_lehmann_ci: Option<(f64, f64)>,
+    /// Cliff's dominance effect size `delta = (u_a - u_b) / (n_a * n_b)` in `[-1, 1]` (Cliff 1993).
     pub cliffs_delta: f64,
+    /// Rank-biserial correlation `r = 1 - 2 * u_min / (n_a * n_b)` / Kerby (2014) signed rank effect size in `[-1, 1]`.
     pub rank_biserial_r: f64,
 }
 
@@ -1008,19 +1068,30 @@ fn hodges_lehmann_two_sample(a: &[f64], b: &[f64], confidence: ConfidenceLevel) 
     Ok((hl, ci))
 }
 
-/// Output of Wilcoxon matched-pairs signed-rank test.
+/// Output of Wilcoxon matched-pairs signed-rank test (Wilcoxon 1945; Pratt 1959).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct WilcoxonMatchedResult {
+    /// Total number of paired observations supplied before any zero-difference handling.
     pub n_pairs: usize,
+    /// Effective non-zero pair count contributing to signed ranks (equal to `n_pairs` minus exact zero differences in classic mode, or total `n_pairs` in Pratt mode).
     pub n_effective: usize,
+    /// Sum of signed ranks for positive differences `a_i > b_i` (`W+`).
     pub w_plus: f64,
+    /// Sum of signed ranks for negative differences `a_i < b_i` (`W-`).
     pub w_minus: f64,
+    /// Wilcoxon test statistic (`W+ - W-` or `min(W+, W-)` depending on mode/tail reporting).
     pub w_stat: f64,
+    /// *P* value testing symmetric median difference around zero (`two_tailed` vs observed-direction one-tailed; exact DP when classic `n_effective <= 25` without ties, else tie-/continuity-corrected normal).
     pub p_value: f64,
+    /// True if exact DP distribution was used; false for Pratt or asymptotic normal approximation.
     pub exact_p_used: bool,
+    /// True for two-sided *P* value; false for directional one-sided test.
     pub two_tailed: bool,
+    /// Hodges–Lehmann (1963) Walsh-average pseudomedian computed over all paired differences (including exact zeros).
     pub hodges_lehmann_pseudomedian: f64,
+    /// Two-sided order-statistic CI `(lower, upper)` over pairwise Walsh averages `(d_i + d_j)/2` at configured `ConfidenceLevel` (`None` if insufficient pairs).
     pub hodges_lehmann_ci: Option<(f64, f64)>,
+    /// Kerby (2014) matched-pairs rank-biserial correlation `(W+ - W-) / (W+ + W-)` in `[-1, 1]`.
     pub rank_biserial_r: f64,
 }
 
@@ -1133,15 +1204,25 @@ pub fn wilcoxon_matched_pairs(
 /// Output of an exact binomial paired sign test on matched differences `a_i - b_i`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairedSignTestResult {
+    /// Total number of paired observations supplied.
     pub n_total: usize,
+    /// Number of strictly positive differences (`a_i - b_i > 0`).
     pub n_positive: usize,
+    /// Number of strictly negative differences (`a_i - b_i < 0`).
     pub n_negative: usize,
+    /// Number of exact zero ties (`a_i == b_i`) excluded from the binomial sign count.
     pub n_ties: usize,
+    /// Total non-zero differences `n_positive + n_negative`.
     pub n_nonzero: usize,
+    /// Sample median across all `n_total` differences `a_i - b_i` (zeros included).
     pub median_difference: f64,
+    /// Exact binomial order-statistic confidence interval `(lower, upper)` for the median difference (`None` when `n_total < 3`).
     pub ci: Option<(f64, f64)>,
+    /// Actual discrete achieved coverage percentage `>= nominal` for `ci` (`None` when `ci` is `None`).
     pub ci_actual_confidence_percent: Option<f64>,
+    /// Exact `Binomial(n_nonzero, 0.5)` sign-test *P* value (`two_tailed` doubles smaller tail vs observed-direction smaller tail).
     pub p_value: f64,
+    /// True for two-sided *P* value; false for directional one-sided test.
     pub two_tailed: bool,
 }
 
@@ -1199,10 +1280,15 @@ pub fn paired_sign_test(a: &[f64], b: &[f64], two_tailed: bool, confidence: Conf
 /// Output of a two-sample Kolmogorov–Smirnov test.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct TwoSampleKsResult {
+    /// Sample size in group A.
     pub n_a: usize,
+    /// Sample size in group B.
     pub n_b: usize,
+    /// Kolmogorov–Smirnov supremum empirical CDF discrepancy `D = sup_x |F_a(x) - F_b(x)|` in `[0, 1]`.
     pub d_statistic: f64,
+    /// Two-sided *P* value testing equality of distributions (exact Smirnov lattice path DP when `n_a <= 25`, `n_b <= 25`, and cross-tie-free; else Smirnov asymptotic series).
     pub p_value: f64,
+    /// True when exact Smirnov combinatorial DP was used; false when asymptotic Smirnov series was used.
     pub exact_p_used: bool,
 }
 
@@ -1301,18 +1387,28 @@ fn ks_exact_smirnov_p(na: usize, nb: usize, d_obs: f64) -> f64 {
 // Bland-Altman Method Comparison
 // ============================================================================
 
-/// Bland–Altman method-comparison bias and Limits of Agreement.
+/// Bland–Altman method-comparison bias and Limits of Agreement (Bland & Altman 1986, 1999).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct BlandAltmanResult {
+    /// Number of paired method measurements included.
     pub n: usize,
+    /// True if differences are expressed as percentages `100 * (a - b) / ((a + b) / 2)`; false for raw difference `a - b`.
     pub percent_difference: bool,
+    /// Mean bias `mean(d)` across paired differences (in raw difference units or percent).
     pub bias: f64,
+    /// Sample standard deviation of paired differences `sd(d)`.
     pub sd_bias: f64,
+    /// Standard error of mean bias `sd(d) / sqrt(n)`.
     pub se_bias: f64,
+    /// Two-sided `t(n - 1)` confidence interval `(lower, upper)` for mean `bias` at configured `ConfidenceLevel`.
     pub bias_ci: (f64, f64),
+    /// Lower Limit of Agreement `bias - z_{alpha/2} * sd_bias`.
     pub loa_lower: f64,
+    /// Upper Limit of Agreement `bias + z_{alpha/2} * sd_bias`.
     pub loa_upper: f64,
+    /// Two-sided Bland–Altman (1999) `t(n - 1)` confidence interval for `loa_lower` using `SE_LoA = sd_bias * sqrt(1/n + z^2 / (2(n - 1)))`.
     pub loa_lower_ci: (f64, f64),
+    /// Two-sided Bland–Altman (1999) `t(n - 1)` confidence interval for `loa_upper` using `SE_LoA`.
     pub loa_upper_ci: (f64, f64),
     /// `(average, difference_or_percent_diff)` points for Bland–Altman plotting.
     pub points: Vec<(f64, f64)>,
@@ -1402,15 +1498,25 @@ pub fn bland_altman(
 /// Single row comparison entry for multiple *t*-tests.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultipleRowTestEntry {
+    /// Zero-based table row index tested.
     pub row_index: usize,
+    /// Human-readable row feature label.
     pub label: String,
+    /// Sample mean (or median in nonparametric rows) of group A on this row.
     pub mean_a: f64,
+    /// Sample mean (or median in nonparametric rows) of group B on this row.
     pub mean_b: f64,
+    /// Signed shift/difference `mean_a - mean_b` (or HL shift / difference of paired medians).
     pub difference: f64,
+    /// Row-level test statistic (*t*, Mann–Whitney *U*/*U_min*, or Wilcoxon *W*/*stat*).
     pub statistic: f64,
+    /// Degrees of freedom (`n_a + n_b - 2`, Welch *df*, `n_pairs - 1`, or `f64::INFINITY` for rank tests).
     pub df: f64,
+    /// Unadjusted two-sided single-row *P* value.
     pub raw_p: f64,
+    /// Familywise-error adjusted *P* or FDR-adjusted *q* value across all tested rows.
     pub adjusted_p_or_q: f64,
+    /// True when the row passes the multiplicity threshold (discovery).
     pub significant: bool,
 }
 
@@ -2156,7 +2262,13 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
             if xy.y_subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
-            if xy.data_sets.len() >= 2 && ba.column_a != ba.column_b {
+            if xy.data_sets.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
+            if ba.column_a == ba.column_b {
+                return Err(StatsError::InvalidParameter { name: "column_b", value: ba.column_b as f64 });
+            }
+            if xy.data_sets.len() >= 2 {
                 let dsa = xy.data_sets.get(ba.column_a).ok_or(StatsError::MissingColumn { index: ba.column_a })?;
                 let dsb = xy.data_sets.get(ba.column_b).ok_or(StatsError::MissingColumn { index: ba.column_b })?;
                 let mut xs = Vec::new();
@@ -2192,9 +2304,16 @@ fn extract_bland_altman_pairs(sheet: &DataSheet, ba: &BlandAltmanSpec) -> Result
                     non_numeric_cells,
                 })
             } else {
-                let y_idx = if ba.column_a < xy.data_sets.len() { ba.column_a } else { 0 };
-                let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
-                let pairs = xy.active_xy_pairs(y_idx);
+                // Single Y dataset: retain only the canonical default X (`0`) vs Y[0] (`1`) mode;
+                // reject explicit out-of-range indices rather than silently falling back to dataset 0.
+                if ba.column_a != 0 {
+                    return Err(StatsError::MissingColumn { index: ba.column_a });
+                }
+                if ba.column_b != 1 {
+                    return Err(StatsError::MissingColumn { index: ba.column_b });
+                }
+                let ds = xy.data_sets.first().ok_or(StatsError::EmptyInput)?;
+                let pairs = xy.active_xy_pairs(0);
                 if pairs.is_empty() {
                     return Err(StatsError::EmptyInput);
                 }
@@ -2277,6 +2396,9 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
                     actual: indices.len(),
                 });
             }
+            if paired && !indices.len().is_multiple_of(2) {
+                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
+            }
             let mid = indices.len() / 2;
             let (left, right) = (&indices[..mid], &indices[mid..]);
             let n_rows = col.row_count();
@@ -2321,6 +2443,9 @@ fn extract_multiple_row_inputs(sheet: &DataSheet, spec: &AnalysisSpec, paired: b
                     required: 4,
                     actual: indices.len(),
                 });
+            }
+            if paired && !indices.len().is_multiple_of(2) {
+                return Err(StatsError::InvalidParameter { name: "paired_selected_columns", value: indices.len() as f64 });
             }
             let mid = indices.len() / 2;
             let (left, right) = (&indices[..mid], &indices[mid..]);
@@ -2652,7 +2777,7 @@ fn populate_paired_t_sheet(
     }
     if include_es {
         row_labels.extend([String::from("Cohen's dz"), String::from("Hedges' gz"), format!("{}% CI of Hedges' gz", conf.percent())]);
-        rows.extend([vec![num_cell(out.cohens_dz)], vec![num_cell(out.hedges_gz)], vec![opt_ci_cell(out.hedges_gz_ci)]]);
+        rows.extend([vec![num_cell(out.cohens_dz)], vec![opt_num_cell(out.hedges_gz)], vec![opt_ci_cell(out.hedges_gz_ci)]]);
     }
     res.tabs.push(build_tab("paired-t", out.method_label, ResultTabKind::MainSummary, vec![format!("{lbl_a} vs. {lbl_b}")], row_labels, rows));
     push_scalar(res, "PValue", None, out.p_value);
@@ -2856,7 +2981,7 @@ fn populate_one_sample_t_sheet_impl(
         vec![num_cell(out.df)],
         vec![p_cell(out.p_value, p_fmt)],
         vec![ci_cell(out.ci.0, out.ci.1)],
-        vec![num_cell(out.hedges_g)],
+        vec![opt_num_cell(out.hedges_g)],
     ];
     res.tabs.push(build_tab("one-sample-t", "One-sample t test", ResultTabKind::MainSummary, vec![label.to_owned()], row_labels, rows));
     push_scalar(res, "PValue", None, out.p_value);

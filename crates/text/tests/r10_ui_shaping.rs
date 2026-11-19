@@ -561,3 +561,27 @@ fn weight_slope_and_family_selection_route_to_matching_sfnt_faces() {
     assert!(set.parsed_face(face_idx).is_some());
     assert!(set.face_bytes(face_idx).is_some());
 }
+
+#[test]
+fn cleanroom_disclosure_triangles_shape_without_missing_glyphs_when_host_fonts_absent() {
+    use curvebook_text::{GlyphOutlineCmd, RichText, has_cleanroom_vector_outline, outline_rich_text};
+
+    for ch in ['▸', '▾', '▶', '▼'] {
+        assert!(has_cleanroom_vector_outline(ch), "expected cleanroom vector outline for {ch:?}");
+        let glyphs = outline_rich_text(&RichText::plain(ch.to_string()), 0.0, 0.0, 12.0);
+        assert_eq!(glyphs.len(), 1);
+        assert!(
+            glyphs[0].commands.iter().any(|cmd| matches!(cmd, GlyphOutlineCmd::MoveTo { .. }))
+                && glyphs[0].commands.iter().any(|cmd| matches!(cmd, GlyphOutlineCmd::Close)),
+            "expected closed cleanroom triangle contour for {ch:?}"
+        );
+    }
+
+    let cleanroom = SystemFontSet::cleanroom_only();
+    let style = UiTextStyle::ui_sans(13.0);
+    for sample in ["▸ Family", "▾ Family", "▶ Play", "▼ More", "H₂O IC₅₀ x⁻¹ ¹⁰⁺ y₀ nᵢ xₐ"] {
+        let shaped = cleanroom.shape_line(&style, sample, 96);
+        assert_eq!(shaped.missing_glyph_count, 0, "cleanroom shaper reported missing glyph for `{sample}`");
+        assert!(shaped.metrics.width_px > 0.0);
+    }
+}

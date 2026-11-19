@@ -105,9 +105,11 @@ pub fn quantile_type6_sorted(sorted: &[f64], p: f64) -> Option<f64> {
 /// Output of `rank_with_ties`: 1-based average ranks and counts of tied groups of size >= 2.
 #[derive(Debug, Clone, PartialEq)]
 pub struct TieRankResult {
+    /// One-based average mid-ranks in `[1.0, n]` aligned 1-to-1 with the input slice.
     pub ranks: Vec<f64>,
+    /// Multiplicity count `t_k >= 2` for each distinct tied value group (empty when all values are unique).
     pub tie_counts: Vec<usize>,
-    /// Tie correction numerator `sum_k (t_k^3 - t_k)`.
+    /// Tie correction numerator `sum_k (t_k^3 - t_k)` used in Spearman, Mann–Whitney, Kruskal–Wallis, and Friedman adjustments.
     pub tie_sum_t3_minus_t: f64,
 }
 
@@ -241,10 +243,15 @@ pub fn is_ignored_non_numeric_cell(cell: &Cell) -> bool {
 /// Extracted labeled numeric sample column from a `DataSheet`.
 #[derive(Debug, Clone)]
 pub struct ExtractedColumn {
+    /// Zero-based originating dataset or variable column index in the source table.
     pub index: usize,
+    /// Column title string from the source table.
     pub label: String,
+    /// Active included finite numeric observations extracted from the column.
     pub values: Vec<f64>,
+    /// Number of excluded cells skipped during extraction.
     pub excluded_count: usize,
+    /// Number of non-numeric text cells ignored during extraction.
     pub non_numeric_count: usize,
 }
 
@@ -305,9 +312,13 @@ pub fn extract_numeric_columns(sheet: &DataSheet, selected: &[usize]) -> Result<
 /// Extracted paired numeric series together with counts of omitted rows and ignored non-numeric cells.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PairedValuesReport {
+    /// Active complete finite numeric values for column/series `X` (`a`).
     pub xs: Vec<f64>,
+    /// Matching active complete finite numeric values for column/series `Y` (`b`), aligned 1-to-1 with `xs`.
     pub ys: Vec<f64>,
+    /// Number of rows omitted because either member of the pair was empty, excluded, or non-finite.
     pub skipped_incomplete_rows: usize,
+    /// Number of non-numeric text cells encountered inside examined pair slots.
     pub non_numeric_cells: usize,
 }
 

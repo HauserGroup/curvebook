@@ -37,44 +37,78 @@ use crate::roc::{RocCiMethod, roc_curve_analysis};
 /// Parameter row for Multiple Linear Regression.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct LinearTermEstimate {
+    /// Parameter or encoded factor-level term name (e.g. `"Intercept"` or `"Arm [B]"`).
     pub name: String,
+    /// Ordinary least-squares regression coefficient $\hat{\beta}_j$.
     pub estimate: f64,
+    /// Standard error $\sqrt{\hat{\sigma}^2 (X^\top X)^+_{jj}}$ (`0.0` or `NaN` on aliased/collinear terms).
     pub se: f64,
+    /// Two-sided Student *t* statistic $\hat{\beta}_j / \mathrm{SE}(\hat{\beta}_j)$ on `df_residual` df (`0.0` if zero SE).
     pub t_statistic: f64,
+    /// Two-sided *P* value $P(|T_{\text{df}}| \ge |t|)$ testing $H_0: \beta_j = 0$ (`NaN` if aliased).
     pub p_value: f64,
+    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` at configured `ConfidenceLevel`.
     pub ci: (f64, f64),
+    /// Variance Inflation Factor $1 / (1 - R_j^2)$ measuring predictor collinearity (`None` for the intercept, when `compute_vif == false`, or single-predictor models).
     pub vif: Option<f64>,
+    /// Type III partial sum of squares measuring the effect of dropping this term while retaining all others (`None` when intercept or unidentifiable).
     pub type_iii_ss: Option<f64>,
+    /// Type III partial *F*-statistic on `(1, df_residual)` df (`None` when `type_iii_ss` is unavailable).
     pub type_iii_f: Option<f64>,
+    /// Upper-tail Type III partial *F* *P* value (`None` when `type_iii_f` is unavailable).
     pub type_iii_p: Option<f64>,
 }
 
 /// Complete Multiple Linear Regression output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultipleLinearResult {
+    /// Number of complete rows (observations) included in the regression fit.
     pub n: usize,
+    /// Total number of columns in the design matrix `X` (including intercept when `has_intercept == true`).
     pub p: usize,
+    /// Numerical column rank of `X` from SVD (`rank < p` when predictors are linearly dependent).
     pub rank: usize,
+    /// True when column `0` represents the model intercept.
     pub has_intercept: bool,
+    /// Per-column boolean mask (`len == p`) marking aliased/rank-deficient predictors dropped from estimation.
     pub aliased_columns: Vec<bool>,
+    /// Ordered coefficient, SE, *t*, *P*, CI, VIF, and Type III SS/F/P records of length `p`.
     pub terms: Vec<LinearTermEstimate>,
+    /// Coefficient of determination $R^2 = 1 - \text{rss} / \text{ss\_total}$ in `[0, 1]`.
     pub r_squared: f64,
+    /// Adjusted coefficient of determination $1 - (1 - R^2) (n - \mathbb{I}[\text{intercept}]) / \text{df\_residual}$ (`R^2` adjusted for degrees of freedom).
     pub adjusted_r_squared: f64,
+    /// Residual sum of squares $\sum (y_i - \hat{y}_i)^2$ in squared response units.
     pub rss: f64,
+    /// Model regression sum of squares (`ss_total - rss`).
     pub ss_regression: f64,
+    /// Total sum of squares ($\sum (y_i - \bar{y})^2$ when `has_intercept == true`, else uncentered $\sum y_i^2$).
     pub ss_total: f64,
+    /// Residual standard deviation $\hat{\sigma} = \sqrt{\text{rss} / \text{df\_residual}}$ in response units (`Sy.x`).
     pub residual_sd: f64,
+    /// Regression model numerator degrees of freedom (`rank - 1` with intercept, else `rank`).
     pub df_model: f64,
+    /// Residual denominator degrees of freedom `n - rank`.
     pub df_residual: f64,
+    /// Omnibus ANOVA *F*-statistic $(\text{ss\_regression} / \text{df\_model}) / (\text{rss} / \text{df\_residual})$.
     pub f_statistic: f64,
+    /// Upper-tail $F(\text{df\_model}, \text{df\_residual})$ *P* value testing zero slope for all non-intercept terms.
     pub f_p_value: f64,
+    /// Gaussian maximum-likelihood Akaike Information Criterion `n * ln(rss / n) + 2 * (rank + 1)` (includes constant/noise variance parameter; relative comparisons unaffected).
     pub aic: f64,
+    /// Small-sample corrected $\text{AIC}_c$ (`f64::INFINITY` when `n - (rank + 1) - 1 <= 0`).
     pub aicc: f64,
+    /// Schwarz Bayesian Information Criterion `BIC` under the Gaussian likelihood.
     pub bic: f64,
+    /// Durbin–Watson first-order residual autocorrelation statistic in `[0, 4]` (`~2.0` indicates uncorrelated residuals).
     pub durbin_watson: f64,
+    /// Fitted mean responses $\hat{y}_i = X_i \hat{\beta}$ in complete-case input order (`len == n`).
     pub fitted: Vec<f64>,
+    /// Unweighted OLS residuals $y_i - \hat{y}_i$ (`len == n`).
     pub residuals: Vec<f64>,
+    /// Diagonal hat-matrix leverage values $h_{ii} = x_i^\top (X^\top X)^+ x_i \in [0, 1]$ (`len == n`).
     pub leverage: Vec<f64>,
+    /// Cook's distance $D_i = \frac{r_i^2}{k \hat{\sigma}^2} \frac{h_{ii}}{(1 - h_{ii})^2}$ measuring case influence (`0.0` or large at $h_{ii} = 1$; `len == n`).
     pub cooks_distance: Vec<f64>,
     /// Parameter covariance matrix `sigma^2 * (X'X)^-1` (`p x p`).
     #[serde(default)]
@@ -84,63 +118,111 @@ pub struct MultipleLinearResult {
 /// Parameter row for Logistic or Poisson GLM.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GlmTermEstimate {
+    /// Coefficient term name (`"Intercept"` or predictor / encoded dummy level).
     pub name: String,
+    /// Log-link or logit-link regression coefficient $\hat{\beta}_j$.
     pub beta: f64,
+    /// Asymptotic standard error $\sqrt{I(\hat{\beta})^{-1}_{jj}}$ from Fisher information (`McCullagh & Nelder 1989`).
     pub se: f64,
+    /// Asymptotic Wald standard normal *z* statistic $\hat{\beta}_j / \mathrm{SE}(\hat{\beta}_j)$.
     pub z_statistic: f64,
+    /// Two-sided Wald normal *P* value $2 \Phi(-|z|)$ testing $H_0: \beta_j = 0$.
     pub p_value: f64,
+    /// Exponentiated effect ratio $\exp(\hat{\beta}_j)$ (Odds Ratio for logistic regression; Incidence Rate Ratio for Poisson regression).
     pub exp_beta: f64,
+    /// Two-sided Wald confidence interval $\exp(\hat{\beta}_j \pm z_{\alpha/2}\mathrm{SE})$ for `exp_beta` at configured `ConfidenceLevel`.
     pub exp_beta_ci: (f64, f64),
+    /// Variance Inflation Factor $1 / (1 - R_j^2)$ (`None` for the intercept, when `compute_vif == false`, or single-predictor fits).
     pub vif: Option<f64>,
 }
 
-/// Complete Multiple Logistic Regression output.
+/// Complete Multiple Logistic Regression output (Bernoulli/binomial logit GLM via IRLS).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultipleLogisticResult {
+    /// Number of complete binary observations included (`n`).
     pub n: usize,
+    /// Number of observed positive events (`y == 1`) across the `n` cases (`0 < n_events < n`).
     pub n_events: usize,
+    /// True when IRLS log-likelihood and coefficient steps satisfied convergence tolerance.
     pub converged: bool,
+    /// True when Albert–Anderson (1984) quasi-complete or complete linear separation was detected during IRLS.
     pub separation_detected: bool,
+    /// Ordered coefficient, OR, Wald *z*/*P*/CI, and VIF records (`len == p`).
     pub terms: Vec<GlmTermEstimate>,
+    /// Null intercept-only Bernoulli log-likelihood $\ell_0$.
     pub log_lik_null: f64,
+    /// Fitted model unpenalized Bernoulli log-likelihood $\ell(\hat{\beta})$.
     pub log_lik_model: f64,
+    /// Null model deviance `-2 * log_lik_null`.
     pub deviance_null: f64,
+    /// Residual deviance `-2 * log_lik_model >= 0`.
     pub deviance_residual: f64,
+    /// Omnibus Likelihood Ratio $\chi^2 = \text{deviance\_null} - \text{deviance\_residual} \ge 0$.
     pub lr_chi2: f64,
+    /// Degrees of freedom for the omnibus Likelihood Ratio test (`max(p - 1, 1)`).
     pub lr_df: f64,
+    /// Upper-tail $\chi^2(\text{lr\_df})$ *P* value testing all non-intercept coefficients equal to zero.
     pub lr_p: f64,
+    /// Akaike Information Criterion `deviance_residual + 2 * p`.
     pub aic: f64,
+    /// Small-sample corrected $\text{AIC}_c$ (`f64::INFINITY` when `n - p - 1 <= 0`).
     pub aicc: f64,
+    /// Schwarz Bayesian Information Criterion `deviance_residual + p * ln(n)`.
     pub bic: f64,
+    /// McFadden's pseudo-$R^2 = 1 - \text{deviance\_residual} / \text{deviance\_null} \in [0, 1]$.
     pub mcfadden_r2: f64,
+    /// Nagelkerke (1991) Cragg–Uhler rescaled pseudo-$R^2 \in [0, 1]$.
     pub nagelkerke_r2: f64,
+    /// Tjur (2009) coefficient of discrimination $\bar{\hat{p}}_{y=1} - \bar{\hat{p}}_{y=0} \in [0, 1]$.
     pub tjur_r2: f64,
+    /// Hosmer–Lemeshow decile calibration chi-square goodness-of-fit statistic (`Hosmer & Lemeshow 2000`).
     pub hosmer_lemeshow_chi2: f64,
+    /// Hosmer–Lemeshow degrees of freedom (`groups - 2`, typically `8.0`).
     pub hosmer_lemeshow_df: f64,
+    /// Upper-tail $\chi^2(\text{hosmer\_lemeshow\_df})$ calibration *P* value (`< 0.05` signals miscalibration).
     pub hosmer_lemeshow_p: f64,
+    /// Area under the fitted ROC curve discriminating `y == 1` vs `y == 0` (`None` if single-class after filtering).
     pub roc_auc: Option<f64>,
+    /// Fitted event probabilities $\hat{p}_i = \mathrm{logistic}(X_i \hat{\beta}) \in (0, 1)$ aligned with complete-case rows (`len == n`).
     pub predicted_probs: Vec<f64>,
 }
 
-/// Complete Multiple Poisson Regression output.
+/// Complete Multiple Poisson Regression output (log-link count GLM via IRLS).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct MultiplePoissonResult {
+    /// Number of complete non-negative count/rate observations included (`n`).
     pub n: usize,
+    /// True when IRLS deviance steps satisfied convergence tolerance.
     pub converged: bool,
+    /// Ordered coefficient, IRR ($\exp(\beta)$), Wald *z*/*P*/CI, and VIF records (`len == p`).
     pub terms: Vec<GlmTermEstimate>,
+    /// Null intercept-only Poisson log-likelihood $\ell_0$.
     pub log_lik_null: f64,
+    /// Fitted model Poisson log-likelihood $\ell(\hat{\beta})$.
     pub log_lik_model: f64,
+    /// Null Poisson deviance $2 \sum (y \ln(y / \bar{y}) - (y - \bar{y}))$.
     pub deviance_null: f64,
+    /// Residual Poisson deviance $2 \sum (y \ln(y / \hat{\mu}) - (y - \hat{\mu})) \ge 0$.
     pub deviance_residual: f64,
+    /// Pearson chi-square goodness-of-fit statistic $\sum (y_i - \hat{\mu}_i)^2 / \hat{\mu}_i$.
     pub pearson_chi2: f64,
+    /// Residual denominator degrees of freedom `n - p`.
     pub df_residual: f64,
+    /// Pearson dispersion parameter $\hat{\phi} = \text{pearson\_chi2} / \text{df\_residual}$ (`> 1` indicates overdispersion relative to Poisson variance).
     pub dispersion_pearson: f64,
+    /// Omnibus Likelihood Ratio $\chi^2 = 2(\ell(\hat{\beta}) - \ell_0) \ge 0$.
     pub lr_chi2: f64,
+    /// Degrees of freedom for the omnibus Likelihood Ratio test (`max(p - 1, 1)`).
     pub lr_df: f64,
+    /// Upper-tail $\chi^2(\text{lr\_df})$ *P* value testing all non-intercept coefficients equal to zero.
     pub lr_p: f64,
+    /// Akaike Information Criterion `-2 * log_lik_model + 2 * p`.
     pub aic: f64,
+    /// Small-sample corrected $\text{AIC}_c$ (`f64::INFINITY` when `n - p - 1 <= 0`).
     pub aicc: f64,
+    /// Schwarz Bayesian Information Criterion `-2 * log_lik_model + p * ln(n)`.
     pub bic: f64,
+    /// Fitted Poisson conditional means $\hat{\mu}_i = \exp(X_i \hat{\beta}) > 0$ aligned with complete-case rows (`len == n`).
     pub predicted_means: Vec<f64>,
 }
 
@@ -944,13 +1026,15 @@ enum RetainedGlmPred {
 struct GlmDesignMatrix {
     x_mat: DenseMatrix,
     y_vec: Vec<f64>,
+    source_rows: Vec<usize>,
     term_names: Vec<String>,
     factor_spans: Vec<GlmFactorSpan>,
 }
 
-/// Assemble `(X, y, term_names, factor_spans)` from a `MultipleVariablesTable` (with categorical
-/// reference-level dummy encoding derived strictly after complete-case filtering) or `XyTable`.
-fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
+/// Assemble `(X, y, source_rows, term_names, factor_spans)` from a `MultipleVariablesTable`
+/// (with categorical reference-level dummy encoding derived strictly after complete-case filtering)
+/// or an `XyTable`.
+fn build_glm_design_with_factors(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
     match &sheet.archetype {
         TableArchetype::MultipleVariables(mv) => {
             let resp_var = mv.variables.get(glm_spec.response_column).ok_or(StatsError::MissingColumn { index: glm_spec.response_column })?;
@@ -963,7 +1047,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                 is_cat.push(var.role == VariableRole::Categorical);
             }
 
-            let mut retained_rows: Vec<(f64, Vec<RetainedGlmPred>)> = Vec::new();
+            let mut retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)> = Vec::new();
             for r in 0..mv.row_count() {
                 let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
                 let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
@@ -1001,7 +1085,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                     }
                 }
                 if ok {
-                    retained_rows.push((yv, row_preds));
+                    retained_rows.push((r + 1, yv, row_preds));
                 }
             }
 
@@ -1011,7 +1095,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                 if is_cat[pos] {
                     let cells: Vec<Cell> = retained_rows
                         .iter()
-                        .filter_map(|(_, preds)| match &preds[pos] {
+                        .filter_map(|(_, _, preds)| match &preds[pos] {
                             RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
                             RetainedGlmPred::Numeric(_) => None,
                         })
@@ -1074,7 +1158,9 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
             }
             let mut x_rows = Vec::with_capacity(n_obs * n_cols);
             let mut y_vec = Vec::with_capacity(n_obs);
-            for (yv, preds) in retained_rows {
+            let mut source_rows = Vec::with_capacity(n_obs);
+            for (row_num, yv, preds) in retained_rows {
+                source_rows.push(row_num);
                 y_vec.push(yv);
                 x_rows.push(1.0);
                 for (pos, pred) in preds.into_iter().enumerate() {
@@ -1090,15 +1176,62 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
                 }
             }
             let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
-            Ok(GlmDesignMatrix { x_mat, y_vec, term_names, factor_spans })
+            Ok(GlmDesignMatrix { x_mat, y_vec, source_rows, term_names, factor_spans })
         }
         TableArchetype::Xy(xy) => {
+            if xy.y_subcolumn_mode.is_pre_summarized() {
+                return Err(StatsError::RequiresRawReplicates);
+            }
+            if xy.data_sets.is_empty() {
+                return Err(StatsError::EmptyInput);
+            }
+            for &idx in &spec.selected_data_sets {
+                if idx >= xy.data_sets.len() {
+                    return Err(StatsError::MissingColumn { index: idx });
+                }
+            }
+            if glm_spec.response_column >= xy.data_sets.len() {
+                return Err(StatsError::MissingColumn { index: glm_spec.response_column });
+            }
+            let y_idx = if spec.selected_data_sets.is_empty() {
+                glm_spec.response_column
+            } else if spec.selected_data_sets.len() == 1 {
+                let sel = spec.selected_data_sets[0];
+                if glm_spec.response_column == 0 || glm_spec.response_column == sel {
+                    sel
+                } else {
+                    return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
+                }
+            } else if spec.selected_data_sets.contains(&glm_spec.response_column) {
+                glm_spec.response_column
+            } else {
+                return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
+            };
+
+            if glm_spec.predictor_columns.is_empty() {
+                return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
+            }
+            for &pc in &glm_spec.predictor_columns {
+                if pc >= xy.data_sets.len().max(2) {
+                    return Err(StatsError::MissingColumn { index: pc });
+                }
+            }
+            if glm_spec.predictor_columns.len() != 1 {
+                return Err(StatsError::InvalidParameter { name: "predictor_columns", value: glm_spec.predictor_columns.len() as f64 });
+            }
+            let pred_col = glm_spec.predictor_columns[0];
+            if pred_col >= 2 {
+                return Err(StatsError::InvalidParameter { name: "predictor_columns", value: pred_col as f64 });
+            }
+
+            let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
             let mut x_rows = Vec::new();
             let mut y_vec = Vec::new();
-            let ds = xy.data_sets.first().ok_or(StatsError::EmptyInput)?;
+            let mut source_rows = Vec::new();
             for r in 0..xy.row_count() {
-                let Some(xv) = xy.x_cells.get(r).and_then(|s| s.first()).and_then(|c| c.active_number()) else { continue };
+                let Some(xv) = xy.x_value_at(r) else { continue };
                 let Some(yv) = ds.cell(r, 0).and_then(|c| c.active_number()) else { continue };
+                source_rows.push(r + 1);
                 x_rows.push(1.0);
                 x_rows.push(xv);
                 y_vec.push(yv);
@@ -1110,7 +1243,7 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
             let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
             let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
             let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
-            Ok(GlmDesignMatrix { x_mat, y_vec, term_names, factor_spans })
+            Ok(GlmDesignMatrix { x_mat, y_vec, source_rows, term_names, factor_spans })
         }
         other => Err(StatsError::IncompatibleTable { analysis: "generalized linear model", actual: other.kind() }),
     }
@@ -1119,12 +1252,19 @@ fn build_glm_design_with_factors(sheet: &DataSheet, glm_spec: &GlmSpec) -> Resul
 /// Complete Passing–Bablok (1983) nonparametric method-comparison regression output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PassingBablokResult {
+    /// Number of finite paired `(x_i, y_i)` method-comparison measurements (`n >= 3`).
     pub n: usize,
+    /// Count of valid pairwise slopes `S_{ij}` retained after excluding exact ties (`dx == dy == 0`) and `S_{ij} == -1`.
     pub valid_slopes: usize,
+    /// Passing–Bablok (1983) rank-offset $K$ counting valid pairwise slopes strictly less than `-1` (ensuring symmetry in `x`/`y` inversion).
     pub k_offset: usize,
+    /// Shifted median slope $\hat{b}$ across ordered pairwise slopes at rank index offset by `k_offset`.
     pub slope: f64,
+    /// Two-sided Passing–Bablok normal-quantile rank confidence interval `(lower, upper)` for `slope` at configured `ConfidenceLevel`.
     pub slope_ci: (f64, f64),
+    /// Median intercept $\hat{a} = \mathrm{median}_i(y_i - \hat{b} x_i)$.
     pub intercept: f64,
+    /// Two-sided quantile confidence interval `median_i(y_i - slope_ci.1 x_i)..median_i(y_i - slope_ci.0 x_i)` for `intercept` (Passing & Bablok 1983).
     pub intercept_ci: (f64, f64),
     /// Raw maximum absolute cumulative sum `H = max_k |S_k|` across ordered residuals.
     pub cusum_h: f64,
@@ -1132,8 +1272,11 @@ pub struct PassingBablokResult {
     pub cusum_statistic: f64,
     /// Two-sided asymptotic Kolmogorov CUSUM linearity *p*-value.
     pub cusum_p_value: f64,
+    /// True when `cusum_p_value >= 0.05` (no significant departure from linearity detected by CUSUM test).
     pub linearity_passed: bool,
+    /// True if asymptotic CI index offset `C_gamma` exceeded the bounds of ordered slopes and endpoints were clamped to extreme observed slopes.
     pub slope_ci_clamped: bool,
+    /// Vertical Passing–Bablok regression residuals `y_i - (intercept + slope * x_i)` in input order.
     pub residuals: Vec<f64>,
 }
 
@@ -1621,9 +1764,10 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let design = build_glm_design_with_factors(sheet, glm_spec)?;
+    let design = build_glm_design_with_factors(sheet, spec, glm_spec)?;
     let x_mat = design.x_mat;
     let y_vec = design.y_vec;
+    let source_rows = design.source_rows;
     let term_names = design.term_names;
     let factor_spans = design.factor_spans;
 
@@ -1705,7 +1849,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
             ));
 
             // Residuals and influence diagnostics.
-            let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
             let mut resid_rows = Vec::with_capacity(res.n);
             for (i, &yi) in y_vec.iter().enumerate().take(res.n) {
                 resid_rows.push(vec![
@@ -1822,7 +1966,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
 
             out.tabs.push(build_logistic_classification_tab(&y_vec, &res.predicted_probs));
 
-            let pred_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let pred_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
             let pred_rows: Vec<Vec<ResultCell>> = y_vec
                 .iter()
                 .zip(res.predicted_probs.iter())
@@ -1900,7 +2044,7 @@ pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSp
                 rows,
             ));
 
-            let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+            let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
             let resid_rows: Vec<Vec<ResultCell>> = y_vec
                 .iter()
                 .zip(res.predicted_means.iter())

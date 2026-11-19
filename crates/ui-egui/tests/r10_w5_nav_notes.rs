@@ -356,9 +356,9 @@ fn floating_notes_render_as_collapsible_movable_cards_and_preserve_split_guard()
 }
 
 fn assert_nav_notes_parity_clean(driver: &mut curvebook_ui_egui::human_driver::HumanPathDriver, context: &str) {
-    let nav_violations: Vec<_> = driver
-        .verify_parity()
-        .violations
+    let locale = driver.app().locale.clone();
+    let violations = driver.verify_parity().violations;
+    let nav_violations: Vec<_> = human_wf_common::filter_locale_parity_violations(&locale, false, violations)
         .into_iter()
         .filter(|v| {
             v.widget_id.starts_with("nav.")

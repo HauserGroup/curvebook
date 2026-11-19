@@ -1,12 +1,13 @@
 # Standalone release pipeline: every push to `release` builds installers for every platform and
 # creates or updates a draft GitHub Release. Manual runs default to Alpha prereleases
-# with ad-hoc macOS signing and unsigned Windows packages. SemVer pre-release versions
-# (for example tag v0.1.0-rc.1) are always drafted as prereleases (packaging/release-channel.sh).
+# with ad-hoc macOS signing and unsigned Windows packages. Non-Alpha, non-schedule macOS runs
+# fail closed when signing or notarization credentials are missing (R8.10). SemVer pre-release
+# versions (for example tag v0.1.0-rc.1) are always drafted as prereleases (packaging/release-channel.sh).
 # See docs/release/releasing.md.
 name: Release
 
 on:
-  # Nightly dry run on main: builds release packages (except macOS notarization) without publishing.
+  # Nightly dry run on main: builds release packages (except macOS) without publishing.
   schedule:
     - cron: "37 3 * * *"
   push:
@@ -195,55 +196,45 @@ jobs:
           name: third-party-licenses
           path: licenses
       - name: Install Linux build & packaging dependencies
-        env:
-          MATRIX_ARCH: ${{ matrix.arch }}
         run: |
           set -euo pipefail
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev \
             libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers \
-            libgl1-mesa-dev desktop-file-utils appstream flatpak flatpak-builder fuse3 zsync
-          if [ "$MATRIX_ARCH" = "aarch64" ]; then
-            nfpm_arch="arm64"
-            nfpm_sha256="17350a838c8e2c422c6e573ed379b18424565d2de8a2b1cb1b20211976124eb5"
-          else
-            nfpm_arch="x86_64"
-            nfpm_sha256="b3cf95aa6dabed836d09ad7f0c190a13c74c5b1304db60846f0f702ee407f430"
-          fi
-          nfpm_tarball="$RUNNER_TEMP/nfpm_2.41.1_Linux_${nfpm_arch}.tar.gz"
-          curl -fsSL "https://github.com/goreleaser/nfpm/releases/download/v2.41.1/nfpm_2.41.1_Linux_${nfpm_arch}.tar.gz" -o "$nfpm_tarball"
-          printf '%s  %s\n' "$nfpm_sha256" "$nfpm_tarball" | sha256sum --check
-          sudo tar -xzf "$nfpm_tarball" -C /usr/local/bin nfpm
-          rm -f "$nfpm_tarball"
+            libgl1-mesa-dev desktop-file-utils appstream fuse3 squashfs-tools
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.99.1"
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Build Linux packages
+      - name: Build Linux AppImage
         env:
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
-          CURVEBOOK_MAINTAINER: ${{ vars.CURVEBOOK_MAINTAINER }}
         run: |
           if [ -n "${INPUT_VERSION:-}" ]; then
             export CURVEBOOK_VERSION="$INPUT_VERSION"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
             export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
           fi
-          if [ -n "$(printf '%s' "${CURVEBOOK_MAINTAINER:-}" | tr -d '[:space:]')" ]; then
-            ./packaging/linux/package.sh
-          else
-            echo "::warning::CURVEBOOK_MAINTAINER is unset; building appimage and tar only (skipping deb/rpm)"
-            ./packaging/linux/package.sh --formats "appimage tar"
-          fi
-          ./packaging/linux/flatpak-bundle.sh --no-test
+          ./packaging/linux/package.sh
+          ./packaging/linux/apprun-test.sh
+      - name: Scan Linux release assets
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: cargo run --locked -p xtask -- release-scan --no-checksums --report "dist/scan-report-linux-$MATRIX_ARCH.json" dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-linux-${{ matrix.arch }}
           path: dist/release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-report-linux-${{ matrix.arch }}
+          path: dist/scan-report-linux-*.json
+          if-no-files-found: error
 
   macos:
     name: macOS universal
@@ -268,7 +259,7 @@ jobs:
           toolchain: "1.99.1"
           targets: aarch64-apple-darwin, x86_64-apple-darwin
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-      - name: Import macOS signing certificate (when configured)
+      - name: Import macOS Developer ID signing certificate
         if: inputs.alpha != true
         env:
           APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
@@ -277,11 +268,20 @@ jobs:
         run: |
           set -euo pipefail
           if [[ -z "${APPLE_CERTIFICATE:-}" ]]; then
-            echo "No APPLE_CERTIFICATE configured; using ad-hoc signing."
-            exit 0
+            echo "error: APPLE_CERTIFICATE secret is required for non-Alpha macOS release builds" >&2
+            exit 1
+          fi
+          if [[ -z "${APPLE_CERTIFICATE_PASSWORD:-}" ]]; then
+            echo "error: APPLE_CERTIFICATE_PASSWORD secret is required for non-Alpha macOS release builds" >&2
+            exit 1
+          fi
+          if [[ -z "${KEYCHAIN_PASSWORD:-}" ]]; then
+            echo "error: KEYCHAIN_PASSWORD secret is required for non-Alpha macOS release builds" >&2
+            exit 1
           fi
           kc="$RUNNER_TEMP/curvebook-signing.keychain-db"
           cert="$RUNNER_TEMP/cert.p12"
+          trap 'rm -f "$cert"' EXIT
           printf '%s' "$APPLE_CERTIFICATE" | base64 --decode > "$cert"
           security create-keychain -p "$KEYCHAIN_PASSWORD" "$kc"
           security set-keychain-settings -lut 21600 "$kc"
@@ -298,11 +298,14 @@ jobs:
           done < <(security list-keychains -d user)
           security list-keychains -d user -s "$kc" "${existing_kcs[@]}"
           security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" "$kc"
-          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' 'NR==1{print $2}')"
+          identity="$(security find-identity -v -p codesigning "$kc" | awk -F'"' '/Developer ID Application/ {print $2; exit}')"
+          if [[ -z "$identity" ]]; then
+            echo "error: no Developer ID Application codesigning identity found in imported certificate" >&2
+            exit 1
+          fi
           echo "MACOS_KEYCHAIN=$kc" >> "$GITHUB_ENV"
           echo "MACOS_SIGN_IDENTITY=$identity" >> "$GITHUB_ENV"
-          rm -f "$cert"
-      - name: Build macOS universal DMG & CLI zip
+      - name: Build and verify macOS universal DMG
         env:
           ALPHA_RELEASE: ${{ inputs.alpha }}
           INPUT_VERSION: ${{ inputs.version }}
@@ -312,6 +315,7 @@ jobs:
           APPLE_PASSWORD: ${{ !inputs.alpha && secrets.APPLE_PASSWORD || '' }}
           APPLE_TEAM_ID: ${{ !inputs.alpha && secrets.APPLE_TEAM_ID || '' }}
         run: |
+          set -euo pipefail
           if [ -n "${INPUT_VERSION:-}" ]; then
             export CURVEBOOK_VERSION="$INPUT_VERSION"
           elif [ "${GITHUB_REF_TYPE:-}" = "tag" ] && [ "${GITHUB_REF_NAME#v}" != "$GITHUB_REF_NAME" ]; then
@@ -319,15 +323,32 @@ jobs:
           fi
           if [ "${ALPHA_RELEASE:-}" = "true" ]; then
             export MACOS_SIGN_IDENTITY="-"
-          fi
-          ./packaging/macos/package.sh --arch universal
-          if [ "${ALPHA_RELEASE:-}" = "true" ]; then
+            ./packaging/macos/package.sh --arch universal
             ./packaging/macos/verify.sh --arch universal
+          else
+            if [[ -z "${MACOS_SIGN_IDENTITY:-}" ]] || [[ "${MACOS_SIGN_IDENTITY:-}" = "-" ]]; then
+              echo "error: MACOS_SIGN_IDENTITY is required for non-Alpha macOS release builds" >&2
+              exit 1
+            fi
+            if [[ -z "${APPLE_ID:-}" ]] || [[ -z "${APPLE_PASSWORD:-}" ]] || [[ -z "${APPLE_TEAM_ID:-}" ]]; then
+              echo "error: APPLE_ID, APPLE_PASSWORD, and APPLE_TEAM_ID secrets are required for non-Alpha macOS notarization" >&2
+              exit 1
+            fi
+            ./packaging/macos/package.sh --arch universal --require-signing
+            ./packaging/macos/verify.sh --arch universal --require-notarized
           fi
+      - name: Scan macOS release assets
+        run: cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-macos-universal.json dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-macos-universal
           path: dist/release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-report-macos-universal
+          path: dist/scan-report-macos-universal.json
+          if-no-files-found: error
 
   windows:
     name: Windows (${{ matrix.arch }})
@@ -335,7 +356,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        arch: [x64, x86, arm64]
+        arch: [x64, arm64]
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -353,7 +374,7 @@ jobs:
         uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
         with:
           toolchain: "1.99.1"
-          targets: x86_64-pc-windows-msvc, i686-pc-windows-msvc, aarch64-pc-windows-msvc
+          targets: x86_64-pc-windows-msvc, aarch64-pc-windows-msvc
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install WiX v5
         shell: pwsh
@@ -363,21 +384,21 @@ jobs:
           $tools >> $env:GITHUB_PATH
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.UI.wixext/5.0.2
           & (Join-Path $tools 'wix.exe') extension add -g WixToolset.Util.wixext/5.0.2
-      - name: Build Windows MSI & portable zip
+      - name: Build Windows MSI
         shell: pwsh
         env:
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
           GITHUB_REF_NAME: ${{ github.ref_name }}
           MATRIX_ARCH: ${{ matrix.arch }}
-          WINDOWS_CERTIFICATE: ${{ !inputs.alpha && secrets.WINDOWS_CERTIFICATE || '' }}
-          WINDOWS_CERTIFICATE_PASSWORD: ${{ !inputs.alpha && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
-          AZURE_TENANT_ID: ${{ !inputs.alpha && secrets.AZURE_TENANT_ID || '' }}
-          AZURE_CLIENT_ID: ${{ !inputs.alpha && secrets.AZURE_CLIENT_ID || '' }}
-          AZURE_CLIENT_SECRET: ${{ !inputs.alpha && secrets.AZURE_CLIENT_SECRET || '' }}
-          AZURE_SIGNING_ENDPOINT: ${{ !inputs.alpha && secrets.AZURE_SIGNING_ENDPOINT || '' }}
-          AZURE_SIGNING_ACCOUNT: ${{ !inputs.alpha && secrets.AZURE_SIGNING_ACCOUNT || '' }}
-          AZURE_CERT_PROFILE: ${{ !inputs.alpha && secrets.AZURE_CERT_PROFILE || '' }}
+          WINDOWS_CERTIFICATE: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.WINDOWS_CERTIFICATE || '' }}
+          WINDOWS_CERTIFICATE_PASSWORD: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.WINDOWS_CERTIFICATE_PASSWORD || '' }}
+          AZURE_TENANT_ID: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_TENANT_ID || '' }}
+          AZURE_CLIENT_ID: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_CLIENT_ID || '' }}
+          AZURE_CLIENT_SECRET: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_CLIENT_SECRET || '' }}
+          AZURE_SIGNING_ENDPOINT: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_SIGNING_ENDPOINT || '' }}
+          AZURE_SIGNING_ACCOUNT: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_SIGNING_ACCOUNT || '' }}
+          AZURE_CERT_PROFILE: ${{ github.event_name != 'schedule' && !inputs.alpha && secrets.AZURE_CERT_PROFILE || '' }}
         run: |
           if ($env:INPUT_VERSION) {
             $env:CURVEBOOK_VERSION = $env:INPUT_VERSION
@@ -385,13 +406,26 @@ jobs:
             $env:CURVEBOOK_VERSION = $env:GITHUB_REF_NAME.Substring(1)
           }
           ./packaging/windows/package.ps1 -Arch $env:MATRIX_ARCH
+      - name: Scan Windows release assets
+        shell: pwsh
+        env:
+          MATRIX_ARCH: ${{ matrix.arch }}
+        run: |
+          cargo run --locked -p xtask -- release-scan --no-checksums --report "dist/scan-report-windows-$env:MATRIX_ARCH.json" dist/release
+          if ($LASTEXITCODE -ne 0) { throw 'Windows release-scan failed' }
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-windows-${{ matrix.arch }}
           path: dist/release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-report-windows-${{ matrix.arch }}
+          path: dist/scan-report-windows-*.json
+          if-no-files-found: error
 
   web:
-    name: WebAssembly bundle
+    name: WebAssembly bundle verification (omitted from Beta release assets)
     needs: [git-sources, credits, licenses]
     runs-on: ubuntu-latest
     steps:
@@ -410,7 +444,7 @@ jobs:
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - name: Install Trunk
         run: cargo install trunk --locked --version 0.22.1
-      - name: Package WebAssembly app
+      - name: Package and verify WebAssembly bundle budget
         env:
           INPUT_VERSION: ${{ inputs.version }}
           GITHUB_REF_TYPE: ${{ github.ref_type }}
@@ -422,10 +456,13 @@ jobs:
             export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
           fi
           ./packaging/web/package.sh
+          CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo run --locked -p xtask -- web-bundle
+          cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-web.json dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: release-web
-          path: dist/release/*
+          name: scan-report-web
+          path: dist/scan-report-web.json
+          if-no-files-found: error
 
   freebsd:
     name: FreeBSD x86_64
@@ -465,10 +502,23 @@ jobs:
               export CURVEBOOK_VERSION="${GITHUB_REF_NAME#v}"
             fi
             bash ./packaging/freebsd/package.sh
+      - name: Install Rust toolchain on host for release-scan
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+      - name: Scan FreeBSD release assets on Ubuntu host
+        run: cargo run --locked -p xtask -- release-scan --no-checksums --report dist/scan-report-freebsd-x86_64.json dist/release
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: release-freebsd-x86_64
           path: dist/release/*
+          if-no-files-found: error
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: scan-report-freebsd-x86_64
+          path: dist/scan-report-freebsd-x86_64.json
+          if-no-files-found: error
 
   publish:
     name: Draft GitHub Release
@@ -483,6 +533,15 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+      - name: Install SquashFS tools for release-scan
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends squashfs-tools
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@df2a88e9fe4098bad09cb42c3dec7187f15861fc # master
+        with:
+          toolchain: "1.99.1"
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           pattern: release-*
@@ -492,7 +551,12 @@ jobs:
         with:
           name: third-party-licenses
           path: dist/release
-      - name: Verify version parity and generate SHA256SUMS.txt
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: scan-report-*
+          path: dist/scan-reports
+          merge-multiple: true
+      - name: Verify version parity, generate SHA256SUMS.txt, and run release-scan
         id: release_meta
         env:
           INPUT_VERSION: ${{ inputs.version }}
@@ -524,6 +588,11 @@ jobs:
             mv ../SHA256SUMS.txt.tmp SHA256SUMS.txt
             sha256sum --check SHA256SUMS.txt
           )
+          cargo run --locked -p xtask -- release-scan \
+            --expect-beta-set "$ver" \
+            --cross-os-reports dist/scan-reports \
+            --report dist/release-scan-publish.json \
+            dist/release
           echo "tag=v$ver" >> "$GITHUB_OUTPUT"
           # SemVer pre-release versions (-alpha.N, -beta.N, -rc.N) are always GitHub prereleases.
           ./packaging/release-channel.sh "$ver" "${ALPHA_RELEASE:-}" >> "$GITHUB_OUTPUT"
@@ -610,4 +679,4 @@ jobs:
             gh release create "$tag" dist/release/* "${release_flags[@]}" --target "$GITHUB_SHA" --generate-notes
           fi
           url="$(gh release view "$tag" --json url --jq .url)"
-          printf '### Draft release\n\n[%s](%s)\n\nInstallers, Linux packages, the WASM ZIP, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"
+          printf '### Draft release\n\n[%s](%s)\n\nInstallers (macOS DMG, Windows MSI), Linux AppImage, FreeBSD preview archive, licence disclosures, and SHA256SUMS.txt are attached under **Assets**. This draft is not publicly published.\n' "$title" "$url" >> "$GITHUB_STEP_SUMMARY"

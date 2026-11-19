@@ -80,125 +80,199 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use crate::error::FitError;
 use crate::types::{DataPoint, validated_replicate_moments};
 
-/// Asymptotic covariance, standard errors, symmetric CIs, correlation matrix, and parameter dependency.
+/// Asymptotic covariance, standard errors, symmetric CIs, correlation matrix, and parameter dependency
+/// (Bates & Watts 1988, §2.1; Motulsky & Christopoulos 2004).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct CovarianceDiagnostics {
+    /// Asymptotic parameter standard errors $\sqrt{\mathrm{Cov}_{jj}}$ (`NaN` when variance matrix is unavailable or unidentifiable).
     pub standard_errors: Vec<f64>,
+    /// Lower bounds of symmetric asymptotic $t_{\alpha/2,\nu}$ Wald confidence intervals at the configured `ConfidenceLevel` (`NaN` when SE is unavailable).
     pub symmetric_ci_lower: Vec<f64>,
+    /// Upper bounds of symmetric asymptotic $t_{\alpha/2,\nu}$ Wald confidence intervals at the configured `ConfidenceLevel` (`NaN` when SE is unavailable).
     pub symmetric_ci_upper: Vec<f64>,
+    /// Linearized asymptotic variance–covariance matrix $s^2 (J^\top J)^{-1}$ over free parameters.
     pub covariance_matrix: Vec<Vec<f64>>,
+    /// Symmetric parameter correlation matrix $R_{ij} = \mathrm{Cov}_{ij} / \sqrt{\mathrm{Cov}_{ii}\mathrm{Cov}_{jj}}$ in `[-1, 1]` (`NaN` on zero-variance slots).
     pub correlation_matrix: Vec<Vec<f64>>,
+    /// Parameter collinearity dependency index $1 - 1 / ((J^\top J)^{-1}_{jj} (J^\top J)_{jj})$ in `[0, 1]` (`NaN` on unidentifiable fits; `> 0.9999` marks [`crate::FitStatus::Ambiguous`]).
     pub dependencies: Vec<f64>,
+    /// Numerical column rank of the weighted Jacobian $J$ estimated via SVD singular-value tolerance.
     pub numerical_rank: usize,
+    /// True when the Jacobian is rank-deficient or any parameter has `dependency > 0.9999`.
     pub ambiguous: bool,
 }
 
-/// Model comparison outcome via Extra-Sum-of-Squares *F*-test.
+/// Model comparison outcome via Extra-Sum-of-Squares *F*-test (Motulsky & Christopoulos 2004, Ch. 21).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct ExtraSumOfSquaresResult {
+    /// Extra-sum-of-squares *F*-ratio $((\mathrm{SS}_{\text{null}} - \mathrm{SS}_{\text{alt}}) / \mathrm{df}_{\text{num}}) / (\mathrm{SS}_{\text{alt}} / \mathrm{df}_{\text{den}})$.
     pub f_stat: f64,
+    /// Numerator degrees of freedom $\mathrm{df}_{\text{null}} - \mathrm{df}_{\text{alt}}$ (difference in free parameters).
     pub df_num: usize,
+    /// Denominator residual degrees of freedom $\mathrm{df}_{\text{alt}}$ of the more complex model.
     pub df_den: usize,
+    /// Upper-tail *F* distribution *P* value testing the null hypothesis that the simpler model is correct.
     pub p_value: f64,
+    /// True when `p_value < alpha` (`1 - confidence`), favoring the more complex alternative model.
     pub preferred_complex_model: bool,
 }
 
-/// Corrected Akaike Information Criterion ($\text{AIC}_c$) and Bayesian Information Criterion ($\text{BIC}$) summary.
+/// Corrected Akaike Information Criterion ($\text{AIC}_c$) and Bayesian Information Criterion ($\text{BIC}$) summary
+/// (Burnham & Anderson 2002; Schwarz 1978).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InformationCriteria {
+    /// Small-sample corrected Akaike Information Criterion $\text{AIC}_c$ computed under least-squares Gaussian or Poisson deviance likelihood (includes residual variance $\sigma^2$ in Gaussian $K$).
     pub aicc: f64,
+    /// Schwarz Bayesian Information Criterion $\text{BIC}$.
     pub bic: f64,
+    /// Number of active observations $N$ included in the likelihood evaluation.
     pub n_obs: usize,
+    /// Effective free parameter count $K$ counted in the penalty term ($k_{\text{free}} + 1$ for Gaussian least squares to account for estimated $\sigma^2$, or $k_{\text{free}}$ for fixed-scale Poisson).
     pub k_params_plus_sigma: usize,
 }
 
-/// Pairwise $\text{AIC}_c$ comparison between two models evaluated on identical observations.
+/// Pairwise $\text{AIC}_c$ comparison between two models evaluated on identical observations
+/// (Burnham & Anderson 2002, §2.9).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct AiccComparisonResult {
+    /// Corrected AIC value $\text{AIC}_{c,A}$ for candidate model `0`.
     pub aicc_a: f64,
+    /// Corrected AIC value $\text{AIC}_{c,B}$ for candidate model `1`.
     pub aicc_b: f64,
+    /// Absolute difference $|\text{AIC}_{c,A} - \text{AIC}_{c,B}| \ge 0$ (lower AICc is better).
     pub delta_aicc: f64,
+    /// Akaike relative model weight $w_A \in [0, 1]$ with $w_A + w_B = 1$.
     pub weight_a: f64,
+    /// Akaike relative model weight $w_B \in [0, 1]$ with $w_A + w_B = 1$.
     pub weight_b: f64,
+    /// Relative evidence ratio $\max(w_A, w_B) / \min(w_A, w_B) \ge 1$ in favor of the preferred model (`f64::INFINITY` when underflowed).
     pub evidence_ratio: f64,
+    /// Zero-based index of the preferred model (`0` if `aicc_a <= aicc_b`, else `1`).
     pub preferred_index: usize,
 }
 
-/// Runs test for systematic deviation from a fitted curve.
+/// Wald–Wolfowitz runs test for systematic curve-vs-data deviation along sorted `X`
+/// (Wald & Wolfowitz 1940; Motulsky & Christopoulos 2004, Ch. 24).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RunsTestResult {
+    /// Observed count of contiguous same-sign residual runs (zeros dropped per Wald–Wolfowitz).
     pub runs: usize,
+    /// Number of strictly positive residuals (`y - y_hat > 0`).
     pub n_above: usize,
+    /// Number of strictly negative residuals (`y - y_hat < 0`).
     pub n_below: usize,
+    /// Expected number of runs $1 + 2 n_{\text{above}} n_{\text{below}} / (n_{\text{above}} + n_{\text{below}})$ under independence.
     pub expected_runs: f64,
+    /// Exact lower-tail probability $P(R \le r_{\text{obs}})$ that residuals cluster into too few runs (`1.0` when degenerate).
     pub p_too_few_runs: f64,
+    /// Exact two-sided probability of observing a run count at least as extreme as `runs` relative to `expected_runs`.
     pub p_two_sided: f64,
+    /// True when `p_too_few_runs < 0.05` (standard 5% non-randomness clustering threshold).
     pub deviates_significantly: bool,
 }
 
-/// Replicates test for lack of fit (pure error vs lack of fit).
+/// Replicates test for lack of fit partitioning residual SS into pure error vs lack of fit
+/// (Draper & Smith 1998, §2.5; Motulsky & Christopoulos 2004).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LackOfFitResult {
+    /// Pure-error sum of squares within shared-`X` replicate groups in original/weighted fit scale.
     pub ss_pure_error: f64,
+    /// Pure-error degrees of freedom $\sum_g (n_g - 1)$.
     pub df_pure_error: usize,
+    /// Lack-of-fit sum of squares $\mathrm{SS}_{\text{res}} - \mathrm{SS}_{\text{pure\_error}}$.
     pub ss_lack_of_fit: f64,
+    /// Lack-of-fit degrees of freedom $\mathrm{df}_{\text{res}} - \mathrm{df}_{\text{pure\_error}}$.
     pub df_lack_of_fit: usize,
+    /// Mean-square ratio $(\mathrm{SS}_{\text{LOF}} / \mathrm{df}_{\text{LOF}}) / (\mathrm{SS}_{\text{PE}} / \mathrm{df}_{\text{PE}})$.
     pub f_stat: f64,
+    /// Upper-tail *F*-distribution *P* value testing adequacy of the functional form (`1.0` if `f_stat <= 0`).
     pub p_value: f64,
+    /// True when `p_value < 0.05`, indicating statistically significant lack of fit.
     pub significant_lack_of_fit: bool,
 }
 
-/// Normality test result on regression residuals.
+/// Omnibus residual normality test result (e.g. D'Agostino–Pearson $K^2$, Anderson–Darling $A^2$, or Lilliefors KS).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct NormalityTestResult {
+    /// Diagnostic test name (`"D'Agostino-Pearson K^2"`, `"Anderson-Darling"`, or `"Lilliefors (Kolmogorov-Smirnov)"`).
     pub test_name: String,
+    /// Test statistic value in the native scale of `test_name` (dimensionless).
     pub statistic: f64,
+    /// Two-sided / upper-tail *P* value against normality; values below alpha reject Gaussian residuals.
     pub p_value: f64,
+    /// True when `p_value >= 0.05` (residuals are consistent with normality at the 5% level).
     pub passed: bool,
 }
 
-/// Model comparison outcome via Likelihood Ratio Test (`D = 2(ln L_alt - ln L_null)` chi-square test).
+/// Model comparison outcome via Likelihood Ratio Test ($D = 2(\ln L_{\text{alt}} - \ln L_{\text{null}})$ chi-square test;
+/// Neyman & Pearson 1928; Wilks 1938).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LikelihoodRatioResult {
+    /// Likelihood-ratio chi-square test statistic $2(\ln L_{\text{alt}} - \ln L_{\text{null}}) \ge 0$.
     pub lr_statistic: f64,
+    /// Difference in free parameters $\mathrm{df}_{\text{null}} - \mathrm{df}_{\text{alt}}$ (chi-square degrees of freedom).
     pub df_diff: usize,
+    /// Residual degrees of freedom of the simpler nested null model.
     pub df_null: usize,
+    /// Residual degrees of freedom of the richer alternative model.
     pub df_alt: usize,
+    /// Upper-tail $\chi^2(\mathrm{df}_{\text{diff}})$ *P* value testing the simpler null model.
     pub p_value: f64,
+    /// True when `p_value < alpha` (`1 - confidence`), favoring the more complex model.
     pub preferred_complex_model: bool,
 }
 
-/// Residual homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`.
+/// Residual homoscedasticity check via Spearman rank correlation between `|residual|` and predicted `Y`
+/// (Spearman 1904; Motulsky & Christopoulos 2004).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct HomoscedasticityResult {
+    /// Spearman rank correlation coefficient $\rho \in [-1, 1]$ between $|r_i|$ (or weighted $|r_i|$) and $\hat{y}_i$.
     pub spearman_rho: f64,
+    /// Student *t* approximation statistic $\rho \sqrt{\mathrm{df} / (1 - \rho^2)}$ (`0.0` at $\rho = 0$, large finite/inf when $|\rho| = 1$).
     pub statistic_t: f64,
+    /// Degrees of freedom `n_obs - 2` (`>= 1`).
     pub df: usize,
+    /// Two-sided *P* value from the $t(\mathrm{df})$ distribution testing zero rank trend in residual magnitude.
     pub p_value: f64,
+    /// True when `p_value >= 0.05` (no significant evidence of heteroscedasticity at the 5% level).
     pub homoscedastic: bool,
 }
 
-/// Per-point ROUT outlier audit entry.
+/// Per-point ROUT outlier audit entry (Motulsky & Brown, *BMC Bioinformatics* 2006).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoutPointAudit {
+    /// Zero-based position in the flattened active observation vector fed to the solver.
     pub index: usize,
+    /// Originating zero-based dataset index (`0 = A`, `1 = B`, ...).
     pub data_set_index: usize,
+    /// Originating zero-based table row index within `data_set_index`.
     pub row: usize,
+    /// Primary predictor coordinate $x_0$ at this observation.
     pub x0: f64,
+    /// Observed response $y_i$ in original table units.
     pub y: f64,
+    /// Robust raw residual $y_i - \hat{y}_{\text{robust}, i}$ in original $Y$ units.
     pub residual: f64,
+    /// Two-sided Student *t* outlier *P* value $|r_i| / \text{RSDR}$ on `df` degrees of freedom.
     pub p_value: f64,
+    /// Benjamini–Hochberg FDR-adjusted *q* value in `[0, 1]` across all observations evaluated together.
     pub q_value: f64,
+    /// True if this observation was flagged as an outlier (`q_value <= q_threshold_percent / 100`) and excluded.
     pub is_outlier: bool,
 }
 
 /// Result of nonlinear ROUT outlier detection (`Motulsky & Brown 2006`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct RoutDetectionResult {
+    /// Robust Standard Deviation of Residuals (`RSDR`) computed from the 68.27th percentile of $|r_i|$ times $n / (n - k_{\text{free}})$.
     pub rsdr: f64,
+    /// Residual degrees of freedom `n_obs - k_free` used for Student *t* outlier *P* values.
     pub df: usize,
+    /// Configured false-discovery-rate threshold $Q$ in percent (e.g. `1.0` for `Q = 1%`).
     pub q_threshold_percent: f64,
+    /// Sorted flattened indices into the active observation list identified as outliers.
     pub outlier_indices: Vec<usize>,
+    /// Complete per-point residual, *P* value, FDR *q* value, and exclusion flag audit trail.
     pub audit: Vec<RoutPointAudit>,
 }
 

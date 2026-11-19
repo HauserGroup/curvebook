@@ -395,6 +395,9 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut ToolbarMenusViewState, 
     if payload == "project.open_browser" {
         dismiss_context_overlays(app, state);
         app.nav.gallery.open = !app.nav.gallery.open;
+        if app.nav.gallery.open {
+            app.nav.sync_gallery(app.session.document());
+        }
         state.last_toolbar_notice = Some(String::from(if app.nav.gallery.open { "Opened project gallery" } else { "Closed project gallery" }));
         return Ok(UiEventOutcome { handled: true, action: String::from("toolbar.open_browser"), ..Default::default() });
     }
@@ -1887,7 +1890,24 @@ pub fn build_open_menu_popup(builder: &mut LayoutBuilder<'_>, menu_key: &str, to
         return;
     };
     let mut items = section.items;
-    if menu_key == "menu.graph" {
+    if menu_key == "menu.file" {
+        let save_as_label = crate::i18n::tr(&builder.app.locale, "menu.file.save_as");
+        let save_as_tip = crate::menus::CommandTooltip {
+            command_id: "file.save_as",
+            label: "Save As...",
+            localized_label: if save_as_label.is_empty() { "Save As..." } else { save_as_label },
+            shortcut: String::from("Cmd+Shift+S"),
+            summary: "Save a copy of the active project under a new path or archive format.",
+            beginner: "Choose a destination file path without overwriting the original project path.",
+            menu_path: "File/Save As...",
+            enabled: true,
+            read_only: true,
+            destructive: false,
+            needs_consent: false,
+        };
+        let insert_pos = items.iter().position(|it| it.command_id == "project.save").map_or(items.len(), |idx| idx + 1);
+        items.insert(insert_pos, save_as_tip);
+    } else if menu_key == "menu.graph" {
         let existing_idx = items.iter().position(|it| it.command_id == "ui.applyStyleFrom.open");
         let tip_opt = existing_idx.map(|idx| items.remove(idx)).or_else(|| command_tooltip(builder.app, "ui.applyStyleFrom.open"));
         if let Some(tip) = tip_opt {
@@ -2502,18 +2522,25 @@ pub fn build_status_bar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx
         let notice_tag = builder.app.view_shards.toolbar_menus.last_toolbar_notice.as_deref().map(|n| format!(" | {n}")).unwrap_or_default();
 
         let summary = if let Some(qs) = &builder.app.grid.quick_stats
-            && qs.numeric_count > 0
+            && (qs.numeric_count > 0 || qs.excluded_count > 0)
         {
-            if let Some(mean) = qs.mean {
-                format!(
-                    "{active_title} ({}){frozen_tag} | n={} | excl={} | mean={mean:.3}{notice_tag}",
-                    ctx.badge(),
-                    qs.numeric_count,
-                    qs.excluded_count
-                )
-            } else {
-                format!("{active_title} ({}){frozen_tag} | n={} | excl={}{notice_tag}", ctx.badge(), qs.numeric_count, qs.excluded_count)
-            }
+            let fmt_stat = |label: &str, value: Option<f64>| -> String {
+                match value {
+                    Some(v) if v.is_finite() => format!("{label}={v:.3}"),
+                    _ => format!("{label}=--"),
+                }
+            };
+            format!(
+                "{active_title} ({}){frozen_tag} | n={} | excl={} | {} | {} | {} | {} | {}{notice_tag}",
+                ctx.badge(),
+                qs.numeric_count,
+                qs.excluded_count,
+                fmt_stat("mean", qs.mean),
+                fmt_stat("SD", qs.sd),
+                fmt_stat("SEM", qs.sem),
+                fmt_stat("median", qs.median),
+                fmt_stat("sum", qs.sum),
+            )
         } else {
             format!(
                 "{active_title} ({}){frozen_tag} | Zoom {:.0}% | {} | {:?}{notice_tag}",

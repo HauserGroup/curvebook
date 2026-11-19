@@ -12,6 +12,7 @@ mod contributors;
 mod corpus;
 mod coverage;
 mod cursors;
+mod docs_site;
 mod ico;
 mod json;
 mod layers;
@@ -58,6 +59,8 @@ commands:
   ui-commands [--check] sync (or verify) crates/mcp/src/ui_catalog.rs from crates/ui-egui
   commands [--check]    regenerate (or verify) docs/commands.md from curvebook-engine
   schemas [--check]     regenerate (or verify) docs/schemas/*.schema.json from curvebook-format
+  docs-site [--check] [--output <dir>] [--release <ver>]
+                        build (or verify) the static GitHub Pages documentation site
   wasm                  check + clippy (-D warnings) wasm32 targets, trunk web-release build, and web bundle readiness
   web-bundle            verify web bundle readiness and R10.22 zip size budget (CURVEBOOK_REQUIRE_WEB_BUNDLE=1 requires zip)
   corpus [--fetch]      run offline corpus & NIST StRD suites (optionally fetch corpus/nist-strd)
@@ -114,6 +117,7 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
         "commands" => commands::run_cli(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
+        "docs-site" => docs_site::run_cli(&root, rest),
         "wasm" => cmd_wasm(&root),
         "web-bundle" => web_fonts::run_bundle_check(&root, rest),
         "corpus" => corpus::run(&root, rest),

@@ -51,6 +51,8 @@
 //!
 //! Reference: Brent, R. P. (1973). *Algorithms for Minimization without Derivatives*. Prentice-Hall.
 
+mod identifiability;
+
 use curvebook_doc::{CiBound, CurveSamplePoint, FitMethod, FittedCurveOverlay, ModelComparisonSpec, ParameterRule, ParameterScope, WeightingScheme};
 use curvebook_math::ConfidenceLevel;
 use curvebook_math::dist::{f_sf, norm_two_sided_isf, student_t_two_sided_isf, student_t_two_sided_p};
@@ -67,35 +69,59 @@ use crate::diagnostics::{
     compute_rsdr, dagostino_pearson_test, homoscedasticity_spearman_test, lilliefors_ks_test, runs_test, shapiro_wilk_test,
 };
 use crate::dsl::{DEFAULT_MAX_ODE_STEPS_PER_FIT, enter_ode_fit_budget, ode_fit_budget_exceeded};
-use crate::error::{FitError, FitStatus, ParameterNote};
+use crate::error::{FitError, FitIdentifiability, FitStatus, ParameterNote};
 use crate::library::ParametricModel;
 use crate::types::{
     DataPoint, DatasetSeries, DerivedScalar, HookContext, filter_datasets_by_range, parse_leading_number, validated_replicate_moments,
 };
+use identifiability::Assessment;
 
 /// Configuration for executing nonlinear regression via [`fit_nonlinear`].
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SolverConfig {
+    /// Fitting objective method (`LeastSquares`, `PoissonDeviance`, `RobustCauchy`, or `RoutOutlierElimination`).
     pub method: FitMethod,
+    /// Variance weighting scheme (`None`, `OneOverY`, `OneOverY2`, `OneOverSd2`, `OneOverX`, `OneOverX2`, `OneOverSema`, `UserSupplied`).
     pub weighting: WeightingScheme,
+    /// Per-parameter sharing scopes, constants, hooks, initial overrides, and inclusive box bounds.
     pub parameter_rules: Vec<ParameterRule>,
+    /// Two-sided confidence level for Wald, profile-likelihood, and band intervals (default `0.95` / 95%).
     pub confidence: ConfidenceLevel,
+    /// Maximum Levenberg–Marquardt trust-region / IRLS outer iterations before reporting `FitStatus::HitMaxIters`.
     pub max_iters: usize,
+    /// Compute profile-likelihood confidence intervals (Venzon & Moolgavkar 1988) instead of only symmetric Wald intervals.
     pub compute_profile_ci: bool,
+    /// Assess free-parameter identifiability (`FitIdentifiability` and `ParameterNote::Unstable`).
+    pub identify_unstable_parameters: bool,
+    /// Compute Hougaard skewness `|g1|` per free parameter (`Ratkowsky 1990`) via directional finite differences.
     pub compute_hougaard: bool,
+    /// Compute smooth mean-response confidence bands along `FittedCurveOverlay`.
     pub compute_bands: bool,
+    /// Include future single-observation variance inside curve overlay bands (`95%` prediction bands in addition to confidence bands).
     pub compute_prediction_bands: bool,
+    /// Run Wald–Wolfowitz runs test on sorted residuals.
     pub compute_runs_test: bool,
+    /// Run pure-error vs lack-of-fit *F*-test when replicate observations share identical predictor coordinates.
     pub compute_lack_of_fit: bool,
+    /// Run residual normality tests (D'Agostino–Pearson $K^2$, Anderson–Darling, Lilliefors KS).
     pub compute_normality: bool,
+    /// Run Spearman rank homoscedasticity check on `|residual|` vs predicted `Y`.
     pub compute_homoscedasticity: bool,
+    /// Interpolate unknown `Y` and/or `X` points found in input series (`unknowns_y` / `unknown_x`) with Fieller/delta CIs and calibration PIs.
     pub interpolate_unknowns: bool,
+    /// Run a Nelder–Mead simplex warm-start rescue when heuristic initial parameter values produce non-finite residuals or poor initial fit.
     pub use_simplex_warm_start: bool,
+    /// Optional inclusive `(min_x, max_x)` domain filter applied before fitting (`None` endpoints are unbounded).
     pub x_range_filter: Option<(Option<f64>, Option<f64>)>,
+    /// Optional inclusive `(min_y, max_y)` response filter applied before fitting (`None` endpoints are unbounded).
     pub y_range_filter: Option<(Option<f64>, Option<f64>)>,
+    /// Evaluate model curve overlay directly from fixed/initial parameters without optimizing free parameters (`0` iterations).
     pub plot_function_only: bool,
+    /// Optional lower `X` endpoint override for emitted `FittedCurveOverlay`; `None` uses observed data minimum.
     pub plot_x_min: Option<f64>,
+    /// Optional upper `X` endpoint override for emitted `FittedCurveOverlay`; `None` uses observed data maximum.
     pub plot_x_max: Option<f64>,
+    /// Number of grid segments used to sample smooth `FittedCurveOverlay` curves.
     pub curve_overlay_segments: usize,
 }
 
@@ -108,6 +134,7 @@ impl Default for SolverConfig {
             confidence: ConfidenceLevel::DEFAULT_95,
             max_iters: 1_000,
             compute_profile_ci: true,
+            identify_unstable_parameters: false,
             compute_hougaard: true,
             compute_bands: true,
             compute_prediction_bands: false,
@@ -233,23 +260,36 @@ impl InferenceAvailability {
 /// Fitted value for a single free parameter slot (local or globally shared).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedParameterSummary {
+    /// Zero-based index into the flattened free parameter vector `theta_free` and covariance matrix.
     pub slot_index: usize,
+    /// Parameter name matched against `ParametricModel::param_names`.
     pub name: String,
+    /// Originating zero-based dataset index for local parameters, or `None` when globally shared across datasets.
     pub dataset_index: Option<usize>,
+    /// Point estimate at convergence (subject to configured bounds).
     pub estimate: f64,
+    /// Linearized asymptotic standard error (`NaN` in `FitMethod::RobustCauchy` mode or rank-deficient fits).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub se: f64,
+    /// Lower bound of the two-sided profile-likelihood confidence interval (falls back to symmetric Wald or [`CiBound::Open`] if unbounded / `RobustCauchy`).
     pub ci_lower: CiBound,
+    /// Upper bound of the two-sided profile-likelihood confidence interval ([`CiBound::Open`] if unbounded / `RobustCauchy`).
     pub ci_upper: CiBound,
+    /// Lower bound of the symmetric asymptotic `t(df)` Wald confidence interval at configured `ConfidenceLevel` (`NaN` when SE unavailable).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub symmetric_ci_lower: f64,
+    /// Upper bound of the symmetric asymptotic `t(df)` Wald confidence interval at configured `ConfidenceLevel` (`NaN` when SE unavailable).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub symmetric_ci_upper: f64,
+    /// Parameter multicollinearity dependency index $1 - 1 / ((J^\top J)^{-1}_{jj} (J^\top J)_{jj}) \in [0, 1]$ (`NaN` when unidentifiable / `RobustCauchy`).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub dependency: f64,
+    /// Absolute Hougaard skewness measure $|g_1|$ assessing nonlinearity bias (`NaN` if uncomputed or `RobustCauchy`; `|g1| < 0.1` close-to-linear per Ratkowsky 1990).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub hougaard_g1: f64,
+    /// Diagnostic flags attached to this parameter (e.g. `HitLowerBound`, `Ambiguous`, `UnboundedCi`).
     pub notes: Vec<ParameterNote>,
+    /// Indicates whether parametric asymptotic SEs/CIs are populated or suppressed in `RobustCauchy` mode.
     #[serde(default)]
     pub inference_availability: InferenceAvailability,
 }
@@ -295,12 +335,18 @@ const fn default_open_ci_bound() -> CiBound {
 /// Interpolated unknown (`X` from `Y` or `Y` from `X`) with mean-response and calibration/prediction intervals.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct InterpolatedUnknown {
+    /// Zero-based dataset index where the unknown row originated.
     pub data_set_index: usize,
+    /// Zero-based table row index of the unknown observation.
     pub row: usize,
+    /// Known coordinate (`Y` for inverse `X`-from-`Y` interpolation, or `X` for forward `Y`-from-`X` prediction).
     pub input_value: f64,
+    /// Solved/evaluated point estimate (`NaN` when inversion fails or falls outside monotone bracket).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub output_estimate: f64,
+    /// Lower bound of the two-sided delta-method mean-response confidence interval (`CiBound::Open` when unestimable / `RobustCauchy`).
     pub ci_lower: CiBound,
+    /// Upper bound of the two-sided delta-method mean-response confidence interval (`CiBound::Open` when unestimable / `RobustCauchy`).
     pub ci_upper: CiBound,
     /// Lower bound of the single-observation calibration / prediction interval (new-observation variance included).
     #[serde(default = "default_open_ci_bound")]
@@ -308,7 +354,9 @@ pub struct InterpolatedUnknown {
     /// Upper bound of the single-observation calibration / prediction interval (new-observation variance included).
     #[serde(default = "default_open_ci_bound")]
     pub pred_upper: CiBound,
+    /// Optional human-readable warning when extrapolation, flat slope, or non-finite SE affected interpolation; `None` on nominal interior interpolation.
     pub note: Option<String>,
+    /// Indicates whether delta-method confidence/prediction intervals are populated or suppressed under `RobustCauchy`.
     #[serde(default)]
     pub inference_availability: InferenceAvailability,
 }
@@ -335,20 +383,31 @@ impl InterpolatedUnknown {
 /// `weighted_ss` (or Poisson deviance).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct FittedDatasetResult {
+    /// Zero-based dataset column index (`0 = A`, `1 = B`, ...).
     pub data_set_index: usize,
+    /// Dataset column label from the upstream table.
     pub label: String,
+    /// Full parameter vector `[theta_1, ..., theta_p]` ordered by `param_names` (including fixed and shared slots resolved for this dataset).
     pub params: Vec<f64>,
+    /// Ordered equation parameter names corresponding 1-to-1 with `params`.
     pub param_names: Vec<String>,
+    /// Inclusive X extent of the observations used in a scalar-predictor fit.
+    /// Absent for multivariate datasets, empty datasets, and plot-only evaluations.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub observed_x_range: Option<(f64, f64)>,
+    /// Fitted model predictions $\hat{y}_i$ at each included point in this dataset.
     pub y_hat: Vec<f64>,
+    /// Unweighted residuals $y_i - \hat{y}_i$ in original $Y$ units.
     pub residuals: Vec<f64>,
+    /// Objective-weighted residuals $\sqrt{w_i}(y_i - \hat{y}_i)$ (or signed deviance residuals for `PoissonDeviance`).
     pub weighted_residuals: Vec<f64>,
+    /// Internally studentized residuals $r_i / (\hat{\sigma}_w \sqrt{1 - h_{ii}})$ (`NaN` where leverage `h_ii >= 1` or under `RobustCauchy`).
     #[serde(default, deserialize_with = "deserialize_opt_f64_vec")]
     pub studentized_residuals: Vec<f64>,
     /// Unweighted residual sum of squares $\sum (y_i - \hat{y}_i)^2$ for this dataset in original $Y$ units.
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub ss_residual: f64,
-    /// Unweighted coefficient of determination $1 - \text{SS}_{\text{res}, d} / \text{SS}_{\text{tot}, d}$ in original $Y$ units.
-    /// Unweighted coefficient of determination $R^2 = 1 - \text{rss} / \text{TSS}$ in original $Y$ units
+    /// Unweighted coefficient of determination $1 - \text{SS}_{\text{res}, d} / \text{SS}_{\text{tot}, d}$ in original $Y$ units
     /// even when weighted least squares or Poisson deviance is active (Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
@@ -356,20 +415,27 @@ pub struct FittedDatasetResult {
     /// using the dataset's effective parameter count $k_{\text{eff}, d}$ (`NaN` in Robust Cauchy mode).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub sy_x: f64,
+    /// Robust Standard Deviation of Residuals (`RSDR`) when `RobustCauchy` or `RoutOutlierElimination` is active (`None` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
+    /// Sampled fitted curve polyline and optional two-sided confidence/prediction bands (`None` when `compute_bands` is `false` and overlay omitted).
     pub curve_overlay: Option<FittedCurveOverlay>,
 }
 
 /// Model comparison output (`Extra-SS F`, `AICc`, Likelihood Ratio Test, or `NotApplicableInRobustMode`).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub enum ModelComparisonOutcome {
+    /// Nested least-squares Extra-Sum-of-Squares *F*-test outcome.
     ExtraSumOfSquaresF(ExtraSumOfSquaresResult),
+    /// Information-theoretic $\text{AIC}_c$ weight and evidence-ratio comparison.
     Aicc(AiccComparisonResult),
+    /// Nested likelihood-ratio $\chi^2$ test (typically used for `PoissonDeviance` fits).
     LikelihoodRatioTest(LikelihoodRatioResult),
     /// Least-squares / likelihood model comparison is not applicable when either model uses Robust (Cauchy) regression.
     NotApplicableInRobustMode {
+        /// Identifier or label of the comparison test requested by the caller.
         requested_test: String,
+        /// Explanation of why statistical comparison is undefined in Robust (Cauchy) regression.
         reason: String,
     },
 }
@@ -394,9 +460,12 @@ impl ModelComparisonOutcome {
 /// Complete model comparison response pairing availability status, alternative fit, and comparison outcome.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ModelComparisonResult {
+    /// Indicates whether parametric model comparison inference is valid or suppressed in `RobustCauchy` mode.
     #[serde(default)]
     pub inference_availability: InferenceAvailability,
+    /// Statistical model comparison test result (`Extra-SS F`, `AICc`, `LRT`, or `NotApplicableInRobustMode`).
     pub outcome: ModelComparisonOutcome,
+    /// Complete fitted result for the alternative (second) candidate model compared against the baseline fit.
     pub alternative_fit: NonlinearFitResult,
 }
 
@@ -411,50 +480,80 @@ impl ModelComparisonResult {
 /// Complete nonlinear regression result across one or multiple globally fitted datasets.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct NonlinearFitResult {
+    /// Canonical equation identifier used for the fit (or custom DSL equation id).
     pub equation_id: String,
+    /// Human-readable display name of the equation.
     pub equation_name: String,
+    /// Objective/robustness method executed (`LeastSquares`, `PoissonDeviance`, `RobustCauchy`, or `RoutOutlierElimination`).
     #[serde(default = "default_fit_method")]
     pub fit_method: FitMethod,
+    /// Parametric inference availability flag (`NotApplicableInRobustMode` disables SE/CI/covariance/AICc reporting).
     #[serde(default)]
     pub inference_availability: InferenceAvailability,
+    /// Convergence status of the nonlinear optimizer (`Converged`, `Ambiguous`, `HitMaxIters`, etc.).
     pub status: FitStatus,
+    /// Optional parameter identifiability assessment across fitted datasets.
+    #[serde(default)]
+    pub identifiability: FitIdentifiability,
+    /// Total number of optimization outer steps executed by Levenberg–Marquardt / IRLS.
     pub iterations: usize,
+    /// Number of active non-excluded non-outlier observations included in the final fit.
     pub n_obs: usize,
+    /// Count of points flagged and excluded by ROUT outlier elimination (`0` when ROUT is inactive).
     pub n_outliers_excluded: usize,
+    /// Total count of free parameters optimized across all datasets (excludes fixed constants, hooked constants, and equal bounds).
     pub k_free: usize,
+    /// Residual degrees of freedom `n_obs.saturating_sub(k_free)`.
     pub df: usize,
     /// Unweighted residual sum of squares $\sum (y_i - \hat{y}_i)^2$ in original $Y$ units.
     pub rss: f64,
     /// Objective value minimised by the fit: weighted residual sum of squares $\sum w_i (y_i - \hat{y}_i)^2$
     /// for least-squares fits (equal to `rss` when unweighted) or Poisson deviance for `PoissonDeviance`.
     pub weighted_ss: f64,
-    /// Unweighted residual standard deviation (`Sy.x = sqrt(rss / df)`) in original $Y$ units;
+    /// Unweighted residual standard deviation (`Sy.x = sqrt(rss / df)`) in original $Y$ units (`NaN` when `df == 0` or `RobustCauchy`);
     /// weighted least-squares parameter covariance, studentized residuals, and bands use
     /// $\sigma_w = \sqrt{\text{weighted\_ss} / \text{df}}$ per Motulsky & Christopoulos (2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub rsd: f64,
+    /// Robust Standard Deviation of Residuals (`RSDR`, Motulsky & Brown 2006) populated under `RobustCauchy` or `RoutOutlierElimination` (`None` otherwise).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub rsdr: Option<f64>,
     /// Unweighted coefficient of determination $R^2 = 1 - \text{rss} / \text{TSS}$ in original $Y$ units
-    /// even when weighted least squares or Poisson deviance is active (Motulsky & Christopoulos 2004).
+    /// even when weighted least squares or Poisson deviance is active (`NaN` when total SS is zero; Motulsky & Christopoulos 2004).
     #[serde(deserialize_with = "deserialize_f64_or_nan")]
     pub r_squared: f64,
+    /// Corrected Akaike Information Criterion ($\text{AIC}_c$, Burnham & Anderson 2002); `None` when `RobustCauchy` or insufficient residual df.
     pub aic_c: Option<f64>,
+    /// Schwarz Bayesian Information Criterion ($\text{BIC}$); `None` when `RobustCauchy` or zero observations.
     pub bic: Option<f64>,
+    /// Estimated free parameters with SEs, profile/Wald CIs, dependencies, Hougaard skewness, and boundary notes.
     pub parameters: Vec<FittedParameterSummary>,
+    /// Fixed constants, hooked values, and equal-bound parameters `(name, value, notes)` consuming `0` free parameters.
     pub fixed_constants: Vec<(String, f64, Vec<ParameterNote>)>,
+    /// Joint asymptotic covariance, correlation matrix, rank, and collinearity diagnostics over free parameters.
     #[serde(deserialize_with = "deserialize_covariance_diagnostics")]
     pub covariance: CovarianceDiagnostics,
+    /// Per-dataset parameter vectors, predictions, residuals, per-curve $R^2$/$S_{y.x}$, and curve overlays.
     pub datasets: Vec<FittedDatasetResult>,
+    /// Equation-specific derived physiological/pharmacological scalars (`EC50`, `t_half`, etc.) indexed by dataset slot.
     pub derived_scalars: Vec<Vec<DerivedScalar>>,
+    /// Wald–Wolfowitz runs test result when `compute_runs_test` is enabled and enough non-zero residuals exist, else `None`.
     pub runs_test: Option<RunsTestResult>,
+    /// Pure-error vs lack-of-fit *F*-test when `compute_lack_of_fit` is enabled and replicate `X` values allow, else `None`.
     pub lack_of_fit: Option<LackOfFitResult>,
+    /// D'Agostino–Pearson $K^2$ residual normality test when `compute_normality` is enabled and sample size suffices, else `None`.
     pub normality: Option<NormalityTestResult>,
+    /// Anderson–Darling residual normality test when `compute_normality` is enabled and sample size suffices, else `None`.
     pub normality_anderson_darling: Option<NormalityTestResult>,
+    /// Lilliefors (Kolmogorov–Smirnov) residual normality test when `compute_normality` is enabled and sample size suffices, else `None`.
     pub normality_lilliefors_ks: Option<NormalityTestResult>,
+    /// Spearman rank homoscedasticity check when `compute_homoscedasticity` is enabled and `n_obs >= 4`, else `None`.
     pub homoscedasticity: Option<HomoscedasticityResult>,
+    /// ROUT outlier detection summary and per-point audit when `FitMethod::RoutOutlierElimination` is active, else `None`.
     pub rout: Option<RoutDetectionResult>,
+    /// Unknown `X` values interpolated from observed `Y` responses when `interpolate_unknowns` is enabled.
     pub interpolated_x: Vec<InterpolatedUnknown>,
+    /// Unknown `Y` values predicted forward from observed `X` values when `interpolate_unknowns` is enabled.
     pub interpolated_y: Vec<InterpolatedUnknown>,
 }
 
@@ -538,6 +637,9 @@ impl ParameterLayout {
             let def_b = default_bounds.get(p_idx).copied().unwrap_or((None, None));
             let lb = rule.and_then(|r| r.lower_bound).or(def_b.0);
             let ub = rule.and_then(|r| r.upper_bound).or(def_b.1);
+            if lb.is_some_and(|l| !l.is_finite()) || ub.is_some_and(|u| !u.is_finite()) {
+                return Err(FitError::InvalidParameter { name: "parameter_rules", reason: format!("Non-finite bound for `{pname}`") });
+            }
             if let (Some(l), Some(u)) = (lb, ub)
                 && l > u
             {
@@ -546,6 +648,10 @@ impl ParameterLayout {
                     reason: format!("Lower bound ({l}) > upper bound ({u}) for `{pname}`"),
                 });
             }
+            let equal_bound = match (lb, ub) {
+                (Some(l), Some(u)) if l == u => Some(l),
+                _ => None,
+            };
 
             let scope = rule.map(|r| &r.scope);
             match scope {
@@ -579,6 +685,10 @@ impl ParameterLayout {
                             bindings[ds_idx][p_idx] = ParamBinding::Fixed(val);
                             let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
                             fixed_constants.push((label, val, vec![ParameterNote::Constant]));
+                        } else if let Some(eq_val) = equal_bound {
+                            bindings[ds_idx][p_idx] = ParamBinding::Fixed(eq_val);
+                            let label = if n_datasets > 1 { format!("{pname} [DS{}]", ds.data_set_index + 1) } else { pname.clone() };
+                            fixed_constants.push((label, eq_val, vec![ParameterNote::Constant]));
                         } else {
                             let slot = free_slots.len();
                             let init_v =
@@ -609,23 +719,35 @@ impl ParameterLayout {
                     }
                 }
                 Some(ParameterScope::SharedGlobal) => {
-                    let slot = free_slots.len();
-                    let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
-                    free_slots.push(FreeSlot {
-                        ds_local_idx: None,
-                        dataset_idx: None,
-                        name: pname.clone(),
-                        lower: lb,
-                        upper: ub,
-                        init: clamp_to_bounds(init_v, lb, ub),
-                        is_shared: n_datasets > 1,
-                    });
-                    for ds_row in &mut bindings {
-                        ds_row[p_idx] = ParamBinding::Free(slot);
+                    if let Some(eq_val) = equal_bound {
+                        for ds_row in &mut bindings {
+                            ds_row[p_idx] = ParamBinding::Fixed(eq_val);
+                        }
+                        fixed_constants.push((pname.clone(), eq_val, vec![ParameterNote::Constant]));
+                    } else {
+                        let slot = free_slots.len();
+                        let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
+                        free_slots.push(FreeSlot {
+                            ds_local_idx: None,
+                            dataset_idx: None,
+                            name: pname.clone(),
+                            lower: lb,
+                            upper: ub,
+                            init: clamp_to_bounds(init_v, lb, ub),
+                            is_shared: n_datasets > 1,
+                        });
+                        for ds_row in &mut bindings {
+                            ds_row[p_idx] = ParamBinding::Free(slot);
+                        }
                     }
                 }
                 None | Some(ParameterScope::Local) => {
-                    if n_datasets <= 1 {
+                    if let Some(eq_val) = equal_bound {
+                        for ds_row in &mut bindings {
+                            ds_row[p_idx] = ParamBinding::Fixed(eq_val);
+                        }
+                        fixed_constants.push((pname.clone(), eq_val, vec![ParameterNote::Constant]));
+                    } else if n_datasets <= 1 {
                         let slot = free_slots.len();
                         let init_v = rule.and_then(|r| r.initial_override).unwrap_or_else(|| default_init.get(p_idx).copied().unwrap_or(1.0));
                         let ds_ext_idx = datasets.first().map_or(0, |d| d.data_set_index);
@@ -915,10 +1037,19 @@ fn eval_predictions_ordered(
 }
 
 /// Evaluate weighted residual vector `r_i = sqrt_w_i * (y_i - f(x_i; theta))` and predictions.
-fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], theta: &[f64]) -> Option<(Vec<f64>, Vec<f64>, f64)> {
+fn eval_residuals_with_domain(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta: &[f64],
+    require_positive_mean: bool,
+) -> Option<(Vec<f64>, Vec<f64>, f64)> {
     let mut flat_params = vec![0.0_f64; layout.n_datasets * layout.p_model];
     let mut y_hat = vec![0.0_f64; obs.len()];
     if !eval_predictions_ordered(model, layout, obs, theta, &mut flat_params, None, &mut y_hat) {
+        return None;
+    }
+    if require_positive_mean && y_hat.iter().any(|&pred| !pred.is_finite() || pred <= 0.0) {
         return None;
     }
 
@@ -934,6 +1065,11 @@ fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[
     }
     let total_ss = ss.total();
     if total_ss.is_finite() { Some((weighted_res, y_hat, total_ss)) } else { None }
+}
+
+/// Evaluate weighted residual vector `r_i = sqrt_w_i * (y_i - f(x_i; theta))` and predictions.
+fn eval_residuals(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], theta: &[f64]) -> Option<(Vec<f64>, Vec<f64>, f64)> {
+    eval_residuals_with_domain(model, layout, obs, theta, false)
 }
 
 fn eval_predictions_into(
@@ -1096,13 +1232,14 @@ struct LmRunOutput {
 /// iteration; the expansion step uses `max(delta, 2 ||D p||)` (MINPACK sets `2 ||D p||`);
 /// and box constraints are handled by projecting each trial point onto the bounds (not part of
 /// Moré's unconstrained algorithm), with the predicted reduction evaluated on the projected step.
-fn run_trust_region_lm(
+fn run_trust_region_lm_with_domain(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
     theta_init: &[f64],
     max_iters: usize,
     init_factor: f64,
+    require_positive_mean: bool,
 ) -> Result<LmRunOutput, FitError> {
     let n = obs.len();
     let k = layout.k_free();
@@ -1110,9 +1247,14 @@ fn run_trust_region_lm(
     let mut theta = theta_init.to_vec();
     project_theta(&mut theta, &bounds);
 
-    let Some((mut w_res, mut y_hat, mut ss_curr)) = eval_residuals(model, layout, obs, &theta) else {
+    let Some((mut w_res, mut y_hat, mut ss_curr)) = eval_residuals_with_domain(model, layout, obs, &theta, require_positive_mean) else {
         if let Some(err) = ode_budget_error() {
             return Err(err);
+        }
+        if require_positive_mean && eval_residuals_with_domain(model, layout, obs, &theta, false).is_some() {
+            return Err(FitError::ImpossibleWeights {
+                reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+            });
         }
         return Err(FitError::BadInitialValues { reason: "Initial parameters evaluate outside model domain".to_owned() });
     };
@@ -1216,7 +1358,7 @@ fn run_trust_region_lm(
             let pred_num = quadratic_pred_num(&j_mat, &w_res, &actual_step).max(0.0);
             let pred_red = if ss_curr > 0.0 { pred_num / ss_curr } else { 0.0 };
 
-            let (act_red, trial_eval) = match eval_residuals(model, layout, obs, &theta_trial) {
+            let (act_red, trial_eval) = match eval_residuals_with_domain(model, layout, obs, &theta_trial, require_positive_mean) {
                 Some((r_t, y_t, ss_t)) => {
                     let act = if ss_t < ss_curr { 1.0 - ss_t / ss_curr } else { -1.0 };
                     (act, Some((r_t, y_t, ss_t)))
@@ -1606,6 +1748,17 @@ fn matvec(a: &DenseMatrix, v: &[f64]) -> Vec<f64> {
     out
 }
 
+fn run_trust_region_lm(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    theta_init: &[f64],
+    max_iters: usize,
+    init_factor: f64,
+) -> Result<LmRunOutput, FitError> {
+    run_trust_region_lm_with_domain(model, layout, obs, theta_init, max_iters, init_factor, false)
+}
+
 /// Nelder–Mead simplex warm-start / local rescue for difficult starts or non-finite initial points.
 ///
 /// Nelder & Mead (1965) with standard coefficients (reflection 1, expansion 2, contraction 0.5,
@@ -1613,7 +1766,14 @@ fn matvec(a: &DenseMatrix, v: &[f64]) -> Vec<f64> {
 /// Lagarias et al. (1998). Box constraints are enforced by projecting vertices before
 /// evaluation (a pragmatic extension, not part of either reference). Termination is on the
 /// relative spread of objective values or the evaluation budget only.
-fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs: &[ObsRecord], seed: &[f64], max_evals: usize) -> Option<Vec<f64>> {
+fn nelder_mead_rescue_with_domain(
+    model: &dyn ParametricModel,
+    layout: &ParameterLayout,
+    obs: &[ObsRecord],
+    seed: &[f64],
+    max_evals: usize,
+    require_positive_mean: bool,
+) -> Option<Vec<f64>> {
     let k = layout.k_free();
     if k == 0 {
         return Some(Vec::new());
@@ -1625,7 +1785,7 @@ fn nelder_mead_rescue(model: &dyn ParametricModel, layout: &ParameterLayout, obs
         }
         let mut clamped = th.to_vec();
         project_theta(&mut clamped, &bounds);
-        eval_residuals(model, layout, obs, &clamped).map_or(f64::INFINITY, |(_, _, ss)| ss)
+        eval_residuals_with_domain(model, layout, obs, &clamped, require_positive_mean).map_or(f64::INFINITY, |(_, _, ss)| ss)
     };
 
     let mut simplex: Vec<(Vec<f64>, f64)> = Vec::with_capacity(k + 1);
@@ -1725,27 +1885,32 @@ fn solve_with_warm_start(
     theta_init: &[f64],
     config: &SolverConfig,
 ) -> Result<LmRunOutput, FitError> {
+    let require_positive_mean = config.method == FitMethod::PoissonDeviance;
     let mut start = theta_init.to_vec();
-    if eval_residuals(model, layout, obs, &start).is_none() {
+    if eval_residuals_with_domain(model, layout, obs, &start, require_positive_mean).is_none() {
         if let Some(err) = ode_budget_error() {
             return Err(err);
         }
         if config.use_simplex_warm_start
-            && let Some(rescued) = nelder_mead_rescue(model, layout, obs, &start, 240)
+            && let Some(rescued) = nelder_mead_rescue_with_domain(model, layout, obs, &start, 240, require_positive_mean)
         {
             start = rescued;
         } else if let Some(err) = ode_budget_error() {
             return Err(err);
+        } else if require_positive_mean && eval_residuals_with_domain(model, layout, obs, &start, false).is_some() {
+            return Err(FitError::ImpossibleWeights {
+                reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+            });
         } else {
             return Err(FitError::BadInitialValues { reason: "Starting parameters evaluate outside model domain".to_owned() });
         }
     }
 
-    let mut best = run_trust_region_lm(model, layout, obs, &start, config.max_iters, 100.0)?;
+    let mut best = run_trust_region_lm_with_domain(model, layout, obs, &start, config.max_iters, 100.0, require_positive_mean)?;
     // If primary run hit max iters or suspiciously poor gradient / flat plateau, try smaller step
     // trust-region factor `1.0` and optional Nelder-Mead restart purely from `start` or `best.theta`.
     if config.use_simplex_warm_start && (best.status != FitStatus::Converged || best.weighted_ss > 1e-3 * obs_y_ss(obs)) {
-        match run_trust_region_lm(model, layout, obs, &start, config.max_iters, 1.0) {
+        match run_trust_region_lm_with_domain(model, layout, obs, &start, config.max_iters, 1.0, require_positive_mean) {
             Ok(alt1)
                 if alt1.weighted_ss < best.weighted_ss
                     || (best.status != FitStatus::Converged && alt1.status == FitStatus::Converged && alt1.weighted_ss <= best.weighted_ss) =>
@@ -1755,8 +1920,8 @@ fn solve_with_warm_start(
             Err(err @ FitError::OdeIntegrationFailed { .. }) => return Err(err),
             _ => {}
         }
-        if let Some(nm) = nelder_mead_rescue(model, layout, obs, &best.theta, 400) {
-            match run_trust_region_lm(model, layout, obs, &nm, config.max_iters, 1.0) {
+        if let Some(nm) = nelder_mead_rescue_with_domain(model, layout, obs, &best.theta, 400, require_positive_mean) {
+            match run_trust_region_lm_with_domain(model, layout, obs, &nm, config.max_iters, 1.0, require_positive_mean) {
                 Ok(alt2)
                     if alt2.weighted_ss < best.weighted_ss
                         || (best.status != FitStatus::Converged && alt2.status == FitStatus::Converged && alt2.weighted_ss <= best.weighted_ss) =>
@@ -1770,8 +1935,8 @@ fn solve_with_warm_start(
             return Err(err);
         }
         if best.weighted_ss > 1e-2 * obs_y_ss(obs) || best.status != FitStatus::Converged {
-            if let Some(nm_start) = nelder_mead_rescue(model, layout, obs, &start, 600) {
-                match run_trust_region_lm(model, layout, obs, &nm_start, config.max_iters, 0.5) {
+            if let Some(nm_start) = nelder_mead_rescue_with_domain(model, layout, obs, &start, 600, require_positive_mean) {
+                match run_trust_region_lm_with_domain(model, layout, obs, &nm_start, config.max_iters, 0.5, require_positive_mean) {
                     Ok(alt3)
                         if alt3.weighted_ss < best.weighted_ss
                             || (best.status != FitStatus::Converged
@@ -2325,6 +2490,7 @@ fn fit_plot_function_only(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: None,
             y_hat: ds_yh,
             residuals: ds_res.clone(),
             weighted_residuals: ds_res.clone(),
@@ -2354,6 +2520,7 @@ fn fit_plot_function_only(
         fit_method: config.method,
         inference_availability,
         status: FitStatus::Converged,
+        identifiability: FitIdentifiability::NotAssessed,
         iterations: 0,
         n_obs: total_obs,
         n_outliers_excluded: 0,
@@ -2431,6 +2598,7 @@ fn solve_lm_by_method(
 
 struct FinalizedUncertainty {
     cov: CovarianceDiagnostics,
+    identifiability: Assessment,
     cov_unscaled: Option<DenseMatrix>,
     hougaard: Vec<f64>,
     profile_cis: Vec<(CiBound, CiBound)>,
@@ -2460,6 +2628,7 @@ fn finalize_fit_uncertainty(
                 numerical_rank: 0,
                 ambiguous: false,
             },
+            identifiability: Assessment::default(),
             cov_unscaled: None,
             hougaard: vec![f64::NAN; k_free],
             profile_cis: vec![(CiBound::Open, CiBound::Open); k_free],
@@ -2493,15 +2662,23 @@ fn finalize_fit_uncertainty(
 
     let hougaard = if config.compute_hougaard && k_free > 0 && k_free <= 10 && !cov.ambiguous && df > 0 {
         if let Some(cov_u) = cov_unscaled.as_ref() {
-            let sqrt_w: Vec<f64> = if is_poisson {
-                lm_out.y_hat.iter().map(|&yh| 1.0 / yh.max(1e-8).sqrt()).collect()
+            let sqrt_w_opt: Option<Vec<f64>> = if is_poisson {
+                if lm_out.y_hat.iter().all(|&yh| yh.is_finite() && yh > 0.0) {
+                    Some(lm_out.y_hat.iter().map(|&yh| 1.0 / yh.sqrt()).collect())
+                } else {
+                    None
+                }
             } else {
-                obs.iter().map(|o| o.sqrt_weight).collect()
+                Some(obs.iter().map(|o| o.sqrt_weight).collect())
             };
-            let mut flat_p = vec![0.0_f64; layout.n_datasets * layout.p_model];
-            compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma_w, |th, out| {
-                eval_predictions_into(model, layout, obs, th, &mut flat_p, out)
-            })
+            if let Some(sqrt_w) = sqrt_w_opt {
+                let mut flat_p = vec![0.0_f64; layout.n_datasets * layout.p_model];
+                compute_hougaard_skewness_into(&lm_out.theta, &sqrt_w, &lm_out.j_mat, cov_u, sigma_w, |th, out| {
+                    eval_predictions_into(model, layout, obs, th, &mut flat_p, out)
+                })
+            } else {
+                vec![0.0; k_free]
+            }
         } else {
             vec![0.0; k_free]
         }
@@ -2510,10 +2687,11 @@ fn finalize_fit_uncertainty(
     };
 
     let bounds = layout.bounds();
+    let profile_computed = config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous;
     let profile_cis = match config.method {
         FitMethod::RobustCauchy => vec![(CiBound::Open, CiBound::Open); k_free],
         FitMethod::PoissonDeviance => {
-            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+            if profile_computed {
                 compute_deviance_profile_likelihood_cis(
                     &lm_out.theta,
                     lm_out.weighted_ss,
@@ -2527,7 +2705,7 @@ fn finalize_fit_uncertainty(
             }
         }
         FitMethod::LeastSquares | FitMethod::RoutOutlierElimination { .. } => {
-            if config.compute_profile_ci && k_free > 0 && df > 0 && !cov.ambiguous {
+            if profile_computed {
                 let mut wy2_acc = NeumaierSum::new();
                 for o in obs {
                     let wy = o.sqrt_weight * o.point.y;
@@ -2550,7 +2728,12 @@ fn finalize_fit_uncertainty(
         }
     };
 
-    Ok(FinalizedUncertainty { cov, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
+    let identifiability = if config.identify_unstable_parameters && k_free > 0 && lm_out.status != FitStatus::Diverged {
+        identifiability::assess(layout, obs, &lm_out.j_mat, df, &cov.dependencies, profile_computed.then_some(profile_cis.as_slice()))?
+    } else {
+        Assessment::default()
+    };
+    Ok(FinalizedUncertainty { cov, identifiability, cov_unscaled, hougaard, profile_cis, t_crit, sigma_w })
 }
 
 fn fit_single_or_shared(
@@ -2573,7 +2756,15 @@ fn fit_single_or_shared(
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
     let unc = finalize_fit_uncertainty(model, &layout, &obs, &mut lm_out, df, ss_within_total, config)?;
-    let parameters = build_fitted_parameter_summaries(&layout, &lm_out.theta, &unc.cov, &unc.hougaard, &unc.profile_cis, inference_availability);
+    let parameters = build_fitted_parameter_summaries(
+        &layout,
+        &lm_out.theta,
+        &unc.cov,
+        &unc.hougaard,
+        &unc.profile_cis,
+        &unc.identifiability.unstable,
+        inference_availability,
+    );
 
     let mut raw_rss_acc = NeumaierSum::new();
     let mut y_mean_acc = NeumaierSum::new();
@@ -2623,7 +2814,7 @@ fn fit_single_or_shared(
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd,
-            ambiguous: cov.ambiguous,
+            ambiguous: cov.ambiguous || unc.identifiability.fit.is_ambiguous(),
             solver: config,
         },
     );
@@ -2644,6 +2835,7 @@ fn fit_single_or_shared(
         fit_method: config.method,
         inference_availability,
         status: lm_out.status,
+        identifiability: unc.identifiability.fit,
         iterations: lm_out.iterations,
         n_obs,
         n_outliers_excluded,
@@ -2682,6 +2874,7 @@ struct SingleDatasetOutcome {
     cov: CovarianceDiagnostics,
     hougaard: Vec<f64>,
     profile_cis: Vec<(CiBound, CiBound)>,
+    identifiability: Assessment,
     ds_result: FittedDatasetResult,
     derived_scalars: Vec<DerivedScalar>,
     interpolated_x: Vec<InterpolatedUnknown>,
@@ -2747,7 +2940,7 @@ fn solve_single_dataset_unit(
             sigma_w: unc.sigma_w,
             t_crit: unc.t_crit,
             rsd: rsd_d,
-            ambiguous: cov.ambiguous,
+            ambiguous: cov.ambiguous || unc.identifiability.fit.is_ambiguous(),
             solver: config,
         },
     );
@@ -2766,6 +2959,7 @@ fn solve_single_dataset_unit(
         cov,
         hougaard: unc.hougaard,
         profile_cis: unc.profile_cis,
+        identifiability: unc.identifiability,
         ds_result,
         derived_scalars: derived,
         interpolated_x: assembled.interpolated_x,
@@ -2867,6 +3061,8 @@ fn fit_independent_datasets(
     let mut global_deps = vec![f64::NAN; k_free];
     let mut global_hougaard = vec![f64::NAN; k_free];
     let mut global_profile_cis = vec![(CiBound::Open, CiBound::Open); k_free];
+    let mut global_unstable = vec![false; k_free];
+    let mut identifiability = FitIdentifiability::NotAssessed;
     let mut global_cov_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
     let mut global_corr_mat = if is_robust { Vec::new() } else { vec![vec![0.0_f64; k_free]; k_free] };
 
@@ -2905,6 +3101,7 @@ fn fit_independent_datasets(
                 global_deps[*g_slot] = sub.cov.dependencies[*l_slot];
                 global_hougaard[*g_slot] = sub.hougaard[*l_slot];
                 global_profile_cis[*g_slot] = sub.profile_cis[*l_slot];
+                global_unstable[*g_slot] = sub.identifiability.unstable.get(*l_slot).copied().unwrap_or(false);
             }
         }
         if !is_robust && !sub.cov.covariance_matrix.is_empty() {
@@ -2916,6 +3113,7 @@ fn fit_independent_datasets(
             }
         }
 
+        identifiability::include_dataset(&mut identifiability, sub.identifiability.fit, &ds.label);
         total_rank += sub.cov.numerical_rank;
         any_diverged |= sub.status == FitStatus::Diverged;
         any_ambiguous |= sub.cov.ambiguous || sub.status == FitStatus::Ambiguous;
@@ -2964,8 +3162,15 @@ fn fit_independent_datasets(
     };
     let is_robust = config.method == FitMethod::RobustCauchy;
     let inference_availability = if is_robust { InferenceAvailability::NotApplicableInRobustMode } else { InferenceAvailability::Available };
-    let parameters =
-        build_fitted_parameter_summaries(&global_layout, &global_theta, &cov, &global_hougaard, &global_profile_cis, inference_availability);
+    let parameters = build_fitted_parameter_summaries(
+        &global_layout,
+        &global_theta,
+        &cov,
+        &global_hougaard,
+        &global_profile_cis,
+        &global_unstable,
+        inference_availability,
+    );
 
     let raw_rss = total_raw_rss.total();
     let weighted_ss = total_weighted_ss.total();
@@ -3006,6 +3211,7 @@ fn fit_independent_datasets(
         fit_method: config.method,
         inference_availability,
         status,
+        identifiability,
         iterations: max_iterations,
         n_obs,
         n_outliers_excluded,
@@ -3041,6 +3247,7 @@ fn build_fitted_parameter_summaries(
     cov: &CovarianceDiagnostics,
     hougaard: &[f64],
     profile_cis: &[(CiBound, CiBound)],
+    unstable: &[bool],
     inference_availability: InferenceAvailability,
 ) -> Vec<FittedParameterSummary> {
     let is_robust = inference_availability.is_not_applicable_in_robust_mode();
@@ -3057,7 +3264,9 @@ fn build_fitted_parameter_summaries(
         if slot.upper.is_some_and(|u| (u - est).abs() <= 1e-9 * est.abs().max(1.0)) {
             notes.push(ParameterNote::HitUpperBound);
         }
-        if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
+        if unstable.get(idx).copied().unwrap_or(false) {
+            notes.push(ParameterNote::Unstable);
+        } else if !is_robust && cov.dependencies.get(idx).copied().unwrap_or(0.0) > 0.9999 {
             notes.push(ParameterNote::Ambiguous);
         }
         if !is_robust && (matches!(profile_cis[idx].0, CiBound::Open) || matches!(profile_cis[idx].1, CiBound::Open)) {
@@ -3149,8 +3358,18 @@ fn assemble_dataset_results(
         let mut ds_y_vals: Vec<(f64, usize, f64)> = Vec::new();
         let mut ds_n = 0_usize;
         let mut ds_y_sum = NeumaierSum::new();
+        let mut scalar_x = true;
+        let mut x_min = f64::INFINITY;
+        let mut x_max = f64::NEG_INFINITY;
         for (i, rec) in obs.iter().enumerate() {
             if rec.ds_local_idx == ds_local_idx {
+                match rec.point.x.as_slice() {
+                    [x] if x.is_finite() => {
+                        x_min = x_min.min(*x);
+                        x_max = x_max.max(*x);
+                    }
+                    _ => scalar_x = false,
+                }
                 let yh = lm_out.y_hat[i];
                 let r = rec.point.y - yh;
                 let w_rep = rec.rep_n as f64;
@@ -3276,6 +3495,7 @@ fn assemble_dataset_results(
             label: ds.label.clone(),
             params: ds_params,
             param_names: model.param_names().to_vec(),
+            observed_x_range: (scalar_x && x_min.is_finite() && x_max.is_finite()).then_some((x_min, x_max)),
             y_hat: ds_y_hat,
             residuals: ds_res,
             weighted_residuals: ds_w_res,
@@ -3457,6 +3677,28 @@ pub fn compare_models_checked(
     Ok(ModelComparisonResult { inference_availability: outcome.inference_availability(), outcome, alternative_fit })
 }
 
+/// Validate strictly positive Poisson fitted means `mu_i > 0` and assign IRLS weights `1 / sqrt(mu_i)`.
+fn assign_poisson_irls_weights(work_obs: &mut [ObsRecord], y_hat: &[f64]) -> Result<(), FitError> {
+    if work_obs.len() != y_hat.len() || y_hat.is_empty() {
+        return Err(FitError::ImpossibleWeights {
+            reason: "Poisson deviance regression requires non-empty strictly positive fitted means".to_owned(),
+        });
+    }
+    for (rec, &yh) in work_obs.iter_mut().zip(y_hat.iter()) {
+        if !yh.is_finite() || yh <= 0.0 {
+            return Err(FitError::ImpossibleWeights {
+                reason: format!("Poisson deviance regression requires strictly positive fitted means (mu > 0, got {yh})"),
+            });
+        }
+        let inv_sqrt = 1.0 / yh.sqrt();
+        if !inv_sqrt.is_finite() {
+            return Err(FitError::ImpossibleWeights { reason: "Poisson IRLS weight 1 / sqrt(mu) overflowed f64 range".to_owned() });
+        }
+        rec.sqrt_weight = inv_sqrt;
+    }
+    Ok(())
+}
+
 /// Poisson maximum-likelihood regression by iteratively reweighted least squares
 /// (Green 1984; McCullagh & Nelder 1989): weights `w_i = 1 / mu_i` are frozen at the current
 /// fitted means and the weighted least-squares problem is re-solved by Levenberg–Marquardt
@@ -3483,16 +3725,17 @@ fn fit_poisson_irls(
     let mut theta = init_theta.to_vec();
     let mut work_obs = obs.to_vec();
     let mut last_out = solve_with_warm_start(model, layout, &work_obs, &theta, config)?;
-    let mut prev_dev = poisson_deviance(&work_obs, &last_out.y_hat);
+    let mut prev_dev = poisson_deviance(&work_obs, &last_out.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
+        reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+    })?;
 
     for _ in 0..12 {
         theta = last_out.theta.clone();
-        for (rec, &yh) in work_obs.iter_mut().zip(last_out.y_hat.iter()) {
-            let mu = yh.max(1e-8);
-            rec.sqrt_weight = 1.0 / mu.sqrt();
-        }
-        let next = run_trust_region_lm(model, layout, &work_obs, &theta, config.max_iters, 10.0)?;
-        let dev = poisson_deviance(&work_obs, &next.y_hat);
+        assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
+        let next = run_trust_region_lm_with_domain(model, layout, &work_obs, &theta, config.max_iters, 10.0, true)?;
+        let dev = poisson_deviance(&work_obs, &next.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
+            reason: "Poisson deviance regression encountered non-positive fitted means (mu <= 0)".to_owned(),
+        })?;
         let rel_change = (prev_dev - dev).abs() / prev_dev.max(1.0);
         last_out = next;
         prev_dev = dev;
@@ -3500,29 +3743,36 @@ fn fit_poisson_irls(
             break;
         }
     }
-    for (rec, &yh) in work_obs.iter_mut().zip(last_out.y_hat.iter()) {
-        let mu = yh.max(1e-8);
-        rec.sqrt_weight = 1.0 / mu.sqrt();
-    }
+    assign_poisson_irls_weights(&mut work_obs, &last_out.y_hat)?;
     if let (Some((wr, _, _)), Some(jm)) = (
-        eval_residuals(model, layout, &work_obs, &last_out.theta),
+        eval_residuals_with_domain(model, layout, &work_obs, &last_out.theta, true),
         compute_jacobian(model, layout, &work_obs, &last_out.theta, &last_out.y_hat, &layout.bounds()),
     ) {
         last_out.weighted_res = wr;
         last_out.j_mat = jm;
     }
-    last_out.weighted_ss = poisson_deviance(&work_obs, &last_out.y_hat);
+    last_out.weighted_ss = poisson_deviance(&work_obs, &last_out.y_hat).ok_or_else(|| FitError::ImpossibleWeights {
+        reason: "Poisson deviance regression requires strictly positive fitted means (mu > 0)".to_owned(),
+    })?;
     Ok(last_out)
 }
 
 /// Poisson deviance `D = 2 sum [ y ln(y / mu) - (y - mu) ]` (McCullagh & Nelder 1989), evaluated
-/// stably via `deviance_bd0`.
-fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> f64 {
+/// stably via `deviance_bd0`. Returns `None` if any observed count is negative/non-finite or any
+/// fitted mean `mu <= 0`.
+fn poisson_deviance(obs: &[ObsRecord], y_hat: &[f64]) -> Option<f64> {
+    if obs.len() != y_hat.len() || obs.is_empty() {
+        return None;
+    }
     let mut acc = NeumaierSum::new();
     for (rec, &mu) in obs.iter().zip(y_hat.iter()) {
-        acc.add(2.0 * deviance_bd0(rec.point.y, mu.max(1e-12)));
+        if !rec.point.y.is_finite() || rec.point.y < 0.0 || !mu.is_finite() || mu <= 0.0 {
+            return None;
+        }
+        acc.add(2.0 * deviance_bd0(rec.point.y, mu));
     }
-    acc.total()
+    let dev = acc.total();
+    dev.is_finite().then_some(dev)
 }
 
 /// Robust Cauchy (Lorentzian) fit minimising `sum ln(1 + (r_{w,i} / RSDR)^2)`, the merit function
@@ -3615,7 +3865,8 @@ struct ReducedLmState {
     ss_curr: f64,
 }
 
-fn run_reduced_lm(
+#[allow(clippy::too_many_arguments)]
+fn run_reduced_lm_with_domain(
     model: &dyn ParametricModel,
     layout: &ParameterLayout,
     obs: &[ObsRecord],
@@ -3623,6 +3874,7 @@ fn run_reduced_lm(
     map_indices: &[usize],
     full_bounds: &[(Option<f64>, Option<f64>)],
     max_iters: usize,
+    require_positive_mean: bool,
 ) -> Option<ReducedLmState> {
     let sub_k = map_indices.len();
     let sub_bounds: Vec<(Option<f64>, Option<f64>)> = map_indices.iter().map(|&i| full_bounds[i]).collect();
@@ -3635,7 +3887,7 @@ fn run_reduced_lm(
     for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
         work[orig] = v;
     }
-    let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals(model, layout, obs, work)?;
+    let (mut w_res, mut y_hat, mut ss_curr) = eval_residuals_with_domain(model, layout, obs, work, require_positive_mean)?;
 
     for iter in 0..max_iters {
         for (&orig, &v) in map_indices.iter().zip(sub_theta.iter()) {
@@ -3690,7 +3942,7 @@ fn run_reduced_lm(
             for (&orig, &v) in map_indices.iter().zip(trial.iter()) {
                 work[orig] = v;
             }
-            if let Some((r_t, y_t, ss_t)) = eval_residuals(model, layout, obs, work) {
+            if let Some((r_t, y_t, ss_t)) = eval_residuals_with_domain(model, layout, obs, work, require_positive_mean) {
                 let act = ss_curr - ss_t;
                 if act >= 0.0 {
                     sub_theta = trial;
@@ -3766,7 +4018,7 @@ fn solve_profile_subproblem(
     }
 
     let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
-    let state = run_reduced_lm(model, layout, obs, &mut work, &map_indices, &full_bounds, 40)?;
+    let state = run_reduced_lm_with_domain(model, layout, obs, &mut work, &map_indices, &full_bounds, 40, false)?;
     Some((state.ss_curr + ss_within, work))
 }
 
@@ -3784,30 +4036,28 @@ fn solve_profile_subproblem_poisson(
     let k = layout.k_free();
     let mut work = seed.to_vec();
     work[fixed_idx] = fixed_val;
-    let (_, init_y_hat, _) = eval_residuals(model, layout, obs, &work)?;
+    let (_, init_y_hat, _) = eval_residuals_with_domain(model, layout, obs, &work, true)?;
     if k == 1 {
-        let dev = poisson_deviance(obs, &init_y_hat);
-        return dev.is_finite().then_some((dev, work));
+        let dev = poisson_deviance(obs, &init_y_hat)?;
+        return Some((dev, work));
     }
 
     let map_indices: Vec<usize> = (0..k).filter(|&i| i != fixed_idx).collect();
     let mut work_obs = obs.to_vec();
     let mut curr_y_hat = init_y_hat;
-    let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat);
-    if !curr_dev.is_finite() {
-        return None;
-    }
+    let mut curr_dev = poisson_deviance(&work_obs, &curr_y_hat)?;
 
     for _ in 0..12 {
-        for (rec, &yh) in work_obs.iter_mut().zip(curr_y_hat.iter()) {
-            rec.sqrt_weight = 1.0 / yh.max(1e-8).sqrt();
+        if assign_poisson_irls_weights(&mut work_obs, &curr_y_hat).is_err() {
+            return None;
         }
         let mut trial = work.clone();
-        let Some(state) = run_reduced_lm(model, layout, &work_obs, &mut trial, &map_indices, &full_bounds, 30) else {
+        let Some(state) = run_reduced_lm_with_domain(model, layout, &work_obs, &mut trial, &map_indices, &full_bounds, 30, true) else {
             break;
         };
-        let next_dev = poisson_deviance(&work_obs, &state.y_hat);
-        if next_dev.is_finite() && next_dev <= curr_dev {
+        if let Some(next_dev) = poisson_deviance(&work_obs, &state.y_hat)
+            && next_dev <= curr_dev
+        {
             let rel_change = (curr_dev - next_dev).abs() / curr_dev.max(1.0);
             work = trial;
             curr_y_hat = state.y_hat;
@@ -3825,15 +4075,15 @@ fn solve_profile_subproblem_poisson(
             for &idx in &map_indices {
                 blended[idx] = work[idx] + alpha * (trial[idx] - work[idx]);
             }
-            if let Some((_, blend_yh, _)) = eval_residuals(model, layout, &work_obs, &blended) {
-                let blend_dev = poisson_deviance(&work_obs, &blend_yh);
-                if blend_dev.is_finite() && blend_dev < curr_dev {
-                    work = blended;
-                    curr_y_hat = blend_yh;
-                    curr_dev = blend_dev;
-                    improved = true;
-                    break;
-                }
+            if let Some((_, blend_yh, _)) = eval_residuals_with_domain(model, layout, &work_obs, &blended, true)
+                && let Some(blend_dev) = poisson_deviance(&work_obs, &blend_yh)
+                && blend_dev < curr_dev
+            {
+                work = blended;
+                curr_y_hat = blend_yh;
+                curr_dev = blend_dev;
+                improved = true;
+                break;
             }
             alpha *= 0.5;
         }
@@ -3841,7 +4091,7 @@ fn solve_profile_subproblem_poisson(
             break;
         }
     }
-    curr_dev.is_finite().then_some((curr_dev, work))
+    poisson_deviance(&work_obs, &curr_y_hat).map(|dev| (dev, work))
 }
 
 struct CurveOverlayContext<'a> {

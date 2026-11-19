@@ -5,10 +5,9 @@
 .DESCRIPTION
   Produces, in $env:DIST (default: dist/release):
     curvebook-<version>-windows-<arch>.msi            installer (WiX v5)
-    curvebook-<version>-windows-<arch>-portable.zip   curvebook.exe + curvebook-cli.exe + portable.txt
 #>
 param(
-  [ValidateSet('x64', 'x86', 'arm64')] [string] $Arch = 'x64',
+  [ValidateSet('x64', 'arm64')] [string] $Arch = 'x64',
   [switch] $SkipBuild
 )
 $ErrorActionPreference = 'Stop'
@@ -31,7 +30,7 @@ if (-not $Version) {
 if (-not $Version) { throw 'could not read [workspace.package] version from Cargo.toml' }
 $MsiVersion = ($Version -split '-')[0]
 
-$Target = switch ($Arch) { 'x64' { 'x86_64-pc-windows-msvc' } 'x86' { 'i686-pc-windows-msvc' } 'arm64' { 'aarch64-pc-windows-msvc' } }
+$Target = switch ($Arch) { 'x64' { 'x86_64-pc-windows-msvc' } 'arm64' { 'aarch64-pc-windows-msvc' } }
 $Dist = if ($env:DIST) { $env:DIST } else { Join-Path $Root 'dist\release' }
 $TargetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $Root 'target' }
 New-Item -ItemType Directory -Force -Path $Dist | Out-Null
@@ -55,7 +54,7 @@ function Get-PeHeader([string] $Path) {
   $pe = [BitConverter]::ToInt32($bytes, 0x3C)
   return @{ Machine = [BitConverter]::ToUInt16($bytes, $pe + 4); Subsystem = [BitConverter]::ToUInt16($bytes, $pe + 0x5C) }
 }
-$Machine = switch ($Arch) { 'x64' { 0x8664 } 'x86' { 0x14C } 'arm64' { 0xAA64 } }
+$Machine = switch ($Arch) { 'x64' { 0x8664 } 'arm64' { 0xAA64 } }
 foreach ($check in @(@('curvebook.exe', 2), @('curvebook-cli.exe', 3))) {
   $h = Get-PeHeader (Join-Path $Bin $check[0])
   if ($h.Machine -ne $Machine) { throw "$($check[0]) is for machine 0x$('{0:X}' -f $h.Machine), expected 0x$('{0:X}' -f $Machine) ($Arch)" }
@@ -130,20 +129,10 @@ Invoke-Native 'wix build' {
 Remove-Item -Force -ErrorAction SilentlyContinue ([IO.Path]::ChangeExtension($Msi, '.wixpdb'))
 & (Join-Path $PSScriptRoot 'sign.ps1') $Msi
 
-$Portable = Join-Path $TargetDir "windows-package\curvebook-$Version-windows-$Arch-portable"
-Remove-Item -Recurse -Force $Portable -ErrorAction SilentlyContinue
-New-Item -ItemType Directory -Force -Path $Portable | Out-Null
-Copy-Item (Join-Path $Stage '*.exe') $Portable
-Copy-Item -Recurse (Join-Path $Docs '*') $Portable
-Copy-Item (Join-Path $PSScriptRoot 'portable.txt') $Portable
-$Zip = Join-Path $Dist "curvebook-$Version-windows-$Arch-portable.zip"
-Remove-Item -Force $Zip -ErrorAction SilentlyContinue
-Compress-Archive -Path $Portable -DestinationPath $Zip
-
 $HostArch = [System.Runtime.InteropServices.RuntimeInformation]::OSArchitecture.ToString().ToLowerInvariant()
 if ($Arch -ne 'arm64' -or $HostArch -eq 'arm64') {
   Invoke-Native 'curvebook-cli --version' { & (Join-Path $Stage 'curvebook-cli.exe') --version }
 } else {
   Write-Output "skipping curvebook-cli --version: an $Arch build doesn't run on this $HostArch machine"
 }
-Get-Item $Msi, $Zip | Format-Table Name, Length
+Get-Item $Msi | Format-Table Name, Length

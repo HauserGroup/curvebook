@@ -57,14 +57,20 @@ use crate::error::StatsError;
 // Exact Binomial Median Confidence Interval
 // ============================================================================
 
-/// Nonparametric exact order-statistic confidence interval for the median.
+/// Nonparametric exact order-statistic confidence interval for the median (Conover 1999).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct MedianCi {
+    /// Lower confidence endpoint equal to order statistic `x_{(lower_rank_1based)}`.
     pub lower: f64,
+    /// Upper confidence endpoint equal to order statistic `x_{(upper_rank_1based)}`.
     pub upper: f64,
+    /// One-based rank index of `lower` in the sorted ascending sample (`>= 1`).
     pub lower_rank_1based: usize,
+    /// One-based rank index of `upper` in the sorted ascending sample (`<= n`).
     pub upper_rank_1based: usize,
+    /// Requested nominal coverage percentage (e.g. `95.0` for a 95% confidence interval).
     pub target_confidence_percent: f64,
+    /// Exact discrete binomial achieved coverage percentage `>= target_confidence_percent` (`100 * (1 - 2 * P(Bin(n, 0.5) <= r))`).
     pub actual_confidence_percent: f64,
 }
 
@@ -119,36 +125,66 @@ pub fn exact_binomial_median_ci(values: &[f64], confidence: ConfidenceLevel) -> 
 /// Complete descriptive summary for a single numeric column or aggregated subcolumn series.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DescriptiveSummary {
+    /// Column or dataset title label.
     pub label: String,
+    /// Count of active finite numeric observations included (`n >= 1`).
     pub n: usize,
+    /// Count of explicitly excluded cells in the column not included in `n`.
     pub excluded_count: usize,
+    /// Minimum observed value.
     pub min: f64,
+    /// Lower quartile (25th percentile) computed with Hyndman & Fan (1996) Type 6 (`p(n + 1)` linear interpolation).
     pub q1: f64,
+    /// Sample median (50th percentile).
     pub median: f64,
+    /// Upper quartile (75th percentile) computed with Hyndman & Fan (1996) Type 6 (`p(n + 1)` linear interpolation).
     pub q3: f64,
+    /// Maximum observed value.
     pub max: f64,
+    /// Interquartile range `q3 - q1` in original units.
     pub iqr: f64,
+    /// Full sample span `max - min` in original units.
     pub range: f64,
+    /// Lower symmetric custom percentile `(percentile_percent, value)` corresponding to `100 - upper` (`None` when `custom_upper_percentile` was omitted).
     pub custom_lower_percentile: Option<(f64, f64)>,
+    /// Upper custom percentile `(percentile_percent, value)` (`None` when `custom_upper_percentile` was omitted).
     pub custom_upper_percentile: Option<(f64, f64)>,
+    /// Arithmetic sum of all active values.
     pub sum: f64,
+    /// Arithmetic sample mean $\bar{x} = \frac{1}{n}\sum x_i$.
     pub mean: f64,
+    /// Sample standard deviation with Bessel `n - 1` denominator (`None` when `n < 2`).
     pub sd: Option<f64>,
+    /// Exact two-sided chi-square confidence interval `(lower, upper)` for population SD on `n - 1` df at configured `ConfidenceLevel` (`None` when `n < 2` or zero variance).
     #[serde(default)]
     pub sd_ci: Option<(f64, f64)>,
+    /// Standard error of the mean `sd / sqrt(n)` (`None` when `n < 2`).
     pub sem: Option<f64>,
+    /// Two-sided Student *t* confidence interval `mean +/- t_{alpha/2, n-1} * sem` (`None` when `n < 2`).
     pub mean_ci: Option<(f64, f64)>,
+    /// Exact binomial order-statistic confidence interval for the median (`None` when `n < 3`).
     pub median_ci: Option<MedianCi>,
+    /// Percent coefficient of variation `100 * sd / |mean|` (`None` when `n < 2` or `mean == 0.0`).
     pub cv_percent: Option<f64>,
+    /// Geometric mean $\exp(\frac{1}{n}\sum \ln x_i)$ (`None` if any value is `<= 0.0`).
     pub geometric_mean: Option<f64>,
+    /// Multiplicative geometric standard deviation factor $\exp(\mathrm{sd}(\ln x)) \ge 1$ (`None` when `n < 2` or any value `<= 0.0`).
     pub geometric_sd_factor: Option<f64>,
+    /// Two-sided exponentiated Student *t* confidence interval on log scale for `geometric_mean` (`None` when `n < 2` or any value `<= 0.0`).
     pub geometric_mean_ci: Option<(f64, f64)>,
+    /// Harmonic mean $n / \sum (1 / x_i)$ (`None` when any value `<= 0.0` or reciprocal sum is zero).
     pub harmonic_mean: Option<f64>,
+    /// Two-sided Student *t* CI transformed on reciprocal scale (`None` when `n < 2`, any value `<= 0.0`, or CI denominator hits zero/negative).
     pub harmonic_mean_ci: Option<(f64, f64)>,
+    /// Quadratic mean (root-mean-square) $\sqrt{\frac{1}{n}\sum x_i^2} \ge 0$.
     pub quadratic_mean: f64,
+    /// Two-sided delta-method / Student *t* CI for `quadratic_mean` (`None` when `n < 2` or `quadratic_mean == 0.0`).
     pub quadratic_mean_ci: Option<(f64, f64)>,
+    /// Sample Fisher–Pearson skewness `G_1` (Joanes & Gill 1998 Type 2 unbiased adjustment; `None` when `n < 3` or zero SD).
     pub skewness: Option<f64>,
+    /// Sample excess kurtosis `G_2` (Joanes & Gill 1998 Type 2 unbiased adjustment; `None` when `n < 4` or zero SD).
     pub excess_kurtosis: Option<f64>,
+    /// Sample lag-1 serial autocorrelation `r_1` in `[-1, 1]` along row order (`None` when `n < 3` or zero variance).
     pub lag1_autocorrelation: Option<f64>,
 }
 
@@ -395,14 +431,22 @@ fn compute_skewness_kurtosis(values: &[f64], mean: f64, sd: Option<f64>) -> (Opt
 /// Pool pre-summarized `(Mean, SD, N)` points into exact combined `(total_n, mean, sd, sem, ci)`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PooledSummaryResult {
+    /// Column or dataset title label.
     pub label: String,
+    /// Number of input summarized rows (`points`) pooled together.
     pub point_count: usize,
+    /// Exact grand replicate count $\sum_i n_i$ reconstructed across all summarized rows.
     pub total_n: f64,
+    /// Pooled weighted grand mean $\sum_i n_i \bar{x}_i / \sum_i n_i$.
     pub mean: f64,
+    /// Exact pooled sample SD combining within-point (`(n_i - 1) SD_i^2`) and between-point (`n_i (mean_i - grand)^2`) sums of squares (`None` when `total_n <= 1.0`).
     pub sd: Option<f64>,
+    /// Two-sided chi-square confidence interval for population SD on `total_n - 1` df at configured `ConfidenceLevel` (`None` when `total_n <= 1.0` or zero variance).
     #[serde(default)]
     pub sd_ci: Option<(f64, f64)>,
+    /// Standard error of the pooled mean `sd / sqrt(total_n)` (`None` when `total_n <= 1.0`).
     pub sem: Option<f64>,
+    /// Two-sided Student *t* confidence interval on `total_n - 1` df (`None` when `total_n <= 1.0`).
     pub mean_ci: Option<(f64, f64)>,
 }
 
@@ -742,25 +786,38 @@ fn aggregate_replicate_datasets(
 /// Result of a single normality test.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalityTestOutcome {
+    /// Human-readable test name (e.g. `"D'Agostino-Pearson"`, `"Shapiro-Wilk"`, `"Anderson-Darling"`, `"Kolmogorov-Smirnov (Lilliefors)"`).
     pub test_name: String,
+    /// Computed test statistic (`K^2`, `W`, adjusted `A^2*`, or `D`).
     pub statistic: f64,
+    /// Test *P* value testing the null hypothesis of Gaussian (or lognormal when on log data) distribution.
     pub p_value: f64,
+    /// True when `p_value >= 0.05` (does not reject normality at the 5% level).
     pub passed: bool,
 }
 
 /// Complete four-test normality battery plus optional lognormal comparison.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct NormalityBatteryResult {
+    /// Number of finite active values evaluated (`n`).
     pub n: usize,
+    /// D'Agostino–Pearson omnibus $K^2$ test on raw values (`None` when `n < 8`).
     pub dagostino_pearson: Option<NormalityTestOutcome>,
+    /// Royston (1992/1995) Shapiro–Wilk *W* test on raw values (`None` when `n < 3` or `n > 5000`).
     pub shapiro_wilk: Option<NormalityTestOutcome>,
+    /// Stephens (1986) Case 3 sample-size-adjusted Anderson–Darling $A^{2*}$ test on raw values (`None` when `n < 5`).
     pub anderson_darling: Option<NormalityTestOutcome>,
+    /// Dallal–Wilkinson (1986) / Lilliefors (1967) Kolmogorov–Smirnov *D* test with composite parameters on raw values (`None` when `n < 5`).
     pub kolmogorov_smirnov: Option<NormalityTestOutcome>,
+    /// D'Agostino–Pearson $K^2$ test evaluated on $\ln(x_i)$ (`None` when `n < 8` or any value `<= 0.0`).
     pub lognormal_dagostino_pearson: Option<NormalityTestOutcome>,
+    /// Shapiro–Wilk *W* test evaluated on $\ln(x_i)$ (`None` when `n < 3`, `n > 5000`, or any value `<= 0.0`).
     pub lognormal_shapiro_wilk: Option<NormalityTestOutcome>,
+    /// Anderson–Darling $A^{2*}$ test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
     pub lognormal_anderson_darling: Option<NormalityTestOutcome>,
+    /// Lilliefors KS *D* test evaluated on $\ln(x_i)$ (`None` when `n < 5` or any value `<= 0.0`).
     pub lognormal_kolmogorov_smirnov: Option<NormalityTestOutcome>,
-    /// `ln(L_normal / L_lognormal)`: positive favors normal, negative favors lognormal.
+    /// `ln(L_normal / L_lognormal)`: positive favors normal, negative favors lognormal (`None` when `n < 2`, non-positive data, or degenerate variance).
     pub normal_vs_lognormal_log_lr: Option<f64>,
 }
 
@@ -1065,21 +1122,31 @@ pub fn qq_expected_quantiles(values: &[f64], lognormal: bool) -> Result<Vec<(f64
 // ============================================================================
 
 /// Flagged outlier record with original 0-based observation index.
+/// Single outlier record flagged by Grubbs' ESD or column ROUT detection.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OutlierFlag {
+    /// Zero-based index of the flagged observation in the input `values` slice.
     pub index: usize,
+    /// Numeric value of the flagged observation.
     pub value: f64,
+    /// Outlier test score (`G` for Grubbs' test; Student *t* ratio `|r_i| / RSDR` for ROUT).
     pub score: f64,
+    /// Critical score threshold (`G_crit` for Grubbs) or raw two-sided *P* value (for ROUT).
     pub threshold_or_p: f64,
 }
 
-/// Output of Grubbs' ESD outlier test.
+/// Output of Grubbs' ESD outlier test (Grubbs 1969).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GrubbsResult {
+    /// Total number of finite input observations originally examined (`n >= 3`).
     pub n: usize,
+    /// Two-sided significance threshold `alpha` in `(0, 1)` used to compute Grubbs critical values.
     pub alpha: f64,
+    /// True for sequential iterative outlier removal; false for single-outlier detection.
     pub iterative: bool,
+    /// Observations flagged as statistical outliers in detection order.
     pub outliers: Vec<OutlierFlag>,
+    /// Remaining non-outlier observations preserving original relative order.
     pub cleaned_values: Vec<f64>,
 }
 
@@ -1138,14 +1205,20 @@ pub fn grubbs_outliers(values: &[f64], alpha: f64, iterative: bool) -> Result<Gr
     Ok(GrubbsResult { n: values.len(), alpha, iterative, outliers, cleaned_values })
 }
 
-/// Output of the standalone column ROUT outlier test (`K = 1`).
+/// Output of the standalone column ROUT outlier test (`K = 1`; Motulsky & Brown 2006).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutResult {
+    /// Number of input observations analyzed (`n >= 3`).
     pub n: usize,
+    /// Target Benjamini–Hochberg false discovery rate `Q` in percent (`(0, 100]`, e.g. `1.0` for 1%).
     pub fdr_q_percent: f64,
+    /// Robust Cauchy/Lorentzian IRLS location estimate (`mu_robust`).
     pub robust_center: f64,
+    /// Robust Standard Deviation of Residuals (`RSDR`, 68.27th percentile scaled by `n / (n - 1)`).
     pub rsdr: f64,
+    /// Observations rejected by the BH step-up procedure at FDR `Q`.
     pub outliers: Vec<OutlierFlag>,
+    /// Non-outlier observations preserving original input order.
     pub cleaned_values: Vec<f64>,
 }
 
@@ -1249,22 +1322,36 @@ pub fn rout_outliers(values: &[f64], fdr_q_percent: f64) -> Result<RoutResult, S
 // One-Sample Hypothesis Tests
 // ============================================================================
 
-/// Result of a one-sample *t*-test against hypothetical mean `mu0`.
+/// Output of a one-sample Student *t*-test against `hypothetical_mean` (Student 1908).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OneSampleTResult {
+    /// Sample size `n` (may be rounded from effective `n_total` for summary inputs; `n >= 2`).
     pub n: usize,
+    /// Null-hypothesis reference value $\mu_0$.
     pub hypothetical_mean: f64,
+    /// Observed sample arithmetic mean $\bar{x}$.
     pub sample_mean: f64,
+    /// Mean discrepancy $\bar{x} - \mu_0$ in sample units.
     pub discrepancy: f64,
+    /// Sample standard deviation (`n - 1` denominator) in sample units.
     pub sd: f64,
+    /// Standard error of the mean `sd / sqrt(n)` in sample units.
     pub sem: f64,
+    /// Student *t* statistic `discrepancy / sem`.
     pub t_statistic: f64,
+    /// Degrees of freedom `n - 1` (`>= 1.0`).
     pub df: f64,
+    /// Student *t*(df) *P* value (`two_tailed` two-sided vs directional one-sided matching `t_statistic` sign).
     pub p_value: f64,
+    /// True when `p_value` is two-sided; false when directional one-tailed.
     pub two_tailed: bool,
+    /// Two-sided `t(df)` confidence interval `(lower, upper)` for `discrepancy = mean - mu0` at configured `ConfidenceLevel`.
     pub ci: (f64, f64),
+    /// Standardized Cohen's $d = (\bar{x} - \mu_0) / \mathrm{sd}$ (Cohen 1988).
     pub cohens_d: f64,
-    pub hedges_g: f64,
+    /// Bias-corrected Hedges' $g = J(\mathrm{df}) \cdot d$ (Hedges 1981); `None` when `df <= 1.0` (`n = 2`, where `Gamma((df-1)/2)` has a pole).
+    pub hedges_g: Option<f64>,
+    /// Exact noncentral-*t* two-sided CI for `hedges_g` scaled by $J(\mathrm{df})$ (Steiger & Fouladi 1997); `None` when `hedges_g` is `None` or noncentral-*t* inversion fails.
     pub hedges_g_ci: Option<(f64, f64)>,
 }
 
@@ -1303,10 +1390,8 @@ pub fn one_sample_t_test(
     let ci = (discrepancy - t_crit * sem, discrepancy + t_crit * sem);
 
     let d = discrepancy / sd;
-    let j = hedges_j_factor(df)?;
-    let g = j * d;
     let inv_sqrt_n = 1.0 / (n as f64).sqrt();
-    let g_ci = noncentral_t_ci(t_stat, df, confidence.percent()).ok().map(|(lo, hi)| (lo * inv_sqrt_n * j, hi * inv_sqrt_n * j));
+    let (g, g_ci) = hedges_g_with_ci(d, t_stat, df, inv_sqrt_n, confidence.percent())?;
 
     Ok(OneSampleTResult {
         n,
@@ -1336,20 +1421,46 @@ pub(crate) fn hedges_j_factor(df: f64) -> Result<f64, MathError> {
     Ok(num / den)
 }
 
+/// Compute Hedges' small-sample corrected `g = J(df) * d` and its noncentral-*t* CI when `df > 1.0`.
+pub(crate) type HedgesEstimate = (Option<f64>, Option<(f64, f64)>);
+
+/// Returns `(None, None)` when `df <= 1.0` because `Gamma((df - 1)/2)` is undefined at its `<= 0` poles.
+pub(crate) fn hedges_g_with_ci(d: f64, t_stat: f64, df: f64, inv_sqrt_n: f64, conf_percent: f64) -> Result<HedgesEstimate, MathError> {
+    if df <= 1.0 {
+        return Ok((None, None));
+    }
+    let j = hedges_j_factor(df)?;
+    let g = j * d;
+    let g_ci = noncentral_t_ci(t_stat, df, conf_percent).ok().map(|(lo, hi)| (lo * inv_sqrt_n * j, hi * inv_sqrt_n * j));
+    Ok((Some(g), g_ci))
+}
+
 /// Result of a one-sample Wilcoxon signed-rank test against hypothetical median `mu0`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct OneSampleWilcoxonResult {
+    /// Total number of active observations supplied before dropping exact zero differences `x_i == mu0`.
     pub n_total: usize,
+    /// Number of non-zero differences `|x_i - mu0| > 0` retained in signed-rank ranking.
     pub n_nonzero: usize,
+    /// Hypothesized null median $\mu_0$.
     pub hypothetical_median: f64,
+    /// Sample median of all `n_total` observations.
     pub sample_median: f64,
+    /// Sum of positive signed ranks `W+`.
     pub w_plus: f64,
+    /// Sum of negative signed ranks `W-`.
     pub w_minus: f64,
+    /// Signed-rank summary statistic (`W+` vs `W-` directional/minimum per exact DP or normal approximation).
     pub w_stat: f64,
+    /// *P* value testing $H_0: \text{median} = \mu_0$ (two-sided when `two_tailed == true`, else directional one-tailed via exact DP for `n_nonzero <= 25` without ties or tie-/continuity-corrected normal).
     pub p_value: f64,
+    /// True if exact dynamic-programming signed-rank tail distribution was used (`n_nonzero <= 25` without ties); false for asymptotic normal.
     pub exact_p_used: bool,
+    /// True for two-sided *P* value; false for directional one-sided test.
     pub two_tailed: bool,
+    /// One-sample Hodges–Lehmann pseudomedian estimator `median_{(i <= j)}((x_i + x_j) / 2)`.
     pub pseudomedian_hl: f64,
+    /// Two-sided Walsh-average confidence interval `(lower, upper)` for the pseudomedian at configured `ConfidenceLevel` (`None` if insufficient non-zero pairs).
     pub pseudomedian_ci: Option<(f64, f64)>,
 }
 

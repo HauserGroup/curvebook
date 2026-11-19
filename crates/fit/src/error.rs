@@ -22,6 +22,29 @@ pub enum FitStatus {
     Diverged,
 }
 
+/// Identifiability assessment for a nonlinear fit.
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+pub enum FitIdentifiability {
+    /// The assessment was disabled or was unavailable for this fit mode.
+    #[default]
+    NotAssessed,
+    /// The fit passed the configured identifiability checks.
+    Identifiable,
+    /// At least one check found evidence of unstable parameter estimation.
+    Ambiguous {
+        /// Human-readable diagnostic reasons explaining why parameter estimation is unstable.
+        reasons: Vec<String>,
+    },
+}
+
+impl FitIdentifiability {
+    /// Whether the assessment detected instability.
+    #[must_use]
+    pub const fn is_ambiguous(&self) -> bool {
+        matches!(self, Self::Ambiguous { .. })
+    }
+}
+
 /// Diagnostic note attached to an individual fitted parameter estimate.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum ParameterNote {
@@ -37,6 +60,8 @@ pub enum ParameterNote {
     HitUpperBound,
     /// Parameter is unidentifiable or severely collinear (`Dependency > 0.9999`).
     Ambiguous,
+    /// Parameter flagged by the opt-in identifiability assessment.
+    Unstable,
     /// Profile-likelihood confidence interval is unbounded on at least one side.
     UnboundedCi,
 }
@@ -47,29 +72,70 @@ pub enum FitError {
     /// No active non-excluded observations were available.
     EmptyInput,
     /// Fewer active observations than required by model degrees of freedom.
-    InsufficientData { required: usize, actual: usize },
+    InsufficientData {
+        /// Minimum number of active non-excluded observations needed to fit the model.
+        required: usize,
+        /// Actual number of active observations found in the dataset.
+        actual: usize,
+    },
     /// Equation identifier was not found in the built-in catalog.
-    UnknownEquation { id: String },
+    UnknownEquation {
+        /// Normalized or raw equation identifier supplied by the caller.
+        id: String,
+    },
     /// Invalid solver or analysis parameter configuration.
-    InvalidParameter { name: &'static str, reason: String },
+    InvalidParameter {
+        /// Name of the offending configuration field or parameter.
+        name: &'static str,
+        /// Human-readable explanation of why the parameter value was rejected.
+        reason: String,
+    },
     /// Upstream `DataSheet` archetype is not compatible with regression.
-    IncompatibleTable { kind: TableKind },
+    IncompatibleTable {
+        /// Table archetype encountered in the input `DataSheet`.
+        kind: TableKind,
+    },
     /// Weighting or Poisson objective domain check failed (e.g. `1/Y^2` when `Y == 0` or `Y < 0` for Poisson).
-    ImpossibleWeights { reason: String },
+    ImpossibleWeights {
+        /// Description of the domain or weight-positivity violation.
+        reason: String,
+    },
     /// Robust / ROUT / normality diagnostics require raw replicates rather than pre-summarized moments.
     RequiresRawReplicates,
     /// Starting parameter values produced non-finite predictions and could not be rescued.
-    BadInitialValues { reason: String },
+    BadInitialValues {
+        /// Diagnostic summary of why initial evaluation or simplex rescue failed.
+        reason: String,
+    },
     /// Custom equation DSL syntax or compilation failure.
-    DslCompileError { message: String, line: usize, column: usize },
+    DslCompileError {
+        /// Parser or compiler diagnostic describing the syntax/semantic error.
+        message: String,
+        /// One-based source line index where the error occurred.
+        line: usize,
+        /// One-based character column index where the error occurred.
+        column: usize,
+    },
     /// Custom equation bytecode VM runtime failure (e.g. step budget exceeded).
-    DslEvalError { message: String },
+    DslEvalError {
+        /// Description of the runtime VM failure (step-budget, stack, or domain error).
+        message: String,
+    },
     /// Adaptive RK45 ODE integration failed to reach observation times within tolerances/budget.
-    OdeIntegrationFailed { reason: String },
+    OdeIntegrationFailed {
+        /// Failure cause from the RK45 ODE solver (e.g. stiffness, step underflow, non-finite derivative).
+        reason: String,
+    },
     /// Implicit equation root-finder failed to bracket or converge for `y(x)`.
-    ImplicitSolveFailed { reason: String },
+    ImplicitSolveFailed {
+        /// Failure cause from Brent root bracketing or bisection for the implicit curve.
+        reason: String,
+    },
     /// Referenced `HookSource` could not be resolved to a finite scalar.
-    HookResolutionError { message: String },
+    HookResolutionError {
+        /// Explanation of the missing, circular, or non-finite hooked reference.
+        message: String,
+    },
     /// Propagated linear-algebra or root-finding error from `curvebook-math`.
     Math(MathError),
     /// Propagated document validation error from `curvebook-doc`.

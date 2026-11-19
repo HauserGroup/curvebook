@@ -4,13 +4,14 @@ use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, FactorialAnovaSpec, GlmFamily, GlmSpec, KappaWeighting,
     MixedModelDfMethod, MultiplicityMethod, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
     RepeatedMeasuresDesign, ResidualCovariance, RocCiMethod, RocSpec, SubcolumnAggregation, SumOfSquaresType, SurvivalAnalysisSpec, TableArchetype,
-    TwoGroupMethod, TwoGroupSpec,
+    TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
 use curvebook_palette::Rgba8;
 use serde::{Deserialize, Serialize};
 
 use crate::UiApp;
-use crate::dialogs_canvas::EditAnalysisParametersState;
+use crate::dialogs_canvas::{EditAnalysisParametersState, VariableRoleFilter, variable_role_badge, variable_role_badge_fg, variable_role_color};
+use crate::i18n::mirror_x_for_rtl;
 use crate::interaction::UiEventOutcome;
 use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
 use crate::layout::paint::{PaintOp, PaintOpKind};
@@ -121,6 +122,11 @@ fn handle_prefixed_custom_action(app: &mut UiApp, state: &mut StatParamsViewStat
         map.insert(String::from("active_tab"), serde_json::Value::String(rest.to_owned()));
         app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
         state.active_section = rest.to_owned();
+        return Ok(true);
+    }
+    if let Some(rest) = payload.strip_prefix("set_mv_role_filter:") {
+        let filter = VariableRoleFilter::from_slug(rest).ok_or_else(|| format!("unknown variable role filter `{rest}`"))?;
+        app.canvas_dialogs.edit_params.role_filter = filter;
         return Ok(true);
     }
     if let Some(rest) = payload.strip_prefix("toggle_dataset:") {
@@ -1583,10 +1589,19 @@ struct SegItem {
     action: WidgetAction,
 }
 
+struct MvGridCell {
+    id: String,
+    label: String,
+    selected: bool,
+    role: Option<(VariableRole, bool)>,
+    action: WidgetAction,
+}
+
 enum StatItem {
     Section(String, String),
     Info(String, String, bool),
     Toggle { id: String, label: String, checked: bool, is_radio: bool, enablement: ControlEnablement, action: WidgetAction },
+    MvVariableGridRow { items: Vec<MvGridCell>, cols_per_row: u32 },
     ButtonRow { items: Vec<SegItem> },
     Dropdown { id: String, label: String, selected_value: String, enablement: ControlEnablement },
     AlphaSpinner { value_text: String },
@@ -1597,7 +1612,7 @@ impl StatItem {
     fn height(&self, scale: f64) -> u32 {
         match self {
             Self::Section(..) | Self::Info(..) => scaled_u32(20.0, scale, 18, 42),
-            Self::Toggle { .. } | Self::ButtonRow { .. } => scaled_u32(24.0, scale, 20, 48),
+            Self::Toggle { .. } | Self::MvVariableGridRow { .. } | Self::ButtonRow { .. } => scaled_u32(24.0, scale, 20, 48),
             Self::Dropdown { .. } | Self::AlphaSpinner { .. } | Self::CustomSpinner { .. } => scaled_u32(26.0, scale, 22, 52),
         }
     }
@@ -1847,6 +1862,40 @@ fn render_design_two_column(
     emit_scrollbars_for_meta(builder, ZLayer::ModalDialog, &scroll_meta, Some(panel_wid));
 }
 
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn emit_mv_role_badge(
+    builder: &mut LayoutBuilder<'_>,
+    parent: &WidgetId,
+    z_layer: ZLayer,
+    id: &str,
+    rect: LayoutRectPx,
+    role: VariableRole,
+    role_inferred: bool,
+    scroll_container: Option<&str>,
+) {
+    let badge_text = variable_role_badge(role);
+    let badge_fill = variable_role_color(role, &builder.app.theme);
+    let badge_fg = variable_role_badge_fg(badge_fill);
+    let wid = builder.push_node(NodeSpec {
+        id: WidgetId::from(id),
+        parent: Some(parent.clone()),
+        z_layer,
+        rect_px: rect,
+        a11y: AccessibilityMeta::new(WidgetRole::Label, badge_text, FocusScope::ModalDialog),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    let _ = role_inferred;
+    builder.paint_fill(z_layer, Some(&wid), rect, badge_fill);
+    builder.paint_stroke(z_layer, Some(&wid), rect, builder.palette.border, 1);
+    let size_px = (10.0 * builder.scale()).clamp(8.0, 20.0);
+    paint_text_fitted(
+        builder,
+        &wid,
+        FittedTextSpec { z_layer, rect, pad_x: 2, text: badge_text, style: &UiTextStyle::ui_bold(size_px), color: badge_fg, scroll_container },
+    );
+}
+
 fn emit_stat_item(
     builder: &mut LayoutBuilder<'_>,
     parent: &WidgetId,
@@ -1940,19 +1989,93 @@ fn emit_stat_item(
                 },
             );
         }
+        StatItem::MvVariableGridRow { items, cols_per_row } => {
+            if items.is_empty() {
+                return;
+            }
+            let is_rtl = builder.tree.is_rtl;
+            let gap = scaled_u32(4.0, scale, 3, 10);
+            let cols = (*cols_per_row).max(items.len() as u32).max(1);
+            let min_cell_w = scaled_u32(48.0, scale, 40, 110);
+            let cell_w = (rect.width.saturating_sub(gap.saturating_mul(cols.saturating_sub(1))) / cols).max(min_cell_w);
+            for (idx, cell) in items.iter().enumerate() {
+                let local_x = (idx as u32).saturating_mul(cell_w.saturating_add(gap));
+                if local_x.saturating_add(cell_w) > rect.width.saturating_add(2) {
+                    break;
+                }
+                let cx = rect.x + i32::try_from(mirror_x_for_rtl(local_x, cell_w, rect.width, is_rtl)).unwrap_or(0);
+                *tab_ord += 1;
+                if let Some((role, role_inferred)) = cell.role {
+                    let inner_gap = scaled_u32(2.0, scale, 2, 6);
+                    let badge_w = scaled_u32(26.0, scale, 22, 62).min((cell_w.saturating_mul(2)) / 5);
+                    let btn_w = cell_w.saturating_sub(badge_w.saturating_add(inner_gap)).max(16);
+                    let btn_local_x = mirror_x_for_rtl(0, btn_w, cell_w, is_rtl);
+                    let badge_local_x = mirror_x_for_rtl(btn_w.saturating_add(inner_gap), badge_w, cell_w, is_rtl);
+                    let btn_rect = LayoutRectPx::new(cx + i32::try_from(btn_local_x).unwrap_or(0), rect.y, btn_w, rect.height);
+                    let badge_h = rect.height.saturating_sub(4).max(12);
+                    let badge_rect = LayoutRectPx::new(
+                        cx + i32::try_from(badge_local_x).unwrap_or(0),
+                        rect.y + i32::try_from((rect.height.saturating_sub(badge_h)) / 2).unwrap_or(2),
+                        badge_w,
+                        badge_h,
+                    );
+                    emit_button(
+                        builder,
+                        ButtonWidgetSpec {
+                            id: &cell.id,
+                            parent: Some(parent.clone()),
+                            z_layer: ZLayer::ModalDialog,
+                            rect: btn_rect,
+                            label: &cell.label,
+                            keyboard_path: &cell.id,
+                            focus_scope: FocusScope::ModalDialog,
+                            tab_order: Some(*tab_ord),
+                            primary: false,
+                            selected: cell.selected,
+                            shortcut: None,
+                            enablement: ControlEnablement::enabled(),
+                            action: cell.action.clone(),
+                        },
+                    );
+                    let badge_id = format!("{}.role_badge", cell.id);
+                    emit_mv_role_badge(builder, parent, ZLayer::ModalDialog, &badge_id, badge_rect, role, role_inferred, scroll_id);
+                } else {
+                    emit_button(
+                        builder,
+                        ButtonWidgetSpec {
+                            id: &cell.id,
+                            parent: Some(parent.clone()),
+                            z_layer: ZLayer::ModalDialog,
+                            rect: LayoutRectPx::new(cx, rect.y, cell_w, rect.height),
+                            label: &cell.label,
+                            keyboard_path: &cell.id,
+                            focus_scope: FocusScope::ModalDialog,
+                            tab_order: Some(*tab_ord),
+                            primary: false,
+                            selected: cell.selected,
+                            shortcut: None,
+                            enablement: ControlEnablement::enabled(),
+                            action: cell.action.clone(),
+                        },
+                    );
+                }
+            }
+        }
         StatItem::ButtonRow { items } => {
             if items.is_empty() {
                 return;
             }
+            let is_rtl = builder.tree.is_rtl;
             let gap = scaled_u32(4.0, scale, 3, 10);
             let min_bw = scaled_u32(36.0, scale, 32, 76);
             let count = items.len() as u32;
             let bw = (rect.width.saturating_sub(gap.saturating_mul(count.saturating_sub(1))) / count).max(min_bw);
             for (idx, seg) in items.iter().enumerate() {
-                let bx = rect.x + i32::try_from((idx as u32) * (bw + gap)).unwrap_or(0);
-                if bx + i32::try_from(bw).unwrap_or(36) > rect.right() + 2 {
+                let local_x = (idx as u32).saturating_mul(bw.saturating_add(gap));
+                if local_x.saturating_add(bw) > rect.width.saturating_add(2) {
                     break;
                 }
+                let bx = rect.x + i32::try_from(mirror_x_for_rtl(local_x, bw, rect.width, is_rtl)).unwrap_or(0);
                 *tab_ord += 1;
                 emit_button(
                     builder,
@@ -2178,11 +2301,91 @@ fn append_dataset_items(app: &UiApp, shape: &TableShapeInfo<'_>, items: &mut Vec
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() else {
         return;
     };
+    let locale = app.locale.as_str();
+    if let Some(ds) = shape.sheet
+        && let TableArchetype::MultipleVariables(mv) = &ds.archetype
+    {
+        if mv.variables.is_empty() {
+            return;
+        }
+        let role_filter = app.canvas_dialogs.edit_params.role_filter;
+        items.push(StatItem::Section(
+            String::from("edit.sec.datasets"),
+            label_i18n(locale, "stat_params.section.datasets", "Variables & Role Filter").to_owned(),
+        ));
+        let chip = |id: &str, label: &str, target: VariableRoleFilter, slug: &str| SegItem {
+            id: String::from(id),
+            label: String::from(label),
+            selected: role_filter == target,
+            enablement: ControlEnablement::enabled(),
+            action: custom_action(format!("set_mv_role_filter:{slug}")),
+        };
+        items.push(StatItem::ButtonRow {
+            items: vec![
+                chip("edit.mv.filter.all", "All", VariableRoleFilter::All, "all"),
+                chip("edit.mv.filter.continuous", "Continuous", VariableRoleFilter::ContinuousOnly, "continuous"),
+                chip("edit.mv.filter.categorical", "Categorical", VariableRoleFilter::CategoricalOnly, "categorical"),
+                chip("edit.mv.filter.label", "Label", VariableRoleFilter::LabelOnly, "label"),
+                chip("edit.mv.filter.calculated", "Calculated", VariableRoleFilter::CalculatedOnly, "calculated"),
+            ],
+        });
+
+        let mut cells = vec![MvGridCell {
+            id: String::from("edit.dataset.all"),
+            label: String::from("All"),
+            selected: spec.selected_data_sets.is_empty(),
+            role: None,
+            action: custom_action("select_all_datasets"),
+        }];
+        let mut matched_count = 0usize;
+        for (idx, var) in mv.variables.iter().enumerate() {
+            if !role_filter.matches(var.role) {
+                continue;
+            }
+            matched_count += 1;
+            let included = spec.selected_data_sets.is_empty() || spec.selected_data_sets.contains(&idx);
+            let raw_title = if var.title.trim().is_empty() { shape.col_title(idx) } else { var.title.clone() };
+            let short = if raw_title.chars().count() > 7 {
+                let prefix: String = raw_title.chars().take(6).collect();
+                format!("{prefix}…")
+            } else {
+                raw_title
+            };
+            cells.push(MvGridCell {
+                id: format!("edit.dataset.{idx}"),
+                label: short,
+                selected: included,
+                role: Some((var.role, var.role_inferred)),
+                action: custom_action(format!("toggle_dataset:{idx}")),
+            });
+        }
+        if matched_count == 0 {
+            items.push(StatItem::Info(String::from("edit.mv.filter.empty"), format!("No variables match `{}`.", role_filter.label()), false));
+        } else {
+            let per_row: usize = 5;
+            for chunk in cells.chunks(per_row) {
+                items.push(StatItem::MvVariableGridRow {
+                    items: chunk
+                        .iter()
+                        .map(|c| MvGridCell {
+                            id: c.id.clone(),
+                            label: c.label.clone(),
+                            selected: c.selected,
+                            role: c.role,
+                            action: c.action.clone(),
+                        })
+                        .collect(),
+                    cols_per_row: u32::try_from(per_row).unwrap_or(5),
+                });
+            }
+        }
+        return;
+    }
+
     let titles = shape.column_titles();
     if titles.is_empty() {
         return;
     }
-    let locale = app.locale.as_str();
     items.push(StatItem::Section(
         String::from("edit.sec.datasets"),
         label_i18n(locale, "stat_params.section.datasets", "Datasets & Columns").to_owned(),

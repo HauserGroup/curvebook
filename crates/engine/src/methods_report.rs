@@ -761,10 +761,13 @@ fn describe_multivariate(s: &MultivariateSpec, source_ds: Option<&DataSheet>) ->
 }
 
 fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
+    let range = s.x_range_filter.filter(|(lo, hi)| lo.is_some() || hi.is_some()).map_or_else(String::new, |(lo, hi)| {
+        format!(" The fit included observations within X bounds [{}, {}].", opt_bound_str(lo), opt_bound_str(hi))
+    });
     if s.deming_model_ii {
-        return vec![ReportBlock::Paragraph(vec![plain(
-            "Model II Deming orthogonal linear regression was fitted to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.",
-        )])];
+        return vec![ReportBlock::Paragraph(vec![plain(format!(
+            "Model II Deming orthogonal linear regression was fitted to account for measurement error in both X and Y variables, with standard errors and confidence intervals computed by leave-one-out jackknife resampling.{range}"
+        ))])];
     }
     let origin =
         if s.force_through_origin { "constrained through the origin (Y = Slope * X)" } else { "with free Y-intercept (Y = Slope * X + YIntercept)" };
@@ -780,7 +783,7 @@ fn describe_linear_regression(s: &LinearRegressionSpec) -> Vec<ReportBlock> {
     }
     let extra_str = if extras.is_empty() { String::new() } else { format!(" Enabled outputs: {}.", extras.join(", ")) };
     vec![ReportBlock::Paragraph(vec![plain(format!(
-        "Ordinary least-squares simple linear regression was fitted {origin}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}"
+        "Ordinary least-squares simple linear regression was fitted {origin}, including a runs test for departure from linearity and ANCOVA comparison of slopes and intercepts when multiple datasets are present.{extra_str}{range}"
     ))])]
 }
 

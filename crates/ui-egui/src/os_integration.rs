@@ -171,6 +171,14 @@ pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
     /// # Errors
     /// Returns a descriptive error string when the bundle is empty or the clipboard backend fails.
     fn write_bundle(&self, bundle: &ClipboardBundle) -> Result<OsAdapterStatus, String>;
+
+    /// Read plain UTF-8 text from the platform clipboard, if supported by the adapter.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when the clipboard backend fails unexpectedly.
+    fn read_text(&self) -> Result<OsAdapterStatus, String> {
+        Ok(OsAdapterStatus::unavailable("platform-clipboard", "clipboard read unsupported on this adapter"))
+    }
 }
 
 /// Default platform clipboard adapter delegating to native OS pasteboard tools on desktop targets.
@@ -201,6 +209,17 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
                 return Err(String::from("cannot write empty clipboard bundle to pasteboard"));
             }
             Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard requires host DOM bridge"))
+        }
+    }
+
+    fn read_text(&self) -> Result<OsAdapterStatus, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            read_os_pasteboard()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard read requires host DOM bridge"))
         }
     }
 }
@@ -267,6 +286,12 @@ impl StubPlatformClipboardAdapter {
         guard.texts.last().cloned()
     }
 
+    /// Seed plain UTF-8 / TSV text into the stub clipboard so raw `Cmd/Ctrl+V` reads it.
+    pub fn seed_text(&self, text: impl Into<String>) {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.texts.push(text.into());
+    }
+
     /// Clear all captured bundle and text entries.
     pub fn clear(&self) {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -312,6 +337,22 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
         } else {
             Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"))
         }
+    }
+
+    fn read_text(&self) -> Result<OsAdapterStatus, String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !guard.available {
+            return Ok(OsAdapterStatus::unavailable("stub-pasteboard", "stubbed pasteboard marked unavailable"));
+        }
+        let text = guard.texts.last().cloned();
+        Ok(OsAdapterStatus {
+            available: true,
+            availability: OsAdapterAvailability::Submitted,
+            backend: String::from("stub-pasteboard"),
+            detail: format!("read {} UTF-8 bytes", text.as_deref().map_or(0, str::len)),
+            text,
+            job_id: None,
+        })
     }
 }
 

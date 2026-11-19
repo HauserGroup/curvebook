@@ -19,7 +19,9 @@ On Windows with WiX 5.0.2 and its UI/Util extensions:
 ./packaging/windows/test-install-policy.ps1 -OutputDirectory ./target/install-policy-tests
 ```
 
-The script compiles x64, x86 and arm64 metadata-only MSI fixtures with non-executable placeholder
+The script compiles x64 and arm64 metadata-only MSI fixtures with non-executable placeholder
 payloads and verifies scope guards, folder preservation, action sequencing, upgrade/component
 identity, and the registry contract in `install-policy.json` using a read-only Windows Installer
 session.
+
+For user-facing Windows `.msi` installation (`x64` and `arm64`) and verification steps, see [Get Started](https://hausergroup.github.io/curvebook/get-started.html) (`docs/reference/get-started.md`).

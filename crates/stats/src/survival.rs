@@ -83,25 +83,40 @@ use crate::multiplicity::{MultiplicityProcedure, adjust_p_values, adjust_sidak};
 /// Single time step on a Kaplan–Meier survival curve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KaplanMeierStep {
+    /// Distinct observed follow-up time `t >= 0` (`t = 0.0` sentinel step emitted only if present or implied).
     pub time: f64,
+    /// Number of subjects still at risk immediately before `time` (`n_i`).
     pub n_at_risk: usize,
+    /// Number of uncensored events observed exactly at `time` (`d_i`).
     pub n_events: usize,
+    /// Number of subjects right-censored at `time` (removed from risk set after events at `time`).
     pub n_censored: usize,
+    /// Kaplan–Meier product-limit survival probability $S(t)$ in `[0, 1]`.
     pub survival: f64,
+    /// Greenwood (1926) asymptotic standard error $\mathrm{SE}[S(t)]$ (`0.0` at $S(t) \in \{0, 1\}$).
     pub greenwood_se: f64,
+    /// Lower endpoint of pointwise confidence interval in `[0, 1]` at configured `ConfidenceLevel` (log-log Kalbfleisch–Prentice or linear plain).
     pub ci_lower: f64,
+    /// Upper endpoint of pointwise confidence interval in `[0, 1]` at configured `ConfidenceLevel`.
     pub ci_upper: f64,
 }
 
 /// Complete Kaplan–Meier summary for a single cohort.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct KaplanMeierCohortResult {
+    /// Cohort / group display label.
     pub label: String,
+    /// Total number of subjects in the cohort (`n_events + n_censored + still at risk`).
     pub n_total: usize,
+    /// Total number of uncensored failure events observed in this cohort.
     pub n_events: usize,
+    /// Total number of right-censored observations in this cohort.
     pub n_censored: usize,
+    /// Estimated median survival time where $S(t)$ reaches/crosses `0.5` (`None` if survival never drops to `<= 0.5`).
     pub median_survival: Option<f64>,
+    /// Two-sided Brookmeyer–Crowley (1982) confidence interval `(lower, upper)` for median survival (`None` endpoints when median or upper/lower crossing is not reached).
     pub median_ci: (Option<f64>, Option<f64>),
+    /// Chronologically ordered event/censoring steps across distinct follow-up times.
     pub steps: Vec<KaplanMeierStep>,
 }
 
@@ -148,23 +163,36 @@ impl HazardRatioResult {
 /// Omnibus multi-cohort survival curve comparison test result.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SurvivalComparisonResult {
+    /// Comparison test name (e.g. `"Log-rank (Mantel-Cox)"`, `"Gehan-Breslow-Wilcoxon"`, `"Log-rank test for trend"`).
     pub test_name: String,
+    /// Chi-square test statistic ($\ge 0$).
     pub chi_square: f64,
+    /// Asymptotic chi-square degrees of freedom (`k - 1` for homogeneity, `1` for log-rank trend).
     pub df: f64,
+    /// Upper-tail $\chi^2(\text{df})$ *P* value testing identical survival curves across cohorts.
     pub p_value: f64,
 }
 
-/// Single covariate estimate from Cox Proportional Hazards regression.
+/// Single covariate estimate from Cox Proportional Hazards regression (Cox 1972).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoxCovariateResult {
+    /// Predictor column or encoded dummy-level term label.
     pub name: String,
+    /// Maximum partial-likelihood log-hazard regression coefficient $\hat{\beta}$.
     pub beta: f64,
+    /// Asymptotic standard error $\sqrt{I(\hat{\beta})^{-1}_{jj}}$ from the observed partial-likelihood information matrix.
     pub se: f64,
+    /// Wald test statistic $\hat{\beta} / \mathrm{SE}(\hat{\beta})$.
     pub z_statistic: f64,
+    /// Two-sided Wald *P* value $2 \Phi(-|z|)$ testing $H_0: \beta_j = 0$.
     pub p_value: f64,
+    /// Estimated hazard ratio $\exp(\hat{\beta}) > 0$ per 1-unit increase in the covariate.
     pub hazard_ratio: f64,
+    /// Two-sided Wald confidence interval $\exp(\hat{\beta} \pm z_{\alpha/2}\mathrm{SE})$ for `hazard_ratio` at configured `ConfidenceLevel`.
     pub hr_ci: (f64, f64),
+    /// Grambsch–Therneau (1994) Pearson correlation `rho` between scaled Schoenfeld residuals and event times (`0.0` if degenerate).
     pub schoenfeld_rho: f64,
+    /// Two-sided proportional-hazards diagnostic *P* value testing $H_0: \rho = 0$ (`1.0` when `< 3` events).
     pub schoenfeld_p: f64,
 }
 
@@ -173,34 +201,62 @@ pub struct CoxCovariateResult {
 /// (Efron-adjusted under Efron ties) and `survival = exp(-cum_hazard)`.
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct CoxBaselinePoint {
+    /// Event follow-up time `t >= 0` (`t = 0.0` initial anchor plus distinct observed event times).
     pub time: f64,
+    /// Baseline cumulative hazard $H_0(t)$ evaluated at sample-mean covariates.
     pub cum_hazard: f64,
+    /// Baseline survival probability $S_0(t) = \exp(-H_0(t)) \in [0, 1]$ at sample-mean covariates.
     pub survival: f64,
 }
 
-/// Complete Cox Proportional Hazards regression output.
+/// Complete Cox Proportional Hazards regression output (Cox 1972; Therneau & Grambsch 2000).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CoxPhResult {
+    /// Number of complete subjects included in the partial likelihood fit.
     pub n_subjects: usize,
+    /// Total count of uncensored failure events across `n_subjects`.
     pub n_events: usize,
+    /// Partial-likelihood tied-event-time handling method (`Breslow`, `Efron`, or `Exact`).
     pub tie_method: CoxTieMethod,
+    /// True if Newton–Raphson step-halving converged within gradient/step tolerances.
     pub converged: bool,
+    /// Number of Newton–Raphson iterations executed.
     pub iterations: usize,
+    /// Null partial log-likelihood $\ell(0)$ at zero coefficients.
     pub log_lik_null: f64,
+    /// Fitted partial log-likelihood $\ell(\hat{\beta})$ at convergence.
     pub log_lik_model: f64,
-    pub concordance: f64,
+    /// Harrell's *C*-index concordance probability in `[0, 1]` over comparable subject pairs (Harrell et al. 1982);
+    /// `None` when `comparable_pairs == 0` (for example when all events occur at identical times).
+    pub concordance: Option<f64>,
+    /// Total number of non-tied comparable pairs contributing to Harrell's *C*-index denominator (`0` makes `concordance` `None`).
+    #[serde(default)]
+    pub comparable_pairs: usize,
+    /// Omnibus Likelihood Ratio $\chi^2 = 2(\ell(\hat{\beta}) - \ell(0))$ on `covariates.len()` degrees of freedom.
     pub likelihood_ratio_chi2: f64,
+    /// Upper-tail $\chi^2(p)$ *P* value for the omnibus likelihood-ratio test.
     pub likelihood_ratio_p: f64,
+    /// Omnibus Wald $\chi^2 = \hat{\beta}^\top I(\hat{\beta}) \hat{\beta}$ on `p` degrees of freedom.
     pub wald_chi2: f64,
+    /// Upper-tail $\chi^2(p)$ *P* value for the omnibus Wald test.
     pub wald_p: f64,
+    /// Omnibus Score (log-rank multivariate) $\chi^2 = U(0)^\top I(0)^{-1} U(0)$ on `p` degrees of freedom.
     pub score_chi2: f64,
+    /// Upper-tail $\chi^2(p)$ *P* value for the omnibus Score test.
     pub score_p: f64,
+    /// Global Grambsch–Therneau (1994) scaled Schoenfeld proportional-hazards $\chi^2$ test statistic.
     pub global_schoenfeld_chi2: f64,
+    /// Degrees of freedom for the global proportional-hazards Schoenfeld test (`p`).
     pub global_schoenfeld_df: f64,
+    /// Upper-tail $\chi^2(p)$ *P* value testing global proportional hazards (`p < 0.05` warns of non-proportionality).
     pub global_schoenfeld_p: f64,
+    /// Ordered per-covariate coefficient, hazard ratio, confidence interval, and Schoenfeld check results.
     pub covariates: Vec<CoxCovariateResult>,
+    /// Per-subject Martingale residuals $M_i = \delta_i - \hat{H}(t_i | X_i)$ in input subject order.
     pub martingale_residuals: Vec<f64>,
+    /// Per-subject symmetric deviance residuals derived from `martingale_residuals` (Therneau & Grambsch 2000).
     pub deviance_residuals: Vec<f64>,
+    /// Estimated baseline cumulative hazard and survival trajectory evaluated at sample-mean covariates.
     pub baseline_survival: Vec<CoxBaselinePoint>,
     /// Inverse Fisher information covariance matrix `Cov(beta_hat)` (`p x p`).
     #[serde(default)]
@@ -656,11 +712,14 @@ fn weighted_log_rank_stats(cohorts: &[&[SurvivalObservation]], weight_kind: Surv
 // Cox Proportional Hazards Regression (Breslow & Efron Ties + Schoenfeld PH)
 // ============================================================================
 
-/// Subject record for Cox Proportional Hazards regression.
-#[derive(Debug, Clone)]
+/// Input observation record for Cox Proportional Hazards regression.
+#[derive(Debug, Clone, PartialEq)]
 pub struct CoxSubject {
+    /// Positive follow-up time (`> 0.0`; non-finite or `<= 0` subjects are rejected).
     pub time: f64,
+    /// Event indicator (`true` = failure event observed at `time`, `false` = right-censored).
     pub event: bool,
+    /// Covariate design vector `X_i` of fixed length `p >= 1` across all subjects.
     pub x: Vec<f64>,
 }
 
@@ -844,7 +903,7 @@ pub fn cox_ph_regression(
     }
 
     let (martingale_residuals, deviance_residuals, baseline_survival) = cox_residuals_and_baseline(&ordered, &clusters, &beta, tie_method, n);
-    let concordance = harrell_c_index(&ordered, &beta);
+    let (concordance, comparable_pairs) = harrell_c_index(&ordered, &beta);
     let (cov_beta_rows, correlation_matrix) = cox_cov_and_corr_matrices(cov_beta.as_ref(), p);
 
     Ok(CoxPhResult {
@@ -856,6 +915,7 @@ pub fn cox_ph_regression(
         log_lik_null: ll_null,
         log_lik_model: ll_curr,
         concordance,
+        comparable_pairs,
         likelihood_ratio_chi2: lr_chi2,
         likelihood_ratio_p: lr_p,
         wald_chi2,
@@ -1632,10 +1692,11 @@ fn cox_residuals_and_baseline(
 /// Harrell et al. (1982) concordance index for the fitted linear predictor. A pair is usable when
 /// the subject with the shorter time had an event (an event tied in time with a censored subject
 /// counts as shorter); tied linear predictors score 1/2. Pairs of tied event times are excluded.
-fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f64 {
+/// Returns `(None, 0)` when zero comparable pairs exist.
+fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> (Option<f64>, usize) {
     let lp: Vec<f64> = ordered.iter().map(|s| s.2.iter().zip(beta.iter()).map(|(x, b)| x * b).sum()).collect();
     let mut conc = 0.0_f64;
-    let mut pairs = 0.0_f64;
+    let mut pairs = 0_usize;
     for i in 0..ordered.len() {
         if !ordered[i].1 {
             continue;
@@ -1646,7 +1707,7 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f6
             }
             let comparable = ordered[j].0 > ordered[i].0 || (ordered[j].0 == ordered[i].0 && !ordered[j].1);
             if comparable {
-                pairs += 1.0;
+                pairs += 1;
                 if lp[i] > lp[j] {
                     conc += 1.0;
                 } else if (lp[i] - lp[j]).abs() <= 1e-12 {
@@ -1655,7 +1716,8 @@ fn harrell_c_index(ordered: &[(f64, bool, Vec<f64>, usize)], beta: &[f64]) -> f6
             }
         }
     }
-    if pairs > 0.0 { conc / pairs } else { 0.5 }
+    let c_index = if pairs > 0 { Some(conc / (pairs as f64)) } else { None };
+    (c_index, pairs)
 }
 
 // ============================================================================
@@ -1865,106 +1927,8 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
             let subjects = extraction.subjects;
 
             let cox = cox_ph_regression(&subjects, &pred_names, *tie_method, confidence)?;
-            let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
-            let has_non_estimable = cox.covariates.iter().any(|c| !c.se.is_finite());
-            push_scalar(&mut out, "Converged", None, if cox.converged { 1.0 } else { 0.0 });
-            push_scalar(&mut out, "Iterations", None, cox.iterations as f64);
-            push_scalar(&mut out, "Concordance (C-index)", None, cox.concordance);
-            push_scalar(&mut out, "Likelihood ratio chi2", None, cox.likelihood_ratio_chi2);
-            push_scalar(&mut out, "Likelihood ratio P", None, cox.likelihood_ratio_p);
-            push_scalar(&mut out, "Global Schoenfeld P", None, cox.global_schoenfeld_p);
-            push_scalar(&mut out, "AIC", None, aic);
-
-            let headers = vec![
-                String::from("beta"),
-                String::from("SE"),
-                String::from("Wald z"),
-                String::from("P value"),
-                String::from("Hazard Ratio"),
-                format!("{}% CI (HR)", confidence.percent()),
-                String::from("Schoenfeld P"),
-            ];
-            let mut labels = Vec::with_capacity(cox.covariates.len());
-            let mut rows = Vec::with_capacity(cox.covariates.len());
-            for cov in &cox.covariates {
-                labels.push(cov.name.clone());
-                rows.push(vec![
-                    num_cell(cov.beta),
-                    num_cell(cov.se),
-                    num_cell(cov.z_statistic),
-                    p_cell(cov.p_value, p_fmt),
-                    num_cell(cov.hazard_ratio),
-                    ci_cell(cov.hr_ci.0, cov.hr_ci.1),
-                    p_cell(cov.schoenfeld_p, p_fmt),
-                ]);
-            }
-            let mut cox_tab = build_tab(
-                "cox-ph",
-                "Cox proportional hazards estimates",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                headers,
-                labels.clone(),
-                rows,
-            );
-            if !cox.converged || has_non_estimable {
-                cox_tab.footnotes.push(String::from(
-                    "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
-                ));
-            } else if !cox.global_schoenfeld_p.is_finite() {
-                cox_tab.footnotes.push(String::from(
-                    "Schoenfeld proportional-hazards residual test is non-estimable when fewer than 3 events (or fewer than 2 distinct event times) are observed.",
-                ));
-            }
-            out.tabs.push(cox_tab);
-
-            append_cox_baseline_tabs(&mut out, &cox.baseline_survival);
-
-            let corr_rows: Vec<Vec<ResultCell>> = cox.correlation_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-            out.tabs.push(build_tab(
-                "cox-covariance",
-                "Cox parameter correlation matrix",
-                ResultTabKind::CovarianceMatrix,
-                labels.clone(),
-                labels,
-                corr_rows,
-            ));
-
-            append_cox_curve_overlays(&mut out, &cox);
-
-            out.checklist.push(checklist_item(
-                "Cox PH convergence & estimability",
-                if cox.converged && !has_non_estimable { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                Some(format!("Converged = {}, iterations = {}", cox.converged, cox.iterations)),
-                if cox.converged && !has_non_estimable {
-                    "Partial-likelihood Newton-Raphson converged with a positive-definite covariate information matrix."
-                } else {
-                    "Partial-likelihood Newton-Raphson failed to converge or encountered monotone-likelihood separation / covariate collinearity; non-estimable Wald SE, Z, P, and HR CI entries are omitted, while Likelihood ratio P tests the omnibus fit."
-                },
-            ));
-
-            let (ph_status, ph_metric, ph_expl) = if cox.global_schoenfeld_p.is_finite() {
-                let ph_ok = cox.global_schoenfeld_p >= 0.05;
-                (
-                    if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
-                    Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
-                    if ph_ok {
-                        "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
-                    } else {
-                        "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
-                    },
-                )
-            } else {
-                (
-                    ChecklistStatus::Warn,
-                    Some(String::from("Global Schoenfeld test unavailable")),
-                    if cox.n_events < 3 {
-                        "Global Schoenfeld proportional-hazards test is non-estimable with fewer than 3 events."
-                    } else {
-                        "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix or distinct event-time variance is non-estimable."
-                    },
-                )
-            };
-            out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
+            append_cox_ph_scalars_and_tabs(&mut out, &cox, confidence, p_fmt);
+            append_cox_ph_diagnostics(&mut out, &cox);
             append_listwise_filtered_checklist_and_footnote(&mut out, "Cox proportional hazards", extraction.skipped_rows, subjects.len());
             append_ignored_text_checklist_and_footnote(&mut out, "Cox proportional hazards", &extraction.ignored_non_numeric);
         }
@@ -1972,6 +1936,125 @@ pub fn run_survival_analysis(sheet: &DataSheet, spec: &AnalysisSpec, surv_spec: 
 
     sanitize_result_sheet_floats(&mut out)?;
     Ok(out)
+}
+
+fn append_cox_ph_scalars_and_tabs(out: &mut ResultSheet, cox: &CoxPhResult, confidence: ConfidenceLevel, p_fmt: PValueFormat) {
+    let aic = -2.0 * cox.log_lik_model + 2.0 * (cox.covariates.len() as f64);
+    let has_non_estimable = cox.covariates.iter().any(|c| !c.se.is_finite());
+    push_scalar(out, "Converged", None, if cox.converged { 1.0 } else { 0.0 });
+    push_scalar(out, "Iterations", None, cox.iterations as f64);
+    if let Some(c_index) = cox.concordance {
+        push_scalar(out, "Concordance (C-index)", None, c_index);
+    }
+    push_scalar(out, "Comparable pairs", None, cox.comparable_pairs as f64);
+    push_scalar(out, "Likelihood ratio chi2", None, cox.likelihood_ratio_chi2);
+    push_scalar(out, "Likelihood ratio P", None, cox.likelihood_ratio_p);
+    push_scalar(out, "Global Schoenfeld P", None, cox.global_schoenfeld_p);
+    push_scalar(out, "AIC", None, aic);
+
+    let headers = vec![
+        String::from("beta"),
+        String::from("SE"),
+        String::from("Wald z"),
+        String::from("P value"),
+        String::from("Hazard Ratio"),
+        format!("{}% CI (HR)", confidence.percent()),
+        String::from("Schoenfeld P"),
+    ];
+    let mut labels = Vec::with_capacity(cox.covariates.len());
+    let mut rows = Vec::with_capacity(cox.covariates.len());
+    for cov in &cox.covariates {
+        labels.push(cov.name.clone());
+        rows.push(vec![
+            num_cell(cov.beta),
+            num_cell(cov.se),
+            num_cell(cov.z_statistic),
+            p_cell(cov.p_value, p_fmt),
+            num_cell(cov.hazard_ratio),
+            ci_cell(cov.hr_ci.0, cov.hr_ci.1),
+            p_cell(cov.schoenfeld_p, p_fmt),
+        ]);
+    }
+    let mut cox_tab =
+        build_tab("cox-ph", "Cox proportional hazards estimates", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels.clone(), rows);
+    if !cox.converged || has_non_estimable {
+        cox_tab.footnotes.push(String::from(
+            "Model did not converge or exhibited separation/collinearity; non-estimable SE, Wald Z/P, and HR CI bounds are omitted. Refer to Likelihood ratio P for the omnibus test.",
+        ));
+    } else if !cox.global_schoenfeld_p.is_finite() {
+        cox_tab.footnotes.push(String::from(
+            "Schoenfeld proportional-hazards residual test is non-estimable when fewer than 3 events (or fewer than 2 distinct event times) are observed.",
+        ));
+    }
+    if cox.concordance.is_none() {
+        cox_tab
+            .footnotes
+            .push(String::from("Harrell's concordance index (C-index) is unavailable (\"—\") because 0 comparable subject pairs exist."));
+    }
+    out.tabs.push(cox_tab);
+
+    append_cox_baseline_tabs(out, &cox.baseline_survival);
+
+    let corr_rows: Vec<Vec<ResultCell>> = cox.correlation_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+    out.tabs.push(build_tab(
+        "cox-covariance",
+        "Cox parameter correlation matrix",
+        ResultTabKind::CovarianceMatrix,
+        labels.clone(),
+        labels,
+        corr_rows,
+    ));
+
+    append_cox_curve_overlays(out, cox);
+}
+
+fn append_cox_ph_diagnostics(out: &mut ResultSheet, cox: &CoxPhResult) {
+    let has_non_estimable = cox.covariates.iter().any(|c| !c.se.is_finite());
+    out.checklist.push(checklist_item(
+        "Cox PH convergence & estimability",
+        if cox.converged && !has_non_estimable { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        Some(format!("Converged = {}, iterations = {}", cox.converged, cox.iterations)),
+        if cox.converged && !has_non_estimable {
+            "Partial-likelihood Newton-Raphson converged with a positive-definite covariate information matrix."
+        } else {
+            "Partial-likelihood Newton-Raphson failed to converge or encountered monotone-likelihood separation / covariate collinearity; non-estimable Wald SE, Z, P, and HR CI entries are omitted, while Likelihood ratio P tests the omnibus fit."
+        },
+    ));
+
+    let (ph_status, ph_metric, ph_expl) = if cox.global_schoenfeld_p.is_finite() {
+        let ph_ok = cox.global_schoenfeld_p >= 0.05;
+        (
+            if ph_ok { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+            Some(format!("Global chi2 = {:.3}, P = {:.4}", cox.global_schoenfeld_chi2, cox.global_schoenfeld_p)),
+            if ph_ok {
+                "Scaled Schoenfeld residuals show no significant time-varying slope (PH assumption satisfied)."
+            } else {
+                "Schoenfeld residual test indicates time-varying hazard ratios (P < 0.05), violating the proportional hazards assumption."
+            },
+        )
+    } else {
+        (
+            ChecklistStatus::Warn,
+            Some(String::from("Global Schoenfeld test unavailable")),
+            if cox.n_events < 3 {
+                "Global Schoenfeld proportional-hazards test is non-estimable with fewer than 3 events."
+            } else {
+                "Global Schoenfeld proportional-hazards test cannot be computed when the covariate covariance matrix or distinct event-time variance is non-estimable."
+            },
+        )
+    };
+    out.checklist.push(checklist_item("Proportional hazards assumption (Schoenfeld)", ph_status, ph_metric, ph_expl));
+    let (c_metric, c_expl) = match cox.concordance {
+        Some(c_idx) => (
+            format!("C = {c_idx:.4} ({} comparable pairs)", cox.comparable_pairs),
+            "Harrell's C-index measures pairwise risk discrimination over all comparable subject pairs (excluding tied event times).",
+        ),
+        None => (
+            format!("— ({} comparable pairs)", cox.comparable_pairs),
+            "Harrell's C-index is unavailable because 0 comparable pairs remain (e.g. all events occurred at tied times or no event precedes a longer follow-up).",
+        ),
+    };
+    out.checklist.push(checklist_item("Model discrimination (Harrell's C-index)", ChecklistStatus::Info, Some(c_metric), c_expl));
 }
 
 fn append_cox_baseline_tabs(out: &mut ResultSheet, baseline: &[CoxBaselinePoint]) {

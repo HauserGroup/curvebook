@@ -819,7 +819,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
     vec![
         ToolDefinition {
             name: String::from("doc_inspect"),
-            description: String::from("Inspect the active project's sheets, variables, hooks, analyses, graphs, and layouts."),
+            description: String::from(concat!(
+                "Inspect the active project's sheets, variables, hooks, analyses, graphs, and layouts. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-doc_inspect.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -832,7 +838,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("open_file"),
-            description: String::from("Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session."),
+            description: String::from(concat!(
+                "Open or import a .curvebook, .curvebook.d, .cbtemplate, .prism, .pzfx, .csv, or .tsv file into the session. Docs: manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-open_file.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "required": ["path"],
@@ -852,7 +864,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("save_file"),
-            description: String::from("Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template."),
+            description: String::from(concat!(
+                "Save the current document as a .curvebook archive, .curvebook.d unpacked directory, or .cbtemplate template. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-save_file.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -865,7 +883,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("command_list"),
-            description: String::from("List all headless engine commands and desktop UI commands (marked with \"ui\": true)."),
+            description: String::from(concat!(
+                "List all headless engine commands and desktop UI commands (marked with \"ui\": true). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-command_list.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -880,7 +904,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("command_run"),
-            description: String::from("Execute a single engine command (or live UI command when attached to --control) with JSON parameters."),
+            description: String::from(concat!(
+                "Execute a single engine command (or live UI command when attached to --control) with JSON parameters. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-command_run.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "required": ["command_id"],
@@ -896,7 +926,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("command_batch"),
-            description: String::from("Execute a sequence of commands, optionally with atomic rollback if any step fails."),
+            description: String::from(concat!(
+                "Execute a sequence of commands, optionally with atomic rollback if any step fails. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-command_batch.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "required": ["commands"],
@@ -922,7 +958,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("render_preview"),
-            description: String::from("Compile a GraphSheet or LayoutSheet and rasterize a PNG preview with metadata."),
+            description: String::from(concat!(
+                "Compile a GraphSheet or LayoutSheet and rasterize a PNG preview with metadata. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-render_preview.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {
@@ -937,7 +979,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("export"),
-            description: String::from("Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk or inline)."),
+            description: String::from(concat!(
+                "Export a sheet or project to svg, pdf, png, tiff, csv, or json (to disk or inline). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-export.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "required": ["format"],
@@ -970,7 +1018,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("list_toolsets"),
-            description: String::from("List all CommandGroup toolsets, their enabled status, and normalized per-command MCP tools."),
+            description: String::from(concat!(
+                "List all CommandGroup toolsets, their enabled status, and normalized per-command MCP tools. Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-list_toolsets.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {},
@@ -980,9 +1034,13 @@ pub fn list_tools() -> Vec<ToolDefinition> {
         },
         ToolDefinition {
             name: String::from("enable_toolset"),
-            description: String::from(
-                "Enable or disable progressive CommandGroup per-command tools or the 'gui' toolset (emits notifications/tools/list_changed when modified).",
-            ),
+            description: String::from(concat!(
+                "Enable or disable progressive CommandGroup per-command tools or the 'gui' toolset (emits notifications/tools/list_changed when modified). Docs: https://hausergroup.github.io/curvebook/manual/v",
+                env!("CARGO_PKG_VERSION_MAJOR"),
+                ".",
+                env!("CARGO_PKG_VERSION_MINOR"),
+                "/registry/mcp-tools.html#mcp-tool-enable_toolset.",
+            )),
             input_schema: json!({
                 "type": "object",
                 "properties": {

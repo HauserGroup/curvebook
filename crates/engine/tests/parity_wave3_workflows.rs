@@ -2,7 +2,7 @@
 //! `graph.setAdditionalTicks` -> `ChartScene`, `#114` biostatistics/imputation/fitting parity,
 //! `curvebook_format::sanitize_circular_hooks` integration, and `CrashRecoveryJournal` WAL replay.
 
-use curvebook_chart::{ChartScene, ScenePrimitive};
+use curvebook_chart::{ChartScene, PathCmd, ScenePrimitive};
 use curvebook_doc::{
     AdditionalTick, AnalysisKind, AnalysisSpec, Cell, ColumnDesignHint, ColumnTable, ConstantValue, ContingencyMethod, ContingencyTable, DataSheet,
     GraphSheet, GroupedTable, HookSource, InfoSheet, LayoutSheet, LayoutSpec, ModelComparisonSpec, MultipleVariablesTable, MultiplicityMethod,
@@ -690,5 +690,131 @@ fn native_directory_journal_torn_tail_replay_into_session() -> TestRes {
     assert_eq!(col.data_sets[0].cells[1][0].active_number(), Some(99.5));
 
     let _ = s2.close_journal_cleanly(j2).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+#[test]
+fn restricted_linear_fit_uses_the_same_domain_for_analysis_and_overlay() -> TestRes {
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 6).map_err(|e| e.to_string())?;
+    let points = [(0.0, 90.0), (10.0, 24.0), (12.0, 26.0), (14.0, 30.0), (16.0, 36.0), (20.0, -100.0)];
+    for (row, (x, y)) in points.into_iter().enumerate() {
+        xy.x_cells[row][0] = Cell::number(x);
+        xy.data_sets[0].cells[row][0] = Cell::number(y);
+    }
+    let mut doc = ProjectDocument::new("Terminal Phase").map_err(|e| e.to_string())?;
+    let data = DataSheet::new("xy-terminal", "Terminal Phase", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?;
+    doc.add_data_sheet(data).map_err(|e| e.to_string())?;
+
+    let mut session = Session::from_document(doc);
+    exec(
+        &mut session,
+        "fit.run",
+        json!({
+            "sheet_id": "terminal", "source_sheet": "xy-terminal", "kind": "linear",
+            "x_range_filter": [10, 16], "plot_segments": 3, "confidence_bands": false
+        }),
+    )?;
+    let result = result_sheet_by_id(&session, "terminal")?;
+    let AnalysisKind::LinearRegression(spec) = &result.analysis.kind else {
+        return Err("expected a linear fit".to_owned());
+    };
+    assert_eq!(spec.x_range_filter, Some((Some(10.0), Some(16.0))));
+    assert_eq!(result.lookup_scalar("Slope", Some(0)), Some(2.0));
+    assert_eq!(result.lookup_scalar("R2", Some(0)), Some(20.0 / 21.0));
+    let overlay = &result.fitted_curves[0].points;
+    assert_eq!(overlay.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 12.0, 14.0, 16.0]);
+    assert!(overlay.iter().all(|p| p.ci_lower.is_none() && p.pred_lower.is_none()));
+    let summary = result.tabs.iter().find(|tab| tab.id == "linear_summary").ok_or("missing summary")?;
+    assert_eq!(&summary.row_labels[10..], ["Observations analyzed", "Excluded by X range", "Residual degrees of freedom"]);
+    for (row, expected) in summary.rows[10..].iter().zip([4.0, 2.0, 2.0]) {
+        assert!(matches!(row.as_slice(), [curvebook_doc::ResultCell::Number { value, .. }] if *value == expected));
+    }
+
+    exec(&mut session, "graph.create", json!({ "sheet_id": "terminal-graph", "source_sheet_id": "xy-terminal", "kind": "xy" }))?;
+    exec(
+        &mut session,
+        "graph.setAxes",
+        json!({ "sheet_id": "terminal-graph", "x_axis": { "min": 0, "max": 20 }, "y_axis": { "min": -120, "max": 100 } }),
+    )?;
+    exec(&mut session, "graph.setRegressionOverlay", json!({ "sheet_id": "terminal-graph", "result_sheet_id": "terminal" }))?;
+    let scene = compile_sheet_scene(session.document(), &SheetId::new("terminal-graph")).map_err(|e| e.to_string())?;
+    let plot = scene.plot_rect_pt;
+    let endpoints = scene
+        .primitives
+        .iter()
+        .find_map(|p| match p {
+            ScenePrimitive::Path { path, stroke: Some(stroke), clip: Some(clip), .. } if *clip == plot && (stroke.width_pt - 1.75).abs() < 1e-12 => {
+                match (path.commands.first(), path.commands.last()) {
+                    (Some(PathCmd::MoveTo(first)), Some(PathCmd::LineTo(last))) => Some((first.x, last.x)),
+                    _ => None,
+                }
+            }
+            _ => None,
+        })
+        .ok_or("missing regression path")?;
+    assert!((endpoints.0 - (plot.x + plot.width * 0.5)).abs() < 1e-8);
+    assert!((endpoints.1 - (plot.x + plot.width * 0.8)).abs() < 1e-8);
+
+    // For lambda = 1, the four selected points have Sxx = 20, Syy = 84, and Sxy = 40.
+    // Deming (1943), Ch. 9 gives the exact slope (64 + sqrt(64^2 + 4*40^2)) / 80.
+    exec(
+        &mut session,
+        "fit.run",
+        json!({ "sheet_id": "terminal-deming", "source_sheet": "xy-terminal", "kind": "deming", "x_range_filter": [10, 16] }),
+    )?;
+    let deming = result_sheet_by_id(&session, "terminal-deming")?;
+    let expected = (64.0 + 10_496.0_f64.sqrt()) / 80.0;
+    let deming_slope = deming.lookup_scalar("Slope", Some(0)).ok_or("missing Deming slope")?;
+    assert!((deming_slope - expected).abs() < 1e-12);
+    let deming_overlay = &deming.fitted_curves[0].points;
+    assert_eq!(deming_overlay.first().map(|p| p.x), Some(10.0));
+    assert_eq!(deming_overlay.last().map(|p| p.x), Some(16.0));
+
+    // The excluded row stays in the source table and remains excluded after recalculation.
+    exec(&mut session, "table.setCell", json!({ "sheet_id": "xy-terminal", "row": 0, "col": 0, "value": -500.0 }))?;
+    assert_eq!(result_sheet_by_id(&session, "terminal")?.lookup_scalar("Slope", Some(0)), Some(2.0));
+
+    exec(&mut session, "analysis.updateParams", json!({ "sheet_id": "terminal", "params": { "plot_x_max": 19.0, "confidence_bands": true } }))?;
+    let extended = result_sheet_by_id(&session, "terminal")?;
+    let overlay = &extended.fitted_curves[0].points;
+    assert_eq!(overlay.iter().map(|p| p.x).collect::<Vec<_>>(), [10.0, 13.0, 16.0, 19.0]);
+    assert!(overlay.iter().all(|p| p.ci_lower.is_some()));
+    assert_eq!(extended.lookup_scalar("Slope", Some(0)), Some(2.0));
+
+    exec(&mut session, "table.setCell", json!({ "sheet_id": "xy-terminal", "row": 4, "col": 0, "value": 38.0 }))?;
+    let refitted = result_sheet_by_id(&session, "terminal")?.lookup_scalar("Slope", Some(0)).ok_or("missing refitted slope")?;
+    assert!((refitted - 2.3).abs() < 1e-12);
+    Ok(())
+}
+
+#[test]
+fn nonlinear_diagnostic_settings_run_and_update_through_commands() -> TestRes {
+    let mut xy = XyTable::new(SubcolumnMode::Single, 1, 4).map_err(|e| e.to_string())?;
+    for (row, (x, y)) in [(10.0, 24.0), (12.0, 26.0), (14.0, 30.0), (16.0, 36.0)].into_iter().enumerate() {
+        xy.x_cells[row][0] = Cell::number(x);
+        xy.data_sets[0].cells[row][0] = Cell::number(y);
+    }
+    let mut doc = ProjectDocument::new("Diagnostics").map_err(|e| e.to_string())?;
+    doc.add_data_sheet(DataSheet::new("xy", "Observations", TableArchetype::Xy(xy)).map_err(|e| e.to_string())?).map_err(|e| e.to_string())?;
+    let mut session = Session::from_document(doc);
+    exec(
+        &mut session,
+        "fit.run",
+        json!({
+            "sheet_id": "fit", "source_sheet": "xy", "kind": "nonlinear", "equation_id": "straight_line",
+            "identify_unstable_parameters": true, "flag_r_squared_below": 0.96
+        }),
+    )?;
+    let result = result_sheet_by_id(&session, "fit")?;
+    assert!(matches!(
+        &result.analysis.kind,
+        AnalysisKind::NonlinearRegression(spec) if spec.identify_unstable_parameters && spec.flag_r_squared_below == Some(0.96)
+    ));
+    assert!(result.checklist.iter().any(|item| item.assumption == "R squared below threshold"));
+
+    exec(&mut session, "analysis.updateParams", json!({ "sheet_id": "fit", "params": { "flag_r_squared_below": null } }))?;
+    let result = result_sheet_by_id(&session, "fit")?;
+    assert!(matches!(&result.analysis.kind, AnalysisKind::NonlinearRegression(spec) if spec.flag_r_squared_below.is_none()));
+    assert!(result.checklist.iter().all(|item| item.assumption != "R squared below threshold"));
     Ok(())
 }

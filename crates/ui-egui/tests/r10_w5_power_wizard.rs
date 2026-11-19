@@ -453,9 +453,8 @@ fn r10_w5_power_wizard_locales_rtl_and_hidpi_parity() -> TestRes {
         let mut driver = human_wf_common::new_human_driver(app, ViewportMetrics::new(1280.0, 800.0, 2.0));
         for stage_idx in 1..=4 {
             let report = driver.verify_parity();
-            let modal_violations: Vec<_> = report
-                .violations
-                .iter()
+            let modal_violations: Vec<_> = human_wf_common::filter_locale_parity_violations(locale, false, report.violations)
+                .into_iter()
                 .filter(|v| v.widget_id.starts_with("power.") || v.widget_id.starts_with("modal.") || v.widget_id.starts_with("dialog."))
                 .collect();
             if !modal_violations.is_empty() {

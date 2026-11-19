@@ -4,12 +4,12 @@
 //! OS chrome/menu dispatch, IME text composition, trackpad gesture inertia, file drop routing,
 //! clipboard pasteboard integration, isolated crash-recovery journals, and JSONL playback.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fmt;
 use std::io::{BufRead, BufReader, Cursor, Read, Write};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
 use curvebook_doc::{
@@ -26,12 +26,13 @@ use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{
     InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, WorkspaceHitTarget,
 };
+use curvebook_ui_egui::layout::{WidgetAction, hit_test_logical};
 use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 use curvebook_ui_egui::{
     CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, OsAdapterStatus, UiApp, dispatch_ui_command,
-    is_http_request_line, read_os_pasteboard, serve_control_stream_with_quit_and_hook, write_os_clipboard_bundle, write_os_pasteboard,
+    is_http_request_line, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -706,29 +707,45 @@ fn apply_control_journal_steps(
     }
 
     let mut recorded_any_step = false;
+    let mut requires_final_checkpoint = false;
     for step in ctx.steps {
         if step.mutated {
             recorded_any_step = true;
             dirty_commands.push(step.command_id.clone());
-            if let Some(journal) = recovery_journal.as_mut() {
-                app.session()
-                    .record_outcome_to_journal(journal, &step.command_id, &step.params, true)
-                    .map_err(|err| format!("failed to record control WAL entry `{}`: {err}", step.command_id))?;
+            if Session::command_requires_wal_checkpoint(&step.command_id) || step.command_id.starts_with("ui.") {
+                requires_final_checkpoint = true;
             }
-        } else if step.command_id == "project.save" && !app.session().is_dirty() {
+        } else if step.command_id == "project.save" {
             recorded_any_step = true;
             dirty_commands.clear();
-            if let Some(journal) = recovery_journal.as_mut() {
-                app.session().checkpoint_journal(journal).map_err(|err| format!("failed to checkpoint control WAL after save: {err}"))?;
+            requires_final_checkpoint = true;
+        }
+    }
+
+    if recorded_any_step && let Some(journal) = recovery_journal.as_mut() {
+        if requires_final_checkpoint {
+            // A batch containing any checkpoint-requiring step (`edit.undo`, `edit.redo`,
+            // `READS_FILESYSTEM`, `project.save`, or a UI command) must snapshot the final
+            // post-batch state ONCE without also appending subsequent steps that would
+            // double-replay on crash recovery.
+            app.session().checkpoint_journal(journal).map_err(|err| format!("failed to checkpoint control WAL batch `{}`: {err}", ctx.method))?;
+        } else {
+            for step in ctx.steps {
+                if step.mutated {
+                    app.session()
+                        .record_outcome_to_journal(journal, &step.command_id, &step.params, true)
+                        .map_err(|err| format!("failed to record control WAL entry `{}`: {err}", step.command_id))?;
+                }
             }
         }
     }
 
     if !recorded_any_step && !ctx.rolled_back && !is_readonly_control_method(ctx.method) {
         let now_dirty = app.session().is_dirty();
+        let mutated = app.mutation_seq() != ctx.prev_mutation_seq;
         let stack_changed = app.session().undo_depth() != ctx.prev_undo_depth || app.session().redo_depth() != ctx.prev_redo_depth;
         let became_dirty = !ctx.prev_dirty && now_dirty;
-        if stack_changed || became_dirty {
+        if mutated || stack_changed || became_dirty {
             dirty_commands.push(ctx.method.to_owned());
             if let Some(journal) = recovery_journal.as_mut() {
                 app.session()
@@ -1136,14 +1153,16 @@ impl DesktopWindowSession {
         prev_undo: usize,
         prev_redo: usize,
         prev_dirty: bool,
+        prev_mutation_seq: u64,
     ) -> Result<(), String> {
         if let Some(journal) = &mut self.recovery_journal {
             maybe_renew_journal_lease_periodically(journal);
         }
         let now_dirty = self.app.session().is_dirty();
+        let mutated = self.app.mutation_seq() != prev_mutation_seq;
         let stack_changed = self.app.session().undo_depth() != prev_undo || self.app.session().redo_depth() != prev_redo;
         let became_dirty = !prev_dirty && now_dirty;
-        if stack_changed || became_dirty {
+        if mutated || stack_changed || became_dirty {
             let label = command_id.unwrap_or("ui.edit").to_owned();
             self.dirty_commands.push(label);
             self.checkpoint_recovery_journal()?;
@@ -1228,6 +1247,286 @@ impl std::fmt::Debug for OpenFileDialogHook {
     }
 }
 
+/// Canonical file extensions accepted by native project/data `Open...` dialogs (`classify_and_load_path`).
+pub const NATIVE_OPEN_FILE_EXTENSIONS: &[&str] = &["curvebook", "cbtemplate", "prism", "pzfx", "csv", "tsv"];
+/// Canonical file extensions accepted by native template save and instantiate dialogs.
+pub const NATIVE_TEMPLATE_FILE_EXTENSIONS: &[&str] = &["cbtemplate"];
+/// Default filename suggested when saving a reusable `.cbtemplate` archive.
+pub const DEFAULT_TEMPLATE_FILE_NAME: &str = "untitled.cbtemplate";
+
+/// OS file-dialog modality requested by native menu, toolbar, or welcome file actions.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum NativeFileDialogKind {
+    OpenFile,
+    PickFolder,
+    SaveFile,
+}
+
+/// Canonical dialog request descriptor sent to a [`NativeFileDialogAdapter`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeFileDialogRequest {
+    pub command_id: String,
+    pub kind: NativeFileDialogKind,
+    pub filter_label: String,
+    pub extensions: Vec<String>,
+    pub default_file_name: Option<String>,
+}
+
+/// Injectable OS file-dialog backend used by [`DesktopHostRuntime`] and the native window shell.
+pub trait NativeFileDialogAdapter: fmt::Debug + Send + Sync {
+    /// Prompt the user with `request`, returning `Ok(None)` when cancelled.
+    ///
+    /// # Errors
+    /// Returns an error string if presenting the native OS dialog fails unexpectedly.
+    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String>;
+}
+
+#[derive(Debug, Default)]
+struct StubNativeFileDialogState {
+    requests: Vec<NativeFileDialogRequest>,
+    keyed_responses: BTreeMap<String, VecDeque<Option<PathBuf>>>,
+    queued_responses: VecDeque<Option<PathBuf>>,
+}
+
+/// Deterministic test stub for [`NativeFileDialogAdapter`] recording every prompt and returning scripted paths.
+#[derive(Debug, Default)]
+pub struct StubNativeFileDialogAdapter {
+    state: RwLock<StubNativeFileDialogState>,
+}
+
+impl StubNativeFileDialogAdapter {
+    /// Construct an empty stub dialog adapter.
+    #[must_use]
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Enqueue a response for a specific `command_id` (`"project.open"`, `"file.save_as"`, `"export.svg"`, ...).
+    pub fn push_response(&self, command_id: impl Into<String>, path: Option<PathBuf>) {
+        if let Ok(mut guard) = self.state.write() {
+            guard.keyed_responses.entry(command_id.into()).or_default().push_back(path);
+        }
+    }
+
+    /// Builder helper queueing a response for `command_id`.
+    #[must_use]
+    pub fn with_response(self, command_id: impl Into<String>, path: Option<PathBuf>) -> Self {
+        self.push_response(command_id, path);
+        self
+    }
+
+    /// Enqueue a fallback FIFO response used when no keyed response matches `request.command_id`.
+    pub fn enqueue(&self, path: Option<PathBuf>) {
+        if let Ok(mut guard) = self.state.write() {
+            guard.queued_responses.push_back(path);
+        }
+    }
+
+    /// Return a snapshot of every [`NativeFileDialogRequest`] received by this adapter.
+    #[must_use]
+    pub fn requests(&self) -> Vec<NativeFileDialogRequest> {
+        self.state.read().map(|guard| guard.requests.clone()).unwrap_or_default()
+    }
+}
+
+impl NativeFileDialogAdapter for StubNativeFileDialogAdapter {
+    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String> {
+        let mut guard = self.state.write().map_err(|_| String::from("stub file dialog lock poisoned"))?;
+        guard.requests.push(request.clone());
+        if let Some(queue) = guard.keyed_responses.get_mut(&request.command_id)
+            && let Some(resp) = queue.pop_front()
+        {
+            return Ok(resp);
+        }
+        if let Some(resp) = guard.queued_responses.pop_front() {
+            return Ok(resp);
+        }
+        Ok(None)
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum NativeExportTargetKind {
+    Renderable,
+    Graph,
+    Layout,
+    TableOrResult,
+    Result,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct NativeExportSpec {
+    command: &'static str,
+    filter_label: &'static str,
+    extensions: &'static [&'static str],
+    default_name: &'static str,
+    target_kind: NativeExportTargetKind,
+}
+
+fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> {
+    let spec = match command_id {
+        "export.svg" | "file.export_svg" => NativeExportSpec {
+            command: "export.svg",
+            filter_label: "SVG Vector",
+            extensions: &["svg"],
+            default_name: "figure.svg",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.pdf" | "file.export_pdf" => NativeExportSpec {
+            command: "export.pdf",
+            filter_label: "PDF Document",
+            extensions: &["pdf"],
+            default_name: "figure.pdf",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.png" | "file.export_png" => NativeExportSpec {
+            command: "export.png",
+            filter_label: "PNG Image",
+            extensions: &["png"],
+            default_name: "figure.png",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "export.tiff" => NativeExportSpec {
+            command: "export.tiff",
+            filter_label: "TIFF Image",
+            extensions: &["tiff", "tif"],
+            default_name: "figure.tiff",
+            target_kind: NativeExportTargetKind::Renderable,
+        },
+        "graph.exportSvg" => NativeExportSpec {
+            command: "graph.exportSvg",
+            filter_label: "SVG Vector",
+            extensions: &["svg"],
+            default_name: "figure.svg",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportPdf" => NativeExportSpec {
+            command: "graph.exportPdf",
+            filter_label: "PDF Document",
+            extensions: &["pdf"],
+            default_name: "figure.pdf",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportPng" => NativeExportSpec {
+            command: "graph.exportPng",
+            filter_label: "PNG Image",
+            extensions: &["png"],
+            default_name: "figure.png",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "graph.exportEmf" => NativeExportSpec {
+            command: "graph.exportEmf",
+            filter_label: "EMF Vector",
+            extensions: &["emf"],
+            default_name: "figure.emf",
+            target_kind: NativeExportTargetKind::Graph,
+        },
+        "layout.exportEmf" => NativeExportSpec {
+            command: "layout.exportEmf",
+            filter_label: "EMF Vector",
+            extensions: &["emf"],
+            default_name: "layout.emf",
+            target_kind: NativeExportTargetKind::Layout,
+        },
+        "table.exportCsv" => NativeExportSpec {
+            command: "table.exportCsv",
+            filter_label: "CSV Table",
+            extensions: &["csv", "tsv"],
+            default_name: "table.csv",
+            target_kind: NativeExportTargetKind::TableOrResult,
+        },
+        "analysis.exportJson" => NativeExportSpec {
+            command: "analysis.exportJson",
+            filter_label: "JSON Results",
+            extensions: &["json"],
+            default_name: "analysis.json",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        "analysis.exportCsv" => NativeExportSpec {
+            command: "analysis.exportCsv",
+            filter_label: "CSV Results",
+            extensions: &["csv"],
+            default_name: "analysis.csv",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        "result.generateReport" => NativeExportSpec {
+            command: "result.generateReport",
+            filter_label: "Methods Report",
+            extensions: &["md", "txt", "tex"],
+            default_name: "methods-report.md",
+            target_kind: NativeExportTargetKind::Result,
+        },
+        _ => return None,
+    };
+    Some(spec)
+}
+
+/// Returns `true` when clicking `command_id` in the native desktop window opens an OS file dialog.
+#[must_use]
+pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "project.open"
+            | "file.open"
+            | "file.open_unpacked_dir"
+            | "project.save"
+            | "file.save"
+            | "project.saveAs"
+            | "file.save_as"
+            | "project.saveTemplate"
+            | "project.instantiateTemplate"
+            | "table.importCsv"
+            | "table.importPrism"
+            | "table.importPzfx"
+    ) || native_export_spec_for_command(command_id).is_some()
+}
+
+/// Returns `true` when an import command replaces the full active document and must detach any
+/// previously associated `.curvebook` archive path so subsequent `Cmd+S` prompts cleanly.
+#[must_use]
+pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
+    matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx")
+}
+
+/// Execute a file-backed import or template instantiation command at `path`, clearing the active
+/// session's archive association when the command replaces the full document.
+///
+/// # Errors
+/// Returns an error string if executing the underlying engine command fails.
+pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path) -> Result<(), String> {
+    let path_str = path.to_string_lossy().into_owned();
+    win.execute_and_journal(command, json!({ "path": path_str }))?;
+    if native_import_replaces_project_file_path(command) {
+        win.app_mut().session_mut().set_file_path(None, false);
+    }
+    Ok(())
+}
+
+fn resolve_native_export_sheet_id(doc: &ProjectDocument, kind: NativeExportTargetKind) -> Option<SheetId> {
+    let active = doc.active_sheet_id.as_ref();
+    match kind {
+        NativeExportTargetKind::Renderable => active
+            .filter(|id| matches!(doc.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)))
+            .cloned()
+            .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+            .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone())),
+        NativeExportTargetKind::Graph => {
+            active.filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+        }
+        NativeExportTargetKind::Layout => {
+            active.filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+        }
+        NativeExportTargetKind::TableOrResult => active
+            .filter(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some())
+            .cloned()
+            .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()))
+            .or_else(|| doc.result_sheets.first().map(|r| r.id.clone())),
+        NativeExportTargetKind::Result => {
+            active.filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
+        }
+    }
+}
+
 /// Injectable OS clipboard adapter used by [`DesktopHostRuntime`].
 pub trait OsClipboardAdapter: fmt::Debug + Send + Sync {
     /// Write plain UTF-8 / TSV text to the OS pasteboard.
@@ -1279,6 +1578,7 @@ pub struct DesktopHostRuntime {
     clipboard_adapter: Box<dyn OsClipboardAdapter>,
     preferences_persist_hook: Option<PreferencesPersistHook>,
     open_file_dialog_hook: Option<OpenFileDialogHook>,
+    file_dialog_adapter: Option<Arc<dyn NativeFileDialogAdapter>>,
 }
 
 impl DesktopHostRuntime {
@@ -1295,6 +1595,7 @@ impl DesktopHostRuntime {
             clipboard_adapter: Box::new(SystemOsClipboardAdapter),
             preferences_persist_hook: None,
             open_file_dialog_hook: None,
+            file_dialog_adapter: None,
         }
     }
 
@@ -1318,6 +1619,197 @@ impl DesktopHostRuntime {
         F: FnMut(DesktopWindowId) -> Result<Option<PathBuf>, String> + 'static,
     {
         self.open_file_dialog_hook = Some(OpenFileDialogHook(Box::new(hook)));
+    }
+
+    /// Install a [`NativeFileDialogAdapter`] used by drawn File menu items, toolbar Open/Save/Export,
+    /// Welcome Open, and native menu file actions.
+    pub fn set_file_dialog_adapter(&mut self, adapter: Arc<dyn NativeFileDialogAdapter>) {
+        self.file_dialog_adapter = Some(adapter);
+    }
+
+    /// Route a file-backed desktop command (`project.open`, `project.save`, `file.save_as`, `export.svg`,
+    /// `export.pdf`, `export.png`, `table.importPzfx`, ...) through the installed [`NativeFileDialogAdapter`].
+    ///
+    /// Returns `Ok(None)` when no [`NativeFileDialogAdapter`] is installed or `command_id` does not
+    /// trigger a native file dialog.
+    ///
+    /// # Errors
+    /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
+    pub fn dispatch_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<Option<DesktopEventOutcome>, String> {
+        let Some(adapter) = self.file_dialog_adapter.as_ref().map(Arc::clone) else {
+            return Ok(None);
+        };
+        if !menu_action_triggers_native_file_dialog(command_id) {
+            return Ok(None);
+        }
+        let win_locale = self.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
+        let outcome = match command_id {
+            "project.open" | "file.open" => {
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label: String::from("CurveBook / Data"),
+                    extensions: NATIVE_OPEN_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => self.handle_file_dropped(window_id, path)?,
+                    None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            "file.open_unpacked_dir" => {
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::PickFolder,
+                    filter_label: String::from("CurveBook Unpacked Project"),
+                    extensions: Vec::new(),
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => self.handle_file_dropped(window_id, path)?,
+                    None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            "project.save" | "file.save" => self.execute_native_save_with_adapter(window_id, command_id, false, adapter.as_ref())?,
+            "project.saveAs" | "file.save_as" => self.execute_native_save_with_adapter(window_id, command_id, true, adapter.as_ref())?,
+            "project.saveTemplate" => {
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::SaveFile,
+                    filter_label: tr(&win_locale, "w6.view.shell.filter_template").to_owned(),
+                    extensions: NATIVE_TEMPLATE_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
+                    default_file_name: Some(String::from(DEFAULT_TEMPLATE_FILE_NAME)),
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let path_str = path.to_string_lossy().into_owned();
+                        let win = self.window_mut(window_id)?;
+                        win.execute_and_journal("project.saveTemplate", json!({ "path": path_str }))?;
+                        Self::completed_file_dialog_outcome(window_id, "project.saveTemplate", &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, "project.saveTemplate"),
+                }
+            }
+            "project.instantiateTemplate" | "table.importCsv" | "table.importPrism" | "table.importPzfx" => {
+                let (filter_label, extensions): (String, Vec<String>) = match command_id {
+                    "project.instantiateTemplate" => (
+                        tr(&win_locale, "w6.view.shell.filter_template").to_owned(),
+                        NATIVE_TEMPLATE_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
+                    ),
+                    "table.importCsv" => (
+                        tr(&win_locale, "w6.view.shell.filter_delimited").to_owned(),
+                        vec![String::from("csv"), String::from("tsv"), String::from("txt")],
+                    ),
+                    "table.importPrism" => (tr(&win_locale, "w6.view.shell.filter_archive").to_owned(), vec![String::from("prism")]),
+                    _ => (tr(&win_locale, "w6.view.shell.filter_xml_project").to_owned(), vec![String::from("pzfx")]),
+                };
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label,
+                    extensions,
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let win = self.window_mut(window_id)?;
+                        execute_native_import_at_path(win, command_id, &path)?;
+                        Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            _ => {
+                let spec = native_export_spec_for_command(command_id).ok_or_else(|| format!("unhandled file command `{command_id}`"))?;
+                let target_sheet_id = {
+                    let win = self.window(window_id)?;
+                    resolve_native_export_sheet_id(win.app().document(), spec.target_kind)
+                        .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
+                };
+                let req = NativeFileDialogRequest {
+                    command_id: spec.command.to_owned(),
+                    kind: NativeFileDialogKind::SaveFile,
+                    filter_label: spec.filter_label.to_owned(),
+                    extensions: spec.extensions.iter().map(|s| (*s).to_owned()).collect(),
+                    default_file_name: Some(spec.default_name.to_owned()),
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let path_str = path.to_string_lossy().into_owned();
+                        let params = if spec.command == "result.generateReport" {
+                            let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
+                                Some("tex") => "latex",
+                                Some("txt") => "plain",
+                                _ => "markdown",
+                            };
+                            json!({ "result_sheet_id": target_sheet_id.as_str(), "format": report_fmt, "path": path_str })
+                        } else {
+                            json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
+                        };
+                        let win = self.window_mut(window_id)?;
+                        win.execute_and_journal(spec.command, params)?;
+                        Self::completed_file_dialog_outcome(window_id, spec.command, &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, spec.command),
+                }
+            }
+        };
+        Ok(Some(outcome))
+    }
+
+    fn execute_native_save_with_adapter(
+        &mut self,
+        window_id: DesktopWindowId,
+        command_id: &str,
+        force_dialog: bool,
+        adapter: &dyn NativeFileDialogAdapter,
+    ) -> Result<DesktopEventOutcome, String> {
+        let existing_path = self.window(window_id).ok().and_then(|win| win.app().session().file_path().map(Path::to_path_buf));
+        let target_path = if !force_dialog && let Some(path) = existing_path {
+            path
+        } else {
+            let req = NativeFileDialogRequest {
+                command_id: command_id.to_owned(),
+                kind: NativeFileDialogKind::SaveFile,
+                filter_label: String::from("CurveBook Project"),
+                extensions: vec![String::from("curvebook")],
+                default_file_name: Some(String::from("untitled.curvebook")),
+            };
+            match adapter.pick(&req)? {
+                Some(path) => path,
+                None => return Ok(Self::cancelled_file_dialog_outcome(window_id, command_id)),
+            }
+        };
+        let is_unpacked = is_unpacked_project_dir(&target_path)
+            || target_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_ascii_lowercase().ends_with(".curvebook.d"));
+        let path_str = target_path.to_string_lossy().into_owned();
+        let win = self.window_mut(window_id)?;
+        win.execute_and_journal("project.save", json!({ "path": path_str, "unpacked": is_unpacked }))?;
+        win.app_mut().session_mut().set_file_path(Some(target_path.clone()), true);
+        win.dirty_commands.clear();
+        win.checkpoint_recovery_journal()?;
+        Ok(Self::completed_file_dialog_outcome(window_id, command_id, &target_path))
+    }
+
+    fn completed_file_dialog_outcome(window_id: DesktopWindowId, command_id: &str, path: &Path) -> DesktopEventOutcome {
+        DesktopEventOutcome {
+            handled: true,
+            action: format!("native_file_dialog.completed:{command_id}"),
+            window_id: Some(window_id),
+            command_id: Some(command_id.to_owned()),
+            command_result: Some(json!({ "path": path.to_string_lossy() })),
+            ..Default::default()
+        }
+    }
+
+    fn cancelled_file_dialog_outcome(window_id: DesktopWindowId, command_id: &str) -> DesktopEventOutcome {
+        DesktopEventOutcome {
+            handled: true,
+            action: format!("native_file_dialog.cancelled:{command_id}"),
+            window_id: Some(window_id),
+            command_id: Some(command_id.to_owned()),
+            ..Default::default()
+        }
     }
 
     fn persist_window_preferences(&mut self, window_id: DesktopWindowId) {
@@ -1778,29 +2270,78 @@ impl DesktopHostRuntime {
         })
     }
 
+    fn take_intercepted_native_file_command(&mut self, window_id: DesktopWindowId, ui_event: &UiInputEvent) -> Result<Option<String>, String> {
+        if self.file_dialog_adapter.is_none() {
+            return Ok(None);
+        }
+        let UiInputEvent::PointerUp { x, y, button: PointerButton::Primary, .. } = ui_event else {
+            return Ok(None);
+        };
+        let win = self.window_mut(window_id)?;
+        let Some(pressed_id) = win.app.interaction.pressed_widget_id.clone() else {
+            return Ok(None);
+        };
+        let tree = win.app.build_and_cache_layout_tree(win.viewport);
+        let Some(node) = hit_test_logical(&tree, *x, *y) else {
+            return Ok(None);
+        };
+        if node.id.as_str() != pressed_id || !node.state.enablement.enabled {
+            return Ok(None);
+        }
+        let WidgetAction::InvokeCommand { command_id, params } = &node.action else {
+            return Ok(None);
+        };
+        let has_explicit_path = params.get("path").and_then(Value::as_str).is_some_and(|p| !p.trim().is_empty());
+        if has_explicit_path || !menu_action_triggers_native_file_dialog(command_id) {
+            return Ok(None);
+        }
+        let cmd = command_id.clone();
+        win.app.interaction.pointer_down = false;
+        win.app.interaction.pressed_widget_id = None;
+        win.app.interaction.open_menu = None;
+        win.app.interaction.open_dropdown = None;
+        win.app.interaction.context_menu_target = None;
+        win.app.view_shards.toolbar_menus.active_context_menu_id = None;
+        Ok(Some(cmd))
+    }
+
     fn dispatch_ui_event_on_window(&mut self, window_id: DesktopWindowId, ui_event: UiInputEvent) -> Result<DesktopEventOutcome, String> {
+        if let Some(cmd) = self.take_intercepted_native_file_command(window_id, &ui_event)?
+            && let Some(outcome) = self.dispatch_native_file_command(window_id, &cmd)?
+        {
+            return Ok(outcome);
+        }
         let check_shortcuts = !matches!(ui_event, UiInputEvent::PointerMove { .. }) && self.preferences_persist_hook.is_some();
         let win = self.window_mut(window_id)?;
         let prev_undo = win.app.session().undo_depth();
         let prev_redo = win.app.session().redo_depth();
         let prev_dirty = win.app.session().is_dirty();
+        let prev_mutation_seq = win.app.mutation_seq();
         let prev_basic = (win.app.locale.clone(), win.app.theme.mode);
         let prev_shortcuts = if check_shortcuts { Some(win.app.shortcuts.export_overrides_json().unwrap_or_default()) } else { None };
         let ui_out: UiEventOutcome = win.app.dispatch_ui_event(ui_event, win.viewport)?;
-        win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty)?;
+        win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
         let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode)
             || prev_shortcuts.as_deref().is_some_and(|before| before != win.app.shortcuts.export_overrides_json().unwrap_or_default());
         if prefs_changed {
             self.persist_window_preferences(window_id);
         }
-        if ui_out.action == "welcome.open_file_requested"
-            && let Some(mut hook) = self.open_file_dialog_hook.take()
-        {
-            let picked = (hook.0)(window_id);
-            self.open_file_dialog_hook = Some(hook);
-            if let Some(path) = picked? {
-                return self.handle_file_dropped(window_id, path);
+        if ui_out.action == "welcome.open_file_requested" {
+            if let Some(outcome) = self.dispatch_native_file_command(window_id, "project.open")? {
+                return Ok(outcome);
             }
+            if let Some(mut hook) = self.open_file_dialog_hook.take() {
+                let picked = (hook.0)(window_id);
+                self.open_file_dialog_hook = Some(hook);
+                if let Some(path) = picked? {
+                    return self.handle_file_dropped(window_id, path);
+                }
+            }
+        }
+        if ui_out.action == "file.save_as_dialog_requested"
+            && let Some(outcome) = self.dispatch_native_file_command(window_id, "file.save_as")?
+        {
+            return Ok(outcome);
         }
         let command_id = ui_out.command_id.or_else(|| (ui_out.action == "welcome.open_file_requested").then(|| String::from("project.open")));
         Ok(DesktopEventOutcome {
@@ -2256,10 +2797,11 @@ impl DesktopHostRuntime {
                 let prev_undo = win.app.session().undo_depth();
                 let prev_redo = win.app.session().redo_depth();
                 let prev_dirty = win.app.session().is_dirty();
+                let prev_mutation_seq = win.app.mutation_seq();
                 let ui_res = dispatch_ui_command(&mut win.app, &ui_command_id, &params)?
                     .ok_or_else(|| format!("UI command `{ui_command_id}` is not registered in dispatcher"))?;
                 win.app.sync_views();
-                win.record_ui_mutation_checkpoint(Some(trimmed), prev_undo, prev_redo, prev_dirty)?;
+                win.record_ui_mutation_checkpoint(Some(trimmed), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
                 let changed = prev_prefs.is_some_and(|before| before != Self::capture_pref_fingerprint(&win.app));
                 if changed {
                     self.persist_window_preferences(window_id);

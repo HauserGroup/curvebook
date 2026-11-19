@@ -990,3 +990,61 @@ fn session_guarded_recalculate_and_panic_rollback() {
     assert!(err.to_string().contains("simulated downstream panic"));
     assert_eq!(session.document(), &before);
 }
+
+#[test]
+fn transient_failed_analysis_preserves_result_sheet_floating_notes() {
+    use curvebook_doc::{TwoGroupMethod, TwoGroupSpec};
+    use curvebook_format::{open_project_bytes, save_project_bytes};
+
+    let mut doc = ProjectDocument::new("Floating Note Recovery").expect("doc");
+    let mut tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 2).expect("col");
+    tbl.data_sets[0].title = String::from("Control");
+    tbl.data_sets[1].title = String::from("Treated");
+    tbl.data_sets[0].cells[0][0] = Cell::number(10.0);
+    tbl.data_sets[0].cells[1][0] = Cell::number(12.0);
+    tbl.data_sets[1].cells[0][0] = Cell::number(20.0);
+    tbl.data_sets[1].cells[1][0] = Cell::number(22.0);
+    doc.add_data_sheet(DataSheet::new("ds-col", "Cohort", TableArchetype::Column(tbl)).expect("ds")).expect("add ds");
+
+    let spec = AnalysisSpec::new(
+        "res-t",
+        "ds-col",
+        AnalysisKind::TwoGroupComparison(TwoGroupSpec { method: TwoGroupMethod::UnpairedT, ..TwoGroupSpec::default() }),
+    )
+    .expect("spec");
+    doc.add_result_sheet(ResultSheet::new(spec).expect("res")).expect("add res");
+
+    recalculate_project(&mut doc).expect("initial recalc");
+    let expected_note = FloatingNote::new("res-note-1", RectPt::new(24.0, 32.0, 180.0, 64.0), "Verify baseline outlier exclusion");
+    doc.result_sheets[0].floating_notes.push(expected_note.clone());
+    assert_eq!(doc.result_sheets[0].status, ResultStatus::UpToDate);
+    assert!(!doc.result_sheets[0].tabs.is_empty());
+
+    // Round-trip through native archive serialization before the transient failure.
+    let saved_bytes = save_project_bytes(&doc).expect("save bytes");
+    let mut session = Session::from_document(open_project_bytes(&saved_bytes).expect("open bytes"));
+
+    // Exclude one observation in Control so only 1 sample remains and the t-test transiently fails.
+    session.execute("table.excludeCells", json_exclude("ds-col", 1, 0, true)).expect("exclude cell triggers reactive recalculation");
+    let failed = session.document().result_sheet(&SheetId::new("res-t")).expect("res after exclude");
+    assert!(matches!(failed.status, ResultStatus::Failed { .. }), "expected Failed status, got {:?}", failed.status);
+    assert!(failed.tabs.is_empty(), "derived tabs must clear on failure");
+    assert!(failed.scalars.is_empty(), "derived scalars must clear on failure");
+    assert_eq!(failed.floating_notes, vec![expected_note.clone()], "floating notes must survive transient analysis failure");
+
+    // Unexclude the observation and verify the analysis recovers while retaining the floating note.
+    session.execute("table.excludeCells", json_exclude("ds-col", 1, 0, false)).expect("unexclude cell restores analysis");
+    let recovered = session.document().result_sheet(&SheetId::new("res-t")).expect("res after unexclude");
+    assert_eq!(recovered.status, ResultStatus::UpToDate);
+    assert!(!recovered.tabs.is_empty());
+    assert!(!recovered.scalars.is_empty());
+    assert_eq!(recovered.floating_notes, vec![expected_note], "floating notes must remain attached after analysis recovery");
+}
+
+fn json_exclude(sheet_id: &str, row: usize, col: usize, excluded: bool) -> serde_json::Value {
+    serde_json::json!({
+        "sheet_id": sheet_id,
+        "coords": [{ "row": row, "col": col }],
+        "excluded": excluded
+    })
+}

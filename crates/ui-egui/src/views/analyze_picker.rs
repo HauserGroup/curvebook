@@ -8,8 +8,9 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::dialogs_canvas::{
-    ANALYSIS_CATALOG, ActiveDialog, AnalysisCatalogItem, AnalysisCategory, AnalyzeDuplicateChoice, default_analysis_kind_for_id,
+    ANALYSIS_CATALOG, ActiveDialog, AnalysisCatalogItem, AnalysisCategory, AnalyzeDuplicateChoice, VariableRoleFilter, default_analysis_kind_for_id,
 };
+use crate::i18n::{is_rtl_locale, mirror_x_for_rtl};
 use crate::interaction::UiEventOutcome;
 use crate::layout::a11y::{AccessibilityMeta, FocusScope, WidgetRole};
 use crate::layout::scroll::{ScrollAxes, ScrollMeta, scrollbar_thickness_px};
@@ -97,6 +98,18 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut AnalyzePickerViewState,
     }
     if payload == "dup_confirm" {
         return execute_duplicate_confirm(app, state);
+    }
+    if let Some(slug) = payload.strip_prefix("set_mv_role_filter:") {
+        let filter = VariableRoleFilter::from_slug(slug).ok_or_else(|| format!("unknown variable role filter `{slug}`"))?;
+        app.canvas_dialogs.analyze.role_filter = filter;
+        app.interaction.scroll_offsets.offsets.insert(String::from("scroll.analyze.mv_vars"), [0.0, 0.0]);
+        return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.set_mv_role_filter:{slug}"), ..Default::default() });
+    }
+    if let Some(col_raw) = payload.strip_prefix("toggle_mv_var:")
+        && let Ok(col) = col_raw.parse::<usize>()
+    {
+        app.canvas_dialogs.analyze.toggle_variable(col);
+        return Ok(UiEventOutcome { handled: true, action: format!("analyze_picker.toggle_mv_var:{col}"), ..Default::default() });
     }
     if let Some(col_raw) = payload.strip_prefix("toggle_pca_pred:")
         && let Ok(col) = col_raw.parse::<usize>()
@@ -197,10 +210,12 @@ pub fn build_analyze_modal_body(builder: &mut LayoutBuilder<'_>, parent: WidgetI
         return;
     }
 
+    let has_mv_vars = builder.app.canvas_dialogs.analyze.source_table_kind == Some(TableKind::MultipleVariables)
+        && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty();
     let show_pcr_panel = matches!(builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("stats.pcr" | "stats.pca"))
         && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty();
-    let summary_h = if show_pcr_panel && remaining_h >= scaled_u32(220.0, scale, 160, 440) {
-        scaled_u32(118.0, scale, 92, 220)
+    let summary_h = if (show_pcr_panel || has_mv_vars) && remaining_h >= scaled_u32(220.0, scale, 160, 440) {
+        scaled_u32(132.0, scale, 102, 240)
     } else if remaining_h >= scaled_u32(220.0, scale, 160, 440) {
         scaled_u32(72.0, scale, 54, 140)
     } else if remaining_h >= scaled_u32(140.0, scale, 110, 280) {
@@ -865,17 +880,31 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
     builder.paint_fill(ZLayer::ModalDialog, Some(&sum_wid), sum_rect, builder.palette.panel);
     builder.paint_stroke(ZLayer::ModalDialog, Some(&sum_wid), sum_rect, builder.palette.border, 1);
 
+    let is_rtl = is_rtl_locale(&builder.tree.locale);
     let show_pcr_panel = matches!(builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref(), Some("stats.pcr" | "stats.pca"))
         && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty()
         && sum_rect.width >= 320
         && sum_rect.height >= 72;
     let show_outlier_panel =
         builder.app.canvas_dialogs.analyze.selected_entry_id.as_deref() == Some("stats.outliers") && sum_rect.width >= 320 && sum_rect.height >= 72;
-    let text_rect = if show_pcr_panel || show_outlier_panel {
+    let show_mv_panel = !show_pcr_panel
+        && !show_outlier_panel
+        && builder.app.canvas_dialogs.analyze.source_table_kind == Some(TableKind::MultipleVariables)
+        && !builder.app.canvas_dialogs.analyze.variable_candidates.is_empty()
+        && sum_rect.width >= 320
+        && sum_rect.height >= 72;
+    let gap_x = scaled_u32(6.0, scale, 4, 12);
+    let (text_rect, side_rect) = if show_pcr_panel || show_outlier_panel || show_mv_panel {
         let left_w = (sum_rect.width * 42) / 100;
-        LayoutRectPx::new(sum_rect.x, sum_rect.y, left_w, sum_rect.height)
+        let right_w = sum_rect.width.saturating_sub(left_w.saturating_add(gap_x).saturating_add(4));
+        let left_local = mirror_x_for_rtl(0, left_w, sum_rect.width, is_rtl);
+        let right_local = mirror_x_for_rtl(left_w.saturating_add(gap_x), right_w, sum_rect.width, is_rtl);
+        (
+            LayoutRectPx::new(sum_rect.x + i32::try_from(left_local).unwrap_or(0), sum_rect.y, left_w, sum_rect.height),
+            Some(LayoutRectPx::new(sum_rect.x + i32::try_from(right_local).unwrap_or(0), sum_rect.y + 4, right_w, sum_rect.height.saturating_sub(8))),
+        )
     } else {
-        sum_rect
+        (sum_rect, None)
     };
 
     builder.push_clip(text_rect);
@@ -954,17 +983,150 @@ fn build_selected_summary_pane(builder: &mut LayoutBuilder<'_>, parent: &WidgetI
 
     builder.pop_clip();
 
-    if show_pcr_panel {
-        let pcr_x = text_rect.right() + i32::try_from(scaled_u32(6.0, scale, 4, 12)).unwrap_or(6);
-        let pcr_w = sum_rect.width.saturating_sub(text_rect.width.saturating_add(10));
-        let pcr_rect = LayoutRectPx::new(pcr_x, sum_rect.y + 4, pcr_w, sum_rect.height.saturating_sub(8));
-        build_pcr_predictor_outcome_panel(builder, &sum_wid, pcr_rect);
-    } else if show_outlier_panel {
-        let out_x = text_rect.right() + i32::try_from(scaled_u32(6.0, scale, 4, 12)).unwrap_or(6);
-        let out_w = sum_rect.width.saturating_sub(text_rect.width.saturating_add(10));
-        let out_rect = LayoutRectPx::new(out_x, sum_rect.y + 4, out_w, sum_rect.height.saturating_sub(8));
-        build_outlier_options_panel(builder, &sum_wid, out_rect);
+    if let Some(panel_rect) = side_rect {
+        if show_pcr_panel {
+            build_pcr_predictor_outcome_panel(builder, &sum_wid, panel_rect);
+        } else if show_outlier_panel {
+            build_outlier_options_panel(builder, &sum_wid, panel_rect);
+        } else if show_mv_panel {
+            build_mv_variable_picker_panel(builder, &sum_wid, panel_rect);
+        }
     }
+}
+
+fn build_mv_variable_picker_panel(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, panel_rect: LayoutRectPx) {
+    if panel_rect.width < 140 || panel_rect.height < 48 {
+        return;
+    }
+    let scale = builder.scale();
+    let is_rtl = is_rtl_locale(&builder.tree.locale);
+    let analyze = builder.app.canvas_dialogs.analyze.clone();
+    let role_filter = analyze.role_filter;
+    let filtered: Vec<_> = analyze.variable_candidates.iter().filter(|v| role_filter.matches(v.role)).cloned().collect();
+
+    let panel_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("analyze.mv_panel"),
+        parent: Some(parent.clone()),
+        z_layer: ZLayer::ModalDialog,
+        rect_px: panel_rect,
+        a11y: labeled_meta(WidgetRole::Dialog, "Variables & Role Filter", FocusScope::ModalDialog, "dialog.analyze.mv_vars"),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.paint_fill(ZLayer::ModalDialog, Some(&panel_wid), panel_rect, builder.palette.surface);
+    builder.paint_stroke(ZLayer::ModalDialog, Some(&panel_wid), panel_rect, builder.palette.border, 1);
+
+    let filter_h = scaled_u32(20.0, scale, 18, 36);
+    let pad = 4u32;
+    let chips = [
+        ("analyze.mv.filter.all", "All", VariableRoleFilter::All, "all"),
+        ("analyze.mv.filter.continuous", "Cont", VariableRoleFilter::ContinuousOnly, "continuous"),
+        ("analyze.mv.filter.categorical", "Cat", VariableRoleFilter::CategoricalOnly, "categorical"),
+        ("analyze.mv.filter.label", "Lbl", VariableRoleFilter::LabelOnly, "label"),
+        ("analyze.mv.filter.calculated", "FX=", VariableRoleFilter::CalculatedOnly, "calculated"),
+    ];
+    let gap = 3u32;
+    let bar_w = panel_rect.width.saturating_sub(pad * 2);
+    let chip_w = (bar_w.saturating_sub(gap * 4) / 5).max(24);
+    for (idx, (id, lbl, target, slug)) in chips.iter().enumerate() {
+        let local_x = (idx as u32) * (chip_w + gap);
+        if local_x + chip_w > bar_w + 2 {
+            break;
+        }
+        let cx = panel_rect.x + i32::try_from(pad).unwrap_or(4) + i32::try_from(mirror_x_for_rtl(local_x, chip_w, bar_w, is_rtl)).unwrap_or(0);
+        emit_button(
+            builder,
+            ButtonWidgetSpec {
+                id,
+                parent: Some(panel_wid.clone()),
+                z_layer: ZLayer::ModalDialog,
+                rect: LayoutRectPx::new(cx, panel_rect.y + 3, chip_w, filter_h),
+                label: lbl,
+                keyboard_path: id,
+                focus_scope: FocusScope::ModalDialog,
+                tab_order: Some(380 + idx as u32),
+                primary: false,
+                selected: role_filter == *target,
+                shortcut: None,
+                enablement: ControlEnablement::enabled(),
+                action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: format!("set_mv_role_filter:{slug}") },
+            },
+        );
+    }
+
+    let list_y = panel_rect.y + i32::try_from(filter_h + 6).unwrap_or(26);
+    let list_h = u32::try_from((panel_rect.bottom() - list_y - 2).max(0)).unwrap_or(0);
+    if list_h < 20 {
+        return;
+    }
+    let list_rect = LayoutRectPx::new(panel_rect.x + 2, list_y, panel_rect.width.saturating_sub(4), list_h);
+    let row_h = scaled_u32(18.0, scale, 16, 32);
+    let content_h = (filtered.len().max(1) as u32).saturating_mul(row_h).saturating_add(6);
+    let scroll_id = String::from("scroll.analyze.mv_vars");
+    let scroll_off = builder.scroll_offset(&scroll_id);
+    let scroll_meta = ScrollMeta::new(scroll_id.clone(), list_rect, [list_rect.width, content_h], scroll_off, ScrollAxes::Vertical);
+    let list_wid = builder.push_node(NodeSpec {
+        id: WidgetId::from("analyze.mv_list"),
+        parent: Some(panel_wid.clone()),
+        z_layer: ZLayer::ModalDialog,
+        rect_px: list_rect,
+        a11y: labeled_meta(WidgetRole::Label, "Filtered Variables", FocusScope::ModalDialog, "dialog.analyze.mv_list"),
+        state: WidgetVisualState::default(),
+        action: WidgetAction::NoOp,
+    });
+    builder.attach_scroll(&list_wid, scroll_meta.clone());
+
+    let sb_w = if scroll_meta.has_vertical_overflow() { scrollbar_thickness_px(scale) } else { 0 };
+    let inner_rect = LayoutRectPx::new(list_rect.x + 2, list_rect.y, list_rect.width.saturating_sub(sb_w + 4), list_rect.height);
+    let off_y = scroll_meta.scroll_offset_px[1].round() as i32;
+    let badge_w = scaled_u32(38.0, scale, 32, 68).min(inner_rect.width / 3);
+    let row_gap = 4u32;
+    let toggle_w = inner_rect.width.saturating_sub(badge_w + row_gap);
+
+    builder.push_clip(inner_rect);
+    for (idx, cand) in filtered.iter().enumerate() {
+        let ry = inner_rect.y + 2 + i32::try_from((idx as u32) * row_h).unwrap_or(0) - off_y;
+        let row_r = LayoutRectPx::new(inner_rect.x, ry, inner_rect.width, row_h.saturating_sub(2));
+        if row_r.y < inner_rect.y - 2 || row_r.bottom() > inner_rect.bottom() + 2 {
+            continue;
+        }
+        let t_local = mirror_x_for_rtl(0, toggle_w, row_r.width, is_rtl);
+        let b_local = mirror_x_for_rtl(toggle_w + row_gap, badge_w, row_r.width, is_rtl);
+        let t_rect = LayoutRectPx::new(row_r.x + i32::try_from(t_local).unwrap_or(0), row_r.y, toggle_w, row_r.height);
+        let b_rect = LayoutRectPx::new(row_r.x + i32::try_from(b_local).unwrap_or(0), row_r.y + 1, badge_w, row_r.height.saturating_sub(2).max(12));
+        let vid = format!("analyze.mv.var.{}", cand.col_index);
+        emit_toggle(
+            builder,
+            ToggleWidgetSpec {
+                id: &vid,
+                parent: Some(panel_wid.clone()),
+                z_layer: ZLayer::ModalDialog,
+                rect: t_rect,
+                label: &cand.title,
+                keyboard_path: "dialog.analyze.mv_var",
+                focus_scope: FocusScope::ModalDialog,
+                tab_order: Some(400 + idx as u32),
+                checked: cand.selected,
+                is_radio: false,
+                enablement: ControlEnablement::enabled(),
+                scroll_container: Some(&scroll_id),
+                action: WidgetAction::Custom { domain: String::from("analyze_picker"), payload: format!("toggle_mv_var:{}", cand.col_index) },
+            },
+        );
+        let badge_id = format!("{vid}.role_badge");
+        super::stat_params::emit_mv_role_badge(
+            builder,
+            &panel_wid,
+            ZLayer::ModalDialog,
+            &badge_id,
+            b_rect,
+            cand.role,
+            cand.role_inferred,
+            Some(&scroll_id),
+        );
+    }
+    builder.pop_clip();
+    emit_scrollbars_for_meta(builder, ZLayer::ModalDialog, &scroll_meta, Some(list_wid));
 }
 
 fn build_outlier_options_panel(builder: &mut LayoutBuilder<'_>, parent: &WidgetId, panel_rect: LayoutRectPx) {

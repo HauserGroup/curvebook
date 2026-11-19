@@ -67,7 +67,7 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
     let report_ok = recalculate_project_with_report(&mut doc2).unwrap();
     assert!(report_ok.failed_result_sheets.is_empty());
 
-    // Populate additional stale fields onto `lin` (pairwise_comparisons, checklist, floating_notes) to prove failure clears ALL of them.
+    // Populate derived stale fields plus user `floating_notes` onto `lin`: failure must clear derived fields while preserving user notes.
     {
         let lin_mut = doc2.result_sheets.iter_mut().find(|r| r.id.as_str() == "lin").unwrap();
         assert_eq!(lin_mut.status, ResultStatus::UpToDate);
@@ -111,7 +111,11 @@ fn r1_x2_01_failed_recompute_clears_stale_outputs_and_consumers_reject_failed() 
         assert!(res.pairwise_comparisons.is_empty(), "{failed_id} stale pairwise comparisons must be cleared");
         assert!(res.analyzable_data.is_none(), "{failed_id} stale analyzable_data must be cleared");
         assert!(res.checklist.is_empty(), "{failed_id} stale checklist must be cleared");
-        assert!(res.floating_notes.is_empty(), "{failed_id} stale floating notes must be cleared");
+        if failed_id == "lin" {
+            assert_eq!(res.floating_notes.len(), 1, "lin user floating notes must survive transient recompute failure");
+        } else {
+            assert!(res.floating_notes.is_empty());
+        }
     }
 
     // Defense-in-depth checks even if a Failed ResultSheet still artificially retains stale fields:
