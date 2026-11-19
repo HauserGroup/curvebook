@@ -119,6 +119,17 @@ pub(crate) struct UiShellSnapshot {
     pub human_path_only: bool,
     pub view_shards: views::ViewShardStates,
     pub clipboard_adapter: ClipboardAdapterSlot,
+    pub mutation_seq: MutationCounter,
+}
+
+/// Equality-transparent monotonic mutation counter tracking UI/session mutations even across undo eviction.
+#[derive(Debug, Clone, Copy, Default)]
+pub(crate) struct MutationCounter(pub u64);
+
+impl PartialEq for MutationCounter {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 /// Equality-transparent cache slot storing the latest finalized [`layout::RetainedLayoutFrame`].
@@ -237,6 +248,7 @@ pub struct UiApp {
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
     pub(crate) retained_layout: CachedLayoutSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
+    pub(crate) mutation_seq: MutationCounter,
 }
 
 impl Default for UiApp {
@@ -281,6 +293,7 @@ impl UiApp {
             clipboard_adapter: ClipboardAdapterSlot::default(),
             retained_layout: CachedLayoutSlot::default(),
             batch_undo_log: None,
+            mutation_seq: MutationCounter(0),
         };
         app.grid.apply_locale_preset(&app.locale_preset);
         app.sync_views();
@@ -312,6 +325,7 @@ impl UiApp {
             human_path_only: self.human_path_only,
             view_shards: self.view_shards.clone(),
             clipboard_adapter: self.clipboard_adapter.clone(),
+            mutation_seq: self.mutation_seq,
         }
     }
 
@@ -339,6 +353,7 @@ impl UiApp {
         self.human_path_only = snap.human_path_only;
         self.view_shards = snap.view_shards;
         self.clipboard_adapter = snap.clipboard_adapter;
+        self.mutation_seq = snap.mutation_seq;
         self.retained_layout.0 = None;
         self.sync_views();
     }
@@ -346,6 +361,7 @@ impl UiApp {
     fn record_session_cmd_on(
         session: &mut Session,
         mut tracker: Option<&mut BatchUndoTracker>,
+        mutation_seq: &mut MutationCounter,
         command_id: &str,
         op: impl FnOnce(&mut Session) -> Result<CommandOutcome, EngineError>,
     ) -> Result<CommandOutcome, EngineError> {
@@ -355,6 +371,9 @@ impl UiApp {
             t.capture_fallback_baseline_before(session, force_fallback);
         }
         let outcome = op(session)?;
+        if outcome.mutated {
+            mutation_seq.0 = mutation_seq.0.wrapping_add(1);
+        }
         if let Some(t) = tracker
             && t.fallback_session.is_none()
         {
@@ -370,15 +389,18 @@ impl UiApp {
     }
 
     pub(crate) fn execute_session_ui_cmd(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
-        Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| session.execute_as_ui(command_id, params))
+        Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
+            session.execute_as_ui(command_id, params)
+        })
     }
 
     pub(crate) fn execute_power_wizard_create(&mut self) -> Result<power_wizard::PowerWizardCreatedSheets, EngineError> {
         let wizard = &mut self.canvas_dialogs.power_wizard;
         let session = &mut self.session;
         let tracker = &mut self.batch_undo_log;
+        let mutation_seq = &mut self.mutation_seq;
         wizard.execute_create_with(&mut |cmd_id, params| {
-            Self::record_session_cmd_on(session, tracker.as_mut(), cmd_id, |s| s.execute_as_ui(cmd_id, params))
+            Self::record_session_cmd_on(session, tracker.as_mut(), mutation_seq, cmd_id, |s| s.execute_as_ui(cmd_id, params))
         })
     }
 
@@ -406,6 +428,12 @@ impl UiApp {
     #[must_use]
     pub const fn session(&self) -> &Session {
         &self.session
+    }
+
+    /// Monotonic counter incremented on every mutating engine/workspace transition.
+    #[must_use]
+    pub const fn mutation_seq(&self) -> u64 {
+        self.mutation_seq.0
     }
 
     /// Mutably borrow the underlying headless [`Session`].
@@ -474,6 +502,13 @@ impl UiApp {
         self.clipboard_adapter.adapter.write_bundle(bundle)
     }
 
+    pub(crate) fn read_clipboard_text(&self) -> Result<OsAdapterStatus, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
+        }
+        self.clipboard_adapter.adapter.read_text()
+    }
+
     pub(crate) fn toggle_navigator_pane(&mut self) -> bool {
         self.nav.navigator_open = !self.nav.navigator_open;
         if !self.nav.navigator_open {
@@ -517,6 +552,56 @@ impl UiApp {
         self.family_open
     }
 
+    /// Return whether `pane` is currently visible in the workspace layout.
+    #[must_use]
+    pub fn is_workspace_pane_visible(&self, pane: workspace_nav::ActiveWorkspacePane) -> bool {
+        if self.presentation_mode {
+            return matches!(pane, workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid);
+        }
+        match pane {
+            workspace_nav::ActiveWorkspacePane::Navigator => self.nav.navigator_open,
+            workspace_nav::ActiveWorkspacePane::FamilyStrip => self.nav.navigator_open && self.family_open,
+            workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid => true,
+            workspace_nav::ActiveWorkspacePane::Inspector => self.nav.inspector_open,
+            workspace_nav::ActiveWorkspacePane::FloatingNotes => {
+                !self.nav.gallery.open
+                    && !self.nav.welcome.open
+                    && self.document().total_sheet_count() > 0
+                    && self
+                        .document()
+                        .active_sheet_id
+                        .as_ref()
+                        .is_some_and(|id| !views::nav_notes::sheet_floating_notes(self.document(), id).is_empty())
+            }
+        }
+    }
+
+    /// Ordered list of currently visible workspace focus panes.
+    #[must_use]
+    pub fn visible_workspace_panes(&self) -> Vec<workspace_nav::ActiveWorkspacePane> {
+        workspace_nav::ActiveWorkspacePane::CYCLE_ORDER.into_iter().filter(|&p| self.is_workspace_pane_visible(p)).collect()
+    }
+
+    /// Cycle keyboard focus across currently visible workspace panes (`F6` / `Shift+F6`).
+    pub fn cycle_focus_pane(&mut self, reverse: bool) -> workspace_nav::ActiveWorkspacePane {
+        let visible = self.visible_workspace_panes();
+        if visible.is_empty() {
+            self.nav.active_pane = workspace_nav::ActiveWorkspacePane::MainCanvasOrGrid;
+            return self.nav.active_pane;
+        }
+        let next = if let Some(pos) = visible.iter().position(|&p| p == self.nav.active_pane) {
+            let idx = if reverse { (pos + visible.len() - 1) % visible.len() } else { (pos + 1) % visible.len() };
+            visible[idx]
+        } else if reverse {
+            visible[visible.len() - 1]
+        } else {
+            visible[0]
+        };
+        self.nav.active_pane = next;
+        self.focus_widget_id = None;
+        next
+    }
+
     /// Build or return the cached retained [`layout::LayoutTree`] for `metrics`.
     pub fn build_and_cache_layout_tree(&mut self, metrics: ViewportMetrics) -> layout::LayoutTree {
         let hash = layout::compute_ui_state_fingerprint(self, metrics);
@@ -546,7 +631,7 @@ impl UiApp {
 
     /// Execute an internal UI command (`Caller::Ui`) and refresh UI navigator and selection state.
     pub fn execute_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
-        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| {
+        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_as_ui(command_id, params)
         })?;
         self.sync_views();
@@ -556,7 +641,7 @@ impl UiApp {
     /// Execute an external control-protocol command (`Caller::Control`) respecting `--gui-only` locks.
     pub fn execute_control_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         let cancelled = std::sync::atomic::AtomicBool::new(false);
-        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), command_id, |session| {
+        let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
             session.execute_with_caller(command_id, params, curvebook_engine::Caller::Control, &cancelled)
         })?;
         self.sync_views();
@@ -785,6 +870,7 @@ impl UiApp {
         next.set_gui_only(gui_only);
         next.set_path_policy(path_policy);
         self.session = next;
+        self.mutation_seq.0 = self.mutation_seq.0.wrapping_add(1);
         self.sync_views();
         Ok(())
     }

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verify macOS release artifacts (.app, .dmg, and CLI .zip):
+# Verify macOS release artifacts (.app and .dmg, including bundled curvebook-cli):
 #   - Strict deep code signature validation (`codesign --verify --strict --deep`)
 #   - Notarization & Gatekeeper checks (`xcrun stapler validate`, `spctl`, `codesign --test-requirement="=notarized"`)
 #     when signed with a Developer ID certificate or `--require-notarized` is passed.
@@ -42,8 +42,7 @@ fi
 
 if [[ ${#TARGETS[@]} -eq 0 ]]; then
   DMG="$DIST/curvebook-$VERSION-macos-$ARCH.dmg"
-  CLI_ZIP="$DIST/curvebook-cli-$VERSION-macos-$ARCH.zip"
-  TARGETS=("$DMG" "$CLI_ZIP")
+  TARGETS=("$DMG")
   if [[ -d "$ROOT/dist/CurveBook.app" ]]; then
     TARGETS=("$ROOT/dist/CurveBook.app" "${TARGETS[@]}")
   fi
@@ -72,67 +71,18 @@ is_adhoc_signed() {
   return 1
 }
 
-verify_app() {
-  local app="$1"
-  [[ -d "$app" ]] || { echo "error: app bundle not found: $app" >&2; exit 1; }
-  echo "==> verifying app signature: $app"
-  codesign --verify --strict --deep --verbose=2 "$app"
-  if is_adhoc_signed "$app"; then
-    if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
-      echo "error: $app is ad-hoc signed but --require-notarized was requested" >&2
-      exit 1
-    fi
-    warn "$app is ad-hoc signed; skipping xcrun stapler validate and spctl"
-  else
-    xcrun stapler validate "$app"
-    spctl --assess --type execute -vvv "$app"
-  fi
-}
-
-verify_dmg() {
-  local dmg="$1" mp app_in_dmg
-  [[ -f "$dmg" ]] || { echo "error: DMG not found: $dmg" >&2; exit 1; }
-  echo "==> verifying DMG signature: $dmg"
-  codesign --verify --strict --deep --verbose=2 "$dmg"
-  if is_adhoc_signed "$dmg"; then
-    if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
-      echo "error: $dmg is ad-hoc signed but --require-notarized was requested" >&2
-      exit 1
-    fi
-    warn "$dmg is ad-hoc signed; skipping xcrun stapler validate and spctl"
-  else
-    xcrun stapler validate "$dmg"
-    spctl --assess --type open --context context:primary-signature -vvv "$dmg"
-  fi
-  mp="$WORK/mount-$(basename "$dmg" .dmg)"
-  mkdir -p "$mp"
-  hdiutil attach "$dmg" -mountpoint "$mp" -nobrowse -readonly -quiet
-  MOUNT_POINTS+=("$mp")
-  app_in_dmg="$mp/CurveBook.app"
-  if [[ ! -d "$app_in_dmg" ]]; then
-    echo "error: CurveBook.app not found inside $dmg (expected $app_in_dmg)" >&2
-    exit 1
-  fi
-  verify_app "$app_in_dmg"
-  hdiutil detach "$mp" -quiet
-}
-
-verify_cli_zip() {
-  local zip_path="$1" stage bin cs_info host_arch bin_archs can_run
-  [[ -f "$zip_path" ]] || { echo "error: CLI zip not found: $zip_path" >&2; exit 1; }
-  echo "==> verifying CLI zip signature: $zip_path"
-  stage="$WORK/cli-$(basename "$zip_path" .zip)"
-  mkdir -p "$stage"
-  ditto -x -k "$zip_path" "$stage"
-  bin="$(find "$stage" -type f -name 'curvebook-cli' | head -n 1)"
-  [[ -n "$bin" ]] || { echo "error: curvebook-cli binary not found inside $zip_path" >&2; exit 1; }
-  codesign --verify --strict --deep --verbose=2 "$bin"
+verify_bundled_cli() {
+  local app="$1" bin cs_info host_arch bin_archs can_run
+  bin="$app/Contents/MacOS/curvebook-cli"
+  [[ -x "$bin" ]] || { echo "error: bundled curvebook-cli not found or not executable: $bin" >&2; exit 1; }
+  echo "==> verifying bundled CLI signature: $bin"
+  codesign --verify --strict --verbose=2 "$bin"
   if is_adhoc_signed "$bin"; then
     if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
       echo "error: $bin is ad-hoc signed but --require-notarized was requested" >&2
       exit 1
     fi
-    warn "$bin is ad-hoc signed; skipping Gatekeeper and hardened-runtime notarization checks"
+    warn "$bin is ad-hoc signed; skipping hardened-runtime and notarization checks"
   else
     cs_info="$(codesign -dv --verbose=4 "$bin" 2>&1 || true)"
     if ! printf '%s\n' "$cs_info" | grep -q 'flags=.*runtime'; then
@@ -163,12 +113,57 @@ verify_cli_zip() {
   fi
 }
 
+verify_app() {
+  local app="$1"
+  [[ -d "$app" ]] || { echo "error: app bundle not found: $app" >&2; exit 1; }
+  echo "==> verifying app signature: $app"
+  codesign --verify --strict --deep --verbose=2 "$app"
+  if is_adhoc_signed "$app"; then
+    if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
+      echo "error: $app is ad-hoc signed but --require-notarized was requested" >&2
+      exit 1
+    fi
+    warn "$app is ad-hoc signed; skipping xcrun stapler validate and spctl"
+  else
+    xcrun stapler validate "$app"
+    spctl --assess --type execute -vvv "$app"
+  fi
+  verify_bundled_cli "$app"
+}
+
+verify_dmg() {
+  local dmg="$1" mp app_in_dmg
+  [[ -f "$dmg" ]] || { echo "error: DMG not found: $dmg" >&2; exit 1; }
+  echo "==> verifying DMG signature: $dmg"
+  codesign --verify --strict --deep --verbose=2 "$dmg"
+  if is_adhoc_signed "$dmg"; then
+    if [[ "$REQUIRE_NOTARIZED" -eq 1 ]]; then
+      echo "error: $dmg is ad-hoc signed but --require-notarized was requested" >&2
+      exit 1
+    fi
+    warn "$dmg is ad-hoc signed; skipping xcrun stapler validate and spctl"
+  else
+    xcrun stapler validate "$dmg"
+    spctl --assess --type open --context context:primary-signature -vvv "$dmg"
+  fi
+  mp="$WORK/mount-$(basename "$dmg" .dmg)"
+  mkdir -p "$mp"
+  hdiutil attach "$dmg" -mountpoint "$mp" -nobrowse -readonly -quiet
+  MOUNT_POINTS+=("$mp")
+  app_in_dmg="$mp/CurveBook.app"
+  if [[ ! -d "$app_in_dmg" ]]; then
+    echo "error: CurveBook.app not found inside $dmg (expected $app_in_dmg)" >&2
+    exit 1
+  fi
+  verify_app "$app_in_dmg"
+  hdiutil detach "$mp" -quiet
+}
+
 for target in "${TARGETS[@]}"; do
   case "$target" in
     *.app) verify_app "$target" ;;
     *.dmg) verify_dmg "$target" ;;
-    *.zip) verify_cli_zip "$target" ;;
-    *) echo "error: unsupported macOS artifact type: $target (expected .app, .dmg, or .zip)" >&2; exit 2 ;;
+    *) echo "error: unsupported macOS artifact type: $target (expected .app or .dmg)" >&2; exit 2 ;;
   esac
 done
 

@@ -66,14 +66,22 @@ const DEFAULT_SENSITIVITY_POWERS: &[f64] = &[0.70, 0.80, 0.90, 0.95];
 /// Supported hypothesis test families for power and sample-size planning.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum PowerTestFamily {
+    /// Two-group independent Student *t* (or Welch–Satterthwaite *t* when `sd_group2` differs from `sd`).
     #[default]
     TwoSampleUnpairedT,
+    /// Paired matched-pairs Student *t* (`n - 1` df) parameterized by `Cohen's d_z` or `(mean_diff, sd_diff / r)`.
     TwoSamplePairedT,
+    /// Single-sample Student *t* against known null mean $\mu_0$ (`n - 1` df).
     OneSampleT,
+    /// Omnibus *k*-group one-way fixed-effects ANOVA *F*-test (`df1 = k - 1`, `df2 = N - k`) parameterized by Cohen's *f*.
     OneWayAnova,
+    /// Two independent binomial proportions test (`PooledNullUnpooledAlt`, `Unpooled`, or arcsine `CohensH`).
     TwoProportions,
+    /// Single-sample Pearson correlation *r* test against $H_0: \rho = 0$ (`FisherZ`, `ExactTTransform`, etc.).
     Correlation,
+    /// Pearson chi-square goodness-of-fit or independence test parameterized by Cohen's *w* and `chi_square_df`.
     ChiSquare,
+    /// Conditional fixed-*x* simple linear regression slope *t*-test (`df = n - 2`, Cohen's $f^2 = R^2 / (1 - R^2)$).
     SimpleLinearRegression,
 }
 
@@ -140,16 +148,20 @@ impl PowerTestFamily {
 /// Direction for one-sided hypothesis tests (`H1: theta > theta_0` vs `H1: theta < theta_0`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum OneSidedDirection {
+    /// Upper-tail alternative (`effect > 0`).
     #[default]
     Greater,
+    /// Lower-tail alternative (`effect < 0`).
     Less,
 }
 
 /// Hypothesis tail mode for power calculations.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum TailMode {
+    /// Two-sided alternative hypothesis (`H1: effect != 0`).
     #[default]
     TwoSided,
+    /// Directional one-sided alternative specified by [`OneSidedDirection`].
     OneSided(OneSidedDirection),
 }
 
@@ -163,9 +175,12 @@ impl TailMode {
 /// Unknown quantity solved by [`solve_power`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum PowerSolveTarget {
+    /// Solve for required continuous and ceiling integer sample size (`n1`, `n2`, `total_n`) given `alpha`, `target_power`, and effect.
     #[default]
     SampleSize,
+    /// Solve for exact statistical power `1 - beta` given `alpha`, `sample_size`, and effect.
     Power,
+    /// Solve for minimum detectable standardized and raw effect size given `alpha`, `target_power`, and `sample_size`.
     DetectableEffect,
 }
 
@@ -218,26 +233,63 @@ pub enum PowerEffectSpec {
     /// Group mean difference (`mu_1 - mu_2` or `mu - mu_0`) and common/group SD `sigma`.
     /// For [`PowerTestFamily::TwoSamplePairedT`], `within_pair_correlation` converts `sigma` via
     /// `sigma_d = sigma * sqrt(2 * (1 - r))` (or `sqrt(sd1^2 + sd2^2 - 2 * r * sd1 * sd2)`).
-    MeanDiffAndSd { mean_diff: f64, sd: f64, sd_group2: Option<f64>, within_pair_correlation: Option<f64> },
+    MeanDiffAndSd {
+        /// Expected difference of means (`mu_1 - mu_2` for two-sample or `mu - mu_0` for one-sample) in raw response units.
+        mean_diff: f64,
+        /// Common or first-group population standard deviation `sigma > 0` in raw response units.
+        sd: f64,
+        /// Optional distinct second-group standard deviation `sigma_2 > 0` triggering Welch–Satterthwaite *t* calculations when unequal to `sd`.
+        sd_group2: Option<f64>,
+        /// Optional within-pair Pearson correlation `r` in `(-1, 1)` used to derive `sigma_d` for paired *t* designs (`None` treats `sd` directly or defaults per family).
+        within_pair_correlation: Option<f64>,
+    },
     /// Direct paired-differences mean difference and SD of paired differences (`sigma_d`).
-    PairedDiff { mean_diff: f64, sd_diff: f64 },
+    PairedDiff {
+        /// Expected mean of paired differences `mu_d` in raw response units.
+        mean_diff: f64,
+        /// Standard deviation of paired differences `sigma_d > 0` in raw response units.
+        sd_diff: f64,
+    },
     /// Raw group means and common within-group SD (for `OneWayAnova` or `TwoSampleUnpairedT`).
-    GroupMeansAndSd { means: Vec<f64>, within_sd: f64 },
+    GroupMeansAndSd {
+        /// Expected group population means `[mu_1, ..., mu_k]` across `k >= 2` groups.
+        means: Vec<f64>,
+        /// Pooled within-group standard deviation `sigma > 0` in raw response units.
+        within_sd: f64,
+    },
     /// Group proportions `(p1, p2)` in `[0, 1]` for [`PowerTestFamily::TwoProportions`].
-    TwoProportions { p1: f64, p2: f64 },
+    TwoProportions {
+        /// Group 1 baseline / control proportion `p_1` in `(0, 1)` (or `[0, 1]`).
+        p1: f64,
+        /// Group 2 treatment / comparison proportion `p_2` in `(0, 1)` (or `[0, 1]`).
+        p2: f64,
+    },
     /// Fixed baseline proportion `p1` when solving `DetectableEffect` for `p2` in [`PowerTestFamily::TwoProportions`].
-    BaselineProportion { p1: f64 },
+    BaselineProportion {
+        /// Known baseline proportion `p_1` in `(0, 1)` used as anchor when solving minimum detectable `p_2`.
+        p1: f64,
+    },
     /// Coefficient of determination `R^2` in `[0, 1)` for [`PowerTestFamily::SimpleLinearRegression`].
     RSquared(f64),
     /// Regression slope `beta1`, predictor SD `sigma_x`, and residual SD `sigma_eps`.
-    RegressionSlope { beta1: f64, sigma_x: f64, sigma_eps: f64 },
+    RegressionSlope {
+        /// Hypothesized alternative slope `beta_1` in `Y / X` units.
+        beta1: f64,
+        /// Predictor population standard deviation `sigma_X > 0`.
+        sigma_x: f64,
+        /// Residual error standard deviation `sigma_epsilon > 0`.
+        sigma_eps: f64,
+    },
 }
 
 /// Typed input specification for [`solve_power`], [`compute_power_curve`], and [`compute_sensitivity_table`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerAnalysisRequest {
+    /// Hypothesis test family (`TwoSampleUnpairedT`, `TwoProportions`, `OneWayAnova`, etc.).
     pub family: PowerTestFamily,
+    /// Target unknown solved by `solve_power` (`SampleSize`, `Power`, or `DetectableEffect`).
     pub solve_target: PowerSolveTarget,
+    /// Two-sided vs one-sided directional alternative test tail.
     pub tail_mode: TailMode,
     /// Significance level `alpha` in `(0, 1)` (default `0.05`).
     pub alpha: f64,
@@ -403,78 +455,91 @@ impl PowerAnalysisRequest {
         }
     }
 
+    /// Set the unknown quantity solved by [`solve_power`] (`SampleSize`, `Power`, or `DetectableEffect`).
     #[must_use]
     pub const fn with_target(mut self, target: PowerSolveTarget) -> Self {
         self.solve_target = target;
         self
     }
 
+    /// Set the alternative hypothesis tail mode (`TwoSided` or directional `OneSided`).
     #[must_use]
     pub const fn with_tail(mut self, tail_mode: TailMode) -> Self {
         self.tail_mode = tail_mode;
         self
     }
 
+    /// Set the Type I error significance threshold `alpha` in `(0, 1)`.
     #[must_use]
     pub const fn with_alpha(mut self, alpha: f64) -> Self {
         self.alpha = alpha;
         self
     }
 
+    /// Set the target statistical power `1 - beta` in `(0, 1)`.
     #[must_use]
     pub const fn with_target_power(mut self, target_power: f64) -> Self {
         self.target_power = Some(target_power);
         self
     }
 
+    /// Set the primary sample size (`n1` per group or total `N`, continuous or integer).
     #[must_use]
     pub const fn with_sample_size(mut self, n: f64) -> Self {
         self.sample_size = Some(n);
         self
     }
 
+    /// Set an explicit second-group sample size `n2` for two-sample designs.
     #[must_use]
     pub const fn with_sample_size_group2(mut self, n2: f64) -> Self {
         self.sample_size_group2 = Some(n2);
         self
     }
 
+    /// Set the allocation ratio `k = n2 / n1 > 0` used when `sample_size_group2` is `None`.
     #[must_use]
     pub const fn with_allocation_ratio(mut self, ratio: f64) -> Self {
         self.allocation_ratio = ratio;
         self
     }
 
+    /// Set the effect-size parameterization (`Standardized`, `MeanDiffAndSd`, `TwoProportions`, etc.).
     #[must_use]
     pub fn with_effect(mut self, effect: PowerEffectSpec) -> Self {
         self.effect = effect;
         self
     }
 
+    /// Set the group count `k >= 2` for `OneWayAnova` designs.
     #[must_use]
     pub const fn with_num_groups(mut self, k: usize) -> Self {
         self.num_groups = Some(k);
         self
     }
 
+    /// Set the chi-square test degrees of freedom `df > 0` for `ChiSquare` designs.
     #[must_use]
     pub const fn with_chi_square_df(mut self, df: f64) -> Self {
         self.chi_square_df = df;
         self
     }
 
+    /// Set the variance / SE approximation method used for `TwoProportions`.
     #[must_use]
     pub const fn with_two_proportions_mode(mut self, mode: TwoProportionsMethod) -> Self {
         self.two_proportions_mode = mode;
         self
     }
 
+    /// Enable or disable Yates/Fleiss continuity correction for normal-approx `TwoProportions`.
     #[must_use]
     pub const fn with_continuity_correction(mut self, enabled: bool) -> Self {
         self.continuity_correction = enabled;
         self
     }
 
+    /// Set the power calculation method for `Correlation` (`FisherZ`, `ExactTTransform`, etc.).
     #[must_use]
     pub const fn with_correlation_method(mut self, method: CorrelationPowerMethod) -> Self {
         self.correlation_method = method;
@@ -485,30 +550,45 @@ impl PowerAnalysisRequest {
 /// Single point on a power-vs-sample-size curve (`Stage 4` interactive chart).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct PowerCurvePoint {
+    /// Primary sample size coordinate (`n1` per group or total `N`).
     pub n: f64,
+    /// Exact achieved statistical power `1 - beta` in `[0, 1]` at `(n, effect_size)`.
     pub power: f64,
+    /// Standardized effect size on the test family's canonical scale (`d`, `d_z`, `f`, `h`, `r`, `w`, or `f^2`).
     pub effect_size: f64,
+    /// Total sample size across all groups (`total_n >= n`).
     pub total_n: f64,
 }
 
 /// Single cell in the multi-alpha by multi-power sensitivity table (`Stage 4`).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct SensitivityCell {
+    /// Nominal significance level `alpha` in `(0, 1)` evaluated for this grid cell.
     pub alpha: f64,
+    /// Requested target power `1 - beta` in `(0, 1)` evaluated for this grid cell.
     pub target_power: f64,
+    /// Ceiling integer primary sample size `n1` required to attain at least `target_power` (or input `n1` when solving `DetectableEffect`).
     pub sample_size: usize,
+    /// Standardized effect size used or solved in this cell (`d`, `d_z`, `f`, `h`, `r`, `w`, or `f^2`).
     pub effect_size: f64,
+    /// Total integer sample size across all groups.
     pub total_n: usize,
+    /// Exact continuous primary sample size solving the power equation before integer ceiling rounding.
     pub continuous_n: f64,
 }
 
 /// Complete numerical output returned by [`solve_power`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PowerAnalysisResult {
+    /// Hypothesis test family evaluated.
     pub family: PowerTestFamily,
+    /// Quantity solved for (`SampleSize`, `Power`, or `DetectableEffect`).
     pub solve_target: PowerSolveTarget,
+    /// Two-sided vs one-sided directional alternative test tail.
     pub tail_mode: TailMode,
+    /// Significance level `alpha` in `(0, 1)` applied to critical thresholds.
     pub alpha: f64,
+    /// Target statistical power `1 - beta` (`Some(...)` when solving `SampleSize` or `DetectableEffect`, optional when solving `Power`).
     pub target_power: Option<f64>,
     /// Exact continuous primary sample size (`n1` or `n_per_group` or total `N`).
     pub continuous_n: f64,

@@ -9,25 +9,44 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
 use std::time::Instant;
 
-use curvebook_doc::{ProjectDocument, SheetId, SheetSection};
 use curvebook_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
 use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp, locale_picker_label};
 use eframe::egui;
-use serde_json::json;
 
 use crate::desktop_host::{
     CloseDisposition, DesktopEventOutcome, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopMenuItem,
-    DesktopWindowId, DesktopWindowSession, LiveControlFrameOutput, match_routed_desktop_shortcut,
+    DesktopWindowId, LiveControlFrameOutput, match_routed_desktop_shortcut,
+};
+pub use crate::desktop_host::{
+    DEFAULT_TEMPLATE_FILE_NAME, NATIVE_OPEN_FILE_EXTENSIONS, NATIVE_TEMPLATE_FILE_EXTENSIONS, NativeFileDialogAdapter, NativeFileDialogKind,
+    NativeFileDialogRequest, execute_native_import_at_path, menu_action_triggers_native_file_dialog, native_import_replaces_project_file_path,
 };
 
-/// Canonical file extensions accepted by native project/data `Open...` dialogs (`classify_and_load_path`).
-pub const NATIVE_OPEN_FILE_EXTENSIONS: &[&str] = &["curvebook", "cbtemplate", "prism", "pzfx", "csv", "tsv"];
-/// Canonical file extensions accepted by native template save and instantiate dialogs.
-pub const NATIVE_TEMPLATE_FILE_EXTENSIONS: &[&str] = &["cbtemplate"];
-/// Default filename suggested when saving a reusable `.cbtemplate` archive.
-pub const DEFAULT_TEMPLATE_FILE_NAME: &str = "untitled.cbtemplate";
+/// Production OS file-dialog backend powered by [`rfd::FileDialog`].
+#[derive(Debug, Default)]
+pub struct RfdNativeFileDialogAdapter;
+
+impl NativeFileDialogAdapter for RfdNativeFileDialogAdapter {
+    fn pick(&self, request: &NativeFileDialogRequest) -> Result<Option<PathBuf>, String> {
+        let mut dialog = rfd::FileDialog::new();
+        if !request.extensions.is_empty() && request.kind != NativeFileDialogKind::PickFolder {
+            let ext_refs: Vec<&str> = request.extensions.iter().map(String::as_str).collect();
+            dialog = dialog.add_filter(&request.filter_label, &ext_refs);
+        }
+        if let Some(ref name) = request.default_file_name
+            && request.kind == NativeFileDialogKind::SaveFile
+        {
+            dialog = dialog.set_file_name(name);
+        }
+        Ok(match request.kind {
+            NativeFileDialogKind::OpenFile => dialog.pick_file(),
+            NativeFileDialogKind::PickFolder => dialog.pick_folder(),
+            NativeFileDialogKind::SaveFile => dialog.save_file(),
+        })
+    }
+}
 
 const MIN_WINDOW_WIDTH_PT: f32 = 640.0;
 const MIN_WINDOW_HEIGHT_PT: f32 = 420.0;
@@ -192,7 +211,8 @@ pub struct CurveBookNativeApp {
 
 impl CurveBookNativeApp {
     /// Construct a native app host wrapping an already-initialized [`DesktopHostRuntime`].
-    pub fn new(runtime: DesktopHostRuntime, primary_window_id: DesktopWindowId, on_exit_cleanup: Option<CleanupHook>) -> Self {
+    pub fn new(mut runtime: DesktopHostRuntime, primary_window_id: DesktopWindowId, on_exit_cleanup: Option<CleanupHook>) -> Self {
+        runtime.set_file_dialog_adapter(Arc::new(RfdNativeFileDialogAdapter));
         Self {
             runtime,
             primary_window_id,
@@ -525,150 +545,23 @@ impl CurveBookNativeApp {
     }
 
     fn try_handle_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Option<Result<(), String>> {
-        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
-        let res = match command_id {
-            "project.open" | "file.open" => self.handle_native_open(window_id),
-            "file.open_unpacked_dir" => self.handle_native_open_folder(window_id),
-            "project.save" | "file.save" => self.handle_native_save(window_id, false),
-            "project.saveAs" | "file.save_as" => self.handle_native_save(window_id, true),
-            "project.saveTemplate" => self.handle_native_save_template(window_id),
-            "project.instantiateTemplate" => self.handle_native_instantiate_template(window_id),
-            "table.importCsv" => self.handle_native_import_file(
-                window_id,
-                "table.importCsv",
-                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_delimited"),
-                &["csv", "tsv", "txt"],
-            ),
-            "table.importPrism" => self.handle_native_import_file(
-                window_id,
-                "table.importPrism",
-                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_archive"),
-                &["prism"],
-            ),
-            "table.importPzfx" => self.handle_native_import_file(
-                window_id,
-                "table.importPzfx",
-                curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_xml_project"),
-                &["pzfx"],
-            ),
-            _ => {
-                let spec = native_export_spec_for_command(command_id)?;
-                self.handle_native_export(window_id, spec)
-            }
+        if !menu_action_triggers_native_file_dialog(command_id) {
+            return None;
+        }
+        let outcome = match self.runtime.dispatch_native_file_command(window_id, command_id) {
+            Ok(Some(outcome)) => outcome,
+            Ok(None) => return None,
+            Err(err) => return Some(Err(err)),
         };
-        Some(res)
-    }
-
-    fn handle_native_open(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter("CurveBook / Data", NATIVE_OPEN_FILE_EXTENSIONS).pick_file() else {
-            return Ok(());
-        };
-        let outcome = self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path })?;
         if outcome.opened_window_id.is_some() {
             self.on_active_window_switched();
         }
-        Ok(())
-    }
-
-    fn handle_native_open_folder(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().pick_folder() else {
-            return Ok(());
-        };
-        let outcome = self.runtime.dispatch(DesktopHostEvent::FileDropped { window_id, path })?;
-        if outcome.opened_window_id.is_some() {
-            self.on_active_window_switched();
-        }
-        Ok(())
+        Some(Ok(()))
     }
 
     fn handle_native_save(&mut self, window_id: DesktopWindowId, force_dialog: bool) -> Result<(), String> {
-        let existing_path = self.runtime.window(window_id).ok().and_then(|win| win.app().session().file_path().map(Path::to_path_buf));
-        let target_path = if !force_dialog {
-            match existing_path {
-                Some(path) => path,
-                None => match pick_save_curvebook_path() {
-                    Some(path) => path,
-                    None => return Ok(()),
-                },
-            }
-        } else {
-            match pick_save_curvebook_path() {
-                Some(path) => path,
-                None => return Ok(()),
-            }
-        };
-        let is_unpacked = curvebook_format::is_unpacked_project_dir(&target_path)
-            || target_path.file_name().and_then(|n| n.to_str()).is_some_and(|n| n.to_ascii_lowercase().ends_with(".curvebook.d"));
-        let win = self.runtime.window_mut(window_id)?;
-        let path_str = target_path.to_string_lossy().into_owned();
-        win.execute_and_journal("project.save", json!({ "path": path_str, "unpacked": is_unpacked }))?;
-        win.app_mut().session_mut().set_file_path(Some(target_path), true);
-        Ok(())
-    }
-
-    fn handle_native_save_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_template"), NATIVE_TEMPLATE_FILE_EXTENSIONS)
-            .set_file_name(DEFAULT_TEMPLATE_FILE_NAME)
-            .save_file()
-        else {
-            return Ok(());
-        };
-        let win = self.runtime.window_mut(window_id)?;
-        let path_str = path.to_string_lossy().into_owned();
-        win.execute_and_journal("project.saveTemplate", json!({ "path": path_str }))?;
-        Ok(())
-    }
-
-    fn handle_native_instantiate_template(&mut self, window_id: DesktopWindowId) -> Result<(), String> {
-        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
-        let Some(path) = rfd::FileDialog::new()
-            .add_filter(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.filter_template"), NATIVE_TEMPLATE_FILE_EXTENSIONS)
-            .pick_file()
-        else {
-            return Ok(());
-        };
-        let win = self.runtime.window_mut(window_id)?;
-        execute_native_import_at_path(win, "project.instantiateTemplate", &path)
-    }
-
-    fn handle_native_import_file(
-        &mut self,
-        window_id: DesktopWindowId,
-        command: &str,
-        filter_label: &str,
-        extensions: &[&str],
-    ) -> Result<(), String> {
-        let Some(path) = rfd::FileDialog::new().add_filter(filter_label, extensions).pick_file() else {
-            return Ok(());
-        };
-        let win = self.runtime.window_mut(window_id)?;
-        execute_native_import_at_path(win, command, &path)
-    }
-
-    fn handle_native_export(&mut self, window_id: DesktopWindowId, spec: NativeExportSpec) -> Result<(), String> {
-        let target_sheet_id = {
-            let win = self.runtime.window(window_id)?;
-            resolve_native_export_sheet_id(win.app().document(), spec.target_kind)
-                .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
-        };
-        let Some(path) = rfd::FileDialog::new().add_filter(spec.filter_label, spec.extensions).set_file_name(spec.default_name).save_file() else {
-            return Ok(());
-        };
-        let win = self.runtime.window_mut(window_id)?;
-        let path_str = path.to_string_lossy().into_owned();
-        let params = if spec.command == "result.generateReport" {
-            let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
-                Some("tex") => "latex",
-                Some("txt") => "plain",
-                _ => "markdown",
-            };
-            json!({ "result_sheet_id": target_sheet_id.as_str(), "format": report_fmt, "path": path_str })
-        } else {
-            json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
-        };
-        win.execute_and_journal(spec.command, params)?;
+        let cmd = if force_dialog { "file.save_as" } else { "project.save" };
+        let _ = self.runtime.dispatch_native_file_command(window_id, cmd)?;
         Ok(())
     }
 
@@ -930,7 +823,7 @@ impl CurveBookNativeApp {
         } else if self.pointer_captured {
             self.pointer_captured = false;
             let (x_pt, y_pt) = to_canvas_pt(args.pos, args.canvas_rect.min);
-            if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::PointerButton {
+            match self.runtime.dispatch(DesktopHostEvent::PointerButton {
                 window_id: args.window_id,
                 x_pt,
                 y_pt,
@@ -938,10 +831,10 @@ impl CurveBookNativeApp {
                 pressed: false,
                 click_count: self.click_count,
                 modifiers: to_key_modifiers(args.modifiers),
-            }) && outcome.action == "welcome.open_file_requested"
-                && let Err(err) = self.handle_native_open(args.window_id)
-            {
-                self.status_banner = Some(err);
+            }) {
+                Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
+                Err(err) => self.status_banner = Some(err),
+                Ok(_) => {}
             }
         }
     }
@@ -1008,16 +901,16 @@ impl CurveBookNativeApp {
             return None;
         }
 
-        if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
+        match self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
             window_id,
             key: key_name,
             pressed,
             modifiers: to_key_modifiers(modifiers),
             text: None,
-        }) && outcome.action == "welcome.open_file_requested"
-            && let Err(err) = self.handle_native_open(window_id)
-        {
-            self.status_banner = Some(err);
+        }) {
+            Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
+            Err(err) => self.status_banner = Some(err),
+            Ok(_) => {}
         }
 
         if pressed && is_single_char_key && !has_cmd_or_ctrl {
@@ -1245,7 +1138,7 @@ impl CurveBookNativeApp {
                         click_count: 1,
                         modifiers: mods,
                     });
-                    if let Ok(outcome) = self.runtime.dispatch(DesktopHostEvent::PointerButton {
+                    match self.runtime.dispatch(DesktopHostEvent::PointerButton {
                         window_id,
                         x_pt,
                         y_pt,
@@ -1253,10 +1146,10 @@ impl CurveBookNativeApp {
                         pressed: false,
                         click_count: 1,
                         modifiers: mods,
-                    }) && outcome.action == "welcome.open_file_requested"
-                        && let Err(err) = self.handle_native_open(window_id)
-                    {
-                        self.status_banner = Some(err);
+                    }) {
+                        Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
+                        Err(err) => self.status_banner = Some(err),
+                        Ok(_) => {}
                     }
                     ctx.request_repaint();
                 }
@@ -1398,188 +1291,6 @@ impl eframe::App for CurveBookNativeApp {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum NativeExportTargetKind {
-    Renderable,
-    Graph,
-    Layout,
-    TableOrResult,
-    Result,
-}
-
-#[derive(Debug, Clone, Copy)]
-struct NativeExportSpec {
-    command: &'static str,
-    filter_label: &'static str,
-    extensions: &'static [&'static str],
-    default_name: &'static str,
-    target_kind: NativeExportTargetKind,
-}
-
-fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> {
-    let spec = match command_id {
-        "export.svg" | "file.export_svg" => NativeExportSpec {
-            command: "export.svg",
-            filter_label: "SVG Vector",
-            extensions: &["svg"],
-            default_name: "figure.svg",
-            target_kind: NativeExportTargetKind::Renderable,
-        },
-        "export.pdf" | "file.export_pdf" => NativeExportSpec {
-            command: "export.pdf",
-            filter_label: "PDF Document",
-            extensions: &["pdf"],
-            default_name: "figure.pdf",
-            target_kind: NativeExportTargetKind::Renderable,
-        },
-        "export.png" | "file.export_png" => NativeExportSpec {
-            command: "export.png",
-            filter_label: "PNG Image",
-            extensions: &["png"],
-            default_name: "figure.png",
-            target_kind: NativeExportTargetKind::Renderable,
-        },
-        "export.tiff" => NativeExportSpec {
-            command: "export.tiff",
-            filter_label: "TIFF Image",
-            extensions: &["tiff", "tif"],
-            default_name: "figure.tiff",
-            target_kind: NativeExportTargetKind::Renderable,
-        },
-        "graph.exportSvg" => NativeExportSpec {
-            command: "graph.exportSvg",
-            filter_label: "SVG Vector",
-            extensions: &["svg"],
-            default_name: "figure.svg",
-            target_kind: NativeExportTargetKind::Graph,
-        },
-        "graph.exportPdf" => NativeExportSpec {
-            command: "graph.exportPdf",
-            filter_label: "PDF Document",
-            extensions: &["pdf"],
-            default_name: "figure.pdf",
-            target_kind: NativeExportTargetKind::Graph,
-        },
-        "graph.exportPng" => NativeExportSpec {
-            command: "graph.exportPng",
-            filter_label: "PNG Image",
-            extensions: &["png"],
-            default_name: "figure.png",
-            target_kind: NativeExportTargetKind::Graph,
-        },
-        "graph.exportEmf" => NativeExportSpec {
-            command: "graph.exportEmf",
-            filter_label: "EMF Vector",
-            extensions: &["emf"],
-            default_name: "figure.emf",
-            target_kind: NativeExportTargetKind::Graph,
-        },
-        "layout.exportEmf" => NativeExportSpec {
-            command: "layout.exportEmf",
-            filter_label: "EMF Vector",
-            extensions: &["emf"],
-            default_name: "layout.emf",
-            target_kind: NativeExportTargetKind::Layout,
-        },
-        "table.exportCsv" => NativeExportSpec {
-            command: "table.exportCsv",
-            filter_label: "CSV Table",
-            extensions: &["csv", "tsv"],
-            default_name: "table.csv",
-            target_kind: NativeExportTargetKind::TableOrResult,
-        },
-        "analysis.exportJson" => NativeExportSpec {
-            command: "analysis.exportJson",
-            filter_label: "JSON Results",
-            extensions: &["json"],
-            default_name: "analysis.json",
-            target_kind: NativeExportTargetKind::Result,
-        },
-        "analysis.exportCsv" => NativeExportSpec {
-            command: "analysis.exportCsv",
-            filter_label: "CSV Results",
-            extensions: &["csv"],
-            default_name: "analysis.csv",
-            target_kind: NativeExportTargetKind::Result,
-        },
-        "result.generateReport" => NativeExportSpec {
-            command: "result.generateReport",
-            filter_label: "Methods Report",
-            extensions: &["md", "txt", "tex"],
-            default_name: "methods-report.md",
-            target_kind: NativeExportTargetKind::Result,
-        },
-        _ => return None,
-    };
-    Some(spec)
-}
-
-/// Returns `true` when clicking `command_id` in the native desktop window opens an OS `rfd::FileDialog`.
-#[must_use]
-pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "project.open"
-            | "file.open"
-            | "file.open_unpacked_dir"
-            | "project.save"
-            | "file.save"
-            | "project.saveAs"
-            | "file.save_as"
-            | "project.saveTemplate"
-            | "project.instantiateTemplate"
-            | "table.importCsv"
-            | "table.importPrism"
-            | "table.importPzfx"
-    ) || native_export_spec_for_command(command_id).is_some()
-}
-
-/// Returns `true` when an import command replaces the full active document and must detach any
-/// previously associated `.curvebook` archive path so subsequent `Cmd+S` prompts cleanly.
-#[must_use]
-pub fn native_import_replaces_project_file_path(command_id: &str) -> bool {
-    matches!(command_id, "project.instantiateTemplate" | "table.importPrism" | "table.importPzfx")
-}
-
-/// Execute a file-backed import or template instantiation command at `path`, clearing the active
-/// session's archive association when the command replaces the full document.
-///
-/// # Errors
-/// Returns an error string if executing the underlying engine command fails.
-pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &str, path: &Path) -> Result<(), String> {
-    let path_str = path.to_string_lossy().into_owned();
-    win.execute_and_journal(command, json!({ "path": path_str }))?;
-    if native_import_replaces_project_file_path(command) {
-        win.app_mut().session_mut().set_file_path(None, false);
-    }
-    Ok(())
-}
-
-fn resolve_native_export_sheet_id(doc: &ProjectDocument, kind: NativeExportTargetKind) -> Option<SheetId> {
-    let active = doc.active_sheet_id.as_ref();
-    match kind {
-        NativeExportTargetKind::Renderable => active
-            .filter(|id| matches!(doc.sheet_section(id), Some(SheetSection::Graphs | SheetSection::Layouts)))
-            .cloned()
-            .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
-            .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone())),
-        NativeExportTargetKind::Graph => {
-            active.filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
-        }
-        NativeExportTargetKind::Layout => {
-            active.filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
-        }
-        NativeExportTargetKind::TableOrResult => active
-            .filter(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some())
-            .cloned()
-            .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()))
-            .or_else(|| doc.result_sheets.first().map(|r| r.id.clone())),
-        NativeExportTargetKind::Result => {
-            active.filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
-        }
-    }
-}
-
 fn menu_item_tooltip(item: &DesktopMenuItem) -> String {
     if item.beginner.is_empty() { item.summary.clone() } else { format!("{}\n{}", item.summary, item.beginner) }
 }
@@ -1675,10 +1386,6 @@ fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[DesktopMenuIte
             ui.close();
         }
     }
-}
-
-fn pick_save_curvebook_path() -> Option<PathBuf> {
-    rfd::FileDialog::new().add_filter("CurveBook Project", &["curvebook"]).set_file_name("untitled.curvebook").save_file()
 }
 
 fn to_canvas_pt(pos: egui::Pos2, canvas_min: egui::Pos2) -> (f64, f64) {
@@ -1815,6 +1522,7 @@ pub fn run_native_desktop_with_control(
 
 #[cfg(test)]
 mod tests {
+    use curvebook_doc::SheetId;
     use curvebook_ui_egui::interaction::ViewportMetrics;
     use serde_json::json;
 

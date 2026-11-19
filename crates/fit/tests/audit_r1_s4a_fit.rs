@@ -5,8 +5,8 @@ use curvebook_doc::{
     NonlinearFitSpec, ResultCell, SubcolumnMode, TableArchetype, WeightingScheme, XyTable,
 };
 use curvebook_fit::{
-    CompiledDslModel, DataPoint, DatasetSeries, DslEquationKind, FitError, HookContext, ParameterNote, ParametricModel, SolverConfig, compare_models,
-    execute_analysis, extract_datasets_from_sheet, fit_nonlinear, get_builtin_model,
+    CompiledDslModel, DataPoint, DatasetSeries, DslEquationKind, FitError, HookContext, ParameterNote, ParametricModel, SolverConfig,
+    UnknownResponse, compare_models, execute_analysis, extract_datasets_from_sheet, fit_nonlinear, get_builtin_model,
 };
 
 fn make_dataset(ds_idx: usize, label: &str, xs: &[f64], ys: &[f64]) -> DatasetSeries {
@@ -341,6 +341,6 @@ fn r1_x2_03_excluded_x_rows_never_queue_or_emit_interpolated_unknowns() {
     rep_sheet.set_cell(CellCoord::new(5, 0, 1), excluded_number_cell(12.0)).unwrap();
 
     let rep_extracted = extract_datasets_from_sheet(&rep_sheet, &[0]).unwrap();
-    assert_eq!(rep_extracted[0].unknowns_y, vec![(3, 5.0)]);
+    assert_eq!(rep_extracted[0].unknowns_y, vec![UnknownResponse::Replicate { row: 3, subcol: 0, value: 5.0 }]);
     assert!(rep_extracted[0].unknowns_x.is_empty(), "all-excluded Y must not become X unknown: {:?}", rep_extracted[0].unknowns_x);
 }

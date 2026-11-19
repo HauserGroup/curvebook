@@ -423,7 +423,7 @@ fn edge_03_heavily_tied_cox_ph_breslow_vs_efron_and_schoenfeld_diagnostics() {
     assert_approx_eq(bres.likelihood_ratio_chi2, 28.090_833_152_663_52, 1e-5, 1e-6, "Breslow LR");
     assert_approx_eq(bres.wald_chi2, 18.789_276_166_983_612, 1e-6, 1e-6, "Breslow Wald");
     assert_approx_eq(bres.score_chi2, 25.107_715_670_935_3, 1e-4, 1e-5, "Breslow Score");
-    assert_approx_eq(bres.concordance, 0.921_428_571_428_571, 1e-12, 1e-12, "Breslow C-index");
+    assert_approx_eq(bres.concordance.unwrap(), 0.921_428_571_428_571, 1e-12, 1e-12, "Breslow C-index");
 
     assert_approx_eq(efrn.covariates[0].beta, -2.994_256_788_991_598_3, 1e-6, 1e-6, "Efron beta x1");
     assert_approx_eq(efrn.covariates[0].se, 1.070_276_579_939_171, 1e-6, 1e-6, "Efron SE x1");
@@ -436,7 +436,7 @@ fn edge_03_heavily_tied_cox_ph_breslow_vs_efron_and_schoenfeld_diagnostics() {
     assert_approx_eq(efrn.likelihood_ratio_chi2, 35.692_871_752_036_17, 1e-5, 1e-6, "Efron LR");
     assert_approx_eq(efrn.wald_chi2, 23.208_087_627_216_862, 1e-6, 1e-6, "Efron Wald");
     assert_approx_eq(efrn.score_chi2, 32.082_681_331_849_13, 1e-4, 1e-5, "Efron Score");
-    assert_approx_eq(efrn.concordance, 0.921_428_571_428_571, 1e-12, 1e-12, "Efron C-index");
+    assert_approx_eq(efrn.concordance.unwrap(), 0.921_428_571_428_571, 1e-12, 1e-12, "Efron C-index");
 
     assert_approx_eq(exct.covariates[0].beta, -4.075_442_513_476_269, 1e-6, 1e-6, "Exact beta x1");
     assert_approx_eq(exct.covariates[0].se, 1.494_809_819_210_741_5, 1e-6, 1e-6, "Exact SE x1");
@@ -449,7 +449,7 @@ fn edge_03_heavily_tied_cox_ph_breslow_vs_efron_and_schoenfeld_diagnostics() {
     assert_approx_eq(exct.likelihood_ratio_chi2, 38.630_921_712_390_42, 1e-5, 1e-6, "Exact LR");
     assert_approx_eq(exct.wald_chi2, 15.276_622_686_327_087, 1e-5, 1e-6, "Exact Wald");
     assert_approx_eq(exct.score_chi2, 29.790_003_749_162_48, 1e-4, 1e-5, "Exact Score");
-    assert_approx_eq(exct.concordance, 0.921_428_571_428_571, 1e-12, 1e-12, "Exact C-index");
+    assert_approx_eq(exct.concordance.unwrap(), 0.921_428_571_428_571, 1e-12, 1e-12, "Exact C-index");
 
     assert!((efrn.covariates[0].beta - bres.covariates[0].beta).abs() > 0.45);
     assert!((efrn.covariates[1].beta - bres.covariates[1].beta).abs() > 0.55);

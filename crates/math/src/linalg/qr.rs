@@ -478,6 +478,10 @@ impl PivotedQr {
     /// # Errors
     /// Returns [`MathError::SingularMatrix`] if `self.rank < self.ncols` or `nrows < ncols`.
     pub fn xtx_inverse(&self) -> Result<DenseMatrix, MathError> {
+        self.unpermute_covariance(&self.inverse_r()?)
+    }
+
+    fn inverse_r(&self) -> Result<DenseMatrix, MathError> {
         if self.nrows < self.ncols || self.rank < self.ncols {
             return Err(MathError::SingularMatrix { rank: self.rank, expected_rank: self.ncols });
         }
@@ -494,11 +498,15 @@ impl PivotedQr {
                 r_inv.set_in_bounds(i, j, acc.total() / diag);
             }
         }
+        Ok(r_inv)
+    }
+
+    fn unpermute_covariance(&self, r_inv: &DenseMatrix) -> Result<DenseMatrix, MathError> {
         // (R^T R)^{-1} = R^{-1} * R^{-T}, then unpermute rows and columns by `perm`.
         let rtr_inv_piv = r_inv.matmul(&r_inv.transpose())?;
-        let mut unpermuted = DenseMatrix::zeros(p, p)?;
-        for (i, &oi) in self.perm.iter().enumerate().take(p) {
-            for (j, &oj) in self.perm.iter().enumerate().take(p) {
+        let mut unpermuted = DenseMatrix::zeros(self.ncols, self.ncols)?;
+        for (i, &oi) in self.perm.iter().enumerate() {
+            for (j, &oj) in self.perm.iter().enumerate() {
                 unpermuted.set_in_bounds(oi, oj, rtr_inv_piv.entry(i, j));
             }
         }
@@ -532,7 +540,8 @@ pub fn parameter_dependencies(a: &DenseMatrix) -> Result<Vec<f64>, MathError> {
 /// 1. Equilibrates non-zero columns by Euclidean norm `D_j = ||X_{:, j}||_2` so multiscale / polynomial
 ///    Vandermonde design matrices (`Filip`, `Wampler1`-`Wampler5`) do not suffer artificial conditioning loss,
 /// 2. Factors `X D^{-1}` via column-pivoted Householder QR (`qr_col_pivoted`) with one compensated
-///    Bjorck residual-refinement pass when full rank,
+///    Bjorck residual-refinement solve when full rank. Refactors the preconditioned original
+///    design to recover covariance precision when the QR rank is clear.
 /// 3. Falls back cleanly to minimum-norm SVD pseudoinverse when rank-deficient, reporting exact
 ///    `rank` and `aliased_columns`.
 ///
@@ -579,10 +588,11 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
 
     let pqr = qr_col_pivoted(&x_scaled)?;
     if pqr.rank() == p && n >= p {
-        let cov_s = pqr.xtx_inverse()?;
+        let r_inv = pqr.inverse_r()?;
+        let cov_s = pqr.unpermute_covariance(&r_inv)?;
         if !is_borderline_singular_cov(&cov_s, pqr.default_tol, p) {
             let (beta_refined, rss_refined) = bjorck_refined_qr_solve(x, y, &scales, &pqr)?;
-            let cov_u = unscale_covariance(&cov_s, &scales)?;
+            let cov_u = refined_covariance(x, &scales, &pqr, &r_inv)?;
             return Ok((
                 LeastSquaresSolution { coefficients: beta_refined, rank: p, aliased_columns: Vec::new(), rss: rss_refined, df_residual: n - p },
                 cov_u,
@@ -608,6 +618,23 @@ pub fn solve_linear_least_squares(x: &DenseMatrix, y: &[f64]) -> Result<(LeastSq
     let svd_s = svd(&x_scaled)?;
     let svd_tol = svd_s.default_tol().max(pqr.default_tol);
     finish_svd_least_squares(x, y, &scales, &svd_s, svd_tol, pqr.permutation())
+}
+
+/// Factor the nearly orthonormal design `X H = Q_c R_c`, where `H = D^{-1} P R^{-1}`.
+/// The compensated product uses the original design to recover rounding lost in the first QR.
+/// Then `X (H R_c^{-1}) = Q_c`, yielding a covariance factor without forming `X^T X`.
+fn refined_covariance(x: &DenseMatrix, scales: &[f64], pqr: &PivotedQr, r_inv: &DenseMatrix) -> Result<DenseMatrix, MathError> {
+    let p = x.ncols();
+    let mut preconditioner = DenseMatrix::zeros(p, p)?;
+    for (i, &orig) in pqr.perm.iter().enumerate() {
+        let scale = scales.get(orig).copied().ok_or(MathError::DimensionMismatch { expected: p, actual: scales.len() })?;
+        for j in i..p {
+            preconditioner.set_in_bounds(orig, j, r_inv.entry(i, j) / scale);
+        }
+    }
+    let corrected_qr = qr(&x.matmul(&preconditioner)?)?;
+    let covariance_factor = preconditioner.matmul(&corrected_qr.inverse_r()?)?;
+    covariance_factor.matmul(&covariance_factor.transpose())
 }
 
 fn is_borderline_singular_cov(cov_scaled: &DenseMatrix, qr_tol: f64, p: usize) -> bool {

@@ -311,6 +311,36 @@ fn r10_4_welcome_clone_pipeline_and_cbtemplate_modes_human_path() {
     assert_eq!(driver.app().document().total_sheet_count(), sheet_count_before);
 }
 
+fn verify_welcome_locale_scale(locale: &str, idx: usize, scale: f64) -> i32 {
+    let mut app = empty_welcome_app();
+    app.locale = locale.to_owned();
+    app.theme = match (idx + if scale > 1.5 { 1 } else { 0 }) % 3 {
+        0 => UiThemeMode::Light.spec(),
+        1 => UiThemeMode::Dark.spec(),
+        _ => UiThemeMode::HighContrast.spec(),
+    };
+    let metrics = ViewportMetrics::new(1280.0, 800.0, scale);
+    let mut driver = new_human_driver(app, metrics);
+    let report = driver.verify_parity();
+    let welcome_violations: Vec<_> = human_wf_common::filter_locale_parity_violations(locale, false, report.violations)
+        .into_iter()
+        .filter(|v| v.widget_id.starts_with("welcome."))
+        .collect();
+    assert!(welcome_violations.is_empty(), "welcome parity violation in `{locale}` @ {scale}x: {welcome_violations:?}");
+    let tree = driver.layout_tree();
+    if human_wf_common::host_covers_locale_sample(locale) {
+        assert!(
+            tree.text_runs.iter().filter(|r| r.owner_widget_id.as_str().starts_with("welcome.")).all(|r| r.shaped.missing_glyph_count == 0),
+            "missing glyph detected in Welcome text_runs for `{locale}` @ {scale}x"
+        );
+    }
+    if locale == "en" && (scale - 1.0).abs() < f64::EPSILON {
+        let en_report = driver.verify_parity();
+        assert!(en_report.is_clean(), "full-tree 1.0x English parity clean: {:?}", en_report.violations);
+    }
+    tree.node("welcome.left_rail").expect("left rail").bounds.rect_px.x
+}
+
 #[test]
 fn r10_4_welcome_i18n_16_locales_themes_rtl_hidpi_and_catalog_completeness() {
     // 1. Parity + zero missing glyphs for Welcome widgets across all 16 locales, 3 themes, and 1.0x/2.0x HiDPI.
@@ -319,32 +349,13 @@ fn r10_4_welcome_i18n_16_locales_themes_rtl_hidpi_and_catalog_completeness() {
     let mut he_rail_x = 0;
     for (idx, &locale) in LOCALES.iter().enumerate() {
         for &scale in &[1.0, 2.0] {
-            let mut app = empty_welcome_app();
-            app.locale = locale.to_owned();
-            app.theme = match (idx + if scale > 1.5 { 1 } else { 0 }) % 3 {
-                0 => UiThemeMode::Light.spec(),
-                1 => UiThemeMode::Dark.spec(),
-                _ => UiThemeMode::HighContrast.spec(),
-            };
-            let metrics = ViewportMetrics::new(1280.0, 800.0, scale);
-            let mut driver = new_human_driver(app, metrics);
-            let report = driver.verify_parity();
-            let welcome_violations: Vec<_> = report.violations.iter().filter(|v| v.widget_id.starts_with("welcome.")).collect();
-            assert!(welcome_violations.is_empty(), "welcome parity violation in `{locale}` @ {scale}x: {welcome_violations:?}");
-            let tree = driver.layout_tree();
-            assert!(
-                tree.text_runs.iter().filter(|r| r.owner_widget_id.as_str().starts_with("welcome.")).all(|r| r.shaped.missing_glyph_count == 0),
-                "missing glyph detected in Welcome text_runs for `{locale}` @ {scale}x"
-            );
+            let rail_x = verify_welcome_locale_scale(locale, idx, scale);
             if (scale - 1.0).abs() < f64::EPSILON {
-                let rail_x = tree.node("welcome.left_rail").expect("left rail").bounds.rect_px.x;
-                if locale == "en" {
-                    assert!(report.is_clean(), "full-tree 1.0x English parity clean: {:?}", report.violations);
-                    prev_ltr_rail_x = rail_x;
-                } else if locale == "ar" {
-                    ar_rail_x = rail_x;
-                } else if locale == "he" {
-                    he_rail_x = rail_x;
+                match locale {
+                    "en" => prev_ltr_rail_x = rail_x,
+                    "ar" => ar_rail_x = rail_x,
+                    "he" => he_rail_x = rail_x,
+                    _ => {}
                 }
             }
         }

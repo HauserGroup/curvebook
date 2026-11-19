@@ -375,10 +375,7 @@ fn fallback_char_advance_em(ch: char) -> f64 {
 }
 
 fn has_cleanroom_outline(ch: char) -> bool {
-    if ch.is_whitespace() {
-        return true;
-    }
-    !outline_rich_text(&RichText::plain(ch.to_string()), 0.0, 0.0, 12.0).iter().all(|g| g.commands.is_empty())
+    ch.is_whitespace() || curvebook_text::has_cleanroom_vector_outline(ch)
 }
 
 impl TextMeasurer for DesktopTextMeasurer {
@@ -946,8 +943,7 @@ struct PolyEdge {
 fn rasterize_glyph_mask(measurer: &DesktopTextMeasurer, key: GlyphCacheKey, ch: char, size_px: f64) -> GlyphCoverageMask {
     let mut cmds: Option<Vec<GlyphOutlineCmd>> = None;
     if let Some(face_idx) = key.face_index
-        && let Some((_, bytes)) = measurer.font_book().raw_faces().get(face_idx)
-        && let Some(ttf) = curvebook_text::TrueTypeFont::parse(bytes)
+        && let Some(ttf) = measurer.font_book().parsed_face(face_idx)
     {
         cmds = outline_ttf_glyph(&ttf, ch, 0.0, 0.0, size_px, false);
     }

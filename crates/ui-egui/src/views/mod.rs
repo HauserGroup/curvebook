@@ -342,7 +342,7 @@ fn build_sheet_pane(builder: &mut LayoutBuilder<'_>, sheet_id: &SheetId, rect: L
 
 fn draw_active_pane_focus(builder: &mut LayoutBuilder<'_>, layout: &WorkspaceFrameLayout) {
     let nav = layout.navigator;
-    let nav_split = (nav.height * 2) / 3;
+    let nav_split = if builder.app.family_open { (nav.height * 2) / 3 } else { nav.height };
     let target = match builder.app.nav.active_pane {
         ActiveWorkspacePane::Navigator => WorkspacePixelRect::new(nav.x, nav.y, nav.width, nav_split.max(8)),
         ActiveWorkspacePane::FamilyStrip => WorkspacePixelRect::new(nav.x, nav.y + nav_split, nav.width, nav.height.saturating_sub(nav_split).max(8)),

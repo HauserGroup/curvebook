@@ -851,6 +851,7 @@ fn arb_hostile_dataset() -> BoxedStrategy<DatasetSeries> {
                         sd: Some(if row % 2 == 0 { 0.5 } else { f64::NAN }),
                         n: Some(if row % 3 == 0 { f64::INFINITY } else { 3.0 }),
                         explicit_weight: if row % 4 == 0 { Some(-1.0) } else { None },
+                        source_subcolumn: 0,
                         data_set_index: 0,
                         row,
                     })

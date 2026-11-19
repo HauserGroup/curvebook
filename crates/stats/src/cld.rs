@@ -30,7 +30,9 @@ pub struct CldGroupInput {
 /// Pairwise significance input between two distinct groups.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CldPairwiseInput {
+    /// Zero-based index of the first compared group (`group_a != group_b`).
     pub group_a: usize,
+    /// Zero-based index of the second compared group.
     pub group_b: usize,
     /// Multiplicity-adjusted p-value or FDR q-value, when available.
     pub p_value: Option<f64>,
@@ -41,7 +43,9 @@ pub struct CldPairwiseInput {
 /// Options governing Piepho (2004) ordering, case, and significance thresholding.
 #[derive(Debug, Clone, Copy, PartialEq, Default)]
 pub struct CldOptions {
+    /// Display sort order applied to groups before assigning compact letters (e.g. descending or ascending mean).
     pub ordering: CldOrdering,
+    /// Emit uppercase letters (`"A"`, `"AB"`, ...) when `true`, or lowercase (`"a"`, `"ab"`, ...) when `false`.
     pub uppercase: bool,
     /// Optional explicit threshold (`p <= alpha`) overriding [`CldPairwiseInput::significant`].
     pub alpha_override: Option<f64>,
@@ -50,8 +54,11 @@ pub struct CldOptions {
 /// Per-group CLD assignment emitted in sorted monotonic display order.
 #[derive(Debug, Clone, PartialEq)]
 pub struct CldGroupAssignment {
+    /// Zero-based group identifier copied from [`CldGroupInput::index`].
     pub group_index: usize,
+    /// Group display label copied from [`CldGroupInput::label`].
     pub label: String,
+    /// Summary location measure (mean, median, or mean rank) used for display sorting.
     pub mean: f64,
     /// Zero-based rank after applying [`CldOptions::ordering`].
     pub rank: usize,

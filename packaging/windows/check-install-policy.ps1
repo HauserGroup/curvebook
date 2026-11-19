@@ -140,9 +140,10 @@ try {
   if (@(Read-Rows $database 'SELECT `Action` FROM `InstallExecuteSequence`' 1 | Where-Object { $_[0] -like 'CurveBookDefault*' }).Count) {
     throw 'Silent installs must not use the wizard-only default folder actions.'
   }
-  $machineRoot = if ((Get-PackageTemplate $database) -match '^Intel') {
-    if (Get-SessionProperty $session 'VersionNT64') { ${env:ProgramFiles(x86)} } else { $env:ProgramFiles }
-  } elseif ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
+  if ((Get-PackageTemplate $database) -match '^Intel(;|$)') {
+    throw '32-bit x86 MSI packages are no longer supported (R0.28).'
+  }
+  $machineRoot = if ($env:ProgramW6432) { $env:ProgramW6432 } else { $env:ProgramFiles }
   $machineFolder = (Join-Path $machineRoot $policy.name) + '\'
   foreach ($scope in @('1', '')) {
     Set-SessionProperty $session 'ALLUSERS' $scope

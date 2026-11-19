@@ -63,9 +63,13 @@ pub trait ParametricModel: Send + Sync {
 /// Metadata summary for cataloging available built-in equations.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EquationCatalogEntry {
+    /// Canonical snake_case identifier accepted by `get_builtin_model` (case-insensitive, `-` / `_` normalized).
     pub id: String,
+    /// Human-readable display name shown in equation pickers and report headers.
     pub name: String,
+    /// Functional equation family category (`EquationCategory`).
     pub category: EquationCategory,
+    /// Ordered parameter names matching the model's parameter vector layout.
     pub param_names: Vec<String>,
 }
 

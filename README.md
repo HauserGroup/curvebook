@@ -1,16 +1,7 @@
 # CurveBook
 
-> **New to CurveBook? [Start with the beginner's guide to using CurveBook with your AI assistant](docs/mcp-for-beginners.md).**
->
-> Follow the step-by-step setup, try your first analysis, and learn how to save your work.
->
-> **Download the Alpha:** get installers for macOS, Windows, Linux, and FreeBSD from the [latest release](https://github.com/HauserGroup/curvebook/releases), or visit the [CurveBook website](https://hausergroup.github.io/curvebook/).
->
-> **Technical babble ahead (temporarily):** below this section, the README gets technical. We are working on making it friendlier; the guide above is the plain-language starting point.
-
 [![CI](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml/badge.svg)](https://github.com/HauserGroup/curvebook/actions/workflows/ci.yml)
-[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license--privacy)
-[![Rust 1.99.1+](https://img.shields.io/badge/rust-1.99.1%2B-orange.svg)](#quick-start)
+[![License: MIT OR Apache-2.0](https://img.shields.io/badge/license-MIT%20OR%20Apache--2.0-blue.svg)](#license-and-privacy)
 
 <p align="center">
   <img src="assets/app-icon/curvebook-win95-2508.png" alt="CurveBook logo: seven coloured curved panes meeting at a central point" width="160">
@@ -18,116 +9,73 @@
 
 **CurveBook** is an open-source, clean-room biostatistics, nonlinear regression, and scientific graphing application written in pure Rust.
 
-> **Status (Alpha):** The headless statistical, curve-fitting, and graphing engine, the command-line runner (`curvebook-cli`), and the stdio MCP server (`curvebook-cli mcp`) are implemented and released as an Alpha prerelease; known issues are listed in [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md). The rendered desktop and WebAssembly GUI is still in development until the [`R10`](docs/ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) manual walkthrough is accepted, and installers are not yet signed; see [`docs/STATUS.md`](docs/STATUS.md) and [`docs/ROADMAP.md`](docs/ROADMAP.md).
+All calculations run locally on your computer with **zero telemetry**. You can work interactively in the **desktop application**, automate pipelines with the **command-line runner** (`curvebook-cli`), or analyze data through an **AI assistant** using the built-in Model Context Protocol server (`curvebook-cli mcp`).
 
-## Quick Start
+- **Website:** [hausergroup.github.io/curvebook](https://hausergroup.github.io/curvebook/)
+- **Install & Download Guide:** [Get Started (Which File Do I Need, Install & Verify)](https://hausergroup.github.io/curvebook/get-started.html)
+- **Documentation:** [Online Manual](https://hausergroup.github.io/curvebook/manual/) · [Repository Docs](docs/README.md)
+- **Downloads:** [Latest Release (GitHub Releases)](https://github.com/HauserGroup/curvebook/releases)
+- **Known Issues (Beta):** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)
 
-**Prerequisites:** **Rust `1.99.1+`** (`edition = "2024"`, pinned in [`rust-toolchain.toml`](rust-toolchain.toml)). Verify both compiler and Cargo inside the repository with `rustc --version` and `cargo --version` (on macOS, if Homebrew Rust takes precedence over `rustup`, see [`docs/development.md#prerequisites`](docs/development.md#prerequisites)).
+## What You Can Do
 
-```sh
-# Build the CLI (which also provides the MCP server) and inspect available commands
-cargo build --release -p curvebook-cli
-./target/release/curvebook-cli --help
-./target/release/curvebook-cli commands --group analysis
-```
+- **Structured Data Tables & Formulas:** Enter, paste, or link data across structured table types (`XY`, `Column`, `Grouped`, `Contingency`, `Survival`, `Parts of Whole`, `Multiple Variables`, and `Nested`), compute live `=` Calculated Variables, and exclude outliers with recorded audit notes.
+- **Biostatistics & Curve Fitting:** Run parametric and nonparametric group comparisons, one-way/multi-way ANOVA, REML mixed models, multiplicity adjustments, survival and contingency analyses, ROC, GLMs, PCA/clustering, power & sample size planning, and built-in or custom nonlinear regression with profile-likelihood confidence intervals.
+- **Publication Graphs & Page Layouts:** Build customizable scientific graphs and multi-panel Page Layouts, copy editable vector figures directly to the system clipboard, and export to `SVG`, `PDF`, `PNG`, `TIFF`, `EMF`, `CSV`, or `TSV`.
+- **Self-Contained Projects:** Save data tables, notes, analyses, graphs, and layouts together in one `.curvebook` file (or Git-friendly `.curvebook.d/` directory), reuse pipelines with `.cbtemplate` templates, and import `.csv`, `.tsv`, `.pzfx`, and `.prism` files.
 
-For workspace tests, policy gates (`cargo xtask ci`), WebAssembly builds, and subsystem guides, see [`docs/development.md`](docs/development.md).
+<p align="center">
+  <img src="docs/images/workspace-split-fit.png" alt="CurveBook light theme split workspace showing Project Navigator, Family tree, dose-response XY table, 4PL curve fit with confidence band, and Format Graph inspector" width="840"><br>
+  <em>Split workspace (Light theme): Project Navigator, Family lineage tree, XY data grid, live 4PL nonlinear fit, and Format Inspector.</em>
+</p>
 
-## Model Context Protocol (MCP)
+<p align="center">
+  <img src="docs/images/workspace-layout-dark.png" alt="CurveBook dark theme multi-panel Page Layout showing linked dose-response and bar graphs with significance brackets, embedded table, physical rulers, and layout inspector" width="840"><br>
+  <em>Page Layout view (Dark theme): multi-panel figure with significance brackets, embedded summary table, physical millimeter rulers, and Page Layout controls.</em>
+</p>
 
-The **Model Context Protocol (MCP)** lets an AI assistant or script talk to CurveBook's statistical and graphing engine over standard input/output (stdio) using structured JSON messages.
+## Download & Install
 
-Key terms in this guide:
-- **stdio:** Your MCP client launches `curvebook-cli mcp` as a local subprocess and exchanges JSON messages through its standard input and output streams—no background daemon or open network port is started.
-- **Headless mode:** Runs calculations, file imports, and figure exports directly in memory with no GUI window (the default for `curvebook-cli mcp`).
-- **`--workdir`:** Sandboxes all file reads, saves, and exports inside one chosen folder on disk so paths outside it or using `..` are rejected.
+Download CurveBook installers from **[GitHub Releases](https://github.com/HauserGroup/curvebook/releases)** (Beta releases appear as prereleases; every desktop installer bundles both `curvebook` and `curvebook-cli`).
 
-### 1. Build or Run the Server
+- **Which File Do I Need, Install Steps & Checksums:** Follow **[Get Started on the CurveBook website](https://hausergroup.github.io/curvebook/get-started.html)** for platform installer selection, OS setup instructions (including macOS `PATH` setup for `curvebook-cli` and Windows SmartScreen guidance), and SHA-256 / Sigstore download verification (`SHA256SUMS.txt` and `gh attestation verify`).
+- **Known Issues & Platform Caveats:** Check **[Known Issues (Beta)](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues)** before installing.
 
-Build the standalone release binary (recommended for MCP clients):
+## Your First Analysis
 
-```sh
-cargo build --release -p curvebook-cli
-```
+You can run your first analysis directly in the desktop window or through an AI assistant connected over MCP.
 
-This creates `./target/release/curvebook-cli` (`.\target\release\curvebook-cli.exe` on Windows). To run directly from a repository checkout without a separate build step, use `cargo run -q -p curvebook-cli -- mcp`.
+### 1. In the Desktop Application (`curvebook`)
 
-### 2. Configure Your MCP Client
+1. Launch **CurveBook**. The **Welcome & New Data Table** screen opens automatically (`File › New Project` or **New** on the toolbar reopens it anytime).
+2. Choose a data table type on the left (such as **Column** or **XY**), or switch to the **Tutorial Sample Data** tab to start with a ready-made dataset.
+3. Click **Create Table** (or **Open Sample Dataset**), then click or double-click cells in the grid to enter or paste (`Cmd/Ctrl+V`) measurements.
+4. Click **Analyze** on the toolbar (or **Analyze › Analyze…**, `Cmd/Ctrl+Shift+A`), select a test or curve fit (for example **t tests (Unpaired / Welch / Paired / Nonparametric)** or **Nonlinear Regression (Curve Fitting)**), and confirm with **OK**.
+5. Inspect the live Results sheet and linked Graph, customize appearance in the right-hand **Format Inspector**, copy vector figures with `Cmd/Ctrl+C`, and save or export via **File › Save** (`.curvebook`) or **File › Export…** (`SVG`, `PDF`, `PNG`, `TIFF`).
 
-Create an existing folder for your data and exports (for example `mkdir -p /path/to/your/data-folder`), then point your MCP client to the **full absolute path** of `curvebook-cli` so it does not rely on shell `PATH` or working-directory lookup (or install onto `PATH` with `cargo install --path apps/curvebook-cli` and check `which curvebook-cli`):
+### 2. Through an AI Assistant (MCP)
 
-```json
-{
-  "mcpServers": {
-    "curvebook": {
-      "command": "/absolute/path/to/curvebook/target/release/curvebook-cli",
-      "args": ["mcp", "--workdir", "/path/to/your/data-folder"]
-    }
-  }
-}
-```
+Follow the step-by-step **[Beginner's Guide to using CurveBook with your AI assistant](docs/mcp-for-beginners.md)** to connect `curvebook-cli mcp --workdir <your-data-folder>` to Claude Desktop or another local MCP client, run a Welch's *t*-test by asking in plain language, and save your work as a `.curvebook` project.
 
-- `curvebook-cli mcp` starts in **default headless mode**.
-- `--workdir` must name an existing directory; CurveBook resolves relative paths beneath it and blocks escapes (`path_escape`). Omit `--workdir` only when testing pure in-memory calculations from a terminal without disk I/O.
+For MCP framing details, attaching to a shared desktop window (`curvebook --control <port> --window`), `--gui-only` mode, and troubleshooting, see [`docs/mcp.md`](docs/mcp.md).
 
-### 3. Verify the Connection
+## Documentation, Known Issues & Getting Help
 
-Send `initialize`, `notifications/initialized`, `ping`, and `tools/list` as newline-delimited JSON-RPC requests over stdin (one JSON object per line; CurveBook also auto-detects standard `Content-Length` MCP framing):
+- **Online Manual & Reference:** [hausergroup.github.io/curvebook/manual/](https://hausergroup.github.io/curvebook/manual/)
+- **Repository Documentation Index:** [`docs/README.md`](docs/README.md)
+- **Known Issues & Release Notes:** [Beta Known Issues](https://hausergroup.github.io/curvebook/troubleshooting.html#known-issues) (historical Alpha notes: [`docs/release/alpha-known-issues.md`](docs/release/alpha-known-issues.md))
+- **Report a Bug or Numerical Issue:** Open a [Bug Report](.github/ISSUE_TEMPLATE/bug_report.yml), [Numerical Result Report](.github/ISSUE_TEMPLATE/numerical_result.yml), or [Feature Request](.github/ISSUE_TEMPLATE/feature_request.yml) via GitHub Issues (avoid attaching unpublished or confidential research data).
+- **Security Vulnerabilities:** Report privately following [`SECURITY.md`](SECURITY.md).
 
-```sh
-./target/release/curvebook-cli mcp <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"quickstart","version":"0.1"}}}
-{"jsonrpc":"2.0","method":"notifications/initialized","params":{}}
-{"jsonrpc":"2.0","id":2,"method":"ping"}
-{"jsonrpc":"2.0","id":3,"method":"tools/list"}
-EOF
-```
+## License and Privacy
 
-Expected output (three JSON lines on stdout; `notifications/initialized` produces no reply):
-1. Line 1 (`"id":1`): `"protocolVersion":"2024-11-05"` and `"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.2"}`.
-2. Line 2 (`"id":2`): exact pong `{"id":2,"jsonrpc":"2.0","result":{}}`.
-3. Line 3 (`"id":3`): `"tools"` array containing the default core tools: `doc_inspect`, `open_file`, `save_file`, `command_list`, `command_run`, `command_batch`, `render_preview`, `export`, `list_toolsets`, and `enable_toolset`.
+- **Privacy & Zero Telemetry:** Read the full [Privacy Policy](https://hausergroup.github.io/curvebook/privacy.html). CurveBook collects **zero telemetry, analytics, or crash reports**, makes **zero outbound network connections**, and includes **no auto-updater** (`cargo xtask telemetry`).
+- **License:** Dual-licensed under **`MIT OR Apache-2.0`** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)).
+- **Clean-Room Development:** CurveBook is implemented independently in pure Rust from published statistical literature and public file-format specifications, without copying proprietary commercial software code, equations, wording, templates, or assets, and without copyleft (`GPL`/`AGPL`/`LGPL`) dependencies. Third-party notices and asset attributions live in [`ASSETS.md`](ASSETS.md), [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), and [`docs/licences.md`](docs/licences.md).
 
-### 4. End-to-End Example (Welch's *t*-test)
+## Contributing & Building from Source
 
-Create a two-group table (`Control`: `10, 11, 12`; `Treated`: `20, 22, 24`) and run an unpaired Welch's *t*-test in one all-or-nothing (`"atomic": true`) `command_batch` call:
+Want to build CurveBook from source, run the workspace test and oracle suites, or submit a pull request?
 
-```sh
-./target/release/curvebook-cli mcp <<'EOF'
-{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2024-11-05"}}
-{"jsonrpc":"2.0","method":"notifications/initialized"}
-{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"command_batch","arguments":{"atomic":true,"commands":[{"command_id":"sheet.createData","params":{"sheet_id":"assay","kind":"Column","rows":3,"cols":2}},{"command_id":"table.setTitles","params":{"sheet_id":"assay","titles":["Control","Treated"]}},{"command_id":"table.paste","params":{"sheet_id":"assay","start_row":0,"start_col":0,"text":"10\t20\n11\t22\n12\t24"}},{"command_id":"stats.run","params":{"source_sheet_id":"assay","sheet_id":"ttest","kind":"welch_t"}}]}}}
-EOF
-```
-
-Expected output:
-1. Line 1 (`"id":1`): `initialize` response (`"serverInfo":{"name":"curvebook","version":"0.1.0-alpha.2"}`).
-2. Line 2 (`"id":2`): `tools/call` response with `"isError":false` whose final `stats.run` step (`"index":3`) reports `"message":"ran Welch's t test"`, `"status":"UpToDate"`, and these exact scalar results:
-   - `"t"`: `-8.520563361656317`
-   - `"PValue"`: `0.0036599555836826485`
-   - `"CohensD"`: `-6.957010852370434`
-   - `"HedgesG"`: `-5.550891548444351`
-
-### 5. Common Startup & Path Troubleshooting
-
-- **`command not found` / `ENOENT` in your MCP client:** Use the full absolute path to `./target/release/curvebook-cli` in `"command"` after running `cargo build --release -p curvebook-cli`.
-- **Build fails on older Rust versions:** Run `rustc --version` and `cargo --version` inside the repository to verify both report `1.99.1` (see [`docs/development.md#prerequisites`](docs/development.md#prerequisites)).
-- **`--workdir` startup error:** Ensure the `--workdir` directory exists (`mkdir -p /path/to/your/data-folder`) and is accessible before launching the server.
-- **`path_escape` error on `open_file` / `save_file` / `export`:** With `--workdir` active, paths outside that folder or containing `..` are blocked; place files inside `--workdir` and pass relative paths or paths inside that directory.
-- **Unexpected text breaks stdio parsing:** Keep wrapper banners and diagnostics off stdout. Cargo normally logs to stderr; `cargo run -q -p curvebook-cli -- mcp` reduces log noise. Building first and invoking `./target/release/curvebook-cli` directly simplifies startup.
-
-For protocol framing details, attaching to a shared desktop window (`curvebook --control <port> --window` + `--control-port`), `--gui-only` mode, advanced configuration, and current limitations, see [`docs/mcp.md`](docs/mcp.md). For launch failures and empty tool lists, see [MCP connection troubleshooting](docs/mcp.md#troubleshooting-the-connection).
-
-## Documentation & Support
-
-- **Documentation index:** [`docs/README.md`](docs/README.md)
-- **Status & Roadmap:** [`docs/STATUS.md`](docs/STATUS.md) · [`docs/ROADMAP.md`](docs/ROADMAP.md) · [`docs/target-app-parity.md`](docs/target-app-parity.md)
-- **MCP, CLI & Formats:** [`docs/mcp.md`](docs/mcp.md) · [`docs/commands.md`](docs/commands.md) · [`docs/implementation/scripting-and-automation.md`](docs/implementation/scripting-and-automation.md) · [`docs/control-protocol.md`](docs/control-protocol.md) · [`docs/file-formats.md`](docs/file-formats.md)
-- **Architecture & Development:** [`docs/architecture.md`](docs/architecture.md) · [`docs/development.md`](docs/development.md) · [`CONTRIBUTING.md`](CONTRIBUTING.md) · [`AGENTS.md`](AGENTS.md) · [`docs/pitfalls.md`](docs/pitfalls.md)
-- **Scientific & UI Specifications:** [`docs/implementation/data-tables-and-transforms.md`](docs/implementation/data-tables-and-transforms.md) · [`docs/implementation/statistics-implementation.md`](docs/implementation/statistics-implementation.md) · [`docs/implementation/curve-fitting-implementation.md`](docs/implementation/curve-fitting-implementation.md) · [`docs/implementation/graphing-and-layouts.md`](docs/implementation/graphing-and-layouts.md) · [`docs/gui-workflows.md`](docs/gui-workflows.md)
-- **Support & Security:** Open [bug](.github/ISSUE_TEMPLATE/bug_report.yml), [numerical result](.github/ISSUE_TEMPLATE/numerical_result.yml), or [feature](.github/ISSUE_TEMPLATE/feature_request.yml) reports via GitHub Issues; report security issues privately following [`SECURITY.md`](SECURITY.md).
-
-## License & Privacy
-
-- **License:** Dual-licensed under **MIT OR Apache-2.0** ([`LICENSE-MIT`](LICENSE-MIT), [`LICENSE-APACHE`](LICENSE-APACHE)). Clean-room policy, third-party notices, and contributor/asset credits live in [`ATTRIBUTION.md`](ATTRIBUTION.md), [`NOTICE`](NOTICE), [`ASSETS.md`](ASSETS.md), [`docs/licences.md`](docs/licences.md), and [`docs/contributors.md`](docs/contributors.md).
-- **Zero Telemetry:** CurveBook collects zero telemetry, analytics, or crash reports and runs strictly offline (`cargo xtask telemetry`).
+- Start with [`CONTRIBUTING.md`](CONTRIBUTING.md), [`docs/development.md`](docs/development.md), and [`AGENTS.md`](AGENTS.md).
+- Contributor credits are maintained in [`docs/contributors.md`](docs/contributors.md).

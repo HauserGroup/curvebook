@@ -11,21 +11,36 @@ use curvebook_doc::{
 use crate::error::FitError;
 
 /// Built-in equation library namespaces for nonlinear regression.
+/// Equation library category used to organize built-in regression models.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, serde::Serialize, serde::Deserialize)]
 pub enum EquationCategory {
+    /// Agonist / stimulatory concentration-response models (e.g. `EC50`, Hill slope).
     DoseResponseStimulation,
+    /// Antagonist / inhibitory concentration-response and Schild models (e.g. `IC50`).
     DoseResponseInhibition,
+    /// Saturation, competition, and kinetic ligand-receptor binding models.
     ReceptorBinding,
+    /// Michaelis–Menten, allosteric, and enzyme inhibition kinetic models.
     EnzymeKinetics,
+    /// Exponential growth, association, and one-/multi-phase decay models.
     Exponential,
+    /// Linear, quadratic, and higher-order polynomial models.
     Polynomial,
+    /// Symmetric bell-shaped Gaussian and log-Gaussian peak models.
     Gaussian,
+    /// Periodic sinusoidal and damped-oscillation wave models.
     SineWave,
+    /// Gompertz, logistic, and sigmoidal population/cell growth models.
     Growth,
+    /// Asymmetric chromatography/spectroscopy peak models.
     Peak,
+    /// Standard-curve calibration models (4PL/5PL, hyperbola, polynomial).
     StandardCurve,
+    /// Linear–quadratic and survival radiobiology dose models.
     Radiobiology,
+    /// NIST Statistical Reference Datasets (StRD) nonlinear regression benchmark models.
     NistBenchmark,
+    /// Caller-authored custom explicit, implicit, or ODE equation compiled via the DSL.
     UserDefined,
 }
 
@@ -105,7 +120,14 @@ pub enum UnknownResponse {
     /// A single response or a response already summarized on the input sheet.
     Single((usize, f64)),
     /// A raw response in a specific replicate subcolumn.
-    Replicate { row: usize, subcol: usize, value: f64 },
+    Replicate {
+        /// Zero-based table row index of the unknown observation.
+        row: usize,
+        /// Zero-based replicate subcolumn index within the dataset column.
+        subcol: usize,
+        /// Active numeric response value read from `(row, subcol)`.
+        value: f64,
+    },
 }
 
 impl From<(usize, f64)> for UnknownResponse {
@@ -146,8 +168,11 @@ pub struct DatasetSeries {
 /// Derived scalar computed from fitted parameters (e.g. `EC50 = 10^LogEC50`, `t_half = ln(2)/K`).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DerivedScalar {
+    /// Human-readable quantity name (e.g. `"IC50"`, `"HalfLife"`, `"AUC"`).
     pub name: String,
+    /// Computed scalar value in the physical units implied by `units` (`NaN` if undefined at the fit optimum).
     pub value: f64,
+    /// Optional physical unit label matching the fitted axis scale (`None` when dimensionless).
     pub units: Option<String>,
 }
 
@@ -155,10 +180,15 @@ pub struct DerivedScalar {
 /// `ColumnTitleValue`) without cyclic references.
 #[derive(Debug, Clone, Default)]
 pub struct HookContext<'a> {
+    /// Upstream metadata `InfoSheet` slices searched when resolving `InfoConstant` hooks.
     pub info_sheets: &'a [InfoSheet],
+    /// Upstream `ResultSheet` slices searched when resolving `ResultScalar` hooks.
     pub result_sheets: &'a [ResultSheet],
+    /// Upstream `DataSheet` slices searched when resolving dataset column-title numeric hooks.
     pub data_sheets: &'a [DataSheet],
+    /// Preferred primary `InfoSheet` ID searched before scanning remaining `info_sheets`; `None` checks all in order.
     pub primary_info_sheet_id: Option<&'a SheetId>,
+    /// Visited hook target keys maintained during resolution to detect and break cyclic references.
     pub visited_sheets: HashSet<String>,
 }
 
@@ -250,8 +280,11 @@ pub fn parse_leading_number(text: &str) -> Option<f64> {
 /// Column selection & multi-factor Cartesian grouping options for `MultipleVariables` tables.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MultivarExtractionSpec<'a> {
+    /// Zero-based grouping column indices whose distinct level tuples partition observations into separate series; empty puts all observations into one series.
     pub group_columns: &'a [usize],
+    /// Zero-based numeric predictor column indices mapped into `DataPoint::x`; empty falls back to auto-detected numeric X columns.
     pub x_columns: &'a [usize],
+    /// Zero-based dependent response column index mapped into `DataPoint::y`; `None` auto-selects the primary response column.
     pub y_column: Option<usize>,
 }
 
@@ -466,6 +499,19 @@ fn extract_from_grouped(g: &curvebook_doc::GroupedTable, selected_data_sets: &[u
                         y: pt.mean,
                         sd: Some(pt.sd),
                         n: Some(pt.n),
+                        explicit_weight: None,
+                        source_subcolumn: 0,
+                        data_set_index: ds_idx,
+                        row,
+                    });
+                }
+            } else if g.subcolumn_mode.is_pre_summarized() {
+                if let Some(y) = subcells.first().and_then(Cell::active_number) {
+                    points.push(DataPoint {
+                        x: vec![x_val],
+                        y,
+                        sd: None,
+                        n: None,
                         explicit_weight: None,
                         source_subcolumn: 0,
                         data_set_index: ds_idx,

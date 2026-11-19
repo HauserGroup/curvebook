@@ -62,22 +62,42 @@ use crate::error::StatsError;
 /// standalone Holm–Bonferroni, Fisher LSD, and Newman–Keuls options).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MultiplicityProcedure {
+    /// Unadjusted pairwise comparisons without multiplicity control (`adjusted == raw_p`).
     None,
+    /// Tukey–Kramer studentized range procedure for unequal or equal sample sizes (FWER; Tukey 1953 / Kramer 1956).
     TukeyKramer,
+    /// Dunn–Šidák multiplicative correction `1 - (1 - p)^m` (FWER; Šidák 1967).
     Sidak,
+    /// Bonferroni multiplicative correction `min(1, p * m)` (FWER; Dunn 1961).
     Bonferroni,
+    /// Holm–Šidák step-down sequential FWER procedure (Holm 1979 / Šidák 1967).
     HolmSidak,
+    /// Holm–Bonferroni step-down sequential FWER procedure (Holm 1979).
     HolmBonferroni,
-    Dunnett { control_column: usize },
+    /// Dunnett many-to-one multivariate *t* comparison against `control_column` (FWER; Dunnett 1955).
+    Dunnett {
+        /// Zero-based group/dataset index designated as the shared control arm.
+        control_column: usize,
+    },
+    /// Dunnett T3 unequal-variance pairwise comparison using Welch *df* and Šidák-adjusted *t* (FWER; Dunnett 1980).
     DunnettT3,
+    /// Games–Howell unequal-variance studentized range comparison with Welch–Satterthwaite *df* (FWER; Games & Howell 1976).
     GamesHowell,
+    /// Tamhane T2 unequal-variance conservative Šidák-adjusted pairwise *t* test (FWER; Tamhane 1979).
     TamhaneT2,
+    /// Dunn nonparametric rank-sum pairwise multiple comparisons following Kruskal–Wallis (Bonferroni-adjusted *z*; Dunn 1964).
     DunnRankSum,
+    /// Single-degree-of-freedom polynomial linear-trend contrast across ordered group means (Maxwell & Delaney 2004).
     LinearTrend,
+    /// Unprotected Fisher's Least Significant Difference pairwise *t* tests (`raw_p`; Fisher 1935).
     FisherLsd,
+    /// Student–Newman–Keuls step-down studentized range comparison (FWER stepwise; Newman 1939 / Keuls 1952).
     NewmanKeuls,
+    /// Benjamini–Hochberg linear step-up FDR procedure producing monotonic *q* values (Benjamini & Hochberg 1995).
     BenjaminiHochbergFdr,
+    /// Benjamini–Yekutieli FDR procedure valid under arbitrary dependence via $c(m) = \sum_{i=1}^m 1/i$ (Benjamini & Yekutieli 2001).
     BenjaminiYekutieliFdr,
+    /// Two-stage adaptive Benjamini–Krieger–Yekutieli step-up FDR procedure (Benjamini, Krieger & Yekutieli 2006).
     TwoStageBkyFdr,
 }
 
@@ -115,28 +135,46 @@ impl From<MultiplicityMethod> for MultiplicityProcedure {
 /// Group summary statistics consumed by pairwise comparison engines.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct GroupComparisonInput {
+    /// Zero-based group or dataset column index.
     pub index: usize,
+    /// Human-readable group header label.
     pub label: String,
+    /// Group sample size `n_i >= 1` (`f64` to support summarized or fractional effective weight designs).
     pub n: f64,
+    /// Sample mean of observations in this group.
     pub mean: f64,
+    /// Sample standard deviation (`N - 1` denominator) within this group (`0.0` if `n == 1`).
     pub sd: f64,
 }
 
 /// Single detailed pairwise comparison output.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PairwiseComparisonDetail {
+    /// Zero-based index of the first group (`A`).
     pub group_a: usize,
+    /// Zero-based index of the second group (`B`).
     pub group_b: usize,
+    /// Display label of `group_a`.
     pub label_a: String,
+    /// Display label of `group_b`.
     pub label_b: String,
+    /// Signed difference `mean_a - mean_b` (or `mean_rank_a - mean_rank_b` for rank procedures).
     pub mean_diff: f64,
+    /// Standard error of `mean_diff` (pooled MSE or Welch unpooled depending on `MultiplicityProcedure`).
     pub se_diff: f64,
+    /// Test statistic (`t`, `q / sqrt(2)`, or Dunn `|z|` depending on procedure).
     pub statistic: f64,
+    /// Denominator degrees of freedom (`f64::INFINITY` for asymptotic normal rank tests like Dunn).
     pub df: f64,
+    /// Unadjusted two-sided single-contrast *P* value (`NaN` if contrast variance is zero).
     pub raw_p: f64,
+    /// Multiplicity-adjusted two-sided *P* value (or FDR-adjusted *q* value when `is_fdr_q == true`) in `[0, 1]`.
     pub adjusted_p_or_q: f64,
+    /// True when `adjusted_p_or_q` represents a false discovery rate *q* value; false for FWER-adjusted or raw *P*.
     pub is_fdr_q: bool,
+    /// Simultaneous or individual confidence interval `(lower, upper)` for `mean_diff` at configured `ConfidenceLevel`; `None` for rank tests or step-down/FDR methods without simultaneous CIs.
     pub ci: Option<(f64, f64)>,
+    /// True when this contrast passes the family significance rule under the chosen procedure and threshold.
     pub significant: bool,
 }
 
@@ -157,14 +195,20 @@ impl PairwiseComparisonDetail {
     }
 }
 
-/// Post-hoc linear trend test across ordered groups.
+/// Post-hoc linear trend test across ordered groups (Maxwell & Delaney 2004).
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
 pub struct LinearTrendResult {
+    /// Single-degree-of-freedom sum of squares explained by the equally spaced linear contrast across group means.
     pub ss_trend: f64,
+    /// Numerator degrees of freedom (`1.0`).
     pub df_trend: f64,
+    /// Residual denominator degrees of freedom copied from the omnibus ANOVA error term.
     pub df_error: f64,
+    /// Contrast *F*-ratio `ss_trend / mse` on `(1, df_error)` degrees of freedom.
     pub f_statistic: f64,
+    /// Upper-tail $F(1, \text{df\_error})$ *P* value testing zero linear slope across ordered group means.
     pub p_value: f64,
+    /// Least-squares slope of group means per unit integer group step `L / sum(c_i^2)`.
     pub slope_estimate: f64,
     /// Proportion of total variation explained by the linear trend (`SS_trend / (SS_between + SS_error)`), in `[0, 1]`.
     pub r_squared: f64,

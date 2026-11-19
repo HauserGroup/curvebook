@@ -34,12 +34,16 @@ use crate::diagnostics::{LackOfFitResult, RunsTestResult, replicates_lack_of_fit
 use crate::error::FitError;
 use crate::types::{DataPoint, validated_replicate_moments};
 
-/// Configuration for [`simple_linear_regression`].
+/// Configuration for `simple_linear_regression`.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct SimpleLinearOptions {
+    /// When `true`, constrain intercept to `0.0` (`y = b * x`, 1 free parameter, `df = n - 1`).
     pub force_through_origin: bool,
+    /// Two-sided confidence level used for parameter CIs and pointwise regression bands (default `0.95` / 95%).
     pub confidence_level: ConfidenceLevel,
+    /// When `true`, populate pointwise mean-response confidence bands along `[x_min, x_max]`.
     pub compute_bands: bool,
+    /// Number of evenly spaced grid points emitted in `SimpleLinearResult::bands` (minimum clamped internally when `compute_bands` is `true`).
     pub band_grid_points: usize,
     /// Inclusive X bounds for the observations used in estimation and inference.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -47,7 +51,9 @@ pub struct SimpleLinearOptions {
     /// Explicit X bounds for band sampling. Missing sides use the filter bounds, then the fitted data extent.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub plot_x_range: Option<(Option<f64>, Option<f64>)>,
+    /// Observed `Y` values queued for inverse calibration (`X` from `Y` with Fieller CI).
     pub unknown_y_values: Vec<f64>,
+    /// Input `X` values queued for forward prediction (`Y` from `X` with confidence and prediction intervals).
     pub unknown_x_values: Vec<f64>,
 }
 
@@ -81,11 +87,17 @@ impl Default for SimpleLinearOptions {
 ///   classification ([`InverseIntervalSet`]).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearInterpolation {
+    /// Input query coordinate (`Y0` when calibrating `X` from `Y`, or `X0` when predicting `Y` from `X`).
     pub input_value: f64,
+    /// Point estimate (`(input_value - intercept) / slope` when calibrating `X`, or `intercept + slope * input_value` when predicting `Y`; `NaN` when slope is zero for inverse calibration).
     pub estimate: f64,
+    /// Lower bound of the two-sided mean-response confidence interval at configured `ConfidenceLevel` (`CiBound::Open` when unbounded under Fieller `g >= 1` or degenerate fit).
     pub ci_lower: CiBound,
+    /// Upper bound of the two-sided mean-response confidence interval at configured `ConfidenceLevel` (`CiBound::Open` when unbounded).
     pub ci_upper: CiBound,
+    /// Lower bound of the single-observation (`m = 1`) prediction / calibration interval (`None` when unbounded `g >= 1` or degenerate).
     pub pred_lower: Option<f64>,
+    /// Upper bound of the single-observation (`m = 1`) prediction / calibration interval (`None` when unbounded `g >= 1` or degenerate).
     pub pred_upper: Option<f64>,
 }
 
@@ -102,10 +114,30 @@ pub struct LinearInterpolation {
 /// - [`InverseIntervalSet::Undefined`]: flat line (`slope == 0`) or non-finite / overflowed inputs.
 #[derive(Debug, Clone, Copy, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum InverseIntervalSet {
-    Bounded { lower: f64, upper: f64 },
-    HalfLine { lower: Option<f64>, upper: Option<f64> },
-    TwoRays { left_upper: f64, right_lower: f64 },
+    /// Finite closed interval `[lower, upper]` when `g < 1` (significant non-zero slope) or zero residual error.
+    Bounded {
+        /// Inclusive lower endpoint in `X` units.
+        lower: f64,
+        /// Inclusive upper endpoint in `X` units.
+        upper: f64,
+    },
+    /// Semi-infinite boundary ray when `g == 1` and `x_hat != x_c`: `[lower, +inf)` or `(-inf, upper]`.
+    HalfLine {
+        /// Finite inclusive lower endpoint when the ray extends to `+inf`, else `None`.
+        lower: Option<f64>,
+        /// Finite inclusive upper endpoint when the ray extends from `-inf`, else `None`.
+        upper: Option<f64>,
+    },
+    /// Exterior complement of two finite roots `(-inf, left_upper] U [right_lower, +inf)` when `g > 1` and discriminant `D' > 0`.
+    TwoRays {
+        /// Upper endpoint of the left ray `(-inf, left_upper]`.
+        left_upper: f64,
+        /// Lower endpoint of the right ray `[right_lower, +inf)`.
+        right_lower: f64,
+    },
+    /// Unbounded solution over all real numbers `(-inf, +inf)` when `g > 1` and `D' <= 0`.
     AllReals,
+    /// Undefined solution set when fitted slope is `0` or fit quantities are non-finite.
     Undefined,
 }
 
@@ -157,9 +189,13 @@ impl InverseIntervalSet {
 /// NIST/SEMATECH e-Handbook §4.5.1.1.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct InverseCalibrationResult {
+    /// Observed query response `y0` being calibrated back to `X`.
     pub input_y: f64,
+    /// Point inverse calibration estimate `(y0 - intercept) / slope` in `X` units (`NaN` if slope is `0`).
     pub estimate: f64,
+    /// Number of future unknown replicates `m >= 1` assumed for `calibration_pi` / `calibration_set`.
     pub unknown_replicates: usize,
+    /// Dimensionless Fieller slope-significance statistic $g = t^2 s^2 / (b^2 S_{xx})$ (`>= 1` yields unbounded calibration sets).
     pub fieller_g: f64,
     /// Mean-response inverse confidence interval (`1/m = 0`; excludes future-observation variance).
     pub mean_response_ci: (CiBound, CiBound),
@@ -174,9 +210,13 @@ pub struct InverseCalibrationResult {
 /// Per-point residual diagnostic record.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearResidual {
+    /// Predictor coordinate `x_i`.
     pub x: f64,
+    /// Observed response `y_i`.
     pub y: f64,
+    /// Fitted model prediction `y_hat_i`.
     pub predicted: f64,
+    /// Unweighted residual `y_i - y_hat_i` in `Y` units.
     pub residual: f64,
 }
 
@@ -188,43 +228,77 @@ pub struct SimpleLinearResult {
     /// Number of observations excluded by the inclusive X filter.
     #[serde(default)]
     pub n_excluded_by_range: usize,
+    /// Residual degrees of freedom (`n - 1` when `force_through_origin`, else `n - 2`).
     pub df_residual: usize,
+    /// Whether the fit constrained the intercept to zero (`y = slope * x`).
     pub force_through_origin: bool,
+    /// Least-squares slope estimate in `Y / X` units.
     pub slope: f64,
+    /// Least-squares `Y`-intercept estimate in `Y` units (`0.0` when `force_through_origin`).
     pub intercept: f64,
+    /// Standard error of `slope` (`sqrt(s^2 / S_xx)`).
     pub se_slope: f64,
+    /// Standard error of `intercept` (`0.0` when `force_through_origin`).
     pub se_intercept: f64,
+    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` for `slope` at configured `ConfidenceLevel`.
     pub ci_slope: (f64, f64),
+    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` for `intercept` (`(0.0, 0.0)` when `force_through_origin`).
     pub ci_intercept: (f64, f64),
+    /// Coefficient of determination $R^2 \in [0, 1]$ (`1 - rss / ss_total`; computed relative to mean or zero when forced through origin per Draper & Smith 1998).
     pub r_squared: f64,
+    /// Signed Pearson correlation $r = \mathrm{sign}(\text{slope})\sqrt{R^2}$ (`NaN` when forced through origin or zero total variance).
     pub r: f64,
+    /// Residual standard deviation $S_{y.x} = \sqrt{\text{rss} / \text{df\_residual}}$ in `Y` units.
     pub sy_x: f64,
+    /// Residual sum of squares $\sum (y_i - \hat{y}_i)^2$ in `Y^2` units.
     pub rss: f64,
+    /// Total sum of squares ($\sum (y_i - \bar{y})^2$, or $\sum y_i^2$ when `force_through_origin`).
     pub ss_total: f64,
+    /// Omnibus *F*-statistic $((\text{ss\_total} - \text{rss}) / 1) / (\text{rss} / \text{df\_residual})$ testing zero slope (`f64::INFINITY` on zero residual SS).
     pub f_stat: f64,
+    /// Upper-tail $F(1, \text{df\_residual})$ *P* value testing $H_0: \text{slope} = 0$ (`0.0` on exact noiseless non-zero slope).
     pub p_value: f64,
+    /// X-intercept `-intercept / slope` where `y = 0` (`None` when `force_through_origin` or `slope == 0`).
     pub x_intercept: Option<f64>,
+    /// Reciprocal slope `1 / slope` (`None` when `slope == 0`).
     pub one_over_slope: Option<f64>,
+    /// Wald–Wolfowitz runs test along sorted `X` testing systematic departure from linearity.
     pub runs_test: RunsTestResult,
+    /// Optional pure-error vs lack-of-fit *F*-test when replicate `X` values (or summarized `SD, N`) exist; `None` without replicates or enough df.
     pub lack_of_fit: Option<LackOfFitResult>,
+    /// Pointwise fitted curve and two-sided confidence/prediction band samples along `X` (empty when `compute_bands` is `false`).
     pub bands: Vec<CurveSamplePoint>,
+    /// Inverse calibration outputs (`X` from `Y`) for requested `unknown_y_values`.
     pub interpolated_x_from_y: Vec<LinearInterpolation>,
+    /// Forward prediction outputs (`Y` from `X`) for requested `unknown_x_values`.
     pub interpolated_y_from_x: Vec<LinearInterpolation>,
+    /// Per-observation residual records in input order.
     pub residuals: Vec<LinearResidual>,
 }
 
-/// ANCOVA comparison of slopes and intercepts across multiple linear regression datasets.
+/// ANCOVA comparison of slopes and intercepts across multiple linear regression datasets
+/// (Zar 2010, Ch. 18; Motulsky & Christopoulos 2004, Ch. 18).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct LinearComparisonResult {
+    /// Number of regression lines compared ($k \ge 2$).
     pub dataset_count: usize,
+    /// Overall *F*-statistic testing equality of all $k$ slopes ($H_0: b_1 = b_2 = \dots = b_k$).
     pub f_slopes: f64,
+    /// Numerator and denominator degrees of freedom `(k - 1, sum(n_i) - 2k)` for the slope comparison *F*-test.
     pub df_slopes: (usize, usize),
+    /// Upper-tail *F* *P* value testing parallel lines ($H_0: b_1 = \dots = b_k$).
     pub p_slopes: f64,
+    /// True when `p_slopes < 0.05` (slopes differ significantly so elevation/intercept comparison is omitted).
     pub slopes_significantly_different: bool,
+    /// Common pooled within-group slope $\sum S_{xy, i} / \sum S_{xx, i}$ under the equal-slopes model.
     pub pooled_slope: f64,
+    /// ANCOVA *F*-statistic testing equality of line elevations/intercepts assuming equal slopes (`None` when `slopes_significantly_different`).
     pub f_intercepts: Option<f64>,
+    /// Numerator and denominator degrees of freedom `(k - 1, sum(n_i) - k - 1)` for the elevation test (`None` when slopes differ).
     pub df_intercepts: Option<(usize, usize)>,
+    /// Upper-tail *F* *P* value testing equal elevations under common slope (`None` when slopes differ).
     pub p_intercepts: Option<f64>,
+    /// True when `p_intercepts < 0.05` under parallel lines (`None` when slopes differ significantly).
     pub intercepts_significantly_different: Option<bool>,
 }
 
@@ -233,6 +307,7 @@ pub struct LinearComparisonResult {
 pub struct DemingOptions {
     /// Variance ratio `lambda = sigma_x^2 / sigma_y^2` (`1.0` for Orthogonal / Major Axis Deming).
     pub variance_ratio_lambda: f64,
+    /// Two-sided confidence level for jackknife slope/intercept confidence intervals (default `0.95` / 95%).
     pub confidence_level: ConfidenceLevel,
 }
 
@@ -242,20 +317,33 @@ impl Default for DemingOptions {
     }
 }
 
-/// Complete Model II Deming regression output with Leave-One-Out jackknife SEs and CIs.
+/// Complete Model II Deming regression output with Leave-One-Out jackknife SEs and CIs
+/// (Deming 1943; Linnet 1990 / 1993).
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DemingResult {
+    /// Number of paired `(x, y)` points included in the Deming fit (`n >= 3`).
     pub n: usize,
+    /// Jackknife residual degrees of freedom (`n - 2`).
     pub df: usize,
+    /// Applied error variance ratio $\lambda = \sigma_x^2 / \sigma_y^2$.
     pub lambda: f64,
+    /// Model II Deming slope estimate in `Y / X` units.
     pub slope: f64,
+    /// Model II Deming `Y`-intercept estimate $\bar{y} - b \bar{x}$ in `Y` units.
     pub intercept: f64,
+    /// Leave-one-out jackknife standard error of `slope` (`Linnet 1990`).
     pub se_slope: f64,
+    /// Leave-one-out jackknife standard error of `intercept` (`Linnet 1990`).
     pub se_intercept: f64,
+    /// Two-sided `t(df)` jackknife confidence interval `(lower, upper)` for `slope`.
     pub ci_slope: (f64, f64),
+    /// Two-sided `t(df)` jackknife confidence interval `(lower, upper)` for `intercept`.
     pub ci_intercept: (f64, f64),
+    /// Weighted Deming residual standard deviation $S_{y.x}$ accounting for errors in both `X` and `Y`.
     pub sy_x: f64,
+    /// X-intercept `-intercept / slope` (`None` when `slope == 0`).
     pub x_intercept: Option<f64>,
+    /// Per-point Deming vertical residual diagnostics.
     pub residuals: Vec<LinearResidual>,
 }
 

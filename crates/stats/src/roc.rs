@@ -24,41 +24,67 @@ use crate::error::StatsError;
 /// Single threshold operating point on an empirical ROC curve.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RocOperatingPoint {
+    /// Classification threshold `t` (observations with test score `>= t` are predicted positive; initial sentinel uses `max + 1`).
     pub cutoff: f64,
+    /// True-positive fraction `TP / n_cases` in `[0, 1]`.
     pub sensitivity: f64,
+    /// True-negative fraction `TN / n_controls` in `[0, 1]`.
     pub specificity: f64,
+    /// False-positive fraction `1 - specificity = FP / n_controls` in `[0, 1]`.
     pub one_minus_specificity: f64,
+    /// Youden's *J* index `sensitivity + specificity - 1` in `[-1, 1]` (Youden 1950).
     pub youden_j: f64,
+    /// Positive predictive value `TP / (TP + FP)` in `[0, 1]` at the sample prevalence (`1.0` when `TP + FP == 0`).
     pub ppv: f64,
+    /// Negative predictive value `TN / (TN + FN)` in `[0, 1]` at the sample prevalence (`1.0` when `TN + FN == 0`).
     pub npv: f64,
+    /// Positive likelihood ratio `sensitivity / (1 - specificity)` (`None` when `specificity == 1.0`).
     pub likelihood_ratio_pos: Option<f64>,
+    /// Negative likelihood ratio `(1 - sensitivity) / specificity` (`None` when `specificity == 0.0`).
     pub likelihood_ratio_neg: Option<f64>,
 }
 
 /// Complete ROC curve analysis for `cases` vs. `controls`.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RocResult {
+    /// Number of reference negative (`control`) observations.
     pub n_controls: usize,
+    /// Number of positive (`case`) observations.
     pub n_cases: usize,
+    /// Empirical trapezoidal area under the ROC curve in `[0, 1]` (equivalent to the Mann–Whitney *U* concordance statistic).
     pub auc: f64,
+    /// Standard error of `auc` via DeLong, DeLong & Clarke-Pearson (1988) or Hanley & McNeil (1982) as selected.
     pub se: f64,
+    /// Two-sided confidence interval `(lower, upper)` in `[0, 1]` at configured `ConfidenceLevel` (normal Wald on `auc` when `se > 0`, falling back to boundary-aware Wilson score on `min(n_controls, n_cases)` under separation).
     pub ci: (f64, f64),
+    /// Two-sided *P* value testing $H_0: \text{AUC} = 0.5$ (`norm_two_sided_p((auc - 0.5) / se)` when `se > 0`, else two-sided Mann–Whitney *U* / exact rank-sum tail under complete separation).
     pub p_value_vs_05: f64,
+    /// Operating point maximizing Youden's *J* index (`sensitivity + specificity - 1`) across candidate thresholds.
     pub optimal_cutoff: RocOperatingPoint,
+    /// Full empirical staircase operating points ordered descending in `cutoff` from `(0, 0)` to `(1, 1)`.
     pub points: Vec<RocOperatingPoint>,
+    /// DeLong (1988) structural placement vector `V_{10}` indexed 1-to-1 over `cases` for paired curve comparison.
     pub delong_v10: Vec<f64>,
+    /// DeLong (1988) structural placement vector `V_{01}` indexed 1-to-1 over `controls` for paired curve comparison.
     pub delong_v01: Vec<f64>,
 }
 
-/// DeLong two-curve AUC comparison result.
+/// DeLong two-curve AUC comparison result (DeLong, DeLong & Clarke-Pearson 1988).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RocComparisonResult {
+    /// Trapezoidal AUC of the first ROC curve (`roc_a`) in `[0, 1]`.
     pub auc_a: f64,
+    /// Trapezoidal AUC of the second ROC curve (`roc_b`) in `[0, 1]`.
     pub auc_b: f64,
+    /// Signed difference `auc_a - auc_b` in `[-1, 1]`.
     pub auc_diff: f64,
+    /// Standard error of `auc_a - auc_b` accounting for paired covariance when `correlated == true`, or pooled independent variance when `false`.
     pub se_diff: f64,
+    /// Standard normal *z*-statistic `(auc_a - auc_b) / se_diff` (`0.0` when `se_diff == 0`).
     pub z_statistic: f64,
+    /// Two-sided normal *P* value testing $H_0: \text{AUC}_A = \text{AUC}_B$.
     pub p_value: f64,
+    /// True for correlated paired DeLong comparisons sharing identical case/control cohorts; false for independent unpaired comparison.
     pub correlated: bool,
 }
 

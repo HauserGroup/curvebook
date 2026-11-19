@@ -627,17 +627,11 @@ fn rtl_mirroring_geometry_and_hitbox_parity_across_five_sheet_types() -> Result<
                     {
                         return Err(format!("{locale}@{scale}x ResultSheet RTL Interpret drawer expected left of table: sec={sec:?}, pri={pri:?}"));
                     }
-                    let r_parity = driver.verify_parity();
-                    if !r_parity.is_clean() {
-                        return Err(format!("{locale}@{scale}x ResultSheet+Interpret parity violations: {:?}", r_parity.violations));
-                    }
+                    human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x ResultSheet+Interpret"))?;
                 }
 
                 // 4. Hit-box parity + accessibility invariants on mirrored RTL tree.
-                let report = driver.verify_parity();
-                if !report.is_clean() {
-                    return Err(format!("{locale}@{scale}x sheet {sid} parity violations: {:?}", report.violations));
-                }
+                human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x sheet {sid}"))?;
                 if let Err(a11y_err) = validate_layout_tree_accessibility(&tree) {
                     return Err(format!("{locale}@{scale}x sheet {sid} a11y failure: {a11y_err:?}"));
                 }
@@ -686,15 +680,9 @@ fn cjk_cyrillic_rtl_five_sheets_dialogs_inspector_and_hidpi_layout_qa() -> Resul
 
             // 1. Welcome view (Empty + Sample tabs).
             driver.app_mut().nav.welcome.open = true;
-            let w_parity = driver.verify_parity();
-            if !w_parity.is_clean() {
-                return Err(format!("{locale}@{scale}x Welcome(Empty) parity violations: {:?}", w_parity.violations));
-            }
+            human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x Welcome(Empty)"))?;
             driver.click_widget("welcome.tab.sample").map_err(|e| format!("welcome.tab.sample in {locale}@{scale}x: {e}"))?;
-            let ws_parity = driver.verify_parity();
-            if !ws_parity.is_clean() {
-                return Err(format!("{locale}@{scale}x Welcome(Sample) parity violations: {:?}", ws_parity.violations));
-            }
+            human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x Welcome(Sample)"))?;
             driver.click_widget("welcome.cancel").map_err(|e| format!("welcome.cancel in {locale}@{scale}x: {e}"))?;
 
             // 2. Sweep all 5 DataTable archetypes + InfoSheet + ResultSheet + GraphSheet + LayoutSheet.
@@ -719,10 +707,7 @@ fn cjk_cyrillic_rtl_five_sheets_dialogs_inspector_and_hidpi_layout_qa() -> Resul
                         eprintln!("[Ellipsized {locale} {sid}] {ell_samples:?}");
                     }
                 }
-                let parity = driver.verify_parity();
-                if !parity.is_clean() {
-                    return Err(format!("{locale}@{scale}x {sid} parity violations: {:?}", parity.violations));
-                }
+                human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x {sid}"))?;
                 if let Err(err) = validate_layout_tree_accessibility(&tree) {
                     return Err(format!("{locale}@{scale}x {sid} a11y error: {err:?}"));
                 }
@@ -732,10 +717,7 @@ fn cjk_cyrillic_rtl_five_sheets_dialogs_inspector_and_hidpi_layout_qa() -> Resul
             driver.click_widget("nav.sheet.g-col").map_err(|e| format!("select g-col for inspector in {locale}@{scale}x: {e}"))?;
             for insp_tab in ["inspector.tab.graph", "inspector.tab.axes", "inspector.tab.multi", "inspector.tab.pairwise", "inspector.tab.layout"] {
                 driver.click_widget(insp_tab).map_err(|e| format!("click {insp_tab} in {locale}@{scale}x: {e}"))?;
-                let parity = driver.verify_parity();
-                if !parity.is_clean() {
-                    return Err(format!("{locale}@{scale}x {insp_tab} parity violations: {:?}", parity.violations));
-                }
+                human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x {insp_tab}"))?;
                 let tree = driver.layout_tree();
                 total_ellipsized += tree.text_runs.iter().filter(|r| r.ellipsized).count();
             }
@@ -799,10 +781,7 @@ fn cjk_cyrillic_rtl_five_sheets_dialogs_inspector_and_hidpi_layout_qa() -> Resul
                         eprintln!("[Ellipsized {locale} {dname}] {ell_samples:?}");
                     }
                 }
-                let parity = driver.verify_parity();
-                if !parity.is_clean() {
-                    return Err(format!("{locale}@{scale}x dialog {dname} parity violations: {:?}", parity.violations));
-                }
+                human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale}@{scale}x dialog {dname}"))?;
                 if let Err(err) = validate_layout_tree_accessibility(&tree) {
                     return Err(format!("{locale}@{scale}x dialog {dname} a11y error: {err:?}"));
                 }
@@ -894,10 +873,7 @@ fn ime_preedit_and_multilingual_text_entry_human_path() -> Result<(), String> {
         }
 
         // Verify parity holds clean after IME + formula commit.
-        let parity = driver.verify_parity();
-        if !parity.is_clean() {
-            return Err(format!("{locale} post-IME parity violations: {:?}", parity.violations));
-        }
+        human_wf_common::assert_parity_for_locale(&mut driver, locale, &format!("{locale} post-IME"))?;
     }
 
     Ok(())

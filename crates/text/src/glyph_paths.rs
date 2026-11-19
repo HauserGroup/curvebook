@@ -1686,6 +1686,10 @@ fn math_symbol_strokes(ch: char) -> Option<Vec<StrokeItem>> {
         '\u{FF0C}' => ascii_digit_punct_strokes(',')?,
         '\u{FF0E}' => ascii_digit_punct_strokes('.')?,
         '\u{FF0F}' => ascii_digit_punct_strokes('/')?,
+        '\u{25B6}' => vec![Solid(vec![(0.16, 0.66), (0.86, 0.36), (0.16, 0.06)])],
+        '\u{25B8}' => vec![Solid(vec![(0.24, 0.58), (0.76, 0.36), (0.24, 0.14)])],
+        '\u{25BC}' => vec![Solid(vec![(0.12, 0.62), (0.88, 0.62), (0.50, 0.08)])],
+        '\u{25BE}' => vec![Solid(vec![(0.18, 0.54), (0.82, 0.54), (0.50, 0.16)])],
         '\u{FF1A}' => ascii_digit_punct_strokes(':')?,
         _ => return None,
     };
@@ -1707,6 +1711,10 @@ fn transform_stroke_items(items: Vec<StrokeItem>, y_scale: f64, y_shift: f64) ->
 
 fn sub_super_strokes(ch: char) -> Option<Vec<StrokeItem>> {
     let (base, is_sup) = match ch {
+        '\u{1D62}' => ('i', false),
+        '\u{1D63}' => ('r', false),
+        '\u{1D64}' => ('u', false),
+        '\u{1D65}' => ('v', false),
         '\u{2071}' => ('i', true),
         '\u{2074}' => ('4', true),
         '\u{2075}' => ('5', true),
@@ -1735,6 +1743,18 @@ fn sub_super_strokes(ch: char) -> Option<Vec<StrokeItem>> {
         '\u{208C}' => ('=', false),
         '\u{208D}' => ('(', false),
         '\u{208E}' => (')', false),
+        '\u{2090}' => ('a', false),
+        '\u{2091}' => ('e', false),
+        '\u{2092}' => ('o', false),
+        '\u{2093}' => ('x', false),
+        '\u{2095}' => ('h', false),
+        '\u{2096}' => ('k', false),
+        '\u{2097}' => ('l', false),
+        '\u{2098}' => ('m', false),
+        '\u{2099}' => ('n', false),
+        '\u{209A}' => ('p', false),
+        '\u{209B}' => ('s', false),
+        '\u{209C}' => ('t', false),
         _ => return None,
     };
     let raw = ascii_digit_punct_strokes(base).or_else(|| ascii_lower_strokes(base))?;

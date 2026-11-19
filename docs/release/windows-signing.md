@@ -1,6 +1,6 @@
 # Windows signing without Azure
 
-CurveBook builds MSI installers and portable ZIP archives using [`packaging/windows/package.ps1`](../../packaging/windows/package.ps1). The separate [`Windows Store package`](../../.github/workflows/windows-store.yml) workflow builds an unsigned x64 MSIX for Store submission. It does not use Azure or signing secrets. Windows installation, CLI/MCP alias behavior, upgrade/uninstall, and certification evidence are still required under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
+CurveBook builds Windows `x64` and `arm64` MSI installers (`x86` and portable ZIP archives were retired in [`R0.28`](../planning/roadmap-history/r0.md#r028-rein-in-the-number-of-release-install-files)) using [`packaging/windows/package.ps1`](../../packaging/windows/package.ps1). Beta `.msi` installers ship **unsigned** ([`R8.10`](../planning/roadmap-history/r8.md#r810-signed-macos-installers--download-verification-beta-gate); Windows Authenticode signing moves to [`R8.11`](../ROADMAP.md#r811-windows-authenticode-signing-after-beta)), covered by `SHA256SUMS.txt` and Sigstore attestations ([verifying downloads](verifying-downloads.md)). Users install unsigned Beta `.msi` files via SmartScreen **More info → Run anyway**; Windows 11 Smart App Control or managed PCs may block unsigned installers until `R8.11` or Microsoft Store MSIX (`R8.9`). The separate [`Windows Store package`](../../.github/workflows/windows-store.yml) workflow builds an unsigned x64 MSIX for Store submission. It does not use Azure or signing secrets. Windows installation, CLI/MCP alias behavior, upgrade/uninstall, and certification evidence are still required under [`R8.9`](../ROADMAP.md#r89-windows-msix-packaging--microsoft-store-distribution).
 
 | Distribution | Signing approach |
 |---|---|
@@ -29,7 +29,7 @@ A pull request changing the Store builder also runs this scoped workflow. It gen
 
 **This unsigned MSIX is for Store submission.** It is not a public sideload installer. Microsoft signs the package after certification. No Azure account, CA certificate, or GitHub signing secret is needed. The test self-signing/install workflow remains pending; the manual PowerShell procedure below is for explicitly trusted test machines.
 
-The main **Release** workflow continues to build MSI/portable ZIP files; Store signing does not sign those downloads. Do not run the full release matrix to experiment with MSIX packaging. Store listing text, screenshots, privacy disclosures, age rating, certification, and installed-app testing still need completion before publishing.
+The main **Release** workflow builds unsigned `x64` and `arm64` MSI installers for Beta (and guards signing secrets against nightly scheduled runs per `R8.11`); Store signing does not sign those downloads. Do not run the full release matrix to experiment with MSIX packaging. Store listing text, screenshots, privacy disclosures, age rating, certification, and installed-app testing still need completion before publishing.
 
 ## 1. Prepare a Windows test machine
 
@@ -92,7 +92,7 @@ $msiPath = (Resolve-Path '.\dist\release\curvebook-0.1.0-windows-x64.msi').Path
 if ($LASTEXITCODE -ne 0) { throw 'MSI signing failed' }
 ```
 
-Adjust the version, architecture, and output directory to your build. The same command signs a standalone `.exe` when given its path. Signing a completed MSI signs the installer container; it does not sign its embedded executables or change copies already inside a portable ZIP. To sign those as well, sign the built EXEs first, repackage with `package.ps1 -SkipBuild`, and then sign the resulting MSI. Package or executable changes after signing invalidate the signature.
+Adjust the version, architecture, and output directory to your build. The same command signs a standalone `.exe` when given its path. Signing a completed MSI signs the installer container; it does not sign its embedded executables. To sign those as well, sign the built EXEs first, repackage with `package.ps1 -SkipBuild`, and then sign the resulting MSI. Package or executable changes after signing invalidate the signature.
 
 `/sha1` selects the certificate by thumbprint; `/fd SHA256` sets the signature digest. This local-test example has no timestamp server dependency; renew and re-sign test packages before the certificate expires. See [SignTool options](https://learn.microsoft.com/en-us/windows/win32/seccrypto/signtool).
 
