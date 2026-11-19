@@ -1,7 +1,13 @@
 //! Native macOS application menu bar bridge (`muda`, gated strictly under `target_os = "macos"`)
 //! plus platform-neutral menu parity descriptors shared across OS hosts (`R15.3`).
 
-use crate::desktop_host::DesktopMenuChromeState;
+use curvebook_ui_egui::UiApp;
+use curvebook_ui_egui::egui_shell::top_chrome::{
+    EXTRA_FILE_MENU_ACTIONS, collect_in_window_menu_sections, effective_menu_item_enabled, is_menu_item_visible, submenu_variants_for_command,
+};
+use curvebook_ui_egui::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
+
+use crate::desktop_host::{DesktopMenuChromeState, DesktopMenuItem};
 
 /// Canonical 10-menu top-level bar titles specified in `docs/planning/gui-layout-spec.md` §3.1.
 pub const NATIVE_MENU_BAR_TITLES: [&str; 10] = ["File", "Edit", "View", "Insert", "Data", "Analyze", "Graph", "Arrange", "Window", "Help"];
@@ -23,7 +29,7 @@ pub struct MenuSectionParityEntry {
     pub items: Vec<MenuItemParityEntry>,
 }
 
-/// Extract deterministic menu-item parity entries from [`DesktopMenuChromeState`].
+/// Extract deterministic, renderable menu-item parity entries from [`DesktopMenuChromeState`].
 #[must_use]
 pub fn collect_menu_parity_entries(chrome: &DesktopMenuChromeState) -> Vec<MenuSectionParityEntry> {
     chrome
@@ -35,21 +41,41 @@ pub fn collect_menu_parity_entries(chrome: &DesktopMenuChromeState) -> Vec<MenuS
             items: sec
                 .items
                 .iter()
+                .filter(|item| is_menu_item_visible(&item.command_id))
                 .map(|item| MenuItemParityEntry {
                     command_id: item.command_id.clone(),
                     label: item.localized_label.clone(),
-                    shortcut: item.shortcut.to_owned(),
-                    enabled: item.enabled,
+                    shortcut: item.shortcut.clone(),
+                    enabled: effective_menu_item_enabled(&item.command_id, item.enabled),
                 })
                 .collect(),
         })
         .collect()
 }
 
-/// Verify that `observed` menu sections match `chrome` on every `command_id`, label, and enablement bit.
+/// Extract matching in-window `egui::MenuBar` parity entries directly from [`UiApp`].
+#[must_use]
+pub fn collect_egui_menubar_parity(app: &UiApp) -> Vec<MenuSectionParityEntry> {
+    collect_in_window_menu_sections(app)
+        .into_iter()
+        .map(|sec| MenuSectionParityEntry {
+            menu_key: sec.menu_key,
+            title: sec.title,
+            items: sec
+                .items
+                .into_iter()
+                .map(|item| MenuItemParityEntry { command_id: item.command_id, label: item.label, shortcut: item.shortcut, enabled: item.enabled })
+                .collect(),
+        })
+        .collect()
+}
+
+/// Verify that `observed` menu sections match `chrome` on every `menu_key`, section `title`,
+/// `command_id`, localized `label`, `shortcut`, and `enabled` bit.
 ///
 /// # Errors
-/// Returns a descriptive mismatch reason on the first section count, command ID, or enablement delta.
+/// Returns a descriptive mismatch reason on the first section count, title, command ID, label,
+/// shortcut, or enablement delta.
 pub fn verify_menu_parity(chrome: &DesktopMenuChromeState, observed: &[MenuSectionParityEntry]) -> Result<(), String> {
     let expected = collect_menu_parity_entries(chrome);
     if expected.len() != observed.len() {
@@ -59,27 +85,181 @@ pub fn verify_menu_parity(chrome: &DesktopMenuChromeState, observed: &[MenuSecti
         if exp_sec.menu_key != obs_sec.menu_key {
             return Err(format!("menu section key mismatch: expected `{}`, got `{}`", exp_sec.menu_key, obs_sec.menu_key));
         }
+        if exp_sec.title != obs_sec.title {
+            return Err(format!("menu section `{}` title mismatch: expected `{}`, got `{}`", exp_sec.menu_key, exp_sec.title, obs_sec.title));
+        }
         if exp_sec.items.len() != obs_sec.items.len() {
             return Err(format!("section `{}` item count mismatch: expected {}, got {}", exp_sec.menu_key, exp_sec.items.len(), obs_sec.items.len()));
         }
         for (exp_item, obs_item) in exp_sec.items.iter().zip(obs_sec.items.iter()) {
-            if exp_item.command_id != obs_item.command_id || exp_item.enabled != obs_item.enabled {
-                return Err(format!(
-                    "menu item mismatch in `{}`: expected ({}, enabled={}), got ({}, enabled={})",
-                    exp_sec.menu_key, exp_item.command_id, exp_item.enabled, obs_item.command_id, obs_item.enabled
-                ));
+            if exp_item != obs_item {
+                return Err(format!("menu item mismatch in `{}`: expected {:?}, got {:?}", exp_sec.menu_key, exp_item, obs_item));
             }
         }
     }
     Ok(())
 }
 
+/// Pure `muda` leaf item specification constructed off AppKit main thread for panic-free testing.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MudaMenuItemSpec {
+    pub menu_id: muda::MenuId,
+    pub command_id: String,
+    pub label: String,
+    pub shortcut: String,
+    pub accelerator: Option<muda::accelerator::Accelerator>,
+    pub enabled: bool,
+    pub variants: Vec<(String, String)>,
+}
+
+/// Pure `muda` submenu specification constructed off AppKit main thread for panic-free testing.
+#[cfg(target_os = "macos")]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MudaMenuSectionSpec {
+    pub menu_key: String,
+    pub title: String,
+    pub items: Vec<MudaMenuItemSpec>,
+    pub extra_file_actions: Vec<(String, String)>,
+}
+
+/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+P"`, `"Cmd+\\"`, `"F11"`, `"Cmd+K / Ctrl+K"`)
+/// into a [`muda::accelerator::Accelerator`] without panicking on unknown or empty strings.
+#[cfg(target_os = "macos")]
+#[must_use]
+pub fn parse_muda_accelerator(shortcut: &str) -> Option<muda::accelerator::Accelerator> {
+    use muda::accelerator::{Accelerator, Code, Modifiers};
+
+    let primary = shortcut.split('/').next().map(str::trim).filter(|s| !s.is_empty())?;
+    let parts: Vec<&str> = primary.split('+').map(str::trim).collect();
+    if parts.is_empty() {
+        return None;
+    }
+
+    let mut mods = Modifiers::empty();
+    let (mod_tokens, key_token) = if primary.ends_with('+') && !primary.ends_with("++") {
+        return None;
+    } else if primary.contains('+') {
+        let idx = parts.len().saturating_sub(1);
+        (&parts[..idx], parts[idx])
+    } else {
+        (&[][..], parts[0])
+    };
+
+    for &tok in mod_tokens {
+        match tok.to_ascii_lowercase().as_str() {
+            "cmd" | "command" | "meta" | "super" | "cmdorctrl" => mods |= Modifiers::META,
+            "ctrl" | "control" => mods |= Modifiers::CONTROL,
+            "alt" | "opt" | "option" => mods |= Modifiers::ALT,
+            "shift" => mods |= Modifiers::SHIFT,
+            "" => {}
+            _ => return None,
+        }
+    }
+
+    let key = parse_muda_key_code(key_token)?;
+    let _ = Code::KeyA;
+    Some(Accelerator::new(mods, key))
+}
+
+#[cfg(target_os = "macos")]
+fn parse_muda_key_code(raw: &str) -> Option<muda::accelerator::Code> {
+    use muda::accelerator::Code;
+
+    let upper = raw.trim().to_ascii_uppercase();
+    match upper.as_str() {
+        "A" => Some(Code::KeyA),
+        "B" => Some(Code::KeyB),
+        "C" => Some(Code::KeyC),
+        "D" => Some(Code::KeyD),
+        "E" => Some(Code::KeyE),
+        "F" => Some(Code::KeyF),
+        "G" => Some(Code::KeyG),
+        "H" => Some(Code::KeyH),
+        "I" => Some(Code::KeyI),
+        "J" => Some(Code::KeyJ),
+        "K" => Some(Code::KeyK),
+        "L" => Some(Code::KeyL),
+        "M" => Some(Code::KeyM),
+        "N" => Some(Code::KeyN),
+        "O" => Some(Code::KeyO),
+        "P" => Some(Code::KeyP),
+        "Q" => Some(Code::KeyQ),
+        "R" => Some(Code::KeyR),
+        "S" => Some(Code::KeyS),
+        "T" => Some(Code::KeyT),
+        "U" => Some(Code::KeyU),
+        "V" => Some(Code::KeyV),
+        "W" => Some(Code::KeyW),
+        "X" => Some(Code::KeyX),
+        "Y" => Some(Code::KeyY),
+        "Z" => Some(Code::KeyZ),
+        "0" => Some(Code::Digit0),
+        "1" => Some(Code::Digit1),
+        "2" => Some(Code::Digit2),
+        "3" => Some(Code::Digit3),
+        "4" => Some(Code::Digit4),
+        "5" => Some(Code::Digit5),
+        "6" => Some(Code::Digit6),
+        "7" => Some(Code::Digit7),
+        "8" => Some(Code::Digit8),
+        "9" => Some(Code::Digit9),
+        "F1" => Some(Code::F1),
+        "F2" => Some(Code::F2),
+        "F3" => Some(Code::F3),
+        "F4" => Some(Code::F4),
+        "F5" => Some(Code::F5),
+        "F6" => Some(Code::F6),
+        "F7" => Some(Code::F7),
+        "F8" => Some(Code::F8),
+        "F9" => Some(Code::F9),
+        "F10" => Some(Code::F10),
+        "F11" => Some(Code::F11),
+        "F12" => Some(Code::F12),
+        "\\" | "BACKSLASH" => Some(Code::Backslash),
+        "/" | "SLASH" => Some(Code::Slash),
+        "," | "COMMA" => Some(Code::Comma),
+        "." | "PERIOD" => Some(Code::Period),
+        "-" | "MINUS" => Some(Code::Minus),
+        "=" | "+" | "EQUAL" | "PLUS" => Some(Code::Equal),
+        "ENTER" | "RETURN" => Some(Code::Enter),
+        "ESC" | "ESCAPE" => Some(Code::Escape),
+        "SPACE" => Some(Code::Space),
+        "TAB" => Some(Code::Tab),
+        "BACKSPACE" => Some(Code::Backspace),
+        "DELETE" | "DEL" => Some(Code::Delete),
+        "HOME" => Some(Code::Home),
+        "END" => Some(Code::End),
+        "PAGEUP" => Some(Code::PageUp),
+        "PAGEDOWN" => Some(Code::PageDown),
+        "ARROWUP" | "UP" => Some(Code::ArrowUp),
+        "ARROWDOWN" | "DOWN" => Some(Code::ArrowDown),
+        "ARROWLEFT" | "LEFT" => Some(Code::ArrowLeft),
+        "ARROWRIGHT" | "RIGHT" => Some(Code::ArrowRight),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "macos")]
+type MenuStructureSignature = Vec<(String, String, Vec<(String, String, String)>)>;
+
 /// Native macOS menu host powered by `muda` (`default-features = false`, strictly `cfg(target_os = "macos")`).
+///
+/// Pure descriptor / `MenuId` / `Accelerator` building executes cleanly off the AppKit thread for
+/// unit tests and headless `--control` runs; OS `muda::Menu` / `NSMenu` installation is guarded
+/// strictly inside [`Self::attach_to_nsapp_for_windowed_host`].
 #[cfg(target_os = "macos")]
 #[derive(Default)]
 pub struct MacNativeMenuHost {
+    section_specs: Vec<MudaMenuSectionSpec>,
     parity_entries: Vec<MenuSectionParityEntry>,
+    structure_signature: MenuStructureSignature,
+    enablement_signature: Vec<bool>,
+    live_nsapp_mode: bool,
     installed_nsmenu: bool,
+    live_menu: Option<muda::Menu>,
+    live_items: Vec<(usize, muda::MenuItem)>,
+    live_variant_items: Vec<(String, muda::MenuItem)>,
 }
 
 #[cfg(target_os = "macos")]
@@ -87,6 +267,7 @@ impl std::fmt::Debug for MacNativeMenuHost {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("MacNativeMenuHost")
             .field("section_count", &self.parity_entries.len())
+            .field("live_nsapp_mode", &self.live_nsapp_mode)
             .field("installed_nsmenu", &self.installed_nsmenu)
             .finish()
     }
@@ -94,37 +275,76 @@ impl std::fmt::Debug for MacNativeMenuHost {
 
 #[cfg(target_os = "macos")]
 impl MacNativeMenuHost {
-    /// Construct an empty macOS native menu host; actual `muda::Menu` population lives in the Wave 3 top-chrome slice.
+    /// Construct an empty macOS native menu host (no AppKit side-effects until windowed startup).
     #[must_use]
     pub const fn new() -> Self {
-        Self { parity_entries: Vec::new(), installed_nsmenu: false }
+        Self {
+            section_specs: Vec::new(),
+            parity_entries: Vec::new(),
+            structure_signature: Vec::new(),
+            enablement_signature: Vec::new(),
+            live_nsapp_mode: false,
+            installed_nsmenu: false,
+            live_menu: None,
+            live_items: Vec::new(),
+            live_variant_items: Vec::new(),
+        }
     }
 
-    /// Build `muda` menu tree mirrors from `chrome` (`command_id` & enablement parity).
+    /// Update menu descriptors and parity entries from `chrome` cleanly on any thread, and update
+    /// the live `muda::Menu` / `NSMenu` only when [`Self::attach_to_nsapp_for_windowed_host`] is active.
     ///
     /// # Errors
-    /// Returns an error if `muda` menu construction fails.
+    /// Returns an error if live `muda` menu construction fails on macOS AppKit.
     pub fn sync_from_chrome(&mut self, chrome: &DesktopMenuChromeState) -> Result<(), String> {
-        let menu = muda::Menu::new();
-        for section in &chrome.sections {
-            let sub = muda::Submenu::new(&section.title, true);
-            for item in &section.items {
-                let entry = muda::MenuItem::with_id(muda::MenuId::new(&item.command_id), &item.localized_label, item.enabled, None);
-                sub.append(&entry).map_err(|err| format!("append menu item `{}`: {err}", item.command_id))?;
+        let next_parity = collect_menu_parity_entries(chrome);
+        let next_specs = build_muda_section_specs(chrome);
+        let next_struct_sig = compute_structure_signature(&next_specs);
+        let next_enable_sig = compute_enablement_signature(&next_specs);
+
+        self.parity_entries = next_parity;
+        self.section_specs = next_specs;
+
+        if self.live_nsapp_mode {
+            if next_struct_sig != self.structure_signature || self.live_menu.is_none() {
+                self.rebuild_live_muda_menu()?;
+                if let Some(menu) = &self.live_menu {
+                    menu.init_for_nsapp();
+                    self.installed_nsmenu = true;
+                }
+            } else if next_enable_sig != self.enablement_signature {
+                self.apply_incremental_enablement();
             }
-            menu.append(&sub).map_err(|err| format!("append submenu `{}`: {err}", section.menu_key))?;
         }
-        self.parity_entries = collect_menu_parity_entries(chrome);
+
+        self.structure_signature = next_struct_sig;
+        self.enablement_signature = next_enable_sig;
         Ok(())
     }
 
-    /// Return whether `init_for_nsapp` has been invoked on this host.
+    /// Initialize live AppKit `muda::Menu` and install onto `NSApp` strictly on windowed startup
+    /// (never call from headless `--control` or worker test threads).
+    ///
+    /// # Errors
+    /// Returns an error if `muda::Menu` assembly fails.
+    pub fn attach_to_nsapp_for_windowed_host(&mut self, chrome: &DesktopMenuChromeState) -> Result<(), String> {
+        self.live_nsapp_mode = true;
+        self.sync_from_chrome(chrome)
+    }
+
+    /// Whether `init_for_nsapp` has been invoked on this host.
     #[must_use]
     pub const fn is_installed_for_nsapp(&self) -> bool {
         self.installed_nsmenu
     }
 
-    /// Install the native menu onto macOS `NSApp` (stubbed cleanly until live app-loop integration).
+    /// Whether live AppKit `NSMenu` syncing is enabled for windowed host frames.
+    #[must_use]
+    pub const fn is_live_nsapp_mode(&self) -> bool {
+        self.live_nsapp_mode
+    }
+
+    /// Mark host as installed onto macOS `NSApp` (testing / bookkeeping helper).
     pub fn mark_installed_for_nsapp(&mut self) {
         self.installed_nsmenu = true;
     }
@@ -140,6 +360,148 @@ impl MacNativeMenuHost {
     pub fn items_parity_entries(&self) -> &[MenuSectionParityEntry] {
         &self.parity_entries
     }
+
+    /// Expose pure `muda` descriptor sections (safe on non-main threads for unit/parity tests).
+    #[must_use]
+    pub fn muda_section_specs(&self) -> &[MudaMenuSectionSpec] {
+        &self.section_specs
+    }
+
+    fn apply_incremental_enablement(&self) {
+        let flat: Vec<&MudaMenuItemSpec> = self.section_specs.iter().flat_map(|s| s.items.iter()).collect();
+        for (idx, item_handle) in &self.live_items {
+            if let Some(spec) = flat.get(*idx) {
+                item_handle.set_enabled(spec.enabled);
+            }
+        }
+        for (cmd_prefix, var_handle) in &self.live_variant_items {
+            if let Some(parent) = flat.iter().find(|s| &s.command_id == cmd_prefix) {
+                var_handle.set_enabled(parent.enabled);
+            }
+        }
+    }
+
+    fn rebuild_live_muda_menu(&mut self) -> Result<(), String> {
+        let menu = muda::Menu::new();
+        let app_sub = muda::Submenu::with_items(
+            "CurveBook",
+            true,
+            &[
+                &muda::MenuItem::with_id(muda::MenuId::new("app.about"), "About CurveBook", true, None),
+                &muda::PredefinedMenuItem::separator(),
+                &muda::PredefinedMenuItem::hide(None),
+                &muda::PredefinedMenuItem::hide_others(None),
+                &muda::PredefinedMenuItem::show_all(None),
+                &muda::PredefinedMenuItem::separator(),
+                &muda::MenuItem::with_id(muda::MenuId::new("app.quit"), "Quit CurveBook", true, parse_muda_accelerator("Cmd+Q")),
+            ],
+        )
+        .map_err(|err| format!("build macOS app submenu: {err}"))?;
+        menu.append(&app_sub).map_err(|err| format!("append app submenu: {err}"))?;
+
+        let mut next_items = Vec::new();
+        let mut next_variants = Vec::new();
+        let mut flat_idx = 0usize;
+
+        for sec in &self.section_specs {
+            let sub = muda::Submenu::with_id(muda::MenuId::new(&sec.menu_key), &sec.title, true);
+            for item in &sec.items {
+                if item.variants.is_empty() {
+                    let entry = muda::MenuItem::with_id(item.menu_id.clone(), &item.label, item.enabled, item.accelerator);
+                    sub.append(&entry).map_err(|err| format!("append menu item `{}`: {err}", item.command_id))?;
+                    next_items.push((flat_idx, entry));
+                } else {
+                    let nested = muda::Submenu::new(&item.label, true);
+                    for (v_label, v_cmd) in &item.variants {
+                        let accel =
+                            if item.command_id == "ui.canvas.applyPreset" && v_cmd.ends_with("SingleColumn88mm") { item.accelerator } else { None };
+                        let v_item = muda::MenuItem::with_id(muda::MenuId::new(v_cmd), v_label, item.enabled, accel);
+                        nested.append(&v_item).map_err(|err| format!("append variant `{v_cmd}`: {err}"))?;
+                        next_variants.push((item.command_id.clone(), v_item));
+                    }
+                    sub.append(&nested).map_err(|err| format!("append submenu `{}`: {err}", item.command_id))?;
+                }
+                flat_idx += 1;
+            }
+            if !sec.extra_file_actions.is_empty() {
+                sub.append(&muda::PredefinedMenuItem::separator()).map_err(|err| format!("append separator: {err}"))?;
+                for (label, cmd) in &sec.extra_file_actions {
+                    let entry = muda::MenuItem::with_id(muda::MenuId::new(cmd), label, true, None);
+                    sub.append(&entry).map_err(|err| format!("append extra file action `{cmd}`: {err}"))?;
+                }
+            }
+            menu.append(&sub).map_err(|err| format!("append submenu `{}`: {err}", sec.menu_key))?;
+        }
+
+        self.live_menu = Some(menu);
+        self.live_items = next_items;
+        self.live_variant_items = next_variants;
+        Ok(())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn build_muda_section_specs(chrome: &DesktopMenuChromeState) -> Vec<MudaMenuSectionSpec> {
+    chrome
+        .sections
+        .iter()
+        .map(|sec| {
+            let items = sec.items.iter().filter(|item| is_menu_item_visible(&item.command_id)).map(build_muda_item_spec).collect();
+            let extra_file_actions = if matches!(sec.menu_key.as_str(), "menu.file" | "file") {
+                EXTRA_FILE_MENU_ACTIONS
+                    .iter()
+                    .filter(|(_, _, aliases)| !sec.items.iter().any(|existing| aliases.contains(&existing.command_id.as_str())))
+                    .map(|&(label, cmd, _)| (label.to_owned(), cmd.to_owned()))
+                    .collect()
+            } else {
+                Vec::new()
+            };
+            MudaMenuSectionSpec { menu_key: sec.menu_key.clone(), title: sec.title.clone(), items, extra_file_actions }
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn build_muda_item_spec(item: &DesktopMenuItem) -> MudaMenuItemSpec {
+    let variants = if let Some(list) = submenu_variants_for_command(&item.command_id) {
+        list.iter().map(|&(label, val)| (label.to_owned(), format!("{}:{val}", item.command_id))).collect()
+    } else if item.command_id == "ui.locale.set" {
+        BETA_ACTIVE_LOCALES
+            .iter()
+            .map(|&loc| {
+                let canonical = normalize_locale(loc);
+                (format!("{loc} ({canonical})"), format!("ui.locale.set:{canonical}"))
+            })
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    MudaMenuItemSpec {
+        menu_id: muda::MenuId::new(&item.command_id),
+        command_id: item.command_id.clone(),
+        label: item.localized_label.clone(),
+        shortcut: item.shortcut.clone(),
+        accelerator: parse_muda_accelerator(&item.shortcut),
+        enabled: effective_menu_item_enabled(&item.command_id, item.enabled),
+        variants,
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn compute_structure_signature(specs: &[MudaMenuSectionSpec]) -> MenuStructureSignature {
+    specs
+        .iter()
+        .map(|sec| {
+            let items = sec.items.iter().map(|it| (it.command_id.clone(), it.label.clone(), it.shortcut.clone())).collect();
+            (sec.menu_key.clone(), sec.title.clone(), items)
+        })
+        .collect()
+}
+
+#[cfg(target_os = "macos")]
+fn compute_enablement_signature(specs: &[MudaMenuSectionSpec]) -> Vec<bool> {
+    specs.iter().flat_map(|s| s.items.iter().map(|it| it.enabled)).collect()
 }
 
 #[cfg(test)]
@@ -173,8 +535,16 @@ mod tests {
         let entries = collect_menu_parity_entries(&chrome);
         assert!(verify_menu_parity(&chrome, &entries).is_ok());
 
-        let mut broken = entries;
-        broken[0].items[0].enabled = false;
-        assert!(verify_menu_parity(&chrome, &broken).is_err());
+        let mut broken_enable = entries.clone();
+        broken_enable[0].items[0].enabled = false;
+        assert!(verify_menu_parity(&chrome, &broken_enable).is_err());
+
+        let mut broken_shortcut = entries.clone();
+        broken_shortcut[0].items[0].shortcut = String::from("Cmd+X");
+        assert!(verify_menu_parity(&chrome, &broken_shortcut).is_err());
+
+        let mut broken_label = entries;
+        broken_label[0].items[0].label = String::from("Other");
+        assert!(verify_menu_parity(&chrome, &broken_label).is_err());
     }
 }
