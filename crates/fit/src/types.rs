@@ -5,7 +5,7 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use curvebook_doc::{
     Cell, CellValue, DataSetColumn, DataSheet, HookSource, InfoSheet, ResultSheet, ResultStatus, SheetId, TableArchetype, VariableColumn,
-    VariableRole,
+    VariableRole, parse_column_title_numeric_hook,
 };
 
 use crate::error::FitError;
@@ -251,30 +251,18 @@ impl<'a> HookContext<'a> {
         let Some(title) = title else {
             return Err(FitError::HookResolutionError { message: format!("column index {data_set_index} out of bounds on `{data_sheet_id}`") });
         };
-        parse_leading_number(title)
-            .ok_or_else(|| FitError::HookResolutionError { message: format!("column title `{title}` does not contain a finite numeric value") })
+        parse_column_title_numeric_hook(title).map_err(|err| FitError::HookResolutionError {
+            message: format!("column title `{title}` does not contain a finite numeric value: {err}"),
+        })
     }
 }
 
-/// Extract the first finite numeric token from a column title (e.g. `"[I] = 10 nM"` -> `10.0`).
+/// Strictly parse an unambiguous finite numeric scalar from a column title
+/// (e.g. `"10"`, `"10 nM"`, or `"[I] = 10 nM"` -> `Some(10.0)`), rejecting ambiguous
+/// identifiers with embedded hyphens/digits (`"Inhibitor-10 nM"`, `"IL-6 10 ng/mL"`).
 #[must_use]
 pub fn parse_leading_number(text: &str) -> Option<f64> {
-    let trimmed = text.trim();
-    if let Ok(v) = trimmed.parse::<f64>()
-        && v.is_finite()
-    {
-        return Some(v);
-    }
-    for tok in trimmed.split(|c: char| c.is_whitespace() || c == '=' || c == ':' || c == ',') {
-        let clean = tok.trim_matches(|c: char| !c.is_ascii_digit() && c != '.' && c != '-' && c != '+' && c != 'e' && c != 'E');
-        if !clean.is_empty()
-            && let Ok(v) = clean.parse::<f64>()
-            && v.is_finite()
-        {
-            return Some(v);
-        }
-    }
-    None
+    parse_column_title_numeric_hook(text).ok()
 }
 
 /// Column selection & multi-factor Cartesian grouping options for `MultipleVariables` tables.
@@ -623,11 +611,7 @@ pub(crate) fn resolve_mv_columns(
 
     let y_col = if let Some(yc) = mv_spec.y_column {
         yc
-    } else if mv_spec.x_columns.is_empty() && selected_numeric.len() >= 2 {
-        selected_numeric[selected_numeric.len() - 1]
-    } else if let Some(&sel) = selected_numeric.first()
-        && !x_set.contains(&sel)
-    {
+    } else if let Some(&sel) = selected_numeric.iter().rev().find(|idx| !x_set.contains(idx)) {
         sel
     } else {
         pick_default_mv_numeric_col(mv, (0..n_vars).rev().filter(|idx| !x_set.contains(idx) && !group_set.contains(idx)))
@@ -635,11 +619,11 @@ pub(crate) fn resolve_mv_columns(
             .unwrap_or_else(|| selected_data_sets.first().copied().unwrap_or(1))
     };
 
+    let selected_x: Vec<usize> = selected_numeric.iter().copied().filter(|&idx| idx != y_col).collect();
     let x_cols = if !mv_spec.x_columns.is_empty() {
         mv_spec.x_columns.to_vec()
-    } else if selected_numeric.len() >= 2 {
-        let filtered: Vec<usize> = selected_numeric.iter().copied().filter(|&idx| idx != y_col).collect();
-        if filtered.is_empty() { selected_numeric[..selected_numeric.len() - 1].to_vec() } else { filtered }
+    } else if !selected_x.is_empty() {
+        selected_x
     } else {
         let fallback = pick_default_mv_numeric_col(mv, (0..n_vars).filter(|&idx| idx != y_col && !group_set.contains(&idx)))
             .or_else(|| (0..n_vars).find(|&idx| idx != y_col && !group_set.contains(&idx)))
@@ -648,10 +632,18 @@ pub(crate) fn resolve_mv_columns(
     };
 
     let x_used: HashSet<usize> = x_cols.iter().copied().collect();
-    let has_selected_categorical = selected_data_sets.iter().any(|&idx| mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical));
+    let selected_categorical: Vec<usize> = selected_data_sets
+        .iter()
+        .copied()
+        .filter(|&idx| {
+            idx < n_vars && idx != y_col && !x_used.contains(&idx) && mv.variables.get(idx).is_some_and(|v| v.role == VariableRole::Categorical)
+        })
+        .collect();
     let group_cols = if !mv_spec.group_columns.is_empty() {
         mv_spec.group_columns.to_vec()
-    } else if selected_data_sets.len() < 2 || has_selected_categorical {
+    } else if !selected_categorical.is_empty() {
+        selected_categorical
+    } else if selected_data_sets.len() < 2 {
         mv.variables
             .iter()
             .enumerate()
