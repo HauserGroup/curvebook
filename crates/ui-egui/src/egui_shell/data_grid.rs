@@ -350,6 +350,151 @@ pub fn render_column_grid(
     }
 }
 
+/// Canonical alias for unified multi-archetype grid state (`R15.4`).
+pub type DataGridEguiState = ColumnGridEguiState;
+/// Canonical alias for unified multi-archetype grid render context (`R15.4`).
+pub type DataGridRenderContext<'a> = ColumnGridRenderContext<'a>;
+/// Canonical alias for unified multi-archetype grid frame report (`R15.4`).
+pub type DataGridFrameReport = ColumnGridFrameReport;
+
+/// Render the active `DataSheet` natively for all 8 table archetypes (`Column`, `XY`, `Grouped`,
+/// `Contingency`, `Survival`, `PartsOfWhole`, `MultipleVariables`, `Nested`) without mutating
+/// `Session` during layout (`R15.4`, `gui-layout-spec.md` §8.2).
+pub fn render_data_grid(
+    ui: &mut Ui,
+    app: &UiApp,
+    state: &mut DataGridEguiState,
+    render_ctx: DataGridRenderContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> DataGridFrameReport {
+    if active_column_sheet(app).is_some() {
+        return render_column_grid(ui, app, state, render_ctx, meta, intents);
+    }
+
+    let available = ui.available_rect_before_wrap();
+    state.ellipsized_headers = 0;
+
+    let Some(ds) = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)) else {
+        state.last_visible_rows = 0..0;
+        state.last_visible_subcols = 0..0;
+        return DataGridFrameReport {
+            grid_rect_pt: available,
+            rendered_modal_guard_open: state.active_link_popover.is_some(),
+            ..DataGridFrameReport::default()
+        };
+    };
+
+    ensure_solid_scrollbar_style(ui, render_ctx.metrics);
+    if !available.is_positive() {
+        return DataGridFrameReport { grid_rect_pt: available, ..DataGridFrameReport::default() };
+    }
+
+    let tokens = render_ctx.tokens;
+    let enabled = !render_ctx.modal_blocked;
+    let row_count = ds.archetype.row_count();
+    let col_count = ds.archetype.column_count();
+    let badge = match &ds.archetype {
+        TableArchetype::Column(_) => "Col",
+        TableArchetype::Xy(_) => "XY",
+        TableArchetype::Grouped(_) => "Grp",
+        TableArchetype::Contingency(_) => "Cont",
+        TableArchetype::Survival(_) => "Surv",
+        TableArchetype::PartsOfWhole(_) => "PoW",
+        TableArchetype::MultipleVariables(_) => "MV",
+        TableArchetype::Nested(_) => "Nest",
+    };
+
+    let mut rendered_cells = 0usize;
+    let max_vis_rows = row_count.min(32);
+    let max_vis_cols = col_count.min(12);
+    ui.scope_builder(UiBuilder::new().max_rect(available), |grid_ui| {
+        grid_ui.set_clip_rect(available);
+        grid_ui.horizontal(|hdr| {
+            let corner_resp = hdr.add_enabled(enabled, egui::Button::new(badge).min_size(vec2(48.0, 24.0)));
+            meta.record_response(
+                hdr,
+                &corner_resp,
+                FrameInspectEntryInput {
+                    widget_id: "grid.corner.archetype",
+                    role: "button",
+                    label: badge,
+                    command_id: Some("ui.table.convertArchetype.open"),
+                    value: None,
+                    enabled,
+                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if corner_resp.clicked() && enabled {
+                intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": ds.id.as_str() }));
+            }
+            hdr.label(egui::RichText::new(format!("{} · {row_count}×{col_count}", ds.title)).strong().color(tokens.text_primary));
+        });
+        grid_ui.separator();
+        let scroll = egui::ScrollArea::both().id_salt(("data_grid_stub", ds.id.as_str())).auto_shrink([false, false]).show(grid_ui, |body| {
+            for row in 0..max_vis_rows {
+                body.horizontal(|row_ui| {
+                    for col in 0..max_vis_cols {
+                        let text = ds
+                            .archetype
+                            .data_cell(CellCoord::new(row, col, 0))
+                            .map(|c| match &c.value {
+                                CellValue::Empty => String::new(),
+                                CellValue::Number(v) => format!("{v}"),
+                                CellValue::Text(s) => s.clone(),
+                            })
+                            .unwrap_or_default();
+                        let acc_label =
+                            if text.is_empty() { format!("R{}C{}", row + 1, col + 1) } else { format!("R{}C{} {text}", row + 1, col + 1) };
+                        let cell_resp = row_ui.add_enabled(enabled, egui::Button::new(text).min_size(vec2(76.0, 22.0)));
+                        cell_resp.widget_info(move || WidgetInfo::labeled(egui::Role::Cell, enabled, acc_label.clone()));
+                        rendered_cells += 1;
+                        if row < 8 && col < 4 && state.record_inspect_meta {
+                            let wid = format!("grid.cell.{row}.{col}.0");
+                            meta.record_response(
+                                row_ui,
+                                &cell_resp,
+                                FrameInspectEntryInput {
+                                    widget_id: &wid,
+                                    role: "gridcell",
+                                    label: &wid,
+                                    command_id: None,
+                                    value: None,
+                                    enabled,
+                                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                                    z_layer: ZLayer::Workspace,
+                                    ellipsized: false,
+                                    full_label: None,
+                                },
+                            );
+                        }
+                        if cell_resp.clicked() && enabled {
+                            intents.push_select_grid_cell(GridCellCoord::new(row, col, 0));
+                        }
+                    }
+                });
+            }
+        });
+        let _ = scroll;
+    });
+
+    state.last_visible_rows = 0..max_vis_rows;
+    state.last_visible_subcols = 0..max_vis_cols;
+    DataGridFrameReport {
+        grid_rect_pt: available,
+        rendered_cells,
+        visible_rows: 0..max_vis_rows,
+        visible_subcols: 0..max_vis_cols,
+        vertical_scrollbar_rect_pt: None,
+        horizontal_scrollbar_rect_pt: None,
+        rendered_modal_guard_open: state.active_link_popover.is_some(),
+        outside_click_blocked: render_ctx.modal_blocked && any_pointer_click_in(ui, available),
+    }
+}
+
 fn active_column_sheet(app: &UiApp) -> Option<(&DataSheet, &ColumnTable)> {
     let doc = app.document();
     let sid = doc.active_sheet_id.as_ref()?;

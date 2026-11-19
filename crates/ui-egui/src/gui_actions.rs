@@ -1977,7 +1977,7 @@ fn map_opt_bool(fields: &Map<String, Value>, keys: &[&str]) -> Result<Option<boo
     Ok(None)
 }
 
-fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
+pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
     let preset = app.locale_preset.clone();
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch_localized(fields, &preset).map_err(disabled_err)?,

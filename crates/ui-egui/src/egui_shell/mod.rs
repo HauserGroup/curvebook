@@ -1,7 +1,7 @@
 //! Native desktop `egui 0.37` shell contracts, canonical layout/color tokens, single-commit
 //! intent buffer, AccessKit inspection metadata, and adapted pure-`egui` widget helpers (`R15`).
 
-use curvebook_doc::{SheetId, SheetSection};
+use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetCellRange, SheetId, SheetSection};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
 use curvebook_palette::{CIVIDIS_STOPS, CanvasPreviewFilter, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
 use egui::{Color32, CornerRadius, FontId, Rect, Stroke, TextStyle, Visuals};
@@ -9,28 +9,43 @@ use serde::{Deserialize, Serialize};
 
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
-use crate::dialogs_canvas::{ActiveDialog, ActiveInspector};
+use crate::dialogs_canvas::{
+    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, BubblePlotInspectorState, ChangeGraphTypeState, ExportFigureState, FormatAxesState,
+    FormatGraphState, PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState,
+};
+use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
 use crate::layout::ZLayer;
+use crate::os_integration::ClipboardBundle;
+use crate::power_wizard::PowerWizardState;
 use crate::theme::{UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
 
+pub mod app_modals;
 pub mod canvas_view;
 pub mod center_stage;
 pub mod command_palette;
 pub mod data_grid;
 pub mod driver;
+pub mod fit_modal;
 pub mod fonts;
+pub mod graph_modals;
+pub mod import_wizard;
 pub mod info_view;
 pub mod inspect_bridge;
 pub mod leading_dock;
+pub mod manage_vars_modal;
+pub mod power_studio;
 pub mod rasterizer;
 pub mod results_view;
 pub mod stat_anova_modal;
+pub mod stats_modals;
 pub mod status_footer;
 pub mod top_bar_fit;
 pub mod top_chrome;
 pub mod trailing_studio;
+pub mod transform_modals;
+pub mod unit_spinners;
 pub mod welcome_hub;
 pub mod widgets;
 
@@ -156,6 +171,17 @@ impl WorkspacePreset {
 pub struct EguiShellViewState {
     pub column_grid: data_grid::ColumnGridEguiState,
     pub anova_modal: stat_anova_modal::AnovaModalEguiState,
+    pub manage_vars_modal: manage_vars_modal::ManageVarsModalEguiState,
+    pub import_wizard: import_wizard::ImportWizardEguiState,
+    pub transform_modals: transform_modals::TransformModalsEguiState,
+    pub stats_modals: stats_modals::StatsModalsEguiState,
+    pub fit_modal: fit_modal::FitModalEguiState,
+    pub power_studio: power_studio::PowerStudioEguiState,
+    pub graph_modals: graph_modals::GraphModalEguiState,
+    pub app_modals: app_modals::AppModalsEguiState,
+    /// When `true`, `ActiveDialog::AnalyzeSheet` routes natively to [`stats_modals::render_analyze_sheet_modal`].
+    /// Defaults to `false` during Wave 4 slice development until `stats_modals` parity lands cleanly.
+    pub native_analyze_sheet: bool,
     pub workspace_preset: WorkspacePreset,
     pub top_chrome: top_chrome::TopChromeEguiState,
     pub command_palette: command_palette::CommandPaletteEguiState,
@@ -200,6 +226,13 @@ pub fn doc_sheet_title<'a>(doc: &'a curvebook_doc::ProjectDocument, id: &SheetId
 }
 
 impl EguiShellViewState {
+    /// Builder toggle enabling native `egui` rendering for `ActiveDialog::AnalyzeSheet`.
+    #[must_use]
+    pub const fn with_native_analyze_sheet(mut self, enabled: bool) -> Self {
+        self.native_analyze_sheet = enabled;
+        self
+    }
+
     /// Record an active sheet visit onto `< >` navigation history unless already at the cursor.
     pub fn record_active_sheet_visit(&mut self, sheet_id: &SheetId) {
         if let Some(current) = self.active_sheet_history.get(self.history_cursor)
@@ -1009,6 +1042,59 @@ pub enum UiIntent {
     OpenRetargetDialog { result_sheet_id: SheetId, target_data_sheet_id: Option<SheetId> },
     BrushPoint { sheet_id: SheetId, coord: curvebook_tools::GridCellCoord },
     ClearBrush,
+    PatchActiveDialog { fields: serde_json::Map<String, serde_json::Value> },
+    CommitDialogAction { action: String },
+    CloseAllModals,
+    OpenManageVariables { sheet_id: SheetId, column: Option<usize> },
+    SelectManageVarColumn { sheet_id: SheetId, column: usize },
+    StageManageVarRecode { from: String, to: String },
+    ClearManageVarRecodes,
+    ApplyManageVarRecodes { sheet_id: SheetId },
+    ApplyManageVarOrder { sheet_id: SheetId, column: usize, order: LevelOrderSpec, reference_level: Option<String> },
+    CloseManageVariables,
+    OpenImportWizard { origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId> },
+    UpdateImportWizard(Box<ImportPasteWizardState>),
+    CommitImportWizard { close_after: bool },
+    CloseImportWizard,
+    OpenTransformModal { sheet_id: SheetId, kind: transform_modals::TransformModalKind },
+    CloseTransformModal,
+    GridCopySelection,
+    GridCutSelection,
+    GridPasteFromClipboard { start_coord: Option<curvebook_tools::GridCellCoord> },
+    SetAnalyzeQuery { query: String },
+    SelectAnalyzeEntry { entry_id: String, clear_duplicate_prompt: bool },
+    ToggleAnalyzeDataset { col_index: usize },
+    SetAnalyzeSelectedDatasets { cols: Vec<usize> },
+    SetEditParamsDraft { spec: Box<curvebook_doc::AnalysisSpec> },
+    SetEditParamsActiveTab { tab: String },
+    SetEditParamsPairedOrMatched { paired: bool },
+    SetEditParamsConfidence { level: ConfidenceLevel },
+    SaveEditParamsAsDefault,
+    SelectRetargetSource { target_data_sheet_id: SheetId },
+    ResolveDuplicateAnalysis { modify_existing_id: Option<SheetId> },
+    SelectHookConstant { index: Option<usize> },
+    UnlinkHookConstant,
+    UpdatePowerWizardState(Box<PowerWizardState>),
+    CommitPowerWizard { action: String },
+    UpdateChangeGraphTypeState(Box<ChangeGraphTypeState>),
+    UpdateFormatGraphState(Box<FormatGraphState>),
+    UpdateFormatAxesState(Box<FormatAxesState>),
+    UpdateBubblePlotState(Box<BubblePlotInspectorState>),
+    UpdatePairwiseState(Box<PairwiseComparisonsState>),
+    UpdatePageLayoutState(Box<PageLayoutComposerState>),
+    UpdateExportFigureState(Box<ExportFigureState>),
+    UpdatePrintDialogState(Box<PrintDialogState>),
+    OpenPreferences { category: Option<app_modals::PreferencesCategory> },
+    ClosePreferences { save: bool },
+    SetShortcutBinding { command_id: String, combo: String },
+    ResetShortcutBinding { command_id: Option<String> },
+    UpdatePreferencesDraft(Box<app_modals::PreferencesModalState>),
+    OpenRecoveryDialog { summary: Box<app_modals::RecoveryDialogSummary> },
+    ResolveRecoveryDialog { decision: app_modals::RecoveryDecision },
+    ResolveUnsavedChanges { action: app_modals::UnsavedCloseAction },
+    OpenFindReplace { initial_query: Option<String> },
+    CloseFindReplace,
+    ExecuteFindReplace { replace_all: bool, find_query: String, replace_with: String, match_case: bool, match_entire_cell: bool },
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -1208,6 +1294,284 @@ impl PendingUiIntents {
     /// Clear any active single-point or row brushing highlight.
     pub fn push_clear_brush(&mut self) {
         self.queue.push(UiIntent::ClearBrush);
+    }
+
+    /// Patch fields on the active modal dialog after the settled frame pass.
+    pub fn push_patch_active_dialog(&mut self, fields: serde_json::Map<String, serde_json::Value>) {
+        self.queue.push(UiIntent::PatchActiveDialog { fields });
+    }
+
+    /// Execute a modal footer button action (`"ok"`, `"cancel"`, `"apply"`, `"create"`, etc.).
+    pub fn push_commit_dialog_action(&mut self, action: impl Into<String>) {
+        self.queue.push(UiIntent::CommitDialogAction { action: action.into() });
+    }
+
+    /// Close all open `ActiveDialog` and shell modal surfaces cleanly.
+    pub fn push_close_all_modals(&mut self) {
+        self.queue.push(UiIntent::CloseAllModals);
+    }
+
+    /// Open `Manage Variables...` synced to `sheet_id` and optional `column`.
+    pub fn push_open_manage_variables(&mut self, sheet_id: SheetId, column: Option<usize>) {
+        self.queue.push(UiIntent::OpenManageVariables { sheet_id, column });
+    }
+
+    /// Select column `column` inside `Manage Variables...`.
+    pub fn push_select_manage_var_column(&mut self, sheet_id: SheetId, column: usize) {
+        self.queue.push(UiIntent::SelectManageVarColumn { sheet_id, column });
+    }
+
+    /// Stage a categorical level rename/merge (`from -> to`) inside `Manage Variables...`.
+    pub fn push_stage_manage_var_recode(&mut self, from: impl Into<String>, to: impl Into<String>) {
+        self.queue.push(UiIntent::StageManageVarRecode { from: from.into(), to: to.into() });
+    }
+
+    /// Clear all unstaged categorical recode mappings.
+    pub fn push_clear_manage_var_recodes(&mut self) {
+        self.queue.push(UiIntent::ClearManageVarRecodes);
+    }
+
+    /// Commit staged categorical level recodes via `table.recodeLevels` (`Caller::Ui`).
+    pub fn push_apply_manage_var_recodes(&mut self, sheet_id: SheetId) {
+        self.queue.push(UiIntent::ApplyManageVarRecodes { sheet_id });
+    }
+
+    /// Commit categorical level order and optional reference level via `table.setCategoricalOrder`.
+    pub fn push_apply_manage_var_order(&mut self, sheet_id: SheetId, column: usize, order: LevelOrderSpec, reference_level: Option<String>) {
+        self.queue.push(UiIntent::ApplyManageVarOrder { sheet_id, column, order, reference_level });
+    }
+
+    /// Close `Manage Variables...` without additional mutations.
+    pub fn push_close_manage_variables(&mut self) {
+        self.queue.push(UiIntent::CloseManageVariables);
+    }
+
+    /// Open the 5-stage `Import & Paste Special` wizard.
+    pub fn push_open_import_wizard(&mut self, origin: ImportOriginKind, is_live_link: bool, target_sheet_id: Option<SheetId>) {
+        self.queue.push(UiIntent::OpenImportWizard { origin, is_live_link, target_sheet_id });
+    }
+
+    /// Persist a settled snapshot update to `app.grid.import_wizard`.
+    pub fn push_update_import_wizard(&mut self, wizard: ImportPasteWizardState) {
+        self.queue.push(UiIntent::UpdateImportWizard(Box::new(wizard)));
+    }
+
+    /// Commit the configured `Import & Paste Special` wizard via `Caller::Ui`.
+    pub fn push_commit_import_wizard(&mut self, close_after: bool) {
+        self.queue.push(UiIntent::CommitImportWizard { close_after });
+    }
+
+    /// Close `Import & Paste Special`.
+    pub fn push_close_import_wizard(&mut self) {
+        self.queue.push(UiIntent::CloseImportWizard);
+    }
+
+    /// Open a native Transform / Baseline / MV Filter / Extract modal for `sheet_id`.
+    pub fn push_open_transform_modal(&mut self, sheet_id: SheetId, kind: transform_modals::TransformModalKind) {
+        self.queue.push(UiIntent::OpenTransformModal { sheet_id, kind });
+    }
+
+    /// Close the shell-hosted transform modal.
+    pub fn push_close_transform_modal(&mut self) {
+        self.queue.push(UiIntent::CloseTransformModal);
+    }
+
+    /// Copy the active grid selection to TSV clipboard.
+    pub fn push_grid_copy_selection(&mut self) {
+        self.queue.push(UiIntent::GridCopySelection);
+    }
+
+    /// Cut the active grid selection (copy + single-commit `table.clearCells`).
+    pub fn push_grid_cut_selection(&mut self) {
+        self.queue.push(UiIntent::GridCutSelection);
+    }
+
+    /// Paste TSV clipboard contents at `start_coord` (or current active cell) via `table.paste`.
+    pub fn push_grid_paste_from_clipboard(&mut self, start_coord: Option<curvebook_tools::GridCellCoord>) {
+        self.queue.push(UiIntent::GridPasteFromClipboard { start_coord });
+    }
+
+    /// Update the live `Analyze...` instant search query.
+    pub fn push_set_analyze_query(&mut self, query: impl Into<String>) {
+        self.queue.push(UiIntent::SetAnalyzeQuery { query: query.into() });
+    }
+
+    /// Select an analysis catalog entry ID in `Analyze...`.
+    pub fn push_select_analyze_entry(&mut self, entry_id: impl Into<String>, clear_duplicate_prompt: bool) {
+        self.queue.push(UiIntent::SelectAnalyzeEntry { entry_id: entry_id.into(), clear_duplicate_prompt });
+    }
+
+    /// Toggle inclusion of dataset `col_index` in `Analyze...`.
+    pub fn push_toggle_analyze_dataset(&mut self, col_index: usize) {
+        self.queue.push(UiIntent::ToggleAnalyzeDataset { col_index });
+    }
+
+    /// Replace the selected dataset column indices in `Analyze...`.
+    pub fn push_set_analyze_selected_datasets(&mut self, cols: Vec<usize>) {
+        self.queue.push(UiIntent::SetAnalyzeSelectedDatasets { cols });
+    }
+
+    /// Commit an updated `AnalysisSpec` draft onto `edit_params`.
+    pub fn push_set_edit_params_draft(&mut self, spec: curvebook_doc::AnalysisSpec) {
+        self.queue.push(UiIntent::SetEditParamsDraft { spec: Box::new(spec) });
+    }
+
+    /// Persist the active tab slug on `edit_params`.
+    pub fn push_set_edit_params_active_tab(&mut self, tab: impl Into<String>) {
+        self.queue.push(UiIntent::SetEditParamsActiveTab { tab: tab.into() });
+    }
+
+    /// Toggle repeated-measures/paired state on `edit_params`.
+    pub fn push_set_edit_params_paired_or_matched(&mut self, paired: bool) {
+        self.queue.push(UiIntent::SetEditParamsPairedOrMatched { paired });
+    }
+
+    /// Update confidence interval level on `edit_params`.
+    pub fn push_set_edit_params_confidence(&mut self, level: ConfidenceLevel) {
+        self.queue.push(UiIntent::SetEditParamsConfidence { level });
+    }
+
+    /// Persist the current `edit_params` draft configuration as family default preset.
+    pub fn push_save_edit_params_as_default(&mut self) {
+        self.queue.push(UiIntent::SaveEditParamsAsDefault);
+    }
+
+    /// Select target source table inside `ChangeDataAnalyzed`.
+    pub fn push_select_retarget_source(&mut self, target_data_sheet_id: SheetId) {
+        self.queue.push(UiIntent::SelectRetargetSource { target_data_sheet_id });
+    }
+
+    /// Resolve `DuplicateAnalysisPrompt` (`Some(existing)` modifies existing; `None` creates new).
+    pub fn push_resolve_duplicate_analysis(&mut self, modify_existing_id: Option<SheetId>) {
+        self.queue.push(UiIntent::ResolveDuplicateAnalysis { modify_existing_id });
+    }
+
+    /// Select a hook option index inside `ConstantHookPicker`.
+    pub fn push_select_hook_constant(&mut self, index: Option<usize>) {
+        self.queue.push(UiIntent::SelectHookConstant { index });
+    }
+
+    /// Clear hook selection on the active target.
+    pub fn push_unlink_hook_constant(&mut self) {
+        self.queue.push(UiIntent::UnlinkHookConstant);
+    }
+
+    /// Persist updated `PowerWizardState` draft cleanly on settlement.
+    pub fn push_update_power_wizard_state(&mut self, state: PowerWizardState) {
+        self.queue.push(UiIntent::UpdatePowerWizardState(Box::new(state)));
+    }
+
+    /// Commit `PowerWizard` action (`"next"`, `"back"`, `"create"`, `"ok"`, `"cancel"`).
+    pub fn push_commit_power_wizard(&mut self, action: impl Into<String>) {
+        self.queue.push(UiIntent::CommitPowerWizard { action: action.into() });
+    }
+
+    /// Persist updated `ChangeGraphTypeState` draft cleanly on settlement.
+    pub fn push_update_change_graph_type_state(&mut self, state: ChangeGraphTypeState) {
+        self.queue.push(UiIntent::UpdateChangeGraphTypeState(Box::new(state)));
+    }
+
+    /// Persist updated `FormatGraphState` draft cleanly on settlement.
+    pub fn push_update_format_graph_state(&mut self, state: FormatGraphState) {
+        self.queue.push(UiIntent::UpdateFormatGraphState(Box::new(state)));
+    }
+
+    /// Persist updated `FormatAxesState` draft cleanly on settlement.
+    pub fn push_update_format_axes_state(&mut self, state: FormatAxesState) {
+        self.queue.push(UiIntent::UpdateFormatAxesState(Box::new(state)));
+    }
+
+    /// Persist updated `BubblePlotInspectorState` draft cleanly on settlement.
+    pub fn push_update_bubble_plot_state(&mut self, state: BubblePlotInspectorState) {
+        self.queue.push(UiIntent::UpdateBubblePlotState(Box::new(state)));
+    }
+
+    /// Persist updated `PairwiseComparisonsState` draft cleanly on settlement.
+    pub fn push_update_pairwise_state(&mut self, state: PairwiseComparisonsState) {
+        self.queue.push(UiIntent::UpdatePairwiseState(Box::new(state)));
+    }
+
+    /// Persist updated `PageLayoutComposerState` draft cleanly on settlement.
+    pub fn push_update_page_layout_state(&mut self, state: PageLayoutComposerState) {
+        self.queue.push(UiIntent::UpdatePageLayoutState(Box::new(state)));
+    }
+
+    /// Persist updated `ExportFigureState` draft cleanly on settlement.
+    pub fn push_update_export_figure_state(&mut self, state: ExportFigureState) {
+        self.queue.push(UiIntent::UpdateExportFigureState(Box::new(state)));
+    }
+
+    /// Persist updated `PrintDialogState` draft cleanly on settlement.
+    pub fn push_update_print_dialog_state(&mut self, state: PrintDialogState) {
+        self.queue.push(UiIntent::UpdatePrintDialogState(Box::new(state)));
+    }
+
+    /// Open `Preferences` modal on optional category.
+    pub fn push_open_preferences(&mut self, category: Option<app_modals::PreferencesCategory>) {
+        self.queue.push(UiIntent::OpenPreferences { category });
+    }
+
+    /// Close `Preferences` modal (`save == true` commits active draft preferences).
+    pub fn push_close_preferences(&mut self, save: bool) {
+        self.queue.push(UiIntent::ClosePreferences { save });
+    }
+
+    /// Rebind `command_id` to `combo` with conflict validation via `ShortcutRegistry`.
+    pub fn push_set_shortcut_binding(&mut self, command_id: impl Into<String>, combo: impl Into<String>) {
+        self.queue.push(UiIntent::SetShortcutBinding { command_id: command_id.into(), combo: combo.into() });
+    }
+
+    /// Reset a single shortcut binding or all shortcuts (`None`) to defaults.
+    pub fn push_reset_shortcut_binding(&mut self, command_id: Option<String>) {
+        self.queue.push(UiIntent::ResetShortcutBinding { command_id });
+    }
+
+    /// Persist updated `PreferencesModalState` draft cleanly on settlement.
+    pub fn push_update_preferences_draft(&mut self, draft: app_modals::PreferencesModalState) {
+        self.queue.push(UiIntent::UpdatePreferencesDraft(Box::new(draft)));
+    }
+
+    /// Open the crash/session recovery prompt with `summary`.
+    pub fn push_open_recovery_dialog(&mut self, summary: app_modals::RecoveryDialogSummary) {
+        self.queue.push(UiIntent::OpenRecoveryDialog { summary: Box::new(summary) });
+    }
+
+    /// Record the user's decision on `RecoveryDialog` (`RestoreSession` / `DiscardRecovery` / `Dismiss`).
+    pub fn push_resolve_recovery(&mut self, decision: app_modals::RecoveryDecision) {
+        self.queue.push(UiIntent::ResolveRecoveryDialog { decision });
+    }
+
+    /// Record the user's decision on `UnsavedChanges` (`Save` / `DontSave` / `Cancel`).
+    pub fn push_resolve_unsaved_changes(&mut self, action: app_modals::UnsavedCloseAction) {
+        self.queue.push(UiIntent::ResolveUnsavedChanges { action });
+    }
+
+    /// Open `Find & Replace` with optional initial query.
+    pub fn push_open_find_replace(&mut self, initial_query: Option<String>) {
+        self.queue.push(UiIntent::OpenFindReplace { initial_query });
+    }
+
+    /// Close `Find & Replace`.
+    pub fn push_close_find_replace(&mut self) {
+        self.queue.push(UiIntent::CloseFindReplace);
+    }
+
+    /// Execute `Find & Replace` cell match or batch single-commit replacement via `table.setCells`.
+    pub fn push_execute_find_replace(
+        &mut self,
+        replace_all: bool,
+        find_query: impl Into<String>,
+        replace_with: impl Into<String>,
+        match_case: bool,
+        match_entire_cell: bool,
+    ) {
+        self.queue.push(UiIntent::ExecuteFindReplace {
+            replace_all,
+            find_query: find_query.into(),
+            replace_with: replace_with.into(),
+            match_case,
+            match_entire_cell,
+        });
     }
 
     /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
@@ -1427,7 +1791,502 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         UiIntent::ClearBrush => {
             app.clear_brush();
         }
+        other => return apply_wave4_intent(app, other),
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::PatchActiveDialog { fields } => {
+            crate::gui_actions::patch_active_dialog(app, &fields)?;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::CommitDialogAction { action } => {
+            let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
+        }
+        UiIntent::CloseAllModals => {
+            app.canvas_dialogs.close_dialog();
+            app.grid.variables_dialog.open = false;
+            app.grid.import_wizard.open = false;
+            app.egui_views.transform_modals.open_kind = None;
+            app.egui_views.app_modals.close_all();
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::OpenManageVariables { .. }
+        | UiIntent::SelectManageVarColumn { .. }
+        | UiIntent::StageManageVarRecode { .. }
+        | UiIntent::ClearManageVarRecodes
+        | UiIntent::ApplyManageVarRecodes { .. }
+        | UiIntent::ApplyManageVarOrder { .. }
+        | UiIntent::CloseManageVariables
+        | UiIntent::OpenImportWizard { .. }
+        | UiIntent::UpdateImportWizard(_)
+        | UiIntent::CommitImportWizard { .. }
+        | UiIntent::CloseImportWizard
+        | UiIntent::OpenTransformModal { .. }
+        | UiIntent::CloseTransformModal
+        | UiIntent::GridCopySelection
+        | UiIntent::GridCutSelection
+        | UiIntent::GridPasteFromClipboard { .. } => apply_wave4_grid_wizard_intent(app, intent),
+        UiIntent::SetAnalyzeQuery { .. }
+        | UiIntent::SelectAnalyzeEntry { .. }
+        | UiIntent::ToggleAnalyzeDataset { .. }
+        | UiIntent::SetAnalyzeSelectedDatasets { .. }
+        | UiIntent::SetEditParamsDraft { .. }
+        | UiIntent::SetEditParamsActiveTab { .. }
+        | UiIntent::SetEditParamsPairedOrMatched { .. }
+        | UiIntent::SetEditParamsConfidence { .. }
+        | UiIntent::SaveEditParamsAsDefault
+        | UiIntent::SelectRetargetSource { .. }
+        | UiIntent::ResolveDuplicateAnalysis { .. }
+        | UiIntent::SelectHookConstant { .. }
+        | UiIntent::UnlinkHookConstant
+        | UiIntent::UpdatePowerWizardState(_)
+        | UiIntent::CommitPowerWizard { .. }
+        | UiIntent::UpdateChangeGraphTypeState(_)
+        | UiIntent::UpdateFormatGraphState(_)
+        | UiIntent::UpdateFormatAxesState(_)
+        | UiIntent::UpdateBubblePlotState(_)
+        | UiIntent::UpdatePairwiseState(_)
+        | UiIntent::UpdatePageLayoutState(_)
+        | UiIntent::UpdateExportFigureState(_)
+        | UiIntent::UpdatePrintDialogState(_) => apply_wave4_modal_state_intent(app, intent),
+        UiIntent::OpenPreferences { .. }
+        | UiIntent::ClosePreferences { .. }
+        | UiIntent::SetShortcutBinding { .. }
+        | UiIntent::ResetShortcutBinding { .. }
+        | UiIntent::UpdatePreferencesDraft(_)
+        | UiIntent::OpenRecoveryDialog { .. }
+        | UiIntent::ResolveRecoveryDialog { .. }
+        | UiIntent::ResolveUnsavedChanges { .. }
+        | UiIntent::OpenFindReplace { .. }
+        | UiIntent::CloseFindReplace
+        | UiIntent::ExecuteFindReplace { .. } => apply_wave4_app_modal_intent(app, intent),
+        _ => Ok(UiIntentOutcome::ShellUpdated),
+    }
+}
+
+fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::OpenManageVariables { sheet_id, column } => {
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                let col = column.unwrap_or(0).min(ds.archetype.column_count().saturating_sub(1));
+                app.grid.variables_dialog.open_for_column(&ds, col);
+            } else {
+                app.grid.variables_dialog.open = true;
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::SelectManageVarColumn { sheet_id, column } => {
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                let col = column.min(ds.archetype.column_count().saturating_sub(1));
+                app.grid.variables_dialog.open_for_column(&ds, col);
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::StageManageVarRecode { from, to } => {
+            app.grid.variables_dialog.add_recode_mapping(from, to);
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::ClearManageVarRecodes => {
+            app.grid.variables_dialog.recode_mappings.clear();
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::ApplyManageVarRecodes { sheet_id } => {
+            if let Some(tool_intent) = app.grid.variables_dialog.build_recode_command(&sheet_id) {
+                let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+                app.grid.variables_dialog.recode_mappings.clear();
+                if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                    app.grid.variables_dialog.sync_from_sheet(&ds);
+                }
+                return Ok(UiIntentOutcome::Engine { command_id: tool_intent.command_id, outcome });
+            }
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::ApplyManageVarOrder { sheet_id, column, order, reference_level } => {
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                app.grid.variables_dialog.set_level_order(order.clone(), Some(&ds));
+            }
+            let params = serde_json::json!({
+                "sheet_id": sheet_id.as_str(),
+                "column": column,
+                "order_spec": order,
+                "reference_level": reference_level,
+            });
+            let outcome = app.execute_session_ui_cmd("table.setCategoricalOrder", params)?;
+            if let Some(ds) = app.session.document().data_sheet(&sheet_id).cloned() {
+                app.grid.variables_dialog.sync_from_sheet(&ds);
+            }
+            Ok(UiIntentOutcome::Engine { command_id: String::from("table.setCategoricalOrder"), outcome })
+        }
+        UiIntent::CloseManageVariables => {
+            app.grid.variables_dialog.open = false;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::OpenImportWizard { origin, is_live_link, target_sheet_id } => {
+            app.grid.import_wizard.open = true;
+            app.grid.import_wizard.origin_kind = origin;
+            app.grid.import_wizard.is_live_link = is_live_link;
+            app.grid.import_wizard.source_sheet_id = target_sheet_id
+                .or_else(|| app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned());
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::UpdateImportWizard(wizard) => {
+            app.grid.import_wizard = *wizard;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::CommitImportWizard { close_after } => {
+            let target_id = app
+                .session
+                .document()
+                .active_sheet_id
+                .as_ref()
+                .filter(|id| app.session.document().data_sheet(id).is_some())
+                .cloned()
+                .or_else(|| app.grid.import_wizard.source_sheet_id.clone())
+                .or_else(|| app.session.document().data_sheets.first().map(|s| s.id.clone()))
+                .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "no data sheet available for import wizard"))?;
+            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(app.session.document()));
+            let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+            if close_after {
+                app.grid.import_wizard.open = false;
+            }
+            Ok(UiIntentOutcome::Engine { command_id: tool_intent.command_id, outcome })
+        }
+        UiIntent::CloseImportWizard => {
+            app.grid.import_wizard.open = false;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::OpenTransformModal { sheet_id, kind } => {
+            app.egui_views.transform_modals.open_kind = Some(kind);
+            app.egui_views.transform_modals.target_sheet_id = Some(sheet_id);
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::CloseTransformModal => {
+            app.egui_views.transform_modals.open_kind = None;
+            Ok(UiIntentOutcome::ShellUpdated)
+        }
+        UiIntent::GridCopySelection => execute_grid_clipboard_copy(app, false),
+        UiIntent::GridCutSelection => execute_grid_clipboard_copy(app, true),
+        UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste(app, start_coord),
+        _ => Ok(UiIntentOutcome::ShellUpdated),
+    }
+}
+
+fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOutcome, EngineError> {
+    let doc = app.session.document();
+    let Some(ds_id) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned() else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+    let Some(ds) = doc.data_sheet(&ds_id) else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+    let coords = app.grid.all_selected_coords(ds);
+    let range = if let Some(first) = coords.first() {
+        let mut min_r = first.row;
+        let mut max_r = first.row;
+        let mut min_c = first.col;
+        let mut max_c = first.col;
+        let mut min_s = first.subcol;
+        let mut max_s = first.subcol;
+        for c in &coords {
+            min_r = min_r.min(c.row);
+            max_r = max_r.max(c.row);
+            min_c = min_c.min(c.col);
+            max_c = max_c.max(c.col);
+            min_s = min_s.min(c.subcol);
+            max_s = max_s.max(c.subcol);
+        }
+        let _ = (min_s, max_s);
+        Some(SheetCellRange::new(CellCoord::new(min_r, min_c, min_s), CellCoord::new(max_r, max_c, max_s)))
+    } else {
+        None
+    };
+    let tsv = match range {
+        Some(r) => ClipboardBundle::tsv_from_datasheet_range(ds, r, app.locale_preset.decimal_separator),
+        None => ClipboardBundle::tsv_from_datasheet(ds, app.locale_preset.decimal_separator).unwrap_or_default(),
+    };
+    app.interaction.last_clipboard_text = Some(tsv.clone());
+    let _ = app.write_clipboard_text(&tsv);
+    if cut
+        && !ds.frozen
+        && let Some(r) = range
+    {
+        let outcome = app.execute_session_ui_cmd("table.clearCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "range": r }))?;
+        return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn execute_grid_clipboard_paste(app: &mut UiApp, start_coord: Option<curvebook_tools::GridCellCoord>) -> Result<UiIntentOutcome, EngineError> {
+    let Some(ds_id) = app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned() else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+    let clip = app
+        .read_clipboard_text()
+        .ok()
+        .filter(|s| s.available)
+        .and_then(|s| s.text)
+        .filter(|t| !t.is_empty())
+        .or_else(|| app.interaction.last_clipboard_text.clone())
+        .unwrap_or_default();
+    if clip.is_empty() {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    }
+    let anchor = start_coord.or(app.grid.tool.active).unwrap_or(curvebook_tools::GridCellCoord::new(0, 0, 0));
+    let outcome = app.execute_session_ui_cmd(
+        "table.paste",
+        serde_json::json!({
+            "sheet_id": ds_id.as_str(),
+            "text": clip,
+            "start_row": anchor.row,
+            "start_col": anchor.col,
+            "start_subcol": anchor.subcol,
+            "propagate_title_header": false,
+        }),
+    )?;
+    Ok(UiIntentOutcome::Engine { command_id: String::from("table.paste"), outcome })
+}
+
+fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::SetAnalyzeQuery { query } => app.canvas_dialogs.analyze.search_query = query,
+        UiIntent::SelectAnalyzeEntry { entry_id, clear_duplicate_prompt } => {
+            app.canvas_dialogs.analyze.selected_entry_id = Some(entry_id);
+            if clear_duplicate_prompt && let ActiveDialog::DuplicateAnalysisPrompt { source_sheet_id, .. } = app.canvas_dialogs.active_dialog.clone()
+            {
+                app.canvas_dialogs.active_dialog = ActiveDialog::AnalyzeSheet { source_sheet_id };
+            }
+        }
+        UiIntent::ToggleAnalyzeDataset { col_index } => {
+            let sel = &mut app.canvas_dialogs.analyze.selected_data_sets;
+            if let Some(pos) = sel.iter().position(|&c| c == col_index) {
+                sel.remove(pos);
+            } else {
+                sel.push(col_index);
+            }
+        }
+        UiIntent::SetAnalyzeSelectedDatasets { cols } => {
+            app.canvas_dialogs.analyze.selected_data_sets = cols;
+        }
+        UiIntent::SetEditParamsDraft { spec } => {
+            app.canvas_dialogs.edit_params.draft = Some(*spec);
+            app.canvas_dialogs.edit_params.sync_rule_flags_from_kind();
+        }
+        UiIntent::SetEditParamsActiveTab { tab } => {
+            app.canvas_dialogs.edit_params.active_tab = tab;
+        }
+        UiIntent::SetEditParamsPairedOrMatched { paired } => {
+            app.canvas_dialogs.edit_params.paired_or_matched = paired;
+        }
+        UiIntent::SetEditParamsConfidence { level } => {
+            if let Some(spec) = &mut app.canvas_dialogs.edit_params.draft {
+                spec.confidence_level = level;
+            }
+        }
+        UiIntent::SaveEditParamsAsDefault => {
+            app.egui_views.anova_modal.method_saved_as_default = true;
+            app.egui_views.stats_modals.method_saved_as_default = true;
+        }
+        UiIntent::SelectRetargetSource { target_data_sheet_id } => {
+            app.canvas_dialogs.change_data.selected_target_id = Some(target_data_sheet_id);
+        }
+        UiIntent::ResolveDuplicateAnalysis { modify_existing_id } => {
+            let choice = match modify_existing_id {
+                Some(id) => AnalyzeDuplicateChoice::ModifyExisting(id),
+                None => AnalyzeDuplicateChoice::CreateNew,
+            };
+            if let Some(tool_intent) = app.canvas_dialogs.analyze.resolve_duplicate_choice(&choice) {
+                app.canvas_dialogs.close_dialog();
+                let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
+                return Ok(UiIntentOutcome::Engine { command_id: tool_intent.command_id, outcome });
+            }
+        }
+        UiIntent::SelectHookConstant { index } => {
+            app.canvas_dialogs.hook_picker.selected_index = index;
+        }
+        UiIntent::UnlinkHookConstant => {
+            app.canvas_dialogs.hook_picker.selected_index = None;
+        }
+        UiIntent::UpdatePowerWizardState(state) => {
+            app.canvas_dialogs.power_wizard = *state;
+            let _ = app.canvas_dialogs.power_wizard.recalculate();
+        }
+        UiIntent::CommitPowerWizard { action } => {
+            let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
+            return Ok(UiIntentOutcome::Ui { command_id: format!("power_wizard:{action}"), result: Some(result) });
+        }
+        UiIntent::UpdateChangeGraphTypeState(state) => app.canvas_dialogs.change_graph_type = *state,
+        UiIntent::UpdateFormatGraphState(state) => app.canvas_dialogs.format_graph = *state,
+        UiIntent::UpdateFormatAxesState(state) => app.canvas_dialogs.format_axes = *state,
+        UiIntent::UpdateBubblePlotState(state) => app.canvas_dialogs.bubble_plot = *state,
+        UiIntent::UpdatePairwiseState(state) => app.canvas_dialogs.pairwise = *state,
+        UiIntent::UpdatePageLayoutState(state) => app.canvas_dialogs.page_layout = *state,
+        UiIntent::UpdateExportFigureState(state) => app.canvas_dialogs.export_figure = *state,
+        UiIntent::UpdatePrintDialogState(state) => app.canvas_dialogs.print = *state,
         _ => {}
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
+    match intent {
+        UiIntent::OpenPreferences { category } => {
+            if let Some(cat) = category {
+                app.egui_views.app_modals.preferences.active_category = cat;
+            }
+            app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+            app.egui_views.app_modals.preferences_open = true;
+        }
+        UiIntent::ClosePreferences { save } => {
+            if save {
+                let scale_val = app.egui_views.app_modals.preferences.ui_scale_spinner.last_committed_value;
+                if let Some(pct) = scale_val {
+                    let scale = (pct / 100.0).clamp(0.75, 3.0) as f32;
+                    app.theme.ui_scale = scale;
+                }
+            }
+            app.egui_views.app_modals.preferences_open = false;
+        }
+        UiIntent::SetShortcutBinding { command_id, combo } => match app.shortcuts.set_shortcut(&command_id, &combo) {
+            Ok(()) => {
+                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+            }
+            Err(err) => {
+                app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
+                return Err(EngineError::with_code(ErrorCode::Conflict, err));
+            }
+        },
+        UiIntent::ResetShortcutBinding { command_id } => match command_id {
+            Some(id) => {
+                if let Err(err) = app.shortcuts.reset_shortcut(&id) {
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
+                    return Err(EngineError::with_code(ErrorCode::Conflict, err));
+                }
+                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+            }
+            None => {
+                app.shortcuts.reset_all();
+                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+            }
+        },
+        UiIntent::UpdatePreferencesDraft(draft) => {
+            app.egui_views.app_modals.preferences = *draft;
+        }
+        UiIntent::OpenRecoveryDialog { summary } => {
+            app.egui_views.app_modals.recovery_summary = *summary;
+            app.egui_views.app_modals.recovery_open = true;
+        }
+        UiIntent::ResolveRecoveryDialog { decision } => {
+            app.egui_views.app_modals.last_recovery_decision = Some(decision);
+            app.egui_views.app_modals.recovery_open = false;
+        }
+        UiIntent::ResolveUnsavedChanges { action } => {
+            app.egui_views.app_modals.pending_unsaved_action = Some(action);
+            app.egui_views.app_modals.unsaved_changes_open = false;
+        }
+        UiIntent::OpenFindReplace { initial_query } => {
+            if let Some(q) = initial_query {
+                app.egui_views.app_modals.find_replace.find_query = q;
+            }
+            app.egui_views.app_modals.find_replace_open = true;
+        }
+        UiIntent::CloseFindReplace => {
+            app.egui_views.app_modals.find_replace_open = false;
+        }
+        UiIntent::ExecuteFindReplace { replace_all, find_query, replace_with, match_case, match_entire_cell } => {
+            return apply_find_replace_on_active_sheet(app, replace_all, &find_query, &replace_with, match_case, match_entire_cell);
+        }
+        _ => {}
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
+}
+
+fn apply_find_replace_on_active_sheet(
+    app: &mut UiApp,
+    replace_all: bool,
+    find_query: &str,
+    replace_with: &str,
+    match_case: bool,
+    match_entire_cell: bool,
+) -> Result<UiIntentOutcome, EngineError> {
+    if find_query.is_empty() {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    }
+    let Some(ds_id) = app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned() else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+    let Some(ds) = app.session.document().data_sheet(&ds_id).cloned() else {
+        return Ok(UiIntentOutcome::ShellUpdated);
+    };
+
+    let mut edits = Vec::new();
+    let mut first_match: Option<curvebook_tools::GridCellCoord> = None;
+    let mut match_count = 0usize;
+    let query_cmp = if match_case { find_query.to_owned() } else { find_query.to_ascii_lowercase() };
+
+    let rows = ds.archetype.row_count();
+    let cols = ds.archetype.column_count();
+    for r in 0..rows {
+        for c in 0..cols {
+            let subcols = crate::grid_view::data_set_subcolumn_count(&ds.archetype, c).max(1);
+            for s in 0..subcols {
+                let Some(cell) = ds.archetype.data_cell(CellCoord::new(r, c, s)) else {
+                    continue;
+                };
+                let raw = match &cell.value {
+                    curvebook_doc::CellValue::Empty => continue,
+                    curvebook_doc::CellValue::Number(v) => v.to_string(),
+                    curvebook_doc::CellValue::Text(t) => t.clone(),
+                };
+                let hay = if match_case { raw.clone() } else { raw.to_ascii_lowercase() };
+                let matched = if match_entire_cell { hay == query_cmp } else { hay.contains(&query_cmp) };
+                if !matched {
+                    continue;
+                }
+                match_count += 1;
+                if first_match.is_none() {
+                    first_match = Some(curvebook_tools::GridCellCoord::new(r, c, s));
+                }
+                if replace_all {
+                    let next_text = if match_entire_cell {
+                        replace_with.to_owned()
+                    } else if match_case {
+                        raw.replace(find_query, replace_with)
+                    } else {
+                        let mut out = String::new();
+                        let lower_raw = raw.to_ascii_lowercase();
+                        let mut cursor = 0usize;
+                        while let Some(rel) = lower_raw.get(cursor..).and_then(|slice| slice.find(&query_cmp)) {
+                            let start = cursor + rel;
+                            let end = start + query_cmp.len();
+                            if let Some(prefix) = raw.get(cursor..start) {
+                                out.push_str(prefix);
+                            }
+                            out.push_str(replace_with);
+                            cursor = end;
+                        }
+                        if let Some(tail) = raw.get(cursor..) {
+                            out.push_str(tail);
+                        }
+                        out
+                    };
+                    edits.push(serde_json::json!({ "row": r, "col": c, "subcol": s, "value": next_text }));
+                }
+            }
+        }
+    }
+
+    app.egui_views.app_modals.find_replace.match_count = match_count;
+    if let Some(coord) = first_match {
+        app.grid.select_single_sync(coord);
+        app.focus_widget_id = Some(format!("grid.cell.{}.{}.{}", coord.row, coord.col, coord.subcol));
+    }
+    if replace_all && !edits.is_empty() {
+        let outcome = app.execute_session_ui_cmd("table.setCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "edits": edits }))?;
+        return Ok(UiIntentOutcome::Engine { command_id: String::from("table.setCells"), outcome });
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }

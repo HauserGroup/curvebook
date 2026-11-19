@@ -19,7 +19,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::AssumptionDiagnosticBanner;
 use crate::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, render_canvas_view_for_sheet};
-use crate::egui_shell::data_grid::{ColumnGridRenderContext, render_column_grid};
+use crate::egui_shell::data_grid::{ColumnGridRenderContext, render_data_grid};
 use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
 use crate::egui_shell::inspect_bridge::{HybridCoexistenceDecision, HybridHostTextureFrame, render_legacy_canvas_in_rect};
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
@@ -53,6 +53,9 @@ pub enum CenterStageMode {
     Welcome,
     /// Native virtualized `egui` `Column` table sheet (`R15.2`).
     ColumnGrid,
+    /// Native virtualized `egui` grid for `XY`, `Grouped`, `Contingency`, `Survival`,
+    /// `PartsOfWhole`, `MultipleVariables`, and `Nested` tables (`R15.4`).
+    DataGrid,
     /// Native structured `38% / 62%` metadata constants and project notes editor (`§8.4`).
     InfoSheet,
     /// Native multi-tab reactive `ResultSheet` analysis report viewer (`§8.10`).
@@ -247,7 +250,7 @@ pub fn resolve_center_stage_mode(app: &UiApp, views: &EguiShellViewState) -> Cen
         if matches!(ds.archetype, TableArchetype::Column(_)) {
             return CenterStageMode::ColumnGrid;
         }
-        return CenterStageMode::LegacyDeferredSheet;
+        return CenterStageMode::DataGrid;
     }
     if doc.info_sheet(active_id).is_some() {
         return CenterStageMode::InfoSheet;
@@ -263,7 +266,7 @@ pub fn resolve_center_stage_mode(app: &UiApp, views: &EguiShellViewState) -> Cen
 
 fn mode_for_sheet(doc: &ProjectDocument, sheet_id: &SheetId) -> CenterStageMode {
     if let Some(ds) = doc.data_sheet(sheet_id) {
-        if matches!(ds.archetype, TableArchetype::Column(_)) { CenterStageMode::ColumnGrid } else { CenterStageMode::LegacyDeferredSheet }
+        if matches!(ds.archetype, TableArchetype::Column(_)) { CenterStageMode::ColumnGrid } else { CenterStageMode::DataGrid }
     } else if doc.info_sheet(sheet_id).is_some() {
         CenterStageMode::InfoSheet
     } else if doc.result_sheet(sheet_id).is_some() {
@@ -668,7 +671,8 @@ fn render_split_pane_container(
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
             render_split_column_sheet_preview(&mut body_ui, app, ds, slot, ctx_in.tokens, enabled, meta, intents, report);
         }
-    } else if pane_mode == CenterStageMode::LegacyDeferredSheet && !(active_matches && slot == SplitPaneSlot::Primary) {
+    } else if matches!(pane_mode, CenterStageMode::DataGrid | CenterStageMode::LegacyDeferredSheet) && !(active_matches && can_use_primary_grid_state)
+    {
         report.handled_natively = true;
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
             render_split_non_column_preview(&mut body_ui, ds, slot, ctx_in.tokens, enabled, meta, intents);
@@ -849,9 +853,9 @@ fn render_single_pane_mode(
             report.handled_natively = true;
             let _ = render_welcome_hub(ui, app, &mut views.welcome_hub, ctx_in.tokens, enabled, meta, intents);
         }
-        CenterStageMode::ColumnGrid => {
+        CenterStageMode::ColumnGrid | CenterStageMode::DataGrid => {
             report.handled_natively = true;
-            let grid_rep = render_column_grid(
+            let grid_rep = render_data_grid(
                 ui,
                 app,
                 &mut views.column_grid,

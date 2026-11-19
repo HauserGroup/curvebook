@@ -708,22 +708,59 @@ impl CurveBookNativeApp {
         let prev_scale = self.runtime.window(window_id).ok().map(|w| w.app().ui_scale());
         let prev_theme = self.runtime.window(window_id).ok().map(|w| w.app().theme.mode);
         let prev_locale = self.runtime.window(window_id).ok().map(|w| w.app().locale.clone());
+        let prev_shortcuts = self.runtime.window(window_id).ok().map(|w| w.app().shortcuts.clone());
+        let mut unsaved_action = None;
         if !remaining_intents.is_empty()
             && let Ok(win) = self.runtime.window_mut(window_id)
         {
             if let Err(err) = remaining_intents.commit_if_settled(win.app_mut(), false) {
                 self.status_banner = Some(err.to_string());
             } else {
+                unsaved_action = win.app_mut().egui_views.app_modals.pending_unsaved_action.take();
                 let changed = Some(win.app().ui_scale()) != prev_scale
                     || Some(win.app().theme.mode) != prev_theme
-                    || Some(win.app().locale.clone()) != prev_locale;
+                    || Some(win.app().locale.clone()) != prev_locale
+                    || Some(&win.app().shortcuts) != prev_shortcuts.as_ref();
                 if changed {
                     self.runtime.notify_preferences_changed(window_id);
                 }
             }
         }
+        if let Some(action) = unsaved_action {
+            self.apply_egui_unsaved_close_action(ctx, window_id, action);
+        }
         for cmd_id in host_commands {
             self.execute_menu_command(Some(ctx), window_id, &cmd_id);
+        }
+    }
+
+    fn apply_egui_unsaved_close_action(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: DesktopWindowId,
+        action: curvebook_ui_egui::egui_shell::app_modals::UnsavedCloseAction,
+    ) {
+        use curvebook_ui_egui::egui_shell::app_modals::UnsavedCloseAction;
+        match action {
+            UnsavedCloseAction::Save => match self.handle_native_save(window_id, false) {
+                Ok(()) => {
+                    let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
+                    if !still_dirty {
+                        match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
+                            Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                            Err(err) => self.status_banner = Some(err),
+                        }
+                    }
+                }
+                Err(err) => self.status_banner = Some(err),
+            },
+            UnsavedCloseAction::DontSave => match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
+                Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                Err(err) => self.status_banner = Some(err),
+            },
+            UnsavedCloseAction::Cancel => {
+                self.close_dialog_open = false;
+            }
         }
     }
 
@@ -922,7 +959,10 @@ impl CurveBookNativeApp {
         }
 
         let post_window_id = self.active_window_id();
-        self.render_unsaved_close_modal(&ctx, post_window_id);
+        let post_is_egui = self.runtime.window(post_window_id).is_ok_and(|w| w.app().ui_backend() == UiBackend::Egui);
+        if !post_is_egui {
+            self.render_unsaved_close_modal(&ctx, post_window_id);
+        }
         self.sync_window_title(&ctx, post_window_id);
 
         let will_discard = ctx.will_discard();
