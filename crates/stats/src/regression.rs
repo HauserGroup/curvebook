@@ -39,15 +39,15 @@ use crate::roc::{RocCiMethod, roc_curve_analysis};
 pub struct LinearTermEstimate {
     /// Parameter or encoded factor-level term name (e.g. `"Intercept"` or `"Arm [B]"`).
     pub name: String,
-    /// Ordinary least-squares regression coefficient $\hat{\beta}_j$.
+    /// Ordinary least-squares regression coefficient $\hat{\beta}_j$ (`f64::NAN` on aliased/collinear terms).
     pub estimate: f64,
-    /// Standard error $\sqrt{\hat{\sigma}^2 (X^\top X)^+_{jj}}$ (`0.0` or `NaN` on aliased/collinear terms).
+    /// Standard error $\sqrt{\hat{\sigma}^2 (X^\top X)^+_{jj}}$ (`f64::NAN` on aliased/collinear terms, `0.0` on exact non-aliased fits).
     pub se: f64,
-    /// Two-sided Student *t* statistic $\hat{\beta}_j / \mathrm{SE}(\hat{\beta}_j)$ on `df_residual` df (`0.0` if zero SE).
+    /// Two-sided Student *t* statistic $\hat{\beta}_j / \mathrm{SE}(\hat{\beta}_j)$ on `df_residual` df (`f64::NAN` when SE is zero or aliased).
     pub t_statistic: f64,
-    /// Two-sided *P* value $P(|T_{\text{df}}| \ge |t|)$ testing $H_0: \beta_j = 0$ (`NaN` if aliased).
+    /// Two-sided *P* value $P(|T_{\text{df}}| \ge |t|)$ testing $H_0: \beta_j = 0$ (`f64::NAN` when SE is zero or aliased).
     pub p_value: f64,
-    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` at configured `ConfidenceLevel`.
+    /// Two-sided `t(df_residual)` confidence interval `(lower, upper)` at configured `ConfidenceLevel` (`(f64::NAN, f64::NAN)` when SE is zero or aliased).
     pub ci: (f64, f64),
     /// Variance Inflation Factor $1 / (1 - R_j^2)$ measuring predictor collinearity (`None` for the intercept, when `compute_vif == false`, or single-predictor models).
     pub vif: Option<f64>,
@@ -358,24 +358,62 @@ pub fn multiple_linear_regression(
         cooks_distance.push(cook);
     }
 
-    let vifs = if compute_vif { compute_vifs_from_matrix(x, has_intercept) } else { vec![None; p] };
+    let mut aliased_flags = vec![false; p];
+    for &idx in &sol.aliased_columns {
+        if idx < p {
+            aliased_flags[idx] = true;
+        }
+    }
+
+    let vifs = if compute_vif { compute_vifs_from_matrix(x, has_intercept, &aliased_flags) } else { vec![None; p] };
     let t_crit = student_t_two_sided_isf(confidence.alpha(), df_resid_f)?;
+    let exact_fit = mse <= 0.0 || rss <= exact_fit_floor;
 
     let mut terms = Vec::with_capacity(p);
     for j in 0..p {
-        let est = sol.coefficients[j];
-        let se = (mse * cov_unscaled.get(j, j).unwrap_or(0.0).max(0.0)).sqrt();
-        let t_stat = if se > 0.0 { est / se } else { 0.0 };
-        let p_val = if se > 0.0 { student_t_two_sided_p(t_stat, df_resid_f)? } else { 1.0 };
-        let ci = (est - t_crit * se, est + t_crit * se);
+        let is_aliased = aliased_flags[j];
+        if is_aliased {
+            terms.push(LinearTermEstimate {
+                name: term_names[j].clone(),
+                estimate: f64::NAN,
+                se: f64::NAN,
+                t_statistic: f64::NAN,
+                p_value: f64::NAN,
+                ci: (f64::NAN, f64::NAN),
+                vif: None,
+                type_iii_ss: None,
+                type_iii_f: None,
+                type_iii_p: None,
+            });
+            continue;
+        }
 
-        let (ss_iii, f_iii, p_iii) = if p > 1 && !(has_intercept && j == 0) && !sol.aliased_columns.contains(&j) {
+        let est = sol.coefficients[j];
+        let raw_se = (mse * cov_unscaled.get(j, j).unwrap_or(0.0).max(0.0)).sqrt();
+        let se = if exact_fit && rss == 0.0 { 0.0 } else { raw_se };
+        let (t_stat, p_val, ci) = if se > 0.0 && !exact_fit {
+            let t_v = est / se;
+            let p_v = student_t_two_sided_p(t_v, df_resid_f)?;
+            (t_v, p_v, (est - t_crit * se, est + t_crit * se))
+        } else {
+            (f64::NAN, f64::NAN, (f64::NAN, f64::NAN))
+        };
+
+        let (ss_iii, f_iii, p_iii) = if p > 1 && !(has_intercept && j == 0) {
             let x_red = drop_matrix_column(x, j)?;
             if let Ok((red_sol, _)) = solve_linear_least_squares(&x_red, y) {
-                let ss_drop = (red_sol.rss - rss).max(0.0);
-                let f_drop = if mse > 0.0 { ss_drop / mse } else { 0.0 };
-                let p_drop = f_sf(f_drop, 1.0, df_resid_f).unwrap_or(1.0);
-                (Some(ss_drop), Some(f_drop), Some(p_drop))
+                if red_sol.rank >= rank {
+                    (None, None, None)
+                } else {
+                    let ss_drop = (red_sol.rss - rss).max(0.0);
+                    if mse > 0.0 && !exact_fit {
+                        let f_drop = ss_drop / mse;
+                        let p_drop = f_sf(f_drop, 1.0, df_resid_f).unwrap_or(1.0);
+                        (Some(ss_drop), Some(f_drop), Some(p_drop))
+                    } else {
+                        (Some(ss_drop), None, None)
+                    }
+                }
             } else {
                 (None, None, None)
             }
@@ -405,14 +443,9 @@ pub fn multiple_linear_regression(
     let aicc = if nf - k_ic - 1.0 > 0.0 { aic + (2.0 * k_ic * (k_ic + 1.0)) / (nf - k_ic - 1.0) } else { f64::INFINITY };
     let bic = n_ln_rss + k_ic * nf.ln();
 
-    let mut aliased_flags = vec![false; p];
-    for &idx in &sol.aliased_columns {
-        if idx < p {
-            aliased_flags[idx] = true;
-        }
-    }
-
-    let cov_beta: Vec<Vec<f64>> = (0..p).map(|j| (0..p).map(|k| mse * cov_unscaled.get(j, k).unwrap_or(0.0)).collect()).collect();
+    let cov_beta: Vec<Vec<f64>> = (0..p)
+        .map(|j| (0..p).map(|k| if aliased_flags[j] || aliased_flags[k] { 0.0 } else { mse * cov_unscaled.get(j, k).unwrap_or(0.0) }).collect())
+        .collect();
 
     Ok(MultipleLinearResult {
         n,
@@ -464,26 +497,32 @@ fn drop_matrix_column(x: &DenseMatrix, drop_col: usize) -> Result<DenseMatrix, S
     drop_matrix_columns(x, drop_col, drop_col.saturating_add(1))
 }
 
-fn compute_vifs_from_matrix(x: &DenseMatrix, has_intercept: bool) -> Vec<Option<f64>> {
+fn compute_vifs_from_matrix(x: &DenseMatrix, has_intercept: bool, aliased: &[bool]) -> Vec<Option<f64>> {
     let n = x.nrows();
     let p = x.ncols();
     let mut vifs = vec![None; p];
     let start = usize::from(has_intercept);
-    if p <= start + 1 {
+    let active_preds = (start..p).filter(|&c| !aliased.get(c).copied().unwrap_or(false)).count();
+    if active_preds <= 1 {
         return vifs;
     }
     for (j, slot) in vifs.iter_mut().enumerate().skip(start) {
+        if aliased.get(j).copied().unwrap_or(false) {
+            continue;
+        }
         let mut target = Vec::with_capacity(n);
-        let mut pred_cols = Vec::with_capacity(p - 1);
+        let retained_cols: Vec<usize> = (0..p).filter(|&c| c != j && !aliased.get(c).copied().unwrap_or(false)).collect();
+        if retained_cols.len() <= start {
+            continue;
+        }
+        let mut pred_cols = Vec::with_capacity(n * retained_cols.len());
         for r in 0..n {
             target.push(x.get(r, j).unwrap_or(0.0));
-            for c in 0..p {
-                if c != j {
-                    pred_cols.push(x.get(r, c).unwrap_or(0.0));
-                }
+            for &c in &retained_cols {
+                pred_cols.push(x.get(r, c).unwrap_or(0.0));
             }
         }
-        let Ok(xm) = DenseMatrix::from_row_major(n, p - 1, pred_cols) else { continue };
+        let Ok(xm) = DenseMatrix::from_row_major(n, retained_cols.len(), pred_cols) else { continue };
         let Ok(tm) = SummaryMoments::from_slice(&target) else { continue };
         if tm.css <= 0.0 {
             continue;
@@ -524,14 +563,113 @@ fn eval_logistic_ll(x: &DenseMatrix, y_binary: &[f64], b: &[f64], ridge: f64) ->
     (ll, probs, weights)
 }
 
-fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Result<(bool, bool), StatsError> {
-    let p = beta.len();
-    let mut ridge = 0.0_f64;
-    let mut separation_detected = false;
-    let mut converged = false;
-    let (mut ll_curr, mut probs, mut weights) = eval_logistic_ll(x, y_binary, beta, 0.0);
+fn has_logistic_separation(x: &DenseMatrix, y_binary: &[f64], dir: &[f64]) -> bool {
+    let p = dir.len();
+    let mut eta_min = f64::INFINITY;
+    let mut eta_max = f64::NEG_INFINITY;
+    let mut min_1 = f64::INFINITY;
+    let mut max_1 = f64::NEG_INFINITY;
+    let mut min_0 = f64::INFINITY;
+    let mut max_0 = f64::NEG_INFINITY;
+    for (r, &yr) in y_binary.iter().enumerate() {
+        let mut eta = 0.0_f64;
+        for (c, &dc) in dir.iter().enumerate().take(p) {
+            eta += x.get(r, c).unwrap_or(0.0) * dc;
+        }
+        if !eta.is_finite() {
+            return false;
+        }
+        eta_min = eta_min.min(eta);
+        eta_max = eta_max.max(eta);
+        if yr == 1.0 {
+            min_1 = min_1.min(eta);
+            max_1 = max_1.max(eta);
+        } else {
+            min_0 = min_0.min(eta);
+            max_0 = max_0.max(eta);
+        }
+    }
+    let span = eta_max - eta_min;
+    if !span.is_finite() || span <= 1.0e-12 {
+        return false;
+    }
+    let tol = 1.0e-12 * span;
+    (min_1 >= max_0 - tol && max_1 > min_0 + tol) || (min_0 >= max_1 - tol && max_0 > min_1 + tol)
+}
 
-    for _iter in 0..50 {
+fn standardize_logistic_design(x: &DenseMatrix) -> Result<(DenseMatrix, Vec<f64>, Vec<f64>, bool), StatsError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let nf = n as f64;
+    let has_const_intercept = p > 0 && (0..n).all(|r| (x.get(r, 0).unwrap_or(0.0) - 1.0).abs() <= 1.0e-14);
+    let mut means = vec![0.0_f64; p];
+    let mut scales = vec![1.0_f64; p];
+    let start = usize::from(has_const_intercept);
+    for j in start..p {
+        let col: Vec<f64> = (0..n).map(|r| x.get(r, j).unwrap_or(0.0)).collect();
+        if has_const_intercept {
+            let mom = SummaryMoments::from_slice(&col)?;
+            let sd = (mom.css / nf).sqrt();
+            means[j] = mom.mean;
+            scales[j] = if sd.is_finite() && sd > 1.0e-15 { sd } else { 1.0 };
+        } else {
+            let mut ss = NeumaierSum::new();
+            for &v in &col {
+                ss.add(v * v);
+            }
+            let rms = (ss.total() / nf).sqrt();
+            scales[j] = if rms.is_finite() && rms > 1.0e-15 { rms } else { 1.0 };
+        }
+    }
+    let mut z_flat = Vec::with_capacity(n * p);
+    for r in 0..n {
+        for j in 0..p {
+            let raw = x.get(r, j).unwrap_or(0.0);
+            z_flat.push((raw - means[j]) / scales[j]);
+        }
+    }
+    let z_mat = DenseMatrix::from_row_major(n, p, z_flat)?;
+    Ok((z_mat, means, scales, has_const_intercept))
+}
+
+fn center_logistic_design(x: &DenseMatrix, means: &[f64], has_const_intercept: bool) -> Result<DenseMatrix, StatsError> {
+    let n = x.nrows();
+    let p = x.ncols();
+    let mut c_flat = Vec::with_capacity(n * p);
+    for r in 0..n {
+        for j in 0..p {
+            let raw = x.get(r, j).unwrap_or(0.0);
+            let shift = if has_const_intercept && j > 0 { means[j] } else { 0.0 };
+            c_flat.push(raw - shift);
+        }
+    }
+    Ok(DenseMatrix::from_row_major(n, p, c_flat)?)
+}
+
+fn uncenter_beta(beta_c: &[f64], means: &[f64], scales: &[f64], has_const_intercept: bool) -> Vec<f64> {
+    let p = beta_c.len();
+    let mut beta = vec![0.0_f64; p];
+    let start = usize::from(has_const_intercept);
+    for j in start..p {
+        beta[j] = beta_c[j] / scales[j];
+    }
+    if has_const_intercept && p > 0 {
+        let mut intercept = beta_c[0];
+        for j in 1..p {
+            intercept -= beta[j] * means[j];
+        }
+        beta[0] = intercept;
+    }
+    beta
+}
+
+fn run_logistic_irls_solver(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64], ridge: f64, max_iters: usize) -> Result<(bool, bool), StatsError> {
+    let p = beta.len();
+    let (mut ll_curr, mut probs, mut weights) = eval_logistic_ll(x, y_binary, beta, ridge);
+    let mut converged = false;
+    let mut cholesky_failed = false;
+
+    for _iter in 0..max_iters {
         let mut grad = vec![0.0_f64; p];
         let mut info = vec![0.0_f64; p * p];
         for (r, (&yr, &pr)) in y_binary.iter().zip(probs.iter()).enumerate() {
@@ -561,8 +699,10 @@ fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Re
         let step = if let Ok(chol) = cholesky(&info_mat) {
             chol.solve(&grad)?
         } else {
-            separation_detected = true;
-            ridge = 1e-3;
+            cholesky_failed = true;
+            if ridge <= 0.0 {
+                break;
+            }
             let (ls, _) = solve_linear_least_squares(&info_mat, &grad)?;
             ls.coefficients
         };
@@ -573,31 +713,69 @@ fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Re
         for _ in 0..16 {
             let cand: Vec<f64> = (0..p).map(|j| beta[j] + scale * step[j]).collect();
             let (ll_cand, p_cand, w_cand) = eval_logistic_ll(x, y_binary, &cand, ridge);
-            if ll_cand.is_finite() && ll_cand >= ll_curr - 1e-10 {
+            if ll_cand.is_finite() && ll_cand >= ll_curr - 1.0e-10 {
                 let delta = (ll_cand - ll_curr).abs();
                 beta.copy_from_slice(&cand);
                 ll_curr = ll_cand;
                 probs = p_cand;
                 weights = w_cand;
                 accepted = true;
-                if delta < 1e-9 && max_step * scale < 1e-7 {
+                if delta < 1.0e-9 && max_step * scale < 1.0e-7 {
                     converged = true;
                 }
                 break;
             }
             scale *= 0.5;
         }
-        if beta.iter().skip(1).any(|b| b.abs() > 15.0) {
-            separation_detected = true;
-            if ridge == 0.0 {
-                ridge = 1e-2;
-            }
+        if ridge <= 0.0
+            && (has_logistic_separation(x, y_binary, beta)
+                || has_logistic_separation(x, y_binary, &step)
+                || beta.iter().skip(1).any(|b| b.abs() > 25.0))
+        {
+            break;
         }
         if converged || !accepted {
             break;
         }
     }
-    Ok((converged, separation_detected))
+    Ok((converged, cholesky_failed))
+}
+
+fn logistic_irls_loop(x: &DenseMatrix, y_binary: &[f64], beta: &mut [f64]) -> Result<(bool, bool), StatsError> {
+    let p = beta.len();
+    let (z_mat, means, scales, has_const_intercept) = standardize_logistic_design(x)?;
+    let mut beta_z = vec![0.0_f64; p];
+    if has_const_intercept && p > 0 {
+        beta_z[0] = beta[0];
+    }
+
+    // Phase 1: Pure unpenalized IRLS on affine-standardized coordinates so predictor unit
+    // rescaling cannot trigger spurious separation or ridge bias on well-specified fits.
+    let (p1_converged, p1_chol_failed) = run_logistic_irls_solver(&z_mat, y_binary, &mut beta_z, 0.0, 60)?;
+    let beta_p1 = uncenter_beta(&beta_z, &means, &scales, has_const_intercept);
+    let (_, p1_probs, _) = eval_logistic_ll(x, y_binary, &beta_p1, 0.0);
+    let probs_saturated = p1_probs.iter().all(|&pr| pr < 1.0e-4 || pr > 1.0 - 1.0e-4);
+    let start = usize::from(has_const_intercept);
+    let std_slope_diverged = beta_z.iter().skip(start).any(|b| b.abs() > 25.0);
+    let separated = p1_chol_failed || std_slope_diverged || probs_saturated || has_logistic_separation(&z_mat, y_binary, &beta_z);
+
+    if !separated {
+        beta.copy_from_slice(&beta_p1);
+        return Ok((p1_converged, false));
+    }
+
+    // Phase 2: Separation confirmed geometrically or by Fisher collapse — solve penalized IRLS
+    // on centered predictors and report unpenalized non-convergence alongside the safeguard flag.
+    let c_mat = center_logistic_design(x, &means, has_const_intercept)?;
+    let mut beta_c = vec![0.0_f64; p];
+    if has_const_intercept && p > 0 {
+        beta_c[0] = beta[0];
+    }
+    let _ = run_logistic_irls_solver(&c_mat, y_binary, &mut beta_c, 1.0e-2, 60)?;
+    let unit_scales = vec![1.0_f64; p];
+    let beta_p2 = uncenter_beta(&beta_c, &means, &unit_scales, has_const_intercept);
+    beta.copy_from_slice(&beta_p2);
+    Ok((false, true))
 }
 
 /// Fit binary Multiple Logistic Regression (`y in {0, 1}`) via IRLS Newton–Raphson with
@@ -672,7 +850,7 @@ pub fn multiple_logistic_regression(
     let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let vifs = if compute_vif { compute_vifs_from_matrix(x, true) } else { vec![None; p] };
+    let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
     let mut terms = Vec::with_capacity(p);
     for j in 0..p {
         let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
@@ -746,30 +924,83 @@ pub fn multiple_logistic_regression(
 
 fn hosmer_lemeshow_test(y: &[f64], probs: &[f64], g_groups: usize) -> Result<(f64, f64, f64), StatsError> {
     let n = y.len();
-    let g = g_groups.min(n / 2).max(2);
     let mut pairs: Vec<(f64, f64)> = probs.iter().copied().zip(y.iter().copied()).collect();
     pairs.sort_by(|a, b| a.0.total_cmp(&b.0));
 
-    let mut chi2 = 0.0_f64;
-    let mut actual_bins = 0_usize;
-    for b in 0..g {
-        let start = b * n / g;
-        let end = (b + 1) * n / g;
-        if end <= start {
+    // Group tied fitted probabilities before quantile binning so row input ordering can never
+    // split identical probabilities across neighboring deciles.
+    struct ProbBlock {
+        rep_p: f64,
+        sum_p: f64,
+        sum_y: f64,
+        count: usize,
+    }
+    let mut blocks: Vec<ProbBlock> = Vec::new();
+    for (p, yv) in pairs {
+        if let Some(last) = blocks.last_mut()
+            && (p - last.rep_p).abs() <= 1.0e-12 * (1.0 + last.rep_p.abs())
+        {
+            last.sum_p += p;
+            last.sum_y += yv;
+            last.count += 1;
             continue;
         }
-        let slice = &pairs[start..end];
-        let nb = slice.len() as f64;
-        let obs1: f64 = slice.iter().map(|(_, yv)| *yv).sum();
-        let exp1: f64 = slice.iter().map(|(pr, _)| *pr).sum();
-        let pi_bar = (exp1 / nb).clamp(1e-12, 1.0 - 1e-12);
+        blocks.push(ProbBlock { rep_p: p, sum_p: p, sum_y: yv, count: 1 });
+    }
+
+    if blocks.len() < 3 {
+        return Ok((f64::NAN, f64::NAN, f64::NAN));
+    }
+
+    let g = g_groups.min(blocks.len()).max(2);
+    let mut chi2 = 0.0_f64;
+    let mut actual_bins = 0_usize;
+    let mut block_idx = 0_usize;
+    let mut cum_count = 0_usize;
+    for bin_idx in 0..g {
+        if block_idx >= blocks.len() {
+            break;
+        }
+        let target = ((bin_idx + 1) * n) as f64 / (g as f64);
+        let remaining_bins = g - bin_idx - 1;
+        let mut obs1 = NeumaierSum::new();
+        let mut exp1 = NeumaierSum::new();
+        let mut nb_usize = 0_usize;
+
+        while block_idx < blocks.len() {
+            let blk = &blocks[block_idx];
+            if nb_usize > 0 {
+                let remaining_after = blocks.len() - block_idx;
+                if remaining_after <= remaining_bins {
+                    break;
+                }
+                let curr_dist = ((cum_count as f64) - target).abs();
+                let next_dist = (((cum_count + blk.count) as f64) - target).abs();
+                if next_dist > curr_dist {
+                    break;
+                }
+            }
+            exp1.add(blk.sum_p);
+            obs1.add(blk.sum_y);
+            nb_usize += blk.count;
+            cum_count += blk.count;
+            block_idx += 1;
+        }
+
+        let nb = nb_usize as f64;
+        let e1 = exp1.total();
+        let o1 = obs1.total();
+        let pi_bar = (e1 / nb).clamp(1e-12, 1.0 - 1e-12);
         let denom = nb * pi_bar * (1.0 - pi_bar);
         if denom > 0.0 {
-            chi2 += (obs1 - exp1).powi(2) / denom;
+            chi2 += (o1 - e1).powi(2) / denom;
             actual_bins += 1;
         }
     }
-    let df = (actual_bins.saturating_sub(2)).max(1) as f64;
+    if actual_bins < 3 {
+        return Ok((f64::NAN, f64::NAN, f64::NAN));
+    }
+    let df = (actual_bins - 2) as f64;
     let p_val = chi2_sf(chi2, df)?;
     Ok((chi2, df, p_val))
 }
@@ -834,7 +1065,7 @@ pub fn multiple_poisson_regression(
         return Err(StatsError::InsufficientSampleSize { context: "GLM regression", required: p + 1, actual: n });
     }
     for &yc in y_counts {
-        if !yc.is_finite() || yc < 0.0 {
+        if !yc.is_finite() || yc < 0.0 || yc.fract() != 0.0 {
             return Err(StatsError::InvalidParameter { name: "poisson_y", value: yc });
         }
     }
@@ -844,7 +1075,11 @@ pub fn multiple_poisson_regression(
     }
 
     let nf = n as f64;
-    let y_mean_raw = y_counts.iter().sum::<f64>() / nf;
+    let mut y_sum = NeumaierSum::new();
+    for &yc in y_counts {
+        y_sum.add(yc);
+    }
+    let y_mean_raw = y_sum.total() / nf;
     if y_mean_raw <= 0.0 {
         return Err(StatsError::InvalidParameter { name: "poisson_events", value: 0.0 });
     }
@@ -853,29 +1088,38 @@ pub fn multiple_poisson_regression(
     let mut beta = vec![0.0_f64; p];
     beta[0] = y_mean.ln();
 
-    let ln_fact = |y: f64| -> f64 { curvebook_math::special::ln_gamma(y + 1.0).unwrap_or(0.0) };
-    let ll_null: f64 = y_counts.iter().map(|&y| y * y_mean.ln() - y_mean - ln_fact(y)).sum();
-
-    let eval_poisson = |b: &[f64]| -> (f64, Vec<f64>) {
-        let mut ll = 0.0_f64;
+    let eval_poisson_half_dev = |b: &[f64]| -> Option<(f64, Vec<f64>, Vec<f64>)> {
+        let mut half_dev = NeumaierSum::new();
         let mut mu_vec = Vec::with_capacity(n);
+        let mut eta_vec = Vec::with_capacity(n);
         for (r, &yr) in y_counts.iter().enumerate() {
             let mut eta = 0.0_f64;
             for (c, &bc) in b.iter().enumerate() {
                 eta += x.get(r, c).unwrap_or(0.0) * bc;
             }
-            eta = eta.clamp(-25.0, 25.0);
+            if !eta.is_finite() || eta > 700.0 {
+                return None;
+            }
             let mu = eta.exp();
-            ll += yr * eta - mu - ln_fact(yr);
+            if !mu.is_finite() {
+                return None;
+            }
+            let contrib = if yr > 0.0 { yr * (yr.ln() - eta) - (yr - mu) } else { mu };
+            if !contrib.is_finite() {
+                return None;
+            }
+            half_dev.add(contrib);
             mu_vec.push(mu);
+            eta_vec.push(eta);
         }
-        (ll, mu_vec)
+        Some((half_dev.total().max(0.0), mu_vec, eta_vec))
     };
 
-    let (mut ll_curr, mut mus) = eval_poisson(&beta);
+    let (mut hd_curr, mut mus, mut etas) =
+        eval_poisson_half_dev(&beta).ok_or(StatsError::InvalidParameter { name: "poisson_eta", value: beta[0] })?;
     let mut converged = false;
 
-    for _iter in 0..50 {
+    for _iter in 0..80 {
         let mut grad = vec![0.0_f64; p];
         let mut info = vec![0.0_f64; p * p];
         for r in 0..n {
@@ -901,19 +1145,23 @@ pub fn multiple_poisson_regression(
             let (ls, _) = solve_linear_least_squares(&info_mat, &grad)?;
             ls.coefficients
         };
+        let max_eta_jump = (0..n).map(|r| (0..p).map(|j| x.get(r, j).unwrap_or(0.0) * step[j]).sum::<f64>().abs()).fold(0.0_f64, f64::max);
         let max_step = step.iter().map(|v| v.abs()).fold(0.0_f64, f64::max);
-        let mut scale = if max_step > 2.0 { 2.0 / max_step } else { 1.0 };
+        let mut scale = if max_eta_jump > 10.0 { 10.0 / max_eta_jump } else { 1.0 };
         let mut accepted = false;
-        for _ in 0..16 {
+        let hd_tol = 1.0e-10 * hd_curr.abs().max(1.0);
+        for _ in 0..24 {
             let cand: Vec<f64> = (0..p).map(|j| beta[j] + scale * step[j]).collect();
-            let (ll_cand, mu_cand) = eval_poisson(&cand);
-            if ll_cand.is_finite() && ll_cand >= ll_curr - 1e-10 {
-                let delta = (ll_cand - ll_curr).abs();
+            if let Some((hd_cand, mu_cand, eta_cand)) = eval_poisson_half_dev(&cand)
+                && hd_cand <= hd_curr + hd_tol
+            {
+                let delta = (hd_cand - hd_curr).abs();
                 beta = cand;
-                ll_curr = ll_cand;
+                hd_curr = hd_cand;
                 mus = mu_cand;
+                etas = eta_cand;
                 accepted = true;
-                if delta < 1e-9 && max_step * scale < 1e-7 {
+                if delta <= hd_tol && max_step * scale < 1.0e-7 && max_eta_jump * scale < 1.0e-7 {
                     converged = true;
                 }
                 break;
@@ -925,10 +1173,28 @@ pub fn multiple_poisson_regression(
         }
     }
 
+    let ln_fact = |y: f64| -> f64 { curvebook_math::special::ln_gamma(y + 1.0).unwrap_or(0.0) };
+    let mut ll_null_acc = NeumaierSum::new();
+    let mut ll_model_acc = NeumaierSum::new();
+    let mut half_dev_null_acc = NeumaierSum::new();
+    let ln_y_mean = y_mean.ln();
+    for (r, &yr) in y_counts.iter().enumerate() {
+        let lnf = ln_fact(yr);
+        ll_null_acc.add(yr * ln_y_mean - y_mean - lnf);
+        ll_model_acc.add(yr * etas[r] - mus[r] - lnf);
+        if yr > 0.0 {
+            half_dev_null_acc.add(yr * (yr.ln() - ln_y_mean) - (yr - y_mean));
+        } else {
+            half_dev_null_acc.add(y_mean);
+        }
+    }
+    let ll_null = ll_null_acc.total();
+    let ll_curr = ll_model_acc.total();
+    let dev_null = (2.0 * half_dev_null_acc.total()).max(0.0);
+    let dev_resid = (2.0 * hd_curr).max(0.0);
+
     let mut info_final = vec![0.0_f64; p * p];
-    let mut dev_null = 0.0_f64;
-    let mut dev_resid = 0.0_f64;
-    let mut pearson_chi2 = 0.0_f64;
+    let mut pearson_acc = NeumaierSum::new();
     for (r, (&yr, &mur)) in y_counts.iter().zip(mus.iter()).enumerate() {
         let wr_info = mur.max(0.0);
         let wr_dev = mur.max(1e-12);
@@ -938,15 +1204,9 @@ pub fn multiple_poisson_regression(
                 info_final[j * p + k] += wr_info * xrj * x.get(r, k).unwrap_or(0.0);
             }
         }
-        if yr > 0.0 {
-            dev_null += 2.0 * (yr * (yr / y_mean).ln() - (yr - y_mean));
-            dev_resid += 2.0 * (yr * (yr / wr_dev).ln() - (yr - wr_dev));
-        } else {
-            dev_null += 2.0 * y_mean;
-            dev_resid += 2.0 * wr_dev;
-        }
-        pearson_chi2 += (yr - wr_dev).powi(2) / wr_dev;
+        pearson_acc.add((yr - wr_dev).powi(2) / wr_dev);
     }
+    let pearson_chi2 = pearson_acc.total();
     for j in 0..p {
         for k in 0..j {
             info_final[j * p + k] = info_final[k * p + j];
@@ -956,7 +1216,7 @@ pub fn multiple_poisson_regression(
     let cov_beta = invert_glm_fisher_information(&info_mat, &diag_null, 1e-8)?;
 
     let z_crit = norm_two_sided_isf(confidence.alpha())?;
-    let vifs = if compute_vif { compute_vifs_from_matrix(x, true) } else { vec![None; p] };
+    let vifs = if compute_vif { compute_vifs_from_matrix(x, true, &vec![false; p]) } else { vec![None; p] };
     let mut terms = Vec::with_capacity(p);
     for j in 0..p {
         let se = cov_beta.get(j, j).unwrap_or(0.0).max(0.0).sqrt();
@@ -978,7 +1238,7 @@ pub fn multiple_poisson_regression(
 
     let df_resid = (n - p) as f64;
     let dispersion = pearson_chi2 / df_resid.max(1.0);
-    let lr_chi2 = (2.0 * (ll_curr - ll_null)).max(0.0);
+    let lr_chi2 = (dev_null - dev_resid).max(0.0);
     let lr_df = (p - 1).max(1) as f64;
     let lr_p = chi2_sf(lr_chi2, lr_df)?;
 
@@ -993,8 +1253,8 @@ pub fn multiple_poisson_regression(
         terms,
         log_lik_null: ll_null,
         log_lik_model: ll_curr,
-        deviance_null: dev_null.max(0.0),
-        deviance_residual: dev_resid.max(0.0),
+        deviance_null: dev_null,
+        deviance_residual: dev_resid,
         pearson_chi2,
         df_residual: df_resid,
         dispersion_pearson: dispersion,
@@ -1012,6 +1272,20 @@ pub fn multiple_poisson_regression(
 // Design Matrix Builder & ResultSheet Builder
 // ============================================================================
 
+fn validate_selected_data_sets(selected: &[usize], total: usize) -> Result<(), StatsError> {
+    let mut seen = Vec::with_capacity(selected.len());
+    for &idx in selected {
+        if idx >= total {
+            return Err(StatsError::MissingColumn { index: idx });
+        }
+        if seen.contains(&idx) {
+            return Err(StatsError::InvalidParameter { name: "selected_data_sets", value: idx as f64 });
+        }
+        seen.push(idx);
+    }
+    Ok(())
+}
+
 struct GlmFactorSpan {
     label: String,
     col_start: usize,
@@ -1026,225 +1300,238 @@ enum RetainedGlmPred {
 struct GlmDesignMatrix {
     x_mat: DenseMatrix,
     y_vec: Vec<f64>,
-    source_rows: Vec<usize>,
+    row_labels: Vec<String>,
     term_names: Vec<String>,
     factor_spans: Vec<GlmFactorSpan>,
 }
 
-/// Assemble `(X, y, source_rows, term_names, factor_spans)` from a `MultipleVariablesTable`
+fn build_mv_glm_design(mv: &curvebook_doc::MultipleVariablesTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
+    validate_selected_data_sets(selected, mv.variables.len())?;
+    let resp_var = mv.variables.get(glm_spec.response_column).ok_or(StatsError::MissingColumn { index: glm_spec.response_column })?;
+    if glm_spec.predictor_columns.is_empty() {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
+    }
+    for &(ref_col, _) in &glm_spec.reference_levels {
+        if ref_col >= mv.variables.len() {
+            return Err(StatsError::MissingColumn { index: ref_col });
+        }
+    }
+    let mut is_cat = Vec::with_capacity(glm_spec.predictor_columns.len());
+    for &pc in &glm_spec.predictor_columns {
+        let var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+        is_cat.push(var.role == VariableRole::Categorical);
+    }
+
+    let mut retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)> = Vec::new();
+    for r in 0..mv.row_count() {
+        let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
+        let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
+        let mut ok = true;
+        for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+            let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
+            let cell = pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
+            if cell.excluded {
+                ok = false;
+                break;
+            }
+            if is_cat[pos] {
+                let tok = match &cell.value {
+                    curvebook_doc::CellValue::Text(s) => {
+                        let trimmed = s.trim();
+                        if trimmed.is_empty() {
+                            ok = false;
+                            break;
+                        }
+                        trimmed.to_owned()
+                    }
+                    curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
+                    _ => {
+                        ok = false;
+                        break;
+                    }
+                };
+                row_preds.push(RetainedGlmPred::Categorical(tok));
+            } else if let Some(xv) = cell.active_number() {
+                row_preds.push(RetainedGlmPred::Numeric(xv));
+            } else {
+                ok = false;
+                break;
+            }
+        }
+        if ok {
+            retained_rows.push((r + 1, yv, row_preds));
+        }
+    }
+
+    let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(glm_spec.predictor_columns.len());
+    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+        let var = &mv.variables[pc];
+        if is_cat[pos] {
+            let cells: Vec<Cell> = retained_rows
+                .iter()
+                .filter_map(|(_, _, preds)| match &preds[pos] {
+                    RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
+                    RetainedGlmPred::Numeric(_) => None,
+                })
+                .collect();
+            let retained_col = VariableColumn {
+                title: var.title.clone(),
+                role: var.role,
+                role_inferred: var.role_inferred,
+                source: var.source.clone(),
+                level_order: var.level_order.clone(),
+                cells,
+            };
+            let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
+            let explicit_ref = glm_spec.reference_levels.iter().rev().find(|(idx, _)| *idx == pc).map(|(_, l)| l.clone());
+            let ref_lvl = match explicit_ref {
+                Some(req) => {
+                    if !lvls.iter().any(|existing| existing == &req) {
+                        return Err(StatsError::InvalidParameter { name: "reference_levels", value: pc as f64 });
+                    }
+                    Some(req)
+                }
+                None => lvls.first().cloned(),
+            };
+            if let Some(rl) = ref_lvl {
+                lvls.retain(|l| l != &rl);
+                cat_levels.push(Some((rl, lvls)));
+            } else {
+                cat_levels.push(None);
+            }
+        } else {
+            cat_levels.push(None);
+        }
+    }
+
+    let mut term_names = vec![String::from("Intercept")];
+    let mut factor_spans = Vec::with_capacity(glm_spec.predictor_columns.len());
+    for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
+        let title = &mv.variables[pc].title;
+        let col_start = term_names.len();
+        if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
+            for lv in non_refs {
+                term_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
+            }
+        } else {
+            term_names.push(title.clone());
+        }
+        let col_end = term_names.len();
+        let col_count = col_end - col_start;
+        if col_count == 1 {
+            factor_spans.push(GlmFactorSpan { label: term_names[col_start].clone(), col_start, col_end });
+        } else if col_count >= 2 {
+            factor_spans.push(GlmFactorSpan { label: title.clone(), col_start, col_end });
+        }
+    }
+
+    let n_cols = term_names.len();
+    if !retained_rows.is_empty() && n_cols <= 1 {
+        return Err(StatsError::ZeroVariance { context: "GLM categorical predictor has fewer than 2 levels after complete-case filtering" });
+    }
+    let n_obs = retained_rows.len();
+    if n_obs <= n_cols {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM observations", required: n_cols + 1, actual: n_obs });
+    }
+    let mut x_rows = Vec::with_capacity(n_obs * n_cols);
+    let mut y_vec = Vec::with_capacity(n_obs);
+    let mut row_labels = Vec::with_capacity(n_obs);
+    for (row_num, yv, preds) in retained_rows {
+        row_labels.push(format!("Row {row_num}"));
+        y_vec.push(yv);
+        x_rows.push(1.0);
+        for (pos, pred) in preds.into_iter().enumerate() {
+            match (pred, &cat_levels[pos]) {
+                (RetainedGlmPred::Categorical(tok), Some((_, non_refs))) => {
+                    for lv in non_refs {
+                        x_rows.push(if &tok == lv { 1.0 } else { 0.0 });
+                    }
+                }
+                (RetainedGlmPred::Numeric(xv), None) => x_rows.push(xv),
+                _ => {}
+            }
+        }
+    }
+    let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
+    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans })
+}
+
+fn build_xy_glm_design(xy: &curvebook_doc::XyTable, selected: &[usize], glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
+    if xy.y_subcolumn_mode.is_pre_summarized() {
+        return Err(StatsError::RequiresRawReplicates);
+    }
+    if xy.data_sets.is_empty() {
+        return Err(StatsError::EmptyInput);
+    }
+    validate_selected_data_sets(selected, xy.data_sets.len())?;
+    if glm_spec.response_column >= xy.data_sets.len() {
+        return Err(StatsError::MissingColumn { index: glm_spec.response_column });
+    }
+    let y_idx = if selected.is_empty() {
+        glm_spec.response_column
+    } else if selected.len() == 1 {
+        let sel = selected[0];
+        if glm_spec.response_column == 0 || glm_spec.response_column == sel {
+            sel
+        } else {
+            return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
+        }
+    } else if selected.contains(&glm_spec.response_column) {
+        glm_spec.response_column
+    } else {
+        return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
+    };
+
+    if glm_spec.predictor_columns.is_empty() {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
+    }
+    for &pc in &glm_spec.predictor_columns {
+        if pc >= xy.data_sets.len().max(2) {
+            return Err(StatsError::MissingColumn { index: pc });
+        }
+    }
+    if glm_spec.predictor_columns.len() != 1 {
+        return Err(StatsError::InvalidParameter { name: "predictor_columns", value: glm_spec.predictor_columns.len() as f64 });
+    }
+    let pred_col = glm_spec.predictor_columns[0];
+    if pred_col >= 2 {
+        return Err(StatsError::InvalidParameter { name: "predictor_columns", value: pred_col as f64 });
+    }
+
+    let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
+    let n_subcols = xy.y_subcolumn_mode.subcolumn_count().max(1);
+    let mut x_rows = Vec::new();
+    let mut y_vec = Vec::new();
+    let mut row_labels = Vec::new();
+    for r in 0..xy.row_count() {
+        let Some(xv) = xy.x_value_at(r) else { continue };
+        let row_len = ds.cells.get(r).map_or(0, Vec::len);
+        for sub in 0..row_len {
+            let Some(yv) = ds.cell(r, sub).and_then(|c| c.active_number()) else { continue };
+            let lbl = if n_subcols > 1 { format!("Row {} (rep {})", r + 1, sub + 1) } else { format!("Row {}", r + 1) };
+            row_labels.push(lbl);
+            x_rows.push(1.0);
+            x_rows.push(xv);
+            y_vec.push(yv);
+        }
+    }
+    let n_obs = y_vec.len();
+    if n_obs < 3 {
+        return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: 3, actual: n_obs });
+    }
+    let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
+    let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
+    let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
+    Ok(GlmDesignMatrix { x_mat, y_vec, row_labels, term_names, factor_spans })
+}
+
+/// Assemble `(X, y, row_labels, term_names, factor_spans)` from a `MultipleVariablesTable`
 /// (with categorical reference-level dummy encoding derived strictly after complete-case filtering)
 /// or an `XyTable`.
 fn build_glm_design_with_factors(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSpec) -> Result<GlmDesignMatrix, StatsError> {
     match &sheet.archetype {
-        TableArchetype::MultipleVariables(mv) => {
-            let resp_var = mv.variables.get(glm_spec.response_column).ok_or(StatsError::MissingColumn { index: glm_spec.response_column })?;
-            if glm_spec.predictor_columns.is_empty() {
-                return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
-            }
-            let mut is_cat = Vec::with_capacity(glm_spec.predictor_columns.len());
-            for &pc in &glm_spec.predictor_columns {
-                let var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-                is_cat.push(var.role == VariableRole::Categorical);
-            }
-
-            let mut retained_rows: Vec<(usize, f64, Vec<RetainedGlmPred>)> = Vec::new();
-            for r in 0..mv.row_count() {
-                let Some(yv) = resp_var.cells.get(r).and_then(|c| c.active_number()) else { continue };
-                let mut row_preds = Vec::with_capacity(glm_spec.predictor_columns.len());
-                let mut ok = true;
-                for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-                    let pred_var = mv.variables.get(pc).ok_or(StatsError::MissingColumn { index: pc })?;
-                    let cell =
-                        pred_var.cells.get(r).ok_or(StatsError::DimensionMismatch { expected: mv.row_count(), actual: pred_var.cells.len() })?;
-                    if cell.excluded {
-                        ok = false;
-                        break;
-                    }
-                    if is_cat[pos] {
-                        let tok = match &cell.value {
-                            curvebook_doc::CellValue::Text(s) => {
-                                let trimmed = s.trim();
-                                if trimmed.is_empty() {
-                                    ok = false;
-                                    break;
-                                }
-                                trimmed.to_owned()
-                            }
-                            curvebook_doc::CellValue::Number(v) if v.is_finite() => format!("{v}"),
-                            _ => {
-                                ok = false;
-                                break;
-                            }
-                        };
-                        row_preds.push(RetainedGlmPred::Categorical(tok));
-                    } else if let Some(xv) = cell.active_number() {
-                        row_preds.push(RetainedGlmPred::Numeric(xv));
-                    } else {
-                        ok = false;
-                        break;
-                    }
-                }
-                if ok {
-                    retained_rows.push((r + 1, yv, row_preds));
-                }
-            }
-
-            let mut cat_levels: Vec<Option<(String, Vec<String>)>> = Vec::with_capacity(glm_spec.predictor_columns.len());
-            for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-                let var = &mv.variables[pc];
-                if is_cat[pos] {
-                    let cells: Vec<Cell> = retained_rows
-                        .iter()
-                        .filter_map(|(_, _, preds)| match &preds[pos] {
-                            RetainedGlmPred::Categorical(tok) => Some(Cell::text(tok.as_str())),
-                            RetainedGlmPred::Numeric(_) => None,
-                        })
-                        .collect();
-                    let retained_col = VariableColumn {
-                        title: var.title.clone(),
-                        role: var.role,
-                        role_inferred: var.role_inferred,
-                        source: var.source.clone(),
-                        level_order: var.level_order.clone(),
-                        cells,
-                    };
-                    let mut lvls: Vec<String> = retained_col.ordered_levels_with(&var.level_order).into_iter().map(|s| s.level).collect();
-                    let ref_lvl = glm_spec
-                        .reference_levels
-                        .iter()
-                        .find(|(idx, _)| *idx == pc)
-                        .map(|(_, l)| l.clone())
-                        .filter(|l| lvls.iter().any(|existing| existing == l))
-                        .or_else(|| lvls.first().cloned());
-                    if let Some(rl) = ref_lvl {
-                        lvls.retain(|l| l != &rl);
-                        cat_levels.push(Some((rl, lvls)));
-                    } else {
-                        cat_levels.push(None);
-                    }
-                } else {
-                    cat_levels.push(None);
-                }
-            }
-
-            let mut term_names = vec![String::from("Intercept")];
-            let mut factor_spans = Vec::with_capacity(glm_spec.predictor_columns.len());
-            for (pos, &pc) in glm_spec.predictor_columns.iter().enumerate() {
-                let title = &mv.variables[pc].title;
-                let col_start = term_names.len();
-                if let Some((ref_lvl, non_refs)) = &cat_levels[pos] {
-                    for lv in non_refs {
-                        term_names.push(format!("{title}[{lv} vs {ref_lvl}]"));
-                    }
-                } else {
-                    term_names.push(title.clone());
-                }
-                let col_end = term_names.len();
-                let col_count = col_end - col_start;
-                if col_count == 1 {
-                    factor_spans.push(GlmFactorSpan { label: term_names[col_start].clone(), col_start, col_end });
-                } else if col_count >= 2 {
-                    factor_spans.push(GlmFactorSpan { label: title.clone(), col_start, col_end });
-                }
-            }
-
-            let n_cols = term_names.len();
-            if !retained_rows.is_empty() && n_cols <= 1 {
-                return Err(StatsError::ZeroVariance { context: "GLM categorical predictor has fewer than 2 levels after complete-case filtering" });
-            }
-            let n_obs = retained_rows.len();
-            if n_obs <= n_cols {
-                return Err(StatsError::InsufficientSampleSize { context: "GLM observations", required: n_cols + 1, actual: n_obs });
-            }
-            let mut x_rows = Vec::with_capacity(n_obs * n_cols);
-            let mut y_vec = Vec::with_capacity(n_obs);
-            let mut source_rows = Vec::with_capacity(n_obs);
-            for (row_num, yv, preds) in retained_rows {
-                source_rows.push(row_num);
-                y_vec.push(yv);
-                x_rows.push(1.0);
-                for (pos, pred) in preds.into_iter().enumerate() {
-                    match (pred, &cat_levels[pos]) {
-                        (RetainedGlmPred::Categorical(tok), Some((_, non_refs))) => {
-                            for lv in non_refs {
-                                x_rows.push(if &tok == lv { 1.0 } else { 0.0 });
-                            }
-                        }
-                        (RetainedGlmPred::Numeric(xv), None) => x_rows.push(xv),
-                        _ => {}
-                    }
-                }
-            }
-            let x_mat = DenseMatrix::from_row_major(n_obs, n_cols, x_rows)?;
-            Ok(GlmDesignMatrix { x_mat, y_vec, source_rows, term_names, factor_spans })
-        }
-        TableArchetype::Xy(xy) => {
-            if xy.y_subcolumn_mode.is_pre_summarized() {
-                return Err(StatsError::RequiresRawReplicates);
-            }
-            if xy.data_sets.is_empty() {
-                return Err(StatsError::EmptyInput);
-            }
-            for &idx in &spec.selected_data_sets {
-                if idx >= xy.data_sets.len() {
-                    return Err(StatsError::MissingColumn { index: idx });
-                }
-            }
-            if glm_spec.response_column >= xy.data_sets.len() {
-                return Err(StatsError::MissingColumn { index: glm_spec.response_column });
-            }
-            let y_idx = if spec.selected_data_sets.is_empty() {
-                glm_spec.response_column
-            } else if spec.selected_data_sets.len() == 1 {
-                let sel = spec.selected_data_sets[0];
-                if glm_spec.response_column == 0 || glm_spec.response_column == sel {
-                    sel
-                } else {
-                    return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
-                }
-            } else if spec.selected_data_sets.contains(&glm_spec.response_column) {
-                glm_spec.response_column
-            } else {
-                return Err(StatsError::InvalidParameter { name: "response_column", value: glm_spec.response_column as f64 });
-            };
-
-            if glm_spec.predictor_columns.is_empty() {
-                return Err(StatsError::InsufficientSampleSize { context: "GLM predictors", required: 1, actual: 0 });
-            }
-            for &pc in &glm_spec.predictor_columns {
-                if pc >= xy.data_sets.len().max(2) {
-                    return Err(StatsError::MissingColumn { index: pc });
-                }
-            }
-            if glm_spec.predictor_columns.len() != 1 {
-                return Err(StatsError::InvalidParameter { name: "predictor_columns", value: glm_spec.predictor_columns.len() as f64 });
-            }
-            let pred_col = glm_spec.predictor_columns[0];
-            if pred_col >= 2 {
-                return Err(StatsError::InvalidParameter { name: "predictor_columns", value: pred_col as f64 });
-            }
-
-            let ds = xy.data_sets.get(y_idx).ok_or(StatsError::MissingColumn { index: y_idx })?;
-            let mut x_rows = Vec::new();
-            let mut y_vec = Vec::new();
-            let mut source_rows = Vec::new();
-            for r in 0..xy.row_count() {
-                let Some(xv) = xy.x_value_at(r) else { continue };
-                let Some(yv) = ds.cell(r, 0).and_then(|c| c.active_number()) else { continue };
-                source_rows.push(r + 1);
-                x_rows.push(1.0);
-                x_rows.push(xv);
-                y_vec.push(yv);
-            }
-            let n_obs = y_vec.len();
-            if n_obs < 3 {
-                return Err(StatsError::InsufficientSampleSize { context: "GLM XY observations", required: 3, actual: n_obs });
-            }
-            let x_mat = DenseMatrix::from_row_major(n_obs, 2, x_rows)?;
-            let term_names = vec![String::from("Intercept"), xy.x_title.clone()];
-            let factor_spans = vec![GlmFactorSpan { label: xy.x_title.clone(), col_start: 1, col_end: 2 }];
-            Ok(GlmDesignMatrix { x_mat, y_vec, source_rows, term_names, factor_spans })
-        }
+        TableArchetype::MultipleVariables(mv) => build_mv_glm_design(mv, &spec.selected_data_sets, glm_spec),
+        TableArchetype::Xy(xy) => build_xy_glm_design(xy, &spec.selected_data_sets, glm_spec),
         other => Err(StatsError::IncompatibleTable { analysis: "generalized linear model", actual: other.kind() }),
     }
 }
@@ -1268,7 +1555,7 @@ pub struct PassingBablokResult {
     pub intercept_ci: (f64, f64),
     /// Raw maximum absolute cumulative sum `H = max_k |S_k|` across ordered residuals.
     pub cusum_h: f64,
-    /// Standardized CUSUM statistic `H / sqrt(L + l)` distributed as Kolmogorov supremum.
+    /// Standardized CUSUM statistic `H / sqrt(L + 1)` (Passing & Bablok 1983 eq. 10) distributed as Kolmogorov supremum.
     pub cusum_statistic: f64,
     /// Two-sided asymptotic Kolmogorov CUSUM linearity *p*-value.
     pub cusum_p_value: f64,
@@ -1359,7 +1646,8 @@ fn passing_bablok_cusum(x: &[f64], y: &[f64], slope: f64, intercept: f64, residu
         h_raw = h_raw.max(cum.abs());
     }
 
-    let h_std = h_raw / ((pos_count + neg_count) as f64).sqrt();
+    let l_one = pos_count.max(neg_count);
+    let h_std = h_raw / ((l_one + 1) as f64).sqrt();
     let p_val = kolmogorov_cusum_p(h_std);
     (h_raw, h_std, p_val)
 }
@@ -1482,33 +1770,38 @@ pub fn passing_bablok_regression(x: &[f64], y: &[f64], conf: ConfidenceLevel) ->
     })
 }
 
-type PassingBablokInput = (Vec<f64>, Vec<f64>, String, String);
+type PassingBablokInput = (Vec<f64>, Vec<f64>, Vec<usize>, String, String);
 
-fn extract_passing_bablok_pairs(sheet: &DataSheet, x_col: usize, y_col: usize) -> Result<PassingBablokInput, StatsError> {
+fn extract_passing_bablok_pairs(sheet: &DataSheet, selected: &[usize], x_col: usize, y_col: usize) -> Result<PassingBablokInput, StatsError> {
     let mut xs = Vec::new();
     let mut ys = Vec::new();
+    let mut source_rows = Vec::new();
     let (x_label, y_label) = match &sheet.archetype {
         TableArchetype::Column(t) => {
             if t.subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
+            validate_selected_data_sets(selected, t.data_sets.len())?;
             let cx = t.data_sets.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
             let cy = t.data_sets.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
             for r in 0..t.row_count() {
                 if let (Some(xv), Some(yv)) = (cx.cell(r, 0).and_then(Cell::active_number), cy.cell(r, 0).and_then(Cell::active_number)) {
                     xs.push(xv);
                     ys.push(yv);
+                    source_rows.push(r + 1);
                 }
             }
             (cx.title.clone(), cy.title.clone())
         }
         TableArchetype::MultipleVariables(t) => {
+            validate_selected_data_sets(selected, t.variables.len())?;
             let vx = t.variables.get(x_col).ok_or(StatsError::MissingColumn { index: x_col })?;
             let vy = t.variables.get(y_col).ok_or(StatsError::MissingColumn { index: y_col })?;
             for r in 0..t.row_count() {
                 if let (Some(xv), Some(yv)) = (vx.cells.get(r).and_then(Cell::active_number), vy.cells.get(r).and_then(Cell::active_number)) {
                     xs.push(xv);
                     ys.push(yv);
+                    source_rows.push(r + 1);
                 }
             }
             (vx.title.clone(), vy.title.clone())
@@ -1517,6 +1810,7 @@ fn extract_passing_bablok_pairs(sheet: &DataSheet, x_col: usize, y_col: usize) -
             if t.y_subcolumn_mode.is_pre_summarized() {
                 return Err(StatsError::RequiresRawReplicates);
             }
+            validate_selected_data_sets(selected, t.data_sets.len())?;
             let total_cols = 1 + t.data_sets.len();
             if x_col >= total_cols {
                 return Err(StatsError::MissingColumn { index: x_col });
@@ -1532,6 +1826,7 @@ fn extract_passing_bablok_pairs(sheet: &DataSheet, x_col: usize, y_col: usize) -
                 if let (Some(xv), Some(yv)) = (val_for(r, x_col), val_for(r, y_col)) {
                     xs.push(xv);
                     ys.push(yv);
+                    source_rows.push(r + 1);
                 }
             }
             (label_for(x_col), label_for(y_col))
@@ -1542,7 +1837,7 @@ fn extract_passing_bablok_pairs(sheet: &DataSheet, x_col: usize, y_col: usize) -
     if xs.is_empty() {
         return Err(StatsError::EmptyInput);
     }
-    Ok((xs, ys, x_label, y_label))
+    Ok((xs, ys, source_rows, x_label, y_label))
 }
 
 /// Execute a [`PassingBablokSpec`] against a `Column`, `Xy`, or `MultipleVariables` [`DataSheet`]
@@ -1551,7 +1846,7 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
     let mut out = init_result_sheet(spec)?;
     let conf = spec.confidence_level;
     let p_fmt = spec.p_value_format;
-    let (xs, ys, x_label, y_label) = extract_passing_bablok_pairs(sheet, pb_spec.x_column, pb_spec.y_column)?;
+    let (xs, ys, source_rows, x_label, y_label) = extract_passing_bablok_pairs(sheet, &spec.selected_data_sets, pb_spec.x_column, pb_spec.y_column)?;
     let res = passing_bablok_regression(&xs, &ys, conf)?;
 
     push_scalar(&mut out, "Slope", None, res.slope);
@@ -1610,13 +1905,13 @@ pub fn run_passing_bablok_analysis(sheet: &DataSheet, spec: &AnalysisSpec, pb_sp
             String::from("Valid pairwise slopes (N)"),
             String::from("Negative-slope offset (K)"),
             String::from("CUSUM linearity H"),
-            String::from("CUSUM standardized H / sqrt(L + l)"),
+            String::from("CUSUM standardized H / sqrt(L + 1)"),
             String::from("CUSUM linearity P value"),
         ],
         summary_rows,
     ));
 
-    let resid_labels: Vec<String> = (1..=res.n).map(|i| format!("Row {i}")).collect();
+    let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
     let resid_rows: Vec<Vec<ResultCell>> = xs
         .iter()
         .zip(ys.iter())
@@ -1759,329 +2054,387 @@ fn append_linear_type_iii_tab(
     Ok(())
 }
 
+fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
+    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
+}
+
+fn populate_linear_glm_sheet(
+    out: &mut ResultSheet,
+    design: GlmDesignMatrix,
+    glm_spec: &GlmSpec,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) -> Result<(), StatsError> {
+    let res = multiple_linear_regression(&design.x_mat, &design.y_vec, &design.term_names, true, glm_spec.compute_vif, confidence)?;
+    push_scalar(out, "R squared", None, res.r_squared);
+    push_scalar(out, "Adjusted R squared", None, res.adjusted_r_squared);
+    push_scalar(out, "Residual SD (Sy.x)", None, res.residual_sd);
+    push_scalar(out, "F statistic", None, res.f_statistic);
+    push_scalar(out, "P value", None, res.f_p_value);
+    push_scalar(out, "AIC", None, res.aic);
+    push_scalar(out, "AICc", None, res.aicc);
+    push_scalar(out, "Durbin-Watson", None, res.durbin_watson);
+
+    let mut headers =
+        vec![String::from("Estimate"), String::from("SE"), String::from("t"), String::from("P value"), format!("{}% CI", confidence.percent())];
+    if glm_spec.compute_vif {
+        headers.push(String::from("VIF"));
+    }
+    let mut labels = Vec::with_capacity(res.terms.len());
+    let mut rows = Vec::with_capacity(res.terms.len());
+    let mut aliased_names = Vec::new();
+    let mut exact_fit_terms = false;
+    for (idx, t) in res.terms.iter().enumerate() {
+        labels.push(t.name.clone());
+        let mut r = if res.aliased_columns.get(idx).copied().unwrap_or(false) {
+            aliased_names.push(t.name.clone());
+            vec![ResultCell::Text(String::from("Aliased")), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty, ResultCell::Empty]
+        } else {
+            if !t.t_statistic.is_finite() {
+                exact_fit_terms = true;
+            }
+            vec![num_cell(t.estimate), num_cell(t.se), num_cell(t.t_statistic), p_cell(t.p_value, p_fmt), finite_ci_cell(t.ci.0, t.ci.1)]
+        };
+        if glm_spec.compute_vif {
+            r.push(opt_num_cell(t.vif));
+        }
+        rows.push(r);
+    }
+    let mut params_tab = build_tab(
+        "glm-linear-params",
+        "Multiple linear regression parameters",
+        ResultTabKind::ParametersAndConfidenceIntervals,
+        headers,
+        labels.clone(),
+        rows,
+    );
+    if !aliased_names.is_empty() {
+        params_tab
+            .footnotes
+            .push(format!("Aliased predictor(s) omitted from estimation due to exact linear dependence: {}.", aliased_names.join(", ")));
+    }
+    if exact_fit_terms {
+        params_tab.footnotes.push(String::from(
+            "Exact linear fit (zero residual sum of squares): coefficient t statistics, P values, and confidence intervals are unavailable.",
+        ));
+    }
+    out.tabs.push(params_tab);
+
+    let anova_rows = vec![
+        vec![
+            num_cell(res.ss_regression),
+            num_cell(res.df_model),
+            num_cell(res.ss_regression / res.df_model.max(1.0)),
+            num_cell(res.f_statistic),
+            p_cell(res.f_p_value, p_fmt),
+        ],
+        vec![num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
+        vec![num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
+    ];
+    out.tabs.push(build_tab(
+        "glm-linear-anova",
+        "ANOVA of regression",
+        ResultTabKind::AnovaTable,
+        vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
+        vec![String::from("Regression"), String::from("Residual"), String::from("Total")],
+        anova_rows,
+    ));
+
+    append_linear_type_iii_tab(out, &res, &design.x_mat, &design.y_vec, &design.factor_spans, p_fmt)?;
+
+    let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
+    out.tabs.push(build_tab(
+        "glm-linear-covariance",
+        "Parameter covariance matrix",
+        ResultTabKind::CovarianceMatrix,
+        labels.clone(),
+        labels,
+        cov_rows,
+    ));
+
+    let mut resid_rows = Vec::with_capacity(res.n);
+    for (i, &yi) in design.y_vec.iter().enumerate().take(res.n) {
+        resid_rows.push(vec![
+            num_cell(yi),
+            num_cell(res.fitted[i]),
+            num_cell(res.residuals[i]),
+            num_cell(res.leverage[i]),
+            num_cell(res.cooks_distance[i]),
+        ]);
+    }
+    out.tabs.push(build_tab(
+        "glm-linear-residuals",
+        "Linear regression residuals and influence",
+        ResultTabKind::Residuals,
+        vec![String::from("Observed Y"), String::from("Predicted Y"), String::from("Residual"), String::from("Leverage"), String::from("Cook's D")],
+        design.row_labels,
+        resid_rows,
+    ));
+
+    if !aliased_names.is_empty() {
+        out.checklist.push(checklist_item(
+            "Predictor collinearity (aliased terms)",
+            ChecklistStatus::Warn,
+            Some(format!("{} aliased term(s): {}", aliased_names.len(), aliased_names.join(", "))),
+            "Design matrix is rank-deficient; aliased columns are exact linear combinations of retained predictors and marked \"Aliased\".",
+        ));
+    }
+    let max_vif = res.terms.iter().filter_map(|t| t.vif).fold(0.0_f64, f64::max);
+    if glm_spec.compute_vif && max_vif > 0.0 {
+        let status = if max_vif >= 10.0 {
+            ChecklistStatus::Violated
+        } else if max_vif >= 5.0 {
+            ChecklistStatus::Warn
+        } else {
+            ChecklistStatus::Pass
+        };
+        out.checklist.push(checklist_item(
+            "Multicollinearity (VIF)",
+            status,
+            Some(format!("max VIF = {max_vif:.2}")),
+            if max_vif >= 10.0 {
+                "Severe multicollinearity detected (VIF >= 10); parameter estimates have inflated standard errors."
+            } else if max_vif >= 5.0 {
+                "Moderate multicollinearity detected (VIF >= 5)."
+            } else {
+                "Predictor collinearity is low (all VIF < 5)."
+            },
+        ));
+    }
+    let max_cook = res.cooks_distance.iter().copied().fold(0.0_f64, f64::max);
+    out.checklist.push(checklist_item(
+        "Influential observations (Cook's D)",
+        if max_cook > 1.0 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+        Some(format!("max Cook's D = {max_cook:.3}, DW = {:.3}", res.durbin_watson)),
+        if max_cook > 1.0 {
+            "One or more points have Cook's D > 1.0 and strongly influence the fitted hyperplane."
+        } else {
+            "No extreme high-leverage influential points (all Cook's D <= 1.0)."
+        },
+    ));
+    out.checklist.push(residual_normality_checklist_item(&res.residuals, confidence.alpha()));
+    Ok(())
+}
+
+fn populate_logistic_glm_sheet(
+    out: &mut ResultSheet,
+    design: GlmDesignMatrix,
+    glm_spec: &GlmSpec,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) -> Result<(), StatsError> {
+    let res = multiple_logistic_regression(&design.x_mat, &design.y_vec, &design.term_names, glm_spec.compute_vif, confidence)?;
+    push_scalar(out, "Converged", None, if res.converged { 1.0 } else { 0.0 });
+    push_scalar(out, "Log-likelihood (model)", None, res.log_lik_model);
+    push_scalar(out, "LR chi-square", None, res.lr_chi2);
+    push_scalar(out, "LR P value", None, res.lr_p);
+    push_scalar(out, "McFadden R squared", None, res.mcfadden_r2);
+    push_scalar(out, "Nagelkerke R squared", None, res.nagelkerke_r2);
+    push_scalar(out, "Tjur R squared", None, res.tjur_r2);
+    push_scalar(out, "AIC", None, res.aic);
+    push_scalar(out, "AICc", None, res.aicc);
+    push_scalar(out, "Hosmer-Lemeshow chi2", None, res.hosmer_lemeshow_chi2);
+    push_scalar(out, "Hosmer-Lemeshow P", None, res.hosmer_lemeshow_p);
+    if let Some(auc) = res.roc_auc {
+        push_scalar(out, "ROC AUC", None, auc);
+    }
+
+    let mut headers = vec![
+        String::from("beta"),
+        String::from("SE"),
+        String::from("Wald z"),
+        String::from("P value"),
+        String::from("Odds Ratio"),
+        format!("{}% CI (OR)", confidence.percent()),
+    ];
+    if glm_spec.compute_vif {
+        headers.push(String::from("VIF"));
+    }
+    let mut labels = Vec::with_capacity(res.terms.len());
+    let mut rows = Vec::with_capacity(res.terms.len());
+    for t in &res.terms {
+        labels.push(t.name.clone());
+        let mut r = vec![
+            num_cell(t.beta),
+            num_cell(t.se),
+            num_cell(t.z_statistic),
+            p_cell(t.p_value, p_fmt),
+            num_cell(t.exp_beta),
+            finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
+        ];
+        if glm_spec.compute_vif {
+            r.push(opt_num_cell(t.vif));
+        }
+        rows.push(r);
+    }
+    let mut params_tab =
+        build_tab("glm-logistic-params", "Logistic regression odds ratios", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels, rows);
+    if res.separation_detected {
+        params_tab
+            .footnotes
+            .push(String::from("Complete or quasi-complete separation detected: unpenalized MLE did not converge; ridge safeguard applied."));
+    } else if !res.converged {
+        params_tab
+            .footnotes
+            .push(String::from("IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable."));
+    }
+    if !res.hosmer_lemeshow_p.is_finite() {
+        params_tab.footnotes.push(String::from(
+            "Hosmer-Lemeshow goodness-of-fit test is unavailable because fewer than 3 distinct fitted-probability groups remain.",
+        ));
+    }
+    out.tabs.push(params_tab);
+
+    out.tabs.push(build_logistic_classification_tab(&design.y_vec, &res.predicted_probs));
+
+    let pred_rows: Vec<Vec<ResultCell>> = design
+        .y_vec
+        .iter()
+        .zip(res.predicted_probs.iter())
+        .map(|(&yi, &pi)| vec![num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })])
+        .collect();
+    out.tabs.push(build_tab(
+        "glm-logistic-predictions",
+        "Logistic regression predicted probabilities",
+        ResultTabKind::Residuals,
+        vec![String::from("Observed Y"), String::from("Predicted probability"), String::from("Predicted class")],
+        design.row_labels,
+        pred_rows,
+    ));
+
+    let hl_str = if res.hosmer_lemeshow_p.is_finite() { format!("{:.4}", res.hosmer_lemeshow_p) } else { String::from("unavailable") };
+    let status = if res.separation_detected || !res.converged { ChecklistStatus::Warn } else { ChecklistStatus::Pass };
+    let explanation = match (res.converged, res.separation_detected) {
+        (true, false) => "IRLS converged without separation; Hosmer-Lemeshow P and ROC AUC summarize calibration and discrimination.",
+        (false, true) => "Complete or quasi-complete separation detected; unpenalized IRLS did not converge and a penalized safeguard was applied.",
+        (true, true) => "Separation detected; penalized safeguard applied to stabilize odds ratios.",
+        (false, false) => "IRLS failed to converge within the iteration limit; parameter estimates and Wald tests may be unreliable.",
+    };
+    out.checklist.push(checklist_item(
+        "Logistic separation & calibration",
+        status,
+        Some(format!("converged = {}, Hosmer-Lemeshow P = {}, AUC = {:.3}", res.converged, hl_str, res.roc_auc.unwrap_or(0.5))),
+        explanation,
+    ));
+    Ok(())
+}
+
+fn populate_poisson_glm_sheet(
+    out: &mut ResultSheet,
+    design: GlmDesignMatrix,
+    glm_spec: &GlmSpec,
+    confidence: ConfidenceLevel,
+    p_fmt: PValueFormat,
+) -> Result<(), StatsError> {
+    let res = multiple_poisson_regression(&design.x_mat, &design.y_vec, &design.term_names, glm_spec.compute_vif, confidence)?;
+    let mcfadden_r2 = if res.log_lik_null.abs() > 1e-12 && res.log_lik_null.is_finite() && res.log_lik_model.is_finite() {
+        (1.0 - res.log_lik_model / res.log_lik_null).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    push_scalar(out, "Converged", None, if res.converged { 1.0 } else { 0.0 });
+    push_scalar(out, "Residual deviance", None, res.deviance_residual);
+    push_scalar(out, "Pearson dispersion", None, res.dispersion_pearson);
+    push_scalar(out, "LR chi-square", None, res.lr_chi2);
+    push_scalar(out, "LR P value", None, res.lr_p);
+    push_scalar(out, "AIC", None, res.aic);
+    push_scalar(out, "AICc", None, res.aicc);
+    push_scalar(out, "McFadden R squared", None, mcfadden_r2);
+
+    let mut headers = vec![
+        String::from("beta"),
+        String::from("SE"),
+        String::from("Wald z"),
+        String::from("P value"),
+        String::from("Rate Ratio"),
+        format!("{}% CI (RR)", confidence.percent()),
+    ];
+    if glm_spec.compute_vif {
+        headers.push(String::from("VIF"));
+    }
+    let mut labels = Vec::with_capacity(res.terms.len());
+    let mut rows = Vec::with_capacity(res.terms.len());
+    for t in &res.terms {
+        labels.push(t.name.clone());
+        let mut r = vec![
+            num_cell(t.beta),
+            num_cell(t.se),
+            num_cell(t.z_statistic),
+            p_cell(t.p_value, p_fmt),
+            num_cell(t.exp_beta),
+            finite_ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
+        ];
+        if glm_spec.compute_vif {
+            r.push(opt_num_cell(t.vif));
+        }
+        rows.push(r);
+    }
+    let mut params_tab =
+        build_tab("glm-poisson-params", "Poisson regression rate ratios", ResultTabKind::ParametersAndConfidenceIntervals, headers, labels, rows);
+    if !res.converged {
+        params_tab.footnotes.push(String::from(
+            "Poisson IRLS did not converge within maximum iterations; parameter estimates and Wald statistics may be unreliable.",
+        ));
+    }
+    out.tabs.push(params_tab);
+
+    let resid_rows: Vec<Vec<ResultCell>> = design
+        .y_vec
+        .iter()
+        .zip(res.predicted_means.iter())
+        .map(|(&yi, &mui)| {
+            let mu = mui.max(1e-12);
+            let pearson = (yi - mui) / mu.sqrt();
+            let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
+            let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
+            vec![num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]
+        })
+        .collect();
+    out.tabs.push(build_tab(
+        "glm-poisson-residuals",
+        "Poisson regression Pearson and deviance residuals",
+        ResultTabKind::Residuals,
+        vec![String::from("Observed Y"), String::from("Predicted count"), String::from("Pearson residual"), String::from("Deviance residual")],
+        design.row_labels,
+        resid_rows,
+    ));
+
+    out.checklist.push(checklist_item(
+        "Poisson IRLS convergence",
+        if res.converged { ChecklistStatus::Pass } else { ChecklistStatus::Warn },
+        Some(if res.converged { String::from("converged") } else { String::from("did not converge") }),
+        if res.converged {
+            "Poisson IRLS deviance and step criteria converged within tolerance."
+        } else {
+            "Poisson IRLS did not converge within the iteration limit (possible zero-count boundary separation); estimates may be unreliable."
+        },
+    ));
+
+    let overdispersed = res.dispersion_pearson > 1.5;
+    out.checklist.push(checklist_item(
+        "Equidispersion assumption (Poisson)",
+        if overdispersed { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
+        Some(format!("Pearson chi2 / df = {:.3}", res.dispersion_pearson)),
+        if overdispersed {
+            "Overdispersion detected (Pearson chi2 / df > 1.5); Poisson variance assumptions understate dispersion and standard errors."
+        } else {
+            "Count variance is consistent with Poisson equidispersion (dispersion <= 1.5)."
+        },
+    ));
+    Ok(())
+}
+
 /// Execute a [`GlmSpec`] (`Linear`, `Logistic`, or `Poisson`) against a `DataSheet`.
 pub fn run_glm_analysis(sheet: &DataSheet, spec: &AnalysisSpec, glm_spec: &GlmSpec) -> Result<ResultSheet, StatsError> {
     let mut out = init_result_sheet(spec)?;
     let confidence = spec.confidence_level;
     let p_fmt = spec.p_value_format;
     let design = build_glm_design_with_factors(sheet, spec, glm_spec)?;
-    let x_mat = design.x_mat;
-    let y_vec = design.y_vec;
-    let source_rows = design.source_rows;
-    let term_names = design.term_names;
-    let factor_spans = design.factor_spans;
 
     match glm_spec.family {
-        GlmFamily::Linear => {
-            let res = multiple_linear_regression(&x_mat, &y_vec, &term_names, true, glm_spec.compute_vif, confidence)?;
-            push_scalar(&mut out, "R squared", None, res.r_squared);
-            push_scalar(&mut out, "Adjusted R squared", None, res.adjusted_r_squared);
-            push_scalar(&mut out, "Residual SD (Sy.x)", None, res.residual_sd);
-            push_scalar(&mut out, "F statistic", None, res.f_statistic);
-            push_scalar(&mut out, "P value", None, res.f_p_value);
-            push_scalar(&mut out, "AIC", None, res.aic);
-            push_scalar(&mut out, "AICc", None, res.aicc);
-            push_scalar(&mut out, "Durbin-Watson", None, res.durbin_watson);
-
-            let mut headers = vec![
-                String::from("Estimate"),
-                String::from("SE"),
-                String::from("t"),
-                String::from("P value"),
-                format!("{}% CI", confidence.percent()),
-            ];
-            if glm_spec.compute_vif {
-                headers.push(String::from("VIF"));
-            }
-            let mut labels = Vec::with_capacity(res.terms.len());
-            let mut rows = Vec::with_capacity(res.terms.len());
-            for t in &res.terms {
-                labels.push(t.name.clone());
-                let mut r = vec![num_cell(t.estimate), num_cell(t.se), num_cell(t.t_statistic), p_cell(t.p_value, p_fmt), ci_cell(t.ci.0, t.ci.1)];
-                if glm_spec.compute_vif {
-                    r.push(opt_num_cell(t.vif));
-                }
-                rows.push(r);
-            }
-            out.tabs.push(build_tab(
-                "glm-linear-params",
-                "Multiple linear regression parameters",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                headers,
-                labels.clone(),
-                rows,
-            ));
-
-            // ANOVA table for regression.
-            let anova_rows = vec![
-                vec![
-                    num_cell(res.ss_regression),
-                    num_cell(res.df_model),
-                    num_cell(res.ss_regression / res.df_model.max(1.0)),
-                    num_cell(res.f_statistic),
-                    p_cell(res.f_p_value, p_fmt),
-                ],
-                vec![num_cell(res.rss), num_cell(res.df_residual), num_cell(res.residual_sd * res.residual_sd), ResultCell::Empty, ResultCell::Empty],
-                vec![num_cell(res.ss_total), num_cell((res.n - 1) as f64), ResultCell::Empty, ResultCell::Empty, ResultCell::Empty],
-            ];
-            out.tabs.push(build_tab(
-                "glm-linear-anova",
-                "ANOVA of regression",
-                ResultTabKind::AnovaTable,
-                vec![String::from("SS"), String::from("df"), String::from("MS"), String::from("F"), String::from("P value")],
-                vec![String::from("Regression"), String::from("Residual"), String::from("Total")],
-                anova_rows,
-            ));
-
-            // Type III partial sum of squares table: joint (K - 1)-df F tests for multi-level
-            // categorical factors and 1-df tests for continuous / 2-level predictors.
-            append_linear_type_iii_tab(&mut out, &res, &x_mat, &y_vec, &factor_spans, p_fmt)?;
-
-            // Parameter covariance matrix sigma^2 * (X'X)^-1.
-            let cov_rows: Vec<Vec<ResultCell>> = res.cov_beta.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
-            out.tabs.push(build_tab(
-                "glm-linear-covariance",
-                "Parameter covariance matrix",
-                ResultTabKind::CovarianceMatrix,
-                labels.clone(),
-                labels,
-                cov_rows,
-            ));
-
-            // Residuals and influence diagnostics.
-            let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
-            let mut resid_rows = Vec::with_capacity(res.n);
-            for (i, &yi) in y_vec.iter().enumerate().take(res.n) {
-                resid_rows.push(vec![
-                    num_cell(yi),
-                    num_cell(res.fitted[i]),
-                    num_cell(res.residuals[i]),
-                    num_cell(res.leverage[i]),
-                    num_cell(res.cooks_distance[i]),
-                ]);
-            }
-            out.tabs.push(build_tab(
-                "glm-linear-residuals",
-                "Linear regression residuals and influence",
-                ResultTabKind::Residuals,
-                vec![
-                    String::from("Observed Y"),
-                    String::from("Predicted Y"),
-                    String::from("Residual"),
-                    String::from("Leverage"),
-                    String::from("Cook's D"),
-                ],
-                resid_labels,
-                resid_rows,
-            ));
-
-            // Checklists: VIF, Cook's distance, and residual normality (QOL-7 diagnostics-only).
-            let max_vif = res.terms.iter().filter_map(|t| t.vif).fold(0.0_f64, f64::max);
-            if glm_spec.compute_vif && max_vif > 0.0 {
-                let status = if max_vif >= 10.0 {
-                    ChecklistStatus::Violated
-                } else if max_vif >= 5.0 {
-                    ChecklistStatus::Warn
-                } else {
-                    ChecklistStatus::Pass
-                };
-                out.checklist.push(checklist_item(
-                    "Multicollinearity (VIF)",
-                    status,
-                    Some(format!("max VIF = {max_vif:.2}")),
-                    if max_vif >= 10.0 {
-                        "Severe multicollinearity detected (VIF >= 10); parameter estimates have inflated standard errors."
-                    } else if max_vif >= 5.0 {
-                        "Moderate multicollinearity detected (VIF >= 5)."
-                    } else {
-                        "Predictor collinearity is low (all VIF < 5)."
-                    },
-                ));
-            }
-            let max_cook = res.cooks_distance.iter().copied().fold(0.0_f64, f64::max);
-            out.checklist.push(checklist_item(
-                "Influential observations (Cook's D)",
-                if max_cook > 1.0 { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
-                Some(format!("max Cook's D = {max_cook:.3}, DW = {:.3}", res.durbin_watson)),
-                if max_cook > 1.0 {
-                    "One or more points have Cook's D > 1.0 and strongly influence the fitted hyperplane."
-                } else {
-                    "No extreme high-leverage influential points (all Cook's D <= 1.0)."
-                },
-            ));
-            out.checklist.push(residual_normality_checklist_item(&res.residuals, confidence.alpha()));
-        }
-        GlmFamily::Logistic => {
-            let res = multiple_logistic_regression(&x_mat, &y_vec, &term_names, glm_spec.compute_vif, confidence)?;
-            push_scalar(&mut out, "Log-likelihood (model)", None, res.log_lik_model);
-            push_scalar(&mut out, "LR chi-square", None, res.lr_chi2);
-            push_scalar(&mut out, "LR P value", None, res.lr_p);
-            push_scalar(&mut out, "McFadden R squared", None, res.mcfadden_r2);
-            push_scalar(&mut out, "Nagelkerke R squared", None, res.nagelkerke_r2);
-            push_scalar(&mut out, "Tjur R squared", None, res.tjur_r2);
-            push_scalar(&mut out, "AIC", None, res.aic);
-            push_scalar(&mut out, "AICc", None, res.aicc);
-            push_scalar(&mut out, "Hosmer-Lemeshow chi2", None, res.hosmer_lemeshow_chi2);
-            push_scalar(&mut out, "Hosmer-Lemeshow P", None, res.hosmer_lemeshow_p);
-            if let Some(auc) = res.roc_auc {
-                push_scalar(&mut out, "ROC AUC", None, auc);
-            }
-
-            let mut headers = vec![
-                String::from("beta"),
-                String::from("SE"),
-                String::from("Wald z"),
-                String::from("P value"),
-                String::from("Odds Ratio"),
-                format!("{}% CI (OR)", confidence.percent()),
-            ];
-            if glm_spec.compute_vif {
-                headers.push(String::from("VIF"));
-            }
-            let mut labels = Vec::with_capacity(res.terms.len());
-            let mut rows = Vec::with_capacity(res.terms.len());
-            for t in &res.terms {
-                labels.push(t.name.clone());
-                let mut r = vec![
-                    num_cell(t.beta),
-                    num_cell(t.se),
-                    num_cell(t.z_statistic),
-                    p_cell(t.p_value, p_fmt),
-                    num_cell(t.exp_beta),
-                    ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-                ];
-                if glm_spec.compute_vif {
-                    r.push(opt_num_cell(t.vif));
-                }
-                rows.push(r);
-            }
-            out.tabs.push(build_tab(
-                "glm-logistic-params",
-                "Logistic regression odds ratios",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                headers,
-                labels,
-                rows,
-            ));
-
-            out.tabs.push(build_logistic_classification_tab(&y_vec, &res.predicted_probs));
-
-            let pred_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
-            let pred_rows: Vec<Vec<ResultCell>> = y_vec
-                .iter()
-                .zip(res.predicted_probs.iter())
-                .map(|(&yi, &pi)| vec![num_cell(yi), num_cell(pi), num_cell(if pi >= 0.5 { 1.0 } else { 0.0 })])
-                .collect();
-            out.tabs.push(build_tab(
-                "glm-logistic-predictions",
-                "Logistic regression predicted probabilities",
-                ResultTabKind::Residuals,
-                vec![String::from("Observed Y"), String::from("Predicted probability"), String::from("Predicted class")],
-                pred_labels,
-                pred_rows,
-            ));
-
-            out.checklist.push(checklist_item(
-                "Logistic separation & calibration",
-                if res.separation_detected { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
-                Some(format!("Hosmer-Lemeshow P = {:.4}, AUC = {:.3}", res.hosmer_lemeshow_p, res.roc_auc.unwrap_or(0.5))),
-                if res.separation_detected {
-                    "Complete or quasi-complete separation detected; penalized safeguard applied to stabilize odds ratios."
-                } else {
-                    "IRLS converged without separation; Hosmer-Lemeshow P and ROC AUC summarize calibration and discrimination."
-                },
-            ));
-        }
-        GlmFamily::Poisson => {
-            let res = multiple_poisson_regression(&x_mat, &y_vec, &term_names, glm_spec.compute_vif, confidence)?;
-            let mcfadden_r2 = if res.log_lik_null.abs() > 1e-12 && res.log_lik_null.is_finite() && res.log_lik_model.is_finite() {
-                (1.0 - res.log_lik_model / res.log_lik_null).clamp(0.0, 1.0)
-            } else {
-                0.0
-            };
-            push_scalar(&mut out, "Residual deviance", None, res.deviance_residual);
-            push_scalar(&mut out, "Pearson dispersion", None, res.dispersion_pearson);
-            push_scalar(&mut out, "LR chi-square", None, res.lr_chi2);
-            push_scalar(&mut out, "LR P value", None, res.lr_p);
-            push_scalar(&mut out, "AIC", None, res.aic);
-            push_scalar(&mut out, "AICc", None, res.aicc);
-            push_scalar(&mut out, "McFadden R squared", None, mcfadden_r2);
-
-            let mut headers = vec![
-                String::from("beta"),
-                String::from("SE"),
-                String::from("Wald z"),
-                String::from("P value"),
-                String::from("Rate Ratio"),
-                format!("{}% CI (RR)", confidence.percent()),
-            ];
-            if glm_spec.compute_vif {
-                headers.push(String::from("VIF"));
-            }
-            let mut labels = Vec::with_capacity(res.terms.len());
-            let mut rows = Vec::with_capacity(res.terms.len());
-            for t in &res.terms {
-                labels.push(t.name.clone());
-                let mut r = vec![
-                    num_cell(t.beta),
-                    num_cell(t.se),
-                    num_cell(t.z_statistic),
-                    p_cell(t.p_value, p_fmt),
-                    num_cell(t.exp_beta),
-                    ci_cell(t.exp_beta_ci.0, t.exp_beta_ci.1),
-                ];
-                if glm_spec.compute_vif {
-                    r.push(opt_num_cell(t.vif));
-                }
-                rows.push(r);
-            }
-            out.tabs.push(build_tab(
-                "glm-poisson-params",
-                "Poisson regression rate ratios",
-                ResultTabKind::ParametersAndConfidenceIntervals,
-                headers,
-                labels,
-                rows,
-            ));
-
-            let resid_labels: Vec<String> = source_rows.iter().map(|r| format!("Row {r}")).collect();
-            let resid_rows: Vec<Vec<ResultCell>> = y_vec
-                .iter()
-                .zip(res.predicted_means.iter())
-                .map(|(&yi, &mui)| {
-                    let mu = mui.max(1e-12);
-                    let pearson = (yi - mui) / mu.sqrt();
-                    let dev_sq = if yi > 0.0 { 2.0 * (yi * (yi / mu).ln() - (yi - mu)) } else { 2.0 * mu };
-                    let dev_res = if yi >= mui { dev_sq.max(0.0).sqrt() } else { -dev_sq.max(0.0).sqrt() };
-                    vec![num_cell(yi), num_cell(mui), num_cell(pearson), num_cell(dev_res)]
-                })
-                .collect();
-            out.tabs.push(build_tab(
-                "glm-poisson-residuals",
-                "Poisson regression Pearson and deviance residuals",
-                ResultTabKind::Residuals,
-                vec![
-                    String::from("Observed Y"),
-                    String::from("Predicted count"),
-                    String::from("Pearson residual"),
-                    String::from("Deviance residual"),
-                ],
-                resid_labels,
-                resid_rows,
-            ));
-
-            let overdispersed = res.dispersion_pearson > 1.5;
-            out.checklist.push(checklist_item(
-                "Equidispersion assumption (Poisson)",
-                if overdispersed { ChecklistStatus::Warn } else { ChecklistStatus::Pass },
-                Some(format!("Pearson chi2 / df = {:.3}", res.dispersion_pearson)),
-                if overdispersed {
-                    "Overdispersion detected (Pearson chi2 / df > 1.5); Poisson variance assumptions understate dispersion and standard errors."
-                } else {
-                    "Count variance is consistent with Poisson equidispersion (dispersion <= 1.5)."
-                },
-            ));
-        }
+        GlmFamily::Linear => populate_linear_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
+        GlmFamily::Logistic => populate_logistic_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
+        GlmFamily::Poisson => populate_poisson_glm_sheet(&mut out, design, glm_spec, confidence, p_fmt)?,
     }
 
     Ok(out)
