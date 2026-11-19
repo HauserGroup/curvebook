@@ -30,7 +30,7 @@ Calculator-specific design rules below apply only if deferred work is explicitly
 
 Implemented across `crates/doc/src/analysis.rs`, `crates/stats/src/{categorical,column,two_group,anova}.rs`, `crates/engine/src/{cmd/analysis.rs,methods_report.rs}`, and `crates/ui-egui` (verified by `crates/stats/tests/wave21_r97_r912_clustering.rs` and `crates/ui-egui/tests/gui_w22b_qol_and_r9.rs`; live test counts in [`STATUS.md`](../STATUS.md)):
 
-### 2.1 Factorial & Multifactor ANOVA Post-Hoc Multiplicity Tabs (`crates/stats/src/anova.rs`)
+### 2.1 Factorial & Multifactor ANOVA Post-Hoc Multiplicity Tabs (`crates/stats/src/anova/posthoc.rs`, `crates/stats/src/anova/sheet/factorial.rs`)
 - Wired `FactorialAnovaSpec::multiplicity` (`crates/doc/src/analysis.rs`) inside `run_factorial_anova` to emit `ResultTabKind::MultipleComparisons` tabs (Tukey, Šídák, Bonferroni, Dunnett, Holm–Šídák, Newman–Keuls, Fisher LSD, and BH/BY/BKY FDR) across main-effect marginal means and simple-effect cell means using `compare_groups_with_procedure(&groups, ms_residual, df_residual, ...)` (or Satterthwaite/Kenward–Roger cell $df$ under REML mixed models), completing the backend tab seam used by `WF-09`, `WF-10`, and `WF-33` ([`gui-workflows.md`](../gui-workflows.md)).
 
 ### 2.2 Inter-Rater Agreement ($\kappa$), NNT CIs & Custom Goodness-of-Fit (`crates/stats/src/categorical.rs`)
