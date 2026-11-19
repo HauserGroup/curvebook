@@ -199,12 +199,12 @@ fn r028_r026_r810_r811_release_workflow_gates_enforced() {
     assert!(release_yml.contains("./packaging/macos/package.sh --arch universal --require-signing"));
     assert!(release_yml.contains("./packaging/macos/verify.sh --arch universal --require-notarized"));
 
-    assert!(release_yml.contains("needs: [linux, macos, windows, freebsd, web]"));
+    assert!(release_yml.contains("needs: [linux, macos, windows, freebsd]"));
+    assert!(!release_yml.contains("./packaging/web/package.sh"));
     for report_name in [
         "name: scan-report-linux-${{ matrix.arch }}",
         "name: scan-report-macos-universal",
         "name: scan-report-windows-${{ matrix.arch }}",
-        "name: scan-report-web",
         "name: scan-report-freebsd-x86_64",
     ] {
         assert!(release_yml.contains(report_name), "release.yml missing `{report_name}` artifact upload");
@@ -212,15 +212,6 @@ fn r028_r026_r810_r811_release_workflow_gates_enforced() {
     assert!(release_yml.contains("--expect-beta-set \"$ver\""));
     assert!(release_yml.contains("--cross-os-reports dist/scan-reports"));
     assert!(release_yml.contains("pattern: scan-report-*"));
-}
-
-#[test]
-fn r111_ci_workflow_enforces_web_bundle_budget() {
-    let root = workspace_root().unwrap();
-    let ci_yml = fs::read_to_string(root.join(".github/workflows/ci.yml")).unwrap();
-    assert!(ci_yml.contains("trunk --version 0.22.1"));
-    assert!(ci_yml.contains("./packaging/web/package.sh"));
-    assert!(ci_yml.contains("CURVEBOOK_REQUIRE_WEB_BUNDLE"));
 }
 
 #[cfg(unix)]

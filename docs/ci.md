@@ -6,9 +6,13 @@ stage and cannot prevent unrelated matrix stages from reporting their results.
 The final **Workspace CI gate** requires the build and every check stage to pass;
 cancelled or skipped dependencies fail that gate.
 
+Automatic WASM verification is paused in GitHub Actions, the release workflow,
+and the default local CI run. Run `cargo xtask ci wasm` on demand. The web
+crate's native tests and static packaging and telemetry checks still run.
+
 | Stage | Checks |
 |---|---|
-| `cargo xtask ci quick [--base <git-ref>]` | Local pre-PR tier, not a hosted stage: every `policy` gate (the i18n report only when `curvebook-ui-egui` is affected), then Clippy (`-D warnings`, all targets) and the `tests` stage filter for the packages changed since the merge base with `main` plus their workspace reverse dependencies. Staged, unstaged, and untracked files count as changed. Root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, or `.cargo/` edits select the whole workspace; documentation-only changes run `policy` alone. It skips `doctests`, `features`, `wasm`, and `performance`, which hosted CI runs on every pull request. |
+| `cargo xtask ci quick [--base <git-ref>]` | Local pre-PR tier, not a hosted stage: every `policy` gate (the i18n report only when `curvebook-ui-egui` is affected), then Clippy (`-D warnings`, all targets) and the `tests` stage filter for the packages changed since the merge base with `main` plus their workspace reverse dependencies. Staged, unstaged, and untracked files count as changed. Root `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `clippy.toml`, or `.cargo/` edits select the whole workspace; documentation-only changes run `policy` alone. It skips `doctests`, `features`, and `performance`, which hosted CI runs on every pull request. |
 | `cargo xtask ci build` | Build and archive every native workspace test target, without running tests. |
 | `cargo xtask ci policy` | Formatting, assets, brands, cleanroom, cursors, exact i18n report, UI/engine command and schema sync, layers, secrets, licences, telemetry, workflow lint, screenshot integrity, web bundle readiness, numerical `D1` literature citations (`cargo xtask citations`), pending items, and status. Hosted CI also runs the full `cargo deny check`. |
 | `cargo xtask ci lint` | Workspace Clippy, every target, with warnings denied. |
@@ -16,7 +20,7 @@ cancelled or skipped dependencies fail that gate.
 | `cargo xtask ci performance` | Every `r10_*` binary (including `r10_phase7_gates` and the landed Wave 5 latency checks), every `human_wf_*` human-path workflow binary with its input-to-paint budgets, plus `*perf*` grid and curve-fit benchmark binaries, serially; existing assertions and budgets are unchanged. |
 | `cargo xtask ci doctests` | Workspace doctests, then `cargo doc --workspace --no-deps` with `RUSTDOCFLAGS="-D warnings"` so broken or private intra-doc links and other rustdoc warnings fail CI. |
 | `cargo xtask ci features` | Text tests without default features; every UI test and doctest without default features, with its performance-sensitive binaries serial; MCP compilation without default features. |
-| `cargo xtask ci wasm` | Web and engine compilation checks plus `curvebook-web` and `curvebook-ui-egui` Clippy (`-D warnings`) for `wasm32-unknown-unknown`, `trunk build --cargo-profile web-release` when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and web bundle readiness/size-budget verification (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1` requires `dist/release/curvebook-web-*.zip`). |
+| `cargo xtask ci wasm` | On demand. Web and engine compilation checks plus `curvebook-web` and `curvebook-ui-egui` Clippy (`-D warnings`) for `wasm32-unknown-unknown`, `trunk build --cargo-profile web-release` when `trunk` is installed (`CURVEBOOK_REQUIRE_TRUNK=1` requires `trunk`), and web bundle readiness/size-budget verification (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1` requires `dist/release/curvebook-web-*.zip`). |
 
 The native and performance selections are exact complements. The full local
 command uses nextest when available; without it, `cargo test --workspace

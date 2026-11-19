@@ -5,21 +5,21 @@ use std::time::Instant;
 
 use crate::{
     assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, cursors, docs_site, has_cargo_nextest, licenses,
-    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, wasm_target_installed, web_fonts, workflows,
+    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
 };
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
 // input-to-paint budgets (`human_wf_*`), grid, and curve-fit throughput gates off the
 // parallel correctness runner. The complement below still covers every other test.
 const PERFORMANCE_FILTER: &str = "binary(r10_*) | binary(human_wf_*) | binary(*perf*)";
-const STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "wasm", "performance"];
+const HOSTED_STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "performance"];
 
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     match args {
         [] => run_all(root),
         [stage, rest @ ..] if stage == "quick" => crate::ci_quick::run(root, rest),
-        [stage] if stage == "build" || STAGES.contains(&stage.as_str()) => run_stage(root, stage),
-        _ => Err(format!("usage: cargo xtask ci [quick [--base <git-ref>]|build|{}]", STAGES.join("|"))),
+        [stage] if matches!(stage.as_str(), "build" | "wasm") || HOSTED_STAGES.contains(&stage.as_str()) => run_stage(root, stage),
+        _ => Err(format!("usage: cargo xtask ci [quick [--base <git-ref>]|build|{}|wasm]", HOSTED_STAGES.join("|"))),
     }
 }
 
@@ -35,11 +35,6 @@ fn run_all(root: &Path) -> Result<(), String> {
     }
     run_stage(root, "doctests")?;
     run_stage(root, "features")?;
-    if workflows::is_ci_env() || wasm_target_installed() {
-        run_stage(root, "wasm")?;
-    } else {
-        println!("wasm: target not installed locally; enforced when CI=true");
-    }
     println!("ci: all checks passed");
     Ok(())
 }
@@ -176,7 +171,7 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
 mod tests {
     use std::path::Path;
 
-    use super::{PERFORMANCE_FILTER, STAGES, run, test_args};
+    use super::{HOSTED_STAGES, PERFORMANCE_FILTER, run, test_args};
 
     #[test]
     fn archived_tests_do_not_rebuild_or_override_the_archived_feature_selection() {
@@ -203,10 +198,14 @@ mod tests {
     }
 
     #[test]
-    fn workflow_runs_every_stage_and_unknown_stages_fail_before_spawning() {
+    fn workflow_runs_every_hosted_stage_and_keeps_wasm_manual() {
         let workflow = include_str!("../../.github/workflows/ci.yml");
-        let expected = format!("stage: [{}]", STAGES.join(", "));
-        assert!(workflow.contains(&expected), "hosted CI must include every quality stage");
+        let setup = include_str!("../../.github/actions/ci-setup/action.yml");
+        let expected = format!("stage: [{}]", HOSTED_STAGES.join(", "));
+        assert!(workflow.contains(&expected), "hosted CI must include every hosted quality stage");
+        assert!(!HOSTED_STAGES.contains(&"wasm"));
+        assert!(!workflow.contains("./packaging/web/package.sh"));
+        assert!(!setup.contains("wasm32-unknown-unknown"));
         assert!(run(Path::new("."), &[String::from("nonexistent")]).is_err());
     }
 }

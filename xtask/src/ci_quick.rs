@@ -7,8 +7,8 @@
 //! manifest, lockfile, toolchain, or lint configuration) select the whole workspace.
 //!
 //! The full `cargo xtask ci` run (and hosted CI on every pull request) remains the complete
-//! gate: this tier skips doctests/rustdoc, the `--no-default-features` builds, the `wasm32`
-//! stage, and the serial performance/budget binaries.
+//! gate: this tier skips doctests/rustdoc, the `--no-default-features` builds, and the serial
+//! performance/budget binaries.
 
 use std::collections::BTreeSet;
 use std::path::Path;

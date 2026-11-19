@@ -65,7 +65,6 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    cargo xtask cleanroom
    cargo xtask cursors
    cargo xtask ui-commands --check
-   cargo xtask wasm
    # Plus R0 gates where active on your branch:
    # cargo xtask secrets && cargo xtask commands --check && cargo xtask schemas --check && cargo xtask status && cargo xtask pending
    ```

@@ -48,7 +48,7 @@ Before tagging or publishing a release, verify both source invariants and packag
      cargo xtask licenses
      ```
      This verifies crates offline against [docs/licences.md](../licences.md) (`deny.toml`), and runs `cargo deny check licenses` when installed (mandatory when `CI=true`); add `--html` to write `THIRD-PARTY-LICENSES.html`.
-   - Run the full CI gate suite (including the `wasm` stage, which installs pinned `trunk 0.22.1`, builds `./packaging/web/package.sh`, and enforces the `R10.22` bundle budget via `CURVEBOOK_REQUIRE_WEB_BUNDLE=1`):
+   - Run the default CI gate suite:
      ```sh
      cargo xtask ci
      ```
@@ -102,7 +102,7 @@ Beta releases ship one installer format per OS and one file per architecture (ev
 | **FreeBSD (`x86_64`)** | `curvebook-<version>-freebsd-x86_64.tar.gz` | `packaging/freebsd/package.sh` | Preview desktop & CLI tarball built on FreeBSD VM and scanned on Ubuntu host. |
 | **Compliance & Checksums** | `THIRD-PARTY-LICENSES.html`, `SHA256SUMS.txt` | `cargo xtask licenses`, `sha256sum`, `actions/attest-build-provenance` | Every asset in the `R0.28` Beta asset set receives a keyless GitHub Sigstore build provenance attestation and is verified by `release-scan --expect-beta-set`. |
 
-**Browser bundle (`curvebook-web`, deferred to `1.0`):** `curvebook-web-<version>.zip` is **omitted from Beta GitHub Release assets** until `1.0` (`R0.28`, [`R11`](../ROADMAP.md#r11-usable-browser-app)). Both `.github/workflows/ci.yml` (`wasm` stage) and the `release.yml` `web` job still build `./packaging/web/package.sh` with pinned `trunk 0.22.1` and enforce the `R10.22` size budget (`CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo xtask web-bundle`) so the WASM target stays healthy.
+**Browser bundle (`curvebook-web`, deferred to `1.0`).** `curvebook-web-<version>.zip` is omitted from Beta GitHub Release assets (`R0.28`, [`R11`](../ROADMAP.md#r11-usable-browser-app)). Automatic WASM verification is paused in both CI and the release workflow. To verify a browser bundle on demand, build it with `./packaging/web/package.sh` and run `CURVEBOOK_REQUIRE_WEB_BUNDLE=1 cargo xtask web-bundle` to check the `R10.22` size budget.
 
 ### Beta Release Notes Template
 

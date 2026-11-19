@@ -16,7 +16,7 @@
 
 ## Checklist
 
-- [ ] `cargo xtask ci` passes (fmt, clippy, tests, doctests, layers, assets, brands, cleanroom, cursors, ui-commands, wasm, and active `R0` checks).
+- [ ] `cargo xtask ci quick` passes locally. The Workspace CI gate runs the full default suite on GitHub.
 - [ ] No panics in shipped code: no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or `unimplemented!` outside tests, and no unchecked indexing on files, parameters, or messages. Errors return typed `Result` values ([AGENTS.md](../AGENTS.md)).
 - [ ] Clean-room & neutral wording: nothing copied from proprietary commercial statistical/graphing applications or `GPL`/`AGPL`/`LGPL` codebases, and no competitor or placeholder suite brand names ([AGENTS.md](../AGENTS.md)).
 - [ ] Every new asset has a row in `ASSETS.md` (and `ATTRIBUTION.md` when third-party), with zero `.ttf`/`.otf`/`.woff`/`.woff2` font files added.
