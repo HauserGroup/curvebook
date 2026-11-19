@@ -203,26 +203,43 @@ fn top_chrome_tier2_adaptive_strips_all_sheet_contexts_and_overflow_menu() -> Re
     assert!(driver.frame_meta().find_by_widget_id("toolbar.format_graph").is_some());
     assert!(driver.frame_meta().find_by_widget_id("toolbar.export_svg").is_some());
 
-    // 6. InfoSheet & LayoutSheet contexts
+    verify_info_layout_and_overflow(&mut driver)
+}
+
+fn verify_info_layout_and_overflow(driver: &mut EguiHumanPathDriver<'_, TopChromeHarnessState>) -> Result<(), String> {
+    // 6. InfoSheet & LayoutSheet contexts (including `toolbar.new_graph` -> `graph.create` & constant click).
     if let Some(info_id) = driver.state().app.document().info_sheets.first().map(|s| s.id.as_str().to_owned()) {
         let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": info_id }));
         driver.run_settled();
-        assert!(driver.frame_meta().find_by_widget_id("toolbar.info_add_constant").is_some(), "InfoSheet must surface + Constant");
+        let add_const = driver.frame_meta().find_by_widget_id("toolbar.info_add_constant").ok_or("InfoSheet must surface + Constant")?;
+        assert!(add_const.enabled);
+        let new_graph_entry = driver.frame_meta().find_by_widget_id("toolbar.new_graph").ok_or("InfoSheet must surface toolbar.new_graph")?;
+        assert_eq!(new_graph_entry.command_id.as_deref(), Some("graph.create"));
+        assert!(new_graph_entry.enabled);
+        let graphs_before = driver.state().app.document().graph_sheets.len();
+        driver.click_widget_id("toolbar.new_graph")?;
+        assert_eq!(driver.state().app.document().graph_sheets.len(), graphs_before + 1, "InfoSheet toolbar.new_graph click must create GraphSheet");
+        let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": info_id }));
+        driver.run_settled();
+        driver.click_widget_id("toolbar.info_add_constant")?;
     }
     driver.state_mut().app.execute_command("layout.create", json!({ "sheet_id": "ls-1", "title": "Figure 1" })).map_err(|e| e.to_string())?;
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "ls-1" })).map_err(|e| e.to_string())?;
     driver.run_settled();
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.layout_composer").is_some(), "LayoutSheet must surface Layout Composer");
+    let composer_btn = driver.frame_meta().find_by_widget_id("toolbar.layout_composer").ok_or("LayoutSheet must surface Layout Composer")?;
+    assert_eq!(composer_btn.command_id.as_deref(), Some("ui.layout.composer.open"));
+    assert_eq!(composer_btn.label, curvebook_ui_egui::tr("en", "cmd.ui.layout.composer.open"));
     assert!(driver.frame_meta().find_by_widget_id("toolbar.rulers").is_some());
     assert!(driver.frame_meta().find_by_widget_id("toolbar.canvas_preset").is_some());
 
-    // Compact 640x420 Tier 2 overflows gracefully into `⋯` (`toolbar.overflow`) and exposes interactive popup items.
+    // Compact 640x420 Tier 2 overflows gracefully into `⋯` (`toolbar.overflow`) and exposes interactive `ZLayer::DropdownMenu` popup items.
     driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.0));
     let _ = driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "ds-mv" }));
     driver.run_settled();
     if driver.frame_meta().find_by_widget_id("toolbar.overflow").is_some() {
         driver.click_widget_id("toolbar.overflow")?;
-        assert!(driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").is_some(), "clicking `⋯` must open overflow popup items");
+        let ov_item = driver.frame_meta().find_by_widget_id("toolbar.overflow.item.0").ok_or("clicking `⋯` must open overflow popup items")?;
+        assert_eq!(ov_item.z_layer, ZLayer::DropdownMenu);
     }
 
     // Sheet tab switching via Tier 2 `sheet.tab.<id>` commits through PendingUiIntents cleanly.
@@ -256,7 +273,8 @@ fn top_chrome_split_presets_workspace_presets_and_presentation_mode() -> Result<
     for wid in
         ["toolbar.preset.default", "toolbar.preset.data_prep", "toolbar.preset.modeling", "toolbar.preset.publication", "toolbar.preset.compact"]
     {
-        assert!(driver.frame_meta().find_by_widget_id(wid).is_some(), "preset switcher popup missing `{wid}`");
+        let entry = driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("preset switcher popup missing `{wid}`"))?;
+        assert_eq!(entry.z_layer, ZLayer::DropdownMenu);
     }
     driver.click_widget_id("toolbar.preset.publication")?;
     assert_eq!(driver.state().app.egui_views.workspace_preset, WorkspacePreset::Publication);
@@ -267,7 +285,9 @@ fn top_chrome_split_presets_workspace_presets_and_presentation_mode() -> Result<
 
     // 2. Split Preset Selector (`Data + Graph`, `Swap Panes`, `Single Pane`, plus `Cmd+\`).
     driver.click_widget_id("toolbar.split")?;
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").is_some_and(|e| e.enabled));
+    let dg_entry = driver.frame_meta().find_by_widget_id("toolbar.split.preset.data_graph").ok_or("missing toolbar.split.preset.data_graph")?;
+    assert!(dg_entry.enabled);
+    assert_eq!(dg_entry.z_layer, ZLayer::DropdownMenu);
     driver.click_widget_id("toolbar.split.preset.data_graph")?;
     assert!(driver.state().app.split.enabled, "Data + Graph preset must enable split view");
     assert_eq!(driver.state().app.split.primary_sheet_id.as_ref().map(|s| s.as_str()), Some("ds-s1"));

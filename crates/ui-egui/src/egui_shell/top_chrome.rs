@@ -1435,7 +1435,7 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                 app,
                 modal_enabled,
                 "toolbar.layout_composer",
-                tr(&app.locale, "menu.insert.new_layout"),
+                tr(&app.locale, "cmd.ui.layout.composer.open"),
                 "ui.layout.composer.open",
                 json!({}),
                 None,
@@ -1485,14 +1485,17 @@ fn collect_tier2_actions(app: &UiApp, modal_enabled: bool) -> Vec<Tier2ActionSpe
                 None,
                 true,
             ));
-            actions.push(make_ui_action(
+            let first_ds = doc.data_sheets.first().map(|ds| ds.id.as_str().to_owned());
+            let can_new_graph = first_ds.is_some();
+            actions.push(make_engine_action(
                 app,
-                modal_enabled,
+                modal_enabled && can_new_graph,
                 "toolbar.new_graph",
                 tr(&app.locale, "menu.insert.new_graph"),
-                "ui.layout.composer.open",
-                json!({}),
-                None,
+                "graph.create",
+                first_ds.as_ref().map_or_else(|| json!({}), |id| json!({ "data_sheet_id": id })),
+                can_new_graph,
+                Some(if modal_enabled { "Create a DataSheet before creating a Graph" } else { "modal dialog is active" }),
                 false,
             ));
             actions.push(make_ui_action(
@@ -1835,7 +1838,7 @@ fn popup_action_button(
                 value: Some(json!(selected)),
                 enabled,
                 disabled_reason,
-                z_layer: ZLayer::FloatingOverlay,
+                z_layer: ZLayer::DropdownMenu,
                 ellipsized,
                 full_label: ellipsized.then_some(label),
             },
