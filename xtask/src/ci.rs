@@ -17,8 +17,9 @@ const STAGES: &[&str] = &["policy", "lint", "tests", "doctests", "features", "wa
 pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     match args {
         [] => run_all(root),
+        [stage, rest @ ..] if stage == "quick" => crate::ci_quick::run(root, rest),
         [stage] if stage == "build" || STAGES.contains(&stage.as_str()) => run_stage(root, stage),
-        _ => Err(format!("usage: cargo xtask ci [build|{}]", STAGES.join("|"))),
+        _ => Err(format!("usage: cargo xtask ci [quick [--base <git-ref>]|build|{}]", STAGES.join("|"))),
     }
 }
 
@@ -48,7 +49,7 @@ fn run_stage(root: &Path, stage: &str) -> Result<(), String> {
     println!("ci: starting {stage}");
     match stage {
         "build" => build_archive(root)?,
-        "policy" => policy(root)?,
+        "policy" => policy(root, true)?,
         "lint" => run_cargo_strs(root, &["clippy", "--locked", "--workspace", "--all-targets", "--", "-D", "warnings"])?,
         "tests" => native_tests(root, false)?,
         "performance" => native_tests(root, true)?,
@@ -99,7 +100,7 @@ fn build_archive(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &args)
 }
 
-fn test_args(root: &Path, performance: bool, archive: Option<&str>) -> Vec<String> {
+pub(crate) fn test_args(root: &Path, performance: bool, archive: Option<&str>) -> Vec<String> {
     let mut args = vec!["nextest", "run", "--profile", "ci", "--no-fail-fast"].into_iter().map(String::from).collect::<Vec<_>>();
     if let Some(path) = archive {
         args.extend([String::from("--archive-file"), path.to_owned(), String::from("--workspace-remap"), root.to_string_lossy().into_owned()]);
@@ -142,13 +143,17 @@ fn feature_checks(root: &Path) -> Result<(), String> {
     run_cargo_strs(root, &["check", "--locked", "-p", "curvebook-mcp", "--no-default-features"])
 }
 
-fn policy(root: &Path) -> Result<(), String> {
+/// Every policy gate. `include_i18n` runs the untranslated-locale report, which compiles the
+/// `curvebook-ui-egui` test library; `cargo xtask ci quick` skips it when that crate is unaffected.
+pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
     run_cargo_strs(root, &["fmt", "--all", "--", "--check"])?;
     assets::run(root)?;
     brands::run(root)?;
     cleanroom::run(root)?;
     cursors::run(root)?;
-    cmd_i18n_report(root)?;
+    if include_i18n {
+        cmd_i18n_report(root)?;
+    }
     ui_commands::run(root, true)?;
     commands::run(root, true)?;
     schemas::run(root, true)?;

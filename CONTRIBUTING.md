@@ -69,7 +69,7 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    # Plus R0 gates where active on your branch:
    # cargo xtask secrets && cargo xtask commands --check && cargo xtask schemas --check && cargo xtask status && cargo xtask pending
    ```
-   Or run `cargo xtask ci` for the workspace gate bundle.
+   Or run `cargo xtask ci quick` for the policy gates plus Clippy and tests of the crates your branch changed and their dependents; hosted CI runs the full `cargo xtask ci` stages on every pull request.
 
 ---
 
