@@ -430,7 +430,7 @@ fn commit_verified_download(tmp_dest: &Path, dest: &Path, item: StrdDatasetSpec)
 fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) -> Result<(), String> {
     let rel = item.relative_path();
     let tmp_dest = dest.with_extension("dat.part");
-    let mut last_err = format!("{rel}: no candidate download URLs configured");
+    let mut errors: Vec<String> = Vec::new();
 
     for url in item.candidate_urls() {
         println!("+ curl -fsSL {url}");
@@ -457,18 +457,26 @@ fn fetch_single_dataset(item: StrdDatasetSpec, dest: &Path, max_filesize: &str) 
             .map_err(|e| format!("failed to execute `curl` for {url}: {e}"))?;
         if !status.success() {
             let _ = fs::remove_file(&tmp_dest);
-            last_err = format!("`curl -fsSL {url}` failed with {status}");
+            errors.push(format!("`curl -fsSL {url}` failed with {status}"));
             continue;
         }
         match commit_verified_download(&tmp_dest, dest, item) {
             Ok(()) => return Ok(()),
-            Err(err) => {
-                last_err = format!("{err} (from {url})");
-            }
+            Err(err) => errors.push(format!("{err} (from {url})")),
         }
     }
 
-    Err(last_err)
+    Err(combine_fetch_errors(&rel, &errors))
+}
+
+/// The error for a dataset whose every candidate URL failed, listing each URL's failure in
+/// order. Reporting only the last one hid real outages: when the primary URL returned HTTP 502,
+/// the fallback URL's HTML description page surfaced as a mere byte-size mismatch.
+fn combine_fetch_errors(rel: &str, errors: &[String]) -> String {
+    if errors.is_empty() {
+        return format!("{rel}: no candidate download URLs configured");
+    }
+    format!("{rel}: every candidate URL failed:\n  - {}", errors.join("\n  - "))
 }
 
 fn build_pinned_manifest_body() -> String {
@@ -535,7 +543,7 @@ mod tests {
 
     use super::{
         CATALOG, CorpusOptions, MANIFEST_FILENAME, MAX_STRD_BYTES, PINNED_NIST_STRD_CORPUS, StrdSuite, build_pinned_manifest_body,
-        commit_verified_download, is_verified_on_disk, parse_args, verify_candidate_dat, verify_corpus_dir,
+        combine_fetch_errors, commit_verified_download, is_verified_on_disk, parse_args, verify_candidate_dat, verify_corpus_dir,
     };
 
     #[test]
@@ -685,6 +693,20 @@ Data:  y   x
         assert!(verify_candidate_dat(CATALOG[5], &oversized).is_err());
 
         let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn fetch_errors_report_every_candidate_url_in_order() {
+        let errors = [
+            String::from("`curl -fsSL https://example.invalid/lls/data/Pontius.dat` failed with exit status: 22"),
+            String::from("lls/Pontius.dat: pinned verification failed: corpus byte size mismatch (from https://example.invalid/lls/Pontius.dat)"),
+        ];
+        let msg = combine_fetch_errors("lls/Pontius.dat", &errors);
+        assert!(msg.starts_with("lls/Pontius.dat: every candidate URL failed:"), "{msg}");
+        let first = msg.find("failed with exit status: 22");
+        let second = msg.find("byte size mismatch");
+        assert!(first.is_some() && second.is_some() && first < second, "both failures must be listed in URL order: {msg}");
+        assert_eq!(combine_fetch_errors("lls/Pontius.dat", &[]), "lls/Pontius.dat: no candidate download URLs configured");
     }
 
     #[test]
