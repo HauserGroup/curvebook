@@ -302,7 +302,9 @@ fn r2_s07_03_and_12_methods_report_accuracy_latex_safety_and_audit_parity() {
     });
     tex_doc.add_result_sheet(fit_res).unwrap();
     let tex_out = generate_methods_report(&tex_doc, &SheetId::new("res-tex"), ReportFormat::Latex).unwrap();
-    assert!(tex_out.contains("\\\\\\relax"), "LaTeX tabular rows must guard against leading `[`: {tex_out}");
+    assert!(!tex_out.contains("\\\\\\relax"), "LaTeX tabular rows must not emit \\\\\\relax before \\hline: {tex_out}");
+    assert!(tex_out.contains("{[}Agonist]"), "LaTeX tabular rows must guard leading `[` with `{{[}}`: {tex_out}");
+    assert!(tex_out.contains(" \\\\\n\\hline"), "LaTeX tabular rows must end with plain `\\\\` before `\\hline`: {tex_out}");
     assert!(tex_out.contains("\\mbox{"), "custom DSL should render via single-line mbox: {tex_out}");
     assert!(!tex_out.contains("(1 with recorded audit justification note"), "orphaned exclusion note must not be counted");
 
