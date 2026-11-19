@@ -75,7 +75,7 @@ pub struct ProjectDocument {
     /// Currently focused sheet in the workspace; `None` when the project contains zero sheets or nothing is selected.
     pub active_sheet_id: Option<SheetId>,
     /// Anchored root sheet for the Family dependency pane (updated when navigating in the Project
-    /// Navigator, kept stable when inspecting sibling sheets inside the Family pane; `docs/ui-parity.md`).
+    /// Navigator, kept stable when inspecting sibling sheets inside the Family pane; `docs/evidence/user-interface.md`).
     pub family_anchor_sheet_id: Option<SheetId>,
     /// Named snapshots created via `project.createCheckpoint` (`QOL-11`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]

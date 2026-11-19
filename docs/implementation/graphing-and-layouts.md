@@ -1,6 +1,6 @@
 # Publication Graphing, Page Layouts & Export — Implementation Guidelines
 
-Governing specification for `crates/palette` (`L0`), `crates/text` (`L2`), `crates/chart` (`L2`), `crates/render` (`L3`), `crates/svg` (`L3`), `crates/pdf` (`L3`), and canvas tools in `crates/tools` (`L4`). Parity checklist: [`graphing-parity.md`](../graphing-parity.md) and [`file-format-parity.md`](../file-format-parity.md).
+Governing specification for `crates/palette` (`L0`), `crates/text` (`L2`), `crates/chart` (`L2`), `crates/render` (`L3`), `crates/svg` (`L3`), `crates/pdf` (`L3`), and canvas tools in `crates/tools` (`L4`). Parity checklist: [`evidence/graphing.md`](../evidence/graphing.md) and [`evidence/file-formats.md`](../evidence/file-formats.md).
 
 Design, typography, and color-vision literature references:
 - **Grammar & statistical graphics:** Wilkinson (2005) *The Grammar of Graphics* (2nd ed., Springer); Cleveland (1994) *The Elements of Graphing Data*; Tufte (2001) *The Visual Display of Quantitative Information*.

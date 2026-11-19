@@ -1,7 +1,7 @@
 //! Virtualized two-tier `(Group x Subcolumn)` spreadsheet grid view state, cell formatting,
 //! `MultipleVariables` role header strip & `Variables...` recoding/ordering model, `=` Calculated
 //! Variable formula bar with autocomplete, 4-stage `Import & Paste Special` / `Paste Link`
-//! pipeline model, and selection quick-stats footer (`docs/ui-parity.md`,
+//! pipeline model, and selection quick-stats footer (`docs/evidence/user-interface.md`,
 //! `docs/implementation/data-tables-and-transforms.md`).
 
 use std::borrow::Borrow;

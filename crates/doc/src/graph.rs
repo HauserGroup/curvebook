@@ -737,7 +737,7 @@ pub struct PairwiseBracketSpec {
     pub bracket_step_pt: f64,
 }
 
-/// Geometric shape primitive for canvas callout regions (`docs/graphing-parity.md`).
+/// Geometric shape primitive for canvas callout regions (`docs/evidence/graphing.md`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, serde::Serialize, serde::Deserialize)]
 pub enum AnnotationShapeKind {
     /// Sharp-cornered axis-aligned rectangle.

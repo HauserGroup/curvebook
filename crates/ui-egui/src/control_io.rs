@@ -1,5 +1,5 @@
 //! Local JSON-lines control channel and publication clipboard/print payload builders
-//! (`docs/control-protocol.md`, `docs/hardware-parity.md`).
+//! (`docs/control-protocol.md`, `docs/evidence/platforms.md`).
 
 use std::fmt;
 use std::io::{self, BufRead, Write};
@@ -312,7 +312,7 @@ fn map_ui_result(res: Result<Value, String>) -> Result<Option<Value>, ControlCal
     res.map(Some).map_err(ControlCallError::from)
 }
 
-/// Physical-size print spool specification (`docs/hardware-parity.md` `G10`).
+/// Physical-size print spool specification (`docs/evidence/platforms.md` `G10`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct PrintJobSpec {
     pub sheet_ids: Vec<SheetId>,

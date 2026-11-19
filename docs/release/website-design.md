@@ -30,7 +30,7 @@ The claim means the saved CurveBook project, not the computer's working director
 
 ## Claims and release honesty
 
-Do not advertise **full feature parity** as achieved. [`STATUS.md`](../STATUS.md) and the [capability assessment](../target-app-parity.md) still record incomplete human GUI acceptance and release/platform QA. Broad implemented scientific scope does not establish complete product parity. Revisit the wording only when there is evidence for the entire claim, with an explicit scope and date. Avoid mutable feature, test, or model counts on the landing page.
+Do not advertise **full feature parity** as achieved. [`STATUS.md`](../STATUS.md) and the [capability assessment](../evidence/overview.md) still record incomplete human GUI acceptance and release/platform QA. Broad implemented scientific scope does not establish complete product parity. Revisit the wording only when there is evidence for the entire claim, with an explicit scope and date. Avoid mutable feature, test, or model counts on the landing page.
 
 The clean-room statement refers to developing CurveBook without using commercial statistical or graphing applications, inspecting their internals, or copying their proprietary code/assets, in accordance with [`AGENTS.md`](../../AGENTS.md). It is not a claim that no commercial editor, operating system, or development service has ever been used. Published scientific references and the project's independent implementation remain the basis of the methods.
 

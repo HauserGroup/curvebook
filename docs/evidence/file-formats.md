@@ -1,6 +1,6 @@
-# File Format & Interchange Parity (`curvebook-format`, `curvebook-svg`, `curvebook-pdf`)
+# File Format & Interchange Evidence (`curvebook-format`, `curvebook-svg`, `curvebook-pdf`)
 
-> Related specifications: [`data-tables-and-transforms.md`](implementation/data-tables-and-transforms.md), [`graphing-and-layouts.md`](implementation/graphing-and-layouts.md), [`scripting-and-automation.md`](implementation/scripting-and-automation.md), [`file-formats.md`](file-formats.md) · Roadmap: [`ROADMAP.md`](planning/roadmap-history/r2.md#r2-typed-data-tables-reactive-dag-persistence--legacy-import) ([`G2`/`G5`/`G10`/`G11`/`QOL-11` mapping](gaps.md))
+> Related specifications: [`data-tables-and-transforms.md`](../implementation/data-tables-and-transforms.md), [`graphing-and-layouts.md`](../implementation/graphing-and-layouts.md), [`scripting-and-automation.md`](../implementation/scripting-and-automation.md), [`file-formats.md`](../file-formats.md) · Roadmap: [`ROADMAP.md`](../planning/roadmap-history/r2.md#r2-typed-data-tables-reactive-dag-persistence--legacy-import) ([`G2`/`G5`/`G10`/`G11`/`QOL-11` mapping](../gaps.md))
 
 ## Native FAIR-Aligned Project Formats
 - [x] `.curvebook` ZIP container and `.curvebook.d/` unpacked Git-friendly directory format (`save_project_unpacked_dir` / `open_project_unpacked_dir`, `manifest.json` with `schema_version`, sheet catalog, CSV data tables, JSON Info/analysis/fit/graph/layout specs, `CellExclusionNote` provenance sidecars, `NamedCheckpoint` snapshots, and optional cached results; verified in `curvebook-format` and `curvebook-engine` suites, including Wave 6 `G2` linked-file error propagation). Full breaking cutover: legacy `.lumencraft` / `lumencraft-archive` payloads are explicitly rejected (`file-formats.md` §4).

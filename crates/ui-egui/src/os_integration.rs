@@ -1,5 +1,5 @@
 //! Native OS clipboard multi-flavor bundles (`PDF`, `SVG`, `HTML`, `PNG`, `EMF`) and host
-//! pasteboard / print-spooler integration (`docs/hardware-parity.md` `G10`, `G11`, `G13`).
+//! pasteboard / print-spooler integration (`docs/evidence/platforms.md` `G10`, `G11`, `G13`).
 
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Duration;

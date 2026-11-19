@@ -39,15 +39,15 @@ The [active roadmap](ROADMAP.md) owns claims and pending work. [Status](STATUS.m
 
 | Area | Evidence or planning document |
 |---|---|
-| Overall assessment | [Feature parity](target-app-parity.md) |
-| Statistics | [Statistical parity](stats-parity.md) |
+| Overall assessment | [Feature parity](evidence/overview.md) |
+| Statistics | [Statistical parity](evidence/statistics.md) |
 | Curve fitting | [Fitting parity](fitting-parity.md) |
-| Graphing | [Graphing parity](graphing-parity.md) |
-| Interchange | [File-format parity](file-format-parity.md) |
-| User interface | [UI parity](ui-parity.md) and [GUI workflows](gui-workflows.md) |
-| Platforms | [Hardware parity](hardware-parity.md) |
-| Localization | [Localization parity](localization-parity.md) |
-| Scientific quality of life | [Enhancements](planning/qol-beyond-parity.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
+| Graphing | [Graphing parity](evidence/graphing.md) |
+| Interchange | [File-format parity](evidence/file-formats.md) |
+| User interface | [UI parity](evidence/user-interface.md) and [GUI workflows](gui-workflows.md) |
+| Platforms | [Hardware parity](evidence/platforms.md) |
+| Localization | [Localization parity](evidence/localization.md) |
+| Scientific quality of life | [Enhancements](planning/qol-enhancements.md) and [calculator reference](planning/calculators-and-quick-stats.md) |
 | Historical progress | [Roadmap history](planning/roadmap-history.md) |
 | Legacy tracking | [Gap mapping and known defects](gaps.md) |
 | Audits | [Audit protocol](audit/README.md), [workflow](audit/workflow.md), [slices](audit/slices.md), [progress](audit/progress.md), [work log](audit/work-log.md), [Round 2 review](audit/round2-post-ebcc622.md), and [R0–R9 milestone review ledger](audit/review-2026-11-16-ledger.md) |

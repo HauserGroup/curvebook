@@ -1,6 +1,6 @@
 //! Publication-quality SVG figure and multi-panel layout export for CurveBook.
 //!
-//! Layer L3 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§6) and `docs/file-format-parity.md`.
+//! Layer L3 crate. Governing spec: `docs/implementation/graphing-and-layouts.md` (§6) and `docs/evidence/file-formats.md`.
 #![forbid(unsafe_code)]
 
 pub mod writer;

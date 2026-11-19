@@ -2,7 +2,7 @@
 
 How CurveBook's interface strings, locales, text direction, and fonts work today, and how to extend them. Everything here describes code that exists in the repository; planned work is labelled **planned**. Mutable totals (locale count, key count) are deliberately not repeated here: read them from `LOCALES` / `catalog_len()` in [`crates/ui-egui/src/i18n.rs`](../crates/ui-egui/src/i18n.rs), from the `cargo xtask i18n-report` output, or from [STATUS.md](STATUS.md) (see [pitfalls.md](pitfalls.md), item 2).
 
-Related: [extending.md](extending.md) (extension matrix), [localization-parity.md](localization-parity.md) (parity checklist and the human-GUI caveat), [licences.md](licences.md) and [../ASSETS.md](../ASSETS.md) (font and asset rules).
+Related: [extending.md](extending.md) (extension matrix), [evidence/localization.md](evidence/localization.md) (parity checklist and the human-GUI caveat), [licences.md](licences.md) and [../ASSETS.md](../ASSETS.md) (font and asset rules).
 
 ---
 
@@ -52,7 +52,7 @@ A locale is a new column in the catalog, so the change touches every entry. In `
 5. If it is a right-to-left language, check `is_rtl_locale` (section 6). If it needs a different number or CSV convention, extend `LocalePreset::for_locale`.
 6. If it uses a script that no installed font may cover, add per-script handling in `curvebook-text` font selection (section 7) and, for CJK-style fallbacks, `system_cjk_font_candidates` in `crates/text/src/metrics.rs`.
 7. Update the hard-coded expectations in the `untranslated_report` test (it pins the expected locale list and totals) and in the locale-normalization tests. The test file is the authority on which assertions exist; read it before editing.
-8. Update [localization-parity.md](localization-parity.md) and the extension row in [extending.md](extending.md) if the process changes. Do not add a count to prose.
+8. Update [evidence/localization.md](evidence/localization.md) and the extension row in [extending.md](extending.md) if the process changes. Do not add a count to prose.
 
 Fallback behaviour for an incomplete locale is described in section 5, but note that the `untranslated_report` test currently requires **zero** missing or empty entries in every registered locale, so a new locale cannot land partially translated.
 
@@ -84,7 +84,7 @@ The active locale is stored on `UiApp` and changed through the control/MCP opera
 - The control-protocol state response reports `is_rtl` for the active locale (`crates/ui-egui/src/control_io.rs`).
 - When you add UI, never hard-code left/right positions that bypass the mirroring helper, and test with `ar` and `he`.
 
-Rendering and human usability are separate from catalog coverage. Check the current implementation and [localization-parity.md](localization-parity.md), together with the `R10.9` typography and `R10.21` translation acceptance work. A complete catalog entry does not prove that a person sees correct glyphs, direction, clipping, or layout in a rendered screen.
+Rendering and human usability are separate from catalog coverage. Check the current implementation and [evidence/localization.md](evidence/localization.md), together with the `R10.9` typography and `R10.21` translation acceptance work. A complete catalog entry does not prove that a person sees correct glyphs, direction, clipping, or layout in a rendered screen.
 
 ## 7. Fonts and glyph coverage
 
@@ -120,7 +120,7 @@ The repository has no field or flag in `CATALOG` that marks a translation as mac
 - Do not present a machine draft as reviewed. A translation counts as reviewed only when a fluent human reviewer, ideally with scientific or statistical background, has read it in context and said so in the PR thread. Reviewers are community contributors; maintainers merge but are not expected to read every language.
 - Statistical terminology (test names, effect sizes, "confidence interval", fit terms) must follow the standard usage of the target language's scientific literature, not a literal word-for-word rendering.
 - Translations must be written from CurveBook's own English strings and public terminology. Do not copy interface text from other statistical or graphing applications, and keep competitor product names out of strings (`cargo xtask brands` and `cargo xtask cleanroom` check the repository).
-- Unreviewed drafts may land when clearly disclosed; do not describe them as linguistically verified. Record pending locale review in [localization-parity.md](localization-parity.md), with the affected keys or a link to the PR, so the review state survives the PR discussion. Do not weaken the coverage checks to hide missing work.
+- Unreviewed drafts may land when clearly disclosed; do not describe them as linguistically verified. Record pending locale review in [evidence/localization.md](evidence/localization.md), with the affected keys or a link to the PR, so the review state survives the PR discussion. Do not weaken the coverage checks to hide missing work.
 
 ## 10. Before you open a PR
 

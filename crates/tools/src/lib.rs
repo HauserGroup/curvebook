@@ -3,7 +3,7 @@
 //! callouts and publication layout alignment.
 //!
 //! Layer L4 crate: pointer and keyboard events in, engine command specs and overlays out.
-//! Governing spec: `docs/development.md` (§Cursors) and `docs/ui-parity.md`.
+//! Governing spec: `docs/development.md` (§Cursors) and `docs/evidence/user-interface.md`.
 #![forbid(unsafe_code)]
 
 pub mod canvas;

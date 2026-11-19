@@ -2,7 +2,7 @@
 //! import/export, `ImportLinkSpec` pipeline execution, tidy `ResultSheet` exports, and
 //! clean-room `.pzfx` / `.prism` adapters.
 //!
-//! Layer L3 file-format crate. Governing spec: `docs/file-format-parity.md` and
+//! Layer L3 file-format crate. Governing spec: `docs/evidence/file-formats.md` and
 //! `docs/implementation/data-tables-and-transforms.md`.
 #![forbid(unsafe_code)]
 

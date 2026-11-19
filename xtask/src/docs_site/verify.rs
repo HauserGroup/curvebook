@@ -40,6 +40,8 @@ fn check_exclusions(site: &GeneratedSite) -> Result<(), String> {
             || lower.contains("status")
             || lower.starts_with("audit/")
             || lower.starts_with("planning/")
+            || lower.starts_with("evidence/")
+            || lower.starts_with("history/")
             || lower.starts_with("contribute/")
             || lower.contains("/contribute/")
             || lower.ends_with("-parity.html")

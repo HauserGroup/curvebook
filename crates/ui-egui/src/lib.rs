@@ -3,7 +3,7 @@
 //! local JSON-lines control channel.
 //!
 //! Layer L6 front-end crate: panels inspect engine state and mutate sessions solely by dispatching
-//! commands. Governing spec: `docs/ui-parity.md`, `docs/control-protocol.md`, and `docs/development.md`.
+//! commands. Governing spec: `docs/evidence/user-interface.md`, `docs/control-protocol.md`, and `docs/development.md`.
 #![forbid(unsafe_code)]
 
 pub mod compositor;

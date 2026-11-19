@@ -1,4 +1,4 @@
-# Post-Parity Quality-of-Life Enhancements (`M8+`)
+# Quality-of-Life Enhancements (`M8+`)
 
 > **Status:** Existing Wave A (`QOL-1`–`QOL-9`, including diagnostics-only `QOL-7` aligned in Waves 20–22b) and active Wave B (`QOL-12`, `QOL-14`, equations-only `QOL-16`, and `QOL-17` `WF-29`–`WF-49` extended `gui_only` suite) are implemented. `QOL-10`, `QOL-11`, `QOL-13`, and `QOL-15` remain deferred without scheduled milestones. Compact Letter Display (`CLD`) stays outside `QOL-16` and is tracked as [`R10.11`](roadmap-history/r10.md#r1011-compact-letter-display-cld). The `QOL-17` workflows run on the semantic agent harness; human-operable GUI completion is tracked in [`R10`](../ROADMAP.md#r10-human-operable-gui--50-workflow-human-completion) · **Last updated:** 2026-11-15 · **Roadmap:** [`ROADMAP.md#r9`](../ROADMAP.md#r9-post-parity-scientific-quality-of-life-suite) · **Implementation evidence:** [`STATUS.md`](../STATUS.md)
 
@@ -22,7 +22,7 @@ Every item in this backlog must satisfy five invariants:
 
 ## Summary & Effort Matrix
 
-Unchanged estimates below are historical scope estimates, following [`target-app-parity.md`](../target-app-parity.md#calibration), rather than verified remaining work. Revised items require re-estimation; deferred estimates are excluded from active totals.
+Unchanged estimates below are historical scope estimates, following [`evidence/overview.md`](../evidence/overview.md#calibration), rather than verified remaining work. Revised items require re-estimation; deferred estimates are excluded from active totals.
 
 | ID | Enhancement | Area | Crates (`L0`–`L6`) | Est. hours | Status |
 |---|---|---|---|---:|---|
@@ -63,7 +63,7 @@ Unchanged estimates below are historical scope estimates, following [`target-app
 - **Crates:** `crates/doc`, `crates/format`, `crates/engine`, `crates/ui-egui` · **Est.:** `12–20 h`
 - **Problem:** Microplate readers (ELISA, luminescence, viability IC50 screens, qPCR) export `8×12` (96-well) or `16×24` (384-well) matrices, while R/Python/LIMS tools export tidy long-format tables (`Compound, Concentration, Replicate, Readout`). Reshaping these manually in external spreadsheets into wide replicate subcolumns is slow and error-prone.
 - **Scope:**
-  - Extend the 4-stage `Import & Paste Special` pipeline ([`ui-parity.md`](../ui-parity.md)) with two optional reshape modes in Stage 2 (`Filter & Reshape`):
+  - Extend the 4-stage `Import & Paste Special` pipeline ([`evidence/user-interface.md`](../evidence/user-interface.md)) with two optional reshape modes in Stage 2 (`Filter & Reshape`):
     1. **Microplate Mapper (`96` / `384` wells):** Interactive visual well-plate grid allowing drag-assignment of dilution series (X values), treatment groups (columns), and technical replicates (subcolumns), plus reusable `.cbtemplate` plate maps and automatic blank-well baseline tagging.
     2. **Tidy Pivot (`Long -> Wide Subcolumns`):** Column picker mapping `(X / Row Factor, Group Column, Optional Replicate Index, Value, Optional Exclusion Flag)` directly into typed `XY`, `Column`, or `Grouped` replicate subcolumns.
 - **Non-breaking invariant:** Outputs standard `DataSheet` cells and optional `ImportLinkSpec` provenance; downstream statistical and curve-fitting crates require zero awareness of plate geometry.
