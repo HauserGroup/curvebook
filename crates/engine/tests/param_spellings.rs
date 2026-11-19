@@ -1135,3 +1135,10 @@ fn corpus_covers_every_spelling() {
         assert!(group_names.contains(case.group), "case `{}` uses a group missing from GROUPS", case.key());
     }
 }
+
+#[test]
+fn groups_match_engine_spelling_tables() {
+    let engine: Vec<(&str, Vec<&str>)> = curvebook_engine::cmd::spellings::ALL.iter().map(|(name, s)| (*name, s.to_vec())).collect();
+    let corpus: Vec<(&str, Vec<&str>)> = GROUPS.iter().map(|(name, s)| (*name, s.to_vec())).collect();
+    assert_eq!(corpus, engine, "GROUPS must list exactly the tables in `curvebook_engine::cmd::spellings::ALL`, in the same order");
+}

@@ -729,14 +729,12 @@ fn document_checkpoint_bytes(doc: &ProjectDocument) -> usize {
     doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()))
 }
 
-const CONVERT_PREVIEW_KEYS: [&str; 5] = ["preview_only", "previewOnly", "preview", "dry_run", "dryRun"];
-
 pub(crate) fn has_conflicting_convert_preview_aliases(params: &serde_json::Value) -> bool {
     let Some(obj) = params.as_object() else {
         return false;
     };
     let mut seen: Option<bool> = None;
-    for key in CONVERT_PREVIEW_KEYS {
+    for &key in cmd::spellings::CONVERT_PREVIEW {
         if let Some(val) = obj.get(key) {
             let Some(b) = val.as_bool() else {
                 return true;
@@ -755,7 +753,7 @@ fn is_preview_only_convert(params: &serde_json::Value) -> bool {
     if has_conflicting_convert_preview_aliases(params) {
         return false;
     }
-    CONVERT_PREVIEW_KEYS.iter().any(|key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
+    cmd::spellings::CONVERT_PREVIEW.iter().any(|&key| params.get(key).and_then(serde_json::Value::as_bool) == Some(true))
 }
 
 /// Execution channel restriction for interactive vs. direct automation callers (`docs/gui-workflows.md` §1).

@@ -34,6 +34,7 @@ use super::params::{
     obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::project::recalculate_dirty_with_links;
+use super::spellings::{self, first_present};
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, Session, dag};
 
@@ -5139,9 +5140,7 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
         return Ok(direct);
     }
     let obj = item.as_object().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] must be an object")))?;
-    let name = obj
-        .get("name")
-        .or_else(|| obj.get("title"))
+    let name = first_present(obj, spellings::SIMULATED_COLUMN_NAME)
         .and_then(Value::as_str)
         .map(str::trim)
         .filter(|s| !s.is_empty())
@@ -5166,10 +5165,7 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
         if let Some(inner_params) = dist_obj.get("params").and_then(Value::as_object) {
             sources.push(inner_params);
         }
-        dist_obj
-            .get("kind")
-            .or_else(|| dist_obj.get("type"))
-            .or_else(|| dist_obj.get("distribution"))
+        first_present(dist_obj, spellings::SIMULATED_COLUMN_KIND)
             .and_then(Value::as_str)
             .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].distribution object must specify `kind`")))?
     } else {
