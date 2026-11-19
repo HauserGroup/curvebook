@@ -237,7 +237,7 @@ pub fn resolve_center_stage_mode(app: &UiApp, views: &EguiShellViewState) -> Cen
     if app.nav.gallery.open {
         return CenterStageMode::Gallery;
     }
-    if views.launcher_open && doc.total_sheet_count() == 0 {
+    if views.launcher_open || doc.total_sheet_count() == 0 {
         return CenterStageMode::Welcome;
     }
     let Some(active_id) = doc.active_sheet_id.as_ref() else {

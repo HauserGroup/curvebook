@@ -759,6 +759,10 @@ pub fn render_egui_shell_frame_with_host(
         report.center_stage_handled_natively = stage_rep.handled_natively;
     });
 
+    if app.presentation_mode && meta.find_by_widget_id("toolbar.presentation.exit").is_none() {
+        let _ = crate::egui_shell::top_chrome::render_presentation_exit_chip(&ctx, app, &tokens, enabled, meta, intents);
+    }
+
     match decision.modal_surface {
         HybridModalSurface::EguiAbout => {
             render_about_modal(&ctx, app, &tokens, meta, intents, &mut report);

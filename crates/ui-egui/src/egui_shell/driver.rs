@@ -342,6 +342,56 @@ pub struct AccessKitRoleBounds {
     pub rect: Rect,
 }
 
+/// Assert zero [`AccessKitRole::ScrollBar`] intersections with interactive controls, rows, or labels,
+/// isolating foreground modal layers (`ZLayer::ModalDialog`+) from occluded workspace layers
+/// behind [`ZLayer::ModalBackdrop`] when `meta` reports an active modal dialog.
+#[must_use]
+pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId, AccessKitNode)], meta: &FrameInspectMeta) -> Vec<ParityViolation> {
+    let has_modal = meta.entries.iter().any(|e| matches!(e.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown));
+    if !has_modal {
+        return check_accesskit_scrollbar_non_overlap(nodes);
+    }
+
+    let dialog_rects: Vec<Rect> = meta
+        .entries
+        .iter()
+        .filter(|e| matches!(e.z_layer, ZLayer::ModalDialog | ZLayer::ModalDropdown) && e.clipped_rect.is_positive())
+        .map(|e| e.clipped_rect)
+        .collect();
+
+    let mut modal_items = Vec::new();
+    let mut background_items = Vec::new();
+    for (id, node) in nodes {
+        if node.is_hidden() {
+            continue;
+        }
+        let Some(bounds) = node.bounds() else {
+            continue;
+        };
+        if bounds.width() <= 0.0 || bounds.height() <= 0.0 {
+            continue;
+        }
+        let rect = accesskit_rect_to_egui(bounds);
+        let item = AccessKitRoleBounds { id: *id, role: node.role(), label: accesskit_accessible_name(node).unwrap_or("<unnamed>").to_owned(), rect };
+        let in_modal = if item.role == AccessKitRole::ScrollBar {
+            !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
+        } else if let Some(entry) = meta.find_by_accesskit_id(*id) {
+            matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
+        } else {
+            !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
+        };
+        if in_modal {
+            modal_items.push(item);
+        } else {
+            background_items.push(item);
+        }
+    }
+
+    let mut violations = check_role_bounds_scrollbar_non_overlap(&modal_items);
+    violations.extend(check_role_bounds_scrollbar_non_overlap(&background_items));
+    violations
+}
+
 /// Assert zero [`AccessKitRole::ScrollBar`] intersections with interactive controls, rows, or labels.
 #[must_use]
 pub fn check_accesskit_scrollbar_non_overlap(nodes: &[(AccessKitNodeId, AccessKitNode)]) -> Vec<ParityViolation> {
@@ -455,7 +505,7 @@ pub fn verify_egui_frame_parity(
 
     let checked_nodes = check_frame_inspect_meta(meta, nodes, viewport_rect, &mut violations);
     check_accesskit_interactive_nodes(nodes, viewport_rect, &mut violations);
-    violations.extend(check_accesskit_scrollbar_non_overlap(nodes));
+    violations.extend(check_accesskit_scrollbar_non_overlap_with_meta(nodes, meta));
 
     let text_runs = extract_rendered_text_runs(shapes);
     let checked_text_runs = text_runs.len();
@@ -961,7 +1011,7 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
     /// Check AccessKit [`AccessKitRole::ScrollBar`] non-overlap on the latest frame.
     #[must_use]
     pub fn check_scrollbar_non_overlap(&self) -> Vec<ParityViolation> {
-        self.last_accesskit.as_ref().map_or_else(Vec::new, |u| check_accesskit_scrollbar_non_overlap(&u.nodes))
+        self.last_accesskit.as_ref().map_or_else(Vec::new, |u| check_accesskit_scrollbar_non_overlap_with_meta(&u.nodes, &self.meta))
     }
 
     /// Verify that an ellipsized widget sets `ellipsized == true`, exposes `expected_full_label`
