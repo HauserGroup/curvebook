@@ -706,37 +706,11 @@ pub(in crate::anova) fn push_pairwise_outputs_with_footnote(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-pub(in crate::anova) fn build_pair_detail(
-    group_a: usize,
-    group_b: usize,
-    label_a: String,
-    label_b: String,
-    diff: f64,
-    se_diff: f64,
-    df: f64,
-    statistic: f64,
-    raw_p: f64,
-    adjusted_p_or_q: f64,
-    is_fdr_q: bool,
-    ci: Option<(f64, f64)>,
-    threshold: f64,
-) -> PairwiseComparisonDetail {
-    PairwiseComparisonDetail {
-        group_a,
-        group_b,
-        label_a,
-        label_b,
-        mean_diff: diff,
-        se_diff,
-        statistic,
-        df,
-        raw_p,
-        adjusted_p_or_q,
-        is_fdr_q,
-        ci,
-        significant: threshold.is_finite() && adjusted_p_or_q.is_finite() && adjusted_p_or_q <= threshold,
-    }
+/// Set `significant` on a pairwise comparison: true when the adjusted *p* (or FDR *q*) is finite and
+/// at or below `threshold`.
+pub(in crate::anova) fn mark_pair_significance(mut detail: PairwiseComparisonDetail, threshold: f64) -> PairwiseComparisonDetail {
+    detail.significant = threshold.is_finite() && detail.adjusted_p_or_q.is_finite() && detail.adjusted_p_or_q <= threshold;
+    detail
 }
 
 pub(in crate::anova) fn zero_se_pair(diff: f64, unsigned: bool) -> (f64, f64) {
@@ -770,19 +744,22 @@ pub(in crate::anova) fn compare_independent_newman_keuls(
 
     let mut out = Vec::with_capacity(m);
     for (idx, e) in entries.iter().enumerate() {
-        out.push(build_pair_detail(
-            e.id_a,
-            e.id_b,
-            e.label_a.to_owned(),
-            e.label_b.to_owned(),
-            e.diff,
-            e.se,
-            e.df,
-            stats[idx],
-            raw_p[idx],
-            adj_vec[idx],
-            false,
-            None,
+        out.push(mark_pair_significance(
+            PairwiseComparisonDetail {
+                group_a: e.id_a,
+                group_b: e.id_b,
+                label_a: e.label_a.to_owned(),
+                label_b: e.label_b.to_owned(),
+                mean_diff: e.diff,
+                se_diff: e.se,
+                df: e.df,
+                statistic: stats[idx],
+                raw_p: raw_p[idx],
+                adjusted_p_or_q: adj_vec[idx],
+                is_fdr_q: false,
+                ci: None,
+                significant: false,
+            },
             threshold,
         ));
     }
@@ -838,19 +815,22 @@ pub(in crate::anova) fn compare_independent_contrast_family(
             } else {
                 None
             };
-            out.push(build_pair_detail(
-                e.id_a,
-                e.id_b,
-                e.label_a.to_owned(),
-                e.label_b.to_owned(),
-                e.diff,
-                e.se,
-                e.df,
-                stats[idx],
-                raw_p[idx],
-                raw_p[idx],
-                false,
-                ci,
+            out.push(mark_pair_significance(
+                PairwiseComparisonDetail {
+                    group_a: e.id_a,
+                    group_b: e.id_b,
+                    label_a: e.label_a.to_owned(),
+                    label_b: e.label_b.to_owned(),
+                    mean_diff: e.diff,
+                    se_diff: e.se,
+                    df: e.df,
+                    statistic: stats[idx],
+                    raw_p: raw_p[idx],
+                    adjusted_p_or_q: raw_p[idx],
+                    is_fdr_q: false,
+                    ci,
+                    significant: false,
+                },
                 threshold,
             ));
         }
@@ -877,19 +857,22 @@ pub(in crate::anova) fn compare_independent_contrast_family(
                 } else {
                     None
                 };
-                out.push(build_pair_detail(
-                    e.id_a,
-                    e.id_b,
-                    e.label_a.to_owned(),
-                    e.label_b.to_owned(),
-                    e.diff,
-                    e.se,
-                    e.df,
-                    stats[idx],
-                    raw_p[idx],
-                    adj_p,
-                    false,
-                    ci,
+                out.push(mark_pair_significance(
+                    PairwiseComparisonDetail {
+                        group_a: e.id_a,
+                        group_b: e.id_b,
+                        label_a: e.label_a.to_owned(),
+                        label_b: e.label_b.to_owned(),
+                        mean_diff: e.diff,
+                        se_diff: e.se,
+                        df: e.df,
+                        statistic: stats[idx],
+                        raw_p: raw_p[idx],
+                        adjusted_p_or_q: adj_p,
+                        is_fdr_q: false,
+                        ci,
+                        significant: false,
+                    },
                     threshold,
                 ));
             }
@@ -912,19 +895,22 @@ pub(in crate::anova) fn compare_independent_contrast_family(
                     }
                     _ => None,
                 };
-                out.push(build_pair_detail(
-                    e.id_a,
-                    e.id_b,
-                    e.label_a.to_owned(),
-                    e.label_b.to_owned(),
-                    e.diff,
-                    e.se,
-                    e.df,
-                    stats[idx],
-                    raw_p[idx],
-                    adj_p[idx],
-                    is_fdr,
-                    ci,
+                out.push(mark_pair_significance(
+                    PairwiseComparisonDetail {
+                        group_a: e.id_a,
+                        group_b: e.id_b,
+                        label_a: e.label_a.to_owned(),
+                        label_b: e.label_b.to_owned(),
+                        mean_diff: e.diff,
+                        se_diff: e.se,
+                        df: e.df,
+                        statistic: stats[idx],
+                        raw_p: raw_p[idx],
+                        adjusted_p_or_q: adj_p[idx],
+                        is_fdr_q: is_fdr,
+                        ci,
+                        significant: false,
+                    },
                     threshold,
                 ));
             }
@@ -985,19 +971,22 @@ pub(in crate::anova) fn compare_contrast_family(eval: ContrastFamilyEval<'_>) ->
                 } else {
                     None
                 };
-                out.push(build_pair_detail(
-                    eval.levels[i].0,
-                    eval.levels[j].0,
-                    eval.levels[i].1.clone(),
-                    eval.levels[j].1.clone(),
-                    est.diff,
-                    est.se,
-                    est.df,
-                    q_stat,
-                    raw_p,
-                    adj_p,
-                    false,
-                    ci,
+                out.push(mark_pair_significance(
+                    PairwiseComparisonDetail {
+                        group_a: eval.levels[i].0,
+                        group_b: eval.levels[j].0,
+                        label_a: eval.levels[i].1.clone(),
+                        label_b: eval.levels[j].1.clone(),
+                        mean_diff: est.diff,
+                        se_diff: est.se,
+                        df: est.df,
+                        statistic: q_stat,
+                        raw_p,
+                        adjusted_p_or_q: adj_p,
+                        is_fdr_q: false,
+                        ci,
+                        significant: false,
+                    },
                     threshold,
                 ));
             }
@@ -1140,19 +1129,22 @@ pub(in crate::anova) fn compare_contrast_dunnett(
             } else {
                 None
             };
-            out.push(build_pair_detail(
-                eval.levels[i].0,
-                eval.levels[j].0,
-                eval.levels[i].1.clone(),
-                eval.levels[j].1.clone(),
-                est.diff,
-                est.se,
-                est.df,
-                t_stat,
-                raw_p,
-                adj_p,
-                false,
-                ci,
+            out.push(mark_pair_significance(
+                PairwiseComparisonDetail {
+                    group_a: eval.levels[i].0,
+                    group_b: eval.levels[j].0,
+                    label_a: eval.levels[i].1.clone(),
+                    label_b: eval.levels[j].1.clone(),
+                    mean_diff: est.diff,
+                    se_diff: est.se,
+                    df: est.df,
+                    statistic: t_stat,
+                    raw_p,
+                    adjusted_p_or_q: adj_p,
+                    is_fdr_q: false,
+                    ci,
+                    significant: false,
+                },
                 threshold,
             ));
         }
@@ -1192,19 +1184,22 @@ pub(in crate::anova) fn compare_contrast_dunnett(
             (st, rp, rp)
         };
         let ci = d_crit.map(|dc| (est.diff - dc * est.se, est.diff + dc * est.se));
-        out.push(build_pair_detail(
-            eval.levels[i].0,
-            eval.levels[j].0,
-            eval.levels[i].1.clone(),
-            eval.levels[j].1.clone(),
-            est.diff,
-            est.se,
-            est.df,
-            t_stat,
-            raw_p,
-            adj_p,
-            false,
-            ci,
+        out.push(mark_pair_significance(
+            PairwiseComparisonDetail {
+                group_a: eval.levels[i].0,
+                group_b: eval.levels[j].0,
+                label_a: eval.levels[i].1.clone(),
+                label_b: eval.levels[j].1.clone(),
+                mean_diff: est.diff,
+                se_diff: est.se,
+                df: est.df,
+                statistic: t_stat,
+                raw_p,
+                adjusted_p_or_q: adj_p,
+                is_fdr_q: false,
+                ci,
+                significant: false,
+            },
             threshold,
         ));
     }
@@ -1289,19 +1284,22 @@ pub(in crate::anova) fn compare_contrast_newman_keuls(
             if se_q > 0.0 { (est.diff.abs() / se_q, student_t_two_sided_p(est.diff / est.se, est.df)?) } else { zero_se_pair(est.diff, true) };
         let (p_lo, p_hi) = (pos_of[i].min(pos_of[j]), pos_of[i].max(pos_of[j]));
         let adj_p = p_mat[p_lo][p_hi];
-        out.push(build_pair_detail(
-            eval.levels[i].0,
-            eval.levels[j].0,
-            eval.levels[i].1.clone(),
-            eval.levels[j].1.clone(),
-            est.diff,
-            est.se,
-            est.df,
-            q_stat,
-            raw_p,
-            adj_p,
-            false,
-            None,
+        out.push(mark_pair_significance(
+            PairwiseComparisonDetail {
+                group_a: eval.levels[i].0,
+                group_b: eval.levels[j].0,
+                label_a: eval.levels[i].1.clone(),
+                label_b: eval.levels[j].1.clone(),
+                mean_diff: est.diff,
+                se_diff: est.se,
+                df: est.df,
+                statistic: q_stat,
+                raw_p,
+                adjusted_p_or_q: adj_p,
+                is_fdr_q: false,
+                ci: None,
+                significant: false,
+            },
             threshold,
         ));
     }
