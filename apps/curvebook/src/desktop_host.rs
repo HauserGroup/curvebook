@@ -22,6 +22,7 @@ use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{
     InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, WorkspaceHitTarget,
@@ -31,8 +32,9 @@ use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_to
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
 use curvebook_ui_egui::{
-    CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, OsAdapterStatus, UiApp, dispatch_ui_command,
-    is_http_request_line, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
+    BETA_ACTIVE_LOCALES, CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, ControlRequest, OsAdapterStatus, UiApp,
+    dispatch_ui_command, encode_egui_control_response, is_http_request_line, normalize_beta_gui_locale, read_os_pasteboard,
+    serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -124,6 +126,20 @@ pub struct ImePreeditState {
     pub cursor: Option<(usize, usize)>,
 }
 
+mod ui_backend_serde {
+    use curvebook_ui_egui::egui_shell::UiBackend;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(backend: &UiBackend, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(backend.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UiBackend, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        UiBackend::from_env_and_args(None, Some(&raw)).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Host runtime configuration constructed from CLI flags (`--in-window-menus`, `--new-instance`, ...)
 /// or embedded test harnesses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +148,8 @@ pub struct DesktopHostConfig {
     pub new_instance: bool,
     #[serde(default)]
     pub gui_only: bool,
+    #[serde(default, with = "ui_backend_serde")]
+    pub ui_backend: UiBackend,
     pub locale_override: Option<String>,
     pub theme_override: Option<String>,
     pub recovery_root: Option<PathBuf>,
@@ -144,6 +162,7 @@ impl Default for DesktopHostConfig {
             in_window_menus: false,
             new_instance: false,
             gui_only: false,
+            ui_backend: UiBackend::Legacy,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -851,6 +870,35 @@ where
     }
 
     let prepended_reauth = conn_authenticated && kind == ControlFrameKind::Command;
+    if prepended_reauth
+        && win.app().ui_backend() == UiBackend::Egui
+        && let Ok(text) = std::str::from_utf8(raw_bytes)
+        && let Ok(req) = serde_json::from_str::<ControlRequest>(text.trim())
+    {
+        let prev_undo_depth = win.app().session().undo_depth();
+        let prev_redo_depth = win.app().session().redo_depth();
+        let prev_dirty = win.app().session().is_dirty();
+        let prev_mutation_seq = win.app().mutation_seq();
+        let method = req.method.clone();
+        if let Some(res) = win.app_mut().try_dispatch_egui_backend(&req.method, &req.params) {
+            let reply = encode_egui_control_response(req.id, res);
+            let mut response_bytes = serde_json::to_vec(&reply).map_err(|err| format!("failed to encode control response: {err}"))?;
+            response_bytes.push(b'\n');
+            let post_ctx = ControlPostRequestContext {
+                method: &method,
+                steps: &[],
+                prev_undo_depth,
+                prev_redo_depth,
+                prev_dirty,
+                prev_mutation_seq,
+                rolled_back: false,
+                request_ok: reply.ok,
+            };
+            on_post_request(win.app(), &post_ctx)?;
+            win.app_mut().sync_views();
+            return Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None });
+        }
+    }
     let reauth_line = if prepended_reauth { Some(build_control_reauth_line(auth)?) } else { None };
     let mut out_bytes = Vec::new();
     let mut last_saved_path: Option<PathBuf> = None;
@@ -898,8 +946,9 @@ where
 }
 
 fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(), String> {
+    app.set_ui_backend(cfg.ui_backend);
     if let Some(locale) = cfg.locale_override.as_deref() {
-        let _ = app.set_locale(locale);
+        let _ = app.set_locale(normalize_beta_gui_locale(locale));
     }
     if let Some(theme_raw) = cfg.theme_override.as_deref() {
         let mode = parse_theme_mode(theme_raw)?;
@@ -1621,6 +1670,12 @@ impl DesktopHostRuntime {
         self.open_file_dialog_hook = Some(OpenFileDialogHook(Box::new(hook)));
     }
 
+    /// Return `true` when a [`NativeFileDialogAdapter`] is already installed.
+    #[must_use]
+    pub fn has_file_dialog_adapter(&self) -> bool {
+        self.file_dialog_adapter.is_some()
+    }
+
     /// Install a [`NativeFileDialogAdapter`] used by drawn File menu items, toolbar Open/Save/Export,
     /// Welcome Open, and native menu file actions.
     pub fn set_file_dialog_adapter(&mut self, adapter: Arc<dyn NativeFileDialogAdapter>) {
@@ -1820,8 +1875,13 @@ impl DesktopHostRuntime {
         }
     }
 
-    fn capture_pref_fingerprint(app: &UiApp) -> (String, curvebook_ui_egui::UiThemeMode, String) {
-        (app.locale.clone(), app.theme.mode, app.shortcuts.export_overrides_json().unwrap_or_default())
+    fn capture_pref_fingerprint(app: &UiApp) -> (String, curvebook_ui_egui::UiThemeMode, u32, String) {
+        (app.locale.clone(), app.theme.mode, app.ui_scale().to_bits(), app.shortcuts.export_overrides_json().unwrap_or_default())
+    }
+
+    /// Persist `preferences.json` for `window_id` when a persistence hook is attached.
+    pub fn notify_preferences_changed(&mut self, window_id: DesktopWindowId) {
+        self.persist_window_preferences(window_id);
     }
 
     /// Borrow the active [`DesktopHostConfig`].
@@ -2317,11 +2377,11 @@ impl DesktopHostRuntime {
         let prev_redo = win.app.session().redo_depth();
         let prev_dirty = win.app.session().is_dirty();
         let prev_mutation_seq = win.app.mutation_seq();
-        let prev_basic = (win.app.locale.clone(), win.app.theme.mode);
+        let prev_basic = (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits());
         let prev_shortcuts = if check_shortcuts { Some(win.app.shortcuts.export_overrides_json().unwrap_or_default()) } else { None };
         let ui_out: UiEventOutcome = win.app.dispatch_ui_event(ui_event, win.viewport)?;
         win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
-        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode)
+        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits())
             || prev_shortcuts.as_deref().is_some_and(|before| before != win.app.shortcuts.export_overrides_json().unwrap_or_default());
         if prefs_changed {
             self.persist_window_preferences(window_id);
@@ -2700,13 +2760,19 @@ impl DesktopHostRuntime {
                 let win = self.window_mut(window_id)?;
                 let prev_locale = win.app.locale.clone();
                 let prev_theme = win.app.theme.mode;
+                let prev_ui_scale = win.app.ui_scale();
+                let prev_ui_backend = win.app.ui_backend();
+                let prev_host_draws_menu_bar = win.app.host_draws_menu_bar;
                 let prev_shortcuts = win.app.shortcuts.clone();
                 let prev_rulers = win.app.canvas_dialogs.rulers_visible;
                 let prev_gui_only = win.app.is_gui_only();
 
                 let mut next_app = UiApp::from_session(session);
-                let _ = next_app.set_locale(&prev_locale);
+                let _ = next_app.set_locale(normalize_beta_gui_locale(&prev_locale));
                 next_app.set_theme_mode(prev_theme);
+                next_app.set_ui_scale(prev_ui_scale);
+                next_app.set_ui_backend(prev_ui_backend);
+                next_app.host_draws_menu_bar = prev_host_draws_menu_bar;
                 next_app.shortcuts = prev_shortcuts;
                 next_app.canvas_dialogs.rulers_visible = prev_rulers;
                 next_app.set_gui_only(prev_gui_only);
@@ -3258,11 +3324,11 @@ fn next_preview_filter_name(current: CanvasPreviewFilter) -> &'static str {
 }
 
 fn next_locale_code(current: &str) -> &'static str {
-    if LOCALES.is_empty() {
+    if BETA_ACTIVE_LOCALES.is_empty() {
         return "en";
     }
-    let idx = LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
-    LOCALES.get((idx + 1) % LOCALES.len()).copied().unwrap_or("en")
+    let idx = BETA_ACTIVE_LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
+    BETA_ACTIVE_LOCALES.get((idx + 1) % BETA_ACTIVE_LOCALES.len()).copied().unwrap_or("en")
 }
 
 fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {

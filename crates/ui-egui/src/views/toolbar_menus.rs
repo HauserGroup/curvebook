@@ -1740,6 +1740,23 @@ pub fn build_toolbar_slot(builder: &mut LayoutBuilder<'_>, rect: LayoutRectPx) {
 
     let is_rtl = builder.tree.is_rtl;
     builder.push_clip(rect);
+    if builder.app.host_draws_menu_bar {
+        let tb_h = rect.height.saturating_sub(8).clamp(14, 28);
+        let tb_y = rect.y + i32::try_from(rect.height.saturating_sub(tb_h) / 2).unwrap_or(0);
+        let (tb_x_start, avail_w) = if is_rtl {
+            let right_edge = rect.right() - 8;
+            (right_edge, u32::try_from((right_edge - (rect.x + 8)).max(0)).unwrap_or(0))
+        } else {
+            let left_edge = rect.x + 8;
+            (left_edge, u32::try_from((rect.right() - 8 - left_edge).max(0)).unwrap_or(0))
+        };
+        if avail_w >= 36 {
+            emit_contextual_toolbar_strip(builder, rect, tb_x_start, avail_w, tb_y, tb_h);
+        }
+        builder.pop_clip();
+        return;
+    }
+
     let two_rows = rect.height >= 40;
     let menu_h = if two_rows { (rect.height / 2).saturating_sub(3).max(14) } else { rect.height.saturating_sub(8).clamp(14, 28) };
     let menu_y = if two_rows { rect.y + 2 } else { rect.y + i32::try_from((rect.height.saturating_sub(menu_h)) / 2).unwrap_or(0) };
