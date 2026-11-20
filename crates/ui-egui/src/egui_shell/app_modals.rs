@@ -241,6 +241,7 @@ pub fn render_app_modal(
         ActiveDialog::ExportFigure { sheet_id } => render_export_modal(ctx, app, state, sheet_id.clone(), tokens, meta, intents),
         ActiveDialog::Print { .. } => render_print_modal(ctx, app, state, tokens, meta, intents),
         ActiveDialog::About => render_about_modal(ctx, app, state, tokens, meta, intents),
+        ActiveDialog::Feedback => render_feedback_modal(ctx, app, tokens, meta, intents),
         _ => AppModalFrameReport::default(),
     }
 }
@@ -1887,6 +1888,30 @@ fn render_about_modal(
                 ctx.data_mut(|d| d.insert_temp(copied_id, true));
             }
 
+            let feedback_lbl = tr(locale, "menu.help.feedback");
+            let feedback_resp = ui.button(feedback_lbl);
+            app_record_visible(
+                ui,
+                &feedback_resp,
+                meta,
+                FrameInspectEntryInput {
+                    widget_id: "dialog.about.send_feedback",
+                    role: "button",
+                    label: feedback_lbl,
+                    command_id: Some("app.feedback"),
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::ModalDialog,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if feedback_resp.clicked() {
+                ctx.data_mut(|d| d.insert_temp(copied_id, false));
+                intents.push_ui("app.feedback", json!({}));
+            }
+
             let ok_lbl = tr(locale, "btn.ok");
             let ok_resp = ui.button(ok_lbl);
             app_record_visible(
@@ -1937,6 +1962,278 @@ fn render_about_modal(
     });
 
     build_report(ctx, &modal_resp, "dialog.about", title, meta)
+}
+
+fn render_feedback_modal(
+    ctx: &Context,
+    app: &UiApp,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> AppModalFrameReport {
+    let locale = normalize_locale(&app.locale);
+    let title = tr(locale, "menu.help.feedback");
+    let (inner_w, max_h, body_w) = modal_bounds(ctx, 560.0);
+    let mut draft = app.canvas_dialogs.feedback.clone();
+    let mut changed = false;
+    let diag = app.feedback_diagnostics();
+
+    if ctx.input_mut(|i| i.consume_key(egui::Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
+
+    let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.feedback"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
+        ui.set_min_width(inner_w);
+        ui.set_max_width(inner_w);
+        ui.set_max_height(max_h);
+        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
+
+        ui.heading(title);
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical()
+            .id_salt("app_modal.feedback.scroll")
+            .max_height((max_h - 116.0).max(120.0))
+            .auto_shrink([false, true])
+            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
+            .show(ui, |ui| {
+                ui.set_width(body_w);
+                ui.set_max_width(body_w);
+
+                if render_feedback_category_row(ui, &mut draft, tokens, meta) {
+                    changed = true;
+                }
+                ui.add_space(4.0);
+                ui.add(egui::Label::new(egui::RichText::new(draft.category.guidance()).color(tokens.text_muted).small()).wrap());
+                ui.add_space(8.0);
+
+                if render_feedback_fields(ui, &mut draft, body_w, meta) {
+                    changed = true;
+                }
+                ui.add_space(8.0);
+                if render_feedback_diagnostics_section(ui, &mut draft, &diag, body_w, tokens, meta) {
+                    changed = true;
+                }
+            });
+
+        if changed {
+            draft.copied_markdown = false;
+            intents.push_update_feedback_draft(draft.clone());
+        }
+
+        let active_diag = draft.include_diagnostics.then_some(&diag);
+        let preview = crate::feedback::build_github_issue_url(&draft, active_diag);
+        render_feedback_footer(ui, &FeedbackFooterInput { locale, draft: &draft, active_diag, preview: &preview, body_w, tokens }, meta, intents);
+    });
+
+    build_report(ctx, &modal_resp, "dialog.feedback", title, meta)
+}
+
+fn render_feedback_category_row(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, tokens: &Tokens, meta: &mut FrameInspectMeta) -> bool {
+    let mut changed = false;
+    ui.horizontal_wrapped(|ui| {
+        for cat in crate::feedback::FeedbackCategory::ALL {
+            let selected = draft.category == cat;
+            let widget_id = format!("feedback.category.{}", cat.slug());
+            if app_tab(ui, meta, &widget_id, cat.label(), selected, tokens).clicked() && !selected {
+                draft.category = cat;
+                draft.status_message = None;
+                changed = true;
+            }
+        }
+    });
+    changed
+}
+
+fn render_feedback_fields(ui: &mut Ui, draft: &mut crate::feedback::FeedbackDraft, body_w: f32, meta: &mut FrameInspectMeta) -> bool {
+    let mut changed = false;
+
+    ui.label("Title");
+    let title_resp = ui.add(
+        egui::TextEdit::singleline(&mut draft.title)
+            .id_salt("feedback.title")
+            .desired_width(body_w)
+            .hint_text("Short summary of the issue or request"),
+    );
+    record_feedback_text_edit(ui, &title_resp, meta, "feedback.title", "Title", &draft.title);
+    if title_resp.changed() {
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    let summary_lbl = draft.category.summary_label();
+    ui.label(summary_lbl);
+    let summary_resp = ui.add(egui::TextEdit::multiline(&mut draft.summary).id_salt("feedback.summary").desired_width(body_w).desired_rows(3));
+    record_feedback_text_edit(ui, &summary_resp, meta, "feedback.summary", summary_lbl, &draft.summary);
+    if summary_resp.changed() {
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    let details_lbl = draft.category.details_label();
+    ui.label(details_lbl);
+    let details_resp = ui.add(egui::TextEdit::multiline(&mut draft.details).id_salt("feedback.details").desired_width(body_w).desired_rows(3));
+    record_feedback_text_edit(ui, &details_resp, meta, "feedback.details", details_lbl, &draft.details);
+    if details_resp.changed() {
+        changed = true;
+    }
+
+    ui.add_space(6.0);
+    let extra_lbl = draft.category.extra_label();
+    ui.label(extra_lbl);
+    let extra_resp = ui.add(egui::TextEdit::multiline(&mut draft.extra).id_salt("feedback.extra").desired_width(body_w).desired_rows(2));
+    record_feedback_text_edit(ui, &extra_resp, meta, "feedback.extra", extra_lbl, &draft.extra);
+    if extra_resp.changed() {
+        changed = true;
+    }
+
+    changed
+}
+
+fn render_feedback_diagnostics_section(
+    ui: &mut Ui,
+    draft: &mut crate::feedback::FeedbackDraft,
+    diag: &crate::feedback::FeedbackDiagnostics,
+    body_w: f32,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+) -> bool {
+    let diag_lbl = "Include sanitized environment diagnostics (no project data or file paths)";
+    let diag_resp = ui.checkbox(&mut draft.include_diagnostics, diag_lbl);
+    app_checkbox(ui, &diag_resp, meta, "feedback.include_diagnostics", diag_lbl, draft.include_diagnostics);
+    if draft.include_diagnostics {
+        egui::Frame::group(ui.style()).fill(tokens.surface_bg).stroke(Stroke::new(1.0, tokens.border)).show(ui, |ui| {
+            ui.set_max_width((body_w - 16.0).max(120.0));
+            ui.add(egui::Label::new(egui::RichText::new(diag.preview_text()).monospace().small()).wrap());
+        });
+    }
+    diag_resp.changed()
+}
+
+struct FeedbackFooterInput<'a> {
+    locale: &'a str,
+    draft: &'a crate::feedback::FeedbackDraft,
+    active_diag: Option<&'a crate::feedback::FeedbackDiagnostics>,
+    preview: &'a crate::feedback::BuiltFeedbackUrl,
+    body_w: f32,
+    tokens: &'a Tokens,
+}
+
+fn render_feedback_footer(ui: &mut Ui, input: &FeedbackFooterInput<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let locale = input.locale;
+    let draft = input.draft;
+    let active_diag = input.active_diag;
+    let preview = input.preview;
+    let body_w = input.body_w;
+    let tokens = input.tokens;
+    ui.add_space(6.0);
+    let length_note = if preview.truncated {
+        format!("GitHub URL capped at {} bytes ({} characters omitted — use Copy Markdown for full text).", preview.url.len(), preview.omitted_chars)
+    } else {
+        format!(
+            "Prefilled GitHub URL: {} / {} bytes · template: {}",
+            preview.url.len(),
+            crate::feedback::MAX_GITHUB_ISSUE_URL_BYTES,
+            draft.category.template_filename()
+        )
+    };
+    ui.add(egui::Label::new(egui::RichText::new(length_note).color(tokens.text_muted).small()).wrap());
+    if let Some(status) = draft.status_message.as_deref() {
+        ui.add(egui::Label::new(egui::RichText::new(status).color(tokens.accent_strong).small()).wrap());
+    }
+    ui.add_space(4.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(body_w);
+        if app_button(
+            ui,
+            meta,
+            AppBtn {
+                widget_id: "dialog.feedback.open_github",
+                label: "Open on GitHub...",
+                command_id: None,
+                selected: true,
+                enabled: true,
+                disabled_reason: None,
+            },
+            tokens,
+        )
+        .clicked()
+        {
+            intents.push_open_feedback_on_github();
+        }
+
+        let copy_lbl = if draft.copied_markdown { "Copied Markdown" } else { "Copy Markdown" };
+        if app_button(
+            ui,
+            meta,
+            AppBtn {
+                widget_id: "dialog.feedback.copy_markdown",
+                label: copy_lbl,
+                command_id: None,
+                selected: false,
+                enabled: true,
+                disabled_reason: None,
+            },
+            tokens,
+        )
+        .clicked()
+        {
+            let md = crate::feedback::build_feedback_markdown(draft, active_diag);
+            ui.ctx().copy_text(md);
+            intents.push_copy_feedback_markdown();
+        }
+
+        if app_button(
+            ui,
+            meta,
+            AppBtn { widget_id: "dialog.feedback.reset", label: "Clear", command_id: None, selected: false, enabled: true, disabled_reason: None },
+            tokens,
+        )
+        .clicked()
+        {
+            intents.push_reset_feedback_draft();
+        }
+
+        if app_button(
+            ui,
+            meta,
+            AppBtn {
+                widget_id: "dialog.button.cancel",
+                label: tr(locale, "btn.cancel"),
+                command_id: None,
+                selected: false,
+                enabled: true,
+                disabled_reason: None,
+            },
+            tokens,
+        )
+        .clicked()
+        {
+            intents.push_dialog_button("cancel");
+        }
+    });
+}
+
+fn record_feedback_text_edit(ui: &Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, value: &str) {
+    app_record_visible(
+        ui,
+        resp,
+        meta,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "textbox",
+            label,
+            command_id: None,
+            value: Some(json!(value)),
+            enabled: true,
+            disabled_reason: None,
+            z_layer: ZLayer::ModalDialog,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
 }
 
 // ============================================================================

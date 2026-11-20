@@ -3670,6 +3670,7 @@ fn is_command_read_only(command_id: &str, params: Option<&Value>) -> bool {
             | "ui.state"
             | "state.snapshot"
             | "app.about"
+            | "app.feedback"
             | "ui.previewFilter.set"
             | "ui.presentation.set"
             | "ui.presentation.toggle"

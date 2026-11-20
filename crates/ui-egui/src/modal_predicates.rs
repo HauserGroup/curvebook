@@ -665,7 +665,8 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::ResultViewer { .. }
         | ActiveDialog::Print { .. }
         | ActiveDialog::CommandPalette
-        | ActiveDialog::About => ControlEnablement::enabled(),
+        | ActiveDialog::About
+        | ActiveDialog::Feedback => ControlEnablement::enabled(),
     })
 }
 
