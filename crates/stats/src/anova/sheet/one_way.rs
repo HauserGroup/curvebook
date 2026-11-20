@@ -375,8 +375,7 @@ pub(in crate::anova) fn emit_multi_vc_rm_reml(
         let (g_mat, rank_c) = cluster_ids_to_g_matrix(ids)?;
         specs.push((scalar_name, g_mat, rank_c));
     }
-    let refs: Vec<(&str, DenseMatrix, usize)> = specs.iter().map(|(n, g, c)| (*n, g.clone(), *c)).collect();
-    let (mres, core) = fit_multi_vc_reml_with_method_and_core(x_mat, y_vec, &refs, term_slices, df_method)?;
+    let (mres, core) = fit_multi_vc_reml_with_method_and_core(x_mat, y_vec, &specs, term_slices, df_method)?;
     let sum_rand: f64 = mres.variance_components.iter().map(|(_, v)| *v).sum();
     let tot = (sum_rand + mres.sigma2_error).max(1e-18);
     let icc_subj = mres.variance_components.first().map_or(0.0, |(_, v)| *v / tot);
