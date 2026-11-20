@@ -4,12 +4,12 @@
 //! (`Navigator` & Scoped `Family` Lineage Tree).
 
 use curvebook_doc::{ColumnDesignHint, ResultStatus, SheetId, SubcolumnMode, TableArchetype, TableKind, VariableRole, XColumnMode};
-use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::egui_shell::leading_dock::NavigatorKindChip;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};

@@ -8,7 +8,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::CommandOrigin;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::tr;
 
 /// Resolved Command Palette search row surfaced by [`filter_palette_commands`].

@@ -1,5 +1,5 @@
 //! Permanent regression gate for Wave 6 `R0.21` strict alpha branding, narrow external-archive
-//! boundaries, 16-locale live `LayoutTree` rendering, packaging/MCP/doc inspection, and complete
+//! boundaries, 16-locale live `egui_shell` rendering, packaging/MCP/doc inspection, and complete
 //! asset-provenance verification (`R0.21`, `R10.14`).
 
 use std::fs;
@@ -12,13 +12,11 @@ use curvebook_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_
 use curvebook_mcp::{GuiSessionHost, McpServerState, dispatch_json_value};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
 use curvebook_svg::{SvgExportOptions, render_svg};
-use curvebook_ui_egui::compositor::FramePalette;
 use curvebook_ui_egui::dialogs_canvas::ActiveInspector;
 use curvebook_ui_egui::i18n;
 use curvebook_ui_egui::menus::{UI_COMMANDS, menu_bar_tooltips};
-use curvebook_ui_egui::views::build_workspace_layout_tree;
 use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, WelcomeMode, instantiate_sample_fixture};
-use curvebook_ui_egui::{ActiveDialog, ClipboardBundle, DesktopTextMeasurer, UiApp, ViewportMetrics};
+use curvebook_ui_egui::{ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, ViewportMetrics};
 
 fn workspace_root() -> Result<PathBuf, String> {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
@@ -114,9 +112,29 @@ fn assert_clean_ui_string(ctx: &str, text: &str, locale: &str, allow_palette_cmd
     Ok(())
 }
 
+fn assert_clean_egui_capture(ctx: &str, cap: &EguiSurfaceCapture, locale: &str, allow_palette_cmd_id: bool) -> Result<(), String> {
+    for (owner, text) in &cap.text_runs {
+        let is_palette_cmd = allow_palette_cmd_id && (owner == "palette.status" || owner.starts_with("palette.item."));
+        let allow = is_palette_cmd || text.contains("*.prism");
+        assert_clean_ui_string(&format!("{ctx}:{owner}"), text, locale, allow)?;
+    }
+    for entry in &cap.a11y_entries {
+        for txt in [Some(entry.label.as_str()), entry.value_text.as_deref(), entry.disabled_reason.as_deref(), entry.full_label.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            assert_clean_ui_string(&format!("{ctx}:a11y:{}", entry.widget_id), txt, locale, txt.contains("*.prism"))?;
+        }
+    }
+    for ak in &cap.accesskit_labels {
+        assert_clean_ui_string(&format!("{ctx}:accesskit"), ak, locale, ak.contains("*.prism"))?;
+    }
+    Ok(())
+}
+
 #[test]
-fn r021_live_layout_tree_and_a11y_clean_across_all_16_locales_and_5_sheets() -> Result<(), String> {
-    let mut doc = ProjectDocument::new("R021 Live LayoutTree Sweep").map_err(|e| e.to_string())?;
+fn r021_live_egui_shell_and_a11y_clean_across_all_16_locales_and_5_sheets() -> Result<(), String> {
+    let mut doc = ProjectDocument::new("R021 Live Egui Shell Sweep").map_err(|e| e.to_string())?;
     for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
         let ds = instantiate_sample_fixture(fixture.id, format!("data-{}", idx + 1)).map_err(|e| e.to_string())?;
         doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
@@ -149,7 +167,6 @@ fn r021_live_layout_tree_and_a11y_clean_across_all_16_locales_and_5_sheets() -> 
     let mut empty_app = UiApp::new();
     let vp = ViewportMetrics::new(1440.0, 900.0, 1.0);
     let narrow_vp = ViewportMetrics::new(640.0, 560.0, 1.0);
-    let measurer = DesktopTextMeasurer::global();
 
     let dialogs = [
         ActiveDialog::FormatAxes { sheet_id: SheetId::new("graph-1") },
@@ -186,29 +203,21 @@ fn r021_live_layout_tree_and_a11y_clean_across_all_16_locales_and_5_sheets() -> 
     let menu_keys: Vec<&'static str> = menu_bar_tooltips(&app).into_iter().map(|s| s.menu_key).collect();
 
     for &locale in i18n::LOCALES {
+        let scanner = EguiSurfaceScanner::new();
         empty_app.set_locale(locale);
-        let empty_palette = FramePalette::from_theme(&empty_app.theme);
         for mode in [WelcomeMode::EmptyTypedTable, WelcomeMode::TutorialSample, WelcomeMode::FromTemplate, WelcomeMode::ClonePipeline] {
             empty_app.nav.welcome.open = true;
             empty_app.nav.welcome.mode = mode;
-            let tree = build_workspace_layout_tree(&empty_app, vp, measurer, &empty_palette);
-            for run in &tree.text_runs {
-                assert_clean_ui_string(&format!("welcome:{locale}:{mode:?}"), &run.text, locale, false)?;
-            }
+            let cap = scanner.scan(&mut empty_app, vp);
+            assert_clean_egui_capture(&format!("welcome:{locale}:{mode:?}"), &cap, locale, false)?;
         }
 
         app.set_locale(locale);
-        let palette = FramePalette::from_theme(&app.theme);
         for sid in ["data-1", "info-1", "res-1", "graph-1", "layout-1"] {
             app.execute_command("sheet.select", serde_json::json!({ "sheet_id": sid })).map_err(|e| e.to_string())?;
             app.sync_views();
-            let tree = build_workspace_layout_tree(&app, vp, measurer, &palette);
-            for run in &tree.text_runs {
-                assert_clean_ui_string(&format!("sheet:{locale}:{sid}:{}", run.owner_widget_id.as_str()), &run.text, locale, false)?;
-            }
-            for node in &tree.nodes {
-                assert_clean_ui_string(&format!("sheet_a11y:{locale}:{sid}:{}", node.id.as_str()), &node.a11y.label, locale, false)?;
-            }
+            let cap = scanner.scan(&mut app, vp);
+            assert_clean_egui_capture(&format!("sheet:{locale}:{sid}"), &cap, locale, false)?;
         }
         for insp in [
             ActiveInspector::None,
@@ -220,10 +229,8 @@ fn r021_live_layout_tree_and_a11y_clean_across_all_16_locales_and_5_sheets() -> 
             ActiveInspector::ResultDetails,
         ] {
             app.canvas_dialogs.active_inspector = insp;
-            let tree = build_workspace_layout_tree(&app, vp, measurer, &palette);
-            for run in &tree.text_runs {
-                assert_clean_ui_string(&format!("insp:{locale}:{insp:?}"), &run.text, locale, false)?;
-            }
+            let cap = scanner.scan(&mut app, vp);
+            assert_clean_egui_capture(&format!("insp:{locale}:{insp:?}"), &cap, locale, false)?;
         }
         app.canvas_dialogs.active_inspector = ActiveInspector::None;
 
@@ -231,40 +238,29 @@ fn r021_live_layout_tree_and_a11y_clean_across_all_16_locales_and_5_sheets() -> 
             app.canvas_dialogs.active_dialog = dlg.clone();
             if matches!(dlg, ActiveDialog::CommandPalette) {
                 app.canvas_dialogs.command_palette.open();
-                let tree_default = build_workspace_layout_tree(&app, vp, measurer, &palette);
-                for run in &tree_default.text_runs {
-                    assert_clean_ui_string(&format!("dlg:{locale}:palette_default"), &run.text, locale, false)?;
-                }
+                let cap_default = scanner.scan(&mut app, vp);
+                assert_clean_egui_capture(&format!("dlg:{locale}:palette_default"), &cap_default, locale, false)?;
                 app.canvas_dialogs.command_palette.query = String::from("import");
-                let tree_filtered = build_workspace_layout_tree(&app, vp, measurer, &palette);
-                for run in &tree_filtered.text_runs {
-                    let is_status = run.owner_widget_id.as_str() == "palette.status";
-                    assert_clean_ui_string(&format!("dlg:{locale}:palette_import"), &run.text, locale, is_status)?;
-                }
+                let cap_filtered = scanner.scan(&mut app, vp);
+                assert_clean_egui_capture(&format!("dlg:{locale}:palette_import"), &cap_filtered, locale, true)?;
                 app.canvas_dialogs.command_palette.open();
             } else {
-                let tree = build_workspace_layout_tree(&app, vp, measurer, &palette);
-                for run in &tree.text_runs {
-                    assert_clean_ui_string(&format!("dlg:{locale}"), &run.text, locale, false)?;
-                }
+                let cap = scanner.scan(&mut app, vp);
+                assert_clean_egui_capture(&format!("dlg:{locale}"), &cap, locale, false)?;
             }
         }
         app.canvas_dialogs.active_dialog = ActiveDialog::None;
 
         for key in &menu_keys {
             app.interaction.open_menu = Some((*key).to_owned());
-            let tree = build_workspace_layout_tree(&app, vp, measurer, &palette);
-            for run in &tree.text_runs {
-                assert_clean_ui_string(&format!("menu:{locale}:{key}"), &run.text, locale, false)?;
-            }
+            let cap = scanner.scan(&mut app, vp);
+            assert_clean_egui_capture(&format!("menu:{locale}:{key}"), &cap, locale, false)?;
         }
         app.interaction.open_menu = None;
 
         app.view_shards.toolbar_menus.overflow_open = true;
-        let overflow_tree = build_workspace_layout_tree(&app, narrow_vp, measurer, &palette);
-        for run in &overflow_tree.text_runs {
-            assert_clean_ui_string(&format!("overflow:{locale}"), &run.text, locale, false)?;
-        }
+        let overflow_cap = scanner.scan(&mut app, narrow_vp);
+        assert_clean_egui_capture(&format!("overflow:{locale}"), &overflow_cap, locale, false)?;
         app.view_shards.toolbar_menus.overflow_open = false;
     }
 

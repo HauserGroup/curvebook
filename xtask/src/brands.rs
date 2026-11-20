@@ -18,7 +18,9 @@ use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, Analy
 use curvebook_ui_egui::i18n;
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips, toolbar_tooltips};
 use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
-use curvebook_ui_egui::{ActiveDialog, ClipboardBundle, LayoutTree, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree};
+use curvebook_ui_egui::{
+    ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
+};
 
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
 const BRANDS: &[&str] = &[
@@ -173,14 +175,14 @@ pub fn run(root: &Path) -> Result<(), String> {
         let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
         if let Some(stats) = dist_stats {
             println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
                 files.len(),
                 stats.files,
                 stats.archive_entries
             );
         } else {
             println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
                 files.len()
             );
         }
@@ -188,7 +190,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
     let lines: Vec<String> = hits.iter().map(|h| format!("{}:{}: `{}`", h.path, h.line, h.brand)).collect();
     Err(format!(
-        "{} unapproved brand/suite mention(s) in repository paths, source identifiers/comments/literals, UI LayoutTree, MCP/engine catalogs, export/icon metadata, or packaging surfaces:\n  {}",
+        "{} unapproved brand/suite mention(s) in repository paths, source identifiers/comments/literals, live egui shell UI, MCP/engine catalogs, export/icon metadata, or packaging surfaces:\n  {}",
         hits.len(),
         lines.join("\n  ")
     ))
@@ -2349,7 +2351,7 @@ fn check_single_string(path: &str, line: usize, text: &str, prism_policy: PrismP
     check_single_string_with_extra(path, line, text, prism_policy, false, out);
 }
 
-/// Scan arbitrary UI, `LayoutTree`, `AccessibilityMeta`, or tooltip `&str` slices for external
+/// Scan arbitrary UI, `egui_shell`, AccessKit, or tooltip `&str` slices for external
 /// brands and suite names. Allows `.prism` / `*.prism` only inside explicit import/export
 /// file-type descriptions.
 #[must_use]
@@ -3271,7 +3273,7 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
 }
 
 /// Sweep in-process UI strings across 16-locale `i18n`, tooltips, all 8 table archetypes,
-/// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `LayoutTree` renders,
+/// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `egui_shell` renders,
 /// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
 /// and SVG/PDF/HTML/manifest/window export metadata.
 pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
@@ -3290,7 +3292,7 @@ pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     session.recalculate_all().map_err(|e| format!("recalculate sweep session: {e}"))?;
     let mut app = UiApp::from_session(session);
     check_all_dialogs_and_inspectors(&mut app, &mut hits);
-    hits.extend(check_live_layout_tree_surfaces()?);
+    hits.extend(check_live_egui_shell_surfaces()?);
     hits.extend(check_mcp_surfaces()?);
 
     Ok(hits)
@@ -3757,11 +3759,11 @@ fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
     }
 }
 
-/// Sweep live `build_workspace_layout_tree` rendered `LayoutTextRun` and `WidgetNode.a11y` strings
+/// Sweep live `egui_shell` painted text runs, `FrameInspectNodeMeta`, and AccessKit strings
 /// across ALL `16` `LOCALES`, all `5` sheet kinds, all `4` `WelcomeMode`s, all `7` `ActiveInspector`
 /// tabs, all `26` `ActiveDialog` variants, open dropdown menus, toolbar overflow, split view, and
 /// portfolio gallery.
-pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
+pub fn check_live_egui_shell_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = Vec::new();
     let desktop_vp = ViewportMetrics::new(1440.0, 900.0, 1.0);
     let narrow_vp = ViewportMetrics::new(640.0, 560.0, 1.0);
@@ -3769,7 +3771,7 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut empty_app = UiApp::new();
     let doc = build_brands_sweep_document()?;
     let mut session = Session::from_document(doc);
-    session.recalculate_all().map_err(|e| format!("layout sweep recalculate: {e}"))?;
+    session.recalculate_all().map_err(|e| format!("egui_shell sweep recalculate: {e}"))?;
     let mut app = UiApp::from_session(session);
     app.sync_views();
 
@@ -3779,12 +3781,13 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
 
     for &locale in i18n::LOCALES {
         let is_it = locale == "it";
+        let scanner = EguiSurfaceScanner::new();
         empty_app.set_locale(locale);
         for mode in [WelcomeMode::EmptyTypedTable, WelcomeMode::TutorialSample, WelcomeMode::FromTemplate, WelcomeMode::ClonePipeline] {
             empty_app.nav.welcome.open = true;
             empty_app.nav.welcome.mode = mode;
-            let tree = LayoutTree::build(&empty_app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:welcome:{mode:?}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut empty_app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:welcome:{mode:?}"), is_it, false, &cap, &mut hits);
         }
         empty_app.nav.welcome.open = false;
 
@@ -3800,8 +3803,8 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
         for sid in sheet_ids {
             app.execute_command("sheet.select", serde_json::json!({ "sheet_id": sid })).map_err(|e| format!("select sheet `{sid}`: {e}"))?;
             app.sync_views();
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:sheet:{sid}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:sheet:{sid}"), is_it, false, &cap, &mut hits);
         }
         app.execute_command("sheet.select", serde_json::json!({ "sheet_id": "graph-1" })).map_err(|e| format!("select graph-1: {e}"))?;
         app.sync_views();
@@ -3816,8 +3819,8 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
             ActiveInspector::ResultDetails,
         ] {
             app.canvas_dialogs.active_inspector = inspector;
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:inspector:{inspector:?}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:inspector:{inspector:?}"), is_it, false, &cap, &mut hits);
         }
         app.canvas_dialogs.active_inspector = ActiveInspector::None;
 
@@ -3825,43 +3828,43 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
             app.canvas_dialogs.active_dialog = dlg.clone();
             if matches!(dlg, ActiveDialog::CommandPalette) {
                 app.canvas_dialogs.command_palette.open();
-                let tree_default = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog:CommandPalette:default"), is_it, false, &tree_default, &mut hits);
+                let cap_default = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:default"), is_it, false, &cap_default, &mut hits);
                 app.canvas_dialogs.command_palette.query = String::from("import");
-                let tree_import = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog:CommandPalette:import"), is_it, true, &tree_import, &mut hits);
+                let cap_import = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:import"), is_it, true, &cap_import, &mut hits);
                 app.canvas_dialogs.command_palette.open();
             } else {
-                let tree = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog"), is_it, false, &tree, &mut hits);
+                let cap = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog"), is_it, false, &cap, &mut hits);
             }
         }
         app.canvas_dialogs.active_dialog = ActiveDialog::None;
 
         for key in &menu_keys {
             app.interaction.open_menu = Some((*key).to_owned());
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:menu:{key}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:menu:{key}"), is_it, false, &cap, &mut hits);
         }
         app.interaction.open_menu = None;
 
         app.view_shards.toolbar_menus.overflow_open = true;
-        let overflow_tree = LayoutTree::build(&app, narrow_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:toolbar_overflow"), is_it, false, &overflow_tree, &mut hits);
+        let overflow_cap = scanner.scan(&mut app, narrow_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:toolbar_overflow"), is_it, false, &overflow_cap, &mut hits);
         app.view_shards.toolbar_menus.overflow_open = false;
 
         app.split.enabled = true;
         app.split.primary_sheet_id = Some(SheetId::new("data-1"));
         app.split.secondary_sheet_id = Some(SheetId::new("graph-1"));
-        let split_tree = LayoutTree::build(&app, desktop_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:split_workspace"), is_it, false, &split_tree, &mut hits);
+        let split_cap = scanner.scan(&mut app, desktop_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:split_workspace"), is_it, false, &split_cap, &mut hits);
         app.split.enabled = false;
 
         app.nav.gallery.open = true;
         let gallery_doc = app.document().clone();
         app.nav.sync_gallery(&gallery_doc);
-        let gallery_tree = LayoutTree::build(&app, desktop_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:gallery"), is_it, false, &gallery_tree, &mut hits);
+        let gallery_cap = scanner.scan(&mut app, desktop_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:gallery"), is_it, false, &gallery_cap, &mut hits);
         app.nav.gallery.open = false;
     }
 
@@ -3907,32 +3910,43 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
     ]
 }
 
-fn collect_layout_tree_hits(context: &str, allow_it_statistica: bool, allow_palette_cmd_id: bool, tree: &LayoutTree, hits: &mut Vec<BrandHit>) {
-    for (idx, run) in tree.text_runs.iter().enumerate() {
-        let is_palette_status_cmd = allow_palette_cmd_id && run.owner_widget_id.as_str() == "palette.status";
-        let run_ctx = format!("{context}:text_run:{}", run.owner_widget_id.as_str());
-        if allow_it_statistica || is_palette_status_cmd {
-            let policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica, allow_palette_cmd_id: is_palette_status_cmd };
-            check_single_string(&run_ctx, idx + 1, &run.text, policy, hits);
-        } else {
-            hits.extend(check_text_runs_strict(&run_ctx, [run.text.as_str()]));
+fn collect_egui_surface_hits(
+    context: &str,
+    allow_it_statistica: bool,
+    allow_palette_cmd_id: bool,
+    cap: &EguiSurfaceCapture,
+    hits: &mut Vec<BrandHit>,
+) {
+    for (idx, (owner, text)) in cap.text_runs.iter().enumerate() {
+        let is_palette_cmd = allow_palette_cmd_id && (owner == "palette.status" || owner.starts_with("palette.item."));
+        let run_ctx = format!("{context}:text_run:{owner}");
+        let policy = PrismPolicy::UiTextRun {
+            allow_dot_prism: is_dot_prism_extension_description(text),
+            allow_it_statistica,
+            allow_palette_cmd_id: is_palette_cmd,
+        };
+        check_single_string(&run_ctx, idx + 1, text, policy, hits);
+    }
+    for (idx, entry) in cap.a11y_entries.iter().enumerate() {
+        let a11y_ctx = format!("{context}:a11y:{}", entry.widget_id);
+        for txt in [Some(entry.label.as_str()), entry.value_text.as_deref(), entry.disabled_reason.as_deref(), entry.full_label.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let policy =
+                PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(txt), allow_it_statistica, allow_palette_cmd_id: false };
+            check_single_string(&a11y_ctx, idx + 1, txt, policy, hits);
+        }
+        if let Some(cmd) = &entry.command_id
+            && cmd != "table.importPrism"
+        {
+            hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:command_id"), [cmd.as_str()]));
         }
     }
-    for (idx, node) in tree.nodes.iter().enumerate() {
-        let a11y_ctx = format!("{context}:a11y:{}", node.id.as_str());
-        for txt in [Some(node.a11y.label.as_str()), node.a11y.value_text.as_deref(), node.a11y.shortcut.as_deref()].into_iter().flatten() {
-            if allow_it_statistica {
-                let policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: true, allow_palette_cmd_id: false };
-                check_single_string(&a11y_ctx, idx + 1, txt, policy, hits);
-            } else {
-                hits.extend(check_text_runs_strict(&a11y_ctx, [txt]));
-            }
-        }
-        if let Some(kpath) = &node.a11y.keyboard_path
-            && kpath != "table.importPrism"
-        {
-            hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:keyboard_path"), [kpath.as_str()]));
-        }
+    for (idx, ak) in cap.accesskit_labels.iter().enumerate() {
+        let policy =
+            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(ak), allow_it_statistica, allow_palette_cmd_id: false };
+        check_single_string(&format!("{context}:accesskit"), idx + 1, ak, policy, hits);
     }
 }
 

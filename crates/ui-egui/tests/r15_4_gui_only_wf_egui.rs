@@ -535,6 +535,7 @@ fn wf15_egui_gui_only_power_wizard_four_stages_hover_and_create() -> TestRes {
     c.gui("ui.answer_dialog", json!({ "action": "next", "fields": { "effect_mode": "standardized", "d": 0.5 } }))?;
     c.gui("ui.answer_dialog", json!({ "action": "next", "fields": { "alpha": 0.05, "target_power": 0.80 } }))?;
     ensure(c.app.canvas_dialogs.power_wizard.stage == PowerWizardStage::Results, "expected Stage 4")?;
+    c.gui("ui.pointer_gesture", json!({ "action": "click", "widget_id": "power.tab.curve" }))?;
     let hover = c.gui("ui.pointer_gesture", json!({ "action": "hover", "widget_id": "power.curve_hover", "hover_fraction_x": 0.5 }))?;
     ensure(hover.get("hover_n").and_then(Value::as_f64).is_some_and(|n| n > 0.0), "expected hover_n")?;
     let created = c.gui("ui.answer_dialog", json!({ "action": "create" }))?;

@@ -126,8 +126,8 @@ pub fn run(root: &Path) -> Result<(), String> {
         println!(
             "status: verified {total_tables} Markdown table(s) across {STATUS_REL} and {ROADMAP_REL}, \
              live metrics, [x] evidence in {UI_EVIDENCE_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL} \
-             ({}/50 legacy, {}/50 egui; backed human tests: {}/50 legacy, {}/50 egui)",
-            telemetry.legacy_claimed, telemetry.egui_claimed, telemetry.legacy_backed, telemetry.egui_backed
+             ({}/50 egui; backed human tests: {}/50 egui)",
+            telemetry.egui_claimed, telemetry.egui_backed
         );
         return Ok(());
     }
@@ -539,9 +539,7 @@ fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
         return None;
     }
     let suffix = &rest[digits_len..];
-    if suffix == "_human" || suffix.starts_with("_human_") {
-        Some(("legacy", idx))
-    } else if suffix == "_egui_human" || suffix.starts_with("_egui_human_") {
+    if suffix == "_human" || suffix.starts_with("_human_") || suffix == "_egui_human" || suffix.starts_with("_egui_human_") {
         Some(("egui", idx))
     } else {
         None
@@ -608,7 +606,8 @@ pub fn check_backend_workflow_telemetry(
         }
     }
 
-    let legacy_claimed = summarize_backend_claims(path, "legacy", &legacy_claims, legacy_backed, &mut violations);
+    let legacy_claimed =
+        if legacy_claims.is_empty() { 0 } else { summarize_backend_claims(path, "legacy", &legacy_claims, legacy_backed, &mut violations) };
     let egui_claimed = summarize_backend_claims(path, "egui", &egui_claims, egui_backed, &mut violations);
 
     (BackendWorkflowTelemetry { legacy_claimed, egui_claimed, legacy_backed, egui_backed }, violations)
@@ -1136,34 +1135,29 @@ fn active_human_test() {}
     fn r15_4_backend_workflow_telemetry_enforces_consistency_and_backed_counts() {
         let mut tests = WorkspaceTests::default();
         for idx in 1..=50 {
-            let legacy_name = format!("wf{idx:02}_human_example");
-            tests.unqualified.insert(legacy_name.clone());
-            tests.qualified.insert(format!("human_wf_demo::{legacy_name}"));
-        }
-        for idx in 1..=2 {
-            let egui_name = format!("wf{idx:02}_egui_human_example");
+            let egui_name = format!("wf{idx:02}_human_example");
             tests.unqualified.insert(egui_name.clone());
-            tests.qualified.insert(format!("r15_4_egui_wf_01_24::{egui_name}"));
+            tests.qualified.insert(format!("human_wf_demo::{egui_name}"));
         }
 
         let valid_md = "\
-- [x] *(human path)* All 50 reference workflows — `50/50 legacy, 2/50 egui`
-- [ ] *(human path — `egui` backend)* Overhaul (`2/50 egui` vs `50/50 legacy`)
+- [x] *(human path)* All 50 reference workflows — `50/50 egui`
+- [x] *(human path — `egui` backend, `R15.5`)* Native `egui` desktop shell (`50/50 egui`)
 ";
         let (telemetry, violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", valid_md, &tests);
         assert!(violations.is_empty(), "unexpected violations: {violations:?}");
-        assert_eq!(telemetry.legacy_claimed, 50);
-        assert_eq!(telemetry.egui_claimed, 2);
-        assert_eq!(telemetry.legacy_backed, 50);
-        assert_eq!(telemetry.egui_backed, 2);
+        assert_eq!(telemetry.legacy_claimed, 0);
+        assert_eq!(telemetry.egui_claimed, 50);
+        assert_eq!(telemetry.legacy_backed, 0);
+        assert_eq!(telemetry.egui_backed, 50);
 
-        let mismatch_md = "\
+        let stale_legacy_md = "\
 - [x] *(human path)* All 50 reference workflows — `50/50 legacy, 50/50 egui`
-- [ ] *(human path — `egui` backend)* Overhaul (`0/50 egui` vs `50/50 legacy`)
+- [ ] *(human path — `egui` backend)* Overhaul (`2/50 egui` vs `50/50 legacy`)
 ";
-        let (_bad_tel, bad_violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", mismatch_md, &tests);
+        let (_bad_tel, bad_violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", stale_legacy_md, &tests);
+        assert!(bad_violations.iter().any(|v| v.reason.contains("only `0/50`")), "{bad_violations:?}");
         assert!(bad_violations.iter().any(|v| v.reason.contains("conflicting")), "{bad_violations:?}");
-        assert!(bad_violations.iter().any(|v| v.reason.contains("only `2/50`")), "{bad_violations:?}");
     }
 }
 

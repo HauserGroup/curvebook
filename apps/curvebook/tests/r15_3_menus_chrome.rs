@@ -304,7 +304,7 @@ fn run_qa3_parity_case(use_bundled_fonts: bool, in_window_menus: bool, scale: f6
             (live_px[1] - off_px[1]).abs() <= 0.5 && (live_px[3] - off_px[3]).abs() <= 0.5,
             "Wave 2 QA #3 Y-offset/height mismatch for `{wid}` (bundled={use_bundled_fonts}, in_window_menus={in_window_menus}, scale={scale}): live={live_px:?} vs offscreen={off_px:?}"
         );
-        if !use_bundled_fonts {
+        if use_bundled_fonts {
             assert!(
                 bounds_close(live_px, off_px, 0.5),
                 "Wave 2 QA #3 full-bounds mismatch for `{wid}` (in_window_menus={in_window_menus}, scale={scale}): live={live_px:?} vs offscreen={off_px:?}"

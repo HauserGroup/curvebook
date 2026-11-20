@@ -202,7 +202,6 @@ fn make_stage_driver<'a>(state: StageHarness, metrics: ViewportMetrics, tokens: 
             tokens: &tokens,
             decision: &decision,
             layout,
-            host_textures: None,
             focused_pane: st.app.nav.active_pane,
             enabled: matches!(st.app.canvas_dialogs.active_dialog, ActiveDialog::None) && st.views.progress_modal.is_none(),
         };
@@ -768,7 +767,7 @@ fn canvas_view_async_raster_hover_pairwise_cld_km_tex_layout_drilldown() -> Resu
         build_driver_font_definitions(),
         |ui, meta, st| {
             let tokens = Tokens::for_mode(st.app.theme.mode);
-            let ctx = CanvasViewContext { tokens: &tokens, host_textures: None, enabled: true, is_secondary_split: false };
+            let ctx = CanvasViewContext { tokens: &tokens, enabled: true, is_secondary_split: false };
             let rep = render_canvas_view(ui, &st.app, &mut st.view, ctx, meta, &mut st.intents);
             st.paper_rect = rep.paper_rect_pt;
             st.km_rect = rep.km_track_rect_pt;
@@ -879,7 +878,7 @@ fn canvas_view_heatmap_colorbar_hover_readout() -> Result<(), Box<dyn std::error
         build_driver_font_definitions(),
         |ui, meta, (app, view, intents, paper_out, cb_hovered)| {
             let tokens = Tokens::for_mode(app.theme.mode);
-            let ctx = CanvasViewContext { tokens: &tokens, host_textures: None, enabled: true, is_secondary_split: false };
+            let ctx = CanvasViewContext { tokens: &tokens, enabled: true, is_secondary_split: false };
             let rep = render_canvas_view(ui, app, view, ctx, meta, intents);
             *paper_out = rep.paper_rect_pt;
             *cb_hovered = rep.colorbar_hovered;

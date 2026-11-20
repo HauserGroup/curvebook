@@ -16,12 +16,12 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ConstantHookPickerState, EditAnalysisParametersState};
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::{LocalePreset, normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::modal_predicates::ControlEnablement;
 
 use super::stat_anova_modal::{
     ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
-    render_modal_seg_btn, render_section_title, render_stepper_row,
+    render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
 };
 use super::stats_modals::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, render_tex_equation_preview, show_wave4_modal};
 use super::{FrameInspectMeta, PendingUiIntents, Tokens};
@@ -99,6 +99,8 @@ pub struct FitModalEguiState {
     pub custom_equation_draft: String,
     pub custom_dsl_enabled: bool,
     pub hook_search_draft: String,
+    pub open_session_sheet_id: Option<String>,
+    pub r2_threshold_draft: String,
     pub expand_info_branch: bool,
     pub expand_analysis_branch: bool,
     pub expand_document_branch: bool,
@@ -140,17 +142,20 @@ pub fn render_fit_modal(
     intents: &mut PendingUiIntents,
 ) -> FitModalFrameReport {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        state.open_session_sheet_id = None;
         return FitModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
+        state.open_session_sheet_id = None;
         return FitModalFrameReport::default();
     };
     let AnalysisKind::NonlinearRegression(nl) = &spec.kind else {
+        state.open_session_sheet_id = None;
         return FitModalFrameReport::default();
     };
 
-    sync_fit_modal_state(ctx, result_sheet_id, &app.canvas_dialogs.edit_params, nl, state);
+    sync_fit_modal_state(result_sheet_id, &app.canvas_dialogs.edit_params, nl, state);
     let is_mv = doc.data_sheet(&spec.source_sheet_id).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
     let mut tabs = Vec::with_capacity(8);
     if is_mv {
@@ -236,13 +241,15 @@ pub fn render_fit_modal(
         },
         |ui, state, _avail_w, _avail_h, meta, intents| match state.active_tab {
             FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
-            FitModalTab::Model => render_fit_model_tab(ctx, ui, FitModelTabCtx { spec, nl, param_names: &param_names }, state, tokens, meta, intents),
+            FitModalTab::Model => {
+                render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
+            }
             FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, tokens, meta, intents),
             FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, result_sheet_id, doc, spec, nl, &param_names, tokens, meta, intents),
             FitModalTab::InitialValues => render_fit_initial_tab(ui, spec, nl, &param_names, tokens, meta, intents),
             FitModalTab::Range => render_fit_range_tab(ui, spec, nl, tokens, meta, intents),
             FitModalTab::Weight => render_fit_weight_tab(ui, spec, nl, tokens, meta, intents),
-            FitModalTab::Output => render_fit_output_tab(ui, spec, nl, tokens, meta, intents),
+            FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
         },
         |ui, _state, meta, intents| {
             ui.horizontal(|ui| {
@@ -304,21 +311,14 @@ pub fn render_fit_modal(
     }
 }
 
-fn sync_fit_modal_state(
-    ctx: &Context,
-    result_sheet_id: &SheetId,
-    ep: &EditAnalysisParametersState,
-    nl: &NonlinearFitSpec,
-    state: &mut FitModalEguiState,
-) {
-    let key = Id::unique(("fit_modal.last_sheet", result_sheet_id.as_str()));
-    let prev: Option<String> = ctx.data(|d| d.get_temp(key));
-    if prev.as_deref() != Some(result_sheet_id.as_str()) {
-        ctx.data_mut(|d| d.insert_temp(key, result_sheet_id.as_str().to_owned()));
+fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersState, nl: &NonlinearFitSpec, state: &mut FitModalEguiState) {
+    if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
+        state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
         state.active_tab = FitModalTab::from_slug(&ep.active_tab).unwrap_or(FitModalTab::Model);
         state.custom_dsl_enabled = nl.custom_dsl.is_some();
         state.custom_equation_draft =
             nl.custom_dsl.clone().unwrap_or_else(|| String::from("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"));
+        state.r2_threshold_draft = nl.flag_r_squared_below.map_or_else(String::new, |v| format!("{v}"));
     }
 }
 
@@ -391,6 +391,91 @@ fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String]) -> Vec<String> {
     alerts
 }
 
+struct FitMvGridCtx<'a> {
+    doc: &'a ProjectDocument,
+    spec: &'a curvebook_doc::AnalysisSpec,
+    nl: &'a NonlinearFitSpec,
+    id_salt: &'a str,
+}
+
+fn render_fit_mv_mapping_grid(
+    ui: &mut Ui,
+    grid_ctx: &FitMvGridCtx<'_>,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    let FitMvGridCtx { doc, spec, nl, id_salt } = *grid_ctx;
+    let Some(ds) = doc.data_sheet(&spec.source_sheet_id) else {
+        return false;
+    };
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return false;
+    };
+    render_section_title(ui, tokens, "Multiple-Variables Curve Mapping (X predictors, Y response, Grouping)");
+    egui::Grid::new(id_salt).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        for (idx, var) in mv.variables.iter().enumerate() {
+            ui.horizontal(|ui| {
+                render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
+                ui.label(&var.title);
+                if render_modal_seg_btn(ui, tokens, meta, &format!("fit.mv.y.{idx}"), "Y", nl.mv_y_column == Some(idx), &ControlEnablement::enabled())
+                {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        fit.mv_y_column = Some(idx);
+                        fit.mv_x_columns.retain(|&c| c != idx);
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.mv.x.{idx}"),
+                    "X",
+                    nl.mv_x_columns.contains(&idx),
+                    &ControlEnablement::enabled(),
+                ) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        if let Some(p) = fit.mv_x_columns.iter().position(|&c| c == idx) {
+                            fit.mv_x_columns.remove(p);
+                        } else {
+                            fit.mv_x_columns.push(idx);
+                            fit.mv_x_columns.sort_unstable();
+                        }
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.mv.group.{idx}"),
+                    "Grp",
+                    nl.mv_group_columns.contains(&idx),
+                    &ControlEnablement::enabled(),
+                ) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        if let Some(p) = fit.mv_group_columns.iter().position(|&c| c == idx) {
+                            fit.mv_group_columns.remove(p);
+                        } else {
+                            fit.mv_group_columns.push(idx);
+                            fit.mv_group_columns.sort_unstable();
+                        }
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+            });
+            if idx % 2 == 1 {
+                ui.end_row();
+            }
+        }
+    });
+    true
+}
+
 fn render_fit_data_tab(
     ui: &mut Ui,
     doc: &ProjectDocument,
@@ -400,79 +485,13 @@ fn render_fit_data_tab(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let Some(ds) = doc.data_sheet(&spec.source_sheet_id) else {
-        return;
-    };
-    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+    if !render_fit_mv_mapping_grid(ui, &FitMvGridCtx { doc, spec, nl, id_salt: "fit_mv_data_grid" }, tokens, meta, intents) {
         ui.label("All columns / datasets in the XY source table are available for fitting.");
-        return;
-    };
-    render_section_title(ui, tokens, "Multiple-Variables Curve Mapping (X predictors, Y response, Grouping)");
-    for (idx, var) in mv.variables.iter().enumerate() {
-        ui.horizontal_wrapped(|ui| {
-            render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
-            ui.label(&var.title);
-            if render_modal_seg_btn(
-                ui,
-                tokens,
-                meta,
-                &format!("fit.mv.y.{idx}"),
-                "Y Response",
-                nl.mv_y_column == Some(idx),
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-                    fit.mv_y_column = Some(idx);
-                    fit.mv_x_columns.retain(|&c| c != idx);
-                }
-                intents.push_set_edit_params_draft(next);
-            }
-            if render_modal_seg_btn(
-                ui,
-                tokens,
-                meta,
-                &format!("fit.mv.x.{idx}"),
-                "X Predictor",
-                nl.mv_x_columns.contains(&idx),
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-                    if let Some(p) = fit.mv_x_columns.iter().position(|&c| c == idx) {
-                        fit.mv_x_columns.remove(p);
-                    } else {
-                        fit.mv_x_columns.push(idx);
-                        fit.mv_x_columns.sort_unstable();
-                    }
-                }
-                intents.push_set_edit_params_draft(next);
-            }
-            if render_modal_seg_btn(
-                ui,
-                tokens,
-                meta,
-                &format!("fit.mv.grp.{idx}"),
-                "Group",
-                nl.mv_group_columns.contains(&idx),
-                &ControlEnablement::enabled(),
-            ) {
-                let mut next = spec.clone();
-                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-                    if let Some(p) = fit.mv_group_columns.iter().position(|&c| c == idx) {
-                        fit.mv_group_columns.remove(p);
-                    } else {
-                        fit.mv_group_columns.push(idx);
-                        fit.mv_group_columns.sort_unstable();
-                    }
-                }
-                intents.push_set_edit_params_draft(next);
-            }
-        });
     }
 }
 
 struct FitModelTabCtx<'a> {
+    doc: &'a ProjectDocument,
     spec: &'a curvebook_doc::AnalysisSpec,
     nl: &'a NonlinearFitSpec,
     param_names: &'a [String],
@@ -487,7 +506,10 @@ fn render_fit_model_tab(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let FitModelTabCtx { spec, nl, param_names } = model_ctx;
+    let FitModelTabCtx { doc, spec, nl, param_names } = model_ctx;
+    if render_fit_mv_mapping_grid(ui, &FitMvGridCtx { doc, spec, nl, id_salt: "fit_mv_model_grid" }, tokens, meta, intents) {
+        ui.add_space(4.0);
+    }
     let preview_params: Vec<(String, f64)> = param_names.iter().map(|p| (p.clone(), 1.0)).collect();
     let tex = format_model_equation_tex(&nl.equation_id, nl.custom_dsl.as_deref(), &preview_params, false, 4);
     render_section_title(ui, tokens, "Symbolic TeX Preview");
@@ -1049,6 +1071,7 @@ fn render_fit_output_tab(
     ui: &mut Ui,
     spec: &curvebook_doc::AnalysisSpec,
     nl: &NonlinearFitSpec,
+    state: &mut FitModalEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
@@ -1179,6 +1202,18 @@ fn render_fit_output_tab(
         }
         intents.push_set_edit_params_draft(next);
     }
+    ui.add_space(4.0);
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.diagnostics.r2.input",
+        "Flag R² Below Threshold (0..1)",
+        "e.g. 0.90",
+        &mut state.r2_threshold_draft,
+        96.0,
+    );
     let _ = (&spec.p_value_format, PValueFormat::FourDecimal, column_titles_for_draft);
 }
 

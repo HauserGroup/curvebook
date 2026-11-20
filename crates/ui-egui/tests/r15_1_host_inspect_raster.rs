@@ -7,16 +7,17 @@
 //! `Role::ScrollBar` non-overlap at `640x420` & `1440x600`, and `ui_scale` preferences migration.
 
 use curvebook_doc::TableKind;
-use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::inspect_bridge::{
     build_ui_tree_snapshot_from_egui, check_accesskit_scrollbar_non_overlap, clipped_rect_to_bounds_px, logical_pt_to_physical_px,
-    physical_px_to_logical_pt, render_minimal_shell_and_about,
+    physical_px_to_logical_pt, render_egui_shell_frame, render_minimal_shell_and_about,
 };
 use curvebook_ui_egui::egui_shell::rasterizer::EguiSoftwareRasterizer;
-use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiBackend, UiIntent, UiIntentOutcome};
+use curvebook_ui_egui::egui_shell::{
+    EguiShellViewState, FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiBackend, UiIntent, UiIntentOutcome,
+};
+use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use curvebook_ui_egui::layout::LayoutTree;
 use curvebook_ui_egui::{
     DEFAULT_UI_SCALE, MAX_UI_SCALE, MIN_UI_SCALE, RenderTargetSpec, UiApp, UiThemeMode, inspect_ui_tree_for_metrics,
     migrate_preferences_value_with_ui_scale,
@@ -32,44 +33,61 @@ fn png_dimensions(png: &[u8]) -> Option<(u32, u32)> {
     Some((w, h))
 }
 
+fn capture_shell_meta(app: &UiApp, w_pt: f32, h_pt: f32) -> FrameInspectMeta {
+    let ctx = egui::Context::default();
+    let mut views = EguiShellViewState::default();
+    let mut meta = FrameInspectMeta::default();
+    for _ in 0..3 {
+        meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::new();
+        let mut out = ctx.run_ui(
+            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))), ..Default::default() },
+            |ui| {
+                let _ = render_egui_shell_frame(ui, app, &mut views, &mut meta, &mut intents);
+            },
+        );
+        out.textures_delta.clear();
+    }
+    meta
+}
+
 #[test]
 fn host_draws_menu_bar_suppresses_duplicate_canvas_menus_only_when_true() {
     let mut app = UiApp::new();
-    let metrics = ViewportMetrics::new(1200.0, 760.0, 1.0);
 
-    // Default headless / Legacy mode emits `menu.*` nodes on canvas.
+    // Default mode renders inline `menu.*` nodes in top chrome.
     assert!(!app.host_draws_menu_bar);
-    let legacy_tree = LayoutTree::build(&app, metrics);
-    assert!(legacy_tree.nodes.iter().any(|n| n.id.0.starts_with("menu.")), "expected canvas menu nodes when host_draws_menu_bar == false");
+    let inline_meta = capture_shell_meta(&app, 1200.0, 760.0);
+    let inline_menus: Vec<&str> = inline_meta.entries.iter().filter(|n| n.widget_id.starts_with("menu.")).map(|n| n.widget_id.as_str()).collect();
+    assert!(!inline_menus.is_empty(), "expected inline menu.* nodes when host_draws_menu_bar == false");
 
-    // Desktop host rendering `egui::MenuBar` sets `host_draws_menu_bar = true`, suppressing duplicates.
+    // Desktop host rendering native menus sets `host_draws_menu_bar = true`, suppressing duplicate inline menus.
     app.host_draws_menu_bar = true;
-    let host_tree = LayoutTree::build(&app, metrics);
-    let duplicate_menus: Vec<&str> = host_tree.nodes.iter().filter(|n| n.id.0.starts_with("menu.")).map(|n| n.id.0.as_str()).collect();
-    assert!(duplicate_menus.is_empty(), "expected zero canvas `menu.*` nodes when host_draws_menu_bar == true, found: {duplicate_menus:?}");
+    let host_meta = capture_shell_meta(&app, 1200.0, 760.0);
+    let duplicate_menus: Vec<&str> = host_meta.entries.iter().filter(|n| n.widget_id.starts_with("menu.")).map(|n| n.widget_id.as_str()).collect();
+    assert!(duplicate_menus.is_empty(), "expected zero inline `menu.*` nodes when host_draws_menu_bar == true, found: {duplicate_menus:?}");
     assert!(
-        host_tree.nodes.iter().any(|n| n.id.0.starts_with("toolbar.")),
+        host_meta.entries.iter().any(|n| n.widget_id.starts_with("toolbar.")),
         "contextual toolbar strip should remain present when duplicate menu bar is suppressed"
     );
 }
 
 #[test]
-fn golden_ui_inspect_about_view_parity_between_legacy_and_egui() -> Result<(), Box<dyn std::error::Error>> {
+fn canonical_ui_inspect_about_dialog_and_toolbar_disablement() -> Result<(), Box<dyn std::error::Error>> {
     let mut app = UiApp::new();
     app.set_ui_backend(UiBackend::Egui);
     app.canvas_dialogs.active_dialog = ActiveDialog::About;
     app.sync_views();
 
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
-    let legacy_snap = inspect_ui_tree_for_metrics(&app, metrics, Some("dialog"), false);
+    let canonical_snap = inspect_ui_tree_for_metrics(&app, metrics, Some("dialog"), false);
     let egui_snap = app.inspect_egui_shell_snapshot(metrics, Some("dialog"), false);
 
-    let legacy_json = serde_json::to_value(&legacy_snap)?;
+    let canonical_json = serde_json::to_value(&canonical_snap)?;
     let egui_json = serde_json::to_value(&egui_snap)?;
     assert_eq!(egui_json["active_dialog"], json!("about"));
     assert_eq!(egui_json["dialog"]["dialog_kind"], json!("about"));
-    assert_eq!(egui_json["dialog"]["title"], legacy_json["dialog"]["title"]);
-    assert_eq!(egui_json, legacy_json, "ui.inspect JSON on minimal About dialog view must match between legacy and egui");
+    assert_eq!(egui_json, canonical_json, "canonical inspect_ui_tree_for_metrics must match egui shell snapshot");
 
     // Full workspace scope with `include_bounds: true` verifies AccessKit + `FrameInspectMeta` wiring.
     let bounded_egui = app.inspect_egui_shell_snapshot(metrics, None, true);

@@ -1,23 +1,29 @@
-#![allow(dead_code)]
-//! Shared zero-unwrap human-path workflow test helpers (`R10.2`, `R10.13`, `R10.20`).
+#![forbid(unsafe_code)]
+#![allow(dead_code, clippy::unwrap_used, clippy::expect_used, clippy::needless_pass_by_value)]
+
+//! Shared zero-unwrap native `egui` human-path workflow test helpers (`R15.4`, `R15.5`).
 //!
-//! All helpers drive [`HumanPathDriver`] strictly through hit-tested widget centers `(x, y)`,
-//! physical pointer events, focus-preserving typing, key combos, and wheel scrolling.
+//! Drives `UiApp` strictly through [`EguiHumanPathDriver`] pointer, wheel, keyboard, and IME
+//! events against [`render_egui_shell_frame`], enforcing `verify_pixel_to_hit_box_parity()`,
+//! `check_scrollbar_non_overlap()`, and `14`-locale `gui-layout-spec.md` §9.4 gates.
 
-use std::sync::OnceLock;
+use std::sync::Arc;
 
-use curvebook_doc::ErrorCode;
-use curvebook_ui_egui::UiApp;
+use curvebook_doc::{ErrorCode, SheetId, SheetSection};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::dispatch_gui_action;
-use curvebook_ui_egui::human_driver::HumanPathDriver;
-use curvebook_ui_egui::interaction::{KeyModifiers, UiEventOutcome, ViewportMetrics};
-use curvebook_ui_egui::layout::hit_test::hit_test_logical;
-use curvebook_ui_egui::layout::verify::{ParityReport, ParityViolation};
-use curvebook_ui_egui::layout::{LayoutTree, WidgetId, WidgetNode};
-use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, TextMeasurer, UiTextStyle};
-use curvebook_ui_egui::theme::FontBook;
+use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
+use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
+use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
+use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
+use curvebook_ui_egui::{RenderTargetSpec, UiApp};
+use egui::{Key, Modifiers, Pos2};
 use serde_json::json;
+
+/// Shared workflow test return type.
+pub type TestRes = Result<(), String>;
 
 /// Default desktop viewport (`1280x800 @ 1.0x`) for human-path workflow tests.
 #[must_use]
@@ -25,143 +31,303 @@ pub fn default_viewport() -> ViewportMetrics {
     ViewportMetrics::new(1280.0, 800.0, 1.0)
 }
 
-/// Construct a [`HumanPathDriver`] with strict `gui_only` and `human_path_only` enabled.
+/// Live `egui` shell test state tracked by [`EguiHumanPathDriver`] across multi-pass frames.
+pub struct WfShellState {
+    pub app: UiApp,
+    pub views: EguiShellViewState,
+    pub intents: PendingUiIntents,
+    pub dialog_rect_pt: Option<egui::Rect>,
+    pub last_intent_error: Option<String>,
+}
+
+impl WfShellState {
+    /// Wrap `app` for strict native `egui` GUI-only + human-path execution.
+    #[must_use]
+    pub fn new(mut app: UiApp) -> Self {
+        app.set_ui_backend(UiBackend::Egui);
+        app.set_gui_only(true);
+        app.set_human_path_only(true);
+        let views = app.egui_views.clone();
+        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None, last_intent_error: None }
+    }
+}
+
+/// Canonical pure-`egui` workflow harness backed by [`EguiHumanPathDriver`].
+pub struct EguiWfHarness {
+    pub driver: EguiHumanPathDriver<'static, WfShellState>,
+}
+
+impl EguiWfHarness {
+    /// Create a fresh strict `egui` desktop harness under `metrics`.
+    #[must_use]
+    pub fn new(metrics: ViewportMetrics) -> Self {
+        let mut app = UiApp::new().with_ui_backend(UiBackend::Egui);
+        app.set_gui_only(true);
+        app.set_human_path_only(true);
+        app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
+        Self::from_app(app, metrics)
+    }
+
+    /// Construct a harness around an existing pre-seeded [`UiApp`].
+    #[must_use]
+    pub fn from_app(mut app: UiApp, metrics: ViewportMetrics) -> Self {
+        if !app.has_custom_clipboard_adapter() {
+            app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
+        }
+        let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+        let mut driver =
+            EguiHumanPathDriver::with_tokens_and_fonts(WfShellState::new(app), metrics, tokens, build_driver_font_definitions(), |ui, meta, st| {
+                let rep = render_egui_shell_frame(ui, &st.app, &mut st.views, meta, &mut st.intents);
+                st.dialog_rect_pt = rep.regions.dialog_rect_pt;
+            });
+        driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+        driver.set_post_frame_hook(|st, settled| {
+            if settled {
+                st.app.egui_views = st.views.clone();
+                if !st.intents.is_empty() {
+                    if let Err(err) = st.intents.commit_if_settled(&mut st.app, false) {
+                        st.last_intent_error = Some(err.to_string());
+                    } else {
+                        st.last_intent_error = None;
+                    }
+                }
+                st.views = st.app.egui_views.clone();
+            } else {
+                st.intents.clear();
+            }
+        });
+        driver.run_settled();
+        Self { driver }
+    }
+
+    /// Borrow the active [`UiApp`].
+    #[must_use]
+    pub fn app(&self) -> &UiApp {
+        &self.driver.state().app
+    }
+
+    /// Mutably borrow the active [`UiApp`].
+    pub fn app_mut(&mut self) -> &mut UiApp {
+        &mut self.driver.state_mut().app
+    }
+
+    /// Locate the visible screen center (in logical points) of `wid` in the settled frame.
+    pub fn widget_center(&self, wid: &str) -> Result<Pos2, String> {
+        let entry = self.driver.frame_meta().find_by_widget_id(wid).ok_or_else(|| format!("missing widget `{wid}`"))?;
+        if !entry.clipped_rect.is_positive() {
+            return Err(format!("widget `{wid}` has empty bounds {:?}", entry.clipped_rect));
+        }
+        Ok(entry.clipped_rect.center())
+    }
+
+    /// Click `wid` via real pointer move/down/up at its rendered center.
+    pub fn click(&mut self, wid: &str) -> TestRes {
+        self.driver.click_widget_id(wid)
+    }
+
+    /// Double-click `wid` via real pointer events at its rendered center.
+    pub fn dbl_click_widget(&mut self, wid: &str) -> TestRes {
+        let pos = self.widget_center(wid)?;
+        self.driver.click_at(pos)?;
+        self.driver.click_at(pos)?;
+        Ok(())
+    }
+
+    /// Focus textbox `wid`, select all, replace contents with `text`, and commit if needed.
+    pub fn replace_textbox(&mut self, wid: &str, text: &str) -> TestRes {
+        self.click(wid)?;
+        self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+        if text.is_empty() {
+            self.driver.press_key("Backspace", KeyModifiers::default())?;
+        } else {
+            self.driver.type_text(text)?;
+        }
+        Ok(())
+    }
+
+    /// Double-click grid cell `wid`, select all, type `text`, and commit via `Enter`.
+    pub fn type_replace_cell(&mut self, wid: &str, text: &str) -> TestRes {
+        self.dbl_click_widget(wid)?;
+        self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+        self.driver.type_text(text)?;
+        self.driver.press_key("Enter", KeyModifiers::default())?;
+        Ok(())
+    }
+
+    /// Enter `text` into data grid cell `(row, col, subcol)`.
+    pub fn enter_grid_cell(&mut self, row: usize, col: usize, subcol: usize, text: &str) -> TestRes {
+        let wid = format!("grid.cell.{row}.{col}.{subcol}");
+        self.type_replace_cell(&wid, text)
+    }
+
+    /// Enter `text` into X-column cell `(row, subcol)`.
+    pub fn enter_x_cell(&mut self, row: usize, subcol: usize, text: &str) -> TestRes {
+        let wid = format!("grid.xcell.{row}.{subcol}");
+        self.type_replace_cell(&wid, text)
+    }
+
+    /// Create a data table via the Welcome Hub using real pointer/keyboard input.
+    pub fn create_table_via_welcome(&mut self, arch_wid: &str, title: &str, extra_clicks: &[&str]) -> Result<SheetId, String> {
+        if !self.driver.state().views.launcher_open && self.app().document().total_sheet_count() > 0 {
+            self.click("toolbar.home")?;
+        }
+        self.click(arch_wid)?;
+        for wid in extra_clicks {
+            self.click(wid)?;
+        }
+        let title_pos = self.widget_center("welcome.input.title")?;
+        self.driver.click_at(title_pos)?;
+        self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+        self.driver.type_text(title)?;
+        let before = self.app().document().data_sheets.len();
+        self.click("welcome.btn.create")?;
+        if self.app().document().data_sheets.len() <= before {
+            return Err(format!("Welcome Create did not add a sheet for `{title}`"));
+        }
+        self.app().document().data_sheets.last().map(|s| s.id.clone()).ok_or_else(|| String::from("missing created sheet"))
+    }
+
+    /// Select `id` via the Project Navigator filter chip and sheet tree row.
+    pub fn select_sheet(&mut self, id: &SheetId) -> TestRes {
+        let wid = format!("nav.sheet.{}", id.as_str());
+        if self.driver.frame_meta().find_by_widget_id(&wid).is_none() {
+            let chip = match self.app().document().sheet_section(id) {
+                Some(SheetSection::Data) => "nav.chip.data",
+                Some(SheetSection::Info) => "nav.chip.info",
+                Some(SheetSection::Analyses) => "nav.chip.results",
+                Some(SheetSection::Graphs) => "nav.chip.graphs",
+                Some(SheetSection::Layouts) => "nav.chip.layouts",
+                None => "nav.chip.all",
+            };
+            self.click(chip)?;
+        }
+        self.click(&wid)
+    }
+
+    /// Change an MV column role badge via popup click.
+    pub fn set_mv_role(&mut self, col: usize, role_slug: &str) -> TestRes {
+        self.click(&format!("mv_formula.role_badge.{col}"))?;
+        self.click(&format!("mv_formula.role_opt.{col}.{role_slug}"))
+    }
+
+    /// Populate a 4-column, 5-row MV table `sid` with categorical group + 3 continuous columns.
+    pub fn seed_mv_4col_5row(&mut self, sid: &SheetId) -> TestRes {
+        self.select_sheet(sid)?;
+        self.set_mv_role(0, "categorical")?;
+        let groups = ["Ctrl", "Ctrl", "Drug", "Drug", "Drug"];
+        for (r, grp) in groups.iter().enumerate() {
+            self.enter_grid_cell(r, 0, 0, grp)?;
+            self.enter_grid_cell(r, 1, 0, &format!("{:.1}", 10.0 + r as f64 * 2.5))?;
+            self.enter_grid_cell(r, 2, 0, &format!("{:.1}", 20.0 + r as f64 * 3.0))?;
+            self.enter_grid_cell(r, 3, 0, &format!("{:.1}", 5.0 + (r % 2) as f64 * 4.0 + r as f64))?;
+        }
+        Ok(())
+    }
+
+    /// Create and populate a 13-row MV table (`Group` + 3 numeric variables) via Welcome Hub.
+    pub fn create_and_seed_mv(&mut self, title: &str) -> Result<SheetId, String> {
+        let sid =
+            self.create_table_via_welcome("welcome.arch.multiple_variables", title, &["welcome.stepper.cols.inc", "welcome.stepper.rows.inc"])?;
+        self.select_sheet(&sid)?;
+        self.set_mv_role(0, "categorical")?;
+        self.set_mv_role(1, "continuous")?;
+        self.set_mv_role(2, "continuous")?;
+        self.set_mv_role(3, "continuous")?;
+        let col1_vals = [10.0, 14.0, 18.0, 22.0, 26.0, 12.0, 19.0, 25.0, 31.0, 38.0, 16.0, 29.0, 34.0];
+        let col2_vals = [0, 1, 0, 1, 1, 0, 1, 0, 1, 1, 0, 1, 1];
+        let col3_vals = [5.2, 8.7, 6.1, 11.4, 9.8, 17.3, 24.2, 20.6, 26.5, 23.1, 13.4, 28.9, 19.2];
+        for r in 0..13 {
+            self.enter_grid_cell(r, 0, 0, if r < 6 { "Ctrl" } else { "Drug" })?;
+            self.enter_grid_cell(r, 1, 0, &format!("{:.1}", col1_vals[r]))?;
+            self.enter_grid_cell(r, 2, 0, &format!("{}", col2_vals[r]))?;
+            self.enter_grid_cell(r, 3, 0, &format!("{:.1}", col3_vals[r]))?;
+        }
+        Ok(sid)
+    }
+
+    /// Open `EditAnalysisParameters` via `Cmd+T`.
+    pub fn open_cmd_t(&mut self) -> TestRes {
+        self.driver.press_key("T", KeyModifiers { meta: true, ..Default::default() })?;
+        if !matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }) {
+            return Err(format!("Cmd+T failed to open EditAnalysisParameters: {:?}", self.app().canvas_dialogs.active_dialog));
+        }
+        Ok(())
+    }
+
+    /// Open the Analyze modal via `toolbar.analyze`, filter, select `entry_wid`, and confirm.
+    pub fn run_analyze_entry(&mut self, search_query: &str, entry_wid: &str) -> Result<SheetId, String> {
+        let before = self.app().document().result_sheets.len();
+        self.click("toolbar.analyze")?;
+        if !search_query.is_empty() && self.driver.frame_meta().find_by_widget_id("analyze.search").is_some() {
+            self.click("analyze.search")?;
+            self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+            self.driver.type_text(search_query)?;
+        }
+        self.click(entry_wid)?;
+        self.click("modal.ok")?;
+        if matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
+            self.click("analyze_picker.dup.create_new")?;
+            self.click("modal.ok")?;
+        }
+        if self.app().document().result_sheets.len() <= before {
+            return Err(format!(
+                "Analyze `{entry_wid}` did not create ResultSheet (active_dialog={:?}, err={:?})",
+                self.app().canvas_dialogs.active_dialog,
+                self.driver.state().last_intent_error
+            ));
+        }
+        self.app().document().result_sheets.last().map(|r| r.id.clone()).ok_or_else(|| String::from("missing created ResultSheet"))
+    }
+
+    /// Assert clean `egui` pixel-to-hit-box parity and AccessKit `Role::ScrollBar` non-overlap.
+    pub fn assert_parity_and_layout(&mut self, label: &str) -> TestRes {
+        let report = self.driver.verify_pixel_to_hit_box_parity();
+        if !report.is_clean() {
+            return Err(format!("{label}: parity violations: {:?}", report.violations));
+        }
+        let overlaps = self.driver.check_scrollbar_non_overlap();
+        if !overlaps.is_empty() {
+            return Err(format!("{label}: scrollbar overlaps: {overlaps:?}"));
+        }
+        Ok(())
+    }
+
+    /// Sweep all 14 active Beta locales across `1440x600@1.0x` and `640x420@1.5x` §9.4 layout gates.
+    pub fn verify_14_locales_section_9_4(&mut self, label: &str) -> TestRes {
+        let saved_locale = self.app().locale.clone();
+        for &loc in &BETA_LOCALE_CODES {
+            let _ = self.app_mut().set_locale(loc);
+            self.driver.set_viewport(ViewportMetrics::new(1440.0, 600.0, 1.0));
+            self.assert_parity_and_layout(&format!("{label} {loc} 1440x600"))?;
+            self.driver.set_viewport(ViewportMetrics::new(640.0, 420.0, 1.5));
+            self.assert_parity_and_layout(&format!("{label} {loc} 640x420@1.5x"))?;
+        }
+        let _ = self.app_mut().set_locale(&saved_locale);
+        self.driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, 1.0));
+        Ok(())
+    }
+
+    /// Capture a software rasterized PNG screenshot of `region` through `EguiSoftwareRasterizer`.
+    pub fn screenshot_png(&mut self, region: ScreenshotRegionTarget) -> Result<Vec<u8>, String> {
+        self.app_mut()
+            .render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 1280, height_px: 800, dpi: 96 }, region)
+            .map(|(b, _, _)| b)
+            .map_err(|e| e.to_string())
+    }
+}
+
+/// Assert `cond` holds or return `msg` as a test error.
+pub fn ensure(cond: bool, msg: impl Into<String>) -> TestRes {
+    if cond { Ok(()) } else { Err(msg.into()) }
+}
+
+/// Construct a default `1280x800` strict [`EguiWfHarness`].
 #[must_use]
-pub fn new_human_driver(app: UiApp, metrics: ViewportMetrics) -> HumanPathDriver {
-    HumanPathDriver::new(app, metrics)
+pub fn new_strict_egui_driver() -> EguiWfHarness {
+    EguiWfHarness::new(default_viewport())
 }
 
-fn is_descendant_of(tree: &LayoutTree, candidate: &WidgetNode, ancestor: &WidgetId) -> bool {
-    let mut cur = candidate.parent.as_ref();
-    let mut hops = 0usize;
-    while let Some(pid) = cur
-        && hops < 32
-    {
-        if pid == ancestor {
-            return true;
-        }
-        cur = tree.node(pid.as_str()).and_then(|n| n.parent.as_ref());
-        hops += 1;
-    }
-    false
-}
-
-/// Resolve the logical center `(x, y)` of `widget_id` and verify [`hit_test_logical`] routes to it.
-///
-/// # Errors
-/// Returns an error if the widget is missing, undrawn, disabled, zero-sized, or occluded at its center.
-pub fn widget_hit_center(driver: &mut HumanPathDriver, widget_id: &WidgetId) -> Result<[f64; 2], String> {
-    let tree = driver.layout_tree();
-    let id_str = widget_id.as_str();
-    let node = tree.node(id_str).ok_or_else(|| format!("widget `{id_str}` not found in LayoutTree"))?;
-    if !node.drawn_in_frame {
-        return Err(format!("widget `{id_str}` is not drawn_in_frame"));
-    }
-    if node.bounds.visible_rect_px.width == 0 || node.bounds.visible_rect_px.height == 0 {
-        return Err(format!("widget `{id_str}` has zero visible bounds"));
-    }
-    if !node.state.enablement.enabled {
-        let reason = node.state.enablement.disabled_reason.as_deref().unwrap_or("unavailable");
-        return Err(format!("widget `{id_str}` is disabled: {reason}"));
-    }
-    let [cx, cy] = node.bounds.visible_rect_px.center();
-    let [lx, ly] = driver.metrics().physical_to_logical_px([f64::from(cx), f64::from(cy)]);
-    let hit = hit_test_logical(&tree, lx, ly).ok_or_else(|| format!("hit_test_logical({lx:.1}, {ly:.1}) for `{id_str}` returned None"))?;
-    if hit.id != *widget_id && !is_descendant_of(&tree, hit, widget_id) {
-        return Err(format!("hit_test_logical({lx:.1}, {ly:.1}) for `{id_str}` hit `{}` instead", hit.id.as_str()));
-    }
-    Ok([lx, ly])
-}
-
-/// Click `widget_id` strictly at its hit-tested logical center `(x, y)` via `PointerMove` + `PointerDown` + `PointerUp`.
-///
-/// # Errors
-/// Returns an error if hit-testing fails or pointer dispatch fails.
-pub fn click_widget_center(driver: &mut HumanPathDriver, widget_id: &WidgetId) -> Result<UiEventOutcome, String> {
-    let [lx, ly] = widget_hit_center(driver, widget_id)?;
-    driver.click_logical(lx, ly)
-}
-
-/// Move pointer to the hit-tested center `(x, y)` of `widget_id` to trigger hover state & tooltips.
-///
-/// # Errors
-/// Returns an error if hit-testing fails or pointer move dispatch fails.
-pub fn hover_widget_center(driver: &mut HumanPathDriver, widget_id: &WidgetId) -> Result<UiEventOutcome, String> {
-    let [lx, ly] = widget_hit_center(driver, widget_id)?;
-    driver.move_pointer(lx, ly)
-}
-
-/// Type `text` into the currently focused widget via `TextInput` (requires an already-focused widget).
-///
-/// # Errors
-/// Returns an error if no widget currently holds focus or text dispatch fails.
-pub fn type_into_focused(driver: &mut HumanPathDriver, text: &str) -> Result<UiEventOutcome, String> {
-    if driver.app().focus_widget_id.as_deref().is_none_or(str::is_empty) {
-        return Err(String::from("type_into_focused requires an already-focused widget"));
-    }
-    driver.type_text(text)
-}
-
-/// Click `widget_id` at its hit-tested center `(x, y)` to focus it, then type `text` via `type_text`.
-///
-/// # Errors
-/// Returns an error if clicking or typing fails.
-pub fn click_and_type(driver: &mut HumanPathDriver, widget_id: &WidgetId, text: &str) -> Result<UiEventOutcome, String> {
-    let _ = click_widget_center(driver, widget_id)?;
-    driver.type_text(text)
-}
-
-/// Dispatch a raw key press with `modifiers` through the unified keyboard handler.
-///
-/// # Errors
-/// Returns an error if keyboard dispatch fails.
-pub fn press_key_combo(driver: &mut HumanPathDriver, key: &str, modifiers: KeyModifiers) -> Result<UiEventOutcome, String> {
-    driver.press_key(key, modifiers)
-}
-
-/// Dispatch a `Cmd+<key>` (`meta: true`) keyboard shortcut through the unified keyboard handler.
-///
-/// # Errors
-/// Returns an error if keyboard dispatch fails.
-pub fn press_cmd_shortcut(driver: &mut HumanPathDriver, key: &str) -> Result<UiEventOutcome, String> {
-    driver.press_key(key, KeyModifiers { meta: true, ..Default::default() })
-}
-
-/// Send a scroll wheel event over `widget_id`'s hit-tested center `(x, y)`.
-///
-/// # Errors
-/// Returns an error if `widget_id` is not visibly drawn or wheel dispatch fails.
-pub fn scroll_widget_wheel(driver: &mut HumanPathDriver, widget_id: &WidgetId, delta_x: f64, delta_y: f64) -> Result<UiEventOutcome, String> {
-    let [lx, ly] = widget_hit_center(driver, widget_id)?;
-    driver.wheel_logical(lx, ly, delta_x, delta_y, KeyModifiers::default())
-}
-
-/// Scroll `container_id` with `step_y` wheel increments until `target_id` is visibly drawn in `LayoutTree`.
-///
-/// # Errors
-/// Returns an error if `target_id` does not become visible within `max_steps` scroll events.
-pub fn scroll_until_widget_visible(
-    driver: &mut HumanPathDriver,
-    container_id: &WidgetId,
-    target_id: &WidgetId,
-    step_y: f64,
-    max_steps: usize,
-) -> Result<(), String> {
-    for _ in 0..=max_steps {
-        let tree = driver.layout_tree();
-        if let Some(node) = tree.node(target_id.as_str())
-            && node.drawn_in_frame
-            && node.bounds.visible_rect_px.width > 0
-            && node.bounds.visible_rect_px.height > 0
-        {
-            return Ok(());
-        }
-        let _ = scroll_widget_wheel(driver, container_id, 0.0, step_y)?;
-    }
-    Err(format!("widget `{}` did not become visible inside `{}` after {max_steps} scroll steps", target_id.as_str(), container_id.as_str()))
-}
-
-fn assert_bypass_blocked(label: &str, res: Result<serde_json::Value, curvebook_engine::EngineError>) -> Result<(), String> {
+fn assert_bypass_blocked(label: &str, res: Result<serde_json::Value, curvebook_engine::EngineError>) -> TestRes {
     match res {
         Ok(val) => Err(format!("zero-shortcut compliance failed: `{label}` unexpectedly succeeded with {val}")),
         Err(err) if err.code == ErrorCode::GuiOnlyViolation => Ok(()),
@@ -169,20 +335,16 @@ fn assert_bypass_blocked(label: &str, res: Result<serde_json::Value, curvebook_e
     }
 }
 
-/// Verify strict `gui_only` + `human_path_only` guard enforcement (zero semantic bypasses) and
-/// run `verify_pixel_to_hit_box_parity` on the active frame.
-///
-/// # Errors
-/// Returns an error if strict guards are disabled, any synthetic bypass succeeds, or parity violations exist.
-pub fn assert_zero_shortcut_compliance(driver: &mut HumanPathDriver) -> Result<ParityReport, String> {
-    if !driver.app().is_gui_only() {
+/// Verify strict `gui_only` + `human_path_only` guard enforcement and `egui` hit-box/scrollbar parity.
+pub fn assert_zero_shortcut_compliance(h: &mut EguiWfHarness) -> TestRes {
+    if !h.app().is_gui_only() {
         return Err(String::from("zero-shortcut compliance failed: UiApp::is_gui_only() is false"));
     }
-    if !driver.app().is_human_path_only() {
+    if !h.app().is_human_path_only() {
         return Err(String::from("zero-shortcut compliance failed: UiApp::is_human_path_only() is false"));
     }
 
-    let mut probe = driver.app().clone();
+    let mut probe = h.app().clone();
     probe.canvas_dialogs.active_dialog = ActiveDialog::About;
     assert_bypass_blocked(
         "ui.invoke_menu(params)",
@@ -199,85 +361,12 @@ pub fn assert_zero_shortcut_compliance(driver: &mut HumanPathDriver) -> Result<P
         dispatch_gui_action(&mut probe, "ui.type_text", json!({ "widget_id": "probe.focus.b", "text": "x" })),
     )?;
 
-    let report = driver.verify_parity();
-    let picker_open = driver.layout_tree().node("popup.menu.ui.locale.set").is_some_and(|n| n.drawn_in_frame);
-    let filtered = filter_locale_parity_violations(&driver.app().locale, picker_open, report.violations.clone());
-    if !filtered.is_empty() {
-        return Err(format!("pixel-to-hit-box parity violations detected: {filtered:?}"));
-    }
-    Ok(report)
+    h.assert_parity_and_layout("zero_shortcut_compliance")
 }
 
-/// Return `true` when the active host `FontBook::with_system_and_fallback()` shapes representative
-/// text for `locale` with zero missing glyphs.
-#[must_use]
-pub fn host_covers_locale_sample(locale: &str) -> bool {
-    let sample = match locale {
-        "ja" => "日本語データ",
-        "zh-CN" => "简体中文数据",
-        "zh-TW" => "繁體中文數據",
-        "ko" => "한국어데이터",
-        "ar" => "البيانات",
-        "he" => "נתונים",
-        _ => return true,
-    };
-    let measurer = DesktopTextMeasurer::with_font_book(FontBook::with_system_and_fallback());
-    measurer.shape_line(sample, &UiTextStyle::ui_sans(13.0), locale).missing_glyph_count == 0
-}
-
-/// Return `true` when the active host font stack covers all six CJK and RTL scripts (`ja`, `zh-CN`,
-/// `zh-TW`, `ko`, `ar`, `he`), matching `r10_phase7_gates`.
-#[must_use]
-pub fn host_covers_cjk_rtl() -> bool {
-    static COVERS: OnceLock<bool> = OnceLock::new();
-    *COVERS.get_or_init(|| ["ja", "zh-CN", "zh-TW", "ko", "ar", "he"].into_iter().all(host_covers_locale_sample))
-}
-
-/// Filter out expected missing-glyph violations on CJK/RTL scripts (or open language-picker CJK/RTL
-/// autonyms) when running on headless runners without host CJK/RTL system fonts, while always
-/// preserving all geometric, layout, clipping, overlap, accessibility, and disclosure-triangle checks.
-#[must_use]
-pub fn filter_locale_parity_violations(locale: &str, allow_picker_options: bool, violations: Vec<ParityViolation>) -> Vec<ParityViolation> {
-    let locale_unbacked = !host_covers_locale_sample(locale);
-    let picker_unbacked = allow_picker_options && !host_covers_cjk_rtl();
-    violations
-        .into_iter()
-        .filter(|v| {
-            if v.check != "text_glyphs" {
-                return true;
-            }
-            if locale_unbacked {
-                return false;
-            }
-            if picker_unbacked && v.widget_id.starts_with("popup.menu.ui.locale.set.opt.") {
-                return false;
-            }
-            true
-        })
-        .collect()
-}
-
-/// Run [`HumanPathDriver::verify_parity`] and fail on any violation not attributable to absent host
-/// CJK/RTL fonts in `locale`.
-///
-/// # Errors
-/// Returns an error describing any unexpected parity violations.
-pub fn assert_parity_for_locale(driver: &mut HumanPathDriver, locale: &str, context: &str) -> Result<(), String> {
-    let report = driver.verify_parity();
-    let picker_open = driver.layout_tree().node("popup.menu.ui.locale.set").is_some_and(|n| n.drawn_in_frame);
-    let filtered = filter_locale_parity_violations(locale, picker_open, report.violations);
-    if !filtered.is_empty() {
-        return Err(format!("{context}: parity violations: {filtered:?}"));
-    }
-    Ok(())
-}
-
-/// Assert that recorded `max_input_to_paint_ms` stays within `budget_ms` (applying a `1500.0 ms` floor under unoptimized `debug_assertions` so heavy debug-mode layout/export steps on 2-core runners do not flake, while release enforces exact `budget_ms`).
-///
-/// # Errors
-/// Returns an error when the measured worst-case input-to-paint latency exceeds the effective budget.
-pub fn assert_input_to_paint_budget(driver: &HumanPathDriver, budget_ms: f64) -> Result<(), String> {
-    let max_ms = driver.max_input_to_paint_ms();
+/// Assert worst-case input-to-paint latency stays within `budget_ms` (applying `1500.0 ms` floor under debug builds).
+pub fn assert_input_to_paint_budget(h: &EguiWfHarness, budget_ms: f64) -> TestRes {
+    let max_ms = h.driver.max_input_to_paint_ms();
     let effective_budget = if cfg!(debug_assertions) { budget_ms.max(1500.0) } else { budget_ms };
     if max_ms > effective_budget {
         return Err(format!("input-to-paint latency budget exceeded: {max_ms:.2} ms > {effective_budget:.2} ms"));

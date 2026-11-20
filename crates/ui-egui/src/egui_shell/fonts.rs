@@ -101,6 +101,19 @@ pub fn install_egui_fonts(ctx: &egui::Context) -> FontDiscoveryReport {
     built.report
 }
 
+/// Install [`egui::FontDefinitions`] into `ctx`, reusing a process-wide cached default build when
+/// `CURVEBOOK_FONTS_DIR` is unset so offscreen inspection/raster passes do not re-index host fonts.
+pub fn install_default_egui_fonts_cached(ctx: &egui::Context) {
+    static DEFAULT_FONT_DEFS: OnceLock<egui::FontDefinitions> = OnceLock::new();
+    let has_env_override = std::env::var_os("CURVEBOOK_FONTS_DIR").is_some_and(|v| !v.is_empty());
+    if has_env_override {
+        let _ = install_egui_fonts(ctx);
+        return;
+    }
+    let defs = DEFAULT_FONT_DEFS.get_or_init(|| build_egui_font_definitions().definitions);
+    ctx.set_fonts(defs.clone());
+}
+
 /// Build [`egui::FontDefinitions`] from an explicit [`FontDiscoveryConfig`].
 #[must_use]
 pub fn build_egui_font_definitions_with_config(config: &FontDiscoveryConfig) -> BuiltEguiFonts {

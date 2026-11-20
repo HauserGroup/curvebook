@@ -1,4 +1,6 @@
-//! Stage 4B regression tests for `curvebook-ui-egui` (`R1-S10-07`, `R1-S11-11`, `R1-S11-12`).
+//! Stage 4B regression tests for `curvebook-ui-egui` on native `egui` (`R1-S10-07`, `R1-S11-11`, `R1-S11-12`).
+
+mod human_wf_common;
 
 use curvebook_chart::{PointPt, compile_graph};
 use curvebook_doc::{
@@ -10,36 +12,14 @@ use curvebook_render::RenderTargetSpec;
 use curvebook_tools::CanvasToolMode;
 use curvebook_tools::canvas::resolve_category_slots;
 use curvebook_tools::grid::parse_tsv_clipboard;
-use curvebook_ui_egui::{
-    KeyModifiers, PointerButton, ScenePaperMapping, UiApp, UiInputEvent, ViewportMetrics, WorkspaceNavState, WorkspacePixelRect,
-    compositor::render_workspace_rgba, grid_view::format_cell_display,
-};
+use curvebook_ui_egui::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, render_canvas_view};
+use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
+use curvebook_ui_egui::egui_shell::{PendingUiIntents, Tokens};
+use curvebook_ui_egui::{ScreenshotRegionTarget, UiApp, ViewportMetrics, WorkspaceNavState, grid_view::format_cell_display};
+use egui::{Event, Modifiers, PointerButton, Pos2};
 use serde_json::{Value, json};
 
 type TestRes = Result<(), String>;
-
-fn rect_center_logical(rect: WorkspacePixelRect, metrics: ViewportMetrics) -> [f64; 2] {
-    let cx = f64::from(rect.x) + f64::from(rect.width) * 0.5;
-    let cy = f64::from(rect.y) + f64::from(rect.height) * 0.5;
-    metrics.physical_to_logical_px([cx, cy])
-}
-
-fn scene_pt_to_logical(paper: &ScenePaperMapping, metrics: ViewportMetrics, target: PointPt) -> Result<[f64; 2], String> {
-    let x_a = f64::from(paper.paper.x) + 12.0;
-    let y_a = f64::from(paper.paper.y) + 12.0;
-    let x_b = f64::from(paper.paper.x) + f64::from(paper.paper.width) - 12.0;
-    let y_b = f64::from(paper.paper.y) + f64::from(paper.paper.height) - 12.0;
-    let s_a = paper.pixel_to_scene_pt(x_a, y_a).ok_or_else(|| String::from("probe A outside paper"))?;
-    let s_b = paper.pixel_to_scene_pt(x_b, y_b).ok_or_else(|| String::from("probe B outside paper"))?;
-    let dx_scene = s_b.x - s_a.x;
-    let dy_scene = s_b.y - s_a.y;
-    if dx_scene.abs() < 1e-6 || dy_scene.abs() < 1e-6 {
-        return Err(String::from("degenerate paper mapping"));
-    }
-    let phys_x = x_a + ((target.x - s_a.x) / dx_scene) * (x_b - x_a);
-    let phys_y = y_a + ((target.y - s_a.y) / dy_scene) * (y_b - y_a);
-    Ok(metrics.physical_to_logical_px([phys_x, phys_y]))
-}
 
 #[test]
 fn r1_s10_07_locale_set_syncs_all_grid_parsing_and_compositor() -> TestRes {
@@ -54,6 +34,7 @@ fn r1_s10_07_locale_set_syncs_all_grid_parsing_and_compositor() -> TestRes {
 
     let session = Session::from_document(doc);
     let mut app = UiApp::from_session(session);
+    app.nav.welcome.open = false;
 
     // Switch to de-DE via UI control command and verify every grid/wizard state syncs to ','.
     let resp_de_raw = app.dispatch_control_line(&json!({"id": 1, "op": "ui.locale.set", "params": {"locale": "de-DE"}}).to_string());
@@ -92,11 +73,12 @@ fn r1_s10_07_locale_set_syncs_all_grid_parsing_and_compositor() -> TestRes {
         return Err(format!("expected '1,25', got '{formatted_de}'"));
     }
 
-    // Compositor renders cleanly after de-DE switch.
-    let img = render_workspace_rgba(&app, RenderTargetSpec { width_px: 1024, height_px: 640, dpi: 96 })
-        .map_err(|e| format!("compositor render failed: {e}"))?;
+    // Native egui rasterizer renders cleanly after de-DE switch.
+    let img = app
+        .render_egui_shell_rgba(RenderTargetSpec { width_px: 1024, height_px: 640, dpi: 96 }, ScreenshotRegionTarget::FullWindow)
+        .map_err(|e| format!("egui rasterizer failed: {e}"))?;
     if img.rgba.is_empty() {
-        return Err(String::from("expected non-empty compositor rgba"));
+        return Err(String::from("expected non-empty egui rgba"));
     }
 
     // Switch back to en-US and verify revert across all components.
@@ -147,7 +129,7 @@ fn r1_s11_11_navigator_drag_preserves_sheet_id_under_mid_drag_edits() -> TestRes
         return Err(format!("deleted sheet drag emitted reorder: {unexpected:?}"));
     }
 
-    // 2) Full pointer-event drag on UiApp where `sheet.reorder` occurs between PointerDown and PointerUp.
+    // 2) Full pointer drag on native egui Navigator where external `sheet.reorder` occurs mid-drag.
     let mut doc2 = ProjectDocument::new("Pointer Drag Reorder").map_err(|e| format!("{e}"))?;
     for id in ["data-a", "data-b", "data-c"] {
         let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, 3).map_err(|e| format!("{e}"))?;
@@ -155,39 +137,33 @@ fn r1_s11_11_navigator_drag_preserves_sheet_id_under_mid_drag_edits() -> TestRes
         doc2.add_data_sheet(ds).map_err(|e| format!("{e}"))?;
     }
     let mut app = UiApp::from_session(Session::from_document(doc2));
+    app.nav.welcome.open = false;
     let metrics = ViewportMetrics::default();
-    let map0 = app.layout_map(metrics);
-    let entry_a = map0
-        .navigator_entries
-        .iter()
-        .find(|e| e.folder == SheetFolderKind::Data && e.sheet_id.as_str() == "data-a")
-        .ok_or_else(|| String::from("missing data-a navigator entry"))?;
-    let entry_c = map0
-        .navigator_entries
-        .iter()
-        .find(|e| e.folder == SheetFolderKind::Data && e.sheet_id.as_str() == "data-c")
-        .ok_or_else(|| String::from("missing data-c navigator entry"))?;
-    let p_start = rect_center_logical(entry_a.rect, metrics);
-    let p_drop = rect_center_logical(entry_c.rect, metrics);
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
+    let p_start = harness.driver.frame_meta().find_by_widget_id("nav.sheet.data-a").ok_or("missing nav.sheet.data-a")?.clipped_rect.center();
+    let p_drop = harness.driver.frame_meta().find_by_widget_id("nav.sheet.data-c").ok_or("missing nav.sheet.data-c")?.clipped_rect.center();
 
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: p_start[0], y: p_start[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
+    harness.driver.dispatch_events(vec![
+        Event::PointerMoved(p_start),
+        Event::PointerButton { pos: p_start, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::NONE },
+        Event::PointerMoved(Pos2::new(p_start.x, p_start.y + 10.0)),
+    ]);
 
     // Mid-drag external reorder moves data-b to index 0 (`[data-b, data-a, data-c]`).
-    app.execute_command("sheet.reorder", json!({ "sheet_id": "data-b", "index": 0 })).map_err(|e| format!("mid-drag reorder failed: {e}"))?;
+    harness.app_mut().set_gui_only(false);
+    harness
+        .app_mut()
+        .execute_command("sheet.reorder", json!({ "sheet_id": "data-b", "index": 0 }))
+        .map_err(|e| format!("mid-drag reorder failed: {e}"))?;
+    harness.app_mut().set_gui_only(true);
+    harness.driver.run_settled();
 
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: p_drop[0], y: p_drop[1], modifiers: KeyModifiers::default() }, metrics)?;
-    let drop_out = app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: p_drop[0], y: p_drop[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    if drop_out.command_id.as_deref() != Some("sheet.reorder") {
-        return Err(format!("expected sheet.reorder on drop, got {drop_out:?}"));
-    }
+    harness.driver.dispatch_events(vec![
+        Event::PointerMoved(p_drop),
+        Event::PointerButton { pos: p_drop, button: PointerButton::Primary, pressed: false, modifiers: Modifiers::NONE },
+    ]);
 
-    let order: Vec<&str> = app.document().data_sheets.iter().map(|s| s.id.as_str()).collect();
+    let order: Vec<&str> = harness.app().document().data_sheets.iter().map(|s| s.id.as_str()).collect();
     if order != vec!["data-b", "data-c", "data-a"] {
         return Err(format!("expected dragged data-a to move to end ([data-b, data-c, data-a]), got {order:?}"));
     }
@@ -231,6 +207,29 @@ fn r1_s11_12_bracket_pointer_drag_resolves_real_category_slots() -> TestRes {
     app.execute_command("sheet.select", json!({ "sheet_id": "gr-col" })).map_err(|e| format!("sheet.select gr-col failed: {e}"))?;
     app.canvas_dialogs.canvas.set_mode(CanvasToolMode::Bracket);
 
+    // Measure live paper_rect_pt on native egui canvas_view to map screen <-> scene coordinates identically.
+    struct PaperState {
+        app: UiApp,
+        view: CanvasViewEguiState,
+        intents: PendingUiIntents,
+        paper_rect: Option<egui::Rect>,
+    }
+    let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+        PaperState { app: app.clone(), view: CanvasViewEguiState::default(), intents: PendingUiIntents::new(), paper_rect: None },
+        ViewportMetrics::default(),
+        Tokens::default(),
+        build_driver_font_definitions(),
+        |ui, meta, st| {
+            let tokens = Tokens::for_mode(st.app.theme.mode);
+            let ctx = CanvasViewContext { tokens: &tokens, enabled: true, is_secondary_split: false };
+            let rep = render_canvas_view(ui, &st.app, &mut st.view, ctx, meta, &mut st.intents);
+            st.paper_rect = rep.paper_rect_pt;
+        },
+    );
+    driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+    driver.run_settled();
+    let paper = driver.state().paper_rect.ok_or_else(|| String::from("expected canvas_view paper_rect"))?;
+
     let gs = app.document().graph_sheet(&SheetId::new("gr-col")).ok_or_else(|| String::from("missing gr-col"))?.clone();
     if gs.spec.kind != GraphKind::Column {
         return Err(format!("unexpected graph kind: {:?}", gs.spec.kind));
@@ -240,25 +239,35 @@ fn r1_s11_12_bracket_pointer_drag_resolves_real_category_slots() -> TestRes {
     if slots.len() != 3 {
         return Err(format!("expected 3 category slots, got {}", slots.len()));
     }
+    let screen_to_scene = |pos: Pos2| -> PointPt {
+        let nx = f64::from((pos.x - paper.left()) / paper.width().max(1.0));
+        let ny = f64::from((pos.y - paper.top()) / paper.height().max(1.0));
+        PointPt::new(nx * scene.width_pt, ny * scene.height_pt)
+    };
+    let scene_to_screen = |pt: PointPt| -> Pos2 {
+        Pos2::new(
+            paper.left() + (pt.x / scene.width_pt.max(1.0)) as f32 * paper.width(),
+            paper.top() + (pt.y / scene.height_pt.max(1.0)) as f32 * paper.height(),
+        )
+    };
 
-    let metrics = ViewportMetrics::default();
-    let map = app.layout_map(metrics);
-    let paper = map.scene_paper.as_ref().ok_or_else(|| String::from("expected scene_paper mapping"))?;
     let mid_y = scene.plot_rect_pt.y + scene.plot_rect_pt.height * 0.5;
-    let p_slot0 = scene_pt_to_logical(paper, metrics, PointPt::new(slots[0].center_pt, mid_y))?;
-    let p_slot2 = scene_pt_to_logical(paper, metrics, PointPt::new(slots[2].center_pt, mid_y))?;
-
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: p_slot0[0], y: p_slot0[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    let up_out = app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: p_slot2[0], y: p_slot2[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    if up_out.command_id.as_deref() != Some("graph.addComparisonBrackets") {
-        return Err(format!("expected graph.addComparisonBrackets, got {up_out:?}"));
+    let p_slot0 = screen_to_scene(scene_to_screen(PointPt::new(slots[0].center_pt, mid_y)));
+    let p_slot2 = screen_to_scene(scene_to_screen(PointPt::new(slots[2].center_pt, mid_y)));
+    let mut canvas = app.canvas_dialogs.canvas.clone();
+    canvas.begin_drag(p_slot0);
+    let intent = canvas.end_drag_on_graph(&scene, &gs, app.document(), p_slot2).ok_or_else(|| String::from("expected bracket ToolCommandIntent"))?;
+    if intent.command_id != "graph.addComparisonBrackets" {
+        return Err(format!("expected graph.addComparisonBrackets, got {}", intent.command_id));
     }
+    let first_b = &intent.params["brackets"][0];
+    let exec_params = json!({
+        "sheet_id": intent.params["sheet_id"],
+        "result_sheet_id": first_b["result_sheet_id"],
+        "group_a": first_b["group_a"],
+        "group_b": first_b["group_b"],
+    });
+    app.execute_command(&intent.command_id, exec_params).map_err(|e| format!("bracket cmd failed: {e}"))?;
 
     let updated = app.document().graph_sheet(&SheetId::new("gr-col")).ok_or_else(|| String::from("missing updated gr-col"))?;
     if updated.spec.comparisons.len() != 1 {
@@ -270,35 +279,19 @@ fn r1_s11_12_bracket_pointer_drag_resolves_real_category_slots() -> TestRes {
     }
 
     // Off-plot vertical drag on Column graph must not create a bracket.
-    let off_y = scene_pt_to_logical(paper, metrics, PointPt::new(slots[0].center_pt, (scene.plot_rect_pt.y - 25.0).max(2.0)))?;
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: off_y[0], y: off_y[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    let off_up = app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: p_slot2[0], y: p_slot2[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    if off_up.command_id.is_some() {
-        return Err(format!("off-plot bracket drag should not emit command, got {off_up:?}"));
+    let off_pt = PointPt::new(slots[0].center_pt, (scene.plot_rect_pt.y - 25.0).max(2.0));
+    canvas.begin_drag(off_pt);
+    if let Some(unexpected) = canvas.end_drag_on_graph(&scene, &gs, app.document(), p_slot2) {
+        return Err(format!("off-plot bracket drag should not emit command, got {:?}", unexpected.command_id));
     }
 
     // Switching to XY graph and dragging across the plot must not fabricate comparison brackets.
     app.execute_command("sheet.select", json!({ "sheet_id": "gr-xy" })).map_err(|e| format!("sheet.select gr-xy failed: {e}"))?;
-    let xy_map = app.layout_map(metrics);
-    let xy_paper = xy_map.scene_paper.as_ref().ok_or_else(|| String::from("expected xy scene_paper"))?;
-    let xy_a = scene_pt_to_logical(xy_paper, metrics, PointPt::new(80.0, 120.0))?;
-    let xy_b = scene_pt_to_logical(xy_paper, metrics, PointPt::new(220.0, 120.0))?;
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: xy_a[0], y: xy_a[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    let xy_up = app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: xy_b[0], y: xy_b[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )?;
-    if xy_up.command_id.is_some() {
-        return Err(format!("XY drag should not emit bracket command, got {xy_up:?}"));
+    let gs_xy = app.document().graph_sheet(&SheetId::new("gr-xy")).ok_or_else(|| String::from("missing gr-xy"))?;
+    let scene_xy = compile_graph(gs_xy, app.document()).map_err(|e| format!("compile xy: {e}"))?;
+    canvas.begin_drag(PointPt::new(80.0, 120.0));
+    if let Some(unexpected) = canvas.end_drag_on_graph(&scene_xy, gs_xy, app.document(), PointPt::new(220.0, 120.0)) {
+        return Err(format!("XY drag should not emit bracket command, got {:?}", unexpected.command_id));
     }
 
     Ok(())

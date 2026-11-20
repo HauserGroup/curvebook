@@ -13,8 +13,8 @@ use egui::{
 };
 
 use super::{FrameInspectEntryInput, FrameInspectMeta, GeometryStamp, Tokens};
+use crate::inspect::{ParityReport, ParityViolation, ZLayer};
 use crate::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
-use crate::layout::{ParityReport, ParityViolation, ZLayer};
 
 /// All 14 Beta-active non-RTL BCP-47 locale identifiers (`docs/planning/gui-layout-spec.md` §1.1, §9.4).
 pub const BETA_LOCALE_CODES: [&str; 14] = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr"];
@@ -359,6 +359,31 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
         .map(|e| e.clipped_rect)
         .collect();
 
+    let mut modal_subtree_ids: std::collections::HashSet<AccessKitNodeId> = std::collections::HashSet::new();
+    let mut bfs_queue: Vec<AccessKitNodeId> = Vec::new();
+    let node_map: std::collections::HashMap<AccessKitNodeId, &AccessKitNode> = nodes.iter().map(|(id, n)| (*id, n)).collect();
+    for entry in &meta.entries {
+        if matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
+            && modal_subtree_ids.insert(entry.accesskit_id)
+        {
+            bfs_queue.push(entry.accesskit_id);
+        }
+    }
+    for (id, node) in nodes {
+        if node.role() == AccessKitRole::Dialog && modal_subtree_ids.insert(*id) {
+            bfs_queue.push(*id);
+        }
+    }
+    while let Some(cur) = bfs_queue.pop() {
+        if let Some(node) = node_map.get(&cur) {
+            for &child in node.children() {
+                if modal_subtree_ids.insert(child) {
+                    bfs_queue.push(child);
+                }
+            }
+        }
+    }
+
     let mut modal_items = Vec::new();
     let mut background_items = Vec::new();
     for (id, node) in nodes {
@@ -373,16 +398,16 @@ pub fn check_accesskit_scrollbar_non_overlap_with_meta(nodes: &[(AccessKitNodeId
         }
         let rect = accesskit_rect_to_egui(bounds);
         let item = AccessKitRoleBounds { id: *id, role: node.role(), label: accesskit_accessible_name(node).unwrap_or("<unnamed>").to_owned(), rect };
-        let in_modal = if item.role == AccessKitRole::ScrollBar {
-            !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
+        let in_modal = if modal_subtree_ids.contains(id) {
+            true
         } else if let Some(entry) = meta.find_by_accesskit_id(*id) {
             matches!(entry.z_layer, ZLayer::ModalBackdrop | ZLayer::ModalDialog | ZLayer::ModalDropdown)
         } else {
-            !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
+            item.role != AccessKitRole::Label && !node.is_disabled() && dialog_rects.iter().any(|r| r.expand(2.0).contains(rect.center()))
         };
         if in_modal {
             modal_items.push(item);
-        } else {
+        } else if !dialog_rects.iter().any(|r| r.contains(item.rect.center())) {
             background_items.push(item);
         }
     }
@@ -1090,8 +1115,8 @@ mod tests {
         check_role_bounds_scrollbar_non_overlap, parse_egui_key, render_tracked_label,
     };
     use crate::egui_shell::{FrameInspectEntryInput, Tokens};
+    use crate::inspect::ZLayer;
     use crate::interaction::{KeyModifiers, ViewportMetrics};
-    use crate::layout::ZLayer;
     use egui_kittest::Harness;
     use egui_kittest::kittest::{NodeT as _, Queryable as _};
 

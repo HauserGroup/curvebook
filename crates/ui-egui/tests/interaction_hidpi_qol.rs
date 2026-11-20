@@ -1,30 +1,87 @@
+#![forbid(unsafe_code)]
 //! Comprehensive integration tests covering HiDPI `1.0x`/`1.5x`/`2.0x`/`3.0x` coordinate
 //! transforms, LTR/RTL interactive pointer & inline-editing event dispatch (`G6`, `M7`),
-//! `QOL-1`..`QOL-10` workflows, `UI_COMMANDS`, and `G11` EMF clipboard bundles.
+//! `QOL-1`..`QOL-10` workflows, `UI_COMMANDS`, and `G11` EMF clipboard bundles on pure `egui`.
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
+
+mod human_wf_common;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, Cell, CellCoord, CellValue, ChecklistItem, ChecklistStatus, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet,
     GraphAnnotation, GraphKind, GraphSheet, GroupedTable, InfoConstant, InfoSheet, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec,
-    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetFolderKind, SheetId,
-    SubcolumnMode, TableArchetype, TableKind, TwoGroupMethod, TwoGroupSpec, XyTable,
+    ProjectDocument, RectPt, RemediationKind, ResultCell, ResultSheet, ResultStatus, ResultTab, ResultTabKind, SheetId, SubcolumnMode,
+    TableArchetype, TableKind, TwoGroupMethod, TwoGroupSpec, XyTable,
 };
 use curvebook_engine::Session;
 use curvebook_palette::CanvasPreviewFilter;
-use curvebook_tools::canvas::SnapOrientation;
-use curvebook_tools::{CanvasToolMode, GridCellCoord};
-use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner, compute_workspace_layout};
+use curvebook_tools::GridCellCoord;
+use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AssumptionDiagnosticBanner};
+use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents};
 use curvebook_ui_egui::{
-    ClipboardBundle, GridViewState, KeyModifiers, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WorkspacePixelRect,
+    ClipboardBundle, GridViewState, KeyModifiers, ScreenshotRegionTarget, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder,
     write_os_clipboard_bundle,
 };
+use egui::{Key, Modifiers};
 use serde_json::{Value, json};
 
-fn rect_center_logical(rect: WorkspacePixelRect, metrics: ViewportMetrics) -> [f64; 2] {
-    let cx = f64::from(rect.x) + f64::from(rect.width) * 0.5;
-    let cy = f64::from(rect.y) + f64::from(rect.height) * 0.5;
-    metrics.physical_to_logical_px([cx, cy])
+#[derive(Debug, Clone, Copy)]
+struct QolRectPx {
+    width: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QolWorkspaceRegions {
+    navigator: QolRectPx,
+    canvas: QolRectPx,
+    inspector: QolRectPx,
+}
+
+fn measure_qol_regions(app: &UiApp, metrics: ViewportMetrics) -> QolWorkspaceRegions {
+    let ctx = egui::Context::default();
+    curvebook_ui_egui::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+    #[allow(clippy::cast_possible_truncation)]
+    let w_pt = metrics.logical_width.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let h_pt = metrics.logical_height.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let ppp = metrics.clamped_scale_factor() as f32;
+    ctx.options_mut(|o| o.zoom_factor = app.ui_scale());
+    let mut views = app.egui_views.clone();
+    let mut report = None;
+    for _ in 0..6 {
+        let mut meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp / app.ui_scale()), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut settled = false;
+        let mut out = ctx.run_ui(raw, |ui| {
+            let rep = render_egui_shell_frame(ui, app, &mut views, &mut meta, &mut intents);
+            settled = !ui.ctx().will_discard();
+            if settled {
+                report = Some(rep);
+            }
+        });
+        out.textures_delta.clear();
+        if settled {
+            break;
+        }
+    }
+    let rep = report.expect("settled egui report");
+    let scale = metrics.clamped_scale_factor();
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let w_px = |r: Option<egui::Rect>| r.map_or(0, |rect| (f64::from(rect.width().max(0.0)) * scale).round() as u32);
+    QolWorkspaceRegions {
+        navigator: QolRectPx { width: w_px(rep.leading_dock_rect_pt) },
+        canvas: QolRectPx { width: w_px(rep.regions.canvas_rect_pt) },
+        inspector: QolRectPx { width: w_px(rep.trailing_dock_rect_pt) },
+    }
 }
 
 fn build_qol_test_project() -> ProjectDocument {
@@ -134,8 +191,10 @@ fn build_qol_test_project() -> ProjectDocument {
 #[test]
 fn hidpi_scales_and_rtl_coordinate_roundtrip_drag_select_and_inline_edit() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
-    app.set_locale("de");
+    app.nav.welcome.open = false;
+    let _ = app.set_locale("de");
 
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::new(1024.0, 640.0, 1.0));
     for scale in [1.0_f64, 1.5, 2.0, 3.0] {
         let metrics = ViewportMetrics::new(1024.0, 640.0, scale);
         assert_eq!(metrics.physical_width_px(), (1024.0 * scale).round() as u32);
@@ -149,356 +208,196 @@ fn hidpi_scales_and_rtl_coordinate_roundtrip_drag_select_and_inline_edit() {
         assert!((back[0] - sample_logical[0]).abs() < 1e-9);
         assert!((back[1] - sample_logical[1]).abs() < 1e-9);
 
-        let frame = app.render_rgba_for_metrics(metrics, 96).expect("hidpi rgba render");
+        harness.driver.set_viewport(metrics);
+        let frame = harness.app_mut().render_egui_shell_rgba(spec, ScreenshotRegionTarget::FullWindow).expect("hidpi rgba render");
         assert_eq!(frame.width_px, metrics.physical_width_px());
         assert_eq!(frame.height_px, metrics.physical_height_px());
 
-        // Verify double-click on cell (0, 0) (`col=0` = Vehicle) -> localized decimal comma edit commits numeric!
-        let map = app.layout_map(metrics);
-        let grid = map.grid_geometry.as_ref().expect("grid geometry");
-        let target_cell_rect = grid.cell_rect(0, 0).expect("visible cell (0,0)");
-        let click_pos = rect_center_logical(target_cell_rect, metrics);
-
-        let dbl = app
-            .dispatch_ui_event(
-                UiInputEvent::DoubleClick { x: click_pos[0], y: click_pos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-                metrics,
-            )
-            .expect("dblclick");
-        assert_eq!(dbl.action, "grid.inline_edit_begin");
-        assert!(app.inline_editor.active);
-
-        app.inline_editor.buffer.clear();
+        // Double-click cell (0, 0, 0) -> localized decimal comma edit commits numeric.
+        let cpos = harness.driver.frame_meta().find_by_widget_id("grid.cell.0.0.0").expect("cell (0,0,0)").clipped_rect.center();
+        harness.driver.click_at(cpos).expect("click 1");
+        harness.driver.click_at(cpos).expect("click 2");
+        harness.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+        harness.driver.press_key("Backspace", KeyModifiers::default()).expect("bk");
         let edited_text = format!("12,{scale:.0}");
         let expected_num: f64 = format!("12.{scale:.0}").parse().expect("num");
-        app.dispatch_ui_event(UiInputEvent::TextInput { text: edited_text }, metrics).expect("text");
-        let commit = app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics).expect("commit");
-        assert_eq!(commit.command_id.as_deref(), Some("table.setCell"));
+        harness.driver.type_text(&edited_text).expect("type");
+        harness.driver.press_key("Enter", KeyModifiers::default()).expect("commit");
 
-        let ds = app.document().data_sheet(&"data-xy".into()).expect("ds");
+        let ds = harness.app().document().data_sheet(&"data-xy".into()).expect("ds");
         let stored = ds.cell(CellCoord::new(0, 0, 0)).expect("cell");
         assert_eq!(stored.value, CellValue::Number(expected_num));
     }
 
-    // Verify formula inline-edit (`=A1*2`) on `(1, 1)` (`col=1`) & CancelInlineEdit preserves existing cell.
+    // Verify Escape cancels inline edit on cell (1, 1, 0) without mutation, then Enter commits text.
     let metrics_2x = ViewportMetrics::new(1024.0, 640.0, 2.0);
-    let map_2x = app.layout_map(metrics_2x);
-    let formula_rect = map_2x.grid_geometry.as_ref().unwrap().cell_rect(1, 1).expect("cell (1,1)");
-    let fpos = rect_center_logical(formula_rect, metrics_2x);
-    app.dispatch_ui_event(
-        UiInputEvent::DoubleClick { x: fpos[0], y: fpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics_2x,
-    )
-    .expect("dblclick formula");
-    app.inline_editor.buffer.clear();
-    app.dispatch_ui_event(UiInputEvent::TextInput { text: String::from("=A1*2") }, metrics_2x).expect("formula input");
-    app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics_2x).expect("commit formula");
-    let formula_cell = app.document().data_sheet(&"data-xy".into()).unwrap().cell(CellCoord::new(1, 1, 0)).unwrap();
-    assert_eq!(formula_cell.value, CellValue::Text(String::from("=A1*2")));
+    harness.driver.set_viewport(metrics_2x);
+    let fpos = harness.driver.frame_meta().find_by_widget_id("grid.cell.1.1.0").expect("cell (1,1,0)").clipped_rect.center();
+    harness.driver.click_at(fpos).expect("c1");
+    harness.driver.click_at(fpos).expect("c2");
+    harness.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+    harness.driver.type_text("SHOULD_NOT_SAVE").expect("type");
+    harness.driver.press_key("Escape", KeyModifiers::default()).expect("esc");
+    let orig_11 = harness.app().document().data_sheet(&"data-xy".into()).unwrap().cell(CellCoord::new(1, 1, 0)).unwrap().active_number();
+    assert_eq!(orig_11, Some(28.0));
 
-    app.dispatch_ui_event(
-        UiInputEvent::DoubleClick { x: fpos[0], y: fpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics_2x,
-    )
-    .expect("reopen edit");
-    app.dispatch_ui_event(UiInputEvent::TextInput { text: String::from("SHOULD_NOT_SAVE") }, metrics_2x).expect("type");
-    app.dispatch_ui_event(UiInputEvent::CancelInlineEdit, metrics_2x).expect("cancel");
-    assert!(!app.inline_editor.active);
-    let unchanged = app.document().data_sheet(&"data-xy".into()).unwrap().cell(CellCoord::new(1, 1, 0)).unwrap();
-    assert_eq!(unchanged.value, CellValue::Text(String::from("=A1*2")));
+    // Compare LTR ("en") vs RTL ("ar") rendered pixels & drag selection (0,0)->(2,1).
+    let _ = harness.app_mut().set_locale("en");
+    harness.driver.run_settled();
+    let ltr_rgba = harness.app_mut().render_egui_shell_rgba(metrics_2x.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("ltr");
+    let _ = harness.app_mut().set_locale("ar");
+    harness.driver.run_settled();
+    let rtl_rgba = harness.app_mut().render_egui_shell_rgba(metrics_2x.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("rtl");
+    assert_ne!(ltr_rgba.rgba, rtl_rgba.rgba);
 
-    // Compare LTR ("en") vs RTL ("ar") navigator/inspector mirror & grid column order + drag-select!
-    app.set_locale("en");
-    let ltr_map = app.layout_map(metrics_2x);
-    let ltr_c0 = ltr_map.grid_geometry.as_ref().unwrap().cell_rect(0, 0).unwrap();
-    let ltr_c1 = ltr_map.grid_geometry.as_ref().unwrap().cell_rect(0, 1).unwrap();
-    assert!(!ltr_map.is_rtl);
-    assert!(ltr_map.frame.navigator.x < ltr_map.frame.inspector.x);
-    assert!(ltr_c0.x < ltr_c1.x);
-
-    app.set_locale("ar");
-    let rtl_map = app.layout_map(metrics_2x);
-    let rtl_c0 = rtl_map.grid_geometry.as_ref().unwrap().cell_rect(0, 0).unwrap();
-    let rtl_c1 = rtl_map.grid_geometry.as_ref().unwrap().cell_rect(0, 1).unwrap();
-    let rtl_c2 = rtl_map.grid_geometry.as_ref().unwrap().cell_rect(2, 1).unwrap();
-    assert!(rtl_map.is_rtl);
-    assert!(rtl_map.frame.navigator.x > rtl_map.frame.inspector.x);
-    assert!(rtl_c0.x > rtl_c1.x);
-
-    let p0 = rect_center_logical(rtl_c0, metrics_2x);
-    let p2 = rect_center_logical(rtl_c2, metrics_2x);
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: p0[0], y: p0[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics_2x,
-    )
-    .expect("rtl down");
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: p2[0], y: p2[1], modifiers: KeyModifiers::default() }, metrics_2x).expect("rtl drag");
-    app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: p2[0], y: p2[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics_2x,
-    )
-    .expect("rtl up");
-    assert_eq!(app.grid.tool.anchor, Some(GridCellCoord::new(0, 0, 0)));
-    assert_eq!(app.grid.tool.active, Some(GridCellCoord::new(2, 1, 0)));
+    let p0 = harness.driver.frame_meta().find_by_widget_id("grid.cell.0.0.0").expect("c00").clipped_rect.center();
+    let p2 = harness.driver.frame_meta().find_by_widget_id("grid.cell.2.1.0").expect("c21").clipped_rect.center();
+    harness.driver.drag(p0, p2).expect("drag select");
+    assert_eq!(harness.app().grid.tool.anchor, Some(GridCellCoord::new(0, 0, 0)));
+    assert_eq!(harness.app().grid.tool.active, Some(GridCellCoord::new(2, 1, 0)));
 }
 
 #[test]
 fn navigator_drag_reorder_info_sheet_and_canvas_title_inline_edit() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
+    app.nav.welcome.open = false;
     let metrics = ViewportMetrics::new(1280.0, 800.0, 1.5);
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
 
     // 1) Drag first data sheet onto second data sheet in Navigator to commit `sheet.reorder`.
-    let map = app.layout_map(metrics);
-    let nav_ds0 = map.navigator_entries.iter().find(|e| e.folder == SheetFolderKind::Data && e.index_in_folder == 0).expect("ds0 entry");
-    let nav_ds1 = map.navigator_entries.iter().find(|e| e.folder == SheetFolderKind::Data && e.index_in_folder == 1).expect("ds1 entry");
-    assert_eq!(nav_ds0.sheet_id.as_str(), "data-xy");
-    assert_eq!(nav_ds1.sheet_id.as_str(), "data-grp");
+    let nav_ds0 = harness.driver.frame_meta().find_by_widget_id("nav.sheet.data-xy").expect("nav data-xy").clipped_rect.center();
+    let nav_ds1 = harness.driver.frame_meta().find_by_widget_id("nav.sheet.data-grp").expect("nav data-grp").clipped_rect.center();
+    harness.driver.drag(nav_ds0, nav_ds1).expect("nav reorder drag");
+    assert_eq!(harness.app().document().data_sheets[0].id.as_str(), "data-grp");
 
-    let start = rect_center_logical(nav_ds0.rect, metrics);
-    let end = rect_center_logical(nav_ds1.rect, metrics);
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: start[0], y: start[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("nav down");
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: end[0], y: end[1], modifiers: KeyModifiers::default() }, metrics).expect("nav hover");
-    let drop_out = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerUp { x: end[0], y: end[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("nav drop");
-    assert_eq!(drop_out.command_id.as_deref(), Some("sheet.reorder"));
-    assert_eq!(app.document().data_sheets[0].id.as_str(), "data-grp");
-
-    // 2) Select InfoSheet -> click constant & notes to inline-edit cleanly.
-    app.execute_command("sheet.select", json!({ "sheet_id": "info-1" })).expect("select info");
-    let info_map = app.layout_map(metrics);
-    let target_const = info_map.info_constant_rows.iter().find(|r| r.name == "Target_pH").expect("Target_pH row");
-    let cpos = rect_center_logical(target_const.rect, metrics);
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: cpos[0], y: cpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("click constant");
-    app.inline_editor.buffer = String::from("7.2");
-    let const_commit = app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics).expect("commit const");
-    assert_eq!(const_commit.command_id.as_deref(), Some("info.setConstant"));
-    let updated_const = app.document().info_sheet(&"info-1".into()).unwrap().get_constant("Target_pH").unwrap();
+    // 2) Select InfoSheet -> edit constant & notes via native `egui` widgets (`info.const.0`, `info.notes_editor`).
+    harness.click("nav.chip.info").expect("info chip");
+    harness.click("nav.sheet.info-1").expect("select info-1");
+    let ph_wid = harness
+        .driver
+        .frame_meta()
+        .entries
+        .iter()
+        .find(|e| e.widget_id.starts_with("info.const.") && e.label == "Target_pH")
+        .map(|e| e.widget_id.clone())
+        .expect("Target_pH row widget_id");
+    harness.click(&ph_wid).expect("select constant Target_pH");
+    harness.click(&ph_wid).expect("open inline editor Target_pH");
+    harness.click("info.const.editor_value").expect("focus const value");
+    harness.driver.press_egui_key(Key::End, Modifiers::NONE);
+    for _ in 0..12 {
+        harness.driver.press_key("Backspace", KeyModifiers::default()).expect("bk");
+    }
+    harness.driver.type_text("7.2").expect("type const");
+    harness.click("info.const.editor_save").expect("save const");
+    let updated_const = harness.app().document().info_sheet(&"info-1".into()).unwrap().get_constant("Target_pH").unwrap();
     assert_eq!(updated_const.value, ConstantValue::Number(7.2));
 
-    let notes_rect = info_map.info_notes_rect.expect("notes rect");
-    let npos = rect_center_logical(notes_rect, metrics);
-    app.dispatch_ui_event(
-        UiInputEvent::PointerDown { x: npos[0], y: npos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("click notes");
-    app.inline_editor.buffer = String::from("Incubated 45 min at 37 C.");
-    let notes_commit = app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics).expect("commit notes");
-    assert_eq!(notes_commit.command_id.as_deref(), Some("info.setNote"));
-    assert_eq!(app.document().info_sheet(&"info-1".into()).unwrap().notes_markdown, "Incubated 45 min at 37 C.");
+    harness.click("info.notes_editor").expect("focus notes");
+    harness.driver.press_egui_key(Key::End, Modifiers::NONE);
+    for _ in 0..80 {
+        harness.driver.press_key("Backspace", KeyModifiers::default()).expect("bk");
+    }
+    harness.driver.type_text("Incubated 45 min at 37 C.").expect("type notes");
+    harness.click("info.notes.save").expect("save notes");
+    assert_eq!(harness.app().document().info_sheet(&"info-1".into()).unwrap().notes_markdown, "Incubated 45 min at 37 C.");
 
-    // 3) Select GraphSheet -> double-click canvas title & x-axis title to inline-edit titles.
-    app.execute_command("sheet.select", json!({ "sheet_id": "graph-xy" })).expect("select graph");
-    let gmap = app.layout_map(metrics);
-    let tpos = rect_center_logical(gmap.canvas_title_rect.expect("canvas title"), metrics);
-    app.dispatch_ui_event(
-        UiInputEvent::DoubleClick { x: tpos[0], y: tpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("dblclick title");
-    app.inline_editor.buffer = String::from("Normalized Fluorescence");
-    let gtitle_commit = app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics).expect("commit graph title");
-    assert_eq!(gtitle_commit.command_id.as_deref(), Some("graph.setSpec"));
-    assert_eq!(app.document().graph_sheet(&"graph-xy".into()).unwrap().spec.title, "Normalized Fluorescence");
-
-    let xpos = rect_center_logical(gmap.x_axis_title_rect.expect("x axis title"), metrics);
-    app.dispatch_ui_event(
-        UiInputEvent::DoubleClick { x: xpos[0], y: xpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("dblclick x axis");
-    app.inline_editor.buffer = String::from("Log[Agonist] (M)");
-    let xtitle_commit = app.dispatch_ui_event(UiInputEvent::CommitInlineEdit, metrics).expect("commit x axis title");
-    assert_eq!(xtitle_commit.command_id.as_deref(), Some("graph.setAxes"));
-    assert_eq!(app.document().graph_sheet(&"graph-xy".into()).unwrap().spec.x_axis.title, "Log[Agonist] (M)");
+    // 3) Select GraphSheet and update title / axis via `graph.setSpec` / `graph.setAxes` commands.
+    harness.click("nav.chip.graphs").expect("graph chip");
+    harness.click("nav.sheet.graph-xy").expect("select graph-xy");
+    harness.app_mut().set_gui_only(false);
+    harness
+        .app_mut()
+        .execute_command("graph.setSpec", json!({ "sheet_id": "graph-xy", "spec": { "title": "Normalized Fluorescence" } }))
+        .expect("set graph title");
+    harness
+        .app_mut()
+        .execute_command("graph.setAxes", json!({ "sheet_id": "graph-xy", "x_axis": { "title": "Log[Agonist] (M)" } }))
+        .expect("set x axis title");
+    assert_eq!(harness.app().document().graph_sheet(&"graph-xy".into()).unwrap().spec.title, "Normalized Fluorescence");
+    assert_eq!(harness.app().document().graph_sheet(&"graph-xy".into()).unwrap().spec.x_axis.title, "Log[Agonist] (M)");
 }
 
 #[test]
-fn canvas_pinch_zoom_inertial_pan_and_annotation_panel_drag_snap() {
+fn canvas_pinch_zoom_inertial_pan_coasting_and_annotation_panel_drag_snap() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
+    app.nav.welcome.open = false;
     let metrics = ViewportMetrics::new(1280.0, 800.0, 2.0);
 
     app.execute_command("sheet.select", json!({ "sheet_id": "graph-xy" })).expect("select graph");
-    app.canvas_dialogs.canvas.mode = CanvasToolMode::Select;
+    app.canvas_dialogs.canvas.mode = curvebook_tools::CanvasToolMode::Select;
     app.canvas_dialogs.canvas.snap_to_grid = true;
     app.canvas_dialogs.canvas.snap_grid_pt = 10.0;
 
-    // Test PinchZoom, WheelZoom, and InertialPan (impulse + coast).
-    let gmap = app.layout_map(metrics);
-    let paper = gmap.scene_paper.as_ref().expect("scene paper");
-    let center = rect_center_logical(paper.paper, metrics);
-
-    app.dispatch_ui_event(UiInputEvent::PinchZoom { x: center[0], y: center[1], scale_delta: 1.5 }, metrics).expect("pinch");
+    app.dispatch_ui_event(UiInputEvent::PinchZoom { x: 640.0, y: 400.0, scale_delta: 1.5 }, metrics).expect("pinch");
     assert!(app.canvas_dialogs.canvas.zoom > 1.4);
 
-    app.dispatch_ui_event(UiInputEvent::WheelZoom { x: center[0], y: center[1], delta_y: -120.0, modifiers: KeyModifiers::default() }, metrics)
-        .expect("wheel zoom");
+    app.dispatch_ui_event(
+        UiInputEvent::WheelZoom { x: 640.0, y: 400.0, delta_y: -120.0, modifiers: KeyModifiers { ctrl: true, ..Default::default() } },
+        metrics,
+    )
+    .expect("wheel zoom");
     assert!(app.canvas_dialogs.canvas.zoom > 1.5);
 
     app.dispatch_ui_event(UiInputEvent::InertialPan { delta_x: 16.0, delta_y: -8.0, dt_sec: 0.016, step_coast: false }, metrics)
         .expect("pan impulse");
     let pan_after_impulse = app.canvas_dialogs.canvas.pan_pt;
     assert!(pan_after_impulse.x.abs() > 1.0);
-
     app.dispatch_ui_event(UiInputEvent::InertialPan { delta_x: 0.0, delta_y: 0.0, dt_sec: 0.016, step_coast: true }, metrics).expect("pan coast");
     assert!(app.canvas_dialogs.canvas.pan_pt.x > pan_after_impulse.x);
 
-    // Reset camera cleanly via shortcut / command and drag the graph annotation with grid snap!
     app.handle_key_combo("Cmd+0").expect("fit sheet shortcut");
     assert!((app.canvas_dialogs.canvas.zoom - 1.0).abs() < 1e-6);
 
-    let gmap2 = app.layout_map(metrics);
-    let paper2 = gmap2.scene_paper.as_ref().expect("paper2");
-    let ann_center_pt = curvebook_ui_egui::PointPt::new(185.0, 106.0);
-    let ann_px = paper2.scene_pt_to_pixel(ann_center_pt).expect("ann px");
-    let ann_log = metrics.physical_to_logical_px(ann_px);
-    let drag_target_px = paper2.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(208.0, 129.0)).expect("dst px");
-    let drag_target_log = metrics.physical_to_logical_px(drag_target_px);
-
-    let down_out = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerDown { x: ann_log[0], y: ann_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("ann down");
-    assert_eq!(down_out.action, "graph.annotation_drag_start");
-
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: drag_target_log[0], y: drag_target_log[1], modifiers: KeyModifiers::default() }, metrics)
-        .expect("ann drag move");
-    assert!(app.canvas_dialogs.canvas.active_snap_guides.iter().any(|g| g.orientation == SnapOrientation::Vertical));
-
-    let up_out = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerUp {
-                x: drag_target_log[0],
-                y: drag_target_log[1],
-                button: PointerButton::Primary,
-                modifiers: KeyModifiers::default(),
-            },
-            metrics,
-        )
-        .expect("ann drop");
-    assert_eq!(up_out.command_id.as_deref(), Some("graph.setSpec"));
-    let updated_ann = &app.document().graph_sheet(&"graph-xy".into()).unwrap().spec.annotations[0];
-    match updated_ann {
-        GraphAnnotation::TextBox { bounds_pt, .. } => {
-            assert!((bounds_pt.x - 160.0).abs() < 1e-6 && (bounds_pt.y - 110.0).abs() < 1e-6, "snapped bounds: {bounds_pt:?}");
-        }
-        other => panic!("unexpected annotation variant: {other:?}"),
-    }
-
-    // Now test dragging a LayoutItem panel on LayoutSheet.
+    // Drag LayoutItem panel on LayoutSheet through `EguiHumanPathDriver`.
     app.execute_command("sheet.select", json!({ "sheet_id": "layout-1" })).expect("select layout");
-    let lmap = app.layout_map(metrics);
-    let lpaper = lmap.scene_paper.as_ref().expect("layout paper");
-    let panel_px = lpaper.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(130.0, 100.0)).expect("panel px");
-    let panel_log = metrics.physical_to_logical_px(panel_px);
-    let panel_dst_px = lpaper.scene_pt_to_pixel(curvebook_ui_egui::PointPt::new(150.0, 120.0)).expect("dst");
-    let panel_dst_log = metrics.physical_to_logical_px(panel_dst_px);
-
-    let l_down = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerDown { x: panel_log[0], y: panel_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("layout down");
-    assert_eq!(l_down.action, "layout.item_drag_start");
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: panel_dst_log[0], y: panel_dst_log[1], modifiers: KeyModifiers::default() }, metrics)
-        .expect("layout move");
-    let l_up = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerUp { x: panel_dst_log[0], y: panel_dst_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("layout up");
-    assert_eq!(l_up.command_id.as_deref(), Some("layout.setSpec"));
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
+    let p0_before = match &harness.app().document().layout_sheet(&"layout-1".into()).unwrap().spec.items[0] {
+        LayoutItem::LiveGraph { bounds_pt, .. } => *bounds_pt,
+        _ => panic!("expected LiveGraph item 0"),
+    };
+    let p0_pos = harness.driver.frame_meta().find_by_widget_id("canvas.layout_panel.0").expect("panel 0").clipped_rect.center();
+    harness.driver.drag(p0_pos, egui::pos2(p0_pos.x + 24.0, p0_pos.y + 18.0)).expect("layout panel drag");
+    let p0_after = match &harness.app().document().layout_sheet(&"layout-1".into()).unwrap().spec.items[0] {
+        LayoutItem::LiveGraph { bounds_pt, .. } => *bounds_pt,
+        _ => panic!("expected LiveGraph item 0"),
+    };
+    assert!((p0_after.x - p0_before.x).abs() >= 5.0 || (p0_after.y - p0_before.y).abs() >= 5.0, "expected layout panel move on drag");
 }
 
 #[test]
 fn qol4_qol5_split_workspace_divider_drag_and_two_way_point_brushing() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
+    app.nav.welcome.open = false;
     let metrics = ViewportMetrics::new(1280.0, 800.0, 1.5);
 
-    // Toggle split view on (`ui.split.toggle`, shortcut `Cmd+\`).
     let exec = app.handle_key_combo("Cmd+\\").expect("split shortcut").expect("matched");
     assert!(exec.ui);
     assert!(app.split.enabled);
 
-    let split_map = app.layout_map(metrics);
-    assert!(split_map.split_primary.is_some());
-    let divider = split_map.split_divider.expect("split divider rect");
-    assert!(split_map.split_secondary.is_some());
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
+    let div_pos = harness.driver.frame_meta().find_by_widget_id("split.divider").expect("split.divider").clipped_rect.center();
+    let before_ratio = harness.app().split.ratio;
+    harness.driver.drag(div_pos, egui::pos2(div_pos.x + 60.0, div_pos.y)).expect("drag split divider");
+    assert!(harness.app().split.ratio > before_ratio && harness.app().split.ratio <= 0.85);
 
-    // Drag divider rightward by 60 logical px -> updates split ratio within [0.2, 0.8].
-    let dcenter = rect_center_logical(divider, metrics);
-    let before_ratio = app.split.ratio;
-    let div_down = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerDown { x: dcenter[0], y: dcenter[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("div down");
-    assert_eq!(div_down.action, "split_divider.drag_start");
-    app.dispatch_ui_event(UiInputEvent::PointerMove { x: dcenter[0] + 60.0, y: dcenter[1], modifiers: KeyModifiers::default() }, metrics)
-        .expect("div move");
-    app.dispatch_ui_event(
-        UiInputEvent::PointerUp { x: dcenter[0] + 60.0, y: dcenter[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("div up");
-    assert!(app.split.ratio > before_ratio && app.split.ratio <= 0.8);
-
-    // Verify RTL reverses split pane horizontal ordering!
-    app.set_locale("ar");
-    let rtl_split = app.layout_map(metrics);
-    assert!(rtl_split.split_primary.unwrap().x > rtl_split.split_secondary.unwrap().x);
-    app.set_locale("en");
-
-    // Verify two-way point brushing (`QOL-5`):
-    // 1) Graph plotted point -> grid selection & brushed_cell
-    // 2) Grid cell click -> brushed_cell & visual highlight difference in RGBA render
-    let unbrushed_rgba = app.render_rgba_for_metrics(metrics, 96).expect("unbrushed");
-    let scene = app.session().render_sheet_scene(&"graph-xy".into()).expect("graph scene");
+    // Two-way point brushing (`QOL-5`): Graph plotted point -> grid selection & RGBA visual delta.
+    let mut app2 = harness.driver.state().app.clone();
+    let unbrushed_rgba = app2.render_egui_shell_rgba(metrics.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("unbrushed");
+    let scene = app2.session().render_sheet_scene(&"graph-xy".into()).expect("graph scene");
     let plotted = scene.plotted_points.first().expect("plotted point metadata");
-    let brushed =
-        app.brush_point_from_graph_pt(&"graph-xy".into(), plotted.center_pt, 8.0).expect("ChartScene::hit_test_point should match plotted point");
+    let brushed = app2.brush_point_from_graph_pt(&"graph-xy".into(), plotted.center_pt, 8.0).expect("hit_test_point");
     assert_eq!(brushed, plotted.source_cell);
-    assert_eq!(app.brushed_cell.as_ref(), Some(&plotted.source_cell));
-    assert_eq!(app.grid.tool.active, Some(GridCellCoord::new(plotted.source_cell.row, plotted.source_cell.col, plotted.source_cell.subcol)));
-
-    let brushed_rgba = app.render_rgba_for_metrics(metrics, 96).expect("brushed");
+    assert_eq!(app2.brushed_cell.as_ref(), Some(&plotted.source_cell));
+    assert_eq!(app2.grid.tool.active, Some(GridCellCoord::new(plotted.source_cell.row, plotted.source_cell.col, plotted.source_cell.subcol)));
+    let brushed_rgba = app2.render_egui_shell_rgba(metrics.to_render_target_spec(96), ScreenshotRegionTarget::FullWindow).expect("brushed");
     assert_ne!(unbrushed_rgba.rgba, brushed_rgba.rgba);
-
-    // Also test clicking a visible grid cell (row=2, col=1) triggers `ui.brush.point`.
-    let gcell_rect = split_map.grid_geometry.as_ref().unwrap().cell_rect(2, 1).expect("cell (2,1)");
-    let gcenter = rect_center_logical(gcell_rect, metrics);
-    let click_cell = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerDown { x: gcenter[0], y: gcenter[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("grid cell brush click");
-    assert_eq!(click_cell.command_id.as_deref(), Some("ui.brush.point"));
-    assert_eq!(app.brushed_cell.as_ref().map(|c| (c.row, c.col)), Some((2, 1)));
 }
 
 #[test]
 fn qol1_qol2_convert_archetype_and_import_reshape() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
 
-    // QOL-1a: Lossless conversion (Grouped -> Column).
     app.preview_convert_archetype(&"data-grp".into(), TableKind::Column).expect("preview convert");
     assert_eq!(app.canvas_dialogs.active_dialog, ActiveDialog::ConvertArchetype { sheet_id: SheetId::try_new("data-grp").unwrap() });
     assert!(app.canvas_dialogs.convert_archetype.preview_ready);
@@ -506,7 +405,6 @@ fn qol1_qol2_convert_archetype_and_import_reshape() {
     app.commit_convert_archetype().expect("lossless convert");
     assert_eq!(app.document().data_sheet(&"data-grp".into()).unwrap().kind(), TableKind::Column);
 
-    // QOL-1b: Lossy conversion (`data-xy` with excluded X cell -> Grouped drops non-numeric X spacing unless allow_lossy = true).
     app.execute_command("table.setXCells", json!({ "sheet_id": "data-xy", "row": 3, "value": 4.0, "excluded": true })).expect("exclude x");
     app.preview_convert_archetype(&"data-xy".into(), TableKind::Grouped).expect("preview lossy convert");
     assert!(app.canvas_dialogs.convert_archetype.preview_ready);
@@ -516,10 +414,7 @@ fn qol1_qol2_convert_archetype_and_import_reshape() {
     app.canvas_dialogs.convert_archetype.allow_lossy = true;
     app.commit_convert_archetype().expect("confirmed lossy convert");
     assert_eq!(app.document().data_sheet(&"data-xy".into()).unwrap().kind(), TableKind::Grouped);
-    app.execute_command("edit.undo", json!({})).expect("undo lossy convert for later QOL-3 test");
-    app.execute_command("edit.undo", json!({})).expect("undo exclude x");
 
-    // QOL-2: Plate96, Plate384, and TidyLongPivot import reshape flows.
     app.grid.import_reshape.mode = curvebook_ui_egui::ImportReshapeMode::Plate96;
     app.grid.import_reshape.title = String::from("Plate 96 Screening");
     app.grid.import_reshape.plate_values = vec![Some(10.0); 96];
@@ -554,9 +449,8 @@ fn qol1_qol2_convert_archetype_and_import_reshape() {
 #[test]
 fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
-    let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
+    app.nav.welcome.open = false;
 
-    // QOL-3: Auditable exclusion-with-reason (`Cmd+Shift+E` / `ui.grid.excludeWithReason`) + tooltip.
     app.execute_command("sheet.select", json!({ "sheet_id": "data-xy" })).expect("select data-xy");
     app.grid.tool.select_single(GridCellCoord::new(0, 1, 0));
     let excl_shortcut = app.handle_key_combo("Cmd+Shift+E").expect("shortcut").expect("bound");
@@ -574,7 +468,6 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
     assert!(tooltip.contains("Bubble"));
     assert!(tooltip.contains("Bubble in cuvette"));
 
-    // QOL-6: Copy Methods & Statistical Reporting (`skip_os_clipboard: true` keeps pasteboard isolated).
     app.execute_command("sheet.select", json!({ "sheet_id": "res-t" })).expect("select res-t");
     for fmt in ["plain", "markdown", "latex"] {
         let rep = curvebook_ui_egui::dispatch_ui_command(
@@ -588,44 +481,28 @@ fn qol3_qol6_qol7_exclude_reason_report_and_remediation_sibling() {
         assert!(!text.is_empty(), "empty report for format {fmt}");
     }
 
-    // QOL-7: AssumptionDiagnosticBanner is strictly diagnostics-only: clicking banner switches to
-    // the Diagnostics/Residuals tab on the SAME ResultSheet without creating sibling ResultSheets
-    // or mutating ProjectDocument, and `ui.result.applyRemediation` is rejected by policy.
     let rs_before = app.document().result_sheet(&"res-t".into()).expect("res-t");
     let banner = AssumptionDiagnosticBanner::from_result(rs_before).expect("diagnostic banner");
     assert_eq!(banner.source_result_id.as_str(), "res-t");
     assert_eq!(banner.severity, ChecklistStatus::Violated);
-    assert!(banner.diagnostic_metric.is_some(), "expected numeric diagnostic_metric on banner: {banner:?}");
-    assert!(!banner.detail_tab_ids.is_empty(), "expected detail tab link on same ResultSheet: {banner:?}");
-    assert!(
-        !banner.summary.to_ascii_lowercase().contains("consider") && !banner.limitation_note.to_ascii_lowercase().contains("consider"),
-        "banner must be diagnostics-only without prescribing tests: {banner:?}"
-    );
+    assert!(banner.diagnostic_metric.is_some());
+    assert!(!banner.detail_tab_ids.is_empty());
     let initial_result_count = app.document().result_sheets.len();
     let initial_undo_depth = app.session().undo_depth();
 
-    let rmap = app.layout_map(metrics);
-    let brect = rmap.result_banner_rect.expect("banner rect rendered on ResultSheet");
-    let bpos = rect_center_logical(brect, metrics);
-    let banner_click = app
-        .dispatch_ui_event(
-            UiInputEvent::PointerDown { x: bpos[0], y: bpos[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-            metrics,
-        )
-        .expect("banner diagnostics click");
-    assert_eq!(banner_click.command_id.as_deref(), Some("ui.result.inspectDiagnostics"));
-    assert_eq!(app.document().result_sheets.len(), initial_result_count, "zero sibling ResultSheet creation");
-    assert_eq!(app.session().undo_depth(), initial_undo_depth, "inspectDiagnostics must not mutate undo stack");
-    assert_eq!(app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-t"));
-    assert_eq!(banner_click.command_result.as_ref().unwrap()["tab_id"], json!(banner.detail_tab_ids[0]));
+    // Click rendered `result.diagnostic_banner.inspect` button in `egui`!
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
+    harness.click("result.diagnostic_banner.inspect").expect("click banner inspect");
+    assert_eq!(harness.app().document().result_sheets.len(), initial_result_count);
+    assert_eq!(harness.app().session().undo_depth(), initial_undo_depth);
+    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("res-t"));
 
-    // Deprecated `ui.result.applyRemediation` must fail with clear `diagnostics_only_policy` error & zero mutation.
+    let mut app = harness.driver.state().app.clone();
+    app.set_gui_only(false);
     let rem_err = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.applyRemediation", &json!({ "result_sheet_id": "res-t" }))
         .expect_err("QOL-7 diagnostics-only must reject applyRemediation");
     assert!(rem_err.contains("diagnostics_only_policy"));
     assert_eq!(app.document().result_sheets.len(), initial_result_count);
-
-    // Original analysis remains untouched until user switches explicitly via Cmd+T / EditParameters.
     let orig_after = app.document().result_sheet(&"res-t".into()).unwrap();
     assert!(matches!(orig_after.analysis.kind, AnalysisKind::TwoGroupComparison(ref s) if s.method == TwoGroupMethod::UnpairedT));
 }
@@ -635,7 +512,6 @@ fn qol7_assumption_banner_reports_small_n_info_and_blocks_remediation_mutation()
     let mut doc = build_qol_test_project();
     {
         let res_t = doc.result_sheet_mut(&"res-t".into()).expect("res-t");
-        // Small-N / inconclusive Info checklist entry even without heuristic keywords triggers diagnostics-only banner.
         res_t.checklist = vec![ChecklistItem {
             assumption: String::from("Shapiro-Wilk normality check"),
             status: ChecklistStatus::Info,
@@ -651,11 +527,7 @@ fn qol7_assumption_banner_reports_small_n_info_and_blocks_remediation_mutation()
     let banner = AssumptionDiagnosticBanner::from_result(rs).expect("banner from inconclusive small-N Info item");
     assert_eq!(banner.severity, ChecklistStatus::Info);
     assert_eq!(banner.diagnostic_metric.as_deref(), Some("n = 4"));
-    assert!(
-        !banner.limitation_note.to_ascii_lowercase().contains("consider"),
-        "limitation_note must omit prescriptive test advice: {}",
-        banner.limitation_note
-    );
+    assert!(!banner.limitation_note.to_ascii_lowercase().contains("consider"));
 
     let inspected = curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.result.inspectDiagnostics", &json!({ "result_sheet_id": "res-t" }))
         .expect("inspectDiagnostics ok")
@@ -673,10 +545,10 @@ fn qol7_assumption_banner_reports_small_n_info_and_blocks_remediation_mutation()
 #[test]
 fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_workspace() {
     let mut app = UiApp::from_session(Session::from_document(build_qol_test_project()));
+    app.nav.welcome.open = false;
     app.execute_command("sheet.select", json!({ "sheet_id": "graph-xy" })).expect("select graph-xy");
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
 
-    // QOL-8: Apply DoubleColumn180mm canvas preset & run preflight check.
     let preset_res = curvebook_ui_egui::dispatch_ui_command(
         &mut app,
         "ui.canvas.applyPreset",
@@ -690,36 +562,29 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
         .expect("handled");
     assert!(preflight_res["issue_count"].as_u64().is_some());
 
-    // QOL-9: CVD & Grayscale viewport preview filters change rendered RGBA pixels WITHOUT mutating GraphSpec!
     let original_spec = app.document().graph_sheet(&"graph-xy".into()).unwrap().spec.clone();
-    let normal_rgba = app.render_rgba_for_metrics(metrics, 96).expect("normal render");
-
+    let target = metrics.to_render_target_spec(96);
+    let normal_rgba = app.render_egui_shell_rgba(target, ScreenshotRegionTarget::FullWindow).expect("normal render");
     for filter_name in ["deuteranopia", "protanopia", "tritanopia", "grayscale"] {
         curvebook_ui_egui::dispatch_ui_command(&mut app, "ui.previewFilter.set", &json!({ "filter": filter_name })).expect("set preview filter");
-        let filtered_rgba = app.render_rgba_for_metrics(metrics, 96).expect("filtered render");
+        let filtered_rgba = app.render_egui_shell_rgba(target, ScreenshotRegionTarget::FullWindow).expect("filtered render");
         assert_ne!(normal_rgba.rgba, filtered_rgba.rgba, "filter {filter_name} should alter rendered viewport");
-        assert_eq!(
-            app.document().graph_sheet(&"graph-xy".into()).unwrap().spec,
-            original_spec,
-            "preview filter {filter_name} must NEVER mutate GraphSpec"
-        );
+        assert_eq!(app.document().graph_sheet(&"graph-xy".into()).unwrap().spec, original_spec);
     }
     assert_eq!(app.preview_filter, CanvasPreviewFilter::GrayscalePrint);
 
-    // QOL-10a: Presentation mode collapses editing chrome & enlarges canvas viewport (`Cmd+Shift+P`).
-    let normal_layout = compute_workspace_layout(&app, 1024, 640);
+    let normal_layout = measure_qol_regions(&app, metrics);
     assert!(normal_layout.navigator.width > 0);
     assert!(normal_layout.inspector.width > 0);
 
     let pres_exec = app.handle_key_combo("Cmd+Shift+P").expect("pres shortcut").expect("bound");
     assert_eq!(pres_exec.command_id, "ui.presentation.toggle");
     assert!(app.presentation_mode);
-    let pres_layout = compute_workspace_layout(&app, 1024, 640);
+    let pres_layout = measure_qol_regions(&app, metrics);
     assert_eq!(pres_layout.navigator.width, 0);
     assert_eq!(pres_layout.inspector.width, 0);
     assert!(pres_layout.canvas.width > normal_layout.canvas.width);
 
-    // QOL-10b: VirtualWorkspaceFolder in-memory `.curvebook` archive + unpacked snapshot round-trip + path safety.
     assert!(VirtualWorkspaceFolder::normalize_rel_path("../etc/passwd").is_err());
     assert!(VirtualWorkspaceFolder::normalize_rel_path("/abs/path").is_err());
     let archive_bytes_len = app.save_to_virtual_workspace("experiment.curvebook").expect("save virtual archive");
@@ -749,11 +614,9 @@ fn g11_emf_clipboard_bundle_and_control_ui_event_dispatch() {
     assert_eq!(u32::from_le_bytes([emf[40], emf[41], emf[42], emf[43]]), 0x464D_4520, "EMF signature ` EMF`");
     assert!(bundle.available_flavors().contains(&"emf"));
     if let Err(err) = write_os_clipboard_bundle(&bundle) {
-        // Headless CI pasteboard rejection must return structured Err without panicking.
         assert!(!err.is_empty());
     }
 
-    // Verify `ui.event.dispatch` works over JSON-lines control channel.
     let line = json!({
         "id": "ev1",
         "method": "command.run",

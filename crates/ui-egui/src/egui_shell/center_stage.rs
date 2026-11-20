@@ -21,7 +21,7 @@ use crate::dialogs_canvas::AssumptionDiagnosticBanner;
 use crate::egui_shell::canvas_view::{CanvasViewContext, CanvasViewEguiState, render_canvas_view_for_sheet};
 use crate::egui_shell::data_grid::{ColumnGridRenderContext, render_data_grid};
 use crate::egui_shell::info_view::{InfoViewEguiState, render_info_view_for_sheet};
-use crate::egui_shell::inspect_bridge::{HybridCoexistenceDecision, HybridHostTextureFrame, render_legacy_canvas_in_rect};
+use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::results_view::{ResultsViewEguiState, render_results_view_for_sheet};
 use crate::egui_shell::welcome_hub::render_welcome_hub;
 use crate::egui_shell::{
@@ -29,7 +29,7 @@ use crate::egui_shell::{
     doc_sheet_title, rgba8_to_color32,
 };
 use crate::i18n::{normalize_locale, try_tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
 
 const MIN_SPLIT_RATIO: f32 = 0.15;
@@ -64,8 +64,6 @@ pub enum CenterStageMode {
     CanvasViewport,
     /// Multi-card `Portfolio Gallery` thumbnail & filter grid (`§5`).
     Gallery,
-    /// Non-Column `DataSheet` archetypes bridged via the hybrid raster host until native R15.4 rollout.
-    LegacyDeferredSheet,
 }
 
 /// Active split-view pane slot for `F6` focus cycling (`§5`).
@@ -174,8 +172,6 @@ pub struct CenterStageContext<'a> {
     pub decision: &'a HybridCoexistenceDecision,
     /// Responsive shell geometry computed by `LayoutMetrics::solve_shell_layout`.
     pub layout: ResponsiveShellLayout,
-    /// Optional host-backed GPU texture bundle for deferred legacy panes or high-DPI scenes.
-    pub host_textures: Option<&'a HybridHostTextureFrame>,
     /// Outer workspace focus pane from `UiApp::nav.active_pane`.
     pub focused_pane: ActiveWorkspacePane,
     /// `false` when a top-level modal backdrop blocks underlying interactions.
@@ -191,10 +187,6 @@ pub struct CenterStageFrameReport {
     pub secondary_rect_pt: Option<egui::Rect>,
     /// Active scrollbar rect reported for non-overlap verification.
     pub scrollbar_rect_pt: Option<egui::Rect>,
-    /// Host texture destination rect when rendering `LegacyDeferredSheet`.
-    pub legacy_canvas_texture_rect_pt: Option<egui::Rect>,
-    /// Widget ID assigned to a legacy hybrid canvas host surface.
-    pub legacy_canvas_widget_id: Option<egui::Id>,
     /// Bounds of the bottom-edge `28–36 pt` `QOL-7` banner when visible.
     pub diagnostic_banner_rect_pt: Option<egui::Rect>,
     /// `true` when the active CenterStage mode rendered natively in `egui` (rather than deferred).
@@ -240,7 +232,7 @@ pub fn resolve_center_stage_mode(app: &UiApp, views: &EguiShellViewState) -> Cen
     if app.nav.gallery.open {
         return CenterStageMode::Gallery;
     }
-    if views.launcher_open || doc.total_sheet_count() == 0 {
+    if views.launcher_open || app.nav.welcome.open || doc.total_sheet_count() == 0 {
         return CenterStageMode::Welcome;
     }
     let Some(active_id) = doc.active_sheet_id.as_ref() else {
@@ -309,8 +301,10 @@ pub fn render_center_stage(
     let stage_enabled = !modal_blocked;
 
     // Reserve bottom 32 pt for QOL-7 banner when visible so scrollbars and footer stay unoccluded.
+    // In split view, the primary pane's sheet owns the singleton bottom banner.
+    let banner_sheet_id = if split_active { app.split.resolve_sheets(doc).0.or_else(|| active_sheet_id.clone()) } else { active_sheet_id.clone() };
     let banner_kind = if !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery) {
-        detect_bottom_banner(app, views, active_sheet_id.as_ref())
+        detect_bottom_banner(app, views, banner_sheet_id.as_ref())
     } else {
         None
     };
@@ -671,11 +665,10 @@ fn render_split_pane_container(
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
             render_split_column_sheet_preview(&mut body_ui, app, ds, slot, ctx_in.tokens, enabled, meta, intents, report);
         }
-    } else if matches!(pane_mode, CenterStageMode::DataGrid | CenterStageMode::LegacyDeferredSheet) && !(active_matches && can_use_primary_grid_state)
-    {
+    } else if pane_mode == CenterStageMode::DataGrid && !(active_matches && can_use_primary_grid_state) {
         report.handled_natively = true;
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
-            render_split_non_column_preview(&mut body_ui, ds, slot, ctx_in.tokens, enabled, meta, intents);
+            render_split_non_column_preview(&mut body_ui, app, ds, slot, ctx_in.tokens, enabled, meta, intents);
         }
     } else {
         render_single_pane_mode(&mut body_ui, app, views, pane_mode, sheet_id, slot, ctx_in, enabled, meta, intents, report);
@@ -847,7 +840,6 @@ fn render_single_pane_mode(
     intents: &mut PendingUiIntents,
     report: &mut CenterStageFrameReport,
 ) {
-    let available = ui.available_rect_before_wrap();
     match mode {
         CenterStageMode::Welcome => {
             report.handled_natively = true;
@@ -895,20 +887,13 @@ fn render_single_pane_mode(
                 app,
                 sheet_id,
                 canvas_state,
-                CanvasViewContext {
-                    tokens: ctx_in.tokens,
-                    host_textures: ctx_in.host_textures,
-                    enabled,
-                    is_secondary_split: slot == SplitPaneSlot::Secondary,
-                },
+                CanvasViewContext { tokens: ctx_in.tokens, enabled, is_secondary_split: slot == SplitPaneSlot::Secondary },
                 meta,
                 intents,
             );
         }
-        CenterStageMode::Gallery | CenterStageMode::LegacyDeferredSheet => {
-            let legacy_resp = render_legacy_canvas_in_rect(ui, app, available, ctx_in.host_textures);
-            report.legacy_canvas_texture_rect_pt = Some(available);
-            report.legacy_canvas_widget_id = Some(legacy_resp.id);
+        CenterStageMode::Gallery => {
+            report.handled_natively = true;
         }
     }
 }
@@ -1019,8 +1004,10 @@ fn render_split_column_sheet_preview(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_split_non_column_preview(
     ui: &mut egui::Ui,
+    app: &UiApp,
     ds: &DataSheet,
     slot: SplitPaneSlot,
     tokens: &Tokens,
@@ -1028,20 +1015,76 @@ fn render_split_non_column_preview(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    let _ = slot;
-    ui.add_space(12.0);
-    ui.label(RichText::new(format!("{} ({:?})", ds.title, ds.archetype.kind())).heading().color(tokens.text_primary));
-    ui.label(RichText::new("Select as active sheet for full hybrid grid editing.").small().color(tokens.text_muted));
-    ui.add_space(6.0);
-    let btn = ui.add_enabled(enabled, egui::Button::new("Activate Data Sheet"));
-    meta.record_response(
-        ui,
-        &btn,
-        inspect_input("split.activate_data_sheet", "button", "Activate Data Sheet", Some("sheet.select"), None, enabled, ZLayer::Workspace),
-    );
-    if btn.clicked() && enabled {
-        intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
+    let avail = ui.available_rect_before_wrap();
+    let bar_h = 26.0_f32.min(avail.height());
+    let bar_rect = Rect::from_min_max(avail.min, pos2(avail.right(), avail.top() + bar_h));
+    let body_rect = Rect::from_min_max(pos2(avail.left(), bar_rect.bottom()), avail.max);
+
+    ui.scope_builder(egui::UiBuilder::new().max_rect(bar_rect), |bar_ui| {
+        bar_ui.set_clip_rect(bar_rect);
+        bar_ui.horizontal(|row| {
+            row.label(
+                RichText::new(format!("{} ({:?} · {} rows)", ds.title, ds.archetype.kind(), ds.archetype.row_count()))
+                    .small()
+                    .color(tokens.text_muted),
+            );
+            let btn = row.add_enabled(enabled, egui::Button::new(RichText::new("Focus in Grid").small()));
+            meta.record_response(
+                row,
+                &btn,
+                inspect_input("split.activate_data_sheet", "button", "Focus in Grid", Some("sheet.select"), None, enabled, ZLayer::Workspace),
+            );
+            if btn.clicked() && enabled {
+                intents.push_engine("sheet.select", json!({ "sheet_id": ds.id.as_str() }));
+            }
+        });
+    });
+
+    if !body_rect.is_positive() {
+        return;
     }
+
+    let preview_grid = crate::grid_view::GridViewState { decimal_separator: app.grid.decimal_separator, ..Default::default() };
+    let frame = preview_grid.visible_frame_for_sheet(ds);
+    let mut body_ui = ui.new_child(egui::UiBuilder::new().max_rect(body_rect).layout(egui::Layout::top_down(egui::Align::Min)));
+    body_ui.set_clip_rect(body_rect);
+
+    egui::ScrollArea::both().id_salt(("split_data_preview", slot, ds.id.as_str())).auto_shrink([false, false]).show(&mut body_ui, |grid_ui| {
+        let row_h = 22.0;
+        let col_w = 80.0;
+        grid_ui.horizontal(|hdr| {
+            hdr.add_sized([36.0, row_h], egui::Label::new(RichText::new("#").small().strong().color(tokens.text_muted)));
+            if let Some(x_title) = &frame.x_column_title {
+                hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(x_title).small().strong()).truncate());
+            }
+            for sub in frame.tier2_subcolumns.iter().take(16) {
+                hdr.add_sized([col_w, row_h], egui::Label::new(RichText::new(&sub.label).small().strong()).truncate());
+            }
+        });
+        for row in frame.rows.iter().take(64) {
+            grid_ui.horizontal(|row_ui| {
+                row_ui.add_sized([36.0, row_h], egui::Label::new(RichText::new(format!("{}", row.row + 1)).small().color(tokens.text_muted)));
+                if let Some(x_txt) = &row.leading.x_or_time_display {
+                    row_ui.add_sized([col_w, row_h], egui::Label::new(RichText::new(x_txt).small().monospace()).truncate());
+                }
+                for cell in row.cells.iter().take(16) {
+                    let is_brushed = app.brushed_points.iter().any(|b| b.sheet_id == ds.id && b.row == row.row && b.col == cell.coord.col)
+                        || app.brushed_cell.as_ref().is_some_and(|b| b.sheet_id == ds.id && b.row == row.row && b.col == cell.coord.col);
+                    let btn = egui::Button::new(RichText::new(&cell.display_text).small().monospace().color(if is_brushed {
+                        tokens.accent
+                    } else {
+                        tokens.text_primary
+                    }))
+                    .fill(if is_brushed { tokens.active_bg } else { tokens.surface_bg })
+                    .stroke(Stroke::new(if is_brushed { 1.5 } else { 0.5 }, if is_brushed { tokens.accent } else { tokens.border }))
+                    .min_size(vec2(col_w, row_h));
+                    if row_ui.add_enabled(enabled, btn).clicked() && enabled {
+                        intents.push_brush_point(ds.id.clone(), cell.coord);
+                    }
+                }
+            });
+        }
+    });
 }
 
 fn sync_two_way_split_brushing(
@@ -1299,8 +1342,9 @@ fn render_gallery_card(
     } else {
         tokens.panel_bg
     };
-    let border_col = if card.active { tokens.accent } else { tokens.border };
-    ui.painter().rect(card_rect, CornerRadius::same(4), bg, Stroke::new(if card.active { 1.5 } else { 1.0 }, border_col), StrokeKind::Inside);
+    let highlighted = card.active || card.selected;
+    let border_col = if highlighted { tokens.accent } else { tokens.border };
+    ui.painter().rect(card_rect, CornerRadius::same(4), bg, Stroke::new(if highlighted { 1.5 } else { 1.0 }, border_col), StrokeKind::Inside);
 
     let thumb_rect = Rect::from_min_max(card_rect.min + vec2(8.0, 8.0), pos2(card_rect.right() - 8.0, card_rect.bottom() - 38.0));
     paint_gallery_thumbnail(ui, doc, card, thumb_rect, tokens);
@@ -1496,7 +1540,8 @@ fn render_bottom_banner(
 
     let text_budget = (inner.width() - 250.0).max(90.0);
     let lbl_resp = bar_ui.add_sized([text_budget, inner.height()], egui::Label::new(RichText::new(&summary).small().color(text_color)).truncate());
-    meta.record_response(&bar_ui, &lbl_resp, inspect_input(wid_prefix, "status", &summary, None, None, enabled, ZLayer::FloatingOverlay));
+    let banner_cmd = (wid_prefix == "result.diagnostic_banner").then_some("ui.result.inspectDiagnostics");
+    meta.record_response(&bar_ui, &lbl_resp, inspect_input(wid_prefix, "status", &summary, banner_cmd, None, enabled, ZLayer::FloatingOverlay));
 
     bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |btns| {
         let dismiss_lbl = stage_tr(locale, "w5.banner.dismiss", "Dismiss");

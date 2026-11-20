@@ -23,7 +23,7 @@ use crate::egui_shell::{
 };
 use crate::grid_view::{resolve_flat_coord, total_flat_data_subcolumns};
 use crate::i18n::{is_rtl_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 /// Hard selection cell cap (`50,000`) preventing pathological UI stalls on 1M-row sheets (`§7.2`).
 pub const QUICK_STATS_CELL_CAP: usize = 50_000;

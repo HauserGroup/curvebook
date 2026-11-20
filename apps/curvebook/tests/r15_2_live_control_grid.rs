@@ -1,9 +1,9 @@
 #![forbid(unsafe_code)]
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
-//! Wave 2 (`R15.2`) live `--control` Column grid acceptance tests (`apps/curvebook/tests/r15_2_live_control_grid.rs`):
+//! Wave 2 (`R15.2`) / R15.5 live `--control` Column grid acceptance tests (`apps/curvebook/tests/r15_2_live_control_grid.rs`):
 //! - Drives `CurveBookNativeApp` + `LiveControlBridge` (`serve_live_control_io`) interactively
-//!   across `UiBackend::Legacy` (baseline) and `UiBackend::Egui`:
+//!   on `UiBackend::Egui`:
 //!   1. Creates/selects an `80`-row `Column` grid so row `45` starts off-screen.
 //!   2. Verifies pre-scroll `ui.inspect` (`scope: "grid"`) omits off-screen `grid.cell.45.1.0`
 //!      and captures baseline `ui.screenshot`.
@@ -159,16 +159,7 @@ fn bounds_rect(node: &Value) -> Option<[f64; 4]> {
     Some([arr.first()?.as_f64()?, arr.get(1)?.as_f64()?, arr.get(2)?.as_f64()?, arr.get(3)?.as_f64()?])
 }
 
-fn scroll_to_target_cell(
-    client: &mut InteractiveControlClient,
-    backend: UiBackend,
-    pre_inspect: &Value,
-    top_bounds: [f64; 4],
-) -> Result<[f64; 4], String> {
-    if backend != UiBackend::Egui {
-        let vis = find_grid_cell(pre_inspect, "grid.cell.3.1.0").ok_or("missing legacy grid.cell.3.1.0")?;
-        return bounds_rect(vis).ok_or_else(|| String::from("missing legacy bounds for grid.cell.3.1.0"));
-    }
+fn scroll_to_target_cell(client: &mut InteractiveControlClient, top_bounds: [f64; 4]) -> Result<[f64; 4], String> {
     let scroll_x = top_bounds[0] + top_bounds[2] * 0.5;
     let scroll_y = top_bounds[1] + top_bounds[3] * 0.5;
     let mut last_cells_summary = String::new();
@@ -219,7 +210,6 @@ fn scroll_to_target_cell(
 
 fn verify_resize_geometry_stamp(
     client: &mut InteractiveControlClient,
-    backend: UiBackend,
     resize_trigger: &std::sync::atomic::AtomicBool,
     resize_settled: &std::sync::atomic::AtomicBool,
     pre_resize_bounds: [f64; 4],
@@ -238,36 +228,34 @@ fn verify_resize_geometry_stamp(
         "params": { "target": "full_window" }
     }))?;
     assert_eq!(resized_shot["ok"], json!(true), "resized screenshot failed: {resized_shot}");
-    if backend == UiBackend::Egui {
-        assert_eq!(resized_shot["result"]["width_px"], json!(1680));
-        assert_eq!(resized_shot["result"]["height_px"], json!(1050));
-        assert_eq!(resized_shot["result"]["dpi"], json!(144));
-        let r_png = decode_base64(resized_shot["result"]["data_base64"].as_str().ok_or("missing resized data_base64")?)?;
-        assert_eq!(png_dimensions(&r_png), Some((1680, 1050)));
+    assert_eq!(resized_shot["result"]["width_px"], json!(1680));
+    assert_eq!(resized_shot["result"]["height_px"], json!(1050));
+    assert_eq!(resized_shot["result"]["dpi"], json!(144));
+    let r_png = decode_base64(resized_shot["result"]["data_base64"].as_str().ok_or("missing resized data_base64")?)?;
+    assert_eq!(png_dimensions(&r_png), Some((1680, 1050)));
 
-        let resized_inspect = client.send(&json!({
-            "id": "7b",
-            "method": "ui.inspect",
-            "params": { "scope": "grid", "include_bounds": true }
-        }))?;
-        assert_eq!(resized_inspect["ok"], json!(true), "resized inspect failed: {resized_inspect}");
-        let post_resize_cell =
-            find_grid_cell(&resized_inspect, "grid.cell.45.1.0").ok_or("expected grid.cell.45.1.0 to remain inspectable after 1.5x DPI resize")?;
-        let resized_bounds = bounds_rect(post_resize_cell).ok_or("missing resized cell bounds")?;
-        assert!(resized_bounds[2] > 0.0 && resized_bounds[3] > 0.0);
-        assert!(resized_bounds[0] + resized_bounds[2] <= 1680.0 && resized_bounds[1] + resized_bounds[3] <= 1050.0);
-        assert_ne!(resized_bounds, pre_resize_bounds, "post-resize GeometryStamp bounds must not stay stale pre-resize 1.0x bounds");
-    }
+    let resized_inspect = client.send(&json!({
+        "id": "7b",
+        "method": "ui.inspect",
+        "params": { "scope": "grid", "include_bounds": true }
+    }))?;
+    assert_eq!(resized_inspect["ok"], json!(true), "resized inspect failed: {resized_inspect}");
+    let post_resize_cell =
+        find_grid_cell(&resized_inspect, "grid.cell.45.1.0").ok_or("expected grid.cell.45.1.0 to remain inspectable after 1.5x DPI resize")?;
+    let resized_bounds = bounds_rect(post_resize_cell).ok_or("missing resized cell bounds")?;
+    assert!(resized_bounds[2] > 0.0 && resized_bounds[3] > 0.0);
+    assert!(resized_bounds[0] + resized_bounds[2] <= 1680.0 && resized_bounds[1] + resized_bounds[3] <= 1050.0);
+    assert_ne!(resized_bounds, pre_resize_bounds, "post-resize GeometryStamp bounds must not stay stale pre-resize 1.0x bounds");
     Ok(())
 }
 
-fn run_live_control_column_scroll_inspect_click_screenshot(backend: UiBackend) -> Result<(), Box<dyn std::error::Error>> {
+fn run_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<dyn std::error::Error>> {
     let initial = ViewportMetrics::new(1280.0, 800.0, 1.0);
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
         in_window_menus: false,
         new_instance: false,
         gui_only: false,
-        ui_backend: backend,
+        ui_backend: UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -340,7 +328,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot(backend: UiBackend) -
         assert_eq!(png_dimensions(&pre_png), Some((1280, 800)));
 
         // 2. Scroll the Column grid downward until row 45 is revealed on-screen (`egui` uses delta_y < 0).
-        let target_bounds = scroll_to_target_cell(&mut client, backend, &pre_inspect, top_bounds)?;
+        let target_bounds = scroll_to_target_cell(&mut client, top_bounds)?;
 
         // 3. Click target cell via ui.pointer_gesture at its inspected bounds center.
         let click_x = target_bounds[0] + target_bounds[2] * 0.5;
@@ -364,8 +352,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot(backend: UiBackend) -
         }))?;
         assert_eq!(post_inspect["ok"], json!(true));
         let active = &post_inspect["result"]["grid_selection"]["active_cell"];
-        let expected_row = if backend == UiBackend::Egui { 45 } else { 3 };
-        assert_eq!(active["row"], json!(expected_row), "expected active row {expected_row} after clicking cell: {post_inspect}");
+        assert_eq!(active["row"], json!(45), "expected active row 45 after clicking cell: {post_inspect}");
         assert_eq!(active["col"], json!(1), "expected active col 1 after clicking cell: {post_inspect}");
 
         // 4. Verify updated ui.screenshot reflects scrolled + selected pixels.
@@ -380,7 +367,7 @@ fn run_live_control_column_scroll_inspect_click_screenshot(backend: UiBackend) -
         assert_ne!(pre_png, post_png, "post-scroll + post-click screenshot must differ from pre-scroll screenshot");
 
         // 5. Trigger resize + 1.5x DPI transition and verify GeometryStamp settles before screenshot/inspect.
-        verify_resize_geometry_stamp(&mut client, backend, &resize_trigger_c, &resize_settled_c, target_bounds)?;
+        verify_resize_geometry_stamp(&mut client, &resize_trigger_c, &resize_settled_c, target_bounds)?;
 
         let quit = client.send(&json!({ "id": "8", "method": "app.quit" }))?;
         assert_eq!(quit["result"]["quit"], json!(true));
@@ -430,11 +417,6 @@ fn run_live_control_column_scroll_inspect_click_screenshot(backend: UiBackend) -
 }
 
 #[test]
-fn legacy_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<dyn std::error::Error>> {
-    run_live_control_column_scroll_inspect_click_screenshot(UiBackend::Legacy)
-}
-
-#[test]
 fn egui_live_control_column_scroll_inspect_click_screenshot() -> Result<(), Box<dyn std::error::Error>> {
-    run_live_control_column_scroll_inspect_click_screenshot(UiBackend::Egui)
+    run_live_control_column_scroll_inspect_click_screenshot()
 }

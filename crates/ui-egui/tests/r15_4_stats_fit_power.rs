@@ -44,7 +44,6 @@ impl Wave4DriverState {
     fn new(mut app: UiApp) -> Self {
         app.set_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
-        app.egui_views = app.egui_views.clone().with_native_analyze_sheet(true);
         let views = app.egui_views.clone();
         Self { app, views, intents: PendingUiIntents::new(), outside_click_captured: false, outside_wheel_captured: false, dialog_rect_pt: None }
     }
@@ -694,7 +693,7 @@ fn all_14_beta_locales_backdrop_capture_and_scrollbar_non_overlap_at_640x420_and
     ak_app.canvas_dialogs.power_wizard.stage = curvebook_ui_egui::power_wizard::PowerWizardStage::Results;
     let ctx = egui::Context::default();
     ctx.enable_accesskit();
-    let mut views = EguiShellViewState::default().with_native_analyze_sheet(true);
+    let mut views = EguiShellViewState::default();
     let mut meta = curvebook_ui_egui::egui_shell::FrameInspectMeta::default();
     let mut intents = PendingUiIntents::new();
     let mut out = ctx.run_ui(

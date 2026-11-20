@@ -12,8 +12,8 @@ use curvebook_ui_egui::egui_shell::top_bar_fit::{BAR_ICON_PT, RightWidths, Searc
 use curvebook_ui_egui::egui_shell::widgets::{check, flat_button_fit, icon_button, primary_button, secondary_button, section_toggle, tab_bar};
 use curvebook_ui_egui::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
 use curvebook_ui_egui::i18n::{LOCALES, is_rtl_locale, normalize_locale, tr};
+use curvebook_ui_egui::inspect::ZLayer;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
-use curvebook_ui_egui::layout::ZLayer;
 use curvebook_ui_egui::theme::UiThemeMode;
 use egui_kittest::Harness;
 use egui_kittest::kittest::{NodeT as _, Queryable as _};

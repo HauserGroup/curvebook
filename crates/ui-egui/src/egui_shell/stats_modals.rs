@@ -20,19 +20,20 @@ use crate::dialogs_canvas::{
 };
 use crate::dialogs_r9::{RandomizationSchemeKind, SimDistKind};
 use crate::i18n::{normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::modal_predicates::{
     ControlEnablement, evaluate_dialog_button, is_reml_mixed_effects_active, r_km_trend_test, r1_paired_or_matched_allowed,
-    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r4_two_group_diagnostics, r4_two_group_welch_correction,
-    r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend, r7_correlation_heatmap_toggle, r8_subcolumn_aggregation,
-    r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape, survival_group_count,
+    r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r4_two_group_diagnostics, r4_two_group_graph_differences,
+    r4_two_group_nonparametric_options, r4_two_group_welch_correction, r5_contingency_2x2_effect_sizes, r5_contingency_cochran_armitage_trend,
+    r7_correlation_heatmap_toggle, r8_subcolumn_aggregation, r9_pvalue_precision_spinner, r10_pcr_outcome_column, source_table_shape,
+    survival_group_count,
 };
 use crate::views::analyze_picker::DuplicateChoice;
 
 use super::inspect_bridge::{ModalCaptureReport, ModalCaptureSpec, finalize_egui_modal_response};
 use super::stat_anova_modal::{
     ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
-    render_modal_seg_btn, render_section_title, render_stepper_row,
+    render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
 };
 use super::widgets::paint_icon_button_named;
 use super::{FrameInspectMeta, PendingUiIntents, Tokens};
@@ -47,6 +48,12 @@ pub struct StatsModalsEguiState {
     pub show_method_reference: bool,
     pub method_saved_as_default: bool,
     pub last_resolved_banner: String,
+    pub open_session_sheet_id: Option<String>,
+    pub lin_x_min_draft: String,
+    pub lin_x_max_draft: String,
+    pub lin_plot_min_draft: String,
+    pub lin_plot_max_draft: String,
+    pub lin_segments_draft: String,
 }
 
 /// Frame geometry and modal capture report emitted by `stats_modals`.
@@ -699,6 +706,43 @@ fn render_analyze_datasets_pane(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.pca" | "stats.pcr" | "pca" | "pcr")) && !az.variable_candidates.is_empty() {
+        render_section_title(ui, tokens, "PCA Predictors / PCR Outcome");
+        let is_pcr = matches!(az.selected_entry_id.as_deref(), Some("stats.pcr" | "pcr"));
+        for var in &az.variable_candidates {
+            let pred_on = az.pca_predictors.contains(&var.col_index);
+            ui.horizontal_wrapped(|ui| {
+                let pred_lbl = if is_pcr { format!("Pred: {}", var.title) } else { format!("Predictor: {}", var.title) };
+                if render_modal_checkbox(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("analyze.pca.pred.{}", var.col_index),
+                    &pred_lbl,
+                    pred_on,
+                    &ControlEnablement::enabled(),
+                ) {
+                    intents.push_custom_view_action("analyze_picker", format!("toggle_pca_pred:{}", var.col_index));
+                }
+                if is_pcr {
+                    let pcr_en = r10_pcr_outcome_column(var.col_index, &az.pca_predictors);
+                    if render_modal_radio(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("analyze.pcr.outcome.{}", var.col_index),
+                        "Outcome (Y)",
+                        az.pcr_outcome_column == Some(var.col_index),
+                        &pcr_en,
+                    ) {
+                        intents.push_custom_view_action("analyze_picker", format!("set_pcr_outcome:{}", var.col_index));
+                    }
+                }
+            });
+        }
+        ui.add_space(6.0);
+    }
+
     if !az.variable_candidates.is_empty() {
         render_section_title(ui, tokens, "Variables & Role Filter");
         ui.horizontal_wrapped(|ui| {
@@ -755,40 +799,7 @@ fn render_analyze_datasets_pane(
         }
     }
 
-    if matches!(az.selected_entry_id.as_deref(), Some("pca" | "pcr")) && !az.variable_candidates.is_empty() {
-        ui.add_space(6.0);
-        render_section_title(ui, tokens, "PCA Predictors / PCR Outcome");
-        for var in &az.variable_candidates {
-            let pred_on = az.pca_predictors.contains(&var.col_index);
-            if render_modal_checkbox(
-                ui,
-                tokens,
-                meta,
-                &format!("analyze.pca.pred.{}", var.col_index),
-                &format!("Predictor: {}", var.title),
-                pred_on,
-                &ControlEnablement::enabled(),
-            ) {
-                intents.push_custom_view_action("analyze_picker", format!("toggle_pca_pred:{}", var.col_index));
-            }
-            if az.selected_entry_id.as_deref() == Some("pcr") {
-                let pcr_en = r10_pcr_outcome_column(var.col_index, &az.pca_predictors);
-                if render_modal_radio(
-                    ui,
-                    tokens,
-                    meta,
-                    &format!("analyze.pcr.outcome.{}", var.col_index),
-                    &format!("Outcome (Y): {}", var.title),
-                    az.pcr_outcome_column == Some(var.col_index),
-                    &pcr_en,
-                ) {
-                    intents.push_custom_view_action("analyze_picker", format!("set_pcr_outcome:{}", var.col_index));
-                }
-            }
-        }
-    }
-
-    if az.selected_entry_id.as_deref() == Some("outliers") {
+    if matches!(az.selected_entry_id.as_deref(), Some("stats.outliers" | "outliers")) {
         ui.add_space(6.0);
         render_section_title(ui, tokens, "Outlier Identification Mode");
         let is_grubbs = az.outlier_method == "grubbs";
@@ -819,9 +830,9 @@ fn render_analyze_datasets_pane(
             },
         );
         if step < 0 {
-            intents.push_custom_view_action("analyze_picker", "outlier_param_step:-1");
+            intents.push_custom_view_action("analyze_picker", if is_grubbs { "outlier_param_step:-0.01" } else { "outlier_param_step:-1" });
         } else if step > 0 {
-            intents.push_custom_view_action("analyze_picker", "outlier_param_step:1");
+            intents.push_custom_view_action("analyze_picker", if is_grubbs { "outlier_param_step:0.01" } else { "outlier_param_step:1" });
         }
         if is_grubbs
             && render_modal_checkbox(
@@ -1119,6 +1130,17 @@ fn tabs_for_spec(app: &UiApp, spec: &curvebook_doc::AnalysisSpec) -> Vec<StatTab
             v.push(StatTabDef { slug: "options", label: "Confidence & Options" });
             v
         }
+        AnalysisKind::LinearRegression(_) => {
+            let mut v = Vec::new();
+            if is_mv {
+                v.push(StatTabDef { slug: "data", label: "Data" });
+            }
+            v.push(StatTabDef { slug: "experimental_design", label: "Parameters" });
+            v.push(StatTabDef { slug: "range", label: "Range & Curve" });
+            v.push(StatTabDef { slug: "options", label: "Options" });
+            v.push(StatTabDef { slug: "diagnostics", label: "Diagnostics" });
+            v
+        }
         _ => {
             let mut v = Vec::new();
             if is_mv {
@@ -1303,10 +1325,12 @@ pub fn render_stat_params_modal(
     intents: &mut PendingUiIntents,
 ) -> StatsModalFrameReport {
     let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        state.open_session_sheet_id = None;
         return StatsModalFrameReport::default();
     };
     let doc = app.document();
     let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
+        state.open_session_sheet_id = None;
         return StatsModalFrameReport::default();
     };
 
@@ -1315,14 +1339,26 @@ pub fn render_stat_params_modal(
     let tabs = tabs_for_spec(app, spec);
     let ep = &app.canvas_dialogs.edit_params;
 
-    // Sync active tab cleanly when switching sheets/families
-    let key_sheet = Id::unique(("stat_modal.sheet", result_sheet_id.as_str()));
-    let prev_sheet: Option<String> = ctx.data(|d| d.get_temp(key_sheet));
-    if prev_sheet.as_deref() != Some(result_sheet_id.as_str()) {
-        ctx.data_mut(|d| d.insert_temp(key_sheet, result_sheet_id.as_str().to_owned()));
+    // Sync active tab and transient input drafts cleanly when opening or switching sheets
+    if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
+        state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
         state.active_tab = tabs.iter().find(|t| t.slug == ep.active_tab).map_or(tabs[0].slug, |t| t.slug).to_owned();
         state.show_method_reference = false;
         state.method_saved_as_default = false;
+        if let AnalysisKind::LinearRegression(lin) = &spec.kind {
+            let (lo, hi) = lin.x_range_filter.unwrap_or_default();
+            state.lin_x_min_draft = lo.map_or_else(String::new, |v| format!("{v}"));
+            state.lin_x_max_draft = hi.map_or_else(String::new, |v| format!("{v}"));
+            state.lin_plot_min_draft = lin.plot_x_min.map_or_else(String::new, |v| format!("{v}"));
+            state.lin_plot_max_draft = lin.plot_x_max.map_or_else(String::new, |v| format!("{v}"));
+            state.lin_segments_draft = lin.plot_segments.map_or_else(String::new, |v| format!("{v}"));
+        } else {
+            state.lin_x_min_draft.clear();
+            state.lin_x_max_draft.clear();
+            state.lin_plot_min_draft.clear();
+            state.lin_plot_max_draft.clear();
+            state.lin_segments_draft.clear();
+        }
     } else if !tabs.iter().any(|t| t.slug == state.active_tab) {
         state.active_tab = tabs[0].slug.to_owned();
     }
@@ -1377,7 +1413,8 @@ pub fn render_stat_params_modal(
                     });
                 ui.add_space(6.0);
             }
-            render_stat_params_tab_body(ui, StatTabBodyCtx { app, ep, spec, tab_slug: &state.active_tab }, tokens, meta, intents);
+            let tab_slug = state.active_tab.clone();
+            render_stat_params_tab_body(ui, state, StatTabBodyCtx { app, ep, spec, tab_slug: &tab_slug }, tokens, meta, intents);
         },
         |ui, state, meta, intents| {
             ui.horizontal(|ui| {
@@ -1526,6 +1563,7 @@ struct StatTabBodyCtx<'a> {
 
 fn render_stat_params_tab_body(
     ui: &mut Ui,
+    state: &mut StatsModalsEguiState,
     tab_ctx: StatTabBodyCtx<'_>,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -1535,12 +1573,83 @@ fn render_stat_params_tab_body(
     let doc = app.document();
     match tab_slug {
         "data" => render_stat_mv_data_tab(ui, doc, spec, tokens, meta, intents),
+        "range" => render_linear_range_tab(ui, state, spec, tokens, meta, intents),
         "repeated_measures" => render_stat_rm_tab(ui, app, ep, spec, tokens, meta, intents),
         "multiple_comparisons" => render_stat_multiplicity_tab(ui, app, ep, spec, tokens, meta, intents),
         "options" => render_stat_options_tab(ui, spec, tokens, meta, intents),
         "diagnostics" => render_stat_diagnostics_tab(ui, spec, tokens, meta, intents),
         _ => render_stat_design_tab(ui, app, ep, spec, tokens, meta, intents),
     }
+}
+
+fn render_linear_range_tab(
+    ui: &mut Ui,
+    state: &mut StatsModalsEguiState,
+    spec: &curvebook_doc::AnalysisSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !matches!(spec.kind, AnalysisKind::LinearRegression(_)) {
+        return;
+    }
+    render_section_title(ui, tokens, "Fit X Range Filter & Curve Plot Window");
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.lr.range.input.x_min",
+        "Restrict fit X >= (optional)",
+        "auto min",
+        &mut state.lin_x_min_draft,
+        110.0,
+    );
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.lr.range.input.x_max",
+        "Restrict fit X <= (optional)",
+        "auto max",
+        &mut state.lin_x_max_draft,
+        110.0,
+    );
+    ui.add_space(4.0);
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.lr.range.input.plot_min",
+        "Plot curve start X (optional)",
+        "data min",
+        &mut state.lin_plot_min_draft,
+        110.0,
+    );
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.lr.range.input.plot_max",
+        "Plot curve end X (optional)",
+        "data max",
+        &mut state.lin_plot_max_draft,
+        110.0,
+    );
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.lr.range.input.segments",
+        "Curve segments (blank = auto)",
+        "auto",
+        &mut state.lin_segments_draft,
+        110.0,
+    );
 }
 
 fn render_stat_mv_data_tab(
@@ -1833,61 +1942,136 @@ fn render_two_group_design(
     };
     let assume_en = r2_assume_gaussian_allowed(doc, Some(&spec.source_sheet_id));
     let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
-    if render_modal_checkbox(ui, tokens, meta, "edit.assume_gaussian", "Assume Gaussian distribution", ep.assume_gaussian, &assume_en) {
-        intents.push_dialog_widget_click("edit.assume_gaussian");
-    }
-    if render_modal_checkbox(ui, tokens, meta, "edit.paired_or_matched", "Paired / Matched design", ep.paired_or_matched, &paired_en) {
-        intents.push_dialog_widget_click("edit.paired_or_matched");
-    }
-    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_checkbox(ui, tokens, meta, "edit.assume_gaussian", "Assume Gaussian distribution", ep.assume_gaussian, &assume_en) {
+            intents.push_dialog_widget_click("edit.assume_gaussian");
+        }
+        if render_modal_checkbox(ui, tokens, meta, "edit.paired_or_matched", "Paired / Matched design", ep.paired_or_matched, &paired_en) {
+            intents.push_dialog_widget_click("edit.paired_or_matched");
+        }
+    });
+    ui.add_space(4.0);
     render_section_title(ui, tokens, "Test Method");
     let welch_en = r4_two_group_welch_correction(t.method);
     let unpaired_nonparam_en = assume_en.clone();
     let paired_nonparam_en = if !assume_en.enabled { assume_en.clone() } else { paired_en.clone() };
-    for (wid, lbl, m, en) in [
-        ("edit.tg.unpaired_t", "Unpaired Student t-test", TwoGroupMethod::UnpairedT, ControlEnablement::enabled()),
-        ("edit.tg.welch_t", "Welch's unpaired t-test", TwoGroupMethod::WelchT, welch_en),
-        ("edit.tg.paired_t", "Paired Student t-test", TwoGroupMethod::PairedT, paired_en.clone()),
-        ("edit.tg.ratio_paired", "Ratio paired t-test (ln A/B)", TwoGroupMethod::RatioPairedT, paired_en.clone()),
-        ("edit.tg.lognormal", "Lognormal unpaired t-test", TwoGroupMethod::LognormalUnpairedT, ControlEnablement::enabled()),
-        ("edit.tg.mann_whitney", "Mann-Whitney U test", TwoGroupMethod::MannWhitneyU, unpaired_nonparam_en.clone()),
-        ("edit.tg.wilcoxon", "Wilcoxon signed-rank test", TwoGroupMethod::WilcoxonSignedRank, paired_nonparam_en.clone()),
-        ("edit.tg.ks", "Kolmogorov-Smirnov test", TwoGroupMethod::KolmogorovSmirnov, unpaired_nonparam_en),
-        ("edit.tg.sign", "Paired binomial sign test", TwoGroupMethod::PairedSignTest, paired_nonparam_en),
-    ] {
-        let active = std::mem::discriminant(&t.method) == std::mem::discriminant(&m);
-        if render_modal_radio(ui, tokens, meta, wid, lbl, active, &en) {
+    ui.horizontal_wrapped(|ui| {
+        for (wid, lbl, m, en) in [
+            ("edit.tg.unpaired_t", "Unpaired Student t", TwoGroupMethod::UnpairedT, ControlEnablement::enabled()),
+            ("edit.tg.welch_t", "Welch's t", TwoGroupMethod::WelchT, welch_en.clone()),
+            ("edit.tg.paired_t", "Paired Student t", TwoGroupMethod::PairedT, paired_en.clone()),
+            ("edit.tg.ratio_paired", "Ratio paired t", TwoGroupMethod::RatioPairedT, paired_en.clone()),
+            ("edit.tg.lognormal", "Lognormal t", TwoGroupMethod::LognormalUnpairedT, ControlEnablement::enabled()),
+            ("edit.tg.mann_whitney", "Mann-Whitney U", TwoGroupMethod::MannWhitneyU, unpaired_nonparam_en.clone()),
+            ("edit.tg.wilcoxon", "Wilcoxon signed-rank", TwoGroupMethod::WilcoxonSignedRank, paired_nonparam_en.clone()),
+            ("edit.tg.ks", "Kolmogorov-Smirnov", TwoGroupMethod::KolmogorovSmirnov, unpaired_nonparam_en),
+            ("edit.tg.sign", "Paired binomial sign", TwoGroupMethod::PairedSignTest, paired_nonparam_en),
+        ] {
+            let active = std::mem::discriminant(&t.method) == std::mem::discriminant(&m);
+            if render_modal_radio(ui, tokens, meta, wid, lbl, active, &en) {
+                let mut next = spec.clone();
+                if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                    tg.method = m;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    let diff_en = r4_two_group_graph_differences(t.method);
+    let np_en = r4_two_group_nonparametric_options(t.method);
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_checkbox(ui, tokens, meta, "edit.tg.two_tailed", "Two-tailed P value", t.two_tailed, &ControlEnablement::enabled()) {
             let mut next = spec.clone();
             if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
-                tg.method = m;
+                tg.two_tailed = !t.two_tailed;
             }
             intents.push_set_edit_params_draft(next);
         }
-    }
-    ui.add_space(6.0);
-    if render_modal_checkbox(ui, tokens, meta, "edit.tg.two_tailed", "Two-tailed P value", t.two_tailed, &ControlEnablement::enabled()) {
-        let mut next = spec.clone();
-        if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
-            tg.two_tailed = !t.two_tailed;
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.compute_effect_sizes",
+            "Effect sizes (Cohen's d)",
+            t.compute_effect_sizes,
+            &ControlEnablement::enabled(),
+        ) {
+            let mut next = spec.clone();
+            if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                tg.compute_effect_sizes = !t.compute_effect_sizes;
+            }
+            intents.push_set_edit_params_draft(next);
         }
-        intents.push_set_edit_params_draft(next);
-    }
-    if render_modal_checkbox(
-        ui,
-        tokens,
-        meta,
-        "edit.compute_effect_sizes",
-        "Compute effect sizes (Cohen's d / Hedges' g)",
-        t.compute_effect_sizes,
-        &ControlEnablement::enabled(),
-    ) {
-        let mut next = spec.clone();
-        if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
-            tg.compute_effect_sizes = !t.compute_effect_sizes;
+        if render_modal_checkbox(
+            ui,
+            tokens,
+            meta,
+            "edit.two_group.welch",
+            "Welch's correction",
+            ep.welch_correction || t.method == TwoGroupMethod::WelchT,
+            &welch_en,
+        ) {
+            intents.push_dialog_widget_click("edit.two_group.welch");
         }
-        intents.push_set_edit_params_draft(next);
+        if render_modal_checkbox(ui, tokens, meta, "edit.two_group.graph_differences", "Graph differences", ep.graph_differences, &diff_en) {
+            intents.push_dialog_widget_click("edit.two_group.graph_differences");
+        }
+        if render_modal_checkbox(ui, tokens, meta, "edit.two_group.graph_ranks", "Graph ranks", ep.graph_ranks, &np_en) {
+            intents.push_dialog_widget_click("edit.two_group.graph_ranks");
+        }
+        if render_modal_checkbox(ui, tokens, meta, "edit.two_group.hodges_lehmann", "Hodges-Lehmann CI", ep.hodges_lehmann_ci, &np_en) {
+            intents.push_dialog_widget_click("edit.two_group.hodges_lehmann");
+        }
+    });
+    if let Some(ds) = doc.data_sheet(&spec.source_sheet_id)
+        && let TableArchetype::MultipleVariables(mv) = &ds.archetype
+    {
+        ui.add_space(4.0);
+        render_section_title(ui, tokens, "Multiple Variables Grouping & Outcome Roles");
+        egui::Grid::new("edit_tg_mv_grid").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
+            for (idx, var) in mv.variables.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
+                    ui.label(&var.title);
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.two_group.group.{idx}"),
+                        "Grp",
+                        t.mv_group_column == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                            tg.mv_group_column = Some(idx);
+                        }
+                        intents.push_set_edit_params_draft(next);
+                    }
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.two_group.resp.{idx}"),
+                        "Y",
+                        t.mv_response_column == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::TwoGroupComparison(tg) = &mut next.kind {
+                            tg.mv_response_column = Some(idx);
+                        }
+                        intents.push_set_edit_params_draft(next);
+                    }
+                });
+                if idx % 3 == 2 {
+                    ui.end_row();
+                }
+            }
+        });
     }
-    ui.add_space(6.0);
+    ui.add_space(4.0);
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
 }
 
@@ -1949,6 +2133,56 @@ fn render_factorial_anova_design(
             fa.compute_effect_sizes = !f.compute_effect_sizes;
         }
         intents.push_set_edit_params_draft(next);
+    }
+    if let Some(ds) = doc.data_sheet(&spec.source_sheet_id)
+        && let TableArchetype::MultipleVariables(mv) = &ds.archetype
+    {
+        ui.add_space(4.0);
+        render_section_title(ui, tokens, "Outcome (Y) & Categorical Factors");
+        egui::Grid::new("edit_fac_mv_grid").num_columns(3).spacing([8.0, 4.0]).show(ui, |ui| {
+            for (idx, var) in mv.variables.iter().enumerate() {
+                ui.horizontal(|ui| {
+                    render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
+                    ui.label(&var.title);
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("edit.fac.resp.{idx}"),
+                        "Y",
+                        f.response_column == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
+                            fa.response_column = Some(idx);
+                            fa.multifactor_columns.retain(|&c| c != idx);
+                        }
+                        intents.push_set_edit_params_draft(next);
+                    }
+                    let fac_en = if f.response_column == Some(idx) {
+                        ControlEnablement::disabled("Outcome column cannot also be a factor.")
+                    } else {
+                        ControlEnablement::enabled()
+                    };
+                    if render_modal_seg_btn(ui, tokens, meta, &format!("edit.fac.col.{idx}"), "Fac", f.multifactor_columns.contains(&idx), &fac_en) {
+                        let mut next = spec.clone();
+                        if let AnalysisKind::FactorialAnova(fa) = &mut next.kind {
+                            if let Some(p) = fa.multifactor_columns.iter().position(|&c| c == idx) {
+                                fa.multifactor_columns.remove(p);
+                            } else {
+                                fa.multifactor_columns.push(idx);
+                                fa.multifactor_columns.sort_unstable();
+                            }
+                        }
+                        intents.push_set_edit_params_draft(next);
+                    }
+                });
+                if idx % 3 == 2 {
+                    ui.end_row();
+                }
+            }
+        });
     }
     ui.add_space(6.0);
     render_dataset_checklist(ui, doc, spec, tokens, meta, intents);
@@ -2561,14 +2795,14 @@ fn render_multivariate_design_controls(
             let heat_en = r7_correlation_heatmap_toggle(true);
             let _ = render_modal_checkbox(ui, tokens, meta, "edit.corr.heatmap", "Generate correlation heatmap graph", true, &heat_en);
         }
-        MultivariateSpec::Clustering { k_means_k, distance, linkage, .. } => {
+        MultivariateSpec::Clustering { k_means_k, distance, linkage, k_sweep_max } => {
             render_section_title(ui, tokens, "Distance Metric & Linkage");
             ui.horizontal_wrapped(|ui| {
                 for (wid, lbl, d) in [
-                    ("edit.cluster.euclid", "Euclidean", ClusterDistance::Euclidean),
-                    ("edit.cluster.manhattan", "Manhattan", ClusterDistance::Manhattan),
-                    ("edit.cluster.pearson", "Pearson (1-r)", ClusterDistance::Pearson),
-                    ("edit.cluster.cosine", "Cosine", ClusterDistance::Cosine),
+                    ("edit.cluster.dist.euclidean", "Euclidean", ClusterDistance::Euclidean),
+                    ("edit.cluster.dist.manhattan", "Manhattan", ClusterDistance::Manhattan),
+                    ("edit.cluster.dist.pearson", "Pearson (1-r)", ClusterDistance::Pearson),
+                    ("edit.cluster.dist.cosine", "Cosine", ClusterDistance::Cosine),
                 ] {
                     if render_modal_seg_btn(ui, tokens, meta, wid, lbl, *distance == d, &ControlEnablement::enabled()) {
                         let mut next = spec.clone();
@@ -2581,10 +2815,13 @@ fn render_multivariate_design_controls(
             });
             ui.horizontal_wrapped(|ui| {
                 for (wid, lbl, l) in [
-                    ("edit.cluster.ward", "Ward", ClusterLinkage::Ward),
-                    ("edit.cluster.complete", "Complete", ClusterLinkage::Complete),
-                    ("edit.cluster.single", "Single", ClusterLinkage::Single),
-                    ("edit.cluster.upgma", "UPGMA", ClusterLinkage::Upgma),
+                    ("edit.cluster.link.ward", "Ward", ClusterLinkage::Ward),
+                    ("edit.cluster.link.complete", "Complete", ClusterLinkage::Complete),
+                    ("edit.cluster.link.single", "Single", ClusterLinkage::Single),
+                    ("edit.cluster.link.upgma", "UPGMA", ClusterLinkage::Upgma),
+                    ("edit.cluster.link.wpgma", "WPGMA", ClusterLinkage::Wpgma),
+                    ("edit.cluster.link.centroid", "Centroid", ClusterLinkage::Centroid),
+                    ("edit.cluster.link.median", "Median", ClusterLinkage::Median),
                 ] {
                     if render_modal_seg_btn(ui, tokens, meta, wid, lbl, *linkage == l, &ControlEnablement::enabled()) {
                         let mut next = spec.clone();
@@ -2595,13 +2832,24 @@ fn render_multivariate_design_controls(
                     }
                 }
             });
+            if render_modal_checkbox(
+                ui,
+                tokens,
+                meta,
+                "edit.cluster.k_means_auto",
+                "Hierarchical only (no fixed K-means)",
+                k_means_k.is_none(),
+                &ControlEnablement::enabled(),
+            ) {
+                intents.push_dialog_widget_click("edit.cluster.k_means_auto");
+            }
             let k_val = k_means_k.unwrap_or(0);
             let step = render_stepper_row(
                 ui,
                 tokens,
                 meta,
                 StepperSpec {
-                    id_prefix: "edit.cluster.k",
+                    id_prefix: "edit.cluster.k_means_k",
                     label: "K-Means Clusters (0 = hierarchical only)",
                     value_text: &k_val.to_string(),
                     enablement: &ControlEnablement::enabled(),
@@ -2618,6 +2866,26 @@ fn render_multivariate_design_controls(
                         k_val - 1
                     };
                     *km = if next_k == 0 { None } else { Some(next_k) };
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+            let sweep_val = k_sweep_max.unwrap_or(6);
+            let sweep_step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: "edit.cluster.k_sweep_max",
+                    label: "Silhouette/Elbow Sweep Max K",
+                    value_text: &sweep_val.to_string(),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if sweep_step != 0 {
+                let mut next = spec.clone();
+                if let AnalysisKind::Multivariate(MultivariateSpec::Clustering { k_sweep_max: ks, .. }) = &mut next.kind {
+                    let next_sweep = if sweep_step > 0 { sweep_val.saturating_add(1).clamp(2, 12) } else { sweep_val.saturating_sub(1).max(2) };
+                    *ks = Some(next_sweep);
                 }
                 intents.push_set_edit_params_draft(next);
             }
@@ -2951,15 +3219,17 @@ fn render_dataset_checklist(
     }
     render_section_title(ui, tokens, "Included Data Sets / Columns");
     let sel = &spec.selected_data_sets;
-    if render_modal_checkbox(ui, tokens, meta, "edit.dataset.all", "All Data Sets / Columns", sel.is_empty(), &ControlEnablement::enabled()) {
-        intents.push_custom_view_action("stat_params", "select_all_datasets");
-    }
-    for (idx, col_title) in titles.iter().enumerate() {
-        let on = sel.is_empty() || sel.contains(&idx);
-        if render_modal_checkbox(ui, tokens, meta, &format!("edit.dataset.{idx}"), col_title, on, &ControlEnablement::enabled()) {
-            intents.push_custom_view_action("stat_params", format!("toggle_dataset:{idx}"));
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_checkbox(ui, tokens, meta, "edit.dataset.all", "All Data Sets / Columns", sel.is_empty(), &ControlEnablement::enabled()) {
+            intents.push_custom_view_action("stat_params", "select_all_datasets");
         }
-    }
+        for (idx, col_title) in titles.iter().enumerate() {
+            let on = sel.is_empty() || sel.contains(&idx);
+            if render_modal_checkbox(ui, tokens, meta, &format!("edit.dataset.{idx}"), col_title, on, &ControlEnablement::enabled()) {
+                intents.push_custom_view_action("stat_params", format!("toggle_dataset:{idx}"));
+            }
+        }
+    });
 }
 
 // ============================================================================
