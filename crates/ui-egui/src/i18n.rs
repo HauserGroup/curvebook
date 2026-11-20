@@ -61,6 +61,7 @@ pub(crate) use entry;
 
 pub mod cjk_rtl;
 pub mod eu;
+pub mod r13_8_ui;
 pub mod shard_extra;
 pub mod w5_analyze_picker;
 pub mod w5_dialogs_graph_misc;
@@ -100,6 +101,7 @@ pub const EXTRA_SHARD_CATALOGS: &[&[CatalogEntry]] = &[
     w7_rm_reml::ENTRIES,
     w7_mv_ui::ENTRIES,
     w8_rv_ui::ENTRIES,
+    r13_8_ui::ENTRIES,
 ];
 
 /// Complete interface translation catalog covering menus, navigator folders, the 8 data-table
@@ -3982,6 +3984,60 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "تصدير الشكل...",
         he: "ייצא איור...",
     ]),
+    entry!("cmd.ui.view.rowTitles.toggle" => [
+        en: "Row Titles",
+        de: "Zeilentitel",
+        es: "Títulos de fila",
+        fr: "Titres de ligne",
+        ja: "行タイトル",
+        ko: "행 제목",
+        pt_br: "Títulos de linha",
+        zh_cn: "行标题",
+        zh_tw: "列標題",
+        it: "Titoli di riga",
+        nl: "Rijtitels",
+        pl: "Tytuły wierszy",
+        ru: "Заголовки строк",
+        tr: "Satır Başlıkları",
+        ar: "عناوين الصفوف",
+        he: "כותרות שורה",
+    ]),
+    entry!("cmd.ui.graph.create.open" => [
+        en: "New Graph...",
+        de: "Neues Diagramm...",
+        es: "Nuevo gráfico...",
+        fr: "Nouveau graphique...",
+        ja: "新規グラフ...",
+        ko: "새 그래프...",
+        pt_br: "Novo gráfico...",
+        zh_cn: "新建图形...",
+        zh_tw: "新增圖表...",
+        it: "Nuovo grafico...",
+        nl: "Nieuwe grafiek...",
+        pl: "Nowy wykres...",
+        ru: "Новый график...",
+        tr: "Yeni Grafik...",
+        ar: "رسم بياني جديد...",
+        he: "גרף חדש...",
+    ]),
+    entry!("cmd.ui.layout.equalizeScaling.open" => [
+        en: "Equalize Scaling...",
+        de: "Skalierung angleichen...",
+        es: "Igualar escala...",
+        fr: "Égaliser l'échelle...",
+        ja: "スケーリングを統一...",
+        ko: "배율 균등화...",
+        pt_br: "Igualar escala...",
+        zh_cn: "均衡缩放...",
+        zh_tw: "均衡縮放...",
+        it: "Equalizza scala...",
+        nl: "Schaal gelijktrekken...",
+        pl: "Wyrównaj skalę...",
+        ru: "Выровнять масштаб...",
+        tr: "Ölçeklemeyi Eşitle...",
+        ar: "موازنة القياس...",
+        he: "השווה קנה מידה...",
+    ]),
     entry!("cmd.app.about" => [
         en: "About CurveBook",
         de: "Über CurveBook",
@@ -6325,8 +6381,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 787);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_592);
+        assert_eq!(catalog_len(), 825);
+        assert_eq!(LOCALES.len() * catalog_len(), 13_200);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6364,7 +6420,7 @@ mod tests {
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
         assert_eq!(engine_specs.len(), 105, "expected 105 engine CommandSpec entries");
-        assert_eq!(crate::menus::UI_COMMANDS.len(), 47, "expected 47 UiCommandSpec entries");
+        assert_eq!(crate::menus::UI_COMMANDS.len(), 50, "expected 50 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();
         for spec in &engine_specs {
@@ -6679,7 +6735,7 @@ mod tests {
 
     #[test]
     fn shard_catalog_aggregation_searches_extra_slices_cleanly() {
-        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 19);
+        assert_eq!(EXTRA_SHARD_CATALOGS.len(), 20);
         let eu_slice = &[entry!("shard.test.key" => [
             en: "Test Key",
             de: "Testschlüssel",

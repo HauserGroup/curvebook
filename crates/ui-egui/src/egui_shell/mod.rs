@@ -10,8 +10,9 @@ use serde::{Deserialize, Serialize};
 use crate::UiApp;
 use crate::control_io::dispatch_ui_command_as_ui;
 use crate::dialogs_canvas::{
-    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, BubblePlotInspectorState, ChangeGraphTypeState, ExportFigureState, FormatAxesState,
-    FormatGraphState, PageLayoutComposerState, PairwiseComparisonsState, PrintDialogState,
+    ActiveDialog, ActiveInspector, AnalyzeDuplicateChoice, ApplyStyleFromState, BubblePlotInspectorState, ChangeGraphTypeState,
+    CreateGraphDialogState, EqualizeScalingDialogState, ExportFigureState, FormatAxesState, FormatGraphState, PageLayoutComposerState,
+    PairwiseComparisonsState, PrintDialogState,
 };
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
@@ -1103,6 +1104,10 @@ pub enum UiIntent {
     UpdatePageLayoutState(Box<PageLayoutComposerState>),
     UpdateExportFigureState(Box<ExportFigureState>),
     UpdatePrintDialogState(Box<PrintDialogState>),
+    UpdateCreateGraphState(Box<CreateGraphDialogState>),
+    UpdateEqualizeScalingState(Box<EqualizeScalingDialogState>),
+    UpdateApplyStyleState(Box<ApplyStyleFromState>),
+    SetGallerySelection { sheet_ids: Vec<SheetId> },
     OpenPreferences { category: Option<app_modals::PreferencesCategory> },
     ClosePreferences { save: bool },
     SetShortcutBinding { command_id: String, combo: String },
@@ -1535,6 +1540,26 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::UpdatePrintDialogState(Box::new(state)));
     }
 
+    /// Persist updated `CreateGraphDialogState` draft cleanly on settlement.
+    pub fn push_update_create_graph_state(&mut self, state: CreateGraphDialogState) {
+        self.queue.push(UiIntent::UpdateCreateGraphState(Box::new(state)));
+    }
+
+    /// Persist updated `EqualizeScalingDialogState` draft cleanly on settlement.
+    pub fn push_update_equalize_scaling_state(&mut self, state: EqualizeScalingDialogState) {
+        self.queue.push(UiIntent::UpdateEqualizeScalingState(Box::new(state)));
+    }
+
+    /// Persist updated `ApplyStyleFromState` draft cleanly on settlement.
+    pub fn push_update_apply_style_state(&mut self, state: ApplyStyleFromState) {
+        self.queue.push(UiIntent::UpdateApplyStyleState(Box::new(state)));
+    }
+
+    /// Replace Portfolio Gallery multi-selection set cleanly on settlement.
+    pub fn push_set_gallery_selection(&mut self, sheet_ids: Vec<SheetId>) {
+        self.queue.push(UiIntent::SetGallerySelection { sheet_ids });
+    }
+
     /// Open `Preferences` modal on optional category.
     pub fn push_open_preferences(&mut self, category: Option<app_modals::PreferencesCategory>) {
         self.queue.push(UiIntent::OpenPreferences { category });
@@ -1696,6 +1721,7 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
         UiIntent::SetRowTitlesCollapsed { collapsed } => {
             app.grid.row_titles_collapsed_override = Some(collapsed);
             app.view_shards.grid_core.row_titles_collapsed = collapsed;
+            app.egui_views.column_grid.row_titles_collapsed = collapsed;
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::DialogWidgetClick { widget_id } => {
@@ -1898,7 +1924,11 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::UpdatePairwiseState(_)
         | UiIntent::UpdatePageLayoutState(_)
         | UiIntent::UpdateExportFigureState(_)
-        | UiIntent::UpdatePrintDialogState(_) => apply_wave4_modal_state_intent(app, intent),
+        | UiIntent::UpdatePrintDialogState(_)
+        | UiIntent::UpdateCreateGraphState(_)
+        | UiIntent::UpdateEqualizeScalingState(_)
+        | UiIntent::UpdateApplyStyleState(_)
+        | UiIntent::SetGallerySelection { .. } => apply_wave4_modal_state_intent(app, intent),
         UiIntent::OpenPreferences { .. }
         | UiIntent::ClosePreferences { .. }
         | UiIntent::SetShortcutBinding { .. }
@@ -2202,6 +2232,15 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::UpdatePageLayoutState(state) => app.canvas_dialogs.page_layout = *state,
         UiIntent::UpdateExportFigureState(state) => app.canvas_dialogs.export_figure = *state,
         UiIntent::UpdatePrintDialogState(state) => app.canvas_dialogs.print = *state,
+        UiIntent::UpdateCreateGraphState(state) => app.canvas_dialogs.create_graph = *state,
+        UiIntent::UpdateEqualizeScalingState(state) => app.canvas_dialogs.equalize_scaling = *state,
+        UiIntent::UpdateApplyStyleState(state) => app.canvas_dialogs.apply_style = *state,
+        UiIntent::SetGallerySelection { sheet_ids } => {
+            app.nav.gallery.selected_ids = sheet_ids.into_iter().collect();
+            for card in &mut app.nav.gallery.cards {
+                card.selected = app.nav.gallery.selected_ids.contains(&card.sheet_id);
+            }
+        }
         _ => {}
     }
     Ok(UiIntentOutcome::ShellUpdated)

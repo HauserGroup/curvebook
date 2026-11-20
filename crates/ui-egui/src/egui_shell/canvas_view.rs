@@ -75,6 +75,8 @@ pub struct CanvasViewEguiState {
     pub tex_equation_count: usize,
     /// Render uncached scenes inline synchronously (used by software screenshot capture).
     pub synchronous_raster: bool,
+    /// Active layout panel right-click Z-order context menu `(layout_sheet_id, item_index, anchor_pos_pt)`.
+    pub layout_context_menu: Option<(SheetId, usize, Pos2)>,
 }
 
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
@@ -600,14 +602,33 @@ fn render_graph_hud_overlays(
             state.hover_readout = Some(readout.clone());
             paint_hover_hud_card(painter, pos + vec2(12.0, -24.0), &readout.value_summary, tokens);
         } else if let Some((idx, hit)) = hit_test_point_indexed(scene, scene_pt, 10.0 / f64::from(sx.max(0.25))) {
-            let sheet_title = doc.data_sheet(&hit.source_cell.sheet_id).map_or(hit.source_cell.sheet_id.as_str(), |d| d.title.as_str());
-            let summary = format!("{sheet_title} · {} · Row {} · {}", hit.series_label, hit.source_cell.row + 1, hit.value_summary);
+            let ds_opt = doc.data_sheet(&hit.source_cell.sheet_id);
+            let sheet_title = ds_opt.map_or(hit.source_cell.sheet_id.as_str(), |d| d.title.as_str());
+            let is_spaghetti = gs.spec.series.iter().any(|s| {
+                matches!(
+                    s.gdo,
+                    GraphicalDataObject::ScatterAndLine { replicate_lines: curvebook_doc::ReplicateLineMode::IndividualReplicateTrajectories, .. }
+                )
+            });
+            let (label, summary) = if is_spaghetti {
+                let row_lbl = ds_opt
+                    .and_then(|d| hover_row_title(&d.archetype, hit.source_cell.row))
+                    .filter(|t| !t.trim().is_empty())
+                    .map_or_else(|| format!("Row {}", hit.source_cell.row + 1), str::to_owned);
+                let rep_idx = hit.source_cell.subcol + 1;
+                (
+                    format!("{} (Rep {rep_idx})", hit.series_label),
+                    format!("{sheet_title} · {} · Rep {rep_idx} · {row_lbl} · {}", hit.series_label, hit.value_summary),
+                )
+            } else {
+                (hit.series_label.clone(), format!("{sheet_title} · {} · Row {} · {}", hit.series_label, hit.source_cell.row + 1, hit.value_summary))
+            };
             let readout = CanvasHoverReadout {
                 source_sheet_id: Some(hit.source_cell.sheet_id.clone()),
                 point_index: Some(idx),
                 row: Some(hit.source_cell.row),
                 col: Some(hit.source_cell.col),
-                label: hit.series_label.clone(),
+                label,
                 value_summary: summary.clone(),
             };
             state.hover_readout = Some(readout);
@@ -662,6 +683,19 @@ fn hit_test_point_indexed(scene: &ChartScene, pt: PointPt, tol_pt: f64) -> Optio
         }
     }
     best.map(|(i, _, m)| (i, m))
+}
+
+fn hover_row_title(arch: &curvebook_doc::TableArchetype, row: usize) -> Option<&str> {
+    match arch {
+        curvebook_doc::TableArchetype::Xy(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Column(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Grouped(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Contingency(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Survival(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::PartsOfWhole(t) => t.slice_labels.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::MultipleVariables(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Nested(t) => t.row_titles.get(row).map(String::as_str),
+    }
 }
 
 fn rect_pt_contains(r: RectPt, pt: PointPt) -> bool {
@@ -1319,6 +1353,11 @@ fn render_layout_hud_overlays(
             if p_resp.clicked() {
                 state.selected_panel_index = Some(idx);
             }
+            if p_resp.secondary_clicked() {
+                let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r.center());
+                state.selected_panel_index = Some(idx);
+                state.layout_context_menu = Some((ls.id.clone(), idx, anchor));
+            }
             if p_resp.drag_started() {
                 state.selected_panel_index = Some(idx);
                 let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r.center());
@@ -1388,6 +1427,75 @@ fn render_layout_hud_overlays(
         && let Some(readout) = &state.last_snap_readout
     {
         paint_hover_hud_card(painter, pos2(paper_rect.left() + 8.0, paper_rect.top() + 8.0), readout, tokens);
+    }
+
+    if !ctx_in.enabled {
+        state.layout_context_menu = None;
+    } else if let Some((ref menu_sheet, panel_idx, anchor)) = state.layout_context_menu.clone() {
+        if menu_sheet != &ls.id || panel_idx >= ls.spec.items.len() {
+            state.layout_context_menu = None;
+        } else {
+            let screen = ui.ctx().content_rect();
+            let pos = pos2(
+                anchor.x.clamp(screen.left() + 4.0, (screen.right() - 172.0).max(screen.left() + 4.0)),
+                anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 136.0).max(screen.top() + 4.0)),
+            );
+            let mut close_menu = false;
+            let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ls.id.as_str())))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ui.ctx(), |menu_ui| {
+                    egui::Frame::popup(menu_ui.style())
+                        .fill(tokens.surface_bg)
+                        .stroke(Stroke::new(1.0, tokens.border))
+                        .corner_radius(CornerRadius::same(4))
+                        .show(menu_ui, |ui| {
+                            ui.set_min_width(152.0);
+                            for (slug, lbl, action_str) in [
+                                ("front", "Bring to Front", "bring_to_front"),
+                                ("forward", "Bring Forward", "bring_forward"),
+                                ("backward", "Send Backward", "send_backward"),
+                                ("back", "Send to Back", "send_to_back"),
+                            ] {
+                                let wid = format!("canvas.layout_ctx.{slug}");
+                                let btn = ui.add_sized([148.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
+                                meta.record_response(
+                                    ui,
+                                    &btn,
+                                    FrameInspectEntryInput {
+                                        widget_id: &wid,
+                                        role: "menuitem",
+                                        label: lbl,
+                                        command_id: Some("layout.reorderPanel"),
+                                        value: Some(json!(action_str)),
+                                        enabled: true,
+                                        disabled_reason: None,
+                                        z_layer: ZLayer::ContextMenu,
+                                        ellipsized: false,
+                                        full_label: None,
+                                    },
+                                );
+                                if btn.clicked() {
+                                    intents.push_engine(
+                                        "layout.reorderPanel",
+                                        json!({
+                                            "sheet_id": ls.id.as_str(),
+                                            "panel_index": panel_idx,
+                                            "action": action_str,
+                                        }),
+                                    );
+                                    close_menu = true;
+                                }
+                            }
+                        });
+                });
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let outside_click =
+                ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+            if close_menu || esc || outside_click {
+                state.layout_context_menu = None;
+            }
+        }
     }
 }
 

@@ -1529,7 +1529,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 47);
+        assert_eq!(UI_COMMANDS.len(), 50);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1540,6 +1540,9 @@ mod tests {
             "ui.changeGraphType.open",
             "ui.clonePipeline.open",
             "ui.applyStyleFrom.open",
+            "ui.graph.create.open",
+            "ui.layout.equalizeScaling.open",
+            "ui.view.rowTitles.toggle",
             "ui.zoom.fitSheet",
             "ui.gallery.toggle",
             "ui.rulers.toggle",

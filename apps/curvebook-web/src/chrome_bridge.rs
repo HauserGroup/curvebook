@@ -1946,6 +1946,15 @@ pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, Str
             let intents = app.canvas_dialogs.page_layout.commit_intents();
             commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.page_layout_committed")
         }
+        ActiveDialog::CreateGraph { .. } => {
+            let intent = app.canvas_dialogs.create_graph.commit_intent().ok_or_else(|| String::from("no source data sheet selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.create_graph_committed")
+        }
+        ActiveDialog::EqualizeScaling { .. } => {
+            let intent =
+                app.canvas_dialogs.equalize_scaling.commit_intent().ok_or_else(|| String::from("no live graph panels available to equalize"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.equalize_scaling_committed")
+        }
         _ => {
             app.canvas_dialogs.close_dialog();
             curvebook_ui_egui::interaction::clear_modal_text_buffers(app);

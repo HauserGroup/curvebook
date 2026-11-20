@@ -147,6 +147,9 @@ fn ui_command_menu_info(id: &str) -> (&'static str, &'static str) {
         "ui.table.simulateDistributions" => ("menu.insert", "Insert/Simulate Distributions Dialog..."),
         "ui.table.openFormulaBar" => ("menu.insert", "Data/Open Formula Bar..."),
         "ui.grid.excludeWithReason" => ("menu.edit", "Edit/Exclude with Reason..."),
+        "ui.view.rowTitles.toggle" => ("menu.view", "View/Row Titles"),
+        "ui.graph.create.open" => ("menu.insert", "Insert/New Graph Dialog..."),
+        "ui.layout.equalizeScaling.open" => ("menu.graph", "Arrange/Equalize Scaling..."),
         _ => ("menu.view", "UI"),
     }
 }
@@ -179,8 +182,10 @@ fn ui_command_enabled(app: &UiApp, id: &str) -> bool {
             .iter()
             .any(|rs| matches!(rs.analysis.kind, curvebook_doc::AnalysisKind::Multivariate(curvebook_doc::MultivariateSpec::Clustering { .. }))),
         "ui.table.openFormulaBar" => doc.data_sheets.iter().any(|ds| matches!(ds.archetype, curvebook_doc::TableArchetype::MultipleVariables(_))),
-        "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" => !doc.data_sheets.is_empty(),
-        "ui.layout.composer.open" => !doc.layout_sheets.is_empty(),
+        "ui.table.convertArchetype.open" | "ui.table.randomSampleRows" | "ui.grid.excludeWithReason" | "ui.graph.create.open" => {
+            !doc.data_sheets.is_empty()
+        }
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => !doc.layout_sheets.is_empty(),
         "ui.canvas.applyPreset" | "ui.canvas.preflight" | "ui.export.figure.open" => !doc.graph_sheets.is_empty() || !doc.layout_sheets.is_empty(),
         _ => true,
     }
@@ -318,7 +323,7 @@ mod tests {
         )?;
         assert!(w == 480 && h == 320 && frame.len() > 8);
 
-        // Menu bar covers all 105 engine + 47 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 105 engine + 50 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -330,7 +335,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 152);
+        assert_eq!(seen.len(), 155);
         Ok(())
     }
 }

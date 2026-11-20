@@ -390,4 +390,28 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         summary: "Open the About CurveBook version and build information dialog.",
         beginner: "Displays the application version, bundled font status, and workspace licensing information.",
     },
+    UiCommandSpec {
+        id: "ui.view.rowTitles.toggle",
+        label: "Row Titles",
+        shortcut: "",
+        params_doc: "{\"collapsed\":\"optional bool\"}",
+        summary: "Toggle or explicitly expand/collapse the Row Titles column band in the data table grid.",
+        beginner: "Shows or hides the Row Titles column along the left edge of the active data table.",
+    },
+    UiCommandSpec {
+        id: "ui.graph.create.open",
+        label: "New Graph...",
+        shortcut: "",
+        params_doc: "{\"data_sheet_id\":\"optional SheetId\",\"kind\":\"optional GraphKind\",\"one_per_data_set\":\"optional bool\",\"y_axis_title\":\"optional string\"}",
+        summary: "Open the Create New Graph dialog to choose source table, graph kind, Y-axis title, or one-graph-per-data-set creation.",
+        beginner: "Creates one or more graphs linked to an existing data or transform result sheet.",
+    },
+    UiCommandSpec {
+        id: "ui.layout.equalizeScaling.open",
+        label: "Equalize Scaling...",
+        shortcut: "",
+        params_doc: "{\"sheet_id\":\"optional LayoutSheetId\",\"mode\":\"optional match_smallest|match_largest|explicit_percent\",\"percent\":\"optional f64\"}",
+        summary: "Open the Equalize Scaling dialog to match inner plot scaling across graph panels on a layout.",
+        beginner: "Aligns visual data scale across multiple panels on a publication layout page.",
+    },
 ];

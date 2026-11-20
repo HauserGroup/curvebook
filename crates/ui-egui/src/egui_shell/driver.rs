@@ -931,9 +931,18 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         self.pointer_pos = Some(pos);
         let egui_btn = to_egui_pointer_button(button);
         let egui_mods = to_egui_modifiers(modifiers);
-        self.dispatch_events(vec![Event::PointerMoved(pos)]);
-        self.dispatch_events(vec![Event::PointerButton { pos, button: egui_btn, pressed: true, modifiers: egui_mods }]);
-        self.dispatch_events(vec![Event::PointerButton { pos, button: egui_btn, pressed: false, modifiers: egui_mods }]);
+        self.dispatch_events(vec![Event::ModifiersChanged(egui_mods), Event::PointerMoved(pos)]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos, button: egui_btn, pressed: true, modifiers: egui_mods },
+        ]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos, button: egui_btn, pressed: false, modifiers: egui_mods },
+        ]);
+        if !egui_mods.is_none() {
+            self.dispatch_events(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        }
         Ok(())
     }
 

@@ -8,8 +8,9 @@ use curvebook_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_grap
 use curvebook_doc::{
     AdditionalTick, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CategoricalTickSource, CldOrdering, ColorChannelMapping,
     ColumnDesignHint, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, FramePreset, GraphAxisScale, GraphKind, GraphSheet,
-    GroupedArrangement, JournalWidthPreset, LayoutItem, LogitDomain, MultivariateGraphEncoding, PageOrientation, PairwiseDisplayMode,
-    PanelBadgeStyle, ProjectDocument, RectPt, SheetId, SizeChannelMapping, SummaryMeasure, TableArchetype, TableKind, TickLabelFormat,
+    GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, JournalWidthPreset, LayoutItem, LogitDomain,
+    MultivariateGraphEncoding, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ProjectDocument, RectPt, SheetId, SizeChannelMapping,
+    SummaryMeasure, SurvivalDisplayMetric, TableArchetype, TableKind, TickDirection, TickLabelFormat,
 };
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, PaletteId, Rgba8, simulate_cvd};
 use egui::scroll_area::ScrollBarVisibility;
@@ -342,6 +343,8 @@ pub const fn is_graph_modal_active(dialog: &ActiveDialog) -> bool {
             | ActiveDialog::FormatSelectedPoints { .. }
             | ActiveDialog::InsertModelEquation { .. }
             | ActiveDialog::PageLayoutComposer { .. }
+            | ActiveDialog::CreateGraph { .. }
+            | ActiveDialog::EqualizeScaling { .. }
     )
 }
 
@@ -383,6 +386,8 @@ pub fn render_graph_modal(
         ActiveDialog::FormatSelectedPoints { .. } => ("dialog.format_selected_points", tr(locale, "cmd.graph.formatSelectedPoints"), 540.0_f32),
         ActiveDialog::InsertModelEquation { .. } => ("dialog.insert_model_equation", tr(locale, "w6.view.modal.insert_model_equation"), 540.0_f32),
         ActiveDialog::PageLayoutComposer { .. } => ("dialog.page_layout_composer", tr(locale, "w6.view.modal.page_layout_composer"), 620.0_f32),
+        ActiveDialog::CreateGraph { .. } => ("dialog.create_graph", tr(locale, "cmd.ui.graph.create.open"), 520.0_f32),
+        ActiveDialog::EqualizeScaling { .. } => ("dialog.equalize_scaling", tr(locale, "cmd.ui.layout.equalizeScaling.open"), 500.0_f32),
         _ => return GraphModalFrameReport::default(),
     };
 
@@ -541,6 +546,8 @@ fn render_dialog_scroll_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx:
         ActiveDialog::FormatSelectedPoints { .. } => render_format_selected_points_body(ui, state, gctx),
         ActiveDialog::InsertModelEquation { .. } => render_insert_equation_body(ui, state, gctx),
         ActiveDialog::PageLayoutComposer { .. } => render_page_layout_body(ui, state, gctx),
+        ActiveDialog::CreateGraph { .. } => render_create_graph_body(ui, gctx),
+        ActiveDialog::EqualizeScaling { .. } => render_equalize_scaling_body(ui, gctx),
         _ => {}
     }
 }
@@ -624,58 +631,43 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
         ActiveDialog::FormatGraph { .. } => {
             let fg = &gctx.app.canvas_dialogs.format_graph;
             let schema = FormatGraphSchema::detect(gctx.app);
-            if let Some(gid) = &fg.graph_sheet_id {
-                if schema == FormatGraphSchema::SeriesBased && state.format_graph_apply_globally {
-                    if let Some(gs) = gctx.app.document().graph_sheet(gid) {
-                        for idx in 0..gs.spec.series.len() {
-                            gctx.intents.push_engine(
-                                "graph.setSeries",
-                                json!({
-                                    "sheet_id": gid.as_str(),
-                                    "series_index": idx,
-                                    "y_error_bars": fg.error_bar_enabled.then_some(fg.error_bar_spec),
-                                    "marker": { "size_pt": fg.marker_size_pt, "fill_mode": fg.marker_fill_mode },
-                                    "connecting_line": { "dash_style": fg.line_dash },
-                                }),
-                            );
-                        }
+            if let Some(gid) = &fg.graph_sheet_id
+                && schema == FormatGraphSchema::Heatmap
+            {
+                let clamp = if state.heatmap_auto_range {
+                    None
+                } else {
+                    match (state.heatmap_min_draft.trim().parse::<f64>(), state.heatmap_max_draft.trim().parse::<f64>()) {
+                        (Ok(lo), Ok(hi)) if lo.is_finite() && hi.is_finite() && lo < hi => Some((lo, hi)),
+                        _ => None,
                     }
-                } else if schema == FormatGraphSchema::Heatmap {
-                    let clamp = if state.heatmap_auto_range {
-                        None
-                    } else {
-                        match (state.heatmap_min_draft.trim().parse::<f64>(), state.heatmap_max_draft.trim().parse::<f64>()) {
-                            (Ok(lo), Ok(hi)) if lo.is_finite() && hi.is_finite() && lo < hi => Some((lo, hi)),
-                            _ => None,
-                        }
+                };
+                if let Some(mut enc) = fg.mv_encoding.clone() {
+                    let col = match enc.color {
+                        ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
+                        ColorChannelMapping::Constant(_) => enc.y_column,
                     };
-                    if let Some(mut enc) = fg.mv_encoding.clone() {
-                        let col = match enc.color {
-                            ColorChannelMapping::Continuous { column, .. } | ColorChannelMapping::Categorical { column, .. } => column,
-                            ColorChannelMapping::Constant(_) => enc.y_column,
-                        };
-                        enc.color = ColorChannelMapping::Continuous {
-                            column: col,
-                            ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
-                            domain_clamp: clamp,
-                        };
-                        gctx.intents.push_engine(
-                            "graph.setSpec",
-                            json!({
-                                "sheet_id": gid.as_str(),
-                                "multivariate": enc,
-                            }),
-                        );
-                    }
+                    enc.color = ColorChannelMapping::Continuous {
+                        column: col,
+                        ramp: ColorRamp::Named { id: state.heatmap_colormap, reversed: state.heatmap_reversed },
+                        domain_clamp: clamp,
+                    };
                     gctx.intents.push_engine(
-                        "graph.setAxes",
+                        "graph.setSpec",
                         json!({
                             "sheet_id": gid.as_str(),
-                            "axis": "x",
-                            "tick_angle_deg": state.heatmap_tick_angle_deg,
+                            "multivariate": enc,
                         }),
                     );
                 }
+                gctx.intents.push_engine(
+                    "graph.setAxes",
+                    json!({
+                        "sheet_id": gid.as_str(),
+                        "axis": "x",
+                        "tick_angle_deg": state.heatmap_tick_angle_deg,
+                    }),
+                );
             }
             gctx.intents.push_dialog_button(action);
         }
@@ -845,6 +837,12 @@ fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalEguiState, g
         ui.add_space(6.0);
     }
 
+    let is_survival = cgt.selected_option_id.starts_with("survival.") || cgt.source_table_kind == Some(TableKind::Survival);
+    if is_survival {
+        render_cgt_survival_options(ui, cgt, gctx);
+        ui.add_space(6.0);
+    }
+
     // Compatibility Hint Banner.
     let hint_text = build_compatibility_hint(cgt.source_table_kind, cgt.column_design_hint, active_opt.as_ref(), gctx.locale);
     egui::Frame::group(ui.style()).fill(gctx.tokens.panel_bg).stroke(Stroke::new(1.0, gctx.tokens.border)).corner_radius(CornerRadius::same(4)).show(
@@ -858,6 +856,88 @@ fn render_change_graph_type_body(ui: &mut Ui, state: &mut GraphModalEguiState, g
 
     ui.add_space(6.0);
     render_live_dataset_preview(ui, gctx, cgt.graph_sheet_id.as_ref(), doc);
+}
+
+fn render_cgt_survival_options(ui: &mut Ui, cgt: &crate::dialogs_canvas::ChangeGraphTypeState, gctx: &mut GraphModalCtx<'_>) {
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(egui::RichText::new("Survival Y:").strong());
+        for (slug, lbl, metric) in [
+            ("pct_survival", "% Survival", SurvivalDisplayMetric::PercentSurvival),
+            ("pct_event", "% Event", SurvivalDisplayMetric::PercentCumulativeEvent),
+            ("fraction", "Fraction", SurvivalDisplayMetric::FractionSurvival),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("graph_type.survival.metric.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: cgt.survival_metric == metric,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = cgt.clone();
+                next.survival_metric = metric;
+                gctx.intents.push_update_change_graph_type_state(next);
+            }
+        }
+    });
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(egui::RichText::new("Curve:").strong());
+        for (slug, lbl, stair) in [("staircase", "Staircase", true), ("point_to_point", "Point-to-point", false)] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("graph_type.survival.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: cgt.survival_staircase == stair,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = cgt.clone();
+                next.survival_staircase = stair;
+                gctx.intents.push_update_change_graph_type_state(next);
+            }
+        }
+        ui.label("Error:");
+        for (slug, lbl, err_opt) in
+            [("none", "None", None), ("sem", "SEM", Some(ErrorBarMetric::Sem)), ("ci95", "95% CI", Some(ErrorBarMetric::ConfidenceInterval95))]
+        {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("graph_type.survival.err.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: cgt.survival_error_display == err_opt,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = cgt.clone();
+                next.survival_error_display = err_opt;
+                gctx.intents.push_update_change_graph_type_state(next);
+            }
+        }
+    });
 }
 
 fn build_compatibility_hint(
@@ -1188,6 +1268,9 @@ fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEguiState, gct
         {
             let mut next = fg.clone();
             next.selected_series_index -= 1;
+            if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
+                next.sync_selected_series_from_spec(&gs.spec);
+            }
             gctx.intents.push_update_format_graph_state(next);
         }
         ui.label(format!("{} / {}", fg.selected_series_index + 1, series_count));
@@ -1209,15 +1292,21 @@ fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEguiState, gct
         {
             let mut next = fg.clone();
             next.selected_series_index += 1;
+            if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
+                next.sync_selected_series_from_spec(&gs.spec);
+            }
             gctx.intents.push_update_format_graph_state(next);
         }
 
-        let mut apply_all = state.format_graph_apply_globally;
+        let mut apply_all = fg.apply_all_data_sets;
         let all_lbl = gtr(gctx.locale, "fg.apply_globally");
         let chk = ui.checkbox(&mut apply_all, all_lbl);
         record_checkbox(ui, &chk, gctx.meta, "format_graph.apply_globally", all_lbl, apply_all);
         if chk.changed() {
             state.format_graph_apply_globally = apply_all;
+            let mut next = fg.clone();
+            next.apply_all_data_sets = apply_all;
+            gctx.intents.push_update_format_graph_state(next);
         }
     });
 
@@ -1305,6 +1394,60 @@ fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEguiState, gct
                 next.line_dash = dash;
                 gctx.intents.push_update_format_graph_state(next);
             }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label("Opacity:");
+        for pct in [25u8, 50, 75, 100] {
+            let lbl = format!("{pct}%");
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.alpha.{pct}"),
+                    label: &lbl,
+                    command_id: None,
+                    selected: fg.series_alpha_pct == pct,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.series_alpha_pct = pct;
+                next.alpha_dirty = true;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        let mut raw_on = fg.show_raw_data;
+        let raw_lbl = tr(gctx.locale, "r13.fg.show_data_points");
+        let raw_chk = ui.checkbox(&mut raw_on, raw_lbl);
+        record_checkbox(ui, &raw_chk, gctx.meta, "format_graph.show_raw_data", raw_lbl, raw_on);
+        if raw_chk.changed() {
+            let mut next = fg.clone();
+            next.show_raw_data = raw_on;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+
+        let mut fit_on = fg.show_fitted_curve;
+        let fit_lbl = tr(gctx.locale, "r13.fg.show_fitted_curve");
+        let fit_enabled = fg.cached_regression_overlay.is_some();
+        let fit_chk = ui.add_enabled(fit_enabled, egui::Checkbox::new(&mut fit_on, fit_lbl));
+        record_checkbox(ui, &fit_chk, gctx.meta, "format_graph.show_fitted_curve", fit_lbl, fit_on);
+        if fit_chk.changed() && fit_enabled {
+            let mut next = fg.clone();
+            next.show_fitted_curve = fit_on;
+            gctx.intents.push_update_format_graph_state(next);
         }
     });
 
@@ -1526,6 +1669,40 @@ fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
             {
                 let mut next = fg.clone();
                 next.cvd_preview = cvd;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.fg.paper_fill")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (slug, lbl_key, fill_opt) in [
+            ("white", "r13.fg.paper_white", Some(Rgba8::WHITE)),
+            ("cream", "r13.fg.paper_cream", Some(Rgba8::rgb(255, 251, 235))),
+            ("slate", "r13.fg.paper_slate", Some(Rgba8::rgb(241, 245, 249))),
+            ("transparent", "r13.fg.paper_transparent", None),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.paper_fill.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.paper_fill == fill_opt,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.paper_fill = fill_opt;
+                next.paper_fill_dirty = true;
                 gctx.intents.push_update_format_graph_state(next);
             }
         }
@@ -1963,8 +2140,79 @@ fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: 
     ui.add_space(6.0);
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.heatmap.row_labels"));
+        for (slug, lbl_key, mode) in [
+            ("titles", "r13.heatmap.row_titles", HeatmapRowLabelMode::RowTitles),
+            ("numbers", "r13.heatmap.row_numbers", HeatmapRowLabelMode::RowNumbers),
+            ("none", "r13.common.none", HeatmapRowLabelMode::None),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.heatmap.row_labels.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.heatmap_labels.row_labels == mode,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.heatmap_labels.row_labels = mode;
+                next.heatmap_labels_dirty = true;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.heatmap.col_labels"));
+        for (slug, lbl_key, mode) in [
+            ("titles", "r13.heatmap.col_titles", HeatmapColumnLabelMode::ColumnTitles),
+            ("letters", "r13.heatmap.col_letters", HeatmapColumnLabelMode::ColumnLetters),
+            ("none", "r13.common.none", HeatmapColumnLabelMode::None),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.heatmap.col_labels.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.heatmap_labels.column_labels == mode,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.heatmap_labels.column_labels = mode;
+                next.heatmap_labels_dirty = true;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
         ui.label("Tick Angle:");
-        for (lbl, deg) in [("0 deg", 0.0_f64), ("45 deg", 45.0_f64), ("90 deg", 90.0_f64)] {
+        for (lbl, deg, angle_variant) in [
+            ("0 deg", 0.0_f64, HeatmapColumnLabelAngle::Horizontal0),
+            ("45 deg", 45.0_f64, HeatmapColumnLabelAngle::Angled45),
+            ("90 deg", 90.0_f64, HeatmapColumnLabelAngle::Vertical90),
+        ] {
+            let selected = fg.heatmap_labels.column_angle == angle_variant;
             if record_button(
                 ui,
                 gctx.meta,
@@ -1972,7 +2220,7 @@ fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: 
                     widget_id: &format!("format_graph.heatmap.angle.{}", deg as i32),
                     label: lbl,
                     command_id: None,
-                    selected: (state.heatmap_tick_angle_deg - deg).abs() < 0.1,
+                    selected,
                     enabled: true,
                     disabled_reason: None,
                 },
@@ -1981,6 +2229,10 @@ fn render_fg_heatmap_labels(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: 
             .clicked()
             {
                 state.heatmap_tick_angle_deg = deg;
+                let mut next = fg.clone();
+                next.heatmap_labels.column_angle = angle_variant;
+                next.heatmap_labels_dirty = true;
+                gctx.intents.push_update_format_graph_state(next);
             }
         }
     });
@@ -2533,6 +2785,7 @@ fn render_axis_ticks_section(
             ("sci_e", "1e-3", TickLabelFormat::ScientificE),
             ("antilog", "Antilog", TickLabelFormat::Antilog),
             ("si", "SI Prefix", TickLabelFormat::EngineeringSi),
+            ("abs_decimal", "|x| Abs", TickLabelFormat::AbsoluteDecimal),
         ] {
             if record_button(
                 ui,
@@ -2562,6 +2815,50 @@ fn render_axis_ticks_section(
             }
         }
     });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.axes.tick_direction"));
+        for (slug, lbl_key, dir) in [
+            ("outside", "r13.axes.dir_outside", TickDirection::Outside),
+            ("inside", "r13.axes.dir_inside", TickDirection::Inside),
+            ("both", "r13.axes.dir_both", TickDirection::Both),
+            ("none", "r13.common.none", TickDirection::None),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("axes.tick_dir.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fa.axis_draft.tick_direction == dir,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fa.clone();
+                next.axis_draft.tick_direction = dir;
+                gctx.intents.push_update_format_axes_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    let mut show_labels = fa.axis_draft.show_tick_labels;
+    let lbl_text = tr(gctx.locale, "r13.axes.show_tick_labels");
+    let show_chk = ui.checkbox(&mut show_labels, lbl_text);
+    record_checkbox(ui, &show_chk, gctx.meta, "axes.show_tick_labels", lbl_text, show_labels);
+    if show_chk.changed() {
+        let mut next = fa.clone();
+        next.axis_draft.show_tick_labels = show_labels;
+        gctx.intents.push_update_format_axes_state(next);
+    }
 
     ui.add_space(6.0);
     let tick_count = fa.axis_draft.additional_ticks.len();
@@ -3171,6 +3468,65 @@ fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
     }
 
     ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.apply_style.targets")).strong());
+    if !asf.target_candidates.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            let sel_all_lbl = tr(gctx.locale, "r13.apply_style.select_all");
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: "apply_style.target.select_all",
+                    label: sel_all_lbl,
+                    command_id: None,
+                    selected: false,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = asf.clone();
+                let mut all_targets: Vec<SheetId> =
+                    asf.target_candidates.iter().filter(|(id, _)| asf.donor_graph_id.as_ref() != Some(id)).map(|(id, _)| id.clone()).collect();
+                if all_targets.is_empty() {
+                    all_targets = asf.target_candidates.iter().map(|(id, _)| id.clone()).collect();
+                }
+                next.target_graph_id = all_targets.first().cloned();
+                next.target_graph_ids = all_targets;
+                gctx.intents.push_update_apply_style_state(next);
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (idx, (id, title)) in asf.target_candidates.iter().enumerate() {
+                let mut checked = asf.target_graph_ids.contains(id) || (asf.target_graph_ids.is_empty() && asf.target_graph_id.as_ref() == Some(id));
+                let chk = ui.checkbox(&mut checked, title);
+                record_checkbox(ui, &chk, gctx.meta, &format!("apply_style.target.{idx}"), title, checked);
+                if chk.changed() {
+                    let mut next = asf.clone();
+                    if next.target_graph_ids.is_empty()
+                        && let Some(cur) = next.target_graph_id.clone()
+                    {
+                        next.target_graph_ids.push(cur);
+                    }
+                    if checked {
+                        if !next.target_graph_ids.contains(id) {
+                            next.target_graph_ids.push(id.clone());
+                        }
+                    } else {
+                        next.target_graph_ids.retain(|t| t != id);
+                    }
+                    next.target_graph_id = next.target_graph_ids.first().cloned();
+                    gctx.intents.push_update_apply_style_state(next);
+                }
+            }
+        });
+    }
+
+    ui.add_space(6.0);
     for (wid, lbl, val) in [
         ("apply_style.clone_palette", "Clone Palette & Swatches", asf.clone_palette),
         ("apply_style.clone_frame_and_axes", "Clone Frame & Axis Styling", asf.clone_frame_and_axes),
@@ -3182,6 +3538,223 @@ fn render_apply_style_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
         if chk.changed() {
             gctx.intents.push_dialog_widget_click(wid);
         }
+    }
+}
+
+fn render_create_graph_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let cg = gctx.app.canvas_dialogs.create_graph.clone();
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.create_graph.source")).strong());
+    if cg.source_candidates.is_empty() {
+        ui.label(egui::RichText::new(tr(gctx.locale, "r13.create_graph.no_source")).color(gctx.tokens.text_muted));
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (idx, (id, title)) in cg.source_candidates.iter().enumerate() {
+                let selected = cg.source_sheet_id.as_ref() == Some(id);
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("create_graph.source.{idx}"),
+                        label: title,
+                        command_id: None,
+                        selected,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = cg.clone();
+                    next.source_sheet_id = Some(id.clone());
+                    gctx.intents.push_update_create_graph_state(next);
+                }
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.create_graph.kind")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (slug, lbl) in [
+            ("auto", "Auto"),
+            ("xy", "XY"),
+            ("column", "Column"),
+            ("grouped", "Grouped"),
+            ("contingency", "Contingency"),
+            ("survival", "Survival"),
+            ("parts_of_whole", "Parts of Whole"),
+            ("multiple_variables", "Multiple Variables"),
+            ("heatmap", "Heatmap"),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("create_graph.kind.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: cg.kind_slug == slug,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = cg.clone();
+                next.kind_slug = slug.to_owned();
+                gctx.intents.push_update_create_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    let mut per_ds = cg.one_per_data_set;
+    let per_lbl = tr(gctx.locale, "r13.create_graph.one_per_ds");
+    let per_chk = ui.checkbox(&mut per_ds, per_lbl);
+    record_checkbox(ui, &per_chk, gctx.meta, "create_graph.one_per_data_set", per_lbl, per_ds);
+    if per_chk.changed() {
+        let mut next = cg.clone();
+        next.one_per_data_set = per_ds;
+        gctx.intents.push_update_create_graph_state(next);
+    }
+
+    let field_w = (gctx.body_w - 110.0).clamp(120.0, 320.0);
+    let mut y_title = cg.y_axis_title.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.create_graph.y_title"));
+        let r = ui.add(egui::TextEdit::singleline(&mut y_title).desired_width(field_w));
+        record_input(ui, &r, gctx.meta, "create_graph.y_axis_title", "Y-axis Title", &y_title, true);
+        if r.changed() {
+            let mut next = cg.clone();
+            next.y_axis_title = y_title.clone();
+            gctx.intents.push_update_create_graph_state(next);
+        }
+    });
+
+    let mut g_title = cg.graph_title.clone();
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.create_graph.title"));
+        let r = ui.add(egui::TextEdit::singleline(&mut g_title).desired_width(field_w));
+        record_input(ui, &r, gctx.meta, "create_graph.title", "Graph Title", &g_title, true);
+        if r.changed() {
+            let mut next = cg.clone();
+            next.graph_title = g_title.clone();
+            gctx.intents.push_update_create_graph_state(next);
+        }
+    });
+}
+
+fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let eq = gctx.app.canvas_dialogs.equalize_scaling.clone();
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.equalize.mode")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (mode_slug, btn_slug, lbl_key) in [
+            ("match_smallest", "smallest", "r13.equalize.match_smallest"),
+            ("match_largest", "largest", "r13.equalize.match_largest"),
+            ("explicit_percent", "explicit", "r13.equalize.explicit_pct"),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("equalize_scaling.mode.{btn_slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: eq.mode == mode_slug,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = eq.clone();
+                next.mode = mode_slug.to_owned();
+                gctx.intents.push_update_equalize_scaling_state(next);
+            }
+        }
+    });
+
+    if eq.mode == "explicit_percent" {
+        ui.add_space(6.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            ui.label(tr(gctx.locale, "r13.equalize.scale_pct"));
+            for pct in [50.0_f64, 75.0, 100.0, 125.0] {
+                let lbl = format!("{}%", pct as i32);
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("equalize_scaling.percent.{}", pct as i32),
+                        label: &lbl,
+                        command_id: None,
+                        selected: (eq.explicit_percent - pct).abs() < 0.05,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = eq.clone();
+                    next.explicit_percent = pct;
+                    gctx.intents.push_update_equalize_scaling_state(next);
+                }
+            }
+            let mut cur_pct = eq.explicit_percent;
+            let dv = ui.add(egui::DragValue::new(&mut cur_pct).range(5.0..=500.0).speed(1.0).suffix("%"));
+            record_input(ui, &dv, gctx.meta, "equalize_scaling.percent", "Scale %", &format!("{cur_pct:.1}"), true);
+            if dv.changed() {
+                let mut next = eq.clone();
+                next.explicit_percent = cur_pct.clamp(5.0, 500.0);
+                gctx.intents.push_update_equalize_scaling_state(next);
+            }
+        });
+    }
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.equalize.panels")).strong());
+    if eq.available_panels.is_empty() {
+        ui.label(egui::RichText::new(tr(gctx.locale, "r13.equalize.no_panels")).color(gctx.tokens.text_muted));
+    } else {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (idx, (pid, label)) in eq.available_panels.iter().enumerate() {
+                let selected = eq.selected_panel_ids.contains(pid);
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("equalize_scaling.panel.{idx}"),
+                        label,
+                        command_id: None,
+                        selected,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = eq.clone();
+                    if let Some(pos) = next.selected_panel_ids.iter().position(|id| id == pid) {
+                        next.selected_panel_ids.remove(pos);
+                    } else {
+                        next.selected_panel_ids.push(pid.clone());
+                    }
+                    gctx.intents.push_update_equalize_scaling_state(next);
+                }
+            }
+        });
     }
 }
 

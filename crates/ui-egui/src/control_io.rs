@@ -1231,6 +1231,9 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.print.open"
             | "file.print"
             | "app.about"
+            | "ui.view.rowTitles.toggle"
+            | "ui.graph.create.open"
+            | "ui.layout.equalizeScaling.open"
     ) {
         return Ok(None);
     }
@@ -1308,6 +1311,9 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
                 "version": env!("CARGO_PKG_VERSION"),
             })))
         }
+        "ui.view.rowTitles.toggle" => map_ui_result(dispatch_ui_row_titles_toggle(app, params)),
+        "ui.graph.create.open" => map_ui_result(dispatch_ui_create_graph_open(app, params)),
+        "ui.layout.equalizeScaling.open" => map_ui_result(dispatch_ui_equalize_scaling_open(app, params)),
         _ => Ok(None),
     }
 }
@@ -2942,6 +2948,26 @@ fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
 
 fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
+    if let Some(arr) = params.get("target_sheet_ids").and_then(Value::as_array) {
+        let targets: Vec<SheetId> = arr.iter().filter_map(Value::as_str).map(SheetId::new).collect();
+        if !targets.is_empty() {
+            if !app.canvas_dialogs.open_apply_style_from_targets(&doc, &targets) {
+                return Err(String::from("none of the requested `target_sheet_ids` matched existing graph sheets"));
+            }
+            return Ok(json!({
+                "dialog": "ApplyStyleFrom",
+                "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    let gallery_graphs: Vec<SheetId> = app.nav.selected_gallery_ids().into_iter().filter(|id| doc.graph_sheet(id).is_some()).collect();
+    if gallery_graphs.len() >= 2 && params.get("sheet_id").is_none() && params.get("sheetId").is_none() {
+        let _ = app.canvas_dialogs.open_apply_style_from_targets(&doc, &gallery_graphs);
+        return Ok(json!({
+            "dialog": "ApplyStyleFrom",
+            "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
+        }));
+    }
     let graph_id = resolve_target_graph_id(&doc, params)?;
     if !app.canvas_dialogs.open_apply_style_from(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
@@ -3161,22 +3187,68 @@ fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, S
 
 fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let layout_id = if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.layout_sheet(&id).is_none() {
-            return Err(format!("layout sheet `{}` not found", id.as_str()));
-        }
-        id
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))?
-    };
+    let layout_id = resolve_target_layout_id(&doc, params)?;
     let _ = app.canvas_dialogs.open_page_layout_composer(&doc, &layout_id);
     let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
     if !fields.is_empty() {
         app.canvas_dialogs.page_layout.apply_field_patch(&fields, Some(&doc))?;
     }
     Ok(json!({ "dialog": "PageLayoutComposer", "layout_sheet_id": layout_id.as_str() }))
+}
+
+fn resolve_target_layout_id(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.layout_sheet(&id).is_none() {
+            return Err(format!("layout sheet `{}` not found", id.as_str()));
+        }
+        return Ok(id);
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))
+}
+
+fn dispatch_ui_equalize_scaling_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let layout_id = resolve_target_layout_id(&doc, params)?;
+    if !app.canvas_dialogs.open_equalize_scaling(&doc, &layout_id) {
+        return Err(format!("layout sheet `{}` not found", layout_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.equalize_scaling.apply_field_patch(&fields)?;
+    }
+    Ok(json!({ "dialog": "EqualizeScaling", "layout_sheet_id": layout_id.as_str() }))
+}
+
+fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let preferred = opt_non_empty_str_param(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"])?.map(SheetId::new);
+    if !app.canvas_dialogs.open_create_graph(&doc, preferred.as_ref()) {
+        return Err(String::from("no source data sheet available to create a graph"));
+    }
+    let fields = filtered_open_patch_fields(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.create_graph.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "CreateGraph",
+        "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str),
+    }))
+}
+
+fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let explicit_collapsed = opt_bool_param(params, &["collapsed"])?;
+    let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(app.egui_views.column_grid.row_titles_collapsed);
+    let next_collapsed = explicit_collapsed.unwrap_or(!current_collapsed);
+    app.grid.row_titles_collapsed_override = Some(next_collapsed);
+    app.view_shards.grid_core.row_titles_collapsed = next_collapsed;
+    app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
+    Ok(json!({
+        "row_titles_collapsed": next_collapsed,
+        "row_titles_expanded": !next_collapsed,
+    }))
 }
 
 fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3776,6 +3848,8 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::RandomSampleRows { .. } => "RandomSampleRows",
         ActiveDialog::SimulateDistributions => "SimulateDistributions",
         ActiveDialog::InsertModelEquation { .. } => "InsertModelEquation",
+        ActiveDialog::CreateGraph { .. } => "CreateGraph",
+        ActiveDialog::EqualizeScaling { .. } => "EqualizeScaling",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
     }

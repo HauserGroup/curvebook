@@ -666,6 +666,20 @@ pub fn evaluate_dialog_button(dialogs: &CanvasDialogState, doc: &ProjectDocument
         | ActiveDialog::Print { .. }
         | ActiveDialog::CommandPalette
         | ActiveDialog::About => ControlEnablement::enabled(),
+        ActiveDialog::CreateGraph { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.create_graph.commit_intent().is_none() {
+                ControlEnablement::disabled("Select a source data table first.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
+        ActiveDialog::EqualizeScaling { .. } => {
+            if matches!(norm.as_str(), "ok" | "apply") && dialogs.equalize_scaling.commit_intent().is_none() {
+                ControlEnablement::disabled("This layout has no live graph panels to equalize.")
+            } else {
+                ControlEnablement::enabled()
+            }
+        }
     })
 }
 

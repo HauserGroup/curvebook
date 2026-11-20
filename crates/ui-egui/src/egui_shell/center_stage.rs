@@ -28,6 +28,7 @@ use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens, UiIntent,
     doc_sheet_title, rgba8_to_color32,
 };
+use crate::i18n::tr;
 use crate::i18n::{normalize_locale, try_tr};
 use crate::inspect::ZLayer;
 use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
@@ -134,6 +135,8 @@ pub struct CenterStageEguiState {
     pub banner_details_open: Option<SheetId>,
     /// Last active grid coordinate mirrored into two-way point brushing.
     pub last_synced_grid_coord: Option<GridCellCoord>,
+    /// Anchor sheet ID for contiguous `Shift+Click` selection inside `Portfolio Gallery`.
+    pub gallery_anchor_id: Option<SheetId>,
 }
 
 impl Default for CenterStageEguiState {
@@ -159,6 +162,7 @@ impl Default for CenterStageEguiState {
             secondary_canvas_view: CanvasViewEguiState::default(),
             banner_details_open: None,
             last_synced_grid_coord: None,
+            gallery_anchor_id: None,
         }
     }
 }
@@ -1225,6 +1229,21 @@ fn render_portfolio_gallery(
             bar.add_enabled(enabled, egui::Slider::new(&mut views.center_stage.gallery_zoom_pt, 120.0..=260.0).show_value(false).text("Size"));
         meta.record_response(bar, &slider, inspect_input("gallery.zoom_slider", "slider", "Thumbnail Zoom", None, None, enabled, ZLayer::Workspace));
 
+        let selected_graph_ids: Vec<SheetId> = app.nav.selected_gallery_ids().into_iter().filter(|id| doc.graph_sheet(id).is_some()).collect();
+        let style_enabled = enabled && !selected_graph_ids.is_empty() && doc.graph_sheets.len() >= 2;
+        let style_lbl = tr(locale, "r13.gallery.apply_style_from");
+        let style_resp = bar.add_enabled(style_enabled, egui::Button::new(RichText::new(style_lbl).small()));
+        meta.record_response(
+            bar,
+            &style_resp,
+            inspect_input("gallery.apply_style_from", "button", style_lbl, Some("ui.applyStyleFrom.open"), None, style_enabled, ZLayer::Workspace),
+        );
+        if style_resp.clicked() && style_enabled {
+            let target_ids: Vec<&str> = selected_graph_ids.iter().map(SheetId::as_str).collect();
+            intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
+            intents.push_ui("ui.applyStyleFrom.open", json!({ "target_sheet_ids": target_ids }));
+        }
+
         let close_lbl = stage_tr(locale, "w5.gallery.close", "Close Gallery");
         let close_resp = bar.add_enabled(enabled, egui::Button::new(RichText::new(close_lbl).small()));
         meta.record_response(
@@ -1247,6 +1266,10 @@ fn render_portfolio_gallery(
         return;
     }
 
+    let selected_ids_snapshot = app.nav.gallery.selected_ids.clone();
+    let visible_ids: Vec<SheetId> = cards.iter().map(|c| c.sheet_id.clone()).collect();
+    let mut gallery_anchor = views.center_stage.gallery_anchor_id.clone();
+
     let scroll = egui::ScrollArea::vertical().id_salt("center_stage.gallery.scroll").auto_shrink([false, false]).show(&mut gal_ui, |grid_ui| {
         let inner_w = (grid_ui.available_width() - 16.0).max(140.0);
         let spacing = 10.0;
@@ -1259,12 +1282,25 @@ fn render_portfolio_gallery(
             grid_ui.horizontal(|row_ui| {
                 row_ui.spacing_mut().item_spacing.x = spacing;
                 for card in row_cards {
-                    render_gallery_card(row_ui, doc, card, vec2(card_w, card_h), tokens, enabled, meta, intents);
+                    render_gallery_card(
+                        row_ui,
+                        doc,
+                        card,
+                        &visible_ids,
+                        &selected_ids_snapshot,
+                        &mut gallery_anchor,
+                        vec2(card_w, card_h),
+                        tokens,
+                        enabled,
+                        meta,
+                        intents,
+                    );
                 }
             });
             grid_ui.add_space(spacing);
         }
     });
+    views.center_stage.gallery_anchor_id = gallery_anchor;
 
     if scroll.content_size.y > scroll.inner_rect.height() + 0.5 {
         let bar_w = gal_ui.spacing().scroll.bar_width.max(10.0);
@@ -1328,6 +1364,9 @@ fn render_gallery_card(
     ui: &mut egui::Ui,
     doc: &ProjectDocument,
     card: &PortfolioCard,
+    visible_ids: &[SheetId],
+    selected_ids_snapshot: &std::collections::BTreeSet<SheetId>,
+    gallery_anchor: &mut Option<SheetId>,
     size: Vec2,
     tokens: &Tokens,
     enabled: bool,
@@ -1375,8 +1414,43 @@ fn render_gallery_card(
     );
 
     if resp.clicked() && enabled {
-        intents.push_engine("sheet.select", json!({ "sheet_id": card.sheet_id.as_str() }));
-        intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
+        let modifiers = ui.input(|i| {
+            i.events
+                .iter()
+                .rev()
+                .find_map(|ev| match ev {
+                    egui::Event::PointerButton { pressed: false, modifiers, .. } => Some(*modifiers),
+                    _ => None,
+                })
+                .unwrap_or(i.modifiers)
+        });
+        if modifiers.command || modifiers.ctrl {
+            let mut next = selected_ids_snapshot.clone();
+            if !next.remove(&card.sheet_id) {
+                next.insert(card.sheet_id.clone());
+            }
+            *gallery_anchor = Some(card.sheet_id.clone());
+            intents.push_set_gallery_selection(next.into_iter().collect());
+        } else if modifiers.shift {
+            let anchor_pos = gallery_anchor
+                .as_ref()
+                .and_then(|aid| visible_ids.iter().position(|id| id == aid))
+                .or_else(|| visible_ids.iter().position(|id| selected_ids_snapshot.contains(id)))
+                .or_else(|| doc.active_sheet_id.as_ref().and_then(|aid| visible_ids.iter().position(|id| id == aid)))
+                .unwrap_or(0);
+            let click_pos = visible_ids.iter().position(|id| id == &card.sheet_id).unwrap_or(anchor_pos);
+            let (lo, hi) = if anchor_pos <= click_pos { (anchor_pos, click_pos) } else { (click_pos, anchor_pos) };
+            let range_ids: Vec<SheetId> = visible_ids[lo..=hi].to_vec();
+            if gallery_anchor.is_none() {
+                *gallery_anchor = visible_ids.get(anchor_pos).cloned();
+            }
+            intents.push_set_gallery_selection(range_ids);
+        } else {
+            *gallery_anchor = Some(card.sheet_id.clone());
+            intents.push_set_gallery_selection(vec![card.sheet_id.clone()]);
+            intents.push_engine("sheet.select", json!({ "sheet_id": card.sheet_id.as_str() }));
+            intents.push_ui("ui.gallery.toggle", json!({ "open": false }));
+        }
     }
 }
 

@@ -974,6 +974,11 @@ fn try_toggle_format_graph_click(app: &mut UiApp, wid: &str) -> Result<Option<Va
         }
         "format_graph.show_legend" => app.canvas_dialogs.format_graph.show_legend = !app.canvas_dialogs.format_graph.show_legend,
         "format_graph.legend_bordered" => app.canvas_dialogs.format_graph.legend_bordered = !app.canvas_dialogs.format_graph.legend_bordered,
+        "format_graph.show_raw_data" => app.canvas_dialogs.format_graph.show_raw_data = !app.canvas_dialogs.format_graph.show_raw_data,
+        "format_graph.show_fitted_curve" => app.canvas_dialogs.format_graph.show_fitted_curve = !app.canvas_dialogs.format_graph.show_fitted_curve,
+        "format_graph.apply_globally" | "format_graph.apply_all_data_sets" => {
+            app.canvas_dialogs.format_graph.apply_all_data_sets = !app.canvas_dialogs.format_graph.apply_all_data_sets;
+        }
         "format_graph.half_violin_with_points" => {
             app.canvas_dialogs.format_graph.half_violin_with_points = !app.canvas_dialogs.format_graph.half_violin_with_points;
         }
@@ -2212,6 +2217,29 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
                         let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
                         app.canvas_dialogs.change_graph_type.error_bar_metric = parse_error_bar_metric_str(raw).map_err(bad_input)?;
                     }
+                    "survival_metric" | "graph_type.survival.metric" => {
+                        let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string")))?;
+                        app.canvas_dialogs.change_graph_type.survival_metric = match raw.trim().to_ascii_lowercase().as_str() {
+                            "percent_survival" | "percentsurvival" | "survival" => curvebook_doc::SurvivalDisplayMetric::PercentSurvival,
+                            "percent_cumulative_event" | "percentcumulativeevent" | "event" => {
+                                curvebook_doc::SurvivalDisplayMetric::PercentCumulativeEvent
+                            }
+                            "fraction_survival" | "fractionsurvival" | "fraction" => curvebook_doc::SurvivalDisplayMetric::FractionSurvival,
+                            _ => return Err(bad_input(format!("unknown `survival_metric` `{raw}`"))),
+                        };
+                    }
+                    "survival_staircase" | "graph_type.survival.staircase" => {
+                        app.canvas_dialogs.change_graph_type.survival_staircase =
+                            val.as_bool().ok_or_else(|| bad_input(format!("`{key}` must be boolean")))?;
+                    }
+                    "survival_error_display" | "graph_type.survival.error_display" => {
+                        app.canvas_dialogs.change_graph_type.survival_error_display = if val.is_null() {
+                            None
+                        } else {
+                            let raw = val.as_str().ok_or_else(|| bad_input(format!("`{key}` must be a string or null")))?;
+                            if raw.trim().eq_ignore_ascii_case("none") { None } else { Some(parse_error_bar_metric_str(raw).map_err(bad_input)?) }
+                        };
+                    }
                     other => return Err(bad_input(format!("unknown ChangeGraphType field `{other}`"))),
                 }
             }
@@ -2337,6 +2365,12 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
         }
         ActiveDialog::InsertModelEquation { .. } => {
             app.canvas_dialogs.insert_model_equation.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
+        }
+        ActiveDialog::CreateGraph { .. } => {
+            app.canvas_dialogs.create_graph.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::EqualizeScaling { .. } => {
+            app.canvas_dialogs.equalize_scaling.apply_field_patch(fields).map_err(bad_input)?;
         }
         ActiveDialog::Print { .. } => {
             if map_opt_bool(fields, &["submit_to_os", "print.submit_to_os"])? == Some(true) && app.is_gui_only() {
@@ -2491,6 +2525,8 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
             let doc = app.document().clone();
             commit_single_intent(app, app.canvas_dialogs.insert_model_equation.commit_intent(Some(&doc)), true)
         }
+        ActiveDialog::CreateGraph { .. } => commit_single_intent(app, app.canvas_dialogs.create_graph.commit_intent(), true),
+        ActiveDialog::EqualizeScaling { .. } => commit_single_intent(app, app.canvas_dialogs.equalize_scaling.commit_intent(), true),
         ActiveDialog::CommandPalette => commit_command_palette_action(app),
         ActiveDialog::ConstantHookPicker { .. } => commit_single_intent(app, app.canvas_dialogs.hook_picker.commit_intent(), true),
         ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::None => {
