@@ -47,6 +47,10 @@ const AGENT_HARNESS_MARKERS: &[&str] = &[
     "control_auth_and_panic",
 ];
 
+const HUMAN_DRIVER_TOKENS: &[&str] = &["humanpathdriver", "eguihumanpathdriver", "egui_kittest"];
+
+const KNOWN_BACKENDS: &[&str] = &["legacy", "egui"];
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DuplicateKey {
     pub path: String,
@@ -112,6 +116,8 @@ pub fn run(root: &Path) -> Result<(), String> {
     let workspace_tests = collect_workspace_tests(root)?;
     let ui_parity_text = fs::read_to_string(root.join(UI_EVIDENCE_REL)).map_err(|e| format!("{UI_EVIDENCE_REL}: {e}"))?;
     violations.extend(check_ui_parity_evidence(UI_EVIDENCE_REL, &ui_parity_text, Some(&workspace_tests)));
+    let (telemetry, telemetry_violations) = check_backend_workflow_telemetry(UI_EVIDENCE_REL, &ui_parity_text, &workspace_tests);
+    violations.extend(telemetry_violations);
 
     let workflows_text = fs::read_to_string(root.join(GUI_WORKFLOWS_REL)).map_err(|e| format!("{GUI_WORKFLOWS_REL}: {e}"))?;
     violations.extend(check_gui_workflows_human_path(GUI_WORKFLOWS_REL, &workflows_text, Some(&workspace_tests)));
@@ -119,7 +125,9 @@ pub fn run(root: &Path) -> Result<(), String> {
     if duplicates.is_empty() && violations.is_empty() {
         println!(
             "status: verified {total_tables} Markdown table(s) across {STATUS_REL} and {ROADMAP_REL}, \
-             live metrics, [x] evidence in {UI_EVIDENCE_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL}"
+             live metrics, [x] evidence in {UI_EVIDENCE_REL}, and §6.2 Human path column in {GUI_WORKFLOWS_REL} \
+             ({}/50 egui; backed human tests: {}/50 egui)",
+            telemetry.egui_claimed, telemetry.egui_backed
         );
         return Ok(());
     }
@@ -461,17 +469,182 @@ fn human_path_requires_evidence(cell: &str) -> bool {
     if matches!(lower.as_str(), "" | "—" | "-" | "–" | "n/a" | "no" | "none" | "todo" | "pending" | "untested" | "[ ]" | "0" | "0%") {
         return false;
     }
-    !is_zero_fraction(&lower)
+    if has_invalid_backend_fraction(&lower) {
+        return true;
+    }
+    !all_fractions_are_zero(&lower)
 }
 
-fn is_zero_fraction(text: &str) -> bool {
-    let Some((left, right)) = text.split_once('/') else {
-        return false;
+fn parse_workflow_fractions(text: &str) -> Vec<(usize, usize, Option<&str>)> {
+    let mut out = Vec::new();
+    let bytes = text.as_bytes();
+    for (slash_idx, &b) in bytes.iter().enumerate() {
+        if b != b'/' {
+            continue;
+        }
+        let mut left_end = slash_idx;
+        while left_end > 0 && bytes[left_end - 1].is_ascii_whitespace() {
+            left_end -= 1;
+        }
+        let mut left_start = left_end;
+        while left_start > 0 && bytes[left_start - 1].is_ascii_digit() {
+            left_start -= 1;
+        }
+        if left_start == left_end || (left_start > 0 && bytes[left_start - 1].is_ascii_alphanumeric()) {
+            continue;
+        }
+
+        let mut right_start = slash_idx + 1;
+        while right_start < bytes.len() && bytes[right_start].is_ascii_whitespace() {
+            right_start += 1;
+        }
+        let mut right_end = right_start;
+        while right_end < bytes.len() && bytes[right_end].is_ascii_digit() {
+            right_end += 1;
+        }
+        if right_start == right_end || (right_end < bytes.len() && bytes[right_end].is_ascii_alphanumeric()) {
+            continue;
+        }
+
+        let Ok(num) = text[left_start..left_end].parse::<usize>() else {
+            continue;
+        };
+        let Ok(den) = text[right_start..right_end].parse::<usize>() else {
+            continue;
+        };
+        let trailing = text[right_end..].trim_start().split(|c: char| !c.is_ascii_alphanumeric()).next().unwrap_or("");
+        let backend = KNOWN_BACKENDS.iter().copied().find(|&b_name| trailing.eq_ignore_ascii_case(b_name));
+        out.push((num, den, backend));
+    }
+    out
+}
+
+/// Per-backend `WF-01`..`WF-50` human-path telemetry parsed from documentation and workspace tests.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct BackendWorkflowTelemetry {
+    pub legacy_claimed: usize,
+    pub egui_claimed: usize,
+    pub legacy_backed: usize,
+    pub egui_backed: usize,
+}
+
+fn parse_backend_wf_index(fn_name: &str) -> Option<(&'static str, u8)> {
+    let rest = fn_name.strip_prefix("wf")?;
+    let digits_len = rest.chars().take_while(char::is_ascii_digit).count();
+    if digits_len == 0 {
+        return None;
+    }
+    let idx: u8 = rest[..digits_len].parse().ok()?;
+    if !(1..=50).contains(&idx) {
+        return None;
+    }
+    let suffix = &rest[digits_len..];
+    if suffix == "_human" || suffix.starts_with("_human_") || suffix == "_egui_human" || suffix.starts_with("_egui_human_") {
+        Some(("egui", idx))
+    } else {
+        None
+    }
+}
+
+/// Count distinct non-ignored `WF-01`..`WF-50` human-path tests per backend (`legacy`, `egui`).
+#[must_use]
+pub fn count_backed_backend_workflows(known_tests: &WorkspaceTests) -> (usize, usize) {
+    let mut legacy_ids = BTreeSet::new();
+    let mut egui_ids = BTreeSet::new();
+    for qualified in &known_tests.qualified {
+        let stem = qualified.split("::").next().unwrap_or("");
+        if stem.starts_with("gui_wf_") {
+            continue;
+        }
+        let fn_name = qualified.rsplit("::").next().unwrap_or(qualified);
+        if let Some((backend, idx)) = parse_backend_wf_index(fn_name) {
+            match backend {
+                "legacy" => {
+                    legacy_ids.insert(idx);
+                }
+                "egui" => {
+                    egui_ids.insert(idx);
+                }
+                _ => {}
+            }
+        }
+    }
+    (legacy_ids.len(), egui_ids.len())
+}
+
+/// Validate per-backend workflow counts in `docs/evidence/user-interface.md` against backed workspace tests.
+#[must_use]
+pub fn check_backend_workflow_telemetry(
+    path: &str,
+    ui_parity_md: &str,
+    known_tests: &WorkspaceTests,
+) -> (BackendWorkflowTelemetry, Vec<EvidenceViolation>) {
+    let (legacy_backed, egui_backed) = count_backed_backend_workflows(known_tests);
+    let mut violations = Vec::new();
+    let mut fence: Option<char> = None;
+    let mut legacy_claims: Vec<(usize, usize)> = Vec::new();
+    let mut egui_claims: Vec<(usize, usize)> = Vec::new();
+
+    for (idx, line) in ui_parity_md.lines().enumerate() {
+        let trimmed = line.trim();
+        if update_fence(trimmed, &mut fence) || fence.is_some() {
+            continue;
+        }
+        let is_checklist_item = trimmed.starts_with("- [x]") || trimmed.starts_with("- [X]") || trimmed.starts_with("- [ ]");
+        if !is_checklist_item || trimmed.to_ascii_lowercase().contains(AGENT_HARNESS_TAG) {
+            continue;
+        }
+        for (num, den, backend) in parse_workflow_fractions(&trimmed.to_ascii_lowercase()) {
+            if den != 50 {
+                continue;
+            }
+            match backend {
+                Some("legacy") => legacy_claims.push((idx + 1, num)),
+                Some("egui") => egui_claims.push((idx + 1, num)),
+                _ => {}
+            }
+        }
+    }
+
+    let legacy_claimed =
+        if legacy_claims.is_empty() { 0 } else { summarize_backend_claims(path, "legacy", &legacy_claims, legacy_backed, &mut violations) };
+    let egui_claimed = summarize_backend_claims(path, "egui", &egui_claims, egui_backed, &mut violations);
+
+    (BackendWorkflowTelemetry { legacy_claimed, egui_claimed, legacy_backed, egui_backed }, violations)
+}
+
+fn summarize_backend_claims(path: &str, backend: &str, claims: &[(usize, usize)], backed: usize, violations: &mut Vec<EvidenceViolation>) -> usize {
+    let Some(&(first_line, first_num)) = claims.first() else {
+        violations.push(EvidenceViolation { path: path.to_owned(), line: 1, reason: format!("missing `N/50 {backend}` workflow checklist count") });
+        return 0;
     };
-    let num = left.trim().trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    let den_tok = right.split_whitespace().next().unwrap_or("");
-    let den = den_tok.trim_matches(|c: char| !c.is_ascii_alphanumeric());
-    num == "0" && !den.is_empty() && den.chars().all(|c| c.is_ascii_digit()) && den != "0"
+
+    for &(line, num) in claims {
+        if num != first_num {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line,
+                reason: format!("conflicting `{num}/50 {backend}` count (line {first_line} reports `{first_num}/50 {backend}`)"),
+            });
+        }
+        if num > 50 || num > backed {
+            violations.push(EvidenceViolation {
+                path: path.to_owned(),
+                line,
+                reason: format!("claims `{num}/50 {backend}` human-path workflows, but only `{backed}/50` backed non-ignored tests exist"),
+            });
+        }
+    }
+    first_num
+}
+
+fn all_fractions_are_zero(text: &str) -> bool {
+    let fractions = parse_workflow_fractions(text);
+    !fractions.is_empty() && fractions.iter().all(|&(num, den, _)| num == 0 && den > 0)
+}
+
+fn has_invalid_backend_fraction(text: &str) -> bool {
+    parse_workflow_fractions(text).into_iter().any(|(num, den, backend)| backend.is_some() && (den == 0 || num > den))
 }
 
 fn validate_human_evidence(path: &str, line: usize, text: &str, known_tests: Option<&WorkspaceTests>) -> Option<EvidenceViolation> {
@@ -480,7 +653,18 @@ fn validate_human_evidence(path: &str, line: usize, text: &str, known_tests: Opt
     let mut valid_tests = Vec::new();
     let mut unknown_tests = Vec::new();
 
+    if has_invalid_backend_fraction(&text.to_ascii_lowercase()) {
+        return Some(EvidenceViolation {
+            path: path.to_owned(),
+            line,
+            reason: String::from("contains invalid per-backend workflow count fraction (expected `num/den legacy|egui` with 0 < den and num <= den)"),
+        });
+    }
+
     for tok in tokens {
+        if is_human_driver_token(&tok) {
+            continue;
+        }
         if is_agent_harness_token(&tok) {
             harness_hits.push(tok);
         } else if is_test_identifier(&tok) {
@@ -566,13 +750,23 @@ fn is_agent_harness_token(raw: &str) -> bool {
     })
 }
 
+fn is_human_driver_token(raw: &str) -> bool {
+    let lower = raw.trim().to_ascii_lowercase();
+    HUMAN_DRIVER_TOKENS.iter().any(|&marker| lower == marker || lower.ends_with(&format!("::{marker}")))
+}
+
 fn is_wf_harness_fn(seg: &str) -> bool {
     let Some(rest) = seg.strip_prefix("wf") else {
         return false;
     };
     let digit_count = rest.chars().take_while(char::is_ascii_digit).count();
     let suffix = &rest[digit_count..];
-    digit_count > 0 && suffix.starts_with('_') && !suffix.starts_with("_human_") && suffix != "_human"
+    digit_count > 0
+        && suffix.starts_with('_')
+        && !suffix.starts_with("_human_")
+        && suffix != "_human"
+        && !suffix.starts_with("_egui_human_")
+        && suffix != "_egui_human"
 }
 
 fn is_test_identifier(tok: &str) -> bool {
@@ -883,6 +1077,87 @@ fn active_human_test() {}
         let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
         assert_eq!(bad_wf.len(), 2, "expected 2 violations, got {bad_wf:?}");
         assert!(bad_wf.iter().all(|v| v.reason.contains("agent-harness")), "got {bad_wf:?}");
+    }
+
+    #[test]
+    fn r15_1_accepts_egui_driver_with_real_test_and_enforces_per_backend_counts() {
+        let mut tests = WorkspaceTests::default();
+        tests.qualified.insert(String::from("r15_1_driver_and_i18n::r15_1_smoke_human_path"));
+        tests.unqualified.insert(String::from("r15_1_smoke_human_path"));
+        tests.qualified.insert(String::from("human_wf_01_06::wf01_egui_human_xy_dose_response"));
+        tests.unqualified.insert(String::from("wf01_egui_human_xy_dose_response"));
+        tests.qualified.insert(String::from("human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason"));
+        tests.unqualified.insert(String::from("wf01_human_xy_dose_response_format_exclude_with_reason"));
+
+        let valid_parity = "\
+- [x] EgUi slice — verified by `r15_1_driver_and_i18n::r15_1_smoke_human_path` using `EguiHumanPathDriver` and `egui_kittest`.
+- [x] Workflows — `50/50 legacy, 1/50 egui`, verified by `human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason` and `human_wf_01_06::wf01_egui_human_xy_dose_response`.
+- [ ] Pending egui port (`0/50 egui`, `50/50 legacy`).
+";
+        let violations = check_ui_parity_evidence("docs/evidence/user-interface.md", valid_parity, Some(&tests));
+        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
+
+        // Mentioning `EguiHumanPathDriver` or `egui_kittest` alone without a real passing test or manual run still fails (Pitfall #6).
+        let unbacked_driver = "- [x] Verified via `EguiHumanPathDriver` and `egui_kittest`.\n";
+        let unbacked_hits = check_ui_parity_evidence("docs/evidence/user-interface.md", unbacked_driver, Some(&tests));
+        assert_eq!(unbacked_hits.len(), 1, "{unbacked_hits:?}");
+        assert!(unbacked_hits[0].reason.contains("missing passing human-path test"));
+
+        // Per-backend counts in §6.2 accept both `0/6 legacy, 0/6 egui`, mixed backed counts, and reject unbacked non-zero `egui` or malformed fractions.
+        let valid_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | `0/6 legacy, 0/6 egui` | None | Pending |
+| Shard 2 | Pass | `0/9 legacy, 1/9 egui` (`human_wf_01_06::wf01_egui_human_xy_dose_response`) | None | Partial |
+";
+        let ok_wf = check_gui_workflows_human_path("docs/gui-workflows.md", valid_wf_table, Some(&tests));
+        assert!(ok_wf.is_empty(), "unexpected dual-backend violations: {ok_wf:?}");
+
+        let bad_wf_table = "\
+### 6.2 Per-shard human-path status
+
+| Shard / workflows | Agent harness | Human path | Blockers | Gaps |
+|---|---|---|---|---|
+| Shard 1 | Pass | `0/6 legacy, 2/6 egui` (`egui_kittest`) | None | Unbacked |
+| Shard 2 | Pass | `55/50 legacy, 0/50 egui` (`human_wf_01_06::wf01_human_xy_dose_response_format_exclude_with_reason`) | None | Out-of-bounds |
+| Shard 3 | Pass | `0/6 legacy, 1/6 egui` (`EguiHumanPathDriver` + `--control`) | None | Harness |
+";
+        let bad_wf = check_gui_workflows_human_path("docs/gui-workflows.md", bad_wf_table, Some(&tests));
+        assert_eq!(bad_wf.len(), 3, "expected 3 dual-backend violations, got {bad_wf:?}");
+        assert!(bad_wf[0].reason.contains("missing passing human-path test"));
+        assert!(bad_wf[1].reason.contains("invalid per-backend workflow count"));
+        assert!(bad_wf[2].reason.contains("agent-harness"));
+    }
+
+    #[test]
+    fn r15_4_backend_workflow_telemetry_enforces_consistency_and_backed_counts() {
+        let mut tests = WorkspaceTests::default();
+        for idx in 1..=50 {
+            let egui_name = format!("wf{idx:02}_human_example");
+            tests.unqualified.insert(egui_name.clone());
+            tests.qualified.insert(format!("human_wf_demo::{egui_name}"));
+        }
+
+        let valid_md = "\
+- [x] *(human path)* All 50 reference workflows — `50/50 egui`
+- [x] *(human path — `egui` backend, `R15.5`)* Native `egui` desktop shell (`50/50 egui`)
+";
+        let (telemetry, violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", valid_md, &tests);
+        assert!(violations.is_empty(), "unexpected violations: {violations:?}");
+        assert_eq!(telemetry.legacy_claimed, 0);
+        assert_eq!(telemetry.egui_claimed, 50);
+        assert_eq!(telemetry.legacy_backed, 0);
+        assert_eq!(telemetry.egui_backed, 50);
+
+        let stale_legacy_md = "\
+- [x] *(human path)* All 50 reference workflows — `50/50 legacy, 50/50 egui`
+- [ ] *(human path — `egui` backend)* Overhaul (`2/50 egui` vs `50/50 legacy`)
+";
+        let (_bad_tel, bad_violations) = super::check_backend_workflow_telemetry("docs/evidence/user-interface.md", stale_legacy_md, &tests);
+        assert!(bad_violations.iter().any(|v| v.reason.contains("only `0/50`")), "{bad_violations:?}");
+        assert!(bad_violations.iter().any(|v| v.reason.contains("conflicting")), "{bad_violations:?}");
     }
 }
 

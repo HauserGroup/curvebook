@@ -9,7 +9,9 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::i18n::{LOCALES, catalog_len, w8_rv_ui};
 use curvebook_ui_egui::menus::{ShortcutRegistry, ShortcutScope, UI_COMMANDS, normalize_shortcut_combo};
 use curvebook_ui_egui::modal_predicates::apply_r2_gaussian_toggle;
-use curvebook_ui_egui::{HumanPathDriver, KeyModifiers, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_event, inspect_ui_tree};
+mod human_wf_common;
+
+use curvebook_ui_egui::{KeyModifiers, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_event, inspect_ui_tree};
 use serde_json::json;
 
 type TestRes = Result<(), String>;
@@ -114,25 +116,25 @@ fn rv75_context_scoped_cmd_t_shortcuts_rebind_and_conflicts() -> TestRes {
 fn rv76_outlier_dialog_methods_parameters_and_parse_fit_method() -> TestRes {
     // 1) AnalyzeDialog: configure Grubbs (method + alpha + iterative) for `stats.outliers` & click OK.
     let (mut app, ds_id) = build_column_app(2, 8)?;
+    app.nav.welcome.open = false;
     app.execute_command("sheet.select", json!({ "sheet_id": ds_id.as_str() })).map_err(err_str)?;
     let _ = dispatch_ui_command(&mut app, "ui.analyze.open", &json!({})).map_err(err_str)?;
 
     app.canvas_dialogs.analyze.select_catalog_entry("stats.outliers");
-    let mut driver = HumanPathDriver::new(app, ViewportMetrics::default());
-    let _ = driver.render_frame();
-    driver.click_widget("analyze.outlier.grubbs")?;
-    driver.click_widget("analyze.outlier.iterative")?;
-    driver.click_widget("analyze.outlier.param.dec")?;
-    assert_eq!(driver.app().canvas_dialogs.analyze.outlier_method, "grubbs");
-    assert!(driver.app().canvas_dialogs.analyze.outlier_iterative);
-    assert!((driver.app().canvas_dialogs.analyze.outlier_alpha - 0.04).abs() < 1e-9);
-    let built_grubbs = driver.app().canvas_dialogs.analyze.build_analysis_kind().ok_or("missing built grubbs kind")?;
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::default());
+    harness.click("analyze.outlier.grubbs")?;
+    harness.click("analyze.outlier.iterative")?;
+    harness.click("analyze.outlier.param.dec")?;
+    assert_eq!(harness.app().canvas_dialogs.analyze.outlier_method, "grubbs");
+    assert!(harness.app().canvas_dialogs.analyze.outlier_iterative);
+    assert!((harness.app().canvas_dialogs.analyze.outlier_alpha - 0.04).abs() < 1e-9);
+    let built_grubbs = harness.app().canvas_dialogs.analyze.build_analysis_kind().ok_or("missing built grubbs kind")?;
     assert!(matches!(
         built_grubbs,
         AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: true }) if (alpha - 0.04).abs() < 1e-9
     ));
-    driver.click_widget("modal.ok")?;
-    let grubbs_rs = driver.app().document().result_sheets.last().ok_or("expected Grubbs outlier ResultSheet")?;
+    harness.click("modal.ok")?;
+    let grubbs_rs = harness.app().document().result_sheets.last().ok_or("expected Grubbs outlier ResultSheet")?;
     assert!(matches!(
         grubbs_rs.analysis.kind,
         AnalysisKind::OutlierDetection(OutlierSpec::Grubbs { alpha, iterative: true }) if (alpha - 0.04).abs() < 1e-9

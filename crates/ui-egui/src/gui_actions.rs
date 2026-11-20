@@ -15,19 +15,19 @@ use curvebook_doc::{
     TransformAnalysisSpec, VariableSource, XColumnMode,
 };
 use curvebook_engine::{EngineError, cmd};
+#[cfg(not(target_arch = "wasm32"))]
 use curvebook_render::RenderTargetSpec;
 use curvebook_tools::GridCellCoord;
 use serde_json::{Map, Value, json};
 
 use crate::UiApp;
-use crate::compositor::{ScreenshotRegionTarget, render_workspace_region_png};
 use crate::control_io::{
     DEFAULT_SCREENSHOT_DPI, DEFAULT_SCREENSHOT_HEIGHT_PX, DEFAULT_SCREENSHOT_WIDTH_PX, MAX_SCREENSHOT_DIM_PX, MIN_DPI, MIN_SCREENSHOT_DIM_PX,
     dispatch_ui_command_as_ui, encode_base64, opt_bool_param, opt_finite_f64_param, opt_non_empty_str_param, opt_str_param, parse_bounded_u32,
     require_params_object_or_null, write_host_file,
 };
 use crate::dialogs_canvas::{ActiveDialog, AnalyzeDuplicateChoice, AxisTarget, ExportFigureFormat, equation_display_mode_str};
-use crate::inspect::{inspect_ui_tree, inspect_ui_tree_for_metrics};
+use crate::inspect::{ScreenshotRegionTarget, inspect_ui_tree, inspect_ui_tree_for_metrics};
 use crate::interaction::{
     KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, clear_modal_text_buffers, close_active_modal, dispatch_ui_event,
     sync_dialogs_on_sheet_switch, sync_edit_params_text_buffers, sync_format_axes_text_buffers,
@@ -95,7 +95,7 @@ fn handle_ui_inspect(app: &mut UiApp, params: &Value) -> Result<Value, EngineErr
     serde_json::to_value(snap).map_err(|err| EngineError::with_code(ErrorCode::InternalError, format!("failed to serialize ui tree: {err}")))
 }
 
-fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineError> {
+fn handle_ui_screenshot(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
     let target_raw = opt_str_param(params, &["target"]).map_err(bad_input)?.unwrap_or("full_window").trim().to_ascii_lowercase();
     let region = match target_raw.as_str() {
         "" | "full_window" | "full" | "window" | "workspace" | "viewport" => ScreenshotRegionTarget::FullWindow,
@@ -123,8 +123,7 @@ fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineErro
     }
     let opt_path = opt_str_param(params, &["path"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
 
-    let (png_bytes, out_w, out_h) = render_workspace_region_png(app, RenderTargetSpec { width_px, height_px, dpi }, region)
-        .map_err(|err| EngineError::with_code(ErrorCode::Conflict, format!("screenshot capture failed: {err}")))?;
+    let (png_bytes, out_w, out_h) = capture_screenshot_png(app, region, width_px, height_px, dpi)?;
 
     let saved_path = match opt_path {
         Some(path) => {
@@ -150,6 +149,29 @@ fn handle_ui_screenshot(app: &UiApp, params: &Value) -> Result<Value, EngineErro
         "data_base64": encode_base64(&png_bytes),
         "path": saved_path,
     }))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn capture_screenshot_png(
+    app: &mut UiApp,
+    region: ScreenshotRegionTarget,
+    width_px: u32,
+    height_px: u32,
+    dpi: u16,
+) -> Result<(Vec<u8>, u32, u32), EngineError> {
+    app.render_egui_shell_screenshot_png(RenderTargetSpec { width_px, height_px, dpi }, region)
+        .map_err(|err| EngineError::with_code(ErrorCode::Conflict, format!("screenshot capture failed: {err}")))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn capture_screenshot_png(
+    _app: &mut UiApp,
+    _region: ScreenshotRegionTarget,
+    _width_px: u32,
+    _height_px: u32,
+    _dpi: u16,
+) -> Result<(Vec<u8>, u32, u32), EngineError> {
+    Err(EngineError::with_code(ErrorCode::Conflict, "screenshot capture failed: native rasterizer unavailable in wasm32 placeholder"))
 }
 
 fn parse_modifiers(val: Option<&Value>) -> Result<KeyModifiers, EngineError> {
@@ -196,18 +218,65 @@ fn handle_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, Engi
     let metrics = parse_metrics(params)?;
     let modifiers = parse_modifiers(params.get("modifiers"))?;
     let widget_id = opt_str_param(params, &["widget_id", "target_id"]).map_err(bad_input)?.map(str::trim).filter(|s| !s.is_empty());
+    if app.is_human_path_only() && widget_id.is_some() {
+        return Err(EngineError::with_code(
+            ErrorCode::GuiOnlyViolation,
+            "`ui.pointer_gesture` cannot target `widget_id` under human_path_only; use physical pixel coordinates `x`/`y`.",
+        ));
+    }
 
-    let tree = inspect_ui_tree_for_metrics(app, metrics, None, true);
-    let target_node = match widget_id {
+    #[allow(unused_mut)]
+    let mut tree = inspect_ui_tree_for_metrics(app, metrics, None, true);
+    #[allow(unused_mut)]
+    let mut target_node = match widget_id {
         Some(wid) => Some(tree.find_widget(wid).ok_or_else(|| EngineError::with_code(ErrorCode::NotFound, format!("widget `{wid}` not found")))?),
         None => None,
     };
+
+    // Stage 4 of Power & Sample Size Studio renders the interactive curve chart on the `Power Curve`
+    // sub-tab; semantic `ui.pointer_gesture` calls targeting `power.curve_hover` reveal that sub-tab
+    // so live `egui` frame geometry supplies its hit bounds.
+    #[cfg(not(target_arch = "wasm32"))]
+    if widget_id == Some("power.curve_hover")
+        && app.canvas_dialogs.active_dialog == ActiveDialog::PowerAndSampleSize
+        && app.canvas_dialogs.power_wizard.stage == PowerWizardStage::Results
+        && matches!(action.as_str(), "hover" | "click")
+        && target_node.as_ref().is_some_and(|n| n.bounds.is_none())
+    {
+        app.egui_views.power_studio.results_tab = crate::egui_shell::power_studio::PowerResultsSubTab::PowerCurve;
+        tree = inspect_ui_tree_for_metrics(app, metrics, None, true);
+        target_node = tree.find_widget("power.curve_hover");
+    }
 
     if let Some(ref node) = target_node
         && !node.enabled
         && matches!(action.as_str(), "click" | "double_click")
     {
         return Err(disabled_err(node.disabled_reason.clone().unwrap_or_else(|| format!("widget `{}` is disabled", node.widget_id))));
+    }
+
+    if let Some(ref node) = target_node
+        && matches!(action.as_str(), "click" | "double_click")
+        && !app.is_human_path_only()
+    {
+        app.focus_widget_id = Some(node.widget_id.clone());
+        if let Some(res) = try_activate_semantic_widget(app, &node.widget_id)? {
+            return Ok(res);
+        }
+        if apply_semantic_grid_pointer_click(app, &node.widget_id, modifiers) {
+            app.sync_views();
+            return Ok(json!({
+                "action": action,
+                "widget_id": widget_id,
+                "selected_rows": app.grid.selected_rows,
+                "brushed_count": app.brushed_points.len(),
+                "context_menu_target": app.interaction.context_menu_target,
+            }));
+        }
+        if let Some(res) = apply_semantic_canvas_point_click(app, &node.widget_id, modifiers) {
+            app.sync_views();
+            return Ok(res);
+        }
     }
 
     let (x, y) = resolve_pointer_xy(params, target_node.as_ref().and_then(|n| n.bounds))?;
@@ -229,10 +298,67 @@ fn handle_pointer_gesture(app: &mut UiApp, params: &Value) -> Result<Value, Engi
         if let Some(res) = try_activate_semantic_widget(app, &node.widget_id)? {
             return Ok(res);
         }
+        if !app.is_human_path_only() && apply_semantic_grid_pointer_click(app, &node.widget_id, modifiers) {
+            app.sync_views();
+        }
     }
 
     let ptr = PointerDispatchInput { action: &action, x, y, params, modifiers, metrics, widget_id, tree: &tree };
     dispatch_physical_pointer(app, &ptr)
+}
+
+fn apply_semantic_canvas_point_click(app: &mut UiApp, wid: &str, modifiers: KeyModifiers) -> Option<Value> {
+    let tail = wid.strip_prefix("canvas.point.")?;
+    let mut parts = tail.split('.');
+    let row = parts.next()?.parse::<usize>().ok()?;
+    let col = parts.next()?.parse::<usize>().ok()?;
+    let pt_idx = parts.next().and_then(|s| s.parse::<usize>().ok());
+    let active_graph_id = app.document().active_sheet_id.clone()?;
+    let gs = app.document().graph_sheet(&active_graph_id)?;
+    let source = if let Some(idx) = pt_idx
+        && let Ok(scene) = app.session().render_sheet_scene(&active_graph_id)
+        && let Some(pt) = scene.plotted_points.get(idx)
+    {
+        pt.source_cell.clone()
+    } else {
+        curvebook_doc::SourceCellId { sheet_id: gs.spec.primary_source_sheet_id.clone(), row, col, subcol: 0 }
+    };
+    if modifiers.shift || modifiers.meta || modifiers.ctrl {
+        if !app.brushed_points.contains(&source) {
+            app.brushed_points.push(source.clone());
+        }
+        if app.brushed_cell.is_none() {
+            app.brushed_cell = Some(source);
+        }
+    } else {
+        app.brushed_cell = Some(source.clone());
+        app.brushed_points = vec![source];
+    }
+    Some(json!({
+        "clicked": wid,
+        "brushed_count": app.brushed_points.len(),
+    }))
+}
+
+fn apply_semantic_grid_pointer_click(app: &mut UiApp, wid: &str, modifiers: KeyModifiers) -> bool {
+    if let Some(coord) = parse_grid_cell_widget_id(wid) {
+        let ds_opt = app.document().active_sheet_id.as_ref().and_then(|id| app.document().data_sheet(id)).cloned();
+        if let Some(ds) = ds_opt {
+            if modifiers.shift {
+                app.grid.extend_shift_range(&ds, coord);
+            } else if modifiers.meta || modifiers.ctrl {
+                app.grid.toggle_cmd_selection(&ds, coord);
+            } else {
+                app.grid.select_single_sync(coord);
+            }
+            app.sync_brush_from_grid_selection(&ds.id);
+            return true;
+        }
+    } else if let Some((row, subcol)) = parse_x_cell_widget_id(wid) {
+        app.grid.select_x_cell_sync(row, subcol);
+        return true;
+    }
+    false
 }
 
 struct PointerDispatchInput<'a> {
@@ -258,6 +384,13 @@ fn handle_power_curve_hover(app: &mut UiApp, params: &Value, x: f64, y: f64, bou
             .unwrap_or_else(|| ((x - bounds[0]) / bounds[2].max(1.0)).clamp(0.0, 1.0));
         app.canvas_dialogs.power_wizard.hover_at_fraction(frac)
     };
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some((n, _)) = hovered {
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        {
+            app.egui_views.power_studio.hover_n = Some(n.round().clamp(1.0, f64::from(u32::MAX)) as u32);
+        }
+    }
     app.interaction.last_logical_pos = Some([x, y]);
     Ok(json!({
         "action": "hover",
@@ -290,6 +423,18 @@ fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Val
     }
     if wid.starts_with("result.tab.") || wid.starts_with("edit.tab.") || wid.starts_with("power.stage.") {
         return handle_switch_tab(app, &json!({ "widget_id": wid })).map(Some);
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    if let Some(sub) = wid.strip_prefix("power.tab.") {
+        use crate::egui_shell::power_studio::PowerResultsSubTab;
+        let tab = match sub {
+            "narrative" => PowerResultsSubTab::NarrativeReport,
+            "curve" => PowerResultsSubTab::PowerCurve,
+            "sensitivity" => PowerResultsSubTab::SensitivityMatrix,
+            _ => return Ok(None),
+        };
+        app.egui_views.power_studio.results_tab = tab;
+        return Ok(Some(json!({ "clicked": wid, "results_tab": sub })));
     }
     if let Some(sheet_id) = wid.strip_prefix("nav.sheet.") {
         return handle_switch_tab(app, &json!({ "sheet_id": sheet_id })).map(Some);
@@ -325,6 +470,7 @@ fn try_activate_semantic_widget(app: &mut UiApp, wid: &str) -> Result<Option<Val
     Ok(None)
 }
 
+#[cfg(not(target_arch = "wasm32"))]
 pub(crate) fn apply_dialog_widget_click(app: &mut UiApp, wid: &str) -> Result<Option<Value>, EngineError> {
     if let Some(res) = try_toggle_dialog_widget_click(app, wid)? {
         return Ok(Some(res));
@@ -646,6 +792,14 @@ fn try_toggle_edit_params_click(app: &mut UiApp, wid: &str) -> Result<Option<Val
             app.canvas_dialogs.edit_params.graph_differences = !app.canvas_dialogs.edit_params.graph_differences;
             return Ok(Some(json!({ "clicked": wid, "updated": true })));
         }
+        "edit.two_group.graph_ranks" => {
+            app.canvas_dialogs.edit_params.graph_ranks = !app.canvas_dialogs.edit_params.graph_ranks;
+            return Ok(Some(json!({ "clicked": wid, "updated": true })));
+        }
+        "edit.two_group.hodges_lehmann" => {
+            app.canvas_dialogs.edit_params.hodges_lehmann_ci = !app.canvas_dialogs.edit_params.hodges_lehmann_ci;
+            return Ok(Some(json!({ "clicked": wid, "updated": true })));
+        }
         "edit.contingency.odds_ratio" => {
             patch.insert(String::from("compute_odds_and_risk_ratios"), json!(!ep.contingency_odds_ratio_checked));
         }
@@ -929,11 +1083,18 @@ fn dispatch_physical_pointer(app: &mut UiApp, input: &PointerDispatchInput<'_>) 
             let to_wid = opt_non_empty_str_param(params, &["to_widget_id"]).map_err(bad_input)?;
             let to_node_bounds = to_wid.and_then(|wid| tree.find_widget(wid).and_then(|n| n.bounds));
             let (tx, ty) = resolve_end_xy(params, to_node_bounds, x, y)?;
-            dispatch_ui_event(app, UiInputEvent::PointerDown { x, y, button: PointerButton::Primary, modifiers }, metrics).map_err(map_err)?;
-            dispatch_ui_event(app, UiInputEvent::PointerMove { x: tx, y: ty, modifiers }, metrics).map_err(map_err)?;
-            let out = dispatch_ui_event(app, UiInputEvent::PointerUp { x: tx, y: ty, button: PointerButton::Primary, modifiers }, metrics)
-                .map_err(map_err)?;
-            serde_json::to_value(out).unwrap_or(Value::Null)
+            #[cfg(not(target_arch = "wasm32"))]
+            if app.canvas_dialogs.active_dialog == ActiveDialog::None
+                && let Some(active_id) = app.document().active_sheet_id.as_ref()
+                && app.document().layout_sheet(active_id).is_some()
+                && let Some(out) = crate::egui_shell::inspect_bridge::dispatch_egui_pointer_drag(app, metrics, [x, y], [tx, ty], modifiers)?
+            {
+                serde_json::to_value(out).unwrap_or(Value::Null)
+            } else {
+                dispatch_fallback_drag(app, metrics, [x, y], [tx, ty], modifiers)?
+            }
+            #[cfg(target_arch = "wasm32")]
+            dispatch_fallback_drag(app, metrics, [x, y], [tx, ty], modifiers)?
         }
         _ => {
             dispatch_ui_event(app, UiInputEvent::PointerDown { x, y, button: PointerButton::Primary, modifiers }, metrics).map_err(map_err)?;
@@ -987,6 +1148,22 @@ fn resolve_end_xy(params: &Value, to_bounds: Option<[f64; 4]>, start_x: f64, sta
     Ok((start_x, start_y))
 }
 
+fn dispatch_fallback_drag(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+    start: [f64; 2],
+    end: [f64; 2],
+    modifiers: KeyModifiers,
+) -> Result<Value, EngineError> {
+    let map_err = |msg: String| EngineError::with_code(ErrorCode::BadInput, msg);
+    dispatch_ui_event(app, UiInputEvent::PointerDown { x: start[0], y: start[1], button: PointerButton::Primary, modifiers }, metrics)
+        .map_err(map_err)?;
+    dispatch_ui_event(app, UiInputEvent::PointerMove { x: end[0], y: end[1], modifiers }, metrics).map_err(map_err)?;
+    let out = dispatch_ui_event(app, UiInputEvent::PointerUp { x: end[0], y: end[1], button: PointerButton::Primary, modifiers }, metrics)
+        .map_err(map_err)?;
+    Ok(serde_json::to_value(out).unwrap_or(Value::Null))
+}
+
 fn point_in_rect(x: f64, y: f64, r: [f64; 4]) -> bool {
     x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]
 }
@@ -1012,7 +1189,7 @@ fn handle_type_text(app: &mut UiApp, params: &Value) -> Result<Value, EngineErro
         && !field_id.starts_with("grid.cell.")
         && parse_x_cell_widget_id(field_id).is_none()
     {
-        return apply_type_text_to_dialog(app, field_id, text, clear_existing, commit_enter);
+        return apply_type_text_to_dialog(app, field_id, text, clear_existing, explicit_formula_commit.unwrap_or(false));
     }
 
     let is_formula_target = wid.as_deref() == Some("formula_bar.input")
@@ -1160,6 +1337,8 @@ fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, clear_
     }
     if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
         app.canvas_dialogs.command_palette.query.clone_from(&combined_text);
+        #[cfg(not(target_arch = "wasm32"))]
+        app.egui_views.command_palette.query.clone_from(&combined_text);
         if commit_enter && let Some(hit) = app.canvas_dialogs.command_palette.matches_for_session(app.session()).first().cloned() {
             if app.is_gui_only() && is_gui_only_blocked_menu_command(hit.id) {
                 return Err(EngineError::with_code(
@@ -1168,10 +1347,10 @@ fn apply_type_text_to_dialog(app: &mut UiApp, field_id: &str, text: &str, clear_
                 )
                 .with_remediation("Select a parameterless menu/dialog command or toggle under --gui-only."));
             }
-            if let Some(res) = dispatch_ui_command_as_ui(app, hit.id, &Value::Null)? {
+            if let Some(res) = dispatch_ui_command_as_ui(app, hit.id, &json!({}))? {
                 return Ok(json!({ "typed": combined_text, "executed": hit.id, "result": res }));
             }
-            let out = app.execute_command(hit.id, Value::Null)?;
+            let out = app.execute_command(hit.id, json!({}))?;
             app.canvas_dialogs.close_dialog();
             return Ok(json!({ "typed": combined_text, "executed": hit.id, "mutated": out.mutated }));
         }
@@ -1977,7 +2156,7 @@ fn map_opt_bool(fields: &Map<String, Value>, keys: &[&str]) -> Result<Option<boo
     Ok(None)
 }
 
-fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
+pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) -> Result<(), EngineError> {
     let preset = app.locale_preset.clone();
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::PowerAndSampleSize => app.canvas_dialogs.power_wizard.apply_field_patch_localized(fields, &preset).map_err(disabled_err)?,
@@ -2617,14 +2796,15 @@ pub(crate) fn cancel_formula_bar(app: &mut UiApp) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::compositor::FramePalette;
-    use crate::interaction::{UiInputEvent, ViewportMetrics, dispatch_ui_event};
-    use crate::layout::LayoutTree;
-    use crate::text_bridge::DesktopTextMeasurer;
-    use crate::views::build_workspace_layout_tree;
+    use crate::inspect::{UiTreeSnapshot, UiWidgetNode, inspect_ui_tree};
+    use crate::interaction::{UiInputEvent, dispatch_ui_event};
 
-    fn build_tree(app: &UiApp, vp: ViewportMetrics) -> LayoutTree {
-        build_workspace_layout_tree(app, vp, &DesktopTextMeasurer::new(), &FramePalette::from_theme(&app.theme))
+    fn inspect_dialog(app: &UiApp) -> UiTreeSnapshot {
+        inspect_ui_tree(app, Some("dialog"), false)
+    }
+
+    fn dialog_node<'a>(snap: &'a UiTreeSnapshot, wid: &str) -> Option<&'a UiWidgetNode> {
+        snap.dialog.as_ref().and_then(|d| d.tabs.iter().chain(d.controls.iter()).chain(d.buttons.iter()).find(|n| n.widget_id == wid))
     }
 
     fn make_9col_mv_app() -> Result<(UiApp, SheetId, SheetId), String> {
@@ -2659,19 +2839,18 @@ mod tests {
     #[test]
     fn w6_mv_pcr_cluster_two_group_factorial_and_fit() -> Result<(), String> {
         let (mut app, ds_id, _gs_id) = make_9col_mv_app()?;
-        let vp = ViewportMetrics::default();
 
         // 1. Analyze picker PCR inline controls & R10 outcome gating.
         let doc = app.document().clone();
         assert!(app.canvas_dialogs.open_analyze_dialog(&doc, &ds_id));
         app.canvas_dialogs.analyze.select_catalog_entry("stats.pcr");
-        let tree_an = build_tree(&app, vp);
-        assert!(tree_an.node("analyze.pca.pred.0").is_some());
-        assert!(tree_an.node("analyze.pcr.outcome.0").is_some());
+        let snap_an = inspect_dialog(&app);
+        assert!(dialog_node(&snap_an, "analyze.pca.pred.0").is_some());
+        assert!(dialog_node(&snap_an, "analyze.pcr.outcome.0").is_some());
         app.canvas_dialogs.analyze.toggle_pca_predictor(2);
-        let tree_an2 = build_tree(&app, vp);
-        assert_eq!(tree_an2.node("analyze.pcr.outcome.2").map(|n| n.state.enablement.enabled), Some(false));
-        assert_eq!(tree_an2.node("analyze.pcr.outcome.3").map(|n| n.state.enablement.enabled), Some(true));
+        let snap_an2 = inspect_dialog(&app);
+        assert_eq!(dialog_node(&snap_an2, "analyze.pcr.outcome.2").map(|n| n.enabled), Some(false));
+        assert_eq!(dialog_node(&snap_an2, "analyze.pcr.outcome.3").map(|n| n.enabled), Some(true));
         app.canvas_dialogs.close_dialog();
 
         // 2. Two-group & Factorial ANOVA MV selectors (>6 cols).
@@ -2684,11 +2863,11 @@ mod tests {
         let tg_id = SheetId::from(tg.payload["sheet_id"].as_str().ok_or("missing tg sheet")?);
         let doc = app.document().clone();
         assert!(app.canvas_dialogs.open_edit_parameters(&doc, &tg_id));
-        let tree_tg = build_tree(&app, vp);
-        assert!(tree_tg.node("edit.dataset.8").is_some(), "expected >6 dataset buttons rendered");
-        assert!(tree_tg.node("edit.two_group.welch").is_some());
-        assert!(tree_tg.node("edit.two_group.group.1").is_some());
-        assert!(tree_tg.node("edit.two_group.resp.8").is_some());
+        let snap_tg = inspect_dialog(&app);
+        assert!(dialog_node(&snap_tg, "edit.dataset.8").is_some(), "expected >6 dataset buttons rendered");
+        assert!(dialog_node(&snap_tg, "edit.two_group.welch").is_some());
+        assert!(dialog_node(&snap_tg, "edit.two_group.group.1").is_some());
+        assert!(dialog_node(&snap_tg, "edit.two_group.resp.8").is_some());
         app.canvas_dialogs.close_dialog();
 
         let fac = app
@@ -2700,9 +2879,9 @@ mod tests {
         let fac_id = SheetId::from(fac.payload["sheet_id"].as_str().ok_or("missing fac sheet")?);
         let doc = app.document().clone();
         assert!(app.canvas_dialogs.open_edit_parameters(&doc, &fac_id));
-        let tree_fac = build_tree(&app, vp);
-        assert!(tree_fac.node("edit.fac.resp.8").is_some());
-        assert!(tree_fac.node("edit.fac.col.1").is_some());
+        let snap_fac = inspect_dialog(&app);
+        assert!(dialog_node(&snap_fac, "edit.fac.resp.8").is_some());
+        assert!(dialog_node(&snap_fac, "edit.fac.col.1").is_some());
         app.canvas_dialogs.close_dialog();
 
         // 3. Clustering controls & Fit MV selectors on fit.tab.model.
@@ -2711,7 +2890,7 @@ mod tests {
         let cl_id = SheetId::from(cl.payload["sheet_id"].as_str().ok_or("missing clust sheet")?);
         let doc = app.document().clone();
         assert!(app.canvas_dialogs.open_edit_parameters(&doc, &cl_id));
-        let tree_cl = build_tree(&app, vp);
+        let snap_cl = inspect_dialog(&app);
         for id in [
             "edit.cluster.k_means_auto",
             "edit.cluster.k_sweep_max.inc",
@@ -2721,7 +2900,7 @@ mod tests {
             "edit.cluster.link.centroid",
             "edit.cluster.link.median",
         ] {
-            assert!(tree_cl.node(id).is_some(), "missing cluster control {id}");
+            assert!(dialog_node(&snap_cl, id).is_some(), "missing cluster control {id}");
         }
         try_toggle_edit_params_click(&mut app, "edit.cluster.k_means_auto").map_err(|e| e.to_string())?;
         assert!(matches!(
@@ -2751,11 +2930,11 @@ mod tests {
         let fit_id = SheetId::from(fit.payload["sheet_id"].as_str().ok_or("missing fit sheet")?);
         let doc = app.document().clone();
         assert!(app.canvas_dialogs.open_edit_parameters(&doc, &fit_id));
-        let tree_fit = build_tree(&app, vp);
-        assert!(tree_fit.node("fit.tab.model").is_some());
-        assert!(tree_fit.node("fit.mv.x.2").is_some());
-        assert!(tree_fit.node("fit.mv.y.3").is_some());
-        assert!(tree_fit.node("fit.mv.group.1").is_some());
+        let snap_fit = inspect_dialog(&app);
+        assert!(dialog_node(&snap_fit, "fit.tab.model").is_some());
+        assert!(dialog_node(&snap_fit, "fit.mv.x.2").is_some());
+        assert!(dialog_node(&snap_fit, "fit.mv.y.3").is_some());
+        assert!(dialog_node(&snap_fit, "fit.mv.group.1").is_some());
         Ok(())
     }
 

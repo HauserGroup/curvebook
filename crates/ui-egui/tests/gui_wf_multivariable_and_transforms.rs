@@ -126,7 +126,7 @@ fn ensure_grid_widget_visible(app: &mut UiApp, target_id: &str) -> TestRes {
             .and_then(|w| w["widget_id"].as_str())
             .ok_or_else(|| format!("no visible grid cell anchor to wheel while scrolling to `{target_id}`"))?
             .to_owned();
-        gui(app, "ui.pointer_gesture", json!({ "widget_id": anchor, "gesture": "wheel", "delta_x": 180.0, "delta_y": 0.0 }))?;
+        gui(app, "ui.pointer_gesture", json!({ "widget_id": anchor, "gesture": "wheel", "delta_x": -180.0, "delta_y": 0.0 }))?;
     }
     Err(format!("grid widget `{target_id}` did not scroll into view"))
 }

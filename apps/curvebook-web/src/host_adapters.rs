@@ -11,11 +11,10 @@ use std::fmt;
 
 use curvebook_engine::cmd;
 use curvebook_format::{CURRENT_PREFERENCES_VERSION, CsvOptions, PreferencesFile, export_datasheet_to_csv, parse_preferences_json};
-use curvebook_ui_egui::layout::WidgetAction;
 use curvebook_ui_egui::serde_json::{self, Map, Value, json};
 use curvebook_ui_egui::{
     ActiveDialog, CanvasPreviewFilter, ClipboardBundle, KeyModifiers, PointerButton, PrintJobSpec, UiApp, UiEventOutcome, UiInputEvent,
-    ViewportMetrics, dispatch_ui_command, execute_widget_action,
+    ViewportMetrics, dispatch_ui_command,
 };
 
 use crate::chrome_bridge::{
@@ -2675,8 +2674,9 @@ impl WebBridgeSession {
             }
             UiInputEvent::DoubleClick { x, y, button, modifiers } => {
                 let chrome_layout = self.current_chrome_layout();
-                if curvebook_ui_egui::layout::hit_test_logical(&chrome_layout.tree, x, y)
-                    .is_some_and(|n| n.id.as_str() == "modal.backdrop" || n.z_layer >= curvebook_ui_egui::layout::ZLayer::DropdownMenu)
+                if chrome_layout
+                    .hit_test_logical(x, y)
+                    .is_some_and(|n| n.id == "modal.backdrop" || n.z_layer >= crate::text_bridge::ZLayer::DropdownMenu)
                 {
                     return self.finish_chrome_dispatch(WebChromeDispatch::BlockedByModalBackdrop);
                 }
@@ -2758,10 +2758,10 @@ impl WebBridgeSession {
         modifiers: KeyModifiers,
     ) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         let chrome_layout = self.current_chrome_layout();
-        let Some(node) = chrome_layout.tree.node(node_id).cloned() else {
+        let Some(node) = chrome_layout.find_node(node_id).cloned() else {
             return Err(WebAdapterError::Validation(format!("chrome node `{node_id}` not found")));
         };
-        let rect = node.bounds.rect_px;
+        let rect = node.rect_px;
         #[allow(clippy::cast_possible_wrap)]
         let phys_x = rect.x.saturating_add((rect.width / 2) as i32);
         #[allow(clippy::cast_possible_wrap)]
@@ -2833,71 +2833,10 @@ impl WebBridgeSession {
             }
             WebChromeDispatch::ShortcutTriggered(act) => self.dispatch_shortcut_action(act),
             WebChromeDispatch::InvokeChromeAction(act) => self.dispatch_chrome_action(act),
-            WebChromeDispatch::ExecuteWidget { widget_id, action } => self.execute_web_widget_action(&widget_id, action),
             WebChromeDispatch::BlockedByModalBackdrop => {
                 Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("modal.backdrop_blocked")), None)?])
             }
             WebChromeDispatch::Ignored => Ok(Vec::new()),
-        }
-    }
-
-    fn execute_web_widget_action(&mut self, widget_id: &str, action: WidgetAction) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
-        match action {
-            WidgetAction::DialogConfirm => self.dispatch_chrome_action(WebChromeAction::DialogConfirm),
-            WidgetAction::InvokeCommand { command_id, params } => {
-                if self.host.app().canvas_dialogs.active_dialog == ActiveDialog::CommandPalette && widget_id.starts_with("palette.hit.") {
-                    self.host.app_mut().canvas_dialogs.close_dialog();
-                }
-                self.chrome.close_popups();
-                {
-                    let app = self.host.app_mut();
-                    app.interaction.open_menu = None;
-                    app.interaction.open_dropdown = None;
-                    app.interaction.context_menu_target = None;
-                }
-                let resolved = if params.is_null() || params.as_object().is_some_and(Map::is_empty) {
-                    contextual_command_params(self.host.app(), &command_id)
-                } else {
-                    params
-                };
-                self.execute_chrome_command_or_dispatch(&command_id, resolved)
-            }
-            other => {
-                let mutating_dialog_action = !matches!(
-                    other,
-                    WidgetAction::NoOp
-                        | WidgetAction::MenuOpen(_)
-                        | WidgetAction::OpenDropdown(_)
-                        | WidgetAction::ClosePopupOrModal
-                        | WidgetAction::DialogCancel
-                        | WidgetAction::SwitchSheet { .. }
-                        | WidgetAction::ToggleFolder(_)
-                        | WidgetAction::ToggleFamilyPane
-                        | WidgetAction::SelectResultTab(_)
-                        | WidgetAction::ToggleInspectorTab(_)
-                        | WidgetAction::SetCanvasZoomFit
-                        | WidgetAction::CycleCanvasZoomPreset
-                        | WidgetAction::ScrollBy { .. }
-                        | WidgetAction::ScrollbarTrackJump { .. }
-                        | WidgetAction::FocusWidget(_)
-                );
-                if mutating_dialog_action && self.access_mode.is_read_only() {
-                    return Err(self.read_only_err(widget_id));
-                }
-                let before = self.capture_pref_fingerprint();
-                let viewport = self.host.viewport();
-                let outcome = execute_widget_action(self.host.app_mut(), &other, viewport).map_err(WebAdapterError::Workspace)?;
-                {
-                    let app = self.host.app_mut();
-                    let doc = app.document().clone();
-                    app.nav.sync_from_document(&doc);
-                    app.sync_views();
-                }
-                self.chrome.sync_from_app(self.host.app());
-                let mut cmds = vec![self.render_frame_command(self.render_dpi, Some(outcome.action), outcome.command_result)?];
-                self.maybe_append_preferences_persist(&before, &mut cmds);
-                Ok(cmds)
-            }
         }
     }
 
@@ -2966,6 +2905,12 @@ impl WebBridgeSession {
     fn dispatch_chrome_action(&mut self, action: WebChromeAction) -> Result<Vec<WebBridgeCommand>, WebAdapterError> {
         match action {
             WebChromeAction::InvokeCommand(command_id) => {
+                self.chrome.close_popups();
+                {
+                    let app = self.host.app_mut();
+                    app.interaction.open_menu = None;
+                    app.interaction.open_dropdown = None;
+                }
                 let params = contextual_command_params(self.host.app(), &command_id);
                 self.execute_chrome_command_or_dispatch(&command_id, params)
             }
@@ -3027,6 +2972,24 @@ impl WebBridgeSession {
                     ]),
                 }
             }
+            WebChromeAction::ToggleMenuSection(key) => {
+                let norm = if key.starts_with("menu.") { key.clone() } else { format!("menu.{key}") };
+                let next = if self.chrome.open_menu_key.as_deref() == Some(norm.as_str()) { None } else { Some(norm) };
+                self.chrome.open_menu_key.clone_from(&next);
+                self.host.app_mut().interaction.open_menu = next;
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(format!("chrome.menu:{key}")), None)?])
+            }
+            WebChromeAction::DialogCancel | WebChromeAction::CloseModalBackdrop => {
+                self.host.app_mut().canvas_dialogs.close_dialog();
+                self.host.app_mut().focus_widget_id = None;
+                self.chrome.close_popups();
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("dialog.closed")), None)?])
+            }
+            WebChromeAction::DismissContextMenu => {
+                self.chrome.context_menu = None;
+                self.host.app_mut().interaction.context_menu_target = None;
+                Ok(vec![self.render_frame_command(self.render_dpi, Some(String::from("context_menu.dismissed")), None)?])
+            }
             _ => Ok(Vec::new()),
         }
     }
@@ -3067,10 +3030,6 @@ impl WebBridgeSession {
                 if ui_cmd == "ui.palette.open" {
                     let app = self.host.app_mut();
                     app.focus_widget_id = Some(String::from("palette.query"));
-                    app.interaction.text_field_buffers.insert(
-                        String::from("palette.query"),
-                        curvebook_ui_egui::layout::widgets::TextFieldEditState::new(&app.canvas_dialogs.command_palette.query, false),
-                    );
                 }
                 self.host.app_mut().sync_views();
                 self.chrome.sync_from_app(self.host.app());
@@ -3386,7 +3345,19 @@ impl WebBridgeSession {
         let viewport = self.host.viewport();
         let chrome_layout = self.chrome.build_layout(self.host.app(), viewport);
         let bg = self.host.app().theme.surface_bg;
-        let layered = WebTextBridge::compose_layout_tree_frame(&chrome_layout.tree, &self.text_measurer, dpi, [bg.r, bg.g, bg.b, bg.a]);
+        let width_px = viewport.physical_width_px().max(1);
+        let height_px = viewport.physical_height_px().max(1);
+        let modal_active = self.host.app().canvas_dialogs.active_dialog != ActiveDialog::None;
+        let popup_open = self.chrome.open_menu_key.is_some() || self.chrome.context_menu.is_some() || self.host.app().interaction.open_menu.is_some();
+        let layered = WebTextBridge::compose_placeholder_frame_with_popup(
+            width_px,
+            height_px,
+            dpi,
+            [bg.r, bg.g, bg.b, bg.a],
+            &chrome_layout.snapshot.status_summary,
+            popup_open,
+            modal_active,
+        );
         WebTextBridge::validate_layered_frame(&layered)?;
         let pan_zoom = &self.host.app().canvas_dialogs.pan_zoom;
         Ok(WebBridgeCommand::RenderRgbaFrame {
@@ -4182,7 +4153,7 @@ mod tests {
         assert!(rgba_layers.iter().any(|l| l.z_band == ZLayerBand::PopupDropdown && !l.uses_base_frame));
         assert!(text_ops.iter().any(|op| op.z_band == ZLayerBand::PopupDropdown && op.clip_px.is_some()));
 
-        // Clicking File > Open triggers browser picker protocol through the shared LayoutTree node `menu.project.open`.
+        // Clicking File > Open triggers browser picker protocol through the web chrome menu node `menu.project.open`.
         scroll_popup_until_node_visible(&mut session, "popup.menu.file", "menu.project.open");
         let picker_cmds = session
             .handle_event(WebBridgeEvent::ClickChromeNode {
@@ -4522,7 +4493,7 @@ mod tests {
             .expect("create ResultSheet");
 
         // Open `menu.view`: automation-only `ui.event.dispatch` must be omitted across entire scroll range,
-        // and theme/filter/locale clicks succeed via shared `LayoutTree` menu nodes.
+        // and theme/filter/locale clicks succeed via web chrome menu nodes.
         session
             .handle_event(WebBridgeEvent::ClickChromeNode {
                 node_id: String::from("menu.view"),

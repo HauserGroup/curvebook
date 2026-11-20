@@ -14,7 +14,7 @@ use std::path::{Path, PathBuf};
 
 use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
 use curvebook_render::RenderTargetSpec;
-use curvebook_ui_egui::{RenderError, UiApp, UiThemeMode, dispatch_ui_command, render_workspace_frame_png};
+use curvebook_ui_egui::{RenderError, ScreenshotRegionTarget, UiApp, UiThemeMode, dispatch_ui_command};
 use serde_json::json;
 
 const WIDTH_PX: u32 = 1440;
@@ -39,8 +39,12 @@ fn write_png(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn render_png_bytes(app: &UiApp) -> Result<Vec<u8>, RenderError> {
-    render_workspace_frame_png(app, RenderTargetSpec { width_px: WIDTH_PX, height_px: HEIGHT_PX, dpi: DPI })
+fn render_png_bytes(app: &mut UiApp) -> Result<Vec<u8>, RenderError> {
+    let (png, _, _) = app.render_egui_shell_screenshot_png(
+        RenderTargetSpec { width_px: WIDTH_PX, height_px: HEIGHT_PX, dpi: DPI },
+        ScreenshotRegionTarget::FullWindow,
+    )?;
+    Ok(png)
 }
 
 fn build_synthetic_dose_response_sheet(id: &str) -> Result<DataSheet, Box<dyn Error>> {
@@ -194,7 +198,7 @@ fn build_split_fit_png() -> Result<Vec<u8>, Box<dyn Error>> {
     app.canvas_dialogs.status_banner = Some(String::from("4PL Fit Ready | R2 = 0.996 | 95% CI Ribbon | SD Error Bars"));
     app.sync_views();
 
-    Ok(render_png_bytes(&app)?)
+    Ok(render_png_bytes(&mut app)?)
 }
 
 fn build_layout_dark_png() -> Result<Vec<u8>, Box<dyn Error>> {
@@ -374,5 +378,5 @@ fn build_layout_dark_png() -> Result<Vec<u8>, Box<dyn Error>> {
     app.canvas_dialogs.status_banner = Some(String::from("Double Column 174 mm | Rulers: mm | Scale bar: 20 mm"));
     app.sync_views();
 
-    Ok(render_png_bytes(&app)?)
+    Ok(render_png_bytes(&mut app)?)
 }

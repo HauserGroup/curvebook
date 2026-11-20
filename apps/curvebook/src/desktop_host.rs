@@ -22,17 +22,16 @@ use curvebook_format::{
     MAX_ARCHIVE_FILE_BYTES, RecoveryReport, instantiate_template_bytes, is_unpacked_project_dir,
 };
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
+use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
-use curvebook_ui_egui::interaction::{
-    InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, WorkspaceHitTarget,
-};
-use curvebook_ui_egui::layout::{WidgetAction, hit_test_logical};
+use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
 use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
-use curvebook_ui_egui::workspace_nav::{ActiveWorkspacePane, WelcomeMode};
+use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
-    CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, LOCALES, OsAdapterStatus, UiApp, dispatch_ui_command,
-    is_http_request_line, read_os_pasteboard, serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
+    BETA_ACTIVE_LOCALES, CanvasPreviewFilter, ClipboardBundle, ControlAuth, ControlPostRequestContext, ControlRequest, OsAdapterStatus, UiApp,
+    dispatch_ui_command, encode_egui_control_response, is_http_request_line, normalize_beta_gui_locale, read_os_pasteboard,
+    serve_control_stream_with_quit_and_hook, tr, write_os_clipboard_bundle, write_os_pasteboard,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
@@ -124,6 +123,20 @@ pub struct ImePreeditState {
     pub cursor: Option<(usize, usize)>,
 }
 
+mod ui_backend_serde {
+    use curvebook_ui_egui::egui_shell::UiBackend;
+    use serde::{Deserialize, Deserializer, Serializer};
+
+    pub fn serialize<S: Serializer>(backend: &UiBackend, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(backend.as_str())
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(deserializer: D) -> Result<UiBackend, D::Error> {
+        let raw = String::deserialize(deserializer)?;
+        UiBackend::from_env_and_args(None, Some(&raw)).map_err(serde::de::Error::custom)
+    }
+}
+
 /// Host runtime configuration constructed from CLI flags (`--in-window-menus`, `--new-instance`, ...)
 /// or embedded test harnesses.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -132,6 +145,8 @@ pub struct DesktopHostConfig {
     pub new_instance: bool,
     #[serde(default)]
     pub gui_only: bool,
+    #[serde(default, with = "ui_backend_serde")]
+    pub ui_backend: UiBackend,
     pub locale_override: Option<String>,
     pub theme_override: Option<String>,
     pub recovery_root: Option<PathBuf>,
@@ -144,6 +159,7 @@ impl Default for DesktopHostConfig {
             in_window_menus: false,
             new_instance: false,
             gui_only: false,
+            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -173,7 +189,7 @@ mod arc_bytes_serde {
     }
 }
 
-/// Rendered software compositor framebuffer output returned by [`DesktopHostEvent::RedrawRequested`].
+/// Rendered software `egui` framebuffer output returned by [`DesktopHostEvent::RedrawRequested`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct DesktopFrameOutput {
     pub window_id: DesktopWindowId,
@@ -851,6 +867,35 @@ where
     }
 
     let prepended_reauth = conn_authenticated && kind == ControlFrameKind::Command;
+    if prepended_reauth
+        && win.app().ui_backend() == UiBackend::Egui
+        && let Ok(text) = std::str::from_utf8(raw_bytes)
+        && let Ok(req) = serde_json::from_str::<ControlRequest>(text.trim())
+    {
+        let prev_undo_depth = win.app().session().undo_depth();
+        let prev_redo_depth = win.app().session().redo_depth();
+        let prev_dirty = win.app().session().is_dirty();
+        let prev_mutation_seq = win.app().mutation_seq();
+        let method = req.method.clone();
+        if let Some(res) = win.app_mut().try_dispatch_egui_backend(&req.method, &req.params) {
+            let reply = encode_egui_control_response(req.id, res);
+            let mut response_bytes = serde_json::to_vec(&reply).map_err(|err| format!("failed to encode control response: {err}"))?;
+            response_bytes.push(b'\n');
+            let post_ctx = ControlPostRequestContext {
+                method: &method,
+                steps: &[],
+                prev_undo_depth,
+                prev_redo_depth,
+                prev_dirty,
+                prev_mutation_seq,
+                rolled_back: false,
+                request_ok: reply.ok,
+            };
+            on_post_request(win.app(), &post_ctx)?;
+            win.app_mut().sync_views();
+            return Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None });
+        }
+    }
     let reauth_line = if prepended_reauth { Some(build_control_reauth_line(auth)?) } else { None };
     let mut out_bytes = Vec::new();
     let mut last_saved_path: Option<PathBuf> = None;
@@ -898,8 +943,9 @@ where
 }
 
 fn configure_app_overrides(app: &mut UiApp, cfg: &DesktopHostConfig) -> Result<(), String> {
+    app.set_ui_backend(cfg.ui_backend);
     if let Some(locale) = cfg.locale_override.as_deref() {
-        let _ = app.set_locale(locale);
+        let _ = app.set_locale(normalize_beta_gui_locale(locale));
     }
     if let Some(theme_raw) = cfg.theme_override.as_deref() {
         let mode = parse_theme_mode(theme_raw)?;
@@ -1016,7 +1062,7 @@ impl DesktopWindowSession {
         self.coasting_active
     }
 
-    /// Last rendered software compositor frame, if [`DesktopHostEvent::RedrawRequested`] has run.
+    /// Last rendered software `egui` frame, if [`DesktopHostEvent::RedrawRequested`] has run.
     #[must_use]
     pub fn last_frame(&self) -> Option<&DesktopFrameOutput> {
         self.last_frame.as_ref()
@@ -1147,7 +1193,7 @@ impl DesktopWindowSession {
         Ok(())
     }
 
-    fn record_ui_mutation_checkpoint(
+    pub(crate) fn record_ui_mutation_checkpoint(
         &mut self,
         command_id: Option<&str>,
         prev_undo: usize,
@@ -1180,7 +1226,7 @@ impl DesktopWindowSession {
     /// Render a single RGBA frame matching `self.viewport` (`physical_width = logical * scale_factor`).
     ///
     /// # Errors
-    /// Returns an error if the software compositor fails.
+    /// Returns an error if the software `egui` rasterizer fails.
     pub fn render_frame(&mut self) -> Result<DesktopFrameOutput, String> {
         if let Some(journal) = &mut self.recovery_journal {
             maybe_renew_journal_lease_periodically(journal);
@@ -1197,14 +1243,15 @@ impl DesktopWindowSession {
             None
         };
 
-        let raster_res = self.app.render_rgba_for_metrics(self.viewport, BASE_LOGICAL_DPI);
+        let target = self.viewport.to_render_target_spec(BASE_LOGICAL_DPI);
+        let raster_res = self.app.render_egui_shell_rgba(target, curvebook_ui_egui::ScreenshotRegionTarget::FullWindow);
         if let Some((orig_buf, orig_caret, orig_grid_buf)) = saved_preedit_snapshot {
             self.app.inline_editor.buffer = orig_buf;
             self.app.inline_editor.caret_byte = orig_caret;
             self.app.grid.tool.editing_buffer = orig_grid_buf;
         }
 
-        let raster = raster_res.map_err(|err| format!("compositor render failed: {err}"))?;
+        let raster = raster_res.map_err(|err| format!("egui rasterize failed: {err}"))?;
         let elapsed_ms = started.elapsed().as_secs_f64() * 1000.0;
         #[allow(clippy::cast_possible_truncation)]
         let scale_factor = self.viewport.clamped_scale_factor() as f32;
@@ -1621,6 +1668,12 @@ impl DesktopHostRuntime {
         self.open_file_dialog_hook = Some(OpenFileDialogHook(Box::new(hook)));
     }
 
+    /// Return `true` when a [`NativeFileDialogAdapter`] is already installed.
+    #[must_use]
+    pub fn has_file_dialog_adapter(&self) -> bool {
+        self.file_dialog_adapter.is_some()
+    }
+
     /// Install a [`NativeFileDialogAdapter`] used by drawn File menu items, toolbar Open/Save/Export,
     /// Welcome Open, and native menu file actions.
     pub fn set_file_dialog_adapter(&mut self, adapter: Arc<dyn NativeFileDialogAdapter>) {
@@ -1636,6 +1689,16 @@ impl DesktopHostRuntime {
     /// # Errors
     /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
     pub fn dispatch_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<Option<DesktopEventOutcome>, String> {
+        if command_id == "project.open"
+            && let Some(mut hook) = self.open_file_dialog_hook.take()
+        {
+            let picked = (hook.0)(window_id);
+            self.open_file_dialog_hook = Some(hook);
+            if let Some(path) = picked? {
+                return self.handle_file_dropped(window_id, path).map(Some);
+            }
+            return Ok(Some(Self::cancelled_file_dialog_outcome(window_id, command_id)));
+        }
         let Some(adapter) = self.file_dialog_adapter.as_ref().map(Arc::clone) else {
             return Ok(None);
         };
@@ -1820,8 +1883,13 @@ impl DesktopHostRuntime {
         }
     }
 
-    fn capture_pref_fingerprint(app: &UiApp) -> (String, curvebook_ui_egui::UiThemeMode, String) {
-        (app.locale.clone(), app.theme.mode, app.shortcuts.export_overrides_json().unwrap_or_default())
+    fn capture_pref_fingerprint(app: &UiApp) -> (String, curvebook_ui_egui::UiThemeMode, u32, String) {
+        (app.locale.clone(), app.theme.mode, app.ui_scale().to_bits(), app.shortcuts.export_overrides_json().unwrap_or_default())
+    }
+
+    /// Persist `preferences.json` for `window_id` when a persistence hook is attached.
+    pub fn notify_preferences_changed(&mut self, window_id: DesktopWindowId) {
+        self.persist_window_preferences(window_id);
     }
 
     /// Borrow the active [`DesktopHostConfig`].
@@ -2270,58 +2338,18 @@ impl DesktopHostRuntime {
         })
     }
 
-    fn take_intercepted_native_file_command(&mut self, window_id: DesktopWindowId, ui_event: &UiInputEvent) -> Result<Option<String>, String> {
-        if self.file_dialog_adapter.is_none() {
-            return Ok(None);
-        }
-        let UiInputEvent::PointerUp { x, y, button: PointerButton::Primary, .. } = ui_event else {
-            return Ok(None);
-        };
-        let win = self.window_mut(window_id)?;
-        let Some(pressed_id) = win.app.interaction.pressed_widget_id.clone() else {
-            return Ok(None);
-        };
-        let tree = win.app.build_and_cache_layout_tree(win.viewport);
-        let Some(node) = hit_test_logical(&tree, *x, *y) else {
-            return Ok(None);
-        };
-        if node.id.as_str() != pressed_id || !node.state.enablement.enabled {
-            return Ok(None);
-        }
-        let WidgetAction::InvokeCommand { command_id, params } = &node.action else {
-            return Ok(None);
-        };
-        let has_explicit_path = params.get("path").and_then(Value::as_str).is_some_and(|p| !p.trim().is_empty());
-        if has_explicit_path || !menu_action_triggers_native_file_dialog(command_id) {
-            return Ok(None);
-        }
-        let cmd = command_id.clone();
-        win.app.interaction.pointer_down = false;
-        win.app.interaction.pressed_widget_id = None;
-        win.app.interaction.open_menu = None;
-        win.app.interaction.open_dropdown = None;
-        win.app.interaction.context_menu_target = None;
-        win.app.view_shards.toolbar_menus.active_context_menu_id = None;
-        Ok(Some(cmd))
-    }
-
     fn dispatch_ui_event_on_window(&mut self, window_id: DesktopWindowId, ui_event: UiInputEvent) -> Result<DesktopEventOutcome, String> {
-        if let Some(cmd) = self.take_intercepted_native_file_command(window_id, &ui_event)?
-            && let Some(outcome) = self.dispatch_native_file_command(window_id, &cmd)?
-        {
-            return Ok(outcome);
-        }
         let check_shortcuts = !matches!(ui_event, UiInputEvent::PointerMove { .. }) && self.preferences_persist_hook.is_some();
         let win = self.window_mut(window_id)?;
         let prev_undo = win.app.session().undo_depth();
         let prev_redo = win.app.session().redo_depth();
         let prev_dirty = win.app.session().is_dirty();
         let prev_mutation_seq = win.app.mutation_seq();
-        let prev_basic = (win.app.locale.clone(), win.app.theme.mode);
+        let prev_basic = (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits());
         let prev_shortcuts = if check_shortcuts { Some(win.app.shortcuts.export_overrides_json().unwrap_or_default()) } else { None };
         let ui_out: UiEventOutcome = win.app.dispatch_ui_event(ui_event, win.viewport)?;
         win.record_ui_mutation_checkpoint(ui_out.command_id.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)?;
-        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode)
+        let prefs_changed = prev_basic != (win.app.locale.clone(), win.app.theme.mode, win.app.ui_scale().to_bits())
             || prev_shortcuts.as_deref().is_some_and(|before| before != win.app.shortcuts.export_overrides_json().unwrap_or_default());
         if prefs_changed {
             self.persist_window_preferences(window_id);
@@ -2401,33 +2429,45 @@ impl DesktopHostRuntime {
     ) -> Result<DesktopEventOutcome, String> {
         let (modal_open, grid_sheet_id, over_scene_paper) = {
             let win = self.window(window_id)?;
-            if win.app.canvas_dialogs.active_dialog != ActiveDialog::None || win.app.nav.welcome.open {
+            if win.app.canvas_dialogs.active_dialog != ActiveDialog::None
+                || win.app.nav.welcome.open
+                || win.app.grid.import_wizard.open
+                || win.app.grid.variables_dialog.open
+            {
                 (true, None, false)
             } else {
-                let layout = win.app.layout_map(win.viewport);
-                let hit = layout.hit_test_logical(x_pt, y_pt);
                 let doc = win.app.document();
-                let grid_hit_rect = if x_pt >= 0.0 && y_pt >= 0.0 {
-                    let phys = win.viewport.logical_to_physical_px([x_pt, y_pt]);
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                    let (px, py) = (phys[0].clamp(0.0, f64::from(u32::MAX)).round() as u32, phys[1].clamp(0.0, f64::from(u32::MAX)).round() as u32);
-                    layout.grid_geometry.as_ref().filter(|g| g.sheet_rect.contains(px, py)).map(|g| g.sheet_id.clone())
+                let snap = curvebook_ui_egui::inspect_ui_tree_for_metrics(&win.app, win.viewport, None, true);
+                let [px, py] = win.viewport.logical_to_physical_px([x_pt, y_pt]);
+                let contains_pt = |bounds: Option<[f64; 4]>| -> bool {
+                    bounds.is_some_and(|b| b[2] > 0.0 && b[3] > 0.0 && px >= b[0] && px <= b[0] + b[2] && py >= b[1] && py <= b[1] + b[3])
+                };
+                let canvas_hits = snap.canvas_elements.as_deref().unwrap_or(&[]);
+                let over_nav = snap.navigator_sheets.as_deref().unwrap_or(&[]).iter().any(|n| contains_pt(n.bounds));
+                let over_viewport = !over_nav
+                    && canvas_hits
+                        .iter()
+                        .any(|n| matches!(n.widget_id.as_str(), "canvas.viewport" | "canvas.split.viewport") && contains_pt(n.bounds));
+                let over_grid_widget = !over_nav && snap.grid_cells.as_deref().unwrap_or(&[]).iter().any(|n| contains_pt(n.bounds));
+                let over_primary_pane = !over_nav && canvas_hits.iter().any(|n| n.widget_id == "center.pane.primary" && contains_pt(n.bounds));
+                let over_secondary_pane = !over_nav && canvas_hits.iter().any(|n| n.widget_id == "center.pane.secondary" && contains_pt(n.bounds));
+
+                let (primary_id, secondary_opt) =
+                    if win.app.split.enabled { win.app.split.resolve_sheets(doc) } else { (doc.active_sheet_id.clone(), None) };
+                let resolved_secondary = secondary_opt
+                    .or_else(|| doc.data_sheets.iter().find(|d| Some(&d.id) != primary_id.as_ref()).map(|d| d.id.clone()))
+                    .or_else(|| doc.data_sheets.first().map(|d| d.id.clone()));
+
+                let grid_target = if over_viewport {
+                    None
+                } else if over_secondary_pane && win.app.split.enabled {
+                    resolved_secondary.filter(|id| doc.data_sheet(id).is_some())
+                } else if over_grid_widget || over_primary_pane {
+                    primary_id.filter(|id| doc.data_sheet(id).is_some())
                 } else {
                     None
                 };
-                let grid_target = match hit {
-                    WorkspaceHitTarget::GridCell { ref sheet_id, .. } | WorkspaceHitTarget::GridXCell { ref sheet_id, .. } => Some(sheet_id.clone()),
-                    _ if grid_hit_rect.is_some() => grid_hit_rect,
-                    WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid) if layout.scene_paper.is_none() => {
-                        doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
-                    }
-                    _ => None,
-                };
-                let over_scene = grid_target.is_none()
-                    && (matches!(
-                        hit,
-                        WorkspaceHitTarget::ScenePaper { .. } | WorkspaceHitTarget::CanvasTitle { .. } | WorkspaceHitTarget::AxisTitle { .. }
-                    ) || (matches!(hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::MainCanvasOrGrid)) && layout.scene_paper.is_some()));
+                let over_scene = grid_target.is_none() && over_viewport;
                 (false, grid_target, over_scene)
             }
         };
@@ -2441,47 +2481,9 @@ impl DesktopHostRuntime {
             });
         }
 
-        if !(modifiers.ctrl || modifiers.meta) {
-            let scroll_target = {
-                let win = self.window(window_id)?;
-                let vp = win.viewport;
-                let tree = win.app.layout_tree_cow(vp);
-                let [px, py] = vp.logical_to_physical_px([x_pt, y_pt]);
-                #[allow(clippy::cast_possible_truncation)]
-                let (ipx, ipy) = (px.round() as i32, py.round() as i32);
-                curvebook_ui_egui::layout::find_scroll_container_at(&tree, ipx, ipy)
-                    .filter(|meta| {
-                        (meta.has_vertical_overflow() || meta.has_horizontal_overflow()) && !meta.container_id.as_str().starts_with("grid.sheet.")
-                    })
-                    .map(|_| vp)
-            };
-            if let Some(vp) = scroll_target {
-                let win = self.window_mut(window_id)?;
-                let outcome = curvebook_ui_egui::interaction::dispatch_mouse_wheel(&mut win.app, vp, x_pt, y_pt, -delta_x, -delta_y, modifiers)?;
-                return Ok(DesktopEventOutcome {
-                    handled: outcome.handled,
-                    action: outcome.action,
-                    command_id: outcome.command_id,
-                    command_result: outcome.command_result,
-                    window_id: Some(window_id),
-                    ..Default::default()
-                });
-            }
-        }
-
         if let Some(sheet_id) = grid_sheet_id {
             let win = self.window_mut(window_id)?;
             if let Some(sheet) = win.app.document().data_sheet(&sheet_id).cloned() {
-                let vp = win.viewport;
-                let tree = win.app.build_and_cache_layout_tree(vp);
-                if let Some(scroll_meta) = tree
-                    .nodes
-                    .iter()
-                    .filter_map(|n| n.scroll.as_ref())
-                    .find(|s| s.container_id.as_str().contains(&format!("grid.sheet.{}", sheet_id.as_str())))
-                {
-                    win.app.interaction.scroll_offsets.apply_wheel(scroll_meta, -delta_x, -delta_y);
-                }
                 win.app.grid.tool.scroll_for_sheet(&sheet, -delta_x, -delta_y);
                 win.app.sync_views();
                 return Ok(DesktopEventOutcome {
@@ -2700,13 +2702,19 @@ impl DesktopHostRuntime {
                 let win = self.window_mut(window_id)?;
                 let prev_locale = win.app.locale.clone();
                 let prev_theme = win.app.theme.mode;
+                let prev_ui_scale = win.app.ui_scale();
+                let prev_ui_backend = win.app.ui_backend();
+                let prev_host_draws_menu_bar = win.app.host_draws_menu_bar;
                 let prev_shortcuts = win.app.shortcuts.clone();
                 let prev_rulers = win.app.canvas_dialogs.rulers_visible;
                 let prev_gui_only = win.app.is_gui_only();
 
                 let mut next_app = UiApp::from_session(session);
-                let _ = next_app.set_locale(&prev_locale);
+                let _ = next_app.set_locale(normalize_beta_gui_locale(&prev_locale));
                 next_app.set_theme_mode(prev_theme);
+                next_app.set_ui_scale(prev_ui_scale);
+                next_app.set_ui_backend(prev_ui_backend);
+                next_app.host_draws_menu_bar = prev_host_draws_menu_bar;
                 next_app.shortcuts = prev_shortcuts;
                 next_app.canvas_dialogs.rulers_visible = prev_rulers;
                 next_app.set_gui_only(prev_gui_only);
@@ -3258,11 +3266,11 @@ fn next_preview_filter_name(current: CanvasPreviewFilter) -> &'static str {
 }
 
 fn next_locale_code(current: &str) -> &'static str {
-    if LOCALES.is_empty() {
+    if BETA_ACTIVE_LOCALES.is_empty() {
         return "en";
     }
-    let idx = LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
-    LOCALES.get((idx + 1) % LOCALES.len()).copied().unwrap_or("en")
+    let idx = BETA_ACTIVE_LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
+    BETA_ACTIVE_LOCALES.get((idx + 1) % BETA_ACTIVE_LOCALES.len()).copied().unwrap_or("en")
 }
 
 fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {

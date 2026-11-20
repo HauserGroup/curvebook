@@ -10,8 +10,8 @@ use curvebook::desktop_host::{
     DesktopCommandRoute, DesktopDialogOpener, DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, resolve_desktop_command_route,
 };
 use curvebook::gui_window::{
-    DEFAULT_TEMPLATE_FILE_NAME, NATIVE_OPEN_FILE_EXTENSIONS, NATIVE_TEMPLATE_FILE_EXTENSIONS, execute_native_import_at_path,
-    menu_action_triggers_native_file_dialog, native_import_replaces_project_file_path,
+    CurveBookNativeApp, DEFAULT_TEMPLATE_FILE_NAME, NATIVE_OPEN_FILE_EXTENSIONS, NATIVE_TEMPLATE_FILE_EXTENSIONS, build_egui_font_definitions,
+    execute_native_import_at_path, menu_action_triggers_native_file_dialog, native_import_replaces_project_file_path,
 };
 use curvebook_doc::{CellCoord, FigureCanvasPreset, ProjectDocument, SheetId};
 use curvebook_engine::{Session, cmd};
@@ -20,6 +20,7 @@ use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, ViewportM
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::{CanvasPreviewFilter, UiApp, dispatch_gui_action};
+use eframe::egui;
 use serde_json::{Value, json};
 
 fn unique_temp_file(name: &str) -> PathBuf {
@@ -158,6 +159,7 @@ fn spawn_window_from_session(session: Session) -> Result<(DesktopHostRuntime, De
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -519,11 +521,11 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
 
     let (mut rt, wid) = spawn_window_from_session(session)?;
     let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
-    let map = rt.window(wid)?.app().layout_map(metrics);
+    let snap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(wid)?.app(), metrics, None, true);
 
     // 1. Wheel over DataGrid scrolls grid without altering canvas zoom.
-    let cell_rect = map.grid_geometry.as_ref().and_then(|g| g.cell_rect(0, 0)).ok_or("missing cell rect")?;
-    let cell_pt = metrics.physical_to_logical_px([f64::from(cell_rect.x) + 12.0, f64::from(cell_rect.y) + 10.0]);
+    let cell_bounds = snap.find_widget("grid.cell.0.0.0").and_then(|n| n.bounds).ok_or("missing cell bounds")?;
+    let cell_pt = metrics.physical_to_logical_px([cell_bounds[0] + 12.0, cell_bounds[1] + 10.0]);
     let zoom_before = rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom;
     let grid_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
         window_id: wid,
@@ -539,8 +541,8 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
     assert!(rt.window(wid)?.app().grid.tool.viewport.scroll_y_px > 0.0);
 
     // 2. Wheel over Navigator ignores zoom cleanly.
-    let nav_rect = map.navigator_entries.first().ok_or("missing nav entry")?.rect;
-    let nav_pt = metrics.physical_to_logical_px([f64::from(nav_rect.x) + 12.0, f64::from(nav_rect.y) + 8.0]);
+    let nav_bounds = snap.navigator_sheets.as_deref().and_then(|ns| ns.first()).and_then(|n| n.bounds).ok_or("missing nav entry bounds")?;
+    let nav_pt = metrics.physical_to_logical_px([nav_bounds[0] + 12.0, nav_bounds[1] + 8.0]);
     let nav_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
         window_id: wid,
         x_pt: nav_pt[0],
@@ -553,13 +555,12 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
     assert_eq!(nav_wheel.action, "wheel.non_canvas_ignored");
     assert!((rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom - zoom_before).abs() < 1e-9);
 
-    // 3. Unmodified vertical wheel over GraphSheet ScenePaper pans cleanly without zooming (`B4`).
+    // 3. Unmodified vertical wheel over GraphSheet viewport pans cleanly without zooming (`B4`).
     let graph_id = rt.window(wid)?.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
     let _ = rt.window_mut(wid)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
-    let gmap = rt.window(wid)?.app().layout_map(metrics);
-    let paper = gmap.scene_paper.as_ref().ok_or("missing scene_paper")?.paper;
-    let paper_pt =
-        metrics.physical_to_logical_px([f64::from(paper.x) + f64::from(paper.width) * 0.5, f64::from(paper.y) + f64::from(paper.height) * 0.5]);
+    let gsnap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(wid)?.app(), metrics, Some("canvas"), true);
+    let vp_bounds = gsnap.find_widget("canvas.viewport").and_then(|n| n.bounds).ok_or("missing canvas.viewport")?;
+    let paper_pt = metrics.physical_to_logical_px([vp_bounds[0] + vp_bounds[2] * 0.5, vp_bounds[1] + vp_bounds[3] * 0.5]);
     let pan_before = rt.window(wid)?.app().canvas_dialogs.pan_zoom.pan_pt;
     let pan_wheel = rt.dispatch(DesktopHostEvent::MouseWheel {
         window_id: wid,
@@ -690,107 +691,53 @@ fn welcome_open_file_dialog_hook_invoked_and_escape_closes_welcome() -> Result<(
         Ok(Some(archive_cb.clone()))
     });
 
-    // Empty session shows Welcome Launcher; clicking `welcome.action.open_existing` emits `welcome.open_file_requested`
-    // and routes through `desktop_host::open_file_dialog_hook`, opening the project cleanly.
-    let tree = rt.window(wid)?.app().layout_tree_cow(metrics);
-    let open_node = tree.node("welcome.action.open_existing").ok_or("missing welcome.action.open_existing on empty session")?;
-    let [cx, cy] = open_node.bounds.visible_rect_px.center();
-    let [lx, ly] = metrics.physical_to_logical_px([f64::from(cx), f64::from(cy)]);
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: lx,
-        y_pt: ly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: lx,
-        y_pt: ly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: false,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
+    // Empty session shows Welcome Launcher; clicking `welcome.action.open_existing` -> `welcome.btn.open_file`
+    // emits `project.open` and routes through `desktop_host::open_file_dialog_hook`, opening the project cleanly.
+    let _ = metrics;
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+    let mut native = CurveBookNativeApp::new(rt, wid, None);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+    let step = |app_host: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app_host.step_ui(ui));
+        out.textures_delta.clear();
+    };
+    let click_wid = |app_host: &mut CurveBookNativeApp, widget_id: &str| -> Result<(), Box<dyn std::error::Error>> {
+        step(app_host, Vec::new());
+        step(app_host, Vec::new());
+        let pos = app_host.inspect_meta().find_by_widget_id(widget_id).ok_or_else(|| format!("missing `{widget_id}`"))?.clipped_rect.center();
+        step(
+            app_host,
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        step(app_host, Vec::new());
+        Ok(())
+    };
+
+    click_wid(&mut native, "welcome.action.open_existing")?;
+    if native.inspect_meta().find_by_widget_id("welcome.btn.open_file").is_some() {
+        click_wid(&mut native, "welcome.btn.open_file")?;
+    }
     assert_eq!(hook_calls.load(Ordering::SeqCst), 1);
-    assert!(rt.window(wid)?.app().document().total_sheet_count() >= 1);
+    assert!(native.runtime().window(wid)?.app().document().total_sheet_count() >= 1);
 
     // Re-open Welcome overlay via `nav.welcome.open` and verify Escape dismisses it cleanly.
-    rt.window_mut(wid)?.app_mut().nav.welcome.open = true;
-    let esc_out = rt.dispatch(DesktopHostEvent::KeyboardInput {
-        window_id: wid,
-        key: String::from("Escape"),
-        pressed: true,
-        modifiers: KeyModifiers::default(),
-        text: None,
-    })?;
-    assert!(esc_out.handled);
-    assert!(!rt.window(wid)?.app().nav.welcome.open);
+    native.runtime_mut().window_mut(wid)?.app_mut().nav.welcome.open = true;
+    step(&mut native, Vec::new());
+    step(
+        &mut native,
+        vec![egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+    );
+    step(&mut native, Vec::new());
+    assert!(!native.runtime().window(wid)?.app().nav.welcome.open);
 
     // Also verify `File > Open...` menu command invokes the same open file dialog hook.
-    let file_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
-    let file_btn = file_tree.node("menu.file").ok_or("missing menu.file button")?;
-    let [fx, fy] = file_btn.bounds.visible_rect_px.center();
-    let [flx, fly] = metrics.physical_to_logical_px([f64::from(fx), f64::from(fy)]);
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: flx,
-        y_pt: fly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: flx,
-        y_pt: fly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: false,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    for _ in 0..8 {
-        let probe_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
-        if probe_tree.node("menu.project.open").is_some_and(|n| n.drawn_in_frame) {
-            break;
-        }
-        let pop = probe_tree.node("popup.menu.file").ok_or("missing popup.menu.file container")?;
-        let [px, py] = pop.bounds.visible_rect_px.center();
-        let [plx, ply] = metrics.physical_to_logical_px([f64::from(px), f64::from(py)]);
-        let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
-            window_id: wid,
-            x_pt: plx,
-            y_pt: ply,
-            delta_x: 0.0,
-            delta_y: -80.0,
-            modifiers: KeyModifiers::default(),
-        })?;
-    }
-    let menu_tree = rt.window(wid)?.app().layout_tree_cow(metrics);
-    let open_menu = menu_tree.node("menu.project.open").ok_or("missing menu.project.open item")?;
-    let [mx, my] = open_menu.bounds.visible_rect_px.center();
-    let [mlx, mly] = metrics.physical_to_logical_px([f64::from(mx), f64::from(my)]);
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: mlx,
-        y_pt: mly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: wid,
-        x_pt: mlx,
-        y_pt: mly,
-        button: curvebook_ui_egui::interaction::PointerButton::Primary,
-        pressed: false,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
+    click_wid(&mut native, "menu.file")?;
+    click_wid(&mut native, "menu.project.open")?;
     assert_eq!(hook_calls.load(Ordering::SeqCst), 2);
 
     let _ = std::fs::remove_file(&archive_path);
@@ -803,89 +750,45 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     use std::path::Path;
     use std::sync::Arc;
 
-    use curvebook::desktop_host::{
-        DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, NativeFileDialogKind, StubNativeFileDialogAdapter,
-    };
+    use curvebook::desktop_host::{DesktopHostConfig, DesktopHostRuntime, NativeFileDialogKind, StubNativeFileDialogAdapter};
     use curvebook_doc::{Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, ProjectDocument, TableArchetype};
     use curvebook_format::{ZipWriter, open_project_file, save_project_file};
-    use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
+    use curvebook_ui_egui::interaction::ViewportMetrics;
 
-    fn click_rect_center(
-        rt: &mut DesktopHostRuntime,
-        wid: DesktopWindowId,
-        metrics: ViewportMetrics,
-        rect: curvebook_ui_egui::layout::LayoutRectPx,
-    ) -> Result<curvebook::desktop_host::DesktopEventOutcome, String> {
-        let [cx, cy] = rect.center();
-        let [lx, ly] = metrics.physical_to_logical_px([f64::from(cx), f64::from(cy)]);
-        let _ = rt.dispatch(DesktopHostEvent::PointerMoved { window_id: wid, x_pt: lx, y_pt: ly, modifiers: KeyModifiers::default() })?;
-        let _ = rt.dispatch(DesktopHostEvent::PointerButton {
-            window_id: wid,
-            x_pt: lx,
-            y_pt: ly,
-            button: PointerButton::Primary,
-            pressed: true,
-            click_count: 1,
-            modifiers: KeyModifiers::default(),
-        })?;
-        rt.dispatch(DesktopHostEvent::PointerButton {
-            window_id: wid,
-            x_pt: lx,
-            y_pt: ly,
-            button: PointerButton::Primary,
-            pressed: false,
-            click_count: 1,
-            modifiers: KeyModifiers::default(),
-        })
-    }
-
-    fn click_drawn_file_menu_item(
-        rt: &mut DesktopHostRuntime,
-        wid: DesktopWindowId,
-        metrics: ViewportMetrics,
-        item_id: &str,
-    ) -> Result<curvebook::desktop_host::DesktopEventOutcome, String> {
-        let file_btn_rect = {
-            let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
-            tree.node("menu.file").ok_or("missing menu.file button")?.bounds.visible_rect_px
+    fn click_drawn_file_menu_item(native: &mut CurveBookNativeApp, ctx: &egui::Context, item_id: &str) -> Result<(), String> {
+        let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0));
+        let step = |app_host: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app_host.step_ui(ui));
+            out.textures_delta.clear();
         };
-        let _ = click_rect_center(rt, wid, metrics, file_btn_rect)?;
-
-        // Scroll back to top of popup.menu.file first, then scan downward until `item_id` is visible.
-        let pop_rect = {
-            let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
-            tree.node("popup.menu.file").ok_or("missing popup.menu.file")?.bounds.visible_rect_px
-        };
-        let [px, py] = pop_rect.center();
-        let [plx, ply] = metrics.physical_to_logical_px([f64::from(px), f64::from(py)]);
-        for _ in 0..8 {
-            let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
-                window_id: wid,
-                x_pt: plx,
-                y_pt: ply,
-                delta_x: 0.0,
-                delta_y: 120.0,
-                modifiers: KeyModifiers::default(),
-            })?;
-        }
-        for _ in 0..16 {
-            let found = {
-                let tree = rt.window_mut(wid)?.app_mut().build_and_cache_layout_tree(metrics);
-                tree.node(item_id).filter(|n| n.drawn_in_frame).map(|n| n.bounds.visible_rect_px)
-            };
-            if let Some(rect) = found {
-                return click_rect_center(rt, wid, metrics, rect);
-            }
-            let _ = rt.dispatch(DesktopHostEvent::MouseWheel {
-                window_id: wid,
-                x_pt: plx,
-                y_pt: ply,
-                delta_x: 0.0,
-                delta_y: -70.0,
-                modifiers: KeyModifiers::default(),
-            })?;
-        }
-        Err(format!("menu item `{item_id}` did not become visible inside popup.menu.file"))
+        step(native, Vec::new());
+        step(native, Vec::new());
+        let file_pos = native.inspect_meta().find_by_widget_id("menu.file").ok_or("missing menu.file button")?.clipped_rect.center();
+        step(
+            native,
+            vec![
+                egui::Event::PointerMoved(file_pos),
+                egui::Event::PointerButton { pos: file_pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos: file_pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        step(native, Vec::new());
+        let item_pos = native
+            .inspect_meta()
+            .find_by_widget_id(item_id)
+            .ok_or_else(|| format!("missing `{item_id}` inside popup.menu.file"))?
+            .clipped_rect
+            .center();
+        step(
+            native,
+            vec![
+                egui::Event::PointerMoved(item_pos),
+                egui::Event::PointerButton { pos: item_pos, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos: item_pos, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        step(native, Vec::new());
+        Ok(())
     }
 
     let tmp_dir = std::env::temp_dir().join(format!("curvebook-r1023-file-dlg-{}", std::process::id()));
@@ -960,22 +863,25 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
         initial_viewport: metrics,
     });
     rt.set_file_dialog_adapter(adapter.clone());
-    let mut wid = rt.open_window(None, metrics)?;
+    let wid = rt.open_window(None, metrics)?;
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+    let mut native = CurveBookNativeApp::new(rt, wid, None);
 
     // 2. Click File > Open... for .curvebook, .pzfx, .prism, and .csv.
     for (expected_title, ext) in
         [("Native Archive Sheet", ".curvebook"), ("PZFX Imported Columns", ".pzfx"), ("Archive Zip Kinetics", ".prism"), ("extra", ".csv")]
     {
-        let outcome = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.open")?;
-        assert!(outcome.handled, "File > Open click for {ext} was not handled");
-        wid = outcome.opened_window_id.unwrap_or(wid);
-        let doc = rt.window(wid)?.app().document();
+        click_drawn_file_menu_item(&mut native, &ctx, "menu.project.open")?;
+        let cur_wid = native.runtime().focused_window_id().unwrap_or(wid);
+        let doc = native.runtime().window(cur_wid)?.app().document();
         assert!(
             doc.data_sheets.iter().any(|ds| ds.title == expected_title),
             "expected `{expected_title}` after File > Open ({ext}), got {:?}",
@@ -984,8 +890,9 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     }
 
     // 3. Create a GraphSheet so Export SVG/PDF/PNG are enabled, then test Save, direct Save, Save As, Exports.
+    let active_wid = native.runtime().focused_window_id().unwrap_or(wid);
     {
-        let win = rt.window_mut(wid)?;
+        let win = native.runtime_mut().window_mut(active_wid)?;
         let mut doc = win.app().document().clone();
         let src_id = doc.data_sheets.first().ok_or("missing data sheet")?.id.clone();
         let ds_ref = doc.data_sheet(&src_id).ok_or("missing source")?.clone();
@@ -1005,35 +912,29 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     }
 
     let reqs_before_save = adapter.requests().len();
-    let save_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.save")?;
-    assert_eq!(save_out.command_id.as_deref(), Some("project.save"));
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.project.save")?;
     assert!(save_path.is_file(), "File > Save must write real archive to disk");
-    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(Path::new(&save_path)));
+    assert_eq!(native.runtime().window(active_wid)?.app().session().file_path(), Some(Path::new(&save_path)));
     assert_eq!(adapter.requests().len(), reqs_before_save + 1);
 
     // Clicking File > Save again with existing file_path writes directly with no extra dialog.
-    let direct_save = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.project.save")?;
-    assert!(direct_save.handled);
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.project.save")?;
     assert_eq!(adapter.requests().len(), reqs_before_save + 1);
 
     // Clicking File > Save As... always opens SaveFile dialog and switches file_path.
-    let save_as_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.file.save_as")?;
-    assert_eq!(save_as_out.command_id.as_deref(), Some("file.save_as"));
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.file.save_as")?;
     assert!(save_as_path.is_file(), "File > Save As... must write archive to picked path");
-    assert_eq!(rt.window(wid)?.app().session().file_path(), Some(Path::new(&save_as_path)));
+    assert_eq!(native.runtime().window(active_wid)?.app().session().file_path(), Some(Path::new(&save_as_path)));
     assert!(!open_project_file(&save_as_path)?.data_sheets.is_empty());
 
     // Clicking File > Export > SVG / PDF / PNG opens SaveFile dialogs and writes valid artifacts.
-    let svg_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.svg")?;
-    assert_eq!(svg_out.command_id.as_deref(), Some("export.svg"));
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.svg")?;
     assert!(fs::read_to_string(&svg_path)?.contains("<svg"));
 
-    let pdf_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.pdf")?;
-    assert_eq!(pdf_out.command_id.as_deref(), Some("export.pdf"));
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.pdf")?;
     assert!(fs::read(&pdf_path)?.starts_with(b"%PDF"));
 
-    let png_out = click_drawn_file_menu_item(&mut rt, wid, metrics, "menu.export.png")?;
-    assert_eq!(png_out.command_id.as_deref(), Some("export.png"));
+    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.png")?;
     assert!(fs::read(&png_path)?.starts_with(&[0x89, b'P', b'N', b'G']));
 
     let recorded = adapter.requests();

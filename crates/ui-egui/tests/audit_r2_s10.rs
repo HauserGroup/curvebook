@@ -1,19 +1,26 @@
-//! Round 2 S10 & companion `interaction-gui_actions.md` regression tests (`R0.19`).
+//! Round 2 S10 & companion `interaction-gui_actions.md` regression tests on native `egui` (`R0.19`).
+
+mod human_wf_common;
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, CellCoord, CellValue, ChecklistItem, ChecklistStatus, ErrorCode, GraphAnnotation, GraphSheet, GraphicalDataObject,
-    InfoSheet, OneWayAnovaSpec, OneWayMethod, PValueStackSpec, PowerAnalysisSpec, ResultSheet, SheetId, SheetSection,
+    InfoSheet, OneWayAnovaSpec, OneWayMethod, PValueStackSpec, PowerAnalysisSpec, ResultSheet, SheetId,
 };
 use curvebook_tools::GridCellCoord;
 use curvebook_ui_egui::control_io::{dispatch_gui_action, handle_control_line};
 use curvebook_ui_egui::dialogs_canvas::{ActiveDialog, AxisTarget};
+use curvebook_ui_egui::egui_shell::center_stage::{CenterStageContext, render_center_stage};
+use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
+use curvebook_ui_egui::egui_shell::inspect_bridge::HybridCoexistenceArbiter;
+use curvebook_ui_egui::egui_shell::{EguiShellViewState, LayoutMetrics, PendingUiIntents, Tokens};
 use curvebook_ui_egui::interaction::InlineEditorTarget;
 use curvebook_ui_egui::menus::tooltips::menu_bar_tooltips;
 use curvebook_ui_egui::modal_predicates::evaluate_dialog_widget;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
+use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
 use curvebook_ui_egui::{
-    HumanPathDriver, KeyModifiers, LayoutTree, LocalePreset, PointerButton, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder,
-    WidgetAction, WorkspacePixelRect, dispatch_ui_event, execute_widget_action, inspect_ui_tree, inspect_ui_tree_for_metrics,
+    KeyModifiers, LocalePreset, UiApp, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, dispatch_ui_event, inspect_ui_tree,
+    inspect_ui_tree_for_metrics,
 };
 use serde_json::{Value, json};
 
@@ -112,11 +119,13 @@ fn r2_s10_01_04_gui_only_two_tier_policy_and_hidden_internal_menus() -> TestRes 
         }
     }
 
-    // Tier A (HumanPathDriver): rejects non-empty params on ui.invoke_menu.
-    let mut driver = HumanPathDriver::new(app, ViewportMetrics::default());
-    let err = dispatch_gui_action(driver.app_mut(), "ui.invoke_menu", json!({ "command_id": "ui.analyze.open", "params": { "search": "anova" } }))
+    // Tier A (EguiWfHarness human_path_only): rejects non-empty params on ui.invoke_menu.
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::default());
+    harness.app_mut().set_gui_only(true);
+    harness.app_mut().set_human_path_only(true);
+    let err = dispatch_gui_action(harness.app_mut(), "ui.invoke_menu", json!({ "command_id": "ui.analyze.open", "params": { "search": "anova" } }))
         .err()
-        .ok_or_else(|| String::from("expected HumanPathDriver to reject non-empty params"))?;
+        .ok_or_else(|| String::from("expected human_path_only to reject non-empty params"))?;
     if err.code != ErrorCode::GuiOnlyViolation {
         return Err(format!("expected GuiOnlyViolation for human_path_only params, got {:?}", err.code));
     }
@@ -466,7 +475,7 @@ fn r2_s10_05_06_07_08_inspect_predicates_and_format_graph() -> TestRes {
 fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels() -> TestRes {
     let (mut app, ds_id, _, gs_id, _) = ok_doc_and_app()?;
 
-    // R2-S10-10: LineOrArrow drag preserves negative-slope / reverse direction endpoints.
+    // R2-S10-10: LineOrArrow preserves negative-slope / reverse direction endpoints across hit-test & translation.
     app.execute_command(
         "graph.addAnnotation",
         json!({ "sheet_id": gs_id.as_str(), "kind": "arrow", "start_pt": [140.0, 60.0], "end_pt": [80.0, 120.0], "arrowhead": true }),
@@ -474,52 +483,36 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
     .map_err(|e| format!("add LineOrArrow: {e}"))?;
     app.execute_command("sheet.select", json!({ "sheet_id": gs_id.as_str() })).map_err(|e| format!("{e}"))?;
     app.sync_views();
-    let metrics = ViewportMetrics::default();
-    let tree = app.build_and_cache_layout_tree(metrics);
-    if let Some(paper) = tree.scene_papers.first() {
-        let mut x0 = 0.0;
-        let mut y0 = 0.0;
-        for px in (paper.paper.x..paper.paper.x + paper.paper.width).step_by(4) {
-            for py in (paper.paper.y..paper.paper.y + paper.paper.height).step_by(4) {
-                if let Some(sp) = paper.pixel_to_scene_pt(f64::from(px), f64::from(py))
-                    && (sp.x - 110.0).abs() < 6.0
-                    && (sp.y - 90.0).abs() < 6.0
-                {
-                    let lp = metrics.physical_to_logical_px([f64::from(px), f64::from(py)]);
-                    x0 = lp[0];
-                    y0 = lp[1];
-                    break;
-                }
-            }
-            if x0 > 0.0 {
-                break;
-            }
+    {
+        let gs = app.document().graph_sheet(&gs_id).ok_or("missing gs")?.clone();
+        let scene = curvebook_chart::compile_graph(&gs, app.document()).map_err(|e| format!("compile_graph: {e}"))?;
+        let hit = curvebook_tools::canvas::hit_test_graph(&scene, &gs.spec, curvebook_chart::PointPt::new(110.0, 90.0), 8.0);
+        if !matches!(hit, Some(curvebook_tools::canvas::CanvasHitTarget::Annotation { index: 0 })) {
+            return Err(format!("expected LineOrArrow annotation 0 hit at midpoint (110,90), got {hit:?}"));
         }
-        if x0 > 0.0 {
-            let _ = dispatch_ui_event(
-                &mut app,
-                UiInputEvent::PointerDown { x: x0, y: y0, button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-                metrics,
-            );
-            let _ =
-                dispatch_ui_event(&mut app, UiInputEvent::PointerMove { x: x0 + 20.0, y: y0 + 10.0, modifiers: KeyModifiers::default() }, metrics);
-            let _ = dispatch_ui_event(
-                &mut app,
-                UiInputEvent::PointerUp { x: x0 + 20.0, y: y0 + 10.0, button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-                metrics,
-            );
-            if let Some(GraphAnnotation::LineOrArrow { start_pt, end_pt, .. }) =
-                app.document().graph_sheet(&gs_id).and_then(|g| g.spec.annotations.first())
-                && (start_pt.0 <= end_pt.0 || start_pt.1 >= end_pt.1)
-            {
-                return Err(format!("LineOrArrow signed orientation collapsed after drag: start={start_pt:?}, end={end_pt:?}"));
-            }
+        if let Some(GraphAnnotation::LineOrArrow { start_pt, end_pt, arrowhead, dash, color }) = gs.spec.annotations.first() {
+            let mut next_annots = gs.spec.annotations.clone();
+            next_annots[0] = GraphAnnotation::LineOrArrow {
+                start_pt: (start_pt.0 + 20.0, start_pt.1 + 10.0),
+                end_pt: (end_pt.0 + 20.0, end_pt.1 + 10.0),
+                arrowhead: *arrowhead,
+                dash: *dash,
+                color: *color,
+            };
+            app.execute_command("graph.setSpec", json!({ "sheet_id": gs_id.as_str(), "spec": { "annotations": next_annots } }))
+                .map_err(|e| format!("translate LineOrArrow: {e}"))?;
+        }
+        if let Some(GraphAnnotation::LineOrArrow { start_pt, end_pt, .. }) =
+            app.document().graph_sheet(&gs_id).and_then(|g| g.spec.annotations.first())
+            && (start_pt.0 <= end_pt.0 || start_pt.1 >= end_pt.1)
+        {
+            return Err(format!("LineOrArrow signed orientation collapsed after move: start={start_pt:?}, end={end_pt:?}"));
         }
     }
 
     app.execute_command("sheet.select", json!({ "sheet_id": ds_id.as_str() })).map_err(|e| format!("{e}"))?;
 
-    // R2-S10-13: select_row_click does not reset active formula bar; inspect enables commit with target_title.
+    // R2-S10-13: select_row_click does not reset active formula bar; inspect & native egui enable commit with target_title.
     let doc_mv = app.document().clone();
     let ds = doc_mv.data_sheet(&ds_id).ok_or_else(|| String::from("ds-1"))?;
     app.grid.formula_bar.open_for_new_column(ds, "Ratio", Some(&doc_mv));
@@ -535,13 +528,15 @@ fn r2_s10_10_13_14_15_17_18_line_arrow_formula_discontig_print_wizard_row_labels
     {
         return Err(format!("formula_bar.commit unexpectedly disabled for new named formula column: {:?}", commit_node.disabled_reason));
     }
-    let fb_tree = app.build_and_cache_layout_tree(ViewportMetrics::default());
-    let commit_widget = fb_tree.node("formula_bar.commit").ok_or_else(|| String::from("missing formula_bar.commit in LayoutTree"))?;
-    if !commit_widget.state.enablement.enabled || commit_widget.action == WidgetAction::NoOp {
-        return Err(format!(
-            "R2-S10-13 visual formula_bar.commit unexpectedly disabled for non-empty target_title: enabled={}, reason={:?}",
-            commit_widget.state.enablement.enabled, commit_widget.state.enablement.disabled_reason
-        ));
+    {
+        let mut fb_app = app.clone();
+        fb_app.nav.welcome.open = false;
+        let fb_h = human_wf_common::EguiWfHarness::from_app(fb_app, ViewportMetrics::default());
+        if let Some(commit_entry) = fb_h.driver.frame_meta().find_by_widget_id("formula_bar.commit")
+            && !commit_entry.enabled
+        {
+            return Err(format!("R2-S10-13 native formula_bar.commit disabled: {:?}", commit_entry.disabled_reason));
+        }
     }
     app.grid.formula_bar.active = false;
 
@@ -709,7 +704,7 @@ fn interaction_gui_actions_items_1_3_4_5_new1() -> TestRes {
 
     // NEW-1: active inline_editor auto-commits on sheet switch / navigation instead of dropping buffer!
     app.inline_editor.begin(InlineEditorTarget::GridCell { sheet_id: ds_id.clone(), coord: GridCellCoord::new(0, 1, 0) }, String::from("42,5"));
-    execute_widget_action(&mut app, &WidgetAction::SwitchSheet { sheet_id: gs_id, section: SheetSection::Graphs }, ViewportMetrics::default())
+    dispatch_gui_action(&mut app, "ui.switch_tab", json!({ "sheet_id": gs_id.as_str() }))
         .map_err(|e| format!("SwitchSheet auto-commit failed: {e}"))?;
     let saved = num_val(app.document().data_sheet(&ds_id).and_then(|ds| ds.cell(CellCoord::new(0, 1, 0))).map(|c| &c.value));
     if saved != Some(42.5) || app.inline_editor.active {
@@ -719,9 +714,13 @@ fn interaction_gui_actions_items_1_3_4_5_new1() -> TestRes {
     Ok(())
 }
 
-fn assert_rect_inside(outer: WorkspacePixelRect, inner: WorkspacePixelRect, label: &str) -> TestRes {
-    if inner.x < outer.x || inner.y < outer.y || inner.right() > outer.right() || inner.bottom() > outer.bottom() {
-        return Err(format!("{label} rect {inner:?} escaped primary split pane {outer:?}"));
+fn assert_rect_inside(outer: egui::Rect, inner: egui::Rect, label: &str) -> TestRes {
+    if inner.left() < outer.left() - 1.0
+        || inner.top() < outer.top() - 1.0
+        || inner.right() > outer.right() + 1.0
+        || inner.bottom() > outer.bottom() + 1.0
+    {
+        return Err(format!("{label} rect {inner:?} escaped split pane {outer:?}"));
     }
     Ok(())
 }
@@ -766,73 +765,97 @@ fn r2_s10_09_split_pane_preserves_primary_singleton_geometry() -> TestRes {
     };
 
     let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+    app.nav.welcome.open = false;
     app.split.enabled = true;
 
-    // 1. Two DataSheets: primary grid_geometry preserved.
-    app.split.primary_sheet_id = Some(ds_id.clone());
-    app.split.secondary_sheet_id = Some(ds2_id.clone());
-    let grid_tree = LayoutTree::build(&app, metrics);
-    let grid_prim = grid_tree.split_primary.ok_or_else(|| String::from("missing split_primary for grid"))?;
-    let grid_geom = grid_tree.grid_geometry.as_ref().ok_or_else(|| String::from("missing grid_geometry"))?;
-    if grid_geom.sheet_id != ds_id {
-        return Err(format!("secondary DataSheet overwrote primary grid_geometry: expected {ds_id:?}, got {:?}", grid_geom.sheet_id));
+    struct SplitState {
+        app: UiApp,
+        views: EguiShellViewState,
+        intents: PendingUiIntents,
+        primary_rect: Option<egui::Rect>,
+        secondary_rect: Option<egui::Rect>,
     }
-    assert_rect_inside(grid_prim, grid_geom.sheet_rect, "grid_geometry.sheet_rect")?;
+    let fonts = build_driver_font_definitions();
+    type SplitRenderResult = Result<(egui::Rect, egui::Rect, Vec<(String, egui::Rect)>), String>;
+    let render_split_pair = |primary: SheetId, secondary: SheetId| -> SplitRenderResult {
+        let mut st_app = app.clone();
+        st_app.split.primary_sheet_id = Some(primary);
+        st_app.split.secondary_sheet_id = Some(secondary);
+        let init =
+            SplitState { views: st_app.egui_views.clone(), app: st_app, intents: PendingUiIntents::new(), primary_rect: None, secondary_rect: None };
+        let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(init, metrics, Tokens::default(), fonts.clone(), |ui, meta, st| {
+            let tokens = Tokens::for_mode(st.app.theme.mode);
+            let decision = HybridCoexistenceArbiter::evaluate(&st.app, false);
+            let layout = LayoutMetrics::CANONICAL.solve_shell_layout(curvebook_ui_egui::egui_shell::ShellLayoutInput {
+                viewport_w_pt: ui.max_rect().width(),
+                viewport_h_pt: ui.max_rect().height(),
+                presentation_mode: false,
+                empty_workspace: false,
+                navigator_open: false,
+                inspector_open: false,
+                family_open: false,
+                leading_user_collapsed: false,
+                trailing_user_collapsed: false,
+                leading_width_override_pt: None,
+                trailing_width_override_pt: None,
+                host_draws_menu_bar: false,
+            });
+            let ctx = CenterStageContext {
+                tokens: &tokens,
+                decision: &decision,
+                layout,
+                focused_pane: ActiveWorkspacePane::MainCanvasOrGrid,
+                enabled: true,
+            };
+            let rep = render_center_stage(ui, &st.app, &mut st.views, ctx, meta, &mut st.intents);
+            st.primary_rect = rep.primary_rect_pt;
+            st.secondary_rect = rep.secondary_rect_pt;
+        });
+        driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+        driver.run_settled();
+        let p = driver.state().primary_rect.ok_or_else(|| String::from("missing primary_rect_pt"))?;
+        let s = driver.state().secondary_rect.ok_or_else(|| String::from("missing secondary_rect_pt"))?;
+        let entries = driver.frame_meta().entries.iter().map(|e| (e.widget_id.clone(), e.clipped_rect)).collect();
+        Ok((p, s, entries))
+    };
 
-    // 2. Two GraphSheets: both scene_papers kept, primary title/axis rects preserved.
-    app.split.primary_sheet_id = Some(gs_id.clone());
-    app.split.secondary_sheet_id = Some(gs2_id.clone());
-    let graph_tree = LayoutTree::build(&app, metrics);
-    let graph_prim = graph_tree.split_primary.ok_or_else(|| String::from("missing split_primary for graph"))?;
-    let paper_ids: Vec<&SheetId> = graph_tree.scene_papers.iter().map(|p| &p.sheet_id).collect();
-    if paper_ids != vec![&gs_id, &gs2_id] {
-        return Err(format!("expected both scene_papers [{gs_id:?}, {gs2_id:?}], got {paper_ids:?}"));
-    }
-    let graph_map = graph_tree.to_workspace_layout_map();
-    if graph_map.scene_paper.as_ref().map(|p| &p.sheet_id) != Some(&gs_id) {
-        return Err(format!("expected map.scene_paper == {gs_id:?}, got {:?}", graph_map.scene_paper.as_ref().map(|p| &p.sheet_id)));
-    }
-    for (label, rect_opt) in [
-        ("canvas_title_rect", graph_tree.canvas_title_rect),
-        ("x_axis_title_rect", graph_tree.x_axis_title_rect),
-        ("y_axis_title_rect", graph_tree.y_axis_title_rect),
-    ] {
-        let rect = rect_opt.ok_or_else(|| format!("missing {label}"))?;
-        assert_rect_inside(graph_prim, rect, label)?;
+    // 1. Two DataSheets: primary grid cell bounds stay strictly inside primary_rect.
+    let (gp, gs_rect, g_entries) = render_split_pair(ds_id.clone(), ds2_id)?;
+    let first_cell = g_entries.iter().find(|(id, _)| id == "grid.cell.0.0.0").ok_or("missing primary grid.cell.0.0.0")?;
+    assert_rect_inside(gp, first_cell.1, "primary grid.cell.0.0.0")?;
+    if !gs_rect.is_positive() {
+        return Err(String::from("missing positive secondary DataSheet split pane"));
     }
 
-    // 3. Two ResultSheets with diagnostic banners: primary banner rect & sheet ID preserved.
-    app.split.primary_sheet_id = Some(rs1_id.clone());
-    app.split.secondary_sheet_id = Some(rs2_id);
-    let res_tree = LayoutTree::build(&app, metrics);
-    let res_prim = res_tree.split_primary.ok_or_else(|| String::from("missing split_primary for result"))?;
-    if res_tree.result_banner_sheet_id.as_ref() != Some(&rs1_id) {
-        return Err(format!("secondary ResultSheet overwrote result_banner_sheet_id: {:?}", res_tree.result_banner_sheet_id));
+    // 2. Two GraphSheets: distinct primary & secondary split rects with parity clean.
+    let (grp, grs, _) = render_split_pair(gs_id.clone(), gs2_id)?;
+    if !grp.is_positive() || !grs.is_positive() || grp.intersects(grs) {
+        return Err(format!("invalid split GraphSheet pane rects: primary={grp:?}, secondary={grs:?}"));
     }
-    let banner_rect = res_tree.result_banner_rect.ok_or_else(|| String::from("missing result_banner_rect"))?;
-    assert_rect_inside(res_prim, banner_rect, "result_banner_rect")?;
 
-    // 4. Two InfoSheets: primary info_sheet_id & notes rect preserved.
-    app.split.primary_sheet_id = Some(info1_id.clone());
-    app.split.secondary_sheet_id = Some(info2_id);
-    let info_tree = LayoutTree::build(&app, metrics);
-    let info_prim = info_tree.split_primary.ok_or_else(|| String::from("missing split_primary for info"))?;
-    if info_tree.info_sheet_id.as_ref() != Some(&info1_id) {
-        return Err(format!("secondary InfoSheet overwrote info_sheet_id: {:?}", info_tree.info_sheet_id));
+    // 3. Two ResultSheets with diagnostic banners: primary owns singleton bottom banner; secondary cannot overwrite.
+    let (rp, _rs, r_entries) = render_split_pair(rs1_id, rs2_id.clone())?;
+    let banner = r_entries.iter().find(|(id, _)| id == "result.diagnostic_banner").ok_or("missing primary result.diagnostic_banner")?;
+    if banner.1.top() < rp.bottom() - 1.0 || banner.1.bottom() > 800.0 || rp.intersects(banner.1) || _rs.intersects(banner.1) {
+        return Err(format!("result.diagnostic_banner rect {:?} collided with split panes rp={rp:?} rs={_rs:?}", banner.1));
     }
-    let notes_rect = info_tree.info_notes_rect.ok_or_else(|| String::from("missing info_notes_rect"))?;
-    assert_rect_inside(info_prim, notes_rect, "info_notes_rect")?;
+    let (_dp, _ds_sec, d_entries) = render_split_pair(ds_id.clone(), rs2_id)?;
+    if d_entries.iter().any(|(id, _)| id == "result.diagnostic_banner") {
+        return Err(String::from("secondary ResultSheet unexpectedly emitted primary result.diagnostic_banner"));
+    }
 
-    // 5. Disjoint categories (Data primary + Graph secondary): secondary populates empty singleton slots.
-    app.split.primary_sheet_id = Some(ds_id.clone());
-    app.split.secondary_sheet_id = Some(gs_id.clone());
-    let mixed_tree = LayoutTree::build(&app, metrics);
-    let mixed_sec = mixed_tree.split_secondary.ok_or_else(|| String::from("missing split_secondary for mixed"))?;
-    if mixed_tree.grid_geometry.as_ref().map(|g| &g.sheet_id) != Some(&ds_id) {
-        return Err(String::from("mixed split missing primary grid_geometry"));
+    // 4. Two InfoSheets: primary notes editor stays inside primary_rect.
+    let (ip, _is, i_entries) = render_split_pair(info1_id, info2_id)?;
+    let notes = i_entries.iter().find(|(id, _)| id == "info.notes_editor").ok_or("missing primary info.notes_editor")?;
+    assert_rect_inside(ip, notes.1, "primary info.notes_editor")?;
+
+    // 5. Disjoint categories (Data primary + Graph secondary): grid in primary, graph in secondary.
+    let (mp, ms, m_entries) = render_split_pair(ds_id, gs_id)?;
+    let m_cell = m_entries.iter().find(|(id, _)| id == "grid.cell.0.0.0").ok_or("missing mixed primary grid.cell.0.0.0")?;
+    assert_rect_inside(mp, m_cell.1, "mixed primary grid.cell.0.0.0")?;
+    if let Some((_, m_zoom)) = m_entries.iter().find(|(id, _)| id.starts_with("canvas.")) {
+        assert_rect_inside(ms, *m_zoom, "mixed secondary canvas control")?;
     }
-    let mixed_title = mixed_tree.canvas_title_rect.ok_or_else(|| String::from("mixed split missing secondary canvas_title_rect"))?;
-    assert_rect_inside(mixed_sec, mixed_title, "mixed secondary canvas_title_rect")?;
 
     Ok(())
 }

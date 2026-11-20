@@ -436,9 +436,6 @@ fn audit_2_mixed_batch_undo_and_create_recovers_exact_sheet_count() -> Result<()
 
 #[test]
 fn audit_5_gui_edit_after_64_undo_eviction_persists_through_crash_recovery() -> Result<(), Box<dyn std::error::Error>> {
-    use curvebook::desktop_host::DesktopHostEvent;
-    use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
-
     let dir = TempDirGuard::new("audit5-64-undo")?;
     let recovery_dir = dir.path.join("recovery");
     let viewport = ViewportMetrics::new(1100.0, 720.0, 1.0);
@@ -462,37 +459,70 @@ fn audit_5_gui_edit_after_64_undo_eviction_persists_through_crash_recovery() -> 
             assert!(win.app().session().is_dirty());
         }
 
-        // Perform a genuine GUI double-click + text commit + Enter edit on cell (0, 0, 0).
-        let center_pt = {
-            let tree = rt.window_mut(win_id)?.app_mut().build_and_cache_layout_tree(viewport);
-            let cell_node = tree.node("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?;
-            let center_px = cell_node.bounds.visible_rect_px.center();
-            viewport.physical_to_logical_px([f64::from(center_px[0]), f64::from(center_px[1])])
+        // Perform a genuine egui GUI double-click + text commit + Enter edit on cell (0, 0, 0).
+        let mut native = curvebook::gui_window::CurveBookNativeApp::new(rt, win_id, None);
+        let ctx = eframe::egui::Context::default();
+        ctx.set_fonts(curvebook::gui_window::build_egui_font_definitions(None));
+        let screen = eframe::egui::Rect::from_min_size(eframe::egui::Pos2::ZERO, eframe::egui::vec2(1280.0, 800.0));
+        let step = |app_host: &mut curvebook::gui_window::CurveBookNativeApp, events: Vec<eframe::egui::Event>| {
+            let mut out = ctx.run_ui(eframe::egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app_host.step_ui(ui));
+            out.textures_delta.clear();
         };
+        for _ in 0..2 {
+            step(&mut native, Vec::new());
+        }
+        let cell_pos = native.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
+        step(
+            &mut native,
+            vec![
+                eframe::egui::Event::PointerMoved(cell_pos),
+                eframe::egui::Event::PointerButton {
+                    pos: cell_pos,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+                eframe::egui::Event::PointerButton {
+                    pos: cell_pos,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+                eframe::egui::Event::PointerButton {
+                    pos: cell_pos,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+                eframe::egui::Event::PointerButton {
+                    pos: cell_pos,
+                    button: eframe::egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+            ],
+        );
+        step(&mut native, Vec::new());
+        step(
+            &mut native,
+            vec![
+                eframe::egui::Event::Text(String::from("777.25")),
+                eframe::egui::Event::Key {
+                    key: eframe::egui::Key::Enter,
+                    physical_key: None,
+                    pressed: true,
+                    repeat: false,
+                    modifiers: eframe::egui::Modifiers::NONE,
+                },
+            ],
+        );
+        step(&mut native, Vec::new());
 
-        rt.dispatch(DesktopHostEvent::PointerButton {
-            window_id: win_id,
-            x_pt: center_pt[0],
-            y_pt: center_pt[1],
-            button: PointerButton::Primary,
-            pressed: true,
-            click_count: 2,
-            modifiers: KeyModifiers::default(),
-        })?;
-        rt.dispatch(DesktopHostEvent::ImeCommit { window_id: win_id, text: String::from("777.25") })?;
-        rt.dispatch(DesktopHostEvent::KeyboardInput {
-            window_id: win_id,
-            key: String::from("Enter"),
-            pressed: true,
-            modifiers: KeyModifiers::default(),
-            text: None,
-        })?;
-
-        let win = rt.window(win_id)?;
+        let win = native.runtime().window(win_id)?;
         assert_eq!(win.app().session().undo_depth(), 64, "undo stack stayed capped at 64 after oldest eviction");
         let ds = win.app().session().document().data_sheet(&SheetId::new("s64")).ok_or("missing live s64")?;
         assert_eq!(ds.cell(CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(777.25));
-        drop(rt);
+        drop(native);
     }
 
     let mut rec_rt = DesktopHostRuntime::new(DesktopHostConfig::default());

@@ -11,3 +11,14 @@ The complete asset manifest is [ASSETS.md](ASSETS.md). Every non-code asset in t
 | `assets/app-icon/curvebook-win95-2508.png` | CurveBook contributors | Exact 2x pixel scaling of the generated 1254x1254 source | MIT OR Apache-2.0 | Transparent large-format pixel-art export |
 | `assets/app-icon/slack/curvebook.png` | CurveBook contributors | Resized from `assets/app-icon/source/seven-pane-win95-1254.png` | MIT OR Apache-2.0 | Transparent static emoji derived from original CurveBook artwork |
 | `assets/app-icon/slack/curvebook-subtle.gif` | CurveBook contributors | Animated from `assets/app-icon/source/seven-pane-win95-1254.png` | MIT OR Apache-2.0 | Transparent animated emoji derived from original CurveBook artwork |
+
+## Attributed Source Code
+
+Per `AGENTS.md` (*Attributed VectorCraft GUI source reuse*), CurveBook adapts permissively licensed (`MIT OR Apache-2.0`) pure-`egui` widget helpers and top-bar width-fitting logic from upstream repository `https://github.com/storytold/vectorcraft` at commit `644f5bc8e377730d093ac5af8967dcd055051a16`:
+
+- `crates/ui-egui/src/widgets/toggles.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
+- `crates/ui-egui/src/widgets/buttons.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
+- `crates/ui-egui/src/widgets/labels.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
+- `crates/ui-egui/src/widgets/panel_chrome.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
+- `crates/ui-egui/src/widgets/wheel_stream.rs` -> [`crates/ui-egui/src/egui_shell/widgets.rs`](crates/ui-egui/src/egui_shell/widgets.rs) (MIT OR Apache-2.0)
+- `crates/ui-egui/src/chrome.rs` (`fit_right_group`) -> [`crates/ui-egui/src/egui_shell/top_bar_fit.rs`](crates/ui-egui/src/egui_shell/top_bar_fit.rs) (MIT OR Apache-2.0)

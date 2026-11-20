@@ -1122,6 +1122,7 @@ fn wf15_full_four_stage_power_and_sample_size_wizard() -> TestRes {
     }
 
     // Check Stage 4 sensitivity matrix (`power.curve_hover` sensitivity_len + exact (alpha, power) grid cells)
+    act(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "power.tab.curve" }))?;
     let sens_inspect = inspect_all(&mut app)?;
     let sens_node = find_widget(&sens_inspect, "power.curve_hover")?;
     let sens_len = sens_node.get("value").and_then(|v| v.get("sensitivity_len")).and_then(Value::as_u64).unwrap_or(0);

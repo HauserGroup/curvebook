@@ -6,17 +6,16 @@
 //! commands. Governing spec: `docs/evidence/user-interface.md`, `docs/control-protocol.md`, and `docs/development.md`.
 #![forbid(unsafe_code)]
 
-pub mod compositor;
 pub mod control_io;
 pub mod dialogs_canvas;
 pub mod dialogs_r9;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod egui_shell;
 pub mod grid_view;
 mod gui_actions;
-pub mod human_driver;
 pub mod i18n;
 pub mod inspect;
 pub mod interaction;
-pub mod layout;
 pub mod menus;
 pub mod modal_predicates;
 pub mod os_integration;
@@ -34,10 +33,6 @@ pub use curvebook_render::{RasterImage, RenderError, RenderTargetSpec};
 use curvebook_tools::{Cursor, GridCellCoord, GridVisibleWindow};
 pub use serde_json;
 
-pub use compositor::{
-    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_for_dpi, compute_workspace_layout_map,
-    render_workspace_frame_png, render_workspace_rgba,
-};
 pub use control_io::{
     CONTROL_AUTH_TOKEN_BYTES, CONTROL_HTTP_FORBIDDEN_RESPONSE, ControlAuth, ControlLoopAction, ControlPostRequestContext, ControlRecordedStep,
     ControlRequest, ControlResponse, MAX_CONTROL_LINE_BYTES, MAX_CONTROL_TOKEN_BYTES, PrintJobSpec, PrintSpoolOutput, dispatch_gui_action,
@@ -54,18 +49,14 @@ pub use dialogs_canvas::{
 };
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
-pub use human_driver::HumanPathDriver;
-pub use i18n::{LOCALES, LocalePreset, is_draft_translation_locale, locale_display_name, locale_picker_label, normalize_locale, tr};
-pub use inspect::{UiTreeSnapshot, inspect_ui_tree, inspect_ui_tree_for_metrics};
-pub use interaction::{
-    CanvasDragTarget, GridHitGeometry, InfoRowHitRect, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers,
-    LayoutResizeHandle, NavigatorEntryHitRect, PointerButton, ScenePaperMapping, UiEventOutcome, UiInputEvent, ViewportMetrics,
-    VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap, dispatch_mouse_wheel, dispatch_ui_event, execute_widget_action,
+pub use i18n::{
+    BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
+    normalize_beta_gui_locale, normalize_locale, tr,
 };
-pub use layout::{
-    AccessibilityMeta, ClipId, FocusScope, LayoutRectPx, LayoutTextRun, LayoutTree, NodeBounds, PaintOp, ParityReport, ParityViolation,
-    RetainedLayoutFrame, ScrollAxes, ScrollMeta, WidgetAction, WidgetId, WidgetNode, WidgetRole, WidgetVisualState, ZLayer,
-    verify_click_action_parity, verify_pixel_to_hit_box_parity,
+pub use inspect::{ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree, inspect_ui_tree_for_metrics};
+pub use interaction::{
+    CanvasDragTarget, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers, LayoutResizeHandle, PointerButton,
+    UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
     CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS,
@@ -81,9 +72,7 @@ pub use os_integration::{
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
 pub use power_wizard::{PowerWizardStage, PowerWizardState};
-pub use text_bridge::{
-    DesktopTextMeasurer, FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, SoftwareTextPainter, TextMeasurer, UiTextStyle,
-};
+pub use text_bridge::{DesktopTextMeasurer, FontFamilyKind, MeasuredTextMetrics, ShapedGlyphRun, ShapedTextLine, TextMeasurer, UiTextStyle};
 pub use theme::{FontBook, UiThemeMode, UiThemeSpec};
 pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 
@@ -91,6 +80,114 @@ pub use workspace_nav::{NavigatorEntry, WorkspaceNavState};
 #[must_use]
 pub const fn bundled_fonts_enabled() -> bool {
     cfg!(feature = "bundled-fonts")
+}
+
+/// Default interface zoom scale factor (`1.0x`).
+pub const DEFAULT_UI_SCALE: f32 = 1.0;
+
+/// Minimum allowed interface zoom scale factor (`75%`).
+pub const MIN_UI_SCALE: f32 = 0.75;
+
+/// Maximum allowed interface zoom scale factor (`300%`).
+pub const MAX_UI_SCALE: f32 = 3.0;
+
+/// Discrete step applied by `Cmd/Ctrl +` and `Cmd/Ctrl -` (`10%`).
+pub const UI_SCALE_STEP: f32 = 0.1;
+
+/// Current persisted `preferences.json` schema version supported for `ui_scale` migration.
+pub const CURRENT_UI_PREFERENCES_VERSION: u32 = 1;
+
+/// Clamp and quantize a requested `ui_scale` into `[MIN_UI_SCALE, MAX_UI_SCALE]` (2 decimal places).
+#[must_use]
+pub fn clamp_ui_scale(scale: f32) -> f32 {
+    if !scale.is_finite() || scale <= 0.0 {
+        return DEFAULT_UI_SCALE;
+    }
+    let clamped = scale.clamp(MIN_UI_SCALE, MAX_UI_SCALE);
+    (clamped * 100.0).round() / 100.0
+}
+
+/// Extract and migrate `ui_scale` (`"ui_scale"` or legacy v0 `"scale"`/`"uiScale"`) from a
+/// `PreferencesFile.extra` map.
+///
+/// # Errors
+/// Returns an error if a present `ui_scale` entry is not a finite positive JSON number.
+pub fn extract_ui_scale_from_preferences_extra(extra: &serde_json::Map<String, serde_json::Value>) -> Result<Option<f32>, String> {
+    let raw_val = extra.get("ui_scale").or_else(|| extra.get("scale")).or_else(|| extra.get("uiScale"));
+    let Some(val) = raw_val else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
+    }
+    let Some(num) = val.as_f64() else {
+        return Err(String::from("`ui_scale` preference must be a finite positive number"));
+    };
+    if !num.is_finite() || num <= 0.0 {
+        return Err(format!("`ui_scale` preference `{num}` must be finite and positive"));
+    }
+    #[allow(clippy::cast_possible_truncation)]
+    let scale_f32 = num as f32;
+    Ok(Some(clamp_ui_scale(scale_f32)))
+}
+
+/// Store migrated `ui_scale` cleanly inside a `PreferencesFile.extra` map, clearing legacy v0 keys.
+pub fn write_ui_scale_to_preferences_extra(extra: &mut serde_json::Map<String, serde_json::Value>, scale: f32) {
+    extra.remove("scale");
+    extra.remove("uiScale");
+    let clamped = clamp_ui_scale(scale);
+    if (clamped - DEFAULT_UI_SCALE).abs() > 0.001 {
+        let rounded_f64 = (f64::from(clamped) * 100.0).round() / 100.0;
+        extra.insert(String::from("ui_scale"), serde_json::json!(rounded_f64));
+    } else {
+        extra.remove("ui_scale");
+    }
+}
+
+/// Migrate a raw `preferences.json` JSON object (`v0` -> `v1`), extracting normalized `ui_scale`
+/// while refusing any schema version newer than [`CURRENT_UI_PREFERENCES_VERSION`].
+///
+/// # Errors
+/// Returns an error if the root value is not a JSON object, its `version` field is invalid,
+/// `version > CURRENT_UI_PREFERENCES_VERSION`, or `ui_scale` is malformed.
+pub fn migrate_preferences_value_with_ui_scale(raw: &serde_json::Value) -> Result<(serde_json::Value, f32), String> {
+    let mut obj = raw.as_object().cloned().ok_or_else(|| String::from("preferences root must be a JSON object"))?;
+    let version = match obj.get("version") {
+        None => 0_u64,
+        Some(v) => v.as_u64().ok_or_else(|| String::from("preferences `version` must be an unsigned integer"))?,
+    };
+    if version > u64::from(CURRENT_UI_PREFERENCES_VERSION) {
+        return Err(format!(
+            "preferences schema version {version} is newer than supported version {CURRENT_UI_PREFERENCES_VERSION}; refusing to migrate or overwrite"
+        ));
+    }
+    let scale = extract_ui_scale_from_preferences_extra(&obj)?.unwrap_or(DEFAULT_UI_SCALE);
+    obj.insert(String::from("version"), serde_json::json!(CURRENT_UI_PREFERENCES_VERSION));
+    write_ui_scale_to_preferences_extra(&mut obj, scale);
+    Ok((serde_json::Value::Object(obj), scale))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+/// Custom hook intercepting `ui.*` actions when an external `egui` host/driver is attached to [`UiApp`].
+pub type EguiDispatchHook =
+    std::sync::Arc<dyn Fn(&mut UiApp, &str, &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> + Send + Sync>;
+
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Clone, Default)]
+pub(crate) struct EguiDispatchHookSlot(pub Option<EguiDispatchHook>);
+
+#[cfg(not(target_arch = "wasm32"))]
+impl std::fmt::Debug for EguiDispatchHookSlot {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("EguiDispatchHookSlot").field(&self.0.is_some()).finish()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl PartialEq for EguiDispatchHookSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
 }
 
 /// Top-level application shell facade owning [`Session`] and panel/tool view state.
@@ -117,8 +214,15 @@ pub(crate) struct UiShellSnapshot {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub host_draws_menu_bar: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ui_backend: egui_shell::UiBackend,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub egui_views: egui_shell::EguiShellViewState,
     pub view_shards: views::ViewShardStates,
     pub clipboard_adapter: ClipboardAdapterSlot,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub egui_dispatch_hook: EguiDispatchHookSlot,
     pub mutation_seq: MutationCounter,
 }
 
@@ -127,16 +231,6 @@ pub(crate) struct UiShellSnapshot {
 pub(crate) struct MutationCounter(pub u64);
 
 impl PartialEq for MutationCounter {
-    fn eq(&self, _other: &Self) -> bool {
-        true
-    }
-}
-
-/// Equality-transparent cache slot storing the latest finalized [`layout::RetainedLayoutFrame`].
-#[derive(Debug, Clone, Default)]
-pub(crate) struct CachedLayoutSlot(pub Option<layout::RetainedLayoutFrame>);
-
-impl PartialEq for CachedLayoutSlot {
     fn eq(&self, _other: &Self) -> bool {
         true
     }
@@ -244,9 +338,15 @@ pub struct UiApp {
     pub focus_widget_id: Option<String>,
     pub power_wizards_by_sheet: std::collections::BTreeMap<SheetId, PowerWizardState>,
     pub human_path_only: bool,
+    pub host_draws_menu_bar: bool,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub ui_backend: egui_shell::UiBackend,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub egui_views: egui_shell::EguiShellViewState,
     pub view_shards: views::ViewShardStates,
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
-    pub(crate) retained_layout: CachedLayoutSlot,
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) egui_dispatch_hook: EguiDispatchHookSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
     pub(crate) mutation_seq: MutationCounter,
 }
@@ -289,9 +389,15 @@ impl UiApp {
             focus_widget_id: None,
             power_wizards_by_sheet: std::collections::BTreeMap::new(),
             human_path_only: false,
+            host_draws_menu_bar: false,
+            #[cfg(not(target_arch = "wasm32"))]
+            ui_backend: egui_shell::UiBackend::Egui,
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_views: egui_shell::EguiShellViewState::default(),
             view_shards: views::ViewShardStates::default(),
             clipboard_adapter: ClipboardAdapterSlot::default(),
-            retained_layout: CachedLayoutSlot::default(),
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_dispatch_hook: EguiDispatchHookSlot::default(),
             batch_undo_log: None,
             mutation_seq: MutationCounter(0),
         };
@@ -323,8 +429,15 @@ impl UiApp {
             focus_widget_id: self.focus_widget_id.clone(),
             power_wizards_by_sheet: self.power_wizards_by_sheet.clone(),
             human_path_only: self.human_path_only,
+            host_draws_menu_bar: self.host_draws_menu_bar,
+            #[cfg(not(target_arch = "wasm32"))]
+            ui_backend: self.ui_backend,
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_views: self.egui_views.clone(),
             view_shards: self.view_shards.clone(),
             clipboard_adapter: self.clipboard_adapter.clone(),
+            #[cfg(not(target_arch = "wasm32"))]
+            egui_dispatch_hook: self.egui_dispatch_hook.clone(),
             mutation_seq: self.mutation_seq,
         }
     }
@@ -351,10 +464,16 @@ impl UiApp {
         self.focus_widget_id = snap.focus_widget_id;
         self.power_wizards_by_sheet = snap.power_wizards_by_sheet;
         self.human_path_only = snap.human_path_only;
+        self.host_draws_menu_bar = snap.host_draws_menu_bar;
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            self.ui_backend = snap.ui_backend;
+            self.egui_views = snap.egui_views;
+            self.egui_dispatch_hook = snap.egui_dispatch_hook;
+        }
         self.view_shards = snap.view_shards;
         self.clipboard_adapter = snap.clipboard_adapter;
         self.mutation_seq = snap.mutation_seq;
-        self.retained_layout.0 = None;
         self.sync_views();
     }
 
@@ -413,9 +532,72 @@ impl UiApp {
         &self.locale
     }
 
-    /// Update active UI theme mode (`Light`, `Dark`, or `HighContrast`).
+    /// Update active UI theme mode (`Light`, `Dark`, or `HighContrast`) while preserving `ui_scale`.
     pub fn set_theme_mode(&mut self, mode: UiThemeMode) {
+        let preserved_scale = clamp_ui_scale(self.theme.ui_scale);
         self.theme = UiThemeSpec::for_mode(mode);
+        self.theme.ui_scale = preserved_scale;
+    }
+
+    /// Return the current clamped user interface scale factor (`0.75..=3.0`, default `1.0`).
+    #[must_use]
+    pub fn ui_scale(&self) -> f32 {
+        clamp_ui_scale(self.theme.ui_scale)
+    }
+
+    /// Set the user interface scale factor (`0.75..=3.0`) and return the clamped value.
+    pub fn set_ui_scale(&mut self, scale: f32) -> f32 {
+        let clamped = clamp_ui_scale(scale);
+        self.theme.ui_scale = clamped;
+        clamped
+    }
+
+    /// Increase user interface zoom scale by [`UI_SCALE_STEP`] (`Cmd/Ctrl +`).
+    pub fn zoom_ui_scale_in(&mut self) -> f32 {
+        self.set_ui_scale(self.ui_scale() + UI_SCALE_STEP)
+    }
+
+    /// Decrease user interface zoom scale by [`UI_SCALE_STEP`] (`Cmd/Ctrl -`).
+    pub fn zoom_ui_scale_out(&mut self) -> f32 {
+        self.set_ui_scale(self.ui_scale() - UI_SCALE_STEP)
+    }
+
+    /// Reset user interface zoom scale to [`DEFAULT_UI_SCALE`] (`1.0x`, `Cmd/Ctrl 0`).
+    pub fn reset_ui_scale(&mut self) -> f32 {
+        self.set_ui_scale(DEFAULT_UI_SCALE)
+    }
+
+    /// Active desktop UI rendering/dispatch backend (`Legacy` default, or `Egui`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn ui_backend(&self) -> egui_shell::UiBackend {
+        self.ui_backend
+    }
+
+    /// Switch the active UI backend between `Legacy` and `Egui`.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_ui_backend(&mut self, backend: egui_shell::UiBackend) {
+        self.ui_backend = backend;
+    }
+
+    /// Builder-style helper setting [`Self::ui_backend`].
+    #[cfg(not(target_arch = "wasm32"))]
+    #[must_use]
+    pub fn with_ui_backend(mut self, backend: egui_shell::UiBackend) -> Self {
+        self.ui_backend = backend;
+        self
+    }
+
+    /// Install a custom `egui` dispatch hook overriding control `ui.*` routing on this [`UiApp`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn set_egui_dispatch_hook(&mut self, hook: EguiDispatchHook) {
+        self.egui_dispatch_hook = EguiDispatchHookSlot(Some(hook));
+    }
+
+    /// Remove any previously installed [`EguiDispatchHook`].
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn clear_egui_dispatch_hook(&mut self) {
+        self.egui_dispatch_hook = EguiDispatchHookSlot(None);
     }
 
     /// Look up the localized UI string for `key` under the currently selected locale.
@@ -459,7 +641,7 @@ impl UiApp {
         self.session.set_gui_only(policy);
     }
 
-    /// Return whether `R10.2` human-path-only enforcement is active (`HumanPathDriver` / parity tests).
+    /// Return whether `R10.2` human-path-only enforcement is active (`EguiHumanPathDriver` / parity tests).
     #[must_use]
     pub const fn is_human_path_only(&self) -> bool {
         self.human_path_only
@@ -602,33 +784,6 @@ impl UiApp {
         next
     }
 
-    /// Build or return the cached retained [`layout::LayoutTree`] for `metrics`.
-    pub fn build_and_cache_layout_tree(&mut self, metrics: ViewportMetrics) -> layout::LayoutTree {
-        let hash = layout::compute_ui_state_fingerprint(self, metrics);
-        if let Some(cached) = &self.retained_layout.0
-            && cached.metrics == metrics
-            && cached.state_hash == hash
-        {
-            return cached.tree.clone();
-        }
-        let tree = layout::LayoutTree::build(self, metrics);
-        self.retained_layout.0 = Some(layout::RetainedLayoutFrame { metrics, state_hash: hash, tree: tree.clone() });
-        tree
-    }
-
-    /// Borrow the cached [`layout::LayoutTree`] if clean, or build a fresh one for immutable callers.
-    #[must_use]
-    pub fn layout_tree_cow(&self, metrics: ViewportMetrics) -> std::borrow::Cow<'_, layout::LayoutTree> {
-        let hash = layout::compute_ui_state_fingerprint(self, metrics);
-        if let Some(cached) = &self.retained_layout.0
-            && cached.metrics == metrics
-            && cached.state_hash == hash
-        {
-            return std::borrow::Cow::Borrowed(&cached.tree);
-        }
-        std::borrow::Cow::Owned(layout::LayoutTree::build(self, metrics))
-    }
-
     /// Execute an internal UI command (`Caller::Ui`) and refresh UI navigator and selection state.
     pub fn execute_command(&mut self, command_id: &str, params: serde_json::Value) -> Result<CommandOutcome, EngineError> {
         let outcome = Self::record_session_cmd_on(&mut self.session, self.batch_undo_log.as_mut(), &mut self.mutation_seq, command_id, |session| {
@@ -651,35 +806,153 @@ impl UiApp {
     /// Process a single JSON-lines control-protocol request line and serialize the JSON reply.
     #[must_use]
     pub fn dispatch_control_line(&mut self, line: &str) -> String {
-        handle_control_line(self, line)
+        self.dispatch_control_line_with_action(line).0
     }
 
     /// Process a single JSON-lines control request and return `(json_reply, loop_action)`.
     #[must_use]
     pub fn dispatch_control_line_with_action(&mut self, line: &str) -> (String, ControlLoopAction) {
+        #[cfg(not(target_arch = "wasm32"))]
+        if line.len() <= MAX_CONTROL_LINE_BYTES
+            && let Ok(req) = serde_json::from_str::<ControlRequest>(line.trim())
+            && let Some(res) = self.try_dispatch_egui_backend(&req.method, &req.params)
+        {
+            let reply = encode_egui_control_response(req.id, res);
+            if let Ok(json_line) = serde_json::to_string(&reply) {
+                return (json_line, ControlLoopAction::Continue);
+            }
+        }
         handle_control_line_with_action(self, line)
     }
 
-    /// Render the full application frame deterministically into an RGBA [`RasterImage`].
+    /// Drive an offscreen `egui` frame until `!ctx.will_discard()` settles, executing queued
+    /// [`egui_shell::PendingUiIntents`] strictly once after settlement.
     ///
     /// # Errors
-    /// Returns [`RenderError`] if the target dimensions or scene rasterization fail.
-    pub fn render_rgba(&self, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
-        compositor::render_workspace_rgba(self, target)
+    /// Returns [`EngineError`] if the layout fails to settle within 8 passes or committing
+    /// settled UI/engine intents fails.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn run_settled_egui_shell_frame(
+        &mut self,
+        logical_size_pt: [f32; 2],
+        pixels_per_point: f32,
+        rasterizer: Option<&mut egui_shell::rasterizer::EguiSoftwareRasterizer>,
+        build_ui: impl FnMut(&mut egui::Ui, &mut Self, &mut egui_shell::FrameInspectMeta, &mut egui_shell::PendingUiIntents),
+    ) -> Result<(egui::Context, egui::FullOutput, egui_shell::FrameInspectMeta, egui_shell::GeometryStamp), EngineError> {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+        let (output, meta, stamp) = run_settled_egui_on_ctx(&ctx, self, logical_size_pt, pixels_per_point, rasterizer, build_ui)?;
+        Ok((ctx, output, meta, stamp))
     }
 
-    /// Render the workspace at the physical HiDPI dimensions described by `metrics`.
-    ///
-    /// # Errors
-    /// Returns [`RenderError`] if rasterization fails.
-    pub fn render_rgba_for_metrics(&self, metrics: ViewportMetrics, base_dpi: u16) -> Result<RasterImage, RenderError> {
-        compositor::render_workspace_rgba(self, metrics.to_render_target_spec(base_dpi))
-    }
-
-    /// Compute interactive pixel/RTL geometry for `metrics`.
+    /// Build a settled `ui.inspect` [`UiTreeSnapshot`] through [`egui_shell::inspect_bridge`] on the
+    /// minimal shell / `About` view.
+    #[cfg(not(target_arch = "wasm32"))]
     #[must_use]
-    pub fn layout_map(&self, metrics: ViewportMetrics) -> WorkspaceLayoutMap {
-        compositor::compute_workspace_layout_map(self, metrics)
+    pub fn inspect_egui_shell_snapshot(&mut self, metrics: ViewportMetrics, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
+        self.sync_views();
+        #[allow(clippy::cast_possible_truncation)]
+        let w_pt = metrics.logical_width.max(1.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let h_pt = metrics.logical_height.max(1.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let ppp = metrics.clamped_scale_factor() as f32;
+        if let Ok((_, mut output, meta, _stamp)) = self.run_settled_egui_shell_frame([w_pt, h_pt], ppp, None, |ui, app_ref, meta, intents| {
+            let mut views = std::mem::take(&mut app_ref.egui_views);
+            let _ = egui_shell::inspect_bridge::render_egui_shell_frame(ui, app_ref, &mut views, meta, intents);
+            app_ref.egui_views = views;
+        }) {
+            output.textures_delta.clear();
+            egui_shell::inspect_bridge::build_ui_tree_snapshot_from_egui(
+                self,
+                &meta,
+                output.platform_output.accesskit_update.as_ref(),
+                scope,
+                include_bounds,
+                metrics,
+            )
+        } else {
+            inspect::inspect_semantic_snapshot(self, metrics, scope, include_bounds)
+        }
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn capture_settled_egui_shell_output(
+        &mut self,
+        target: RenderTargetSpec,
+        rasterizer: &mut egui_shell::rasterizer::EguiSoftwareRasterizer,
+    ) -> Result<(egui::Context, egui::FullOutput, egui_shell::rasterizer::EguiScreenshotRegions, egui::Color32), RenderError> {
+        let ppp = egui_shell::rasterizer::pixels_per_point_for_dpi(target.dpi);
+        #[allow(clippy::cast_precision_loss)]
+        let w_pt = (target.width_px.max(1) as f32) / ppp;
+        #[allow(clippy::cast_precision_loss)]
+        let h_pt = (target.height_px.max(1) as f32) / ppp;
+        let mut regions = egui_shell::rasterizer::EguiScreenshotRegions::default();
+        let prev_sync_primary = self.egui_views.canvas_view.synchronous_raster;
+        let prev_sync_secondary = self.egui_views.center_stage.secondary_canvas_view.synchronous_raster;
+        self.egui_views.canvas_view.synchronous_raster = true;
+        self.egui_views.canvas_view.slot.cached_texture = None;
+        self.egui_views.center_stage.secondary_canvas_view.synchronous_raster = true;
+        self.egui_views.center_stage.secondary_canvas_view.slot.cached_texture = None;
+        let run_res = self.run_settled_egui_shell_frame([w_pt, h_pt], ppp, Some(rasterizer), |ui, app_ref, meta, intents| {
+            let mut views = std::mem::take(&mut app_ref.egui_views);
+            let rep = egui_shell::inspect_bridge::render_egui_shell_frame(ui, app_ref, &mut views, meta, intents);
+            app_ref.egui_views = views;
+            regions = rep.regions;
+        });
+        self.egui_views.canvas_view.synchronous_raster = prev_sync_primary;
+        self.egui_views.canvas_view.slot.cached_texture = None;
+        self.egui_views.center_stage.secondary_canvas_view.synchronous_raster = prev_sync_secondary;
+        self.egui_views.center_stage.secondary_canvas_view.slot.cached_texture = None;
+        let (ctx, output, _meta, _stamp) = run_res.map_err(|err| RenderError::InvalidTarget { message: err.to_string() })?;
+        let tokens = egui_shell::Tokens::from_theme_spec(&self.theme, &self.locale);
+        Ok((ctx, output, regions, tokens.surface_bg))
+    }
+
+    /// Render a settled `egui` shell frame into a straight-RGBA [`RasterImage`] cropped to `region`.
+    ///
+    /// # Errors
+    /// Returns [`RenderError`] when screenshot dimensions fail validation or the requested crop
+    /// region (such as `Dialog` when no modal is open) is unavailable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_egui_shell_rgba(&mut self, target: RenderTargetSpec, region: inspect::ScreenshotRegionTarget) -> Result<RasterImage, RenderError> {
+        let mut rasterizer = egui_shell::rasterizer::EguiSoftwareRasterizer::new();
+        let (ctx, mut output, regions, clear_color) = self.capture_settled_egui_shell_output(target, &mut rasterizer)?;
+        rasterizer.render_egui_screenshot_rgba(&ctx, &mut output, target, region, regions, clear_color)
+    }
+
+    /// Render a settled `ui.screenshot` PNG through [`egui_shell::rasterizer::EguiSoftwareRasterizer`].
+    ///
+    /// # Errors
+    /// Returns [`RenderError`] when screenshot dimensions fail validation or the requested crop
+    /// region (such as `Dialog` when no modal is open) is unavailable.
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn render_egui_shell_screenshot_png(
+        &mut self,
+        target: RenderTargetSpec,
+        region: inspect::ScreenshotRegionTarget,
+    ) -> Result<(Vec<u8>, u32, u32), RenderError> {
+        let mut rasterizer = egui_shell::rasterizer::EguiSoftwareRasterizer::new();
+        let (ctx, mut output, regions, clear_color) = self.capture_settled_egui_shell_output(target, &mut rasterizer)?;
+        rasterizer.render_egui_screenshot_png(&ctx, &mut output, target, region, regions, clear_color)
+    }
+
+    /// Intercept control actions via custom [`EguiDispatchHook`] or the built-in `egui` shell
+    /// backend (`ui.inspect` / `ui.screenshot`).
+    #[cfg(not(target_arch = "wasm32"))]
+    pub fn try_dispatch_egui_backend(&mut self, method: &str, params: &serde_json::Value) -> Option<Result<serde_json::Value, EngineError>> {
+        if let Some(hook) = self.egui_dispatch_hook.0.clone()
+            && let Some(res) = hook(self, method, params)
+        {
+            self.sync_views();
+            return Some(res);
+        }
+        match method {
+            "ui.inspect" => Some(dispatch_egui_inspect_action(self, params)),
+            "ui.screenshot" => Some(dispatch_egui_screenshot_action(self, params)),
+            _ => None,
+        }
     }
 
     /// Dispatch a HiDPI interactive [`UiInputEvent`] through the interaction controller (`G6`, `M7`).
@@ -931,6 +1204,317 @@ impl UiApp {
             Some(SheetSection::Info) | None => Cursor::Select,
         }
     }
+}
+
+/// Encode a `ControlResponse` preserving structured [`EngineError`] details cleanly.
+#[must_use]
+pub fn encode_egui_control_response(id: serde_json::Value, res: Result<serde_json::Value, EngineError>) -> ControlResponse {
+    match res {
+        Ok(value) => ControlResponse { id, ok: true, result: value, error: None, error_detail: None },
+        Err(err) => {
+            let detail = serde_json::to_value(&err).unwrap_or_else(|_| {
+                serde_json::json!({
+                    "code": err.code.as_str(),
+                    "category": err.category,
+                    "message": err.message(),
+                    "retryable": err.retryable,
+                    "remediation": err.remediation,
+                    "details": err.details,
+                })
+            });
+            ControlResponse { id, ok: false, result: serde_json::Value::Null, error: Some(err.to_string()), error_detail: Some(detail) }
+        }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn egui_bad_input(msg: impl Into<String>) -> EngineError {
+    EngineError::with_code(curvebook_doc::ErrorCode::BadInput, msg)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn parse_egui_inspect_metrics(params: &serde_json::Value) -> Result<ViewportMetrics, EngineError> {
+    let Some(m) = params.get("metrics").filter(|v| !v.is_null()) else {
+        return Ok(ViewportMetrics::default());
+    };
+    if !m.is_object() {
+        return Err(egui_bad_input("`metrics` must be a JSON object"));
+    }
+    let mut metrics = ViewportMetrics::default();
+    if let Some(w) = control_io::opt_finite_f64_param(m, &["logical_width", "width_pt"]).map_err(egui_bad_input)? {
+        if w < 160.0 || w > 16_384.0 {
+            return Err(egui_bad_input("`metrics.logical_width` out of range [160, 16384]"));
+        }
+        metrics.logical_width = w;
+    }
+    if let Some(h) = control_io::opt_finite_f64_param(m, &["logical_height", "height_pt"]).map_err(egui_bad_input)? {
+        if h < 120.0 || h > 16_384.0 {
+            return Err(egui_bad_input("`metrics.logical_height` out of range [120, 16384]"));
+        }
+        metrics.logical_height = h;
+    }
+    if let Some(s) = control_io::opt_finite_f64_param(m, &["scale_factor", "dpi_scale"]).map_err(egui_bad_input)? {
+        if !(0.5..=8.0).contains(&s) {
+            return Err(egui_bad_input("`metrics.scale_factor` out of range [0.5, 8.0]"));
+        }
+        metrics.scale_factor = s;
+    }
+    Ok(metrics)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_egui_inspect_action(app: &mut UiApp, params: &serde_json::Value) -> Result<serde_json::Value, EngineError> {
+    control_io::require_params_object_or_null(params, "ui.inspect").map_err(egui_bad_input)?;
+    let metrics = parse_egui_inspect_metrics(params)?;
+    let scope = control_io::opt_str_param(params, &["scope"]).map_err(egui_bad_input)?;
+    let include_bounds = control_io::opt_bool_param(params, &["include_bounds"]).map_err(egui_bad_input)?.unwrap_or(true);
+    let snap = app.inspect_egui_shell_snapshot(metrics, scope, include_bounds);
+    serde_json::to_value(snap)
+        .map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::InternalError, format!("failed to serialize egui inspect tree: {err}")))
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn dispatch_egui_screenshot_action(app: &mut UiApp, params: &serde_json::Value) -> Result<serde_json::Value, EngineError> {
+    control_io::require_params_object_or_null(params, "ui.screenshot").map_err(egui_bad_input)?;
+    let target_raw = control_io::opt_str_param(params, &["target"]).map_err(egui_bad_input)?.unwrap_or("full_window").trim().to_ascii_lowercase();
+    let region = match target_raw.as_str() {
+        "" | "full_window" | "full" | "window" | "workspace" | "viewport" => inspect::ScreenshotRegionTarget::FullWindow,
+        "canvas" | "main" => inspect::ScreenshotRegionTarget::Canvas,
+        "dialog" | "modal" => inspect::ScreenshotRegionTarget::Dialog,
+        other => {
+            return Err(egui_bad_input(format!(
+                "unsupported screenshot target `{other}`; expected full_window, workspace, viewport, canvas, or dialog"
+            )));
+        }
+    };
+
+    let width_px = control_io::parse_bounded_u32(
+        params.get("width_px"),
+        control_io::DEFAULT_SCREENSHOT_WIDTH_PX,
+        control_io::MIN_SCREENSHOT_DIM_PX,
+        control_io::MAX_SCREENSHOT_DIM_PX,
+        "width_px",
+    )
+    .map_err(egui_bad_input)?;
+    let height_px = control_io::parse_bounded_u32(
+        params.get("height_px"),
+        control_io::DEFAULT_SCREENSHOT_HEIGHT_PX,
+        control_io::MIN_SCREENSHOT_DIM_PX,
+        control_io::MAX_SCREENSHOT_DIM_PX,
+        "height_px",
+    )
+    .map_err(egui_bad_input)?;
+    let dpi_u32 =
+        control_io::parse_bounded_u32(params.get("dpi"), u32::from(control_io::DEFAULT_SCREENSHOT_DPI), u32::from(control_io::MIN_DPI), 600, "dpi")
+            .map_err(egui_bad_input)?;
+    let dpi = u16::try_from(dpi_u32).map_err(|_| egui_bad_input("dpi out of range"))?;
+
+    if app.is_gui_only() && params.get("path").is_some_and(|v| !v.is_null() && v.as_str().is_none_or(|s| !s.trim().is_empty())) {
+        return Err(EngineError::with_code(
+            curvebook_doc::ErrorCode::GuiOnlyViolation,
+            "direct filesystem writes via `ui.screenshot` `path` are blocked under --gui-only",
+        )
+        .with_remediation("Omit `path` and inspect the returned in-memory `data_base64` PNG instead."));
+    }
+    let opt_path = control_io::opt_str_param(params, &["path"]).map_err(egui_bad_input)?.map(str::trim).filter(|s| !s.is_empty());
+
+    let (png_bytes, out_w, out_h) = app
+        .render_egui_shell_screenshot_png(RenderTargetSpec { width_px, height_px, dpi }, region)
+        .map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::Conflict, format!("screenshot capture failed: {err}")))?;
+
+    let saved_path = match opt_path {
+        Some(path) => {
+            control_io::write_host_file(path, &png_bytes).map_err(|err| EngineError::with_code(curvebook_doc::ErrorCode::IoError, err))?;
+            Some(path.to_owned())
+        }
+        None => None,
+    };
+    let target_label = match region {
+        inspect::ScreenshotRegionTarget::FullWindow => "full_window",
+        inspect::ScreenshotRegionTarget::Canvas => "canvas",
+        inspect::ScreenshotRegionTarget::Dialog => "dialog",
+    };
+
+    Ok(serde_json::json!({
+        "format": "png",
+        "target": target_label,
+        "width_px": out_w,
+        "height_px": out_h,
+        "dpi": dpi,
+        "bytes_len": png_bytes.len(),
+        "data_base64": control_io::encode_base64(&png_bytes),
+        "path": saved_path,
+    }))
+}
+
+/// Accessible label/value snapshot recorded for a single rendered `egui_shell` widget.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default)]
+pub struct EguiSurfaceA11yEntry {
+    pub widget_id: String,
+    pub label: String,
+    pub value_text: Option<String>,
+    pub command_id: Option<String>,
+    pub disabled_reason: Option<String>,
+    pub full_label: Option<String>,
+}
+
+/// Captured painted text runs and accessibility metadata from a settled `egui_shell` frame.
+#[cfg(not(target_arch = "wasm32"))]
+#[derive(Debug, Clone, Default)]
+pub struct EguiSurfaceCapture {
+    pub text_runs: Vec<(String, String)>,
+    pub a11y_entries: Vec<EguiSurfaceA11yEntry>,
+    pub accesskit_labels: Vec<String>,
+}
+
+/// Reusable offscreen `egui_shell` surface scanner sharing cached fonts across multiple frames.
+#[cfg(not(target_arch = "wasm32"))]
+pub struct EguiSurfaceScanner {
+    ctx: egui::Context,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl Default for EguiSurfaceScanner {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl EguiSurfaceScanner {
+    /// Initialize a reusable offscreen `egui::Context` with AccessKit and cached UI fonts enabled.
+    #[must_use]
+    pub fn new() -> Self {
+        let ctx = egui::Context::default();
+        ctx.enable_accesskit();
+        egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+        Self { ctx }
+    }
+
+    /// Render `app` under `metrics` until settled and return all painted text runs,
+    /// `FrameInspectNodeMeta` entries, and AccessKit node labels/values.
+    #[must_use]
+    pub fn scan(&self, app: &mut UiApp, metrics: ViewportMetrics) -> EguiSurfaceCapture {
+        app.sync_views();
+        #[allow(clippy::cast_possible_truncation)]
+        let w_pt = metrics.logical_width.max(1.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let h_pt = metrics.logical_height.max(1.0) as f32;
+        #[allow(clippy::cast_possible_truncation)]
+        let ppp = metrics.clamped_scale_factor() as f32;
+
+        let Ok((output, meta, _stamp)) = run_settled_egui_on_ctx(&self.ctx, app, [w_pt, h_pt], ppp, None, |ui, app_ref, meta, intents| {
+            let mut views = std::mem::take(&mut app_ref.egui_views);
+            let _ = egui_shell::inspect_bridge::render_egui_shell_frame(ui, app_ref, &mut views, meta, intents);
+            app_ref.egui_views = views;
+        }) else {
+            return EguiSurfaceCapture::default();
+        };
+
+        let text_runs = egui_shell::driver::extract_rendered_text_runs(&output.shapes)
+            .into_iter()
+            .map(|run| {
+                let owner = meta.entries.iter().find(|e| e.clipped_rect.intersects(run.text_rect)).map(|e| e.widget_id.clone()).unwrap_or_default();
+                (owner, run.full_text)
+            })
+            .collect();
+
+        let a11y_entries = meta
+            .entries
+            .into_iter()
+            .map(|e| EguiSurfaceA11yEntry {
+                widget_id: e.widget_id,
+                label: e.label,
+                value_text: e.value.map(|v| match v {
+                    serde_json::Value::String(s) => s,
+                    other => other.to_string(),
+                }),
+                command_id: e.command_id,
+                disabled_reason: e.disabled_reason,
+                full_label: e.full_label,
+            })
+            .collect();
+
+        let mut accesskit_labels = Vec::new();
+        if let Some(update) = &output.platform_output.accesskit_update {
+            for (_, node) in &update.nodes {
+                if let Some(lbl) = node.label()
+                    && !lbl.trim().is_empty()
+                {
+                    accesskit_labels.push(lbl.to_owned());
+                }
+                if let Some(val) = node.value()
+                    && !val.trim().is_empty()
+                {
+                    accesskit_labels.push(val.to_owned());
+                }
+            }
+        }
+
+        EguiSurfaceCapture { text_runs, a11y_entries, accesskit_labels }
+    }
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn run_settled_egui_on_ctx(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    logical_size_pt: [f32; 2],
+    pixels_per_point: f32,
+    mut rasterizer: Option<&mut egui_shell::rasterizer::EguiSoftwareRasterizer>,
+    mut build_ui: impl FnMut(&mut egui::Ui, &mut UiApp, &mut egui_shell::FrameInspectMeta, &mut egui_shell::PendingUiIntents),
+) -> Result<(egui::FullOutput, egui_shell::FrameInspectMeta, egui_shell::GeometryStamp), EngineError> {
+    let w_pt = if logical_size_pt[0].is_finite() && logical_size_pt[0] > 0.0 { logical_size_pt[0] } else { 1024.0 };
+    let h_pt = if logical_size_pt[1].is_finite() && logical_size_pt[1] > 0.0 { logical_size_pt[1] } else { 640.0 };
+    let ppp = if pixels_per_point.is_finite() && pixels_per_point > 0.0 { pixels_per_point } else { 1.0 };
+    let zoom = app.ui_scale();
+    // Pre-seed `zoom_factor` BEFORE calling `apply_theme_to_ctx` (never `set_zoom_factor` prior
+    // to frame 0, which queues `new_zoom_factor` and makes `egui` overwrite pass-0 `screen_rect`
+    // with its `10_000x10_000` default `content_rect`). Apply theme tokens before `ctx.run_ui`
+    // so pass-0 `ui.style().visuals` reflects the target light/dark theme immediately.
+    let native_ppp = (ppp / zoom).max(0.05);
+    ctx.options_mut(|o| {
+        o.zoom_with_keyboard = false;
+        o.zoom_factor = zoom;
+    });
+    egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_theme_to_ctx(ctx);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let width_px = (w_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let height_px = (h_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
+
+    let mut meta = egui_shell::FrameInspectMeta::default();
+    for pass in 0..8_u32 {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut intents = egui_shell::PendingUiIntents::default();
+        let mut settled_in_pass = false;
+        let mut output = ctx.run_ui(raw_input, |ui| {
+            build_ui(ui, app, &mut meta, &mut intents);
+            settled_in_pass = !ui.ctx().will_discard();
+        });
+        let stamp = egui_shell::GeometryStamp::from_context(u64::from(pass) + 1, ctx, [width_px, height_px], settled_in_pass);
+        if let Some(rast) = rasterizer.as_deref_mut() {
+            rast.consume_textures_set(&mut output.textures_delta);
+            if !settled_in_pass {
+                rast.consume_textures_free(&mut output.textures_delta);
+            }
+        } else {
+            output.textures_delta.clear();
+        }
+        if settled_in_pass {
+            intents.commit_if_settled(app, false)?;
+            app.sync_views();
+            return Ok((output, meta, stamp));
+        }
+    }
+    Err(EngineError::with_code(curvebook_doc::ErrorCode::InternalError, "egui shell layout pass exceeded maximum discard retries without settling"))
 }
 
 #[cfg(test)]

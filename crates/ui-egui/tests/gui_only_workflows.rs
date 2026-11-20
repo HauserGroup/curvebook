@@ -193,7 +193,9 @@ fn power_wizard_four_stage_flow_under_gui_only_emits_linked_result_and_graph() -
     .map_err(|e| err_str("stage 3 -> 4", e))?;
     assert_eq!(next3.get("stage_index").and_then(Value::as_u64), Some(3));
 
-    // Hover along the Stage 4 Power vs N curve via ui.pointer_gesture.
+    // Switch Stage 4 subtab to Power Curve and hover along the curve via ui.pointer_gesture.
+    let _ = dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "power.tab.curve" }))
+        .map_err(|e| err_str("switch power curve subtab", e))?;
     let hovered =
         dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "hover", "widget_id": "power.curve_hover", "hover_fraction_x": 0.6 }))
             .map_err(|e| err_str("hover curve", e))?;

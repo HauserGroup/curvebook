@@ -25,13 +25,13 @@ All calculations run locally on your computer with **zero telemetry**. You can w
 - **Self-Contained Projects:** Save data tables, notes, analyses, graphs, and layouts together in one `.curvebook` file (or Git-friendly `.curvebook.d/` directory), reuse pipelines with `.cbtemplate` templates, and import `.csv`, `.tsv`, `.pzfx`, and `.prism` files.
 
 <p align="center">
-  <img src="docs/images/workspace-split-fit.png" alt="CurveBook light theme split workspace showing Project Navigator, Family tree, dose-response XY table, 4PL curve fit with confidence band, and Format Graph inspector" width="840"><br>
-  <em>Split workspace (Light theme): Project Navigator, Family lineage tree, XY data grid, live 4PL nonlinear fit, and Format Inspector.</em>
+  <img src="docs/images/workspace-split-fit.png" alt="CurveBook light theme egui desktop split workspace showing Project Navigator, Family tree, dose-response XY table, 4PL curve fit with confidence band, and Graph Inspector" width="840"><br>
+  <em>Split workspace (Light theme): Project Navigator, Family lineage tree, XY data grid, live 4PL nonlinear fit, and Graph Inspector.</em>
 </p>
 
 <p align="center">
-  <img src="docs/images/workspace-layout-dark.png" alt="CurveBook dark theme multi-panel Page Layout showing linked dose-response and bar graphs with significance brackets, embedded table, physical rulers, and layout inspector" width="840"><br>
-  <em>Page Layout view (Dark theme): multi-panel figure with significance brackets, embedded summary table, physical millimeter rulers, and Page Layout controls.</em>
+  <img src="docs/images/workspace-layout-dark.png" alt="CurveBook dark theme egui desktop multi-panel Page Layout showing linked dose-response and bar graphs with significance brackets, embedded table, physical rulers, and Page Layout Composer" width="840"><br>
+  <em>Page Layout view (Dark theme): multi-panel figure with significance brackets, embedded summary table, physical millimeter rulers, and Page Layout Composer.</em>
 </p>
 
 ## Download & Install
@@ -50,8 +50,8 @@ You can run your first analysis directly in the desktop window or through an AI 
 1. Launch **CurveBook**. The **Welcome & New Data Table** screen opens automatically (`File › New Project` or **New** on the toolbar reopens it anytime).
 2. Choose a data table type on the left (such as **Column** or **XY**), or switch to the **Tutorial Sample Data** tab to start with a ready-made dataset.
 3. Click **Create Table** (or **Open Sample Dataset**), then click or double-click cells in the grid to enter or paste (`Cmd/Ctrl+V`) measurements.
-4. Click **Analyze** on the toolbar (or **Analyze › Analyze…**, `Cmd/Ctrl+Shift+A`), select a test or curve fit (for example **t tests (Unpaired / Welch / Paired / Nonparametric)** or **Nonlinear Regression (Curve Fitting)**), and confirm with **OK**.
-5. Inspect the live Results sheet and linked Graph, customize appearance in the right-hand **Format Inspector**, copy vector figures with `Cmd/Ctrl+C`, and save or export via **File › Save** (`.curvebook`) or **File › Export…** (`SVG`, `PDF`, `PNG`, `TIFF`).
+4. Click **Analyze…** on the toolbar (or **Analyze › Analyze…**, `Cmd/Ctrl+Shift+A`), select a test or curve fit (for example **t tests (Unpaired / Welch / Paired / Nonparametric)** or **Nonlinear Regression (Curve Fitting)**), and confirm with **OK**.
+5. Inspect the live Results sheet and linked Graph, customize appearance in the right-hand **Graph Inspector** (or **Page Layout Composer**), copy vector figures with `Cmd/Ctrl+C`, and save or export via **File › Save** (`.curvebook`) or **Export** (**File › Export Figure…** for `SVG`, `PDF`, `PNG`, `TIFF`).
 
 ### 2. Through an AI Assistant (MCP)
 

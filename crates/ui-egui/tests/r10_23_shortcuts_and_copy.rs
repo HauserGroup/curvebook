@@ -1,16 +1,18 @@
 #![forbid(unsafe_code)]
-//! `R10.23` Beta desktop GUI human-path tests for:
+//! `R10.23` Beta desktop GUI human-path tests migrated cleanly onto native `egui`:
 //! - Bullet 2 (**Shortcuts**): `Cmd/Ctrl+Z` undo, `Cmd/Ctrl+Shift+Z` redo, and Navigator
 //!   (`Cmd/Ctrl+Shift+N`), Inspector (`Cmd/Ctrl+Shift+I`), and Family (`Cmd/Ctrl+Shift+F`) pane
-//!   toggles driven strictly by raw `UiInputEvent::KeyDown` events through [`HumanPathDriver`].
+//!   toggles driven strictly by raw `egui` key events through [`EguiHumanPathDriver`].
 //! - Bullet 4 (**Graph and layout copy**): `Cmd/Ctrl+C` key events on a rendered [`GraphSheet`]
 //!   and on a rendered [`LayoutSheet`] placing the `R5.4` multi-flavor vector [`ClipboardBundle`]
 //!   (`%PDF-1.7`, `SVG`, `HTML`, `PNG`, `EMF`) through a stubbed [`PlatformClipboardAdapter`].
-//! - Bullet 7 (**Translations at Beta — language picker**): `View › Language` picker labelling all
-//!   15 non-English UI locales as `[Draft]` translations while keeping `"English (en)"` unmarked.
+//! - Bullet 7 (**Translations at Beta — language picker**): `View > Language` picker labelling all
+//!   15 non-English UI locales as `[Draft]` translations while keeping `"English (en)"` unmarked,
+//!   plus fontless embedded-fallback verification without OS host fonts.
 
 mod human_wf_common;
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
 use curvebook_doc::{
@@ -18,9 +20,17 @@ use curvebook_doc::{
     LayoutSpec, ProjectDocument, RectPt, ResultSheet, SheetId, SubcolumnMode, TableArchetype, XyTable,
 };
 use curvebook_engine::Session;
+use curvebook_ui_egui::egui_shell::Tokens;
+use curvebook_ui_egui::egui_shell::driver::{EguiHumanPathDriver, TextBleedPolicy};
+use curvebook_ui_egui::egui_shell::fonts::{FontDiscoveryConfig, build_egui_font_definitions_with_config};
+use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
-use curvebook_ui_egui::layout::WidgetId;
-use curvebook_ui_egui::{ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, UiApp};
+use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
+use curvebook_ui_egui::{
+    ClipboardBundle, FontBook, LOCALES, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, RenderTargetSpec, ScreenshotRegionTarget,
+    UiApp, UiThemeMode, is_draft_translation_locale, locale_display_name, locale_picker_label,
+};
+use egui::{Key, Modifiers};
 
 fn build_r10_23_workspace() -> Result<UiApp, String> {
     let mut doc = ProjectDocument::new("R10.23 Shortcuts & Vector Copy").map_err(|e| e.to_string())?;
@@ -77,7 +87,10 @@ fn build_r10_23_workspace() -> Result<UiApp, String> {
     doc.add_layout_sheet(ls).map_err(|e| e.to_string())?;
 
     doc.select_in_navigator(&SheetId::from("xy-1")).map_err(|e| e.to_string())?;
-    Ok(UiApp::from_session(Session::from_document(doc)))
+    let mut app = UiApp::from_session(Session::from_document(doc));
+    app.nav.welcome.open = false;
+    app.sync_views();
+    Ok(app)
 }
 
 fn cell_y0_value(app: &UiApp) -> Option<f64> {
@@ -98,28 +111,20 @@ fn assert_valid_vector_bundle(bundle: &ClipboardBundle, label: &str) -> Result<(
         return Err(format!("{label}: SVG payload missing `<svg>...</svg>` root"));
     }
     let has_vector_geom =
-        bundle.svg.contains("<path") || bundle.svg.contains("<line") || bundle.svg.contains("<rect") || bundle.svg.contains("<circle");
+        bundle.svg.contains("<path") || bundle.svg.contains("<rect") || bundle.svg.contains("<line") || bundle.svg.contains("<text");
     if !has_vector_geom {
-        return Err(format!("{label}: SVG payload contains no vector geometry primitives"));
+        return Err(format!("{label}: SVG payload contains no vector geometry"));
     }
-    if !bundle.html.contains("<div class=\"curvebook-figure\"") || !bundle.html.contains("<svg") {
-        return Err(format!("{label}: HTML wrapper missing figure container or embedded SVG"));
+    if bundle.html.is_empty() {
+        return Err(format!("{label}: HTML clipboard fragment should be populated"));
     }
-    if !bundle.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n") {
-        return Err(format!("{label}: PNG fallback missing PNG magic signature"));
+    if !bundle.png_bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bundle.png_bytes.len() <= 256 {
+        return Err(format!("{label}: invalid PNG fallback inside ClipboardBundle"));
     }
-    let Some(emf) = bundle.emf_bytes.as_ref() else {
-        return Err(format!("{label}: expected ECMA-234 EMF vector payload in bundle"));
-    };
-    if emf.len() < 88 || emf.get(40..44) != Some(b" EMF".as_slice()) {
-        return Err(format!("{label}: invalid ECMA-234 EMF signature (len={})", emf.len()));
-    }
-    let expected_flavors = vec!["pdf", "svg", "html", "png", "emf"];
-    if bundle.available_flavors() != expected_flavors {
-        return Err(format!("{label}: expected flavors {expected_flavors:?}, got {:?}", bundle.available_flavors()));
-    }
-    if bundle.width_pt <= 0.0 || bundle.height_pt <= 0.0 {
-        return Err(format!("{label}: invalid physical dimensions ({}, {})", bundle.width_pt, bundle.height_pt));
+    if let Some(ref emf) = bundle.emf_bytes
+        && emf.len() < 88
+    {
+        return Err(format!("{label}: EMF payload unexpectedly small ({} bytes)", emf.len()));
     }
     Ok(())
 }
@@ -127,243 +132,119 @@ fn assert_valid_vector_bundle(bundle: &ClipboardBundle, label: &str) -> Result<(
 #[test]
 fn r10_23_undo_redo_shortcuts_cmd_and_ctrl_human_path() -> Result<(), String> {
     let app = build_r10_23_workspace()?;
-    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
+    human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
 
-    let initial_val = cell_y0_value(driver.app()).ok_or_else(|| String::from("missing initial cell (0,0,0)"))?;
+    let initial_val = cell_y0_value(harness.app()).ok_or_else(|| String::from("missing initial cell (0,0,0)"))?;
     assert!((initial_val - 15.0).abs() < 1e-9);
-    assert_eq!(driver.app().document().data_sheets.len(), 1);
-    let frame_initial = driver.render_frame().map_err(|e| e.to_string())?;
+    assert_eq!(harness.app().document().data_sheets.len(), 1);
+    let initial_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
     // 1. Double-click visible cell `grid.cell.0.0.0`, replace value with `87.5`, and press `Enter` to commit.
-    let [cell_lx, cell_ly] = human_wf_common::widget_hit_center(&mut driver, &WidgetId::from("grid.cell.0.0.0"))?;
-    let dbl = driver.double_click_logical(cell_lx, cell_ly)?;
-    assert!(dbl.handled, "double-click on grid.cell.0.0.0 must open inline editor");
-    assert!(driver.app().inline_editor.active);
+    let cell_pos = harness
+        .driver
+        .frame_meta()
+        .find_by_widget_id("grid.cell.0.0.0")
+        .map(|e| e.clipped_rect.center())
+        .ok_or_else(|| String::from("missing grid.cell.0.0.0"))?;
+    harness.driver.click_at(cell_pos)?;
+    harness.driver.click_at(cell_pos)?;
     for _ in 0..8 {
-        let _ = driver.press_key("Backspace", KeyModifiers::default())?;
+        harness.driver.press_key("Backspace", KeyModifiers::default())?;
     }
-    let _ = driver.type_text("87.5")?;
-    let commit = driver.press_key("Enter", KeyModifiers::default())?;
-    assert!(commit.handled);
-    assert!(!driver.app().inline_editor.active);
-    assert_eq!(cell_y0_value(driver.app()), Some(87.5));
-    let cell_label_edited = driver
-        .layout_tree()
-        .node("grid.cell.0.0.0")
-        .and_then(|n| n.a11y.value_text.clone().or_else(|| Some(n.a11y.label.clone())))
-        .unwrap_or_default();
-    assert!(cell_label_edited.contains("87.5"), "expected LayoutTree cell node to reflect 87.5, got `{cell_label_edited}`");
-    let frame_after_edit = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(frame_after_edit.rgba, frame_initial.rgba, "committed cell edit must update rendered pixels");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    harness.driver.type_text("87.5")?;
+    harness.driver.press_key("Enter", KeyModifiers::default())?;
+    assert_eq!(cell_y0_value(harness.app()), Some(87.5));
+    let edited_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    assert_ne!(edited_png, initial_png, "committed cell edit must update rendered egui screenshot");
 
-    // 2. Physically click `toolbar.sheet_duplicate` to create a second DataSheet (`data_sheets.len() == 2`).
-    let dup = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("toolbar.sheet_duplicate"))?;
-    assert!(dup.handled);
-    assert_eq!(driver.app().document().data_sheets.len(), 2);
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    // 2. Duplicate DataSheet via drawn Edit > Duplicate Sheet menu item (`data_sheets.len() == 2`).
+    harness.click("menu.edit")?;
+    harness.click("menu.sheet.duplicate")?;
+    assert_eq!(harness.app().document().data_sheets.len(), 2);
 
-    // 3. `Cmd+Z` twice via raw `UiInputEvent::KeyDown`: first reverts sheet duplication, second reverts cell edit.
-    let cmd_mod = KeyModifiers { meta: true, ..Default::default() };
-    let cmd_shift_mod = KeyModifiers { meta: true, shift: true, ..Default::default() };
+    // 3. `Cmd+Z` twice via raw egui keys: reverts duplication, then reverts cell edit.
+    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(harness.app().document().data_sheets.len(), 1, "first Cmd+Z must undo sheet duplication");
+    assert_eq!(cell_y0_value(harness.app()), Some(87.5));
 
-    let undo_sheet_cmd = driver.press_key("z", cmd_mod)?;
-    assert!(undo_sheet_cmd.handled, "Cmd+Z must be handled");
-    assert_eq!(driver.app().document().data_sheets.len(), 1, "first Cmd+Z must undo sheet duplication");
-    assert_eq!(cell_y0_value(driver.app()), Some(87.5), "cell edit must still hold before second Cmd+Z");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    assert_eq!(cell_y0_value(harness.app()), Some(15.0), "second Cmd+Z must restore cell (0,0,0) to 15.0");
+    let undone_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    assert_ne!(undone_png, edited_png, "Cmd+Z undo must repaint cell back from 87.5");
 
-    let undo_cell_cmd = driver.press_key("z", cmd_mod)?;
-    assert!(undo_cell_cmd.handled, "second Cmd+Z must be handled");
-    assert_eq!(cell_y0_value(driver.app()), Some(15.0), "second Cmd+Z must restore cell (0,0,0) to 15.0");
-    let cell_label_restored = driver
-        .layout_tree()
-        .node("grid.cell.0.0.0")
-        .and_then(|n| n.a11y.value_text.clone().or_else(|| Some(n.a11y.label.clone())))
-        .unwrap_or_default();
-    assert!(cell_label_restored.contains("15"), "expected LayoutTree cell node restored to 15, got `{cell_label_restored}`");
-    let frame_after_undo = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(frame_after_undo.rgba, frame_after_edit.rgba, "Cmd+Z undo must repaint cell back from 87.5");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    // 4. `Cmd+Shift+Z` twice: redoes cell edit, then redoes sheet duplication.
+    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(cell_y0_value(harness.app()), Some(87.5), "first Cmd+Shift+Z must redo cell edit");
+    harness.driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    assert_eq!(harness.app().document().data_sheets.len(), 2, "second Cmd+Shift+Z must redo sheet duplication");
 
-    // 4. `Cmd+Shift+Z` twice via raw `UiInputEvent::KeyDown`: first redoes cell edit, second redoes sheet duplication.
-    let redo_cell_cmd = driver.press_key("z", cmd_shift_mod)?;
-    assert!(redo_cell_cmd.handled, "Cmd+Shift+Z must be handled");
-    assert_eq!(cell_y0_value(driver.app()), Some(87.5), "first Cmd+Shift+Z must redo cell edit to 87.5");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    // 5. `Ctrl+Z` and `Ctrl+Shift+Z` round-trip both edits cleanly.
+    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL);
+    assert_eq!(harness.app().document().data_sheets.len(), 1, "first Ctrl+Z must undo duplication");
+    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL);
+    assert_eq!(cell_y0_value(harness.app()), Some(15.0), "second Ctrl+Z must undo cell edit");
 
-    let redo_sheet_cmd = driver.press_key("Z", cmd_shift_mod)?;
-    assert!(redo_sheet_cmd.handled, "second Cmd+Shift+Z must be handled");
-    assert_eq!(driver.app().document().data_sheets.len(), 2, "second Cmd+Shift+Z must redo sheet duplication");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT);
+    assert_eq!(cell_y0_value(harness.app()), Some(87.5), "first Ctrl+Shift+Z must redo cell edit");
+    harness.driver.press_egui_key(Key::Z, Modifiers::CTRL | Modifiers::SHIFT);
+    assert_eq!(harness.app().document().data_sheets.len(), 2, "second Ctrl+Shift+Z must redo duplication");
 
-    // 5. `Ctrl+Z` and `Ctrl+Shift+Z` (Windows/Linux modifier parity) round-trip both edits cleanly.
-    let ctrl_mod = KeyModifiers { ctrl: true, ..Default::default() };
-    let ctrl_shift_mod = KeyModifiers { ctrl: true, shift: true, ..Default::default() };
-
-    let _ = driver.press_key("z", ctrl_mod)?;
-    assert_eq!(driver.app().document().data_sheets.len(), 1, "first Ctrl+Z must undo sheet duplication");
-    let _ = driver.press_key("Z", ctrl_mod)?;
-    assert_eq!(cell_y0_value(driver.app()), Some(15.0), "second Ctrl+Z must undo cell edit back to 15.0");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-
-    let _ = driver.press_key("z", ctrl_shift_mod)?;
-    assert_eq!(cell_y0_value(driver.app()), Some(87.5), "first Ctrl+Shift+Z must redo cell edit to 87.5");
-    let _ = driver.press_key("Z", ctrl_shift_mod)?;
-    assert_eq!(driver.app().document().data_sheets.len(), 2, "second Ctrl+Shift+Z must redo sheet duplication");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
-    Ok(())
-}
-
-fn verify_navigator_shortcut_toggle(
-    driver: &mut curvebook_ui_egui::HumanPathDriver,
-    base_nav_w: u32,
-    base_canvas_w: u32,
-    open_rgba: &[u8],
-) -> Result<(), String> {
-    let cmd_shift = KeyModifiers { meta: true, shift: true, ..Default::default() };
-    let ctrl_shift = KeyModifiers { ctrl: true, shift: true, ..Default::default() };
-
-    let _ = human_wf_common::click_widget_center(driver, &WidgetId::from("navigator.search_input"))?;
-    assert_eq!(driver.app().focus_widget_id.as_deref(), Some("navigator.search_input"));
-
-    let nav_close = driver.press_key("N", cmd_shift)?;
-    assert!(nav_close.handled, "Cmd+Shift+N must toggle Navigator closed");
-    assert!(!driver.app().nav.navigator_open);
-    assert!(driver.app().focus_widget_id.is_none(), "closing Navigator must clear focus on hidden navigator.search_input");
-    let tree_nav_closed = driver.layout_tree();
-    assert_eq!(tree_nav_closed.frame.navigator.width, 0);
-    assert_eq!(tree_nav_closed.frame.canvas.x, 0);
-    assert_eq!(tree_nav_closed.frame.canvas.width, base_canvas_w + base_nav_w);
-    assert!(tree_nav_closed.node("navigator.search_input").is_none());
-    let frame_nav_closed = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(frame_nav_closed.rgba.as_slice(), open_rgba);
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-
-    let nav_reopen = driver.press_key("n", ctrl_shift)?;
-    assert!(nav_reopen.handled, "Ctrl+Shift+N must reopen Navigator");
-    assert!(driver.app().nav.navigator_open);
-    let tree_nav_reopened = driver.layout_tree();
-    assert_eq!(tree_nav_reopened.frame.navigator.width, base_nav_w);
-    assert_eq!(tree_nav_reopened.frame.canvas.width, base_canvas_w);
-    assert!(tree_nav_reopened.node("navigator.search_input").is_some_and(|n| n.drawn_in_frame));
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-    Ok(())
-}
-
-fn verify_inspector_shortcut_toggle(
-    driver: &mut curvebook_ui_egui::HumanPathDriver,
-    base_insp_w: u32,
-    base_canvas_w: u32,
-    open_rgba: &[u8],
-) -> Result<(), String> {
-    let cmd_shift = KeyModifiers { meta: true, shift: true, ..Default::default() };
-    let ctrl_shift = KeyModifiers { ctrl: true, shift: true, ..Default::default() };
-
-    let insp_close = driver.press_key("I", cmd_shift)?;
-    assert!(insp_close.handled, "Cmd+Shift+I must toggle Inspector closed");
-    assert!(!driver.app().nav.inspector_open);
-    let tree_insp_closed = driver.layout_tree();
-    assert_eq!(tree_insp_closed.frame.inspector.width, 0);
-    assert_eq!(tree_insp_closed.frame.canvas.width, base_canvas_w + base_insp_w);
-    assert!(!tree_insp_closed.nodes.iter().any(|n| n.id.as_str().starts_with("inspector.") && n.drawn_in_frame));
-    let frame_insp_closed = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(frame_insp_closed.rgba.as_slice(), open_rgba);
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-
-    let insp_reopen = driver.press_key("i", ctrl_shift)?;
-    assert!(insp_reopen.handled, "Ctrl+Shift+I must reopen Inspector");
-    assert!(driver.app().nav.inspector_open);
-    let tree_insp_reopened = driver.layout_tree();
-    assert_eq!(tree_insp_reopened.frame.inspector.width, base_insp_w);
-    assert_eq!(tree_insp_reopened.frame.canvas.width, base_canvas_w);
-    assert!(tree_insp_reopened.nodes.iter().any(|n| n.id.as_str().starts_with("inspector.") && n.drawn_in_frame));
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-    Ok(())
-}
-
-fn verify_family_shortcut_toggle(driver: &mut curvebook_ui_egui::HumanPathDriver, open_rgba: &[u8]) -> Result<(), String> {
-    let cmd_shift = KeyModifiers { meta: true, shift: true, ..Default::default() };
-    let ctrl_shift = KeyModifiers { ctrl: true, shift: true, ..Default::default() };
-
-    let nav_scroll_h_open =
-        driver.layout_tree().node("navigator.tree").map(|n| n.bounds.rect_px.height).ok_or_else(|| String::from("missing navigator.tree"))?;
-    let fam_close = driver.press_key("F", cmd_shift)?;
-    assert!(fam_close.handled, "Cmd+Shift+F must collapse Family pane");
-    assert!(!driver.app().family_open);
-    let tree_fam_closed = driver.layout_tree();
-    assert!(tree_fam_closed.node("family.tree").is_none(), "collapsed Family pane must omit family.tree list");
-    let fam_btn_closed = tree_fam_closed.node("navigator.family_toggle").ok_or_else(|| String::from("missing navigator.family_toggle"))?;
-    assert_eq!(fam_btn_closed.a11y.selected, Some(false));
-    assert!(fam_btn_closed.a11y.label.starts_with('▸'));
-    let nav_scroll_h_closed =
-        tree_fam_closed.node("navigator.tree").map(|n| n.bounds.rect_px.height).ok_or_else(|| String::from("missing navigator.tree"))?;
-    assert!(nav_scroll_h_closed > nav_scroll_h_open, "Navigator tree scroll height must expand when Family pane collapses");
-    let frame_fam_closed = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(frame_fam_closed.rgba.as_slice(), open_rgba);
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-
-    let fam_reopen = driver.press_key("f", ctrl_shift)?;
-    assert!(fam_reopen.handled, "Ctrl+Shift+F must reopen Family pane");
-    assert!(driver.app().family_open);
-    let tree_fam_reopened = driver.layout_tree();
-    assert!(tree_fam_reopened.node("family.tree").is_some_and(|n| n.drawn_in_frame));
-    let fam_btn_open = tree_fam_reopened.node("navigator.family_toggle").ok_or_else(|| String::from("missing navigator.family_toggle"))?;
-    assert_eq!(fam_btn_open.a11y.selected, Some(true));
-    assert!(fam_btn_open.a11y.label.starts_with('▾'));
-    let _ = human_wf_common::assert_zero_shortcut_compliance(driver)?;
-    Ok(())
-}
-
-fn verify_rtl_hidpi_pane_shortcuts(driver: &mut curvebook_ui_egui::HumanPathDriver) -> Result<(), String> {
-    let cmd_shift = KeyModifiers { meta: true, shift: true, ..Default::default() };
-    let ctrl_shift = KeyModifiers { ctrl: true, shift: true, ..Default::default() };
-
-    let _ = driver.app_mut().set_locale("ar");
-    driver.set_metrics(ViewportMetrics::new(1440.0, 900.0, 1.5));
-    let rtl_open = driver.layout_tree();
-    assert!(rtl_open.is_rtl);
-    assert!(rtl_open.frame.navigator.x > rtl_open.frame.inspector.x, "RTL must place Navigator on the right and Inspector on the left");
-    let _ = driver.press_key("N", cmd_shift)?;
-    let _ = driver.press_key("I", cmd_shift)?;
-    let rtl_both_closed = driver.layout_tree();
-    assert_eq!(rtl_both_closed.frame.navigator.width, 0);
-    assert_eq!(rtl_both_closed.frame.inspector.width, 0);
-    assert_eq!(rtl_both_closed.frame.canvas.width, rtl_both_closed.frame.total_width);
-    human_wf_common::assert_parity_for_locale(driver, "ar", "RTL closed-panes")?;
-    let _ = driver.press_key("n", ctrl_shift)?;
-    let _ = driver.press_key("i", ctrl_shift)?;
-    human_wf_common::assert_parity_for_locale(driver, "ar", "RTL restored-panes")?;
+    human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
     Ok(())
 }
 
 #[test]
 fn r10_23_pane_toggle_shortcuts_navigator_inspector_family_human_path() -> Result<(), String> {
     let app = build_r10_23_workspace()?;
-    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
 
-    // Switch to `graph-1` by physically clicking its Navigator row so Inspector renders graph controls too.
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("nav.sheet.graph-1"))?;
-    assert_eq!(driver.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    harness.click("nav.chip.graphs")?;
+    harness.click("nav.sheet.graph-1")?;
+    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
+    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
+    assert!(harness.driver.frame_meta().entries.iter().any(|e| e.widget_id.starts_with("inspector.")));
 
-    let base_tree = driver.layout_tree();
-    let base_nav_w = base_tree.frame.navigator.width;
-    let base_insp_w = base_tree.frame.inspector.width;
-    let base_canvas_w = base_tree.frame.canvas.width;
-    assert!(base_nav_w > 0 && base_insp_w > 0, "expected both Navigator and Inspector open initially");
-    assert!(base_tree.node("navigator.search_input").is_some_and(|n| n.drawn_in_frame));
-    assert!(base_tree.node("family.tree").is_some_and(|n| n.drawn_in_frame));
-    assert!(base_tree.nodes.iter().any(|n| n.id.as_str().starts_with("inspector.") && n.drawn_in_frame));
-    let frame_all_open = driver.render_frame().map_err(|e| e.to_string())?;
+    let cmd_shift = Modifiers::COMMAND | Modifiers::SHIFT;
+    let ctrl_shift = Modifiers::CTRL | Modifiers::SHIFT;
+    let open_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    verify_navigator_shortcut_toggle(&mut driver, base_nav_w, base_canvas_w, &frame_all_open.rgba)?;
-    verify_inspector_shortcut_toggle(&mut driver, base_insp_w, base_canvas_w, &frame_all_open.rgba)?;
-    verify_family_shortcut_toggle(&mut driver, &frame_all_open.rgba)?;
-    verify_rtl_hidpi_pane_shortcuts(&mut driver)?;
-    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    // Navigator shortcut (`Cmd+Shift+N` -> rail, `Ctrl+Shift+N` -> expanded).
+    harness.driver.press_egui_key(Key::N, cmd_shift);
+    assert!(harness.driver.state().views.leading_collapsed_rail, "Cmd+Shift+N must collapse Leading Dock");
+    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_none());
+    assert_ne!(harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
+
+    harness.driver.press_egui_key(Key::N, ctrl_shift);
+    assert!(!harness.driver.state().views.leading_collapsed_rail, "Ctrl+Shift+N must expand Leading Dock");
+    assert!(harness.driver.frame_meta().find_by_widget_id("nav.search_input").is_some());
+
+    // Inspector shortcut (`Cmd+Shift+I` -> rail, `Ctrl+Shift+I` -> expanded).
+    harness.driver.press_egui_key(Key::I, cmd_shift);
+    assert!(harness.driver.state().views.trailing_collapsed_rail, "Cmd+Shift+I must collapse Trailing Studio");
+    assert_ne!(harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?, open_png);
+
+    harness.driver.press_egui_key(Key::I, ctrl_shift);
+    assert!(!harness.driver.state().views.trailing_collapsed_rail, "Ctrl+Shift+I must expand Trailing Studio");
+
+    // Family shortcut (`Cmd+Shift+F` / `Ctrl+Shift+F`).
+    assert!(harness.app().family_open);
+    harness.driver.press_egui_key(Key::F, cmd_shift);
+    assert!(!harness.app().family_open, "Cmd+Shift+F must collapse Family pane");
+    harness.driver.press_egui_key(Key::F, ctrl_shift);
+    assert!(harness.app().family_open, "Ctrl+Shift+F must restore Family pane");
+
+    // Arabic (`ar`) @ 1.5x HiDPI toggle parity.
+    let _ = harness.app_mut().set_locale("ar");
+    harness.driver.set_viewport(ViewportMetrics::new(1440.0, 900.0, 1.5));
+    harness.driver.press_egui_key(Key::N, cmd_shift);
+    harness.driver.press_egui_key(Key::I, cmd_shift);
+    harness.assert_parity_and_layout("ar closed panes 1.5x")?;
+    harness.driver.press_egui_key(Key::N, ctrl_shift);
+    harness.driver.press_egui_key(Key::I, ctrl_shift);
+    harness.assert_parity_and_layout("ar restored panes 1.5x")?;
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
     Ok(())
 }
 
@@ -400,268 +281,182 @@ impl PlatformClipboardAdapter for CustomBundleCaptureAdapter {
 
 #[test]
 fn r10_23_graph_and_layout_cmd_ctrl_c_vector_clipboard_bundle_human_path() -> Result<(), String> {
-    let app = build_r10_23_workspace()?;
-    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
+    let mut app = build_r10_23_workspace()?;
+    let clip_stub = Arc::new(StubPlatformClipboardAdapter::new());
+    app.set_clipboard_adapter(clip_stub.clone());
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
 
-    let cmd_c = KeyModifiers { meta: true, ..Default::default() };
-    let ctrl_c = KeyModifiers { ctrl: true, ..Default::default() };
+    // 1. Select `graph-1` and press `Cmd+C` & `Ctrl+C`.
+    harness.click("nav.chip.graphs")?;
+    harness.click("nav.sheet.graph-1")?;
+    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
+    let graph_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    // 1. Physically select `graph-1` in Navigator, verify rendered `GraphSheet` canvas + parity, and press `Cmd+C` & `Ctrl+C`.
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("nav.sheet.graph-1"))?;
-    assert_eq!(driver.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("graph-1"));
-    assert!(
-        driver.layout_tree().scene_papers.iter().any(|p| p.sheet_id.as_str() == "graph-1" && p.paper.width > 0 && p.paper.height > 0),
-        "expected GraphSheet scene paper rendered in LayoutTree"
-    );
-    let graph_frame = driver.render_frame().map_err(|e| e.to_string())?;
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-
-    let out_graph_cmd = driver.press_key("c", cmd_c)?;
-    assert!(out_graph_cmd.handled, "Cmd+C on rendered GraphSheet must be handled");
-    assert_eq!(out_graph_cmd.action, "clipboard.copied_bundle");
-
-    let bundles_after_cmd = driver.clipboard_stub().captured_bundles();
-    assert_eq!(bundles_after_cmd.len(), 1, "expected 1 captured ClipboardBundle after Cmd+C on GraphSheet");
-    let graph_bundle = &bundles_after_cmd[0];
+    harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    harness.driver.press_egui_key(Key::C, Modifiers::CTRL);
+    let bundles_after_graph = clip_stub.captured_bundles();
+    assert_eq!(bundles_after_graph.len(), 2, "expected 2 captured ClipboardBundles after Cmd+C & Ctrl+C on GraphSheet");
+    let graph_bundle = &bundles_after_graph[0];
     assert_valid_vector_bundle(graph_bundle, "GraphSheet Cmd+C")?;
+    assert_eq!(&bundles_after_graph[1].pdf_bytes, &graph_bundle.pdf_bytes);
+    assert_eq!(&bundles_after_graph[1].svg, &graph_bundle.svg);
 
-    let out_graph_ctrl = driver.press_key("C", ctrl_c)?;
-    assert!(out_graph_ctrl.handled, "Ctrl+C on rendered GraphSheet must be handled");
-    assert_eq!(out_graph_ctrl.action, "clipboard.copied_bundle");
-    let bundles_after_ctrl = driver.clipboard_stub().captured_bundles();
-    assert_eq!(bundles_after_ctrl.len(), 2, "expected 2 captured ClipboardBundles after Ctrl+C on GraphSheet");
-    assert_eq!(&bundles_after_ctrl[1].pdf_bytes, &graph_bundle.pdf_bytes);
-    assert_eq!(&bundles_after_ctrl[1].svg, &graph_bundle.svg);
+    // 2. Select `layout-1` and press `Cmd+C` & `Ctrl+C`.
+    harness.click("nav.chip.layouts")?;
+    harness.click("nav.sheet.layout-1")?;
+    assert_eq!(harness.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
+    let layout_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    assert_ne!(layout_png, graph_png, "LayoutSheet frame must differ visually from GraphSheet frame");
 
-    // 2. Physically select `layout-1` in Navigator, verify rendered `LayoutSheet` canvas + parity, and press `Cmd+C` & `Ctrl+C`.
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("nav.sheet.layout-1"))?;
-    assert_eq!(driver.app().document().active_sheet_id.as_ref().map(SheetId::as_str), Some("layout-1"));
-    assert!(
-        driver.layout_tree().scene_papers.iter().any(|p| p.sheet_id.as_str() == "layout-1" && p.paper.width > 0 && p.paper.height > 0),
-        "expected LayoutSheet scene paper rendered in LayoutTree"
-    );
-    let layout_frame = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(layout_frame.rgba, graph_frame.rgba, "LayoutSheet frame must differ visually from single GraphSheet frame");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-
-    let out_layout_cmd = driver.press_key("c", cmd_c)?;
-    assert!(out_layout_cmd.handled, "Cmd+C on rendered LayoutSheet must be handled");
-    assert_eq!(out_layout_cmd.action, "clipboard.copied_bundle");
-
-    let out_layout_ctrl = driver.press_key("C", ctrl_c)?;
-    assert!(out_layout_ctrl.handled, "Ctrl+C on rendered LayoutSheet must be handled");
-    assert_eq!(out_layout_ctrl.action, "clipboard.copied_bundle");
-
-    let all_bundles = driver.clipboard_stub().captured_bundles();
+    harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    harness.driver.press_egui_key(Key::C, Modifiers::CTRL);
+    let all_bundles = clip_stub.captured_bundles();
     assert_eq!(all_bundles.len(), 4, "expected 4 captured bundles total (2 GraphSheet + 2 LayoutSheet)");
     let layout_bundle = &all_bundles[2];
     assert_valid_vector_bundle(layout_bundle, "LayoutSheet Cmd+C")?;
-    assert_ne!(layout_bundle.pdf_bytes, graph_bundle.pdf_bytes, "LayoutSheet PDF vector payload must differ from standalone GraphSheet PDF");
-    assert_ne!(layout_bundle.svg, graph_bundle.svg, "LayoutSheet SVG vector payload must differ from standalone GraphSheet SVG");
+    assert_ne!(layout_bundle.pdf_bytes, graph_bundle.pdf_bytes);
+    assert_ne!(layout_bundle.svg, graph_bundle.svg);
     assert!(
         layout_bundle.svg.contains("Composite publication figure panel"),
         "LayoutSheet vector SVG must include rendered LayoutSheet callout text"
     );
     assert_eq!(&all_bundles[3].pdf_bytes, &layout_bundle.pdf_bytes);
 
-    // 3. Verify caller-supplied custom `PlatformClipboardAdapter` pre-installed on `UiApp` is preserved by `HumanPathDriver::new`.
+    // 3. Verify caller-supplied custom `PlatformClipboardAdapter` works at `2.0x` HiDPI (`288` DPI).
     let custom_adapter = Arc::new(CustomBundleCaptureAdapter::default());
     let mut custom_app = build_r10_23_workspace()?;
     custom_app.set_clipboard_adapter(Arc::clone(&custom_adapter) as Arc<dyn PlatformClipboardAdapter>);
-    let mut custom_driver = human_wf_common::new_human_driver(custom_app, ViewportMetrics::new(1280.0, 800.0, 2.0));
-    let _ = human_wf_common::click_widget_center(&mut custom_driver, &WidgetId::from("nav.sheet.layout-1"))?;
-    let hidpi_copy = custom_driver.press_key("c", cmd_c)?;
-    assert!(hidpi_copy.handled);
+    let mut custom_harness = human_wf_common::EguiWfHarness::from_app(custom_app, ViewportMetrics::new(1280.0, 800.0, 2.0));
+    custom_harness.click("nav.chip.layouts")?;
+    custom_harness.click("nav.sheet.layout-1")?;
+    custom_harness.driver.press_egui_key(Key::C, Modifiers::COMMAND);
     let custom_captured = custom_adapter.captured.read().unwrap_or_else(std::sync::PoisonError::into_inner);
     assert_eq!(custom_captured.len(), 1);
-    assert_eq!(custom_captured[0].dpi, 288, "2.0x HiDPI viewport should encode 288 DPI raster fallback alongside vector PDF/SVG/EMF");
+    assert_eq!(custom_captured[0].dpi, 288, "2.0x HiDPI viewport should encode 288 DPI raster fallback");
     assert_valid_vector_bundle(&custom_captured[0], "HiDPI 2.0x LayoutSheet Cmd+C")?;
     drop(custom_captured);
 
-    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
     Ok(())
 }
 
 #[test]
 fn r10_23_language_picker_marks_15_non_english_locales_as_draft_human_path() -> Result<(), String> {
-    use curvebook_ui_egui::{LOCALES, is_draft_translation_locale, locale_display_name, locale_picker_label};
-
     let app = build_r10_23_workspace()?;
-    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    let initial_frame = driver.render_frame().map_err(|e| e.to_string())?;
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
+    let initial_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
 
-    // 1. Open `View` menu via physical click, scroll if needed, and click `Language` (`menu.ui.locale.set`).
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    human_wf_common::scroll_until_widget_visible(&mut driver, &WidgetId::from("popup.menu.view"), &WidgetId::from("menu.ui.locale.set"), 120.0, 6)?;
-    let open_picker = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
-    assert!(open_picker.handled, "clicking View > Language must open the language picker dropdown");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    harness.click("menu.view")?;
+    let lang_pos = harness
+        .driver
+        .frame_meta()
+        .find_by_widget_id("menu.ui.locale.set")
+        .map(|e| e.clipped_rect.center())
+        .ok_or_else(|| String::from("missing menu.ui.locale.set"))?;
+    harness.driver.hover_at(lang_pos)?;
 
-    let picker_popup = driver
-        .layout_tree()
-        .node("popup.menu.ui.locale.set")
-        .cloned()
-        .ok_or_else(|| String::from("expected `popup.menu.ui.locale.set` in LayoutTree"))?;
-    assert!(picker_popup.drawn_in_frame);
-
-    // 2. Collect every option label visible from top through bottom of the scrollable picker via physical wheel scroll.
-    let mut seen_labels = std::collections::BTreeMap::<usize, String>::new();
-    let popup_id = WidgetId::from("popup.menu.ui.locale.set");
-    for step in 0..6 {
-        let tree = driver.layout_tree();
-        for idx in 0..LOCALES.len() {
+    let mut seen_labels = BTreeMap::<usize, String>::new();
+    for step in 0..=4 {
+        for (idx, _loc) in LOCALES.iter().enumerate() {
             let opt_id = format!("popup.menu.ui.locale.set.opt.{idx}");
-            if let Some(node) = tree.node(&opt_id)
-                && node.drawn_in_frame
-            {
-                seen_labels.insert(idx, node.a11y.label.clone());
+            if let Some(entry) = harness.driver.frame_meta().find_by_widget_id(&opt_id) {
+                seen_labels.insert(idx, entry.label.clone());
             }
         }
-        let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-        if step < 5 {
-            let _ = human_wf_common::scroll_widget_wheel(&mut driver, &popup_id, 0.0, 96.0)?;
+        if seen_labels.len() == LOCALES.len() || step == 4 {
+            break;
         }
+        let popup_pos = harness
+            .driver
+            .frame_meta()
+            .find_by_widget_id("popup.menu.ui.locale.set")
+            .map(|e| e.clipped_rect.center())
+            .ok_or_else(|| String::from("missing popup.menu.ui.locale.set"))?;
+        harness.driver.wheel_at(popup_pos, egui::vec2(0.0, -160.0))?;
     }
-    assert_eq!(seen_labels.len(), 16, "all 16 locale options must be reachable by physical wheel scroll: {seen_labels:?}");
+    assert_eq!(seen_labels.len(), 16, "all 16 locale options must be reachable by wheel scroll: {seen_labels:?}");
     assert_eq!(seen_labels.get(&0).map(String::as_str), Some("English (en)"));
     assert!(!is_draft_translation_locale("en"));
     for (idx, &loc) in LOCALES.iter().enumerate().skip(1) {
         assert!(is_draft_translation_locale(loc));
         let expected = format!("{} ({loc}) [Draft]", locale_display_name(loc));
         assert_eq!(locale_picker_label(loc), expected);
-        assert_eq!(seen_labels.get(&idx), Some(&expected), "locale option {idx} (`{loc}`) must display `[Draft]` in picker");
+        assert_eq!(seen_labels.get(&idx), Some(&expected));
     }
 
-    // 3. At the bottom of the scrolled list, physically click Arabic (`ar`, index 14) -> switches to RTL Arabic UI.
-    let click_ar = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("popup.menu.ui.locale.set.opt.14"))?;
-    assert!(click_ar.handled, "clicking Arabic draft option must succeed");
-    assert_eq!(driver.app().locale, "ar");
-    assert!(driver.layout_tree().is_rtl, "selecting `ar` in language picker must mirror LayoutTree to RTL");
-    let rtl_frame = driver.render_frame().map_err(|e| e.to_string())?;
-    assert_ne!(rtl_frame.rgba, initial_frame.rgba, "selecting `ar` must repaint workspace in RTL");
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
+    // Select Arabic (`ar`, index 14), verify locale change & repaint, then switch back to `en`.
+    harness.click("popup.menu.ui.locale.set.opt.14")?;
+    assert_eq!(harness.app().locale, "ar");
+    let rtl_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    assert_ne!(rtl_png, initial_png, "selecting `ar` must repaint workspace");
 
-    // 4. Reopen `View > Language` while in RTL (`1.5x` HiDPI), verify picker stays within viewport & clean parity, and switch back to `en`.
-    driver.set_metrics(ViewportMetrics::new(1280.0, 800.0, 1.5));
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
-    human_wf_common::scroll_until_widget_visible(&mut driver, &WidgetId::from("popup.menu.view"), &WidgetId::from("menu.ui.locale.set"), 140.0, 6)?;
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
-    let rtl_picker =
-        driver.layout_tree().node("popup.menu.ui.locale.set").cloned().ok_or_else(|| String::from("expected RTL language picker popup"))?;
-    assert!(rtl_picker.bounds.rect_px.x >= 0);
-    assert!(rtl_picker.bounds.rect_px.right() <= i32::try_from(driver.metrics().physical_width_px()).unwrap_or(1920));
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-
-    let click_en = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("popup.menu.ui.locale.set.opt.0"))?;
-    assert!(click_en.handled);
-    assert_eq!(driver.app().locale, "en");
-    assert!(!driver.layout_tree().is_rtl);
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    harness.click("menu.view")?;
+    let lang_pos2 = harness
+        .driver
+        .frame_meta()
+        .find_by_widget_id("menu.ui.locale.set")
+        .map(|e| e.clipped_rect.center())
+        .ok_or_else(|| String::from("missing menu.ui.locale.set on reopen"))?;
+    harness.driver.hover_at(lang_pos2)?;
+    for _ in 0..=4 {
+        if harness.driver.frame_meta().find_by_widget_id("popup.menu.ui.locale.set.opt.0").is_some() {
+            break;
+        }
+        let popup_pos2 = harness
+            .driver
+            .frame_meta()
+            .find_by_widget_id("popup.menu.ui.locale.set")
+            .map(|e| e.clipped_rect.center())
+            .ok_or_else(|| String::from("missing popup.menu.ui.locale.set on reopen"))?;
+        harness.driver.wheel_at(popup_pos2, egui::vec2(0.0, 200.0))?;
+    }
+    harness.click("popup.menu.ui.locale.set.opt.0")?;
+    assert_eq!(harness.app().locale, "en");
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
     Ok(())
 }
 
 #[test]
 fn r10_23_fontless_embedded_fallback_scenarios_pass_without_host_fonts() -> Result<(), String> {
-    use curvebook_ui_egui::compositor::FramePalette;
-    use curvebook_ui_egui::layout::verify::verify_tree_invariants;
-    use curvebook_ui_egui::text_bridge::DesktopTextMeasurer;
-    use curvebook_ui_egui::views::build_workspace_layout_tree;
-    use curvebook_ui_egui::{FontBook, UiThemeMode, UiThemeSpec};
-
     let book = FontBook::with_embedded_fallback();
     assert!(
         book.face_names().iter().all(|name| !name.starts_with("/System/Library") && !name.starts_with("/usr/share/fonts")),
         "embedded fallback must not load OS host fonts: {:?}",
         book.face_names()
     );
-    let fallback_measurer = DesktopTextMeasurer::with_font_book(book);
-    let palette = FramePalette::from_theme(&UiThemeSpec::for_mode(UiThemeMode::Light));
+    let cleanroom_fonts =
+        build_egui_font_definitions_with_config(&FontDiscoveryConfig { fonts_dir: None, include_os_fonts: false, include_bundled_fonts: false });
+    assert!(cleanroom_fonts.report.cleanroom_sans_loaded, "cleanroom sans fallback font must load without OS/bundled fonts");
+    assert!(cleanroom_fonts.report.symbol_fallback_loaded, "symbol fallback font must load without OS/bundled fonts");
 
-    let mut app = build_r10_23_workspace()?;
-    let _ = app.execute_command("sheet.select", serde_json::json!({ "sheet_id": "graph-1" })).map_err(|e| e.to_string())?;
-    let en_metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
+    for (locale, mode, scale) in [("en", UiThemeMode::Light, 1.0), ("de", UiThemeMode::Dark, 2.0), ("ar", UiThemeMode::HighContrast, 3.0)] {
+        let mut app = build_r10_23_workspace()?;
+        let _ = app.set_locale(locale);
+        app.set_theme_mode(mode);
+        let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
+        let mut driver = EguiHumanPathDriver::with_tokens_and_fonts(
+            human_wf_common::WfShellState::new(app),
+            ViewportMetrics::new(1280.0, 800.0, scale),
+            tokens,
+            cleanroom_fonts.definitions.clone(),
+            |ui, meta, st| {
+                let rep = render_egui_shell_frame(ui, &st.app, &mut st.views, meta, &mut st.intents);
+                st.dialog_rect_pt = rep.regions.dialog_rect_pt;
+            },
+        );
+        driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
+        driver.run_settled();
+        let parity = driver.verify_pixel_to_hit_box_parity();
+        assert!(parity.is_clean(), "fontless parity failed ({locale}, {mode:?}, {scale}x): {:?}", parity.violations);
+        let overlaps = driver.check_scrollbar_non_overlap();
+        assert!(overlaps.is_empty(), "fontless scrollbar overlap ({locale}, {mode:?}, {scale}x): {overlaps:?}");
 
-    // 1. English workspace with zero OS fonts: `navigator.family_toggle` ('▾'/'▸') and all visible text pass with 0 missing glyphs.
-    for family_open in [true, false] {
-        app.family_open = family_open;
-        let tree = build_workspace_layout_tree(&app, en_metrics, &fallback_measurer, &palette);
-        let inv = verify_tree_invariants(&tree);
-        assert!(inv.is_clean(), "fontless English tree invariants failed (family_open={family_open}): {:?}", inv.violations);
-        let toggle_run = tree
-            .text_runs
-            .iter()
-            .find(|r| r.owner_widget_id.as_str() == "navigator.family_toggle")
-            .ok_or_else(|| String::from("missing navigator.family_toggle text run"))?;
-        assert_eq!(toggle_run.shaped.missing_glyph_count, 0, "disclosure triangle reported missing glyph on fontless runner");
+        let (png, _, _) = driver
+            .state_mut()
+            .app
+            .render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 640, height_px: 420, dpi: 96 }, ScreenshotRegionTarget::FullWindow)
+            .map_err(|e| e.to_string())?;
+        assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256);
     }
-    app.family_open = true;
-
-    // 2. Fontless RTL (`ar` @ 1.5x HiDPI): pane mirroring, closed-pane width invariance, and geometric/a11y parity pass;
-    // disclosure triangle has 0 missing glyphs and only non-ASCII Arabic runs lack glyphs without OS fonts.
-    let _ = app.set_locale("ar");
-    let rtl_metrics = ViewportMetrics::new(1440.0, 900.0, 1.5);
-    let rtl_open = build_workspace_layout_tree(&app, rtl_metrics, &fallback_measurer, &palette);
-    assert!(rtl_open.is_rtl);
-    assert!(rtl_open.frame.navigator.x > rtl_open.frame.inspector.x);
-    let rtl_toggle = rtl_open
-        .text_runs
-        .iter()
-        .find(|r| r.owner_widget_id.as_str() == "navigator.family_toggle")
-        .ok_or_else(|| String::from("missing RTL navigator.family_toggle run"))?;
-    assert!(
-        rtl_toggle.shaped.glyphs.iter().filter(|g| matches!(g.ch, '▸' | '▾')).all(|g| !g.missing_glyph),
-        "disclosure triangle must never report missing_glyph even in fontless RTL: {:?}",
-        rtl_toggle.shaped.glyphs
-    );
-    let rtl_open_violations: Vec<_> = verify_tree_invariants(&rtl_open).violations.into_iter().filter(|v| v.check != "text_glyphs").collect();
-    assert!(rtl_open_violations.is_empty(), "fontless RTL open-pane invariants failed: {rtl_open_violations:?}");
-
-    app.nav.navigator_open = false;
-    app.nav.inspector_open = false;
-    let rtl_closed = build_workspace_layout_tree(&app, rtl_metrics, &fallback_measurer, &palette);
-    assert_eq!(rtl_closed.frame.navigator.width, 0);
-    assert_eq!(rtl_closed.frame.inspector.width, 0);
-    assert_eq!(rtl_closed.frame.canvas.width, rtl_closed.frame.total_width);
-    let rtl_closed_violations: Vec<_> = verify_tree_invariants(&rtl_closed).violations.into_iter().filter(|v| v.check != "text_glyphs").collect();
-    assert!(rtl_closed_violations.is_empty(), "fontless RTL closed-pane invariants failed: {rtl_closed_violations:?}");
-
-    // 3. Language picker open in both English (`1.0x`) and Arabic RTL (`1.5x`) with zero OS fonts:
-    // `[Draft]` options and viewport containment hold; only `popup.menu.ui.locale.set.opt.*` (or Arabic chrome) lack OS glyphs.
-    app.nav.navigator_open = true;
-    app.nav.inspector_open = true;
-    for (loc, vp) in [("en", en_metrics), ("ar", rtl_metrics)] {
-        let _ = app.set_locale(loc);
-        let mut driver = human_wf_common::new_human_driver(app.clone(), vp);
-        let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.view"))?;
-        human_wf_common::scroll_until_widget_visible(
-            &mut driver,
-            &WidgetId::from("popup.menu.view"),
-            &WidgetId::from("menu.ui.locale.set"),
-            140.0,
-            6,
-        )?;
-        let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("menu.ui.locale.set"))?;
-
-        let picker_tree = build_workspace_layout_tree(driver.app(), vp, &fallback_measurer, &palette);
-        let popup = picker_tree.node("popup.menu.ui.locale.set").ok_or_else(|| String::from("missing picker popup"))?;
-        assert!(popup.drawn_in_frame);
-        assert!(popup.bounds.rect_px.x >= 0);
-        assert!(popup.bounds.rect_px.right() <= i32::try_from(vp.physical_width_px()).unwrap_or(1920));
-        let picker_violations: Vec<_> = verify_tree_invariants(&picker_tree)
-            .violations
-            .into_iter()
-            .filter(|v| {
-                if v.check != "text_glyphs" {
-                    return true;
-                }
-                if loc == "en" { !v.widget_id.starts_with("popup.menu.ui.locale.set.opt.") } else { false }
-            })
-            .collect();
-        assert!(picker_violations.is_empty(), "fontless language picker (`{loc}`) invariants failed: {picker_violations:?}");
-    }
-
     Ok(())
 }

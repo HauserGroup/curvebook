@@ -7,7 +7,9 @@
 
 #![forbid(unsafe_code)]
 
-use curvebook_chart::{ChartScene, PointPt, compile_graph, compile_layout};
+mod human_wf_common;
+
+use curvebook_chart::{ChartScene, compile_graph, compile_layout};
 use curvebook_doc::{
     BracketLabelMode, BracketStyle, ErrorBarMetric, FigureCanvasPreset, FramePreset, GraphAnnotation, GraphicalDataObject, JournalWidthPreset,
     LayoutItem, MultivariatePlotMode, PanelBadgeStyle, ProjectDocument, ReplicateOverlayStyle, SheetId, SummaryMeasure, WhiskerMethod,
@@ -766,33 +768,27 @@ fn wf27_multi_panel_layout_drag_snap_apply_style_and_preflight_strict_gui_only()
     )?;
     select_sheet(&mut app, "layout-wf27")?;
 
-    // Drag Panel 1 via real `ui.pointer_gesture` `drag` on the active layout canvas (using UI layout metrics).
+    // Drag Panel 1 via native `egui` pointer drag on `canvas.layout_panel.1`.
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
-    let map = app.layout_map(metrics);
-    let paper = map.scene_paper.as_ref().ok_or_else(|| String::from("missing scene_paper for layout-wf27"))?;
-    let start_phys = paper.scene_pt_to_pixel(PointPt::new(350.0, 107.0)).ok_or("panel 1 center off-paper")?;
-    let end_phys = paper.scene_pt_to_pixel(PointPt::new(350.0, 89.0)).ok_or("panel 1 drag target off-paper")?;
-    let start_log = metrics.physical_to_logical_px(start_phys);
-    let end_log = metrics.physical_to_logical_px(end_phys);
-
     let layout_sid = SheetId::try_new("layout-wf27").map_err(|e| e.to_string())?;
     let y_before = match app.document().layout_sheet(&layout_sid).and_then(|l| l.spec.items.get(1)) {
         Some(LayoutItem::LiveGraph { bounds_pt, .. }) => bounds_pt.y,
         other => return Err(format!("expected LiveGraph item 1 before drag, got {other:?}")),
     };
 
-    gui(
-        &mut app,
-        "ui.pointer_gesture",
-        json!({
-            "action": "drag",
-            "x": start_log[0],
-            "y": start_log[1],
-            "to_x": end_log[0],
-            "to_y": end_log[1],
-            "steps": 4
-        }),
-    )?;
+    let was_human_only = app.is_human_path_only();
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
+    let panel_rect = harness
+        .driver
+        .frame_meta()
+        .find_by_widget_id("canvas.layout_panel.1")
+        .map(|m| m.clipped_rect)
+        .ok_or_else(|| String::from("missing canvas.layout_panel.1 in egui frame"))?;
+    let start_pos = panel_rect.center();
+    let end_pos = egui::pos2(start_pos.x, start_pos.y - 24.0);
+    harness.driver.drag(start_pos, end_pos)?;
+    app = harness.driver.state().app.clone();
+    app.set_human_path_only(was_human_only);
     let y_after = match app.document().layout_sheet(&layout_sid).and_then(|l| l.spec.items.get(1)) {
         Some(LayoutItem::LiveGraph { bounds_pt, .. }) => bounds_pt.y,
         other => return Err(format!("expected LiveGraph item 1 after drag, got {other:?}")),

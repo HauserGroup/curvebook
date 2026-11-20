@@ -18,7 +18,9 @@ use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, Analy
 use curvebook_ui_egui::i18n;
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips, toolbar_tooltips};
 use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
-use curvebook_ui_egui::{ActiveDialog, ClipboardBundle, LayoutTree, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree};
+use curvebook_ui_egui::{
+    ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
+};
 
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
 const BRANDS: &[&str] = &[
@@ -63,6 +65,20 @@ const SUITE_BRANDS: &[&str] = &[
     "craft-update",
     "craft-window",
 ];
+
+/// Exact upstream repository URL permitted solely inside `## Attributed Source Code` of
+/// `ATTRIBUTION.md` and `NOTICE` (`R15.1` provenance policy).
+pub(crate) const ADAPTED_UPSTREAM_REPO_URL: &str = "https://github.com/storytold/vectorcraft";
+
+/// Adapted upstream repository/crate identifier forbidden across `crates/`, `apps/`,
+/// runtime UI/MCP/export text surfaces, and non-attribution release metadata.
+pub(crate) const ADAPTED_UPSTREAM_BRAND: &str = "vectorcraft";
+
+/// Markdown section heading inside `ATTRIBUTION.md` and `NOTICE` within which
+/// [`ADAPTED_UPSTREAM_REPO_URL`] (and only that exact URL) is permitted.
+const ATTRIBUTED_SOURCE_SECTION_HEADING: &str = "## Attributed Source Code";
+
+const ATTRIBUTED_REPO_PLACEHOLDER: &str = "upstream-attributed-repo";
 
 const ALLOW_MARKER: &str = "brand-ok";
 
@@ -159,14 +175,14 @@ pub fn run(root: &Path) -> Result<(), String> {
         let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
         if let Some(stats) = dist_stats {
             println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
                 files.len(),
                 stats.files,
                 stats.archive_entries
             );
         } else {
             println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live LayoutTree, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
                 files.len()
             );
         }
@@ -174,7 +190,7 @@ pub fn run(root: &Path) -> Result<(), String> {
     }
     let lines: Vec<String> = hits.iter().map(|h| format!("{}:{}: `{}`", h.path, h.line, h.brand)).collect();
     Err(format!(
-        "{} unapproved brand/suite mention(s) in repository paths, source identifiers/comments/literals, UI LayoutTree, MCP/engine catalogs, export/icon metadata, or packaging surfaces:\n  {}",
+        "{} unapproved brand/suite mention(s) in repository paths, source identifiers/comments/literals, live egui shell UI, MCP/engine catalogs, export/icon metadata, or packaging surfaces:\n  {}",
         hits.len(),
         lines.join("\n  ")
     ))
@@ -253,6 +269,9 @@ fn scan_tracked_path_name(path: &str, out: &mut Vec<BrandHit>) {
     }
     let start_idx = out.len();
     collect_line_words(path, 1, &norm, SUITE_BRANDS, PrismPolicy::Strict, out);
+    if is_crates_or_apps_path(&norm) {
+        collect_line_words(path, 1, &norm, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, out);
+    }
     let allow_prism_module = norm == "crates/format/src/prism.rs";
     let path_policy = if allow_prism_module { PrismPolicy::AllowExactBarePrism } else { PrismPolicy::Strict };
     collect_line_words(path, 1, &norm, BRANDS, path_policy, out);
@@ -383,14 +402,124 @@ fn dedup_tail_hits(hits: &mut Vec<BrandHit>, from: usize) {
 }
 
 fn scan_suite_lines(path: &str, text: &str, out: &mut Vec<BrandHit>) {
-    for (idx, line) in text.lines().enumerate() {
+    scan_suite_lines_with_scope(path, text, false, out);
+}
+
+fn scan_suite_lines_with_scope(path: &str, text: &str, allow_packaged: bool, out: &mut Vec<BrandHit>) {
+    let masked = mask_attributed_upstream_url(path, text, allow_packaged);
+    let check_adapted_brand = is_crates_or_apps_path(path);
+    for (idx, line) in masked.lines().enumerate() {
+        let line_no = idx + 1;
         if path == SUITE_DISCLAIMER_PATH && line.contains(ALLOW_MARKER) {
             let strict: Vec<&'static str> = SUITE_BRANDS.iter().copied().filter(|brand| !SUITE_DISCLAIMER_NAMES.contains(brand)).collect();
-            collect_line_words(path, idx + 1, line, &strict, PrismPolicy::Strict, out);
+            collect_line_words(path, line_no, line, &strict, PrismPolicy::Strict, out);
         } else {
-            collect_line_words(path, idx + 1, line, SUITE_BRANDS, PrismPolicy::Strict, out);
+            collect_line_words(path, line_no, line, SUITE_BRANDS, PrismPolicy::Strict, out);
+        }
+        if check_adapted_brand {
+            collect_line_words(path, line_no, line, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, out);
         }
     }
+}
+
+pub(crate) fn is_crates_or_apps_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    trimmed.starts_with("crates/") || trimmed.starts_with("apps/")
+}
+
+pub(crate) fn is_legal_policy_doc_path(path: &str) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    matches!(trimmed, "AGENTS.md" | "docs/ROADMAP.md" | "docs/planning/gui-layout-spec.md" | "plan/curvebook-rename.md")
+        || trimmed == "contribute/agents.html"
+        || trimmed.ends_with("/contribute/agents.html")
+}
+
+pub(crate) fn is_attribution_or_notice_path(path: &str, allow_packaged: bool) -> bool {
+    let norm = path.replace('\\', "/");
+    let trimmed = norm.strip_prefix("./").unwrap_or(&norm);
+    if matches!(trimmed, "ATTRIBUTION.md" | "NOTICE") {
+        return true;
+    }
+    if !allow_packaged || is_generated_docs_html_path(trimmed) || trimmed.split(['/', '!', ':']).any(|seg| matches!(seg, "crates" | "apps")) {
+        return false;
+    }
+    trimmed.rsplit(['/', ':', '!']).next().is_some_and(|name| matches!(name, "ATTRIBUTION.md" | "NOTICE"))
+}
+
+pub(crate) fn is_attributed_source_section_heading(line: &str) -> bool {
+    line.trim() == ATTRIBUTED_SOURCE_SECTION_HEADING
+}
+
+pub(crate) fn closes_attributed_source_section(line: &str) -> bool {
+    let trimmed = line.trim();
+    trimmed != ATTRIBUTED_SOURCE_SECTION_HEADING
+        && (trimmed.starts_with("# ") || trimmed.starts_with("#\t") || trimmed.starts_with("## ") || trimmed.starts_with("##\t"))
+}
+
+pub(crate) fn mask_attributed_upstream_url<'a>(path: &str, text: &'a str, allow_packaged: bool) -> std::borrow::Cow<'a, str> {
+    if !is_attribution_or_notice_path(path, allow_packaged) || !text.contains(ADAPTED_UPSTREAM_REPO_URL) {
+        return std::borrow::Cow::Borrowed(text);
+    }
+    let mut out = String::with_capacity(text.len());
+    let mut in_attributed_source = false;
+    for (idx, line) in text.lines().enumerate() {
+        if idx > 0 {
+            out.push('\n');
+        }
+        if is_attributed_source_section_heading(line) {
+            in_attributed_source = true;
+        } else if closes_attributed_source_section(line) {
+            in_attributed_source = false;
+        }
+        if in_attributed_source && line.contains(ADAPTED_UPSTREAM_REPO_URL) {
+            out.push_str(&mask_exact_upstream_url_on_line(line));
+        } else {
+            out.push_str(line);
+        }
+    }
+    if text.ends_with('\n') {
+        out.push('\n');
+    }
+    std::borrow::Cow::Owned(out)
+}
+
+fn is_valid_url_prefix(before: Option<char>) -> bool {
+    before.is_none_or(|ch| ch.is_whitespace() || matches!(ch, '(' | '[' | '{' | '<' | '`' | '"' | '\'' | ':' | ',' | ';'))
+}
+
+fn is_valid_url_suffix(after_slice: &str) -> bool {
+    let mut chars = after_slice.chars();
+    match chars.next() {
+        None => true,
+        Some(ch) if ch.is_whitespace() => true,
+        Some(')' | ']' | '}' | '>' | '`' | '"' | '\'' | ',' | ';') => true,
+        Some('.') => chars.next().is_none_or(|next| next.is_whitespace() || matches!(next, ')' | ']' | '}' | '>' | '`' | '"' | '\'' | ',' | ';')),
+        _ => false,
+    }
+}
+
+fn mask_exact_upstream_url_on_line(line: &str) -> String {
+    let url_len = ADAPTED_UPSTREAM_REPO_URL.len();
+    let mut out = String::with_capacity(line.len());
+    let mut cursor = 0usize;
+    while let Some(rel) = line.get(cursor..).and_then(|s| s.find(ADAPTED_UPSTREAM_REPO_URL)) {
+        let pos = cursor + rel;
+        let end = pos + url_len;
+        let prefix_ok = is_valid_url_prefix(line[..pos].chars().next_back());
+        let suffix_ok = is_valid_url_suffix(&line[end..]);
+        if prefix_ok && suffix_ok {
+            out.push_str(&line[cursor..pos]);
+            out.push_str(ATTRIBUTED_REPO_PLACEHOLDER);
+            cursor = end;
+        } else {
+            out.push_str(&line[cursor..pos + 1]);
+            cursor = pos + 1;
+        }
+    }
+    out.push_str(&line[cursor..]);
+    out
 }
 
 fn scan_cargo_toml(path: &str, text: &str, out: &mut Vec<BrandHit>) {
@@ -2197,6 +2326,13 @@ fn check_single_string_with_extra(
             out.push(BrandHit { path: path.to_owned(), line, brand });
         }
     }
+    if !is_legal_policy_doc_path(path)
+        && !is_attribution_or_notice_path(path, true)
+        && has_word_match(text, &lower, ADAPTED_UPSTREAM_BRAND, PrismPolicy::Strict)
+        && seen.insert(ADAPTED_UPSTREAM_BRAND)
+    {
+        out.push(BrandHit { path: path.to_owned(), line, brand: ADAPTED_UPSTREAM_BRAND });
+    }
     if include_pre_rename {
         for &brand in PRE_RENAME_ASSET_BRANDS {
             if has_word_match(text, &lower, brand, PrismPolicy::Strict) && seen.insert(brand) {
@@ -2215,7 +2351,7 @@ fn check_single_string(path: &str, line: usize, text: &str, prism_policy: PrismP
     check_single_string_with_extra(path, line, text, prism_policy, false, out);
 }
 
-/// Scan arbitrary UI, `LayoutTree`, `AccessibilityMeta`, or tooltip `&str` slices for external
+/// Scan arbitrary UI, `egui_shell`, AccessKit, or tooltip `&str` slices for external
 /// brands and suite names. Allows `.prism` / `*.prism` only inside explicit import/export
 /// file-type descriptions.
 #[must_use]
@@ -3137,7 +3273,7 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
 }
 
 /// Sweep in-process UI strings across 16-locale `i18n`, tooltips, all 8 table archetypes,
-/// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `LayoutTree` renders,
+/// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `egui_shell` renders,
 /// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
 /// and SVG/PDF/HTML/manifest/window export metadata.
 pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
@@ -3156,7 +3292,7 @@ pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     session.recalculate_all().map_err(|e| format!("recalculate sweep session: {e}"))?;
     let mut app = UiApp::from_session(session);
     check_all_dialogs_and_inspectors(&mut app, &mut hits);
-    hits.extend(check_live_layout_tree_surfaces()?);
+    hits.extend(check_live_egui_shell_surfaces()?);
     hits.extend(check_mcp_surfaces()?);
 
     Ok(hits)
@@ -3623,11 +3759,11 @@ fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
     }
 }
 
-/// Sweep live `build_workspace_layout_tree` rendered `LayoutTextRun` and `WidgetNode.a11y` strings
+/// Sweep live `egui_shell` painted text runs, `FrameInspectNodeMeta`, and AccessKit strings
 /// across ALL `16` `LOCALES`, all `5` sheet kinds, all `4` `WelcomeMode`s, all `7` `ActiveInspector`
 /// tabs, all `26` `ActiveDialog` variants, open dropdown menus, toolbar overflow, split view, and
 /// portfolio gallery.
-pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
+pub fn check_live_egui_shell_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = Vec::new();
     let desktop_vp = ViewportMetrics::new(1440.0, 900.0, 1.0);
     let narrow_vp = ViewportMetrics::new(640.0, 560.0, 1.0);
@@ -3635,7 +3771,7 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut empty_app = UiApp::new();
     let doc = build_brands_sweep_document()?;
     let mut session = Session::from_document(doc);
-    session.recalculate_all().map_err(|e| format!("layout sweep recalculate: {e}"))?;
+    session.recalculate_all().map_err(|e| format!("egui_shell sweep recalculate: {e}"))?;
     let mut app = UiApp::from_session(session);
     app.sync_views();
 
@@ -3645,12 +3781,13 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
 
     for &locale in i18n::LOCALES {
         let is_it = locale == "it";
+        let scanner = EguiSurfaceScanner::new();
         empty_app.set_locale(locale);
         for mode in [WelcomeMode::EmptyTypedTable, WelcomeMode::TutorialSample, WelcomeMode::FromTemplate, WelcomeMode::ClonePipeline] {
             empty_app.nav.welcome.open = true;
             empty_app.nav.welcome.mode = mode;
-            let tree = LayoutTree::build(&empty_app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:welcome:{mode:?}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut empty_app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:welcome:{mode:?}"), is_it, false, &cap, &mut hits);
         }
         empty_app.nav.welcome.open = false;
 
@@ -3666,8 +3803,8 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
         for sid in sheet_ids {
             app.execute_command("sheet.select", serde_json::json!({ "sheet_id": sid })).map_err(|e| format!("select sheet `{sid}`: {e}"))?;
             app.sync_views();
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:sheet:{sid}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:sheet:{sid}"), is_it, false, &cap, &mut hits);
         }
         app.execute_command("sheet.select", serde_json::json!({ "sheet_id": "graph-1" })).map_err(|e| format!("select graph-1: {e}"))?;
         app.sync_views();
@@ -3682,8 +3819,8 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
             ActiveInspector::ResultDetails,
         ] {
             app.canvas_dialogs.active_inspector = inspector;
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:inspector:{inspector:?}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:inspector:{inspector:?}"), is_it, false, &cap, &mut hits);
         }
         app.canvas_dialogs.active_inspector = ActiveInspector::None;
 
@@ -3691,43 +3828,43 @@ pub fn check_live_layout_tree_surfaces() -> Result<Vec<BrandHit>, String> {
             app.canvas_dialogs.active_dialog = dlg.clone();
             if matches!(dlg, ActiveDialog::CommandPalette) {
                 app.canvas_dialogs.command_palette.open();
-                let tree_default = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog:CommandPalette:default"), is_it, false, &tree_default, &mut hits);
+                let cap_default = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:default"), is_it, false, &cap_default, &mut hits);
                 app.canvas_dialogs.command_palette.query = String::from("import");
-                let tree_import = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog:CommandPalette:import"), is_it, true, &tree_import, &mut hits);
+                let cap_import = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog:CommandPalette:import"), is_it, true, &cap_import, &mut hits);
                 app.canvas_dialogs.command_palette.open();
             } else {
-                let tree = LayoutTree::build(&app, desktop_vp);
-                collect_layout_tree_hits(&format!("layout_tree:{locale}:dialog"), is_it, false, &tree, &mut hits);
+                let cap = scanner.scan(&mut app, desktop_vp);
+                collect_egui_surface_hits(&format!("egui_shell:{locale}:dialog"), is_it, false, &cap, &mut hits);
             }
         }
         app.canvas_dialogs.active_dialog = ActiveDialog::None;
 
         for key in &menu_keys {
             app.interaction.open_menu = Some((*key).to_owned());
-            let tree = LayoutTree::build(&app, desktop_vp);
-            collect_layout_tree_hits(&format!("layout_tree:{locale}:menu:{key}"), is_it, false, &tree, &mut hits);
+            let cap = scanner.scan(&mut app, desktop_vp);
+            collect_egui_surface_hits(&format!("egui_shell:{locale}:menu:{key}"), is_it, false, &cap, &mut hits);
         }
         app.interaction.open_menu = None;
 
         app.view_shards.toolbar_menus.overflow_open = true;
-        let overflow_tree = LayoutTree::build(&app, narrow_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:toolbar_overflow"), is_it, false, &overflow_tree, &mut hits);
+        let overflow_cap = scanner.scan(&mut app, narrow_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:toolbar_overflow"), is_it, false, &overflow_cap, &mut hits);
         app.view_shards.toolbar_menus.overflow_open = false;
 
         app.split.enabled = true;
         app.split.primary_sheet_id = Some(SheetId::new("data-1"));
         app.split.secondary_sheet_id = Some(SheetId::new("graph-1"));
-        let split_tree = LayoutTree::build(&app, desktop_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:split_workspace"), is_it, false, &split_tree, &mut hits);
+        let split_cap = scanner.scan(&mut app, desktop_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:split_workspace"), is_it, false, &split_cap, &mut hits);
         app.split.enabled = false;
 
         app.nav.gallery.open = true;
         let gallery_doc = app.document().clone();
         app.nav.sync_gallery(&gallery_doc);
-        let gallery_tree = LayoutTree::build(&app, desktop_vp);
-        collect_layout_tree_hits(&format!("layout_tree:{locale}:gallery"), is_it, false, &gallery_tree, &mut hits);
+        let gallery_cap = scanner.scan(&mut app, desktop_vp);
+        collect_egui_surface_hits(&format!("egui_shell:{locale}:gallery"), is_it, false, &gallery_cap, &mut hits);
         app.nav.gallery.open = false;
     }
 
@@ -3773,32 +3910,43 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
     ]
 }
 
-fn collect_layout_tree_hits(context: &str, allow_it_statistica: bool, allow_palette_cmd_id: bool, tree: &LayoutTree, hits: &mut Vec<BrandHit>) {
-    for (idx, run) in tree.text_runs.iter().enumerate() {
-        let is_palette_status_cmd = allow_palette_cmd_id && run.owner_widget_id.as_str() == "palette.status";
-        let run_ctx = format!("{context}:text_run:{}", run.owner_widget_id.as_str());
-        if allow_it_statistica || is_palette_status_cmd {
-            let policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica, allow_palette_cmd_id: is_palette_status_cmd };
-            check_single_string(&run_ctx, idx + 1, &run.text, policy, hits);
-        } else {
-            hits.extend(check_text_runs_strict(&run_ctx, [run.text.as_str()]));
+fn collect_egui_surface_hits(
+    context: &str,
+    allow_it_statistica: bool,
+    allow_palette_cmd_id: bool,
+    cap: &EguiSurfaceCapture,
+    hits: &mut Vec<BrandHit>,
+) {
+    for (idx, (owner, text)) in cap.text_runs.iter().enumerate() {
+        let is_palette_cmd = allow_palette_cmd_id && (owner == "palette.status" || owner.starts_with("palette.item."));
+        let run_ctx = format!("{context}:text_run:{owner}");
+        let policy = PrismPolicy::UiTextRun {
+            allow_dot_prism: is_dot_prism_extension_description(text),
+            allow_it_statistica,
+            allow_palette_cmd_id: is_palette_cmd,
+        };
+        check_single_string(&run_ctx, idx + 1, text, policy, hits);
+    }
+    for (idx, entry) in cap.a11y_entries.iter().enumerate() {
+        let a11y_ctx = format!("{context}:a11y:{}", entry.widget_id);
+        for txt in [Some(entry.label.as_str()), entry.value_text.as_deref(), entry.disabled_reason.as_deref(), entry.full_label.as_deref()]
+            .into_iter()
+            .flatten()
+        {
+            let policy =
+                PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(txt), allow_it_statistica, allow_palette_cmd_id: false };
+            check_single_string(&a11y_ctx, idx + 1, txt, policy, hits);
+        }
+        if let Some(cmd) = &entry.command_id
+            && cmd != "table.importPrism"
+        {
+            hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:command_id"), [cmd.as_str()]));
         }
     }
-    for (idx, node) in tree.nodes.iter().enumerate() {
-        let a11y_ctx = format!("{context}:a11y:{}", node.id.as_str());
-        for txt in [Some(node.a11y.label.as_str()), node.a11y.value_text.as_deref(), node.a11y.shortcut.as_deref()].into_iter().flatten() {
-            if allow_it_statistica {
-                let policy = PrismPolicy::UiTextRun { allow_dot_prism: false, allow_it_statistica: true, allow_palette_cmd_id: false };
-                check_single_string(&a11y_ctx, idx + 1, txt, policy, hits);
-            } else {
-                hits.extend(check_text_runs_strict(&a11y_ctx, [txt]));
-            }
-        }
-        if let Some(kpath) = &node.a11y.keyboard_path
-            && kpath != "table.importPrism"
-        {
-            hits.extend(check_text_runs_strict(&format!("{a11y_ctx}:keyboard_path"), [kpath.as_str()]));
-        }
+    for (idx, ak) in cap.accesskit_labels.iter().enumerate() {
+        let policy =
+            PrismPolicy::UiTextRun { allow_dot_prism: is_dot_prism_extension_description(ak), allow_it_statistica, allow_palette_cmd_id: false };
+        check_single_string(&format!("{context}:accesskit"), idx + 1, ak, policy, hits);
     }
 }
 
@@ -4358,7 +4506,7 @@ fn scan_dist_bytes(display_path: &str, bytes: &[u8], depth: usize, stats: &mut D
     } else if display_path.ends_with(".desktop") {
         scan_desktop_entry(display_path, &text, hits);
     } else {
-        scan_suite_lines(display_path, &text, hits);
+        scan_suite_lines_with_scope(display_path, &text, true, hits);
         scan_plain_lines_no_waiver(display_path, &text, hits);
     }
     Ok(())
@@ -4374,6 +4522,7 @@ fn is_mime_package_xml(path: &str) -> bool {
 pub(crate) fn scan_dist_label(source: &str, label: &str) -> Vec<BrandHit> {
     let mut hits = Vec::new();
     collect_line_words(source, 1, label, SUITE_BRANDS, PrismPolicy::Strict, &mut hits);
+    collect_line_words(source, 1, label, &[ADAPTED_UPSTREAM_BRAND], PrismPolicy::Strict, &mut hits);
     collect_line_words(source, 1, label, BRANDS, PrismPolicy::Strict, &mut hits);
     collect_line_words(source, 1, label, PRE_RENAME_ASSET_BRANDS, PrismPolicy::Strict, &mut hits);
     dedup_tail_hits(&mut hits, 0);
@@ -4386,7 +4535,7 @@ pub(crate) fn scan_dist_label(source: &str, label: &str) -> Vec<BrandHit> {
 pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandHit> {
     let mut hits = scan_dist_label(display_path, display_path);
     let from = hits.len();
-    scan_suite_lines(display_path, text, &mut hits);
+    scan_suite_lines_with_scope(display_path, text, true, &mut hits);
     scan_plain_lines_no_waiver(display_path, text, &mut hits);
     let ext = Path::new(display_path).extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).unwrap_or_default();
     if matches!(ext.as_str(), "html" | "htm") {
@@ -4425,6 +4574,79 @@ pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
 mod tests {
     use std::path::PathBuf;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn r15_1_provenance_permits_only_exact_upstream_url_inside_attributed_source_section() {
+        let story = ["sto", "ry", "told"].concat();
+        let vc = ["vec", "tor", "craft"].concat();
+        let vc_title = ["Vec", "tor", "Cra", "ft"].concat();
+        let exact_url = format!("https://github.com/{story}/{vc}");
+
+        let mut ok_attr = Vec::new();
+        let attr_body =
+            format!("# Attribution\n\n## Attributed Source Code\n\nAdapted helpers from {vc_title} (`{exact_url}`) at commit `deadbeef`.\n");
+        super::scan_file("ATTRIBUTION.md", &attr_body, &mut ok_attr);
+        assert!(ok_attr.is_empty(), "expected clean ATTRIBUTION.md, got {ok_attr:?}");
+
+        let mut ok_notice = Vec::new();
+        let notice_body = format!(
+            "CurveBook\n\n## Attributed Source Code\n\nFrom {vc_title} ({exact_url}, commit abc).\nCopyright (c) 2026 {vc_title} contributors.\n"
+        );
+        super::scan_file("NOTICE", &notice_body, &mut ok_notice);
+        assert!(ok_notice.is_empty(), "expected clean NOTICE, got {ok_notice:?}");
+
+        let mut ok_packaged_notice = Vec::new();
+        let pkg_notice_body = format!("## Attributed Source Code\nFrom {vc_title} ({exact_url}).\n");
+        super::scan_suite_lines_with_scope("curvebook-web-0.1.0/NOTICE", &pkg_notice_body, true, &mut ok_packaged_notice);
+        assert!(ok_packaged_notice.is_empty(), "expected clean packaged NOTICE, got {ok_packaged_notice:?}");
+
+        // Legal policy docs may mention the adapted upstream name but never the org or URL.
+        let mut ok_policy = Vec::new();
+        let policy_body = format!("Attributed {vc_title} GUI source reuse rules.\n");
+        super::scan_file("AGENTS.md", &policy_body, &mut ok_policy);
+        assert!(ok_policy.is_empty(), "expected preserved AGENTS.md policy, got {ok_policy:?}");
+
+        for (path, bad_body) in [
+            ("ATTRIBUTION.md", format!("## Other Section\n{exact_url}\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\n{exact_url}/blob/main/lib.rs\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\nhttp://github.com/{story}/{vc}\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\n{exact_url}.git\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\nhttps://github.com/{story}/other\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\nMaintained by {story}.\n")),
+            ("ATTRIBUTION.md", format!("## Attributed Source Code\nSee {exact_url}\n## Assets\n{exact_url}\n")),
+            ("NOTICE", format!("Preamble {exact_url}\n")),
+            ("README.md", format!("Upstream {exact_url} <!-- brand-ok -->\n")),
+            ("AGENTS.md", format!("Do not link {exact_url} here.\n")),
+            ("docs/ATTRIBUTION.md", format!("## Attributed Source Code\n{exact_url}\n")),
+        ] {
+            let mut hits = Vec::new();
+            super::scan_file(path, &bad_body, &mut hits);
+            assert!(hits.iter().any(|h| h.brand == "storytold"), "expected storytold rejection for {path}: {bad_body:?}, got {hits:?}");
+        }
+    }
+
+    #[test]
+    fn r15_1_vectorcraft_is_forbidden_across_crates_apps_and_ui_surfaces() {
+        let vc = ["vec", "tor", "craft"].concat();
+        let vc_title = ["Vec", "tor", "Cra", "ft"].concat();
+        for (path, body) in [
+            ("crates/ui-egui/src/widgets.rs", format!("// Adapted from {vc_title}\n")),
+            ("crates/ui-egui/src/widgets.rs", format!("pub fn {vc}_helper() {{}}\n")),
+            ("apps/curvebook/src/gui_window.rs", format!("const HELP: &str = \"{vc}\";\n")),
+            ("apps/curvebook-web/index.html", format!("<title>CurveBook {vc_title}</title>\n")),
+        ] {
+            let mut hits = Vec::new();
+            super::scan_file(path, &body, &mut hits);
+            assert!(hits.iter().any(|h| h.brand == "vectorcraft"), "expected vectorcraft rejection for {path}, got {hits:?}");
+        }
+
+        let mut path_hits = Vec::new();
+        super::scan_tracked_path_name(&format!("crates/ui-egui/src/{vc}_panel.rs"), &mut path_hits);
+        assert!(path_hits.iter().any(|h| h.brand == "vectorcraft"), "{path_hits:?}");
+
+        let ui_hits = super::check_text_runs("ui_label", [format!("Exported with {vc_title}")]);
+        assert!(ui_hits.iter().any(|h| h.brand == "vectorcraft"), "{ui_hits:?}");
+    }
 
     use super::{
         BrandHit, check_html_metadata, check_i18n_catalog, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata,

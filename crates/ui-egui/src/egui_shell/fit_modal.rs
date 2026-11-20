@@ -1,0 +1,1536 @@
+//! 7-tab `Nonlinear Curve Fitting` modal (plus MV `[Data]` tab) and 3-branch `Hook Constant`
+//! browser in `egui 0.37` (`R15.4`, `gui-layout-spec.md` §8.9).
+
+use std::sync::OnceLock;
+
+use curvebook_doc::{
+    AnalysisKind, FitMethod, HookSource, ModelComparisonSpec, NonlinearFitSpec, PValueFormat, ParameterRule, ParameterScope, ProjectDocument,
+    SheetId, TableArchetype, WeightingScheme,
+};
+use curvebook_fit::{
+    CompiledDslModel, DslEquationKind, EquationCatalogEntry, EquationCategory, ParametricModel, format_model_equation_tex, list_builtin_equations,
+};
+use egui::{Context, Id, Key, Modifiers, Rect, Stroke, TextEdit, Ui, Vec2};
+
+use crate::UiApp;
+use crate::dialogs_canvas::{ActiveDialog, ConstantHookPickerState, EditAnalysisParametersState};
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{LocalePreset, normalize_locale, tr};
+use crate::inspect::ZLayer;
+use crate::modal_predicates::ControlEnablement;
+
+use super::stat_anova_modal::{
+    ClippedTextSpec, StepperSpec, column_titles_for_draft, record_widget, render_clipped_text, render_modal_checkbox, render_modal_radio,
+    render_modal_seg_btn, render_modal_textbox_row, render_section_title, render_stepper_row,
+};
+use super::stats_modals::{Wave4ModalShell, render_modal_action_button, render_mv_role_badge, render_tex_equation_preview, show_wave4_modal};
+use super::{FrameInspectMeta, PendingUiIntents, Tokens};
+
+/// Core tabs of the `Nonlinear Curve Fitting` parameter modal (`gui-layout-spec.md` §8.9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
+pub enum FitModalTab {
+    Data,
+    #[default]
+    Model,
+    Compare,
+    Constrain,
+    InitialValues,
+    Range,
+    Weight,
+    Output,
+}
+
+impl FitModalTab {
+    /// Core 7 tabs in §8.9 order (`Data` prepended dynamically on MV tables).
+    pub const CORE_SEVEN: [Self; 7] = [Self::Model, Self::Compare, Self::Constrain, Self::InitialValues, Self::Range, Self::Weight, Self::Output];
+
+    /// Canonical tab slug (`fit.tab.<slug>`).
+    #[must_use]
+    pub const fn slug(self) -> &'static str {
+        match self {
+            Self::Data => "data",
+            Self::Model => "model",
+            Self::Compare => "compare",
+            Self::Constrain => "constraints",
+            Self::InitialValues => "initial_values",
+            Self::Range => "weights_range",
+            Self::Weight => "weight",
+            Self::Output => "output",
+        }
+    }
+
+    /// Human-readable §8.9 tab label.
+    #[must_use]
+    pub const fn label(self) -> &'static str {
+        match self {
+            Self::Data => "Data",
+            Self::Model => "Model",
+            Self::Compare => "Compare",
+            Self::Constrain => "Constrain",
+            Self::InitialValues => "Initial Values",
+            Self::Range => "Range",
+            Self::Weight => "Weight",
+            Self::Output => "Output",
+        }
+    }
+
+    /// Map legacy `fit_params` or §8.9 tab slugs into [`FitModalTab`].
+    #[must_use]
+    pub fn from_slug(slug: &str) -> Option<Self> {
+        match slug.trim().to_ascii_lowercase().as_str() {
+            "data" => Some(Self::Data),
+            "model" | "equation" => Some(Self::Model),
+            "compare" => Some(Self::Compare),
+            "constrain" | "constraints" => Some(Self::Constrain),
+            "initial_values" | "initial" => Some(Self::InitialValues),
+            "range" | "weights_range" => Some(Self::Range),
+            "weight" | "weights" => Some(Self::Weight),
+            "output" | "confidence" | "diagnostics" => Some(Self::Output),
+            _ => None,
+        }
+    }
+}
+
+/// Persistent transient UI state for `render_fit_modal` and `render_hook_constant_modal`.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FitModalEguiState {
+    pub active_tab: FitModalTab,
+    pub model_search: String,
+    pub custom_equation_draft: String,
+    pub custom_dsl_enabled: bool,
+    pub hook_search_draft: String,
+    pub open_session_sheet_id: Option<String>,
+    pub r2_threshold_draft: String,
+    pub expand_info_branch: bool,
+    pub expand_analysis_branch: bool,
+    pub expand_document_branch: bool,
+}
+
+/// Frame geometry and modal capture report emitted by `fit_modal`.
+#[derive(Debug, Clone, PartialEq, Default)]
+pub struct FitModalFrameReport {
+    pub modal_open: bool,
+    pub dialog_rect_pt: Option<Rect>,
+    pub outside_click_captured: bool,
+    pub outside_wheel_captured: bool,
+}
+
+fn builtin_catalog() -> &'static [EquationCatalogEntry] {
+    static CATALOG: OnceLock<Vec<EquationCatalogEntry>> = OnceLock::new();
+    CATALOG.get_or_init(list_builtin_equations)
+}
+
+/// Return `true` when `ActiveDialog::EditAnalysisParameters` edits a `NonlinearRegression` spec.
+#[must_use]
+pub fn is_nonlinear_fit_dialog_active(app: &UiApp) -> bool {
+    let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        return false;
+    };
+    if let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref() {
+        return matches!(spec.kind, AnalysisKind::NonlinearRegression(_));
+    }
+    app.document().result_sheet(result_sheet_id).is_some_and(|rs| matches!(rs.analysis.kind, AnalysisKind::NonlinearRegression(_)))
+}
+
+/// Render the 7-tab `Nonlinear Curve Fitting` modal when active.
+pub fn render_fit_modal(
+    ctx: &Context,
+    app: &UiApp,
+    state: &mut FitModalEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> FitModalFrameReport {
+    let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        state.open_session_sheet_id = None;
+        return FitModalFrameReport::default();
+    };
+    let doc = app.document();
+    let Some(spec) = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| doc.result_sheet(result_sheet_id).map(|rs| &rs.analysis)) else {
+        state.open_session_sheet_id = None;
+        return FitModalFrameReport::default();
+    };
+    let AnalysisKind::NonlinearRegression(nl) = &spec.kind else {
+        state.open_session_sheet_id = None;
+        return FitModalFrameReport::default();
+    };
+
+    sync_fit_modal_state(result_sheet_id, &app.canvas_dialogs.edit_params, nl, state);
+    let is_mv = doc.data_sheet(&spec.source_sheet_id).is_some_and(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_)));
+    let mut tabs = Vec::with_capacity(8);
+    if is_mv {
+        tabs.push(FitModalTab::Data);
+    }
+    tabs.extend(FitModalTab::CORE_SEVEN);
+    if !tabs.contains(&state.active_tab) {
+        state.active_tab = FitModalTab::Model;
+    }
+
+    let eq_label = if nl.custom_dsl.is_some() {
+        format!("Custom DSL: {}", nl.equation_id)
+    } else {
+        builtin_catalog().iter().find(|e| e.id == nl.equation_id).map_or_else(|| nl.equation_id.clone(), |e| e.name.clone())
+    };
+    let banner = format!("{eq_label}  |  {:?}  |  {} CI", nl.method, if nl.profile_likelihood_ci { "Profile-likelihood" } else { "Wald-t" });
+    let param_names = resolve_parameter_names(nl);
+    let alerts = compute_fit_alerts(nl, &param_names);
+    let locale = normalize_locale(&app.locale);
+    let is_create = doc.result_sheet(result_sheet_id).is_none();
+
+    let capture = show_wave4_modal(
+        ctx,
+        tokens,
+        meta,
+        intents,
+        state,
+        Wave4ModalShell {
+            widget_id: "dialog.nonlinear_fit",
+            title: "Parameters: Nonlinear Curve Fitting",
+            subtitle_or_banner: Some(&banner),
+            banner_widget_id: "edit.resolved_test_banner",
+            max_width_pt: 820.0,
+            max_height_pt: 580.0,
+            use_body_scroll: true,
+            footer_reserve_pt: 42.0,
+        },
+        |ui, state, meta, intents| {
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                for tab in &tabs {
+                    let selected = state.active_tab == *tab;
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("fit.tab.{}", tab.slug()),
+                        tab.label(),
+                        selected,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        state.active_tab = *tab;
+                        intents.push_set_edit_params_active_tab(tab.slug());
+                    }
+                }
+            });
+            if !alerts.is_empty() {
+                ui.add_space(4.0);
+                egui::Frame::NONE
+                    .fill(tokens.panel_bg)
+                    .stroke(Stroke::new(1.0, tokens.link_red))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(Vec2::new(8.0, 4.0))
+                    .show(ui, |ui| {
+                        for (idx, alert) in alerts.iter().enumerate() {
+                            render_clipped_text(
+                                ui,
+                                meta,
+                                ClippedTextSpec {
+                                    widget_id: &format!("fit.alert.{idx}"),
+                                    role: "status",
+                                    text: alert,
+                                    font_size: 11.0,
+                                    color: tokens.link_red,
+                                    z_layer: ZLayer::ModalDialog,
+                                    tooltip: Some(alert),
+                                    record_meta: true,
+                                },
+                            );
+                        }
+                    });
+            }
+        },
+        |ui, state, _avail_w, _avail_h, meta, intents| match state.active_tab {
+            FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
+            FitModalTab::Model => {
+                render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
+            }
+            FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, tokens, meta, intents),
+            FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, result_sheet_id, doc, spec, nl, &param_names, tokens, meta, intents),
+            FitModalTab::InitialValues => render_fit_initial_tab(ui, spec, nl, &param_names, tokens, meta, intents),
+            FitModalTab::Range => render_fit_range_tab(ui, spec, nl, tokens, meta, intents),
+            FitModalTab::Weight => render_fit_weight_tab(ui, spec, nl, tokens, meta, intents),
+            FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
+        },
+        |ui, _state, meta, intents| {
+            ui.horizontal(|ui| {
+                if render_modal_action_button(
+                    ui,
+                    tokens,
+                    meta,
+                    "dialog.button.save_default",
+                    "Save as Default",
+                    false,
+                    false,
+                    &ControlEnablement::enabled(),
+                ) {
+                    intents.push_save_edit_params_as_default();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    let ok_lbl = if is_create { "Fit Curve" } else { tr(locale, "btn.ok") };
+                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ControlEnablement::enabled()) {
+                        intents.push_dialog_button("ok");
+                    }
+                    if !is_create
+                        && doc.result_sheet(result_sheet_id).is_some()
+                        && render_modal_action_button(ui, tokens, meta, "modal.apply", "Update Fit", false, false, &ControlEnablement::enabled())
+                    {
+                        intents.push_dialog_button("apply");
+                    }
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "modal.cancel",
+                        tr(locale, "btn.cancel"),
+                        false,
+                        false,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        intents.push_dialog_button("cancel");
+                    }
+                });
+            });
+        },
+    );
+
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+        intents.push_dialog_button("ok");
+    } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageDown)) {
+        step_fit_tab(&tabs, state, 1, intents);
+    } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL | Modifiers::SHIFT, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageUp)) {
+        step_fit_tab(&tabs, state, -1, intents);
+    }
+
+    FitModalFrameReport {
+        modal_open: true,
+        dialog_rect_pt: capture.dialog_rect_pt,
+        outside_click_captured: capture.outside_click_captured,
+        outside_wheel_captured: capture.outside_wheel_captured,
+    }
+}
+
+fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersState, nl: &NonlinearFitSpec, state: &mut FitModalEguiState) {
+    if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
+        state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
+        state.active_tab = FitModalTab::from_slug(&ep.active_tab).unwrap_or(FitModalTab::Model);
+        state.custom_dsl_enabled = nl.custom_dsl.is_some();
+        state.custom_equation_draft =
+            nl.custom_dsl.clone().unwrap_or_else(|| String::from("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"));
+        state.r2_threshold_draft = nl.flag_r_squared_below.map_or_else(String::new, |v| format!("{v}"));
+    }
+}
+
+fn step_fit_tab(tabs: &[FitModalTab], state: &mut FitModalEguiState, dir: isize, intents: &mut PendingUiIntents) {
+    if tabs.is_empty() {
+        return;
+    }
+    let len = tabs.len() as isize;
+    let cur = tabs.iter().position(|&t| t == state.active_tab).unwrap_or(0) as isize;
+    let next = tabs[(cur + dir).rem_euclid(len) as usize];
+    state.active_tab = next;
+    intents.push_set_edit_params_active_tab(next.slug());
+}
+
+fn resolve_parameter_names(nl: &NonlinearFitSpec) -> Vec<String> {
+    if let Some(dsl) = &nl.custom_dsl
+        && let Ok(compiled) = CompiledDslModel::compile("custom", dsl)
+    {
+        return compiled.param_names().to_vec();
+    }
+    if let Some(model) = curvebook_fit::get_builtin_model(&nl.equation_id) {
+        return model.param_names().to_vec();
+    }
+    nl.parameter_rules.iter().map(|r| r.name.clone()).collect()
+}
+
+fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String]) -> Vec<String> {
+    let mut alerts = Vec::new();
+    if let Some((Some(xmin), Some(xmax))) = nl.x_range_filter
+        && xmin >= xmax
+    {
+        alerts.push(format!("Range alert: X min ({xmin}) must be strictly less than X max ({xmax})."));
+    }
+    if let Some((Some(ymin), Some(ymax))) = nl.y_range_filter
+        && ymin >= ymax
+    {
+        alerts.push(format!("Range alert: Y min ({ymin}) must be strictly less than Y max ({ymax})."));
+    }
+    if let (Some(pmin), Some(pmax)) = (nl.plot_x_min, nl.plot_x_max)
+        && pmin >= pmax
+    {
+        alerts.push(format!("Plot domain alert: Plot X min ({pmin}) must be less than Plot X max ({pmax})."));
+    }
+    let mut fixed_count = 0usize;
+    for rule in &nl.parameter_rules {
+        if matches!(rule.scope, ParameterScope::Constant(_) | ParameterScope::HookedConstant(_) | ParameterScope::ColumnTitleConstant) {
+            fixed_count += 1;
+        }
+        if let (Some(lo), Some(hi)) = (rule.lower_bound, rule.upper_bound)
+            && lo >= hi
+        {
+            alerts.push(format!("Constraint conflict on `{}`: lower bound ({lo}) >= upper bound ({hi}).", rule.name));
+        }
+        if let Some(init) = rule.initial_override {
+            if let Some(lo) = rule.lower_bound
+                && init < lo
+            {
+                alerts.push(format!("Identifiability warning: `{}` initial ({init}) < lower bound ({lo}).", rule.name));
+            }
+            if let Some(hi) = rule.upper_bound
+                && init > hi
+            {
+                alerts.push(format!("Identifiability warning: `{}` initial ({init}) > upper bound ({hi}).", rule.name));
+            }
+        }
+    }
+    if !params.is_empty() && fixed_count >= params.len() && !nl.plot_function_only {
+        alerts.push(String::from("Identifiability alert: all parameters are fixed; enable Plot Function Only or unfix >= 1 parameter."));
+    }
+    alerts
+}
+
+struct FitMvGridCtx<'a> {
+    doc: &'a ProjectDocument,
+    spec: &'a curvebook_doc::AnalysisSpec,
+    nl: &'a NonlinearFitSpec,
+    id_salt: &'a str,
+}
+
+fn render_fit_mv_mapping_grid(
+    ui: &mut Ui,
+    grid_ctx: &FitMvGridCtx<'_>,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    let FitMvGridCtx { doc, spec, nl, id_salt } = *grid_ctx;
+    let Some(ds) = doc.data_sheet(&spec.source_sheet_id) else {
+        return false;
+    };
+    let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+        return false;
+    };
+    render_section_title(ui, tokens, "Multiple-Variables Curve Mapping (X predictors, Y response, Grouping)");
+    egui::Grid::new(id_salt).num_columns(2).spacing([10.0, 4.0]).show(ui, |ui| {
+        for (idx, var) in mv.variables.iter().enumerate() {
+            ui.horizontal(|ui| {
+                render_mv_role_badge(ui, tokens, var.role, var.role_inferred);
+                ui.label(&var.title);
+                if render_modal_seg_btn(ui, tokens, meta, &format!("fit.mv.y.{idx}"), "Y", nl.mv_y_column == Some(idx), &ControlEnablement::enabled())
+                {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        fit.mv_y_column = Some(idx);
+                        fit.mv_x_columns.retain(|&c| c != idx);
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.mv.x.{idx}"),
+                    "X",
+                    nl.mv_x_columns.contains(&idx),
+                    &ControlEnablement::enabled(),
+                ) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        if let Some(p) = fit.mv_x_columns.iter().position(|&c| c == idx) {
+                            fit.mv_x_columns.remove(p);
+                        } else {
+                            fit.mv_x_columns.push(idx);
+                            fit.mv_x_columns.sort_unstable();
+                        }
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.mv.group.{idx}"),
+                    "Grp",
+                    nl.mv_group_columns.contains(&idx),
+                    &ControlEnablement::enabled(),
+                ) {
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        if let Some(p) = fit.mv_group_columns.iter().position(|&c| c == idx) {
+                            fit.mv_group_columns.remove(p);
+                        } else {
+                            fit.mv_group_columns.push(idx);
+                            fit.mv_group_columns.sort_unstable();
+                        }
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+            });
+            if idx % 2 == 1 {
+                ui.end_row();
+            }
+        }
+    });
+    true
+}
+
+fn render_fit_data_tab(
+    ui: &mut Ui,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !render_fit_mv_mapping_grid(ui, &FitMvGridCtx { doc, spec, nl, id_salt: "fit_mv_data_grid" }, tokens, meta, intents) {
+        ui.label("All columns / datasets in the XY source table are available for fitting.");
+    }
+}
+
+struct FitModelTabCtx<'a> {
+    doc: &'a ProjectDocument,
+    spec: &'a curvebook_doc::AnalysisSpec,
+    nl: &'a NonlinearFitSpec,
+    param_names: &'a [String],
+}
+
+fn render_fit_model_tab(
+    ctx: &Context,
+    ui: &mut Ui,
+    model_ctx: FitModelTabCtx<'_>,
+    state: &mut FitModalEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let FitModelTabCtx { doc, spec, nl, param_names } = model_ctx;
+    if render_fit_mv_mapping_grid(ui, &FitMvGridCtx { doc, spec, nl, id_salt: "fit_mv_model_grid" }, tokens, meta, intents) {
+        ui.add_space(4.0);
+    }
+    let preview_params: Vec<(String, f64)> = param_names.iter().map(|p| (p.clone(), 1.0)).collect();
+    let tex = format_model_equation_tex(&nl.equation_id, nl.custom_dsl.as_deref(), &preview_params, false, 4);
+    render_section_title(ui, tokens, "Symbolic TeX Preview");
+    render_tex_equation_preview(ui, tokens, meta, "fit.eq.tex_preview", &tex, 13.5);
+
+    ui.add_space(4.0);
+    // Guidance Card
+    egui::Frame::NONE
+        .fill(tokens.panel_bg)
+        .stroke(Stroke::new(1.0, tokens.border))
+        .corner_radius(egui::CornerRadius::same(4))
+        .inner_margin(Vec2::new(8.0, 5.0))
+        .show(ui, |ui| {
+            let entry_opt = builtin_catalog().iter().find(|e| e.id == nl.equation_id);
+            let cat_str = entry_opt.map_or("Custom DSL Equation", |e| eq_category_label(e.category));
+            ui.label(
+                egui::RichText::new(format!("Guidance — {cat_str}  |  Parameters ({}): {}", param_names.len(), param_names.join(", ")))
+                    .small()
+                    .color(tokens.text_primary),
+            );
+        });
+
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "fit.eq.mode.builtin",
+            "Built-in Library (117+)",
+            !state.custom_dsl_enabled,
+            &ControlEnablement::enabled(),
+        ) {
+            state.custom_dsl_enabled = false;
+            if nl.custom_dsl.is_some() {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.custom_dsl = None;
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+        if render_modal_seg_btn(
+            ui,
+            tokens,
+            meta,
+            "fit.eq.custom_toggle",
+            "Custom Equation DSL (Explicit / Implicit / ODE)",
+            state.custom_dsl_enabled,
+            &ControlEnablement::enabled(),
+        ) {
+            state.custom_dsl_enabled = true;
+            let mut next = spec.clone();
+            if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                fit.custom_dsl = Some(state.custom_equation_draft.clone());
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    });
+
+    ui.add_space(6.0);
+    if state.custom_dsl_enabled {
+        render_section_title(ui, tokens, "Custom Explicit / Implicit / ODE DSL Equation");
+        ui.horizontal_wrapped(|ui| {
+            for (wid, lbl, preset_src) in [
+                ("fit.eq.dsl.explicit", "Explicit Example", "Y = Top * X / (Kd + X)"),
+                ("fit.eq.dsl.implicit", "Implicit F(X,Y)=0", "Y + Km * ln(Y / Y0) - Y0 + Vmax * X = 0"),
+                ("fit.eq.dsl.ode", "ODE System d[A]/dt", "d[A]/dt = -k_el * [A]\nY = [A]"),
+            ] {
+                if render_modal_seg_btn(ui, tokens, meta, wid, lbl, false, &ControlEnablement::enabled()) {
+                    state.custom_equation_draft = String::from(preset_src);
+                    let mut next = spec.clone();
+                    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                        fit.custom_dsl = Some(state.custom_equation_draft.clone());
+                    }
+                    intents.push_set_edit_params_draft(next);
+                }
+            }
+        });
+        let edit_resp = ui.add_sized(
+            Vec2::new(ui.available_width().max(180.0), 74.0),
+            TextEdit::multiline(&mut state.custom_equation_draft).id(Id::unique("fit.eq.custom_dsl")).code_editor(),
+        );
+        record_widget(
+            ui,
+            meta,
+            &edit_resp,
+            "fit.eq.custom_dsl",
+            "textbox",
+            "Custom DSL Equation",
+            None,
+            Some(serde_json::json!(state.custom_equation_draft)),
+            true,
+            None,
+            ZLayer::ModalDialog,
+            false,
+            None,
+        );
+        if edit_resp.changed() {
+            let mut next = spec.clone();
+            if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                fit.custom_dsl = Some(state.custom_equation_draft.clone());
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+        match CompiledDslModel::compile("custom", &state.custom_equation_draft) {
+            Ok(compiled) => {
+                let kind_str = match compiled.kind() {
+                    DslEquationKind::Explicit => "Explicit algebraic",
+                    DslEquationKind::Implicit => "Implicit root-solve F(x,y)=0",
+                    DslEquationKind::OdeFirstOrder => "First-order RK45 ODE",
+                };
+                ui.label(
+                    egui::RichText::new(format!("Compiled OK ({kind_str}): params [{}]", compiled.param_names().join(", ")))
+                        .small()
+                        .color(tokens.accent_strong),
+                );
+            }
+            Err(err) => {
+                ui.label(egui::RichText::new(format!("DSL syntax note: {err}")).small().color(tokens.link_red));
+            }
+        }
+    } else {
+        let cat_filter_key = Id::unique("fit_modal.category_filter");
+        let mut active_cat: Option<EquationCategory> = ctx.data(|d| d.get_temp(cat_filter_key)).flatten();
+
+        ui.horizontal(|ui| {
+            let q_resp = ui.add_sized(
+                Vec2::new((ui.available_width() - 64.0).max(120.0), 22.0),
+                TextEdit::singleline(&mut state.model_search)
+                    .id(Id::unique("fit.eq.search"))
+                    .hint_text("Search 117+ equations (EC50, Michaelis, exponential, NIST)…"),
+            );
+            record_widget(
+                ui,
+                meta,
+                &q_resp,
+                "fit.eq.search",
+                "textbox",
+                "Search Equations",
+                None,
+                Some(serde_json::json!(state.model_search)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+            if render_modal_seg_btn(ui, tokens, meta, "fit.eq.search.clear", "Clear", false, &ControlEnablement::enabled()) {
+                state.model_search.clear();
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            if render_modal_seg_btn(ui, tokens, meta, "fit.eq.cat.all", "All Categories", active_cat.is_none(), &ControlEnablement::enabled()) {
+                active_cat = None;
+                ctx.data_mut(|d| d.insert_temp(cat_filter_key, active_cat));
+            }
+            for cat in ALL_EQ_CATEGORIES {
+                let is_on = active_cat == Some(cat);
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.eq.cat.{cat:?}"),
+                    eq_category_label(cat),
+                    is_on,
+                    &ControlEnablement::enabled(),
+                ) {
+                    active_cat = if is_on { None } else { Some(cat) };
+                    ctx.data_mut(|d| d.insert_temp(cat_filter_key, active_cat));
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        let q = state.model_search.trim().to_ascii_lowercase();
+        let matches: Vec<&EquationCatalogEntry> = builtin_catalog()
+            .iter()
+            .filter(|e| {
+                active_cat.is_none_or(|c| e.category == c)
+                    && (q.is_empty()
+                        || e.id.to_ascii_lowercase().contains(&q)
+                        || e.name.to_ascii_lowercase().contains(&q)
+                        || eq_category_label(e.category).to_ascii_lowercase().contains(&q))
+            })
+            .collect();
+        ui.label(
+            egui::RichText::new(format!("Showing {} of {} built-in equations", matches.len(), builtin_catalog().len()))
+                .small()
+                .color(tokens.text_muted),
+        );
+        for entry in matches {
+            let selected = nl.custom_dsl.is_none() && nl.equation_id == entry.id;
+            let lbl = format!("{} [{}]", entry.name, entry.param_names.join(", "));
+            if render_modal_radio(ui, tokens, meta, &format!("fit.eq.item.{}", entry.id), &lbl, selected, &ControlEnablement::enabled()) {
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.equation_id = entry.id.clone();
+                    fit.custom_dsl = None;
+                    fit.parameter_rules.clear();
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    }
+}
+
+fn render_fit_compare_tab(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Compare Two Models");
+    let alt_id = match &nl.comparison {
+        Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id })
+        | Some(ModelComparisonSpec::Aicc { alternative_equation_id })
+        | Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id }) => alternative_equation_id.clone(),
+        None => String::from("linear"),
+    };
+    for (wid, lbl, active, comp) in [
+        ("fit.cmp.none", "Fit one model only (no comparison)", nl.comparison.is_none(), None),
+        (
+            "fit.cmp.extra_f",
+            "Extra sum-of-squares F test (nested models)",
+            matches!(nl.comparison, Some(ModelComparisonSpec::ExtraSumOfSquaresF { .. })),
+            Some(ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: alt_id.clone() }),
+        ),
+        (
+            "fit.cmp.aicc",
+            "Compare AICc evidence ratio (nested or non-nested)",
+            matches!(nl.comparison, Some(ModelComparisonSpec::Aicc { .. })),
+            Some(ModelComparisonSpec::Aicc { alternative_equation_id: alt_id.clone() }),
+        ),
+        (
+            "fit.cmp.lrt",
+            "Likelihood Ratio Test (Poisson Deviance)",
+            matches!(nl.comparison, Some(ModelComparisonSpec::LikelihoodRatioTest { .. })),
+            Some(ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: alt_id.clone() }),
+        ),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                fit.comparison = comp.clone();
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+
+    if let Some(cur_cmp) = &nl.comparison {
+        ui.add_space(6.0);
+        render_section_title(ui, tokens, "Select Null / Alternative Comparison Equation");
+        for entry in builtin_catalog().iter().take(18) {
+            if entry.id == nl.equation_id {
+                continue;
+            }
+            if render_modal_radio(
+                ui,
+                tokens,
+                meta,
+                &format!("fit.cmp.alt.{}", entry.id),
+                &entry.name,
+                alt_id == entry.id,
+                &ControlEnablement::enabled(),
+            ) {
+                let updated = match cur_cmp {
+                    ModelComparisonSpec::ExtraSumOfSquaresF { .. } => {
+                        ModelComparisonSpec::ExtraSumOfSquaresF { alternative_equation_id: entry.id.clone() }
+                    }
+                    ModelComparisonSpec::Aicc { .. } => ModelComparisonSpec::Aicc { alternative_equation_id: entry.id.clone() },
+                    ModelComparisonSpec::LikelihoodRatioTest { .. } => {
+                        ModelComparisonSpec::LikelihoodRatioTest { alternative_equation_id: entry.id.clone() }
+                    }
+                };
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.comparison = Some(updated);
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_fit_constrain_tab(
+    ctx: &Context,
+    ui: &mut Ui,
+    result_sheet_id: &SheetId,
+    doc: &ProjectDocument,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    params: &[String],
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Parameter Constraints, Sharing & Constant Hooks");
+    let hook_target_key = Id::unique("fit_modal.inline_hook_param");
+    let mut hook_target: Option<String> = ctx.data(|d| d.get_temp(hook_target_key)).flatten();
+    let preset = LocalePreset::for_locale(tokens.locale);
+
+    for p in params {
+        let existing_idx = nl.parameter_rules.iter().position(|r| r.name == *p);
+        let rule = existing_idx.map_or_else(
+            || ParameterRule { name: p.clone(), scope: ParameterScope::Local, initial_override: None, lower_bound: None, upper_bound: None },
+            |i| nl.parameter_rules[i].clone(),
+        );
+        ui.group(|ui| {
+            ui.horizontal_wrapped(|ui| {
+                ui.label(egui::RichText::new(p).strong().color(tokens.text_strong));
+                for (slug, lbl, scope_eq) in [
+                    ("local", "No constraint", matches!(rule.scope, ParameterScope::Local)),
+                    ("shared", "Shared global", matches!(rule.scope, ParameterScope::SharedGlobal)),
+                    ("fixed", "Constant", matches!(rule.scope, ParameterScope::Constant(_))),
+                    ("col_title", "Col Title", matches!(rule.scope, ParameterScope::ColumnTitleConstant)),
+                ] {
+                    if render_modal_seg_btn(ui, tokens, meta, &format!("fit.con.rule.{p}.{slug}"), lbl, scope_eq, &ControlEnablement::enabled()) {
+                        let new_scope = match slug {
+                            "shared" => ParameterScope::SharedGlobal,
+                            "fixed" => ParameterScope::Constant(1.0),
+                            "col_title" => ParameterScope::ColumnTitleConstant,
+                            _ => ParameterScope::Local,
+                        };
+                        update_param_rule(spec, p, |r| r.scope = new_scope, intents);
+                    }
+                }
+                if render_modal_seg_btn(
+                    ui,
+                    tokens,
+                    meta,
+                    &format!("fit.con.hook.{p}"),
+                    "🔗 Hook",
+                    matches!(rule.scope, ParameterScope::HookedConstant(_)) || hook_target.as_deref() == Some(p.as_str()),
+                    &ControlEnablement::enabled(),
+                ) {
+                    hook_target = if hook_target.as_deref() == Some(p.as_str()) { None } else { Some(p.clone()) };
+                    ctx.data_mut(|d| d.insert_temp(hook_target_key, hook_target.clone()));
+                }
+            });
+
+            if let ParameterScope::Constant(val) = rule.scope {
+                let buf_id = Id::unique(("fit_con_const", p.as_str()));
+                let mut text: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| format!("{val}"));
+                ui.horizontal(|ui| {
+                    ui.label("Constant value:");
+                    let ed = ui.add_sized(Vec2::new(90.0, 20.0), TextEdit::singleline(&mut text));
+                    ctx.data_mut(|d| d.insert_temp(buf_id, text.clone()));
+                    if ed.changed()
+                        && let Some(parsed) = parse_localized_number_input(&text, &preset).filter(|v| v.is_finite())
+                    {
+                        update_param_rule(spec, p, |r| r.scope = ParameterScope::Constant(parsed), intents);
+                    }
+                });
+            } else if let ParameterScope::HookedConstant(ref src) = rule.scope {
+                ui.label(egui::RichText::new(format!("Linked hook: {}", format_hook_source_short(src))).small().color(tokens.accent_strong));
+            }
+        });
+    }
+
+    if let Some(target_param) = hook_target {
+        ui.add_space(6.0);
+        egui::Frame::NONE
+            .fill(tokens.panel_bg)
+            .stroke(Stroke::new(1.2, tokens.accent_strong))
+            .corner_radius(egui::CornerRadius::same(5))
+            .inner_margin(Vec2::new(8.0, 6.0))
+            .show(ui, |ui| {
+                let mut picker = ConstantHookPickerState::default();
+                picker.open_for_document(result_sheet_id.clone(), Some(target_param.clone()), doc);
+                render_section_title(ui, tokens, &format!("Link Constant to `{target_param}`"));
+                for opt in picker.options.iter().take(12) {
+                    if render_modal_seg_btn(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("fit.con.hook_opt.{}.{}", target_param, opt.label),
+                        &format!("{} ({})", opt.label, opt.preview_value),
+                        false,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        let source = opt.source.clone();
+                        update_param_rule(spec, &target_param, move |r| r.scope = ParameterScope::HookedConstant(source), intents);
+                        ctx.data_mut(|d| d.insert_temp::<Option<String>>(hook_target_key, None));
+                    }
+                }
+            });
+    }
+}
+
+fn render_fit_initial_tab(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    params: &[String],
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Initial Parameter Guesses");
+    let heuristic_vals = curvebook_fit::get_builtin_model(&nl.equation_id).map(|m| m.initial_guess(&[])).unwrap_or_default();
+    for (idx, p) in params.iter().enumerate() {
+        let rule = nl.parameter_rules.iter().find(|r| r.name == *p);
+        let override_val = rule.and_then(|r| r.initial_override);
+        let auto_guess = heuristic_vals.get(idx).copied().unwrap_or(1.0);
+        let is_auto = override_val.is_none();
+        ui.horizontal_wrapped(|ui| {
+            ui.label(egui::RichText::new(p).strong());
+            if render_modal_seg_btn(
+                ui,
+                tokens,
+                meta,
+                &format!("fit.init.auto.{p}"),
+                &format!("Auto ({auto_guess:.3})"),
+                is_auto,
+                &ControlEnablement::enabled(),
+            ) {
+                update_param_rule(spec, p, |r| r.initial_override = None, intents);
+            }
+            let cur = override_val.unwrap_or(auto_guess);
+            let step = render_stepper_row(
+                ui,
+                tokens,
+                meta,
+                StepperSpec {
+                    id_prefix: &format!("fit.init.val.{p}"),
+                    label: "Initial Value",
+                    value_text: &format!("{cur:.3}"),
+                    enablement: &ControlEnablement::enabled(),
+                },
+            );
+            if step != 0 {
+                let next_v = cur + f64::from(step) * 0.5;
+                update_param_rule(spec, p, |r| r.initial_override = Some(next_v), intents);
+            }
+        });
+    }
+}
+
+fn render_fit_range_tab(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Fit X Domain & Curve Plot Window");
+    let has_x_filter = nl.x_range_filter.is_some();
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.wr.x_range_enable",
+        "Restrict fit to X domain filter",
+        has_x_filter,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.x_range_filter = if has_x_filter { None } else { Some((Some(0.0), Some(100.0))) };
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.wr.plot_only",
+        "Simulate curve using initial/fixed parameters only (no fit)",
+        nl.plot_function_only,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.plot_function_only = !nl.plot_function_only;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    let step = render_stepper_row(
+        ui,
+        tokens,
+        meta,
+        StepperSpec {
+            id_prefix: "fit.wr.max_iters",
+            label: "Max Levenberg-Marquardt Iterations",
+            value_text: &nl.max_iters.to_string(),
+            enablement: &ControlEnablement::enabled(),
+        },
+    );
+    if step != 0 {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.max_iters = (fit.max_iters as isize + step as isize * 100).clamp(50, NonlinearFitSpec::HARD_MAX_ITERS as isize) as usize;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+}
+
+fn render_fit_weight_tab(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Fitting Objective / Outlier Method");
+    for (wid, lbl, active, method) in [
+        ("fit.method.ls", "Ordinary / Weighted Least Squares", matches!(nl.method, FitMethod::LeastSquares), FitMethod::LeastSquares),
+        ("fit.method.poisson", "Poisson Count Regression (Deviance)", matches!(nl.method, FitMethod::PoissonDeviance), FitMethod::PoissonDeviance),
+        ("fit.method.robust", "Robust Regression (Cauchy M-estimator)", matches!(nl.method, FitMethod::RobustCauchy), FitMethod::RobustCauchy),
+        (
+            "fit.method.rout",
+            "ROUT Outlier Detection + Refit",
+            matches!(nl.method, FitMethod::RoutOutlierElimination { .. }),
+            FitMethod::RoutOutlierElimination { fdr_q_percent: 1.0 },
+        ),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, active, &ControlEnablement::enabled()) {
+            let mut next = spec.clone();
+            if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                fit.method = method;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Residual Weighting Scheme");
+    let wt_en = if matches!(nl.method, FitMethod::PoissonDeviance) {
+        ControlEnablement::disabled("Poisson deviance likelihood fixes intrinsic variance weights.")
+    } else {
+        ControlEnablement::enabled()
+    };
+    for (wid, lbl, w) in [
+        ("fit.wt.none", "No weighting (equal SD everywhere)", WeightingScheme::None),
+        ("fit.wt.rel_sq", "Relative 1/Y^2 (constant %CV)", WeightingScheme::RelativeSquare),
+        ("fit.wt.rel", "Poisson-like 1/|Y|", WeightingScheme::Relative),
+        ("fit.wt.inv_x2", "1/X^2", WeightingScheme::InverseX2),
+        ("fit.wt.obs_sd", "By 1/SD^2 of Y replicates", WeightingScheme::ObservedSd),
+    ] {
+        if render_modal_radio(ui, tokens, meta, wid, lbl, nl.weighting == w, &wt_en) {
+            let mut next = spec.clone();
+            if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                fit.weighting = w;
+            }
+            intents.push_set_edit_params_draft(next);
+        }
+    }
+}
+
+fn render_fit_output_tab(
+    ui: &mut Ui,
+    spec: &curvebook_doc::AnalysisSpec,
+    nl: &NonlinearFitSpec,
+    state: &mut FitModalEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    render_section_title(ui, tokens, "Confidence Intervals & Curve Bands");
+    if render_modal_radio(
+        ui,
+        tokens,
+        meta,
+        "fit.ci.profile",
+        "Profile-likelihood asymmetrical CIs (recommended)",
+        nl.profile_likelihood_ci,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.profile_likelihood_ci = true;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_radio(ui, tokens, meta, "fit.ci.wald", "Symmetric Wald-t intervals", !nl.profile_likelihood_ci, &ControlEnablement::enabled()) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.profile_likelihood_ci = false;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+
+    let conf_pct = spec.confidence_level.percent();
+    ui.horizontal_wrapped(|ui| {
+        for (wid, pct, lbl) in [("fit.conf.90", 90.0_f64, "90% CI"), ("fit.conf.95", 95.0, "95% CI"), ("fit.conf.99", 99.0, "99% CI")] {
+            if render_modal_seg_btn(ui, tokens, meta, wid, lbl, (conf_pct - pct).abs() < 0.05, &ControlEnablement::enabled()) {
+                intents.push_custom_view_action("stat_params", format!("set_confidence:{pct:.1}"));
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    render_section_title(ui, tokens, "Diagnostics, Interpolation & Output Tabs");
+    if render_modal_checkbox(ui, tokens, meta, "fit.out.conf_bands", "Plot 95% confidence bands", nl.confidence_bands, &ControlEnablement::enabled())
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.confidence_bands = !nl.confidence_bands;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(ui, tokens, meta, "fit.out.pred_bands", "Plot 95% prediction bands", nl.prediction_bands, &ControlEnablement::enabled())
+    {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.prediction_bands = !nl.prediction_bands;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.interp",
+        "Interpolate unknowns from standard curve",
+        nl.interpolate_unknowns,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.interpolate_unknowns = !nl.interpolate_unknowns;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.unstable",
+        "Identify unstable / ambiguous parameters",
+        nl.identify_unstable_parameters,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.identify_unstable_parameters = !nl.identify_unstable_parameters;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.normality",
+        "Test normality of residuals + Runs test",
+        nl.normality_of_residuals,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.normality_of_residuals = !nl.normality_of_residuals;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.residuals_tab",
+        "Emit Residuals diagnostics tab",
+        nl.emit_residuals_tab,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.emit_residuals_tab = !nl.emit_residuals_tab;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "fit.out.cov_tab",
+        "Emit Parameter Covariance Matrix tab",
+        nl.emit_covariance_tab,
+        &ControlEnablement::enabled(),
+    ) {
+        let mut next = spec.clone();
+        if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+            fit.emit_covariance_tab = !nl.emit_covariance_tab;
+        }
+        intents.push_set_edit_params_draft(next);
+    }
+    ui.add_space(4.0);
+    render_modal_textbox_row(
+        ui,
+        tokens,
+        meta,
+        intents,
+        "fit.diagnostics.r2.input",
+        "Flag R² Below Threshold (0..1)",
+        "e.g. 0.90",
+        &mut state.r2_threshold_draft,
+        96.0,
+    );
+    let _ = (&spec.p_value_format, PValueFormat::FourDecimal, column_titles_for_draft);
+}
+
+fn update_param_rule<F: FnOnce(&mut ParameterRule)>(spec: &curvebook_doc::AnalysisSpec, param_name: &str, mutate: F, intents: &mut PendingUiIntents) {
+    let mut next = spec.clone();
+    if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+        if let Some(existing) = fit.parameter_rules.iter_mut().find(|r| r.name == param_name) {
+            mutate(existing);
+        } else {
+            let mut created = ParameterRule {
+                name: param_name.to_owned(),
+                scope: ParameterScope::Local,
+                initial_override: None,
+                lower_bound: None,
+                upper_bound: None,
+            };
+            mutate(&mut created);
+            fit.parameter_rules.push(created);
+        }
+    }
+    intents.push_set_edit_params_draft(next);
+}
+
+// ============================================================================
+// Hook Constant 3-Branch Browser (§8.9)
+// ============================================================================
+
+/// Render the 3-branch `Hook Constant` browser modal when `ActiveDialog::ConstantHookPicker` is active.
+pub fn render_hook_constant_modal(
+    ctx: &Context,
+    app: &UiApp,
+    state: &mut FitModalEguiState,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> FitModalFrameReport {
+    let ActiveDialog::ConstantHookPicker { .. } = &app.canvas_dialogs.active_dialog else {
+        ctx.data_mut(|d| d.remove::<bool>(Id::unique("hook_modal.init_branches")));
+        return FitModalFrameReport::default();
+    };
+    let hp = &app.canvas_dialogs.hook_picker;
+    let init_key = Id::unique("hook_modal.init_branches");
+    if !ctx.data(|d| d.get_temp::<bool>(init_key)).unwrap_or(false) {
+        ctx.data_mut(|d| d.insert_temp(init_key, true));
+        state.expand_info_branch = true;
+        state.expand_analysis_branch = true;
+        state.expand_document_branch = true;
+        state.hook_search_draft = hp.search_query.clone();
+    }
+
+    let locale = normalize_locale(&app.locale);
+    let target_desc =
+        hp.target_parameter_name.as_deref().map_or_else(|| String::from("Link constant to target"), |p| format!("Binding parameter `{p}`"));
+    let link_en = hp
+        .selected_option()
+        .map(|_| ControlEnablement::enabled())
+        .unwrap_or_else(|| ControlEnablement::disabled("Select a constant from one of the three branches."));
+
+    let capture = show_wave4_modal(
+        ctx,
+        tokens,
+        meta,
+        intents,
+        state,
+        Wave4ModalShell {
+            widget_id: "dialog.constant_hook_picker",
+            title: tr(locale, "w6.view.modal.hook_constant"),
+            subtitle_or_banner: Some(&target_desc),
+            banner_widget_id: "hook.target_banner",
+            max_width_pt: 640.0,
+            max_height_pt: 520.0,
+            use_body_scroll: true,
+            footer_reserve_pt: 40.0,
+        },
+        |ui, state, meta, intents| {
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                let s_resp = ui.add_sized(
+                    Vec2::new((ui.available_width() - 64.0).max(120.0), 22.0),
+                    TextEdit::singleline(&mut state.hook_search_draft)
+                        .id(Id::unique("hook.search_input"))
+                        .hint_text("Search Info Constants, Fit Parameters, Result Summaries…"),
+                );
+                record_widget(
+                    ui,
+                    meta,
+                    &s_resp,
+                    "hook.search_input",
+                    "textbox",
+                    "Search Hooks",
+                    None,
+                    Some(serde_json::json!(state.hook_search_draft)),
+                    true,
+                    None,
+                    ZLayer::ModalDialog,
+                    false,
+                    None,
+                );
+                if s_resp.changed() {
+                    let mut fields = serde_json::Map::new();
+                    fields.insert(String::from("hook.search_query"), serde_json::json!(state.hook_search_draft));
+                    intents.push_patch_active_dialog(fields);
+                }
+                if render_modal_seg_btn(ui, tokens, meta, "hook.search_clear", "Clear", false, &ControlEnablement::enabled()) {
+                    state.hook_search_draft.clear();
+                    intents.push_custom_view_action("dialogs_graph_misc", "hook:clear_search");
+                }
+            });
+        },
+        |ui, state, _w, _h, meta, intents| {
+            let filtered = hp.filtered_options();
+            let mut info_opts = Vec::new();
+            let mut analysis_opts = Vec::new();
+            let mut doc_opts = Vec::new();
+            for opt in filtered {
+                if let Some(raw_idx) = hp.options.iter().position(|o| o == opt) {
+                    match &opt.source {
+                        HookSource::InfoConstant { .. } => info_opts.push((raw_idx, opt)),
+                        HookSource::ResultScalar { .. } => analysis_opts.push((raw_idx, opt)),
+                        HookSource::ColumnTitleValue { .. } => doc_opts.push((raw_idx, opt)),
+                    }
+                }
+            }
+
+            if render_modal_seg_btn(
+                ui,
+                tokens,
+                meta,
+                "hook.branch.info",
+                &format!("{} Info Constants ({})", if state.expand_info_branch { "▾" } else { "▸" }, info_opts.len()),
+                state.expand_info_branch,
+                &ControlEnablement::enabled(),
+            ) {
+                state.expand_info_branch = !state.expand_info_branch;
+            }
+            if state.expand_info_branch {
+                for (idx, opt) in info_opts {
+                    if render_modal_radio(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("hook.item.{idx}"),
+                        &format!("{} = {}", opt.label, opt.preview_value),
+                        hp.selected_index == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        intents.push_select_hook_constant(Some(idx));
+                    }
+                }
+            }
+
+            ui.add_space(4.0);
+            if render_modal_seg_btn(
+                ui,
+                tokens,
+                meta,
+                "hook.branch.analysis",
+                &format!("{} Fit Parameters & Analysis Results ({})", if state.expand_analysis_branch { "▾" } else { "▸" }, analysis_opts.len()),
+                state.expand_analysis_branch,
+                &ControlEnablement::enabled(),
+            ) {
+                state.expand_analysis_branch = !state.expand_analysis_branch;
+            }
+            if state.expand_analysis_branch {
+                for (idx, opt) in analysis_opts {
+                    if render_modal_radio(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("hook.item.{idx}"),
+                        &format!("{} = {}", opt.label, opt.preview_value),
+                        hp.selected_index == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        intents.push_select_hook_constant(Some(idx));
+                    }
+                }
+            }
+
+            ui.add_space(4.0);
+            if render_modal_seg_btn(
+                ui,
+                tokens,
+                meta,
+                "hook.branch.document",
+                &format!("{} Result Summaries & Column Titles ({})", if state.expand_document_branch { "▾" } else { "▸" }, doc_opts.len()),
+                state.expand_document_branch,
+                &ControlEnablement::enabled(),
+            ) {
+                state.expand_document_branch = !state.expand_document_branch;
+            }
+            if state.expand_document_branch {
+                for (idx, opt) in doc_opts {
+                    if render_modal_radio(
+                        ui,
+                        tokens,
+                        meta,
+                        &format!("hook.item.{idx}"),
+                        &format!("{} = {}", opt.label, opt.preview_value),
+                        hp.selected_index == Some(idx),
+                        &ControlEnablement::enabled(),
+                    ) {
+                        intents.push_select_hook_constant(Some(idx));
+                    }
+                }
+            }
+
+            if let Some(sel) = hp.selected_option() {
+                ui.add_space(8.0);
+                egui::Frame::NONE
+                    .fill(tokens.panel_bg)
+                    .stroke(Stroke::new(1.0, tokens.accent))
+                    .corner_radius(egui::CornerRadius::same(4))
+                    .inner_margin(Vec2::new(8.0, 5.0))
+                    .show(ui, |ui| {
+                        render_clipped_text(
+                            ui,
+                            meta,
+                            ClippedTextSpec {
+                                widget_id: "hook.preview",
+                                role: "status",
+                                text: &format!("Selected: {}  →  {}", sel.label, sel.preview_value),
+                                font_size: 11.5,
+                                color: tokens.accent_strong,
+                                z_layer: ZLayer::ModalDialog,
+                                tooltip: None,
+                                record_meta: true,
+                            },
+                        );
+                    });
+            }
+        },
+        |ui, _state, meta, intents| {
+            ui.horizontal(|ui| {
+                if render_modal_action_button(ui, tokens, meta, "hook.unlink", "Unlink", false, false, &ControlEnablement::enabled()) {
+                    intents.push_unlink_hook_constant();
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if render_modal_action_button(ui, tokens, meta, "modal.ok", "Link Constant", true, false, &link_en) {
+                        intents.push_dialog_button("ok");
+                    }
+                    if render_modal_action_button(
+                        ui,
+                        tokens,
+                        meta,
+                        "modal.cancel",
+                        tr(locale, "btn.cancel"),
+                        false,
+                        false,
+                        &ControlEnablement::enabled(),
+                    ) {
+                        intents.push_dialog_button("cancel");
+                    }
+                });
+            });
+        },
+    );
+
+    if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
+        intents.push_dialog_button("cancel");
+    }
+
+    FitModalFrameReport {
+        modal_open: true,
+        dialog_rect_pt: capture.dialog_rect_pt,
+        outside_click_captured: capture.outside_click_captured,
+        outside_wheel_captured: capture.outside_wheel_captured,
+    }
+}
+
+const ALL_EQ_CATEGORIES: [EquationCategory; 14] = [
+    EquationCategory::DoseResponseStimulation,
+    EquationCategory::DoseResponseInhibition,
+    EquationCategory::ReceptorBinding,
+    EquationCategory::EnzymeKinetics,
+    EquationCategory::Exponential,
+    EquationCategory::Polynomial,
+    EquationCategory::Gaussian,
+    EquationCategory::SineWave,
+    EquationCategory::Growth,
+    EquationCategory::Peak,
+    EquationCategory::StandardCurve,
+    EquationCategory::Radiobiology,
+    EquationCategory::NistBenchmark,
+    EquationCategory::UserDefined,
+];
+
+fn eq_category_label(cat: EquationCategory) -> &'static str {
+    match cat {
+        EquationCategory::DoseResponseStimulation => "Dose-Response (Stim)",
+        EquationCategory::DoseResponseInhibition => "Dose-Response (Inhib)",
+        EquationCategory::ReceptorBinding => "Binding",
+        EquationCategory::EnzymeKinetics => "Enzyme Kinetics",
+        EquationCategory::Exponential => "Exponential",
+        EquationCategory::Polynomial => "Polynomial",
+        EquationCategory::Gaussian => "Gaussian",
+        EquationCategory::SineWave => "Sine / Wave",
+        EquationCategory::Growth => "Growth",
+        EquationCategory::Peak => "Peak",
+        EquationCategory::StandardCurve => "Standard Curve",
+        EquationCategory::Radiobiology => "Radiobiology",
+        EquationCategory::NistBenchmark => "NIST StRD",
+        EquationCategory::UserDefined => "User-Defined",
+    }
+}
+
+fn format_hook_source_short(src: &HookSource) -> String {
+    match src {
+        HookSource::InfoConstant { info_sheet_id, constant_name } => {
+            let sid = info_sheet_id.as_ref().map_or("active", SheetId::as_str);
+            format!("Info({sid}:{constant_name})")
+        }
+        HookSource::ResultScalar { result_sheet_id, parameter_key, .. } => {
+            format!("Result({}:{parameter_key})", result_sheet_id.as_str())
+        }
+        HookSource::ColumnTitleValue { data_sheet_id, data_set_index } => {
+            format!("Title({}:col {data_set_index})", data_sheet_id.as_str())
+        }
+    }
+}

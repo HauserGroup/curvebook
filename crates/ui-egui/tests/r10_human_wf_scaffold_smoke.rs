@@ -1,6 +1,6 @@
 #![forbid(unsafe_code)]
-//! Smoke tests verifying the `R10` Wave 5 scaffold (`views/` 14-module split, `ViewShardStates`,
-//! `dispatch_custom_view_action`, `i18n` shard infrastructure, and `human_wf_common` harness).
+//! Smoke tests verifying the view shard dispatch infrastructure, `i18n` shard infrastructure,
+//! and pure-`egui` `human_wf_common` harness (`R15.5`).
 
 mod human_wf_common;
 
@@ -9,10 +9,8 @@ use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::i18n::{EXTRA_SHARD_CATALOGS, LOCALES, all_keys, missing_translations, try_tr};
-use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics, execute_widget_action};
-use curvebook_ui_egui::layout::a11y::{FocusScope, WidgetRole};
-use curvebook_ui_egui::layout::{WidgetAction, WidgetId};
-use curvebook_ui_egui::views::{ViewShardStates, a11y::validate_interactive_a11y, dispatch_custom_view_action};
+use curvebook_ui_egui::interaction::KeyModifiers;
+use curvebook_ui_egui::views::{ViewShardStates, dispatch_custom_view_action};
 
 fn make_smoke_app() -> Result<UiApp, String> {
     let mut doc = ProjectDocument::default();
@@ -53,25 +51,10 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
     for domain in domains {
         let out = dispatch_custom_view_action(&mut app, &mut shards, domain, "smoke")?;
         assert!(!out.handled);
-        let action_out = execute_widget_action(
-            &mut app,
-            &WidgetAction::Custom { domain: domain.to_owned(), payload: String::from("smoke") },
-            ViewportMetrics::default(),
-        )?;
-        assert!(!action_out.handled);
     }
 
     let err = dispatch_custom_view_action(&mut app, &mut shards, "nonexistent_domain", "payload");
     assert!(err.is_err(), "unknown custom view action domain must return Err");
-    let action_err = execute_widget_action(
-        &mut app,
-        &WidgetAction::Custom { domain: String::from("nonexistent_domain"), payload: String::from("payload") },
-        ViewportMetrics::default(),
-    );
-    assert!(action_err.is_err(), "execute_widget_action with unknown Custom domain must return Err");
-
-    let valid_meta = curvebook_ui_egui::views::a11y::labeled_meta(WidgetRole::Button, "Run", FocusScope::Workspace, "Enter");
-    validate_interactive_a11y(&valid_meta)?;
 
     assert_eq!(EXTRA_SHARD_CATALOGS.len(), 19);
     assert!(all_keys().count() >= 653);
@@ -84,42 +67,31 @@ fn view_shards_and_custom_action_dispatch_smoke() -> Result<(), String> {
 
 #[test]
 fn human_wf_common_helpers_drive_ui_with_zero_shortcuts() -> Result<(), String> {
-    let app = make_smoke_app()?;
-    let mut driver = human_wf_common::new_human_driver(app, human_wf_common::default_viewport());
+    let mut app = make_smoke_app()?;
+    app.nav.welcome.open = false;
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, human_wf_common::default_viewport());
 
-    let report = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    assert!(report.checked_nodes > 0);
+    human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
+    harness.driver.hover_widget_id("toolbar.command_palette")?;
+    harness.click("toolbar.command_palette")?;
+    assert_eq!(harness.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
 
-    let palette_btn = WidgetId::from("toolbar.palette");
-    let _ = human_wf_common::hover_widget_center(&mut driver, &palette_btn)?;
-    let _ = human_wf_common::click_widget_center(&mut driver, &palette_btn)?;
-    assert_eq!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
+    harness.click("palette.query")?;
+    harness.driver.type_text("ANOVA")?;
+    assert_eq!(harness.driver.state().views.command_palette.query, "ANOVA");
 
-    let query_id = WidgetId::from("palette.query");
-    let _ = human_wf_common::click_and_type(&mut driver, &query_id, "ANO")?;
-    let _ = human_wf_common::type_into_focused(&mut driver, "VA")?;
-    assert_eq!(driver.app().canvas_dialogs.command_palette.query, "ANOVA");
+    harness.driver.press_key("Escape", KeyModifiers::default())?;
+    assert_eq!(harness.app().canvas_dialogs.active_dialog, ActiveDialog::None);
 
-    let _ = human_wf_common::press_key_combo(&mut driver, "Escape", KeyModifiers::default())?;
-    assert_eq!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::None);
+    harness.driver.press_key("k", KeyModifiers { meta: true, ..Default::default() })?;
+    assert_eq!(harness.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
+    harness.driver.press_key("Escape", KeyModifiers::default())?;
 
-    let _ = human_wf_common::press_cmd_shortcut(&mut driver, "k")?;
-    assert_eq!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::CommandPalette);
-    let _ = human_wf_common::press_key_combo(&mut driver, "Escape", KeyModifiers::default())?;
+    let rs_id = harness.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
+    assert_eq!(harness.app().document().result_sheets.len(), 1);
+    assert_eq!(harness.app().document().result_sheets[0].id, rs_id);
 
-    let analyze_btn = WidgetId::from("toolbar.analyze");
-    let _ = human_wf_common::click_widget_center(&mut driver, &analyze_btn)?;
-    assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
-
-    let list_id = WidgetId::from("analyze.entries_list");
-    let anova_id = WidgetId::from("analyze.entry.stats.one_way_anova");
-    human_wf_common::scroll_until_widget_visible(&mut driver, &list_id, &anova_id, -180.0, 6)?;
-    let _ = human_wf_common::scroll_widget_wheel(&mut driver, &list_id, 0.0, 0.0)?;
-    let _ = human_wf_common::click_widget_center(&mut driver, &anova_id)?;
-    let _ = human_wf_common::click_widget_center(&mut driver, &WidgetId::from("modal.ok"))?;
-    assert_eq!(driver.app().document().result_sheets.len(), 1);
-
-    let _ = human_wf_common::assert_zero_shortcut_compliance(&mut driver)?;
-    human_wf_common::assert_input_to_paint_budget(&driver, 50.0)?;
+    human_wf_common::assert_zero_shortcut_compliance(&mut harness)?;
+    human_wf_common::assert_input_to_paint_budget(&harness, 50.0)?;
     Ok(())
 }

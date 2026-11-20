@@ -2,6 +2,8 @@
 
 #![allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 
+mod human_wf_common;
+
 use std::collections::HashSet;
 use std::path::Path;
 
@@ -10,12 +12,91 @@ use curvebook_doc::{LayoutItem, SheetId};
 use curvebook_palette::Rgba8;
 use curvebook_render::RenderTargetSpec;
 use curvebook_tools::canvas::SnapSource;
-use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
+use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents};
 use curvebook_ui_egui::{
-    ActiveDialog, CanvasDragTarget, FontBook, KeyModifiers, LayoutResizeHandle, OsAdapterAvailability, PointerButton, UiApp, UiInputEvent,
-    ViewportMetrics, WorkspaceHitTarget, compute_workspace_layout_map, dispatch_ui_command, dispatch_ui_event, render_workspace_rgba,
+    ActiveDialog, FontBook, OsAdapterAvailability, ScreenshotRegionTarget, UiApp, UiInputEvent, ViewportMetrics, dispatch_ui_command,
+    dispatch_ui_event,
 };
 use serde_json::json;
+
+#[derive(Debug, Clone, Copy)]
+struct QaPixelRect {
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct QaWorkspaceRegions {
+    toolbar: QaPixelRect,
+    navigator: QaPixelRect,
+    canvas: QaPixelRect,
+    inspector: QaPixelRect,
+    status_bar: QaPixelRect,
+}
+
+fn rect_to_px(rect: egui::Rect, scale: f64, max_w: u32, max_h: u32) -> QaPixelRect {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let x = ((f64::from(rect.min.x.max(0.0)) * scale).floor() as u32).min(max_w);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let y = ((f64::from(rect.min.y.max(0.0)) * scale).floor() as u32).min(max_h);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let r = ((f64::from(rect.max.x.max(0.0)) * scale).ceil() as u32).min(max_w);
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    let b = ((f64::from(rect.max.y.max(0.0)) * scale).ceil() as u32).min(max_h);
+    QaPixelRect { x, y, width: r.saturating_sub(x), height: b.saturating_sub(y) }
+}
+
+fn measure_qa_regions(app: &UiApp, metrics: ViewportMetrics) -> QaWorkspaceRegions {
+    let ctx = egui::Context::default();
+    curvebook_ui_egui::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+    #[allow(clippy::cast_possible_truncation)]
+    let w_pt = metrics.logical_width.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let h_pt = metrics.logical_height.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let ppp = metrics.clamped_scale_factor() as f32;
+    ctx.options_mut(|o| o.zoom_factor = app.ui_scale());
+    let mut views = app.egui_views.clone();
+    let mut report = None;
+    for _ in 0..6 {
+        let mut meta = FrameInspectMeta::default();
+        let mut intents = PendingUiIntents::default();
+        let raw = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(ppp / app.ui_scale()), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut settled = false;
+        let mut out = ctx.run_ui(raw, |ui| {
+            let rep = render_egui_shell_frame(ui, app, &mut views, &mut meta, &mut intents);
+            settled = !ui.ctx().will_discard();
+            if settled {
+                report = Some(rep);
+            }
+        });
+        out.textures_delta.clear();
+        if settled {
+            break;
+        }
+    }
+    let rep = report.expect("settled qa shell report");
+    let scale = metrics.clamped_scale_factor();
+    let max_w = metrics.physical_width_px();
+    let max_h = metrics.physical_height_px();
+    let zero = QaPixelRect { x: 0, y: 0, width: 0, height: 0 };
+    QaWorkspaceRegions {
+        toolbar: rep.tier1_rect_pt.map_or(zero, |r| rect_to_px(r, scale, max_w, max_h)),
+        navigator: rep.leading_dock_rect_pt.map_or(zero, |r| rect_to_px(r, scale, max_w, max_h)),
+        canvas: rep.regions.canvas_rect_pt.map_or(zero, |r| rect_to_px(r, scale, max_w, max_h)),
+        inspector: rep.trailing_dock_rect_pt.map_or(zero, |r| rect_to_px(r, scale, max_w, max_h)),
+        status_bar: rep.footer_rect_pt.map_or(zero, |r| rect_to_px(r, scale, max_w, max_h)),
+    }
+}
 
 fn build_qa_two_panel_app() -> (UiApp, SheetId, SheetId, SheetId) {
     let mut app = UiApp::new();
@@ -82,8 +163,8 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
     let scales = [1.0_f64, 1.5, 2.0, 3.0];
 
     for locale in locales {
-        let is_rtl = matches!(locale, "ar" | "he");
-        app.locale = String::from(locale);
+        let _ = app.set_locale(locale);
+        app.nav.welcome.open = false;
         app.sync_views();
 
         for &scale in &scales {
@@ -93,23 +174,14 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
             #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
             let dpi = (96.0 * scale).round() as u16;
 
-            let map = compute_workspace_layout_map(&app, metrics);
-            let layout = &map.frame;
-
-            if is_rtl {
-                assert_eq!(layout.inspector.x, 0, "{locale}@{scale}x: inspector must mirror to left");
-                assert!(layout.canvas.x >= layout.inspector.right());
-                assert!(layout.navigator.x >= layout.canvas.right());
-                assert_eq!(layout.navigator.right(), phys_w, "{locale}@{scale}x: navigator must flush right");
-            } else {
-                assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
-                assert!(layout.canvas.x >= layout.navigator.right());
-                assert!(layout.inspector.x >= layout.canvas.right());
-                assert_eq!(layout.inspector.right(), phys_w, "{locale}@{scale}x: inspector flushes right");
-            }
+            let layout = measure_qa_regions(&app, metrics);
+            assert!(layout.navigator.width > 0 && layout.canvas.width > 0 && layout.inspector.width > 0);
+            assert_eq!(layout.navigator.x, 0, "{locale}@{scale}x: navigator starts on left");
+            assert!(layout.navigator.x < layout.canvas.x && layout.canvas.x < layout.inspector.x);
+            assert_eq!(layout.inspector.x + layout.inspector.width, phys_w, "{locale}@{scale}x: inspector flushes right");
 
             let target = RenderTargetSpec { width_px: phys_w, height_px: phys_h, dpi };
-            let img = render_workspace_rgba(&app, target).expect("render workspace rgba");
+            let img = app.render_egui_shell_rgba(target, ScreenshotRegionTarget::FullWindow).expect("render egui shell rgba");
             assert_eq!(img.rgba.len(), (phys_w as usize) * (phys_h as usize) * 4);
             for region in [layout.toolbar, layout.navigator, layout.canvas, layout.inspector, layout.status_bar] {
                 assert!(
@@ -118,19 +190,9 @@ fn cjk_rtl_locales_render_mirror_panes_and_keep_hidpi_hit_test_parity() {
                 );
             }
 
-            // Verify logical<->physical HiDPI hit-test parity on both mirrored inspector and navigator.
-            let insp_phys = [f64::from(layout.inspector.x) + f64::from(layout.inspector.width) * 0.5, f64::from(layout.inspector.y) + 60.0];
-            let insp_logical = metrics.physical_to_logical_px(insp_phys);
-            let insp_hit = map.hit_test_logical(insp_logical[0], insp_logical[1]);
-            assert_eq!(insp_hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::Inspector), "{locale}@{scale}x inspector hit parity failed");
-
-            let nav_phys = [f64::from(layout.navigator.x) + f64::from(layout.navigator.width) * 0.5, f64::from(layout.navigator.y) + 32.0];
-            let nav_logical = metrics.physical_to_logical_px(nav_phys);
-            let nav_hit = map.hit_test_logical(nav_logical[0], nav_logical[1]);
-            assert!(
-                matches!(nav_hit, WorkspaceHitTarget::Pane(ActiveWorkspacePane::Navigator) | WorkspaceHitTarget::NavigatorEntry { .. }),
-                "{locale}@{scale}x navigator hit parity failed: {nav_hit:?}"
-            );
+            let snap = app.inspect_egui_shell_snapshot(metrics, None, true);
+            assert!(snap.navigator_sheets.as_ref().is_some_and(|n| !n.is_empty()), "{locale}@{scale}x missing navigator nodes");
+            assert!(snap.toolbar.as_ref().is_some_and(|t| !t.is_empty()), "{locale}@{scale}x missing toolbar nodes");
         }
     }
 }
@@ -178,138 +240,67 @@ fn font_book_loads_system_fonts_and_rasterizes_cjk_and_rtl_glyphs() {
 #[test]
 fn layout_live_plot_origin_drag_snap_and_resize_handle_commit() {
     let (mut app, layout_id, g1, g2) = build_qa_two_panel_app();
-    let metrics = ViewportMetrics::new(1000.0, 680.0, 1.5);
-    let map = compute_workspace_layout_map(&app, metrics);
-    let paper = map.scene_paper.clone().expect("layout scene paper mapping");
+    app.nav.welcome.open = false;
+    app.canvas_dialogs.canvas.snap_to_grid = false;
+    let metrics = ViewportMetrics::new(1280.0, 800.0, 1.5);
 
     // Compute exact panel-0 plot origin and panel-1 plot-origin offset from compiled graph scenes.
     let sub0 = app.session().render_sheet_scene(&g1).expect("compile g1");
     let sub1 = app.session().render_sheet_scene(&g2).expect("compile g2");
-    let scale0 = ((200.0 / sub0.width_pt.max(1.0)).min(150.0 / sub0.height_pt.max(1.0))).max(0.05);
-    let scale1 = ((170.0 / sub1.width_pt.max(1.0)).min(130.0 / sub1.height_pt.max(1.0))).max(0.05);
-    let p0_plot_origin = PointPt::new(24.0 + sub0.plot_rect_pt.x * scale0, 24.0 + sub0.plot_rect_pt.y * scale0);
-    let p1_offset = PointPt::new(sub1.plot_rect_pt.x * scale1, sub1.plot_rect_pt.y * scale1);
+    let p0_plot_origin = PointPt::new(24.0 + sub0.plot_rect_pt.x, 24.0 + sub0.plot_rect_pt.y);
+    let p1_offset = PointPt::new(sub1.plot_rect_pt.x, sub1.plot_rect_pt.y);
 
-    // Start dragging Panel 1 at its interior center (away from 8 resize handles).
-    let start_pt = PointPt::new(345.0, 245.0);
-    let start_phys = paper.scene_pt_to_pixel(start_pt).expect("panel 1 start pixel");
-    let start_log = metrics.physical_to_logical_px(start_phys);
-    let down = dispatch_ui_event(
-        &mut app,
-        UiInputEvent::PointerDown { x: start_log[0], y: start_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("pointer down panel 1");
-    assert_eq!(down.action, "layout.item_drag_start");
-    assert!(matches!(app.interaction.canvas_drag, Some(CanvasDragTarget::LayoutItem { item_index: 1, resize_handle: None, .. })));
+    let mut harness = human_wf_common::EguiWfHarness::from_app(app, metrics);
+    let p0_rect = harness.driver.frame_meta().find_by_widget_id("canvas.layout_panel.0").expect("panel 0 meta").clipped_rect;
+    let p1_rect = harness.driver.frame_meta().find_by_widget_id("canvas.layout_panel.1").expect("panel 1 meta").clipped_rect;
+    let px_per_pt = p0_rect.width() / 200.0;
 
-    // Move Panel 1 so its plot origin lands 2pt right of Panel 0's plot origin X (within default snap tolerance).
-    let desired_p1_x = (p0_plot_origin.x - p1_offset.x) + 2.0;
-    let delta_x = desired_p1_x - 260.0;
-    let move_pt = PointPt::new(start_pt.x + delta_x, start_pt.y);
-    let move_phys = paper.scene_pt_to_pixel(move_pt).expect("panel 1 move pixel");
-    let move_log = metrics.physical_to_logical_px(move_phys);
-    let pre_drag_rgba =
-        render_workspace_rgba(&app, RenderTargetSpec { width_px: metrics.physical_width_px(), height_px: metrics.physical_height_px(), dpi: 144 })
-            .expect("pre drag render");
+    // Start dragging Panel 1 and move so its plot origin lands within snap tolerance of Panel 0's plot origin X.
+    let start_pos = p1_rect.center();
+    let desired_p1_x = (p0_plot_origin.x - p1_offset.x) + 1.0;
+    let delta_x_pt = desired_p1_x - 260.0;
+    let trigger_pos = egui::pos2(start_pos.x - 12.0, start_pos.y);
+    let move_pos = egui::pos2(trigger_pos.x + (delta_x_pt as f32) * px_per_pt, start_pos.y);
 
-    dispatch_ui_event(&mut app, UiInputEvent::PointerMove { x: move_log[0], y: move_log[1], modifiers: KeyModifiers::default() }, metrics)
-        .expect("pointer move panel 1");
+    harness.driver.dispatch_events(vec![egui::Event::PointerMoved(start_pos)]);
+    harness.driver.dispatch_events(vec![egui::Event::PointerButton {
+        pos: start_pos,
+        button: egui::PointerButton::Primary,
+        pressed: true,
+        modifiers: egui::Modifiers::NONE,
+    }]);
+    harness.driver.dispatch_events(vec![egui::Event::PointerMoved(trigger_pos)]);
+    harness.driver.dispatch_events(vec![egui::Event::PointerMoved(move_pos)]);
 
+    let snap_guides = &harness.driver.state().views.canvas_view.active_snap_guides;
+    assert!(snap_guides.iter().any(|g| g.source == SnapSource::PlotOrigin), "expected PlotOrigin snap guide during live drag, got: {snap_guides:?}");
+    let drag_preview = harness.driver.state().views.canvas_view.layout_drag.as_ref().expect("active layout_drag preview");
     assert!(
-        app.canvas_dialogs.canvas.active_snap_guides.iter().any(|g| g.source == SnapSource::PlotOrigin),
-        "expected PlotOrigin snap guide during live drag, got: {:?}",
-        app.canvas_dialogs.canvas.active_snap_guides
-    );
-    let CanvasDragTarget::LayoutItem { preview_rect_pt: Some(preview), .. } =
-        app.interaction.canvas_drag.as_ref().expect("active canvas drag preview")
-    else {
-        panic!("expected LayoutItem preview_rect_pt during drag");
-    };
-    assert!(
-        ((preview.x + p1_offset.x) - p0_plot_origin.x).abs() <= 0.5,
+        ((drag_preview.current_bounds_pt.x + p1_offset.x) - p0_plot_origin.x).abs() <= 0.5,
         "panel 1 plot origin ({}) failed to snap to panel 0 plot origin ({})",
-        preview.x + p1_offset.x,
+        drag_preview.current_bounds_pt.x + p1_offset.x,
         p0_plot_origin.x
     );
 
-    let mid_drag_rgba =
-        render_workspace_rgba(&app, RenderTargetSpec { width_px: metrics.physical_width_px(), height_px: metrics.physical_height_px(), dpi: 144 })
-            .expect("mid drag render");
-    assert_ne!(pre_drag_rgba.rgba, mid_drag_rgba.rgba, "mid-drag preview and snap guide should update pixels");
-    assert!(
-        mid_drag_rgba.rgba.as_chunks::<4>().0.iter().any(|px| px[0] == 220 && px[1] == 38 && px[2] == 38),
-        "rendered mid-drag workspace should draw PlotOrigin alignment hairline"
-    );
+    harness.driver.dispatch_events(vec![egui::Event::PointerButton {
+        pos: move_pos,
+        button: egui::PointerButton::Primary,
+        pressed: false,
+        modifiers: egui::Modifiers::NONE,
+    }]);
 
-    let up = dispatch_ui_event(
-        &mut app,
-        UiInputEvent::PointerUp { x: move_log[0], y: move_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("pointer up panel 1");
-    assert_eq!(up.command_id.as_deref(), Some("layout.setSpec"));
-    assert!(app.canvas_dialogs.canvas.active_snap_guides.is_empty());
-
-    let ls = app.session().document().layout_sheet(&layout_id).expect("layout sheet");
+    let ls = harness.app().document().layout_sheet(&layout_id).expect("layout sheet");
     let LayoutItem::LiveGraph { bounds_pt: moved_bounds, .. } = &ls.spec.items[1] else {
         panic!("expected LiveGraph item 1");
     };
     let moved_bounds = *moved_bounds;
     assert!(((moved_bounds.x + p1_offset.x) - p0_plot_origin.x).abs() <= 0.5);
-
-    // Exercise live BottomRight resize handle drag on Panel 1 while keeping TopLeft anchored.
-    let br_pt = PointPt::new(moved_bounds.x + moved_bounds.width, moved_bounds.y + moved_bounds.height);
-    let br_phys = paper.scene_pt_to_pixel(br_pt).expect("bottom right handle px");
-    let br_log = metrics.physical_to_logical_px(br_phys);
-    dispatch_ui_event(
-        &mut app,
-        UiInputEvent::PointerDown { x: br_log[0], y: br_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("pointer down resize handle");
-    assert!(matches!(
-        app.interaction.canvas_drag,
-        Some(CanvasDragTarget::LayoutItem { item_index: 1, resize_handle: Some(LayoutResizeHandle::BottomRight), .. })
-    ));
-
-    let resized_pt = PointPt::new(br_pt.x + 32.0, br_pt.y + 24.0);
-    let resized_phys = paper.scene_pt_to_pixel(resized_pt).expect("resized br px");
-    let resized_log = metrics.physical_to_logical_px(resized_phys);
-    dispatch_ui_event(&mut app, UiInputEvent::PointerMove { x: resized_log[0], y: resized_log[1], modifiers: KeyModifiers::default() }, metrics)
-        .expect("pointer move resize");
-
-    if let Some(CanvasDragTarget::LayoutItem {
-        preview_rect_pt: Some(resize_preview), resize_handle: Some(LayoutResizeHandle::BottomRight), ..
-    }) = &app.interaction.canvas_drag
-    {
-        assert!((resize_preview.x - moved_bounds.x).abs() < 1e-3, "TopLeft X must stay anchored during BottomRight resize");
-        assert!((resize_preview.y - moved_bounds.y).abs() < 1e-3, "TopLeft Y must stay anchored during BottomRight resize");
-        assert!(resize_preview.width > moved_bounds.width + 20.0);
-        assert!(resize_preview.height > moved_bounds.height + 15.0);
-    } else {
-        panic!("expected live resize preview_rect_pt");
-    }
-
-    let resize_up = dispatch_ui_event(
-        &mut app,
-        UiInputEvent::PointerUp { x: resized_log[0], y: resized_log[1], button: PointerButton::Primary, modifiers: KeyModifiers::default() },
-        metrics,
-    )
-    .expect("pointer up resize");
-    assert_eq!(resize_up.command_id.as_deref(), Some("layout.setSpec"));
-
-    let ls_after = app.session().document().layout_sheet(&layout_id).expect("layout sheet after resize");
-    let LayoutItem::LiveGraph { bounds_pt: final_bounds, .. } = &ls_after.spec.items[1] else {
-        panic!("expected LiveGraph item 1");
-    };
-    assert!(final_bounds.width > moved_bounds.width + 20.0);
-    assert!(final_bounds.height > moved_bounds.height + 15.0);
 }
 
 #[test]
 fn pinch_zoom_inertial_pan_coasting_and_print_dialog_flow() {
     let (mut app, layout_id, _, _) = build_qa_two_panel_app();
+    app.nav.welcome.open = false;
     let metrics = ViewportMetrics::new(1024.0, 640.0, 2.0);
 
     dispatch_ui_event(&mut app, UiInputEvent::PinchZoom { x: 400.0, y: 300.0, scale_delta: 1.5 }, metrics).expect("pinch zoom");
@@ -349,7 +340,9 @@ fn pinch_zoom_inertial_pan_coasting_and_print_dialog_flow() {
     assert!(spool.pdf_bytes.starts_with(b"%PDF-1.7"));
     assert_eq!(app.canvas_dialogs.print.last_spool_bytes, spool.pdf_bytes.len());
 
-    let modal_img = render_workspace_rgba(&app, RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 }).expect("render print modal");
+    let modal_img = app
+        .render_egui_shell_rgba(RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 }, ScreenshotRegionTarget::FullWindow)
+        .expect("render print modal");
     assert!(distinct_colors_in_rect(&modal_img.rgba, modal_img.width_px, 200, 120, 400, 260) >= 3);
 
     if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {

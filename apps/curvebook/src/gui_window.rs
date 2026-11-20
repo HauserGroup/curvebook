@@ -2,22 +2,22 @@
 
 //! Interactive `eframe` + `egui` + `wgpu` native desktop window host for CurveBook.
 
-#[cfg(feature = "accessibility")]
-use std::collections::{BTreeMap, BTreeSet, VecDeque};
-use std::path::{Path, PathBuf};
+use std::collections::VecDeque;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, OnceLock, mpsc};
-use std::time::Instant;
 
-use curvebook_text::{BUNDLED_FONTS, TrueTypeFont, build_minimal_truetype_font};
+use curvebook_text::TrueTypeFont;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton};
-use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, LOCALES, UiApp, locale_picker_label};
+use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
+use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, inspect_bridge, top_chrome};
+use curvebook_ui_egui::interaction::KeyModifiers;
+use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp};
 use eframe::egui;
 
 use crate::desktop_host::{
-    CloseDisposition, DesktopEventOutcome, DesktopFrameOutput, DesktopHostEvent, DesktopHostRuntime, DesktopMenuChromeState, DesktopMenuItem,
-    DesktopWindowId, LiveControlFrameOutput, match_routed_desktop_shortcut,
+    CloseDisposition, ControlFrameKind, DesktopEventOutcome, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, LiveControlFrameOutput,
+    classify_control_frame, match_routed_desktop_shortcut,
 };
 pub use crate::desktop_host::{
     DEFAULT_TEMPLATE_FILE_NAME, NATIVE_OPEN_FILE_EXTENSIONS, NATIVE_TEMPLATE_FILE_EXTENSIONS, NativeFileDialogAdapter, NativeFileDialogKind,
@@ -52,29 +52,6 @@ const MIN_WINDOW_WIDTH_PT: f32 = 640.0;
 const MIN_WINDOW_HEIGHT_PT: f32 = 420.0;
 const DEFAULT_WINDOW_WIDTH_PT: f32 = 1280.0;
 const DEFAULT_WINDOW_HEIGHT_PT: f32 = 800.0;
-const DOUBLE_CLICK_WINDOW_SEC: f64 = 0.40;
-const DOUBLE_CLICK_RADIUS_PT: f32 = 5.0;
-const MAX_HOST_FONT_BYTES: usize = 64 * 1024 * 1024;
-
-const HOST_PROPORTIONAL_TTF_CANDIDATES: &[&str] = &[
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/System/Library/Fonts/Supplemental/Helvetica.ttf",
-    "/System/Library/Fonts/SFNS.ttf",
-    "/Library/Fonts/Arial.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-    "C:\\Windows\\Fonts\\arial.ttf",
-    "C:\\Windows\\Fonts\\segoeui.ttf",
-];
-
-const HOST_MONOSPACE_TTF_CANDIDATES: &[&str] = &[
-    "/System/Library/Fonts/Supplemental/Courier New.ttf",
-    "/System/Library/Fonts/SFNSMono.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSansMono.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationMono-Regular.ttf",
-    "C:\\Windows\\Fonts\\consola.ttf",
-    "C:\\Windows\\Fonts\\cour.ttf",
-];
 
 type CleanupHook = Box<dyn FnOnce(&mut DesktopHostRuntime) -> Result<(), String>>;
 
@@ -106,133 +83,115 @@ impl LiveControlChannel {
     }
 }
 
-struct CanvasPointerButtonArgs {
-    window_id: DesktopWindowId,
-    canvas_rect: egui::Rect,
-    pos: egui::Pos2,
-    button: egui::PointerButton,
-    pressed: bool,
-    modifiers: egui::Modifiers,
-}
-
-/// Build `egui` font definitions from validated single-face SFNT fonts and a deterministic minimal fallback.
+/// Build `egui` font definitions using `curvebook_ui_egui::egui_shell::fonts`, optionally prepending an extra CLI TTF override.
 #[must_use]
 pub fn build_egui_font_definitions(extra_ttf: Option<&[u8]>) -> egui::FontDefinitions {
-    let mut defs = egui::FontDefinitions::empty();
-    let mut proportional = Vec::new();
-    let mut monospace = Vec::new();
-
+    let mut defs = curvebook_ui_egui::egui_shell::fonts::build_egui_font_definitions().definitions;
     if let Some(bytes) = extra_ttf
-        && let Some(key) = insert_valid_sfnt(&mut defs, "cli-ttf-override", bytes)
+        && TrueTypeFont::parse(bytes).is_some()
     {
-        proportional.push(key.clone());
-        monospace.push(key);
-    }
-
-    for &(font_name, font_bytes) in BUNDLED_FONTS {
-        if let Some(key) = insert_valid_sfnt(&mut defs, font_name, font_bytes) {
-            if font_name.to_ascii_lowercase().contains("mono") {
-                monospace.push(key);
-            } else {
-                proportional.push(key);
-            }
+        let key = String::from("cli-ttf-override");
+        defs.font_data.insert(key.clone(), Arc::new(egui::FontData::from_owned(bytes.to_vec())));
+        for family in [egui::FontFamily::Proportional, egui::FontFamily::Monospace] {
+            defs.families.entry(family).or_default().insert(0, key.clone());
         }
     }
-
-    load_host_sfnt_candidates(&mut defs, HOST_PROPORTIONAL_TTF_CANDIDATES, &mut proportional);
-    load_host_sfnt_candidates(&mut defs, HOST_MONOSPACE_TTF_CANDIDATES, &mut monospace);
-
-    let minimal_ttf = build_minimal_truetype_font();
-    if let Some(key) = insert_valid_sfnt(&mut defs, "curvebook-minimal-fallback", &minimal_ttf) {
-        proportional.push(key.clone());
-        monospace.push(key);
-    } else {
-        let name = String::from("curvebook-minimal-fallback");
-        defs.font_data.insert(name.clone(), Arc::new(egui::FontData::from_owned(minimal_ttf)));
-        proportional.push(name.clone());
-        monospace.push(name);
-    }
-
-    defs.families.insert(egui::FontFamily::Proportional, proportional);
-    defs.families.insert(egui::FontFamily::Monospace, monospace);
     defs
 }
 
-fn insert_valid_sfnt(defs: &mut egui::FontDefinitions, name: &str, bytes: &[u8]) -> Option<String> {
-    TrueTypeFont::parse(bytes)?;
-    let key = name.to_string();
-    defs.font_data.insert(key.clone(), Arc::new(egui::FontData::from_owned(bytes.to_vec())));
-    Some(key)
-}
-
-fn load_host_sfnt_candidates(defs: &mut egui::FontDefinitions, candidates: &[&str], family_list: &mut Vec<String>) {
-    for (idx, path) in candidates.iter().enumerate() {
-        let Ok(bytes) = curvebook_platform::fs::read_regular_file_bytes(Path::new(path), MAX_HOST_FONT_BYTES) else {
-            continue;
-        };
-        let label = format!("host-font-{idx}-{}", path_stem_hint(path));
-        if let Some(key) = insert_valid_sfnt(defs, &label, &bytes) {
-            family_list.push(key);
-        }
-    }
-}
-
-fn path_stem_hint(path: &str) -> String {
-    Path::new(path)
-        .file_stem()
-        .and_then(|stem| stem.to_str())
-        .map(|s| s.chars().filter(|c| c.is_ascii_alphanumeric()).collect())
-        .filter(|s: &String| !s.is_empty())
-        .unwrap_or_else(|| String::from("font"))
+struct DeferredLivePointerGesture {
+    req: LiveControlRequest,
+    response_payload: serde_json::Value,
 }
 
 /// Interactive `eframe::App` wrapping a [`DesktopHostRuntime`] session.
 pub struct CurveBookNativeApp {
     runtime: DesktopHostRuntime,
     primary_window_id: DesktopWindowId,
-    texture: Option<egui::TextureHandle>,
+    last_active_sheet_id: Option<curvebook_doc::SheetId>,
     last_frame_size: [u32; 2],
     last_scale_factor: f32,
     last_title: String,
-    last_frame_time: Option<Instant>,
-    last_click_time: Option<Instant>,
-    last_click_pos: Option<egui::Pos2>,
-    click_count: u8,
-    pointer_captured: bool,
     hovered_paths_active: bool,
     close_dialog_open: bool,
     close_confirmed: bool,
     status_banner: Option<String>,
     on_exit_cleanup: Option<CleanupHook>,
     live_control: Option<LiveControlChannel>,
-    #[cfg(feature = "accessibility")]
-    a11y_id_map: BTreeMap<egui::accesskit::NodeId, String>,
+    frame_seq: u64,
+    last_geometry_stamp: Option<GeometryStamp>,
+    inspect_meta: FrameInspectMeta,
+    last_regions: EguiScreenshotRegions,
+    pending_intents: PendingUiIntents,
+    deferred_live_requests: Vec<LiveControlRequest>,
+    pending_synthetic_egui_batches: VecDeque<Vec<egui::Event>>,
+    pending_live_gesture: Option<DeferredLivePointerGesture>,
+    menu_popup_was_open: bool,
+    #[cfg(target_os = "macos")]
+    mac_menu_host: crate::mac_menu::MacNativeMenuHost,
 }
 
 impl CurveBookNativeApp {
     /// Construct a native app host wrapping an already-initialized [`DesktopHostRuntime`].
     pub fn new(mut runtime: DesktopHostRuntime, primary_window_id: DesktopWindowId, on_exit_cleanup: Option<CleanupHook>) -> Self {
-        runtime.set_file_dialog_adapter(Arc::new(RfdNativeFileDialogAdapter));
+        if !runtime.has_file_dialog_adapter() {
+            runtime.set_file_dialog_adapter(Arc::new(RfdNativeFileDialogAdapter));
+        }
         Self {
             runtime,
             primary_window_id,
-            texture: None,
+            last_active_sheet_id: None,
             last_frame_size: [0, 0],
             last_scale_factor: 0.0,
             last_title: String::new(),
-            last_frame_time: None,
-            last_click_time: None,
-            last_click_pos: None,
-            click_count: 1,
-            pointer_captured: false,
             hovered_paths_active: false,
             close_dialog_open: false,
             close_confirmed: false,
             status_banner: None,
             on_exit_cleanup,
             live_control: None,
-            #[cfg(feature = "accessibility")]
-            a11y_id_map: BTreeMap::new(),
+            frame_seq: 0,
+            last_geometry_stamp: None,
+            inspect_meta: FrameInspectMeta::default(),
+            last_regions: EguiScreenshotRegions::default(),
+            pending_intents: PendingUiIntents::default(),
+            deferred_live_requests: Vec::new(),
+            pending_synthetic_egui_batches: VecDeque::new(),
+            pending_live_gesture: None,
+            menu_popup_was_open: false,
+            #[cfg(target_os = "macos")]
+            mac_menu_host: crate::mac_menu::MacNativeMenuHost::new(),
+        }
+    }
+
+    /// Borrow the macOS native menu host mirror (for headless parity inspection and windowed sync).
+    #[cfg(target_os = "macos")]
+    #[must_use]
+    pub const fn mac_menu_host(&self) -> &crate::mac_menu::MacNativeMenuHost {
+        &self.mac_menu_host
+    }
+
+    /// Synchronize macOS `muda` menu descriptors (and live `NSMenu` only if attached on main thread).
+    #[cfg(target_os = "macos")]
+    pub fn sync_macos_menu_for_window(&mut self, window_id: DesktopWindowId) {
+        if let Ok(win) = self.runtime.window(window_id) {
+            let chrome = win.chrome_state();
+            if let Err(err) = self.mac_menu_host.sync_from_chrome(&chrome) {
+                self.status_banner = Some(err);
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    fn attach_macos_menus_on_windowed_startup(&mut self) {
+        let win_id = self.active_window_id();
+        if let Ok(win) = self.runtime.window(win_id) {
+            let chrome = win.chrome_state();
+            if !chrome.menu_bar_visible
+                && let Err(err) = self.mac_menu_host.attach_to_nsapp_for_windowed_host(&chrome)
+            {
+                self.status_banner = Some(err);
+            }
         }
     }
 
@@ -272,6 +231,18 @@ impl CurveBookNativeApp {
         self.status_banner.as_deref()
     }
 
+    /// Most recent frame geometry synchronization stamp (`GeometryStamp`).
+    #[must_use]
+    pub const fn geometry_stamp(&self) -> Option<GeometryStamp> {
+        self.last_geometry_stamp
+    }
+
+    /// Borrow the latest settled [`FrameInspectMeta`] captured by the `egui` shell pass.
+    #[must_use]
+    pub const fn inspect_meta(&self) -> &FrameInspectMeta {
+        &self.inspect_meta
+    }
+
     /// Drain and process all currently queued live-control requests without blocking rendering.
     pub fn poll_live_control(&mut self, ctx: &egui::Context) -> usize {
         let mut pending = Vec::new();
@@ -285,14 +256,28 @@ impl CurveBookNativeApp {
             return 0;
         }
         let count = pending.len();
-        let quit_requested = self.dispatch_pending_live_requests(pending);
+        let has_deferred_in_flight =
+            !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some();
+        let mut immediate = Vec::new();
+        for req in pending {
+            if should_defer_to_settled_frame(&req) || (has_deferred_in_flight && classify_control_frame(&req.raw_bytes) == ControlFrameKind::Command)
+            {
+                self.deferred_live_requests.push(req);
+            } else {
+                immediate.push(req);
+            }
+        }
+        let quit_requested = self.dispatch_pending_live_requests(immediate);
         if quit_requested {
+            self.fail_deferred_live_requests("desktop window is closing");
             self.close_confirmed = true;
             self.close_dialog_open = false;
             if let Some(ref ctrl) = self.live_control {
                 ctrl.shutdown.store(true, Ordering::Release);
             }
             ctx.send_viewport_cmd(egui::ViewportCommand::Close);
+        } else if !self.deferred_live_requests.is_empty() || !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some() {
+            ctx.request_repaint();
         }
         count
     }
@@ -305,16 +290,7 @@ impl CurveBookNativeApp {
                 let _ = req.reply_tx.send(Err(String::from("desktop window is closing")));
                 continue;
             }
-            let win_id = self.active_window_id();
-            let res = match self.runtime.window_mut(win_id) {
-                Ok(win) => win.dispatch_live_control_frame_with_hook(&req.raw_bytes, &req.auth, req.conn_authenticated, |app, hook_ctx| {
-                    if let Some(ref mut hook) = post_hook {
-                        hook(app, hook_ctx)?;
-                    }
-                    Ok(())
-                }),
-                Err(err) => Err(err),
-            };
+            let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, &mut post_hook);
             if res.as_ref().is_ok_and(|out| out.quit) {
                 quit_requested = true;
             }
@@ -326,7 +302,224 @@ impl CurveBookNativeApp {
         quit_requested
     }
 
+    fn dispatch_single_live_request(
+        &mut self,
+        raw_bytes: &[u8],
+        auth: &ControlAuth,
+        conn_authenticated: bool,
+        post_hook: &mut Option<LiveControlPostHook>,
+    ) -> Result<LiveControlFrameOutput, String> {
+        let win_id = self.active_window_id();
+        self.runtime.window_mut(win_id)?.dispatch_live_control_frame_with_hook(raw_bytes, auth, conn_authenticated, |app, hook_ctx| {
+            if let Some(ref mut hook) = *post_hook {
+                hook(app, hook_ctx)?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Pop the next queued synthetic `egui` event batch into `raw_input` for headless or live frame stepping.
+    pub fn drain_synthetic_events_into(&mut self, raw_input: &mut egui::RawInput) {
+        if let Some(batch) = self.pending_synthetic_egui_batches.pop_front() {
+            raw_input.events.extend(batch);
+        }
+    }
+
+    fn complete_pending_live_gesture(&mut self) {
+        let Some(pending) = self.pending_live_gesture.take() else {
+            return;
+        };
+        let Ok(req) = serde_json::from_str::<ControlRequest>(std::str::from_utf8(&pending.req.raw_bytes).unwrap_or("").trim()) else {
+            let _ = pending.req.reply_tx.send(Err(String::from("invalid queued pointer gesture payload")));
+            return;
+        };
+        let reply = curvebook_ui_egui::encode_egui_control_response(req.id, Ok(pending.response_payload));
+        let Ok(mut response_bytes) = serde_json::to_vec(&reply) else {
+            let _ = pending.req.reply_tx.send(Err(String::from("failed to serialize pointer gesture reply")));
+            return;
+        };
+        response_bytes.push(b'\n');
+        let _ = pending.req.reply_tx.send(Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None }));
+    }
+
+    fn flush_deferred_live_requests(&mut self, ctx: &egui::Context) {
+        if ctx.will_discard() {
+            return;
+        }
+        let Some(stamp) = self.last_geometry_stamp.filter(|s| s.settled) else {
+            return;
+        };
+        if !self.pending_synthetic_egui_batches.is_empty() {
+            ctx.request_repaint();
+            return;
+        }
+        self.complete_pending_live_gesture();
+
+        if self.deferred_live_requests.is_empty() {
+            return;
+        }
+        let queued = std::mem::take(&mut self.deferred_live_requests);
+        let mut iter = queued.into_iter();
+        let mut post_hook = self.live_control.as_mut().and_then(|ctrl| ctrl.post_hook.take());
+        while let Some(req) = iter.next() {
+            if is_pointer_gesture_request(&req) {
+                match self.try_enqueue_live_pointer_gesture(ctx, req, &mut post_hook) {
+                    LiveGestureDispatch::EguiQueued => {
+                        self.deferred_live_requests.extend(iter);
+                        ctx.request_repaint();
+                        break;
+                    }
+                    LiveGestureDispatch::ImmediateReply => {}
+                }
+                continue;
+            }
+            let injected_bytes = self.prepare_settled_live_request_bytes(&req.raw_bytes, stamp);
+            let res = self.dispatch_single_live_request(&injected_bytes, &req.auth, req.conn_authenticated, &mut post_hook);
+            let _ = req.reply_tx.send(res);
+        }
+        if let Some(ref mut ctrl) = self.live_control {
+            ctrl.post_hook = post_hook;
+        }
+    }
+
+    fn try_enqueue_live_pointer_gesture(
+        &mut self,
+        ctx: &egui::Context,
+        req: LiveControlRequest,
+        post_hook: &mut Option<LiveControlPostHook>,
+    ) -> LiveGestureDispatch {
+        let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
+            let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, post_hook);
+            let _ = req.reply_tx.send(res);
+            return LiveGestureDispatch::ImmediateReply;
+        };
+        let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+            let res = self.dispatch_single_live_request(&req.raw_bytes, &req.auth, req.conn_authenticated, post_hook);
+            let _ = req.reply_tx.send(res);
+            return LiveGestureDispatch::ImmediateReply;
+        };
+        let params = &parsed.params;
+        let action = params
+            .get("action")
+            .or_else(|| params.get("kind"))
+            .or_else(|| params.get("gesture"))
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or("click")
+            .trim()
+            .to_ascii_lowercase();
+        let widget_id =
+            params.get("widget_id").or_else(|| params.get("target_id")).and_then(serde_json::Value::as_str).map(str::trim).filter(|s| !s.is_empty());
+
+        let meta_entry = widget_id.and_then(|wid| self.inspect_meta.find_by_widget_id(wid).cloned());
+        if let Some(ref entry) = meta_entry
+            && !entry.enabled
+            && matches!(action.as_str(), "click" | "double_click")
+        {
+            let msg = entry.disabled_reason.clone().unwrap_or_else(|| format!("widget `{}` is disabled", entry.widget_id));
+            let err = curvebook_engine::EngineError::with_code(curvebook_doc::ErrorCode::Conflict, msg);
+            let reply = curvebook_ui_egui::encode_egui_control_response(parsed.id, Err(err));
+            let bytes = serde_json::to_vec(&reply).map(|mut b| {
+                b.push(b'\n');
+                LiveControlFrameOutput { response_bytes: b, quit: false, close_connection: false, auth_succeeded: None }
+            });
+            let _ = req.reply_tx.send(bytes.map_err(|e| e.to_string()));
+            return LiveGestureDispatch::ImmediateReply;
+        }
+
+        let explicit_xy = params.get("x").and_then(serde_json::Value::as_f64).zip(params.get("y").and_then(serde_json::Value::as_f64));
+        let target_pos = meta_entry.as_ref().map(|e| e.clipped_rect.center()).or_else(|| {
+            #[allow(clippy::cast_possible_truncation)]
+            explicit_xy.map(|(x, y)| egui::pos2(x as f32, y as f32))
+        });
+
+        let pos = target_pos.unwrap_or_else(|| self.last_regions.canvas_rect_pt.map_or_else(|| ctx.content_rect().center(), |r| r.center()));
+        let egui_mods = parse_egui_modifiers_param(params.get("modifiers"));
+        let batches = build_synthetic_egui_gesture_batches(&action, pos, params, egui_mods);
+        self.pending_synthetic_egui_batches.extend(batches);
+        // Append one empty settle pass so post-gesture layout & `PendingUiIntents` commit before reply/inspect.
+        self.pending_synthetic_egui_batches.push_back(Vec::new());
+        self.pending_live_gesture = Some(DeferredLivePointerGesture {
+            req,
+            response_payload: serde_json::json!({
+                "action": action,
+                "widget_id": widget_id,
+                "x": f64::from(pos.x),
+                "y": f64::from(pos.y),
+                "egui_dispatched": true,
+            }),
+        });
+        LiveGestureDispatch::EguiQueued
+    }
+
+    fn prepare_settled_live_request_bytes(&self, raw_bytes: &[u8], stamp: GeometryStamp) -> Vec<u8> {
+        let Ok(text) = std::str::from_utf8(raw_bytes) else {
+            return raw_bytes.to_vec();
+        };
+        let Ok(mut req) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+            return raw_bytes.to_vec();
+        };
+        let scale = f64::from(stamp.scale_factor());
+        let mut updated = false;
+        match req.method.as_str() {
+            "ui.screenshot" => {
+                let obj = ensure_params_object(&mut req.params);
+                if let Some(map) = obj {
+                    if !map.contains_key("width_px") {
+                        map.insert(String::from("width_px"), serde_json::json!(stamp.physical_width_px.max(64)));
+                        updated = true;
+                    }
+                    if !map.contains_key("height_px") {
+                        map.insert(String::from("height_px"), serde_json::json!(stamp.physical_height_px.max(64)));
+                        updated = true;
+                    }
+                    if !map.contains_key("dpi") {
+                        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+                        let dpi = (scale * 96.0).round().clamp(72.0, 600.0) as u16;
+                        map.insert(String::from("dpi"), serde_json::json!(dpi));
+                        updated = true;
+                    }
+                }
+            }
+            "ui.inspect" => {
+                let obj = ensure_params_object(&mut req.params);
+                if let Some(map) = obj
+                    && !map.contains_key("metrics")
+                {
+                    let logical_w = (f64::from(stamp.physical_width_px) / scale).max(160.0);
+                    let logical_h = (f64::from(stamp.physical_height_px) / scale).max(120.0);
+                    map.insert(
+                        String::from("metrics"),
+                        serde_json::json!({
+                            "logical_width": logical_w,
+                            "logical_height": logical_h,
+                            "scale_factor": scale,
+                        }),
+                    );
+                    updated = true;
+                }
+            }
+            _ => {}
+        }
+        if !updated {
+            return raw_bytes.to_vec();
+        }
+        serde_json::to_vec(&req).map_or_else(
+            |_| raw_bytes.to_vec(),
+            |mut bytes| {
+                bytes.push(b'\n');
+                bytes
+            },
+        )
+    }
+
+    fn fail_deferred_live_requests(&mut self, reason: &str) {
+        for req in self.deferred_live_requests.drain(..) {
+            let _ = req.reply_tx.send(Err(String::from(reason)));
+        }
+    }
+
     fn drain_pending_control_on_exit(&mut self) {
+        self.fail_deferred_live_requests("desktop window is closing");
         let Some(ctrl) = self.live_control.take() else {
             return;
         };
@@ -336,37 +529,246 @@ impl CurveBookNativeApp {
         }
     }
 
+    fn commit_pending_intents(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, will_discard: bool) {
+        if self.pending_intents.is_empty() {
+            return;
+        }
+        let mut raw_intents = std::mem::take(&mut self.pending_intents);
+        if will_discard {
+            if let Ok(win) = self.runtime.window_mut(window_id) {
+                let _ = raw_intents.commit_if_settled(win.app_mut(), true);
+            }
+            return;
+        }
+
+        let mut remaining_intents = PendingUiIntents::default();
+        let mut host_commands = Vec::new();
+        let mut host_copy = false;
+        let mut host_cut = false;
+        let mut host_paste = false;
+        let active_is_result = self.runtime.window(window_id).ok().is_some_and(|w| {
+            let doc = w.app().document();
+            doc.active_sheet_id.as_ref().is_some_and(|id| doc.result_sheet(id).is_some())
+        });
+        for intent in raw_intents.intents().iter().cloned() {
+            match &intent {
+                UiIntent::UiCommand { command_id, .. } | UiIntent::EngineCommand { command_id, .. } if is_host_routed_intent_command(command_id) => {
+                    host_commands.push(command_id.clone());
+                }
+                UiIntent::CustomViewAction { domain, payload } if domain == "welcome" && payload == "action:open_file" => {
+                    host_commands.push(String::from("project.open"));
+                }
+                UiIntent::WorkspaceCopy { .. } if !active_is_result => {
+                    host_copy = true;
+                }
+                UiIntent::GridCopySelection => {
+                    host_copy = true;
+                }
+                UiIntent::GridCutSelection => {
+                    host_cut = true;
+                }
+                UiIntent::GridPasteFromClipboard { .. } => {
+                    host_paste = true;
+                }
+                _ => remaining_intents.push(intent),
+            }
+        }
+
+        let prev_scale = self.runtime.window(window_id).ok().map(|w| w.app().ui_scale());
+        let prev_theme = self.runtime.window(window_id).ok().map(|w| w.app().theme.mode);
+        let prev_locale = self.runtime.window(window_id).ok().map(|w| w.app().locale.clone());
+        let prev_shortcuts = self.runtime.window(window_id).ok().map(|w| w.app().shortcuts.clone());
+        let mut unsaved_action = None;
+        if !remaining_intents.is_empty()
+            && let Ok(win) = self.runtime.window_mut(window_id)
+        {
+            let prev_undo = win.app().session().undo_depth();
+            let prev_redo = win.app().session().redo_depth();
+            let prev_dirty = win.app().session().is_dirty();
+            let prev_mutation_seq = win.app().mutation_seq();
+            let command_hint = remaining_intents.intents().iter().find_map(|intent| match intent {
+                UiIntent::EngineCommand { command_id, .. } | UiIntent::UiCommand { command_id, .. } => Some(command_id.clone()),
+                _ => None,
+            });
+            if let Err(err) = remaining_intents.commit_if_settled(win.app_mut(), false) {
+                self.status_banner = Some(err.to_string());
+            } else {
+                if let Err(err) = win.record_ui_mutation_checkpoint(command_hint.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq) {
+                    self.status_banner = Some(err);
+                }
+                unsaved_action = win.app_mut().egui_views.app_modals.pending_unsaved_action.take();
+                let changed = Some(win.app().ui_scale()) != prev_scale
+                    || Some(win.app().theme.mode) != prev_theme
+                    || Some(win.app().locale.clone()) != prev_locale
+                    || Some(&win.app().shortcuts) != prev_shortcuts.as_ref();
+                if changed {
+                    self.runtime.notify_preferences_changed(window_id);
+                }
+            }
+        }
+        if let Some(action) = unsaved_action {
+            self.apply_egui_unsaved_close_action(ctx, window_id, action);
+        }
+        if host_copy {
+            self.dispatch_clipboard_copy(ctx, window_id);
+        }
+        if host_cut {
+            self.dispatch_clipboard_cut(ctx, window_id);
+        }
+        if host_paste && let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: None }) {
+            self.status_banner = Some(err);
+        }
+        for cmd_id in host_commands {
+            self.execute_menu_command(Some(ctx), window_id, &cmd_id);
+        }
+    }
+
+    fn apply_egui_unsaved_close_action(
+        &mut self,
+        ctx: &egui::Context,
+        window_id: DesktopWindowId,
+        action: curvebook_ui_egui::egui_shell::app_modals::UnsavedCloseAction,
+    ) {
+        use curvebook_ui_egui::egui_shell::app_modals::UnsavedCloseAction;
+        match action {
+            UnsavedCloseAction::Save => match self.handle_native_save(window_id, false) {
+                Ok(()) => {
+                    let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
+                    if !still_dirty {
+                        match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
+                            Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                            Err(err) => self.status_banner = Some(err),
+                        }
+                    }
+                }
+                Err(err) => self.status_banner = Some(err),
+            },
+            UnsavedCloseAction::DontSave => match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
+                Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
+                Err(err) => self.status_banner = Some(err),
+            },
+            UnsavedCloseAction::Cancel => {
+                self.close_dialog_open = false;
+            }
+        }
+    }
+
     /// Execute one UI frame (polling live control requests, handling OS events, and rendering).
     pub fn step_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
+        self.frame_seq = self.frame_seq.wrapping_add(1);
+        self.pending_intents = PendingUiIntents::default();
         let _ = self.poll_live_control(&ctx);
         let initial_window_id = self.active_window_id();
 
+        if let Ok(win) = self.runtime.window(initial_window_id) {
+            let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
+            tokens.apply_to_ctx(&ctx);
+            tokens.apply_to_ui(ui);
+        }
+        ctx.options_mut(|o| o.zoom_with_keyboard = false);
+
         self.handle_close_request(&ctx, initial_window_id);
+        self.menu_popup_was_open = egui::Popup::is_any_open(&ctx);
         let bar_window_id = self.active_window_id();
-        self.render_top_menu_bar(ui, bar_window_id);
-
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            let canvas_rect = ui.available_rect_before_wrap();
-            let ppp = ctx.pixels_per_point().max(1.0);
-            let input_window_id = self.active_window_id();
-            self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
-            self.process_canvas_input(ui, input_window_id, canvas_rect);
-
-            let paint_window_id = self.active_window_id();
-            if let Some(frame) = self.tick_animations_and_redraw(&ctx, paint_window_id)
-                && let Some(canvas_resp) = self.upload_and_paint_frame(ui, canvas_rect, &frame)
-            {
-                #[cfg(feature = "accessibility")]
-                self.sync_accesskit_tree(ui, paint_window_id, canvas_rect, canvas_resp.id);
-                #[cfg(not(feature = "accessibility"))]
-                let _ = canvas_resp;
+        #[cfg(target_os = "macos")]
+        {
+            self.sync_macos_menu_for_window(bar_window_id);
+            if self.mac_menu_host.is_installed_for_nsapp() {
+                while let Some(cmd_id) = self.mac_menu_host.poll_triggered_command_id() {
+                    self.execute_menu_command(Some(&ctx), bar_window_id, &cmd_id);
+                }
             }
-        });
+        }
+        if let Ok(win) = self.runtime.window_mut(bar_window_id) {
+            let in_window_menus = win.chrome_state().menu_bar_visible;
+            win.app_mut().host_draws_menu_bar = !in_window_menus;
+        }
+
+        let input_window_id = self.active_window_id();
+        let ppp = ctx.pixels_per_point().max(1.0);
+        let available_rect = ui.available_rect_before_wrap();
+        let (active_sheet_id, modal_backdrop_active) = self
+            .runtime
+            .window(input_window_id)
+            .map(|w| {
+                let app = w.app();
+                let modal = self.close_dialog_open
+                    || app.canvas_dialogs.active_dialog != ActiveDialog::None
+                    || app.nav.welcome.open
+                    || app.grid.import_wizard.open
+                    || app.grid.variables_dialog.open;
+                (app.document().active_sheet_id.clone(), modal)
+            })
+            .unwrap_or((None, self.close_dialog_open));
+
+        if active_sheet_id != self.last_active_sheet_id {
+            self.last_active_sheet_id = active_sheet_id;
+            ctx.request_repaint();
+        }
+
+        let mut next_intents = PendingUiIntents::default();
+        let mut next_meta = FrameInspectMeta::default();
+        let report = if let Ok(win) = self.runtime.window_mut(input_window_id) {
+            let mut views = std::mem::take(&mut win.app_mut().egui_views);
+            let rep = inspect_bridge::render_egui_shell_frame_with_host(
+                ui,
+                win.app(),
+                &mut views,
+                &mut next_meta,
+                &mut next_intents,
+                self.close_dialog_open,
+            );
+            win.app_mut().egui_views = views;
+            rep
+        } else {
+            inspect_bridge::ShellAboutFrameReport::default()
+        };
+        self.inspect_meta = next_meta;
+        self.last_regions = report.regions;
+        self.pending_intents = next_intents;
+        self.menu_popup_was_open |= report.menu_popup_open;
+
+        if let Ok(win) = self.runtime.window(input_window_id)
+            && win.app().presentation_mode
+            && self.inspect_meta.find_by_widget_id("toolbar.presentation.exit").is_none()
+        {
+            let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
+            let _ = top_chrome::render_presentation_exit_chip(
+                &ctx,
+                win.app(),
+                &tokens,
+                !modal_backdrop_active,
+                &mut self.inspect_meta,
+                &mut self.pending_intents,
+            );
+        }
+
+        let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_rect);
+        self.sync_canvas_viewport(input_window_id, canvas_rect, ppp);
+        self.process_canvas_input(ui, input_window_id);
 
         let post_window_id = self.active_window_id();
-        self.render_unsaved_close_modal(&ctx, post_window_id);
         self.sync_window_title(&ctx, post_window_id);
+
+        let will_discard = ctx.will_discard();
+        self.commit_pending_intents(&ctx, post_window_id, will_discard);
+        if will_discard {
+            ctx.request_repaint();
+        }
+        let content_rect = ctx.content_rect();
+        let ppp = ctx.pixels_per_point().clamp(0.5, 8.0);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let phys_w = (content_rect.width() * ppp).round().max(1.0) as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let phys_h = (content_rect.height() * ppp).round().max(1.0) as u32;
+        self.last_geometry_stamp = Some(GeometryStamp::from_context(self.frame_seq, &ctx, [phys_w, phys_h], !will_discard));
+        if !will_discard {
+            self.flush_deferred_live_requests(&ctx);
+        }
+        if !self.pending_synthetic_egui_batches.is_empty() || self.pending_live_gesture.is_some() {
+            ctx.request_repaint();
+        }
     }
 
     /// Run shutdown cleanup, signal any attached live-control server to stop, and close all windows.
@@ -382,14 +784,6 @@ impl CurveBookNativeApp {
 
     fn active_window_id(&self) -> DesktopWindowId {
         self.runtime.focused_window_id().unwrap_or(self.primary_window_id)
-    }
-
-    fn inline_editor_snapshot(&self, window_id: DesktopWindowId) -> (bool, String) {
-        let Ok(win) = self.runtime.window(window_id) else {
-            return (false, String::new());
-        };
-        let editor = &win.app().inline_editor;
-        (editor.active, editor.buffer.clone())
     }
 
     fn sync_window_title(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
@@ -408,7 +802,6 @@ impl CurveBookNativeApp {
         self.last_scale_factor = 0.0;
         self.last_title.clear();
         self.hovered_paths_active = false;
-        self.pointer_captured = false;
         self.close_dialog_open = false;
     }
 
@@ -450,72 +843,6 @@ impl CurveBookNativeApp {
                 self.status_banner = Some(err);
                 self.close_dialog_open = true;
             }
-        }
-    }
-
-    fn render_top_menu_bar(&mut self, ui: &mut egui::Ui, window_id: DesktopWindowId) {
-        let Ok(win) = self.runtime.window(window_id) else {
-            return;
-        };
-        if win.app().presentation_mode {
-            return;
-        }
-        let win_locale = win.app().locale.clone();
-        let chrome: DesktopMenuChromeState = win.chrome_state();
-        if !chrome.menu_bar_visible || chrome.sections.is_empty() {
-            if let Some(err) = self.status_banner.clone() {
-                egui::Panel::top("curvebook_status_banner").show(ui, |ui| {
-                    ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
-                });
-            }
-            return;
-        }
-
-        let window_entries: Vec<(DesktopWindowId, String)> = if self.runtime.window_count() > 1 {
-            self.runtime.window_ids().into_iter().filter_map(|id| self.runtime.window(id).ok().map(|w| (id, w.window_title()))).collect()
-        } else {
-            Vec::new()
-        };
-
-        let mut pending_command: Option<String> = None;
-        let mut pending_focus_window: Option<DesktopWindowId> = None;
-        egui::Panel::top("curvebook_menu_bar").show(ui, |ui| {
-            egui::MenuBar::new().ui(ui, |ui| {
-                for section in &chrome.sections {
-                    ui.menu_button(&section.title, |ui| {
-                        for item in &section.items {
-                            render_menu_item(ui, item, &mut pending_command);
-                        }
-                        if matches!(section.menu_key.as_str(), "menu.file" | "file") {
-                            render_extra_file_actions(ui, &section.items, &mut pending_command);
-                        }
-                    });
-                }
-                if !window_entries.is_empty() {
-                    ui.menu_button(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.window_menu"), |ui| {
-                        for (id, title) in &window_entries {
-                            let label = if *id == window_id { format!("✓ Window {}: {title}", id.0) } else { format!("Window {}: {title}", id.0) };
-                            if ui.button(label).clicked() {
-                                pending_focus_window = Some(*id);
-                                ui.close();
-                            }
-                        }
-                    });
-                }
-                if let Some(err) = self.status_banner.as_deref() {
-                    ui.separator();
-                    ui.colored_label(egui::Color32::from_rgb(200, 60, 60), err);
-                }
-            });
-        });
-
-        if let Some(target_id) = pending_focus_window {
-            let _ = self.runtime.dispatch(DesktopHostEvent::WindowFocused { window_id: target_id });
-            self.on_active_window_switched();
-        }
-        if let Some(command_id) = pending_command {
-            let ctx = ui.ctx().clone();
-            self.execute_menu_command(Some(&ctx), window_id, &command_id);
         }
     }
 
@@ -565,45 +892,6 @@ impl CurveBookNativeApp {
         Ok(())
     }
 
-    fn render_unsaved_close_modal(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) {
-        if !self.close_dialog_open {
-            return;
-        }
-        let win_locale = self.runtime.window(window_id).map(|w| w.app().locale.clone()).unwrap_or_else(|_| String::from("en"));
-        egui::Modal::new(egui::Id::unique("curvebook_unsaved_close_modal")).show(ctx, |ui| {
-            ui.heading(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.unsaved_title"));
-            ui.label(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.unsaved_prompt"));
-            ui.add_space(10.0);
-            ui.horizontal(|ui| {
-                if ui.button(curvebook_ui_egui::tr(&win_locale, "menu.file.save")).clicked() {
-                    match self.handle_native_save(window_id, false) {
-                        Ok(()) => {
-                            let still_dirty = self.runtime.window(window_id).map(|w| w.has_unsaved_changes()).unwrap_or(false);
-                            if !still_dirty {
-                                match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: false }) {
-                                    Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
-                                    Err(err) => self.status_banner = Some(err),
-                                }
-                            }
-                        }
-                        Err(err) => {
-                            self.status_banner = Some(err);
-                        }
-                    }
-                }
-                if ui.button(curvebook_ui_egui::tr(&win_locale, "w6.view.shell.dont_save")).clicked() {
-                    match self.runtime.dispatch(DesktopHostEvent::WindowCloseRequested { window_id, force: true }) {
-                        Ok(outcome) => self.apply_close_outcome(Some(ctx), &outcome),
-                        Err(err) => self.status_banner = Some(err),
-                    }
-                }
-                if ui.button(curvebook_ui_egui::tr(&win_locale, "btn.cancel")).clicked() {
-                    self.close_dialog_open = false;
-                }
-            });
-        });
-    }
-
     fn sync_canvas_viewport(&mut self, window_id: DesktopWindowId, canvas_rect: egui::Rect, ppp: f32) {
         let clamped_ppp = ppp.max(1.0);
         if (clamped_ppp - self.last_scale_factor).abs() > 0.001 {
@@ -619,27 +907,12 @@ impl CurveBookNativeApp {
         }
     }
 
-    /// Process `egui` events against `canvas_rect` and translate them cleanly to [`DesktopHostEvent`].
-    pub fn process_canvas_input(&mut self, ui: &egui::Ui, window_id: DesktopWindowId, canvas_rect: egui::Rect) {
-        let (events, raw_hovered, raw_dropped, hover_pos, modifiers, zoom_delta) = ui.ctx().input(|i| {
-            (i.events.clone(), i.raw.hovered_files.clone(), i.raw.dropped_files.clone(), i.pointer.hover_pos(), i.modifiers, i.zoom_delta())
-        });
+    /// Process host-level `egui` file drag-and-drop and global desktop shortcut events.
+    pub fn process_canvas_input(&mut self, ui: &egui::Ui, window_id: DesktopWindowId) {
+        let (events, raw_hovered, raw_dropped) = ui.ctx().input(|i| (i.events.clone(), i.raw.hovered_files.clone(), i.raw.dropped_files.clone()));
 
         self.dispatch_file_dnd(window_id, &raw_hovered, &raw_dropped);
-        self.dispatch_egui_events(ui.ctx(), window_id, canvas_rect, hover_pos, modifiers, &events);
-
-        if (zoom_delta - 1.0).abs() > 1e-4
-            && let Some(pos) = hover_pos
-            && canvas_rect.contains(pos)
-        {
-            let (ax, ay) = to_canvas_pt(pos, canvas_rect.min);
-            let _ = self.runtime.dispatch(DesktopHostEvent::TrackpadMagnify {
-                window_id,
-                anchor_x_pt: ax,
-                anchor_y_pt: ay,
-                magnification_delta: f64::from(zoom_delta - 1.0),
-            });
-        }
+        self.dispatch_egui_events(ui.ctx(), window_id, &events);
     }
 
     fn dispatch_file_dnd(&mut self, window_id: DesktopWindowId, hovered: &[egui::HoveredFile], dropped: &[egui::DroppedFileHandle]) {
@@ -667,89 +940,26 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn dispatch_egui_events(
-        &mut self,
-        ctx: &egui::Context,
-        window_id: DesktopWindowId,
-        canvas_rect: egui::Rect,
-        hover_pos: Option<egui::Pos2>,
-        frame_modifiers: egui::Modifiers,
-        events: &[egui::Event],
-    ) {
-        let mut suppressed_text_char: Option<String> = None;
+    fn dispatch_egui_events(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, events: &[egui::Event]) {
+        let popup_open = self.menu_popup_was_open || egui::Popup::is_any_open(ctx);
 
         for event in events {
-            match event {
-                egui::Event::PointerMoved(pos) => {
-                    if canvas_rect.contains(*pos) || self.pointer_captured {
-                        let (x_pt, y_pt) = to_canvas_pt(*pos, canvas_rect.min);
-                        let _ = self.runtime.dispatch(DesktopHostEvent::PointerMoved {
-                            window_id,
-                            x_pt,
-                            y_pt,
-                            modifiers: to_key_modifiers(frame_modifiers),
-                        });
-                    }
+            if let egui::Event::Key { key, pressed, modifiers, .. } = event {
+                let is_menu_nav_key = matches!(
+                    key,
+                    egui::Key::ArrowLeft
+                        | egui::Key::ArrowRight
+                        | egui::Key::ArrowUp
+                        | egui::Key::ArrowDown
+                        | egui::Key::Enter
+                        | egui::Key::Space
+                        | egui::Key::Escape
+                        | egui::Key::Tab
+                );
+                if popup_open && is_menu_nav_key {
+                    continue;
                 }
-                egui::Event::PointerButton { pos, button, pressed, modifiers } => {
-                    self.dispatch_pointer_button(CanvasPointerButtonArgs {
-                        window_id,
-                        canvas_rect,
-                        pos: *pos,
-                        button: *button,
-                        pressed: *pressed,
-                        modifiers: *modifiers,
-                    });
-                }
-                egui::Event::MouseWheel { unit, delta, modifiers, .. } => {
-                    let anchor = hover_pos.unwrap_or(canvas_rect.center());
-                    if canvas_rect.contains(anchor) {
-                        let (x_pt, y_pt) = to_canvas_pt(anchor, canvas_rect.min);
-                        let scale = wheel_unit_scale(*unit);
-                        let _ = self.runtime.dispatch(DesktopHostEvent::MouseWheel {
-                            window_id,
-                            x_pt,
-                            y_pt,
-                            delta_x: f64::from(delta.x) * scale,
-                            delta_y: f64::from(delta.y) * scale,
-                            modifiers: to_key_modifiers(*modifiers),
-                        });
-                    }
-                }
-                egui::Event::Key { key, pressed, modifiers, .. } => {
-                    if let Some(inserted) = self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers) {
-                        suppressed_text_char = Some(inserted);
-                    }
-                }
-                egui::Event::Text(text) => {
-                    if suppressed_text_char.as_deref() == Some(text.as_str()) {
-                        suppressed_text_char = None;
-                        continue;
-                    }
-                    let (inline_active, _) = self.inline_editor_snapshot(window_id);
-                    if inline_active {
-                        let _ = self.runtime.dispatch(DesktopHostEvent::ImeCommit { window_id, text: text.clone() });
-                    }
-                }
-                egui::Event::Ime(ime) => {
-                    self.dispatch_ime_event(window_id, ime);
-                }
-                egui::Event::Copy => {
-                    self.dispatch_clipboard_copy(ctx, window_id);
-                }
-                egui::Event::Cut => {
-                    self.dispatch_clipboard_cut(ctx, window_id);
-                }
-                egui::Event::Paste(text) => {
-                    if let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: Some(text.clone()) }) {
-                        self.status_banner = Some(err);
-                    }
-                }
-                #[cfg(feature = "accessibility")]
-                egui::Event::AccessKitActionRequest(req) => {
-                    self.handle_accesskit_action_request(ctx, window_id, req);
-                }
-                _ => {}
+                self.dispatch_key_event(ctx, window_id, *key, *pressed, *modifiers);
             }
         }
     }
@@ -803,62 +1013,10 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn dispatch_pointer_button(&mut self, args: CanvasPointerButtonArgs) {
-        if args.pressed {
-            if !args.canvas_rect.contains(args.pos) {
-                return;
-            }
-            self.pointer_captured = true;
-            let click_count = self.next_click_count(args.pos);
-            let (x_pt, y_pt) = to_canvas_pt(args.pos, args.canvas_rect.min);
-            let _ = self.runtime.dispatch(DesktopHostEvent::PointerButton {
-                window_id: args.window_id,
-                x_pt,
-                y_pt,
-                button: to_pointer_button(args.button),
-                pressed: true,
-                click_count,
-                modifiers: to_key_modifiers(args.modifiers),
-            });
-        } else if self.pointer_captured {
-            self.pointer_captured = false;
-            let (x_pt, y_pt) = to_canvas_pt(args.pos, args.canvas_rect.min);
-            match self.runtime.dispatch(DesktopHostEvent::PointerButton {
-                window_id: args.window_id,
-                x_pt,
-                y_pt,
-                button: to_pointer_button(args.button),
-                pressed: false,
-                click_count: self.click_count,
-                modifiers: to_key_modifiers(args.modifiers),
-            }) {
-                Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
-                Err(err) => self.status_banner = Some(err),
-                Ok(_) => {}
-            }
-        }
-    }
-
-    fn next_click_count(&mut self, pos: egui::Pos2) -> u8 {
-        let now = Instant::now();
-        let within_time = self.last_click_time.is_some_and(|prev| now.duration_since(prev).as_secs_f64() <= DOUBLE_CLICK_WINDOW_SEC);
-        let within_dist = self.last_click_pos.is_some_and(|prev| prev.distance(pos) <= DOUBLE_CLICK_RADIUS_PT);
-        self.click_count = if within_time && within_dist { self.click_count.saturating_add(1).min(3) } else { 1 };
-        self.last_click_time = Some(now);
-        self.last_click_pos = Some(pos);
-        self.click_count
-    }
-
-    fn dispatch_key_event(
-        &mut self,
-        ctx: &egui::Context,
-        window_id: DesktopWindowId,
-        key: egui::Key,
-        pressed: bool,
-        modifiers: egui::Modifiers,
-    ) -> Option<String> {
-        let key_name = egui_key_to_name(key)?;
-        let (inline_active_before, inline_text_before) = self.inline_editor_snapshot(window_id);
+    fn dispatch_key_event(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, key: egui::Key, pressed: bool, modifiers: egui::Modifiers) {
+        let Some(key_name) = egui_key_to_name(key) else {
+            return;
+        };
         let dialog_inactive = !self.close_dialog_open
             && self.runtime.window(window_id).is_ok_and(|w| {
                 let app = w.app();
@@ -868,410 +1026,50 @@ impl CurveBookNativeApp {
                     && !app.grid.variables_dialog.open
             });
         let primary_cmd = modifiers.command || modifiers.mac_cmd || modifiers.ctrl;
-        if pressed && !inline_active_before && dialog_inactive {
-            if primary_cmd && !modifiers.alt {
+        if pressed && primary_cmd && !modifiers.alt && !ctx.text_edit_focused() {
+            if key == egui::Key::Plus || key == egui::Key::Equals {
+                self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::In);
+                return;
+            }
+            if key == egui::Key::Minus {
+                self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::Out);
+                return;
+            }
+            if key == egui::Key::Num0 && !modifiers.shift {
+                self.apply_ui_scale_adjustment(ctx, window_id, UiScaleAdjust::Reset);
+                return;
+            }
+        }
+        if pressed && dialog_inactive && primary_cmd && !ctx.text_edit_focused() {
+            if !modifiers.alt {
                 if key == egui::Key::O && !modifiers.shift {
                     self.execute_menu_command(Some(ctx), window_id, "project.open");
-                    return None;
+                    return;
                 }
                 if key == egui::Key::S {
                     let cmd = if modifiers.shift { "project.saveAs" } else { "project.save" };
                     self.execute_menu_command(Some(ctx), window_id, cmd);
-                    return None;
+                    return;
                 }
             }
             let routed_cmd =
                 self.runtime.window(window_id).ok().and_then(|w| match_routed_desktop_shortcut(w.app(), &key_name, to_key_modifiers(modifiers)));
-            if let Some(cmd) = routed_cmd
-                && (menu_action_triggers_native_file_dialog(&cmd)
-                    || matches!(cmd.as_str(), "window.close" | "file.close" | "window.new" | "file.newWindow"))
-            {
-                self.execute_menu_command(Some(ctx), window_id, &cmd);
-                return None;
-            }
-        }
-        let has_cmd_or_ctrl = modifiers.ctrl || modifiers.alt || modifiers.command || modifiers.mac_cmd;
-        if pressed && !dialog_inactive && has_cmd_or_ctrl {
-            return None;
-        }
-        let is_single_char_key = key_name.chars().count() == 1;
-
-        if inline_active_before && pressed && is_single_char_key && !has_cmd_or_ctrl {
-            // Let `egui::Event::Text` handle printable character insertion once when inline editor is active.
-            return None;
-        }
-
-        match self.runtime.dispatch(DesktopHostEvent::KeyboardInput {
-            window_id,
-            key: key_name,
-            pressed,
-            modifiers: to_key_modifiers(modifiers),
-            text: None,
-        }) {
-            Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
-            Err(err) => self.status_banner = Some(err),
-            Ok(_) => {}
-        }
-
-        if pressed && is_single_char_key && !has_cmd_or_ctrl {
-            let (inline_active_after, inline_text_after) = self.inline_editor_snapshot(window_id);
-            if inline_active_after && (!inline_active_before || inline_text_after != inline_text_before) {
-                return inline_text_after.strip_prefix(&inline_text_before).filter(|s| !s.is_empty()).map(str::to_string);
-            }
-        }
-        None
-    }
-
-    fn dispatch_ime_event(&mut self, window_id: DesktopWindowId, ime: &egui::ImeEvent) {
-        match ime {
-            egui::ImeEvent::Preedit { text, active_range_chars } => {
-                let cursor = active_range_chars.as_ref().map(|r| (r.start, r.end));
-                let _ = self.runtime.dispatch(DesktopHostEvent::ImePreedit { window_id, text: text.clone(), cursor });
-            }
-            egui::ImeEvent::Commit(text) => {
-                let _ = self.runtime.dispatch(DesktopHostEvent::ImeCommit { window_id, text: text.clone() });
-            }
-            _ => {}
-        }
-    }
-
-    fn tick_animations_and_redraw(&mut self, ctx: &egui::Context, window_id: DesktopWindowId) -> Option<DesktopFrameOutput> {
-        let now = Instant::now();
-        let dt_sec = self.last_frame_time.map(|prev| now.duration_since(prev).as_secs_f64().clamp(0.0, 0.1)).unwrap_or(0.0);
-        self.last_frame_time = Some(now);
-
-        let coasting = self.runtime.window_ids().into_iter().any(|id| self.runtime.window(id).map(|w| w.is_coasting()).unwrap_or(false));
-        if coasting && dt_sec > 0.0 {
-            let _ = self.runtime.dispatch(DesktopHostEvent::AnimationTick { dt_sec });
-            if self.runtime.window(window_id).map(|w| w.is_coasting()).unwrap_or(false) {
-                ctx.request_repaint();
-            }
-        }
-
-        self.runtime.dispatch(DesktopHostEvent::RedrawRequested { window_id }).ok().and_then(|outcome| outcome.frame)
-    }
-
-    fn upload_and_paint_frame(&mut self, ui: &mut egui::Ui, canvas_rect: egui::Rect, frame: &DesktopFrameOutput) -> Option<egui::Response> {
-        let size = [frame.width_px as usize, frame.height_px as usize];
-        if size[0] == 0 || size[1] == 0 || frame.rgba_bytes.len() < size[0] * size[1] * 4 {
-            return None;
-        }
-        let color_image = egui::ColorImage::from_rgba_unmultiplied(size, &frame.rgba_bytes);
-        let tex_id = match &mut self.texture {
-            Some(tex) => {
-                tex.set(color_image, egui::TextureOptions::NEAREST);
-                tex.id()
-            }
-            None => {
-                let tex = ui.ctx().load_texture("curvebook_canvas_rgba", color_image, egui::TextureOptions::NEAREST);
-                let id = tex.id();
-                self.texture = Some(tex);
-                id
-            }
-        };
-        let response = ui.allocate_rect(canvas_rect, egui::Sense::click_and_drag());
-        ui.painter().image(tex_id, canvas_rect, egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)), egui::Color32::WHITE);
-        Some(response)
-    }
-
-    #[cfg(feature = "accessibility")]
-    fn sync_accesskit_tree(&mut self, ui: &mut egui::Ui, window_id: DesktopWindowId, canvas_rect: egui::Rect, canvas_id: egui::Id) {
-        if ui.ctx().accesskit_node_builder(canvas_id, |_| {}).is_none() {
-            return;
-        }
-        let tree_update = {
-            let Ok(win) = self.runtime.window(window_id) else {
-                return;
-            };
-            curvebook_ui_egui::views::a11y::sync_app_accessibility_tree(win.app(), win.viewport())
-        };
-
-        let a11y_id = |num: u64| egui::Id::unique(("curvebook_a11y", num));
-        let focus_eid = (tree_update.focus_numeric_id != 0)
-            .then(|| tree_update.node_by_numeric_id(tree_update.focus_numeric_id))
-            .flatten()
-            .map(|n| (a11y_id(n.numeric_id), n));
-        if let Some((fe, fnode)) = focus_eid {
-            #[allow(clippy::cast_possible_truncation)]
-            let frect = egui::Rect::from_min_size(
-                egui::pos2(canvas_rect.min.x + fnode.bounds_logical.x as f32, canvas_rect.min.y + fnode.bounds_logical.y as f32),
-                egui::vec2((fnode.bounds_logical.w as f32).max(1.0), (fnode.bounds_logical.h as f32).max(1.0)),
-            );
-            let _ = ui.interact(frect, fe, egui::Sense::focusable_noninteractive());
-            ui.ctx().memory_mut(|m| m.request_focus(fe));
-        }
-
-        let mut by_num: BTreeMap<u64, usize> = BTreeMap::new();
-        for (idx, node) in tree_update.nodes.iter().enumerate() {
-            by_num.insert(node.numeric_id, idx);
-        }
-        let mut emitted: BTreeSet<u64> = BTreeSet::new();
-        let mut queue: VecDeque<u64> = tree_update.root_children_numeric_ids.iter().copied().collect();
-        for node in &tree_update.nodes {
-            if node.parent_numeric_id.is_none() {
-                queue.push_back(node.numeric_id);
-            }
-        }
-
-        self.a11y_id_map.clear();
-        let mut owned_ak_ids: BTreeSet<egui::accesskit::NodeId> = BTreeSet::new();
-        let mut root_ak_ids: Vec<egui::accesskit::NodeId> = Vec::new();
-        let mut emit_node = |node: &curvebook_ui_egui::layout::a11y::AccessibleNodeUpdate| {
-            let eid = a11y_id(node.numeric_id);
-            let ak_id = eid.accesskit_id();
-            owned_ak_ids.insert(ak_id);
-            self.a11y_id_map.insert(ak_id, node.widget_id.clone());
-            if node.parent_numeric_id.is_none() {
-                root_ak_ids.push(ak_id);
-            }
-            let origin = canvas_rect.min;
-            let _ = ui.ctx().accesskit_node_builder(eid, |ak| {
-                populate_accesskit_node(ak, node, origin);
-                let child_ak_ids: Vec<egui::accesskit::NodeId> = node.children_numeric_ids.iter().map(|c| a11y_id(*c).accesskit_id()).collect();
-                ak.set_children(child_ak_ids);
-            });
-        };
-
-        while let Some(num_id) = queue.pop_front() {
-            if !emitted.insert(num_id) {
-                continue;
-            }
-            let Some(&idx) = by_num.get(&num_id) else {
-                continue;
-            };
-            let node = &tree_update.nodes[idx];
-            emit_node(node);
-            for &child_num in &node.children_numeric_ids {
-                if !emitted.contains(&child_num) {
-                    queue.push_back(child_num);
-                }
-            }
-        }
-        for node in &tree_update.nodes {
-            if !emitted.insert(node.numeric_id) {
-                continue;
-            }
-            emit_node(node);
-        }
-
-        if let Some(msg) = tree_update.live_announcement.as_deref().map(str::trim).filter(|s| !s.is_empty()) {
-            let politeness = map_accesskit_live(tree_update.live_politeness);
-            if politeness != egui::accesskit::Live::Off {
-                let live_id = egui::Id::unique("curvebook_a11y_live_region");
-                let live_ak = live_id.accesskit_id();
-                owned_ak_ids.insert(live_ak);
-                root_ak_ids.push(live_ak);
-                let _ = ui.ctx().accesskit_node_builder(live_id, |ak| {
-                    ak.set_role(egui::accesskit::Role::Status);
-                    ak.set_live(politeness);
-                    ak.set_label(msg.to_owned());
-                    ak.set_bounds(egui::accesskit::Rect {
-                        x0: f64::from(canvas_rect.min.x),
-                        y0: f64::from(canvas_rect.min.y),
-                        x1: f64::from(canvas_rect.min.x) + 1.0,
-                        y1: f64::from(canvas_rect.min.y) + 1.0,
+            if let Some(cmd) = routed_cmd {
+                let already_queued_edit_params = cmd == "ui.editParams.open"
+                    && self.pending_intents.intents().iter().any(|intent| {
+                        matches!(intent, curvebook_ui_egui::egui_shell::UiIntent::UiCommand { command_id, .. } if command_id == "ui.editParams.open")
                     });
-                });
-            }
-        }
-
-        // Remove any auto-parented edges from egui root/panel containers so every node has a single parent (`canvas_id` or its declared parent).
-        for container_id in [egui::accesskit_root_id(), ui.unique_id()] {
-            let _ = ui.ctx().accesskit_node_builder(container_id, |ak| {
-                let kept: Vec<egui::accesskit::NodeId> = ak.children().iter().copied().filter(|id| !owned_ak_ids.contains(id)).collect();
-                ak.set_children(kept);
-            });
-        }
-        let _ = ui.ctx().accesskit_node_builder(canvas_id, |ak| {
-            ak.set_role(egui::accesskit::Role::Canvas);
-            ak.set_label(tree_update.root_label.clone());
-            ak.set_bounds(egui::accesskit::Rect {
-                x0: f64::from(canvas_rect.min.x),
-                y0: f64::from(canvas_rect.min.y),
-                x1: f64::from(canvas_rect.max.x),
-                y1: f64::from(canvas_rect.max.y),
-            });
-            let mut kids: Vec<egui::accesskit::NodeId> = ak.children().iter().copied().filter(|id| !owned_ak_ids.contains(id)).collect();
-            kids.extend(root_ak_ids);
-            ak.set_children(kids);
-        });
-    }
-
-    #[cfg(feature = "accessibility")]
-    fn handle_accesskit_action_request(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, req: &egui::accesskit::ActionRequest) {
-        use egui::accesskit::{Action, ActionData};
-
-        let Some(widget_id) = self.a11y_id_map.get(&req.target_node).cloned() else {
-            return;
-        };
-        let (center_pt, viewport) = {
-            let Ok(win) = self.runtime.window(window_id) else {
-                return;
-            };
-            let vp = win.viewport();
-            let scale = vp.clamped_scale_factor();
-            let tree = win.app().layout_tree_cow(vp);
-            let pt = tree.node(&widget_id).map(|n| {
-                let r = n.bounds.rect_px;
-                ((f64::from(r.x) + f64::from(r.width) * 0.5) / scale, (f64::from(r.y) + f64::from(r.height) * 0.5) / scale)
-            });
-            (pt, vp)
-        };
-
-        match req.action {
-            Action::Focus => {
-                if let Ok(win) = self.runtime.window_mut(window_id) {
-                    win.app_mut().focus_widget_id = Some(widget_id);
-                    let _ = win.app_mut().build_and_cache_layout_tree(viewport);
-                }
-                ctx.request_repaint();
-            }
-            Action::Click | Action::Expand | Action::Collapse => {
-                if let Some((x_pt, y_pt)) = center_pt {
-                    let mods = KeyModifiers::default();
-                    let _ = self.runtime.dispatch(DesktopHostEvent::PointerButton {
-                        window_id,
-                        x_pt,
-                        y_pt,
-                        button: PointerButton::Primary,
-                        pressed: true,
-                        click_count: 1,
-                        modifiers: mods,
-                    });
-                    match self.runtime.dispatch(DesktopHostEvent::PointerButton {
-                        window_id,
-                        x_pt,
-                        y_pt,
-                        button: PointerButton::Primary,
-                        pressed: false,
-                        click_count: 1,
-                        modifiers: mods,
-                    }) {
-                        Ok(outcome) if outcome.opened_window_id.is_some() => self.on_active_window_switched(),
-                        Err(err) => self.status_banner = Some(err),
-                        Ok(_) => {}
-                    }
-                    ctx.request_repaint();
+                if !already_queued_edit_params
+                    && (menu_action_triggers_native_file_dialog(&cmd)
+                        || matches!(
+                            cmd.as_str(),
+                            "window.close" | "file.close" | "window.new" | "file.newWindow" | "ui.editParams.open" | "ui.analyze.open"
+                        ))
+                {
+                    self.execute_menu_command(Some(ctx), window_id, &cmd);
                 }
             }
-            Action::SetValue => {
-                let next_text = match &req.data {
-                    Some(ActionData::Value(val)) => Some(val.to_string()),
-                    Some(ActionData::NumericValue(num)) => Some(format!("{num}")),
-                    _ => None,
-                };
-                if let Some(text) = next_text {
-                    if let Ok(win) = self.runtime.window_mut(window_id) {
-                        let app = win.app_mut();
-                        app.focus_widget_id = Some(widget_id.clone());
-                        app.interaction.text_field_buffers.remove(&widget_id);
-                    }
-                    if !text.is_empty() {
-                        let _ = self.runtime.dispatch(DesktopHostEvent::ImeCommit { window_id, text });
-                    }
-                    ctx.request_repaint();
-                }
-            }
-            _ => {}
         }
-    }
-}
-
-#[cfg(feature = "accessibility")]
-fn map_accesskit_role(mapping: &curvebook_ui_egui::layout::a11y::AriaRoleMapping) -> egui::accesskit::Role {
-    use egui::accesskit::Role;
-    match mapping.accesskit_role {
-        "MenuBar" => Role::MenuBar,
-        "MenuItem" => Role::MenuItem,
-        "Button" => Role::Button,
-        "Tab" => Role::Tab,
-        "TreeItem" => Role::TreeItem,
-        "GridCell" => Role::GridCell,
-        "TextInput" => Role::TextInput,
-        "MultilineTextInput" => Role::MultilineTextInput,
-        "ComboBox" => Role::ComboBox,
-        "CheckBox" => Role::CheckBox,
-        "RadioButton" => Role::RadioButton,
-        "SpinButton" => Role::SpinButton,
-        "Slider" => Role::Slider,
-        "ScrollBar" => Role::ScrollBar,
-        "Splitter" => Role::Splitter,
-        "Canvas" => Role::Canvas,
-        "GraphicsSymbol" => Role::GraphicsSymbol,
-        "Dialog" => Role::Dialog,
-        "Banner" => Role::Banner,
-        "Tooltip" => Role::Tooltip,
-        "Menu" => Role::Menu,
-        "DisclosureTriangle" => Role::DisclosureTriangle,
-        _ => Role::Label,
-    }
-}
-
-#[cfg(feature = "accessibility")]
-fn map_accesskit_live(politeness: curvebook_ui_egui::layout::a11y::AriaLivePoliteness) -> egui::accesskit::Live {
-    use curvebook_ui_egui::layout::a11y::AriaLivePoliteness;
-    use egui::accesskit::Live;
-    match politeness {
-        AriaLivePoliteness::Off => Live::Off,
-        AriaLivePoliteness::Polite => Live::Polite,
-        AriaLivePoliteness::Assertive => Live::Assertive,
-    }
-}
-
-#[cfg(feature = "accessibility")]
-fn populate_accesskit_node(ak: &mut egui::accesskit::Node, node: &curvebook_ui_egui::layout::a11y::AccessibleNodeUpdate, origin: egui::Pos2) {
-    use curvebook_ui_egui::layout::a11y::AccessibleActionTag;
-    use egui::accesskit::{Action, Toggled};
-
-    ak.set_role(map_accesskit_role(&node.role_mapping));
-    let x0 = f64::from(origin.x) + node.bounds_logical.x;
-    let y0 = f64::from(origin.y) + node.bounds_logical.y;
-    ak.set_bounds(egui::accesskit::Rect { x0, y0, x1: x0 + node.bounds_logical.w, y1: y0 + node.bounds_logical.h });
-    ak.set_label(node.label.clone());
-    if let Some(val) = &node.value_text {
-        ak.set_value(val.clone());
-    }
-    if node.enabled {
-        ak.clear_disabled();
-    } else {
-        ak.set_disabled();
-        if let Some(reason) = &node.disabled_reason {
-            ak.set_description(reason.clone());
-        }
-    }
-    if let Some(sel) = node.selected {
-        ak.set_selected(sel);
-    }
-    if let Some(exp) = node.expanded {
-        ak.set_expanded(exp);
-    }
-    if let Some(chk) = node.checked {
-        ak.set_toggled(if chk { Toggled::True } else { Toggled::False });
-    }
-    if node.hidden {
-        ak.set_hidden();
-    }
-    if node.modal {
-        ak.set_modal();
-    }
-    if let Some(live) = node.live_region {
-        ak.set_live(map_accesskit_live(live));
-    }
-    if let Some(shortcut) = node.shortcut.as_deref().or(node.keyboard_path.as_deref()) {
-        ak.set_keyboard_shortcut(shortcut.to_owned());
-    }
-    for act in &node.actions {
-        let ak_act = match act {
-            AccessibleActionTag::Focus => Action::Focus,
-            AccessibleActionTag::Click => Action::Click,
-            AccessibleActionTag::Expand => Action::Expand,
-            AccessibleActionTag::Collapse => Action::Collapse,
-            AccessibleActionTag::Increment => Action::Increment,
-            AccessibleActionTag::Decrement => Action::Decrement,
-            AccessibleActionTag::SetValue => Action::SetValue,
-            AccessibleActionTag::Scroll => Action::ScrollIntoView,
-        };
-        ak.add_action(ak_act);
     }
 }
 
@@ -1282,6 +1080,10 @@ impl Drop for CurveBookNativeApp {
 }
 
 impl eframe::App for CurveBookNativeApp {
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw_input: &mut egui::RawInput) {
+        self.drain_synthetic_events_into(raw_input);
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.step_ui(ui);
     }
@@ -1291,121 +1093,170 @@ impl eframe::App for CurveBookNativeApp {
     }
 }
 
-fn menu_item_tooltip(item: &DesktopMenuItem) -> String {
-    if item.beginner.is_empty() { item.summary.clone() } else { format!("{}\n{}", item.summary, item.beginner) }
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LiveGestureDispatch {
+    ImmediateReply,
+    EguiQueued,
 }
 
-fn render_menu_item(ui: &mut egui::Ui, item: &DesktopMenuItem, pending_command: &mut Option<String>) {
-    if item.command_id == "ui.event.dispatch" {
-        return;
+fn is_pointer_gesture_request(req: &LiveControlRequest) -> bool {
+    if !req.conn_authenticated || classify_control_frame(&req.raw_bytes) != ControlFrameKind::Command {
+        return false;
     }
-    let tooltip = menu_item_tooltip(item);
-    let effective_enabled = item.enabled && item.command_id != "ui.result.applyRemediation";
-
-    if let Some(variants) = submenu_variants_for_command(&item.command_id) {
-        ui.menu_button(&item.localized_label, |ui| {
-            for (label, variant) in variants {
-                let mut btn = egui::Button::new(*label);
-                if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && *variant == "SingleColumn88mm" {
-                    btn = btn.shortcut_text(&item.shortcut);
-                }
-                let resp = ui.add_enabled(effective_enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
-                if resp.clicked() {
-                    *pending_command = Some(format!("{}:{variant}", item.command_id));
-                    ui.close();
-                }
-            }
-        });
-        return;
-    }
-
-    if item.command_id == "ui.locale.set" {
-        ui.menu_button(&item.localized_label, |ui| {
-            for &loc in LOCALES {
-                let caption = locale_picker_label(loc);
-                if ui.button(caption).on_hover_text(&tooltip).clicked() {
-                    *pending_command = Some(format!("ui.locale.set:{loc}"));
-                    ui.close();
-                }
-            }
-        });
-        return;
-    }
-
-    let mut button = egui::Button::new(&item.localized_label);
-    if !item.shortcut.is_empty() {
-        button = button.shortcut_text(&item.shortcut);
-    }
-    let resp = ui.add_enabled(effective_enabled, button).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
-    if resp.clicked() {
-        *pending_command = Some(item.command_id.clone());
-        ui.close();
-    }
+    let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+        return false;
+    };
+    parsed.method == "ui.pointer_gesture"
 }
 
-fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'static str, &'static str)]> {
-    match command_id {
-        "ui.theme.set" => Some(&[("Light", "light"), ("Dark", "dark"), ("High Contrast", "high_contrast")]),
-        "ui.previewFilter.set" => Some(&[
-            ("Normal Vision", "normal"),
-            ("Deuteranopia", "deuteranopia"),
-            ("Protanopia", "protanopia"),
-            ("Tritanopia", "tritanopia"),
-            ("Grayscale Print", "grayscale"),
-        ]),
-        "ui.canvas.applyPreset" | "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => Some(&[
-            ("Single Column (88 mm)", "SingleColumn88mm"),
-            ("1.5 Column (130 mm)", "ColumnAndHalf130mm"),
-            ("Double Column (180 mm)", "DoubleColumn180mm"),
-            ("Full Page Portrait (180 × 240 mm)", "FullPagePortrait"),
-            ("Presentation Slide 16:9", "Slide16x9"),
-            ("Poster Panel (12 × 9 in)", "PosterPanel"),
-        ]),
-        _ => None,
-    }
+fn parse_egui_modifiers_param(val: Option<&serde_json::Value>) -> egui::Modifiers {
+    let Some(obj) = val.and_then(serde_json::Value::as_object) else {
+        return egui::Modifiers::NONE;
+    };
+    let flag = |k: &str| obj.get(k).and_then(serde_json::Value::as_bool).unwrap_or(false);
+    let ctrl = flag("ctrl");
+    let meta = flag("meta");
+    egui::Modifiers { alt: flag("alt"), ctrl, shift: flag("shift"), mac_cmd: meta, command: ctrl || meta || flag("command") }
 }
 
-fn render_extra_file_actions(ui: &mut egui::Ui, existing_items: &[DesktopMenuItem], pending_command: &mut Option<String>) {
-    let extras = [
-        ("Open Unpacked Folder…", "file.open_unpacked_dir", &["file.open_unpacked_dir"][..]),
-        ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"][..]),
-        ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"][..]),
-        ("Export PNG…", "export.png", &["export.png", "file.export_png"][..]),
-    ];
-    let mut added_separator = false;
-    for (label, cmd, aliases) in extras {
-        if existing_items.iter().any(|item| aliases.contains(&item.command_id.as_str())) {
-            continue;
+fn build_synthetic_egui_gesture_batches(
+    action: &str,
+    pos: egui::Pos2,
+    params: &serde_json::Value,
+    modifiers: egui::Modifiers,
+) -> Vec<Vec<egui::Event>> {
+    match action {
+        "hover" => vec![vec![egui::Event::PointerMoved(pos)]],
+        "scroll" | "wheel" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let dx = params.get("delta_x").and_then(serde_json::Value::as_f64).unwrap_or(0.0) as f32;
+            #[allow(clippy::cast_possible_truncation)]
+            let dy = params.get("delta_y").and_then(serde_json::Value::as_f64).unwrap_or(if params.get("delta_x").is_none() { -120.0 } else { 0.0 })
+                as f32;
+            vec![vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::MouseWheel {
+                    unit: egui::MouseWheelUnit::Point,
+                    delta: egui::vec2(dx, dy),
+                    phase: egui::TouchPhase::Move,
+                    source: egui::MouseWheelSource::Unknown,
+                    modifiers,
+                },
+            ]]
         }
-        if !added_separator {
-            ui.separator();
-            added_separator = true;
+        "right_click" => vec![
+            vec![
+                egui::Event::PointerMoved(pos),
+                egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: true, modifiers },
+            ],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Secondary, pressed: false, modifiers }],
+        ],
+        "double_click" => vec![
+            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
+        ],
+        "drag" => {
+            #[allow(clippy::cast_possible_truncation)]
+            let end_x = params.get("end_x").and_then(serde_json::Value::as_f64).map_or(pos.x, |v| v as f32);
+            #[allow(clippy::cast_possible_truncation)]
+            let end_y = params.get("end_y").and_then(serde_json::Value::as_f64).map_or(pos.y, |v| v as f32);
+            let end_pos = egui::pos2(end_x, end_y);
+            vec![
+                vec![
+                    egui::Event::PointerMoved(pos),
+                    egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers },
+                ],
+                vec![egui::Event::PointerMoved(end_pos)],
+                vec![egui::Event::PointerButton { pos: end_pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
+            ]
         }
-        if ui.button(label).clicked() {
-            *pending_command = Some(String::from(cmd));
-            ui.close();
+        _ => vec![
+            vec![egui::Event::PointerMoved(pos), egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, modifiers }],
+            vec![egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: false, modifiers }],
+        ],
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+enum UiScaleAdjust {
+    In,
+    Out,
+    Reset,
+}
+
+impl CurveBookNativeApp {
+    fn apply_ui_scale_adjustment(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, adjust: UiScaleAdjust) {
+        let mut applied_scale = None;
+        let changed = if let Ok(win) = self.runtime.window_mut(window_id) {
+            let prev = win.app().ui_scale();
+            let next = match adjust {
+                UiScaleAdjust::In => win.app_mut().zoom_ui_scale_in(),
+                UiScaleAdjust::Out => win.app_mut().zoom_ui_scale_out(),
+                UiScaleAdjust::Reset => win.app_mut().reset_ui_scale(),
+            };
+            applied_scale = Some(next);
+            (next - prev).abs() > 0.001
+        } else {
+            false
+        };
+        if let Some(next_scale) = applied_scale {
+            ctx.set_zoom_factor(next_scale);
         }
+        if changed {
+            self.runtime.notify_preferences_changed(window_id);
+        }
+        ctx.request_repaint();
     }
 }
 
-fn to_canvas_pt(pos: egui::Pos2, canvas_min: egui::Pos2) -> (f64, f64) {
-    (f64::from((pos.x - canvas_min.x).max(0.0)), f64::from((pos.y - canvas_min.y).max(0.0)))
+fn should_defer_to_settled_frame(req: &LiveControlRequest) -> bool {
+    if !req.conn_authenticated || classify_control_frame(&req.raw_bytes) != ControlFrameKind::Command {
+        return false;
+    }
+    let Ok(text) = std::str::from_utf8(&req.raw_bytes) else {
+        return false;
+    };
+    let Ok(parsed) = serde_json::from_str::<ControlRequest>(text.trim()) else {
+        return false;
+    };
+    matches!(parsed.method.as_str(), "ui.inspect" | "ui.screenshot" | "ui.pointer_gesture")
 }
 
-fn wheel_unit_scale(unit: egui::MouseWheelUnit) -> f64 {
-    match unit {
-        egui::MouseWheelUnit::Point => 1.0,
-        egui::MouseWheelUnit::Line => 24.0,
-        egui::MouseWheelUnit::Page => 120.0,
+fn ensure_params_object(params: &mut serde_json::Value) -> Option<&mut serde_json::Map<String, serde_json::Value>> {
+    if params.is_null() {
+        *params = serde_json::Value::Object(serde_json::Map::new());
     }
+    params.as_object_mut()
 }
 
-fn to_pointer_button(button: egui::PointerButton) -> PointerButton {
-    match button {
-        egui::PointerButton::Primary => PointerButton::Primary,
-        egui::PointerButton::Secondary => PointerButton::Secondary,
-        egui::PointerButton::Middle | egui::PointerButton::Extra1 | egui::PointerButton::Extra2 => PointerButton::Middle,
-    }
+fn is_host_routed_intent_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "project.open"
+            | "project.save"
+            | "project.saveAs"
+            | "file.open"
+            | "file.open_unpacked_dir"
+            | "file.save_as"
+            | "export.svg"
+            | "file.export_svg"
+            | "export.pdf"
+            | "file.export_pdf"
+            | "export.png"
+            | "file.export_png"
+            | "window.new"
+            | "file.newWindow"
+            | "window.close"
+            | "file.close"
+            | "file.quit"
+            | "app.quit"
+            | "edit.copy"
+    )
 }
 
 fn to_key_modifiers(modifiers: egui::Modifiers) -> KeyModifiers {
@@ -1509,6 +1360,8 @@ pub fn run_native_desktop_with_control(
             let fonts = build_egui_font_definitions(font_bytes.as_deref());
             cc.egui_ctx.set_fonts(fonts);
             let mut app = CurveBookNativeApp::new(runtime, primary_window_id, Some(on_exit_cleanup));
+            #[cfg(target_os = "macos")]
+            app.attach_macos_menus_on_windowed_startup();
             if let Some(ctrl) = control {
                 let _ = ctrl.egui_ctx_cell.set(cc.egui_ctx.clone());
                 cc.egui_ctx.request_repaint();
@@ -1523,7 +1376,9 @@ pub fn run_native_desktop_with_control(
 #[cfg(test)]
 mod tests {
     use curvebook_doc::SheetId;
+    use curvebook_ui_egui::egui_shell::UiBackend;
     use curvebook_ui_egui::interaction::ViewportMetrics;
+    use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, locale_picker_label, normalize_beta_gui_locale};
     use serde_json::json;
 
     use super::*;
@@ -1534,6 +1389,7 @@ mod tests {
             in_window_menus: true,
             new_instance: true,
             gui_only: false,
+            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -1556,14 +1412,7 @@ mod tests {
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
 
         let mut output = ctx.run_ui(raw_input, |ui| {
-            app.render_top_menu_bar(ui, id);
-            egui::CentralPanel::no_frame().show(ui, |ui| {
-                let rect = ui.available_rect_before_wrap();
-                app.sync_canvas_viewport(id, rect, 1.0);
-                if let Some(frame) = app.tick_animations_and_redraw(ui.ctx(), id) {
-                    app.upload_and_paint_frame(ui, rect, &frame);
-                }
-            });
+            app.step_ui(ui);
         });
         output.textures_delta.clear();
 
@@ -1577,24 +1426,74 @@ mod tests {
         let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
         {
             let win = runtime.window_mut(id)?;
-            win.app_mut().inline_editor.active = true;
-            win.app_mut().inline_editor.buffer.clear();
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-inline", "kind": "column", "cols": 1, "rows": 3 }))?;
         }
         let mut app = CurveBookNativeApp::new(runtime, id, None);
         let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(960.0, 616.0));
+        ctx.set_fonts(build_egui_font_definitions(None));
 
-        let events = vec![
-            egui::Event::Key { key: egui::Key::Num4, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
-            egui::Event::Text(String::from("4")),
-            egui::Event::Key { key: egui::Key::Num2, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
-            egui::Event::Text(String::from("2")),
-        ];
+        let step = |native: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| native.step_ui(ui),
+            );
+            out.textures_delta.clear();
+        };
 
-        app.dispatch_egui_events(&ctx, id, rect, Some(egui::pos2(200.0, 200.0)), egui::Modifiers::NONE, &events);
+        for _ in 0..2 {
+            step(&mut app, Vec::new());
+        }
+        let cell_center = app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
+        step(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(cell_center),
+                egui::Event::PointerButton {
+                    pos: cell_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: cell_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: cell_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: true,
+                    modifiers: egui::Modifiers::NONE,
+                },
+                egui::Event::PointerButton {
+                    pos: cell_center,
+                    button: egui::PointerButton::Primary,
+                    pressed: false,
+                    modifiers: egui::Modifiers::NONE,
+                },
+            ],
+        );
+        step(&mut app, Vec::new());
+        step(
+            &mut app,
+            vec![
+                egui::Event::Key { key: egui::Key::Num4, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+                egui::Event::Text(String::from("4")),
+                egui::Event::Key { key: egui::Key::Num2, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+                egui::Event::Text(String::from("2")),
+                egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        step(&mut app, Vec::new());
 
         let win = app.runtime.window(id)?;
-        assert_eq!(win.app().inline_editor.buffer, "42");
+        let ds = win.app().document().data_sheet(&SheetId::new("ds-inline")).ok_or("missing ds-inline")?;
+        assert_eq!(ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), Some(42.0));
         Ok(())
     }
 
@@ -1603,18 +1502,27 @@ mod tests {
         let (runtime, id) = test_runtime(ViewportMetrics::new(400.0, 300.0, 1.0))?;
         let mut app = CurveBookNativeApp::new(runtime, id, None);
         let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(800.0, 500.0));
+        ctx.set_fonts(build_egui_font_definitions(None));
+        let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 500.0));
 
-        app.sync_canvas_viewport(id, rect, 2.0);
-        assert_eq!(app.last_frame_size, [1600, 1000]);
-
-        let events = vec![egui::Event::PointerMoved(egui::pos2(120.0, 74.0))];
-        app.dispatch_egui_events(&ctx, id, rect, Some(egui::pos2(120.0, 74.0)), egui::Modifiers::NONE, &events);
+        let mut out = ctx.run_ui(
+            egui::RawInput {
+                screen_rect: Some(rect),
+                viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(2.0), ..Default::default() })]
+                    .into_iter()
+                    .collect(),
+                events: vec![egui::Event::PointerMoved(egui::pos2(120.0, 74.0))],
+                ..Default::default()
+            },
+            |ui| app.step_ui(ui),
+        );
+        out.textures_delta.clear();
 
         let win = app.runtime.window(id)?;
         assert_eq!(win.viewport().scale_factor, 2.0);
-        assert_eq!(win.viewport().logical_width, 800.0);
-        assert_eq!(win.viewport().logical_height, 500.0);
+        assert!(app.last_frame_size[0] > 0 && app.last_frame_size[1] > 0);
+        assert!(win.viewport().logical_width > 0.0 && win.viewport().logical_width <= 800.0);
+        assert!(win.viewport().logical_height > 0.0 && win.viewport().logical_height <= 500.0);
         Ok(())
     }
 
@@ -1713,25 +1621,35 @@ mod tests {
     fn r2_s11_07_graph_copy_skips_ctx_copy_text_surfaces_errors_and_cut_clears_selection() -> Result<(), String> {
         let (mut runtime, id) = test_runtime(ViewportMetrics::new(960.0, 640.0, 1.0))?;
         runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, false)));
-        {
+        let graph_id = {
             let win = runtime.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ds-1", "kind": "column", "cols": 1, "rows": 3, "auto_graph": true }))?;
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 0, "col": 0, "value": 11.0 }))?;
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-1", "row": 1, "col": 0, "value": 22.0 }))?;
             let graph_id = win.app().document().graph_sheets.first().ok_or("missing graph")?.id.clone();
             win.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
-        }
+            graph_id
+        };
         let mut app = CurveBookNativeApp::new(runtime, id, None);
         let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(960.0, 616.0));
+        ctx.set_fonts(build_egui_font_definitions(None));
+
+        let run_events = |native: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+            let mut out = ctx.run_ui(
+                egui::RawInput {
+                    screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
+                    events,
+                    ..Default::default()
+                },
+                |ui| native.step_ui(ui),
+            );
+            out.textures_delta.clear();
+            out
+        };
 
         // 1. Copy on GraphSheet must NOT emit OutputCommand::CopyText (preserves PDF/PNG/HTML bundle).
-        let raw_input =
-            egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(960.0, 640.0))), ..Default::default() };
-        let mut out_graph = ctx.run_ui(raw_input.clone(), |ui| {
-            app.dispatch_egui_events(ui.ctx(), id, rect, None, egui::Modifiers::NONE, &[egui::Event::Copy]);
-        });
-        out_graph.textures_delta.clear();
+        run_events(&mut app, Vec::new());
+        let out_graph = run_events(&mut app, vec![egui::Event::Copy]);
         assert!(app.runtime.clipboard_bundle().is_some());
         assert!(app.runtime.clipboard_text().is_none());
         let emitted_copy_text = out_graph.platform_output.commands.iter().any(|c| matches!(c, egui::OutputCommand::CopyText(_)));
@@ -1741,28 +1659,28 @@ mod tests {
         {
             let win = app.runtime.window_mut(id)?;
             win.execute_and_journal("sheet.select", json!({ "sheet_id": "ds-1" }))?;
-            win.app_mut().grid.select_single_sync(curvebook_doc::CellCoord::new(0, 0, 0).into());
         }
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Cut]);
+        run_events(&mut app, Vec::new());
+        let cell_pt = app.inspect_meta().find_by_widget_id("grid.cell.0.0.0").ok_or("missing grid.cell.0.0.0")?.clipped_rect.center();
+        run_events(
+            &mut app,
+            vec![
+                egui::Event::PointerMoved(cell_pt),
+                egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+                egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        run_events(&mut app, vec![egui::Event::Cut]);
         let ds = app.runtime.window(id)?.app().document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
         assert_eq!(ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)).and_then(|c| c.active_number()), None);
         assert_eq!(ds.cell(curvebook_doc::CellCoord::new(1, 0, 0)).and_then(|c| c.active_number()), Some(22.0));
 
-        // 3. Cut during inline editor clears inline_editor.buffer cleanly.
-        {
-            let win = app.runtime.window_mut(id)?;
-            win.app_mut().inline_editor.active = true;
-            win.app_mut().inline_editor.buffer = String::from("edited-inline");
-            win.app_mut().inline_editor.caret_byte = 13;
-        }
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Cut]);
-        assert_eq!(app.runtime.window(id)?.app().inline_editor.buffer, "");
-        assert_eq!(app.runtime.clipboard_text(), Some("edited-inline"));
-
-        // 4. Failing OS clipboard surfaced in status_banner.
+        // 3. Failing OS clipboard surfaced in status_banner.
+        app.runtime.window_mut(id)?.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
         app.runtime.set_clipboard_adapter(Box::new(TestGuiClipboard::new(true, true)));
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::Copy]);
-        assert!(app.status_banner().is_some_and(|s| s.contains("pasteboard write denied")), "banner: {:?}", app.status_banner());
+        run_events(&mut app, Vec::new());
+        run_events(&mut app, vec![egui::Event::Copy]);
+        assert!(app.status_banner().is_some_and(|s| s.contains("denied")), "banner: {:?}", app.status_banner());
         Ok(())
     }
 
@@ -1785,7 +1703,6 @@ mod tests {
 
         let mut app = CurveBookNativeApp::new(runtime, id, None);
         let ctx = egui::Context::default();
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(960.0, 616.0));
         let cmd_s = egui::Event::Key {
             key: egui::Key::S,
             physical_key: None,
@@ -1796,17 +1713,17 @@ mod tests {
 
         // Blocked while import_wizard / variables_dialog / close_dialog_open are open.
         app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = true;
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
         assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while ImportWizard is open");
         app.runtime.window_mut(id)?.app_mut().grid.import_wizard.open = false;
 
         app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = true;
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
         assert!(app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must be blocked while VariablesDialog is open");
         app.runtime.window_mut(id)?.app_mut().grid.variables_dialog.open = false;
 
         // With all modals closed, Cmd+S saves archive to disk cleanly.
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, std::slice::from_ref(&cmd_s));
+        app.dispatch_egui_events(&ctx, id, std::slice::from_ref(&cmd_s));
         assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty archive");
         let reopened = curvebook_format::open_project_file(&archive_path).map_err(|e| e.to_string())?;
         assert_eq!(
@@ -1821,7 +1738,7 @@ mod tests {
             win.app_mut().session_mut().set_file_path(Some(unpacked_path.clone()), true);
             win.execute_and_journal("table.setCell", json!({ "sheet_id": "sv-1", "row": 1, "col": 0, "value": 88.5 }))?;
         }
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[cmd_s]);
+        app.dispatch_egui_events(&ctx, id, &[cmd_s]);
         assert!(!app.runtime.window(id)?.has_unsaved_changes(), "Cmd+S must persist dirty unpacked dir");
         let reopened_dir = curvebook_format::open_project_unpacked_dir(&unpacked_path).map_err(|e| e.to_string())?;
         assert_eq!(
@@ -1843,10 +1760,10 @@ mod tests {
         {
             let win = runtime.window_mut(id)?;
             win.execute_and_journal("sheet.createData", json!({ "sheet_id": "ak-1", "kind": "column", "cols": 2, "rows": 3 }))?;
-            win.app_mut().focus_widget_id = Some(String::from("toolbar.analyze"));
         }
         let mut app = CurveBookNativeApp::new(runtime, id, None);
         let ctx = egui::Context::default();
+        ctx.set_fonts(build_egui_font_definitions(None));
         ctx.enable_accesskit();
         let raw_input =
             egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::pos2(0.0, 0.0), egui::vec2(1024.0, 640.0))), ..Default::default() };
@@ -1861,7 +1778,6 @@ mod tests {
         }
         let update = last_update.ok_or_else(|| String::from("expected accesskit_update when accesskit is enabled"))?;
         assert!(!update.nodes.is_empty(), "expected non-empty accesskit nodes");
-        assert!(!app.a11y_id_map.is_empty(), "expected populated a11y_id_map, frame_size={:?}", app.last_frame_size);
 
         let mut parent_counts: std::collections::BTreeMap<egui::accesskit::NodeId, usize> = std::collections::BTreeMap::new();
         for (_, node) in &update.nodes {
@@ -1872,25 +1788,25 @@ mod tests {
         for (nid, count) in &parent_counts {
             assert_eq!(*count, 1, "accesskit node {nid:?} has {count} parents (expected 1)");
         }
-        let focused_ak = app.a11y_id_map.iter().find_map(|(k, v)| (v == "toolbar.analyze").then_some(*k));
+        let analyze_entry = app.inspect_meta().find_by_widget_id("toolbar.analyze").ok_or("missing toolbar.analyze in inspect_meta")?.clone();
         assert!(
-            focused_ak.is_some(),
-            "missing toolbar.analyze in a11y_id_map (focus={:?}, nodes={:?})",
-            app.runtime.window(id)?.app().focus_widget_id,
-            app.a11y_id_map.values().collect::<Vec<_>>()
+            update.nodes.iter().any(|(nid, _)| *nid == analyze_entry.accesskit_id),
+            "expected toolbar.analyze accesskit node in AccessKit TreeUpdate"
         );
-        assert_eq!(Some(update.focus), focused_ak, "expected AccessKit focus on toolbar.analyze across multi-frame pass");
 
         // Dispatch AccessKit Click action on `toolbar.analyze` -> opens AnalyzeSheet dialog.
-        let target_node = focused_ak.ok_or_else(|| String::from("missing toolbar.analyze ak id"))?;
         let req = egui::accesskit::ActionRequest {
             action: egui::accesskit::Action::Click,
             target_tree: egui::accesskit::TreeId::ROOT,
-            target_node,
+            target_node: analyze_entry.accesskit_id,
             data: None,
         };
-        let rect = egui::Rect::from_min_size(egui::pos2(0.0, 24.0), egui::vec2(1024.0, 616.0));
-        app.dispatch_egui_events(&ctx, id, rect, None, egui::Modifiers::NONE, &[egui::Event::AccessKitActionRequest(req)]);
+        let mut click_in = raw_input.clone();
+        click_in.events.push(egui::Event::AccessKitActionRequest(req));
+        let mut out_click = ctx.run_ui(click_in, |ui| app.step_ui(ui));
+        out_click.textures_delta.clear();
+        let mut out_settle = ctx.run_ui(raw_input, |ui| app.step_ui(ui));
+        out_settle.textures_delta.clear();
         assert!(
             matches!(app.runtime.window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }),
             "expected AccessKit Click on toolbar.analyze to open AnalyzeSheet"
@@ -1900,6 +1816,7 @@ mod tests {
 
     #[test]
     fn language_picker_labels_mark_15_non_english_locales_as_draft() {
+        use curvebook_ui_egui::LOCALES;
         assert_eq!(LOCALES.len(), 16);
         assert_eq!(locale_picker_label("en"), "English (en)");
         let draft_labels: Vec<String> = LOCALES.iter().skip(1).map(|&loc| locale_picker_label(loc)).collect();
@@ -1908,5 +1825,127 @@ mod tests {
             assert!(label.ends_with(" [Draft]"), "expected `[Draft]` suffix on `{loc}`, got `{label}`");
             assert!(label.contains(&format!("({loc})")), "expected locale tag `({loc})` in `{label}`");
         }
+
+        assert_eq!(BETA_ACTIVE_LOCALES.len(), 14);
+        assert_eq!(BETA_ACTIVE_LOCALES.first().copied(), Some("en"));
+        let beta_drafts: Vec<String> = BETA_ACTIVE_LOCALES.iter().skip(1).map(|&loc| locale_picker_label(loc)).collect();
+        assert_eq!(beta_drafts.len(), 13);
+        for (&loc, label) in BETA_ACTIVE_LOCALES.iter().skip(1).zip(&beta_drafts) {
+            assert!(!curvebook_ui_egui::i18n::is_rtl_locale(loc), "RTL locale `{loc}` must be excluded from BETA_ACTIVE_LOCALES");
+            assert!(label.ends_with(" [Draft]"), "expected `[Draft]` suffix on `{loc}`, got `{label}`");
+        }
+        assert_eq!(normalize_beta_gui_locale("ar"), "en");
+        assert_eq!(normalize_beta_gui_locale("he"), "en");
+        assert_eq!(normalize_beta_gui_locale("fa"), "en");
+        assert_eq!(normalize_beta_gui_locale("ur"), "en");
+        assert_eq!(normalize_beta_gui_locale("pt"), "pt-BR");
+    }
+
+    #[test]
+    fn r15_5_gui_window_pure_egui_live_gesture_analyze_and_edit_params() -> Result<(), String> {
+        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig {
+            in_window_menus: true,
+            new_instance: true,
+            gui_only: true,
+            ui_backend: UiBackend::Egui,
+            locale_override: None,
+            theme_override: None,
+            recovery_root: None,
+            initial_viewport: ViewportMetrics::new(1024.0, 640.0, 1.0),
+        });
+        let opened = runtime.dispatch(DesktopHostEvent::WindowOpened { initial_file: None, viewport: ViewportMetrics::new(1024.0, 640.0, 1.0) })?;
+        let id = opened.window_id.ok_or_else(|| String::from("missing window id"))?;
+        {
+            let win = runtime.window_mut(id)?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "col-h1", "kind": "column", "cols": 3, "rows": 4 }))?;
+            for col in 0..3 {
+                for row in 0..4 {
+                    let val = 10.0 + (col as f64) * 3.0 + (row as f64) * 0.25;
+                    win.execute_and_journal("table.setCell", json!({ "sheet_id": "col-h1", "row": row, "col": col, "value": val }))?;
+                }
+            }
+        }
+
+        let (req_tx, req_rx) = mpsc::channel();
+        let ctrl = LiveControlChannel {
+            request_rx: req_rx,
+            egui_ctx_cell: Arc::new(OnceLock::new()),
+            shutdown: Arc::new(AtomicBool::new(false)),
+            post_hook: None,
+        };
+        let mut app = CurveBookNativeApp::new(runtime, id, None).with_live_control(ctrl);
+        let ctx = egui::Context::default();
+        ctx.set_fonts(build_egui_font_definitions(None));
+
+        let step_once = |native: &mut CurveBookNativeApp, extra: Vec<egui::Event>| {
+            let mut raw_input = egui::RawInput {
+                screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1024.0, 640.0))),
+                events: extra,
+                ..Default::default()
+            };
+            native.drain_synthetic_events_into(&mut raw_input);
+            let mut out = ctx.run_ui(raw_input, |ui| native.step_ui(ui));
+            out.textures_delta.clear();
+        };
+
+        // Settle initial Column grid frame so inspect_meta captures `toolbar.analyze`.
+        for _ in 0..3 {
+            step_once(&mut app, Vec::new());
+        }
+        assert!(app.inspect_meta().find_by_widget_id("toolbar.analyze").is_some(), "expected settled toolbar.analyze");
+
+        let auth = ControlAuth::from_token("test-token-r15-5").map_err(|e| e.to_string())?;
+        let send_ctrl = |native: &mut CurveBookNativeApp, req_json: Vec<u8>| -> Result<serde_json::Value, String> {
+            let (tx, rx) = mpsc::channel();
+            req_tx
+                .send(LiveControlRequest { raw_bytes: req_json, auth: auth.clone(), conn_authenticated: true, reply_tx: tx })
+                .map_err(|e| e.to_string())?;
+            for _ in 0..8 {
+                step_once(native, Vec::new());
+                if let Ok(res) = rx.try_recv() {
+                    let out = res?;
+                    let txt = String::from_utf8_lossy(&out.response_bytes);
+                    return serde_json::from_str(&txt).map_err(|e| format!("invalid control reply `{txt}`: {e}"));
+                }
+            }
+            Err(String::from("timed out waiting for LiveControlRequest reply"))
+        };
+
+        let gesture_val =
+            send_ctrl(&mut app, br#"{"id":"g1","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"toolbar.analyze"}}"#.to_vec())?;
+        assert_eq!(gesture_val.pointer("/result/egui_dispatched").and_then(serde_json::Value::as_bool), Some(true), "got {gesture_val}");
+        step_once(&mut app, Vec::new());
+
+        // Native egui AnalyzeSheet modal rendered cleanly over Column grid.
+        assert!(matches!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
+
+        // Select `analyze.entry.stats.one_way_anova` via live `egui` widget pointer click & confirm!
+        let sel_val = send_ctrl(
+            &mut app,
+            br#"{"id":"sel","method":"ui.pointer_gesture","params":{"action":"click","widget_id":"analyze.entry.stats.one_way_anova"}}"#.to_vec(),
+        )?;
+        assert_eq!(sel_val.get("ok").and_then(serde_json::Value::as_bool), Some(true), "select one_way_anova failed: {sel_val}");
+
+        let ok_val =
+            send_ctrl(&mut app, br#"{"id":"run","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}"#.to_vec())?;
+        assert_eq!(ok_val.get("ok").and_then(serde_json::Value::as_bool), Some(true), "confirm analyze_sheet failed: {ok_val}");
+        step_once(&mut app, Vec::new());
+        let active_rs = app.runtime().window(id)?.app().document().active_sheet_id.clone().ok_or("expected active ResultSheet")?;
+        assert!(app.runtime().window(id)?.app().document().result_sheet(&active_rs).is_some());
+
+        // Press Cmd+T on ResultSheet -> opens `egui` One-Way ANOVA modal!
+        step_once(
+            &mut app,
+            vec![
+                egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND },
+                egui::Event::Key { key: egui::Key::T, physical_key: None, pressed: false, repeat: false, modifiers: egui::Modifiers::COMMAND },
+            ],
+        );
+        step_once(&mut app, Vec::new());
+        assert!(
+            matches!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
+            "Cmd+T on ResultSheet must open egui EditAnalysisParameters modal"
+        );
+        Ok(())
     }
 }

@@ -421,26 +421,42 @@ fn r73_gui_only_wf26_to_wf28_multivariate_layouts_and_export() -> Result<(), Str
     )?;
     gui.ui_switch_sheet("wf27-layout")?;
     let all_insp = gui.ui_inspect("all", true)?;
-    // Default MCP `ViewportMetrics` is 1024x640 with docked navigator (~204px) and right inspector (256px).
-    let nav_right = all_insp["navigator_sheets"]
-        .as_array()
-        .and_then(|arr| {
-            arr.iter().filter_map(|n| n["bounds"].as_array()).map(|b| b[0].as_f64().unwrap_or(0.0) + b[2].as_f64().unwrap_or(0.0)).reduce(f64::max)
-        })
-        .unwrap_or(204.0)
-        .clamp(204.0, 244.0);
-    let top_y = all_insp["toolbar"]
-        .as_array()
-        .and_then(|arr| {
-            arr.iter().filter_map(|n| n["bounds"].as_array()).map(|b| b[1].as_f64().unwrap_or(0.0) + b[3].as_f64().unwrap_or(0.0)).reduce(f64::max)
-        })
-        .unwrap_or(52.0)
-        .clamp(46.0, 56.0);
-    let canvas_w = ((1024.0 - 256.0) - nav_right).max(300.0);
-    let canvas_h = ((640.0 - 26.0) - top_y).max(240.0);
     let before_drag_shot = gui.ui_screenshot("canvas", 720, 480)?;
-    let drag_x = nav_right + canvas_w * 0.68;
-    let drag_y = top_y + canvas_h * 0.30;
+    let (drag_x, drag_y) = all_insp["canvas_elements"]
+        .as_array()
+        .and_then(|arr| arr.iter().find(|n| n["widget_id"] == json!("canvas.layout_panel.1")))
+        .and_then(|n| n["bounds"].as_array())
+        .filter(|b| b.len() == 4 && b[2].as_f64().unwrap_or(0.0) > 0.0 && b[3].as_f64().unwrap_or(0.0) > 0.0)
+        .map_or_else(
+            || {
+                let nav_right = all_insp["navigator_sheets"]
+                    .as_array()
+                    .and_then(|arr| {
+                        arr.iter()
+                            .filter_map(|n| n["bounds"].as_array())
+                            .map(|b| b[0].as_f64().unwrap_or(0.0) + b[2].as_f64().unwrap_or(0.0))
+                            .reduce(f64::max)
+                    })
+                    .unwrap_or(240.0)
+                    .clamp(204.0, 260.0);
+                let top_y = all_insp["toolbar"]
+                    .as_array()
+                    .and_then(|arr| {
+                        arr.iter()
+                            .filter_map(|n| n["bounds"].as_array())
+                            .map(|b| b[1].as_f64().unwrap_or(0.0) + b[3].as_f64().unwrap_or(0.0))
+                            .reduce(f64::max)
+                    })
+                    .unwrap_or(70.0)
+                    .clamp(46.0, 80.0);
+                let canvas_w = ((1024.0 - 280.0) - nav_right).max(300.0);
+                let canvas_h = ((640.0 - 26.0) - top_y).max(240.0);
+                (nav_right + canvas_w * 0.68, top_y + canvas_h * 0.30)
+            },
+            |b| {
+                (b[0].as_f64().unwrap_or(0.0) + b[2].as_f64().unwrap_or(0.0) * 0.5, b[1].as_f64().unwrap_or(0.0) + b[3].as_f64().unwrap_or(0.0) * 0.5)
+            },
+        );
     let drag_out = gui.ui_pointer(json!({ "action": "drag", "x": drag_x, "y": drag_y, "to_x": drag_x, "to_y": drag_y - 32.0 }))?;
     if drag_out["outcome"]["action"] != json!("layout.item_drag_committed") {
         return Err(format!("WF-27 expected layout.item_drag_committed, got {drag_out}"));

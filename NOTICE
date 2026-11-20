@@ -11,3 +11,39 @@ Every asset committed to this repository is checked by `cargo xtask assets` (par
 Builds made with optional bundled fonts (`CURVEBOOK_FONTS_DIR`) embed SIL Open Font License 1.1
 font faces from `$CURVEBOOK_FONTS_DIR/fonts/` and ship their license texts alongside the release
 packages as `OFL-<family>.txt`. Builds without `CURVEBOOK_FONTS_DIR` embed none of them.
+
+## Attributed Source Code
+
+CurveBook adapts permissively licensed (MIT OR Apache-2.0) pure-egui widget helpers and top-bar
+fitting logic from VectorCraft (https://github.com/storytold/vectorcraft,
+commit 644f5bc8e377730d093ac5af8967dcd055051a16):
+
+- crates/ui-egui/src/widgets/toggles.rs -> crates/ui-egui/src/egui_shell/widgets.rs
+- crates/ui-egui/src/widgets/buttons.rs -> crates/ui-egui/src/egui_shell/widgets.rs
+- crates/ui-egui/src/widgets/labels.rs -> crates/ui-egui/src/egui_shell/widgets.rs
+- crates/ui-egui/src/widgets/panel_chrome.rs -> crates/ui-egui/src/egui_shell/widgets.rs
+- crates/ui-egui/src/widgets/wheel_stream.rs -> crates/ui-egui/src/egui_shell/widgets.rs
+- crates/ui-egui/src/chrome.rs (fit_right_group) -> crates/ui-egui/src/egui_shell/top_bar_fit.rs
+
+Upstream permission and copyright notice (MIT OR Apache-2.0):
+Copyright (c) 2026 VectorCraft contributors (upstream repository linked above).
+Licensed under the MIT License or the Apache License, Version 2.0, at your option
+(LICENSE-MIT, LICENSE-APACHE).
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
