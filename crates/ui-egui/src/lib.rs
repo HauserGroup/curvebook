@@ -59,9 +59,9 @@ pub use interaction::{
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
-    CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS,
-    ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo,
-    toolbar_caption_command_id, toolbar_tooltips,
+    CommandTooltip, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry,
+    ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip,
+    is_desktop_host_routed_command, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
@@ -1485,6 +1485,7 @@ fn run_settled_egui_on_ctx(
     let height_px = (h_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
 
     let mut meta = egui_shell::FrameInspectMeta::default();
+    let mut carried_intents = egui_shell::PendingUiIntents::default();
     for pass in 0..8_u32 {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
@@ -1493,10 +1494,11 @@ fn run_settled_egui_on_ctx(
                 .collect(),
             ..Default::default()
         };
-        let mut intents = egui_shell::PendingUiIntents::default();
         let mut settled_in_pass = false;
         let mut output = ctx.run_ui(raw_input, |ui| {
-            build_ui(ui, app, &mut meta, &mut intents);
+            let mut pass_intents = egui_shell::PendingUiIntents::default();
+            build_ui(ui, app, &mut meta, &mut pass_intents);
+            carried_intents.merge_pass(pass_intents);
             settled_in_pass = !ui.ctx().will_discard();
         });
         let stamp = egui_shell::GeometryStamp::from_context(u64::from(pass) + 1, ctx, [width_px, height_px], settled_in_pass);
@@ -1509,8 +1511,9 @@ fn run_settled_egui_on_ctx(
             output.textures_delta.clear();
         }
         if settled_in_pass {
-            intents.commit_if_settled(app, false)?;
+            let commit_res = carried_intents.commit_if_settled(app, false);
             app.sync_views();
+            commit_res?;
             return Ok((output, meta, stamp));
         }
     }

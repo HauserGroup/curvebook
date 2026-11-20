@@ -25,7 +25,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
-use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_tooltips};
+use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, is_desktop_host_routed_command, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
@@ -1557,6 +1557,24 @@ pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &s
     Ok(())
 }
 
+fn resolve_native_export_sheet_id_with_hint(doc: &ProjectDocument, kind: NativeExportTargetKind, hint: Option<&str>) -> Option<SheetId> {
+    if let Some(raw) = hint
+        && let Ok(id) = SheetId::try_new(raw)
+    {
+        let valid = match kind {
+            NativeExportTargetKind::Renderable => matches!(doc.sheet_section(&id), Some(SheetSection::Graphs | SheetSection::Layouts)),
+            NativeExportTargetKind::Graph => doc.graph_sheet(&id).is_some(),
+            NativeExportTargetKind::Layout => doc.layout_sheet(&id).is_some(),
+            NativeExportTargetKind::TableOrResult => doc.data_sheet(&id).is_some() || doc.result_sheet(&id).is_some(),
+            NativeExportTargetKind::Result => doc.result_sheet(&id).is_some(),
+        };
+        if valid {
+            return Some(id);
+        }
+    }
+    resolve_native_export_sheet_id(doc, kind)
+}
+
 fn resolve_native_export_sheet_id(doc: &ProjectDocument, kind: NativeExportTargetKind) -> Option<SheetId> {
     let active = doc.active_sheet_id.as_ref();
     match kind {
@@ -1689,7 +1707,8 @@ impl DesktopHostRuntime {
     }
 
     /// Route a file-backed desktop command (`project.open`, `project.save`, `file.save_as`, `export.svg`,
-    /// `export.pdf`, `export.png`, `table.importPzfx`, ...) through the installed [`NativeFileDialogAdapter`].
+    /// `export.pdf`, `export.png`, `graph.exportEmf`, `layout.exportEmf`, `table.importPzfx`, ...)
+    /// through the installed [`NativeFileDialogAdapter`].
     ///
     /// Returns `Ok(None)` when no [`NativeFileDialogAdapter`] is installed or `command_id` does not
     /// trigger a native file dialog.
@@ -1697,6 +1716,26 @@ impl DesktopHostRuntime {
     /// # Errors
     /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
     pub fn dispatch_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<Option<DesktopEventOutcome>, String> {
+        self.dispatch_native_file_command_with_params(window_id, command_id, &json!({}))
+    }
+
+    /// Route a file-backed desktop command with explicit JSON `params` (such as `{"path": "..."}`
+    /// from the Welcome Hub open pane or `{"sheet_id": "..."}` from the Export dialog) through the
+    /// desktop host file/save flow (`R15-GUI-13`, `R15-GUI-23`).
+    ///
+    /// # Errors
+    /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
+    pub fn dispatch_native_file_command_with_params(
+        &mut self,
+        window_id: DesktopWindowId,
+        command_id: &str,
+        params: &Value,
+    ) -> Result<Option<DesktopEventOutcome>, String> {
+        if matches!(command_id, "project.open" | "file.open")
+            && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+        {
+            return self.handle_file_dropped(window_id, PathBuf::from(explicit_path)).map(Some);
+        }
         if command_id == "project.open"
             && let Some(mut hook) = self.open_file_dialog_hook.take()
         {
@@ -1792,9 +1831,10 @@ impl DesktopHostRuntime {
             }
             _ => {
                 let spec = native_export_spec_for_command(command_id).ok_or_else(|| format!("unhandled file command `{command_id}`"))?;
+                let sheet_hint = params.get("sheet_id").or_else(|| params.get("result_sheet_id")).and_then(Value::as_str);
                 let target_sheet_id = {
                     let win = self.window(window_id)?;
-                    resolve_native_export_sheet_id(win.app().document(), spec.target_kind)
+                    resolve_native_export_sheet_id_with_hint(win.app().document(), spec.target_kind, sheet_hint)
                         .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
                 };
                 let req = NativeFileDialogRequest {
@@ -1807,7 +1847,7 @@ impl DesktopHostRuntime {
                 match adapter.pick(&req)? {
                     Some(path) => {
                         let path_str = path.to_string_lossy().into_owned();
-                        let params = if spec.command == "result.generateReport" {
+                        let export_params = if spec.command == "result.generateReport" {
                             let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
                                 Some("tex") => "latex",
                                 Some("txt") => "plain",
@@ -1818,7 +1858,7 @@ impl DesktopHostRuntime {
                             json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
                         };
                         let win = self.window_mut(window_id)?;
-                        win.execute_and_journal(spec.command, params)?;
+                        win.execute_and_journal(spec.command, export_params)?;
                         Self::completed_file_dialog_outcome(window_id, spec.command, &path)
                     }
                     None => Self::cancelled_file_dialog_outcome(window_id, spec.command),
@@ -3396,7 +3436,7 @@ fn resolve_host_or_ui_route(
 ) -> Result<Option<DesktopCommandRoute>, String> {
     match base_cmd {
         "window.new" | "file.newWindow" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.new" })),
-        "window.close" | "file.close" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "window.close" | "file.close" | "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
         "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
@@ -4018,29 +4058,19 @@ fn build_shortcut_candidates_for(key: &str, modifiers: KeyModifiers) -> Vec<Stri
 }
 
 fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
-    if matches!(
-        command_id,
-        "window.new"
-            | "file.newWindow"
-            | "window.close"
-            | "file.close"
-            | "edit.copy"
-            | "edit.paste"
-            | "project.open"
-            | "file.open"
-            | "project.save"
-            | "file.save"
-            | "project.saveAs"
-            | "file.save_as"
-            | "sheet.createData"
-            | "ui.theme.set"
-            | "ui.locale.set"
-            | "ui.previewFilter.set"
-            | "ui.canvas.applyPreset"
-            | "ui.shortcut.set"
-            | "ui.result.applyRemediation"
-            | "ui.event.dispatch"
-    ) {
+    if is_desktop_host_routed_command(command_id)
+        || matches!(
+            command_id,
+            "sheet.createData"
+                | "ui.theme.set"
+                | "ui.locale.set"
+                | "ui.previewFilter.set"
+                | "ui.canvas.applyPreset"
+                | "ui.shortcut.set"
+                | "ui.result.applyRemediation"
+                | "ui.event.dispatch"
+        )
+    {
         return true;
     }
     engine_cmd::registry()

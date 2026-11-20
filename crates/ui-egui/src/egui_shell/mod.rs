@@ -1125,6 +1125,56 @@ pub enum UiIntentOutcome {
     ShellUpdated,
 }
 
+/// Per-intent batch commit report returned by [`PendingUiIntents::commit_all_if_settled`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiIntentBatchResult {
+    pub results: Vec<Result<UiIntentOutcome, EngineError>>,
+}
+
+impl UiIntentBatchResult {
+    /// Collect all successful [`UiIntentOutcome`] entries in FIFO order.
+    #[must_use]
+    pub fn outcomes(&self) -> Vec<UiIntentOutcome> {
+        self.results.iter().filter_map(|res| res.as_ref().ok().cloned()).collect()
+    }
+
+    /// Return the first [`EngineError`] encountered during batch execution, if any.
+    #[must_use]
+    pub fn first_error(&self) -> Option<&EngineError> {
+        self.results.iter().find_map(|res| res.as_ref().err())
+    }
+
+    /// Return the first command ID that succeeded in this batch, useful for recovery journal labels.
+    #[must_use]
+    pub fn first_succeeded_command_id(&self) -> Option<&str> {
+        self.results.iter().find_map(|res| match res {
+            Ok(UiIntentOutcome::Engine { command_id, .. } | UiIntentOutcome::Ui { command_id, .. }) => Some(command_id.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Convert to `Result<Vec<UiIntentOutcome>, EngineError>`, preserving the first error when any
+    /// intent in the batch failed.
+    ///
+    /// # Errors
+    /// Returns the first [`EngineError`] encountered in the batch.
+    pub fn into_first_error_result(self) -> Result<Vec<UiIntentOutcome>, EngineError> {
+        let mut outcomes = Vec::with_capacity(self.results.len());
+        let mut first_err: Option<EngineError> = None;
+        for res in self.results {
+            match res {
+                Ok(out) => outcomes.push(out),
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_err { Err(err) } else { Ok(outcomes) }
+    }
+}
+
 /// Single-commit FIFO queue buffering GUI intents across discardable `egui` layout passes.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct PendingUiIntents {
@@ -1164,6 +1214,33 @@ impl PendingUiIntents {
     /// Enqueue a typed [`UiIntent`].
     pub fn push(&mut self, intent: UiIntent) {
         self.queue.push(intent);
+    }
+
+    /// Merge intents captured in a subsequent layout pass of the same frame without duplicating
+    /// intents already buffered from an earlier discarded pass (`R15-GUI-05`).
+    ///
+    /// Preserves intra-pass multiplicity: if the earlier pass buffered `k` copies of an intent and
+    /// `next_pass` buffers `m` copies, the merged queue retains `max(k, m)` copies in FIFO order.
+    pub fn merge_pass(&mut self, next_pass: Self) {
+        if self.queue.is_empty() {
+            self.queue = next_pass.queue;
+            return;
+        }
+        if next_pass.queue.is_empty() {
+            return;
+        }
+        let mut unmatched_existing = vec![true; self.queue.len()];
+        for intent in next_pass.queue {
+            if let Some(pos) =
+                self.queue.iter().enumerate().position(|(idx, existing)| unmatched_existing.get(idx).copied().unwrap_or(false) && *existing == intent)
+            {
+                if let Some(slot) = unmatched_existing.get_mut(pos) {
+                    *slot = false;
+                }
+            } else {
+                self.queue.push(intent);
+            }
+        }
     }
 
     /// Enqueue an engine command to execute once via `Caller::Ui` after layout settles.
@@ -1604,49 +1681,85 @@ impl PendingUiIntents {
         });
     }
 
-    /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
+    /// Commit every buffered intent one by one via `Session::execute_as_ui` (`Caller::Ui`) when
+    /// `!will_discard`, collecting per-intent results instead of aborting on the first failure.
     ///
-    /// When `will_discard` is `true`, clears the buffer without executing any mutations so
-    /// multi-pass `ctx.request_discard()` layouts never duplicate undo steps or journal entries.
+    /// When `will_discard` is `true`, leaves the buffered intents intact without executing any
+    /// mutations so first-pass input intents survive `egui` layout discard retries and commit once
+    /// the frame settles (`R15-GUI-05`).
     ///
-    /// # Errors
-    /// Returns [`EngineError`] if any queued engine or UI command fails validation or preconditions.
-    pub fn commit_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> Result<Vec<UiIntentOutcome>, EngineError> {
-        let pending = std::mem::take(&mut self.queue);
-        if will_discard || pending.is_empty() {
-            return Ok(Vec::new());
+    /// Always runs `app.sync_views()` and `sync_history_with_document()` after processing a
+    /// non-empty batch so earlier/later mutations never leave views or history stale, and mirrors
+    /// the first batch error into `app.canvas_dialogs.status_banner`.
+    pub fn commit_all_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> UiIntentBatchResult {
+        if will_discard || self.queue.is_empty() {
+            return UiIntentBatchResult::default();
         }
-        let mut outcomes = Vec::with_capacity(pending.len());
+        let pending = std::mem::take(&mut self.queue);
+        let mut results = Vec::with_capacity(pending.len());
+        let mut first_err_msg: Option<String> = None;
         for intent in pending {
-            outcomes.push(apply_single_ui_intent(app, intent)?);
+            let res = apply_single_ui_intent(app, intent);
+            if let Err(ref err) = res
+                && first_err_msg.is_none()
+            {
+                first_err_msg = Some(err.to_string());
+            }
+            results.push(res);
+        }
+        if let Some(msg) = first_err_msg {
+            app.canvas_dialogs.status_banner = Some(msg);
         }
         app.sync_views();
         app.egui_views.sync_history_with_document(app.session.document());
-        Ok(outcomes)
+        UiIntentBatchResult { results }
+    }
+
+    /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
+    ///
+    /// Applies every queued intent one by one (without dropping later intents on an earlier error),
+    /// preserves queued intents while `will_discard` is `true`, always syncs views and navigation
+    /// history, and returns the first [`EngineError`] if any failed.
+    ///
+    /// # Errors
+    /// Returns the first [`EngineError`] if any queued engine or UI command fails validation or preconditions.
+    pub fn commit_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> Result<Vec<UiIntentOutcome>, EngineError> {
+        self.commit_all_if_settled(app, will_discard).into_first_error_result()
     }
 
     /// Commit only [`UiIntent::EngineCommand`] items directly on `session` (`Caller::Ui`) when `!will_discard`.
     ///
     /// # Errors
-    /// Returns [`EngineError`] if any queued command fails.
+    /// Returns the first [`EngineError`] if any queued command fails.
     pub fn commit_engine_intents_on_session(&mut self, session: &mut Session, will_discard: bool) -> Result<Vec<CommandOutcome>, EngineError> {
-        let pending = std::mem::take(&mut self.queue);
-        if will_discard || pending.is_empty() {
+        if will_discard || self.queue.is_empty() {
             return Ok(Vec::new());
         }
+        let pending = std::mem::take(&mut self.queue);
         let mut outcomes = Vec::new();
+        let mut first_err: Option<EngineError> = None;
         for intent in pending {
             if let UiIntent::EngineCommand { command_id, params } = intent {
-                outcomes.push(session.execute_as_ui(&command_id, params)?);
+                match session.execute_as_ui(&command_id, params) {
+                    Ok(out) => outcomes.push(out),
+                    Err(err) => {
+                        if first_err.is_none() {
+                            first_err = Some(err);
+                        }
+                    }
+                }
             }
         }
-        Ok(outcomes)
+        if let Some(err) = first_err { Err(err) } else { Ok(outcomes) }
     }
 }
 
 fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::EngineCommand { command_id, mut params } => {
+            if command_id == "project.open" && app.session.is_dirty() && params.get("force").and_then(serde_json::Value::as_bool) != Some(true) {
+                return Err(EngineError::with_code(ErrorCode::Conflict, "unsaved changes exist; save or discard before opening another project"));
+            }
             if matches!(command_id.as_str(), "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze")
                 && params.get("sheet_id").is_none()
                 && let Some(active_id) = app.session.document().active_sheet_id.as_ref()
@@ -2616,15 +2729,23 @@ mod tests {
     fn pending_intents_discard_on_multi_pass_and_commit_once_when_settled() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = UiApp::new();
         let mut intents = PendingUiIntents::new();
-        intents.push_engine("sheet.createData", json!({"sheet_id": "d-1", "title": "Discard Test", "kind": "column", "auto_graph": false}));
+        let create_params = json!({"sheet_id": "d-1", "title": "Committed Test", "kind": "column", "auto_graph": false});
+        intents.push_engine("sheet.createData", create_params.clone());
         let discarded = intents.commit_if_settled(&mut app, true)?;
         assert!(discarded.is_empty());
-        assert!(intents.is_empty());
+        // Pass-0 intents stay buffered across discarded passes until the frame settles (`R15-GUI-05`).
+        assert_eq!(intents.len(), 1);
         assert_eq!(app.document().total_sheet_count(), 0);
 
-        intents.push_engine("sheet.createData", json!({"sheet_id": "d-1", "title": "Committed Test", "kind": "column", "auto_graph": false}));
+        // Re-running on pass 1 and merging the identical intent deduplicates cleanly.
+        let mut pass1 = PendingUiIntents::new();
+        pass1.push_engine("sheet.createData", create_params);
+        intents.merge_pass(pass1);
+        assert_eq!(intents.len(), 1);
+
         let committed = intents.commit_if_settled(&mut app, false)?;
         assert_eq!(committed.len(), 1);
+        assert!(intents.is_empty());
         assert_eq!(app.document().total_sheet_count(), 1);
         assert_eq!(app.session().undo_depth(), 1);
         Ok(())

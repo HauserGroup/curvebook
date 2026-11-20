@@ -1297,6 +1297,7 @@ fn render_export_modal(
                 {
                     if state.export_emf_selected {
                         let cmd = if is_layout { "layout.exportEmf" } else { "graph.exportEmf" };
+                        state.export_emf_selected = false;
                         intents.push_engine(cmd, json!({ "sheet_id": sheet_id.as_str() }));
                         intents.push(UiIntent::CloseAllModals);
                     } else {

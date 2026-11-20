@@ -328,6 +328,9 @@ pub fn render_column_grid(
 
     let scrolled_this_frame = (state.scroll_offset_pt - prev_scroll).length_sq() > 0.01;
     if scrolled_this_frame {
+        // Request a same-frame re-layout when no grid intents were queued yet so frozen headers
+        // stay aligned with the updated scroll offset; any intents queued later in the same
+        // discarded pass are preserved across passes by `PendingUiIntents::merge_pass` (`R15-GUI-05`).
         if intents.is_empty() && !ui.ctx().will_discard() {
             ui.ctx().request_discard("column grid scroll offset updated");
         } else {
@@ -4532,10 +4535,8 @@ fn render_inline_text_edit(
     let escaped = was_focused && ui.input(|i| i.key_pressed(Key::Escape));
     if escaped {
         ui.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape));
-        if !ui.ctx().will_discard() {
-            state.inline_edit = None;
-            ui.data_mut(|d| d.remove::<bool>(pending_commit_key(&rctx.ds.id)));
-        }
+        state.inline_edit = None;
+        ui.data_mut(|d| d.remove::<bool>(pending_commit_key(&rctx.ds.id)));
         ui.memory_mut(|m| m.surrender_focus(editor_id));
         ui.ctx().request_repaint();
         return true;

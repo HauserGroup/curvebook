@@ -203,7 +203,6 @@ struct ScrubChipBounds {
     decimals: usize,
     chip_w: f32,
     unit_w: f32,
-    settled_frame: bool,
     focus_edit_flag: Id,
 }
 
@@ -219,17 +218,13 @@ fn render_scrub_text_editor(
     let edit = ui.add(TextEdit::singleline(&mut state.draft_text).id(edit_id).desired_width(bounds.chip_w));
     if ui.ctx().data(|d| d.get_temp::<bool>(bounds.focus_edit_flag)).unwrap_or(false) {
         edit.request_focus();
-        if bounds.settled_frame {
-            ui.ctx().data_mut(|d| d.remove::<bool>(bounds.focus_edit_flag));
-        }
+        ui.ctx().data_mut(|d| d.remove::<bool>(bounds.focus_edit_flag));
     }
     let enter_pressed = ui.input(|i| i.key_pressed(Key::Enter));
     let escape_pressed = ui.input(|i| i.key_pressed(Key::Escape));
     if escape_pressed {
-        if bounds.settled_frame {
-            state.editing = false;
-            state.draft_text.clear();
-        }
+        state.editing = false;
+        state.draft_text.clear();
     } else if enter_pressed || edit.lost_focus() {
         if let Some((parsed_val, typed_unit)) = parse_scrub_text_input(&state.draft_text, state.unit, preset) {
             let converted = match typed_unit {
@@ -243,9 +238,7 @@ fn render_scrub_text_editor(
                 *committed_value = Some(finalized);
             }
         }
-        if bounds.settled_frame {
-            state.editing = false;
-        }
+        state.editing = false;
     }
 }
 
@@ -294,7 +287,7 @@ fn render_scrub_value_chip(
         if val_btn.hovered() && !state.dragging {
             ui.ctx().set_cursor_icon(CursorIcon::ResizeHorizontal);
         }
-        apply_drag_interaction(&val_btn, ui, cfg, bounds.min_val, bounds.max_val, bounds.clamped_in, state, bounds.settled_frame, committed_value);
+        apply_drag_interaction(&val_btn, ui, cfg, bounds.min_val, bounds.max_val, bounds.clamped_in, state, committed_value);
 
         if val_btn.clicked() && !state.dragging {
             state.editing = true;
@@ -326,10 +319,8 @@ fn handle_chip_keyboard(
     if step_dir != 0.0 {
         let factor = if ui.input(|i| i.modifiers.shift) { 0.2 } else { 2.0 };
         let next = (bounds.clamped_in + step_dir * cfg.step_per_pt.max(1e-6) * factor).clamp(bounds.min_val, bounds.max_val);
-        if bounds.settled_frame {
-            state.drag_current_value = next;
-            state.last_committed_value = Some(next);
-        }
+        state.drag_current_value = next;
+        state.last_committed_value = Some(next);
         *committed_value = Some(next);
     } else if ui.input(|i| i.key_pressed(Key::Enter) || i.key_pressed(Key::Space)) {
         state.editing = true;
@@ -366,7 +357,7 @@ fn render_scrub_unit_badge(
             FontId::proportional(10.5),
             if cfg.enabled { tokens.accent_strong } else { tokens.text_disabled },
         );
-        if cfg.enabled && unit_btn.clicked() && bounds.settled_frame {
+        if cfg.enabled && unit_btn.clicked() {
             let prev = state.unit;
             let next = prev.next_length_unit();
             state.drag_anchor_value = prev.convert(state.drag_anchor_value, next);
@@ -403,7 +394,6 @@ pub fn render_scrub_unit_field(
 
     let preset = LocalePreset::for_locale(tokens.locale);
     let decimals = cfg.decimals.min(6);
-    let settled_frame = !ui.ctx().will_discard();
     let mut committed_value: Option<f64> = None;
     let mut unit_switched_conversion = false;
     let active_display = if state.dragging { state.drag_current_value } else { clamped_in };
@@ -424,7 +414,7 @@ pub fn render_scrub_unit_field(
     } else {
         (avail_w - label_cap - unit_w - 22.0).clamp(46.0, 84.0)
     };
-    let bounds = ScrubChipBounds { min_val, max_val, active_display, clamped_in, decimals, chip_w, unit_w, settled_frame, focus_edit_flag };
+    let bounds = ScrubChipBounds { min_val, max_val, active_display, clamped_in, decimals, chip_w, unit_w, focus_edit_flag };
 
     let border_col = if !cfg.enabled {
         tokens.border
@@ -460,7 +450,7 @@ pub fn render_scrub_unit_field(
                         galley,
                         if cfg.enabled { tokens.text_primary } else { tokens.text_disabled },
                     );
-                    apply_drag_interaction(&label_btn, ui, cfg, min_val, max_val, clamped_in, state, settled_frame, &mut committed_value);
+                    apply_drag_interaction(&label_btn, ui, cfg, min_val, max_val, clamped_in, state, &mut committed_value);
                 }
 
                 if state.editing && cfg.enabled {
@@ -556,7 +546,6 @@ fn apply_drag_interaction(
     max_val: f64,
     clamped_in: f64,
     state: &mut ScrubUnitFieldState,
-    settled_frame: bool,
     committed_value: &mut Option<f64>,
 ) {
     if !cfg.enabled {
@@ -596,10 +585,8 @@ fn apply_drag_interaction(
     }
     if state.dragging && resp.drag_stopped() {
         let finalized = state.drag_current_value.clamp(min_val, max_val);
-        if settled_frame {
-            state.dragging = false;
-            state.last_committed_value = Some(finalized);
-        }
+        state.dragging = false;
+        state.last_committed_value = Some(finalized);
         *committed_value = Some(finalized);
     }
 }
