@@ -16,7 +16,7 @@ use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use curvebook_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
@@ -2106,29 +2106,6 @@ fn opt_u16_bounded_param(params: &Value, key: &str, min: u16, max: u16) -> Resul
     u16::try_from(raw).map(Some).map_err(|_| format!("`{key}` out of range"))
 }
 
-fn build_control_render_spec(scene: &ChartScene, requested_w: Option<u32>, requested_h: Option<u32>, dpi: u16) -> RenderTargetSpec {
-    const MAX_DIM: f64 = 8192.0;
-    let default_w = if scene.width_pt.is_finite() && scene.width_pt > 0.0 {
-        let scaled = (scene.width_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            scaled.clamp(64.0, MAX_DIM) as u32
-        }
-    } else {
-        960
-    };
-    let default_h = if scene.height_pt.is_finite() && scene.height_pt > 0.0 {
-        let scaled = (scene.height_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            scaled.clamp(64.0, MAX_DIM) as u32
-        }
-    } else {
-        640
-    };
-    RenderTargetSpec { width_px: requested_w.unwrap_or(default_w), height_px: requested_h.unwrap_or(default_h), dpi }
-}
-
 fn enforce_control_payload_budget(bytes_len: usize) -> Result<(), ControlCallError> {
     let max_raw_bytes = (MAX_CONTROL_LINE_BYTES.saturating_mul(3)) / 4 - 4096;
     if bytes_len > max_raw_bytes {
@@ -2145,12 +2122,12 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
     let doc = app.document();
     let sheet_id = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
     let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
 
     let sheet_kind = if doc.graph_sheet(&sheet_id).is_some() { "graph" } else { "layout" };
     let scene = app.session().render_sheet_scene(&sheet_id)?;
-    let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+    let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
     let raster = render_scene(&scene, spec).map_err(|err| format!("preview rasterization failed: {err}"))?;
     let png_bytes = encode_png(&raster).map_err(|err| format!("PNG encode failed: {err}"))?;
     enforce_control_payload_budget(png_bytes.len())?;
@@ -2259,8 +2236,8 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"]).map_err(ControlCallError::from)?;
     let all_graphs = opt_bool_param(params, &["all_graphs", "all"]).map_err(ControlCallError::from)?.unwrap_or(false);
     let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
     let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"]).map_err(ControlCallError::from)? {
         Some(raw) => match raw.to_ascii_lowercase().as_str() {
             "none" => TiffCompression::None,
@@ -2322,7 +2299,7 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         "png" | "tiff" => {
             let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
             let scene = app.session().render_sheet_scene(&target_sheet)?;
-            let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+            let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
             let raster = render_scene(&scene, spec).map_err(|err| format!("rasterization failed: {err}"))?;
             raster_meta = Some((raster.width_px, raster.height_px, raster.dpi));
             let encoded = if format == "png" {

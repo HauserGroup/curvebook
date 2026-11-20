@@ -94,6 +94,30 @@ impl JournalWidthPreset {
             Self::A4Landscape => (297.0, 210.0, PhysicalUnit::Millimeters),
         }
     }
+
+    /// Look up a [`JournalWidthPreset`] from an already-normalized lowercase name.
+    ///
+    /// Matches the ten canonical preset spellings in both `snake_case` and compacted lowercase
+    /// alphanumeric form, plus the standard short dimension and paper-size tokens (`"85mm"`,
+    /// `"89mm"`, `"120mm"`, `"136mm"`, `"174mm"`, `"183mm"`, `"letter"`, `"a4"`). Callers remain
+    /// responsible for input normalization (trimming, case-folding, or punctuation stripping) and
+    /// any boundary-specific compatibility aliases.
+    #[must_use]
+    pub fn from_canonical_name(normalized: &str) -> Option<Self> {
+        match normalized {
+            "single_column_85mm" | "singlecolumn85mm" | "85mm" => Some(Self::SingleColumn85Mm),
+            "single_column_89mm" | "singlecolumn89mm" | "89mm" => Some(Self::SingleColumn89Mm),
+            "one_and_half_column_120mm" | "oneandhalfcolumn120mm" | "120mm" => Some(Self::OneAndHalfColumn120Mm),
+            "one_and_half_column_136mm" | "oneandhalfcolumn136mm" | "136mm" => Some(Self::OneAndHalfColumn136Mm),
+            "double_column_174mm" | "doublecolumn174mm" | "174mm" => Some(Self::DoubleColumn174Mm),
+            "double_column_183mm" | "doublecolumn183mm" | "183mm" => Some(Self::DoubleColumn183Mm),
+            "letter_portrait" | "letterportrait" | "letter" => Some(Self::LetterPortrait),
+            "letter_landscape" | "letterlandscape" => Some(Self::LetterLandscape),
+            "a4_portrait" | "a4portrait" | "a4" => Some(Self::A4Portrait),
+            "a4_landscape" | "a4landscape" => Some(Self::A4Landscape),
+            _ => None,
+        }
+    }
 }
 
 /// Standardized print / presentation figure size presets (`QOL-8`).
@@ -530,5 +554,38 @@ impl LayoutSheet {
             return Err(DocError::InvalidCellValue { archetype: crate::TableKind::Column, row: 0, col: 0, reason: "floating_notes.bounds_pt" });
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::JournalWidthPreset;
+
+    #[test]
+    fn journal_width_preset_from_canonical_name_covers_all_variants() {
+        assert_eq!(JournalWidthPreset::from_canonical_name("85mm"), Some(JournalWidthPreset::SingleColumn85Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("singlecolumn85mm"), Some(JournalWidthPreset::SingleColumn85Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("single_column_85mm"), Some(JournalWidthPreset::SingleColumn85Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("89mm"), Some(JournalWidthPreset::SingleColumn89Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("singlecolumn89mm"), Some(JournalWidthPreset::SingleColumn89Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("120mm"), Some(JournalWidthPreset::OneAndHalfColumn120Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("oneandhalfcolumn120mm"), Some(JournalWidthPreset::OneAndHalfColumn120Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("136mm"), Some(JournalWidthPreset::OneAndHalfColumn136Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("oneandhalfcolumn136mm"), Some(JournalWidthPreset::OneAndHalfColumn136Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("174mm"), Some(JournalWidthPreset::DoubleColumn174Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("doublecolumn174mm"), Some(JournalWidthPreset::DoubleColumn174Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("183mm"), Some(JournalWidthPreset::DoubleColumn183Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("doublecolumn183mm"), Some(JournalWidthPreset::DoubleColumn183Mm));
+        assert_eq!(JournalWidthPreset::from_canonical_name("letter"), Some(JournalWidthPreset::LetterPortrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("letter_portrait"), Some(JournalWidthPreset::LetterPortrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("letterportrait"), Some(JournalWidthPreset::LetterPortrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("letter_landscape"), Some(JournalWidthPreset::LetterLandscape));
+        assert_eq!(JournalWidthPreset::from_canonical_name("letterlandscape"), Some(JournalWidthPreset::LetterLandscape));
+        assert_eq!(JournalWidthPreset::from_canonical_name("a4"), Some(JournalWidthPreset::A4Portrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("a4_portrait"), Some(JournalWidthPreset::A4Portrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("a4portrait"), Some(JournalWidthPreset::A4Portrait));
+        assert_eq!(JournalWidthPreset::from_canonical_name("a4_landscape"), Some(JournalWidthPreset::A4Landscape));
+        assert_eq!(JournalWidthPreset::from_canonical_name("a4landscape"), Some(JournalWidthPreset::A4Landscape));
+        assert_eq!(JournalWidthPreset::from_canonical_name("unknown"), None);
     }
 }

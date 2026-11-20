@@ -37,7 +37,7 @@ use curvebook_format::{
     strip_project_data_for_template,
 };
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use curvebook_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use serde::Serialize;
 use serde_json::{Map, Value, json};
@@ -52,10 +52,7 @@ use crate::tools::{
     required_non_empty_str,
 };
 
-const DEFAULT_PREVIEW_WIDTH_PX: u32 = 960;
-const DEFAULT_PREVIEW_HEIGHT_PX: u32 = 640;
 const DEFAULT_PREVIEW_DPI: u16 = 144;
-const MAX_RASTER_DIM_PX: u32 = 8192;
 const MAX_DPI: u16 = 2400;
 const MIN_DPI: u16 = 18;
 
@@ -684,8 +681,8 @@ fn resolve_save_exporter<'a>(reg: &'a FormatRegistry, explicit: Option<&str>, pa
 pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<String, Value>) -> Result<ToolCallResult, ToolCallError> {
     let sheet_id = optional_non_empty_str(args, "sheet_id")?;
     let dpi = parse_dpi(args)?;
-    let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
-    let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
+    let requested_w = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+    let requested_h = optional_u32_bounded(args, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
 
     #[cfg(not(target_arch = "wasm32"))]
     if let Some(port) = state.control_port() {
@@ -723,7 +720,7 @@ pub(crate) fn handle_render_preview(state: &mut McpServerState, args: &Map<Strin
         Err(msg) => return Ok(errors::result_from_code(ErrorCode::NotFound, msg)),
     };
 
-    let spec = build_render_spec(&scene, requested_w, requested_h, dpi);
+    let spec = RenderTargetSpec::from_scene_capped(&scene, requested_w, requested_h, dpi);
     let raster = match render_scene(&scene, spec) {
         Ok(img) => img,
         Err(err) => return Ok(errors::result_from_engine_error(&EngineError::from(err))),
@@ -992,8 +989,8 @@ impl ExportArtifactConfig {
         };
         let all_graphs = optional_bool(args, "all_graphs")?.unwrap_or(false);
         let dpi = parse_dpi(args)?;
-        let width_px = optional_u32_bounded(args, "width_px", 1, MAX_RASTER_DIM_PX)?;
-        let height_px = optional_u32_bounded(args, "height_px", 1, MAX_RASTER_DIM_PX)?;
+        let width_px = optional_u32_bounded(args, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
+        let height_px = optional_u32_bounded(args, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX)?;
         let tiff_compression = match optional_non_empty_str(args, "tiff_compression")? {
             Some(raw) => parse_tiff_compression(&raw)?,
             None => TiffCompression::Lzw,
@@ -1118,7 +1115,7 @@ impl Exporter for McpPngExporter {
     fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let doc = expect_document(source, DESC_PNG.id)?;
         let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-        let spec = build_render_spec(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
+        let spec = RenderTargetSpec::from_scene_capped(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
         let raster = render_scene(&scene, spec).map_err(|err| FormatError::Io(format!("rasterization failed: {err}")))?;
         let png_bytes = encode_png(&raster).map_err(|err| FormatError::Io(format!("PNG encoding failed: {err}")))?;
         let _ = self.recorder.target_id.set(target_id);
@@ -1140,7 +1137,7 @@ impl Exporter for McpTiffExporter {
     fn export_bytes(&self, source: ExportSource<'_>, _opts: &ExportOptions) -> Result<Vec<u8>, FormatError> {
         let doc = expect_document(source, DESC_TIFF.id)?;
         let (target_id, _, scene) = compile_visual_sheet(doc, self.cfg.sheet_id.as_deref()).map_err(FormatError::Io)?;
-        let spec = build_render_spec(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
+        let spec = RenderTargetSpec::from_scene_capped(&scene, self.cfg.width_px, self.cfg.height_px, self.cfg.dpi);
         let raster = render_scene(&scene, spec).map_err(|err| FormatError::Io(format!("rasterization failed: {err}")))?;
         let tiff_bytes = encode_tiff(&raster, self.cfg.tiff_compression).map_err(|err| FormatError::Io(format!("TIFF encoding failed: {err}")))?;
         let _ = self.recorder.target_id.set(target_id);
@@ -1324,27 +1321,6 @@ fn resolve_tabular_export_target<'a>(doc: &'a ProjectDocument, sheet_id: Option<
     }
 
     Err(String::from("no DataSheet or ResultSheet exists in the current document"))
-}
-
-fn build_render_spec(scene: &ChartScene, requested_w: Option<u32>, requested_h: Option<u32>, dpi: u16) -> RenderTargetSpec {
-    let default_w = if scene.width_pt.is_finite() && scene.width_pt > 0.0 {
-        let scaled = (scene.width_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let clamped = scaled.clamp(64.0, f64::from(MAX_RASTER_DIM_PX)) as u32;
-        clamped
-    } else {
-        DEFAULT_PREVIEW_WIDTH_PX
-    };
-    let default_h = if scene.height_pt.is_finite() && scene.height_pt > 0.0 {
-        let scaled = (scene.height_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let clamped = scaled.clamp(64.0, f64::from(MAX_RASTER_DIM_PX)) as u32;
-        clamped
-    } else {
-        DEFAULT_PREVIEW_HEIGHT_PX
-    };
-
-    RenderTargetSpec { width_px: requested_w.unwrap_or(default_w), height_px: requested_h.unwrap_or(default_h), dpi }
 }
 
 fn parse_dpi(args: &Map<String, Value>) -> Result<u16, ToolCallError> {

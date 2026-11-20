@@ -748,21 +748,20 @@ fn parse_journal_preset(val: &Value) -> Result<JournalWidthPreset, EngineError> 
     if let Ok(p) = serde_json::from_value::<JournalWidthPreset>(val.clone()) {
         return Ok(p);
     }
-    match val.as_str().map(|s| s.trim().to_ascii_lowercase()).as_deref() {
-        Some("single_column" | "single" | "85mm") => Ok(JournalWidthPreset::SingleColumn85Mm),
-        Some("89mm") => Ok(JournalWidthPreset::SingleColumn89Mm),
-        Some("column_1_5" | "one_and_half" | "120mm") => Ok(JournalWidthPreset::OneAndHalfColumn120Mm),
-        Some("136mm") => Ok(JournalWidthPreset::OneAndHalfColumn136Mm),
-        Some("double_column" | "double" | "174mm") => Ok(JournalWidthPreset::DoubleColumn174Mm),
-        Some("183mm") => Ok(JournalWidthPreset::DoubleColumn183Mm),
-        Some("us_letter" | "letter" | "letter_portrait") => Ok(JournalWidthPreset::LetterPortrait),
-        Some("letter_landscape") => Ok(JournalWidthPreset::LetterLandscape),
-        Some("full_page" | "a4" | "a4_portrait") => Ok(JournalWidthPreset::A4Portrait),
-        Some("a4_landscape") => Ok(JournalWidthPreset::A4Landscape),
-        _ => {
-            Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid layout `preset`: {val}")).with_details(json!({ "pointer": "/preset" })))
+    if let Some(norm) = val.as_str().map(|s| s.trim().to_ascii_lowercase()) {
+        if let Some(preset) = JournalWidthPreset::from_canonical_name(&norm) {
+            return Ok(preset);
+        }
+        match norm.as_str() {
+            "single_column" | "single" => return Ok(JournalWidthPreset::SingleColumn85Mm),
+            "column_1_5" | "one_and_half" => return Ok(JournalWidthPreset::OneAndHalfColumn120Mm),
+            "double_column" | "double" => return Ok(JournalWidthPreset::DoubleColumn174Mm),
+            "us_letter" => return Ok(JournalWidthPreset::LetterPortrait),
+            "full_page" => return Ok(JournalWidthPreset::A4Portrait),
+            _ => {}
         }
     }
+    Err(EngineError::with_code(ErrorCode::BadInput, format!("invalid layout `preset`: {val}")).with_details(json!({ "pointer": "/preset" })))
 }
 
 fn parse_physical_unit(val: &Value) -> Result<PhysicalUnit, EngineError> {

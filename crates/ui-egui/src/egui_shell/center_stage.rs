@@ -28,7 +28,7 @@ use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, SplitOrientation, Tokens, UiIntent,
     doc_sheet_title, rgba8_to_color32,
 };
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 use crate::workspace_nav::{ActiveWorkspacePane, PortfolioCard};
 
@@ -191,11 +191,6 @@ pub struct CenterStageFrameReport {
     pub diagnostic_banner_rect_pt: Option<egui::Rect>,
     /// `true` when the active CenterStage mode rendered natively in `egui` (rather than deferred).
     pub handled_natively: bool,
-}
-
-fn stage_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    let norm = normalize_locale(locale);
-    try_tr(norm, key).or_else(|| try_tr("en", key)).unwrap_or(fallback)
 }
 
 fn record_region_meta(meta: &mut FrameInspectMeta, ui: &egui::Ui, resp: &egui::Response, input: FrameInspectEntryInput<'_>) {
@@ -713,8 +708,8 @@ fn render_split_pane_header(
     hdr_ui.set_clip_rect(header_rect);
 
     let slot_badge = match slot {
-        SplitPaneSlot::Primary => stage_tr(locale, "w5.split.primary", "Primary"),
-        SplitPaneSlot::Secondary => stage_tr(locale, "w5.split.secondary", "Secondary"),
+        SplitPaneSlot::Primary => tr_or_fallback(locale, "w5.split.primary", "Primary"),
+        SplitPaneSlot::Secondary => tr_or_fallback(locale, "w5.split.secondary", "Secondary"),
     };
     hdr_ui.label(RichText::new(slot_badge).small().strong().color(if focused { tokens.accent } else { tokens.text_muted }));
 
@@ -760,12 +755,12 @@ fn render_split_pane_header(
             }
         }
     } else if slot == SplitPaneSlot::Primary && header_rect.width() >= 280.0 {
-        hdr_ui.label(RichText::new(stage_tr(locale, "w5.split.brush_sync", "Sync Brush")).small().color(tokens.text_muted));
+        hdr_ui.label(RichText::new(tr_or_fallback(locale, "w5.split.brush_sync", "Sync Brush")).small().color(tokens.text_muted));
     }
 
     if slot == SplitPaneSlot::Secondary {
         hdr_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |right_ui| {
-            let close_lbl = stage_tr(locale, "w5.split.close", "Close");
+            let close_lbl = tr_or_fallback(locale, "w5.split.close", "Close");
             let close_resp = right_ui.add_enabled(enabled, egui::Button::new(RichText::new(close_lbl).small()).min_size(vec2(44.0, 18.0)));
             meta.record_response(
                 right_ui,
@@ -776,7 +771,7 @@ fn render_split_pane_header(
                 intents.push_ui("ui.split.toggle", json!({ "enabled": false }));
             }
 
-            let swap_lbl = stage_tr(locale, "w5.split.swap", "Swap");
+            let swap_lbl = tr_or_fallback(locale, "w5.split.swap", "Swap");
             let swap_resp = right_ui.add_enabled(
                 enabled && sheet_id.is_some() && other_sheet_id.is_some(),
                 egui::Button::new(RichText::new(swap_lbl).small()).min_size(vec2(40.0, 18.0)),
@@ -1173,9 +1168,9 @@ fn render_portfolio_gallery(
 
     gal_ui.horizontal_wrapped(|bar| {
         bar.spacing_mut().item_spacing = vec2(6.0, 4.0);
-        bar.label(RichText::new(stage_tr(locale, "w5.gallery.title", "Portfolio Gallery")).strong().color(tokens.text_strong));
+        bar.label(RichText::new(tr_or_fallback(locale, "w5.gallery.title", "Portfolio Gallery")).strong().color(tokens.text_strong));
 
-        let search_hint = stage_tr(locale, "w5.gallery.search", "Search sheets...");
+        let search_hint = tr_or_fallback(locale, "w5.gallery.search", "Search sheets...");
         let search_resp = bar.add_enabled(
             enabled,
             egui::TextEdit::singleline(&mut views.center_stage.gallery_search)
@@ -1225,7 +1220,7 @@ fn render_portfolio_gallery(
             bar.add_enabled(enabled, egui::Slider::new(&mut views.center_stage.gallery_zoom_pt, 120.0..=260.0).show_value(false).text("Size"));
         meta.record_response(bar, &slider, inspect_input("gallery.zoom_slider", "slider", "Thumbnail Zoom", None, None, enabled, ZLayer::Workspace));
 
-        let close_lbl = stage_tr(locale, "w5.gallery.close", "Close Gallery");
+        let close_lbl = tr_or_fallback(locale, "w5.gallery.close", "Close Gallery");
         let close_resp = bar.add_enabled(enabled, egui::Button::new(RichText::new(close_lbl).small()));
         meta.record_response(
             bar,
@@ -1243,7 +1238,7 @@ fn render_portfolio_gallery(
 
     let cards = build_filtered_gallery_cards(doc, app, &views.center_stage.gallery_search);
     if cards.is_empty() {
-        gal_ui.label(RichText::new(stage_tr(locale, "w5.gallery.empty", "No matching sheets in this view.")).color(tokens.text_muted));
+        gal_ui.label(RichText::new(tr_or_fallback(locale, "w5.gallery.empty", "No matching sheets in this view.")).color(tokens.text_muted));
         return;
     }
 
@@ -1544,7 +1539,7 @@ fn render_bottom_banner(
     meta.record_response(&bar_ui, &lbl_resp, inspect_input(wid_prefix, "status", &summary, banner_cmd, None, enabled, ZLayer::FloatingOverlay));
 
     bar_ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |btns| {
-        let dismiss_lbl = stage_tr(locale, "w5.banner.dismiss", "Dismiss");
+        let dismiss_lbl = tr_or_fallback(locale, "w5.banner.dismiss", "Dismiss");
         let dismiss_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(dismiss_lbl).small()).min_size(vec2(54.0, 22.0)));
         let dismiss_wid = format!("{wid_prefix}.dismiss");
         meta.record_response(btns, &dismiss_resp, inspect_input(&dismiss_wid, "button", dismiss_lbl, None, None, enabled, ZLayer::FloatingOverlay));
@@ -1570,7 +1565,7 @@ fn render_bottom_banner(
 
         match kind {
             BottomBannerKind::ResultDiagnostic { sheet_id, banner } => {
-                let insp_lbl = stage_tr(locale, "w5.banner.inspect", "Inspect Details");
+                let insp_lbl = tr_or_fallback(locale, "w5.banner.inspect", "Inspect Details");
                 let insp_resp = btns.add_enabled(enabled, egui::Button::new(RichText::new(insp_lbl).small()).min_size(vec2(86.0, 22.0)));
                 meta.record_response(
                     btns,
@@ -2033,7 +2028,7 @@ fn render_progress_modal_if_open(ui: &mut egui::Ui, app: &UiApp, views: &mut Egu
 
                 if snapshot.cancellable {
                     body.add_space(8.0);
-                    let cancel_lbl = stage_tr(app.locale.as_str(), "w5.common.cancel", "Cancel");
+                    let cancel_lbl = tr_or_fallback(app.locale.as_str(), "w5.common.cancel", "Cancel");
                     let cancel_resp = body.add_enabled(!snapshot.cancel_requested, egui::Button::new(cancel_lbl));
                     meta.record_response(
                         body,

@@ -2509,6 +2509,9 @@ pub struct FrameInspectNodeMeta {
     pub full_label: Option<String>,
 }
 
+/// Minimum clipped width and height (logical `pt`) required before a modal widget is recorded in [`FrameInspectMeta`].
+pub const MODAL_INSPECT_MIN_CLIP_EXTENT_PT: f32 = 0.5;
+
 /// Parameter bundle for [`FrameInspectMeta::record_response`].
 #[derive(Debug, Clone)]
 pub struct FrameInspectEntryInput<'a> {
@@ -2522,6 +2525,32 @@ pub struct FrameInspectEntryInput<'a> {
     pub z_layer: ZLayer,
     pub ellipsized: bool,
     pub full_label: Option<&'a str>,
+}
+
+impl<'a> FrameInspectEntryInput<'a> {
+    /// Construct modal-dialog inspection metadata with [`ZLayer::ModalDialog`] and the default
+    /// `"unavailable"` disabled reason when `enabled` is `false`.
+    #[must_use]
+    pub fn modal(widget_id: &'a str, role: &'a str, label: &'a str, value: Option<String>, enabled: bool) -> Self {
+        Self {
+            widget_id,
+            role,
+            label,
+            command_id: None,
+            value: value.map(serde_json::Value::String),
+            enabled,
+            disabled_reason: (!enabled).then_some("unavailable"),
+            z_layer: ZLayer::ModalDialog,
+            ellipsized: false,
+            full_label: None,
+        }
+    }
+
+    /// Construct modal-dialog button inspection metadata (`role = "button"`, `value = None`).
+    #[must_use]
+    pub fn modal_button(widget_id: &'a str, label: &'a str, enabled: bool) -> Self {
+        Self::modal(widget_id, "button", label, None, enabled)
+    }
 }
 
 /// Settled-pass (`!ctx.will_discard()`) side-table mapping `egui`/AccessKit nodes to CurveBook
@@ -2595,6 +2624,21 @@ impl FrameInspectMeta {
             ellipsized: input.ellipsized,
             full_label: input.full_label.map(str::to_owned),
         });
+    }
+
+    /// Record inspection metadata for a modal-dialog widget when its clipped interaction rectangle
+    /// exceeds [`MODAL_INSPECT_MIN_CLIP_EXTENT_PT`] in both axes, enforcing [`ZLayer::ModalDialog`]
+    /// and a default `"unavailable"` disabled reason when `input.enabled` is `false`.
+    pub fn record_modal_response(&mut self, ui: &egui::Ui, resp: &egui::Response, mut input: FrameInspectEntryInput<'_>) {
+        let clipped = resp.interact_rect.intersect(ui.clip_rect());
+        if clipped.width() <= MODAL_INSPECT_MIN_CLIP_EXTENT_PT || clipped.height() <= MODAL_INSPECT_MIN_CLIP_EXTENT_PT {
+            return;
+        }
+        input.z_layer = ZLayer::ModalDialog;
+        if !input.enabled && input.disabled_reason.is_none() {
+            input.disabled_reason = Some("unavailable");
+        }
+        self.record_response(ui, resp, input);
     }
 
     /// Look up the first recorded entry matching `widget_id`.

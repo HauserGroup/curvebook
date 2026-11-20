@@ -51,12 +51,12 @@ pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{
     BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
-    normalize_beta_gui_locale, normalize_locale, tr,
+    normalize_beta_gui_locale, normalize_locale, tr, tr_or_fallback,
 };
 pub use inspect::{ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers, LayoutResizeHandle, PointerButton,
-    UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, dispatch_mouse_wheel, dispatch_ui_event,
+    UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
     CommandTooltip, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry,

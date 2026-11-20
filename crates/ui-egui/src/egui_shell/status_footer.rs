@@ -22,7 +22,7 @@ use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title,
 };
 use crate::grid_view::{resolve_flat_coord, total_flat_data_subcolumns};
-use crate::i18n::{is_rtl_locale, tr};
+use crate::i18n::{is_rtl_locale, tr_or_fallback};
 use crate::inspect::ZLayer;
 
 /// Hard selection cell cap (`50,000`) preventing pathological UI stalls on 1M-row sheets (`§7.2`).
@@ -48,11 +48,6 @@ pub struct QuickStatsSummary {
     pub truncated_at_cap: bool,
 }
 
-fn tr_fallback<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    let resolved = tr(locale, key);
-    if resolved.is_empty() { fallback } else { resolved }
-}
-
 impl QuickStatsSummary {
     /// Format compact full-telemetry status line (`N`, `Mean`, `SD`, `SEM`, `Median`, `Range`).
     #[must_use]
@@ -63,7 +58,7 @@ impl QuickStatsSummary {
             } else if self.selected_cells > 0 {
                 String::from("N = 0")
             } else {
-                String::from(tr_fallback(locale, "w6.view.status.ready", "Ready"))
+                String::from(tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
             };
         }
         let mut parts = Vec::with_capacity(7);
@@ -1059,7 +1054,7 @@ fn render_footer_history_and_sections(
         ];
         for (sec, wid, i18n_key, fallback) in sections {
             let first_id = first_sheet_in_section(doc, sec).cloned();
-            let label = tr_fallback(locale, i18n_key, fallback);
+            let label = tr_or_fallback(locale, i18n_key, fallback);
             let is_selected = !gallery_open && active_section == Some(sec);
             let has_sheets = first_id.is_some();
             let pill_resp = draw_footer_chip(
@@ -1088,7 +1083,7 @@ fn render_footer_history_and_sections(
             }
         }
 
-        let gal_lbl = tr_fallback(locale, "cmd.ui.gallery.toggle", "Gallery");
+        let gal_lbl = tr_or_fallback(locale, "cmd.ui.gallery.toggle", "Gallery");
         let gal_resp = draw_footer_chip(
             ui,
             ctx_in.tokens,
@@ -1223,9 +1218,9 @@ fn render_footer_center_readout(
         String::from("Welcome Hub")
     } else if let Some(sid) = doc.active_sheet_id.as_ref() {
         let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
-        format!("{} — {title}", tr_fallback(locale, "w6.view.status.ready", "Ready"))
+        format!("{} — {title}", tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
     } else {
-        String::from(tr_fallback(locale, "w6.view.status.ready", "Ready"))
+        String::from(tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
     };
     draw_footer_summary_label(
         ui,

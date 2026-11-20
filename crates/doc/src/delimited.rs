@@ -13,6 +13,8 @@ use std::fmt;
 use std::iter::Peekable;
 use std::str::Chars;
 
+use crate::cell::{Cell, CellValue};
+
 /// Configuration for [`scan_delimited`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct DelimitedScanOptions {
@@ -228,9 +230,26 @@ where
     }
 }
 
+/// Format a [`Cell`] as a single tab-separated pasted-grid token for linked-paste freezing and
+/// import-preview serialization.
+///
+/// Embedded tabs and line breaks in text cells are replaced with ASCII spaces, and non-empty
+/// excluded cells receive a trailing `*` marker.
+#[must_use]
+pub fn format_linked_paste_tsv_cell(cell: &Cell) -> String {
+    let base = match &cell.value {
+        CellValue::Empty => String::new(),
+        CellValue::Number(v) => v.to_string(),
+        CellValue::Text(s) => s.replace(['\t', '\n', '\r'], " "),
+    };
+    if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, scan_delimited};
+    use crate::cell::Cell;
+
+    use super::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 
     fn collect_fields(input: &str, opts: DelimitedScanOptions) -> Result<Vec<DelimitedField>, DelimitedScanError> {
         let mut out = Vec::new();
@@ -286,5 +305,15 @@ mod tests {
         .unwrap_err();
         assert_eq!(err, DelimitedVisitorError::Callback("limit"));
         assert_eq!(seen, 2);
+    }
+
+    #[test]
+    fn formats_linked_paste_tsv_cells_with_whitespace_sanitization_and_exclusion_marker() {
+        assert_eq!(format_linked_paste_tsv_cell(&Cell::empty()), "");
+        assert_eq!(format_linked_paste_tsv_cell(&Cell { value: crate::cell::CellValue::Empty, excluded: true }), "");
+        assert_eq!(format_linked_paste_tsv_cell(&Cell::number(12.5)), "12.5");
+        assert_eq!(format_linked_paste_tsv_cell(&Cell { value: crate::cell::CellValue::Number(12.5), excluded: true }), "12.5*");
+        assert_eq!(format_linked_paste_tsv_cell(&Cell::text("a\tb\nc\rd")), "a b c d");
+        assert_eq!(format_linked_paste_tsv_cell(&Cell { value: crate::cell::CellValue::Text(String::from("ctrl\t1")), excluded: true }), "ctrl 1*");
     }
 }

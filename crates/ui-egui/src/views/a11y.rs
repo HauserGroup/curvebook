@@ -76,21 +76,9 @@ pub fn handle_custom_action(app: &mut UiApp, state: &mut A11yViewState, payload:
     }
 
     match trimmed {
-        "clear_announcement" => {
-            state.last_announcement = None;
-            state.live_politeness = AriaLivePoliteness::Off;
-            Ok(UiEventOutcome { handled: true, action: String::from("a11y.clear_announcement"), ..Default::default() })
-        }
+        "clear_announcement" => clear_announcement(state),
         "announce_focus" => announce_widget_focus(app, state, None),
-        "toggle_high_contrast_focus" => {
-            state.high_contrast_focus_ring = !state.high_contrast_focus_ring;
-            Ok(UiEventOutcome {
-                handled: true,
-                action: String::from("a11y.high_contrast_focus"),
-                command_result: Some(json!({ "high_contrast_focus_ring": state.high_contrast_focus_ring })),
-                ..Default::default()
-            })
-        }
+        "toggle_high_contrast_focus" => set_high_contrast_focus(state, !state.high_contrast_focus_ring),
         "high_contrast_focus:on" => set_high_contrast_focus(state, true),
         "high_contrast_focus:off" => set_high_contrast_focus(state, false),
         _ => Ok(UiEventOutcome::default()),
@@ -108,11 +96,7 @@ fn handle_json_a11y_action(app: &UiApp, state: &mut A11yViewState, val: &Value) 
             let politeness = if assertive { AriaLivePoliteness::Assertive } else { AriaLivePoliteness::Polite };
             apply_announcement(state, text, politeness)
         }
-        "clear_announcement" => {
-            state.last_announcement = None;
-            state.live_politeness = AriaLivePoliteness::Off;
-            Ok(UiEventOutcome { handled: true, action: String::from("a11y.clear_announcement"), ..Default::default() })
-        }
+        "clear_announcement" => clear_announcement(state),
         "announce_focus" => {
             let wid = val.get("widget_id").and_then(Value::as_str);
             announce_widget_focus(app, state, wid)
@@ -123,6 +107,12 @@ fn handle_json_a11y_action(app: &UiApp, state: &mut A11yViewState, val: &Value) 
         }
         _ => Ok(UiEventOutcome::default()),
     }
+}
+
+fn clear_announcement(state: &mut A11yViewState) -> Result<UiEventOutcome, String> {
+    state.last_announcement = None;
+    state.live_politeness = AriaLivePoliteness::Off;
+    Ok(UiEventOutcome { handled: true, action: String::from("a11y.clear_announcement"), ..Default::default() })
 }
 
 fn set_high_contrast_focus(state: &mut A11yViewState, enabled: bool) -> Result<UiEventOutcome, String> {
@@ -208,4 +198,46 @@ pub fn high_contrast_focus_ring_style(theme: &UiThemeSpec, state: &A11yViewState
     };
     let inner = if dark_surface { Rgba8::BLACK } else { Rgba8::WHITE };
     FocusRingStyle { outer_color: outer, inner_color: inner, stroke_px: 3 }
+}
+
+#[cfg(test)]
+mod tests {
+    use serde_json::json;
+
+    use crate::UiApp;
+
+    use super::{A11yViewState, AriaLivePoliteness, handle_custom_action};
+
+    #[test]
+    fn clear_announcement_and_high_contrast_toggle_match_across_text_and_json_spellings() {
+        let mut app = UiApp::new();
+        let mut state = A11yViewState::default();
+
+        let _ = handle_custom_action(&mut app, &mut state, "announce:Saved").unwrap();
+        assert_eq!(state.last_announcement.as_deref(), Some("Saved"));
+        assert_eq!(state.live_politeness, AriaLivePoliteness::Polite);
+
+        let cleared_text = handle_custom_action(&mut app, &mut state, "clear_announcement").unwrap();
+        assert!(cleared_text.handled);
+        assert_eq!(cleared_text.action, "a11y.clear_announcement");
+        assert_eq!(state.last_announcement, None);
+        assert_eq!(state.live_politeness, AriaLivePoliteness::Off);
+
+        let _ = handle_custom_action(&mut app, &mut state, r#"{"op":"announce","text":"Alert","assertive":true}"#).unwrap();
+        assert_eq!(state.live_politeness, AriaLivePoliteness::Assertive);
+        let cleared_json = handle_custom_action(&mut app, &mut state, r#"{"op":"clear_announcement"}"#).unwrap();
+        assert_eq!(cleared_json, cleared_text);
+        assert_eq!(state.last_announcement, None);
+        assert_eq!(state.live_politeness, AriaLivePoliteness::Off);
+
+        let toggled_on = handle_custom_action(&mut app, &mut state, "toggle_high_contrast_focus").unwrap();
+        assert!(state.high_contrast_focus_ring);
+        assert_eq!(toggled_on.action, "a11y.high_contrast_focus");
+        assert_eq!(toggled_on.command_result, Some(json!({ "high_contrast_focus_ring": true })));
+
+        let toggled_off = handle_custom_action(&mut app, &mut state, r#"{"op":"set_high_contrast_focus"}"#).unwrap();
+        assert!(!state.high_contrast_focus_ring);
+        assert_eq!(toggled_off.action, "a11y.high_contrast_focus");
+        assert_eq!(toggled_off.command_result, Some(json!({ "high_contrast_focus_ring": false })));
+    }
 }

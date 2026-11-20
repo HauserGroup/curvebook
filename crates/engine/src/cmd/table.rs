@@ -7,7 +7,8 @@ use curvebook_doc::{
     HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource,
     MAX_DATA_SETS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable, NormalizeAnchor, ParameterScope,
     PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SimulationNoise, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode, validate_rows, validate_title,
+    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode, format_linked_paste_tsv_cell,
+    validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv};
 use curvebook_transform::{
@@ -2486,20 +2487,11 @@ fn serialize_2d_rows_as_tsv(rows_arr: &[Vec<Value>], decimal_separator: char) ->
         let mut tokens = Vec::with_capacity(row_cells.len());
         for cell_val in row_cells {
             let cell = parse_cell_value_with_options(cell_val, decimal_separator, true)?;
-            tokens.push(format_cell_as_tsv_token(&cell));
+            tokens.push(format_linked_paste_tsv_cell(&cell));
         }
         lines.push(tokens.join("\t"));
     }
     Ok(lines.join("\n"))
-}
-
-fn format_cell_as_tsv_token(cell: &Cell) -> String {
-    let base = match &cell.value {
-        CellValue::Empty => String::new(),
-        CellValue::Number(v) => v.to_string(),
-        CellValue::Text(s) => s.replace(['\t', '\n', '\r'], " "),
-    };
-    if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
 }
 
 fn apply_paste_payload(

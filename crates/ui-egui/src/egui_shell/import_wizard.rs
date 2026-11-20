@@ -2,7 +2,6 @@
 //! & Tidy Long Pivot), and `Convert Table Archetype...` modal in `egui 0.37` (`R15.4`,
 //! `gui-layout-spec.md` §8.5).
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
 
 use curvebook_doc::{Cell, CellCoord, CellValue, LinkBorderColor, PlacementMode, TableKind};
@@ -12,7 +11,7 @@ use serde_json::{Map, Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display};
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -109,11 +108,6 @@ pub struct ImportWizardFrameReport {
     pub outside_wheel_captured: bool,
 }
 
-fn wiz_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> Cow<'a, str> {
-    let norm = normalize_locale(locale);
-    if let Some(s) = try_tr(norm, key).or_else(|| try_tr("en", key)) { Cow::Borrowed(s) } else { Cow::Borrowed(fallback) }
-}
-
 /// Render `Import & Paste Special` (`app.grid.import_wizard.open`), `ImportReshape`, or `ConvertArchetype`.
 pub fn render_import_or_convert_modal(
     ctx: &Context,
@@ -136,14 +130,13 @@ pub fn render_import_or_convert_modal(
         state.initialized_for_open = true;
     }
 
-    let (widget_id, title_cow) = if is_convert {
-        ("dialog.convert_archetype", wiz_tr(tokens.locale, "cmd.table.convertArchetype", "Convert Table Archetype"))
+    let (widget_id, title) = if is_convert {
+        ("dialog.convert_archetype", tr_or_fallback(tokens.locale, "cmd.table.convertArchetype", "Convert Table Archetype"))
     } else if is_reshape {
-        ("dialog.import_reshape", wiz_tr(tokens.locale, "w6.view.modal.import_reshape", "Import Plate & Tidy Data"))
+        ("dialog.import_reshape", tr_or_fallback(tokens.locale, "w6.view.modal.import_reshape", "Import Plate & Tidy Data"))
     } else {
-        ("dialog.import_paste_special", wiz_tr(tokens.locale, "menu.edit.paste_special", "Import & Paste Special"))
+        ("dialog.import_paste_special", tr_or_fallback(tokens.locale, "menu.edit.paste_special", "Import & Paste Special"))
     };
-    let title: &str = &title_cow;
 
     let vp = ctx.content_rect();
     let dlg_w = (vp.width() - 24.0).clamp(320.0, 680.0);
@@ -236,7 +229,7 @@ fn render_five_stage_wizard_body(
         for step in ImportWizardStep::ALL {
             let active = state.active_step == step;
             let resp = choice_pill(bar, tokens, step.label(), active, true);
-            record_wiz_node(bar, meta, step.tab_id(), "tab", step.label(), Some(active.to_string()), true, &resp);
+            meta.record_modal_response(bar, &resp, FrameInspectEntryInput::modal(step.tab_id(), "tab", step.label(), Some(active.to_string()), true));
             if resp.clicked() {
                 state.active_step = step;
                 let mut wiz = app.grid.import_wizard.clone();
@@ -282,7 +275,7 @@ fn render_step_source(
         ] {
             let active = wiz.origin_kind == kind;
             let r = choice_pill(row, tokens, label, active, true);
-            record_wiz_node(row, meta, wid, "radio", label, Some(active.to_string()), true, &r);
+            meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", label, Some(active.to_string()), true));
             if r.clicked() {
                 wiz.origin_kind = kind;
                 dirty = true;
@@ -293,7 +286,17 @@ fn render_step_source(
     ui.horizontal(|row| {
         let can_link = wiz.origin_kind != ImportOriginKind::Clipboard;
         let r = row.add_enabled(can_link, egui::Checkbox::new(&mut wiz.is_live_link, "Maintain Live Link (Provenance Badge)"));
-        record_wiz_node(row, meta, "import_paste.opt.live_link", "checkbox", "Maintain Live Link", Some(wiz.is_live_link.to_string()), can_link, &r);
+        meta.record_modal_response(
+            row,
+            &r,
+            FrameInspectEntryInput::modal(
+                "import_paste.opt.live_link",
+                "checkbox",
+                "Maintain Live Link",
+                Some(wiz.is_live_link.to_string()),
+                can_link,
+            ),
+        );
         if r.changed() {
             dirty = true;
         }
@@ -315,7 +318,11 @@ fn render_step_source(
             let pr = row.add(
                 egui::TextEdit::singleline(&mut wiz.external_file_path).hint_text("/path/to/data.csv").desired_width((avail_w - 90.0).max(160.0)),
             );
-            record_wiz_node(row, meta, "import_paste.input.path", "textbox", "External File Path", Some(wiz.external_file_path.clone()), true, &pr);
+            meta.record_modal_response(
+                row,
+                &pr,
+                FrameInspectEntryInput::modal("import_paste.input.path", "textbox", "External File Path", Some(wiz.external_file_path.clone()), true),
+            );
             if pr.changed() {
                 dirty = true;
             }
@@ -326,15 +333,16 @@ fn render_step_source(
             for ds in &app.document().data_sheets {
                 let sel = wiz.source_sheet_id.as_ref() == Some(&ds.id);
                 let sr = choice_pill(row, tokens, &ds.title, sel, true);
-                record_wiz_node(
+                meta.record_modal_response(
                     row,
-                    meta,
-                    &format!("import_paste.source_sheet.{}", ds.id.as_str()),
-                    "radio",
-                    &ds.title,
-                    Some(sel.to_string()),
-                    true,
                     &sr,
+                    FrameInspectEntryInput::modal(
+                        &format!("import_paste.source_sheet.{}", ds.id.as_str()),
+                        "radio",
+                        &ds.title,
+                        Some(sel.to_string()),
+                        true,
+                    ),
                 );
                 if sr.clicked() {
                     wiz.source_sheet_id = Some(ds.id.clone());
@@ -352,7 +360,11 @@ fn render_step_source(
             .desired_rows(5)
             .desired_width((avail_w - 20.0).max(200.0)),
     );
-    record_wiz_node(ui, meta, "import_paste.input.csv", "textbox", "Delimited Source Data", Some(state.raw_source_draft.clone()), true, &tr_edit);
+    meta.record_modal_response(
+        ui,
+        &tr_edit,
+        FrameInspectEntryInput::modal("import_paste.input.csv", "textbox", "Delimited Source Data", Some(state.raw_source_draft.clone()), true),
+    );
     if tr_edit.changed() {
         wiz.raw_clipboard_text = state.raw_source_draft.clone();
         dirty = true;
@@ -363,7 +375,11 @@ fn render_step_source(
         row.label("Delimiter:");
         for (delim, slug, lbl) in [('\t', "tab", "Tab"), (',', "comma", "Comma"), (';', "semi", "Semicolon"), (' ', "space", "Space")] {
             let dr = choice_pill(row, tokens, lbl, wiz.delimiter == delim, true);
-            record_wiz_node(row, meta, &format!("import_paste.delim.{slug}"), "radio", lbl, Some((wiz.delimiter == delim).to_string()), true, &dr);
+            meta.record_modal_response(
+                row,
+                &dr,
+                FrameInspectEntryInput::modal(&format!("import_paste.delim.{slug}"), "radio", lbl, Some((wiz.delimiter == delim).to_string()), true),
+            );
             if dr.clicked() {
                 wiz.delimiter = delim;
                 dirty = true;
@@ -374,15 +390,16 @@ fn render_step_source(
         row.label("Decimal:");
         for (dec, slug, lbl) in [('.', "dot", "Period (.)"), (',', "comma", "Comma (,)")] {
             let r = choice_pill(row, tokens, lbl, wiz.decimal_separator == dec, true);
-            record_wiz_node(
+            meta.record_modal_response(
                 row,
-                meta,
-                &format!("import_paste.decimal.{slug}"),
-                "radio",
-                lbl,
-                Some((wiz.decimal_separator == dec).to_string()),
-                true,
                 &r,
+                FrameInspectEntryInput::modal(
+                    &format!("import_paste.decimal.{slug}"),
+                    "radio",
+                    lbl,
+                    Some((wiz.decimal_separator == dec).to_string()),
+                    true,
+                ),
             );
             if r.clicked() {
                 wiz.decimal_separator = dec;
@@ -395,7 +412,11 @@ fn render_step_source(
     ui.horizontal_wrapped(|row| {
         let mut hdr = wiz.placement.propagate_title_header;
         let hr = row.checkbox(&mut hdr, "First row contains column titles");
-        record_wiz_node(row, meta, "import_paste.opt.propagate_headers", "checkbox", "Header Row", Some(hdr.to_string()), true, &hr);
+        meta.record_modal_response(
+            row,
+            &hr,
+            FrameInspectEntryInput::modal("import_paste.opt.propagate_headers", "checkbox", "Header Row", Some(hdr.to_string()), true),
+        );
         if hr.changed() {
             wiz.placement.propagate_title_header = hdr;
             dirty = true;
@@ -409,15 +430,16 @@ fn render_step_source(
         }
         row.label("Missing sentinels:");
         let mr = row.add(egui::TextEdit::singleline(&mut state.missing_tokens_draft).hint_text("NA, NaN, .").desired_width(110.0));
-        record_wiz_node(
+        meta.record_modal_response(
             row,
-            meta,
-            "import_paste.input.missing_tokens",
-            "textbox",
-            "Missing Sentinels",
-            Some(state.missing_tokens_draft.clone()),
-            true,
             &mr,
+            FrameInspectEntryInput::modal(
+                "import_paste.input.missing_tokens",
+                "textbox",
+                "Missing Sentinels",
+                Some(state.missing_tokens_draft.clone()),
+                true,
+            ),
         );
     });
 
@@ -434,7 +456,11 @@ fn render_step_preview(ui: &mut Ui, app: &UiApp, state: &ImportWizardEguiState, 
 
     let summary = format!("Parsed Preview: {rows} rows × {cols} cols · {excluded_count} excluded · Encoding: {}", state.encoding_name);
     let sr = ui.label(RichText::new(&summary).strong().color(tokens.text_primary));
-    record_wiz_node(ui, meta, "import_paste.preview.summary", "label", &summary, Some(summary.clone()), true, &sr);
+    meta.record_modal_response(
+        ui,
+        &sr,
+        FrameInspectEntryInput::modal("import_paste.preview.summary", "label", &summary, Some(summary.clone()), true),
+    );
     ui.add_space(6.0);
 
     render_preview_grid_table(ui, app, &preview, tokens);
@@ -454,15 +480,16 @@ fn render_step_filter_unstack(
 
     ui.horizontal_wrapped(|row| {
         let r = row.checkbox(&mut wiz.filter.parse_asterisk_exclusions, "Treat * values (e.g. 45.6*) as excluded");
-        record_wiz_node(
+        meta.record_modal_response(
             row,
-            meta,
-            "import_paste.opt.asterisk_excl",
-            "checkbox",
-            "Parse Asterisk Exclusions",
-            Some(wiz.filter.parse_asterisk_exclusions.to_string()),
-            true,
             &r,
+            FrameInspectEntryInput::modal(
+                "import_paste.opt.asterisk_excl",
+                "checkbox",
+                "Parse Asterisk Exclusions",
+                Some(wiz.filter.parse_asterisk_exclusions.to_string()),
+                true,
+            ),
         );
         if r.changed() {
             dirty = true;
@@ -470,7 +497,11 @@ fn render_step_filter_unstack(
 
         let mut unstack_on = wiz.filter.unstack_group_column.is_some();
         let ur = row.checkbox(&mut unstack_on, "Unstack / Pivot by group column");
-        record_wiz_node(row, meta, "import_paste.opt.unstack", "checkbox", "Unstack Enabled", Some(unstack_on.to_string()), true, &ur);
+        meta.record_modal_response(
+            row,
+            &ur,
+            FrameInspectEntryInput::modal("import_paste.opt.unstack", "checkbox", "Unstack Enabled", Some(unstack_on.to_string()), true),
+        );
         if ur.changed() {
             wiz.filter.unstack_group_column = if unstack_on { Some(0) } else { None };
             dirty = true;
@@ -495,9 +526,17 @@ fn render_step_filter_unstack(
     ui.horizontal_wrapped(|row| {
         row.label("Row window:");
         let r0 = row.add(egui::TextEdit::singleline(&mut state.row_start_draft).hint_text("start").desired_width(48.0));
-        record_wiz_node(row, meta, "import_paste.input.row_start", "textbox", "Row Start", Some(state.row_start_draft.clone()), true, &r0);
+        meta.record_modal_response(
+            row,
+            &r0,
+            FrameInspectEntryInput::modal("import_paste.input.row_start", "textbox", "Row Start", Some(state.row_start_draft.clone()), true),
+        );
         let r1 = row.add(egui::TextEdit::singleline(&mut state.row_end_draft).hint_text("end").desired_width(48.0));
-        record_wiz_node(row, meta, "import_paste.input.row_end", "textbox", "Row End", Some(state.row_end_draft.clone()), true, &r1);
+        meta.record_modal_response(
+            row,
+            &r1,
+            FrameInspectEntryInput::modal("import_paste.input.row_end", "textbox", "Row End", Some(state.row_end_draft.clone()), true),
+        );
         if r0.changed() || r1.changed() {
             wiz.filter.row_window = parse_opt_window(&state.row_start_draft, &state.row_end_draft);
             dirty = true;
@@ -506,18 +545,29 @@ fn render_step_filter_unstack(
         row.separator();
         row.label("Col window:");
         let c0 = row.add_enabled(col_range_enabled, egui::TextEdit::singleline(&mut state.col_start_draft).hint_text("start").desired_width(48.0));
-        record_wiz_node(
+        meta.record_modal_response(
             row,
-            meta,
-            "import_paste.input.col_start",
-            "textbox",
-            "Column Start",
-            Some(state.col_start_draft.clone()),
-            col_range_enabled,
             &c0,
+            FrameInspectEntryInput::modal(
+                "import_paste.input.col_start",
+                "textbox",
+                "Column Start",
+                Some(state.col_start_draft.clone()),
+                col_range_enabled,
+            ),
         );
         let c1 = row.add_enabled(col_range_enabled, egui::TextEdit::singleline(&mut state.col_end_draft).hint_text("end").desired_width(48.0));
-        record_wiz_node(row, meta, "import_paste.input.col_end", "textbox", "Column End", Some(state.col_end_draft.clone()), col_range_enabled, &c1);
+        meta.record_modal_response(
+            row,
+            &c1,
+            FrameInspectEntryInput::modal(
+                "import_paste.input.col_end",
+                "textbox",
+                "Column End",
+                Some(state.col_end_draft.clone()),
+                col_range_enabled,
+            ),
+        );
         if !col_range_enabled {
             c0.clone().on_disabled_hover_text("Disabled while Unstack by group column is active");
         } else if c0.changed() || c1.changed() {
@@ -536,15 +586,16 @@ fn render_step_filter_unstack(
         }
         row.label("Text filter:");
         let fr = row.add(egui::TextEdit::singleline(&mut state.filter_predicate_draft).hint_text("substring…").desired_width(140.0));
-        record_wiz_node(
+        meta.record_modal_response(
             row,
-            meta,
-            "import_paste.input.filter_pattern",
-            "textbox",
-            "Row Filter Pattern",
-            Some(state.filter_predicate_draft.clone()),
-            true,
             &fr,
+            FrameInspectEntryInput::modal(
+                "import_paste.input.filter_pattern",
+                "textbox",
+                "Row Filter Pattern",
+                Some(state.filter_predicate_draft.clone()),
+                true,
+            ),
         );
     });
 
@@ -578,7 +629,11 @@ fn render_step_placement(
         ] {
             let active = wiz.placement.mode == mode;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_wiz_node(row, meta, &format!("import_paste.place.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("import_paste.place.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 wiz.placement.mode = mode;
                 dirty = true;
@@ -630,15 +685,16 @@ fn render_step_placement(
             (WizardBlockReshape::Plate384, "plate384", "384-Well Plate (16×24)"),
         ] {
             let r = choice_pill(row, tokens, lbl, state.block_reshape == mode, true);
-            record_wiz_node(
+            meta.record_modal_response(
                 row,
-                meta,
-                &format!("import_paste.reshape.{slug}"),
-                "radio",
-                lbl,
-                Some((state.block_reshape == mode).to_string()),
-                true,
                 &r,
+                FrameInspectEntryInput::modal(
+                    &format!("import_paste.reshape.{slug}"),
+                    "radio",
+                    lbl,
+                    Some((state.block_reshape == mode).to_string()),
+                    true,
+                ),
             );
             if r.clicked() {
                 state.block_reshape = mode;
@@ -678,7 +734,11 @@ fn render_step_metadata(
     ui.horizontal_wrapped(|row| {
         row.label("Link ID:");
         let lr = row.add(egui::TextEdit::singleline(&mut wiz.link_id).hint_text("Optional link ID").desired_width(140.0));
-        record_wiz_node(row, meta, "import_paste.input.link_id", "textbox", "Link ID", Some(wiz.link_id.clone()), true, &lr);
+        meta.record_modal_response(
+            row,
+            &lr,
+            FrameInspectEntryInput::modal("import_paste.input.link_id", "textbox", "Link ID", Some(wiz.link_id.clone()), true),
+        );
         if lr.changed() {
             dirty = true;
         }
@@ -690,7 +750,11 @@ fn render_step_metadata(
             .desired_rows(3)
             .desired_width((ui.available_width() - 20.0).clamp(180.0, 480.0)),
     );
-    record_wiz_node(ui, meta, "import_paste.input.notes", "textbox", "Provenance Note", Some(wiz.provenance_note.clone()), true, &nr);
+    meta.record_modal_response(
+        ui,
+        &nr,
+        FrameInspectEntryInput::modal("import_paste.input.notes", "textbox", "Provenance Note", Some(wiz.provenance_note.clone()), true),
+    );
     if nr.changed() {
         dirty = true;
     }
@@ -704,7 +768,11 @@ fn render_step_metadata(
     ui.add_space(8.0);
     ui.horizontal(|row| {
         let reset_r = widgets::secondary_button(row, "Reset Defaults");
-        record_wiz_node(row, meta, "import_paste.btn.reset_defaults", "button", "Reset Defaults", None, true, &reset_r);
+        meta.record_modal_response(
+            row,
+            &reset_r,
+            FrameInspectEntryInput::modal("import_paste.btn.reset_defaults", "button", "Reset Defaults", None, true),
+        );
         if reset_r.clicked() {
             let fresh = ImportPasteWizardState {
                 open: true,
@@ -716,7 +784,7 @@ fn render_step_metadata(
             return;
         }
         let save_r = widgets::secondary_button(row, "Save Preset");
-        record_wiz_node(row, meta, "import_paste.btn.save_default", "button", "Save Preset", None, true, &save_r);
+        meta.record_modal_response(row, &save_r, FrameInspectEntryInput::modal("import_paste.btn.save_default", "button", "Save Preset", None, true));
     });
 
     if dirty {
@@ -747,7 +815,7 @@ fn render_import_reshape_body(
                     (ImportReshapeMode::TidyLongPivot, "import_paste.source.tidy", "Tidy Long Pivot"),
                 ] {
                     let r = choice_pill(row, tokens, lbl, ir.mode == mode, true);
-                    record_wiz_node(row, meta, wid, "radio", lbl, Some((ir.mode == mode).to_string()), true, &r);
+                    meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(wid, "radio", lbl, Some((ir.mode == mode).to_string()), true));
                     if r.clicked() {
                         let mut fields = Map::new();
                         fields.insert(
@@ -767,7 +835,17 @@ fn render_import_reshape_body(
             body.horizontal_wrapped(|row| {
                 row.label("Table Title:");
                 let tr = row.add(egui::TextEdit::singleline(&mut state.reshape_title_draft).hint_text("Sheet title").desired_width(150.0));
-                record_wiz_node(row, meta, "import_paste.input.title", "textbox", "Sheet Title", Some(state.reshape_title_draft.clone()), true, &tr);
+                meta.record_modal_response(
+                    row,
+                    &tr,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.input.title",
+                        "textbox",
+                        "Sheet Title",
+                        Some(state.reshape_title_draft.clone()),
+                        true,
+                    ),
+                );
                 if tr.changed() {
                     let mut f = Map::new();
                     f.insert(String::from("title"), Value::String(state.reshape_title_draft.clone()));
@@ -775,7 +853,17 @@ fn render_import_reshape_body(
                 }
                 row.label("X Title:");
                 let xr = row.add(egui::TextEdit::singleline(&mut state.reshape_x_title_draft).hint_text("X column title").desired_width(110.0));
-                record_wiz_node(row, meta, "import_paste.input.x_title", "textbox", "X Title", Some(state.reshape_x_title_draft.clone()), true, &xr);
+                meta.record_modal_response(
+                    row,
+                    &xr,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.input.x_title",
+                        "textbox",
+                        "X Title",
+                        Some(state.reshape_x_title_draft.clone()),
+                        true,
+                    ),
+                );
                 if xr.changed() {
                     let mut f = Map::new();
                     f.insert(String::from("x_title"), Value::String(state.reshape_x_title_draft.clone()));
@@ -786,7 +874,11 @@ fn render_import_reshape_body(
             body.add_space(6.0);
             let mut sub_blank = ir.subtract_blank_mean;
             let sb_resp = body.checkbox(&mut sub_blank, "Subtract blank well mean automatically");
-            record_wiz_node(body, meta, "import.subtract_blank_mean", "checkbox", "Subtract Blank Mean", Some(sub_blank.to_string()), true, &sb_resp);
+            meta.record_modal_response(
+                body,
+                &sb_resp,
+                FrameInspectEntryInput::modal("import.subtract_blank_mean", "checkbox", "Subtract Blank Mean", Some(sub_blank.to_string()), true),
+            );
             if sb_resp.changed() {
                 intents.push_dialog_widget_click("import.subtract_blank_mean");
                 let is_384 = ir.mode == ImportReshapeMode::Plate384;
@@ -802,27 +894,29 @@ fn render_import_reshape_body(
                 body.horizontal_wrapped(|row| {
                     row.label("Group Col:");
                     let gr = row.add(egui::TextEdit::singleline(&mut state.reshape_group_col_draft).hint_text("Group").desired_width(96.0));
-                    record_wiz_node(
+                    meta.record_modal_response(
                         row,
-                        meta,
-                        "import_paste.input.group_col",
-                        "textbox",
-                        "Group Column",
-                        Some(state.reshape_group_col_draft.clone()),
-                        true,
                         &gr,
+                        FrameInspectEntryInput::modal(
+                            "import_paste.input.group_col",
+                            "textbox",
+                            "Group Column",
+                            Some(state.reshape_group_col_draft.clone()),
+                            true,
+                        ),
                     );
                     row.label("Value Col:");
                     let vr = row.add(egui::TextEdit::singleline(&mut state.reshape_value_col_draft).hint_text("Value").desired_width(96.0));
-                    record_wiz_node(
+                    meta.record_modal_response(
                         row,
-                        meta,
-                        "import_paste.input.value_col",
-                        "textbox",
-                        "Value Column",
-                        Some(state.reshape_value_col_draft.clone()),
-                        true,
                         &vr,
+                        FrameInspectEntryInput::modal(
+                            "import_paste.input.value_col",
+                            "textbox",
+                            "Value Column",
+                            Some(state.reshape_value_col_draft.clone()),
+                            true,
+                        ),
                     );
                     if gr.changed() || vr.changed() {
                         let mut f = Map::new();
@@ -841,15 +935,16 @@ fn render_import_reshape_body(
                         .desired_rows(4)
                         .desired_width((avail_w - 28.0).clamp(180.0, 520.0)),
                 );
-                record_wiz_node(
+                meta.record_modal_response(
                     body,
-                    meta,
-                    "import_paste.input.plate_values",
-                    "textbox",
-                    "Plate Values",
-                    Some(state.plate_values_draft.clone()),
-                    true,
                     &pr,
+                    FrameInspectEntryInput::modal(
+                        "import_paste.input.plate_values",
+                        "textbox",
+                        "Plate Values",
+                        Some(state.plate_values_draft.clone()),
+                        true,
+                    ),
                 );
                 if pr.changed() {
                     let mut f = Map::new();
@@ -890,7 +985,11 @@ fn render_convert_archetype_body(
             ] {
                 let active = ca.target_kind == kind;
                 let r = choice_pill(row, tokens, lbl, active, true);
-                record_wiz_node(row, meta, &format!("convert.target.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("convert.target.{slug}"), "radio", lbl, Some(active.to_string()), true),
+                );
                 if r.clicked() {
                     let mut f = Map::new();
                     f.insert(String::from("target_kind"), Value::String(slug.to_owned()));
@@ -902,14 +1001,22 @@ fn render_convert_archetype_body(
         body.add_space(6.0);
         let mut lossy = ca.allow_lossy;
         let lr = body.checkbox(&mut lossy, "Allow lossy reshape if structure drops subcolumns or X values");
-        record_wiz_node(body, meta, "convert.allow_lossy", "checkbox", "Allow Lossy Conversion", Some(lossy.to_string()), true, &lr);
+        meta.record_modal_response(
+            body,
+            &lr,
+            FrameInspectEntryInput::modal("convert.allow_lossy", "checkbox", "Allow Lossy Conversion", Some(lossy.to_string()), true),
+        );
         if lr.changed() {
             intents.push_dialog_widget_click("convert.allow_lossy");
         }
 
         let mut prev_only = ca.preview_only;
         let pr = body.checkbox(&mut prev_only, "Preview mapping without mutating table");
-        record_wiz_node(body, meta, "convert.preview_only", "checkbox", "Preview Only", Some(prev_only.to_string()), true, &pr);
+        meta.record_modal_response(
+            body,
+            &pr,
+            FrameInspectEntryInput::modal("convert.preview_only", "checkbox", "Preview Only", Some(prev_only.to_string()), true),
+        );
         if pr.changed() {
             intents.push_dialog_widget_click("convert.preview_only");
         }
@@ -950,9 +1057,9 @@ fn render_wizard_footer(
     intents: &mut PendingUiIntents,
 ) {
     ui.horizontal(|footer| {
-        let cancel_lbl = wiz_tr(tokens.locale, "btn.cancel", "Cancel");
-        let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-        record_wiz_node(footer, meta, "modal.cancel", "button", cancel_lbl.as_ref(), None, true, &cancel_resp);
+        let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+        let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+        meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
             if is_wizard {
                 intents.push_close_import_wizard();
@@ -962,15 +1069,9 @@ fn render_wizard_footer(
         }
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-            let ok_cow;
-            let finish_lbl: &str = if is_wizard {
-                "Import"
-            } else {
-                ok_cow = wiz_tr(tokens.locale, "btn.ok", "OK");
-                ok_cow.as_ref()
-            };
+            let finish_lbl = if is_wizard { "Import" } else { tr_or_fallback(tokens.locale, "btn.ok", "OK") };
             let ok_resp = widgets::primary_button(rhs, finish_lbl);
-            record_wiz_node(rhs, meta, "modal.ok", "button", finish_lbl, None, true, &ok_resp);
+            meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", finish_lbl, None, true));
             if ok_resp.clicked() {
                 if is_wizard {
                     let mut wiz = app.grid.import_wizard.clone();
@@ -988,14 +1089,14 @@ fn render_wizard_footer(
                 let idx = ImportWizardStep::ALL.iter().position(|s| *s == state.active_step).unwrap_or(0);
                 let has_next = idx + 1 < ImportWizardStep::ALL.len();
                 let next_r = rhs.add_enabled(has_next, egui::Button::new("Next >"));
-                record_wiz_node(rhs, meta, "modal.next", "button", "Next", None, has_next, &next_r);
+                meta.record_modal_response(rhs, &next_r, FrameInspectEntryInput::modal("modal.next", "button", "Next", None, has_next));
                 if next_r.clicked() && has_next {
                     state.active_step = ImportWizardStep::ALL[idx + 1];
                 }
 
                 let has_back = idx > 0;
                 let back_r = rhs.add_enabled(has_back, egui::Button::new("< Back"));
-                record_wiz_node(rhs, meta, "modal.back", "button", "Back", None, has_back, &back_r);
+                meta.record_modal_response(rhs, &back_r, FrameInspectEntryInput::modal("modal.back", "button", "Back", None, has_back));
                 if back_r.clicked() && has_back {
                     state.active_step = ImportWizardStep::ALL[idx - 1];
                 }
@@ -1189,37 +1290,4 @@ fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enable
         text = text.color(tokens.accent).strong();
     }
     ui.add_enabled(enabled, egui::Button::new(text).selected(selected))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_wiz_node(
-    ui: &Ui,
-    meta: &mut FrameInspectMeta,
-    wid: &str,
-    role: &str,
-    label: &str,
-    value: Option<String>,
-    enabled: bool,
-    resp: &egui::Response,
-) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
-        return;
-    }
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id: wid,
-            role,
-            label,
-            command_id: None,
-            value: value.map(Value::String),
-            enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
 }

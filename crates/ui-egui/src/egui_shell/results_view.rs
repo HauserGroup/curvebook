@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::ResultSheetViewState;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 use crate::tr;
 
@@ -72,11 +72,6 @@ pub struct ResultsViewFrameReport {
     pub active_tab_index: usize,
     pub active_tab_category: Option<ResultTabCategory>,
     pub has_ambiguity_callout: bool,
-}
-
-fn res_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    let norm = normalize_locale(locale);
-    try_tr(norm, key).or_else(|| try_tr("en", key)).unwrap_or(fallback)
 }
 
 #[derive(Debug, Clone)]
@@ -230,7 +225,7 @@ pub fn render_results_view_for_sheet(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let edit_lbl = if hdr_rect.width() >= 520.0 {
-                res_tr(&app.locale, "results.parameters", "Edit Parameters (Cmd+T)")
+                tr_or_fallback(&app.locale, "results.parameters", "Edit Parameters (Cmd+T)")
             } else {
                 tr(&app.locale, "toolbar.parameters")
             };
@@ -267,7 +262,7 @@ pub fn render_results_view_for_sheet(
                 FrameInspectEntryInput {
                     widget_id: "result.tabs.prev",
                     role: "button",
-                    label: res_tr(&app.locale, "results.prev_tabs", "Previous Tab"),
+                    label: tr_or_fallback(&app.locale, "results.prev_tabs", "Previous Tab"),
                     command_id: None,
                     value: None,
                     enabled: can_prev,
@@ -422,7 +417,7 @@ pub fn render_results_view_for_sheet(
                 FrameInspectEntryInput {
                     widget_id: "result.tabs.next",
                     role: "button",
-                    label: res_tr(&app.locale, "results.next_tabs", "Next Tab"),
+                    label: tr_or_fallback(&app.locale, "results.next_tabs", "Next Tab"),
                     command_id: None,
                     value: None,
                     enabled: can_next,
@@ -487,7 +482,7 @@ pub fn render_results_view_for_sheet(
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
                     ui.allocate_ui(vec2(fn_max_w, 0.0), |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                        let fn_lbl = res_tr(&app.locale, "results.footnotes", "Footnotes");
+                        let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
                         ui.add(egui::Label::new(RichText::new(fn_lbl).small().strong().color(tokens.text_strong)).wrap());
                         for note in &tab.footnotes {
                             ui.add(egui::Label::new(RichText::new(note).small().color(tokens.text_muted)).wrap());
@@ -664,7 +659,7 @@ fn render_result_tab_table(
         let corner_rect = Rect::from_min_size(hdr_rect.min, vec2(row_stub_w, row_h));
         let corner_vis = corner_rect.intersect(hdr_vis);
         if corner_vis.width() >= 4.0 && corner_vis.height() >= 4.0 {
-            let corner_lbl = res_tr(tokens.locale, "results.row_metric", "Row / Metric");
+            let corner_lbl = tr_or_fallback(tokens.locale, "results.row_metric", "Row / Metric");
             let _ = paint_table_cell_text(
                 ui,
                 corner_rect,
@@ -875,7 +870,7 @@ fn render_empty_or_failed_result_body(
                 }
             }
             ResultStatus::Dirty => {
-                ui.colored_label(tokens.text_muted, res_tr(tokens.locale, "w6.view.results.status_pending", "Status: Recalculation pending"));
+                ui.colored_label(tokens.text_muted, tr_or_fallback(tokens.locale, "w6.view.results.status_pending", "Status: Recalculation pending"));
             }
             ResultStatus::UpToDate => {
                 ui.colored_label(tokens.text_muted, "No tabular output generated for this result sheet.");
