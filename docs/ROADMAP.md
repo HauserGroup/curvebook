@@ -508,7 +508,7 @@ Build these as `egui` views on the [`R15`](#r15-modern-egui-desktop-gui-overhaul
 - [ ] **`R13.5` surfaces:** tick direction and tick-label controls in `Format Axes`, background fill in `Format Graph > Page`, an `Equalize Scaling` dialog (`Change > Equalize Scaling Factors...`), and `Bring to Front` / `Bring Forward` / `Send Backward` / `Send to Back` (`WF-59`).
 
 ### R13.9 Column titles in per-data-set fit result labels
-Owner: open · Status: in progress — claimed: jsture, branch `bugfix/R13.9-dataset-display-labels` · Was: user report 2026-11-20 (fit result rows read `LogEC50 [DS4]` while checklists name the column) · Est. note: 2–4 h · Depends on: none · Gate: none
+Owner: open · Status: in progress — claimed: jsture, branch `bugfix/R13.9-dataset-display-labels` — in PR #54 · Was: user report 2026-11-20 (fit result rows read `LogEC50 [DS4]` while checklists name the column) · Est. note: 2–4 h · Depends on: none · Gate: none
 
 - [ ] Show column titles in per-data-set parameter, fixed-constant, and covariance rows of multi-data-set fits (`LogEC50 [VEHICLE]`). Blank titles fall back to `DS n`, and repeated titles get ` (DS n)` appended so row labels stay unique. Scalar keys, per-data-set constant keys (`AntagConc [DS1]`), hooks, and equation annotations keep their existing keys (`crates/fit/src/result.rs`, `crates/fit/src/types.rs`, `crates/fit/tests/r13_9_dataset_display_labels.rs`).
 
