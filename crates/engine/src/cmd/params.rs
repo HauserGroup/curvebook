@@ -1,11 +1,108 @@
 //! Draft 2020-12 JSON Schema builders and RFC-6901 validating decoder for command parameters.
 
+use std::cell::RefCell;
+
 use serde::de::DeserializeOwned;
 use serde_json::{Map, Value, json};
 
 use crate::{EngineError, ErrorCode};
 
 const MAX_SCHEMA_DEPTH: usize = 32;
+
+/// Retired parameter spelling detected during command parameter parsing or lookup,
+/// paired with its canonical `snake_case` replacement.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DeprecationHit {
+    /// Retired parameter spelling supplied by the caller.
+    pub deprecated: String,
+    /// Canonical `snake_case` replacement key.
+    pub canonical: String,
+}
+
+thread_local! {
+    static DEPRECATION_SCOPES: RefCell<Vec<Vec<DeprecationHit>>> = const { RefCell::new(Vec::new()) };
+}
+
+/// RAII scope collecting retired parameter spellings observed while executing one command.
+pub(crate) struct DeprecationScope {
+    active: bool,
+}
+
+impl DeprecationScope {
+    /// Push a new empty collection frame onto the thread-local deprecation stack.
+    #[must_use]
+    pub(crate) fn enter() -> Self {
+        DEPRECATION_SCOPES.with(|stack| {
+            stack.borrow_mut().push(Vec::new());
+        });
+        Self { active: true }
+    }
+
+    /// Pop the active collection frame and format deduplicated deprecation warnings for `command_id`.
+    #[must_use]
+    pub(crate) fn finish_warnings(mut self, command_id: &str) -> Vec<String> {
+        self.active = false;
+        let hits = DEPRECATION_SCOPES.with(|stack| stack.borrow_mut().pop().unwrap_or_default());
+        hits.into_iter().map(|hit| format_deprecation_warning(command_id, &hit)).collect()
+    }
+}
+
+impl Drop for DeprecationScope {
+    fn drop(&mut self) {
+        if self.active {
+            let _ = DEPRECATION_SCOPES.with(|stack| stack.borrow_mut().pop());
+        }
+    }
+}
+
+fn push_unique_hit(out: &mut Vec<DeprecationHit>, hit: DeprecationHit) {
+    if hit.deprecated != hit.canonical && !out.iter().any(|existing| existing == &hit) {
+        out.push(hit);
+    }
+}
+
+fn push_hits_to_active_scope(hits: &[DeprecationHit]) {
+    if hits.is_empty() {
+        return;
+    }
+    DEPRECATION_SCOPES.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            for hit in hits {
+                push_unique_hit(frame, hit.clone());
+            }
+        }
+    });
+}
+
+/// Record one retired parameter spelling in the active command deprecation scope, if any.
+pub(crate) fn record_deprecated_alias(deprecated: &str, canonical: &str) {
+    if deprecated == canonical {
+        return;
+    }
+    DEPRECATION_SCOPES.with(|stack| {
+        if let Some(frame) = stack.borrow_mut().last_mut() {
+            push_unique_hit(frame, DeprecationHit { deprecated: deprecated.to_owned(), canonical: canonical.to_owned() });
+        }
+    });
+}
+
+/// Record any retired key in `pairs` (`(deprecated_alias, canonical_key)`) present on JSON object `val`.
+pub(crate) fn record_deprecated_object_aliases(val: &Value, pairs: &[(&str, &str)]) {
+    let Some(obj) = val.as_object() else {
+        return;
+    };
+    for &(alias, canonical) in pairs {
+        if obj.contains_key(alias) {
+            record_deprecated_alias(alias, canonical);
+        }
+    }
+}
+
+/// Format a deterministic user-facing deprecation notice for a retired parameter spelling.
+#[must_use]
+pub fn format_deprecation_warning(command_id: &str, hit: &DeprecationHit) -> String {
+    format!("parameter `{}` is deprecated for `{command_id}`; use canonical `{}` instead", hit.deprecated, hit.canonical)
+}
 
 /// Schema for commands taking no parameters (an empty object).
 #[must_use]
@@ -35,10 +132,11 @@ pub fn obj_schema(props: Vec<(&str, Value)>, required: &[&str], additional_prope
     })
 }
 
-/// Build an object schema documenting accepted legacy aliases via `x-aliases`.
+/// Build an object schema documenting retired legacy aliases via `x-deprecated-aliases`.
 ///
 /// Each entry `(canonical_key, aliases)` allows any listed alias to populate
-/// `canonical_key` during [`parse_params`] before validation and deserialization.
+/// `canonical_key` during [`parse_params`] (while emitting a deprecation warning)
+/// before validation and deserialization.
 #[must_use]
 pub fn obj_schema_with_aliases(props: Vec<(&str, Value)>, required: &[&str], aliases: Vec<(&str, &[&str])>, additional_properties: bool) -> Value {
     let has_variables_and_auto_family = props.iter().any(|(name, _)| *name == "variables") && props.iter().any(|(name, _)| *name == "auto_family");
@@ -61,12 +159,12 @@ pub fn obj_schema_with_aliases(props: Vec<(&str, Value)>, required: &[&str], ali
     if let Value::Object(ref mut map) = schema
         && !alias_map.is_empty()
     {
-        map.insert(String::from("x-aliases"), Value::Object(alias_map));
+        map.insert(String::from("x-deprecated-aliases"), Value::Object(alias_map));
     }
     schema
 }
 
-/// Attach `x-aliases` mappings to an existing object schema value.
+/// Attach `x-deprecated-aliases` mappings to an existing object schema value.
 #[must_use]
 pub fn with_aliases(mut schema: Value, aliases: Vec<(&str, &[&str])>) -> Value {
     let mut alias_map = Map::new();
@@ -77,7 +175,7 @@ pub fn with_aliases(mut schema: Value, aliases: Vec<(&str, &[&str])>) -> Value {
     if let Value::Object(ref mut map) = schema
         && !alias_map.is_empty()
     {
-        map.insert(String::from("x-aliases"), Value::Object(alias_map));
+        map.insert(String::from("x-deprecated-aliases"), Value::Object(alias_map));
     }
     schema
 }
@@ -174,15 +272,29 @@ pub fn schema_node_to_value(node: &curvebook_doc::SchemaNode) -> Result<Value, E
 }
 
 /// Validate `raw` against a Draft 2020-12 JSON Schema, reporting RFC-6901 JSON-pointer errors,
+/// and deserialize into `T` while rejecting undeclared fields on closed parameter structs and
+/// returning any retired `x-deprecated-aliases` spellings supplied in `raw`.
+///
+/// # Errors
+/// Returns [`EngineError`] with [`ErrorCode::BadInput`] and `details: { "pointer": "..." }`
+/// if validation or deserialization fails.
+pub fn parse_params_with_warnings<T: DeserializeOwned>(schema: &Value, mut raw: Value) -> Result<(T, Vec<DeprecationHit>), EngineError> {
+    let mut hits = Vec::new();
+    validate_value_with_hits(schema, schema, &mut raw, "", 0, &mut hits)?;
+    push_hits_to_active_scope(&hits);
+    let de = StrictValueDeserializer { value: &raw, pointer: String::new(), field_name: None, allow_ignored_fields: is_open_catchall_schema(schema) };
+    let parsed = T::deserialize(de).map_err(StrictDeError::into_engine_error)?;
+    Ok((parsed, hits))
+}
+
+/// Validate `raw` against a Draft 2020-12 JSON Schema, reporting RFC-6901 JSON-pointer errors,
 /// and deserialize into `T` while rejecting undeclared fields on closed parameter structs.
 ///
 /// # Errors
 /// Returns [`EngineError`] with [`ErrorCode::BadInput`] and `details: { "pointer": "..." }`
 /// if validation or deserialization fails.
-pub fn parse_params<T: DeserializeOwned>(schema: &Value, mut raw: Value) -> Result<T, EngineError> {
-    validate_value(schema, schema, &mut raw, "", 0)?;
-    let de = StrictValueDeserializer { value: &raw, pointer: String::new(), field_name: None, allow_ignored_fields: is_open_catchall_schema(schema) };
-    T::deserialize(de).map_err(StrictDeError::into_engine_error)
+pub fn parse_params<T: DeserializeOwned>(schema: &Value, raw: Value) -> Result<T, EngineError> {
+    parse_params_with_warnings(schema, raw).map(|(parsed, _)| parsed)
 }
 
 /// Strictly deserialize a JSON [`Value`] into `T`, rejecting unknown struct fields at any nesting depth.
@@ -707,48 +819,73 @@ fn resolve_ref<'a>(root: &'a Value, ref_str: &str, pointer: &str) -> Result<&'a 
     Ok(cur)
 }
 
-fn validate_value(root: &Value, schema: &Value, val: &mut Value, pointer: &str, depth: usize) -> Result<(), EngineError> {
+fn validate_value_with_hits(
+    root: &Value,
+    schema: &Value,
+    val: &mut Value,
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     if depth > MAX_SCHEMA_DEPTH {
         return Err(pointer_error(pointer, "parameter validation exceeded schema depth limit"));
     }
     match schema {
         Value::Bool(true) => Ok(()),
         Value::Bool(false) => Err(pointer_error(pointer, "parameter rejected by schema")),
-        Value::Object(schema_obj) => validate_schema_object(root, schema_obj, val, pointer, depth),
+        Value::Object(schema_obj) => validate_schema_object(root, schema_obj, val, pointer, depth, hits),
         _ => Ok(()),
     }
 }
 
-fn validate_schema_object(root: &Value, schema_obj: &Map<String, Value>, val: &mut Value, pointer: &str, depth: usize) -> Result<(), EngineError> {
+fn validate_schema_object(
+    root: &Value,
+    schema_obj: &Map<String, Value>,
+    val: &mut Value,
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     if let Some(Value::String(ref_str)) = schema_obj.get("$ref") {
         let target = resolve_ref(root, ref_str, pointer)?;
-        validate_value(root, target, val, pointer, depth.saturating_add(1))?;
+        validate_value_with_hits(root, target, val, pointer, depth.saturating_add(1), hits)?;
     }
     if let Some(Value::Array(all_of)) = schema_obj.get("allOf") {
         for sub in all_of {
-            validate_value(root, sub, val, pointer, depth.saturating_add(1))?;
+            validate_value_with_hits(root, sub, val, pointer, depth.saturating_add(1), hits)?;
         }
     }
     if let Some(Value::Array(any_of)) = schema_obj.get("anyOf") {
-        validate_any_of(root, any_of, val, pointer, depth)?;
+        validate_any_of(root, any_of, val, pointer, depth, hits)?;
     }
     if let Some(Value::Array(one_of)) = schema_obj.get("oneOf") {
-        validate_one_of(root, one_of, val, pointer, depth)?;
+        validate_one_of(root, one_of, val, pointer, depth, hits)?;
     }
     if let Some(expected_type) = schema_obj.get("type") {
         validate_type_constraint(expected_type, val, pointer)?;
     }
     validate_enum_and_const(schema_obj, val, pointer)?;
-    validate_typed_keywords(root, schema_obj, val, pointer, depth)
+    validate_typed_keywords(root, schema_obj, val, pointer, depth, hits)
 }
 
-fn validate_any_of(root: &Value, variants: &[Value], val: &mut Value, pointer: &str, depth: usize) -> Result<(), EngineError> {
+fn validate_any_of(
+    root: &Value,
+    variants: &[Value],
+    val: &mut Value,
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     let mut deepest: Option<(usize, EngineError)> = None;
     for sub in variants {
         let mut candidate = val.clone();
-        match validate_value(root, sub, &mut candidate, pointer, depth.saturating_add(1)) {
+        let mut branch_hits = Vec::new();
+        match validate_value_with_hits(root, sub, &mut candidate, pointer, depth.saturating_add(1), &mut branch_hits) {
             Ok(()) => {
                 *val = candidate;
+                for hit in branch_hits {
+                    push_unique_hit(hits, hit);
+                }
                 return Ok(());
             }
             Err(err) => {
@@ -762,17 +899,25 @@ fn validate_any_of(root: &Value, variants: &[Value], val: &mut Value, pointer: &
     Err(deepest.map_or_else(|| pointer_error(pointer, "value did not match anyOf schema variants"), |(_, err)| err))
 }
 
-fn validate_one_of(root: &Value, variants: &[Value], val: &mut Value, pointer: &str, depth: usize) -> Result<(), EngineError> {
-    let mut matched: Option<Value> = None;
+fn validate_one_of(
+    root: &Value,
+    variants: &[Value],
+    val: &mut Value,
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
+    let mut matched: Option<(Value, Vec<DeprecationHit>)> = None;
     let mut match_count = 0usize;
     let mut deepest: Option<(usize, EngineError)> = None;
     for sub in variants {
         let mut candidate = val.clone();
-        match validate_value(root, sub, &mut candidate, pointer, depth.saturating_add(1)) {
+        let mut branch_hits = Vec::new();
+        match validate_value_with_hits(root, sub, &mut candidate, pointer, depth.saturating_add(1), &mut branch_hits) {
             Ok(()) => {
                 match_count = match_count.saturating_add(1);
                 if matched.is_none() {
-                    matched = Some(candidate);
+                    matched = Some((candidate, branch_hits));
                 }
             }
             Err(err) => {
@@ -784,8 +929,11 @@ fn validate_one_of(root: &Value, variants: &[Value], val: &mut Value, pointer: &
         }
     }
     if match_count == 1 {
-        if let Some(canon) = matched {
+        if let Some((canon, branch_hits)) = matched {
             *val = canon;
+            for hit in branch_hits {
+                push_unique_hit(hits, hit);
+            }
         }
         return Ok(());
     }
@@ -831,12 +979,19 @@ fn validate_enum_and_const(schema_obj: &Map<String, Value>, val: &Value, pointer
     Ok(())
 }
 
-fn validate_typed_keywords(root: &Value, schema_obj: &Map<String, Value>, val: &mut Value, pointer: &str, depth: usize) -> Result<(), EngineError> {
+fn validate_typed_keywords(
+    root: &Value,
+    schema_obj: &Map<String, Value>,
+    val: &mut Value,
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     match val {
         Value::String(text) => validate_string_keywords(schema_obj, text, pointer),
         Value::Number(num) => validate_number_keywords(schema_obj, num, pointer),
-        Value::Array(arr) => validate_array_keywords(root, schema_obj, arr, pointer, depth),
-        Value::Object(obj) => validate_object_keywords(root, schema_obj, obj, pointer, depth),
+        Value::Array(arr) => validate_array_keywords(root, schema_obj, arr, pointer, depth, hits),
+        Value::Object(obj) => validate_object_keywords(root, schema_obj, obj, pointer, depth, hits),
         Value::Null | Value::Bool(_) => Ok(()),
     }
 }
@@ -883,7 +1038,14 @@ fn validate_number_keywords(schema_obj: &Map<String, Value>, num: &serde_json::N
     Ok(())
 }
 
-fn validate_array_keywords(root: &Value, schema_obj: &Map<String, Value>, arr: &mut [Value], pointer: &str, depth: usize) -> Result<(), EngineError> {
+fn validate_array_keywords(
+    root: &Value,
+    schema_obj: &Map<String, Value>,
+    arr: &mut [Value],
+    pointer: &str,
+    depth: usize,
+    hits: &mut Vec<DeprecationHit>,
+) -> Result<(), EngineError> {
     if let Some(min_items) = schema_obj.get("minItems").and_then(Value::as_u64)
         && (arr.len() as u64) < min_items
     {
@@ -901,18 +1063,20 @@ fn validate_array_keywords(root: &Value, schema_obj: &Map<String, Value>, arr: &
         if let Some(prefix_arr) = prefix
             && let Some(prefix_schema) = prefix_arr.get(idx)
         {
-            validate_value(root, prefix_schema, item, &item_ptr, depth.saturating_add(1))?;
+            validate_value_with_hits(root, prefix_schema, item, &item_ptr, depth.saturating_add(1), hits)?;
             continue;
         }
         if let Some(item_schema) = items_schema {
-            validate_value(root, item_schema, item, &item_ptr, depth.saturating_add(1))?;
+            validate_value_with_hits(root, item_schema, item, &item_ptr, depth.saturating_add(1), hits)?;
         }
     }
     Ok(())
 }
 
-fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, Value>) {
+fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, Value>, hits: &mut Vec<DeprecationHit>) {
     let props = schema_obj.get("properties").and_then(Value::as_object);
+    // Legacy `importPrism`/`importPzfx` payloads sometimes carried an ignored `sheet_id`/`sheetId`;
+    // strip it silently since those commands have no target `sheet_id` parameter.
     if props.is_some_and(|p| p.contains_key("merge") && p.contains_key("bytes_base64") && !p.contains_key("sheet_id")) {
         for legacy_sheet_key in ["sheet_id", "sheetId"] {
             if obj.get(legacy_sheet_key).is_some_and(|v| v.is_string() || v.is_null()) {
@@ -920,13 +1084,19 @@ fn canonicalize_aliases(obj: &mut Map<String, Value>, schema_obj: &Map<String, V
             }
         }
     }
-    let Some(Value::Object(alias_map)) = schema_obj.get("x-aliases") else {
+    let Some(Value::Object(alias_map)) = schema_obj.get("x-deprecated-aliases") else {
         return;
     };
     for (canonical, aliases_val) in alias_map {
         let Some(alias_list) = aliases_val.as_array() else {
             continue;
         };
+        for alias in alias_list.iter().filter_map(Value::as_str) {
+            let is_declared_prop = props.is_some_and(|p| p.contains_key(alias));
+            if alias != canonical && !is_declared_prop && obj.contains_key(alias) {
+                push_unique_hit(hits, DeprecationHit { deprecated: alias.to_owned(), canonical: canonical.clone() });
+            }
+        }
         if !obj.contains_key(canonical) {
             for alias in alias_list.iter().filter_map(Value::as_str) {
                 if let Some(moved) = obj.remove(alias) {
@@ -950,8 +1120,9 @@ fn validate_object_keywords(
     obj: &mut Map<String, Value>,
     pointer: &str,
     depth: usize,
+    hits: &mut Vec<DeprecationHit>,
 ) -> Result<(), EngineError> {
-    canonicalize_aliases(obj, schema_obj);
+    canonicalize_aliases(obj, schema_obj, hits);
     if let Some(Value::Array(required)) = schema_obj.get("required") {
         for req_key in required.iter().filter_map(Value::as_str) {
             if !obj.contains_key(req_key) {
@@ -965,7 +1136,7 @@ fn validate_object_keywords(
     for (key, child_val) in obj.iter_mut() {
         let child_ptr = append_pointer(pointer, key);
         if let Some(prop_schema) = props.and_then(|p| p.get(key)) {
-            validate_value(root, prop_schema, child_val, &child_ptr, depth.saturating_add(1))?;
+            validate_value_with_hits(root, prop_schema, child_val, &child_ptr, depth.saturating_add(1), hits)?;
         } else if let Some(extra_rule) = additional {
             match extra_rule {
                 Value::Bool(false) => {
@@ -973,7 +1144,7 @@ fn validate_object_keywords(
                 }
                 Value::Bool(true) => {}
                 extra_schema => {
-                    validate_value(root, extra_schema, child_val, &child_ptr, depth.saturating_add(1))?;
+                    validate_value_with_hits(root, extra_schema, child_val, &child_ptr, depth.saturating_add(1), hits)?;
                 }
             }
         }
@@ -1044,7 +1215,20 @@ mod tests {
     #[test]
     fn resolves_aliases_and_preserves_canonical_validation() {
         let schema = set_cells_schema();
-        let parsed = parse_params::<SetCellsParams>(
+        assert!(schema.get("x-aliases").is_none(), "retired x-aliases key must not be emitted");
+        assert!(schema.get("x-deprecated-aliases").is_some(), "schema must emit x-deprecated-aliases");
+
+        let (canonical_parsed, canonical_hits) = parse_params_with_warnings::<SetCellsParams>(
+            &schema,
+            json!({
+                "sheet_id": "data_1",
+                "cells": [{ "row": 0, "col": 1, "value": "42" }]
+            }),
+        )
+        .expect("canonical input should decode cleanly");
+        assert!(canonical_hits.is_empty(), "canonical params must emit zero deprecation hits");
+
+        let (parsed, hits) = parse_params_with_warnings::<SetCellsParams>(
             &schema,
             json!({
                 "sheetId": "data_1",
@@ -1052,10 +1236,12 @@ mod tests {
             }),
         )
         .expect("alias should decode cleanly");
+        assert_eq!(parsed, canonical_parsed);
         assert_eq!(
             parsed,
             SetCellsParams { sheet_id: String::from("data_1"), cells: vec![CellUpdate { row: 0, col: 1, value: String::from("42") }] }
         );
+        assert_eq!(hits, vec![DeprecationHit { deprecated: String::from("sheetId"), canonical: String::from("sheet_id") }]);
 
         let bad_alias = parse_params::<SetCellsParams>(
             &schema,
@@ -1066,6 +1252,24 @@ mod tests {
         )
         .expect_err("empty aliased sheetId must still trigger minLength");
         assert_eq!(bad_alias.details.as_ref().and_then(|d| d.get("pointer")).and_then(Value::as_str), Some("/sheet_id"));
+
+        // Rejected anyOf variants must not leak deprecation hits.
+        let variant_a = obj_schema_with_aliases(
+            vec![("kind", json!({ "const": "a" })), ("target", str_schema("Target A"))],
+            &["kind", "target"],
+            vec![("target", &["legacy_a"])],
+            false,
+        );
+        let variant_b = obj_schema_with_aliases(
+            vec![("kind", json!({ "const": "b" })), ("target", str_schema("Target B"))],
+            &["kind", "target"],
+            vec![("target", &["legacy_b"])],
+            false,
+        );
+        let any_schema = json!({ "anyOf": [variant_a, variant_b] });
+        let (_v, variant_hits) =
+            parse_params_with_warnings::<Value>(&any_schema, json!({ "kind": "b", "legacy_b": "ok" })).expect("second anyOf variant should validate");
+        assert_eq!(variant_hits, vec![DeprecationHit { deprecated: String::from("legacy_b"), canonical: String::from("target") }]);
     }
 
     #[test]

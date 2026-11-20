@@ -23,6 +23,7 @@ fn run_edit_undo(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, Eng
         mutated: applied,
         message: String::from(message),
         payload: json!({ "applied": applied }),
+        warnings: Vec::new(),
     })
 }
 
@@ -35,6 +36,7 @@ fn run_edit_redo(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, Eng
         mutated: applied,
         message: String::from(message),
         payload: json!({ "applied": applied }),
+        warnings: Vec::new(),
     })
 }
 

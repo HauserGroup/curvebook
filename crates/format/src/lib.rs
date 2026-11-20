@@ -45,7 +45,8 @@ pub use registry::{ExportOptions, ExportSource, Exporter, FormatDescriptor, Form
 pub use schemas::{all_persisted_schemas, archive_manifest_schema, batch_v1_schema, document_schema, journal_record_schema, preferences_schema};
 pub use versioned::{
     BATCH_SCHEMA_V1, CURRENT_PREFERENCES_VERSION, MAX_PREFERENCES_FILE_BYTES, PreferencesFile, VersionStep, load_preferences_file,
-    parse_preferences_json, save_preferences_file, upgrade, validate_batch_manifest_version,
+    normalize_batch_manifest_v1, normalize_batch_manifest_v1_with_warnings, normalize_command_params_in_place, parse_preferences_json,
+    save_preferences_file, upgrade, validate_batch_manifest_version,
 };
 pub use xml::{MAX_XML_BYTES, MAX_XML_DEPTH, MAX_XML_NODES, XmlElement, XmlLimits, XmlNode, parse_xml, parse_xml_with_limits};
 pub use zip::{MAX_ZIP_ENTRIES, MAX_ZIP_ENTRY_BYTES, MAX_ZIP_UNCOMPRESSED_BYTES, ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};

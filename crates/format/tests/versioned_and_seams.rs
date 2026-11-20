@@ -160,7 +160,7 @@ fn journal_and_lock_version_validation_and_atomic_cleanup() {
         "command_json": record.command_json,
     })
     .to_string();
-    assert_eq!(JournalOpRecord::from_json_str(&legacy_record_json).unwrap().format_version, CURRENT_JOURNAL_VERSION);
+    assert_eq!(JournalOpRecord::from_json_str(&legacy_record_json).unwrap().format_version, 1);
 
     let future_record_json = serde_json::json!({
         "format_version": 99,
@@ -448,4 +448,89 @@ fn explicit_rejection_of_legacy_unpacked_dirs_batch_manifests_and_owner_pids() {
 
     // 3. Legacy PID owner prefix does not match CurveBook local PID reclamation.
     assert!(!is_dead_local_owner("lumencraft-pid-999999999"));
+}
+
+#[test]
+fn journal_v1_crc_verified_before_v2_upgrade_and_batch_manifest_normalizes() {
+    use curvebook_format::{
+        JournalBackend, MemoryJournalBackend, compute_record_crc32, normalize_batch_manifest_v1, normalize_batch_manifest_v1_with_warnings,
+    };
+
+    // 1. Valid v1 record carrying retired aliases verifies raw v1 CRC first, then upgrades to v2.
+    let v1_cmd = serde_json::json!({
+        "command_id": "sheet.rename",
+        "params": { "id": "data_1", "new_title": "Normalized Title" }
+    });
+    let v1_crc = compute_record_crc32(1, &v1_cmd).unwrap();
+    let v1_line = serde_json::json!({
+        "format_version": 1,
+        "seq": 1,
+        "crc32": v1_crc,
+        "command_json": v1_cmd,
+    })
+    .to_string();
+
+    let mut mem = MemoryJournalBackend::new();
+    mem.append_journal_line(&v1_line).unwrap();
+    let (mut journal, report) = CrashRecoveryJournal::open_or_recover(mem, "migrator", 10_000, 1_000).unwrap();
+    assert_eq!(report.recovered_commands.len(), 1);
+    assert_eq!(
+        report.recovered_commands[0],
+        serde_json::json!({
+            "command_id": "sheet.rename",
+            "params": { "sheet_id": "data_1", "title": "Normalized Title" }
+        })
+    );
+
+    // Subsequent writes use CURRENT_JOURNAL_VERSION (2).
+    journal.record_command(serde_json::json!({ "command_id": "sheet.freeze", "params": { "sheet_id": "data_1" } })).unwrap();
+    let journal_text = std::str::from_utf8(journal.backend().journal_bytes()).unwrap();
+    let parsed_tail = JournalOpRecord::from_json_str(journal_text.lines().last().unwrap()).unwrap();
+    assert_eq!(parsed_tail.format_version, 2);
+
+    // 2. Tampered v1 record with invalid raw CRC fails CorruptCrc even if command_json would upgrade.
+    let mut bad_rec = JournalOpRecord { format_version: 1, seq: 1, crc32: v1_crc ^ 0xFFFF, command_json: v1_cmd.clone() };
+    assert!(matches!(bad_rec.upgrade_to_current(), Err(FormatError::CorruptCrc { .. })));
+
+    let mut tampered_mem = MemoryJournalBackend::new();
+    tampered_mem
+        .append_journal_line(
+            &serde_json::json!({
+                "format_version": 1,
+                "seq": 1,
+                "crc32": v1_crc ^ 1,
+                "command_json": v1_cmd,
+            })
+            .to_string(),
+        )
+        .unwrap();
+    tampered_mem.append_journal_line(&parsed_tail.to_ndjson_line().unwrap()).unwrap();
+    assert!(matches!(CrashRecoveryJournal::open_or_recover(tampered_mem, "migrator-bad", 10_000, 1_000), Err(FormatError::CorruptCrc { .. })));
+
+    // 3. Batch manifest v1 normalization upgrades inputs, commands, and exports while catching versions.
+    let mut manifest = serde_json::json!({
+        "schema": BATCH_SCHEMA_V1,
+        "inputs": [{ "csv": "in.csv", "sheetId": "s1", "tableKind": "xy", "subcolumnMode": "replicate", "decimalSeparator": "." }],
+        "commands": [
+            { "command": "graph.create", "params": { "id": "g1", "source_sheet_id": "s1" } },
+            { "method": "sheet.rename", "params": { "id": "s1", "new_title": "Dose" } }
+        ],
+        "exports": [{ "out": "out.pdf", "sheetId": "g1", "tabIndex": 0, "pdfVersion": "1.7", "ttfFont": "font.ttf" }]
+    });
+    let warnings = normalize_batch_manifest_v1_with_warnings(&mut manifest).unwrap();
+    assert!(warnings.len() >= 8, "expected warnings for all deprecated batch keys, got {warnings:?}");
+    assert_eq!(
+        manifest,
+        serde_json::json!({
+            "schema": BATCH_SCHEMA_V1,
+            "inputs": [{ "csv": "in.csv", "sheet": "s1", "kind": "xy", "subcolumn_mode": "replicate", "decimal_separator": "." }],
+            "commands": [
+                { "cmd": "graph.create", "params": { "sheet_id": "g1", "data_sheet_id": "s1" } },
+                { "cmd": "sheet.rename", "params": { "sheet_id": "s1", "title": "Dose" } }
+            ],
+            "exports": [{ "out": "out.pdf", "sheet": "g1", "tab_index": 0, "pdf_version": "1.7", "ttf_font": "font.ttf" }]
+        })
+    );
+    assert!(normalize_batch_manifest_v1(&mut manifest).is_ok());
+    assert!(normalize_batch_manifest_v1(&mut serde_json::json!({ "schema": "curvebook.batch.v2" })).is_err());
 }

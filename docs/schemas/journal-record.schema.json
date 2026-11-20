@@ -48,7 +48,7 @@
           "type": "integer"
         },
         "format_version": {
-          "maximum": 1,
+          "maximum": 2,
           "minimum": 1,
           "type": "integer"
         },

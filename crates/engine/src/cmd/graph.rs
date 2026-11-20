@@ -20,7 +20,7 @@ use super::helpers::{
     next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_result_sheet, validate_point_override_in_bounds,
 };
 use super::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::spellings::{self, first_present};
@@ -820,24 +820,21 @@ fn schema_graph_preflight_check() -> Value {
 }
 
 fn schema_graph_format_selected_points() -> Value {
-    let coord_schema = obj_schema(
+    let coord_schema = obj_schema_with_aliases(
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
             ("subcol", nullable_schema(int_schema("Optional zero-based replicate subcolumn index", Some(0), None))),
-            ("subcolumn", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
-            ("replicate", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
         ],
         &["series_index", "point_index"],
+        vec![("subcol", &["subcolumn", "replicate"])],
         false,
     );
-    let override_item_schema = obj_schema(
+    let override_item_schema = obj_schema_with_aliases(
         vec![
             ("series_index", int_schema("Zero-based series index", Some(0), None)),
             ("point_index", int_schema("Zero-based data point index within the series", Some(0), None)),
             ("subcol", nullable_schema(int_schema("Optional zero-based replicate subcolumn index", Some(0), None))),
-            ("subcolumn", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
-            ("replicate", nullable_schema(int_schema("Alias for `subcol`", Some(0), None))),
             ("color", nullable_schema(any_json_schema("Override accent/stroke color (hex, color name, [r,g,b], [r,g,b,a], or null to clear)"))),
             (
                 "symbol",
@@ -845,10 +842,8 @@ fn schema_graph_format_selected_points() -> Value {
                     "Override marker shape (circle, square, triangle_up, triangle_down, diamond, cross, plus, star, hexagon, or null)",
                 )),
             ),
-            ("shape", nullable_schema(str_schema("Alias for `symbol`"))),
             ("size_pt", nullable_schema(num_schema("Override positive marker size in points (> 0, or null to clear)", None, None))),
             ("border_width_pt", nullable_schema(num_schema("Override marker border width in points (>= 0, or null to clear)", None, None))),
-            ("stroke_width_pt", nullable_schema(num_schema("Alias for `border_width_pt`", None, None))),
             ("fill_color", nullable_schema(any_json_schema("Override marker fill color (or null to clear)"))),
             (
                 "fill_mode",
@@ -857,6 +852,7 @@ fn schema_graph_format_selected_points() -> Value {
             ("hidden", bool_schema("True hides this point marker while leaving data intact")),
         ],
         &["series_index", "point_index"],
+        vec![("subcol", &["subcolumn", "replicate"]), ("symbol", &["shape"]), ("border_width_pt", &["stroke_width_pt"])],
         false,
     );
 
@@ -875,13 +871,11 @@ fn schema_graph_format_selected_points() -> Value {
             ("points", array_schema("Target (series_index, point_index) points to format uniformly or clear", coord_schema, None, None)),
             ("color", nullable_schema(any_json_schema("Shared stroke/accent color for batch `points` (or null to clear)"))),
             ("symbol", nullable_schema(str_schema("Shared marker shape for batch `points` (or null to clear)"))),
-            ("shape", nullable_schema(str_schema("Alias for `symbol`"))),
             ("size_pt", nullable_schema(num_schema("Shared positive marker size in points for batch `points` (or null to clear)", None, None))),
             (
                 "border_width_pt",
                 nullable_schema(num_schema("Shared marker border width in points for batch `points` (or null to clear)", None, None)),
             ),
-            ("stroke_width_pt", nullable_schema(num_schema("Alias for `border_width_pt`", None, None))),
             ("fill_color", nullable_schema(any_json_schema("Shared marker fill color for batch `points` (or null to clear)"))),
             ("fill_mode", nullable_schema(str_schema("Shared marker fill mode for batch `points` (or null to clear)"))),
             ("hidden", bool_schema("Shared hidden flag applied across batch `points`")),
@@ -1090,15 +1084,13 @@ fn parse_optional_patch<T>(
     keys: &[&str],
     parser: fn(&Value) -> Result<T, EngineError>,
 ) -> Result<OptionalPatch<T>, EngineError> {
-    for key in keys {
-        if let Some(val) = obj.get(*key) {
-            if val.is_null() {
-                return Ok(OptionalPatch::Clear);
-            }
-            return Ok(OptionalPatch::Set(parser(val)?));
-        }
+    let Some((_, val)) = spellings::first_present_with_key(obj, keys) else {
+        return Ok(OptionalPatch::Keep);
+    };
+    if val.is_null() {
+        return Ok(OptionalPatch::Clear);
     }
-    Ok(OptionalPatch::Keep)
+    Ok(OptionalPatch::Set(parser(val)?))
 }
 
 fn parse_positive_f64(val: &Value) -> Result<f64, EngineError> {
@@ -2724,7 +2716,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
     let kind = opt_str(params, &["kind", "type"]).unwrap_or("text").trim().to_ascii_lowercase();
     match kind.as_str() {
         "text" | "text_box" | "textbox" => {
-            let markdown = opt_str(params, &["markdown", "text"])
+            let markdown = opt_str(params, &["text", "markdown"])
                 .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, "missing `text` or `markdown`"))?
                 .to_owned();
             let bounds_pt = parse_rect_pt(
@@ -2758,7 +2750,7 @@ fn parse_annotation_shorthand(doc: &ProjectDocument, params: &Value) -> Result<G
             let stroke_color = first_present(params, spellings::ANNOTATION_STROKE_COLOR).map(parse_rgba8).transpose()?.unwrap_or(Rgba8::BLACK);
             let fill_color = params.get("fill_color").filter(|v| !v.is_null()).map(parse_rgba8).transpose()?;
             let stroke_width_pt = params.get("stroke_width_pt").and_then(Value::as_f64).unwrap_or(1.0);
-            let dash = params.get("dash").map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
+            let dash = first_present(params, spellings::ANNOTATION_DASH).map(parse_line_dash_style).transpose()?.unwrap_or(LineDashStyle::Solid);
             Ok(GraphAnnotation::Shape { kind: shape_kind, bounds_pt, stroke_color, stroke_width_pt, dash, fill_color })
         }
         "table" | "embedded_result_table" | "result_table" => {
@@ -2829,6 +2821,13 @@ fn resolve_group_index(val: &Value, comparisons: &[PairwiseComparisonRecord]) ->
 }
 
 fn opt_str<'a>(params: &'a Value, keys: &[&str]) -> Option<&'a str> {
+    if let Some(&canonical) = keys.first() {
+        for &deprecated in &keys[1..] {
+            if deprecated != canonical && params.get(deprecated).and_then(Value::as_str).is_some() {
+                super::params::record_deprecated_alias(deprecated, canonical);
+            }
+        }
+    }
     keys.iter().find_map(|k| params.get(*k).and_then(Value::as_str))
 }
 

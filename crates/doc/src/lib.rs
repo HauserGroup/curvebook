@@ -28,6 +28,7 @@ pub mod ids;
 pub mod info;
 pub mod layout;
 pub mod links;
+pub mod param_spellings;
 pub mod project;
 pub mod result;
 pub mod schema;

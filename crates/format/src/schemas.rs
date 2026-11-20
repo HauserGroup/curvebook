@@ -113,6 +113,27 @@ fn set_property_pattern(def_node: &mut serde_json::Value, props: &[&str], patter
     }
 }
 
+fn mark_deprecated_aliases(def_node: &mut serde_json::Value, aliases: &[(&str, &[&str])]) {
+    let Some(obj) = def_node.as_object_mut() else {
+        return;
+    };
+    let mut alias_map = serde_json::Map::new();
+    for &(canonical, list) in aliases {
+        let items: Vec<serde_json::Value> = list.iter().map(|a| serde_json::Value::String((*a).to_owned())).collect();
+        alias_map.insert(canonical.to_owned(), serde_json::Value::Array(items));
+        if let Some(props) = obj.get_mut("properties").and_then(serde_json::Value::as_object_mut) {
+            for &alias in list {
+                if let Some(prop_obj) = props.get_mut(alias).and_then(serde_json::Value::as_object_mut) {
+                    prop_obj.insert(String::from("deprecated"), serde_json::Value::Bool(true));
+                }
+            }
+        }
+    }
+    if !alias_map.is_empty() {
+        obj.insert(String::from("x-deprecated-aliases"), serde_json::Value::Object(alias_map));
+    }
+}
+
 fn set_u64_max(node: &mut serde_json::Value, def_name: &str, field_name: &str) {
     if let Some(prop_obj) = node
         .as_object_mut()
@@ -243,10 +264,20 @@ pub fn batch_v1_schema() -> serde_json::Value {
     if let Some(defs) = value.get_mut("$defs").and_then(serde_json::Value::as_object_mut) {
         if let Some(input_def) = defs.get_mut("BatchInput") {
             insert_non_null_string_any_of(input_def, &["csv", "tsv", "path", "file"], false);
+            mark_deprecated_aliases(
+                input_def,
+                &[
+                    ("sheet", &["sheet_id", "sheetId"]),
+                    ("kind", &["table_kind", "tableKind"]),
+                    ("subcolumn_mode", &["subcolumnMode"]),
+                    ("decimal_separator", &["decimalSeparator"]),
+                ],
+            );
         }
         if let Some(cmd_def) = defs.get_mut("BatchCommand") {
             set_property_pattern(cmd_def, &["cmd", "command", "method"], r"\S");
             insert_non_null_string_any_of(cmd_def, &["cmd", "command", "method"], true);
+            mark_deprecated_aliases(cmd_def, &[("cmd", &["command", "method"])]);
         }
         if let Some(exp_def) = defs.get_mut("BatchExport") {
             insert_non_null_string_any_of(exp_def, &["out", "path"], false);
@@ -257,6 +288,10 @@ pub fn batch_v1_schema() -> serde_json::Value {
             );
             set_nullable_enum_property(exp_def, "pdf_version", &["1.4", "1.7"]);
             set_nullable_enum_property(exp_def, "pdfVersion", &["1.4", "1.7"]);
+            mark_deprecated_aliases(
+                exp_def,
+                &[("sheet", &["sheet_id", "sheetId"]), ("tab_index", &["tabIndex"]), ("pdf_version", &["pdfVersion"]), ("ttf_font", &["ttfFont"])],
+            );
         }
     }
     value

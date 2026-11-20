@@ -2398,7 +2398,7 @@ fn resolve_transform_shorthand(name: &str, params: &Value) -> Result<Option<Anal
             x_min: opt_f64_checked(params, &["x_min"])?.unwrap_or(-9.0),
             x_max: opt_f64_checked(params, &["x_max"])?.unwrap_or(-3.0),
             equation_id: opt_str_checked(params, &["equation_id"])?.unwrap_or("log_agonist_vs_response_4pl").to_owned(),
-            parameters: parse_named_params_vec(params.get("params"))?,
+            parameters: parse_named_params_vec(first_present(params, &["parameters", "params"]))?,
             noise: SimulationNoise::None,
         },
         "random_sample" | "sample" | "transform.random_sample" => {
@@ -2507,7 +2507,7 @@ fn resolve_other_stats_shorthand(name: &str, params: &Value) -> Result<Option<An
         "poisson_glm" | "multiple_poisson" => AnalysisKind::GeneralizedLinearModel(default_glm(GlmFamily::Poisson)),
         "pca" | "principal_components" => AnalysisKind::Multivariate(default_pca()),
         "correlation" | "correlation_matrix" => AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix {
-            spearman_rank: opt_bool_checked(params, &["spearman"])?.unwrap_or(false),
+            spearman_rank: opt_bool_checked(params, spellings::MULTIVARIATE_SPEARMAN)?.unwrap_or(false),
         }),
         "clustering" | "kmeans" => {
             let k_means_k = if let Some(v) = first_present(params, spellings::MULTIVARIATE_K_CLUSTERS) {
@@ -2996,7 +2996,7 @@ fn apply_transform_overrides(spec: &mut TransformAnalysisSpec, params: &Value) -
             if let Some(eq) = opt_str_checked(params, &["equation_id"])? {
                 *equation_id = eq.to_owned();
             }
-            if let Some(p_val) = params.get("parameters").or_else(|| params.get("params"))
+            if let Some(p_val) = first_present(params, &["parameters", "params"])
                 && !p_val.is_null()
                 && p_val.is_object()
             {
@@ -3766,38 +3766,32 @@ fn single_char(raw: &str, name: &str) -> Result<char, EngineError> {
 }
 
 fn opt_str_checked<'a>(params: &'a Value, keys: &[&str]) -> Result<Option<&'a str>, EngineError> {
-    for key in keys {
-        if let Some(val) = params.get(*key) {
-            if val.is_null() {
-                return Ok(None);
-            }
-            let s = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a string or null")))?;
-            return Ok(Some(s));
-        }
+    let Some((key, val)) = super::spellings::first_present_with_key(params, keys) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
     }
-    Ok(None)
+    let s = val.as_str().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a string or null")))?;
+    Ok(Some(s))
 }
 
 fn opt_bool_checked(params: &Value, keys: &[&str]) -> Result<Option<bool>, EngineError> {
-    for key in keys {
-        if let Some(val) = params.get(*key) {
-            if val.is_null() {
-                return Ok(None);
-            }
-            let b = val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a boolean or null")))?;
-            return Ok(Some(b));
-        }
+    let Some((key, val)) = super::spellings::first_present_with_key(params, keys) else {
+        return Ok(None);
+    };
+    if val.is_null() {
+        return Ok(None);
     }
-    Ok(None)
+    let b = val.as_bool().ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("`{key}` must be a boolean or null")))?;
+    Ok(Some(b))
 }
 
 fn opt_f64_checked(params: &Value, keys: &[&str]) -> Result<Option<f64>, EngineError> {
-    for key in keys {
-        if let Some(val) = params.get(*key) {
-            return parse_nullable_finite_f64(val, key);
-        }
+    match super::spellings::first_present_with_key(params, keys) {
+        Some((key, val)) => parse_nullable_finite_f64(val, key),
+        None => Ok(None),
     }
-    Ok(None)
 }
 
 fn parse_named_params_vec(val: Option<&Value>) -> Result<Vec<(String, f64)>, EngineError> {
@@ -3828,16 +3822,14 @@ fn apply_bool_opt_checked(params: &Value, keys: &[&str], target: &mut bool) -> R
 }
 
 fn opt_usize_checked(params: &Value, keys: &[&str]) -> Result<Option<(usize, bool)>, EngineError> {
-    for key in keys {
-        if let Some(v) = params.get(*key) {
-            if v.is_null() {
-                return Ok(Some((0, true)));
-            }
-            let idx = parse_usize_json_value(v, key)?;
-            return Ok(Some((idx, false)));
-        }
+    let Some((key, v)) = super::spellings::first_present_with_key(params, keys) else {
+        return Ok(None);
+    };
+    if v.is_null() {
+        return Ok(Some((0, true)));
     }
-    Ok(None)
+    let idx = parse_usize_json_value(v, key)?;
+    Ok(Some((idx, false)))
 }
 
 fn apply_usize_field(params: &Value, keys: &[&str], target: &mut usize) -> Result<(), EngineError> {
@@ -3858,11 +3850,8 @@ fn apply_opt_usize_field(params: &Value, keys: &[&str], target: &mut Option<usiz
 }
 
 fn apply_opt_f64_field(params: &Value, keys: &[&str], target: &mut Option<f64>) -> Result<(), EngineError> {
-    for key in keys {
-        if let Some(v) = params.get(*key) {
-            *target = parse_nullable_finite_f64(v, key)?;
-            return Ok(());
-        }
+    if let Some((key, v)) = super::spellings::first_present_with_key(params, keys) {
+        *target = parse_nullable_finite_f64(v, key)?;
     }
     Ok(())
 }
