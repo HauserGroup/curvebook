@@ -781,7 +781,12 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     use curvebook_format::{ZipWriter, open_project_file, save_project_file};
     use curvebook_ui_egui::interaction::ViewportMetrics;
 
-    fn click_drawn_file_menu_item(native: &mut CurveBookNativeApp, ctx: &egui::Context, item_id: &str) -> Result<(), String> {
+    fn click_drawn_file_submenu_item(
+        native: &mut CurveBookNativeApp,
+        ctx: &egui::Context,
+        submenu_id: Option<&str>,
+        item_id: &str,
+    ) -> Result<(), String> {
         let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 820.0));
         let step = |app_host: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
             let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app_host.step_ui(ui));
@@ -799,6 +804,16 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
             ],
         );
         step(native, Vec::new());
+        if let Some(sub_id) = submenu_id {
+            let sub_pos = native
+                .inspect_meta()
+                .find_by_widget_id(sub_id)
+                .ok_or_else(|| format!("missing `{sub_id}` inside popup.menu.file"))?
+                .clipped_rect
+                .center();
+            step(native, vec![egui::Event::PointerMoved(sub_pos)]);
+            step(native, Vec::new());
+        }
         let item_pos = native
             .inspect_meta()
             .find_by_widget_id(item_id)
@@ -815,6 +830,10 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
         );
         step(native, Vec::new());
         Ok(())
+    }
+
+    fn click_drawn_file_menu_item(native: &mut CurveBookNativeApp, ctx: &egui::Context, item_id: &str) -> Result<(), String> {
+        click_drawn_file_submenu_item(native, ctx, None, item_id)
     }
 
     let tmp_dir = std::env::temp_dir().join(format!("curvebook-r1023-file-dlg-{}", std::process::id()));
@@ -954,13 +973,13 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     assert!(!open_project_file(&save_as_path)?.data_sheets.is_empty());
 
     // Clicking File > Export > SVG / PDF / PNG opens SaveFile dialogs and writes valid artifacts.
-    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.svg")?;
+    click_drawn_file_submenu_item(&mut native, &ctx, Some("menu.file.export"), "menu.export.svg")?;
     assert!(fs::read_to_string(&svg_path)?.contains("<svg"));
 
-    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.pdf")?;
+    click_drawn_file_submenu_item(&mut native, &ctx, Some("menu.file.export"), "menu.export.pdf")?;
     assert!(fs::read(&pdf_path)?.starts_with(b"%PDF"));
 
-    click_drawn_file_menu_item(&mut native, &ctx, "menu.export.png")?;
+    click_drawn_file_submenu_item(&mut native, &ctx, Some("menu.file.export"), "menu.export.png")?;
     assert!(fs::read(&png_path)?.starts_with(&[0x89, b'P', b'N', b'G']));
 
     let recorded = adapter.requests();

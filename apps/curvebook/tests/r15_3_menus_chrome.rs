@@ -99,7 +99,7 @@ fn bounds_close(a: [f64; 4], b: [f64; 4], tol: f64) -> bool {
 
 #[test]
 fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Result<(), Box<dyn std::error::Error>> {
-    assert_eq!(NATIVE_MENU_BAR_TITLES.len(), 10);
+    assert_eq!(NATIVE_MENU_BAR_TITLES.len(), 8);
 
     for &loc in BETA_ACTIVE_LOCALES {
         let metrics = ViewportMetrics::new(1280.0, 800.0, 1.0);
@@ -172,7 +172,7 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
     // Verify helper mirror on UiApp itself.
     let mut app = UiApp::new();
     app.set_ui_backend(UiBackend::Egui);
-    assert_eq!(collect_egui_menubar_parity(&app).len(), 7);
+    assert_eq!(collect_egui_menubar_parity(&app).len(), 8);
     let mut helper_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
     let helper_win = helper_rt.open_window(None, ViewportMetrics::new(800.0, 600.0, 1.0))?;
     let _ = collect_menu_parity_entries(&helper_rt.window(helper_win)?.chrome_state());

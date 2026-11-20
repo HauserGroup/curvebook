@@ -25,7 +25,7 @@ use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{
     InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates,
 };
-use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, is_desktop_host_routed_command, menu_bar_tooltips};
+use curvebook_ui_egui::menus::{CuratedMenuNode, TOOLBAR_BUTTONS, curated_menu_bar, is_desktop_host_routed_command};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
@@ -96,11 +96,22 @@ pub struct DesktopMenuItem {
     pub beginner: String,
 }
 
-/// One localized top-level menu bar section (`File`, `Edit`, `Insert`, ...).
+/// Hierarchical menu node in a top-level [`DesktopMenuSection`].
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopMenuNode {
+    Action(DesktopMenuItem),
+    Separator,
+    Submenu { id: String, title: String, children: Vec<Self> },
+}
+
+/// One localized top-level menu bar section (`File`, `Edit`, `View`, ...).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DesktopMenuSection {
     pub menu_key: String,
     pub title: String,
+    #[serde(default)]
+    pub nodes: Vec<DesktopMenuNode>,
     pub items: Vec<DesktopMenuItem>,
 }
 
@@ -522,17 +533,12 @@ pub fn open_document_from_files(files: &[PathBuf]) -> Result<Session, String> {
     Ok(session)
 }
 
-fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
-    let raw_sections: Vec<MenuSectionTooltips> = menu_bar_tooltips(app);
-    raw_sections
+fn build_desktop_menu_nodes(nodes: Vec<CuratedMenuNode>, flat_items: &mut Vec<DesktopMenuItem>) -> Vec<DesktopMenuNode> {
+    nodes
         .into_iter()
-        .map(|sec| DesktopMenuSection {
-            menu_key: sec.menu_key.to_owned(),
-            title: sec.title.to_owned(),
-            items: sec
-                .items
-                .into_iter()
-                .map(|item| DesktopMenuItem {
+        .map(|node| match node {
+            CuratedMenuNode::Action(item) => {
+                let desktop_item = DesktopMenuItem {
                     command_id: item.command_id.to_owned(),
                     localized_label: item.localized_label.to_owned(),
                     shortcut: item.shortcut,
@@ -540,8 +546,26 @@ fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
                     enabled: item.enabled,
                     summary: item.summary.to_owned(),
                     beginner: item.beginner.to_owned(),
-                })
-                .collect(),
+                };
+                flat_items.push(desktop_item.clone());
+                DesktopMenuNode::Action(desktop_item)
+            }
+            CuratedMenuNode::Separator => DesktopMenuNode::Separator,
+            CuratedMenuNode::Submenu { id, title, children, .. } => {
+                let child_nodes = build_desktop_menu_nodes(children, flat_items);
+                DesktopMenuNode::Submenu { id: id.to_owned(), title, children: child_nodes }
+            }
+        })
+        .collect()
+}
+
+fn build_menu_sections(app: &UiApp) -> Vec<DesktopMenuSection> {
+    curated_menu_bar(app)
+        .into_iter()
+        .map(|sec| {
+            let mut items = Vec::new();
+            let nodes = build_desktop_menu_nodes(sec.nodes, &mut items);
+            DesktopMenuSection { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), nodes, items }
         })
         .collect()
 }
@@ -3558,7 +3582,7 @@ fn resolve_project_or_sheet_route(
         "edit.undo" | "edit.redo" | "file.new" | "project.new" | "project.inspect" | "project.recalculate" | "layout.create" => {
             Ok(Some(DesktopCommandRoute::EngineCommand { engine_command_id: base_cmd.to_owned(), params: json!({}) }))
         }
-        "project.open" | "file.open" => {
+        "project.open" | "file.open" | "file.open_unpacked_dir" => {
             Ok(Some(DesktopCommandRoute::UiDialogOpener { kind: DesktopDialogOpener::WelcomeOpenProject, target_sheet_id: None, query: None }))
         }
         "project.instantiateTemplate" => {

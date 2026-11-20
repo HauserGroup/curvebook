@@ -4547,7 +4547,7 @@ mod tests {
             .expect("click Locale dropdown item toggles to de");
         assert_eq!(session.host.app().locale, "de");
 
-        // Open `menu.analyze`: if `ui.result.applyRemediation` appears, it stays disabled (QOL-7 diagnostic-only).
+        // Open `menu.analyze`: curated Analyze dropdown surfaces `ui.analyze.open` and omits internal `ui.result.applyRemediation`.
         session
             .handle_event(WebBridgeEvent::ClickChromeNode {
                 node_id: String::from("menu.analyze"),
@@ -4555,10 +4555,12 @@ mod tests {
                 modifiers: KeyModifiers::default(),
             })
             .expect("open Analyze dropdown");
-        scroll_popup_until_node_visible(&mut session, "popup.menu.analyze", "menu.ui.result.applyRemediation");
-        let rem_node =
-            session.current_chrome_layout().find_node("menu.ui.result.applyRemediation").cloned().expect("applyRemediation node in menu.analyze");
-        assert!(!rem_node.enabled, "ui.result.applyRemediation must stay disabled in web dropdown");
+        scroll_popup_until_node_visible(&mut session, "popup.menu.analyze", "menu.ui.analyze.open");
+        assert!(session.current_chrome_layout().find_node("menu.ui.analyze.open").is_some(), "menu.ui.analyze.open missing in menu.analyze");
+        assert!(
+            session.current_chrome_layout().find_node("menu.ui.result.applyRemediation").is_none(),
+            "internal ui.result.applyRemediation must not clutter curated Analyze menu"
+        );
         session
             .handle_event(WebBridgeEvent::UiInput {
                 event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() },

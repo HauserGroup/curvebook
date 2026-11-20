@@ -1,9 +1,11 @@
 //! Menu definitions, customizable shortcuts, and desktop UI command metadata.
 
+pub mod menu_bar;
 pub mod shortcuts;
 pub mod tooltips;
 pub mod ui_commands;
 
+pub use menu_bar::{CuratedMenuNode, CuratedMenuSection, curated_menu_bar};
 pub use shortcuts::{
     ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, format_shortcut_for_os, format_shortcut_for_platform,
     normalize_shortcut_combo,

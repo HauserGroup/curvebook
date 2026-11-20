@@ -158,8 +158,8 @@ fn r10_23_undo_redo_shortcuts_cmd_and_ctrl_human_path() -> Result<(), String> {
     let edited_png = harness.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
     assert_ne!(edited_png, initial_png, "committed cell edit must update rendered egui screenshot");
 
-    // 2. Duplicate DataSheet via drawn Edit > Duplicate Sheet menu item (`data_sheets.len() == 2`).
-    harness.click("menu.edit")?;
+    // 2. Duplicate DataSheet via drawn Data > Duplicate Sheet menu item (`data_sheets.len() == 2`).
+    harness.click("menu.data")?;
     harness.click("menu.sheet.duplicate")?;
     assert_eq!(harness.app().document().data_sheets.len(), 2);
 

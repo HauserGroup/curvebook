@@ -214,45 +214,45 @@ fn r15_gui_30_inline_menus_synthesize_parameters_and_open_dialogs() -> Result<()
     let app = seed_xy_data_and_graph_app()?;
     let mut driver = make_shell_driver(app, 1440.0, 800.0);
 
-    // 1. Analyze > Analyze... (`ui.analyze.open` / `analysis.add`) opens Analyze modal with sheet_id bound.
+    // 1. Analyze > Analyze... (`ui.analyze.open`) opens Analyze modal with sheet_id bound.
     driver.click_widget_id("menu.analyze")?;
-    driver.click_widget_id("menu.analysis.add")?;
+    driver.click_widget_id("menu.ui.analyze.open")?;
     assert_eq!(driver.state().last_err, None);
     assert!(
         matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }),
-        "menu.analysis.add must open AnalyzeSheet modal, got {:?}",
+        "menu.ui.analyze.open must open AnalyzeSheet modal, got {:?}",
         driver.state().app.canvas_dialogs.active_dialog
     );
     driver.click_widget_id("modal.cancel")?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
 
-    // 2. Graph > Format Axes... (`graph.setAxes`) opens FormatAxes modal with gs-1.
+    // 2. Graph > Format Axes... (`ui.graph.axes.open`) opens FormatAxes modal with gs-1.
     driver.click_widget_id("menu.graph")?;
-    driver.click_widget_id("menu.graph.setAxes")?;
+    driver.click_widget_id("menu.ui.graph.axes.open")?;
     assert_eq!(driver.state().last_err, None);
     assert!(
         matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }),
-        "menu.graph.setAxes must open FormatAxes modal, got {:?}",
+        "menu.ui.graph.axes.open must open FormatAxes modal, got {:?}",
         driver.state().app.canvas_dialogs.active_dialog
     );
     driver.click_widget_id("modal.cancel")?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
 
-    // 3. Analyze/Data > Convert Table Archetype... (`table.convertArchetype`) opens ConvertArchetype modal.
-    driver.click_widget_id("menu.analyze")?;
-    driver.click_widget_id("menu.table.convertArchetype")?;
+    // 3. Data > Convert Table... (`ui.table.convertArchetype.open`) opens ConvertArchetype modal.
+    driver.click_widget_id("menu.data")?;
+    driver.click_widget_id("menu.ui.table.convertArchetype.open")?;
     assert_eq!(driver.state().last_err, None);
     assert!(
         matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::ConvertArchetype { .. }),
-        "menu.table.convertArchetype must open ConvertArchetype modal, got {:?}",
+        "menu.ui.table.convertArchetype.open must open ConvertArchetype modal, got {:?}",
         driver.state().app.canvas_dialogs.active_dialog
     );
     driver.click_widget_id("modal.cancel")?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
 
-    // 4. Edit `sheet.duplicate` synthesizes `sheet_id` and duplicates active sheet cleanly.
+    // 4. Data > `sheet.duplicate` synthesizes `sheet_id` and duplicates active sheet cleanly.
     let initial_data_count = driver.state().app.document().data_sheets.len();
-    driver.click_widget_id("menu.edit")?;
+    driver.click_widget_id("menu.data")?;
     driver.click_widget_id("menu.sheet.duplicate")?;
     assert_eq!(driver.state().last_err, None, "menu.sheet.duplicate must synthesize active sheet_id");
     assert_eq!(driver.state().app.document().data_sheets.len(), initial_data_count + 1);
@@ -340,7 +340,8 @@ fn r15_gui_31_checkpoints_modal_creates_restores_and_deletes_checkpoints() -> Re
     driver.run_settled();
 
     driver.click_widget_id("menu.file")?;
-    driver.click_widget_id("menu.project.restoreCheckpoint")?;
+    driver.hover_widget_id("menu.file.checkpoints")?;
+    driver.click_widget_id("menu.project.listCheckpoints")?;
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::Checkpoints);
 
     // 4. Restore checkpoint -> cell (0,0,0) reverts from 999.0 to 10.0.

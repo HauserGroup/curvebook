@@ -132,7 +132,7 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
   - Platform window caption clearance on macOS transparent titlebars (with double-click-to-zoom drag area on empty bar space).
   - **Home / Launcher Button** (`20 × 20 pt`, hit box `28 × 28 pt`): Toggles the Project Launcher / Template Hub without closing the current project.
   - **Menu Bar:** Routed to the native macOS menu bar via macOS-only `muda` (`cfg(target_os = "macos")`, `default-features = false`) while keeping the in-`egui` `MenuBar` active on Windows/Linux/FreeBSD, under `--in-window-menus`, and across `EguiHumanPathDriver`/`egui_kittest` runs with an automated `command_id`/enablement parity test:
-    `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Arrange` · `Window` · `Help`.
+    `File` · `Edit` · `View` · `Insert` · `Data` · `Analyze` · `Graph` · `Help`.
 - **Middle Cluster — Active Project Header / Optional Multi-Project Tabs:**
   - In **Beta**, renders the active project header and dirty-state indicator (`•`) for `apps/curvebook`'s single-session window; multi-project in-window document tabs (`.curvebook` tab strip, `+` new project, OS window drag-out, and `Window › Consolidate / Tile`) are optional post-Beta enhancements.
 - **Trailing Cluster (Right-to-Left Fit Solver):**

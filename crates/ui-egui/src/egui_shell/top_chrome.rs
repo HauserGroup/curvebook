@@ -16,7 +16,7 @@ use crate::egui_shell::{
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
-use crate::menus::{CommandTooltip, command_tooltip, format_shortcut_for_platform, menu_bar_tooltips};
+use crate::menus::{CommandTooltip, CuratedMenuNode, command_tooltip, curated_menu_bar, format_shortcut_for_platform};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, MultivariateSpec, SheetId, TableArchetype};
 
@@ -43,13 +43,13 @@ pub fn submenu_variants_for_command(command_id: &str) -> Option<&'static [(&'sta
     }
 }
 
-/// Extra desktop File menu actions surfaced whenever absent from `menu_bar_tooltips(app)`.
-pub const EXTRA_FILE_MENU_ACTIONS: &[(&str, &str, &[&str])] = &[
-    ("Open Unpacked Folder…", "file.open_unpacked_dir", &["file.open_unpacked_dir"]),
-    ("Save As…", "file.save_as", &["project.saveAs", "file.save_as"]),
-    ("Export PDF…", "export.pdf", &["export.pdf", "file.export_pdf"]),
-    ("Export PNG…", "export.png", &["export.png", "file.export_png"]),
-];
+/// Hierarchical node inside [`InWindowMenuSectionParity`] (`R15-GUI-34`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum InWindowMenuNode {
+    Action(InWindowMenuItemParity),
+    Separator,
+    Submenu { id: String, title: String, children: Vec<Self> },
+}
 
 /// Cross-backend parity item descriptor shared between Tier 1 inline `egui::MenuBar` and `muda`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -68,6 +68,7 @@ pub struct InWindowMenuSectionParity {
     pub menu_key: String,
     pub title: String,
     pub items: Vec<InWindowMenuItemParity>,
+    pub nodes: Vec<InWindowMenuNode>,
 }
 
 /// Canonical filtering & effective enablement check for menu items across all hosts.
@@ -82,28 +83,45 @@ pub fn effective_menu_item_enabled(command_id: &str, base_enabled: bool) -> bool
     base_enabled && command_id != "ui.result.applyRemediation"
 }
 
-/// Build canonical localized menu sections directly from [`menu_bar_tooltips`] for `egui::MenuBar`
-/// and desktop menu-bar parity checks.
-#[must_use]
-pub fn collect_in_window_menu_sections(app: &UiApp) -> Vec<InWindowMenuSectionParity> {
-    menu_bar_tooltips(app)
-        .into_iter()
-        .map(|sec| InWindowMenuSectionParity {
-            menu_key: sec.menu_key.to_owned(),
-            title: sec.title.to_owned(),
-            items: sec
-                .items
-                .into_iter()
-                .filter(|item| is_menu_item_visible(item.command_id))
-                .map(|item| InWindowMenuItemParity {
+fn convert_curated_nodes_for_window(nodes: Vec<CuratedMenuNode>, flat: &mut Vec<InWindowMenuItemParity>) -> Vec<InWindowMenuNode> {
+    let mut out = Vec::new();
+    for node in nodes {
+        match node {
+            CuratedMenuNode::Action(item) if is_menu_item_visible(item.command_id) => {
+                let entry = InWindowMenuItemParity {
                     command_id: item.command_id.to_owned(),
                     label: item.localized_label.to_owned(),
                     shortcut: item.shortcut,
                     summary: item.summary.to_owned(),
                     beginner: item.beginner.to_owned(),
                     enabled: effective_menu_item_enabled(item.command_id, item.enabled),
-                })
-                .collect(),
+                };
+                flat.push(entry.clone());
+                out.push(InWindowMenuNode::Action(entry));
+            }
+            CuratedMenuNode::Action(_) => {}
+            CuratedMenuNode::Separator => out.push(InWindowMenuNode::Separator),
+            CuratedMenuNode::Submenu { id, title, children, .. } => {
+                let converted = convert_curated_nodes_for_window(children, flat);
+                if !converted.is_empty() {
+                    out.push(InWindowMenuNode::Submenu { id: id.to_owned(), title, children: converted });
+                }
+            }
+        }
+    }
+    out
+}
+
+/// Build canonical localized hierarchical menu sections from [`curated_menu_bar`] for `egui::MenuBar`
+/// and desktop menu-bar parity checks.
+#[must_use]
+pub fn collect_in_window_menu_sections(app: &UiApp) -> Vec<InWindowMenuSectionParity> {
+    curated_menu_bar(app)
+        .into_iter()
+        .map(|sec| {
+            let mut items = Vec::new();
+            let nodes = convert_curated_nodes_for_window(sec.nodes, &mut items);
+            InWindowMenuSectionParity { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), items, nodes }
         })
         .collect()
 }
@@ -504,7 +522,7 @@ fn render_inline_menu_bar(
                         state.active_in_window_menu = Some(String::from("menu.bar.overflow"));
                         for sec in &sections[visible_count..] {
                             ui.menu_button(&sec.title, |ui| {
-                                render_section_menu_items(ui, mctx, &sec.menu_key, &sec.items, meta, intents);
+                                render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
                             });
                         }
                     });
@@ -567,7 +585,7 @@ fn render_top_menu_button(
         let mctx = MenuRenderCtx { app, locale: tokens.locale };
         egui::Popup::menu(&resp).show(|ui| {
             state.active_in_window_menu = Some(sec.menu_key.clone());
-            render_section_menu_items(ui, mctx, &sec.menu_key, &sec.items, meta, intents);
+            render_section_menu_nodes(ui, mctx, &sec.nodes, meta, intents);
             let popup_rect = ui.min_rect().intersect(ui.clip_rect()).intersect(meta.viewport_rect);
             if popup_rect.is_positive() {
                 let popup_id = ui.scope_id().with(("popup", &sec.menu_key));
@@ -621,49 +639,31 @@ fn record_menu_popup_response(ui: &egui::Ui, resp: &egui::Response, meta: &mut F
     );
 }
 
-fn render_section_menu_items(
+fn render_section_menu_nodes(
     ui: &mut egui::Ui,
     mctx: MenuRenderCtx<'_>,
-    menu_key: &str,
-    items: &[InWindowMenuItemParity],
+    nodes: &[InWindowMenuNode],
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    if matches!(menu_key, "menu.file" | "file") {
-        let is_primary_file_cmd =
-            |cmd: &str| matches!(cmd, "project.new" | "file.new" | "project.open" | "project.save" | "export.svg" | "export.pdf" | "export.png");
-        for item in items.iter().filter(|it| is_primary_file_cmd(&it.command_id)) {
-            render_menu_leaf_item(ui, mctx, item, meta, intents);
-        }
-        let mut added_extra = false;
-        for &(label, cmd, aliases) in EXTRA_FILE_MENU_ACTIONS {
-            if items.iter().any(|existing| aliases.contains(&existing.command_id.as_str())) {
-                continue;
-            }
-            if !added_extra {
+    for node in nodes {
+        match node {
+            InWindowMenuNode::Action(item) => render_menu_leaf_item(ui, mctx, item, meta, intents),
+            InWindowMenuNode::Separator => {
                 ui.separator();
-                added_extra = true;
             }
-            let resp = ui.button(label);
-            record_menu_popup_response(
-                ui,
-                &resp,
-                meta,
-                MenuPopupInspect { widget_id: &format!("menu.{cmd}"), label, command_id: Some(cmd), selected: None, enabled: true },
-            );
-            if resp.clicked() {
-                push_menu_command_intent(mctx.app, cmd, None, intents);
-                ui.close();
+            InWindowMenuNode::Submenu { id, title, children } => {
+                let sub = ui.menu_button(title, |ui| {
+                    render_section_menu_nodes(ui, mctx, children, meta, intents);
+                });
+                record_menu_popup_response(
+                    ui,
+                    &sub.response,
+                    meta,
+                    MenuPopupInspect { widget_id: id, label: title, command_id: None, selected: None, enabled: true },
+                );
             }
         }
-        ui.separator();
-        for item in items.iter().filter(|it| !is_primary_file_cmd(&it.command_id)) {
-            render_menu_leaf_item(ui, mctx, item, meta, intents);
-        }
-        return;
-    }
-    for item in items {
-        render_menu_leaf_item(ui, mctx, item, meta, intents);
     }
 }
 

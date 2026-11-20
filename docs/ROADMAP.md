@@ -595,9 +595,9 @@ Every fix proves itself through the rendered GUI with an `EguiHumanPathDriver` r
 - [x] **Single-drawn model equations (`R15-GUI-40`):** Keep `ChartScene` as sole renderer for `ModelEquation` annotations and convert the canvas HUD overlay into an invisible hit and AccessKit label target.
 
 ### R15.8 Curated 8-menu bar restructure
-Owner: open · Status: todo · Was: R15 GUI audit addendum 2026-11-20 (`R15-GUI-34`) · Depends on: [`R15.7`](#r157-post-cutover-gui-addendum-bugfixes--presentation-mode-removal-beta-gate) · Gate: **Beta**
+Owner: agent · Status: done — branch `refactor/R15.8-curated-menu-bar` · Was: R15 GUI audit addendum 2026-11-20 (`R15-GUI-34`) · Depends on: [`R15.7`](#r157-post-cutover-gui-addendum-bugfixes--presentation-mode-removal-beta-gate) (done) · Gate: **Beta**
 
-- [ ] **Declarative curated 8-menu bar (`R15-GUI-34`):** Replace flat registry dumps with a single hierarchical menu definition (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph` [with `Layout ▸`], `Help` and `File › Import ▸` / `Export ▸` / `Checkpoints ▸` submenus) shared between `egui::MenuBar` and native macOS `muda`, keeping `ui.invoke_menu` backwards-compatible and adding menu-hygiene parity tests.
+- [x] **Declarative curated 8-menu bar (`R15-GUI-34`):** Replace flat registry dumps with a single hierarchical menu definition (`File`, `Edit`, `View`, `Insert`, `Data`, `Analyze`, `Graph` [with `Layout ▸`], `Help` and `File › Import ▸` / `Export ▸` / `Checkpoints ▸` submenus) shared between `egui::MenuBar` and native macOS `muda`, keeping `ui.invoke_menu` backwards-compatible and adding menu-hygiene parity tests.
 
 ### R15.9 Section 10 visual design rules, hover contrast & broken-link glyph
 Owner: open · Status: todo · Was: [`gui-layout-spec.md`](planning/gui-layout-spec.md) §10 (PR #55) & `R15-GUI-37` · Depends on: [`R15.8`](#r158-curated-menu-bar) · Gate: **Beta**

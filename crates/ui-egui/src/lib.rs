@@ -64,10 +64,10 @@ pub use interaction::{
     UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
-    CommandTooltip, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry,
-    ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, format_shortcut_for_os,
-    format_shortcut_for_platform, is_desktop_host_routed_command, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id,
-    toolbar_tooltips,
+    CommandTooltip, CuratedMenuNode, CuratedMenuSection, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution,
+    ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec,
+    command_tooltip, curated_menu_bar, format_shortcut_for_os, format_shortcut_for_platform, is_desktop_host_routed_command, menu_bar_tooltips,
+    normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{

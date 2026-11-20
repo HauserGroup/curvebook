@@ -234,54 +234,14 @@ pub struct MenuSectionTooltips {
     pub items: Vec<CommandTooltip>,
 }
 
-fn menu_key_for_path(menu_path: &str) -> &'static str {
-    let head = menu_path.split(['/', '>']).next().map_or("", str::trim);
-    match head {
-        "File" => "menu.file",
-        "Edit" => "menu.edit",
-        "Insert" => "menu.insert",
-        "Analyze" | "Data" | "Change" | "Info" => "menu.analyze",
-        "Graph" | "Format" | "Draw" | "Arrange" => "menu.graph",
-        "Help" => "menu.help",
-        _ => "menu.view",
-    }
-}
-
-/// Collect all menu sections with localized section titles and per-item [`CommandTooltip`] metadata.
+/// Collect all menu sections with localized section titles and per-item [`CommandTooltip`] metadata
+/// derived directly from the curated 8-menu hierarchy ([`super::menu_bar::curated_menu_bar`]).
 #[must_use]
 pub fn menu_bar_tooltips(app: &UiApp) -> Vec<MenuSectionTooltips> {
-    let mut sections = vec![
-        MenuSectionTooltips { menu_key: "menu.file", title: app.tr("menu.file"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.edit", title: app.tr("menu.edit"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.insert", title: app.tr("menu.insert"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.analyze", title: app.tr("menu.analyze"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.graph", title: app.tr("menu.graph"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.view", title: app.tr("menu.view"), items: Vec::new() },
-        MenuSectionTooltips { menu_key: "menu.help", title: app.tr("menu.help"), items: Vec::new() },
-    ];
-
-    let gui_only = app.is_gui_only();
-    for spec in cmd::registry().specs() {
-        if gui_only && spec.menu_path.is_empty() {
-            continue;
-        }
-        let bucket = menu_key_for_path(spec.menu_path);
-        if let (Some(section), Some(tip)) = (sections.iter_mut().find(|s| s.menu_key == bucket), command_tooltip(app, spec.id)) {
-            section.items.push(tip);
-        }
-    }
-    for spec in UI_COMMANDS {
-        if gui_only
-            && matches!(spec.id, "ui.screenshot" | "ui.event.dispatch" | "ui.shortcut.set" | "ui.shortcut.reset" | "ui.brush.point" | "app.quit")
-        {
-            continue;
-        }
-        let (bucket, _) = ui_command_menu_info(spec.id);
-        if let (Some(section), Some(tip)) = (sections.iter_mut().find(|s| s.menu_key == bucket), command_tooltip(app, spec.id)) {
-            section.items.push(tip);
-        }
-    }
-    sections
+    super::menu_bar::curated_menu_bar(app)
+        .into_iter()
+        .map(|sec| MenuSectionTooltips { menu_key: sec.menu_key, title: sec.title, items: sec.into_flat_actions() })
+        .collect()
 }
 
 #[cfg(test)]
@@ -338,9 +298,9 @@ mod tests {
         )?;
         assert!(w == 480 && h == 320 && frame.len() > 8);
 
-        // Menu bar covers all 105 engine + 53 UI commands with non-empty summary & beginner guidance.
+        // Curated 8-menu bar exposes non-duplicate actions with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
-        assert_eq!(sections.len(), 7);
+        assert_eq!(sections.len(), 8);
         let mut seen = HashSet::new();
         for sec in &sections {
             assert!(!sec.title.is_empty());
@@ -350,7 +310,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 158);
+        assert!(seen.len() >= 60 && seen.len() <= 96, "expected curated menu size, got {}", seen.len());
         Ok(())
     }
 }

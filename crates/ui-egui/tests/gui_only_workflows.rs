@@ -98,7 +98,7 @@ fn eight_gui_actions_and_modal_guards_drive_live_ui_under_gui_only() -> TestRes 
     assert_eq!(snap.get("active_sheet_id").and_then(Value::as_str), Some("col-1"));
     assert_eq!(snap.get("gui_only").and_then(Value::as_bool), Some(true));
     let menus = snap.get("menus").and_then(Value::as_array).map_or(0, Vec::len);
-    assert_eq!(menus, 7, "all 7 top-level menus present in ui.inspect");
+    assert_eq!(menus, 8, "all 8 top-level menus present in ui.inspect");
 
     // 4. ui.type_text types scalar cell values and TSV blocks cleanly as Caller::Ui.
     dispatch_gui_action(&mut app, "ui.pointer_gesture", json!({ "action": "click", "widget_id": "grid.cell.0.0.0" }))

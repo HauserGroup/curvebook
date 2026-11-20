@@ -32,8 +32,9 @@ use crate::interaction::{
     KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, clear_modal_text_buffers, close_active_modal, dispatch_ui_event,
     sync_dialogs_on_sheet_switch, sync_edit_params_text_buffers, sync_format_axes_text_buffers,
 };
-use crate::menus::tooltips::menu_bar_tooltips;
+use crate::menus::tooltips::{CommandTooltip, command_tooltip};
 use crate::menus::ui_commands::UI_COMMANDS;
+use crate::menus::{CuratedMenuNode, CuratedMenuSection, curated_menu_bar};
 use crate::modal_predicates::{
     ControlEnablement, evaluate_dialog_button, evaluate_edit_params_tab, is_reml_mixed_effects_active, r1_paired_or_matched_allowed,
     r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed,
@@ -1869,7 +1870,7 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         return Err(bad_input("ui.invoke_menu requires `command_id` or `path`"));
     }
 
-    let sections = menu_bar_tooltips(app);
+    let sections = curated_menu_bar(app);
     let norm_path = path.as_deref().map(normalize_menu_token);
     if app.is_gui_only()
         && let Some(ref np) = norm_path
@@ -1882,23 +1883,8 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         .with_remediation("Use visible interactive workspace controls and dialogs under --gui-only."));
     }
 
-    let matched_tip = sections.iter().find_map(|sec| {
-        sec.items.iter().find(|tip| {
-            if let Some(cid) = explicit_cmd
-                && tip.command_id == cid
-            {
-                return true;
-            }
-            if let Some(ref target) = norm_path {
-                let by_section = normalize_menu_token(&format!("{}/{}", sec.title, tip.label));
-                let by_menu_path = normalize_menu_token(tip.menu_path);
-                let by_label = normalize_menu_token(tip.label);
-                let by_loc = normalize_menu_token(tip.localized_label);
-                return &by_section == target || &by_menu_path == target || &by_label == target || &by_loc == target;
-            }
-            false
-        })
-    });
+    let matched_tip =
+        find_curated_menu_tooltip(&sections, explicit_cmd, norm_path.as_deref()).or_else(|| find_fallback_menu_tooltip(app, norm_path.as_deref()));
 
     let cmd_id = if let Some(cid) = explicit_cmd
         && app.is_gui_only()
@@ -1969,6 +1955,72 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         "mutated": outcome.mutated,
         "payload": outcome.payload,
     }))
+}
+
+fn find_curated_menu_tooltip(sections: &[CuratedMenuSection], explicit_cmd: Option<&str>, norm_path: Option<&str>) -> Option<CommandTooltip> {
+    sections.iter().find_map(|sec| find_curated_nodes_tooltip(&sec.nodes, sec.title, sec.title, explicit_cmd, norm_path))
+}
+
+fn find_curated_nodes_tooltip(
+    nodes: &[CuratedMenuNode],
+    section_title: &str,
+    path_prefix: &str,
+    explicit_cmd: Option<&str>,
+    norm_path: Option<&str>,
+) -> Option<CommandTooltip> {
+    for node in nodes {
+        match node {
+            CuratedMenuNode::Action(tip) => {
+                if let Some(cid) = explicit_cmd
+                    && tip.command_id == cid
+                {
+                    return Some(tip.clone());
+                }
+                if let Some(target) = norm_path
+                    && curated_menu_tip_matches(tip, section_title, path_prefix, target)
+                {
+                    return Some(tip.clone());
+                }
+            }
+            CuratedMenuNode::Submenu { title, children, .. } => {
+                let next_prefix = format!("{path_prefix}/{title}");
+                if let Some(found) = find_curated_nodes_tooltip(children, section_title, &next_prefix, explicit_cmd, norm_path) {
+                    return Some(found);
+                }
+            }
+            CuratedMenuNode::Separator => {}
+        }
+    }
+    None
+}
+
+fn curated_menu_tip_matches(tip: &CommandTooltip, section_title: &str, path_prefix: &str, target: &str) -> bool {
+    let by_section = normalize_menu_token(&format!("{section_title}/{}", tip.label));
+    let by_section_loc = normalize_menu_token(&format!("{section_title}/{}", tip.localized_label));
+    let by_nested = normalize_menu_token(&format!("{path_prefix}/{}", tip.label));
+    let by_nested_loc = normalize_menu_token(&format!("{path_prefix}/{}", tip.localized_label));
+    let by_menu_path = normalize_menu_token(tip.menu_path);
+    let by_label = normalize_menu_token(tip.label);
+    let by_loc = normalize_menu_token(tip.localized_label);
+    by_section == target
+        || by_section_loc == target
+        || by_nested == target
+        || by_nested_loc == target
+        || by_menu_path == target
+        || by_label == target
+        || by_loc == target
+}
+
+fn find_fallback_menu_tooltip(app: &UiApp, norm_path: Option<&str>) -> Option<CommandTooltip> {
+    let target = norm_path?;
+    cmd::registry().specs().map(|s| s.id).chain(UI_COMMANDS.iter().map(|u| u.id)).filter_map(|id| command_tooltip(app, id)).find(|tip| {
+        let by_menu_path = normalize_menu_token(tip.menu_path);
+        let by_label = normalize_menu_token(tip.label);
+        let by_loc = normalize_menu_token(tip.localized_label);
+        let by_nested = normalize_menu_token(&format!("{}/{}", tip.menu_path, tip.label));
+        let by_bucket = tip.menu_path.split('/').next().map(|bucket| normalize_menu_token(&format!("{bucket}/{}", tip.label)));
+        by_menu_path == target || by_label == target || by_loc == target || by_nested == target || by_bucket.as_deref() == Some(target)
+    })
 }
 
 fn handle_switch_tab(app: &mut UiApp, params: &Value) -> Result<Value, EngineError> {
