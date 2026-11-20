@@ -257,7 +257,7 @@ fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::None => HybridModalSurface::None,
         ActiveDialog::About => HybridModalSurface::EguiAbout,
-        ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } => HybridModalSurface::EguiAppModal,
+        ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } | ActiveDialog::Feedback => HybridModalSurface::EguiAppModal,
         ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
         ActiveDialog::AnalyzeSheet { .. } => HybridModalSurface::EguiAnalyzeSheet,
         ActiveDialog::DuplicateAnalysisPrompt { .. } => HybridModalSurface::EguiDuplicateAnalysis,

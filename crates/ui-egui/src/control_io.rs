@@ -1231,6 +1231,7 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.print.open"
             | "file.print"
             | "app.about"
+            | "app.feedback"
     ) {
         return Ok(None);
     }
@@ -1306,6 +1307,29 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             Ok(Some(json!({
                 "dialog": "About",
                 "version": env!("CARGO_PKG_VERSION"),
+            })))
+        }
+        "app.feedback" => {
+            if let Some(raw_cat) = params.get("category").and_then(Value::as_str) {
+                let Some(parsed) = crate::feedback::FeedbackCategory::parse(raw_cat) else {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("unknown feedback category `{raw_cat}` (expected `bug`, `feature`, or `numerical`)"),
+                    )
+                    .into());
+                };
+                app.canvas_dialogs.feedback.category = parsed;
+            }
+            app.canvas_dialogs.feedback.status_message = None;
+            app.canvas_dialogs.feedback.copied_markdown = false;
+            app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
+            let preview = app.build_feedback_issue_url();
+            Ok(Some(json!({
+                "dialog": "Feedback",
+                "category": app.canvas_dialogs.feedback.category.slug(),
+                "template": app.canvas_dialogs.feedback.category.template_filename(),
+                "preview_url": preview.url,
+                "truncated": preview.truncated,
             })))
         }
         _ => Ok(None),
@@ -1445,7 +1469,7 @@ fn dispatch_command_by_id(
     }
     if app.is_gui_only()
         && !is_control_readonly_ui_command(command_id)
-        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "file.print")
+        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "app.feedback" || command_id == "file.print")
     {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
@@ -3801,6 +3825,7 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::InsertModelEquation { .. } => "InsertModelEquation",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
+        ActiveDialog::Feedback => "Feedback",
     }
 }
 

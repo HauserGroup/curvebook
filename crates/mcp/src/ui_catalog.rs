@@ -391,4 +391,12 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         summary: "Open the About CurveBook version and build information dialog.",
         beginner: "Displays the application version, bundled font status, and workspace licensing information.",
     },
+    UiCommandSpec {
+        id: "app.feedback",
+        label: "Send Feedback...",
+        shortcut: "",
+        params_doc: "{\"category\":\"optional bug|feature|numerical\"}",
+        summary: "Open the Send Feedback dialog to compose a prefilled GitHub issue or copy a Markdown report.",
+        beginner: "Draft a bug report, feature request, or numerical result report with optional environment diagnostics and open it on GitHub.",
+    },
 ];

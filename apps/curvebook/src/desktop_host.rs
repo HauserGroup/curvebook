@@ -1634,6 +1634,7 @@ pub struct DesktopHostRuntime {
     preferences_persist_hook: Option<PreferencesPersistHook>,
     open_file_dialog_hook: Option<OpenFileDialogHook>,
     file_dialog_adapter: Option<Arc<dyn NativeFileDialogAdapter>>,
+    url_opener: Option<Arc<dyn curvebook_ui_egui::PlatformUrlOpener>>,
 }
 
 impl DesktopHostRuntime {
@@ -1651,6 +1652,7 @@ impl DesktopHostRuntime {
             preferences_persist_hook: None,
             open_file_dialog_hook: None,
             file_dialog_adapter: None,
+            url_opener: None,
         }
     }
 
@@ -1658,6 +1660,15 @@ impl DesktopHostRuntime {
     /// external OS pasteboard changes or OS pasteboard failures).
     pub fn set_clipboard_adapter(&mut self, adapter: Box<dyn OsClipboardAdapter>) {
         self.clipboard_adapter = adapter;
+    }
+
+    /// Install a [`curvebook_ui_egui::PlatformUrlOpener`] across all current and future windows
+    /// owned by this runtime.
+    pub fn set_url_opener(&mut self, opener: Arc<dyn curvebook_ui_egui::PlatformUrlOpener>) {
+        for win in self.windows.values_mut() {
+            win.app.set_url_opener(Arc::clone(&opener));
+        }
+        self.url_opener = Some(opener);
     }
 
     /// Install a callback invoked before closing windows or when UI preference/shortcut state changes.
@@ -2115,6 +2126,9 @@ impl DesktopHostRuntime {
         let effective_viewport = if viewport.logical_width > 0.0 && viewport.logical_height > 0.0 { viewport } else { self.config.initial_viewport };
 
         let mut app = UiApp::from_session(session);
+        if let Some(opener) = self.url_opener.as_ref() {
+            app.set_url_opener(Arc::clone(opener));
+        }
         if let Err(err) = configure_app_overrides(&mut app, &self.config) {
             if let Some((_, journal, _)) = recovery {
                 abort_journal_lease_best_effort(journal);
@@ -2707,6 +2721,7 @@ impl DesktopHostRuntime {
                 if let Some(p) = archive_path {
                     session.set_file_path(Some(p), clean_archive);
                 }
+                let inherited_url_opener = self.url_opener.clone();
                 let win = self.window_mut(window_id)?;
                 let prev_locale = win.app.locale.clone();
                 let prev_theme = win.app.theme.mode;
@@ -2718,6 +2733,9 @@ impl DesktopHostRuntime {
                 let prev_gui_only = win.app.is_gui_only();
 
                 let mut next_app = UiApp::from_session(session);
+                if let Some(opener) = inherited_url_opener {
+                    next_app.set_url_opener(opener);
+                }
                 let _ = next_app.set_locale(normalize_beta_gui_locale(&prev_locale));
                 next_app.set_theme_mode(prev_theme);
                 next_app.set_ui_scale(prev_ui_scale);
@@ -3462,7 +3480,7 @@ fn resolve_host_or_ui_route(
                 "metrics": { "logical_width": 1024.0, "logical_height": 640.0, "scale_factor": 1.0 }
             }),
         })),
-        cmd if cmd.starts_with("ui.") || cmd == "app.about" => {
+        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.feedback" => {
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
         }
         _ => Ok(None),

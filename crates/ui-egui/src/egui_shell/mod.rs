@@ -1115,6 +1115,10 @@ pub enum UiIntent {
     OpenFindReplace { initial_query: Option<String> },
     CloseFindReplace,
     ExecuteFindReplace { replace_all: bool, find_query: String, replace_with: String, match_case: bool, match_entire_cell: bool },
+    UpdateFeedbackDraft(Box<crate::feedback::FeedbackDraft>),
+    OpenFeedbackOnGitHub,
+    CopyFeedbackMarkdown,
+    ResetFeedbackDraft,
 }
 
 /// Outcome produced when committing a buffered [`UiIntent`].
@@ -1604,6 +1608,26 @@ impl PendingUiIntents {
         });
     }
 
+    /// Persist updated `FeedbackDraft` fields cleanly on settlement.
+    pub fn push_update_feedback_draft(&mut self, draft: crate::feedback::FeedbackDraft) {
+        self.queue.push(UiIntent::UpdateFeedbackDraft(Box::new(draft)));
+    }
+
+    /// Open the prefilled GitHub new-issue URL for the current feedback draft.
+    pub fn push_open_feedback_on_github(&mut self) {
+        self.queue.push(UiIntent::OpenFeedbackOnGitHub);
+    }
+
+    /// Copy the untruncated Markdown feedback report to the configured clipboard adapter.
+    pub fn push_copy_feedback_markdown(&mut self) {
+        self.queue.push(UiIntent::CopyFeedbackMarkdown);
+    }
+
+    /// Clear user-entered feedback form fields while keeping category and diagnostics preference.
+    pub fn push_reset_feedback_draft(&mut self) {
+        self.queue.push(UiIntent::ResetFeedbackDraft);
+    }
+
     /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
     ///
     /// When `will_discard` is `true`, clears the buffer without executing any mutations so
@@ -1910,7 +1934,11 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::ResolveUnsavedChanges { .. }
         | UiIntent::OpenFindReplace { .. }
         | UiIntent::CloseFindReplace
-        | UiIntent::ExecuteFindReplace { .. } => apply_wave4_app_modal_intent(app, intent),
+        | UiIntent::ExecuteFindReplace { .. }
+        | UiIntent::UpdateFeedbackDraft(_)
+        | UiIntent::OpenFeedbackOnGitHub
+        | UiIntent::CopyFeedbackMarkdown
+        | UiIntent::ResetFeedbackDraft => apply_wave4_app_modal_intent(app, intent),
         _ => Ok(UiIntentOutcome::ShellUpdated),
     }
 }
@@ -2275,6 +2303,22 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::ExecuteFindReplace { replace_all, find_query, replace_with, match_case, match_entire_cell } => {
             return apply_find_replace_on_active_sheet(app, replace_all, &find_query, &replace_with, match_case, match_entire_cell);
+        }
+        UiIntent::UpdateFeedbackDraft(draft) => {
+            app.canvas_dialogs.feedback = *draft;
+        }
+        UiIntent::OpenFeedbackOnGitHub => {
+            if let Err(err) = app.open_feedback_on_github() {
+                app.canvas_dialogs.feedback.status_message = Some(format!("Could not open GitHub issue form: {err}"));
+            }
+        }
+        UiIntent::CopyFeedbackMarkdown => {
+            if let Err(err) = app.copy_feedback_markdown() {
+                app.canvas_dialogs.feedback.status_message = Some(format!("Could not copy Markdown report: {err}"));
+            }
+        }
+        UiIntent::ResetFeedbackDraft => {
+            app.canvas_dialogs.feedback.clear_fields();
         }
         _ => {}
     }

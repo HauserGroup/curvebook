@@ -1561,7 +1561,7 @@ fn resolve_mapped_ui_or_engine_route(app: &UiApp, cmd_id: &str) -> WebCommandRou
         return WebCommandRoute::UiCommand { command_id: ui_cmd.to_owned(), params: contextual_command_params(app, ui_cmd) };
     }
     if curvebook_ui_egui::UI_COMMANDS.iter().any(|s| s.id == cmd_id)
-        || matches!(cmd_id, "ui.print.open" | "app.about" | "ui.palette.open" | "ui.editParams.open")
+        || matches!(cmd_id, "ui.print.open" | "app.about" | "app.feedback" | "ui.palette.open" | "ui.editParams.open")
     {
         return WebCommandRoute::UiCommand { command_id: cmd_id.to_owned(), params: contextual_command_params(app, cmd_id) };
     }

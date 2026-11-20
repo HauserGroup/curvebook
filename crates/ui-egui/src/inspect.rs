@@ -2330,6 +2330,7 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
             (insp_tr(app, "inspector.command_palette", "Command Palette (Cmd+K)"), None)
         }
         ActiveDialog::About => (insp_tr(app, "menu.help.about", "About CurveBook"), None),
+        ActiveDialog::Feedback => (insp_tr(app, "menu.help.feedback", "Send Feedback..."), None),
         _ => ("", None),
     };
     (
@@ -2381,6 +2382,7 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::Print { .. } => String::from("print"),
         ActiveDialog::CommandPalette => String::from("command_palette"),
         ActiveDialog::About => String::from("about"),
+        ActiveDialog::Feedback => String::from("feedback"),
     }
 }
 

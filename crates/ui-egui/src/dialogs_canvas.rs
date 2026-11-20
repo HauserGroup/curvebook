@@ -111,6 +111,7 @@ pub enum ActiveDialog {
     },
     CommandPalette,
     About,
+    Feedback,
 }
 
 /// Active non-modal inspector docked on the right side of the workspace.
@@ -7498,6 +7499,8 @@ pub struct CanvasDialogState {
     pub simulate_distributions: SimulateDistributionsDialogState,
     #[serde(default)]
     pub insert_model_equation: InsertModelEquationDialogState,
+    #[serde(default)]
+    pub feedback: crate::feedback::FeedbackDraft,
 }
 
 /// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).

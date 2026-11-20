@@ -1387,11 +1387,14 @@ fn viewport_icon_for_launch() -> egui::IconData {
 /// # Errors
 /// Returns an error if no open window is present or `eframe` window startup fails.
 pub fn run_native_desktop_with_control(
-    runtime: DesktopHostRuntime,
+    mut runtime: DesktopHostRuntime,
     extra_ttf: Option<Vec<u8>>,
     on_exit_cleanup: CleanupHook,
     control: Option<LiveControlChannel>,
 ) -> Result<(), String> {
+    if control.is_none() {
+        runtime.set_url_opener(std::sync::Arc::new(curvebook_ui_egui::SystemPlatformUrlOpener::live()));
+    }
     let primary_window_id = runtime
         .focused_window_id()
         .or_else(|| runtime.window_ids().into_iter().next())

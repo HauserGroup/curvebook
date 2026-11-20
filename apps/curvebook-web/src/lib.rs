@@ -76,6 +76,43 @@ impl Default for WebWorkspaceHost {
     }
 }
 
+/// Zero-telemetry browser URL opener restricted strictly to allowlisted CurveBook GitHub issue URLs.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct WebPlatformUrlOpener;
+
+impl curvebook_ui_egui::PlatformUrlOpener for WebPlatformUrlOpener {
+    fn open_external_url(&self, url: &str) -> Result<curvebook_ui_egui::OsAdapterStatus, String> {
+        curvebook_ui_egui::validate_github_issue_url(url)?;
+        #[cfg(target_arch = "wasm32")]
+        {
+            let Some(win) = web_sys::window() else {
+                return Ok(curvebook_ui_egui::OsAdapterStatus::unavailable("web-window", "browser Window object unavailable"));
+            };
+            match win.open_with_url_and_target_and_features(url, "_blank", "noopener,noreferrer") {
+                Ok(_) => Ok(curvebook_ui_egui::OsAdapterStatus {
+                    available: true,
+                    availability: curvebook_ui_egui::OsAdapterAvailability::Submitted,
+                    backend: String::from("web-window-open"),
+                    detail: String::from("opened GitHub issue form in a new browser tab"),
+                    text: Some(url.to_owned()),
+                    job_id: None,
+                }),
+                Err(_) => Ok(curvebook_ui_egui::OsAdapterStatus::unavailable(
+                    "web-window-open",
+                    "browser blocked opening a new tab; use Copy Markdown to paste into GitHub",
+                )),
+            }
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            Ok(curvebook_ui_egui::OsAdapterStatus::unavailable(
+                "web-window-open",
+                "native test build cannot invoke browser window.open; use Copy Markdown or install a stub opener",
+            ))
+        }
+    }
+}
+
 impl WebWorkspaceHost {
     /// Construct a fresh browser workspace host with bundled fonts installed and an empty session.
     #[must_use]
@@ -90,6 +127,7 @@ impl WebWorkspaceHost {
         let _ = curvebook_ui_egui::bundled_fonts_enabled();
         let _ = curvebook_format::EXTENSION;
         let mut app = UiApp::new();
+        app.set_url_opener(std::sync::Arc::new(WebPlatformUrlOpener));
         app.sync_views();
         Self { app, viewport, format_tag: String::from("empty"), warnings: Vec::new() }
     }

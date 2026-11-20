@@ -2348,7 +2348,7 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
             }
             app.canvas_dialogs.print.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
-        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::None => {
+        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
             if !fields.is_empty() {
                 return Err(bad_input("active dialog does not accept field patches"));
             }
@@ -2493,7 +2493,7 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
         }
         ActiveDialog::CommandPalette => commit_command_palette_action(app),
         ActiveDialog::ConstantHookPicker { .. } => commit_single_intent(app, app.canvas_dialogs.hook_picker.commit_intent(), true),
-        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::None => {
+        ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
             app.canvas_dialogs.close_dialog();
             Ok(json!({ "action": action, "closed": true }))
         }
