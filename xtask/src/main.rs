@@ -26,6 +26,7 @@ mod secrets;
 mod stats;
 mod status;
 mod telemetry;
+mod text_decode;
 mod ui_commands;
 mod version;
 mod web_fonts;
