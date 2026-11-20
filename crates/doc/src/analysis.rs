@@ -9,7 +9,10 @@ use crate::TableKind;
 use crate::error::{ConfidenceLevel, DocError, validate_confidence_level, validate_title};
 use crate::ids::{HookSource, SheetId};
 
+pub mod descriptor;
 mod finite;
+
+pub use descriptor::*;
 
 const fn default_col_b() -> usize {
     1
@@ -1936,21 +1939,6 @@ impl AnalysisKind {
     #[must_use]
     pub fn is_compatible_with(&self, table_kind: TableKind) -> bool {
         match self {
-            Self::Transform(_) => true,
-            Self::DescriptiveStats(_) | Self::OutlierDetection(_) => {
-                matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
-            }
-            Self::TwoGroupComparison(_) | Self::OneWayAnova(_) | Self::RocCurve(_) => {
-                matches!(table_kind, TableKind::Column | TableKind::MultipleVariables)
-            }
-            Self::BlandAltman(_) | Self::PassingBablok(_) => {
-                matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::MultipleVariables)
-            }
-            Self::MultipleRowTTests(_) => {
-                matches!(table_kind, TableKind::Grouped | TableKind::Xy | TableKind::Column | TableKind::MultipleVariables)
-            }
-            Self::FactorialAnova(_) => matches!(table_kind, TableKind::Grouped | TableKind::MultipleVariables),
-            Self::NestedComparison(_) => matches!(table_kind, TableKind::Nested),
             Self::Contingency(s) => match table_kind {
                 TableKind::Contingency => true,
                 TableKind::PartsOfWhole => {
@@ -1959,17 +1947,7 @@ impl AnalysisKind {
                 TableKind::Column => matches!(s.method, ContingencyMethod::ExactBinomial),
                 _ => false,
             },
-            Self::Survival(_) => matches!(table_kind, TableKind::Survival | TableKind::MultipleVariables),
-            Self::GeneralizedLinearModel(_) | Self::Multivariate(_) => {
-                matches!(table_kind, TableKind::MultipleVariables | TableKind::Xy | TableKind::Column)
-            }
-            Self::LinearRegression(_) | Self::NonlinearRegression(_) => {
-                matches!(table_kind, TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
-            }
-            Self::PValueStack(_) => {
-                matches!(table_kind, TableKind::Column | TableKind::Xy | TableKind::Grouped | TableKind::MultipleVariables)
-            }
-            Self::PowerAnalysis(_) => true,
+            other => other.descriptor().supports_table_kind(table_kind),
         }
     }
 

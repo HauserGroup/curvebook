@@ -14,6 +14,7 @@ use std::collections::BTreeSet;
 use std::fmt::Write as _;
 use std::path::Path;
 
+use curvebook_doc::analysis::{ALL_ANALYSIS_DESCRIPTORS, descriptor_for_kind};
 use curvebook_doc::{
     AnalysisKind, AxisScale, DiagnosticPlotKind, ErrorCode, FitMethod, FramePreset, GraphKind, LogitDomain, ParameterScope, STANDARD_INFO_KEYS,
     SubcolumnMode, TableKind, WeightingScheme,
@@ -103,104 +104,14 @@ pub fn generate_registry_pages(root: &Path, defined_analysis_anchors: &BTreeSet<
 /// Canonical slug for any [`AnalysisKind`] matching `@r12-methods-ref`'s `{#analysis-<slug>}` contract.
 #[must_use]
 pub const fn analysis_kind_slug(kind: &AnalysisKind) -> &'static str {
-    match kind {
-        AnalysisKind::Transform(_) => "transform",
-        AnalysisKind::DescriptiveStats(_) => "descriptive-stats",
-        AnalysisKind::OutlierDetection(_) => "outlier-detection",
-        AnalysisKind::TwoGroupComparison(_) => "two-group-comparison",
-        AnalysisKind::BlandAltman(_) => "bland-altman",
-        AnalysisKind::MultipleRowTTests(_) => "multiple-row-t-tests",
-        AnalysisKind::PassingBablok(_) => "passing-bablok",
-        AnalysisKind::OneWayAnova(_) => "one-way-anova",
-        AnalysisKind::FactorialAnova(_) => "factorial-anova",
-        AnalysisKind::NestedComparison(_) => "nested-comparison",
-        AnalysisKind::Contingency(_) => "contingency",
-        AnalysisKind::Survival(_) => "survival",
-        AnalysisKind::RocCurve(_) => "roc-curve",
-        AnalysisKind::GeneralizedLinearModel(_) => "generalized-linear-model",
-        AnalysisKind::Multivariate(_) => "multivariate",
-        AnalysisKind::LinearRegression(_) => "linear-regression",
-        AnalysisKind::NonlinearRegression(_) => "nonlinear-regression",
-        AnalysisKind::PValueStack(_) => "p-value-stack",
-        AnalysisKind::PowerAnalysis(_) => "power-analysis",
-    }
+    descriptor_for_kind(kind).slug
 }
 
-/// All 19 [`AnalysisKind`] metadata tuples `(slug, title, description)`.
+/// All [`AnalysisKind`] metadata tuples `(slug, title, description)` sourced from
+/// [`ALL_ANALYSIS_DESCRIPTORS`].
 #[must_use]
 pub fn all_analysis_kinds_meta() -> Vec<(&'static str, &'static str, &'static str)> {
-    // Compile-time exhaustive match guard referencing `analysis_kind_slug`: if a new variant is
-    // added to `AnalysisKind`, `analysis_kind_slug` above will fail to compile until documented.
-    let _guard: fn(&AnalysisKind) -> &'static str = analysis_kind_slug;
-    vec![
-        (
-            "transform",
-            "Transforms & Data Manipulation",
-            "Mathematical transforms, normalization, baseline subtraction, transpose, row pruning, simulation, and random sampling.",
-        ),
-        (
-            "descriptive-stats",
-            "Descriptive Statistics & Normality",
-            "Univariate location, spread, quantiles, normality battery, and one-sample location tests.",
-        ),
-        (
-            "outlier-detection",
-            "Outlier Detection (Grubbs / ROUT)",
-            "Single-outlier Grubbs ESD and multi-outlier ROUT false-discovery-rate detection.",
-        ),
-        (
-            "two-group-comparison",
-            "Two-Group & One-Sample Comparisons",
-            "Parametric t-tests (Student, Welch, paired, ratio, lognormal) and nonparametric rank/sign tests.",
-        ),
-        ("bland-altman", "Bland–Altman Method Comparison", "Method-comparison bias and 95% limits of agreement."),
-        ("multiple-row-t-tests", "Multiple Row-by-Row Two-Group Tests", "Row-wise parametric or nonparametric comparisons with FWER/FDR correction."),
-        ("passing-bablok", "Passing–Bablok Regression", "Nonparametric errors-in-variables linear method-comparison regression."),
-        (
-            "one-way-anova",
-            "One-Way ANOVA & Nonparametric Equivalents",
-            "Ordinary, Brown–Forsythe/Welch, repeated-measures/REML, Kruskal–Wallis, and Friedman ANOVA with post-hoc multiple comparisons.",
-        ),
-        (
-            "factorial-anova",
-            "Two-Way, Three-Way & Factorial ANOVA",
-            "Multi-factor ANOVA / REML mixed models with main effects, interactions, and simple-effects slicing.",
-        ),
-        ("nested-comparison", "Nested t-Test & Nested One-Way ANOVA", "Hierarchical nested random-effects / mixed-model comparisons."),
-        (
-            "contingency",
-            "Contingency & Proportion Tests",
-            "Chi-square, Fisher's exact, chi-square for trend, McNemar, Cohen's kappa, and exact binomial tests.",
-        ),
-        (
-            "survival",
-            "Survival Analysis & Cox Regression",
-            "Kaplan–Meier survival curves, log-rank/Gehan-Breslow-Wilcoxon tests, and Cox proportional hazards regression.",
-        ),
-        (
-            "roc-curve",
-            "ROC Curve Analysis",
-            "Receiver operating characteristic curves, DeLong/Hanley–McNeil AUC confidence intervals, Youden cutoffs, and AUC comparison.",
-        ),
-        (
-            "generalized-linear-model",
-            "Generalized Linear Models (GLM)",
-            "Multiple linear, logistic, and Poisson regression with link diagnostics and likelihood tests.",
-        ),
-        (
-            "multivariate",
-            "Multivariate Analysis (PCA, Correlation, Clustering, MI)",
-            "Principal component analysis, Pearson/Spearman correlation matrices, k-means/hierarchical clustering, and Rubin multiple imputation.",
-        ),
-        ("linear-regression", "Simple & Deming Linear Regression", "Model I OLS, ANCOVA slope/intercept comparison, and Model II Deming regression."),
-        (
-            "nonlinear-regression",
-            "Nonlinear Regression & Custom Equations",
-            "Trust-region Levenberg–Marquardt, Poisson deviance, Cauchy robust, and ROUT curve fitting with DSL/ODE support.",
-        ),
-        ("p-value-stack", "P-Value Stack Multiplicity Adjustment", "Standalone FWER and FDR adjustment over a pre-computed column of P values."),
-        ("power-analysis", "Statistical Power & Sample Size", "Prospective power, sample-size, and minimum-detectable-effect calculations."),
-    ]
+    ALL_ANALYSIS_DESCRIPTORS.iter().map(|desc| (desc.slug, desc.title, desc.description)).collect()
 }
 
 fn kebab_id(raw: &str) -> String {
