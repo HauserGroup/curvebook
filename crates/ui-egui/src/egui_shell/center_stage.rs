@@ -316,30 +316,27 @@ pub fn render_center_stage(
     if mode == CenterStageMode::Gallery {
         report.primary_rect_pt = Some(work_rect);
         report.handled_natively = true;
-        render_portfolio_gallery(ui, app, views, work_rect, ctx_in.tokens, stage_enabled, meta, intents, &mut report);
+        let mut io = StageFrameIo { views, meta, intents, report: &mut report };
+        render_portfolio_gallery(ui, app, work_rect, ctx_in.tokens, stage_enabled, &mut io);
         draw_focus_ring_if_active(ui, work_rect, ctx_in.tokens, ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid);
         render_progress_modal_if_open(ui, app, views, ctx_in.tokens, meta);
         return report;
     }
 
     if split_active {
-        render_split_stage(ui, app, views, &ctx_in, work_rect, stage_enabled, meta, intents, &mut report);
+        let mut io = StageFrameIo { views, meta, intents, report: &mut report };
+        render_split_stage(ui, app, &ctx_in, work_rect, stage_enabled, &mut io);
     } else {
         report.primary_rect_pt = Some(work_rect);
         let mut pane_ui = ui.new_child(egui::UiBuilder::new().max_rect(work_rect).layout(egui::Layout::top_down(egui::Align::Min)));
         pane_ui.set_clip_rect(work_rect);
+        let mut io = StageFrameIo { views, meta, intents, report: &mut report };
         render_single_pane_mode(
             &mut pane_ui,
             app,
-            views,
-            mode,
-            active_sheet_id.as_ref(),
-            SplitPaneSlot::Primary,
+            SinglePaneTarget { mode, sheet_id: active_sheet_id.as_ref(), slot: SplitPaneSlot::Primary, enabled: stage_enabled },
             &ctx_in,
-            stage_enabled,
-            meta,
-            intents,
-            &mut report,
+            &mut io,
         );
         draw_focus_ring_if_active(
             ui,
@@ -351,7 +348,14 @@ pub fn render_center_stage(
 
     if let (Some(banner), Some(b_rect)) = (banner_kind, banner_rect) {
         report.diagnostic_banner_rect_pt = Some(b_rect);
-        render_bottom_banner(ui, app, views, &banner, b_rect, ctx_in.tokens, stage_enabled, meta, intents);
+        render_bottom_banner(
+            ui,
+            app,
+            views,
+            BottomBannerSpec { kind: &banner, rect: b_rect, tokens: ctx_in.tokens, enabled: stage_enabled },
+            meta,
+            intents,
+        );
     }
 
     if let Some(sheet_id) = active_sheet_id.as_ref().filter(|_| !matches!(mode, CenterStageMode::Welcome | CenterStageMode::Gallery)) {
@@ -361,12 +365,14 @@ pub fn render_center_stage(
                 ui,
                 app,
                 views,
-                sheet_id,
-                notes,
-                work_rect,
-                ctx_in.tokens,
-                stage_enabled,
-                ctx_in.focused_pane == ActiveWorkspacePane::FloatingNotes,
+                FloatingNotesSpec {
+                    sheet_id,
+                    notes,
+                    stage_bounds: work_rect,
+                    tokens: ctx_in.tokens,
+                    enabled: stage_enabled,
+                    notes_pane_focused: ctx_in.focused_pane == ActiveWorkspacePane::FloatingNotes,
+                },
                 meta,
                 intents,
             );
@@ -495,18 +501,50 @@ fn resolve_effective_split_ratio(app: &UiApp, state: &mut CenterStageEguiState) 
     state.split_ratio_override.unwrap_or(app.split.ratio as f32).clamp(MIN_SPLIT_RATIO, MAX_SPLIT_RATIO)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_split_stage(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    views: &mut EguiShellViewState,
-    ctx_in: &CenterStageContext<'_>,
-    work_rect: Rect,
+struct StageFrameIo<'a> {
+    views: &'a mut EguiShellViewState,
+    meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
+    report: &'a mut CenterStageFrameReport,
+}
+
+struct SplitPaneSpec<'a> {
+    slot: SplitPaneSlot,
+    pane_rect: Rect,
+    sheet_id: Option<&'a SheetId>,
+    other_sheet_id: Option<&'a SheetId>,
+    locale: &'a str,
     enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    report: &mut CenterStageFrameReport,
-) {
+    focused: bool,
+}
+
+struct SplitPaneHeaderSpec<'a> {
+    slot: SplitPaneSlot,
+    header_rect: Rect,
+    sheet_id: Option<&'a SheetId>,
+    other_sheet_id: Option<&'a SheetId>,
+    locale: &'a str,
+    tokens: &'a Tokens,
+    enabled: bool,
+    focused: bool,
+}
+
+struct SinglePaneTarget<'a> {
+    mode: CenterStageMode,
+    sheet_id: Option<&'a SheetId>,
+    slot: SplitPaneSlot,
+    enabled: bool,
+}
+
+struct SplitSheetPreviewSpec<'a> {
+    ds: &'a DataSheet,
+    slot: SplitPaneSlot,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
+fn render_split_stage(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, work_rect: Rect, enabled: bool, io: &mut StageFrameIo<'_>) {
+    let StageFrameIo { views, meta, intents, report } = io;
     let doc = app.document();
     let orientation = if work_rect.width() >= 720.0 { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
     let mut ratio = resolve_effective_split_ratio(app, &mut views.center_stage);
@@ -579,72 +617,66 @@ fn render_split_stage(
     let stage_has_focus = ctx_in.focused_pane == ActiveWorkspacePane::MainCanvasOrGrid;
     let locale = app.locale.as_str();
 
-    render_split_pane_container(
-        ui,
-        app,
-        views,
-        ctx_in,
-        SplitPaneSlot::Primary,
-        primary_rect,
-        primary_id.as_ref(),
-        secondary_id.as_ref(),
-        locale,
-        enabled,
-        stage_has_focus && views.center_stage.focused_split_pane == SplitPaneSlot::Primary,
-        meta,
-        intents,
-        report,
-    );
+    {
+        let primary_focused = stage_has_focus && views.center_stage.focused_split_pane == SplitPaneSlot::Primary;
+        let mut pane_io = StageFrameIo { views, meta, intents, report };
+        render_split_pane_container(
+            ui,
+            app,
+            ctx_in,
+            SplitPaneSpec {
+                slot: SplitPaneSlot::Primary,
+                pane_rect: primary_rect,
+                sheet_id: primary_id.as_ref(),
+                other_sheet_id: secondary_id.as_ref(),
+                locale,
+                enabled,
+                focused: primary_focused,
+            },
+            &mut pane_io,
+        );
 
-    render_split_pane_container(
-        ui,
-        app,
-        views,
-        ctx_in,
-        SplitPaneSlot::Secondary,
-        secondary_rect,
-        secondary_id.as_ref(),
-        primary_id.as_ref(),
-        locale,
-        enabled,
-        stage_has_focus && views.center_stage.focused_split_pane == SplitPaneSlot::Secondary,
-        meta,
-        intents,
-        report,
-    );
+        let secondary_focused = stage_has_focus && pane_io.views.center_stage.focused_split_pane == SplitPaneSlot::Secondary;
+        render_split_pane_container(
+            ui,
+            app,
+            ctx_in,
+            SplitPaneSpec {
+                slot: SplitPaneSlot::Secondary,
+                pane_rect: secondary_rect,
+                sheet_id: secondary_id.as_ref(),
+                other_sheet_id: primary_id.as_ref(),
+                locale,
+                enabled,
+                focused: secondary_focused,
+            },
+            &mut pane_io,
+        );
+    }
 
     sync_two_way_split_brushing(app, views, primary_id.as_ref(), secondary_id.as_ref(), intents);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_split_pane_container(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    views: &mut EguiShellViewState,
-    ctx_in: &CenterStageContext<'_>,
-    slot: SplitPaneSlot,
-    pane_rect: Rect,
-    sheet_id: Option<&SheetId>,
-    other_sheet_id: Option<&SheetId>,
-    locale: &str,
-    enabled: bool,
-    focused: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    report: &mut CenterStageFrameReport,
-) {
+fn render_split_pane_container(ui: &mut egui::Ui, app: &UiApp, ctx_in: &CenterStageContext<'_>, pane: SplitPaneSpec<'_>, io: &mut StageFrameIo<'_>) {
+    let SplitPaneSpec { slot, pane_rect, sheet_id, other_sheet_id, locale, enabled, focused } = pane;
     let doc = app.document();
     let header_h = PANE_HEADER_HEIGHT_PT.min(pane_rect.height());
     let header_rect = Rect::from_min_max(pane_rect.min, pos2(pane_rect.right(), pane_rect.top() + header_h));
     let body_rect = Rect::from_min_max(pos2(pane_rect.left(), header_rect.bottom()), pane_rect.max);
 
-    render_split_pane_header(ui, app, slot, header_rect, sheet_id, other_sheet_id, locale, ctx_in.tokens, enabled, focused, meta, intents);
+    render_split_pane_header(
+        ui,
+        app,
+        SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, locale, tokens: ctx_in.tokens, enabled, focused },
+        io.meta,
+        io.intents,
+    );
 
     let click_in_pane = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| pane_rect.contains(p)));
     if enabled && click_in_pane {
-        views.center_stage.focused_split_pane = slot;
+        io.views.center_stage.focused_split_pane = slot;
         if ctx_in.focused_pane != ActiveWorkspacePane::MainCanvasOrGrid {
-            intents.push_set_focus_pane(ActiveWorkspacePane::MainCanvasOrGrid);
+            io.intents.push_set_focus_pane(ActiveWorkspacePane::MainCanvasOrGrid);
         }
     }
 
@@ -656,18 +688,33 @@ fn render_split_pane_container(
     let can_use_primary_grid_state = slot == SplitPaneSlot::Primary || other_sheet_id != sheet_id;
 
     if pane_mode == CenterStageMode::ColumnGrid && !(active_matches && can_use_primary_grid_state) {
-        report.handled_natively = true;
+        io.report.handled_natively = true;
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
-            render_split_column_sheet_preview(&mut body_ui, app, ds, slot, ctx_in.tokens, enabled, meta, intents, report);
+            render_split_column_sheet_preview(
+                &mut body_ui,
+                app,
+                SplitSheetPreviewSpec { ds, slot, tokens: ctx_in.tokens, enabled },
+                io.meta,
+                io.intents,
+                io.report,
+            );
         }
     } else if pane_mode == CenterStageMode::DataGrid && !(active_matches && can_use_primary_grid_state) {
-        report.handled_natively = true;
+        io.report.handled_natively = true;
         if let Some(ds) = sheet_id.and_then(|id| doc.data_sheet(id)) {
-            render_split_non_column_preview(&mut body_ui, app, ds, slot, ctx_in.tokens, enabled, meta, intents);
+            render_split_non_column_preview(
+                &mut body_ui,
+                app,
+                SplitSheetPreviewSpec { ds, slot, tokens: ctx_in.tokens, enabled },
+                io.meta,
+                io.intents,
+            );
         }
     } else {
-        render_single_pane_mode(&mut body_ui, app, views, pane_mode, sheet_id, slot, ctx_in, enabled, meta, intents, report);
+        render_single_pane_mode(&mut body_ui, app, SinglePaneTarget { mode: pane_mode, sheet_id, slot, enabled }, ctx_in, io);
     }
+
+    let meta = &mut *io.meta;
 
     let pane_wid = match slot {
         SplitPaneSlot::Primary => "center.pane.primary",
@@ -683,21 +730,14 @@ fn render_split_pane_container(
     draw_focus_ring_if_active(ui, pane_rect, ctx_in.tokens, focused);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_split_pane_header(
     ui: &mut egui::Ui,
     app: &UiApp,
-    slot: SplitPaneSlot,
-    header_rect: Rect,
-    sheet_id: Option<&SheetId>,
-    other_sheet_id: Option<&SheetId>,
-    locale: &str,
-    tokens: &Tokens,
-    enabled: bool,
-    focused: bool,
+    spec: SplitPaneHeaderSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let SplitPaneHeaderSpec { slot, header_rect, sheet_id, other_sheet_id, locale, tokens, enabled, focused } = spec;
     let doc = app.document();
     let bg = if focused { tokens.active_bg } else { tokens.panel_bg };
     ui.painter().rect_filled(header_rect, CornerRadius::ZERO, bg);
@@ -821,20 +861,9 @@ fn compute_split_geometries(work_rect: Rect, orientation: SplitOrientation, rati
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_single_pane_mode(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    views: &mut EguiShellViewState,
-    mode: CenterStageMode,
-    sheet_id: Option<&SheetId>,
-    slot: SplitPaneSlot,
-    ctx_in: &CenterStageContext<'_>,
-    enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    report: &mut CenterStageFrameReport,
-) {
+fn render_single_pane_mode(ui: &mut egui::Ui, app: &UiApp, target: SinglePaneTarget<'_>, ctx_in: &CenterStageContext<'_>, io: &mut StageFrameIo<'_>) {
+    let SinglePaneTarget { mode, sheet_id, slot, enabled } = target;
+    let StageFrameIo { views, meta, intents, report } = io;
     match mode {
         CenterStageMode::Welcome => {
             report.handled_natively = true;
@@ -893,18 +922,15 @@ fn render_single_pane_mode(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_split_column_sheet_preview(
     ui: &mut egui::Ui,
     app: &UiApp,
-    ds: &DataSheet,
-    slot: SplitPaneSlot,
-    tokens: &Tokens,
-    enabled: bool,
+    spec: SplitSheetPreviewSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CenterStageFrameReport,
 ) {
+    let SplitSheetPreviewSpec { ds, slot, tokens, enabled } = spec;
     let TableArchetype::Column(col_table) = &ds.archetype else {
         return;
     };
@@ -999,17 +1025,14 @@ fn render_split_column_sheet_preview(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_split_non_column_preview(
     ui: &mut egui::Ui,
     app: &UiApp,
-    ds: &DataSheet,
-    slot: SplitPaneSlot,
-    tokens: &Tokens,
-    enabled: bool,
+    spec: SplitSheetPreviewSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let SplitSheetPreviewSpec { ds, slot, tokens, enabled } = spec;
     let avail = ui.available_rect_before_wrap();
     let bar_h = 26.0_f32.min(avail.height());
     let bar_rect = Rect::from_min_max(avail.min, pos2(avail.right(), avail.top() + bar_h));
@@ -1146,18 +1169,8 @@ fn collect_all_sheet_ids(doc: &ProjectDocument) -> Vec<(SheetId, String, &'stati
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_portfolio_gallery(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    views: &mut EguiShellViewState,
-    rect: Rect,
-    tokens: &Tokens,
-    enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-    report: &mut CenterStageFrameReport,
-) {
+fn render_portfolio_gallery(ui: &mut egui::Ui, app: &UiApp, rect: Rect, tokens: &Tokens, enabled: bool, io: &mut StageFrameIo<'_>) {
+    let StageFrameIo { views, meta, intents, report } = io;
     let doc = app.document();
     let locale = app.locale.as_str();
     ui.painter().rect_filled(rect, CornerRadius::ZERO, tokens.surface_bg);
@@ -1254,7 +1267,7 @@ fn render_portfolio_gallery(
             grid_ui.horizontal(|row_ui| {
                 row_ui.spacing_mut().item_spacing.x = spacing;
                 for card in row_cards {
-                    render_gallery_card(row_ui, doc, card, vec2(card_w, card_h), tokens, enabled, meta, intents);
+                    render_gallery_card(row_ui, doc, GalleryCardSpec { card, size: vec2(card_w, card_h), tokens, enabled }, meta, intents);
                 }
             });
             grid_ui.add_space(spacing);
@@ -1318,17 +1331,21 @@ fn build_filtered_gallery_cards(doc: &ProjectDocument, app: &UiApp, search: &str
     out
 }
 
-#[allow(clippy::too_many_arguments)]
+struct GalleryCardSpec<'a> {
+    card: &'a PortfolioCard,
+    size: Vec2,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
 fn render_gallery_card(
     ui: &mut egui::Ui,
     doc: &ProjectDocument,
-    card: &PortfolioCard,
-    size: Vec2,
-    tokens: &Tokens,
-    enabled: bool,
+    spec: GalleryCardSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let GalleryCardSpec { card, size, tokens, enabled } = spec;
     let (card_rect, resp) = ui.allocate_exact_size(size, if enabled { Sense::click() } else { Sense::hover() });
     let bg = if card.active || card.selected {
         tokens.active_bg
@@ -1488,18 +1505,22 @@ fn collect_graph_clipping_warnings(app: &UiApp, gs: &GraphSheet) -> (usize, Vec<
     (details.len(), details)
 }
 
-#[allow(clippy::too_many_arguments)]
+struct BottomBannerSpec<'a> {
+    kind: &'a BottomBannerKind,
+    rect: Rect,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
 fn render_bottom_banner(
     ui: &mut egui::Ui,
     app: &UiApp,
     views: &mut EguiShellViewState,
-    kind: &BottomBannerKind,
-    rect: Rect,
-    tokens: &Tokens,
-    enabled: bool,
+    spec: BottomBannerSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let BottomBannerSpec { kind, rect, tokens, enabled } = spec;
     let locale = app.locale.as_str();
     let warn_bg = if tokens.dark { Color32::from_rgb(66, 48, 22) } else { Color32::from_rgb(255, 245, 224) };
     let (bg, border, text_color) = match kind {
@@ -1677,20 +1698,24 @@ fn render_bottom_banner(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct FloatingNotesSpec<'a> {
+    sheet_id: &'a SheetId,
+    notes: &'a [FloatingNote],
+    stage_bounds: Rect,
+    tokens: &'a Tokens,
+    enabled: bool,
+    notes_pane_focused: bool,
+}
+
 fn render_floating_notes_overlay(
     ui: &mut egui::Ui,
     app: &UiApp,
     views: &mut EguiShellViewState,
-    sheet_id: &SheetId,
-    notes: &[FloatingNote],
-    stage_bounds: Rect,
-    tokens: &Tokens,
-    enabled: bool,
-    notes_pane_focused: bool,
+    spec: FloatingNotesSpec<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let FloatingNotesSpec { sheet_id, notes, stage_bounds, tokens, enabled, notes_pane_focused } = spec;
     if stage_bounds.width() < 180.0 || stage_bounds.height() < 60.0 {
         return;
     }

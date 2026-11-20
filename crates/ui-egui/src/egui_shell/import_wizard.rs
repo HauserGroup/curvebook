@@ -108,6 +108,14 @@ pub struct ImportWizardFrameReport {
     pub outside_wheel_captured: bool,
 }
 
+struct ImportModalCtx<'a> {
+    app: &'a UiApp,
+    state: &'a mut ImportWizardEguiState,
+    tokens: &'a Tokens,
+    meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
+}
+
 /// Render `Import & Paste Special` (`app.grid.import_wizard.open`), `ImportReshape`, or `ConvertArchetype`.
 pub fn render_import_or_convert_modal(
     ctx: &Context,
@@ -153,18 +161,19 @@ pub fn render_import_or_convert_modal(
         ui.heading(RichText::new(title).color(tokens.text_primary));
         ui.add_space(4.0);
 
+        let mut modal_cx = ImportModalCtx { app, state, tokens, meta, intents };
         if is_convert {
-            render_convert_archetype_body(ui, app, dlg_h - 88.0, tokens, meta, intents);
+            render_convert_archetype_body(ui, &mut modal_cx, dlg_h - 88.0);
         } else if is_reshape {
-            render_import_reshape_body(ui, app, state, inner_w, dlg_h - 88.0, tokens, meta, intents);
+            render_import_reshape_body(ui, &mut modal_cx, inner_w, dlg_h - 88.0);
         } else {
-            render_five_stage_wizard_body(ui, app, state, inner_w, dlg_h - 88.0, tokens, meta, intents);
+            render_five_stage_wizard_body(ui, &mut modal_cx, inner_w, dlg_h - 88.0);
         }
 
         ui.add_space(6.0);
         widgets::divider(ui);
         ui.add_space(4.0);
-        render_wizard_footer(ui, app, state, is_wizard, is_reshape, is_convert, tokens, meta, intents);
+        render_wizard_footer(ui, &mut modal_cx, is_wizard, is_reshape);
     });
 
     let title_for_ak = title.to_owned();
@@ -213,28 +222,22 @@ fn sync_drafts_from_app(app: &UiApp, state: &mut ImportWizardEguiState) {
         ir.plate_values.iter().map(|v| v.map_or_else(|| String::from("NA"), |n| format!("{n}"))).collect::<Vec<_>>().join(", ");
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_five_stage_wizard_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    avail_w: f32,
-    body_h: f32,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_five_stage_wizard_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32, body_h: f32) {
     // Persistent 5-stage horizontal stepper bar.
     ui.horizontal_wrapped(|bar| {
         for step in ImportWizardStep::ALL {
-            let active = state.active_step == step;
-            let resp = choice_pill(bar, tokens, step.label(), active, true);
-            meta.record_modal_response(bar, &resp, FrameInspectEntryInput::modal(step.tab_id(), "tab", step.label(), Some(active.to_string()), true));
+            let active = cx.state.active_step == step;
+            let resp = choice_pill(bar, cx.tokens, step.label(), active, true);
+            cx.meta.record_modal_response(
+                bar,
+                &resp,
+                FrameInspectEntryInput::modal(step.tab_id(), "tab", step.label(), Some(active.to_string()), true),
+            );
             if resp.clicked() {
-                state.active_step = step;
-                let mut wiz = app.grid.import_wizard.clone();
+                cx.state.active_step = step;
+                let mut wiz = cx.app.grid.import_wizard.clone();
                 wiz.stage = step.sync_backend_stage();
-                intents.push_update_import_wizard(wiz);
+                cx.intents.push_update_import_wizard(wiz);
             }
         }
     });
@@ -242,26 +245,22 @@ fn render_five_stage_wizard_body(
 
     let scroll_h = (body_h - 34.0).max(100.0);
     egui::ScrollArea::vertical().id_salt("import_wizard_body_scroll").max_height(scroll_h).auto_shrink([false, false]).show(ui, |body| {
-        match state.active_step {
-            ImportWizardStep::Source => render_step_source(body, app, state, avail_w, tokens, meta, intents),
-            ImportWizardStep::Preview => render_step_preview(body, app, state, tokens, meta),
-            ImportWizardStep::FilterAndUnstack => render_step_filter_unstack(body, app, state, tokens, meta, intents),
-            ImportWizardStep::PlacementAndReshape => render_step_placement(body, app, state, tokens, meta, intents),
-            ImportWizardStep::Metadata => render_step_metadata(body, app, state, tokens, meta, intents),
+        match cx.state.active_step {
+            ImportWizardStep::Source => render_step_source(body, cx, avail_w),
+            ImportWizardStep::Preview => render_step_preview(body, cx.app, cx.state, cx.tokens, cx.meta),
+            ImportWizardStep::FilterAndUnstack => render_step_filter_unstack(body, cx),
+            ImportWizardStep::PlacementAndReshape => render_step_placement(body, cx),
+            ImportWizardStep::Metadata => render_step_metadata(body, cx),
         }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_step_source(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    avail_w: f32,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_step_source(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut wiz = app.grid.import_wizard.clone();
     let mut dirty = false;
 
@@ -466,15 +465,12 @@ fn render_step_preview(ui: &mut Ui, app: &UiApp, state: &ImportWizardEguiState, 
     render_preview_grid_table(ui, app, &preview, tokens);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_step_filter_unstack(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_step_filter_unstack(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut wiz = app.grid.import_wizard.clone();
     let mut dirty = false;
 
@@ -607,15 +603,12 @@ fn render_step_filter_unstack(
     render_preview_grid_table(ui, app, &preview, tokens);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_step_placement(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_step_placement(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut wiz = app.grid.import_wizard.clone();
     let mut dirty = false;
 
@@ -719,14 +712,12 @@ fn render_step_placement(
     render_preview_grid_table(ui, app, &preview, tokens);
 }
 
-fn render_step_metadata(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_step_metadata(ui: &mut Ui, cx: &mut ImportModalCtx<'_>) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut wiz = app.grid.import_wizard.clone();
     let mut dirty = false;
 
@@ -792,17 +783,12 @@ fn render_step_metadata(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_import_reshape_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    avail_w: f32,
-    body_h: f32,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_import_reshape_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, avail_w: f32, body_h: f32) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let ir = &app.grid.import_reshape;
     egui::ScrollArea::vertical().id_salt("import_reshape_scroll").max_width(avail_w).max_height(body_h).auto_shrink([false, false]).show(
         ui,
@@ -959,14 +945,11 @@ fn render_import_reshape_body(
     );
 }
 
-fn render_convert_archetype_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    body_h: f32,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_convert_archetype_body(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, body_h: f32) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let ca = &app.canvas_dialogs.convert_archetype;
     egui::ScrollArea::vertical().id_salt("convert_archetype_scroll").max_height(body_h).auto_shrink([false, false]).show(ui, |body| {
         body.label(RichText::new(format!("Source Archetype: {:?}", ca.source_kind.unwrap_or(TableKind::Column))).strong().color(tokens.text_primary));
@@ -1044,18 +1027,12 @@ fn render_convert_archetype_body(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_wizard_footer(
-    ui: &mut Ui,
-    app: &UiApp,
-    state: &mut ImportWizardEguiState,
-    is_wizard: bool,
-    is_reshape: bool,
-    _is_convert: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_wizard_footer(ui: &mut Ui, cx: &mut ImportModalCtx<'_>, is_wizard: bool, is_reshape: bool) {
+    let app = cx.app;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     ui.horizontal(|footer| {
         let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
         let cancel_resp = widgets::secondary_button(footer, cancel_lbl);

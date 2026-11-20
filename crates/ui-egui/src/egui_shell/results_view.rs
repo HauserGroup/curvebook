@@ -461,7 +461,8 @@ pub fn render_results_view_for_sheet(
         report.active_tab_category = Some(category);
 
         // Sub-header strip identifying Inferential Report vs Plot-Ready Derived Matrix
-        render_tab_category_bar(ui, rs, tab, category, tokens, enabled, meta, intents);
+        let tab_ctx = ResultTabRenderCtx { rs, tab, tokens, enabled };
+        render_tab_category_bar(ui, &tab_ctx, category, meta, intents);
 
         let is_survival_summary = matches!(rs.analysis.kind, AnalysisKind::Survival(_)) && matches!(tab.kind, ResultTabKind::MainSummary);
         let tab_has_ambig_cell = tab_contains_ambiguity(tab, rs.analysis.p_value_format, is_survival_summary);
@@ -476,7 +477,7 @@ pub fn render_results_view_for_sheet(
 
         let scroll_out =
             egui::ScrollArea::both().id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-                render_result_tab_table(ui, rs, tab, active_idx, is_survival_summary, state, tokens, enabled, meta);
+                render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, state, meta);
                 if !tab.footnotes.is_empty() {
                     ui.add_space(6.0);
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
@@ -514,17 +515,21 @@ fn tab_contains_ambiguity(tab: &ResultTab, p_format: PValueFormat, is_survival_s
     false
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ResultTabRenderCtx<'a> {
+    rs: &'a ResultSheet,
+    tab: &'a ResultTab,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
 fn render_tab_category_bar(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
-    tab: &ResultTab,
+    ctx: &ResultTabRenderCtx<'_>,
     category: ResultTabCategory,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ResultTabRenderCtx { rs, tab, tokens, enabled } = *ctx;
     let bar_rect = ui.allocate_space(vec2(ui.available_width().max(1.0), 26.0)).1;
     ui.painter().rect_filled(bar_rect, CornerRadius::ZERO, tokens.header_bg);
     ui.painter()
@@ -628,18 +633,15 @@ fn render_ambiguity_callout(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_result_tab_table(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
-    tab: &ResultTab,
+    ctx: &ResultTabRenderCtx<'_>,
     active_tab_idx: usize,
     is_survival_summary: bool,
     state: &mut ResultsViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
 ) {
+    let ResultTabRenderCtx { rs, tab, tokens, enabled } = *ctx;
     let num_cols = tab.column_headers.len().max(tab.rows.iter().map(Vec::len).max().unwrap_or(0));
     let row_stub_w = 190.0_f32;
     let col_w = 128.0_f32;

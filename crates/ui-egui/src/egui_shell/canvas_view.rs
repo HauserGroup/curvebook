@@ -413,7 +413,10 @@ pub fn render_canvas_view_for_sheet(
     report.paper_rect_pt = Some(paper_rect);
 
     if let (Some(tr_r), Some(lr_r)) = (top_ruler_rect, left_ruler_rect) {
-        render_canvas_rulers(ui, mat_rect, tr_r, lr_r, paper_rect, eff_scale, app.canvas_dialogs.ruler_unit, tokens);
+        render_canvas_rulers(
+            ui,
+            CanvasRulersSpec { mat_rect, top_r: tr_r, left_r: lr_r, paper_rect, eff_scale, unit: app.canvas_dialogs.ruler_unit, tokens },
+        );
     }
 
     // Paint paper drop shadow & white sheet backing inside clipped mat_rect
@@ -423,26 +426,31 @@ pub fn render_canvas_view_for_sheet(
     clipped_painter.rect_stroke(paper_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     if let Some(ref sc) = scene {
-        composite_async_scene_texture(ui, app, sc, target_id, paper_rect, slot_tag, state, &clipped_painter);
+        composite_async_scene_texture(
+            ui,
+            app,
+            CompositeSceneSpec { scene: sc, sheet_id: target_id, paper_rect, slot_tag, painter: &clipped_painter },
+            state,
+        );
     }
     report.async_rendering_in_flight = state.slot.rendering_in_flight;
 
     if let Some(gs) = gs_opt
         && let Some(ref sc) = scene
     {
-        render_graph_hud_overlays(ui, &clipped_painter, app, gs, sc, paper_rect, &resp, state, &ctx_in, meta, intents, &mut report);
+        render_graph_hud_overlays(
+            ui,
+            GraphHudInput { painter: &clipped_painter, app, gs, scene: sc, paper_rect, canvas_resp: &resp, ctx_in: &ctx_in },
+            state,
+            meta,
+            intents,
+            &mut report,
+        );
     } else if let Some(ls) = ls_opt {
         render_layout_hud_overlays(
             ui,
-            &clipped_painter,
-            app,
-            ls,
-            scene.as_deref(),
-            paper_rect,
-            eff_scale,
-            &resp,
+            LayoutHudInput { painter: &clipped_painter, app, ls, scene: scene.as_deref(), paper_rect, eff_scale, ctx_in: &ctx_in },
             state,
-            &ctx_in,
             meta,
             intents,
             &mut report,
@@ -525,17 +533,16 @@ fn resolve_cached_scene(ctx: &egui::Context, app: &UiApp, sheet_id: &SheetId, sl
     Some(compiled)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn composite_async_scene_texture(
-    ui: &egui::Ui,
-    app: &UiApp,
-    scene: &Arc<ChartScene>,
-    sheet_id: &SheetId,
+struct CompositeSceneSpec<'a> {
+    scene: &'a Arc<ChartScene>,
+    sheet_id: &'a SheetId,
     paper_rect: Rect,
-    slot_tag: &str,
-    state: &mut CanvasViewEguiState,
-    painter: &egui::Painter,
-) {
+    slot_tag: &'a str,
+    painter: &'a egui::Painter,
+}
+
+fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeSceneSpec<'_>, state: &mut CanvasViewEguiState) {
+    let CompositeSceneSpec { scene, sheet_id, paper_rect, slot_tag, painter } = spec;
     let ppp = ui.ctx().pixels_per_point().clamp(1.0, 4.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (paper_rect.width() * ppp).round().clamp(32.0, 4096.0) as u32;
@@ -690,21 +697,34 @@ fn paint_polyline(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct GraphHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    gs: &'a GraphSheet,
+    scene: &'a ChartScene,
+    paper_rect: Rect,
+    canvas_resp: &'a egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+struct GraphOverlayCtx<'a> {
+    painter: &'a egui::Painter,
+    gs: &'a GraphSheet,
+    doc: &'a ProjectDocument,
+    scene: &'a ChartScene,
+    paper_rect: Rect,
+    tokens: &'a Tokens,
+}
+
 fn render_graph_hud_overlays(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    gs: &GraphSheet,
-    scene: &ChartScene,
-    paper_rect: Rect,
-    canvas_resp: &egui::Response,
+    input: GraphHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let GraphHudInput { painter, app, gs, scene, paper_rect, canvas_resp, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let sx = paper_rect.width() / (scene.width_pt.max(1.0) as f32);
@@ -771,22 +791,24 @@ fn render_graph_hud_overlays(
         }
     }
 
+    let ov = GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens };
+
     // 3. Pairwise Significance Brackets & Compact Letter Display (CLD) HUD
     let has_pairwise_results = doc.result_sheets.iter().any(|r| !r.pairwise_comparisons.is_empty());
     if !gs.spec.comparisons.is_empty() || gs.spec.compact_letter_display.is_some() || has_pairwise_results {
-        render_pairwise_cld_hud(ui, gs, doc, paper_rect, ctx_in.enabled, tokens, meta, intents);
+        render_pairwise_cld_hud(ui, &ov, ctx_in.enabled, meta, intents);
     }
 
     // 4. Axis-Synchronized Kaplan-Meier `Number at risk` Alignment Track
     if should_show_km_track(gs, doc) {
-        let track_rect = render_km_number_at_risk_track(ui, painter, gs, doc, scene, paper_rect, state, tokens, meta);
+        let track_rect = render_km_number_at_risk_track(ui, &ov, state, meta);
         report.km_track_rect_pt = track_rect;
     } else {
         state.km_at_risk_rows = 0;
     }
 
     // 5. Live TeX Curve/Fit Equations via `curvebook-text` layout helpers
-    let eq_rects = render_live_tex_equations(ui, painter, gs, doc, scene, paper_rect, sx, sy, state, tokens, meta);
+    let eq_rects = render_live_tex_equations(ui, &ov, (sx, sy), state, meta);
     report.tex_equation_rects_pt = eq_rects;
 }
 
@@ -894,17 +916,8 @@ fn paint_hover_hud_card(painter: &egui::Painter, anchor: Pos2, text: &str, token
     painter.galley(card_rect.min + vec2(6.0, 4.0), galley, tokens.text_strong);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_pairwise_cld_hud(
-    ui: &mut egui::Ui,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    paper_rect: Rect,
-    enabled: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_pairwise_cld_hud(ui: &mut egui::Ui, ov: &GraphOverlayCtx<'_>, enabled: bool, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let GraphOverlayCtx { gs, doc, paper_rect, tokens, .. } = *ov;
     let mode_lbl = match (gs.spec.comparisons.is_empty(), gs.spec.compact_letter_display.is_some()) {
         (false, true) => format!("Brackets ({}) + CLD", gs.spec.comparisons.len()),
         (true, true) => String::from("CLD Active"),
@@ -991,18 +1004,13 @@ struct KmCohortRiskRow {
     counts: Vec<usize>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_km_number_at_risk_track(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
+    ov: &GraphOverlayCtx<'_>,
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Option<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
     let ticks = extract_x_axis_ticks_pt(gs, scene);
     if ticks.is_empty() {
         state.km_at_risk_rows = 0;
@@ -1162,20 +1170,15 @@ fn build_km_risk_rows(gs: &GraphSheet, doc: &ProjectDocument, ticks: &[(f64, f64
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_live_tex_equations(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
-    sx: f32,
-    sy: f32,
+    ov: &GraphOverlayCtx<'_>,
+    scale_xy: (f32, f32),
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Vec<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
+    let (sx, sy) = scale_xy;
     let mut rects = Vec::new();
     let mut eq_idx = 0usize;
 
@@ -1344,22 +1347,25 @@ fn paint_equation_segments(
     Rect::from_min_size(origin, vec2(total_w.max(1.0), total_h.max(1.0)))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_layout_hud_overlays(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    ls: &LayoutSheet,
-    scene: Option<&ChartScene>,
+struct LayoutHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    ls: &'a LayoutSheet,
+    scene: Option<&'a ChartScene>,
     paper_rect: Rect,
     eff_scale: f32,
-    _canvas_resp: &egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+fn render_layout_hud_overlays(
+    ui: &mut egui::Ui,
+    input: LayoutHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let LayoutHudInput { painter, app, ls, scene, paper_rect, eff_scale, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let scene_w = scene.map_or(ls.spec.page_size_pt().width.max(1.0), |s| s.width_pt.max(1.0)) as f32;
@@ -1601,17 +1607,18 @@ fn set_layout_item_bounds_doc(item: &mut LayoutItem, bounds: DocRectPt) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_canvas_rulers(
-    ui: &egui::Ui,
+struct CanvasRulersSpec<'a> {
     mat_rect: Rect,
     top_r: Rect,
     left_r: Rect,
     paper_rect: Rect,
     eff_scale: f32,
     unit: PhysicalUnit,
-    tokens: &Tokens,
-) {
+    tokens: &'a Tokens,
+}
+
+fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
+    let CanvasRulersSpec { mat_rect, top_r, left_r, paper_rect, eff_scale, unit, tokens } = spec;
     let corner = Rect::from_min_size(pos2(left_r.left(), top_r.top()), vec2(RULER_THICKNESS_PT, RULER_THICKNESS_PT));
     let unit_lbl = match unit {
         PhysicalUnit::Points => "pt",
