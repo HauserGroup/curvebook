@@ -803,35 +803,11 @@ fn push_menu_command_intent(command_id: &str, variant: Option<&str>, intents: &m
         }
         return;
     }
-    if command_id.starts_with("ui.") || command_id.starts_with("app.") || is_desktop_host_routed_command(command_id) {
+    if command_id.starts_with("ui.") || command_id.starts_with("app.") || crate::menus::is_desktop_host_routed_command(command_id) {
         intents.push_ui(command_id, json!({}));
     } else {
         intents.push_engine(command_id, json!({}));
     }
-}
-
-fn is_desktop_host_routed_command(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "project.open"
-            | "project.save"
-            | "project.saveAs"
-            | "file.open"
-            | "file.open_unpacked_dir"
-            | "file.save_as"
-            | "export.svg"
-            | "file.export_svg"
-            | "export.pdf"
-            | "file.export_pdf"
-            | "export.png"
-            | "file.export_png"
-            | "window.new"
-            | "file.newWindow"
-            | "window.close"
-            | "file.close"
-            | "file.quit"
-            | "app.quit"
-    )
 }
 
 #[allow(clippy::too_many_arguments)]

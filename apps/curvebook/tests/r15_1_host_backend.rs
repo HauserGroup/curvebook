@@ -490,8 +490,9 @@ fn step_ui_clears_discarded_pass_intents_without_double_or_stale_execution() -> 
         .ok_or("missing toolbar.help.about clipped_rect in egui_shell")?;
 
     // Emulate an `egui` multi-pass frame where Pass 0 emits an intent (`toolbar.help.about` click)
-    // AND calls `request_discard`. Pass 0's discarded intent must NOT execute and must be cleared
-    // before Pass 1 (settled) and subsequent frames run.
+    // AND calls `request_discard`. Because egui 0.37 delivers input events only to Pass 0,
+    // Pass 0 must NOT commit while discarded, and Pass 1 (settled) must preserve and commit
+    // Pass 0's click strictly once (`R15-GUI-05`), without replaying on later frames.
     let raw_click = egui::RawInput {
         screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(960.0, 640.0))),
         events: vec![
@@ -514,15 +515,16 @@ fn step_ui_clears_discarded_pass_intents_without_double_or_stale_execution() -> 
     out_discard.textures_delta.clear();
     assert_eq!(pass_records.len(), 2, "expected Pass 0 discarded + Pass 1 settled, got {pass_records:?}");
     assert_eq!(pass_records[0], (false, ActiveDialog::None), "discarded Pass 0 must not commit intent");
-    assert_eq!(pass_records[1], (true, ActiveDialog::None), "settled Pass 1 must not inherit discarded Pass 0 intent");
+    assert_eq!(pass_records[1], (true, ActiveDialog::About), "settled Pass 1 must preserve and commit Pass 0 click once (R15-GUI-05)");
 
-    // Next separate frame with NO click must also not observe any carried-over discarded intent.
+    // Dismiss About and verify the next separate empty frame does not replay any stale carried intent.
+    native.runtime_mut().window_mut(win_id)?.app_mut().canvas_dialogs.active_dialog = ActiveDialog::None;
     let mut out_after_discard = ctx.run_ui(raw_empty, |ui| native.step_ui(ui));
     out_after_discard.textures_delta.clear();
     assert_eq!(
         native.runtime().window(win_id)?.app().canvas_dialogs.active_dialog,
         ActiveDialog::None,
-        "discarded pass intent must be cleared and never execute on a later settled frame"
+        "committed Pass 0 intent must be drained on settlement and never replay on a later frame"
     );
     assert!(native.geometry_stamp().ok_or("missing GeometryStamp")?.settled);
 

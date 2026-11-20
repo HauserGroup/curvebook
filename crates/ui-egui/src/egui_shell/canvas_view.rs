@@ -1,7 +1,7 @@
 //! Native `egui` async `ChartScene` / `LayoutScene` viewport (`docs/planning/gui-layout-spec.md`
 //! §8.11A & §8.12, `R15.3`).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, PoisonError, RwLock, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
@@ -106,10 +106,170 @@ struct CachedCompiledScene {
     scene: Arc<ChartScene>,
 }
 
+/// Diagnostic snapshot of the single long-lived async canvas raster worker (`R15-GUI-04`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CanvasAsyncWorkerStats {
+    pub worker_spawn_count: u64,
+    pub submitted_count: u64,
+    pub rendered_count: u64,
+}
+
+/// Inspect runtime statistics for the per-context async canvas raster worker, if initialized.
+#[must_use]
+pub fn canvas_async_worker_stats(ctx: &egui::Context) -> Option<CanvasAsyncWorkerStats> {
+    let worker_id = Id::unique("egui_shell.canvas_async_worker");
+    let handle: AsyncRasterWorkerHandle = ctx.data(|d| d.get_temp(worker_id))?;
+    let guard = handle.owner.results.read().unwrap_or_else(PoisonError::into_inner);
+    Some(CanvasAsyncWorkerStats {
+        worker_spawn_count: guard.worker_spawn_count,
+        submitted_count: guard.submitted_count,
+        rendered_count: guard.rendered_count,
+    })
+}
+
+struct RasterJobRequest {
+    slot_key: (String, SheetId),
+    req_key: RasterRequestKey,
+    scene: Arc<ChartScene>,
+    filter: CanvasPreviewFilter,
+    ctx_wake: egui::Context,
+}
+
+#[derive(Default)]
+struct RasterWorkerResults {
+    completed: Vec<((String, SheetId), RasterRequestKey, Option<RasterImage>)>,
+    last_submitted: Vec<((String, SheetId), RasterRequestKey)>,
+    submitted_count: u64,
+    rendered_count: u64,
+    worker_spawn_count: u64,
+}
+
+struct AsyncRasterWorkerOwner {
+    tx: RwLock<Option<mpsc::Sender<RasterJobRequest>>>,
+    results: Arc<RwLock<RasterWorkerResults>>,
+    join: RwLock<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for AsyncRasterWorkerOwner {
+    fn drop(&mut self) {
+        // Close the request channel first so the worker exits its `recv()` loop cleanly.
+        let _ = self.tx.write().unwrap_or_else(PoisonError::into_inner).take();
+        let handle = self.join.write().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(join_handle) = handle {
+            let _ = join_handle.join();
+        }
+    }
+}
+
 #[derive(Clone)]
-struct AsyncRasterJob {
-    key: RasterRequestKey,
-    output: Arc<OnceLock<Option<RasterImage>>>,
+struct AsyncRasterWorkerHandle {
+    owner: Arc<AsyncRasterWorkerOwner>,
+}
+
+impl AsyncRasterWorkerHandle {
+    fn get_or_spawn(ctx: &egui::Context) -> Option<Self> {
+        let worker_id = Id::unique("egui_shell.canvas_async_worker");
+        if let Some(existing) = ctx.data(|d| d.get_temp::<Self>(worker_id)) {
+            return Some(existing);
+        }
+        let (tx, rx) = mpsc::channel();
+        let results = Arc::new(RwLock::new(RasterWorkerResults { worker_spawn_count: 1, ..RasterWorkerResults::default() }));
+        let results_bg = Arc::clone(&results);
+        let join_handle =
+            std::thread::Builder::new().name(String::from("cb-canvas-raster")).spawn(move || raster_worker_loop(&rx, &results_bg)).ok()?;
+        let handle = Self { owner: Arc::new(AsyncRasterWorkerOwner { tx: RwLock::new(Some(tx)), results, join: RwLock::new(Some(join_handle)) }) };
+        ctx.data_mut(|d| d.insert_temp(worker_id, handle.clone()));
+        Some(handle)
+    }
+
+    fn poll_or_submit(
+        &self,
+        slot_key: (String, SheetId),
+        req_key: RasterRequestKey,
+        scene: &Arc<ChartScene>,
+        filter: CanvasPreviewFilter,
+        ctx_wake: &egui::Context,
+    ) -> Option<Option<RasterImage>> {
+        let mut guard = self.owner.results.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
+            let (_, _, img) = guard.completed.remove(pos);
+            return Some(img);
+        }
+        let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
+        if !already_submitted {
+            let tx_guard = self.owner.tx.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(tx) = tx_guard.as_ref() {
+                let request = RasterJobRequest {
+                    slot_key: slot_key.clone(),
+                    req_key: req_key.clone(),
+                    scene: Arc::clone(scene),
+                    filter,
+                    ctx_wake: ctx_wake.clone(),
+                };
+                if tx.send(request).is_ok() {
+                    if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
+                        entry.1 = req_key;
+                    } else {
+                        guard.last_submitted.push((slot_key, req_key));
+                    }
+                    guard.submitted_count = guard.submitted_count.saturating_add(1);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn coalesce_pending_raster_jobs(rx: &mpsc::Receiver<RasterJobRequest>, pending: &mut Vec<RasterJobRequest>) {
+    while let Ok(next) = rx.try_recv() {
+        if let Some(existing) = pending.iter_mut().find(|job| job.slot_key == next.slot_key) {
+            // Supersede any unstarted request for the same slot before rendering begins.
+            *existing = next;
+        } else {
+            pending.push(next);
+        }
+    }
+}
+
+fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<RasterWorkerResults>) {
+    let mut pending: Vec<RasterJobRequest> = Vec::new();
+    loop {
+        if pending.is_empty() {
+            let Ok(first) = rx.recv() else {
+                return;
+            };
+            pending.push(first);
+        }
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let job = pending.remove(0);
+
+        let rendered =
+            render_scene(&job.scene, RenderTargetSpec { width_px: job.req_key.width_px, height_px: job.req_key.height_px, dpi: job.req_key.dpi })
+                .ok()
+                .map(|mut img| {
+                    if job.filter != CanvasPreviewFilter::Normal {
+                        apply_canvas_preview_filter(&mut img, job.filter);
+                    }
+                    img
+                });
+
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
+        {
+            let mut guard = results.write().unwrap_or_else(PoisonError::into_inner);
+            guard.rendered_count = guard.rendered_count.saturating_add(1);
+            if !superseded {
+                if let Some(slot) = guard.completed.iter_mut().find(|(sk, _, _)| *sk == job.slot_key) {
+                    *slot = (job.slot_key, job.req_key, rendered);
+                } else {
+                    guard.completed.push((job.slot_key, job.req_key, rendered));
+                }
+            }
+        }
+        if !superseded {
+            job.ctx_wake.request_repaint();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -401,7 +561,8 @@ fn composite_async_scene_texture(
         return;
     }
 
-    if state.synchronous_raster {
+    let worker = (!state.synchronous_raster).then(|| AsyncRasterWorkerHandle::get_or_spawn(ui.ctx())).flatten();
+    if state.synchronous_raster || worker.is_none() {
         let mut rendered = render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).ok();
         if let Some(ref mut img) = rendered
             && app.preview_filter != CanvasPreviewFilter::Normal
@@ -424,50 +585,27 @@ fn composite_async_scene_texture(
         }
     }
 
-    let job_id = Id::unique(("egui_shell.canvas_async_job", slot_tag, sheet_id.as_str()));
-    let existing_job: Option<AsyncRasterJob> = ui.ctx().data(|d| d.get_temp(job_id));
-    let job = match existing_job {
-        Some(j) if j.key == req_key => j,
-        _ => {
-            let output = Arc::new(OnceLock::new());
-            let out_worker = output.clone();
-            let scene_clone = scene.clone();
-            let filter = app.preview_filter;
-            let ctx_wake = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let rendered = render_scene(&scene_clone, RenderTargetSpec { width_px, height_px, dpi }).ok().map(|mut img| {
-                    if filter != CanvasPreviewFilter::Normal {
-                        apply_canvas_preview_filter(&mut img, filter);
-                    }
-                    img
-                });
-                let _ = out_worker.set(rendered);
-                ctx_wake.request_repaint();
-            });
-            let new_job = AsyncRasterJob { key: req_key.clone(), output };
-            ui.ctx().data_mut(|d| d.insert_temp(job_id, new_job.clone()));
-            new_job
+    if let Some(worker) = worker {
+        let slot_key = (slot_tag.to_owned(), sheet_id.clone());
+        if let Some(maybe_img) = worker.poll_or_submit(slot_key, req_key.clone(), scene, app.preview_filter, ui.ctx()) {
+            state.slot.rendering_in_flight = false;
+            state.slot.last_sheet_id = Some(sheet_id.clone());
+            state.slot.last_mutation_seq = req_key.mutation_seq;
+            state.slot.last_width_px = width_px;
+            state.slot.last_height_px = height_px;
+            state.slot.last_dpi = dpi;
+            state.slot.last_filter_slug = filter_slug.clone();
+            if let Some(raster) = maybe_img {
+                let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
+                let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
+                state.slot.cached_texture = Some(tex_id);
+                painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                return;
+            }
+        } else {
+            state.slot.rendering_in_flight = true;
+            ui.ctx().request_repaint();
         }
-    };
-
-    if let Some(maybe_img) = job.output.get() {
-        state.slot.rendering_in_flight = false;
-        state.slot.last_sheet_id = Some(sheet_id.clone());
-        state.slot.last_mutation_seq = req_key.mutation_seq;
-        state.slot.last_width_px = width_px;
-        state.slot.last_height_px = height_px;
-        state.slot.last_dpi = dpi;
-        state.slot.last_filter_slug = filter_slug.clone();
-        if let Some(raster) = maybe_img {
-            let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
-            let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
-            state.slot.cached_texture = Some(tex_id);
-            painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            return;
-        }
-    } else {
-        state.slot.rendering_in_flight = true;
-        ui.ctx().request_repaint();
     }
 
     // While async worker finishes on frame 1, show previous cached texture or crisp vector scene preview
