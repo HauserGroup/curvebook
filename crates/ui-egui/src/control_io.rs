@@ -1234,6 +1234,9 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.view.rowTitles.toggle"
             | "ui.graph.create.open"
             | "ui.layout.equalizeScaling.open"
+            | "ui.gridOverlay.toggle"
+            | "ui.embeddedTable.format.open"
+            | "ui.image.format.open"
     ) {
         return Ok(None);
     }
@@ -1314,6 +1317,9 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.view.rowTitles.toggle" => map_ui_result(dispatch_ui_row_titles_toggle(app, params)),
         "ui.graph.create.open" => map_ui_result(dispatch_ui_create_graph_open(app, params)),
         "ui.layout.equalizeScaling.open" => map_ui_result(dispatch_ui_equalize_scaling_open(app, params)),
+        "ui.gridOverlay.toggle" => map_ui_result(dispatch_ui_grid_overlay_toggle(app, params)),
+        "ui.embeddedTable.format.open" => map_ui_result(dispatch_ui_embedded_table_format_open(app, params)),
+        "ui.image.format.open" => map_ui_result(dispatch_ui_image_format_open(app, params)),
         _ => Ok(None),
     }
 }
@@ -3238,6 +3244,130 @@ fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
     }))
 }
 
+fn resolve_canvas_sheet_for_object(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.graph_sheet(&id).is_some() || doc.layout_sheet(&id).is_some() {
+            return Ok(id);
+        }
+        return Err(format!("graph or layout sheet `{}` not found", id.as_str()));
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.graph_sheets
+        .first()
+        .map(|g| g.id.clone())
+        .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+        .ok_or_else(|| String::from("no graph or layout sheet available"))
+}
+
+fn resolve_target_embedded_index(
+    doc: &curvebook_doc::ProjectDocument,
+    sheet_id: &SheetId,
+    explicit_idx: Option<usize>,
+    want_image: bool,
+) -> Option<usize> {
+    if let Some(gs) = doc.graph_sheet(sheet_id) {
+        if let Some(idx) = explicit_idx {
+            let ok = gs.spec.annotations.get(idx).is_some_and(|a| {
+                if want_image {
+                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
+                } else {
+                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
+                }
+            });
+            return ok.then_some(idx);
+        }
+        return gs.spec.annotations.iter().rposition(|a| {
+            if want_image {
+                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
+            } else {
+                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
+            }
+        });
+    }
+    if let Some(ls) = doc.layout_sheet(sheet_id) {
+        if let Some(idx) = explicit_idx {
+            let ok = ls.spec.items.get(idx).is_some_and(|it| {
+                if want_image {
+                    matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
+                } else {
+                    matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
+                }
+            });
+            return ok.then_some(idx);
+        }
+        return ls.spec.items.iter().rposition(|it| {
+            if want_image {
+                matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
+            } else {
+                matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
+            }
+        });
+    }
+    None
+}
+
+fn dispatch_ui_grid_overlay_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(spacing) = opt_finite_f64_param(params, &["spacing_pt"])? {
+        if spacing <= 1.0 || spacing > 200.0 {
+            return Err(String::from("`spacing_pt` must be in (1.0, 200.0]"));
+        }
+        app.canvas_dialogs.grid_overlay_spacing_pt = spacing;
+    }
+    if let Some(visible) = opt_bool_param(params, &["visible"])? {
+        app.canvas_dialogs.grid_overlay_visible = visible;
+    } else {
+        app.canvas_dialogs.grid_overlay_visible = !app.canvas_dialogs.grid_overlay_visible;
+    }
+    Ok(json!({
+        "grid_overlay_visible": app.canvas_dialogs.grid_overlay_visible,
+        "spacing_pt": app.canvas_dialogs.grid_overlay_spacing_pt,
+    }))
+}
+
+fn dispatch_ui_embedded_table_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
+    let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
+    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, false)
+        .ok_or_else(|| format!("no embedded result table found on `{}`", sheet_id.as_str()))?;
+    if !app.canvas_dialogs.open_format_embedded_table(&doc, &sheet_id, idx) {
+        return Err(format!("failed opening Format Embedded Table on `{}` index {idx}", sheet_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.format_embedded_table.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "FormatEmbeddedTable",
+        "sheet_id": sheet_id.as_str(),
+        "target_index": idx,
+        "is_layout": app.canvas_dialogs.format_embedded_table.is_layout,
+    }))
+}
+
+fn dispatch_ui_image_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
+    let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
+    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, true)
+        .ok_or_else(|| format!("no embedded image found on `{}`", sheet_id.as_str()))?;
+    if !app.canvas_dialogs.open_format_image(&doc, &sheet_id, idx) {
+        return Err(format!("failed opening Format Image on `{}` index {idx}", sheet_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.format_image.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "FormatImage",
+        "sheet_id": sheet_id.as_str(),
+        "target_index": idx,
+        "is_layout": app.canvas_dialogs.format_image.is_layout,
+    }))
+}
+
 fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let explicit_collapsed = opt_bool_param(params, &["collapsed"])?;
     let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(app.egui_views.column_grid.row_titles_collapsed);
@@ -3850,6 +3980,8 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::InsertModelEquation { .. } => "InsertModelEquation",
         ActiveDialog::CreateGraph { .. } => "CreateGraph",
         ActiveDialog::EqualizeScaling { .. } => "EqualizeScaling",
+        ActiveDialog::FormatEmbeddedTable { .. } => "FormatEmbeddedTable",
+        ActiveDialog::FormatImage { .. } => "FormatImage",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
     }

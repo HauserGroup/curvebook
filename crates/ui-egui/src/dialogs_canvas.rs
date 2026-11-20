@@ -6,17 +6,18 @@ use curvebook_chart::{ChartScene, PreflightIssue};
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
     CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
-    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
-    EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
-    GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec,
-    HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind,
-    LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
-    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec,
-    OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode,
-    PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RegressionOverlaySpec,
-    RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId,
-    SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, SurvivalDisplayMetric, TableArchetype,
-    TableKind, TickDirection, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
+    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, CropInsetsPt, DataSheet, DescriptiveSpec,
+    DiagnosticPlotKind, EmbeddedTableStyle, EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec,
+    FigureCanvasPreset, FitMethod, FramePreset, GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec,
+    GraphicalDataObject, GroupedArrangement, HeatmapLabelSpec, HookSource, ImageBorderSpec, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec,
+    LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod,
+    MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec,
+    NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod,
+    PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout,
+    PassingBablokSpec, ProjectDocument, RectPt, RegressionOverlaySpec, RepeatedMeasuresDesign, ReplicateOverlayStyle, ResidualCovariance, ResultCell,
+    ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation, SumOfSquaresType, SummaryMeasure,
+    SurvivalAnalysisSpec, SurvivalDisplayMetric, TableArchetype, TableKind, TickDirection, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
+    VariableRole, WeightingScheme, WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -114,6 +115,16 @@ pub enum ActiveDialog {
     },
     EqualizeScaling {
         layout_sheet_id: SheetId,
+    },
+    FormatEmbeddedTable {
+        sheet_id: SheetId,
+        target_index: usize,
+        is_layout: bool,
+    },
+    FormatImage {
+        sheet_id: SheetId,
+        target_index: usize,
+        is_layout: bool,
     },
     CommandPalette,
     About,
@@ -7919,8 +7930,388 @@ impl EqualizeScalingDialogState {
     }
 }
 
+/// Modal state for `Format Embedded Table...` (`WF-58` / `R13.4`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatEmbeddedTableDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub target_index: usize,
+    pub is_layout: bool,
+    pub source_label: String,
+    pub bounds_pt: RectPt,
+    pub style: EmbeddedTableStyle,
+}
+
+impl Default for FormatEmbeddedTableDialogState {
+    fn default() -> Self {
+        Self {
+            sheet_id: None,
+            target_index: 0,
+            is_layout: false,
+            source_label: String::new(),
+            bounds_pt: RectPt::new(180.0, 40.0, 180.0, 90.0),
+            style: EmbeddedTableStyle::default(),
+        }
+    }
+}
+
+impl FormatEmbeddedTableDialogState {
+    /// Populate draft state from `gs.spec.annotations[ann_idx]`.
+    pub fn open_for_graph(&mut self, doc: &ProjectDocument, gs: &GraphSheet, ann_idx: usize) -> bool {
+        let Some(GraphAnnotation::EmbeddedResultTable { result_sheet_id, tab_id, bounds_pt, style, .. }) = gs.spec.annotations.get(ann_idx) else {
+            return false;
+        };
+        let rs_title = doc.result_sheet(result_sheet_id).map_or_else(|| result_sheet_id.as_str().to_owned(), |r| r.title().to_owned());
+        self.sheet_id = Some(gs.id.clone());
+        self.target_index = ann_idx;
+        self.is_layout = false;
+        self.source_label = tab_id.as_ref().map_or(rs_title.clone(), |t| format!("{rs_title} · {t}"));
+        self.bounds_pt = *bounds_pt;
+        self.style = *style;
+        true
+    }
+
+    /// Populate draft state from `ls.spec.items[item_idx]`.
+    pub fn open_for_layout(&mut self, doc: &ProjectDocument, ls: &LayoutSheet, item_idx: usize) -> bool {
+        let Some(LayoutItem::LiveTable { source_sheet_id, tab_id, bounds_pt, style, .. }) = ls.spec.items.get(item_idx) else {
+            return false;
+        };
+        let src_title = doc
+            .result_sheet(source_sheet_id)
+            .map(|r| r.title().to_owned())
+            .or_else(|| doc.data_sheet(source_sheet_id).map(|d| d.title.clone()))
+            .or_else(|| doc.info_sheet(source_sheet_id).map(|i| i.title.clone()))
+            .unwrap_or_else(|| source_sheet_id.as_str().to_owned());
+        self.sheet_id = Some(ls.id.clone());
+        self.target_index = item_idx;
+        self.is_layout = true;
+        self.source_label = tab_id.as_ref().map_or(src_title.clone(), |t| format!("{src_title} · {t}"));
+        self.bounds_pt = *bounds_pt;
+        self.style = *style;
+        true
+    }
+
+    /// Apply localized/headless field patch entries to this embedded table style draft.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "show_column_titles" | "embedded_table.show_column_titles" => {
+                    self.style.show_column_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "show_row_titles" | "embedded_table.show_row_titles" => {
+                    self.style.show_row_titles = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "transpose" | "embedded_table.transpose" => {
+                    self.style.transpose = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "bold_headers" | "embedded_table.bold_headers" => {
+                    self.style.bold_headers = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "font_size_pt" | "embedded_table.font_size" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || f <= 0.0 || f > 72.0 {
+                        return Err(format!("`{key}` must be in (0, 72]"));
+                    }
+                    self.style.font_size_pt = f;
+                }
+                "outer_border_width_pt" | "embedded_table.outer_border_width_pt" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
+                        return Err(format!("`{key}` must be in [0, 12]"));
+                    }
+                    self.style.outer_border_width_pt = f;
+                }
+                "gridline_width_pt" | "embedded_table.gridline_width_pt" => {
+                    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !f.is_finite() || !(0.0..=12.0).contains(&f) {
+                        return Err(format!("`{key}` must be in [0, 12]"));
+                    }
+                    self.style.gridline_width_pt = f;
+                }
+                "border_color" | "embedded_table.border_color" => {
+                    self.style.border_color = parse_threshold_color(val, key)?;
+                }
+                "fill_color" | "embedded_table.fill_color" => {
+                    self.style.fill_color = if val.is_null() { None } else { Some(parse_threshold_color(val, key)?) };
+                }
+                other => return Err(format!("unknown FormatEmbeddedTable field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build single atomic `graph.setSpec` or `layout.setSpec` intent updating the target table item.
+    #[must_use]
+    pub fn commit_intent(&self, doc: &ProjectDocument) -> Option<ToolCommandIntent> {
+        let sid = self.sheet_id.as_ref()?;
+        if self.is_layout {
+            let ls = doc.layout_sheet(sid)?;
+            let mut items = ls.spec.items.clone();
+            let item = items.get_mut(self.target_index)?;
+            let LayoutItem::LiveTable { bounds_pt, style, .. } = item else {
+                return None;
+            };
+            *bounds_pt = self.bounds_pt;
+            *style = self.style;
+            Some(ToolCommandIntent::new("layout.setSpec", json!({ "sheet_id": sid.as_str(), "spec": { "items": items } })))
+        } else {
+            let gs = doc.graph_sheet(sid)?;
+            let mut annotations = gs.spec.annotations.clone();
+            let ann = annotations.get_mut(self.target_index)?;
+            let GraphAnnotation::EmbeddedResultTable { bounds_pt, style, .. } = ann else {
+                return None;
+            };
+            *bounds_pt = self.bounds_pt;
+            *style = self.style;
+            Some(ToolCommandIntent::new("graph.setSpec", json!({ "sheet_id": sid.as_str(), "spec": { "annotations": annotations } })))
+        }
+    }
+}
+
+/// Modal state for `Format Image...` (`WF-57` / `R13.7`).
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct FormatImageDialogState {
+    pub sheet_id: Option<SheetId>,
+    pub target_index: usize,
+    pub is_layout: bool,
+    pub asset_id: String,
+    pub pixel_size: Option<(u32, u32)>,
+    pub bounds_pt: RectPt,
+    pub rotation_deg: f64,
+    pub lock_aspect_ratio: bool,
+    pub crop: CropInsetsPt,
+    pub border_enabled: bool,
+    pub border_width_pt: f64,
+    pub border_color: Rgba8,
+    pub border_dash: LineDashStyle,
+}
+
+impl Default for FormatImageDialogState {
+    fn default() -> Self {
+        Self {
+            sheet_id: None,
+            target_index: 0,
+            is_layout: false,
+            asset_id: String::new(),
+            pixel_size: None,
+            bounds_pt: RectPt::new(24.0, 24.0, 120.0, 90.0),
+            rotation_deg: 0.0,
+            lock_aspect_ratio: true,
+            crop: CropInsetsPt::default(),
+            border_enabled: false,
+            border_width_pt: 0.75,
+            border_color: Rgba8::BLACK,
+            border_dash: LineDashStyle::Solid,
+        }
+    }
+}
+
+struct FormatImageSeed<'a> {
+    doc: &'a ProjectDocument,
+    sheet_id: SheetId,
+    target_index: usize,
+    is_layout: bool,
+    asset_id: &'a str,
+    bounds_pt: RectPt,
+    rotation_deg: f64,
+    lock_aspect_ratio: bool,
+    crop: CropInsetsPt,
+    border: Option<ImageBorderSpec>,
+}
+
+impl FormatImageDialogState {
+    fn populate_common(&mut self, seed: FormatImageSeed<'_>) {
+        self.sheet_id = Some(seed.sheet_id);
+        self.target_index = seed.target_index;
+        self.is_layout = seed.is_layout;
+        self.asset_id = seed.asset_id.to_owned();
+        self.pixel_size = seed.doc.image_asset(seed.asset_id).map(|a| a.pixel_size);
+        self.bounds_pt = seed.bounds_pt;
+        self.rotation_deg = seed.rotation_deg;
+        self.lock_aspect_ratio = seed.lock_aspect_ratio;
+        self.crop = seed.crop;
+        if let Some(b) = seed.border {
+            self.border_enabled = true;
+            self.border_width_pt = b.width_pt;
+            self.border_color = b.color;
+            self.border_dash = b.dash;
+        } else {
+            self.border_enabled = false;
+            self.border_width_pt = 0.75;
+            self.border_color = Rgba8::BLACK;
+            self.border_dash = LineDashStyle::Solid;
+        }
+    }
+
+    /// Populate draft state from `gs.spec.annotations[ann_idx]`.
+    pub fn open_for_graph(&mut self, doc: &ProjectDocument, gs: &GraphSheet, ann_idx: usize) -> bool {
+        let Some(GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border }) =
+            gs.spec.annotations.get(ann_idx)
+        else {
+            return false;
+        };
+        self.populate_common(FormatImageSeed {
+            doc,
+            sheet_id: gs.id.clone(),
+            target_index: ann_idx,
+            is_layout: false,
+            asset_id,
+            bounds_pt: *bounds_pt,
+            rotation_deg: *rotation_deg,
+            lock_aspect_ratio: *lock_aspect_ratio,
+            crop: *crop,
+            border: *border,
+        });
+        true
+    }
+
+    /// Populate draft state from `ls.spec.items[item_idx]`.
+    pub fn open_for_layout(&mut self, doc: &ProjectDocument, ls: &LayoutSheet, item_idx: usize) -> bool {
+        let Some(LayoutItem::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border, .. }) = ls.spec.items.get(item_idx)
+        else {
+            return false;
+        };
+        self.populate_common(FormatImageSeed {
+            doc,
+            sheet_id: ls.id.clone(),
+            target_index: item_idx,
+            is_layout: true,
+            asset_id,
+            bounds_pt: *bounds_pt,
+            rotation_deg: *rotation_deg,
+            lock_aspect_ratio: *lock_aspect_ratio,
+            crop: *crop,
+            border: *border,
+        });
+        true
+    }
+
+    /// Intrinsic height/width aspect ratio falling back to current bounds aspect ratio.
+    #[must_use]
+    pub fn aspect_h_over_w(&self) -> f64 {
+        self.pixel_size
+            .filter(|&(w, h)| w > 0 && h > 0)
+            .map(|(w, h)| f64::from(h) / f64::from(w))
+            .unwrap_or_else(|| if self.bounds_pt.width > 0.0 { self.bounds_pt.height / self.bounds_pt.width } else { 1.0 })
+    }
+
+    /// Apply localized/headless field patch entries to this embedded image draft.
+    pub fn apply_field_patch(&mut self, fields: &serde_json::Map<String, Value>) -> Result<(), String> {
+        for (key, val) in fields {
+            match key.as_str() {
+                "width_pt" | "format_image.width_pt" => {
+                    let w = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !w.is_finite() || w <= 0.0 {
+                        return Err(format!("`{key}` must be finite and > 0"));
+                    }
+                    self.bounds_pt.width = w;
+                    if self.lock_aspect_ratio {
+                        self.bounds_pt.height = (w * self.aspect_h_over_w()).max(1.0);
+                    }
+                }
+                "height_pt" | "format_image.height_pt" => {
+                    let h = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !h.is_finite() || h <= 0.0 {
+                        return Err(format!("`{key}` must be finite and > 0"));
+                    }
+                    self.bounds_pt.height = h;
+                    if self.lock_aspect_ratio {
+                        self.bounds_pt.width = (h / self.aspect_h_over_w().max(1e-9)).max(1.0);
+                    }
+                }
+                "lock_aspect_ratio" | "format_image.lock_aspect_ratio" => {
+                    self.lock_aspect_ratio = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "rotation_deg" | "format_image.rotation_deg" => {
+                    let deg = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+                    if !deg.is_finite() {
+                        return Err(format!("`{key}` must be finite"));
+                    }
+                    self.rotation_deg = deg;
+                }
+                "crop_left_pt" | "format_image.crop.left" => self.crop.left_pt = parse_nonneg_crop(val, key)?,
+                "crop_right_pt" | "format_image.crop.right" => self.crop.right_pt = parse_nonneg_crop(val, key)?,
+                "crop_top_pt" | "format_image.crop.top" => self.crop.top_pt = parse_nonneg_crop(val, key)?,
+                "crop_bottom_pt" | "format_image.crop.bottom" => self.crop.bottom_pt = parse_nonneg_crop(val, key)?,
+                "border_enabled" | "format_image.border.enabled" => {
+                    self.border_enabled = val.as_bool().ok_or_else(|| format!("`{key}` must be bool"))?;
+                }
+                "border_width_pt" | "format_image.border.width" => {
+                    let w = parse_nonneg_crop(val, key)?;
+                    self.border_enabled = true;
+                    self.border_width_pt = w;
+                }
+                "border_color" | "format_image.border.color" => {
+                    self.border_enabled = true;
+                    self.border_color = parse_threshold_color(val, key)?;
+                }
+                "border_dash" | "format_image.border.dash" => {
+                    self.border_enabled = true;
+                    self.border_dash = parse_threshold_dash_style(val, key)?;
+                }
+                other => return Err(format!("unknown FormatImage field `{other}`")),
+            }
+        }
+        Ok(())
+    }
+
+    /// Build `graph.updateImage` or `layout.updateImage` engine intent cleanly.
+    #[must_use]
+    pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
+        let sid = self.sheet_id.as_ref()?;
+        let dash_slug = match self.border_dash {
+            LineDashStyle::Solid => "solid",
+            LineDashStyle::Dashed => "dashed",
+            LineDashStyle::Dotted => "dotted",
+            LineDashStyle::DashDot => "dash_dot",
+            LineDashStyle::DashDotDot => "dash_dot_dot",
+            LineDashStyle::LongDash => "long_dash",
+        };
+        let border_val = if self.border_enabled {
+            let c = self.border_color;
+            json!({
+                "width_pt": self.border_width_pt,
+                "color": format!("#{:02X}{:02X}{:02X}{:02X}", c.r, c.g, c.b, c.a),
+                "dash": dash_slug,
+            })
+        } else {
+            Value::Null
+        };
+        let idx_key = if self.is_layout { "item_index" } else { "annotation_index" };
+        let cmd_id = if self.is_layout { "layout.updateImage" } else { "graph.updateImage" };
+        let mut obj = serde_json::Map::new();
+        obj.insert(String::from("sheet_id"), json!(sid.as_str()));
+        obj.insert(String::from(idx_key), json!(self.target_index));
+        obj.insert(String::from("bounds_pt"), json!([self.bounds_pt.x, self.bounds_pt.y, self.bounds_pt.width, self.bounds_pt.height]));
+        obj.insert(String::from("rotation_deg"), json!(self.rotation_deg));
+        obj.insert(String::from("lock_aspect_ratio"), json!(self.lock_aspect_ratio));
+        obj.insert(
+            String::from("crop"),
+            json!({
+                "left_pt": self.crop.left_pt,
+                "right_pt": self.crop.right_pt,
+                "top_pt": self.crop.top_pt,
+                "bottom_pt": self.crop.bottom_pt,
+            }),
+        );
+        obj.insert(String::from("border"), border_val);
+        Some(ToolCommandIntent::new(cmd_id, Value::Object(obj)))
+    }
+}
+
+fn parse_nonneg_crop(val: &Value, key: &str) -> Result<f64, String> {
+    let f = val.as_f64().ok_or_else(|| format!("`{key}` must be finite"))?;
+    if !f.is_finite() || f < 0.0 {
+        return Err(format!("`{key}` must be finite and >= 0"));
+    }
+    Ok(f)
+}
+
+const fn default_grid_overlay_spacing_pt() -> f64 {
+    18.0
+}
+
 /// Interactive state for the graph/layout canvas, non-modal inspectors, and parameter dialogs.
-#[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct CanvasDialogState {
     pub canvas: CanvasToolState,
     pub active_dialog: ActiveDialog,
@@ -7955,6 +8346,10 @@ pub struct CanvasDialogState {
     #[serde(default)]
     pub ruler_unit: PhysicalUnit,
     #[serde(default)]
+    pub grid_overlay_visible: bool,
+    #[serde(default = "default_grid_overlay_spacing_pt")]
+    pub grid_overlay_spacing_pt: f64,
+    #[serde(default)]
     pub journal_preset: Option<curvebook_tools::JournalWidthPreset>,
     #[serde(default)]
     pub pan_zoom: PanZoomInertiaState,
@@ -7976,6 +8371,57 @@ pub struct CanvasDialogState {
     pub create_graph: CreateGraphDialogState,
     #[serde(default)]
     pub equalize_scaling: EqualizeScalingDialogState,
+    #[serde(default)]
+    pub format_embedded_table: FormatEmbeddedTableDialogState,
+    #[serde(default)]
+    pub format_image: FormatImageDialogState,
+}
+
+impl Default for CanvasDialogState {
+    fn default() -> Self {
+        Self {
+            canvas: CanvasToolState::default(),
+            active_dialog: ActiveDialog::default(),
+            status_banner: None,
+            active_inspector: ActiveInspector::default(),
+            analyze: AnalyzeDialogState::default(),
+            edit_params: EditAnalysisParametersState::default(),
+            change_data: ChangeDataAnalyzedState::default(),
+            result_view: ResultSheetViewState::default(),
+            hook_picker: ConstantHookPickerState::default(),
+            change_graph_type: ChangeGraphTypeState::default(),
+            format_graph: FormatGraphState::default(),
+            format_axes: FormatAxesState::default(),
+            pairwise: PairwiseComparisonsState::default(),
+            bubble_plot: BubblePlotInspectorState::default(),
+            apply_style: ApplyStyleFromState::default(),
+            page_layout: PageLayoutComposerState::default(),
+            export_figure: ExportFigureState::default(),
+            command_palette: CommandPaletteState::default(),
+            convert_archetype: ConvertArchetypeDialogState::default(),
+            exclude_with_reason: ExcludeWithReasonDialogState::default(),
+            active_canvas_preset: None,
+            canvas_resize_mode: CanvasResizeMode::default(),
+            preflight_issues: Vec::new(),
+            rulers_visible: false,
+            ruler_unit: PhysicalUnit::default(),
+            grid_overlay_visible: false,
+            grid_overlay_spacing_pt: default_grid_overlay_spacing_pt(),
+            journal_preset: None,
+            pan_zoom: PanZoomInertiaState::default(),
+            print: PrintDialogState::default(),
+            power_wizard: PowerWizardState::default(),
+            format_points: FormatSelectedPointsState::default(),
+            randomize_groups: RandomizeGroupsDialogState::default(),
+            random_sample_rows: RandomSampleRowsDialogState::default(),
+            simulate_distributions: SimulateDistributionsDialogState::default(),
+            insert_model_equation: InsertModelEquationDialogState::default(),
+            create_graph: CreateGraphDialogState::default(),
+            equalize_scaling: EqualizeScalingDialogState::default(),
+            format_embedded_table: FormatEmbeddedTableDialogState::default(),
+            format_image: FormatImageDialogState::default(),
+        }
+    }
 }
 
 /// Interactive state for the `Print...` setup and OS print-spool dialog (`R5.4`).
@@ -8428,6 +8874,40 @@ impl CanvasDialogState {
         self.equalize_scaling.open_for_layout(doc, ls);
         self.active_dialog = ActiveDialog::EqualizeScaling { layout_sheet_id: ls.id.clone() };
         true
+    }
+
+    /// Open `Format Embedded Table...` targeting annotation/panel `target_index` on `sheet_id` (`WF-58` / `R13.4`).
+    pub fn open_format_embedded_table(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, target_index: usize) -> bool {
+        if let Some(gs) = doc.graph_sheet(sheet_id)
+            && self.format_embedded_table.open_for_graph(doc, gs, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatEmbeddedTable { sheet_id: gs.id.clone(), target_index, is_layout: false };
+            return true;
+        }
+        if let Some(ls) = doc.layout_sheet(sheet_id)
+            && self.format_embedded_table.open_for_layout(doc, ls, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatEmbeddedTable { sheet_id: ls.id.clone(), target_index, is_layout: true };
+            return true;
+        }
+        false
+    }
+
+    /// Open `Format Image...` targeting embedded image `target_index` on `sheet_id` (`WF-57` / `R13.7`).
+    pub fn open_format_image(&mut self, doc: &ProjectDocument, sheet_id: &SheetId, target_index: usize) -> bool {
+        if let Some(gs) = doc.graph_sheet(sheet_id)
+            && self.format_image.open_for_graph(doc, gs, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatImage { sheet_id: gs.id.clone(), target_index, is_layout: false };
+            return true;
+        }
+        if let Some(ls) = doc.layout_sheet(sheet_id)
+            && self.format_image.open_for_layout(doc, ls, target_index)
+        {
+            self.active_dialog = ActiveDialog::FormatImage { sheet_id: ls.id.clone(), target_index, is_layout: true };
+            return true;
+        }
+        false
     }
 
     /// Open `Cmd+K` Command Palette.

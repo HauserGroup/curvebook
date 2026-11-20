@@ -7,10 +7,10 @@
 use curvebook_chart::{ChartScene, PathCmd, PointPt, ScenePrimitive, compile_graph};
 use curvebook_doc::{
     AdditionalTick, AxisThreshold, BracketLabelMode, BracketStyle, BreakOrnament, CategoricalTickSource, CldOrdering, ColorChannelMapping,
-    ColumnDesignHint, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, FramePreset, GraphAxisScale, GraphKind, GraphSheet,
-    GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, JournalWidthPreset, LayoutItem, LogitDomain,
-    MultivariateGraphEncoding, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ProjectDocument, RectPt, SheetId, SizeChannelMapping,
-    SummaryMeasure, SurvivalDisplayMetric, TableArchetype, TableKind, TickDirection, TickLabelFormat,
+    ColumnDesignHint, CropInsetsPt, DiagnosticPlotKind, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, FramePreset, GraphAxisScale,
+    GraphKind, GraphSheet, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode, HeatmapRowLabelMode, JournalWidthPreset, LayoutItem,
+    LogitDomain, MultivariateGraphEncoding, PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ProjectDocument, RectPt, SheetId,
+    SizeChannelMapping, SummaryMeasure, SurvivalDisplayMetric, TableArchetype, TableKind, TickDirection, TickLabelFormat,
 };
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, PaletteId, Rgba8, simulate_cvd};
 use egui::scroll_area::ScrollBarVisibility;
@@ -345,6 +345,8 @@ pub const fn is_graph_modal_active(dialog: &ActiveDialog) -> bool {
             | ActiveDialog::PageLayoutComposer { .. }
             | ActiveDialog::CreateGraph { .. }
             | ActiveDialog::EqualizeScaling { .. }
+            | ActiveDialog::FormatEmbeddedTable { .. }
+            | ActiveDialog::FormatImage { .. }
     )
 }
 
@@ -388,6 +390,8 @@ pub fn render_graph_modal(
         ActiveDialog::PageLayoutComposer { .. } => ("dialog.page_layout_composer", tr(locale, "w6.view.modal.page_layout_composer"), 620.0_f32),
         ActiveDialog::CreateGraph { .. } => ("dialog.create_graph", tr(locale, "cmd.ui.graph.create.open"), 520.0_f32),
         ActiveDialog::EqualizeScaling { .. } => ("dialog.equalize_scaling", tr(locale, "cmd.ui.layout.equalizeScaling.open"), 500.0_f32),
+        ActiveDialog::FormatEmbeddedTable { .. } => ("dialog.format_embedded_table", tr(locale, "cmd.ui.embeddedTable.format.open"), 520.0_f32),
+        ActiveDialog::FormatImage { .. } => ("dialog.format_image", tr(locale, "cmd.ui.image.format.open"), 540.0_f32),
         _ => return GraphModalFrameReport::default(),
     };
 
@@ -548,6 +552,8 @@ fn render_dialog_scroll_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx:
         ActiveDialog::PageLayoutComposer { .. } => render_page_layout_body(ui, state, gctx),
         ActiveDialog::CreateGraph { .. } => render_create_graph_body(ui, gctx),
         ActiveDialog::EqualizeScaling { .. } => render_equalize_scaling_body(ui, gctx),
+        ActiveDialog::FormatEmbeddedTable { .. } => render_format_embedded_table_body(ui, gctx),
+        ActiveDialog::FormatImage { .. } => render_format_image_body(ui, gctx),
         _ => {}
     }
 }
@@ -596,6 +602,8 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
                 | ActiveDialog::FormatGraph { .. }
                 | ActiveDialog::FormatAxes { .. }
                 | ActiveDialog::PairwiseComparisons { .. }
+                | ActiveDialog::FormatEmbeddedTable { .. }
+                | ActiveDialog::FormatImage { .. }
         );
         if supports_apply {
             let apply_lbl = gtr(gctx.locale, "modal.apply");
@@ -3752,6 +3760,445 @@ fn render_equalize_scaling_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
                         next.selected_panel_ids.push(pid.clone());
                     }
                     gctx.intents.push_update_equalize_scaling_state(next);
+                }
+            }
+        });
+    }
+}
+
+fn render_format_embedded_table_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let et = gctx.app.canvas_dialogs.format_embedded_table.clone();
+    if !et.source_label.is_empty() {
+        ui.label(egui::RichText::new(format!("{}: {}", tr(gctx.locale, "r13.table.source"), et.source_label)).color(gctx.tokens.text_muted));
+        ui.add_space(4.0);
+    }
+
+    let mut style = et.style;
+    let mut dirty = false;
+    for (wid, lbl_key, val_ref) in [
+        ("embedded_table.show_column_titles", "r13.table.show_col_titles", &mut style.show_column_titles),
+        ("embedded_table.show_row_titles", "r13.table.show_row_titles", &mut style.show_row_titles),
+        ("embedded_table.transpose", "r13.table.transpose", &mut style.transpose),
+        ("embedded_table.bold_headers", "r13.table.bold_headers", &mut style.bold_headers),
+    ] {
+        let lbl = tr(gctx.locale, lbl_key);
+        let chk = ui.checkbox(val_ref, lbl);
+        record_checkbox(ui, &chk, gctx.meta, wid, lbl, *val_ref);
+        dirty |= chk.changed();
+    }
+    if dirty {
+        let mut next = et.clone();
+        next.style = style;
+        gctx.intents.push_update_format_embedded_table_state(next);
+    }
+
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.table.font_size"));
+        for (slug, sz) in [("6", 6.0_f64), ("75", 7.5), ("9", 9.0), ("11", 11.0)] {
+            let lbl = if (sz - 7.5).abs() < 0.05 { String::from("7.5 pt") } else { format!("{} pt", sz as i32) };
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("embedded_table.font_size.{slug}"),
+                    label: &lbl,
+                    command_id: None,
+                    selected: (et.style.font_size_pt - sz).abs() < 0.1,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = et.clone();
+                next.style.font_size_pt = sz;
+                gctx.intents.push_update_format_embedded_table_state(next);
+            }
+        }
+        let mut cur_sz = et.style.font_size_pt;
+        let dv = ui.add(egui::DragValue::new(&mut cur_sz).range(4.0..=36.0).speed(0.5).suffix(" pt"));
+        record_input(ui, &dv, gctx.meta, "embedded_table.font_size", "Font pt", &format!("{cur_sz:.1}"), true);
+        if dv.changed() {
+            let mut next = et.clone();
+            next.style.font_size_pt = cur_sz.clamp(4.0, 36.0);
+            gctx.intents.push_update_format_embedded_table_state(next);
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.table.outer_border"));
+        for (slug, lbl, w) in [("0", "0 pt", 0.0_f64), ("05", "0.5 pt", 0.5), ("075", "0.75 pt", 0.75), ("15", "1.5 pt", 1.5)] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("embedded_table.outer_border.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: (et.style.outer_border_width_pt - w).abs() < 0.05,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = et.clone();
+                next.style.outer_border_width_pt = w;
+                gctx.intents.push_update_format_embedded_table_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.table.gridlines"));
+        for (slug, lbl, w) in [("0", "0 pt", 0.0_f64), ("05", "0.5 pt", 0.5), ("1", "1 pt", 1.0)] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("embedded_table.gridline.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: (et.style.gridline_width_pt - w).abs() < 0.05,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = et.clone();
+                next.style.gridline_width_pt = w;
+                gctx.intents.push_update_format_embedded_table_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.table.fill"));
+        for (slug, lbl_key, fill) in [
+            ("white", "r13.fg.paper_white", Some(Rgba8::WHITE)),
+            ("cream", "r13.fg.paper_cream", Some(Rgba8::rgb(250, 248, 242))),
+            ("transparent", "r13.common.none", None),
+        ] {
+            let lbl = tr(gctx.locale, lbl_key);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("embedded_table.fill.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: et.style.fill_color == fill,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = et.clone();
+                next.style.fill_color = fill;
+                gctx.intents.push_update_format_embedded_table_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.table.border_color"));
+        for (slug, lbl, col) in
+            [("black", "Black", Rgba8::BLACK), ("slate", "Slate", Rgba8::rgb(71, 85, 105)), ("navy", "Navy", Rgba8::rgb(30, 58, 138))]
+        {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("embedded_table.border_color.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: et.style.border_color == col,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = et.clone();
+                next.style.border_color = col;
+                gctx.intents.push_update_format_embedded_table_state(next);
+            }
+        }
+    });
+}
+
+fn render_format_image_body(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let fi = gctx.app.canvas_dialogs.format_image.clone();
+    if let Some((pw, ph)) = fi.pixel_size {
+        ui.label(egui::RichText::new(format!("{} · {pw}×{ph} px", fi.asset_id)).small().color(gctx.tokens.text_muted));
+        ui.add_space(4.0);
+    }
+    render_format_image_geometry(ui, gctx, &fi);
+    ui.add_space(6.0);
+    render_format_image_crop(ui, gctx, &fi);
+    ui.add_space(6.0);
+    render_format_image_border(ui, gctx, &fi);
+}
+
+fn render_format_image_geometry(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &crate::dialogs_canvas::FormatImageDialogState) {
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.image.size_rotation")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label("W:");
+        let mut w_pt = fi.bounds_pt.width;
+        let w_dv = ui.add(egui::DragValue::new(&mut w_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
+        record_input(ui, &w_dv, gctx.meta, "format_image.width_pt", "Width", &format!("{w_pt:.1}"), true);
+        if w_dv.changed() {
+            let mut next = fi.clone();
+            next.bounds_pt.width = w_pt.clamp(8.0, 2000.0);
+            if next.lock_aspect_ratio {
+                next.bounds_pt.height = (next.bounds_pt.width * next.aspect_h_over_w()).clamp(8.0, 2000.0);
+            }
+            gctx.intents.push_update_format_image_state(next);
+        }
+
+        ui.label("H:");
+        let mut h_pt = fi.bounds_pt.height;
+        let h_dv = ui.add(egui::DragValue::new(&mut h_pt).range(8.0..=2000.0).speed(1.0).suffix(" pt"));
+        record_input(ui, &h_dv, gctx.meta, "format_image.height_pt", "Height", &format!("{h_pt:.1}"), true);
+        if h_dv.changed() {
+            let mut next = fi.clone();
+            next.bounds_pt.height = h_pt.clamp(8.0, 2000.0);
+            if next.lock_aspect_ratio {
+                next.bounds_pt.width = (next.bounds_pt.height / next.aspect_h_over_w().max(1e-9)).clamp(8.0, 2000.0);
+            }
+            gctx.intents.push_update_format_image_state(next);
+        }
+
+        let mut lock = fi.lock_aspect_ratio;
+        let lock_lbl = tr(gctx.locale, "r13.image.lock_aspect");
+        let lock_chk = ui.checkbox(&mut lock, lock_lbl);
+        record_checkbox(ui, &lock_chk, gctx.meta, "format_image.lock_aspect_ratio", lock_lbl, lock);
+        if lock_chk.changed() {
+            let mut next = fi.clone();
+            next.lock_aspect_ratio = lock;
+            gctx.intents.push_update_format_image_state(next);
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(tr(gctx.locale, "r13.image.rotation"));
+        for deg in [0.0_f64, 90.0, 180.0, 270.0] {
+            let lbl = format!("{}°", deg as i32);
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_image.rotation.{}", deg as i32),
+                    label: &lbl,
+                    command_id: None,
+                    selected: (fi.rotation_deg - deg).abs() < 0.25,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fi.clone();
+                next.rotation_deg = deg;
+                gctx.intents.push_update_format_image_state(next);
+            }
+        }
+        let mut rot = fi.rotation_deg;
+        let rot_dv = ui.add(egui::DragValue::new(&mut rot).range(-360.0..=360.0).speed(1.0).suffix("°"));
+        record_input(ui, &rot_dv, gctx.meta, "format_image.rotation_deg", "Angle", &format!("{rot:.1}"), true);
+        if rot_dv.changed() {
+            let mut next = fi.clone();
+            next.rotation_deg = rot.clamp(-360.0, 360.0);
+            gctx.intents.push_update_format_image_state(next);
+        }
+    });
+}
+
+fn render_format_image_crop(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &crate::dialogs_canvas::FormatImageDialogState) {
+    ui.label(egui::RichText::new(tr(gctx.locale, "r13.image.crop")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        let max_lr = (fi.bounds_pt.width - 2.0).max(0.0);
+        let max_tb = (fi.bounds_pt.height - 2.0).max(0.0);
+        let mut crop = fi.crop;
+        let mut changed = false;
+
+        for (wid, lbl, val_ref, cap) in [
+            ("format_image.crop.left", "L", &mut crop.left_pt, (max_lr - fi.crop.right_pt).max(0.0)),
+            ("format_image.crop.right", "R", &mut crop.right_pt, (max_lr - fi.crop.left_pt).max(0.0)),
+            ("format_image.crop.top", "T", &mut crop.top_pt, (max_tb - fi.crop.bottom_pt).max(0.0)),
+            ("format_image.crop.bottom", "B", &mut crop.bottom_pt, (max_tb - fi.crop.top_pt).max(0.0)),
+        ] {
+            ui.label(format!("{lbl}:"));
+            let dv = ui.add(egui::DragValue::new(val_ref).range(0.0..=cap).speed(0.5).suffix(" pt"));
+            record_input(ui, &dv, gctx.meta, wid, lbl, &format!("{:.1}", *val_ref), true);
+            changed |= dv.changed();
+        }
+        if changed {
+            let mut next = fi.clone();
+            next.crop = crop;
+            gctx.intents.push_update_format_image_state(next);
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (edge, lbl) in [("left", "L +4"), ("right", "R +4"), ("top", "T +4"), ("bottom", "B +4")] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_image.crop.{edge}_plus4"),
+                    label: lbl,
+                    command_id: None,
+                    selected: false,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fi.clone();
+                match edge {
+                    "left" => next.crop.left_pt = (next.crop.left_pt + 4.0).min((next.bounds_pt.width - next.crop.right_pt - 2.0).max(0.0)),
+                    "right" => next.crop.right_pt = (next.crop.right_pt + 4.0).min((next.bounds_pt.width - next.crop.left_pt - 2.0).max(0.0)),
+                    "top" => next.crop.top_pt = (next.crop.top_pt + 4.0).min((next.bounds_pt.height - next.crop.bottom_pt - 2.0).max(0.0)),
+                    _ => next.crop.bottom_pt = (next.crop.bottom_pt + 4.0).min((next.bounds_pt.height - next.crop.top_pt - 2.0).max(0.0)),
+                }
+                gctx.intents.push_update_format_image_state(next);
+            }
+        }
+        let reset_lbl = tr(gctx.locale, "r13.image.crop_reset");
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "format_image.crop.reset",
+                label: reset_lbl,
+                command_id: None,
+                selected: false,
+                enabled: true,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            let mut next = fi.clone();
+            next.crop = CropInsetsPt::default();
+            gctx.intents.push_update_format_image_state(next);
+        }
+    });
+}
+
+fn render_format_image_border(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, fi: &crate::dialogs_canvas::FormatImageDialogState) {
+    let mut border_on = fi.border_enabled;
+    let border_lbl = tr(gctx.locale, "r13.image.border");
+    let chk = ui.checkbox(&mut border_on, border_lbl);
+    record_checkbox(ui, &chk, gctx.meta, "format_image.border.enabled", border_lbl, border_on);
+    if chk.changed() {
+        let mut next = fi.clone();
+        next.border_enabled = border_on;
+        gctx.intents.push_update_format_image_state(next);
+    }
+
+    if fi.border_enabled {
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (slug, lbl, w) in [("05", "0.5 pt", 0.5_f64), ("1", "1 pt", 1.0), ("2", "2 pt", 2.0)] {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_image.border.width.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: (fi.border_width_pt - w).abs() < 0.05,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fi.clone();
+                    next.border_width_pt = w;
+                    gctx.intents.push_update_format_image_state(next);
+                }
+            }
+        });
+
+        ui.add_space(4.0);
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (slug, lbl, col) in
+                [("black", "Black", Rgba8::BLACK), ("slate", "Slate", Rgba8::rgb(71, 85, 105)), ("accent", "Blue", Rgba8::rgb(37, 99, 235))]
+            {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_image.border.color.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fi.border_color == col,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fi.clone();
+                    next.border_color = col;
+                    gctx.intents.push_update_format_image_state(next);
+                }
+            }
+            for (slug, lbl, dash) in
+                [("solid", "Solid", LineDashStyle::Solid), ("dashed", "Dashed", LineDashStyle::Dashed), ("dotted", "Dotted", LineDashStyle::Dotted)]
+            {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_image.border.dash.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fi.border_dash == dash,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fi.clone();
+                    next.border_dash = dash;
+                    gctx.intents.push_update_format_image_state(next);
                 }
             }
         });

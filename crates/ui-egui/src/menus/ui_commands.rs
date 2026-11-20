@@ -414,4 +414,28 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         summary: "Open the Equalize Scaling dialog to match inner plot scaling across graph panels on a layout.",
         beginner: "Aligns visual data scale across multiple panels on a publication layout page.",
     },
+    UiCommandSpec {
+        id: "ui.gridOverlay.toggle",
+        label: "Canvas Grid",
+        shortcut: "",
+        params_doc: "{\"visible\":\"optional bool\",\"spacing_pt\":\"optional number\"}",
+        summary: "Toggle the non-exported alignment grid overlay on GraphSheet and LayoutSheet canvases.",
+        beginner: "Displays a lightweight screen-only alignment grid over the figure page without affecting exports.",
+    },
+    UiCommandSpec {
+        id: "ui.embeddedTable.format.open",
+        label: "Format Embedded Table...",
+        shortcut: "",
+        params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
+        summary: "Open the Format Embedded Table dialog for a pasted ResultSheet or LiveTable annotation.",
+        beginner: "Customize transposition, row/column titles, bold headers, borders, and font size on embedded tables.",
+    },
+    UiCommandSpec {
+        id: "ui.image.format.open",
+        label: "Format Image...",
+        shortcut: "",
+        params_doc: "{\"sheet_id\":\"optional GraphSheetId|LayoutSheetId\",\"annotation_index\":\"optional usize\",\"panel_index\":\"optional usize\"}",
+        summary: "Open the Format Image dialog to edit bounds, aspect lock, rotation, 4-edge crop, and border.",
+        beginner: "Resize, rotate, crop, and frame an embedded PNG, JPEG, or TIFF image.",
+    },
 ];

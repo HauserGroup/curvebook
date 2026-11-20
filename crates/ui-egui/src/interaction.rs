@@ -749,6 +749,22 @@ pub struct InteractionControllerState {
     pub last_clipboard_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clipboard_bundle: Option<crate::os_integration::ClipboardBundle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_copied_result_table: Option<ResultTableClipboard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clipboard_image_png: Option<Vec<u8>>,
+}
+
+/// Structured copy reference to a [`curvebook_doc::ResultSheet`] selection for graph pasting (`WF-58`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultTableClipboard {
+    pub source_sheet_id: SheetId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_rows: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_cols: Option<Vec<usize>>,
 }
 
 /// Structured outcome emitted by [`dispatch_ui_event`].

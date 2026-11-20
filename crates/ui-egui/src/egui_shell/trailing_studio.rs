@@ -14,9 +14,9 @@ use std::collections::BTreeSet;
 
 use curvebook_doc::{
     AnalysisKind, AxisSpec, ChecklistStatus, ConstantValue, DataSheet, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation,
-    GraphSheet, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, LayoutSheet, LevelOrderKind, MultipleVariablesTable, PageOrientation,
-    PairwiseDisplayMode, PanelBadgeStyle, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, SeriesSpec, SheetId, TableArchetype,
-    VariableColumn, VariableRole, VariableSource,
+    GraphSheet, GraphicalDataObject, GroupedArrangement, HookSource, InfoSheet, LayoutItem, LayoutSheet, LevelOrderKind, MultipleVariablesTable,
+    PageOrientation, PairwiseDisplayMode, PanelBadgeStyle, ParameterScope, ProjectDocument, ResultSheet, ResultStatus, SeriesSpec, SheetId,
+    TableArchetype, VariableColumn, VariableRole, VariableSource,
 };
 use curvebook_engine::methods_report::{ReportFormat, generate_methods_report};
 use curvebook_math::AxisScale;
@@ -2549,6 +2549,8 @@ fn render_graph_inspector_studio(
                 intents.push_set_preview_filter(if is_gray { CanvasPreviewFilter::Normal } else { CanvasPreviewFilter::GrayscalePrint });
             }
 
+            render_graph_canvas_media_controls(ui, app, gs, ctx_in, meta, intents);
+
             ui.add_space(6.0);
             widgets::divider(ui);
             ui.add_space(4.0);
@@ -3103,6 +3105,8 @@ fn render_page_layout_composer_studio(
         intents.push_ui("ui.layout.equalizeScaling.open", json!({ "sheet_id": ls.id.as_str() }));
     }
 
+    render_layout_media_controls(ui, app, ls, ctx_in, meta, intents);
+
     ui.add_space(6.0);
     widgets::divider(ui);
     ui.add_space(4.0);
@@ -3308,4 +3312,168 @@ pub fn render_trailing_studio(
 
     report.dock_rect_pt = Some(resp);
     report
+}
+
+struct MediaControlsSpec<'a> {
+    prefix: &'a str,
+    sheet_id: &'a SheetId,
+    insert_cmd: &'a str,
+    idx_key: &'a str,
+    img_idx: Option<usize>,
+    table_idx: Option<usize>,
+}
+
+fn render_canvas_media_buttons(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    spec: MediaControlsSpec<'_>,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    let locale = tokens.locale;
+    ui.add_space(4.0);
+    if studio_full_button(
+        ui,
+        tokens,
+        tr(locale, "r13.canvas.grid_overlay"),
+        "Toggle non-exported visual alignment grid",
+        app.canvas_dialogs.grid_overlay_visible,
+        ctx_in.enabled,
+        false,
+        meta,
+        &format!("inspector.{}.grid_overlay", spec.prefix),
+        Some("ui.gridOverlay.toggle"),
+        None,
+    ) {
+        intents.push_ui("ui.gridOverlay.toggle", json!({}));
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.spacing_mut().item_spacing = Vec2::new(4.0, 4.0);
+        if studio_chip(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.insert_image"),
+            "Insert PNG, JPEG, or TIFF image from file",
+            116.0,
+            false,
+            ctx_in.enabled,
+            None,
+            meta,
+            &format!("inspector.{}.insert_image", spec.prefix),
+            "button",
+            Some(spec.insert_cmd),
+            None,
+        ) {
+            intents.push_engine(spec.insert_cmd, json!({}));
+        }
+        if studio_chip(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.paste_image"),
+            "Paste image bytes from clipboard",
+            110.0,
+            false,
+            ctx_in.enabled,
+            None,
+            meta,
+            &format!("inspector.{}.paste_image", spec.prefix),
+            "button",
+            Some("edit.pasteImage"),
+            None,
+        ) {
+            intents.push_paste_image_from_clipboard(spec.sheet_id.clone(), None);
+        }
+    });
+
+    if let Some(idx) = spec.img_idx {
+        ui.add_space(4.0);
+        if studio_full_button(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.format_image"),
+            "Edit image placement, rotation, 4-edge crop, and border",
+            false,
+            ctx_in.enabled,
+            false,
+            meta,
+            &format!("inspector.{}.format_image", spec.prefix),
+            Some("ui.image.format.open"),
+            None,
+        ) {
+            intents.push_ui("ui.image.format.open", json!({ "sheet_id": spec.sheet_id.as_str(), spec.idx_key: idx }));
+        }
+    }
+
+    if let Some(idx) = spec.table_idx {
+        ui.add_space(4.0);
+        if studio_full_button(
+            ui,
+            tokens,
+            tr(locale, "r13.canvas.format_embedded_table"),
+            "Format embedded result table borders, gridlines, font, and fill",
+            false,
+            ctx_in.enabled,
+            false,
+            meta,
+            &format!("inspector.{}.format_embedded_table", spec.prefix),
+            Some("ui.embeddedTable.format.open"),
+            None,
+        ) {
+            intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": spec.sheet_id.as_str(), spec.idx_key: idx }));
+        }
+    }
+}
+
+fn render_graph_canvas_media_controls(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    gs: &GraphSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let sel = app.egui_views.canvas_view.selected_graph_annotation;
+    let img_idx = sel
+        .filter(|&i| matches!(gs.spec.annotations.get(i), Some(GraphAnnotation::EmbeddedImage { .. })))
+        .or_else(|| gs.spec.annotations.iter().position(|a| matches!(a, GraphAnnotation::EmbeddedImage { .. })));
+    let table_idx = sel
+        .filter(|&i| matches!(gs.spec.annotations.get(i), Some(GraphAnnotation::EmbeddedResultTable { .. })))
+        .or_else(|| gs.spec.annotations.iter().position(|a| matches!(a, GraphAnnotation::EmbeddedResultTable { .. })));
+    render_canvas_media_buttons(
+        ui,
+        app,
+        MediaControlsSpec { prefix: "canvas", sheet_id: &gs.id, insert_cmd: "graph.insertImage", idx_key: "annotation_index", img_idx, table_idx },
+        ctx_in,
+        meta,
+        intents,
+    );
+}
+
+fn render_layout_media_controls(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ls: &LayoutSheet,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let sel = app.egui_views.canvas_view.selected_panel_index;
+    let img_idx = sel
+        .filter(|&i| matches!(ls.spec.items.get(i), Some(LayoutItem::EmbeddedImage { .. })))
+        .or_else(|| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::EmbeddedImage { .. })));
+    let table_idx = sel
+        .filter(|&i| matches!(ls.spec.items.get(i), Some(LayoutItem::LiveTable { .. })))
+        .or_else(|| ls.spec.items.iter().position(|it| matches!(it, LayoutItem::LiveTable { .. })));
+    render_canvas_media_buttons(
+        ui,
+        app,
+        MediaControlsSpec { prefix: "layout", sheet_id: &ls.id, insert_cmd: "layout.insertImage", idx_key: "panel_index", img_idx, table_idx },
+        ctx_in,
+        meta,
+        intents,
+    );
 }

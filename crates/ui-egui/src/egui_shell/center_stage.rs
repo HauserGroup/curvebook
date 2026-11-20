@@ -195,6 +195,8 @@ pub struct CenterStageFrameReport {
     pub diagnostic_banner_rect_pt: Option<egui::Rect>,
     /// `true` when the active CenterStage mode rendered natively in `egui` (rather than deferred).
     pub handled_natively: bool,
+    /// `true` when the non-exported Canvas Grid alignment overlay was painted on `paper_rect`.
+    pub grid_overlay_shown: bool,
 }
 
 fn stage_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
@@ -886,7 +888,7 @@ fn render_single_pane_mode(
                 SplitPaneSlot::Primary => &mut views.canvas_view,
                 SplitPaneSlot::Secondary => &mut views.center_stage.secondary_canvas_view,
             };
-            let _ = render_canvas_view_for_sheet(
+            let c_rep = render_canvas_view_for_sheet(
                 ui,
                 app,
                 sheet_id,
@@ -895,6 +897,7 @@ fn render_single_pane_mode(
                 meta,
                 intents,
             );
+            report.grid_overlay_shown |= c_rep.grid_overlay_shown;
         }
         CenterStageMode::Gallery => {
             report.handled_natively = true;

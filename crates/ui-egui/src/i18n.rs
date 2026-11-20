@@ -4038,6 +4038,60 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "موازنة القياس...",
         he: "השווה קנה מידה...",
     ]),
+    entry!("cmd.ui.gridOverlay.toggle" => [
+        en: "Canvas Grid",
+        de: "Zeichenflächen-Raster",
+        es: "Cuadrícula del lienzo",
+        fr: "Grille du canevas",
+        ja: "キャンバスグリッド",
+        ko: "캔버스 격자",
+        pt_br: "Grade da tela",
+        zh_cn: "画布网格",
+        zh_tw: "畫布格線",
+        it: "Griglia tela",
+        nl: "Canvasraster",
+        pl: "Siatka płótna",
+        ru: "Сетка холста",
+        tr: "Tuval Izgarası",
+        ar: "شبكة اللوحة",
+        he: "רשת קנבס",
+    ]),
+    entry!("cmd.ui.embeddedTable.format.open" => [
+        en: "Format Embedded Table...",
+        de: "Eingebettete Tabelle formatieren...",
+        es: "Formatear tabla incrustada...",
+        fr: "Mettre en forme le tableau intégré...",
+        ja: "埋め込み表の書式設定...",
+        ko: "포함된 표 서식...",
+        pt_br: "Formatar tabela incorporada...",
+        zh_cn: "设置嵌入表格式...",
+        zh_tw: "設定內嵌表格格式...",
+        it: "Formatta tabella incorporata...",
+        nl: "Ingesloten tabel opmaken...",
+        pl: "Formatuj osadzoną tabelę...",
+        ru: "Форматировать встроенную таблицу...",
+        tr: "Gömülü Tabloyu Biçimlendir...",
+        ar: "تنسيق الجدول المُضمّن...",
+        he: "עצב טבלה מוטבעת...",
+    ]),
+    entry!("cmd.ui.image.format.open" => [
+        en: "Format Image...",
+        de: "Bild formatieren...",
+        es: "Formatear imagen...",
+        fr: "Mettre en forme l'image...",
+        ja: "画像の書式設定...",
+        ko: "이미지 서식...",
+        pt_br: "Formatar imagem...",
+        zh_cn: "设置图像格式...",
+        zh_tw: "設定圖片格式...",
+        it: "Formatta immagine...",
+        nl: "Afbeelding opmaken...",
+        pl: "Formatuj obraz...",
+        ru: "Форматировать изображение...",
+        tr: "Görseli Biçimlendir...",
+        ar: "تنسيق الصورة...",
+        he: "עצב תמונה...",
+    ]),
     entry!("cmd.app.about" => [
         en: "About CurveBook",
         de: "Über CurveBook",
@@ -6381,8 +6435,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 825);
-        assert_eq!(LOCALES.len() * catalog_len(), 13_200);
+        assert_eq!(catalog_len(), 852);
+        assert_eq!(LOCALES.len() * catalog_len(), 13_632);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6420,7 +6474,7 @@ mod tests {
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
         assert_eq!(engine_specs.len(), 105, "expected 105 engine CommandSpec entries");
-        assert_eq!(crate::menus::UI_COMMANDS.len(), 50, "expected 50 UiCommandSpec entries");
+        assert_eq!(crate::menus::UI_COMMANDS.len(), 53, "expected 53 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();
         for spec in &engine_specs {

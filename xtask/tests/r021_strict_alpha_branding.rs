@@ -199,6 +199,8 @@ fn r021_live_egui_shell_and_a11y_clean_across_all_16_locales_and_5_sheets() -> R
         ActiveDialog::InsertModelEquation { graph_sheet_id: SheetId::new("graph-1") },
         ActiveDialog::CreateGraph { source_sheet_id: Some(SheetId::new("data-1")) },
         ActiveDialog::EqualizeScaling { layout_sheet_id: SheetId::new("layout-1") },
+        ActiveDialog::FormatEmbeddedTable { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
+        ActiveDialog::FormatImage { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
         ActiveDialog::About,
     ];

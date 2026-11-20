@@ -2372,6 +2372,12 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
         ActiveDialog::EqualizeScaling { .. } => {
             app.canvas_dialogs.equalize_scaling.apply_field_patch(fields).map_err(bad_input)?;
         }
+        ActiveDialog::FormatEmbeddedTable { .. } => {
+            app.canvas_dialogs.format_embedded_table.apply_field_patch(fields).map_err(bad_input)?;
+        }
+        ActiveDialog::FormatImage { .. } => {
+            app.canvas_dialogs.format_image.apply_field_patch(fields).map_err(bad_input)?;
+        }
         ActiveDialog::Print { .. } => {
             if map_opt_bool(fields, &["submit_to_os", "print.submit_to_os"])? == Some(true) && app.is_gui_only() {
                 return Err(EngineError::with_code(
@@ -2527,6 +2533,12 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
         }
         ActiveDialog::CreateGraph { .. } => commit_single_intent(app, app.canvas_dialogs.create_graph.commit_intent(), true),
         ActiveDialog::EqualizeScaling { .. } => commit_single_intent(app, app.canvas_dialogs.equalize_scaling.commit_intent(), true),
+        ActiveDialog::FormatEmbeddedTable { .. } => {
+            let doc = app.document().clone();
+            let intent = app.canvas_dialogs.format_embedded_table.commit_intent(&doc);
+            commit_single_intent(app, intent, action != "apply")
+        }
+        ActiveDialog::FormatImage { .. } => commit_single_intent(app, app.canvas_dialogs.format_image.commit_intent(), action != "apply"),
         ActiveDialog::CommandPalette => commit_command_palette_action(app),
         ActiveDialog::ConstantHookPicker { .. } => commit_single_intent(app, app.canvas_dialogs.hook_picker.commit_intent(), true),
         ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::None => {

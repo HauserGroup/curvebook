@@ -146,11 +146,35 @@ fn build_populated_routing_app() -> Result<UiApp, Box<dyn std::error::Error>> {
     let _ = app.execute_command("layout.create", json!({ "sheet_id": "layout-1", "title": "Figure 1" }))?;
     let _ = app.execute_command("layout.addPanel", json!({ "sheet_id": "layout-1", "graph_sheet_id": "graph-xy" }))?;
 
+    // 5b. Seed embedded result table and image objects so R13 table/image formatting and reorder routes have targets.
+    let result_id = app.document().result_sheets.first().map(|r| r.id.as_str().to_owned()).ok_or("expected populated result sheet")?;
+    let _ = app.execute_command("edit.pasteResultTable", json!({ "source_sheet_id": result_id, "target_sheet_id": "graph-xy" }))?;
+    let tiny_png = curvebook_render::png::encode_png(&curvebook_render::RasterImage { width_px: 2, height_px: 2, dpi: 96, rgba: vec![255u8; 16] })?;
+    let tiny_png_b64 = encode_base64(&tiny_png);
+    let _ = app.execute_command("graph.insertImage", json!({ "sheet_id": "graph-xy", "bytes_base64": tiny_png_b64.clone() }))?;
+    let _ = app.execute_command("layout.insertImage", json!({ "sheet_id": "layout-1", "bytes_base64": tiny_png_b64 }))?;
+
     // 6. Focus back onto data-xy so grid cell selection exists cleanly.
     let _ = app.execute_command("sheet.select", json!({ "sheet_id": "data-xy" }))?;
     app.grid.select_single_sync(curvebook_doc::CellCoord::new(0, 0, 0).into());
     app.sync_views();
     Ok(app)
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut out = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    for chunk in bytes.chunks(3) {
+        let b0 = usize::from(chunk[0]);
+        let b1 = usize::from(*chunk.get(1).unwrap_or(&0));
+        let b2 = usize::from(*chunk.get(2).unwrap_or(&0));
+        let triple = (b0 << 16) | (b1 << 8) | b2;
+        out.push(char::from(TABLE[(triple >> 18) & 0x3F]));
+        out.push(char::from(TABLE[(triple >> 12) & 0x3F]));
+        out.push(if chunk.len() > 1 { char::from(TABLE[(triple >> 6) & 0x3F]) } else { '=' });
+        out.push(if chunk.len() > 2 { char::from(TABLE[triple & 0x3F]) } else { '=' });
+    }
+    out
 }
 
 fn spawn_window_from_session(session: Session) -> Result<(DesktopHostRuntime, DesktopWindowId), String> {
@@ -609,6 +633,8 @@ fn native_file_dialog_routing_covers_all_import_export_template_commands() {
         "graph.exportPng",
         "graph.exportEmf",
         "layout.exportEmf",
+        "graph.insertImage",
+        "layout.insertImage",
         "table.importCsv",
         "table.importPrism",
         "table.importPzfx",
@@ -947,5 +973,65 @@ fn r10_23_drawn_file_menu_routes_open_save_save_as_and_exports_through_adapter()
     assert_eq!(recorded[8].extensions, vec!["png"]);
 
     let _ = fs::remove_dir_all(&tmp_dir);
+    Ok(())
+}
+
+#[test]
+fn r13_7_native_rfd_image_picker_inserts_png_on_graph_and_layout() -> Result<(), Box<dyn std::error::Error>> {
+    use curvebook::desktop_host::{NativeFileDialogKind, StubNativeFileDialogAdapter};
+    use curvebook_doc::{GraphAnnotation, LayoutItem};
+    use curvebook_render::{RasterImage, png::encode_png};
+
+    let png_path = unique_temp_file("r13-7-insert.png");
+    let png_bytes = encode_png(&RasterImage { width_px: 16, height_px: 8, dpi: 96, rgba: [40, 120, 220, 255].repeat(16 * 8) })?;
+    std::fs::write(&png_path, png_bytes)?;
+
+    let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+    adapter.push_response("graph.insertImage", Some(png_path.clone()));
+    adapter.push_response("layout.insertImage", Some(png_path.clone()));
+
+    let metrics = ViewportMetrics::new(1280.0, 820.0, 1.0);
+    let mut rt = DesktopHostRuntime::new(DesktopHostConfig {
+        in_window_menus: true,
+        new_instance: false,
+        gui_only: false,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
+        locale_override: None,
+        theme_override: None,
+        recovery_root: None,
+        initial_viewport: metrics,
+    });
+    rt.set_file_dialog_adapter(adapter.clone());
+    let wid = rt.open_window(None, metrics)?;
+
+    rt.window_mut(wid)?.app_mut().execute_command(
+        "sheet.createData",
+        json!({ "sheet_id": "data-xy", "title": "Image Host Data", "kind": "xy", "data_sets": 1, "rows": 3, "auto_graph": false }),
+    )?;
+    rt.window_mut(wid)?.app_mut().execute_command("graph.create", json!({ "sheet_id": "g-img", "data_sheet_id": "data-xy", "kind": "xy" }))?;
+    rt.window_mut(wid)?.app_mut().execute_command("layout.create", json!({ "sheet_id": "lay-img", "title": "Img Layout" }))?;
+
+    rt.window_mut(wid)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "g-img" }))?;
+    let g_out = rt.dispatch_native_file_command(wid, "graph.insertImage")?.ok_or("expected graph.insertImage native dialog")?;
+    assert!(g_out.handled);
+
+    rt.window_mut(wid)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "lay-img" }))?;
+    let l_out = rt.dispatch_native_file_command(wid, "layout.insertImage")?.ok_or("expected layout.insertImage native dialog")?;
+    assert!(l_out.handled);
+
+    let reqs = adapter.requests();
+    assert_eq!(reqs.len(), 2);
+    for req in &reqs {
+        assert_eq!(req.kind, NativeFileDialogKind::OpenFile);
+        assert_eq!(req.extensions, vec!["png", "jpg", "jpeg", "tif", "tiff"]);
+    }
+
+    let doc = rt.window(wid)?.app().document();
+    let gs = doc.graph_sheet(&SheetId::new("g-img")).ok_or("missing g-img")?;
+    assert!(gs.spec.annotations.iter().any(|a| matches!(a, GraphAnnotation::EmbeddedImage { .. })), "expected EmbeddedImage on GraphSheet");
+    let ls = doc.layout_sheet(&SheetId::new("lay-img")).ok_or("missing lay-img")?;
+    assert!(ls.spec.items.iter().any(|it| matches!(it, LayoutItem::EmbeddedImage { .. })), "expected EmbeddedImage on LayoutSheet");
+
+    let _ = std::fs::remove_file(&png_path);
     Ok(())
 }

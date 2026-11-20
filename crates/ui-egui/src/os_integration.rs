@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use curvebook_chart::ChartScene;
-use curvebook_doc::{DataSheet, SheetCellRange, SheetId};
+use curvebook_doc::{DataSheet, MAX_IMAGE_ASSET_BYTES, SheetCellRange, SheetId};
 use curvebook_engine::Session;
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
@@ -179,6 +179,14 @@ pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
         Ok(OsAdapterStatus::unavailable("platform-clipboard", "clipboard read unsupported on this adapter"))
     }
+
+    /// Read PNG/JPEG/TIFF raster image bytes from the platform clipboard, if present.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when reading clipboard image data fails unexpectedly.
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
 }
 
 /// Default platform clipboard adapter delegating to native OS pasteboard tools on desktop targets.
@@ -222,12 +230,24 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
             Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard read requires host DOM bridge"))
         }
     }
+
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            read_os_clipboard_image_bytes()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct StubClipboardInner {
     bundles: Vec<ClipboardBundle>,
     texts: Vec<String>,
+    image_bytes: Option<Vec<u8>>,
     available: bool,
 }
 
@@ -248,14 +268,28 @@ impl StubPlatformClipboardAdapter {
     /// Construct an available in-memory clipboard stub with empty capture buffers.
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: true })) }
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
+                bundles: Vec::new(),
+                texts: Vec::new(),
+                image_bytes: None,
+                available: true,
+            })),
+        }
     }
 
     /// Construct an in-memory clipboard stub simulating a headless environment (`available = false`)
     /// while still recording submitted payloads.
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: false })) }
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
+                bundles: Vec::new(),
+                texts: Vec::new(),
+                image_bytes: None,
+                available: false,
+            })),
+        }
     }
 
     /// Return all captured multi-flavor [`ClipboardBundle`] writes in submission order.
@@ -289,20 +323,29 @@ impl StubPlatformClipboardAdapter {
     /// Seed plain UTF-8 / TSV text into the stub clipboard so raw `Cmd/Ctrl+V` reads it.
     pub fn seed_text(&self, text: impl Into<String>) {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = None;
         guard.texts.push(text.into());
     }
 
-    /// Clear all captured bundle and text entries.
+    /// Seed encoded PNG/JPEG/TIFF bytes into the stub clipboard for image paste testing.
+    pub fn seed_image_bytes(&self, bytes: Vec<u8>) {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = Some(bytes);
+    }
+
+    /// Clear all captured bundle, text, and seeded image entries.
     pub fn clear(&self) {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.bundles.clear();
         guard.texts.clear();
+        guard.image_bytes = None;
     }
 }
 
 impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = None;
         guard.texts.push(text.to_owned());
         if guard.available {
             Ok(OsAdapterStatus {
@@ -353,6 +396,14 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
             text,
             job_id: None,
         })
+    }
+
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !guard.available {
+            return Ok(None);
+        }
+        Ok(guard.image_bytes.clone())
     }
 }
 
@@ -904,6 +955,94 @@ function run(argv) {
 #[cfg(target_arch = "wasm32")]
 pub fn read_os_clipboard_pdf_bytes() -> Result<Vec<u8>, String> {
     Err(String::from("OS clipboard PDF read is unavailable in wasm32 builds"))
+}
+
+/// Read PNG, JPEG, or TIFF raster image bytes from the host OS clipboard when available (`WF-57`).
+///
+/// # Errors
+/// Returns a descriptive error string only when a host clipboard backend errors unexpectedly;
+/// returns `Ok(None)` when the clipboard holds no raster image or no display session is active.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_os_clipboard_image_bytes() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        const JXA_READ_IMG: &str = "\
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  var outPath = argv[0];
+  var pb = $.NSPasteboard.generalPasteboard;
+  var types = ['public.png', 'public.jpeg', 'public.tiff'];
+  for (var i = 0; i < types.length; i++) {
+    var data = pb.dataForType($(types[i]));
+    if (data && !data.isNil() && Number(data.length) > 0) {
+      return data.writeToFileAtomically($(outPath), true) ? String(data.length) : 'ERR';
+    }
+  }
+  return 'EMPTY';
+}";
+        let stage_dir = StageDirGuard::create("pb-read-img")?;
+        let out_path = stage_dir.path().join("clipboard-image.bin");
+        let candidate = OsCommandCandidate {
+            program: String::from("/usr/bin/osascript"),
+            args: vec![
+                String::from("-l"),
+                String::from("JavaScript"),
+                String::from("-e"),
+                String::from(JXA_READ_IMG),
+                out_path.to_string_lossy().into_owned(),
+            ],
+        };
+        let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) else {
+            return Ok(None);
+        };
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if marker == "EMPTY" || marker == "ERR" || !out_path.exists() {
+            return Ok(None);
+        }
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&out_path, MAX_IMAGE_ASSET_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard image: {err}"))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            candidates.push(OsCommandCandidate::new("wl-paste", &["--type", "image/png"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]));
+        }
+        for candidate in &candidates {
+            if let Ok(Some(output)) = spawn_candidate_with_stdin(candidate, None)
+                && !output.stdout.is_empty()
+                && output.stdout.len() <= MAX_IMAGE_ASSET_BYTES
+            {
+                return Ok(Some(output.stdout));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let stage_dir = StageDirGuard::create("pb-read-img")?;
+        let out_path = stage_dir.path().join("clipboard-image.png");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($null -ne $img) {{ $img.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png); 'OK' }} else {{ 'EMPTY' }}",
+            out_path.to_string_lossy().replace('\'', "''")
+        );
+        let candidate = OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-STA", "-Command", &script]);
+        let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) else {
+            return Ok(None);
+        };
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if marker != "OK" || !out_path.exists() {
+            return Ok(None);
+        }
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&out_path, MAX_IMAGE_ASSET_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard image: {err}"))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
 }
 
 /// Read UTF-8 plain-text payload from the host OS clipboard.

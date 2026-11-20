@@ -3228,6 +3228,8 @@ fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
         ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id.clone() },
         ActiveDialog::CreateGraph { source_sheet_id: Some(data_id.clone()) },
         ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id.clone() },
+        ActiveDialog::FormatEmbeddedTable { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
+        ActiveDialog::FormatImage { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
         ActiveDialog::About,
     ];
@@ -3909,6 +3911,8 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
         ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id },
         ActiveDialog::CreateGraph { source_sheet_id: Some(data_id) },
         ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id },
+        ActiveDialog::FormatEmbeddedTable { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
+        ActiveDialog::FormatImage { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
         ActiveDialog::About,
     ]
