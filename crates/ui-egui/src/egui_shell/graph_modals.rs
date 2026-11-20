@@ -18,7 +18,8 @@ use serde_json::{Map, Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AxisTarget, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind};
-use crate::i18n::{normalize_locale, tr};
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{LocalePreset, normalize_locale, tr};
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -246,6 +247,7 @@ pub struct GraphModalEguiState {
     pub heatmap_auto_range: bool,
     pub heatmap_min_draft: String,
     pub heatmap_max_draft: String,
+    pub heatmap_range_error: Option<String>,
     pub heatmap_annotate_cells: bool,
     pub heatmap_cell_gap_pt: f64,
     pub heatmap_tick_angle_deg: f64,
@@ -253,10 +255,16 @@ pub struct GraphModalEguiState {
     pub mv_min_radius_spinner: ScrubUnitFieldState,
     pub mv_max_radius_spinner: ScrubUnitFieldState,
     pub mv_out_of_range: MvOutOfRangePolicy,
+    pub format_axes_session_synced: bool,
+    pub format_axes_synced_generation: Option<u64>,
     pub format_axes_last_sheet_id: Option<String>,
     pub format_axes_last_target: Option<AxisTarget>,
     pub format_axes_frame_preset: FramePreset,
+    pub format_axes_frame_preset_dirty: bool,
     pub format_axes_title_draft: String,
+    pub axis_min_draft: String,
+    pub axis_max_draft: String,
+    pub axis_bounds_error: Option<String>,
     pub format_axes_guard_pending_scale: Option<GraphAxisScale>,
     pub format_axes_guard_pending_tick_format: Option<TickLabelFormat>,
     pub additional_tick_draw_gridline: bool,
@@ -292,6 +300,7 @@ impl Default for GraphModalEguiState {
             heatmap_auto_range: true,
             heatmap_min_draft: String::from("-1.0"),
             heatmap_max_draft: String::from("1.0"),
+            heatmap_range_error: None,
             heatmap_annotate_cells: true,
             heatmap_cell_gap_pt: 1.5,
             heatmap_tick_angle_deg: 0.0,
@@ -299,10 +308,16 @@ impl Default for GraphModalEguiState {
             mv_min_radius_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
             mv_max_radius_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Points),
             mv_out_of_range: MvOutOfRangePolicy::ClampToBounds,
+            format_axes_session_synced: false,
+            format_axes_synced_generation: None,
             format_axes_last_sheet_id: None,
             format_axes_last_target: None,
             format_axes_frame_preset: FramePreset::OpenL,
+            format_axes_frame_preset_dirty: false,
             format_axes_title_draft: String::new(),
+            axis_min_draft: String::new(),
+            axis_max_draft: String::new(),
+            axis_bounds_error: None,
             format_axes_guard_pending_scale: None,
             format_axes_guard_pending_tick_format: None,
             additional_tick_draw_gridline: true,
@@ -363,6 +378,44 @@ struct ButtonEntry<'a> {
     disabled_reason: Option<&'a str>,
 }
 
+fn format_localized_draft_f64(value: f64, preset: &LocalePreset) -> String {
+    let normalized = if value == 0.0 { 0.0 } else { value };
+    let text = format!("{normalized}");
+    if preset.decimal_separator != '.' { text.replace('.', &preset.decimal_separator.to_string()) } else { text }
+}
+
+fn validate_heatmap_range(state: &GraphModalEguiState, preset: &LocalePreset) -> Result<Option<(f64, f64)>, String> {
+    if state.heatmap_auto_range {
+        return Ok(None);
+    }
+    let min_raw = state.heatmap_min_draft.trim();
+    let max_raw = state.heatmap_max_draft.trim();
+    if min_raw.is_empty() && max_raw.is_empty() {
+        return Ok(None);
+    }
+    if min_raw.is_empty() || max_raw.is_empty() {
+        return Err(String::from("Enter both Min and Max bounds, or enable Automatic Domain Bounds"));
+    }
+    let Some(lo) = parse_localized_number_input(min_raw, preset) else {
+        return Err(format!("Invalid heatmap Min value `{min_raw}`"));
+    };
+    let Some(hi) = parse_localized_number_input(max_raw, preset) else {
+        return Err(format!("Invalid heatmap Max value `{max_raw}`"));
+    };
+    if lo >= hi {
+        return Err(format!("Heatmap Min ({lo}) must be strictly less than Max ({hi})"));
+    }
+    Ok(Some((lo, hi)))
+}
+
+fn reset_format_axes_session_state(state: &mut GraphModalEguiState) {
+    state.format_axes_session_synced = false;
+    state.format_axes_frame_preset_dirty = false;
+    state.additional_ticks.open = false;
+    state.additional_tick_status = None;
+    state.axis_bounds_error = None;
+}
+
 /// Render the active graph or page-layout configuration modal when active.
 pub fn render_graph_modal(
     ctx: &Context,
@@ -372,6 +425,9 @@ pub fn render_graph_modal(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> GraphModalFrameReport {
+    if !matches!(app.canvas_dialogs.active_dialog, ActiveDialog::FormatAxes { .. }) {
+        reset_format_axes_session_state(state);
+    }
     let locale = normalize_locale(&app.locale);
     let (widget_id, title, preferred_w) = match &app.canvas_dialogs.active_dialog {
         ActiveDialog::ChangeGraphType { .. } => ("dialog.change_graph_type", tr(locale, "cmd.graph.setKind"), 760.0_f32),
@@ -580,6 +636,8 @@ fn render_dialog_footer(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut
         )
         .clicked()
         {
+            reset_format_axes_session_state(state);
+            state.heatmap_range_error = None;
             gctx.intents.push_dialog_button("cancel");
         }
 
@@ -641,12 +699,15 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
                         }
                     }
                 } else if schema == FormatGraphSchema::Heatmap {
-                    let clamp = if state.heatmap_auto_range {
-                        None
-                    } else {
-                        match (state.heatmap_min_draft.trim().parse::<f64>(), state.heatmap_max_draft.trim().parse::<f64>()) {
-                            (Ok(lo), Ok(hi)) if lo.is_finite() && hi.is_finite() && lo < hi => Some((lo, hi)),
-                            _ => None,
+                    let clamp = match validate_heatmap_range(state, &gctx.app.locale_preset) {
+                        Ok(bounds) => {
+                            state.heatmap_range_error = None;
+                            bounds
+                        }
+                        Err(msg) => {
+                            state.heatmap_range_error = Some(msg);
+                            state.format_graph_tab = FormatGraphTab::ColorMapping;
+                            return;
                         }
                     };
                     if let Some(mut enc) = fg.mv_encoding.clone() {
@@ -680,8 +741,13 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
             gctx.intents.push_dialog_button(action);
         }
         ActiveDialog::FormatAxes { .. } => {
+            if state.axis_bounds_error.is_some() {
+                return;
+            }
             let fa = &gctx.app.canvas_dialogs.format_axes;
-            if let Some(gid) = &fa.graph_sheet_id {
+            if state.format_axes_frame_preset_dirty
+                && let Some(gid) = &fa.graph_sheet_id
+            {
                 gctx.intents.push_engine(
                     "graph.setAxes",
                     json!({
@@ -694,7 +760,9 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
                 if let Some(intent) = fa.commit_intent() {
                     gctx.intents.push_engine(intent.command_id, intent.params);
                 }
+                state.format_axes_frame_preset_dirty = false;
             } else {
+                reset_format_axes_session_state(state);
                 gctx.intents.push_dialog_button(action);
             }
         }
@@ -1941,6 +2009,18 @@ fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModalEguiState,
     record_checkbox(ui, &rev_chk, gctx.meta, "format_graph.heatmap.reversed", "Reverse Colormap", state.heatmap_reversed);
     let auto_chk = ui.checkbox(&mut state.heatmap_auto_range, "Automatic Domain Bounds");
     record_checkbox(ui, &auto_chk, gctx.meta, "format_graph.heatmap.auto_range", "Automatic Domain Bounds", state.heatmap_auto_range);
+    if auto_chk.changed() {
+        if state.heatmap_auto_range {
+            state.heatmap_range_error = None;
+        } else {
+            if state.heatmap_min_draft == "-1.0" && parse_localized_number_input(&state.heatmap_min_draft, &gctx.app.locale_preset).is_none() {
+                state.heatmap_min_draft = format_localized_draft_f64(-1.0, &gctx.app.locale_preset);
+            }
+            if state.heatmap_max_draft == "1.0" && parse_localized_number_input(&state.heatmap_max_draft, &gctx.app.locale_preset).is_none() {
+                state.heatmap_max_draft = format_localized_draft_f64(1.0, &gctx.app.locale_preset);
+            }
+        }
+    }
 
     if !state.heatmap_auto_range {
         ui.horizontal_wrapped(|ui| {
@@ -1952,6 +2032,14 @@ fn render_fg_heatmap_color_mapping(ui: &mut Ui, state: &mut GraphModalEguiState,
             let max_resp = ui.add(egui::TextEdit::singleline(&mut state.heatmap_max_draft).desired_width(72.0));
             record_input(ui, &max_resp, gctx.meta, "format_graph.heatmap.max", "Max", &state.heatmap_max_draft, true);
         });
+        match validate_heatmap_range(state, &gctx.app.locale_preset) {
+            Ok(_) => state.heatmap_range_error = None,
+            Err(err) => {
+                state.heatmap_range_error = Some(err.clone());
+                let err_resp = ui.add(egui::Label::new(egui::RichText::new(&err).color(gctx.tokens.link_red)).wrap());
+                record_label(ui, &err_resp, gctx.meta, "format_graph.heatmap.range_error", &err);
+            }
+        }
     }
 }
 
@@ -2073,28 +2161,44 @@ fn render_format_axes_body(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &
 fn sync_format_axes_local_drafts(app: &UiApp, state: &mut GraphModalEguiState) {
     let fa = &app.canvas_dialogs.format_axes;
     let sheet_key = fa.graph_sheet_id.as_ref().map(|s| s.as_str().to_owned());
-    let changed = state.format_axes_last_sheet_id != sheet_key || state.format_axes_last_target != Some(fa.target_axis);
-    if !changed {
+    let session_needs_sync = !state.format_axes_session_synced
+        || state.format_axes_synced_generation != Some(fa.open_generation)
+        || state.format_axes_last_sheet_id != sheet_key;
+    let axis_changed = session_needs_sync || state.format_axes_last_target != Some(fa.target_axis);
+    if !session_needs_sync && !axis_changed {
         return;
     }
-    state.format_axes_last_sheet_id = sheet_key;
-    state.format_axes_last_target = Some(fa.target_axis);
-    state.format_axes_title_draft = fa.axis_draft.title.clone();
-    if let Some(gs) = fa.graph_sheet_id.as_ref().and_then(|id| app.document().graph_sheet(id)) {
-        state.format_axes_frame_preset = gs.spec.frame_preset;
+    if session_needs_sync {
+        state.format_axes_session_synced = true;
+        state.format_axes_synced_generation = Some(fa.open_generation);
+        state.format_axes_last_sheet_id = sheet_key;
+        state.format_axes_frame_preset_dirty = false;
+        if let Some(gs) = fa.graph_sheet_id.as_ref().and_then(|id| app.document().graph_sheet(id)) {
+            state.format_axes_frame_preset = gs.spec.frame_preset;
+        }
+        state.additional_ticks.open = false;
+        state.additional_tick_status = None;
     }
-    state.axis_min_spinner.draft_text.clear();
-    state.axis_min_spinner.editing = false;
-    state.axis_max_spinner.draft_text.clear();
-    state.axis_max_spinner.editing = false;
-    state.axis_gap_spinner.draft_text.clear();
-    state.axis_gap_spinner.editing = false;
-    state.axis_stroke_spinner.draft_text.clear();
-    state.axis_stroke_spinner.editing = false;
-    state.categorical_guard_confirmed = false;
-    state.categorical_guard_pending_axis = None;
-    state.format_axes_guard_pending_scale = None;
-    state.format_axes_guard_pending_tick_format = None;
+    if axis_changed {
+        state.format_axes_last_target = Some(fa.target_axis);
+        state.format_axes_title_draft = fa.axis_draft.title.clone();
+        let seg0 = fa.axis_draft.segments.first();
+        state.axis_min_draft = seg0.and_then(|s| s.min).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+        state.axis_max_draft = seg0.and_then(|s| s.max).map(|v| format_localized_draft_f64(v, &app.locale_preset)).unwrap_or_default();
+        state.axis_bounds_error = None;
+        state.axis_min_spinner.draft_text.clear();
+        state.axis_min_spinner.editing = false;
+        state.axis_max_spinner.draft_text.clear();
+        state.axis_max_spinner.editing = false;
+        state.axis_gap_spinner.draft_text.clear();
+        state.axis_gap_spinner.editing = false;
+        state.axis_stroke_spinner.draft_text.clear();
+        state.axis_stroke_spinner.editing = false;
+        state.categorical_guard_confirmed = false;
+        state.categorical_guard_pending_axis = None;
+        state.format_axes_guard_pending_scale = None;
+        state.format_axes_guard_pending_tick_format = None;
+    }
 }
 
 fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
@@ -2126,6 +2230,7 @@ fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gc
             .clicked()
             {
                 state.format_axes_frame_preset = preset;
+                state.format_axes_frame_preset_dirty = true;
                 if preset == FramePreset::DualYSecondaryRight && !fa.enable_y2 {
                     let mut next = fa.clone();
                     next.enable_y2 = true;
@@ -2145,6 +2250,7 @@ fn render_axes_frame_origin_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gc
         next.enable_y2 = enable_y2;
         if enable_y2 {
             state.format_axes_frame_preset = FramePreset::DualYSecondaryRight;
+            state.format_axes_frame_preset_dirty = true;
         }
         gctx.intents.push_update_format_axes_state(next);
     }
@@ -2172,6 +2278,7 @@ fn render_axes_single_axis_tab(ui: &mut Ui, state: &mut GraphModalEguiState, gct
             let mut next = fa;
             next.enable_y2 = true;
             state.format_axes_frame_preset = FramePreset::DualYSecondaryRight;
+            state.format_axes_frame_preset_dirty = true;
             gctx.intents.push_update_format_axes_state(next);
         }
         return;
@@ -2376,6 +2483,14 @@ fn render_categorical_guard_banner(
         });
 }
 
+fn parse_optional_bound_draft(raw: &str, label: &str, preset: &LocalePreset) -> Result<Option<f64>, String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return Ok(None);
+    }
+    parse_localized_number_input(trimmed, preset).map(Some).ok_or_else(|| format!("Invalid {label} `{trimmed}`"))
+}
+
 fn render_axis_segments_section(
     ui: &mut Ui,
     state: &mut GraphModalEguiState,
@@ -2383,37 +2498,80 @@ fn render_axis_segments_section(
     fa: &crate::dialogs_canvas::FormatAxesState,
 ) {
     let seg0 = fa.axis_draft.segments.first().cloned().unwrap_or_default();
-    let cur_min = seg0.min.unwrap_or(0.0);
-    let cur_max = seg0.max.unwrap_or(100.0);
+    let min_lbl = gtr(gctx.locale, "axes.min");
+    let max_lbl = gtr(gctx.locale, "axes.max");
+    let mut bounds_edited = false;
 
-    let min_cfg = ScrubUnitFieldConfig {
-        step_per_pt: 1.0,
-        decimals: 3,
-        allow_unit_switch: false,
-        ..ScrubUnitFieldConfig::new("axes.seg.0.min", gtr(gctx.locale, "axes.min"), -1.0e9, 1.0e9)
-    };
-    let min_out = render_scrub_unit_field(ui, cur_min, &mut state.axis_min_spinner, min_cfg, gctx.tokens, gctx.meta);
-    if let Some(val) = min_out.committed_value {
-        let mut next = fa.clone();
-        if val < cur_max {
-            let _ = next.set_segment_bounds(0, Some(val), seg0.max);
-            gctx.intents.push_update_format_axes_state(next);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(min_lbl);
+        let min_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_min_draft).hint_text("Auto").desired_width(96.0));
+        record_input(ui, &min_resp, gctx.meta, "axes.seg.0.min", min_lbl, &state.axis_min_draft, true);
+        if min_resp.changed() || min_resp.lost_focus() {
+            bounds_edited = true;
+        }
+
+        ui.label(max_lbl);
+        let max_resp = ui.add(egui::TextEdit::singleline(&mut state.axis_max_draft).hint_text("Auto").desired_width(96.0));
+        record_input(ui, &max_resp, gctx.meta, "axes.seg.0.max", max_lbl, &state.axis_max_draft, true);
+        if max_resp.changed() || max_resp.lost_focus() {
+            bounds_edited = true;
+        }
+
+        let is_auto = state.axis_min_draft.trim().is_empty() && state.axis_max_draft.trim().is_empty() && seg0.min.is_none() && seg0.max.is_none();
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "axes.seg.0.auto",
+                label: "Auto",
+                command_id: None,
+                selected: is_auto,
+                enabled: !is_auto,
+                disabled_reason: is_auto.then_some("Axis range is already set to Auto"),
+            },
+            gctx.tokens,
+        )
+        .clicked()
+        {
+            state.axis_min_draft.clear();
+            state.axis_max_draft.clear();
+            state.axis_bounds_error = None;
+            let mut next = fa.clone();
+            if next.set_segment_bounds(0, None, None).is_ok() {
+                gctx.intents.push_update_format_axes_state(next);
+            }
+        }
+    });
+
+    if bounds_edited {
+        match (
+            parse_optional_bound_draft(&state.axis_min_draft, "axis minimum", &gctx.app.locale_preset),
+            parse_optional_bound_draft(&state.axis_max_draft, "axis maximum", &gctx.app.locale_preset),
+        ) {
+            (Err(err), _) | (_, Err(err)) => {
+                state.axis_bounds_error = Some(err);
+            }
+            (Ok(lo_opt), Ok(hi_opt)) => {
+                let mut next = fa.clone();
+                match next.set_segment_bounds(0, lo_opt, hi_opt) {
+                    Ok(()) => {
+                        state.axis_bounds_error = None;
+                        if seg0.min != lo_opt || seg0.max != hi_opt {
+                            gctx.intents.push_update_format_axes_state(next);
+                        }
+                    }
+                    Err(err) => {
+                        state.axis_bounds_error = Some(err);
+                    }
+                }
+            }
         }
     }
 
-    let max_cfg = ScrubUnitFieldConfig {
-        step_per_pt: 1.0,
-        decimals: 3,
-        allow_unit_switch: false,
-        ..ScrubUnitFieldConfig::new("axes.seg.0.max", gtr(gctx.locale, "axes.max"), -1.0e9, 1.0e9)
-    };
-    let max_out = render_scrub_unit_field(ui, cur_max, &mut state.axis_max_spinner, max_cfg, gctx.tokens, gctx.meta);
-    if let Some(val) = max_out.committed_value {
-        let mut next = fa.clone();
-        if cur_min < val {
-            let _ = next.set_segment_bounds(0, seg0.min, Some(val));
-            gctx.intents.push_update_format_axes_state(next);
-        }
+    if let Some(err) = &state.axis_bounds_error {
+        let err_resp = ui.add(egui::Label::new(egui::RichText::new(err).color(gctx.tokens.link_red)).wrap());
+        record_label(ui, &err_resp, gctx.meta, "axes.seg.0.bounds_error", err);
     }
 
     ui.add_space(4.0);
@@ -2685,7 +2843,7 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
                 {
                     let mut next = fa.clone();
                     next.axis_draft.additional_ticks.remove(idx);
-                    push_additional_ticks_update(gctx.intents, &next);
+                    next.stage_active_additional_ticks();
                     gctx.intents.push_update_format_axes_state(next);
                 }
             });
@@ -2720,6 +2878,7 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
                 {
                     let mut next = fa.clone();
                     next.axis_draft.thresholds.remove(idx);
+                    next.stage_active_thresholds();
                     gctx.intents.push_update_format_axes_state(next);
                 }
             });
@@ -2763,7 +2922,8 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
     }
 
     if let Some(err) = &state.additional_tick_status {
-        ui.colored_label(gctx.tokens.link_red, err);
+        let err_resp = ui.colored_label(gctx.tokens.link_red, err);
+        record_label(ui, &err_resp, gctx.meta, "axes.add_tick.error", err);
     }
 
     ui.add_space(6.0);
@@ -2782,15 +2942,15 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
     )
     .clicked()
     {
-        match state.additional_ticks.value_draft.trim().parse::<f64>() {
-            Ok(val) if val.is_finite() => {
+        match parse_localized_number_input(&state.additional_ticks.value_draft, &gctx.app.locale_preset) {
+            Some(val) => {
                 let label_opt = (!state.additional_ticks.label_draft.trim().is_empty()).then(|| state.additional_ticks.label_draft.trim().to_owned());
                 let mut next = fa.clone();
                 if state.additional_ticks.show_line || state.additional_ticks.shaded_zone {
                     let shade_to = if state.additional_ticks.shaded_zone {
-                        match state.additional_ticks.end_value_draft.trim().parse::<f64>() {
-                            Ok(end) if end.is_finite() => Some(end),
-                            _ => {
+                        match parse_localized_number_input(&state.additional_ticks.end_value_draft, &gctx.app.locale_preset) {
+                            Some(end) => Some(end),
+                            None => {
                                 state.additional_tick_status = Some(String::from("Enter a valid finite End Value for Shaded Zone"));
                                 return;
                             }
@@ -2806,6 +2966,7 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
                         stroke_width_pt: 1.0,
                         label: label_opt.clone(),
                     });
+                    next.stage_active_thresholds();
                 }
                 if !state.additional_ticks.shaded_zone {
                     next.axis_draft.additional_ticks.push(AdditionalTick {
@@ -2813,7 +2974,7 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
                         label: label_opt,
                         draw_gridline: state.additional_tick_draw_gridline,
                     });
-                    push_additional_ticks_update(gctx.intents, &next);
+                    next.stage_active_additional_ticks();
                 }
                 gctx.intents.push_update_format_axes_state(next);
                 state.additional_tick_status = None;
@@ -2821,30 +2982,11 @@ fn render_additional_ticks_submodal(ui: &mut Ui, state: &mut GraphModalEguiState
                 state.additional_ticks.end_value_draft.clear();
                 state.additional_ticks.label_draft.clear();
             }
-            _ => {
+            None => {
                 state.additional_tick_status = Some(String::from("Enter a valid finite numeric value"));
             }
         }
     }
-}
-
-fn push_additional_ticks_update(intents: &mut PendingUiIntents, fa: &crate::dialogs_canvas::FormatAxesState) {
-    let Some(gid) = &fa.graph_sheet_id else {
-        return;
-    };
-    let axis_name = match fa.target_axis {
-        AxisTarget::X => "x",
-        AxisTarget::Y => "y",
-        AxisTarget::Y2 => "y2",
-    };
-    intents.push_engine(
-        "graph.setAdditionalTicks",
-        json!({
-            "sheet_id": gid.as_str(),
-            "axis": axis_name,
-            "ticks": fa.axis_draft.additional_ticks,
-        }),
-    );
 }
 
 // ============================================================================
