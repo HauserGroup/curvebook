@@ -43,7 +43,8 @@ cache behavior, per-test timeouts, and scoped `cargo xtask ci <stage>` commands.
 | Task | Command |
 |---|---|
 | Run the fast pre-PR tier (policy + changed crates and dependents) | `cargo xtask ci quick` |
-| Run all CI gates locally | `cargo xtask ci` |
+| Run the default CI gates locally | `cargo xtask ci` |
+| Run the opt-in WASM checks locally | `cargo xtask ci wasm` |
 | Run unit, integration & doctests | `cargo xtask test` |
 | Verify crate dependency layers (`L0`–`L7`) | `cargo xtask layers` |
 | Verify asset attributions in `ASSETS.md` | `cargo xtask assets` |

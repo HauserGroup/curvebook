@@ -40,7 +40,7 @@ const HELP: &str = "\
 usage: cargo xtask <command> [args...]
 
 commands:
-  ci [stage]            run all gates or build/policy/lint/tests/doctests/features/wasm/performance
+  ci [stage]            run default gates or build/policy/lint/tests/doctests/features/performance/wasm
   ci quick [--base <ref>] policy gates + clippy/tests for packages changed since main and their dependents
   r10-gate              run R10 parity, Unicode, screenshot baseline, web parity & latency gates
   test [args...]        run workspace test suite (uses cargo-nextest when installed, else cargo test)
@@ -355,17 +355,6 @@ fn run_cargo(root: &Path, args: &[String]) -> Result<(), String> {
 
 fn has_cargo_nextest() -> bool {
     Command::new("cargo").args(["nextest", "--version"]).output().is_ok_and(|o| o.status.success())
-}
-
-fn wasm_target_installed() -> bool {
-    let Ok(out) = Command::new("rustc").args(["--print", "target-libdir", "--target", "wasm32-unknown-unknown"]).output() else {
-        return false;
-    };
-    if !out.status.success() {
-        return false;
-    }
-    let dir = PathBuf::from(String::from_utf8_lossy(&out.stdout).trim());
-    std::fs::read_dir(dir).ok().into_iter().flatten().flatten().any(|e| e.file_name().to_string_lossy().starts_with("libcore"))
 }
 
 #[cfg(test)]

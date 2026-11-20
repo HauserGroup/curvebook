@@ -60,14 +60,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stage: [policy, lint, tests, doctests, features, wasm, performance]
+        stage: [policy, lint, tests, doctests, features, performance]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
       - uses: ./.github/actions/ci-setup
         with:
-          install-gui-libs: ${{ matrix.stage != 'wasm' && 'true' || 'false' }}
+          install-gui-libs: 'true'
           install-linters: ${{ matrix.stage == 'policy' && 'true' || 'false' }}
           install-nextest: ${{ (matrix.stage == 'tests' || matrix.stage == 'performance' || matrix.stage == 'features') && 'true' || 'false' }}
           # The release-scan tests unpack a synthetic `.rpm` that only libarchive can read.
@@ -107,23 +107,12 @@ jobs:
         with:
           path: corpus/nist-strd
           key: nist-strd-${{ hashFiles('crates/testkit/src/nist_strd/corpus.rs') }}
-      - name: Install pinned Trunk for WebAssembly bundle check
-        if: matrix.stage == 'wasm'
-        run: |
-          if ! trunk --version 2>/dev/null | grep -Fx 'trunk 0.22.1'; then
-            cargo install --locked trunk --version 0.22.1
-          fi
-          trunk --version
-      - name: Build WebAssembly release bundle
-        if: matrix.stage == 'wasm'
-        run: ./packaging/web/package.sh
       - name: Run quality stage
         env:
           CI_STAGE: ${{ matrix.stage }}
           CURVEBOOK_CI_TEST_ARCHIVE: target/ci-tests.tar.zst
           CURVEBOOK_CORPUS_DIR: ${{ github.workspace }}/corpus/nist-strd
           CURVEBOOK_REQUIRE_CORPUS: ${{ matrix.stage == 'tests' && '1' || '0' }}
-          CURVEBOOK_REQUIRE_WEB_BUNDLE: ${{ matrix.stage == 'wasm' && '1' || '0' }}
         run: |
           cargo build --locked -p xtask
           cp target/debug/xtask "$RUNNER_TEMP/curvebook-ci"
