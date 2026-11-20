@@ -143,7 +143,7 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
 
 ### 3.2 Tier 2 — Sheet-Adaptive Contextual Action Strip (`38 pt`)
 
-A single, uncluttered horizontal strip divided by subtle `1 px` vertical rules into semantic groups. Universal left-hand anchors stay in fixed pixel positions across sheet switches so muscle memory never breaks; right-hand groups adapt to the active sheet kind and table archetype:
+A single, uncluttered horizontal strip divided by subtle `1 pt` vertical rules into semantic groups. Universal left-hand anchors stay in fixed pixel positions across sheet switches so muscle memory never breaks; right-hand groups adapt to the active sheet kind and table archetype:
 
 | Active Context | Fixed Leading Anchors | Primary Contextual CTA Group | Secondary Contextual Tools | Trailing Output & View Group |
 |---|---|---|---|---|
@@ -590,7 +590,7 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 | `chrome.status_bar_h` | `26 pt` | Fixed single-line footer; tabular numerals for quick-stats & zoom |
 | `dock.navigator_w` | `240 pt` (`180–380 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `760 pt` window width |
 | `dock.inspector_w` | `280 pt` (`220–420 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `960 pt` window width |
-| `dock.splitter_w` | `4 pt` (`8 pt` hit slop) | Visual `1 px` border line centered inside an `8 pt` pointer grab zone |
+| `dock.splitter_w` | `4 pt` (`8 pt` hit slop) | Visual `1 pt` border line centered inside an `8 pt` pointer grab zone |
 | `grid.row_h` / `header_h` | `24 pt` / `20+24+20 pt` | Minimum interactive target `24 × 24 pt` (`>= 28 × 28 pt` on toolbar buttons) |
 | `scroll.bar_thickness` | `10 pt` (`12 pt` hover) | Reserved gutter alongside content—**scrollbars must never overlap controls or row badges** |
 | `font.ui_body` / `ui_small` | `13 pt` / `11.5 pt` | System SFNT proportional family discovered via `fontdb` (`memmap` off) + CJK/deterministic SFNT symbol fallback chain (**Beta:** `14` LTR/CJK locales; **1.0:** + `4` RTL locales); zero bundled font binaries |
@@ -628,3 +628,109 @@ Every desktop layout change in `crates/ui-egui` and `apps/curvebook` must pass (
 3. **14-Locale Beta Text Fitting, Symbol Coverage & Ellipsis Gate (`R10.9` / `R15.1`):** Zero unclipped text bleed across all `14` Beta-active LTR/CJK locales (extending to all `16` incl. the `4` RTL locales at **1.0**); mandatory non-missing glyph coverage across UI and scientific symbols (`→ ▾ ● ✓ ± ≤ ≥ μ χ²`); and any ellipsized label sets `state.ellipsized = true` and exposes its full un-truncated label via hover tooltip and accessibility name.
 4. **1,000,000-Cell 60-FPS Virtualization Gate (`R10.22` / `R15.2`):** Matched `1,000,000`-cell `Column` scrolling, selection, and exclusion benchmarks stay strictly inside `<= 16.67 ms` steady-state frame time and `<= 50 ms` input-to-paint latency (`1.0x`/`2.0x` DPI).
 5. **Clean-Room & Brand Gate (`cargo xtask brands && cargo xtask cleanroom && cargo xtask assets`):** Zero competitor trademarks, zero external suite identifiers, zero unattributed assets, and zero bundled font binaries.
+
+---
+
+## 10. Visual Design Rules
+
+> **Status:** Proposed. These rules apply within the structure set by §1–9. Token names below are design names. Values marked *new* are not yet in `LayoutMetrics`, `Tokens`, or the font setup (`crates/ui-egui/src/egui_shell/mod.rs`, `crates/ui-egui/src/egui_shell/fonts.rs`); until they land there, these rules guide new code only. Existing values map to the §9.1 fields (`font_ui_body_pt`, `font_ui_small_pt`, `font_grid_numeral_pt`, `grid_row_h`, `min_toolbar_target_pt`). All sizes are logical points at `1.0x`.
+
+### 10.1 Spacing Scale
+
+All padding, gaps, and margins come from this scale. Any other value needs a code comment explaining why.
+
+| Token | Value | Use |
+|---|---|---|
+| `space.xxs` *new* | `2 pt` | Between an icon and its badge, or inside a control |
+| `space.xs` *new* | `4 pt` | Between an icon and its label, or between controls that work together |
+| `space.sm` *new* | `6 pt` | Between rows in a form, between controls in one row, and padding inside side docks |
+| `space.md` *new* | `8 pt` | Padding inside cards and popovers |
+| `space.lg` *new* | `12 pt` | Between groups in a panel, dialog margins, and one nesting indent |
+| `space.xl` *new* | `16 pt` | Between major sections in a dialog or page |
+| `space.xxl` *new* | `24 pt` | Around the edges of the Welcome screen and empty states |
+
+**Rules**
+
+1. **Groups are set apart by space first.** The gap between groups is at least twice the gap inside a group. Add a divider line only when spacing alone cannot separate them.
+2. **One framed box per level.** No frame inside a frame inside a panel. A group inside a frame is shown by spacing and a heading.
+3. **Padding by container.** Side docks use `space.sm`, cards and popovers use `space.md`, and dialogs use `space.lg`, so narrow docks keep their width for content.
+4. Gaps that fall off the scale (for example `3 pt` and `10 pt`) move to the nearest value on the scale.
+
+### 10.2 Type Scale & Text Hierarchy
+
+| Token | Size & weight | Use |
+|---|---|---|
+| `type.small` | `11.5 pt` regular | Smallest UI text: secondary labels, status bar, badges, hints (`font_ui_small_pt`) |
+| `type.numeral` | `12.5 pt` tabular | Grid cells and numbers in results (`font_grid_numeral_pt`) |
+| `type.body` | `13 pt` regular | Default text for labels, controls, and menus (`font_ui_body_pt`) |
+| `type.section` *new* | `13 pt` bold, `text_strong` | Group headings inside panels and dialogs |
+| `type.title` *new* | `15 pt` regular, `text_strong` | Panel and dialog titles. Replaces the `15 pt` heading size currently set directly in `Tokens::configure_style`. |
+| `type.display` *new* | `18 pt` regular | Welcome screen and empty-state headlines only |
+
+**Bold face** *new*: the font setup loads the bold face of the same system UI family alongside the regular face (system fonts only; zero bundled font binaries per §9.1). If no bold face is found, `type.section` falls back to `14 pt` regular.
+
+**Rules**
+
+1. **At most three text sizes on one panel at a time,** not counting `type.numeral` in grids and result tables. Section headings differ from body text by weight, not size.
+2. **Each tool has one job.** Size marks titles, weight marks section headings and the active item in a list, and `text_muted` marks secondary text. Never bold whole paragraphs.
+3. **Numbers** use tabular digits, right-aligned, with decimal points lined up (§9.1).
+4. **Capitalisation (English).** Title Case for menus, menu items, buttons, tabs, and dialog and panel titles. Sentence case for descriptions, hints, tooltips, checkbox and radio labels, and messages. Variable-role badges such as `NUM` and `CAT` (§9.2) stay in capitals. Other locales follow their own conventions.
+5. **Minimum size.** No UI text below `type.small` (`11.5 pt`). Letters drawn inside icons count as icons (§10.5). Chart text follows the graph's own format settings.
+
+### 10.3 Corner Radius, Strokes & Elevation
+
+| Token | Value | Use |
+|---|---|---|
+| `radius.sm` *new* | `2 pt` | Badges, chips, cell highlights |
+| `radius.md` *new* | `4 pt` | Buttons, inputs, toggles, list rows |
+| `radius.lg` *new* | `6 pt` | Popups, menus, cards, windows (matches the current `window_corner_radius`) |
+
+- **Strokes.** Borders and dividers are `1 pt`. Only the keyboard focus ring and the active selection use `2 pt`. Icon line weights follow §10.5 instead.
+- **Elevation has four levels:**
+  - **Base** (`panel_bg`): docks and toolbars.
+  - **Raised** (`surface_bg` plus a `1 pt` `border`): cards and the center stage.
+  - **Floating** (`border` plus a soft shadow): menus, popovers, tooltips.
+  - **Modal** (`scrim` backdrop): dialogs.
+- Shadows are used only at the floating and modal levels, never on content inside a panel.
+- Radii that fall off the scale move to the nearest token. Round shapes such as toggle tracks keep a radius of half their height.
+
+### 10.4 Alignment, Density & Grouping
+
+1. **One left edge per panel.** Labels, headings, and controls start on the same vertical line. Indent only to show nesting, one step of `space.lg` per level.
+2. **Inspector forms.** Labels sit in a left column sized to the longest label in the group (`widgets::dim_label_width`, `widgets::label_row`), capped at 40% of the panel width. When a label does not fit within that cap, it goes above its control instead of being truncated.
+3. **Rows.** Controls in one row are centred vertically on each other. Text in a row shares a baseline.
+4. **Compact density by default.** Use the §9.1 heights (`grid_row_h`, `min_toolbar_target_pt`). Make room by removing clutter, not by shrinking controls below those targets.
+5. **One primary action per surface.** Dialog footers use the same order on every platform, from the leading to the trailing edge: Cancel, then Apply when present, then the primary action. A destructive action is never the default (Return-key) button.
+6. **Progressive disclosure.** Advanced options go in a collapsed group, not in a second column.
+
+### 10.5 Iconography & Imagery
+
+1. **Sizes.** `16 pt` in toolbars and the action strip, `14 pt` beside text, `12 pt` in badges. All icons at one size share one line weight.
+2. All icons use the `icon` colour token and come from CurveBook's own icon set ([`../../ASSETS.md`](../../ASSETS.md)).
+3. **Icon-only buttons** need a tooltip and an accessible name, the same as ellipsized labels in §9.4.
+4. **State is never shown by colour alone.** Pair colour with an icon, a text change, or a pattern. Known gap: linked-cell provenance borders (§9.2) currently tell valid and broken links apart by colour only, and need a broken-link glyph.
+
+### 10.6 Motion & State Feedback
+
+1. **Every interactive widget has distinct looks for six states:** rest, hover, pressed, focused, selected, and disabled, using the existing tokens (`hover_bg`, `active_bg`, `focus_ring`, `text_disabled`).
+2. **Keyboard focus is always visible,** shown by the `2 pt` `focus_ring`.
+3. **Motion is short and functional.** At most `150 ms` for hover, expand, and collapse. Data, grid, and chart updates appear immediately, without animation.
+4. When a reduced-motion setting is available, every transition becomes immediate.
+
+### 10.7 Visual Review Checklist
+
+Before a GUI change counts as done, take screenshots at `1280 × 800 pt` (default window), `1440 × 600 pt`, and `640 × 420 pt` (the §9.4 gate sizes), in the `Light`, `Dark`, and `HighContrast` themes. Check each one for:
+
+- [ ] Every gap and padding comes from §10.1, and the gap between groups is at least twice the gap inside a group.
+- [ ] Each panel has one left edge, and there are no frames nested beyond one level.
+- [ ] No more than three text sizes per panel (grid numerals excepted), and no UI text below `11.5 pt`.
+- [ ] Section headings are bold, and English labels follow the §10.2 capitalisation rule.
+- [ ] Each surface has exactly one primary action, and dialog footers read Cancel, Apply, primary.
+- [ ] Corner radius is the same across each kind of element (§10.3).
+- [ ] Icons are the same size within each area, and every icon-only button has a tooltip.
+- [ ] Interface colours come only from `Tokens`. Document content (series colours, user-chosen colours, palette swatches) is exempt.
+- [ ] No state is shown by colour alone.
+- [ ] Disabled controls are clearly different from enabled ones in all three themes.
+- [ ] Nothing is cut off without an ellipsis and tooltip (§9.4).
+
+This checklist reviews appearance only. It is not evidence that a person can complete a workflow through the GUI ([`../pitfalls.md`](../pitfalls.md) #6).
