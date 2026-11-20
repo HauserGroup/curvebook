@@ -5916,6 +5916,14 @@ pub fn tr(locale: &str, key: &str) -> &'static str {
     try_tr(canonical, key).or_else(|| try_tr("en", key)).unwrap_or("")
 }
 
+/// Look up a localized string for `(locale, key)`, normalizing BCP-47 tags and falling back to
+/// `"en"`, or returning caller-supplied `fallback` when `key` is not registered or empty.
+#[must_use]
+pub fn tr_or_fallback<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
+    let canonical = normalize_locale(locale);
+    try_tr(canonical, key).or_else(|| try_tr("en", key)).unwrap_or(fallback)
+}
+
 /// Look up a localized string, returning `key` unchanged if it is not registered in [`CATALOG`] or [`EXTRA_SHARD_CATALOGS`].
 #[must_use]
 pub fn tr_or<'a>(locale: &str, key: &'a str) -> Cow<'a, str> {
@@ -6631,5 +6639,15 @@ mod tests {
             assert!(is_beta_active_locale(expected));
             assert_eq!(normalize_beta_gui_locale(input), expected);
         }
+    }
+
+    #[test]
+    fn tr_or_fallback_normalizes_locale_falls_back_to_english_then_caller_fallback() {
+        use super::{tr, tr_or_fallback};
+
+        assert_eq!(tr_or_fallback("de-DE", "btn.cancel", "Fallback Cancel"), tr("de", "btn.cancel"));
+        assert_eq!(tr_or_fallback("xx-unknown", "btn.cancel", "Fallback Cancel"), tr("en", "btn.cancel"));
+        assert_eq!(tr_or_fallback("de-DE", "unregistered.test.key", "Custom Fallback"), "Custom Fallback");
+        assert_eq!(tr_or_fallback("en", "unregistered.test.key", "Custom Fallback"), "Custom Fallback");
     }
 }

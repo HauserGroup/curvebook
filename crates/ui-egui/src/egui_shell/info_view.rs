@@ -1,8 +1,6 @@
 //! Native `egui` `InfoSheet` workspace (`docs/planning/gui-layout-spec.md` §8.4, `R15.3`):
 //! `38%` structured Key/Value/Hook-Badge constants table + `62%` formatted laboratory notes.
 
-use std::borrow::Cow;
-
 use curvebook_doc::{ConstantValue, InfoConstant, InfoSheet, ProjectDocument, SheetId, extract_template_hooks};
 use curvebook_text::expand_template_hooks;
 use egui::{CornerRadius, FontId, Id, Key, Rect, RichText, Sense, Stroke, StrokeKind, TextEdit, Vec2, pos2, vec2};
@@ -11,7 +9,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
 use crate::grid_view::parse_localized_number_input;
-use crate::i18n::{LocalePreset, normalize_locale, try_tr};
+use crate::i18n::{LocalePreset, tr_or_fallback};
 use crate::inspect::ZLayer;
 
 const DEFAULT_SPLIT_RATIO: f32 = 0.38;
@@ -118,11 +116,6 @@ pub struct InfoViewFrameReport {
     pub divider_rect_pt: Option<Rect>,
     pub split_ratio: f32,
     pub hook_badge_count: usize,
-}
-
-fn info_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> Cow<'a, str> {
-    let norm = normalize_locale(locale);
-    if let Some(val) = try_tr(norm, key).or_else(|| try_tr("en", key)) { Cow::Borrowed(val) } else { Cow::Borrowed(fallback) }
 }
 
 fn matches_info_constant_hook(
@@ -414,12 +407,12 @@ fn render_constants_pane(
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(padded), |ui| {
         ui.set_clip_rect(padded);
-        let const_heading = info_tr(tokens.locale, "info.constants_heading", "Constants");
+        let const_heading = tr_or_fallback(tokens.locale, "info.constants_heading", "Constants");
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
-            let title_lbl = ui.add(egui::Label::new(RichText::new(const_heading.as_ref()).strong().color(tokens.text_strong)).truncate());
-            title_lbl.on_hover_text(const_heading.as_ref());
+            let title_lbl = ui.add(egui::Label::new(RichText::new(const_heading).strong().color(tokens.text_strong)).truncate());
+            title_lbl.on_hover_text(const_heading);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let add_lbl = "+ Add Constant";
@@ -866,13 +859,13 @@ fn render_notes_pane(
 
     ui.scope_builder(egui::UiBuilder::new().max_rect(padded), |ui| {
         ui.set_clip_rect(padded);
-        let notes_heading = info_tr(tokens.locale, "info.notes_heading", "Experiment Notes");
+        let notes_heading = tr_or_fallback(tokens.locale, "info.notes_heading", "Experiment Notes");
         let mut commit_now = false;
 
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
-            let hdr_lbl = ui.add(egui::Label::new(RichText::new(notes_heading.as_ref()).strong().color(tokens.text_strong)).truncate());
-            hdr_lbl.on_hover_text(notes_heading.as_ref());
+            let hdr_lbl = ui.add(egui::Label::new(RichText::new(notes_heading).strong().color(tokens.text_strong)).truncate());
+            hdr_lbl.on_hover_text(notes_heading);
 
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 let save_enabled = enabled && state.notes_dirty;
@@ -994,7 +987,7 @@ fn render_notes_pane(
                         FrameInspectEntryInput {
                             widget_id: "info.notes_editor",
                             role: "textbox",
-                            label: notes_heading.as_ref(),
+                            label: notes_heading,
                             command_id: Some("info.setNote"),
                             value: Some(json!({ "len": draft.len(), "dirty": state.notes_dirty })),
                             enabled,

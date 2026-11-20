@@ -2,8 +2,6 @@
 //! extract & rearrange, and exclusion-with-reason modals in `egui 0.37` (`R15.4`,
 //! `gui-layout-spec.md` §8.6).
 
-use std::borrow::Cow;
-
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MathTransformPreset, SheetId,
     TableArchetype, TableKind, TransformAnalysisSpec,
@@ -15,7 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExcludeWithReasonDialogState};
 use crate::grid_view::parse_localized_number_input;
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -124,11 +122,6 @@ pub struct TransformModalFrameReport {
     pub outside_wheel_captured: bool,
 }
 
-fn tr_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> Cow<'a, str> {
-    let norm = normalize_locale(locale);
-    if let Some(s) = try_tr(norm, key).or_else(|| try_tr("en", key)) { Cow::Borrowed(s) } else { Cow::Borrowed(fallback) }
-}
-
 /// Return `true` when `ActiveDialog::EditAnalysisParameters` edits a `Transform` analysis spec.
 #[must_use]
 pub fn is_transform_edit_dialog_active(app: &UiApp) -> bool {
@@ -178,7 +171,7 @@ pub fn render_transform_modal(
         ui.set_max_width(inner_w);
         ui.set_max_height(dlg_h);
 
-        ui.heading(RichText::new(title.as_ref()).color(tokens.text_primary));
+        ui.heading(RichText::new(title).color(tokens.text_primary));
         ui.add_space(4.0);
         widgets::divider(ui);
 
@@ -225,13 +218,13 @@ pub fn render_transform_modal(
         render_transform_footer(ui, app, source_sheet, effective_kind, state, from_edit, tokens, meta, intents);
     });
 
-    let title_for_ak = title.as_ref().to_owned();
+    let title_for_ak = title.to_owned();
     modal_resp.response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Dialog, true, title_for_ak.clone()));
 
     let capture = finalize_egui_modal_response(
         ctx,
         &modal_resp,
-        ModalCaptureSpec { widget_id: "dialog.transform", title: title.as_ref(), z_dialog: ZLayer::ModalDialog },
+        ModalCaptureSpec { widget_id: "dialog.transform", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
     TransformModalFrameReport {
@@ -258,17 +251,17 @@ fn resolve_effective_modal_kind(draft_kind: Option<&AnalysisKind>, open_kind: Op
     open_kind.unwrap_or(TransformModalKind::TransformValues)
 }
 
-fn modal_title_for(kind: TransformModalKind, locale: &str) -> Cow<'_, str> {
+fn modal_title_for(kind: TransformModalKind, locale: &str) -> &'static str {
     match kind {
-        TransformModalKind::TransformValues => Cow::Borrowed("Transform Values & Concentrations"),
-        TransformModalKind::Normalize => Cow::Borrowed("Normalize Data"),
-        TransformModalKind::RemoveBaseline => tr_tr(locale, "analysis.remove_baseline", "Remove Baseline & Column Math"),
-        TransformModalKind::MvFilterAndTransform => Cow::Borrowed("Multiple Variables: Filter & Transform"),
-        TransformModalKind::ExtractAndRearrange => Cow::Borrowed("Extract & Rearrange Table"),
-        TransformModalKind::Transpose => Cow::Borrowed("Transpose Table"),
-        TransformModalKind::PruneRows => Cow::Borrowed("Prune Rows"),
-        TransformModalKind::Simulate => Cow::Borrowed("Simulate XY Curve"),
-        TransformModalKind::RandomSample => Cow::Borrowed("Random Sample Rows"),
+        TransformModalKind::TransformValues => "Transform Values & Concentrations",
+        TransformModalKind::Normalize => "Normalize Data",
+        TransformModalKind::RemoveBaseline => tr_or_fallback(locale, "analysis.remove_baseline", "Remove Baseline & Column Math"),
+        TransformModalKind::MvFilterAndTransform => "Multiple Variables: Filter & Transform",
+        TransformModalKind::ExtractAndRearrange => "Extract & Rearrange Table",
+        TransformModalKind::Transpose => "Transpose Table",
+        TransformModalKind::PruneRows => "Prune Rows",
+        TransformModalKind::Simulate => "Simulate XY Curve",
+        TransformModalKind::RandomSample => "Random Sample Rows",
     }
 }
 
@@ -378,12 +371,20 @@ fn render_transform_values_body(
 
     ui.horizontal_wrapped(|row| {
         let std_r = choice_pill(row, tokens, "Standard Functions", !state.pharmacology_mode, true);
-        record_tr_node(row, meta, "edit.transform.mode.standard", "tab", "Standard Functions", None, true, &std_r);
+        meta.record_modal_response(
+            row,
+            &std_r,
+            FrameInspectEntryInput::modal("edit.transform.mode.standard", "tab", "Standard Functions", None, true),
+        );
         if std_r.clicked() {
             state.pharmacology_mode = false;
         }
         let pharm_r = choice_pill(row, tokens, "Pharmacology (-log10[M])", state.pharmacology_mode, true);
-        record_tr_node(row, meta, "edit.transform.mode.pharmacology", "tab", "Pharmacology", None, true, &pharm_r);
+        meta.record_modal_response(
+            row,
+            &pharm_r,
+            FrameInspectEntryInput::modal("edit.transform.mode.pharmacology", "tab", "Pharmacology", None, true),
+        );
         if pharm_r.clicked() {
             state.pharmacology_mode = true;
             if from_edit {
@@ -415,7 +416,11 @@ fn render_transform_values_body(
         for (slug, lbl, preset_opt) in x_choices {
             let active = cur_x == preset_opt;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.x_transform.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.x_transform.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if from_edit {
                     apply_math_patch(draft_spec.as_mut(), Some(preset_opt), None, None, intents);
@@ -425,7 +430,7 @@ fn render_transform_values_body(
             }
         }
         let legacy_x = widgets::secondary_button(row, "Cycle X Transform");
-        record_tr_node(row, meta, "edit.transform.x_transform", "button", "Transform X", None, true, &legacy_x);
+        meta.record_modal_response(row, &legacy_x, FrameInspectEntryInput::modal("edit.transform.x_transform", "button", "Transform X", None, true));
         if legacy_x.clicked() {
             let next = match cur_x {
                 None => Some(MathTransformPreset::Log10),
@@ -464,7 +469,11 @@ fn render_transform_values_body(
                 None => active_k_op.is_none() && cur_y == preset_opt,
             };
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.y_transform.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.y_transform.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if let Some(k_op) = ConstantKOp::from_slug(slug) {
                     state.selected_k_op = Some(k_op);
@@ -486,7 +495,7 @@ fn render_transform_values_body(
             }
         }
         let legacy_y = widgets::secondary_button(row, "Cycle Y Transform");
-        record_tr_node(row, meta, "edit.transform.y_transform", "button", "Transform Y", None, true, &legacy_y);
+        meta.record_modal_response(row, &legacy_y, FrameInspectEntryInput::modal("edit.transform.y_transform", "button", "Transform Y", None, true));
         if legacy_y.clicked() {
             let next = match cur_y {
                 Some(MathTransformPreset::Log10) => Some(MathTransformPreset::Ln),
@@ -508,7 +517,11 @@ fn render_transform_values_body(
     ui.horizontal(|row| {
         row.label("Constant K:");
         let kr = row.add(egui::TextEdit::singleline(&mut state.constant_k_draft).hint_text("0.0").desired_width(96.0));
-        record_tr_node(row, meta, "edit.transform.constant_k", "textbox", "Constant K", Some(state.constant_k_draft.clone()), true, &kr);
+        meta.record_modal_response(
+            row,
+            &kr,
+            FrameInspectEntryInput::modal("edit.transform.constant_k", "textbox", "Constant K", Some(state.constant_k_draft.clone()), true),
+        );
         if kr.changed()
             && from_edit
             && let Some(k_op) = state.selected_k_op
@@ -517,7 +530,7 @@ fn render_transform_values_body(
             apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
         }
         let hr = widgets::secondary_button(row, "Hook Constant");
-        record_tr_node(row, meta, "edit.transform.hook_k", "button", "Hook Constant", None, true, &hr);
+        meta.record_modal_response(row, &hr, FrameInspectEntryInput::modal("edit.transform.hook_k", "button", "Hook Constant", None, true));
         if hr.clicked() {
             state.hook_picker_open = !state.hook_picker_open;
         }
@@ -532,7 +545,11 @@ fn render_transform_values_body(
         ] {
             let active = cur_ep == mode;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.error_propagation.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.error_propagation.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if from_edit {
                     apply_math_patch(draft_spec.as_mut(), None, None, Some(mode), intents);
@@ -542,7 +559,11 @@ fn render_transform_values_body(
             }
         }
         let legacy_ep = widgets::secondary_button(row, "Toggle Error Prop");
-        record_tr_node(row, meta, "edit.transform.error_propagation", "button", "Error Propagation", None, true, &legacy_ep);
+        meta.record_modal_response(
+            row,
+            &legacy_ep,
+            FrameInspectEntryInput::modal("edit.transform.error_propagation", "button", "Error Propagation", None, true),
+        );
         if legacy_ep.clicked() {
             let next = if cur_ep == ErrorPropagationMode::ReplicateEndpoints {
                 ErrorPropagationMode::FirstOrderDeltaMethod
@@ -596,7 +617,7 @@ fn render_normalize_body(
         row.label("0% Anchor:");
         for (idx, lbl) in [(0usize, "Smallest value"), (1, "First row"), (2, "Fixed 0.0")] {
             let r = choice_pill(row, tokens, lbl, state.norm_zero_idx == idx, true);
-            record_tr_node(row, meta, &format!("edit.transform.norm_zero.{idx}"), "radio", lbl, None, true, &r);
+            meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(&format!("edit.transform.norm_zero.{idx}"), "radio", lbl, None, true));
             if r.clicked() {
                 state.norm_zero_idx = idx;
             }
@@ -606,7 +627,11 @@ fn render_normalize_body(
         row.label("100% Anchor:");
         for (idx, lbl) in [(0usize, "Largest value"), (1, "Sum of column"), (2, "Last row")] {
             let r = choice_pill(row, tokens, lbl, state.norm_hundred_idx == idx, true);
-            record_tr_node(row, meta, &format!("edit.transform.norm_hundred.{idx}"), "radio", lbl, None, true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.norm_hundred.{idx}"), "radio", lbl, None, true),
+            );
             if r.clicked() {
                 state.norm_hundred_idx = idx;
             }
@@ -652,7 +677,11 @@ fn render_remove_baseline_body(
             let selected = cur_cols.contains(&c);
             let title = ds.map_or_else(|| format!("Col {}", c + 1), |s| s.title_at(c));
             let r = choice_pill(row, tokens, &title, selected, true);
-            record_tr_node(row, meta, &format!("edit.transform.baseline_col.{c}"), "checkbox", &title, Some(selected.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.baseline_col.{c}"), "checkbox", &title, Some(selected.to_string()), true),
+            );
             if r.clicked() {
                 let mut next_cols = cur_cols.clone();
                 if let Some(pos) = next_cols.iter().position(|x| *x == c) {
@@ -686,7 +715,11 @@ fn render_remove_baseline_body(
         ] {
             let active = cur_op == op;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.baseline_operation.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.baseline_operation.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if from_edit {
                     if let Some(spec) = draft_spec.as_mut() {
@@ -700,7 +733,11 @@ fn render_remove_baseline_body(
             }
         }
         let legacy_op = widgets::secondary_button(row, "Cycle Operation");
-        record_tr_node(row, meta, "edit.transform.baseline_operation", "button", "Baseline Operation", None, true, &legacy_op);
+        meta.record_modal_response(
+            row,
+            &legacy_op,
+            FrameInspectEntryInput::modal("edit.transform.baseline_operation", "button", "Baseline Operation", None, true),
+        );
         if legacy_op.clicked()
             && from_edit
             && let Some(spec) = draft_spec.as_mut()
@@ -745,7 +782,7 @@ fn render_mv_filter_transform_body(
             (2, "edit.tab.select_cols", "3. Select Columns"),
         ] {
             let r = choice_pill(tabs, tokens, lbl, state.active_tab == idx, true);
-            record_tr_node(tabs, meta, wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true, &r);
+            meta.record_modal_response(tabs, &r, FrameInspectEntryInput::modal(wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true));
             if r.clicked() {
                 state.active_tab = idx;
             }
@@ -761,7 +798,11 @@ fn render_mv_filter_transform_body(
                 let _ = row.add(egui::TextEdit::singleline(&mut state.derived_title_draft).hint_text("Derived1").desired_width(110.0));
                 row.label("Expr:");
                 let er = row.add(egui::TextEdit::singleline(&mut state.formula_draft).hint_text("= log10([Dose])").desired_width(210.0));
-                record_tr_node(row, meta, "edit.transform.formula", "textbox", "Derived Formula", Some(state.formula_draft.clone()), true, &er);
+                meta.record_modal_response(
+                    row,
+                    &er,
+                    FrameInspectEntryInput::modal("edit.transform.formula", "textbox", "Derived Formula", Some(state.formula_draft.clone()), true),
+                );
                 let can_add = !state.derived_title_draft.trim().is_empty() && !state.formula_draft.trim().is_empty();
                 if row.add_enabled(can_add, egui::Button::new("Add Derived")).clicked() {
                     let t = state.derived_title_draft.trim().to_owned();
@@ -790,7 +831,11 @@ fn render_mv_filter_transform_body(
             ui.label(RichText::new("Conjunctive Row Filter Formula:").strong().color(tokens.text_primary));
             let fw = (ui.available_width() - 16.0).clamp(180.0, 420.0);
             let fr = ui.add(egui::TextEdit::singleline(&mut filter_formula).hint_text("[Dose] > 0 && [Arm] == \"Drug\"").desired_width(fw));
-            record_tr_node(ui, meta, "edit.transform.filter_formula", "textbox", "Filter Formula", Some(filter_formula.clone()), true, &fr);
+            meta.record_modal_response(
+                ui,
+                &fr,
+                FrameInspectEntryInput::modal("edit.transform.filter_formula", "textbox", "Filter Formula", Some(filter_formula.clone()), true),
+            );
             if fr.changed() {
                 if from_edit && let Some(spec) = draft_spec.as_mut() {
                     spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
@@ -875,7 +920,11 @@ fn render_mv_filter_transform_body(
                         let active = selected.is_empty() || selected.contains(&c);
                         let cname = s.title_at(c);
                         let r = choice_pill(row, tokens, &cname, active, true);
-                        record_tr_node(row, meta, &format!("edit.transform.col.{c}"), "checkbox", &cname, Some(active.to_string()), true, &r);
+                        meta.record_modal_response(
+                            row,
+                            &r,
+                            FrameInspectEntryInput::modal(&format!("edit.transform.col.{c}"), "checkbox", &cname, Some(active.to_string()), true),
+                        );
                         if r.clicked() && from_edit {
                             if let Some(pos) = selected.iter().position(|x| *x == c) {
                                 selected.remove(pos);
@@ -916,7 +965,7 @@ fn render_extract_and_rearrange_body(
         for (idx, wid, lbl) in [(0usize, "edit.tab.target_format", "1. Target Table Format"), (1, "edit.tab.data_arrangement", "2. Data Arrangement")]
         {
             let r = choice_pill(tabs, tokens, lbl, state.active_tab == idx, true);
-            record_tr_node(tabs, meta, wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true, &r);
+            meta.record_modal_response(tabs, &r, FrameInspectEntryInput::modal(wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true));
             if r.clicked() {
                 state.active_tab = idx;
             }
@@ -939,7 +988,11 @@ fn render_extract_and_rearrange_body(
             ] {
                 let active = target_kind == tk;
                 let r = choice_pill(row, tokens, lbl, active, true);
-                record_tr_node(row, meta, &format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true),
+                );
                 if r.clicked() {
                     state.extract_target_kind = Some(tk);
                     if from_edit
@@ -957,7 +1010,11 @@ fn render_extract_and_rearrange_body(
             }
         });
         let legacy_ta = widgets::secondary_button(ui, "Cycle Target Archetype");
-        record_tr_node(ui, meta, "edit.transform.target_archetype", "button", "Target Archetype", None, true, &legacy_ta);
+        meta.record_modal_response(
+            ui,
+            &legacy_ta,
+            FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Archetype", None, true),
+        );
         if legacy_ta.clicked() && from_edit {
             let next_tk = if target_kind == TableKind::Xy { TableKind::Column } else { TableKind::Xy };
             state.extract_target_kind = Some(next_tk);
@@ -1003,7 +1060,11 @@ fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModa
                     if let Some(num) = c.value.as_finite_f64() {
                         let lbl = format!("{} -> {num}", c.name);
                         let r = choice_pill(box_ui, tokens, &lbl, false, true);
-                        record_tr_node(box_ui, meta, &format!("edit.transform.hook_item.{found}"), "menuitem", &lbl, None, true, &r);
+                        meta.record_modal_response(
+                            box_ui,
+                            &r,
+                            FrameInspectEntryInput::modal(&format!("edit.transform.hook_item.{found}"), "menuitem", &lbl, None, true),
+                        );
                         found += 1;
                         if r.clicked() {
                             state.constant_k_draft = format!("{num}");
@@ -1033,9 +1094,9 @@ fn render_transform_footer(
     intents: &mut PendingUiIntents,
 ) {
     ui.horizontal(|footer| {
-        let cancel_lbl = tr_tr(tokens.locale, "btn.cancel", "Cancel");
-        let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-        record_tr_node(footer, meta, "modal.cancel", "button", cancel_lbl.as_ref(), None, true, &cancel_resp);
+        let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+        let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+        meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
             if from_edit {
                 intents.push_dialog_button("cancel");
@@ -1045,10 +1106,10 @@ fn render_transform_footer(
         }
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-            let ok_lbl = tr_tr(tokens.locale, "btn.ok", "OK");
+            let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
             let can_ok = state.validation_error.is_none();
-            let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl.as_ref(), can_ok);
-            record_tr_node(rhs, meta, "modal.ok", "button", ok_lbl.as_ref(), None, can_ok, &ok_resp);
+            let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
+            meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
             if ok_resp.clicked() {
                 if from_edit {
                     if commit_edit_transform_k_if_needed(app, kind, state, intents) {
@@ -1072,9 +1133,9 @@ fn render_transform_footer(
             }
 
             if from_edit {
-                let apply_lbl = tr_tr(tokens.locale, "btn.apply", "Apply");
-                let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl.as_ref()));
-                record_tr_node(rhs, meta, "modal.apply", "button", apply_lbl.as_ref(), None, can_ok, &apply_resp);
+                let apply_lbl = tr_or_fallback(tokens.locale, "btn.apply", "Apply");
+                let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl));
+                meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
                 if apply_resp.clicked() && commit_edit_transform_k_if_needed(app, kind, state, intents) {
                     intents.push_dialog_button("apply");
                 }
@@ -1268,7 +1329,7 @@ pub fn render_exclude_with_reason_modal(
         state.exclude_note_draft = app.canvas_dialogs.exclude_with_reason.note.clone();
     }
 
-    let title = tr_tr(tokens.locale, "w6.view.modal.exclude_with_reason", "Exclude with Reason");
+    let title = tr_or_fallback(tokens.locale, "w6.view.modal.exclude_with_reason", "Exclude with Reason");
     let vp = ctx.content_rect();
     let dlg_w = (vp.width() - 24.0).clamp(280.0, 460.0);
 
@@ -1278,7 +1339,7 @@ pub fn render_exclude_with_reason_modal(
         ui.set_width(inner_w);
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
-        ui.heading(RichText::new(title.as_ref()).color(tokens.text_primary));
+        ui.heading(RichText::new(title).color(tokens.text_primary));
         ui.add_space(6.0);
         ui.label(format!("Target cells selected: {}", app.canvas_dialogs.exclude_with_reason.coords.len()));
         ui.add_space(4.0);
@@ -1287,7 +1348,11 @@ pub fn render_exclude_with_reason_modal(
             for (idx, tag) in ExcludeWithReasonDialogState::preset_reason_tags().iter().enumerate() {
                 let active = app.canvas_dialogs.exclude_with_reason.reason_tag == *tag;
                 let r = choice_pill(row, tokens, tag, active, true);
-                record_tr_node(row, meta, &format!("exclude.preset.{idx}"), "radio", tag, Some(active.to_string()), true, &r);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("exclude.preset.{idx}"), "radio", tag, Some(active.to_string()), true),
+                );
                 if r.clicked() {
                     state.exclude_reason_draft = (*tag).to_owned();
                     let mut f = Map::new();
@@ -1301,7 +1366,11 @@ pub fn render_exclude_with_reason_modal(
         ui.horizontal_wrapped(|row| {
             row.label("Reason Tag:");
             let tr_box = row.add(egui::TextEdit::singleline(&mut state.exclude_reason_draft).hint_text("Reason tag").desired_width(180.0));
-            record_tr_node(row, meta, "exclude.reason_tag", "textbox", "Reason Tag", Some(state.exclude_reason_draft.clone()), true, &tr_box);
+            meta.record_modal_response(
+                row,
+                &tr_box,
+                FrameInspectEntryInput::modal("exclude.reason_tag", "textbox", "Reason Tag", Some(state.exclude_reason_draft.clone()), true),
+            );
             if tr_box.changed() {
                 let mut f = Map::new();
                 f.insert(String::from("reason_tag"), Value::String(state.exclude_reason_draft.clone()));
@@ -1315,7 +1384,11 @@ pub fn render_exclude_with_reason_modal(
                 .desired_rows(2)
                 .desired_width((dlg_w - 44.0).max(160.0)),
         );
-        record_tr_node(ui, meta, "exclude.note", "textbox", "Audit Note", Some(state.exclude_note_draft.clone()), true, &nr);
+        meta.record_modal_response(
+            ui,
+            &nr,
+            FrameInspectEntryInput::modal("exclude.note", "textbox", "Audit Note", Some(state.exclude_note_draft.clone()), true),
+        );
         if nr.changed() {
             let mut f = Map::new();
             f.insert(String::from("note"), Value::String(state.exclude_note_draft.clone()));
@@ -1324,17 +1397,17 @@ pub fn render_exclude_with_reason_modal(
 
         ui.add_space(8.0);
         ui.horizontal(|footer| {
-            let cancel_lbl = tr_tr(tokens.locale, "btn.cancel", "Cancel");
-            let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-            record_tr_node(footer, meta, "modal.cancel", "button", cancel_lbl.as_ref(), None, true, &cancel_resp);
+            let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+            let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+            meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
             if cancel_resp.clicked() {
                 intents.push_dialog_button("cancel");
             }
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-                let ok_lbl = tr_tr(tokens.locale, "btn.ok", "OK");
+                let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
                 let can_ok = !state.exclude_reason_draft.trim().is_empty() && !app.canvas_dialogs.exclude_with_reason.coords.is_empty();
-                let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl.as_ref(), can_ok);
-                record_tr_node(rhs, meta, "modal.ok", "button", ok_lbl.as_ref(), None, can_ok, &ok_resp);
+                let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
+                meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
                 if ok_resp.clicked() {
                     intents.push_dialog_button("ok");
                 }
@@ -1342,13 +1415,13 @@ pub fn render_exclude_with_reason_modal(
         });
     });
 
-    let title_for_ak = title.as_ref().to_owned();
+    let title_for_ak = title.to_owned();
     modal_resp.response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Dialog, true, title_for_ak.clone()));
 
     let capture = finalize_egui_modal_response(
         ctx,
         &modal_resp,
-        ModalCaptureSpec { widget_id: "dialog.exclude_with_reason", title: title.as_ref(), z_dialog: ZLayer::ModalDialog },
+        ModalCaptureSpec { widget_id: "dialog.exclude_with_reason", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
     TransformModalFrameReport {
@@ -1365,37 +1438,4 @@ fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enable
         text = text.color(tokens.accent).strong();
     }
     ui.add_enabled(enabled, egui::Button::new(text).selected(selected))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_tr_node(
-    ui: &Ui,
-    meta: &mut FrameInspectMeta,
-    wid: &str,
-    role: &str,
-    label: &str,
-    value: Option<String>,
-    enabled: bool,
-    resp: &egui::Response,
-) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
-        return;
-    }
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id: wid,
-            role,
-            label,
-            command_id: None,
-            value: value.map(Value::String),
-            enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
 }

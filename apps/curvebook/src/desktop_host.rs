@@ -22,7 +22,9 @@ use curvebook_format::{
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
-use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
+use curvebook_ui_egui::interaction::{
+    InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates,
+};
 use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, is_desktop_host_routed_command, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
@@ -4005,35 +4007,6 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
     }
 }
 
-fn build_shortcut_candidates_for(key: &str, modifiers: KeyModifiers) -> Vec<String> {
-    if key.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(2);
-    let build = |use_cmd_for_ctrl: bool| -> String {
-        let mut parts = Vec::with_capacity(5);
-        if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
-            parts.push("Cmd");
-        }
-        if modifiers.ctrl && !(use_cmd_for_ctrl && !modifiers.meta) {
-            parts.push("Ctrl");
-        }
-        if modifiers.alt {
-            parts.push("Alt");
-        }
-        if modifiers.shift {
-            parts.push("Shift");
-        }
-        parts.push(key);
-        parts.join("+")
-    };
-    out.push(build(false));
-    if modifiers.ctrl && !modifiers.meta {
-        out.push(build(true));
-    }
-    out
-}
-
 fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
     if is_desktop_host_routed_command(command_id)
         || matches!(
@@ -4063,7 +4036,7 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         return None;
     }
     let on_result_sheet = app.is_result_sheet_shortcut_context();
-    for candidate in build_shortcut_candidates_for(key, modifiers) {
+    for candidate in build_shortcut_candidates(key, modifiers) {
         if let Some(matched) = app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet)
             && shortcut_uses_desktop_routing(&matched.command_id)
         {

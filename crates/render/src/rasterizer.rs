@@ -17,6 +17,18 @@ pub const MAX_RASTER_DIM_PX: u32 = 16_384;
 /// Maximum supported total raster pixel budget (`8192 x 8192` = 67,108,864 pixels).
 pub const MAX_RASTER_PIXELS: u64 = 67_108_864;
 
+/// Minimum auto-scaled raster dimension in pixels for capped preview/export outputs.
+pub const MIN_CAPPED_RASTER_DIM_PX: u32 = 64;
+
+/// Maximum auto-scaled raster dimension in pixels for capped preview/export outputs.
+pub const MAX_CAPPED_RASTER_DIM_PX: u32 = 8_192;
+
+/// Default fallback width in pixels when a scene's point width is non-finite or non-positive.
+pub const DEFAULT_CAPPED_RASTER_WIDTH_PX: u32 = 960;
+
+/// Default fallback height in pixels when a scene's point height is non-finite or non-positive.
+pub const DEFAULT_CAPPED_RASTER_HEIGHT_PX: u32 = 640;
+
 /// Alias for uncompressed RGBA pixel buffers compatible with canvas preview filters.
 pub type RgbaPixmap = RasterImage;
 
@@ -100,6 +112,29 @@ impl RenderTargetSpec {
         let height_px = h_round as u32;
         let _ = validate_raster_target_dims(width_px, height_px, dpi, "raster")?;
         Ok(Self { width_px, height_px, dpi })
+    }
+
+    /// Resolve pixel dimensions for capped preview/export outputs (MCP and desktop control).
+    ///
+    /// Positive finite `scene` point dimensions are scaled by `dpi / 72.0`, rounded to the nearest
+    /// integer pixel, and clamped independently to
+    /// [`MIN_CAPPED_RASTER_DIM_PX`]..=[`MAX_CAPPED_RASTER_DIM_PX`] (`64..=8192`). Non-finite or
+    /// non-positive axes fall back to [`DEFAULT_CAPPED_RASTER_WIDTH_PX`] x
+    /// [`DEFAULT_CAPPED_RASTER_HEIGHT_PX`] (`960 x 640`). Caller-supplied `requested_width_px` and
+    /// `requested_height_px` override the derived dimensions verbatim.
+    #[must_use]
+    pub fn from_scene_capped(scene: &ChartScene, requested_width_px: Option<u32>, requested_height_px: Option<u32>, dpi: u16) -> Self {
+        let scale_axis = |dim_pt: f64, fallback_px: u32| -> u32 {
+            if dim_pt.is_finite() && dim_pt > 0.0 {
+                let scaled = (dim_pt * f64::from(dpi) / 72.0).round();
+                scaled.clamp(f64::from(MIN_CAPPED_RASTER_DIM_PX), f64::from(MAX_CAPPED_RASTER_DIM_PX)) as u32
+            } else {
+                fallback_px
+            }
+        };
+        let default_w = scale_axis(scene.width_pt, DEFAULT_CAPPED_RASTER_WIDTH_PX);
+        let default_h = scale_axis(scene.height_pt, DEFAULT_CAPPED_RASTER_HEIGHT_PX);
+        Self { width_px: requested_width_px.unwrap_or(default_w), height_px: requested_height_px.unwrap_or(default_h), dpi }
     }
 }
 
@@ -3104,5 +3139,25 @@ mod tests {
         assert_eq!(img_1.rgba, img_2.rgba);
         let non_white = img_1.rgba.as_chunks::<4>().0.iter().filter(|px| *px != &[255, 255, 255, 255]).count();
         assert!(non_white > 10_000, "expected rasterized marker ink, got {non_white}");
+    }
+
+    #[test]
+    fn from_scene_capped_scales_clamps_falls_back_and_honors_overrides() {
+        let normal = ChartScene::new("g1", "Normal", 144.0, 72.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, None, None, 144), RenderTargetSpec { width_px: 288, height_px: 144, dpi: 144 });
+
+        let tiny = ChartScene::new("g2", "Tiny", 1.0, 2.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&tiny, None, None, 72), RenderTargetSpec { width_px: 64, height_px: 64, dpi: 72 });
+
+        let huge = ChartScene::new("g3", "Huge", 10_000.0, 20_000.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&huge, None, None, 300), RenderTargetSpec { width_px: 8192, height_px: 8192, dpi: 300 });
+
+        let mut invalid = ChartScene::new("g4", "Invalid", 144.0, 72.0, Some(Rgba8::WHITE));
+        invalid.width_pt = f64::NAN;
+        invalid.height_pt = 0.0;
+        assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, None, 144), RenderTargetSpec { width_px: 960, height_px: 640, dpi: 144 });
+
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, Some(512), None, 144), RenderTargetSpec { width_px: 512, height_px: 144, dpi: 144 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, Some(300), 144), RenderTargetSpec { width_px: 960, height_px: 300, dpi: 144 });
     }
 }
