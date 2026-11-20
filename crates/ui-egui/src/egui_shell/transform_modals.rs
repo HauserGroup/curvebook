@@ -44,6 +44,43 @@ pub struct MvFilterPredicateRow {
     pub compare_variable: bool,
 }
 
+/// Selected constant-K arithmetic mode for `TransformValues` Y transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantKOp {
+    /// `Y + K` (`LinearScale { slope: 1.0, intercept: K }`).
+    Add,
+    /// `Y * K` (`LinearScale { slope: K, intercept: 0.0 }`).
+    Multiply,
+    /// `Y / K` (`LinearScale { slope: 1.0 / K, intercept: 0.0 }`, requires `K != 0`).
+    Divide,
+}
+
+impl ConstantKOp {
+    fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "affine_k" => Some(Self::Add),
+            "multiply_k" => Some(Self::Multiply),
+            "divide_k" => Some(Self::Divide),
+            _ => None,
+        }
+    }
+
+    fn infer_from_preset(preset: MathTransformPreset) -> Option<(Self, f64)> {
+        let MathTransformPreset::LinearScale { slope, intercept } = preset else {
+            return None;
+        };
+        if (slope - 1.0).abs() < 1e-12 && intercept.abs() >= 1e-12 {
+            Some((Self::Add, intercept))
+        } else if intercept.abs() < 1e-12 && slope > 0.0 && slope < 1.0 {
+            Some((Self::Divide, 1.0 / slope))
+        } else if intercept.abs() < 1e-12 {
+            Some((Self::Multiply, slope))
+        } else {
+            Some((Self::Add, intercept))
+        }
+    }
+}
+
 /// Persistent transient UI state for `render_transform_modal` and `render_exclude_with_reason_modal`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransformModalsEguiState {
@@ -52,13 +89,14 @@ pub struct TransformModalsEguiState {
     pub active_tab: usize,
     pub formula_draft: String,
     pub constant_k_draft: String,
-    pub create_new_graph: bool,
+    pub selected_k_op: Option<ConstantKOp>,
+    pub synced_edit_sheet_id: Option<String>,
     pub filter_rows: Vec<MvFilterPredicateRow>,
     pub exclude_reason_draft: String,
     pub validation_error: Option<String>,
     pub standalone_x_preset: Option<String>,
     pub standalone_y_preset: Option<String>,
-    pub zero_conc_sub_draft: String,
+    pub standalone_error_propagation: ErrorPropagationMode,
     pub pharmacology_mode: bool,
     pub baseline_cols: Vec<usize>,
     pub baseline_op: usize,
@@ -113,8 +151,14 @@ pub fn render_transform_modal(
     intents: &mut PendingUiIntents,
 ) -> TransformModalFrameReport {
     let from_edit = is_transform_edit_dialog_active(app);
+    if !from_edit {
+        state.synced_edit_sheet_id = None;
+    }
     if !from_edit && state.open_kind.is_none() {
         return TransformModalFrameReport::default();
+    }
+    if from_edit {
+        sync_transform_edit_state(app, state);
     }
 
     let draft_kind = if from_edit { app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) } else { None };
@@ -241,6 +285,67 @@ fn resolve_source_sheet<'a>(app: &'a UiApp, state: &TransformModalsEguiState, fr
         .or_else(|| doc.data_sheets.first())
 }
 
+fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) {
+    let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        return;
+    };
+    if state.synced_edit_sheet_id.as_deref() == Some(result_sheet_id.as_str()) {
+        return;
+    }
+    state.synced_edit_sheet_id = Some(result_sheet_id.as_str().to_owned());
+    let spec = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| app.document().result_sheet(result_sheet_id).map(|rs| &rs.analysis));
+    if let Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) = spec.map(|s| &s.kind) {
+        if let Some((op, k)) = y_transform.and_then(ConstantKOp::infer_from_preset) {
+            state.selected_k_op = Some(op);
+            state.constant_k_draft = format!("{k}");
+        } else {
+            state.selected_k_op = None;
+        }
+    } else {
+        state.selected_k_op = None;
+    }
+}
+
+fn parse_k_constant(raw: &str, locale_preset: &crate::i18n::LocalePreset) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_localized_number_input(trimmed, locale_preset).or_else(|| trimmed.parse::<f64>().ok()).filter(|v| v.is_finite())
+}
+
+fn build_linear_scale_for_k(op: ConstantKOp, raw_k: &str, locale_preset: &crate::i18n::LocalePreset) -> Result<MathTransformPreset, String> {
+    let trimmed = raw_k.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("Enter a numeric value for Constant K."));
+    }
+    let Some(k) = parse_k_constant(trimmed, locale_preset) else {
+        return Err(format!("Invalid numeric constant `{trimmed}`."));
+    };
+    match op {
+        ConstantKOp::Add => Ok(MathTransformPreset::LinearScale { slope: 1.0, intercept: k }),
+        ConstantKOp::Multiply => Ok(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 }),
+        ConstantKOp::Divide => {
+            if k.abs() <= f64::EPSILON {
+                Err(String::from("Constant K cannot be 0 when dividing (Y / K)."))
+            } else {
+                Ok(MathTransformPreset::LinearScale { slope: 1.0 / k, intercept: 0.0 })
+            }
+        }
+    }
+}
+
+fn validate_transform_k(active_k_op: Option<ConstantKOp>, raw_k: &str, locale_preset: &crate::i18n::LocalePreset) -> Option<String> {
+    if let Some(op) = active_k_op {
+        return build_linear_scale_for_k(op, raw_k, locale_preset).err();
+    }
+    let trimmed = raw_k.trim();
+    if !trimmed.is_empty() && parse_k_constant(trimmed, locale_preset).is_none() {
+        return Some(format!("Invalid numeric constant `{trimmed}`."));
+    }
+    None
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_transform_values_body(
     ui: &mut Ui,
@@ -253,15 +358,22 @@ fn render_transform_values_body(
     intents: &mut PendingUiIntents,
 ) {
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+    if !from_edit {
+        state.selected_k_op = state.standalone_y_preset.as_deref().and_then(ConstantKOp::from_slug);
+    }
+    let active_k_op = state.selected_k_op;
     let (cur_x, cur_y, cur_ep) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })) => {
-            (*x_transform, *y_transform, *error_propagation)
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })) if from_edit => {
+            let eff_y = active_k_op.map(|op| build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok()).unwrap_or(*y_transform);
+            (*x_transform, eff_y, *error_propagation)
         }
-        _ => (
-            state.standalone_x_preset.as_deref().and_then(parse_math_slug),
-            state.standalone_y_preset.as_deref().and_then(parse_math_slug).or(Some(MathTransformPreset::Log10)),
-            ErrorPropagationMode::ReplicateEndpoints,
-        ),
+        _ => {
+            let eff_y = match active_k_op {
+                Some(op) => build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok(),
+                None => state.standalone_y_preset.as_deref().and_then(parse_math_slug),
+            };
+            (state.standalone_x_preset.as_deref().and_then(parse_math_slug), eff_y, state.standalone_error_propagation)
+        }
     };
 
     ui.horizontal_wrapped(|row| {
@@ -329,23 +441,6 @@ fn render_transform_values_body(
         }
     });
 
-    if matches!(cur_x, Some(MathTransformPreset::Log10 | MathTransformPreset::Ln | MathTransformPreset::ConcentrationToNegativeLogM { .. })) {
-        ui.horizontal(|row| {
-            row.label("Zero X substitution:");
-            let zr = row.add(egui::TextEdit::singleline(&mut state.zero_conc_sub_draft).hint_text("e.g. 1e-12 (optional)").desired_width(130.0));
-            record_tr_node(
-                row,
-                meta,
-                "edit.transform.zero_conc_sub",
-                "textbox",
-                "Zero X Substitution",
-                Some(state.zero_conc_sub_draft.clone()),
-                true,
-                &zr,
-            );
-        });
-    }
-
     ui.add_space(6.0);
     // Transform Y choices (`edit.transform.y_transform`).
     ui.label(RichText::new("Transform Y values:").strong().color(tokens.text_primary));
@@ -364,37 +459,29 @@ fn render_transform_values_body(
             ("divide_k", "Y / K", None),
         ];
         for (slug, lbl, preset_opt) in y_choices {
-            let active = match slug {
-                "affine_k" => matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, .. }) if (slope - 1.0).abs() < 1e-12),
-                "multiply_k" => {
-                    matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, intercept }) if intercept.abs() < 1e-12 && slope >= 1.0)
-                }
-                "divide_k" => matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, intercept }) if intercept.abs() < 1e-12 && slope < 1.0),
-                _ => cur_y == preset_opt,
+            let active = match ConstantKOp::from_slug(slug) {
+                Some(k_op) => active_k_op == Some(k_op),
+                None => active_k_op.is_none() && cur_y == preset_opt,
             };
             let r = choice_pill(row, tokens, lbl, active, true);
             record_tr_node(row, meta, &format!("edit.transform.y_transform.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
             if r.clicked() {
-                let target_p = match slug {
-                    "affine_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(0.0);
-                        Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: k })
+                if let Some(k_op) = ConstantKOp::from_slug(slug) {
+                    state.selected_k_op = Some(k_op);
+                    if from_edit {
+                        if let Ok(linear) = build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
+                            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+                        }
+                    } else {
+                        state.standalone_y_preset = Some(slug.to_owned());
                     }
-                    "multiply_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        Some(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 })
-                    }
-                    "divide_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        let slope = if k.abs() > f64::EPSILON { 1.0 / k } else { 1.0 };
-                        Some(MathTransformPreset::LinearScale { slope, intercept: 0.0 })
-                    }
-                    _ => preset_opt,
-                };
-                if from_edit {
-                    apply_math_patch(draft_spec.as_mut(), None, Some(target_p), None, intents);
                 } else {
-                    state.standalone_y_preset = if slug == "none" { None } else { Some(slug.to_owned()) };
+                    state.selected_k_op = None;
+                    if from_edit {
+                        apply_math_patch(draft_spec.as_mut(), None, Some(preset_opt), None, intents);
+                    } else {
+                        state.standalone_y_preset = (slug != "none").then(|| slug.to_owned());
+                    }
                 }
             }
         }
@@ -407,6 +494,7 @@ fn render_transform_values_body(
                 Some(MathTransformPreset::Sqrt) => None,
                 _ => Some(MathTransformPreset::Log10),
             };
+            state.selected_k_op = None;
             if from_edit {
                 apply_math_patch(draft_spec.as_mut(), None, Some(next), None, intents);
             } else {
@@ -421,6 +509,13 @@ fn render_transform_values_body(
         row.label("Constant K:");
         let kr = row.add(egui::TextEdit::singleline(&mut state.constant_k_draft).hint_text("0.0").desired_width(96.0));
         record_tr_node(row, meta, "edit.transform.constant_k", "textbox", "Constant K", Some(state.constant_k_draft.clone()), true, &kr);
+        if kr.changed()
+            && from_edit
+            && let Some(k_op) = state.selected_k_op
+            && let Ok(linear) = build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset)
+        {
+            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+        }
         let hr = widgets::secondary_button(row, "Hook Constant");
         record_tr_node(row, meta, "edit.transform.hook_k", "button", "Hook Constant", None, true, &hr);
         if hr.clicked() {
@@ -438,38 +533,42 @@ fn render_transform_values_body(
             let active = cur_ep == mode;
             let r = choice_pill(row, tokens, lbl, active, true);
             record_tr_node(row, meta, &format!("edit.transform.error_propagation.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
-            if r.clicked() && from_edit {
-                apply_math_patch(draft_spec.as_mut(), None, None, Some(mode), intents);
+            if r.clicked() {
+                if from_edit {
+                    apply_math_patch(draft_spec.as_mut(), None, None, Some(mode), intents);
+                } else {
+                    state.standalone_error_propagation = mode;
+                }
             }
         }
         let legacy_ep = widgets::secondary_button(row, "Toggle Error Prop");
         record_tr_node(row, meta, "edit.transform.error_propagation", "button", "Error Propagation", None, true, &legacy_ep);
-        if legacy_ep.clicked() && from_edit {
+        if legacy_ep.clicked() {
             let next = if cur_ep == ErrorPropagationMode::ReplicateEndpoints {
                 ErrorPropagationMode::FirstOrderDeltaMethod
             } else {
                 ErrorPropagationMode::ReplicateEndpoints
             };
-            apply_math_patch(draft_spec.as_mut(), None, None, Some(next), intents);
+            if from_edit {
+                apply_math_patch(draft_spec.as_mut(), None, None, Some(next), intents);
+            } else {
+                state.standalone_error_propagation = next;
+            }
         }
     });
 
-    if !from_edit {
-        let cr = ui.checkbox(&mut state.create_new_graph, "Create new graph of transformed results");
-        record_tr_node(ui, meta, "edit.transform.create_graph", "checkbox", "Create New Graph", Some(state.create_new_graph.to_string()), true, &cr);
-    }
+    state.validation_error = validate_transform_k(state.selected_k_op, &state.constant_k_draft, &app.locale_preset);
 
-    state.validation_error = if let Some(k_txt) = (!state.constant_k_draft.trim().is_empty()).then_some(state.constant_k_draft.as_str()) {
-        if parse_localized_number_input(k_txt, &app.locale_preset).is_none() { Some(format!("Invalid numeric constant `{k_txt}`")) } else { None }
-    } else {
-        None
+    let y_preview = match (state.selected_k_op, cur_y) {
+        (_, Some(p)) => format!("{p:?}"),
+        (Some(_), None) => String::from("Invalid Constant K"),
+        (None, None) => String::from("Unchanged"),
     };
-
     let preview = format!(
         "Preview ({}): X -> {}, Y -> {} | Error: {:?}",
         ds.map_or("No sheet", |s| s.title.as_str()),
         cur_x.map_or_else(|| String::from("Unchanged"), |p| format!("{p:?}")),
-        cur_y.map_or_else(|| String::from("Unchanged"), |p| format!("{p:?}")),
+        y_preview,
         cur_ep
     );
     ui.add_space(6.0);
@@ -909,6 +1008,7 @@ fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModa
                         if r.clicked() {
                             state.constant_k_draft = format!("{num}");
                             state.hook_picker_open = false;
+                            state.validation_error = validate_transform_k(state.selected_k_op, &state.constant_k_draft, &app.locale_preset);
                         }
                     }
                 }
@@ -926,7 +1026,7 @@ fn render_transform_footer(
     app: &UiApp,
     ds: Option<&DataSheet>,
     kind: TransformModalKind,
-    state: &TransformModalsEguiState,
+    state: &mut TransformModalsEguiState,
     from_edit: bool,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
@@ -951,13 +1051,23 @@ fn render_transform_footer(
             record_tr_node(rhs, meta, "modal.ok", "button", ok_lbl.as_ref(), None, can_ok, &ok_resp);
             if ok_resp.clicked() {
                 if from_edit {
-                    intents.push_dialog_button("ok");
+                    if commit_edit_transform_k_if_needed(app, kind, state, intents) {
+                        intents.push_dialog_button("ok");
+                    }
                 } else {
                     if let Some(sheet) = ds {
-                        let cmd_params = build_standalone_transform_params(app, sheet, kind, state);
-                        intents.push_engine("transform.run", cmd_params);
+                        match build_standalone_transform_params(app, sheet, kind, state) {
+                            Ok(cmd_params) => {
+                                intents.push_engine("transform.run", cmd_params);
+                                intents.push_close_transform_modal();
+                            }
+                            Err(err) => {
+                                state.validation_error = Some(err);
+                            }
+                        }
+                    } else {
+                        intents.push_close_transform_modal();
                     }
-                    intents.push_close_transform_modal();
                 }
             }
 
@@ -965,12 +1075,37 @@ fn render_transform_footer(
                 let apply_lbl = tr_tr(tokens.locale, "btn.apply", "Apply");
                 let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl.as_ref()));
                 record_tr_node(rhs, meta, "modal.apply", "button", apply_lbl.as_ref(), None, can_ok, &apply_resp);
-                if apply_resp.clicked() {
+                if apply_resp.clicked() && commit_edit_transform_k_if_needed(app, kind, state, intents) {
                     intents.push_dialog_button("apply");
                 }
             }
         });
     });
+}
+
+fn commit_edit_transform_k_if_needed(
+    app: &UiApp,
+    kind: TransformModalKind,
+    state: &mut TransformModalsEguiState,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    if kind != TransformModalKind::TransformValues {
+        return true;
+    }
+    let Some(k_op) = state.selected_k_op else {
+        return true;
+    };
+    match build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
+        Ok(linear) => {
+            let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+            true
+        }
+        Err(err) => {
+            state.validation_error = Some(err);
+            false
+        }
+    }
 }
 
 fn apply_math_patch(
@@ -995,51 +1130,43 @@ fn apply_math_patch(
     }
 }
 
-fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: TransformModalKind, state: &TransformModalsEguiState) -> Value {
+fn build_standalone_transform_params(
+    app: &UiApp,
+    ds: &DataSheet,
+    kind: TransformModalKind,
+    state: &TransformModalsEguiState,
+) -> Result<Value, String> {
     match kind {
         TransformModalKind::TransformValues => {
-            let y_t = state.standalone_y_preset.as_deref().unwrap_or("log10");
-            let mut obj = json!({
-                "source_sheet": ds.id.as_str(),
-                "kind": "math",
-                "y_transform": match y_t {
-                    "affine_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(0.0);
-                        json!({ "LinearScale": { "slope": 1.0, "intercept": k } })
+            let x_transform = state.standalone_x_preset.as_deref().and_then(parse_math_slug);
+            let y_transform = match state.standalone_y_preset.as_deref() {
+                None | Some("none") => None,
+                Some(slug) => {
+                    if let Some(k_op) = ConstantKOp::from_slug(slug) {
+                        Some(build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset)?)
+                    } else {
+                        parse_math_slug(slug)
                     }
-                    "multiply_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        json!({ "LinearScale": { "slope": k, "intercept": 0.0 } })
-                    }
-                    "divide_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        let slope = if k.abs() > f64::EPSILON { 1.0 / k } else { 1.0 };
-                        json!({ "LinearScale": { "slope": slope, "intercept": 0.0 } })
-                    }
-                    other => Value::String(other.to_owned()),
                 }
-            });
-            if let Some(x_slug) = state.standalone_x_preset.as_deref()
-                && let Some(m) = obj.as_object_mut()
-            {
-                let x_val = match x_slug {
-                    "neg_log_m_um" => json!({ "ConcentrationToNegativeLogM": { "molar_unit_factor": 1e-6 } }),
-                    "neg_log_m_nm" => json!({ "ConcentrationToNegativeLogM": { "molar_unit_factor": 1e-9 } }),
-                    other => Value::String(other.to_owned()),
-                };
-                m.insert(String::from("x_transform"), x_val);
-            }
-            obj
+            };
+            Ok(json!({
+                "source_sheet": ds.id.as_str(),
+                "kind": AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                    x_transform,
+                    y_transform,
+                    error_propagation: state.standalone_error_propagation,
+                }),
+            }))
         }
-        TransformModalKind::Normalize => json!({
+        TransformModalKind::Normalize => Ok(json!({
             "source_sheet": ds.id.as_str(),
             "kind": "normalize",
             "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
             "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
             "as_fraction": !state.norm_percent,
             "per_data_set": state.norm_per_dataset,
-        }),
-        TransformModalKind::RemoveBaseline => json!({
+        })),
+        TransformModalKind::RemoveBaseline => Ok(json!({
             "source_sheet": ds.id.as_str(),
             "kind": "remove_baseline",
             "baseline_columns": if state.baseline_cols.is_empty() { vec![0] } else { state.baseline_cols.clone() },
@@ -1049,16 +1176,20 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
                 3 => "fractional_change",
                 _ => "difference",
             },
-        }),
-        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => json!({
+        })),
+        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => Ok(json!({
             "source_sheet": ds.id.as_str(),
             "kind": "select_and_transform",
             "filter_formula": (!state.formula_draft.trim().is_empty()).then_some(state.formula_draft.trim()),
-        }),
-        TransformModalKind::Transpose => json!({ "source_sheet": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true }),
-        TransformModalKind::PruneRows => json!({ "source_sheet": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false }),
-        TransformModalKind::Simulate => json!({ "source_sheet": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }),
-        TransformModalKind::RandomSample => json!({ "source_sheet": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 }),
+        })),
+        TransformModalKind::Transpose => Ok(json!({ "source_sheet": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true })),
+        TransformModalKind::PruneRows => {
+            Ok(json!({ "source_sheet": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false }))
+        }
+        TransformModalKind::Simulate => {
+            Ok(json!({ "source_sheet": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }))
+        }
+        TransformModalKind::RandomSample => Ok(json!({ "source_sheet": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 })),
     }
 }
 
