@@ -33,7 +33,7 @@ impl TextMetricsPt {
 /// pre-set to a script factor (e.g. `0.7` from [`crate::parse_markup`]) while still applying `0.7`
 /// when a caller constructs a `Superscript`/`Subscript` span with default `scale = 1.0`.
 #[must_use]
-pub(crate) fn effective_span_scale(span: &RichSpan) -> f64 {
+pub fn effective_span_scale(span: &RichSpan) -> f64 {
     let raw = if span.scale.is_finite() && span.scale > 0.0 { span.scale } else { 1.0 };
     match span.script {
         SpanScript::Baseline => raw,
@@ -49,7 +49,7 @@ pub(crate) fn effective_span_scale(span: &RichSpan) -> f64 {
 
 /// Baseline Y-offset in Y-down PostScript points (`negative` shifts upward, `positive` downward).
 #[must_use]
-pub(crate) fn script_baseline_offset_pt(script: SpanScript, base_size_pt: f64) -> f64 {
+pub const fn script_baseline_offset_pt(script: SpanScript, base_size_pt: f64) -> f64 {
     match script {
         SpanScript::Baseline => 0.0,
         SpanScript::Superscript => -0.35 * base_size_pt,
