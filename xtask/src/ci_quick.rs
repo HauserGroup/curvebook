@@ -15,7 +15,8 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Instant;
 
-use crate::json::Json;
+use serde_json::Value;
+
 use crate::layers::Crate;
 use crate::{cargo_metadata, cargo_metadata_resolved, ci, has_cargo_nextest, layers, run_cargo};
 
@@ -143,13 +144,13 @@ fn git_stdout(root: &Path, args: &[&str]) -> Result<String, String> {
 }
 
 /// `(package name, package directory relative to the workspace root with a trailing `/`)`.
-fn package_dirs(meta: &Json) -> Result<Vec<(String, String)>, String> {
-    let ws_root = meta.get("workspace_root").and_then(Json::as_str).ok_or_else(|| String::from("metadata: no workspace_root"))?;
-    let pkgs = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
+fn package_dirs(meta: &Value) -> Result<Vec<(String, String)>, String> {
+    let ws_root = meta.get("workspace_root").and_then(Value::as_str).ok_or_else(|| String::from("metadata: no workspace_root"))?;
+    let pkgs = meta.get("packages").and_then(Value::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
     let mut dirs = Vec::with_capacity(pkgs.len());
     for p in pkgs {
-        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("metadata: package without name"))?;
-        let manifest = p.get("manifest_path").and_then(Json::as_str).ok_or_else(|| format!("metadata: `{name}` has no manifest_path"))?;
+        let name = p.get("name").and_then(Value::as_str).ok_or_else(|| String::from("metadata: package without name"))?;
+        let manifest = p.get("manifest_path").and_then(Value::as_str).ok_or_else(|| format!("metadata: `{name}` has no manifest_path"))?;
         let rel = Path::new(manifest)
             .strip_prefix(ws_root)
             .ok()

@@ -15,7 +15,6 @@ mod coverage;
 mod cursors;
 mod docs_site;
 mod ico;
-mod json;
 mod layers;
 mod licenses;
 mod msix;
@@ -179,20 +178,19 @@ fn git_ls_files_nul(root: &Path, args: &[&str]) -> Result<Vec<String>, String> {
     Ok(paths)
 }
 
-fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<json::Json, String> {
+fn run_cargo_metadata(root: &Path, args: &[&str]) -> Result<serde_json::Value, String> {
     let out = Command::new("cargo").current_dir(root).args(args).output().map_err(|e| format!("cargo metadata: {e}"))?;
     if !out.status.success() {
         return Err(format!("cargo metadata failed: {}", String::from_utf8_lossy(&out.stderr)));
     }
-    let text = String::from_utf8(out.stdout).map_err(|e| format!("cargo metadata utf-8: {e}"))?;
-    json::parse(&text)
+    serde_json::from_slice(&out.stdout).map_err(|e| format!("cargo metadata json: {e}"))
 }
 
-pub(crate) fn cargo_metadata(root: &Path) -> Result<json::Json, String> {
+pub(crate) fn cargo_metadata(root: &Path) -> Result<serde_json::Value, String> {
     run_cargo_metadata(root, &["metadata", "--format-version", "1", "--no-deps"])
 }
 
-pub(crate) fn cargo_metadata_resolved(root: &Path) -> Result<json::Json, String> {
+pub(crate) fn cargo_metadata_resolved(root: &Path) -> Result<serde_json::Value, String> {
     run_cargo_metadata(root, &["metadata", "--format-version", "1"])
 }
 

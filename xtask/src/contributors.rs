@@ -92,8 +92,8 @@ pub fn parse_cargo_repo_slug(cargo_toml: &str) -> Option<String> {
 
 fn existing_head_date(path: &Path) -> Option<String> {
     let raw = std::fs::read_to_string(path).ok()?;
-    let parsed = crate::json::parse(&raw).ok()?;
-    parsed.get("head_date").and_then(crate::json::Json::as_str).map(str::to_owned)
+    let parsed: serde_json::Value = serde_json::from_str(&raw).ok()?;
+    parsed.get("head_date").and_then(serde_json::Value::as_str).map(str::to_owned)
 }
 
 fn git_stdout(root: &Path, args: &[&str]) -> Option<String> {
@@ -331,8 +331,8 @@ Local User\x1flocal@example.org
             }]
         );
         let json = render_contributors_json("HauserGroup/curvebook", "main", "abc", "2026-11-13T00:00:00Z", total, unattributed, &entries);
-        let parsed = crate::json::parse(&json).unwrap();
-        assert_eq!(parsed.get("repo").and_then(crate::json::Json::as_str), Some("HauserGroup/curvebook"));
+        let parsed: serde_json::Value = serde_json::from_str(&json).unwrap();
+        assert_eq!(parsed.get("repo").and_then(serde_json::Value::as_str), Some("HauserGroup/curvebook"));
     }
 
     #[test]
