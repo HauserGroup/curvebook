@@ -79,7 +79,7 @@ impl Default for PairwiseComparisonsState {
 }
 
 impl PairwiseComparisonsState {
-    /// Synchronize brackets, CLD settings, and discover upstream [`ResultSheet`]s carrying pairwise comparisons.
+    /// Synchronize brackets, CLD settings, and discover upstream [`curvebook_doc::ResultSheet`]s carrying pairwise comparisons.
     pub fn sync_from_graph(&mut self, graph: &GraphSheet, doc: &ProjectDocument) {
         self.graph_sheet_id = Some(graph.id.clone());
         self.brackets = graph.spec.comparisons.clone();
@@ -118,7 +118,7 @@ impl PairwiseComparisonsState {
         }
     }
 
-    /// Populate brackets automatically from the selected [`ResultSheet`]'s `pairwise_comparisons`.
+    /// Populate brackets automatically from the selected [`curvebook_doc::ResultSheet`]'s `pairwise_comparisons`.
     pub fn auto_add_from_analysis(&mut self, doc: &ProjectDocument) -> usize {
         let Some(res_id) = &self.selected_result_sheet_id else {
             return 0;

@@ -286,7 +286,7 @@ impl CanvasDialogState {
 
     /// Synchronize inspector/dialog state when navigating to `sheet_id`.
     ///
-    /// First-time visits to an uninitialized [`GraphSheet`] automatically present
+    /// First-time visits to an uninitialized [`curvebook_doc::GraphSheet`] automatically present
     /// [`ActiveDialog::ChangeGraphType`].
     pub fn on_sheet_selected(&mut self, doc: &ProjectDocument, sheet_id: &SheetId) {
         if let Some(gs) = doc.graph_sheet(sheet_id) {
