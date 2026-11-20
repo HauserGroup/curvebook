@@ -12,7 +12,7 @@
 //!
 //! Reference: Press, W. H., Teukolsky, S. A., Vetterling, W. T. & Flannery, B. P. (2007). *Numerical Recipes: The Art of Scientific Computing*, 3rd ed. Cambridge University Press.
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ChecklistItem, ChecklistStatus, CiBound, CurveSamplePoint, DataSheet, FittedCurveOverlay, LinearRegressionSpec,
@@ -34,7 +34,7 @@ use crate::solver::{
 };
 use crate::types::{
     DataPoint, DatasetSeries, HookContext, MultivarExtractionSpec, extract_datasets_from_sheet, extract_datasets_from_sheet_with_options,
-    filter_datasets_by_range,
+    filter_datasets_by_range, per_dataset_parameter_key,
 };
 
 fn p_cell(fmt: PValueFormat, p: f64) -> ResultCell {
@@ -496,11 +496,61 @@ pub fn execute_nonlinear_analysis(
     Ok(result)
 }
 
-fn parameter_display_label(fit: &NonlinearFitResult, name: &str, dataset_index: Option<usize>) -> String {
+/// Display names for the fitted datasets, keyed by zero-based source column index.
+///
+/// Each dataset shows its column title. A blank title falls back to `DS n` (one-based column
+/// number), and names shared by several datasets, compared trimmed and case-insensitively, get
+/// ` (DS n)` appended so every row label stays unique. These names are display-only: scalar keys,
+/// hooks, and equation annotations keep using the parameter name plus `data_set_index`.
+fn dataset_display_names(fit: &NonlinearFitResult) -> HashMap<usize, String> {
+    let fallback = |idx: usize| format!("DS{}", idx.saturating_add(1));
+    let base: Vec<(usize, String)> = fit
+        .datasets
+        .iter()
+        .map(|d| {
+            let title = d.label.trim();
+            (d.data_set_index, if title.is_empty() { fallback(d.data_set_index) } else { title.to_owned() })
+        })
+        .collect();
+    let mut counts: HashMap<String, usize> = HashMap::new();
+    for (_, name) in &base {
+        *counts.entry(name.to_lowercase()).or_insert(0) += 1;
+    }
+    base.into_iter()
+        .map(|(idx, name)| {
+            let shared = counts.get(&name.to_lowercase()).copied().unwrap_or(0) > 1;
+            let shown = if shared { format!("{name} ({})", fallback(idx)) } else { name };
+            (idx, shown)
+        })
+        .collect()
+}
+
+/// Row label for a fitted parameter: the bare name for single-dataset fits, otherwise
+/// `"{name} [{dataset display name}]"` (for example `"LogEC50 [VEHICLE]"`).
+fn parameter_display_label(fit: &NonlinearFitResult, ds_names: &HashMap<usize, String>, name: &str, dataset_index: Option<usize>) -> String {
     match dataset_index {
-        Some(d) if fit.datasets.len() > 1 => format!("{name} [DS{}]", d + 1),
+        Some(d) if fit.datasets.len() > 1 => {
+            let ds = ds_names.get(&d).cloned().unwrap_or_else(|| format!("DS{}", d.saturating_add(1)));
+            format!("{name} [{ds}]")
+        }
         _ => name.to_owned(),
     }
+}
+
+/// Row label for a fixed constant. Per-dataset constants are stored under their stable key
+/// (`"AntagConc [DS1]"`), which is matched exactly against [`per_dataset_parameter_key`] and
+/// shown with the dataset's display name; any other constant keeps its name.
+fn fixed_constant_display_label(fit: &NonlinearFitResult, ds_names: &HashMap<usize, String>, key: &str) -> String {
+    if fit.datasets.len() > 1 {
+        for ds in &fit.datasets {
+            for pname in &ds.param_names {
+                if per_dataset_parameter_key(pname, ds.data_set_index) == key {
+                    return parameter_display_label(fit, ds_names, pname, Some(ds.data_set_index));
+                }
+            }
+        }
+    }
+    key.to_owned()
 }
 
 fn nonlinear_uses_weighted_objective(fit: &NonlinearFitResult, nl_spec: &NonlinearFitSpec) -> bool {
@@ -514,9 +564,10 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     let mut param_labels = Vec::with_capacity(param_rows.capacity());
     let is_robust = fit.is_robust_cauchy() || nl_spec.method == curvebook_doc::FitMethod::RobustCauchy;
     let mut emitted_scalars: HashSet<(String, Option<usize>)> = HashSet::new();
+    let ds_names = dataset_display_names(fit);
 
     for p in &fit.parameters {
-        let mut label = parameter_display_label(fit, &p.name, p.dataset_index);
+        let mut label = parameter_display_label(fit, &ds_names, &p.name, p.dataset_index);
         let unstable = p.notes.contains(&ParameterNote::Unstable);
         if unstable {
             label.push_str(" (Unstable)");
@@ -541,7 +592,7 @@ fn append_nonlinear_parameter_tab(result: &mut ResultSheet, fit: &NonlinearFitRe
     }
 
     for (name, val, _) in &fit.fixed_constants {
-        param_labels.push(format!("{name} (Constant)"));
+        param_labels.push(format!("{} (Constant)", fixed_constant_display_label(fit, &ds_names, name)));
         param_rows.push(vec![num_cell(*val), ResultCell::Empty, ResultCell::Text("Fixed".to_owned()), ResultCell::Empty, ResultCell::Empty]);
         emitted_scalars.insert((name.to_ascii_lowercase(), None));
         result.scalars.push(ResultScalarEntry { key: name.clone(), data_set_index: None, value: *val, units: None });
@@ -1109,7 +1160,8 @@ fn append_nonlinear_covariance_tab(result: &mut ResultSheet, fit: &NonlinearFitR
     if fit.covariance.covariance_matrix.is_empty() {
         return;
     }
-    let labels: Vec<String> = fit.parameters.iter().map(|p| parameter_display_label(fit, &p.name, p.dataset_index)).collect();
+    let ds_names = dataset_display_names(fit);
+    let labels: Vec<String> = fit.parameters.iter().map(|p| parameter_display_label(fit, &ds_names, &p.name, p.dataset_index)).collect();
     let rows: Vec<Vec<ResultCell>> = fit.covariance.covariance_matrix.iter().map(|r| r.iter().map(|&v| num_cell(v)).collect()).collect();
     result.tabs.push(ResultTab {
         id: "nonlinear_covariance".to_owned(),

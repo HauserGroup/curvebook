@@ -507,6 +507,11 @@ Build these as `egui` views on the [`R15`](#r15-modern-egui-desktop-gui-overhaul
 - [ ] **`R13.7` surfaces:** native `rfd` file picking and clipboard paste for images, canvas corner-resize (`Shift` unlocks the aspect ratio) and rotation handles, a `Format Image` dialog with 4-edge crop and border, and the non-exported `ui.gridOverlay.toggle` (`View > Canvas Grid`) (`WF-57`). Browser file-input and clipboard adapters follow [`R11`](#r11-usable-browser-app).
 - [ ] **`R13.5` surfaces:** tick direction and tick-label controls in `Format Axes`, background fill in `Format Graph > Page`, an `Equalize Scaling` dialog (`Change > Equalize Scaling Factors...`), and `Bring to Front` / `Bring Forward` / `Send Backward` / `Send to Back` (`WF-59`).
 
+### R13.9 Column titles in per-data-set fit result labels
+Owner: open · Status: in progress — claimed: jsture, branch `bugfix/R13.9-dataset-display-labels` · Was: user report 2026-11-20 (fit result rows read `LogEC50 [DS4]` while checklists name the column) · Est. note: 2–4 h · Depends on: none · Gate: none
+
+- [ ] Show column titles in per-data-set parameter, fixed-constant, and covariance rows of multi-data-set fits (`LogEC50 [VEHICLE]`). Blank titles fall back to `DS n`, and repeated titles get ` (DS n)` appended so row labels stay unique. Scalar keys, per-data-set constant keys (`AntagConc [DS1]`), hooks, and equation annotations keep their existing keys (`crates/fit/src/result.rs`, `crates/fit/src/types.rs`, `crates/fit/tests/r13_9_dataset_display_labels.rs`).
+
 ### R13.6 Extended 15-workflow (WF-51 to WF-65) agent-harness, desktop human-path & web acceptance
 Owner: maintainers · Status: todo · Was: Advanced workflow & graphing spec 2026-11-18 · Est. note: 36–56 h · Depends on: `R13.1`–`R13.5`, [`R13.7`](#r137-embedded-image-assets-and-image-rendering), [`R13.8`](#r138-desktop-gui-views-for-r13-features), [`R15.5`](#r155-default-desktop-egui-cutover-screenshot-refresh-and-beta-readiness), `R10.2` (done); the web half also depends on [`R11.9`](#r119-50-workflow-human-path-parity-on-the-web-host)–[`R11.10`](#r1110-live-browser-qa--supported-browser-matrix) · Gate: **1.0** (full release; not required for **Beta**)
 

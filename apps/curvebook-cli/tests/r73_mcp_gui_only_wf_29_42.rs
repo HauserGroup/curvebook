@@ -398,7 +398,7 @@ fn r73_gui_only_wf33_to_wf36_multifactor_qpcr_survival_and_4pl_mv() -> Result<()
         let _ = result_tab(&rs35, "survival-pairwise")?;
         let rs36 = read_result_json(headless, &fit36)?;
         let p36 = result_tab(&rs36, "nonlinear_parameters")?;
-        assert_approx(tab_cell_f64(p36, "LogIC50 [DS1]", "Best-fit value")?, -7.0, 0.25, "WF-36 InhibitorA LogIC50")?;
+        assert_approx(tab_cell_f64(p36, "LogIC50 [InhibitorA]", "Best-fit value")?, -7.0, 0.25, "WF-36 InhibitorA LogIC50")?;
         Ok(())
     })?;
     Ok(())
