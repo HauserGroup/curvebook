@@ -931,7 +931,9 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-text",
  "flate2",
+ "png",
  "serde",
+ "weezl",
 ]
 
 [[package]]
@@ -955,6 +957,7 @@ dependencies = [
  "curvebook-palette",
  "curvebook-testkit",
  "curvebook-text",
+ "quick-xml",
  "serde",
 ]
 
