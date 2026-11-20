@@ -356,3 +356,68 @@ fn pinch_zoom_inertial_pan_coasting_and_print_dialog_flow() {
     assert_eq!(alias_res["dialog"], "Print");
     assert!(alias_res["last_spool_bytes"].as_u64().unwrap_or(0) > 100);
 }
+
+#[test]
+fn r13_rtl_ar_he_and_hidpi_pixel_to_hit_box_parity() {
+    let (mut base_app, layout_id, g1, _) = build_qa_two_panel_app();
+    base_app.nav.welcome.open = false;
+    base_app.egui_views.launcher_open = false;
+    base_app
+        .execute_command("analysis.run", json!({ "source_sheet_id": "d1", "kind": "descriptive", "sheet_id": "res-desc" }))
+        .expect("descriptive stats");
+    base_app
+        .execute_command("edit.pasteResultTable", json!({ "source_sheet_id": "res-desc", "target_sheet_id": g1.as_str() }))
+        .expect("pasteResultTable");
+
+    let png_bytes =
+        curvebook_render::png::encode_png(&curvebook_render::RasterImage { width_px: 8, height_px: 8, dpi: 96, rgba: vec![96u8; 8 * 8 * 4] })
+            .expect("encode png");
+    let png_b64 = {
+        const LUT: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+        let mut out = String::new();
+        for chunk in png_bytes.chunks(3) {
+            let n =
+                (u32::from(chunk[0]) << 16) | (u32::from(chunk.get(1).copied().unwrap_or(0)) << 8) | u32::from(chunk.get(2).copied().unwrap_or(0));
+            out.push(LUT[((n >> 18) & 0x3F) as usize] as char);
+            out.push(LUT[((n >> 12) & 0x3F) as usize] as char);
+            out.push(if chunk.len() > 1 { LUT[((n >> 6) & 0x3F) as usize] as char } else { '=' });
+            out.push(if chunk.len() > 2 { LUT[(n & 0x3F) as usize] as char } else { '=' });
+        }
+        out
+    };
+    base_app.execute_command("edit.pasteImage", json!({ "target_sheet_id": g1.as_str(), "bytes_base64": png_b64 })).expect("pasteImage");
+
+    let dialogs = [
+        ("ui.graph.create.open", json!({ "data_sheet_id": "d1" })),
+        ("ui.layout.equalizeScaling.open", json!({ "sheet_id": layout_id.as_str() })),
+        ("ui.embeddedTable.format.open", json!({ "sheet_id": g1.as_str(), "annotation_index": 0 })),
+        ("ui.image.format.open", json!({ "sheet_id": g1.as_str(), "annotation_index": 1 })),
+    ];
+
+    for locale in ["ar", "he"] {
+        for metrics in [ViewportMetrics::new(1280.0, 800.0, 1.0), ViewportMetrics::new(1024.0, 640.0, 2.0)] {
+            for (cmd_id, params) in &dialogs {
+                let mut app = base_app.clone();
+                let _ = app.set_locale(locale);
+                let _ = dispatch_ui_command(&mut app, cmd_id, params).expect("open R13 modal").expect("handled");
+                app.sync_views();
+                let h = human_wf_common::EguiWfHarness::from_app(app, metrics);
+                let parity = h.driver.verify_pixel_to_hit_box_parity();
+                let modal_violations: Vec<_> = parity
+                    .violations
+                    .iter()
+                    .filter(|v| {
+                        v.widget_id != "canvas.viewport"
+                            && v.widget_id != "canvas.split.viewport"
+                            && !v.widget_id.starts_with("canvas.layout_panel.")
+                            && !v.widget_id.starts_with("canvas.graph_ann.")
+                            && !v.widget_id.starts_with("canvas.image.handle.")
+                    })
+                    .collect();
+                assert!(modal_violations.is_empty(), "{cmd_id} `{locale}` @ {metrics:?} parity violations: {modal_violations:?}");
+                let overlaps = h.driver.check_scrollbar_non_overlap();
+                assert!(overlaps.is_empty(), "{cmd_id} `{locale}` @ {metrics:?} scrollbar overlaps: {overlaps:?}");
+            }
+        }
+    }
+}

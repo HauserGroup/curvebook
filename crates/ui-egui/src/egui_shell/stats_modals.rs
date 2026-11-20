@@ -2078,12 +2078,28 @@ fn render_two_group_design(
 fn render_factorial_anova_design(
     ui: &mut Ui,
     doc: &ProjectDocument,
+    ep: &EditAnalysisParametersState,
     spec: &curvebook_doc::AnalysisSpec,
-    f: &curvebook_doc::FactorialAnovaSpec,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let AnalysisKind::FactorialAnova(f) = &spec.kind else {
+        return;
+    };
+    let paired_en = r1_paired_or_matched_allowed(doc, Some(&spec.source_sheet_id));
+    if render_modal_checkbox(
+        ui,
+        tokens,
+        meta,
+        "edit.paired_or_matched",
+        tr(tokens.locale, "stat_params.label.paired_matched"),
+        ep.paired_or_matched,
+        &paired_en,
+    ) {
+        intents.push_dialog_widget_click("edit.paired_or_matched");
+    }
+    ui.add_space(4.0);
     render_section_title(ui, tokens, "Factorial & Sum of Squares Structure");
     ui.horizontal_wrapped(|ui| {
         for (wid, lbl, target) in [
@@ -2671,7 +2687,7 @@ fn render_stat_design_tab(
     let doc = app.document();
     match &spec.kind {
         AnalysisKind::TwoGroupComparison(_) => render_two_group_design(ui, doc, ep, spec, tokens, meta, intents),
-        AnalysisKind::FactorialAnova(f) => render_factorial_anova_design(ui, doc, spec, f, tokens, meta, intents),
+        AnalysisKind::FactorialAnova(_) => render_factorial_anova_design(ui, doc, ep, spec, tokens, meta, intents),
         AnalysisKind::GeneralizedLinearModel(glm) => {
             render_section_title(ui, tokens, "Exponential Family & Link Function");
             for (wid, lbl, fam) in [
