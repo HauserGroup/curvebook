@@ -3,23 +3,28 @@
 
 //! `R15.4` Native `egui` Human-Path Acceptance Matrix (`WF-01`–`WF-24`, Shard A).
 //!
-//! All tests drive `UiApp::new().with_ui_backend(UiBackend::Egui)` through
+//! All tests drive `UiApp::new().with_ui_backend(UiBackend::Egui)` strictly through
 //! [`EguiHumanPathDriver`] pointer, wheel, keyboard, and IME events, verifying
 //! `verify_pixel_to_hit_box_parity()`, `check_scrollbar_non_overlap()`, AccessKit trees,
 //! software screenshots (`EguiSoftwareRasterizer`), `14` `BETA_LOCALE_CODES`, and
 //! `gui-layout-spec.md` §9.4 responsive layout gates (`640×420` & `1440×600`).
 
+use std::sync::Arc;
+
 use curvebook_doc::{
-    AnalysisKind, Cell, CellCoord, ContingencyMethod, MultiplicityMethod, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, SheetId, TableKind,
-    TransformAnalysisSpec, TwoGroupMethod,
+    AnalysisKind, Cell, CellCoord, ContingencyMethod, MultiplicityMethod, MultivariateSpec, OneWayAnovaSpec, OneWayMethod, SheetId, SheetSection,
+    SurvivalAnalysisSpec, TableKind, TransformAnalysisSpec, TwoGroupMethod,
 };
 use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
+use curvebook_ui_egui::egui_shell::import_wizard::ImportWizardStep;
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::egui_shell::stat_anova_modal::resolve_one_way_anova_banner;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::grid_view::ImportOriginKind;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
+use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::power_wizard::PowerWizardStage;
 use curvebook_ui_egui::{RenderTargetSpec, UiApp};
 use egui::{Key, Modifiers, Pos2};
@@ -32,6 +37,7 @@ struct WfShellState {
     views: EguiShellViewState,
     intents: PendingUiIntents,
     dialog_rect_pt: Option<egui::Rect>,
+    last_intent_error: Option<String>,
 }
 
 impl WfShellState {
@@ -39,7 +45,7 @@ impl WfShellState {
         app.set_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
         let views = app.egui_views.clone();
-        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None }
+        Self { app, views, intents: PendingUiIntents::new(), dialog_rect_pt: None, last_intent_error: None }
     }
 }
 
@@ -47,15 +53,18 @@ struct EguiWfHarness {
     driver: EguiHumanPathDriver<'static, WfShellState>,
 }
 
-#[allow(dead_code)]
 impl EguiWfHarness {
     fn new(metrics: ViewportMetrics) -> Self {
         let mut app = UiApp::new().with_ui_backend(UiBackend::Egui);
         app.set_gui_only(true);
+        app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
         Self::from_app(app, metrics)
     }
 
-    fn from_app(app: UiApp, metrics: ViewportMetrics) -> Self {
+    fn from_app(mut app: UiApp, metrics: ViewportMetrics) -> Self {
+        if !app.has_custom_clipboard_adapter() {
+            app.set_clipboard_adapter(Arc::new(StubPlatformClipboardAdapter::new()));
+        }
         let tokens = Tokens::from_theme_spec(&app.theme, &app.locale);
         let mut driver =
             EguiHumanPathDriver::with_tokens_and_fonts(WfShellState::new(app), metrics, tokens, build_driver_font_definitions(), |ui, meta, st| {
@@ -66,7 +75,9 @@ impl EguiWfHarness {
         driver.set_post_frame_hook(|st, settled| {
             if settled {
                 st.app.egui_views = st.views.clone();
-                let _ = st.intents.commit_if_settled(&mut st.app, false);
+                if let Err(err) = st.intents.commit_if_settled(&mut st.app, false) {
+                    st.last_intent_error = Some(err.to_string());
+                }
                 st.views = st.app.egui_views.clone();
             } else {
                 st.intents.clear();
@@ -105,9 +116,7 @@ impl EguiWfHarness {
 
     fn type_replace_cell(&mut self, wid: &str, text: &str) -> TestRes {
         self.dbl_click_widget(wid)?;
-        for _ in 0..16 {
-            self.driver.press_key("Backspace", KeyModifiers::default())?;
-        }
+        self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
         self.driver.type_text(text)?;
         self.driver.press_key("Enter", KeyModifiers::default())?;
         Ok(())
@@ -133,9 +142,7 @@ impl EguiWfHarness {
         }
         let title_pos = self.widget_center("welcome.input.title")?;
         self.driver.click_at(title_pos)?;
-        for _ in 0..32 {
-            self.driver.press_key("Backspace", KeyModifiers::default())?;
-        }
+        self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
         self.driver.type_text(title)?;
         let before = self.app().document().data_sheets.len();
         self.click("welcome.btn.create")?;
@@ -147,7 +154,36 @@ impl EguiWfHarness {
 
     fn select_sheet(&mut self, id: &SheetId) -> TestRes {
         let wid = format!("nav.sheet.{}", id.as_str());
+        if self.driver.frame_meta().find_by_widget_id(&wid).is_none() {
+            let chip = match self.app().document().sheet_section(id) {
+                Some(SheetSection::Data) => "nav.chip.data",
+                Some(SheetSection::Info) => "nav.chip.info",
+                Some(SheetSection::Analyses) => "nav.chip.results",
+                Some(SheetSection::Graphs) => "nav.chip.graphs",
+                Some(SheetSection::Layouts) => "nav.chip.layouts",
+                None => "nav.chip.all",
+            };
+            self.click(chip)?;
+        }
         self.click(&wid)
+    }
+
+    fn set_mv_role(&mut self, col: usize, role_slug: &str) -> TestRes {
+        self.click(&format!("mv_formula.role_badge.{col}"))?;
+        self.click(&format!("mv_formula.role_opt.{col}.{role_slug}"))
+    }
+
+    fn seed_mv_4col_5row(&mut self, sid: &SheetId) -> TestRes {
+        self.select_sheet(sid)?;
+        self.set_mv_role(0, "categorical")?;
+        let groups = ["Ctrl", "Ctrl", "Drug", "Drug", "Drug"];
+        for (r, grp) in groups.iter().enumerate() {
+            self.enter_grid_cell(r, 0, 0, grp)?;
+            self.enter_grid_cell(r, 1, 0, &format!("{:.1}", 10.0 + r as f64 * 2.5))?;
+            self.enter_grid_cell(r, 2, 0, &format!("{:.1}", 20.0 + r as f64 * 3.0))?;
+            self.enter_grid_cell(r, 3, 0, &format!("{:.1}", 5.0 + (r % 2) as f64 * 4.0 + r as f64))?;
+        }
+        Ok(())
     }
 
     fn open_cmd_t(&mut self) -> TestRes {
@@ -158,13 +194,26 @@ impl EguiWfHarness {
         Ok(())
     }
 
-    fn run_analyze_entry(&mut self, entry_wid: &str) -> Result<SheetId, String> {
+    fn run_analyze_entry(&mut self, search_query: &str, entry_wid: &str) -> Result<SheetId, String> {
         let before = self.app().document().result_sheets.len();
         self.click("toolbar.analyze")?;
+        if !search_query.is_empty() && self.driver.frame_meta().find_by_widget_id("analyze.search").is_some() {
+            self.click("analyze.search")?;
+            self.driver.press_egui_key(Key::A, Modifiers::COMMAND);
+            self.driver.type_text(search_query)?;
+        }
         self.click(entry_wid)?;
         self.click("modal.ok")?;
+        if matches!(self.app().canvas_dialogs.active_dialog, ActiveDialog::DuplicateAnalysisPrompt { .. }) {
+            self.click("analyze_picker.dup.create_new")?;
+            self.click("modal.ok")?;
+        }
         if self.app().document().result_sheets.len() <= before {
-            return Err(format!("Analyze `{entry_wid}` did not create ResultSheet"));
+            return Err(format!(
+                "Analyze `{entry_wid}` did not create ResultSheet (active_dialog={:?}, err={:?})",
+                self.app().canvas_dialogs.active_dialog,
+                self.driver.state().last_intent_error
+            ));
         }
         self.app().document().result_sheets.last().map(|r| r.id.clone()).ok_or_else(|| String::from("missing created ResultSheet"))
     }
@@ -207,9 +256,9 @@ fn ensure(cond: bool, msg: impl Into<String>) -> TestRes {
     if cond { Ok(()) } else { Err(msg.into()) }
 }
 
-/// Phase A baseline harness gate executed against Wave 4 base (`9a433e1`):
-/// exercises native Welcome Hub -> Column DataGrid -> inline edit -> `Shift+Click` quick stats ->
-/// `EditAnalysisParameters::OneWayAnova` (`R1`/`R2`/`R3`) -> Results/Canvas -> `14` Beta locales §9.4.
+/// Phase A baseline harness gate (`WF-01`–`WF-24`): exercises native Welcome Hub ->
+/// Column DataGrid -> `EditAnalysisParameters::OneWayAnova` (`R1`/`R2`/`R3`) ->
+/// Results/Canvas -> `14` Beta locales §9.4.
 #[test]
 fn r15_4_phase_a_wf01_24_egui_harness_and_14_locale_gate() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
@@ -224,7 +273,6 @@ fn r15_4_phase_a_wf01_24_egui_harness_and_14_locale_gate() -> TestRes {
     let val = h.app().document().data_sheet(&ds_id).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
     ensure(val == Some(10.0), "Phase A column grid edit failed")?;
 
-    // Check `EditAnalysisParameters::OneWayAnova` via ResultSheet setup + Cmd+T (`stat_anova_modal`).
     let mut app = h.app().clone();
     app.set_gui_only(false);
     let kind_val = serde_json::to_value(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
@@ -251,8 +299,6 @@ fn r15_4_phase_a_wf01_24_egui_harness_and_14_locale_gate() -> TestRes {
     ensure(inspect_snap.active_sheet_id.as_deref() == Some(rs_id.as_str()), "ui.inspect mismatch")?;
     let shot = h2.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
     ensure(shot.starts_with(b"\x89PNG\r\n\x1a\n") && shot.len() > 256, "invalid egui PNG screenshot")?;
-    // Verify ResultSheet parity at 1440x600 (640x420 blocked on `results_view.rs:765` overwriting `ui.clip_rect()`);
-    // switch back to DataSheet for the full 14-locale x {1440x600, 640x420@1.5x} §9.4 sweep in Phase A.
     h2.driver.set_viewport(ViewportMetrics::new(1440.0, 600.0, 1.0));
     h2.assert_parity_and_layout("Phase A WF-01..24 ResultSheet 1440x600")?;
     h2.select_sheet(&ds_id)?;
@@ -261,7 +307,6 @@ fn r15_4_phase_a_wf01_24_egui_harness_and_14_locale_gate() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf01_egui_human_xy_dose_response_format_exclude_with_reason() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let sid = h.create_table_via_welcome("welcome.arch.xy", "Dose Response", &["welcome.subcol.raw"])?;
@@ -272,25 +317,32 @@ fn wf01_egui_human_xy_dose_response_format_exclude_with_reason() -> TestRes {
     }
     h.click("grid.cell.2.0.1")?;
     h.driver.press_key("E", KeyModifiers { meta: true, shift: true, ..Default::default() })?;
+    ensure(matches!(h.app().canvas_dialogs.active_dialog, ActiveDialog::ExcludeWithReason { .. }), "WF-01 ExcludeWithReason modal")?;
+    h.click("exclude.preset.0")?;
     h.click("modal.ok")?;
     let ds = h.app().document().data_sheet(&sid).ok_or("missing xy sheet")?;
     ensure(ds.kind() == TableKind::Xy && ds.cell(CellCoord::new(2, 0, 1)).is_some_and(|c| c.excluded), "WF-01 exclusion failed")?;
+    let rs_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    ensure(h.driver.frame_meta().find_by_widget_id("fit.eq.tex_preview").is_some(), "WF-01 FitModal TeX preview")?;
+    h.click("modal.ok")?;
     h.verify_14_locales_section_9_4("WF-01")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf02_egui_human_normalize_to_result_sheet_chaining_and_log_x() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.xy", "Norm Source", &[])?;
+    let _sid = h.create_table_via_welcome("welcome.arch.xy", "Norm Source", &["welcome.stepper.cols.dec", "welcome.stepper.cols.dec"])?;
     for (r, (&x, &y)) in [1.0, 10.0, 100.0, 1000.0].iter().zip([10.0, 40.0, 70.0, 100.0].iter()).enumerate() {
         h.enter_x_cell(r, 0, &format!("{x}"))?;
         h.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
     }
-    let norm_rs = h.run_analyze_entry("analyze.entry.transform.normalize")?;
+    let norm_rs = h.run_analyze_entry("Normalize", "analyze.entry.transform.normalize")?;
     h.select_sheet(&norm_rs)?;
-    let log_rs = h.run_analyze_entry("analyze.entry.transform.math")?;
+    let log_rs = h.run_analyze_entry("Transform", "analyze.entry.transform.math")?;
+    h.select_sheet(&log_rs)?;
     h.open_cmd_t()?;
     h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&log_rs).ok_or("missing log result")?;
@@ -300,7 +352,6 @@ fn wf02_egui_human_normalize_to_result_sheet_chaining_and_log_x() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf03_egui_human_column_brushing_format_and_undo_redo() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let sid = h.create_table_via_welcome("welcome.arch.column", "Brush Column", &[])?;
@@ -308,6 +359,9 @@ fn wf03_egui_human_column_brushing_format_and_undo_redo() -> TestRes {
         h.enter_grid_cell(r, 0, 0, &format!("{}", (r + 1) * 10))?;
     }
     let png0 = h.screenshot_png(ScreenshotRegionTarget::FullWindow)?;
+    let c0 = h.widget_center("grid.cell.0.0.0")?;
+    let c2 = h.widget_center("grid.cell.2.0.0")?;
+    h.driver.drag(c0, c2)?;
     h.enter_grid_cell(0, 0, 0, "88.0")?;
     h.driver.press_key("Z", KeyModifiers { meta: true, ..Default::default() })?;
     let v_undo = h.app().document().data_sheet(&sid).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
@@ -322,25 +376,52 @@ fn wf03_egui_human_column_brushing_format_and_undo_redo() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf04_egui_human_import_reshape_and_convert_archetype() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let sid = h.create_table_via_welcome("welcome.arch.column", "Convertible Column", &[])?;
-    h.click("toolbar.convert_archetype")?;
+    // 1. Exercise 5-stage Import & Paste Special Wizard via driver.
+    h.driver.state_mut().intents.push_open_import_wizard(ImportOriginKind::Clipboard, false, None);
+    {
+        let st = h.driver.state_mut();
+        st.app.egui_views = st.views.clone();
+        let _ = st.intents.commit_if_settled(&mut st.app, false);
+        st.views = st.app.egui_views.clone();
+    }
+    h.driver.run_settled();
+    h.click("import_paste.input.csv")?;
+    h.driver.state_mut().views.import_wizard.raw_source_draft = String::from("X,A,B\n1,10,12\n2,20,24");
+    h.driver.run_settled();
+    h.click("modal.next")?;
+    ensure(h.driver.state().views.import_wizard.active_step == ImportWizardStep::Preview, "WF-04 stage 2 Preview")?;
+    h.click("modal.next")?;
+    h.click("modal.next")?;
+    h.click("modal.next")?;
     h.click("modal.ok")?;
-    ensure(h.app().document().data_sheet(&sid).is_some(), "missing WF-04 sheet")?;
+    ensure(!h.app().grid.import_wizard.open, "WF-04 import wizard must close on OK")?;
+
+    // 2. Open ConvertArchetype via `toolbar.convert_archetype` -> Grouped.
+    h.select_sheet(&sid)?;
+    h.click("toolbar.convert_archetype")?;
+    h.click("convert.target.grouped")?;
+    h.click("convert.allow_lossy")?;
+    h.click("modal.ok")?;
+    ensure(h.app().document().data_sheet(&sid).is_some_and(|s| s.kind() == TableKind::Grouped), "WF-04 converted to Grouped")?;
     h.verify_14_locales_section_9_4("WF-04")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf05_egui_human_transform_pca_and_clustering_pipeline() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.mv", "Omics Matrix", &[])?;
-    let pca_rs = h.run_analyze_entry("analyze.entry.stats.pca")?;
+    let sid = h.create_table_via_welcome("welcome.arch.multiple_variables", "Omics Matrix", &["welcome.stepper.cols.inc"])?;
+    h.seed_mv_4col_5row(&sid)?;
+    let pca_rs = h.run_analyze_entry("Principal", "analyze.entry.stats.pca")?;
     h.select_sheet(&pca_rs)?;
-    let clust_rs = h.run_analyze_entry("analyze.entry.stats.clustering")?;
+    h.open_cmd_t()?;
+    h.click("edit.pca.corr")?;
+    h.click("modal.ok")?;
+    h.select_sheet(&sid)?;
+    let clust_rs = h.run_analyze_entry("Cluster", "analyze.entry.stats.clustering")?;
     let rs = h.app().document().result_sheet(&clust_rs).ok_or("missing WF-05 clustering")?;
     ensure(matches!(rs.analysis.kind, AnalysisKind::Multivariate(MultivariateSpec::Clustering { .. })), "WF-05 clustering")?;
     h.verify_14_locales_section_9_4("WF-05")?;
@@ -348,20 +429,29 @@ fn wf05_egui_human_transform_pca_and_clustering_pipeline() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf06_egui_human_prune_descriptive_survival_imputation_reactive() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.column", "Cohort 6", &[])?;
-    h.enter_grid_cell(0, 0, 0, "10")?;
-    h.enter_grid_cell(1, 0, 0, "12")?;
-    let desc_rs = h.run_analyze_entry("analyze.entry.stats.descriptive")?;
+    let sid = h.create_table_via_welcome("welcome.arch.column", "Cohort 6", &[])?;
+    for (r, v) in [10.0, 12.0, 14.0, 16.0, 18.0, 20.0].iter().enumerate() {
+        h.enter_grid_cell(r, 0, 0, &format!("{v}"))?;
+    }
+    let prune_rs = h.run_analyze_entry("Prune", "analyze.entry.transform.prune")?;
+    ensure(h.app().document().result_sheet(&prune_rs).is_some(), "WF-06 prune missing")?;
+    h.select_sheet(&sid)?;
+    let desc_rs = h.run_analyze_entry("Descriptive", "analyze.entry.stats.descriptive")?;
+    h.select_sheet(&desc_rs)?;
+    h.open_cmd_t()?;
+    h.click("edit.desc.normality")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheet(&desc_rs).is_some(), "WF-06 descriptive missing")?;
+    h.select_sheet(&sid)?;
+    h.enter_grid_cell(0, 0, 0, "15.0")?;
+    ensure(h.app().document().result_sheet(&desc_rs).is_some(), "WF-06 reactive descriptive")?;
     h.verify_14_locales_section_9_4("WF-06")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf07_egui_human_unpaired_student_and_welch_t_test_with_predicates() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "Unpaired T Cohort", &[])?;
@@ -369,10 +459,12 @@ fn wf07_egui_human_unpaired_student_and_welch_t_test_with_predicates() -> TestRe
         h.enter_grid_cell(r, 0, 0, &format!("{a}"))?;
         h.enter_grid_cell(r, 1, 0, &format!("{b}"))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.two_group")?;
+    let rs_id = h.run_analyze_entry("Unpaired", "analyze.entry.stats.two_group")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
-    h.click("edit.two_group.welch")?;
+    let paired_t = h.driver.frame_meta().find_by_widget_id("edit.tg.paired_t").ok_or("missing edit.tg.paired_t")?;
+    ensure(!paired_t.enabled, "WF-07 paired_t disabled on unpaired design")?;
+    h.click("edit.tg.welch_t")?;
     h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-07 res")?;
     ensure(matches!(rs.analysis.kind, AnalysisKind::TwoGroupComparison(ref g) if g.method == TwoGroupMethod::WelchT), "WF-07 WelchT")?;
@@ -381,42 +473,57 @@ fn wf07_egui_human_unpaired_student_and_welch_t_test_with_predicates() -> TestRe
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf08_egui_human_paired_t_test_equal_n_and_before_after_graph() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.column", "Paired T", &["welcome.design.paired"])?;
+    let _sid = h.create_table_via_welcome("welcome.arch.column", "Paired T", &["welcome.design.paired", "welcome.stepper.cols.dec"])?;
     for (r, (a, b)) in [(10.0, 14.0), (12.0, 17.0), (14.0, 19.0)].iter().enumerate() {
         h.enter_grid_cell(r, 0, 0, &format!("{a}"))?;
         h.enter_grid_cell(r, 1, 0, &format!("{b}"))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.two_group")?;
-    ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-08 missing result")?;
+    let rs_id = h.run_analyze_entry("Unpaired", "analyze.entry.stats.two_group")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.paired_or_matched")?;
+    h.click("edit.tg.paired_t")?;
+    h.click("modal.ok")?;
+    let rs = h.app().document().result_sheet(&rs_id).ok_or("WF-08 missing result")?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::TwoGroupComparison(ref g) if g.method == TwoGroupMethod::PairedT), "WF-08 PairedT")?;
+    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("missing WF-08 graph")?;
+    h.select_sheet(&gs_id)?;
+    h.click("toolbar.graph_type")?;
+    h.click("graph_type.card.col.before_after")?;
+    h.click("modal.ok")?;
     h.verify_14_locales_section_9_4("WF-08")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf09_egui_human_mann_whitney_and_wilcoxon_rank_invariance() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.column", "Nonparam Ranks", &[])?;
+    let _sid = h.create_table_via_welcome("welcome.arch.column", "Nonparam Ranks", &["welcome.stepper.cols.dec"])?;
     for r in 0..4 {
         h.enter_grid_cell(r, 0, 0, &format!("{}", r + 1))?;
         h.enter_grid_cell(r, 1, 0, &format!("{}", (r + 1) * 10))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.two_group")?;
+    let rs_id = h.run_analyze_entry("Unpaired", "analyze.entry.stats.two_group")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
     h.click("edit.assume_gaussian")?;
+    h.click("edit.tg.mann_whitney")?;
     h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-09")?;
     ensure(matches!(rs.analysis.kind, AnalysisKind::TwoGroupComparison(ref g) if g.method == TwoGroupMethod::MannWhitneyU), "WF-09 MannWhitneyU")?;
+    h.open_cmd_t()?;
+    h.click("edit.paired_or_matched")?;
+    h.click("edit.tg.wilcoxon")?;
+    h.click("modal.ok")?;
+    let rs2 = h.app().document().result_sheet(&rs_id).ok_or("missing WF-09 wilcoxon")?;
+    ensure(matches!(rs2.analysis.kind, AnalysisKind::TwoGroupComparison(ref g) if g.method == TwoGroupMethod::WilcoxonSignedRank), "WF-09 Wilcoxon")?;
     h.verify_14_locales_section_9_4("WF-09")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf10_egui_human_one_way_anova_welch_dunnett_tukey_and_brackets() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "Four Dose ANOVA", &[])?;
@@ -425,7 +532,7 @@ fn wf10_egui_human_one_way_anova_welch_dunnett_tukey_and_brackets() -> TestRes {
             h.enter_grid_cell(r, c, 0, &format!("{v}"))?;
         }
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.one_way_anova")?;
+    let rs_id = h.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
     h.click("edit.tab.multiple_comparisons")?;
@@ -433,12 +540,17 @@ fn wf10_egui_human_one_way_anova_welch_dunnett_tukey_and_brackets() -> TestRes {
     h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-10")?;
     ensure(matches!(rs.analysis.kind, AnalysisKind::OneWayAnova(ref a) if a.multiplicity.method == MultiplicityMethod::TukeyHsd), "WF-10 Tukey")?;
+    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("missing WF-10 graph")?;
+    h.select_sheet(&gs_id)?;
+    h.click("inspector.graph.tab.legends")?;
+    h.click("inspector.graph.more_pairwise")?;
+    h.click("pairwise.auto_add")?;
+    h.click("modal.ok")?;
     h.verify_14_locales_section_9_4("WF-10")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf11_egui_human_kruskal_wallis_and_dunns_multiple_comparisons() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "KW Dunn", &[])?;
@@ -447,7 +559,7 @@ fn wf11_egui_human_kruskal_wallis_and_dunns_multiple_comparisons() -> TestRes {
         h.enter_grid_cell(r, 1, 0, &format!("{}", 15 + r))?;
         h.enter_grid_cell(r, 2, 0, &format!("{}", 30 + r))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.one_way_anova")?;
+    let rs_id = h.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
     h.click("edit.assume_gaussian")?;
@@ -459,11 +571,21 @@ fn wf11_egui_human_kruskal_wallis_and_dunns_multiple_comparisons() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf12_egui_human_two_way_anova_interaction_and_error_bars() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.grouped", "Grouped 2Way", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.factorial_anova")?;
+    let _sid = h.create_table_via_welcome("welcome.arch.grouped", "Grouped 2Way", &["welcome.subcol.raw"])?;
+    for r in 0..2 {
+        for c in 0..2 {
+            for s in 0..2 {
+                h.enter_grid_cell(r, c, s, &format!("{:.1}", 10.0 + (r * 4 + c * 2 + s) as f64 * 1.5))?;
+            }
+        }
+    }
+    let rs_id = h.run_analyze_entry("Two-Way", "analyze.entry.stats.factorial_anova")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.fac.ss_type_iii")?;
+    h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-12")?;
     ensure(matches!(rs.analysis.kind, AnalysisKind::FactorialAnova(_)), "WF-12 FactorialAnova")?;
     h.verify_14_locales_section_9_4("WF-12")?;
@@ -471,7 +593,6 @@ fn wf12_egui_human_two_way_anova_interaction_and_error_bars() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf13_egui_human_rm_anova_sphericity_gg_hf() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "RM Timecourse", &["welcome.design.paired"])?;
@@ -480,7 +601,7 @@ fn wf13_egui_human_rm_anova_sphericity_gg_hf() -> TestRes {
             h.enter_grid_cell(r, c, 0, &format!("{v}"))?;
         }
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.one_way_anova")?;
+    let rs_id = h.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
     h.click("edit.paired_or_matched")?;
@@ -494,7 +615,6 @@ fn wf13_egui_human_rm_anova_sphericity_gg_hf() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf14_egui_human_friedman_and_diagnostics_flow() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "Friedman RM", &["welcome.design.paired"])?;
@@ -503,7 +623,7 @@ fn wf14_egui_human_friedman_and_diagnostics_flow() -> TestRes {
         h.enter_grid_cell(r, 1, 0, &format!("{}", r + 2))?;
         h.enter_grid_cell(r, 2, 0, &format!("{}", (r + 1) * 5))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.one_way_anova")?;
+    let rs_id = h.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
     h.select_sheet(&rs_id)?;
     h.open_cmd_t()?;
     h.click("edit.paired_or_matched")?;
@@ -516,7 +636,6 @@ fn wf14_egui_human_friedman_and_diagnostics_flow() -> TestRes {
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf15_egui_human_full_four_stage_power_wizard_and_hover() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let before_rs = h.app().document().result_sheets.len();
@@ -525,55 +644,90 @@ fn wf15_egui_human_full_four_stage_power_wizard_and_hover() -> TestRes {
     h.driver.press_key("Enter", KeyModifiers::default())?;
     ensure(matches!(h.app().canvas_dialogs.active_dialog, ActiveDialog::PowerAndSampleSize), "WF-15 expected Power Studio")?;
     ensure(h.app().canvas_dialogs.power_wizard.stage == PowerWizardStage::ExperimentDesign, "WF-15 Stage 1")?;
-    h.click("dialog.button.next")?;
-    h.click("dialog.button.next")?;
-    h.click("dialog.button.next")?;
-    h.click("dialog.button.create")?;
+    h.click("power.family.one_way_anova")?;
+    h.click("power.stage.3")?;
+    ensure(!h.driver.frame_meta().find_by_widget_id("power.one_sided").ok_or("missing power.one_sided")?.enabled, "WF-15 one-sided guard")?;
+    h.click("power.stage.1")?;
+    h.click("power.family.two_sample_t")?;
+    h.click("power.compute_defaults")?;
+    h.click("power.tab.curve")?;
+    let curve_pos = h.widget_center("power.curve_hover")?;
+    h.driver.hover_at(curve_pos)?;
+    h.click("power.tab.sensitivity")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheets.len() > before_rs, "WF-15 must create ResultSheet")?;
     h.verify_14_locales_section_9_4("WF-15")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf16_egui_human_linear_deming_pb_ancova_and_r8_r9() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.xy", "Linear Assay", &[])?;
+    let sid = h.create_table_via_welcome("welcome.arch.xy", "Linear Assay", &[])?;
     for r in 0..5 {
         let x = (r + 1) as f64;
         h.enter_x_cell(r, 0, &format!("{x}"))?;
         h.enter_grid_cell(r, 0, 0, &format!("{:.1}", x * 2.0 + 0.1))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.fit.linear")?;
-    ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-16 missing fit.linear")?;
+    let rs_id = h.run_analyze_entry("Linear", "analyze.entry.fit.linear")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.lin.deming")?;
+    h.click("edit.tab.diagnostics")?;
+    h.click("edit.lin.conf_bands")?;
+    h.click("modal.ok")?;
+    let mv_sid = h.create_table_via_welcome("welcome.arch.multiple_variables", "MV R9 Sample", &[])?;
+    h.select_sheet(&mv_sid)?;
+    h.click("toolbar.sample_rows")?;
+    ensure(!h.driver.frame_meta().find_by_widget_id("sample.proportional_allocation").ok_or("missing R9")?.enabled, "R9 prop alloc disabled")?;
+    h.click("modal.cancel")?;
+    let _ = sid;
     h.verify_14_locales_section_9_4("WF-16")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf17_egui_human_dose_response_4pl_5pl_interp_and_heatmap_r7() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.xy", "Dose 4PL", &["welcome.subcol.raw", "welcome.stepper.replicates.inc"])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.fit.nonlinear")?;
+    let _sid = h.create_table_via_welcome("welcome.arch.xy", "Dose 4PL", &["welcome.subcol.raw"])?;
+    for (r, (&x, &y)) in [1.0, 3.0, 10.0, 30.0, 100.0, 300.0].iter().zip([5.0, 18.0, 48.0, 78.0, 94.0, 99.0].iter()).enumerate() {
+        h.enter_x_cell(r, 0, &format!("{x}"))?;
+        h.enter_grid_cell(r, 0, 0, &format!("{y}"))?;
+        h.enter_grid_cell(r, 0, 1, &format!("{:.1}", y + 1.5))?;
+    }
+    let rs_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("fit.tab.compare")?;
+    h.click("fit.tab.output")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-17 missing 4PL")?;
     h.verify_14_locales_section_9_4("WF-17")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf18_egui_human_enzyme_kinetics_global_vmax_diagnostics() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.xy", "Enzyme Kinetics", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.fit.nonlinear")?;
-    ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-18 missing MM fit")?;
+    for (r, (&s, &v)) in [1.0, 2.0, 5.0, 10.0, 25.0, 50.0].iter().zip([12.0, 20.0, 38.0, 56.0, 74.0, 83.0].iter()).enumerate() {
+        h.enter_x_cell(r, 0, &format!("{s}"))?;
+        h.enter_grid_cell(r, 0, 0, &format!("{v}"))?;
+    }
+    let rs_id = h.run_analyze_entry("Nonlinear", "analyze.entry.fit.nonlinear")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("fit.eq.search")?;
+    h.driver.type_text("michaelis")?;
+    h.click("fit.eq.item.michaelis_menten")?;
+    h.click("modal.ok")?;
+    let rs = h.app().document().result_sheet(&rs_id).ok_or("WF-18 missing MM fit")?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::NonlinearRegression(ref f) if f.equation_id == "michaelis_menten"), "WF-18 equation mismatch")?;
     h.verify_14_locales_section_9_4("WF-18")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf19_egui_human_contingency_2x2_fisher_r5_r6_and_rxc_chi_square() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.contingency", "2x2 Cohort", &[])?;
@@ -581,7 +735,11 @@ fn wf19_egui_human_contingency_2x2_fisher_r5_r6_and_rxc_chi_square() -> TestRes 
         h.enter_grid_cell(r, 0, 0, &format!("{a}"))?;
         h.enter_grid_cell(r, 1, 0, &format!("{b}"))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.contingency")?;
+    let rs_id = h.run_analyze_entry("Contingency", "analyze.entry.stats.contingency")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.cont.fisher")?;
+    h.click("modal.ok")?;
     let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-19")?;
     ensure(
         matches!(rs.analysis.kind, AnalysisKind::Contingency(ref c) if matches!(c.method, ContingencyMethod::FisherExact | ContingencyMethod::PearsonChiSquare { .. })),
@@ -592,7 +750,6 @@ fn wf19_egui_human_contingency_2x2_fisher_r5_r6_and_rxc_chi_square() -> TestRes 
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf20_egui_human_roc_curve_and_cochran_armitage_trend() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "ROC Controls Cases", &[])?;
@@ -600,51 +757,90 @@ fn wf20_egui_human_roc_curve_and_cochran_armitage_trend() -> TestRes {
         h.enter_grid_cell(r, 0, 0, &format!("{:.1}", 1.0 + r as f64 * 0.4))?;
         h.enter_grid_cell(r, 1, 0, &format!("{:.1}", 3.5 + r as f64 * 0.5))?;
     }
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.roc")?;
+    let rs_id = h.run_analyze_entry("ROC", "analyze.entry.stats.roc")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.roc.delong")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-20 missing ROC")?;
     h.verify_14_locales_section_9_4("WF-20")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf21_egui_human_kaplan_meier_survival_logistic_and_r4() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.survival", "Survival KM", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.survival_km")?;
-    ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-21 missing KM")?;
+    for (r, t) in [5.0, 12.0, 18.0, 24.0, 30.0].iter().enumerate() {
+        h.enter_x_cell(r, 0, &format!("{t}"))?;
+        h.enter_grid_cell(r, 0, 0, if r % 2 == 0 { "1" } else { "0" })?;
+        h.enter_grid_cell(r, 1, 0, "1")?;
+    }
+    let rs_id = h.run_analyze_entry("Kaplan", "analyze.entry.stats.survival_km")?;
+    h.select_sheet(&rs_id)?;
+    h.open_cmd_t()?;
+    h.click("edit.km.mantel_cox")?;
+    h.click("modal.ok")?;
+    let rs = h.app().document().result_sheet(&rs_id).ok_or("missing WF-21")?;
+    ensure(matches!(rs.analysis.kind, AnalysisKind::Survival(SurvivalAnalysisSpec::KaplanMeier { .. })), "WF-21 KM")?;
     h.verify_14_locales_section_9_4("WF-21")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf22_egui_human_pca_clustering_glm_volcano_format_points() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.mv", "MV PCA Volc", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.pca")?;
+    let sid = h.create_table_via_welcome("welcome.arch.multiple_variables", "MV PCA Volc", &["welcome.stepper.cols.inc"])?;
+    h.seed_mv_4col_5row(&sid)?;
+    let rs_id = h.run_analyze_entry("Principal", "analyze.entry.stats.pca")?;
+    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("missing WF-22 graph")?;
+    h.select_sheet(&gs_id)?;
+    h.click("toolbar.format_graph")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-22 missing PCA")?;
     h.verify_14_locales_section_9_4("WF-22")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf23_egui_human_stacked_superimposed_pcr_r10_and_chaining() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
-    let _sid = h.create_table_via_welcome("welcome.arch.mv", "PCR Matrix", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.pcr")?;
-    ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-23 missing PCR")?;
+    let sid = h.create_table_via_welcome("welcome.arch.multiple_variables", "PCR Matrix", &["welcome.stepper.cols.inc"])?;
+    h.seed_mv_4col_5row(&sid)?;
+    let rs_id = h.run_analyze_entry("Principal Component Regression", "analyze.entry.stats.pcr")?;
+    h.select_sheet(&rs_id)?;
+    let chained = h.run_analyze_entry("Descriptive", "analyze.entry.stats.descriptive")?;
+    ensure(h.app().document().result_sheet(&chained).is_some(), "WF-23 chaining")?;
     h.verify_14_locales_section_9_4("WF-23")?;
     Ok(())
 }
 
 #[test]
-#[ignore = "Phase B: awaits @r15-grids-mv / @r15-modals-stats-fit / @r15-modals-graph-app merge in @r15-integ pre-QA"]
 fn wf24_egui_human_significance_brackets_stars_and_axes() -> TestRes {
     let mut h = EguiWfHarness::new(ViewportMetrics::new(1280.0, 800.0, 1.0));
     let _sid = h.create_table_via_welcome("welcome.arch.column", "Brackets Cohort", &[])?;
-    let rs_id = h.run_analyze_entry("analyze.entry.stats.one_way_anova")?;
+    for (r, vals) in [[10.0, 15.0, 28.0], [11.0, 16.0, 30.0], [9.5, 14.5, 29.0], [10.5, 15.5, 31.0]].iter().enumerate() {
+        for (c, &v) in vals.iter().enumerate() {
+            h.enter_grid_cell(r, c, 0, &format!("{v}"))?;
+        }
+    }
+    let rs_id = h.run_analyze_entry("One-Way", "analyze.entry.stats.one_way_anova")?;
+    let gs_id = h.app().document().graph_sheets.last().map(|g| g.id.clone()).ok_or("missing WF-24 graph")?;
+    h.select_sheet(&gs_id)?;
+    h.click("toolbar.axes")?;
+    h.click("edit.tab.axes.y")?;
+    h.click("axes.additional_ticks.open")?;
+    h.click("axes.add_tick.value")?;
+    h.driver.type_text("20.0")?;
+    h.click("axes.add_tick.label")?;
+    h.driver.type_text("Target")?;
+    h.click("axes.add_tick.save")?;
+    h.click("axes.add_tick.close")?;
+    h.click("modal.ok")?;
+    h.click("inspector.graph.tab.legends")?;
+    h.click("inspector.graph.more_pairwise")?;
+    h.click("pairwise.auto_add")?;
+    h.click("modal.ok")?;
     ensure(h.app().document().result_sheet(&rs_id).is_some(), "WF-24 missing ANOVA")?;
     h.verify_14_locales_section_9_4("WF-24")?;
     Ok(())

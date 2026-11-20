@@ -6,9 +6,12 @@
 //! `1.0x` / `2.0x` / `3.0x` HiDPI, RTL (`ar`, `he`), fontless embedded fallback,
 //! and `gui-layout-spec.md` §9.4 responsive layout gates (`640×420` & `1440×600`).
 
+use std::sync::Arc;
+
 use curvebook_doc::{
-    Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, InfoConstant, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec,
-    ProjectDocument, RectPt, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype, XyTable,
+    AnalysisKind, Cell, CellCoord, ColumnDesignHint, ColumnTable, DataSheet, GraphKind, GraphSheet, InfoConstant, InfoSheet, LayoutItem, LayoutSheet,
+    LayoutSpec, MultipleVariablesTable, OneWayAnovaSpec, ProjectDocument, RectPt, SheetFolderKind, SheetId, SubcolumnMode, TableArchetype,
+    VariableRole, XyTable,
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
@@ -16,11 +19,14 @@ use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriv
 use curvebook_ui_egui::egui_shell::fonts::{FontDiscoveryConfig, build_egui_font_definitions_with_config};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::i18n::{LOCALES, locale_picker_label};
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
+use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::ActiveWorkspacePane;
 use curvebook_ui_egui::{FontBook, RenderTargetSpec, UiApp};
 use egui::{Key, Modifiers, Pos2};
+use serde_json::json;
 
 struct GapsState {
     app: UiApp,
@@ -214,6 +220,16 @@ fn r15_4_r10_23_egui_inline_edit_col_cell_title_nav_rename_and_undo_toolbar() ->
     let val_redone =
         driver.state().app.document().data_sheet(&SheetId::from("col-1")).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
     assert_eq!(val_redone, Some(87.5), "toolbar.redo must reapply committed cell edit");
+
+    // 2b. Keyboard `Cmd+Z` / `Cmd+Shift+Z` / `Ctrl+Y` global Undo & Redo parity.
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND);
+    let val_kb_undo =
+        driver.state().app.document().data_sheet(&SheetId::from("col-1")).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
+    assert_eq!(val_kb_undo, Some(10.0), "Cmd+Z must undo committed cell edit");
+    driver.press_egui_key(Key::Z, Modifiers::COMMAND | Modifiers::SHIFT);
+    let val_kb_redo =
+        driver.state().app.document().data_sheet(&SheetId::from("col-1")).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
+    assert_eq!(val_kb_redo, Some(87.5), "Cmd+Shift+Z must redo committed cell edit");
 
     // 3. Column title inline edit (`grid.col_title.0`) via double-click + Escape cancel + Enter commit.
     let hdr_pos = widget_center(&driver, "grid.col_title.0")?;
@@ -432,5 +448,158 @@ fn r15_4_r10_23_egui_fontless_embedded_fallback_scenarios() -> Result<(), String
             .0;
         assert!(png.starts_with(b"\x89PNG\r\n\x1a\n") && png.len() > 256);
     }
+    Ok(())
+}
+
+#[test]
+fn r15_4_r10_23_egui_drag_select_clipboard_bundle_language_draft_and_wave4_grids() -> Result<(), String> {
+    let mut app = build_r10_23_column_and_nav_app()?;
+    let clipboard = Arc::new(StubPlatformClipboardAdapter::new());
+    app.set_clipboard_adapter(clipboard.clone());
+
+    // Add MultipleVariables sheet + an ANOVA ResultSheet to verify Wave 4 X/MV/Results gaps.
+    {
+        let mut doc = app.document().clone();
+        let mut mv = MultipleVariablesTable::new(3, 2).map_err(|e| e.to_string())?;
+        mv.variables[0].title = String::from("Group");
+        mv.variables[0].role = VariableRole::Categorical;
+        mv.variables[1].title = String::from("Response");
+        mv.variables[1].role = VariableRole::Continuous;
+        mv.variables[2].title = String::from("Weight");
+        mv.variables[2].role = VariableRole::Continuous;
+        mv.variables[0].cells = vec![Cell::text("Ctrl"), Cell::text("Drug")];
+        mv.variables[1].cells = vec![Cell::number(10.0), Cell::number(25.0)];
+        mv.variables[2].cells = vec![Cell::number(1.0), Cell::number(2.0)];
+        let ds_mv = DataSheet::new("mv-1", "MV Gap Cohort", TableArchetype::MultipleVariables(mv)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds_mv).map_err(|e| e.to_string())?;
+        *app.session_mut() = Session::from_document(doc);
+        app.sync_views();
+    }
+    app.set_gui_only(false);
+    let kind_val = serde_json::to_value(AnalysisKind::OneWayAnova(OneWayAnovaSpec::default())).map_err(|e| e.to_string())?;
+    let res_out = app
+        .execute_command("analysis.run", json!({ "source_sheet_id": "col-1", "sheet_id": "res-gap", "kind": kind_val }))
+        .map_err(|e| e.to_string())?;
+    assert!(res_out.payload.get("sheet_id").is_some());
+    app.set_gui_only(true);
+    app.execute_command("sheet.select", json!({ "sheet_id": "col-1" })).map_err(|e| e.to_string())?;
+
+    let mut driver = make_driver(app, ViewportMetrics::new(1280.0, 800.0, 1.0), build_driver_font_definitions());
+
+    // 1. Pointer drag-selection across Column cells `(0,0,0)..(2,0,0)` (`10, 20, 30`) updates quick-stats footer.
+    let c0 = widget_center(&driver, "grid.cell.0.0.0")?;
+    let c2 = widget_center(&driver, "grid.cell.2.0.0")?;
+    driver.drag(c0, c2)?;
+    let summary_entry = driver.frame_meta().find_by_widget_id("status.summary").ok_or("missing status.summary")?;
+    for expected in ["N=3", "Mean=20", "Med=20", "Rng=20"] {
+        assert!(summary_entry.label.contains(expected), "drag-select quick stats missing `{expected}` in `{}`", summary_entry.label);
+    }
+
+    // 1b. `Cmd+C` / `Cmd+V` clipboard roundtrip directly inside `ColumnGrid` (`data_grid.rs`).
+    driver.click_widget_id("grid.cell.1.0.0")?;
+    driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    driver.click_widget_id("grid.cell.0.1.0")?;
+    driver.press_egui_key(Key::V, Modifiers::COMMAND);
+    let pasted_col =
+        driver.state().app.document().data_sheet(&SheetId::from("col-1")).and_then(|s| s.cell(CellCoord::new(0, 1, 0))).and_then(Cell::active_number);
+    assert_eq!(pasted_col, Some(20.0), "ColumnGrid Cmd+C/V must copy and paste across columns");
+
+    // 2. `Cmd+C` vector `ClipboardBundle` on `GraphSheet` & `LayoutSheet`.
+    driver.click_widget_id("nav.chip.graphs")?;
+    driver.click_widget_id("nav.sheet.graph-1")?;
+    driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    assert_eq!(clipboard.captured_bundles().len(), 1, "Cmd+C on GraphSheet must write ClipboardBundle");
+    let g_bundle = clipboard.last_bundle().ok_or("missing graph bundle")?;
+    assert!(!g_bundle.svg.is_empty() && !g_bundle.png_bytes.is_empty() && g_bundle.pdf_bytes.starts_with(b"%PDF"));
+
+    driver.click_widget_id("nav.chip.layouts")?;
+    driver.click_widget_id("nav.sheet.layout-1")?;
+    driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    assert_eq!(clipboard.captured_bundles().len(), 2, "Cmd+C on LayoutSheet must write ClipboardBundle");
+
+    // 3. `View > Language` picker lists all 16 `LOCALES` with `[Draft]` on non-English + switches locale.
+    driver.click_widget_id("menu.view")?;
+    let lang_pos = widget_center(&driver, "menu.ui.locale.set")?;
+    driver.hover_at(lang_pos)?;
+    assert_eq!(LOCALES.len(), 16);
+    let mut seen = vec![false; LOCALES.len()];
+    for scroll_step in 0..=4 {
+        for (idx, &loc) in LOCALES.iter().enumerate() {
+            let opt_wid = format!("popup.menu.ui.locale.set.opt.{idx}");
+            if let Some(entry) = driver.frame_meta().find_by_widget_id(&opt_wid) {
+                assert_eq!(entry.label, locale_picker_label(loc));
+                if loc != "en" {
+                    assert!(entry.label.contains("[Draft]"), "expected [Draft] badge on `{}`", entry.label);
+                }
+                seen[idx] = true;
+            }
+        }
+        if seen.iter().all(|&s| s) || scroll_step == 4 {
+            break;
+        }
+        let popup_center = widget_center(&driver, "popup.menu.ui.locale.set")?;
+        driver.wheel_at(popup_center, egui::vec2(0.0, -160.0))?;
+    }
+    assert!(seen.iter().all(|&s| s), "all 16 LOCALES must be reachable in View > Language popup: {seen:?}");
+    let popup_center = widget_center(&driver, "popup.menu.ui.locale.set")?;
+    driver.wheel_at(popup_center, egui::vec2(0.0, 400.0))?;
+    driver.click_widget_id("popup.menu.ui.locale.set.opt.1")?; // `de`
+    assert_eq!(driver.state().app.locale, "de");
+    let _ = driver.state_mut().app.set_locale("en");
+    driver.run_settled();
+
+    // 4. `Xy` X-cell inline editing + `Cmd+C/V` grid paste + `ResultSheet` 640x420@1.5x scroll-clip check across RTL/CJK/LTR.
+    driver.click_widget_id("nav.chip.data")?;
+    driver.click_widget_id("nav.sheet.xy-1")?;
+    driver.click_widget_id("grid.cell.1.0.0")?;
+    driver.press_egui_key(Key::C, Modifiers::COMMAND);
+    driver.click_widget_id("grid.cell.0.0.0")?;
+    driver.press_egui_key(Key::V, Modifiers::COMMAND);
+    let pasted =
+        driver.state().app.document().data_sheet(&SheetId::from("xy-1")).and_then(|s| s.cell(CellCoord::new(0, 0, 0))).and_then(Cell::active_number);
+    assert_eq!(pasted, Some(18.0), "Cmd+C/V must copy and paste cell value on Xy grid");
+    let x_pos = widget_center(&driver, "grid.xcell.0.0")?;
+    driver.click_at(x_pos)?;
+    driver.click_at(x_pos)?;
+    for _ in 0..8 {
+        driver.press_key("Backspace", KeyModifiers::default())?;
+    }
+    driver.type_text("7.5")?;
+    driver.press_key("Enter", KeyModifiers::default())?;
+    if let TableArchetype::Xy(xy) = &driver.state().app.document().data_sheet(&SheetId::from("xy-1")).unwrap().archetype {
+        assert_eq!(xy.x_cells[0][0].active_number(), Some(7.5), "Xy inline X-cell edit failed");
+    }
+
+    driver.click_widget_id("nav.chip.results")?;
+    driver.click_widget_id("nav.sheet.res-gap")?;
+    for &(loc, mode, scale) in &[
+        ("en", UiThemeMode::Light, 1.0),
+        ("de", UiThemeMode::Dark, 2.0),
+        ("ja", UiThemeMode::Light, 1.5),
+        ("ar", UiThemeMode::HighContrast, 1.5),
+        ("he", UiThemeMode::Dark, 1.5),
+    ] {
+        let _ = driver.state_mut().app.set_locale(loc);
+        driver.state_mut().app.set_theme_mode(mode);
+        driver.set_viewport(ViewportMetrics::new(640.0, 420.0, scale));
+        assert_clean_section_9_4(&driver, &format!("ResultSheet 640x420@{scale}x locale={loc} mode={mode:?}"))?;
+        driver.set_viewport(ViewportMetrics::new(1440.0, 600.0, 1.0));
+        assert_clean_section_9_4(&driver, &format!("ResultSheet 1440x600 locale={loc} mode={mode:?}"))?;
+    }
+
+    // 6. `MV` Data-tab role badges (`mv_formula.role_badge.0`) & `Manage Variables…` modal (`dialog.manage_variables`).
+    let _ = driver.state_mut().app.set_locale("en");
+    driver.state_mut().app.set_theme_mode(UiThemeMode::Light);
+    driver.set_viewport(ViewportMetrics::new(1280.0, 800.0, 1.0));
+    driver.click_widget_id("nav.chip.data")?;
+    driver.click_widget_id("nav.sheet.mv-1")?;
+    assert!(driver.frame_meta().find_by_widget_id("mv_formula.role_badge.0").is_some());
+    driver.click_widget_id("mv_formula.role_badge.0")?;
+    driver.click_widget_id("mv_formula.role_manage.0")?;
+    assert!(driver.state().app.grid.variables_dialog.open, "Manage Variables dialog must open");
+    assert!(driver.frame_meta().find_by_widget_id("dialog.manage_variables").is_some());
+    assert_clean_section_9_4(&driver, "Manage Variables modal 1280x800")?;
+    driver.click_widget_id("modal.ok")?;
+    assert!(!driver.state().app.grid.variables_dialog.open, "modal.ok must close Manage Variables dialog");
     Ok(())
 }
