@@ -1277,7 +1277,10 @@ fn normalize_key(raw: &str) -> String {
 #[must_use]
 pub fn check_live_status_metrics(root: &Path, status_md: &str) -> Vec<EvidenceViolation> {
     let mut violations = Vec::new();
-    let live_engine = curvebook_engine::cmd::registry().len();
+    #[cfg(feature = "full-gates")]
+    let live_engine = Some(curvebook_engine::cmd::registry().len());
+    #[cfg(not(feature = "full-gates"))]
+    let live_engine: Option<usize> = None;
     let live_ui = count_live_ui_commands(root);
     let live_pkgs = crate::layers::TABLE.len();
 
@@ -1310,12 +1313,12 @@ fn check_status_structural_headings(status_md: &str, violations: &mut Vec<Eviden
 
 fn check_status_headline_table(
     status_md: &str,
-    live_engine: usize,
+    live_engine: Option<usize>,
     live_ui: Option<usize>,
     live_pkgs: usize,
     violations: &mut Vec<EvidenceViolation>,
 ) {
-    let engine_needle = live_engine.to_string();
+    let engine_needle = live_engine.map(|n| n.to_string());
     let pkg_needle = format!("{live_pkgs}` packages");
     let pkg_plain = format!("{live_pkgs} packages");
     let mut saw_engine_row = false;
@@ -1334,11 +1337,14 @@ fn check_status_headline_table(
         let line_no = idx + 1;
         if norm == "engine command registry" {
             saw_engine_row = true;
-            if !cell_contains_number(trimmed, &engine_needle) {
+            if let Some(count) = live_engine
+                && let Some(ref needle) = engine_needle
+                && !cell_contains_number(trimmed, needle)
+            {
                 violations.push(EvidenceViolation {
                     path: String::from(STATUS_REL),
                     line: line_no,
-                    reason: format!("Engine command registry row does not report live count `{live_engine}`"),
+                    reason: format!("Engine command registry row does not report live count `{count}`"),
                 });
             }
         } else if norm == "ui command catalog" {
@@ -1396,28 +1402,32 @@ fn cell_contains_number(row: &str, needle: &str) -> bool {
     false
 }
 
-fn check_doc_count_parity(root: &Path, live_engine: usize, live_ui: Option<usize>, violations: &mut Vec<EvidenceViolation>) {
-    let cmds_rel = "docs/commands.md";
-    if let Ok(cmds_doc) = fs::read_to_string(root.join(cmds_rel)) {
-        let expected = format!("Registered commands: {live_engine}");
-        if !cmds_doc.contains(&expected) {
-            violations.push(EvidenceViolation {
-                path: String::from(cmds_rel),
-                line: 1,
-                reason: format!("expected `{expected}` matching live registry"),
-            });
+fn check_doc_count_parity(root: &Path, live_engine: Option<usize>, live_ui: Option<usize>, violations: &mut Vec<EvidenceViolation>) {
+    if let Some(engine_count) = live_engine {
+        let cmds_rel = "docs/commands.md";
+        if let Ok(cmds_doc) = fs::read_to_string(root.join(cmds_rel)) {
+            let expected = format!("Registered commands: {engine_count}");
+            if !cmds_doc.contains(&expected) {
+                violations.push(EvidenceViolation {
+                    path: String::from(cmds_rel),
+                    line: 1,
+                    reason: format!("expected `{expected}` matching live registry"),
+                });
+            }
         }
     }
 
     let agents_rel = "AGENTS.md";
     if let Ok(agents_doc) = fs::read_to_string(root.join(agents_rel)) {
-        let expected_engine = format!("`{live_engine}` commands");
-        if !agents_doc.contains(&expected_engine) {
-            violations.push(EvidenceViolation {
-                path: String::from(agents_rel),
-                line: 1,
-                reason: format!("expected `{expected_engine}` matching live command registry"),
-            });
+        if let Some(engine_count) = live_engine {
+            let expected_engine = format!("`{engine_count}` commands");
+            if !agents_doc.contains(&expected_engine) {
+                violations.push(EvidenceViolation {
+                    path: String::from(agents_rel),
+                    line: 1,
+                    reason: format!("expected `{expected_engine}` matching live command registry"),
+                });
+            }
         }
         if let Some(ui_count) = live_ui {
             let expected_ui = format!("`{ui_count}` entries");
@@ -1498,6 +1508,7 @@ mod tests {
             .replace("`97`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
             .replace("`47`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
         let stale_hits = super::check_live_status_metrics(root, &stale_status);
+        #[cfg(feature = "full-gates")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");
         assert!(stale_hits.iter().any(|v| v.reason.contains("UI command catalog")), "{stale_hits:?}");
     }

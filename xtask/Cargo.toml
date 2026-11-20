@@ -6,22 +6,45 @@ license.workspace = true
 rust-version.workspace = true
 publish = false
 
+[features]
+default = ["full-gates"]
+full-gates = [
+    "dep:curvebook-chart",
+    "dep:curvebook-doc",
+    "dep:curvebook-engine",
+    "dep:curvebook-fit",
+    "dep:curvebook-mcp",
+    "dep:curvebook-palette",
+    "dep:curvebook-pdf",
+    "dep:curvebook-stats",
+    "dep:curvebook-svg",
+    "dep:curvebook-ui-egui",
+]
+
 [dependencies]
-curvebook-chart = { workspace = true }
-curvebook-doc = { workspace = true }
-curvebook-engine = { workspace = true }
-curvebook-fit = { workspace = true }
+curvebook-chart = { workspace = true, optional = true }
+curvebook-doc = { workspace = true, optional = true }
+curvebook-engine = { workspace = true, optional = true }
+curvebook-fit = { workspace = true, optional = true }
 curvebook-format = { workspace = true }
-curvebook-mcp = { workspace = true, default-features = false }
-curvebook-palette = { workspace = true }
-curvebook-pdf = { workspace = true }
+curvebook-mcp = { workspace = true, default-features = false, optional = true }
+curvebook-palette = { workspace = true, optional = true }
+curvebook-pdf = { workspace = true, optional = true }
 curvebook-platform = { workspace = true }
 image = { version = "0.25", default-features = false, features = ["png"] }
-curvebook-stats = { workspace = true }
-curvebook-svg = { workspace = true }
+curvebook-stats = { workspace = true, optional = true }
+curvebook-svg = { workspace = true, optional = true }
 curvebook-testkit = { workspace = true }
-curvebook-ui-egui = { workspace = true, default-features = false }
+curvebook-ui-egui = { workspace = true, default-features = false, optional = true }
 serde_json = { workspace = true }
+
+[[test]]
+name = "r021_strict_alpha_branding"
+required-features = ["full-gates"]
+
+[[test]]
+name = "r12_docs_site"
+required-features = ["full-gates"]
 
 [lints]
 workspace = true

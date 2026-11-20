@@ -8,11 +8,13 @@ mod ci;
 mod ci_quick;
 mod citations;
 mod cleanroom;
+#[cfg(feature = "full-gates")]
 mod commands;
 mod contributors;
 mod corpus;
 mod coverage;
 mod cursors;
+#[cfg(feature = "full-gates")]
 mod docs_site;
 mod ico;
 mod json;
@@ -117,9 +119,9 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "cursors" => cursors::run(&root),
         "i18n-report" => cmd_i18n_report(&root),
         "ui-commands" => ui_commands::run(&root, rest.iter().any(|a| a == "--check")),
-        "commands" => commands::run_cli(&root, rest),
+        "commands" => cmd_commands(&root, rest),
         "schemas" => schemas::run_cli(&root, rest),
-        "docs-site" => docs_site::run_cli(&root, rest),
+        "docs-site" => cmd_docs_site(&root, rest),
         "wasm" => cmd_wasm(&root),
         "web-bundle" => web_fonts::run_bundle_check(&root, rest),
         "corpus" => corpus::run(&root, rest),
@@ -134,6 +136,26 @@ fn dispatch(args: &[String]) -> Result<(), String> {
         "web-fonts" => web_fonts::run(&root),
         other => Err(format!("unknown xtask command `{other}`\n\n{HELP}")),
     }
+}
+
+#[cfg(feature = "full-gates")]
+fn cmd_commands(root: &Path, rest: &[String]) -> Result<(), String> {
+    commands::run_cli(root, rest)
+}
+
+#[cfg(not(feature = "full-gates"))]
+fn cmd_commands(_root: &Path, _rest: &[String]) -> Result<(), String> {
+    Err(String::from("`commands` requires the default `full-gates` Cargo feature (rebuild without `--no-default-features`)"))
+}
+
+#[cfg(feature = "full-gates")]
+fn cmd_docs_site(root: &Path, rest: &[String]) -> Result<(), String> {
+    docs_site::run_cli(root, rest)
+}
+
+#[cfg(not(feature = "full-gates"))]
+fn cmd_docs_site(_root: &Path, _rest: &[String]) -> Result<(), String> {
+    Err(String::from("`docs-site` requires the default `full-gates` Cargo feature (rebuild without `--no-default-features`)"))
 }
 
 pub(crate) fn workspace_root() -> Result<PathBuf, String> {
