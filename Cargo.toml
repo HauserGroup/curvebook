@@ -39,8 +39,11 @@ curvebook-testkit = { path = "crates/testkit" }
 crc32fast = "1.5"
 flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
 proptest = "1"
+quick-xml = { version = "0.41", default-features = false }
+semver = "1.0"
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["float_roundtrip"] }
+weezl = { version = "0.1", default-features = false, features = ["std"] }
 
 # native GPU desktop windowing (without default_fonts to keep only permissive licenses) & wasm bridge
 eframe = { version = "0.37", default-features = false }
