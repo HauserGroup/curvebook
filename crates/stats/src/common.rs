@@ -45,19 +45,7 @@ pub fn sorted_finite(values: &[f64]) -> Vec<f64> {
 /// `(p_k, x_(k))` with `p_k = (k - 1) / (n - 1)`, that is, the 0-based position `p * (n - 1)`.
 #[must_use]
 pub fn quantile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
-    let n = sorted.len();
-    if n == 0 || !p.is_finite() {
-        return None;
-    }
-    let pc = p.clamp(0.0, 1.0);
-    if n == 1 {
-        return Some(sorted[0]);
-    }
-    let idx = pc * ((n - 1) as f64);
-    let lo = (idx.floor() as usize).min(n - 1);
-    let hi = (lo + 1).min(n - 1);
-    let frac = idx - (lo as f64);
-    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+    curvebook_math::quantile_type7_sorted(sorted, p)
 }
 
 /// Quartiles `(Q1, median, Q3)` by the type-6 sample-quantile definition of Hyndman & Fan (1996)
