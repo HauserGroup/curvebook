@@ -857,6 +857,7 @@ dependencies = [
  "curvebook-testkit",
  "flate2",
  "proptest",
+ "quick-xml",
  "serde",
  "serde_json",
 ]
