@@ -1,7 +1,7 @@
 //! Native desktop `egui 0.37` shell contracts, canonical layout/color tokens, single-commit
 //! intent buffer, AccessKit inspection metadata, and adapted pure-`egui` widget helpers (`R15`).
 
-use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetCellRange, SheetId, SheetSection};
+use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetId, SheetSection};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
 use curvebook_palette::{CIVIDIS_STOPS, CanvasPreviewFilter, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
 use egui::{Color32, CornerRadius, FontId, Rect, Stroke, TextStyle, Visuals};
@@ -16,7 +16,6 @@ use crate::dialogs_canvas::{
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
 use crate::inspect::ZLayer;
-use crate::os_integration::ClipboardBundle;
 use crate::power_wizard::PowerWizardState;
 use crate::theme::{UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
@@ -1109,8 +1108,6 @@ pub enum UiIntent {
     SetShortcutBinding { command_id: String, combo: String },
     ResetShortcutBinding { command_id: Option<String> },
     UpdatePreferencesDraft(Box<app_modals::PreferencesModalState>),
-    OpenRecoveryDialog { summary: Box<app_modals::RecoveryDialogSummary> },
-    ResolveRecoveryDialog { decision: app_modals::RecoveryDecision },
     ResolveUnsavedChanges { action: app_modals::UnsavedCloseAction },
     OpenFindReplace { initial_query: Option<String> },
     CloseFindReplace,
@@ -1493,7 +1490,7 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::GridPasteFromClipboard { start_coord });
     }
 
-    /// Copy selection or active Graph/Layout vector [`ClipboardBundle`] cleanly on commit.
+    /// Copy selection or active Graph/Layout vector [`crate::os_integration::ClipboardBundle`] cleanly on commit.
     pub fn push_workspace_copy(&mut self, dpi: u16) {
         self.queue.push(UiIntent::WorkspaceCopy { dpi });
     }
@@ -1636,16 +1633,6 @@ impl PendingUiIntents {
     /// Persist updated `PreferencesModalState` draft cleanly on settlement.
     pub fn push_update_preferences_draft(&mut self, draft: app_modals::PreferencesModalState) {
         self.queue.push(UiIntent::UpdatePreferencesDraft(Box::new(draft)));
-    }
-
-    /// Open the crash/session recovery prompt with `summary`.
-    pub fn push_open_recovery_dialog(&mut self, summary: app_modals::RecoveryDialogSummary) {
-        self.queue.push(UiIntent::OpenRecoveryDialog { summary: Box::new(summary) });
-    }
-
-    /// Record the user's decision on `RecoveryDialog` (`RestoreSession` / `DiscardRecovery` / `Dismiss`).
-    pub fn push_resolve_recovery(&mut self, decision: app_modals::RecoveryDecision) {
-        self.queue.push(UiIntent::ResolveRecoveryDialog { decision });
     }
 
     /// Record the user's decision on `UnsavedChanges` (`Save` / `DontSave` / `Cancel`).
@@ -2018,8 +2005,6 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::SetShortcutBinding { .. }
         | UiIntent::ResetShortcutBinding { .. }
         | UiIntent::UpdatePreferencesDraft(_)
-        | UiIntent::OpenRecoveryDialog { .. }
-        | UiIntent::ResolveRecoveryDialog { .. }
         | UiIntent::ResolveUnsavedChanges { .. }
         | UiIntent::OpenFindReplace { .. }
         | UiIntent::CloseFindReplace
@@ -2089,7 +2074,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.origin_kind = origin;
             app.grid.import_wizard.is_live_link = is_live_link;
-            app.grid.import_wizard.source_sheet_id = target_sheet_id
+            app.grid.import_wizard.target_sheet_id = target_sheet_id
                 .or_else(|| app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned());
             Ok(UiIntentOutcome::ShellUpdated)
         }
@@ -2098,17 +2083,33 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::CommitImportWizard { close_after } => {
+            let doc = app.session.document();
             let target_id = app
-                .session
-                .document()
-                .active_sheet_id
+                .grid
+                .import_wizard
+                .target_sheet_id
                 .as_ref()
-                .filter(|id| app.session.document().data_sheet(id).is_some())
+                .filter(|id| doc.data_sheet(id).is_some())
                 .cloned()
-                .or_else(|| app.grid.import_wizard.source_sheet_id.clone())
-                .or_else(|| app.session.document().data_sheets.first().map(|s| s.id.clone()))
-                .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "no data sheet available for import wizard"))?;
-            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(app.session.document()));
+                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned())
+                .ok_or_else(|| {
+                    EngineError::with_code(
+                        ErrorCode::Conflict,
+                        "no target data sheet available for import wizard; activate or select a target data sheet first",
+                    )
+                })?;
+            if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
+                let Some(src_id) = app.grid.import_wizard.source_sheet_id.as_ref() else {
+                    return Err(EngineError::with_code(ErrorCode::Conflict, "select a source sheet before committing an internal link or import"));
+                };
+                if src_id == &target_id {
+                    return Err(EngineError::with_code(
+                        ErrorCode::Conflict,
+                        format!("cannot link or import sheet `{}` onto itself; choose a different source or target sheet", target_id.as_str()),
+                    ));
+                }
+            }
+            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(doc));
             let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
             if close_after {
                 app.grid.import_wizard.open = false;
@@ -2166,46 +2167,31 @@ fn execute_workspace_copy(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, 
 }
 
 fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOutcome, EngineError> {
-    let doc = app.session.document();
-    let Some(ds_id) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned() else {
-        return Ok(UiIntentOutcome::ShellUpdated);
+    let (plan, clear_reqs, frozen) = {
+        let doc = app.session.document();
+        let Some(ds_id) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) else {
+            return Ok(UiIntentOutcome::ShellUpdated);
+        };
+        let Some(ds) = doc.data_sheet(ds_id) else {
+            return Ok(UiIntentOutcome::ShellUpdated);
+        };
+        let plan = app
+            .grid
+            .prepare_clipboard_selection(ds, app.locale_preset.decimal_separator)
+            .map_err(|msg| EngineError::with_code(ErrorCode::Conflict, msg))?;
+        let clear_reqs = if cut && !ds.frozen { plan.clear_cells_requests(ds) } else { Vec::new() };
+        (plan, clear_reqs, ds.frozen)
     };
-    let Some(ds) = doc.data_sheet(&ds_id) else {
-        return Ok(UiIntentOutcome::ShellUpdated);
-    };
-    let coords = app.grid.all_selected_coords(ds);
-    let range = if let Some(first) = coords.first() {
-        let mut min_r = first.row;
-        let mut max_r = first.row;
-        let mut min_c = first.col;
-        let mut max_c = first.col;
-        let mut min_s = first.subcol;
-        let mut max_s = first.subcol;
-        for c in &coords {
-            min_r = min_r.min(c.row);
-            max_r = max_r.max(c.row);
-            min_c = min_c.min(c.col);
-            max_c = max_c.max(c.col);
-            min_s = min_s.min(c.subcol);
-            max_s = max_s.max(c.subcol);
+    app.interaction.last_clipboard_text = Some(plan.tsv.clone());
+    let _ = app.write_clipboard_text(&plan.tsv);
+    if cut && !frozen && !clear_reqs.is_empty() {
+        let mut last_outcome = None;
+        for params in clear_reqs {
+            last_outcome = Some(app.execute_session_ui_cmd("table.clearCells", params)?);
         }
-        let _ = (min_s, max_s);
-        Some(SheetCellRange::new(CellCoord::new(min_r, min_c, min_s), CellCoord::new(max_r, max_c, max_s)))
-    } else {
-        None
-    };
-    let tsv = match range {
-        Some(r) => ClipboardBundle::tsv_from_datasheet_range(ds, r, app.locale_preset.decimal_separator),
-        None => ClipboardBundle::tsv_from_datasheet(ds, app.locale_preset.decimal_separator).unwrap_or_default(),
-    };
-    app.interaction.last_clipboard_text = Some(tsv.clone());
-    let _ = app.write_clipboard_text(&tsv);
-    if cut
-        && !ds.frozen
-        && let Some(r) = range
-    {
-        let outcome = app.execute_session_ui_cmd("table.clearCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "range": r }))?;
-        return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
+        if let Some(outcome) = last_outcome {
+            return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
+        }
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }
@@ -2324,11 +2310,7 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
 fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::OpenPreferences { category } => {
-            if let Some(cat) = category {
-                app.egui_views.app_modals.preferences.active_category = cat;
-            }
-            app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
-            app.egui_views.app_modals.preferences_open = true;
+            app.egui_views.app_modals.open_preferences(&app.shortcuts, category);
         }
         UiIntent::ClosePreferences { save } => {
             if save {
@@ -2337,41 +2319,46 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                     let scale = (pct / 100.0).clamp(0.75, 3.0) as f32;
                     app.theme.ui_scale = scale;
                 }
+                if let Some(staged) = app.egui_views.app_modals.preferences.staged_shortcuts.take() {
+                    app.shortcuts = staged;
+                }
             }
+            app.egui_views.app_modals.preferences.discard_shortcut_draft();
             app.egui_views.app_modals.preferences_open = false;
         }
-        UiIntent::SetShortcutBinding { command_id, combo } => match app.shortcuts.set_shortcut(&command_id, &combo) {
-            Ok(()) => {
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
-            }
-            Err(err) => {
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
-                return Err(EngineError::with_code(ErrorCode::Conflict, err));
-            }
-        },
-        UiIntent::ResetShortcutBinding { command_id } => match command_id {
-            Some(id) => {
-                if let Err(err) = app.shortcuts.reset_shortcut(&id) {
+        UiIntent::SetShortcutBinding { command_id, combo } => {
+            let staged = app.egui_views.app_modals.preferences.staged_shortcuts.get_or_insert_with(|| app.shortcuts.clone());
+            match staged.set_shortcut(&command_id, &combo) {
+                Ok(()) => {
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
+                Err(err) => {
                     app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
                     return Err(EngineError::with_code(ErrorCode::Conflict, err));
                 }
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
             }
-            None => {
-                app.shortcuts.reset_all();
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+        }
+        UiIntent::ResetShortcutBinding { command_id } => {
+            let staged = app.egui_views.app_modals.preferences.staged_shortcuts.get_or_insert_with(|| app.shortcuts.clone());
+            match command_id {
+                Some(id) => {
+                    if let Err(err) = staged.reset_shortcut(&id) {
+                        app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
+                        return Err(EngineError::with_code(ErrorCode::Conflict, err));
+                    }
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
+                None => {
+                    staged.reset_all();
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
             }
-        },
-        UiIntent::UpdatePreferencesDraft(draft) => {
+        }
+        UiIntent::UpdatePreferencesDraft(mut draft) => {
+            if draft.staged_shortcuts.is_none() {
+                draft.staged_shortcuts = app.egui_views.app_modals.preferences.staged_shortcuts.take();
+            }
             app.egui_views.app_modals.preferences = *draft;
-        }
-        UiIntent::OpenRecoveryDialog { summary } => {
-            app.egui_views.app_modals.recovery_summary = *summary;
-            app.egui_views.app_modals.recovery_open = true;
-        }
-        UiIntent::ResolveRecoveryDialog { decision } => {
-            app.egui_views.app_modals.last_recovery_decision = Some(decision);
-            app.egui_views.app_modals.recovery_open = false;
         }
         UiIntent::ResolveUnsavedChanges { action } => {
             app.egui_views.app_modals.pending_unsaved_action = Some(action);

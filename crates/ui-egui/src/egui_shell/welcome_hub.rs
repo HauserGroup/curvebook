@@ -1369,14 +1369,22 @@ fn render_middle_open_file(
         meta,
     );
     ui.add_space(4.0);
-    render_plain_clipped_label(ui, "Open a .cbk project or .cbtemplate file path.", FontId::proportional(11.0), tokens.text_muted);
+    render_clipped_text_label(
+        ui,
+        "welcome.open.subtitle",
+        tr(locale, "welcome.open.subtitle"),
+        FontId::proportional(11.0),
+        tokens.text_muted,
+        z_layer,
+        meta,
+    );
     ui.add_space(6.0);
     render_clipped_text_edit(
         ui,
         "welcome.input.open_path",
-        "Project path",
+        tr(locale, "welcome.open.path_label"),
         &mut state.open_file_path_draft,
-        "/path/to/project.cbk",
+        tr(locale, "welcome.open.path_placeholder"),
         (content_w - 8.0).max(80.0),
         enabled,
         z_layer,
@@ -1432,7 +1440,7 @@ fn render_right_pane(
                 }
             }
             WelcomeLeftMode::StarterTemplates => "Data -> Info -> Linked Graph",
-            WelcomeLeftMode::OpenFile => "Open existing .cbk workspace",
+            WelcomeLeftMode::OpenFile => tr(locale, "welcome.open.pipeline_label"),
             WelcomeLeftMode::NewTableArchetype(_) => match (state.schema.auto_info, state.schema.auto_graph) {
                 (true, true) => "Data + Info + Graph",
                 (true, false) => "Data + Info",
@@ -1440,7 +1448,7 @@ fn render_right_pane(
                 (false, false) => "Data only",
             },
         };
-        render_plain_clipped_label(ui, pipeline, FontId::proportional(11.0), tokens.text_muted);
+        render_clipped_text_label(ui, "welcome.preview.pipeline", pipeline, FontId::proportional(11.0), tokens.text_muted, z_layer, meta);
     });
     schematic_rect
 }

@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use curvebook_doc::{
-    CellCoord, CellValue, ProjectDocument, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource,
-};
+use curvebook_doc::{CellCoord, CellValue, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource};
 use curvebook_engine::{CommandOutcome, Session, cmd as engine_cmd};
 use curvebook_format::recovery::is_lease_reclaimable;
 use curvebook_format::{
@@ -2919,22 +2917,11 @@ impl DesktopHostRuntime {
             win.app.inline_editor.buffer.clear();
             win.app.inline_editor.caret_byte = 0;
         } else if let Some(sheet_id) = win.app.document().active_sheet_id.clone()
-            && win.app.document().data_sheet(&sheet_id).is_some()
+            && let Some(ds) = win.app.document().data_sheet(&sheet_id).cloned()
+            && !ds.frozen
         {
-            let range = win.app.grid.tool.selection_bounds().or_else(|| win.app.grid.tool.active.map(|c| (c, c)));
-            if let Some((min, max)) = range {
-                let _ = win.execute_and_journal(
-                    "table.clearCells",
-                    json!({
-                        "sheet_id": sheet_id.as_str(),
-                        "row_start": min.row,
-                        "row_end": max.row,
-                        "col_start": min.col,
-                        "col_end": max.col,
-                        "subcol_start": min.subcol,
-                        "subcol_end": max.subcol,
-                    }),
-                )?;
+            for params in win.app.grid.clipboard_target(&ds).clear_cells_requests(&ds) {
+                let _ = win.execute_and_journal("table.clearCells", params)?;
             }
         }
         Ok(DesktopEventOutcome { action: copy_out.action.replacen("copied", "cut", 1), ..copy_out })
@@ -3040,13 +3027,8 @@ impl DesktopHostRuntime {
                     && let Some(ds) = doc.data_sheet(sheet_id)
                 {
                     let dec = win.app.locale_preset.decimal_separator;
-                    let tsv = if let Some((min, max)) = win.app.grid.tool.selection_bounds() {
-                        let range = SheetCellRange::new(CellCoord::new(min.row, min.col, min.subcol), CellCoord::new(max.row, max.col, max.subcol));
-                        ClipboardBundle::tsv_from_datasheet_range(ds, range, dec)
-                    } else {
-                        ClipboardBundle::tsv_from_datasheet(ds, dec)?
-                    };
-                    CopyTarget::TableTsv(tsv)
+                    let plan = win.app.grid.prepare_clipboard_selection(ds, dec)?;
+                    CopyTarget::TableTsv(plan.tsv)
                 } else if let Some(sheet_id) = active_id
                     && matches!(doc.sheet_section(sheet_id), Some(SheetSection::Graphs | SheetSection::Layouts))
                 {
@@ -3329,6 +3311,10 @@ fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
         .or_else(|| doc.result_sheets.first().map(|s| s.id.clone()))
         .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
         .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
+}
+
+fn active_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
 }
 
 fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
@@ -3634,17 +3620,17 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
         })),
         "table.paste" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPaste,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.pasteLink" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPasteLink,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.importCsv" | "table.importPrism" | "table.importPzfx" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardExternalFile,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.setRowTitles" | "table.setGroupTitles" | "table.setTitles" | "table.setSubcolumnTitles" => {
@@ -3734,18 +3720,8 @@ fn build_table_context_params(app: &UiApp, doc: &ProjectDocument, cmd: &str) -> 
             Ok(json!({ "sheet_id": id.as_str(), "edits": [{ "row": row, "col": col, "subcol": subcol, "value": existing }] }))
         }
         "table.clearCells" => {
-            if let Some((a, b)) = bounds {
-                let start_row = a.row.min(total_rows - 1);
-                let end_row = b.row.min(total_rows - 1);
-                let start_col = a.col.min(total_cols - 1);
-                let end_col = b.col.min(total_cols - 1);
-                Ok(json!({
-                    "sheet_id": id.as_str(),
-                    "range": {
-                        "start": { "row": start_row, "col": start_col, "subcol": a.subcol },
-                        "end": { "row": end_row, "col": end_col, "subcol": b.subcol }
-                    }
-                }))
+            if let Some(first_req) = app.grid.clipboard_target(ds).clear_cells_requests(ds).into_iter().next() {
+                Ok(first_req)
             } else {
                 Ok(json!({ "sheet_id": id.as_str(), "row": row, "col": col, "subcol": subcol }))
             }
@@ -3951,19 +3927,20 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = false;
             app.grid.import_wizard.origin_kind = ImportOriginKind::Clipboard;
-            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": false }))
         }
         DesktopDialogOpener::ImportWizardPasteLink => {
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = true;
-            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": true }))
         }
         DesktopDialogOpener::ImportWizardExternalFile => {
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = false;
             app.grid.import_wizard.origin_kind = ImportOriginKind::ExternalDelimitedFile;
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "origin_kind": "ExternalDelimitedFile" }))
         }
         DesktopDialogOpener::VariablesDialog => {
@@ -4094,4 +4071,115 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         }
     }
     None
+}
+
+#[cfg(test)]
+mod wave_b_host_tests {
+    use super::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
+    use curvebook_doc::{Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, ProjectDocument, SheetId, TableArchetype};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::interaction::ViewportMetrics;
+    use serde_json::json;
+
+    fn cell_number(ds: &DataSheet, row: usize, col: usize) -> Option<f64> {
+        match ds.cell(CellCoord::new(row, col, 0))?.value {
+            CellValue::Number(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn desktop_host_large_2x5000_copy_and_cut_do_not_truncate_at_4096_cells() -> Result<(), String> {
+        let rows = 5_000usize;
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, rows).map_err(|e| e.to_string())?;
+        for r in 0..rows {
+            col.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+            col.data_sets[1].cells[r][0] = Cell::number((10_000 + r + 1) as f64);
+        }
+        let mut doc = ProjectDocument::new("Host Large Clipboard").map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("ds-large", "Large", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-large"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        {
+            let win = rt.window_mut(wid)?;
+            let ds = win.app.document().data_sheet(&SheetId::new("ds-large")).ok_or("missing ds-large")?.clone();
+            win.app.grid.select_single_sync(CellCoord::new(0, 0, 0).into());
+            win.app.grid.extend_shift_range(&ds, CellCoord::new(rows - 1, 1, 0).into());
+        }
+
+        let out = rt.cut_selection(wid)?;
+        assert!(out.handled);
+        let tsv = rt.clipboard_text.as_deref().ok_or("missing host clipboard_text")?;
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), rows);
+        assert_eq!(lines.first().copied(), Some("1\t10001"));
+        assert_eq!(lines.last().copied(), Some("5000\t15000"));
+
+        let ds = rt.window(wid)?.app.document().data_sheet(&SheetId::new("ds-large")).ok_or("missing ds-large")?;
+        assert!(ds.cell(CellCoord::new(rows - 1, 1, 0)).is_some_and(Cell::is_empty));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_host_discontiguous_cut_leaves_unselected_interior_cells_intact() -> Result<(), String> {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 6).map_err(|e| e.to_string())?;
+        for r in 0..6 {
+            for c in 0..3 {
+                col.data_sets[c].cells[r][0] = Cell::number(((r + 1) * 10 + (c + 1)) as f64);
+            }
+        }
+        let mut doc = ProjectDocument::new("Host Discontiguous Cut").map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("ds-1", "Table", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-1"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        {
+            let win = rt.window_mut(wid)?;
+            let ds = win.app.document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?.clone();
+            win.app.grid.select_single_sync(CellCoord::new(0, 0, 0).into());
+            win.app.grid.toggle_cmd_selection(&ds, CellCoord::new(4, 2, 0).into());
+        }
+
+        let out = rt.cut_selection(wid)?;
+        assert!(out.handled);
+        let tsv = rt.clipboard_text.as_deref().ok_or("missing host clipboard_text")?;
+        assert!(tsv.contains("11") && tsv.contains("53") && !tsv.contains("22"), "unexpected TSV: {tsv:?}");
+
+        let ds = rt.window(wid)?.app.document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
+        assert!(ds.cell(CellCoord::new(0, 0, 0)).is_some_and(Cell::is_empty));
+        assert!(ds.cell(CellCoord::new(4, 2, 0)).is_some_and(Cell::is_empty));
+        assert_eq!(cell_number(ds, 1, 1), Some(22.0));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_host_paste_link_opener_sets_target_sheet_id_without_clobbering_source_sheet_id() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Host Import Opener").map_err(|e| e.to_string())?;
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).map_err(|e| e.to_string())?;
+        let ds_a = DataSheet::new("ds-a", "A", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        let graph = GraphSheet::new_uninitialized_for_data("g-1", &ds_a).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds_a).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(graph).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-a"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("table.pasteLink") })?;
+        let wiz = &rt.window(wid)?.app.grid.import_wizard;
+        assert!(wiz.open && wiz.is_live_link);
+        assert_eq!(wiz.target_sheet_id, Some(SheetId::new("ds-a")));
+        assert_eq!(wiz.source_sheet_id, None, "desktop opener must not overwrite source_sheet_id with target");
+
+        // When a Graph is active, opening Paste Link must leave target_sheet_id = None (never defaulting to source A).
+        rt.window_mut(wid)?.app.execute_command("sheet.select", json!({ "sheet_id": "g-1" })).map_err(|e| e.to_string())?;
+        let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("table.pasteLink") })?;
+        let wiz2 = &rt.window(wid)?.app.grid.import_wizard;
+        assert_eq!(wiz2.target_sheet_id, None, "graph-active opener must not silently target primary source sheet");
+        Ok(())
+    }
 }
