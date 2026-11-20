@@ -1,10 +1,9 @@
 //! Application-level modals in `egui 0.37` (`R15.4`, `gui-layout-spec.md` §8.14):
-//! conditional `Export Figure / Layout`, `Print`, `Unsaved Changes`, `Recovery`, `About`,
-//! `Find & Replace`, and 5-category `Preferences` (with pure-Rust conflict-checked
-//! `Keyboard Shortcuts` editor and strict 14-locale Beta language selector).
+//! conditional `Export Figure / Layout`, `Print`, `Unsaved Changes`, `About`,
+//! `Find & Replace`, and 4-category `Preferences` (with pure-Rust conflict-checked
+//! staged `Keyboard Shortcuts` editor and strict 14-locale Beta language selector).
 
-use curvebook_doc::{ErrorBarMetric, SheetId};
-use curvebook_palette::PaletteId;
+use curvebook_doc::SheetId;
 use curvebook_pdf::PdfColorSpace;
 use curvebook_render::TiffCompression;
 use egui::scroll_area::ScrollBarVisibility;
@@ -15,7 +14,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat};
 use crate::i18n::{BETA_ACTIVE_LOCALES, is_rtl_locale, locale_picker_label, normalize_locale, tr};
 use crate::inspect::ZLayer;
-use crate::menus::shortcuts::{ShortcutBinding, normalize_shortcut_combo};
+use crate::menus::shortcuts::{ShortcutBinding, ShortcutRegistry, normalize_shortcut_combo};
 use crate::theme::UiThemeMode;
 use crate::workspace_nav::NavigatorNestingMode;
 
@@ -23,19 +22,18 @@ use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
 use super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
 use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, UiIntent};
 
-/// Five categories in the `Preferences` sidebar (`gui-layout-spec.md` §8.14).
+/// Four active categories in the `Preferences` sidebar (`gui-layout-spec.md` §8.14).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub enum PreferencesCategory {
     #[default]
     General,
     Appearance,
     Language,
-    GraphDefaults,
     KeyboardShortcuts,
 }
 
 impl PreferencesCategory {
-    pub const ALL: [Self; 5] = [Self::General, Self::Appearance, Self::Language, Self::GraphDefaults, Self::KeyboardShortcuts];
+    pub const ALL: [Self; 4] = [Self::General, Self::Appearance, Self::Language, Self::KeyboardShortcuts];
 
     /// Stable machine slug for layout and test assertions.
     #[must_use]
@@ -44,7 +42,6 @@ impl PreferencesCategory {
             Self::General => "general",
             Self::Appearance => "appearance",
             Self::Language => "language",
-            Self::GraphDefaults => "graph_defaults",
             Self::KeyboardShortcuts => "keyboard_shortcuts",
         }
     }
@@ -55,7 +52,6 @@ impl PreferencesCategory {
             Self::General => "prefs.cat.general",
             Self::Appearance => "prefs.cat.appearance",
             Self::Language => "prefs.cat.language",
-            Self::GraphDefaults => "prefs.cat.graph_defaults",
             Self::KeyboardShortcuts => "prefs.cat.shortcuts",
         }
     }
@@ -69,29 +65,10 @@ pub enum UnsavedCloseAction {
     Cancel,
 }
 
-/// Resolution decision chosen in the `Recovery` crash/session restore prompt.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum RecoveryDecision {
-    RestoreSession,
-    DiscardRecovery,
-    Dismiss,
-}
-
-/// Metadata surfaced in the crash/session recovery modal (`RecoveryDialogSummary`).
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct RecoveryDialogSummary {
-    pub source_path: Option<String>,
-    pub warning_lines: Vec<String>,
-    pub replayed_commands: usize,
-    pub dirty_timestamp_utc: Option<String>,
-}
-
-/// Editable draft settings inside the 5-category `Preferences` modal.
+/// Editable draft settings inside the 4-category `Preferences` modal.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PreferencesModalState {
     pub active_category: PreferencesCategory,
-    pub default_unit: ScrubUnitKind,
-    pub default_show_en_dash: bool,
     pub shortcut_search: String,
     pub selected_shortcut_command: Option<String>,
     pub shortcut_combo_draft: String,
@@ -99,16 +76,14 @@ pub struct PreferencesModalState {
     pub ui_scale_spinner: ScrubUnitFieldState,
     pub shortcuts_ui_only: bool,
     pub shortcut_capture_armed: bool,
-    pub default_palette: PaletteId,
-    pub default_error_bar: ErrorBarMetric,
+    /// Staged shortcut bindings edited inside the modal and committed to `app.shortcuts` only on OK.
+    pub staged_shortcuts: Option<ShortcutRegistry>,
 }
 
 impl Default for PreferencesModalState {
     fn default() -> Self {
         Self {
             active_category: PreferencesCategory::General,
-            default_unit: ScrubUnitKind::Millimeters,
-            default_show_en_dash: true,
             shortcut_search: String::new(),
             selected_shortcut_command: None,
             shortcut_combo_draft: String::new(),
@@ -116,9 +91,34 @@ impl Default for PreferencesModalState {
             ui_scale_spinner: ScrubUnitFieldState::new(ScrubUnitKind::Percent),
             shortcuts_ui_only: false,
             shortcut_capture_armed: false,
-            default_palette: PaletteId::OkabeIto,
-            default_error_bar: ErrorBarMetric::Sd,
+            staged_shortcuts: None,
         }
+    }
+}
+
+impl PreferencesModalState {
+    /// Snapshot `shortcuts` into the modal draft and clear transient editor fields when opening Preferences.
+    pub fn begin_shortcut_session(&mut self, shortcuts: &ShortcutRegistry) {
+        self.staged_shortcuts = Some(shortcuts.clone());
+        self.selected_shortcut_command = None;
+        self.shortcut_combo_draft.clear();
+        self.shortcut_conflict_error = None;
+        self.shortcut_capture_armed = false;
+    }
+
+    /// Discard any uncommitted shortcut edits and reset transient shortcut editor fields.
+    pub fn discard_shortcut_draft(&mut self) {
+        self.staged_shortcuts = None;
+        self.selected_shortcut_command = None;
+        self.shortcut_combo_draft.clear();
+        self.shortcut_conflict_error = None;
+        self.shortcut_capture_armed = false;
+    }
+
+    /// Borrow the staged shortcut registry when active, falling back to `fallback`.
+    #[must_use]
+    pub fn effective_shortcuts<'a>(&'a self, fallback: &'a ShortcutRegistry) -> &'a ShortcutRegistry {
+        self.staged_shortcuts.as_ref().unwrap_or(fallback)
     }
 }
 
@@ -138,9 +138,6 @@ pub struct FindReplaceModalState {
 pub struct AppModalsEguiState {
     pub preferences_open: bool,
     pub preferences: PreferencesModalState,
-    pub recovery_open: bool,
-    pub recovery_summary: RecoveryDialogSummary,
-    pub last_recovery_decision: Option<RecoveryDecision>,
     pub unsaved_changes_open: bool,
     pub pending_unsaved_action: Option<UnsavedCloseAction>,
     pub find_replace_open: bool,
@@ -160,9 +157,6 @@ impl Default for AppModalsEguiState {
         Self {
             preferences_open: false,
             preferences: PreferencesModalState::default(),
-            recovery_open: false,
-            recovery_summary: RecoveryDialogSummary::default(),
-            last_recovery_decision: None,
             unsaved_changes_open: false,
             pending_unsaved_action: None,
             find_replace_open: false,
@@ -180,16 +174,25 @@ impl Default for AppModalsEguiState {
 }
 
 impl AppModalsEguiState {
-    /// Return `true` when any shell-managed app modal flag (`Preferences`, `Recovery`, `Unsaved`, `Find`) is active.
-    #[must_use]
-    pub const fn any_open(&self) -> bool {
-        self.preferences_open || self.recovery_open || self.unsaved_changes_open || self.find_replace_open
+    /// Open the `Preferences` modal, snapshotting `shortcuts` into the staged draft.
+    pub fn open_preferences(&mut self, shortcuts: &ShortcutRegistry, category: Option<PreferencesCategory>) {
+        if let Some(cat) = category {
+            self.preferences.active_category = cat;
+        }
+        self.preferences.begin_shortcut_session(shortcuts);
+        self.preferences_open = true;
     }
 
-    /// Dismiss all shell-managed app modal flags cleanly.
+    /// Return `true` when any shell-managed app modal flag (`Preferences`, `Unsaved`, `Find`) is active.
+    #[must_use]
+    pub const fn any_open(&self) -> bool {
+        self.preferences_open || self.unsaved_changes_open || self.find_replace_open
+    }
+
+    /// Dismiss all shell-managed app modal flags cleanly and discard any staged preference drafts.
     pub fn close_all(&mut self) {
+        self.preferences.discard_shortcut_draft();
         self.preferences_open = false;
-        self.recovery_open = false;
         self.unsaved_changes_open = false;
         self.find_replace_open = false;
     }
@@ -213,7 +216,7 @@ struct AppBtn<'a> {
     disabled_reason: Option<&'a str>,
 }
 
-/// Render whichever application-level modal (`UnsavedChanges`, `RecoveryDialog`, `Preferences`,
+/// Render whichever application-level modal (`UnsavedChanges`, `Preferences`,
 /// `FindAndReplace`, `ExportFigure`, `Print`, or `About`) is currently active.
 pub fn render_app_modal(
     ctx: &Context,
@@ -226,9 +229,6 @@ pub fn render_app_modal(
 ) -> AppModalFrameReport {
     if host_unsaved_close || state.unsaved_changes_open {
         return render_unsaved_modal(ctx, app, tokens, meta, intents);
-    }
-    if state.recovery_open {
-        return render_recovery_modal(ctx, app, state, tokens, meta, intents);
     }
     if state.preferences_open {
         return render_preferences_modal(ctx, app, state, tokens, meta, intents);
@@ -246,7 +246,7 @@ pub fn render_app_modal(
 }
 
 // ============================================================================
-// 1. Unsaved Changes & Recovery Modals
+// 1. Unsaved Changes Modal
 // ============================================================================
 
 fn render_unsaved_modal(
@@ -340,116 +340,8 @@ fn render_unsaved_modal(
     build_report(ctx, &modal_resp, "dialog.unsaved_changes", title, meta)
 }
 
-fn render_recovery_modal(
-    ctx: &Context,
-    app: &UiApp,
-    state: &AppModalsEguiState,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) -> AppModalFrameReport {
-    let locale = normalize_locale(&app.locale);
-    let title = atr(locale, "recovery.title");
-    let (inner_w, max_h, body_w) = modal_bounds(ctx, 560.0);
-
-    let modal_resp = egui::Modal::new(egui::Id::unique("egui_shell_recovery_modal")).backdrop_color(tokens.scrim).show(ctx, |ui| {
-        ui.set_min_width(inner_w);
-        ui.set_max_width(inner_w);
-        ui.set_max_height(max_h);
-        ui.style_mut().spacing.scroll = egui::style::ScrollStyle::solid();
-
-        ui.heading(title);
-        ui.add_space(4.0);
-        egui::ScrollArea::vertical()
-            .id_salt("app_modal.recovery.scroll")
-            .max_height((max_h - 108.0).max(90.0))
-            .auto_shrink([false, true])
-            .scroll_bar_visibility(ScrollBarVisibility::AlwaysVisible)
-            .show(ui, |ui| {
-                ui.set_width(body_w);
-                ui.set_max_width(body_w);
-                if let Some(src) = &state.recovery_summary.source_path {
-                    ui.add(egui::Label::new(format!("{}: {src}", atr(locale, "recovery.source"))).wrap());
-                }
-                if let Some(ts) = &state.recovery_summary.dirty_timestamp_utc {
-                    ui.add(egui::Label::new(format!("{}: {ts}", atr(locale, "recovery.timestamp"))).wrap());
-                }
-                ui.label(format!(
-                    "Replayed commands: {}, warnings: {}",
-                    state.recovery_summary.replayed_commands,
-                    state.recovery_summary.warning_lines.len()
-                ));
-                if !state.recovery_summary.warning_lines.is_empty() {
-                    ui.add_space(4.0);
-                    for (idx, line) in state.recovery_summary.warning_lines.iter().enumerate() {
-                        ui.add(egui::Label::new(egui::RichText::new(format!("{}. {line}", idx + 1)).color(tokens.link_red).small()).wrap());
-                    }
-                }
-            });
-        ui.add_space(8.0);
-        ui.separator();
-        ui.add_space(4.0);
-        ui.horizontal_wrapped(|ui| {
-            ui.set_max_width(body_w);
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: "modal.restore",
-                    label: atr(locale, "recovery.restore"),
-                    command_id: None,
-                    selected: true,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                intents.push_resolve_recovery(RecoveryDecision::RestoreSession);
-            }
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: "modal.discard",
-                    label: atr(locale, "recovery.discard"),
-                    command_id: None,
-                    selected: false,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                intents.push_resolve_recovery(RecoveryDecision::DiscardRecovery);
-            }
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: "modal.cancel",
-                    label: atr(locale, "recovery.dismiss"),
-                    command_id: None,
-                    selected: false,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                intents.push_resolve_recovery(RecoveryDecision::Dismiss);
-            }
-        });
-    });
-
-    build_report(ctx, &modal_resp, "dialog.recovery", title, meta)
-}
-
 // ============================================================================
-// 2. Five-Category Preferences Modal (§8.14)
+// 2. Four-Category Preferences Modal (§8.14)
 // ============================================================================
 
 fn render_preferences_modal(
@@ -460,6 +352,9 @@ fn render_preferences_modal(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> AppModalFrameReport {
+    if state.preferences.staged_shortcuts.is_none() {
+        state.preferences.staged_shortcuts = Some(app.shortcuts.clone());
+    }
     let locale = normalize_locale(&app.locale);
     let title = atr(locale, "prefs.title");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 720.0);
@@ -483,7 +378,7 @@ fn render_preferences_modal(
         ui.heading(title);
         ui.add_space(4.0);
 
-        // 5-Category tab/sidebar bar (wraps safely at 640x420 & 1440x600).
+        // 4-Category tab/sidebar bar (wraps safely at 640x420 & 1440x600).
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(body_w);
             for &cat in &PreferencesCategory::ALL {
@@ -511,10 +406,9 @@ fn render_preferences_modal(
                 ui.set_width(body_w);
                 ui.set_max_width(body_w);
                 match state.preferences.active_category {
-                    PreferencesCategory::General => render_prefs_general(ui, app, state, locale, body_w, tokens, meta, intents),
+                    PreferencesCategory::General => render_prefs_general(ui, app, locale, body_w, tokens, meta, intents),
                     PreferencesCategory::Appearance => render_prefs_appearance(ui, app, state, locale, body_w, tokens, meta, intents),
                     PreferencesCategory::Language => render_prefs_language(ui, locale, body_w, tokens, meta, intents),
-                    PreferencesCategory::GraphDefaults => render_prefs_graph_defaults(ui, state, locale, body_w, tokens, meta),
                     PreferencesCategory::KeyboardShortcuts => render_prefs_shortcuts(ui, app, state, locale, body_w, tokens, meta, intents),
                 }
             });
@@ -560,11 +454,9 @@ fn render_preferences_modal(
     build_report(ctx, &modal_resp, "dialog.preferences", title, meta)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_prefs_general(
     ui: &mut Ui,
     app: &UiApp,
-    state: &mut AppModalsEguiState,
     locale: &str,
     body_w: f32,
     tokens: &Tokens,
@@ -586,10 +478,6 @@ fn render_prefs_general(
             }
         }
     });
-
-    ui.add_space(8.0);
-    ui.label(egui::RichText::new(atr(locale, "prefs.general.units_heading")).strong());
-    render_default_unit_selector(ui, &mut state.preferences.default_unit, body_w, tokens, meta);
 
     ui.add_space(6.0);
     ui.label(format!("Active regional format preset: {}", app.locale_preset.locale));
@@ -680,101 +568,6 @@ fn render_prefs_language(ui: &mut Ui, locale: &str, body_w: f32, tokens: &Tokens
     });
 }
 
-fn render_prefs_graph_defaults(ui: &mut Ui, state: &mut AppModalsEguiState, locale: &str, body_w: f32, tokens: &Tokens, meta: &mut FrameInspectMeta) {
-    ui.label(egui::RichText::new(atr(locale, "prefs.graph_defaults.units")).strong());
-    render_default_unit_selector(ui, &mut state.preferences.default_unit, body_w, tokens, meta);
-
-    ui.add_space(6.0);
-    let en_dash_lbl = atr(locale, "prefs.graph_defaults.en_dash");
-    let chk = ui.checkbox(&mut state.preferences.default_show_en_dash, en_dash_lbl);
-    app_checkbox(ui, &chk, meta, "prefs.graph_defaults.en_dash", en_dash_lbl, state.preferences.default_show_en_dash);
-
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(atr(locale, "prefs.graph_defaults.palette")).strong());
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(body_w);
-        for &pal in &PaletteId::ALL {
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: &format!("prefs.graph_defaults.palette.{pal:?}"),
-                    label: pal.label(),
-                    command_id: None,
-                    selected: state.preferences.default_palette == pal,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                state.preferences.default_palette = pal;
-            }
-        }
-    });
-
-    ui.add_space(6.0);
-    ui.label(egui::RichText::new(atr(locale, "prefs.graph_defaults.error_bars")).strong());
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(body_w);
-        for (lbl, metric) in [
-            ("SD", ErrorBarMetric::Sd),
-            ("SEM", ErrorBarMetric::Sem),
-            ("95% CI", ErrorBarMetric::ConfidenceInterval95),
-            ("IQR", ErrorBarMetric::InterquartileRange),
-            ("Range", ErrorBarMetric::Range),
-        ] {
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: &format!("prefs.graph_defaults.eb.{metric:?}"),
-                    label: lbl,
-                    command_id: None,
-                    selected: state.preferences.default_error_bar == metric,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                state.preferences.default_error_bar = metric;
-            }
-        }
-    });
-}
-
-fn render_default_unit_selector(ui: &mut Ui, unit: &mut ScrubUnitKind, body_w: f32, tokens: &Tokens, meta: &mut FrameInspectMeta) {
-    ui.horizontal_wrapped(|ui| {
-        ui.set_max_width(body_w);
-        for (slug, lbl, kind) in [
-            ("pt", "Points (pt)", ScrubUnitKind::Points),
-            ("mm", "Millimeters (mm)", ScrubUnitKind::Millimeters),
-            ("in", "Inches (in)", ScrubUnitKind::Inches),
-        ] {
-            if app_button(
-                ui,
-                meta,
-                AppBtn {
-                    widget_id: &format!("prefs.unit.{slug}"),
-                    label: lbl,
-                    command_id: None,
-                    selected: *unit == kind,
-                    enabled: true,
-                    disabled_reason: None,
-                },
-                tokens,
-            )
-            .clicked()
-            {
-                *unit = kind;
-            }
-        }
-    });
-}
-
 #[allow(clippy::too_many_arguments)]
 fn render_prefs_shortcuts(
     ui: &mut Ui,
@@ -786,6 +579,8 @@ fn render_prefs_shortcuts(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let active_shortcuts = state.preferences.effective_shortcuts(&app.shortcuts).clone();
+
     ui.horizontal_wrapped(|ui| {
         ui.set_max_width(body_w);
         ui.label(atr(locale, "prefs.shortcuts.filter"));
@@ -811,15 +606,20 @@ fn render_prefs_shortcuts(
         .clicked()
         {
             state.preferences.shortcut_conflict_error = None;
+            if let Some(sel_id) = state.preferences.selected_shortcut_command.as_deref()
+                && let Some(binding) = active_shortcuts.get(sel_id)
+            {
+                state.preferences.shortcut_combo_draft = binding.default_combo.clone();
+            }
             intents.push_reset_shortcut_binding(None);
         }
     });
 
     ui.add_space(6.0);
-    // Selected command editor + pure-Rust conflict check.
+    // Selected command editor + pure-Rust conflict check against the staged shortcut snapshot.
     if let Some(sel_id) = state.preferences.selected_shortcut_command.clone() {
-        let binding_opt = app.shortcuts.bindings().find(|b| b.command_id == sel_id);
-        render_shortcut_editor_bar(ui, app, state, &sel_id, binding_opt, body_w, tokens, meta, intents);
+        let binding_opt = active_shortcuts.get(&sel_id);
+        render_shortcut_editor_bar(ui, &active_shortcuts, state, &sel_id, binding_opt, body_w, tokens, meta, intents);
         ui.add_space(6.0);
     } else {
         ui.label(egui::RichText::new("Select any command below to rebind its keyboard shortcut.").color(tokens.text_muted));
@@ -833,8 +633,7 @@ fn render_prefs_shortcuts(
 
     ui.separator();
     let needle = state.preferences.shortcut_search.trim().to_ascii_lowercase();
-    let matching: Vec<&ShortcutBinding> = app
-        .shortcuts
+    let matching: Vec<&ShortcutBinding> = active_shortcuts
         .bindings()
         .filter(|binding| {
             if state.preferences.shortcuts_ui_only && !binding.is_ui {
@@ -901,7 +700,7 @@ fn render_prefs_shortcuts(
 #[allow(clippy::too_many_arguments)]
 fn render_shortcut_editor_bar(
     ui: &mut Ui,
-    app: &UiApp,
+    active_shortcuts: &ShortcutRegistry,
     state: &mut AppModalsEguiState,
     cmd_id: &str,
     binding_opt: Option<&ShortcutBinding>,
@@ -950,7 +749,7 @@ fn render_shortcut_editor_bar(
         )
         .clicked()
         {
-            validate_and_queue_shortcut(app, state, cmd_id, binding_opt, intents);
+            validate_and_queue_shortcut(active_shortcuts, state, cmd_id, binding_opt, intents);
         }
 
         if app_button(
@@ -978,7 +777,7 @@ fn render_shortcut_editor_bar(
 }
 
 fn validate_and_queue_shortcut(
-    app: &UiApp,
+    active_shortcuts: &ShortcutRegistry,
     state: &mut AppModalsEguiState,
     cmd_id: &str,
     binding_opt: Option<&ShortcutBinding>,
@@ -991,8 +790,8 @@ fn validate_and_queue_shortcut(
         Ok(normalized) => {
             let scope = binding_opt.map(|b| b.scope);
             let conflict = match scope {
-                Some(sc) => app.shortcuts.find_conflict_with_scope(&normalized, sc, Some(cmd_id)),
-                None => app.shortcuts.find_conflict(&normalized, Some(cmd_id)),
+                Some(sc) => active_shortcuts.find_conflict_with_scope(&normalized, sc, Some(cmd_id)),
+                None => active_shortcuts.find_conflict(&normalized, Some(cmd_id)),
             };
             if let Some(other_cmd) = conflict {
                 state.preferences.shortcut_conflict_error = Some(format!("Shortcut `{normalized}` conflicts with `{other_cmd}`"));
@@ -2111,31 +1910,16 @@ fn atr(locale: &str, key: &str) -> &'static str {
         ("prefs.cat.language", "de") => "Sprache",
         ("prefs.cat.language", "ja") => "言語",
         ("prefs.cat.language", _) => "Language",
-        ("prefs.cat.graph_defaults", "de") => "Diagramm-Standards",
-        ("prefs.cat.graph_defaults", "ja") => "グラフ既定値",
-        ("prefs.cat.graph_defaults", _) => "Graph Defaults",
         ("prefs.cat.shortcuts", "de") => "Tastenkürzel",
         ("prefs.cat.shortcuts", "ja") => "ショートカット",
         ("prefs.cat.shortcuts", _) => "Keyboard Shortcuts",
 
         ("prefs.general.tree_heading", _) => "Project Navigator Organization",
-        ("prefs.general.units_heading", _) => "Default Physical Unit",
         ("prefs.appearance.theme_heading", _) => "Theme & Contrast",
         ("prefs.appearance.ui_scale", _) => "UI Scale",
         ("prefs.language.heading", _) => "Application Language (14 Active Beta Locales)",
         ("prefs.language.subtitle", _) => "Right-to-left (RTL) locales remain hidden during the Beta release.",
-        ("prefs.graph_defaults.units", _) => "Graph Default Dimension Unit",
-        ("prefs.graph_defaults.en_dash", _) => "Use Typographic En-Dash Minus Signs (−)",
-        ("prefs.graph_defaults.palette", _) => "Default Color Palette",
-        ("prefs.graph_defaults.error_bars", _) => "Default Error Bar Metric",
         ("prefs.shortcuts.filter", _) => "Filter:",
-
-        ("recovery.title", _) => "Crash & Session Recovery",
-        ("recovery.source", _) => "Project File",
-        ("recovery.timestamp", _) => "Dirty Snapshot (UTC)",
-        ("recovery.restore", _) => "Restore Session",
-        ("recovery.discard", _) => "Discard Recovery",
-        ("recovery.dismiss", _) => "Dismiss",
 
         ("export.title.layout", _) => "Export Page Layout",
         ("export.commit", _) => "Export",
@@ -2154,7 +1938,7 @@ mod tests {
     fn beta_locale_list_is_strictly_14_non_rtl() {
         assert_eq!(BETA_ACTIVE_LOCALES.len(), 14);
         assert!(BETA_ACTIVE_LOCALES.iter().all(|loc| !is_rtl_locale(loc)));
-        assert_eq!(PreferencesCategory::ALL.len(), 5);
+        assert_eq!(PreferencesCategory::ALL.len(), 4);
         assert!(!AppModalsEguiState::default().any_open());
     }
 }

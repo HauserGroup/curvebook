@@ -6181,8 +6181,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 779);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_464);
+        assert_eq!(catalog_len(), 783);
+        assert_eq!(LOCALES.len() * catalog_len(), 12_528);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();

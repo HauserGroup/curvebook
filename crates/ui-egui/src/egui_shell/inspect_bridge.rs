@@ -91,10 +91,8 @@ pub enum HybridModalSurface {
     EguiGraphModal,
     /// Native `egui` `Export Figure` / `Print` utility modal (`R15.4`).
     EguiAppModal,
-    /// Native `egui` 5-category `Preferences` modal (`R15.4`).
+    /// Native `egui` 4-category `Preferences` modal (`R15.4`).
     EguiPreferences,
-    /// Native `egui` `Recovery` session restore modal (`R15.4`).
-    EguiRecoveryDialog,
     /// Native `egui` `Find & Replace` modal (`R15.4`).
     EguiFindReplace,
 }
@@ -216,8 +214,6 @@ impl HybridCoexistenceArbiter {
 
         let modal_surface = if host_close_dialog_open || views.app_modals.unsaved_changes_open {
             HybridModalSurface::HostUnsavedClose
-        } else if views.app_modals.recovery_open {
-            HybridModalSurface::EguiRecoveryDialog
         } else if views.app_modals.preferences_open {
             HybridModalSurface::EguiPreferences
         } else if views.app_modals.find_replace_open {
@@ -1105,7 +1101,6 @@ pub fn render_egui_shell_frame_with_host(
         | HybridModalSurface::EguiAppModal
         | HybridModalSurface::HostUnsavedClose
         | HybridModalSurface::EguiPreferences
-        | HybridModalSurface::EguiRecoveryDialog
         | HybridModalSurface::EguiFindReplace => {
             let app_rep = render_app_modal(&ctx, app, &mut views.app_modals, host_close_dialog_open, &tokens, meta, intents);
             report.regions.dialog_rect_pt = app_rep.dialog_rect_pt;

@@ -872,8 +872,8 @@ impl CurveBookNativeApp {
         self.status_banner = None;
         if command_id == "app.preferences" {
             if let Ok(win) = self.runtime.window_mut(window_id) {
-                win.app_mut().egui_views.app_modals.preferences.shortcut_conflict_error = None;
-                win.app_mut().egui_views.app_modals.preferences_open = true;
+                let shortcuts = win.app().shortcuts.clone();
+                win.app_mut().egui_views.app_modals.open_preferences(&shortcuts, None);
             }
             return;
         }

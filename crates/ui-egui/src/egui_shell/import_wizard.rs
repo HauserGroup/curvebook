@@ -326,6 +326,16 @@ fn render_step_source(
             for ds in &app.document().data_sheets {
                 let sel = wiz.source_sheet_id.as_ref() == Some(&ds.id);
                 let sr = choice_pill(row, tokens, &ds.title, sel, true);
+                record_wiz_node(
+                    row,
+                    meta,
+                    &format!("import_paste.source_sheet.{}", ds.id.as_str()),
+                    "radio",
+                    &ds.title,
+                    Some(sel.to_string()),
+                    true,
+                    &sr,
+                );
                 if sr.clicked() {
                     wiz.source_sheet_id = Some(ds.id.clone());
                     dirty = true;
@@ -696,8 +706,12 @@ fn render_step_metadata(
         let reset_r = widgets::secondary_button(row, "Reset Defaults");
         record_wiz_node(row, meta, "import_paste.btn.reset_defaults", "button", "Reset Defaults", None, true, &reset_r);
         if reset_r.clicked() {
-            let fresh =
-                ImportPasteWizardState { open: true, raw_clipboard_text: wiz.raw_clipboard_text.clone(), ..ImportPasteWizardState::default() };
+            let fresh = ImportPasteWizardState {
+                open: true,
+                raw_clipboard_text: wiz.raw_clipboard_text.clone(),
+                target_sheet_id: wiz.target_sheet_id.clone(),
+                ..ImportPasteWizardState::default()
+            };
             intents.push_update_import_wizard(fresh);
             return;
         }

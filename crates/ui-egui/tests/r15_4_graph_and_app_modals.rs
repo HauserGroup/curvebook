@@ -17,7 +17,7 @@ use curvebook_doc::{
 use curvebook_engine::Session;
 use curvebook_palette::{ColorRamp, ColormapId};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
-use curvebook_ui_egui::egui_shell::app_modals::{PreferencesCategory, RecoveryDecision, RecoveryDialogSummary, UnsavedCloseAction};
+use curvebook_ui_egui::egui_shell::app_modals::{PreferencesCategory, UnsavedCloseAction};
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy};
 use curvebook_ui_egui::egui_shell::inspect_bridge::{check_accesskit_scrollbar_non_overlap, render_egui_shell_frame};
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, UiBackend};
@@ -410,23 +410,12 @@ fn export_conditional_formats_print_recovery_unsaved_and_find_replace() -> Resul
         assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
     }
 
-    // 3. Recovery, Unsaved Changes, Find & Replace, About
+    // 3. Unsaved Changes, Find & Replace, About
     {
         let mut app = base_app;
         let _ = app.execute_command("sheet.select", json!({ "sheet_id": col_id.as_str() }));
-        app.egui_views.app_modals.recovery_summary = RecoveryDialogSummary {
-            source_path: Some(String::from("assay.cb")),
-            warning_lines: vec![String::from("2 unsaved operations recovered")],
-            replayed_commands: 2,
-            dirty_timestamp_utc: Some(String::from("2026-11-20T00:00:00Z")),
-        };
-        app.egui_views.app_modals.recovery_open = true;
+        app.egui_views.app_modals.unsaved_changes_open = true;
         let mut driver = make_driver(ModalTestState::new(app), ViewportMetrics::new(1440.0, 600.0, 1.0));
-        driver.click_widget_id("modal.restore")?;
-        assert_eq!(driver.state().app.egui_views.app_modals.last_recovery_decision, Some(RecoveryDecision::RestoreSession));
-
-        driver.state_mut().views.app_modals.unsaved_changes_open = true;
-        driver.run_settled();
         driver.click_widget_id("dialog.button.dont_save")?;
         assert_eq!(driver.state().app.egui_views.app_modals.pending_unsaved_action, Some(UnsavedCloseAction::DontSave));
 
@@ -482,17 +471,32 @@ fn preferences_5_categories_14_locales_and_shortcut_conflict_guard() -> Result<(
     assert!(driver.state().views.app_modals.preferences.shortcut_conflict_error.is_some());
     assert!(driver.frame_meta().find_by_widget_id("prefs.shortcuts.conflict").is_some());
 
-    // Valid non-conflicting combo updates binding cleanly.
+    // Valid non-conflicting combo stages in the modal draft until OK (`R15-GUI-25`).
+    let original_save_combo =
+        driver.state().app.shortcuts.bindings().find(|b| b.command_id == "project.save").ok_or("missing project.save binding")?.active_combo.clone();
     driver.state_mut().views.app_modals.preferences.shortcut_combo_draft = String::from("Ctrl+Alt+Y");
     driver.run_settled();
     driver.click_widget_id("prefs.shortcuts.apply")?;
     assert!(driver.state().views.app_modals.preferences.shortcut_conflict_error.is_none());
-    let updated = driver.state().app.shortcuts.bindings().find(|b| b.command_id == "project.save").ok_or("missing project.save binding")?;
-    assert_eq!(updated.active_combo, "Ctrl+Alt+Y");
+    let staged = driver
+        .state()
+        .views
+        .app_modals
+        .preferences
+        .staged_shortcuts
+        .as_ref()
+        .and_then(|s| s.get("project.save"))
+        .ok_or("missing staged project.save binding")?;
+    assert_eq!(staged.active_combo, "Ctrl+Alt+Y");
+    assert_eq!(
+        driver.state().app.shortcuts.active_combo("project.save"),
+        Some(original_save_combo.as_str()),
+        "staged shortcut must not mutate live app.shortcuts before OK"
+    );
 
-    driver.click_widget_id("prefs.shortcuts.reset_all")?;
     driver.click_widget_id("modal.ok")?;
     assert!(!driver.state().app.egui_views.app_modals.preferences_open);
+    assert_eq!(driver.state().app.shortcuts.active_combo("project.save"), Some("Ctrl+Alt+Y"));
     Ok(())
 }
 
