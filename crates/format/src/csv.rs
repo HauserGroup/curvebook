@@ -1448,7 +1448,7 @@ fn place_grid_in_datasheet(
 
     ensure_sheet_capacity(target, needed_rows, start_col, placement.anchor.subcol, grid_cols)?;
     if placement.mode == PlacementMode::InsertRows && start_row < existing_rows {
-        shift_archetype_rows_down(&mut target.archetype, start_row, grid_rows, existing_rows);
+        target.archetype.shift_rows_down(start_row, grid_rows, existing_rows);
     }
     if let Some(hdrs) = headers {
         apply_headers_to_sheet(target, start_col, placement.anchor.subcol, hdrs)?;
@@ -1654,76 +1654,6 @@ fn ensure_sheet_capacity(
         }
     }
     Ok(())
-}
-
-fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
-    if let Some(slice) = rows.get_mut(start_row..end_row)
-        && shift < slice.len()
-    {
-        slice.rotate_right(shift);
-    }
-}
-
-fn shift_archetype_rows_down(arch: &mut TableArchetype, start_row: usize, insert_rows: usize, existing_rows: usize) {
-    if insert_rows == 0 || start_row >= existing_rows {
-        return;
-    }
-    let end = existing_rows + insert_rows;
-    match arch {
-        TableArchetype::Xy(t) => {
-            rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Column(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Grouped(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            if let Some(spacing) = &mut t.row_numeric_spacing {
-                rotate_rows_down(spacing, start_row, insert_rows, end);
-            }
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Contingency(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Survival(t) => {
-            rotate_rows_down(&mut t.times, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.cohorts {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::PartsOfWhole(t) => {
-            rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::MultipleVariables(mv) => {
-            rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
-            for var in &mut mv.variables {
-                rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Nested(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for grp in &mut t.groups {
-                rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
-            }
-        }
-    }
 }
 
 fn grow_datasets(data_sets: &mut Vec<DataSetColumn>, needed_cols: usize, needed_rows: usize, subs: usize) -> Result<(), FormatError> {
