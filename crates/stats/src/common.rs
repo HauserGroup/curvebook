@@ -159,6 +159,14 @@ pub fn ci_cell(lower: f64, upper: f64) -> ResultCell {
     ResultCell::ConfidenceInterval { lower: lo, upper: hi }
 }
 
+/// Build a [`ResultCell::ConfidenceInterval`] when neither bound is `NaN`, or [`ResultCell::Empty`]
+/// if either bound is missing (`NaN`). Infinite bounds still delegate to [`ci_cell`] and render as
+/// [`CiBound::Open`].
+#[must_use]
+pub fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
+    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
+}
+
 /// Build a [`ResultCell::ConfidenceInterval`] from `Option<(f64, f64)>`.
 #[must_use]
 pub fn opt_ci_cell(bounds: Option<(f64, f64)>) -> ResultCell {
@@ -692,4 +700,22 @@ pub fn select_kth_upper_triangle_half_sum(sorted_x: &[f64], k: u64) -> Result<f6
     let n = sorted_x.len();
     let init_left: Vec<usize> = (0..n).collect();
     select_kth_monotone_matrix(&init_left, n, k, |i, j| normalize_zero(0.5 * sorted_x[i] + 0.5 * sorted_x[j]))
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{CiBound, ResultCell};
+
+    use super::{ci_cell, finite_ci_cell};
+
+    #[test]
+    fn finite_ci_cell_distinguishes_missing_nan_from_open_infinity() {
+        assert_eq!(finite_ci_cell(1.0, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.0), upper: CiBound::Finite(2.0) });
+        assert_eq!(finite_ci_cell(f64::NEG_INFINITY, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.0) });
+        assert_eq!(finite_ci_cell(1.0, f64::INFINITY), ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.0), upper: CiBound::Open });
+        assert_eq!(finite_ci_cell(f64::NAN, 2.0), ResultCell::Empty);
+        assert_eq!(finite_ci_cell(1.0, f64::NAN), ResultCell::Empty);
+        // Existing `ci_cell` keeps mapping non-finite (including NaN) to `CiBound::Open`.
+        assert_eq!(ci_cell(f64::NAN, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.0) });
+    }
 }

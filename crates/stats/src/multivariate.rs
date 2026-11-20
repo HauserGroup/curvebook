@@ -47,8 +47,8 @@ use curvebook_math::sum::{NeumaierSum, SummaryMoments, pearson_r};
 use serde::{Deserialize, Serialize};
 
 use crate::common::{
-    build_tab, checklist_item, ci_cell, extract_numeric_columns, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, quantile_sorted,
-    rank_with_ties, resolve_selected_indices, t_crit_two_sided, validate_finite_slice,
+    build_tab, checklist_item, ci_cell, extract_numeric_columns, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar,
+    quantile_sorted, rank_with_ties, resolve_selected_indices, t_crit_two_sided, validate_finite_slice,
 };
 use crate::error::StatsError;
 use crate::multiplicity::adjust_benjamini_hochberg;
@@ -2529,10 +2529,6 @@ fn extract_mi_columns(
     };
 
     Ok(ExtractedMiData { labels, cols: padded_cols, model_response_col, model_predictor_cols })
-}
-
-fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
-    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
 }
 
 fn populate_mi_result_sheet(out: &mut ResultSheet, res: &MultipleImputationResult, p_fmt: curvebook_doc::PValueFormat, confidence: ConfidenceLevel) {

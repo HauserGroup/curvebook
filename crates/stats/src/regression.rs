@@ -26,7 +26,9 @@ use curvebook_math::linalg::{DenseMatrix, cholesky, solve_linear_least_squares, 
 use curvebook_math::sum::{NeumaierSum, SummaryMoments};
 use serde::{Deserialize, Serialize};
 
-use crate::common::{build_tab, checklist_item, ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, validate_finite_slice};
+use crate::common::{
+    build_tab, checklist_item, ci_cell, finite_ci_cell, init_result_sheet, num_cell, opt_num_cell, p_cell, push_scalar, validate_finite_slice,
+};
 use crate::error::StatsError;
 use crate::roc::{RocCiMethod, roc_curve_analysis};
 
@@ -2052,10 +2054,6 @@ fn append_linear_type_iii_tab(
         ));
     }
     Ok(())
-}
-
-fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
-    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
 }
 
 fn populate_linear_glm_sheet(
