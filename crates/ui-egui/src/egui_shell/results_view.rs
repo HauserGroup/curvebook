@@ -762,7 +762,11 @@ fn paint_table_cell_text(ui: &egui::Ui, rect: Rect, text: &str, color: egui::Col
         egui::Align::LEFT => rect.left() + pad_x,
     };
     let y = rect.center().y - size.y * 0.5;
-    ui.painter().with_clip_rect(rect).galley(pos2(x, y), galley, color);
+    let clipped = ui.clip_rect().intersect(rect);
+    if !clipped.is_positive() {
+        return elided;
+    }
+    ui.painter().with_clip_rect(clipped).galley(pos2(x, y), galley, color);
     elided
 }
 

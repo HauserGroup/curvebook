@@ -1061,6 +1061,7 @@ pub enum UiIntent {
     GridCopySelection,
     GridCutSelection,
     GridPasteFromClipboard { start_coord: Option<curvebook_tools::GridCellCoord> },
+    WorkspaceCopy { dpi: u16 },
     SetAnalyzeQuery { query: String },
     SelectAnalyzeEntry { entry_id: String, clear_duplicate_prompt: bool },
     ToggleAnalyzeDataset { col_index: usize },
@@ -1391,6 +1392,11 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::GridPasteFromClipboard { start_coord });
     }
 
+    /// Copy selection or active Graph/Layout vector [`ClipboardBundle`] cleanly on commit.
+    pub fn push_workspace_copy(&mut self, dpi: u16) {
+        self.queue.push(UiIntent::WorkspaceCopy { dpi });
+    }
+
     /// Update the live `Analyze...` instant search query.
     pub fn push_set_analyze_query(&mut self, query: impl Into<String>) {
         self.queue.push(UiIntent::SetAnalyzeQuery { query: query.into() });
@@ -1618,6 +1624,9 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
     match intent {
         UiIntent::EngineCommand { command_id, params } => {
             let outcome = app.execute_session_ui_cmd(&command_id, params)?;
+            if matches!(command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
+                crate::interaction::clear_inspector_axis_buffers(app);
+            }
             Ok(UiIntentOutcome::Engine { command_id, outcome })
         }
         UiIntent::UiCommand { command_id, params } => {
@@ -1829,7 +1838,8 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::CloseTransformModal
         | UiIntent::GridCopySelection
         | UiIntent::GridCutSelection
-        | UiIntent::GridPasteFromClipboard { .. } => apply_wave4_grid_wizard_intent(app, intent),
+        | UiIntent::GridPasteFromClipboard { .. }
+        | UiIntent::WorkspaceCopy { .. } => apply_wave4_grid_wizard_intent(app, intent),
         UiIntent::SetAnalyzeQuery { .. }
         | UiIntent::SelectAnalyzeEntry { .. }
         | UiIntent::ToggleAnalyzeDataset { .. }
@@ -1971,8 +1981,38 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
         UiIntent::GridCopySelection => execute_grid_clipboard_copy(app, false),
         UiIntent::GridCutSelection => execute_grid_clipboard_copy(app, true),
         UiIntent::GridPasteFromClipboard { start_coord } => execute_grid_clipboard_paste(app, start_coord),
+        UiIntent::WorkspaceCopy { dpi } => execute_workspace_copy(app, dpi),
         _ => Ok(UiIntentOutcome::ShellUpdated),
     }
+}
+
+fn execute_workspace_copy(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, EngineError> {
+    if let Some(rs_id) = crate::interaction::resolve_result_sheet_for_shortcut(app, false) {
+        let mut results_state = std::mem::take(&mut app.view_shards.results);
+        let out = crate::views::results::handle_custom_action(app, &mut results_state, &format!("copy_selection:{}", rs_id.as_str()));
+        app.view_shards.results = results_state;
+        if let Ok(outcome) = out
+            && outcome.handled
+        {
+            return Ok(UiIntentOutcome::Ui {
+                command_id: outcome.command_id.unwrap_or_else(|| String::from("results.copy_selection")),
+                result: outcome.command_result,
+            });
+        }
+    }
+    if !app.egui_views.launcher_open
+        && !app.nav.welcome.open
+        && !app.nav.gallery.open
+        && let Some(fig_id) = crate::interaction::resolve_figure_sheet_for_shortcut(app)
+    {
+        let outcome =
+            crate::interaction::copy_figure_sheet_bundle_dpi(app, &fig_id, dpi).map_err(|msg| EngineError::with_code(ErrorCode::Conflict, msg))?;
+        return Ok(UiIntentOutcome::Ui { command_id: outcome.command_id.unwrap_or(outcome.action), result: outcome.command_result });
+    }
+    if app.session.document().active_sheet_id.as_ref().is_some_and(|id| app.session.document().data_sheet(id).is_some()) {
+        return execute_grid_clipboard_copy(app, false);
+    }
+    Ok(UiIntentOutcome::ShellUpdated)
 }
 
 fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOutcome, EngineError> {

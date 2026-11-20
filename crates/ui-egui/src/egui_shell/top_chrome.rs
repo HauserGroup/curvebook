@@ -10,8 +10,10 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, SplitWorkspaceState};
 use crate::egui_shell::inspect_bridge::HybridCoexistenceDecision;
 use crate::egui_shell::top_bar_fit::{MIN_SWITCHER_PT, RightWidths, SearchVisibility, fit_right_group};
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset};
-use crate::i18n::{BETA_ACTIVE_LOCALES, normalize_locale};
+use crate::egui_shell::{
+    FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset,
+};
+use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
 use crate::interaction::resolve_result_sheet_for_shortcut;
 use crate::layout::ZLayer;
 use crate::menus::{CommandTooltip, command_tooltip, menu_bar_tooltips};
@@ -499,7 +501,7 @@ fn render_inline_menu_bar(
                         state.active_in_window_menu = Some(String::from("menu.bar.overflow"));
                         for sec in &sections[visible_count..] {
                             ui.menu_button(&sec.title, |ui| {
-                                render_section_menu_items(ui, &sec.menu_key, &sec.items, intents);
+                                render_section_menu_items(ui, &sec.menu_key, &sec.items, tokens.locale, meta, intents);
                             });
                         }
                     });
@@ -564,14 +566,70 @@ fn render_top_menu_button(
     if enabled {
         egui::Popup::menu(&resp).show(|ui| {
             state.active_in_window_menu = Some(sec.menu_key.clone());
-            render_section_menu_items(ui, &sec.menu_key, &sec.items, intents);
+            render_section_menu_items(ui, &sec.menu_key, &sec.items, tokens.locale, meta, intents);
+            let popup_rect = ui.min_rect().intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+            if popup_rect.is_positive() {
+                let popup_id = ui.scope_id().with(("popup", &sec.menu_key));
+                meta.record(FrameInspectNodeMeta {
+                    egui_id: popup_id,
+                    accesskit_id: popup_id.accesskit_id(),
+                    widget_id: format!("popup.{}", sec.menu_key),
+                    role: String::from("menu"),
+                    label: sec.title.clone(),
+                    command_id: None,
+                    value: Some(json!(true)),
+                    enabled: true,
+                    disabled_reason: None,
+                    clipped_rect: popup_rect,
+                    z_layer: ZLayer::DropdownMenu,
+                    ellipsized: false,
+                    full_label: None,
+                });
+            }
         });
     }
 }
 
-fn render_section_menu_items(ui: &mut egui::Ui, menu_key: &str, items: &[InWindowMenuItemParity], intents: &mut PendingUiIntents) {
+struct MenuPopupInspect<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    command_id: Option<&'a str>,
+    selected: Option<bool>,
+    enabled: bool,
+}
+
+fn record_menu_popup_response(ui: &egui::Ui, resp: &egui::Response, meta: &mut FrameInspectMeta, spec: MenuPopupInspect<'_>) {
+    if !resp.rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
+        return;
+    }
+    meta.record_response(
+        ui,
+        resp,
+        FrameInspectEntryInput {
+            widget_id: spec.widget_id,
+            role: "menuitem",
+            label: spec.label,
+            command_id: spec.command_id,
+            value: spec.selected.map(|s| json!(s)),
+            enabled: spec.enabled,
+            disabled_reason: modal_reason(spec.enabled),
+            z_layer: ZLayer::DropdownMenu,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+}
+
+fn render_section_menu_items(
+    ui: &mut egui::Ui,
+    menu_key: &str,
+    items: &[InWindowMenuItemParity],
+    current_locale: &str,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
     for item in items {
-        render_menu_leaf_item(ui, item, intents);
+        render_menu_leaf_item(ui, item, current_locale, meta, intents);
     }
     if matches!(menu_key, "menu.file" | "file") {
         let mut added_sep = false;
@@ -591,10 +649,16 @@ fn render_section_menu_items(ui: &mut egui::Ui, menu_key: &str, items: &[InWindo
     }
 }
 
-fn render_menu_leaf_item(ui: &mut egui::Ui, item: &InWindowMenuItemParity, intents: &mut PendingUiIntents) {
+fn render_menu_leaf_item(
+    ui: &mut egui::Ui,
+    item: &InWindowMenuItemParity,
+    current_locale: &str,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
     let tooltip = if item.beginner.is_empty() { item.summary.clone() } else { format!("{}\n{}", item.summary, item.beginner) };
     if let Some(variants) = submenu_variants_for_command(&item.command_id) {
-        ui.menu_button(&item.label, |ui| {
+        let sub = ui.menu_button(&item.label, |ui| {
             for &(v_label, variant) in variants {
                 let mut btn = egui::Button::new(v_label);
                 if item.command_id == "ui.canvas.applyPreset" && !item.shortcut.is_empty() && variant == "SingleColumn88mm" {
@@ -607,20 +671,79 @@ fn render_menu_leaf_item(ui: &mut egui::Ui, item: &InWindowMenuItemParity, inten
                 }
             }
         });
+        record_menu_popup_response(
+            ui,
+            &sub.response,
+            meta,
+            MenuPopupInspect {
+                widget_id: &format!("menu.{}", item.command_id),
+                label: &item.label,
+                command_id: Some(&item.command_id),
+                selected: None,
+                enabled: item.enabled,
+            },
+        );
         return;
     }
 
     if item.command_id == "ui.locale.set" {
-        ui.menu_button(&item.label, |ui| {
-            for &loc in BETA_ACTIVE_LOCALES {
-                let canonical = normalize_locale(loc);
-                let caption = format!("{loc} ({canonical})");
-                if ui.button(caption).on_hover_text(&tooltip).clicked() {
-                    push_menu_command_intent(&item.command_id, Some(canonical), intents);
-                    ui.close();
+        let active_canonical = normalize_locale(current_locale);
+        let sub = ui.menu_button(&item.label, |ui| {
+            let scroll_out = egui::ScrollArea::vertical().id_salt("popup.menu.ui.locale.set").max_height(240.0).show(ui, |ui| {
+                for (idx, &loc) in LOCALES.iter().enumerate() {
+                    let canonical = normalize_locale(loc);
+                    let caption = locale_picker_label(loc);
+                    let opt_resp = ui.button(&caption).on_hover_text(&tooltip);
+                    record_menu_popup_response(
+                        ui,
+                        &opt_resp,
+                        meta,
+                        MenuPopupInspect {
+                            widget_id: &format!("popup.menu.ui.locale.set.opt.{idx}"),
+                            label: &caption,
+                            command_id: Some("ui.locale.set"),
+                            selected: Some(canonical == active_canonical),
+                            enabled: item.enabled,
+                        },
+                    );
+                    if opt_resp.clicked() {
+                        push_menu_command_intent(&item.command_id, Some(canonical), intents);
+                        ui.close();
+                    }
                 }
+            });
+            let popup_rect = scroll_out.inner_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+            if popup_rect.is_positive() {
+                let popup_id = ui.scope_id().with("popup.menu.ui.locale.set");
+                meta.record(FrameInspectNodeMeta {
+                    egui_id: popup_id,
+                    accesskit_id: popup_id.accesskit_id(),
+                    widget_id: String::from("popup.menu.ui.locale.set"),
+                    role: String::from("menu"),
+                    label: item.label.clone(),
+                    command_id: Some(String::from("ui.locale.set")),
+                    value: None,
+                    enabled: item.enabled,
+                    disabled_reason: None,
+                    clipped_rect: popup_rect,
+                    z_layer: ZLayer::DropdownMenu,
+                    ellipsized: false,
+                    full_label: None,
+                });
             }
         });
+        record_menu_popup_response(
+            ui,
+            &sub.response,
+            meta,
+            MenuPopupInspect {
+                widget_id: "menu.ui.locale.set",
+                label: &item.label,
+                command_id: Some("ui.locale.set"),
+                selected: None,
+                enabled: item.enabled,
+            },
+        );
         return;
     }
 
@@ -629,6 +752,18 @@ fn render_menu_leaf_item(ui: &mut egui::Ui, item: &InWindowMenuItemParity, inten
         btn = btn.shortcut_text(&item.shortcut);
     }
     let resp = ui.add_enabled(item.enabled, btn).on_hover_text(&tooltip).on_disabled_hover_text(&tooltip);
+    record_menu_popup_response(
+        ui,
+        &resp,
+        meta,
+        MenuPopupInspect {
+            widget_id: &format!("menu.{}", item.command_id),
+            label: &item.label,
+            command_id: Some(&item.command_id),
+            selected: None,
+            enabled: item.enabled,
+        },
+    );
     if resp.clicked() {
         push_menu_command_intent(&item.command_id, None, intents);
         ui.close();

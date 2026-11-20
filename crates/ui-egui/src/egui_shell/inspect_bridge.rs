@@ -864,7 +864,7 @@ pub fn render_egui_shell_frame_with_host(
     let mut report = ShellAboutFrameReport { decision: Some(decision), ..ShellAboutFrameReport::default() };
 
     views.sync_history_with_document(app.document());
-    handle_shell_global_shortcuts(&ctx, app, &decision, intents);
+    handle_shell_global_shortcuts(&ctx, app, views, &decision, intents);
 
     let content_rect = ctx.content_rect();
     let layout = tokens.metrics.solve_shell_layout(ShellLayoutInput {
@@ -1078,8 +1078,14 @@ pub fn render_egui_shell_frame_with_host(
     report
 }
 
-fn handle_shell_global_shortcuts(ctx: &egui::Context, app: &UiApp, decision: &HybridCoexistenceDecision, intents: &mut PendingUiIntents) {
-    let egui_wants_kb = ctx.egui_wants_keyboard_input();
+fn handle_shell_global_shortcuts(
+    ctx: &egui::Context,
+    app: &UiApp,
+    views: &EguiShellViewState,
+    decision: &HybridCoexistenceDecision,
+    intents: &mut PendingUiIntents,
+) {
+    let egui_wants_kb = ctx.egui_wants_keyboard_input() || views.column_grid.inline_edit.is_some();
     if HybridCoexistenceArbiter::allows_cmd_t_edit_params(app, decision, egui_wants_kb)
         && ctx.input_mut(|i| {
             i.consume_key(Modifiers::COMMAND, Key::T) || i.consume_key(Modifiers::CTRL, Key::T) || i.consume_key(Modifiers::MAC_CMD, Key::T)
@@ -1095,6 +1101,45 @@ fn handle_shell_global_shortcuts(ctx: &egui::Context, app: &UiApp, decision: &Hy
     }) {
         intents.push_set_palette_open(true);
     }
+    let shift_cmd = Modifiers::COMMAND | Modifiers::SHIFT;
+    let shift_ctrl = Modifiers::CTRL | Modifiers::SHIFT;
+    let shift_mac = Modifiers::MAC_CMD | Modifiers::SHIFT;
+    if ctx.input_mut(|i| {
+        i.consume_key(shift_cmd, Key::Z)
+            || i.consume_key(shift_ctrl, Key::Z)
+            || i.consume_key(shift_mac, Key::Z)
+            || i.consume_key(Modifiers::COMMAND, Key::Y)
+            || i.consume_key(Modifiers::CTRL, Key::Y)
+            || i.consume_key(Modifiers::MAC_CMD, Key::Y)
+    }) {
+        if app.session().redo_depth() > 0 {
+            intents.push_engine("edit.redo", json!({}));
+        }
+    } else if ctx.input_mut(|i| {
+        i.consume_key(Modifiers::COMMAND, Key::Z) || i.consume_key(Modifiers::CTRL, Key::Z) || i.consume_key(Modifiers::MAC_CMD, Key::Z)
+    }) && app.session().undo_depth() > 0
+    {
+        intents.push_engine("edit.undo", json!({}));
+    }
+    let copy_triggered = ctx.input_mut(|i| {
+        let mut hit = false;
+        i.events.retain(|ev| {
+            if matches!(ev, egui::Event::Copy) {
+                hit = true;
+                false
+            } else {
+                true
+            }
+        });
+        if i.consume_key(Modifiers::COMMAND, Key::C) || i.consume_key(Modifiers::CTRL, Key::C) || i.consume_key(Modifiers::MAC_CMD, Key::C) {
+            hit = true;
+        }
+        hit
+    });
+    if copy_triggered {
+        let dpi = ViewportMetrics::new(1.0, 1.0, f64::from(ctx.pixels_per_point())).dpi_for_base(144);
+        intents.push_workspace_copy(dpi);
+    }
     if ctx.input_mut(|i| {
         i.consume_key(Modifiers::COMMAND, Key::Backslash)
             || i.consume_key(Modifiers::CTRL, Key::Backslash)
@@ -1102,14 +1147,11 @@ fn handle_shell_global_shortcuts(ctx: &egui::Context, app: &UiApp, decision: &Hy
     }) {
         intents.push_ui("ui.split.toggle", json!({}));
     }
-    let shift_cmd_p = Modifiers::COMMAND | Modifiers::SHIFT;
-    let shift_ctrl_p = Modifiers::CTRL | Modifiers::SHIFT;
-    let shift_mac_p = Modifiers::MAC_CMD | Modifiers::SHIFT;
     let toggle_presentation = ctx.input_mut(|i| {
         i.consume_key(Modifiers::NONE, Key::F11)
-            || i.consume_key(shift_cmd_p, Key::P)
-            || i.consume_key(shift_ctrl_p, Key::P)
-            || i.consume_key(shift_mac_p, Key::P)
+            || i.consume_key(shift_cmd, Key::P)
+            || i.consume_key(shift_ctrl, Key::P)
+            || i.consume_key(shift_mac, Key::P)
     }) || (app.presentation_mode && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)));
     if toggle_presentation {
         intents.push_ui("ui.presentation.toggle", json!({}));

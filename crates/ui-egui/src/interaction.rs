@@ -2775,7 +2775,7 @@ pub(crate) fn resolve_result_sheet_for_shortcut(app: &UiApp, allow_any_split_fal
     None
 }
 
-fn resolve_figure_sheet_for_shortcut(app: &UiApp) -> Option<SheetId> {
+pub(crate) fn resolve_figure_sheet_for_shortcut(app: &UiApp) -> Option<SheetId> {
     let doc = app.document();
     let is_figure = |id: &SheetId| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some();
     if app.split.enabled {
@@ -2790,8 +2790,11 @@ fn resolve_figure_sheet_for_shortcut(app: &UiApp) -> Option<SheetId> {
 }
 
 fn copy_figure_sheet_bundle(app: &mut UiApp, sheet_id: &SheetId, metrics: ViewportMetrics) -> Result<UiEventOutcome, String> {
-    let dpi = metrics.dpi_for_base(144);
-    let bundle = crate::os_integration::ClipboardBundle::from_sheet(app.session(), sheet_id, dpi)?;
+    copy_figure_sheet_bundle_dpi(app, sheet_id, metrics.dpi_for_base(144))
+}
+
+pub(crate) fn copy_figure_sheet_bundle_dpi(app: &mut UiApp, sheet_id: &SheetId, dpi: u16) -> Result<UiEventOutcome, String> {
+    let bundle = crate::os_integration::ClipboardBundle::from_sheet(app.session(), sheet_id, dpi.max(72))?;
     let flavors = bundle.available_flavors();
     let pdf_bytes = bundle.pdf_bytes.len();
     let svg_bytes = bundle.svg.len();
