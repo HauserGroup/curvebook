@@ -2844,6 +2844,8 @@ mod tests {
                     win.execute_and_journal("table.setCell", json!({ "sheet_id": "col-h1", "row": row, "col": col, "value": val }))?;
                 }
             }
+            // Case B explicitly exercises cropped legacy AnalyzeSheet hybrid coexistence over the egui Column grid.
+            win.app_mut().egui_views.native_analyze_sheet = false;
         }
 
         let (req_tx, req_rx) = mpsc::channel();

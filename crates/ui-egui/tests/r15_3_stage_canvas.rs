@@ -827,13 +827,27 @@ fn canvas_view_async_raster_hover_pairwise_cld_km_tex_layout_drilldown() -> Resu
 
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "lay-1" }))?;
     driver.run_settled();
+    for _ in 0..24 {
+        if !driver.state().view.slot.rendering_in_flight {
+            break;
+        }
+        std::thread::sleep(std::time::Duration::from_millis(25));
+        driver.run_settled();
+    }
     let p0_center = driver.frame_meta().find_by_widget_id("canvas.layout_panel.0").expect("panel 0").clipped_rect.center();
     driver.drag(p0_center, pos2(p0_center.x + 8.0, p0_center.y + 1.0))?;
     assert!(driver.state().view.last_snap_readout.as_deref().is_some_and(|s| s.contains("0.1 pt")));
 
     let p0_center2 = driver.frame_meta().find_by_widget_id("canvas.layout_panel.0").expect("panel 0").clipped_rect.center();
-    driver.click_at(p0_center2)?;
-    driver.click_at(p0_center2)?;
+    driver.dispatch_events(vec![
+        egui::Event::PointerMoved(p0_center2),
+        egui::Event::PointerButton { pos: p0_center2, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        egui::Event::PointerButton { pos: p0_center2, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
+    driver.dispatch_events(vec![
+        egui::Event::PointerButton { pos: p0_center2, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+        egui::Event::PointerButton { pos: p0_center2, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+    ]);
     assert_eq!(driver.state().app.document().active_sheet_id.as_ref().map(SheetId::as_str), Some("g-1"));
     assert!(driver.state().breadcrumb, "Return to Layout breadcrumb must show after double-click drill-down");
 
