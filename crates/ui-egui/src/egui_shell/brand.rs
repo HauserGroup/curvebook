@@ -80,11 +80,7 @@ mod tests {
             let uploads = out.textures_delta.set.values().flat_map(|d| d.iter()).filter(|d| d.image.size() == [128, 128]).count();
             out.textures_delta.clear();
             let tex_id = texture_id(&ctx);
-            let painted = out
-                .shapes
-                .iter()
-                .filter(|clipped| matches!(&clipped.shape, egui::Shape::Mesh(m) if m.texture_id == tex_id))
-                .count();
+            let painted = out.shapes.iter().filter(|clipped| matches!(&clipped.shape, egui::Shape::Mesh(m) if m.texture_id == tex_id)).count();
             (uploads, painted)
         };
 

@@ -533,4 +533,25 @@ fn journal_v1_crc_verified_before_v2_upgrade_and_batch_manifest_normalizes() {
     );
     assert!(normalize_batch_manifest_v1(&mut manifest).is_ok());
     assert!(normalize_batch_manifest_v1(&mut serde_json::json!({ "schema": "curvebook.batch.v2" })).is_err());
+
+    // 4. `graph.addAnnotation` combining `"type": "shape"` and `"color"` upgrades `"type" -> "kind"`
+    // before reading `"kind"`, so `"color"` also resolves to `"stroke_color"` in one pass.
+    let mut ann_manifest = serde_json::json!({
+        "schema": BATCH_SCHEMA_V1,
+        "commands": [{
+            "cmd": "graph.addAnnotation",
+            "params": { "id": "g1", "type": "shape", "color": "#ff0000", "rect_pt": { "x": 10.0, "y": 10.0, "width": 50.0, "height": 20.0 } }
+        }]
+    });
+    let ann_warnings = normalize_batch_manifest_v1_with_warnings(&mut ann_manifest).unwrap();
+    assert_eq!(ann_warnings.len(), 4, "expected 4 warnings, got {ann_warnings:?}");
+    assert_eq!(
+        ann_manifest["commands"][0]["params"],
+        serde_json::json!({
+            "sheet_id": "g1",
+            "kind": "shape",
+            "stroke_color": "#ff0000",
+            "bounds_pt": { "x": 10.0, "y": 10.0, "width": 50.0, "height": 20.0 }
+        })
+    );
 }

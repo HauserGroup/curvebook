@@ -98,6 +98,18 @@ struct ParsedManifest {
     inputs: Vec<BatchInputSpec>,
     commands: Vec<ParsedCommand>,
     exports: Vec<BatchExportSpec>,
+    warnings: Vec<String>,
+}
+
+struct ExecutedCommands {
+    results: Vec<Value>,
+    warnings: Vec<String>,
+}
+
+fn push_unique_warning(out: &mut Vec<String>, warning: String) {
+    if !out.contains(&warning) {
+        out.push(warning);
+    }
 }
 
 /// Execute `curvebook-cli run <script> [--workdir <dir>] [--json]`.
@@ -112,20 +124,25 @@ pub fn run_script(args: &[String]) -> Result<(), CliError> {
         if let Some(dir) = parsed.workdir.as_deref() {
             session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
         }
-        let results = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
+        let executed = execute_commands(&mut session, &commands, parsed.workdir.is_some())?;
 
         if parsed.json {
-            let payload = json!({
+            let mut payload = json!({
                 "ok": true,
                 "script": parsed.source_path,
-                "commands_executed": results.len(),
+                "commands_executed": executed.results.len(),
                 "total_sheets": session.document().total_sheet_count(),
-                "results": results,
+                "results": executed.results,
             });
+            if !executed.warnings.is_empty()
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(String::from("warnings"), json!(executed.warnings));
+            }
             let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
             println!("{text}");
         } else {
-            println!("executed {} command(s) cleanly (sheets: {})", results.len(), session.document().total_sheet_count());
+            println!("executed {} command(s) cleanly (sheets: {})", executed.results.len(), session.document().total_sheet_count());
         }
         Ok(())
     })
@@ -143,13 +160,25 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
         let resolver = build_resolver(parsed.workdir.as_deref(), &manifest_base)?;
         let raw_text = read_text_source(&parsed.source_path)?;
         let manifest = parse_batch_manifest(&raw_text, &resolver)?;
+        let mut all_warnings = Vec::new();
+        for w in &manifest.warnings {
+            eprintln!("warning: {w}");
+            push_unique_warning(&mut all_warnings, w.clone());
+        }
 
         let mut session = open_manifest_base_session(&manifest)?;
         if let Some(dir) = parsed.workdir.as_deref() {
             session.set_path_policy(ExternalPathPolicy::workdir(Path::new(dir))?);
         }
-        load_manifest_inputs(&mut session, &manifest.inputs)?;
-        let results = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
+        let input_warnings = load_manifest_inputs(&mut session, &manifest.inputs)?;
+        for w in input_warnings {
+            eprintln!("warning: {w}");
+            push_unique_warning(&mut all_warnings, w);
+        }
+        let executed = execute_commands(&mut session, &manifest.commands, parsed.workdir.is_some())?;
+        for w in executed.warnings {
+            push_unique_warning(&mut all_warnings, w);
+        }
         session.recalculate_all()?;
         ensure_no_failed_result_sheets(session.document())?;
 
@@ -176,20 +205,30 @@ pub fn run_batch(args: &[String]) -> Result<(), CliError> {
         }
 
         if parsed.json {
-            let payload = json!({
+            let mut payload = json!({
                 "ok": true,
                 "schema": BATCH_SCHEMA_V1,
                 "manifest": parsed.source_path,
                 "inputs_loaded": manifest.inputs.len(),
-                "commands_executed": results.len(),
+                "commands_executed": executed.results.len(),
                 "exports_written": export_summaries.len(),
                 "exports": export_summaries,
-                "results": results,
+                "results": executed.results,
             });
+            if !all_warnings.is_empty()
+                && let Some(obj) = payload.as_object_mut()
+            {
+                obj.insert(String::from("warnings"), json!(all_warnings));
+            }
             let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
             println!("{text}");
         } else {
-            println!("batch completed: {} input(s), {} command(s), {} export(s)", manifest.inputs.len(), results.len(), export_summaries.len());
+            println!(
+                "batch completed: {} input(s), {} command(s), {} export(s)",
+                manifest.inputs.len(),
+                executed.results.len(),
+                export_summaries.len()
+            );
         }
         Ok(())
     })
@@ -316,7 +355,7 @@ fn extract_cmd_name(map: &Map<String, Value>, line_label: usize) -> Result<Strin
 }
 
 fn parse_batch_manifest(raw_text: &str, resolver: &PathResolver) -> Result<ParsedManifest, CliError> {
-    let val: Value = serde_json::from_str(raw_text).map_err(|err| CliError::Schema(format!("invalid manifest JSON: {err}")))?;
+    let mut val: Value = serde_json::from_str(raw_text).map_err(|err| CliError::Schema(format!("invalid manifest JSON: {err}")))?;
     let Some(obj) = val.as_object() else {
         return Err(CliError::Schema(String::from("batch manifest root must be a JSON object")));
     };
@@ -325,6 +364,11 @@ fn parse_batch_manifest(raw_text: &str, resolver: &PathResolver) -> Result<Parse
     if schema != BATCH_SCHEMA_V1 {
         return Err(CliError::Schema(format!("manifest `schema` must be `{BATCH_SCHEMA_V1}` (got `{schema}`)")));
     }
+
+    let warnings = curvebook_format::normalize_batch_manifest_v1_with_warnings(&mut val).map_err(|err| CliError::Schema(err.to_string()))?;
+    let Some(obj) = val.as_object() else {
+        return Err(CliError::Schema(String::from("batch manifest root must be a JSON object")));
+    };
     reject_unknown_keys(obj, MANIFEST_ROOT_KEYS, "manifest")?;
 
     let template_path = parse_optional_resolved_path(obj, "template", resolver)?;
@@ -337,7 +381,7 @@ fn parse_batch_manifest(raw_text: &str, resolver: &PathResolver) -> Result<Parse
     let commands = parse_manifest_commands(obj.get("commands"), resolver)?;
     let exports = parse_manifest_exports(obj.get("exports"), resolver)?;
 
-    Ok(ParsedManifest { template_path, project_path, inputs, commands, exports })
+    Ok(ParsedManifest { template_path, project_path, inputs, commands, exports, warnings })
 }
 
 fn parse_optional_resolved_path(obj: &Map<String, Value>, key: &str, resolver: &PathResolver) -> Result<Option<PathBuf>, CliError> {
@@ -522,7 +566,9 @@ fn open_manifest_base_session(manifest: &ParsedManifest) -> Result<Session, CliE
     Ok(Session::new())
 }
 
-fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Result<(), CliError> {
+fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Result<Vec<String>, CliError> {
+    let cancelled = AtomicBool::new(false);
+    let mut warnings = Vec::new();
     for (idx, input) in inputs.iter().enumerate() {
         let csv_text = curvebook_platform::fs::read_regular_file_utf8(&input.csv_path, MAX_CSV_FILE_BYTES).map_err(|err| match err {
             PlatformError::FileTooLarge { .. } => CliError::from(err),
@@ -551,9 +597,12 @@ fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Res
             params.insert(String::from("decimal_separator"), Value::String(dec.clone()));
         }
 
-        session.execute("table.importCsv", Value::Object(params))?;
+        let outcome = session.execute_with_caller("table.importCsv", Value::Object(params), Caller::Cli, &cancelled)?;
+        for w in outcome.warnings {
+            push_unique_warning(&mut warnings, w);
+        }
     }
-    Ok(())
+    Ok(warnings)
 }
 
 fn resolve_existing_data_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) -> Option<String> {
@@ -566,8 +615,9 @@ fn resolve_existing_data_sheet_id(doc: &ProjectDocument, sheet: Option<&str>) ->
         .map(|d| d.id.as_str().to_owned())
 }
 
-fn execute_commands(session: &mut Session, commands: &[ParsedCommand], ensure_output_parents: bool) -> Result<Vec<Value>, CliError> {
+fn execute_commands(session: &mut Session, commands: &[ParsedCommand], ensure_output_parents: bool) -> Result<ExecutedCommands, CliError> {
     let mut results = Vec::with_capacity(commands.len());
+    let mut warnings = Vec::new();
     for entry in commands {
         let mut params = entry.params.clone();
         apply_command_convenience_defaults(session.document(), &entry.cmd, &mut params);
@@ -576,16 +626,26 @@ fn execute_commands(session: &mut Session, commands: &[ParsedCommand], ensure_ou
         }
         let cancelled = AtomicBool::new(false);
         let outcome = session.execute_with_caller(&entry.cmd, params, Caller::Cli, &cancelled)?;
-        results.push(json!({
+        for w in &outcome.warnings {
+            eprintln!("warning: {w}");
+            push_unique_warning(&mut warnings, w.clone());
+        }
+        let mut entry_json = json!({
             "index": entry.index,
             "id": entry.id,
             "cmd": entry.cmd,
             "mutated": outcome.mutated,
             "message": outcome.message,
             "result": outcome.payload,
-        }));
+        });
+        if !outcome.warnings.is_empty()
+            && let Some(obj) = entry_json.as_object_mut()
+        {
+            obj.insert(String::from("warnings"), json!(outcome.warnings));
+        }
+        results.push(entry_json);
     }
-    Ok(results)
+    Ok(ExecutedCommands { results, warnings })
 }
 
 fn apply_command_convenience_defaults(doc: &ProjectDocument, cmd: &str, params: &mut Value) {

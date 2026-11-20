@@ -1792,13 +1792,19 @@ fn execute_single_command(state: &mut McpServerState, command_id: &str, mut para
         let out = session.execute_with_caller(command_id, params, Caller::Mcp, &cancel)?;
         Ok::<_, EngineError>((out, session.is_dirty()))
     })?;
-    Ok(json!({
+    let mut payload = json!({
         "command_id": outcome.command_id,
         "mutated": outcome.mutated,
         "message": outcome.message,
         "payload": outcome.payload,
         "dirty": dirty,
-    }))
+    });
+    if !outcome.warnings.is_empty()
+        && let Some(map) = payload.as_object_mut()
+    {
+        map.insert(String::from("warnings"), json!(outcome.warnings));
+    }
+    Ok(payload)
 }
 
 #[cfg(not(target_arch = "wasm32"))]

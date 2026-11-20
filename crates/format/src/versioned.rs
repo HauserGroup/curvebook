@@ -228,8 +228,8 @@ pub fn validate_batch_manifest_version(value: &serde_json::Value) -> Result<(), 
 
 const JOURNAL_MIGRATION_STEPS: &[VersionStep] = &[VersionStep { from_version: 1, apply: migrate_journal_command_v1_to_v2 }];
 
-fn extract_object_kind(val: &serde_json::Value) -> Option<String> {
-    val.as_object().and_then(|obj| obj.get("kind")).and_then(serde_json::Value::as_str).map(str::to_owned)
+fn extract_object_kind(obj: &serde_json::Map<String, serde_json::Value>) -> Option<&str> {
+    obj.get("kind").and_then(serde_json::Value::as_str)
 }
 
 fn rename_key_if_present(obj: &mut serde_json::Map<String, serde_json::Value>, old_key: &str, canonical_key: &str) -> Option<(String, String)> {
@@ -254,10 +254,21 @@ fn normalize_command_params_recursive(
 ) {
     match val {
         serde_json::Value::Object(obj) => {
-            let local_kind = extract_object_kind(&serde_json::Value::Object(obj.clone()));
+            let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            // Upgrade any retired `"kind"` discriminant alias (e.g. `graph.addAnnotation`
+            // `"type" -> "kind"`) before reading `local_kind`, so sibling kind-dependent aliases
+            // (such as `"color" -> "stroke_color"` on `shape` annotations) resolve in one pass.
+            let pre_keys: Vec<String> = obj.keys().cloned().collect();
+            for key in pre_keys {
+                if canonical_command_param_alias(command_id, &path_refs, kind, &key) == Some("kind")
+                    && let Some(pair) = rename_key_if_present(obj, &key, "kind")
+                {
+                    hits.push(pair);
+                }
+            }
+            let local_kind = extract_object_kind(obj).map(str::to_owned);
             let eff_kind = local_kind.as_deref().or(kind);
             let keys: Vec<String> = obj.keys().cloned().collect();
-            let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
             for key in keys {
                 if let Some(canonical) = canonical_command_param_alias(command_id, &path_refs, eff_kind, &key)
                     && let Some(pair) = rename_key_if_present(obj, &key, canonical)
@@ -288,8 +299,7 @@ fn normalize_command_params_recursive(
 pub fn normalize_command_params_in_place(command_id: &str, params: &mut serde_json::Value) -> Vec<(String, String)> {
     let mut hits = Vec::new();
     let mut path = Vec::new();
-    let kind = extract_object_kind(params);
-    normalize_command_params_recursive(command_id, &mut path, kind.as_deref(), params, &mut hits);
+    normalize_command_params_recursive(command_id, &mut path, None, params, &mut hits);
     hits
 }
 

@@ -3,12 +3,12 @@
 use std::collections::HashSet;
 
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage, ContingencyMethod, ContingencySpec,
-    CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode, FactorialAnovaSpec, FitMethod, GlmFamily,
-    GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, ModelComparisonSpec, MultipleRowTestsSpec,
-    MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor,
-    OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope, PassingBablokSpec,
-    PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
+    AnalysisDomainKind, AnalysisKind, AnalysisSpec, BaselineOperation, BlandAltmanSpec, CellValue, ClusterDistance, ClusterLinkage,
+    ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DerivedColumnFormula, DescriptiveSpec, ErrorCode, ErrorPropagationMode,
+    FactorialAnovaSpec, FitMethod, GlmFamily, GlmSpec, HookSource, KappaWeighting, LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod,
+    ModelComparisonSpec, MultipleRowTestsSpec, MultipleVariablesTable, MultiplicityMethod, MultiplicitySpec, MultivariateSpec, NestedAnalysisSpec,
+    NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec, PValueStackMethod, PValueStackSpec, ParameterRule, ParameterScope,
+    PassingBablokSpec, PowerAnalysisSpec, PowerEffectSpec, PowerOneSidedDirection, PowerSolveTarget, PowerTailMode, PowerTestFamily, ProjectDocument,
     RepeatedMeasuresDesign, ResidualCovariance, ResultSheet, ResultStatus, RocCiMethod, RocSpec, SheetId, SimulationNoise, SumOfSquaresType,
     SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec, VariableColumn, VariableRole,
     WeightingScheme, XyTable,
@@ -1207,21 +1207,20 @@ fn default_multivariate_numeric_columns(mv: &curvebook_doc::MultipleVariablesTab
 
 fn domain_prefix(domain: AnalysisDomain) -> &'static str {
     match domain {
-        AnalysisDomain::TransformOnly => "tr",
-        AnalysisDomain::StatsOnly => "stat",
-        AnalysisDomain::FitOnly => "fit",
+        AnalysisDomain::TransformOnly => AnalysisDomainKind::Transform.default_sheet_prefix(),
+        AnalysisDomain::StatsOnly => AnalysisDomainKind::Stats.default_sheet_prefix(),
+        AnalysisDomain::FitOnly => AnalysisDomainKind::Fit.default_sheet_prefix(),
         AnalysisDomain::Any => "res",
     }
 }
 
 fn validate_domain_and_compat(kind: &AnalysisKind, domain: AnalysisDomain, table_kind: TableKind) -> Result<(), EngineError> {
+    let actual_domain = kind.descriptor().domain;
     let domain_ok = match domain {
         AnalysisDomain::Any => true,
-        AnalysisDomain::TransformOnly => matches!(kind, AnalysisKind::Transform(_)),
-        AnalysisDomain::FitOnly => matches!(kind, AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_)),
-        AnalysisDomain::StatsOnly => {
-            !matches!(kind, AnalysisKind::Transform(_) | AnalysisKind::LinearRegression(_) | AnalysisKind::NonlinearRegression(_))
-        }
+        AnalysisDomain::TransformOnly => actual_domain == AnalysisDomainKind::Transform,
+        AnalysisDomain::FitOnly => actual_domain == AnalysisDomainKind::Fit,
+        AnalysisDomain::StatsOnly => actual_domain == AnalysisDomainKind::Stats,
     };
     if !domain_ok {
         return Err(EngineError::with_code(ErrorCode::BadInput, "analysis kind does not match the requested command family"));
@@ -4282,5 +4281,48 @@ mod tests {
             .execute("analysis.updateParams", json!({ "sheet_id": "glm-ok", "params": { "predictor_columns": [99] } }))
             .expect_err("updateParams with invalid predictor_columns must fail cleanly");
         assert_eq!(update_err.code, ErrorCode::BadInput);
+    }
+
+    #[test]
+    fn all_descriptor_shorthands_resolve_and_validate_domain_and_table_compat() {
+        use curvebook_doc::{ALL_ANALYSIS_DESCRIPTORS, AnalysisDomainKind, AnalysisKindId, descriptor_by_shorthand};
+
+        let empty = json!({});
+        for desc in &ALL_ANALYSIS_DESCRIPTORS {
+            let expected_domain = match desc.domain {
+                AnalysisDomainKind::Transform => AnalysisDomain::TransformOnly,
+                AnalysisDomainKind::Stats => AnalysisDomain::StatsOnly,
+                AnalysisDomainKind::Fit => AnalysisDomain::FitOnly,
+            };
+            assert_eq!(domain_prefix(expected_domain), desc.domain.default_sheet_prefix());
+
+            for &shorthand in desc.shorthands {
+                assert_eq!(descriptor_by_shorthand(shorthand).map(|d| d.id), Some(desc.id), "descriptor lookup mismatch for `{shorthand}`");
+                let resolved =
+                    resolve_kind_shorthand(shorthand, &empty).unwrap_or_else(|err| panic!("shorthand `{shorthand}` failed to resolve: {err}"));
+                assert_eq!(resolved.id(), desc.id, "AnalysisKindId mismatch for `{shorthand}`");
+                assert_eq!(resolved.descriptor().domain, desc.domain, "domain mismatch for `{shorthand}`");
+
+                for tk in TableKind::ALL {
+                    let compat_res = validate_domain_and_compat(&resolved, expected_domain, tk);
+                    let any_res = validate_domain_and_compat(&resolved, AnalysisDomain::Any, tk);
+                    assert_eq!(compat_res.is_ok(), resolved.is_compatible_with(tk));
+                    assert_eq!(any_res.is_ok(), resolved.is_compatible_with(tk));
+                    if let Err(err) = compat_res {
+                        assert_eq!(err.code, ErrorCode::Conflict);
+                    }
+                    for wrong_domain in [AnalysisDomain::TransformOnly, AnalysisDomain::StatsOnly, AnalysisDomain::FitOnly] {
+                        if wrong_domain != expected_domain {
+                            let err = validate_domain_and_compat(&resolved, wrong_domain, tk).expect_err("wrong domain must fail");
+                            assert_eq!(err.code, ErrorCode::BadInput);
+                        }
+                    }
+                }
+            }
+        }
+
+        let eq_kind = resolve_kind_shorthand("one_phase_decay", &empty).expect("built-in equation ID must resolve");
+        assert_eq!(eq_kind.id(), AnalysisKindId::NonlinearRegression);
+        assert!(eq_kind.descriptor().accepts_equation_id_shorthand);
     }
 }

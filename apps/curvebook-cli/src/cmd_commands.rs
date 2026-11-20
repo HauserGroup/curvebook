@@ -47,6 +47,7 @@ struct DirectCommandArgs {
     json: bool,
     help: bool,
     params: Value,
+    warnings: Vec<String>,
 }
 
 /// Schema type classification extracted from a JSON Schema property object.
@@ -164,6 +165,15 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
     }
 
     let outcome = session.execute_with_caller(spec.id, parsed.params, Caller::Cli, cancelled)?;
+    let mut warnings = parsed.warnings;
+    for w in outcome.warnings {
+        if !warnings.contains(&w) {
+            warnings.push(w);
+        }
+    }
+    for w in &warnings {
+        eprintln!("warning: {w}");
+    }
 
     let saved_out = if let Some((ref out_path, format)) = out_target {
         run_guarded_cli("cli.direct.export_out", || persist_session_output(&session, out_path, format))?;
@@ -173,7 +183,7 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
     };
 
     if parsed.json {
-        let payload = json!({
+        let mut payload = json!({
             "ok": true,
             "command_id": spec.id,
             "mutated": outcome.mutated,
@@ -181,6 +191,11 @@ pub fn run_direct_command_with_cancel(spec: &CommandSpec, args: &[String], cance
             "result": outcome.payload,
             "out": saved_out,
         });
+        if !warnings.is_empty()
+            && let Some(obj) = payload.as_object_mut()
+        {
+            obj.insert(String::from("warnings"), json!(warnings));
+        }
         let text = serde_json::to_string_pretty(&payload).map_err(|err| CliError::Runtime(format!("JSON serialization failed: {err}")))?;
         println!("{text}");
     } else if let Some(path) = saved_out {
@@ -272,6 +287,7 @@ fn parse_direct_command_args(spec: &CommandSpec, schema: &Value, args: &[String]
     let mut json = false;
     let mut help = false;
     let mut params = Map::new();
+    let mut warnings = Vec::new();
 
     let mut idx = 0usize;
     while idx < args.len() {
@@ -291,7 +307,13 @@ fn parse_direct_command_args(spec: &CommandSpec, schema: &Value, args: &[String]
             return Err(CliError::Usage(format!("empty flag `--` for `{}`", spec.id)));
         }
 
-        if let Some((prop, negated)) = resolve_flag_property(&prop_table, flag_name) {
+        if let Some((prop, negated, deprecated_alias)) = resolve_flag_property(&prop_table, flag_name) {
+            if let Some(alias) = deprecated_alias {
+                let msg = format!("parameter `{alias}` is deprecated for `{}`; use canonical `{}` instead", spec.id, prop.canonical);
+                if !warnings.contains(&msg) {
+                    warnings.push(msg);
+                }
+            }
             let parsed_val = parse_flag_value(prop, negated, inline_val, args, &mut idx, flag_name)?;
             merge_param_value(&mut params, prop, parsed_val)?;
         } else {
@@ -300,7 +322,7 @@ fn parse_direct_command_args(spec: &CommandSpec, schema: &Value, args: &[String]
         idx += 1;
     }
 
-    Ok(DirectCommandArgs { in_path, out_path, workdir, json, help, params: Value::Object(params) })
+    Ok(DirectCommandArgs { in_path, out_path, workdir, json, help, params: Value::Object(params), warnings })
 }
 
 fn handle_wrapper_flag(
@@ -345,9 +367,15 @@ fn non_empty_inline(arg: &str, prefix: &str) -> Result<String, CliError> {
     Ok(val.to_owned())
 }
 
+#[derive(Debug, Clone)]
+struct FlagTarget {
+    prop_idx: usize,
+    deprecated_alias: Option<String>,
+}
+
 struct PropertyLookup {
     props: Vec<PropertySchema>,
-    by_token: BTreeMap<String, usize>,
+    by_token: BTreeMap<String, FlagTarget>,
 }
 
 fn build_property_lookup(schema: &Value) -> PropertyLookup {
@@ -359,19 +387,21 @@ fn build_property_lookup(schema: &Value) -> PropertyLookup {
             let (kind, nullable) = inspect_schema_kind(prop_schema);
             let idx = props.len();
             props.push(PropertySchema { canonical: name.clone(), nullable, kind });
-            register_flag_tokens(&mut by_token, name, idx);
+            register_flag_tokens(&mut by_token, name, idx, None);
         }
     }
 
     for alias_key in ["x-deprecated-aliases", "x-aliases"] {
         if let Some(alias_map) = schema.get(alias_key).and_then(Value::as_object) {
             for (canonical, aliases) in alias_map {
-                let Some(&idx) = by_token.get(canonical).or_else(|| by_token.get(&normalize_token(canonical))) else {
+                let Some(idx) = by_token.get(canonical).or_else(|| by_token.get(&normalize_token(canonical))).map(|t| t.prop_idx) else {
                     continue;
                 };
                 if let Some(list) = aliases.as_array() {
                     for alias in list.iter().filter_map(Value::as_str) {
-                        register_flag_tokens(&mut by_token, alias, idx);
+                        if alias != canonical {
+                            register_flag_tokens(&mut by_token, alias, idx, Some(alias));
+                        }
                     }
                 }
             }
@@ -381,10 +411,11 @@ fn build_property_lookup(schema: &Value) -> PropertyLookup {
     PropertyLookup { props, by_token }
 }
 
-fn register_flag_tokens(map: &mut BTreeMap<String, usize>, raw_name: &str, idx: usize) {
-    map.entry(raw_name.to_owned()).or_insert(idx);
-    map.entry(normalize_token(raw_name)).or_insert(idx);
-    map.entry(camel_to_snake_lower(raw_name)).or_insert(idx);
+fn register_flag_tokens(map: &mut BTreeMap<String, FlagTarget>, raw_name: &str, prop_idx: usize, deprecated: Option<&str>) {
+    let make_target = || FlagTarget { prop_idx, deprecated_alias: deprecated.map(str::to_owned) };
+    map.entry(raw_name.to_owned()).or_insert_with(make_target);
+    map.entry(normalize_token(raw_name)).or_insert_with(make_target);
+    map.entry(camel_to_snake_lower(raw_name)).or_insert_with(make_target);
 }
 
 fn normalize_token(raw: &str) -> String {
@@ -408,16 +439,16 @@ fn camel_to_snake_lower(raw: &str) -> String {
     out
 }
 
-fn resolve_flag_property<'a>(lookup: &'a PropertyLookup, flag_name: &str) -> Option<(&'a PropertySchema, bool)> {
-    if let Some(&idx) = lookup.by_token.get(flag_name).or_else(|| lookup.by_token.get(&normalize_token(flag_name))) {
-        return lookup.props.get(idx).map(|p| (p, false));
+fn resolve_flag_property<'a>(lookup: &'a PropertyLookup, flag_name: &str) -> Option<(&'a PropertySchema, bool, Option<&'a str>)> {
+    if let Some(target) = lookup.by_token.get(flag_name).or_else(|| lookup.by_token.get(&normalize_token(flag_name))) {
+        return lookup.props.get(target.prop_idx).map(|p| (p, false, target.deprecated_alias.as_deref()));
     }
     if let Some(pos_flag) = flag_name.strip_prefix("no-")
-        && let Some(&idx) = lookup.by_token.get(pos_flag).or_else(|| lookup.by_token.get(&normalize_token(pos_flag)))
-        && let Some(prop) = lookup.props.get(idx)
+        && let Some(target) = lookup.by_token.get(pos_flag).or_else(|| lookup.by_token.get(&normalize_token(pos_flag)))
+        && let Some(prop) = lookup.props.get(target.prop_idx)
         && kind_accepts_bool(&prop.kind)
     {
-        return Some((prop, true));
+        return Some((prop, true, target.deprecated_alias.as_deref()));
     }
     None
 }
@@ -821,6 +852,15 @@ mod tests {
         let parsed_deprecated = parse_direct_command_args(spec, &deprecated_schema, &args).unwrap();
         assert_eq!(parsed_legacy.params["kind"], json!("xy"));
         assert_eq!(parsed_deprecated.params["kind"], json!("xy"));
+        assert_eq!(
+            parsed_legacy.warnings,
+            vec![String::from("parameter `archetype` is deprecated for `sheet.createData`; use canonical `kind` instead")]
+        );
+        assert_eq!(parsed_deprecated.warnings, parsed_legacy.warnings);
+
+        let canonical_args = vec![String::from("--sheet-id"), String::from("d1"), String::from("--kind"), String::from("xy")];
+        let parsed_canonical = parse_direct_command_args(spec, &deprecated_schema, &canonical_args).unwrap();
+        assert!(parsed_canonical.warnings.is_empty(), "canonical flags must emit zero warnings: {:?}", parsed_canonical.warnings);
     }
 
     #[test]
