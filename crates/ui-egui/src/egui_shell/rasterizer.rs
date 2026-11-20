@@ -8,7 +8,7 @@ use std::collections::BTreeMap;
 
 use curvebook_render::{RasterImage, RenderError, RenderTargetSpec, encode_png};
 
-use crate::compositor::ScreenshotRegionTarget;
+use crate::inspect::ScreenshotRegionTarget;
 
 /// Standard logical display DPI (`1.0x` scale factor = `96` DPI).
 pub const BASE_SCREENSHOT_DPI: f32 = 96.0;
@@ -472,6 +472,51 @@ impl EguiSoftwareRasterizer {
     }
 
     /// Apply `full_output.textures_delta` updates, tessellate `full_output.shapes`, rasterize at
+    /// `target`, and crop to `region` returning a straight-RGBA [`RasterImage`].
+    ///
+    /// # Errors
+    /// Returns [`RenderError`] if `target` is invalid or `region == Dialog` without an active dialog
+    /// rect.
+    pub fn render_egui_screenshot_rgba(
+        &mut self,
+        ctx: &egui::Context,
+        full_output: &mut egui::FullOutput,
+        target: RenderTargetSpec,
+        region: ScreenshotRegionTarget,
+        region_rects: EguiScreenshotRegions,
+        clear_color: egui::Color32,
+    ) -> Result<RasterImage, RenderError> {
+        self.consume_textures_set(&mut full_output.textures_delta);
+        let ppp = if full_output.pixels_per_point.is_finite() && full_output.pixels_per_point > 0.0 {
+            full_output.pixels_per_point
+        } else {
+            pixels_per_point_for_dpi(target.dpi)
+        };
+        let clipped = ctx.tessellate(std::mem::take(&mut full_output.shapes), ppp);
+        let full_img = self.rasterize_tessellated(&clipped, target, ppp, clear_color);
+        self.consume_textures_free(&mut full_output.textures_delta);
+        let full_img = full_img?;
+
+        match region {
+            ScreenshotRegionTarget::FullWindow => Ok(full_img),
+            ScreenshotRegionTarget::Canvas => {
+                let rect = region_rects
+                    .canvas_rect_pt
+                    .ok_or_else(|| RenderError::InvalidTarget { message: String::from("canvas screenshot region unavailable on current frame") })?;
+                let (cx, cy, cw, ch) = logical_rect_to_pixel_crop(rect, ppp, full_img.width_px, full_img.height_px)?;
+                crop_raster_rgba(&full_img, cx, cy, cw, ch)
+            }
+            ScreenshotRegionTarget::Dialog => {
+                let rect = region_rects.dialog_rect_pt.ok_or_else(|| RenderError::InvalidTarget {
+                    message: String::from("cannot capture `dialog` screenshot when no modal dialog is open"),
+                })?;
+                let (dx, dy, dw, dh) = logical_rect_to_pixel_crop(rect, ppp, full_img.width_px, full_img.height_px)?;
+                crop_raster_rgba(&full_img, dx, dy, dw, dh)
+            }
+        }
+    }
+
+    /// Apply `full_output.textures_delta` updates, tessellate `full_output.shapes`, rasterize at
     /// `target`, crop to `region`, and encode an RGBA PNG (`(png_bytes, out_width_px, out_height_px)`).
     ///
     /// # Errors
@@ -486,35 +531,7 @@ impl EguiSoftwareRasterizer {
         region_rects: EguiScreenshotRegions,
         clear_color: egui::Color32,
     ) -> Result<(Vec<u8>, u32, u32), RenderError> {
-        self.consume_textures_set(&mut full_output.textures_delta);
-        let ppp = if full_output.pixels_per_point.is_finite() && full_output.pixels_per_point > 0.0 {
-            full_output.pixels_per_point
-        } else {
-            pixels_per_point_for_dpi(target.dpi)
-        };
-        let clipped = ctx.tessellate(std::mem::take(&mut full_output.shapes), ppp);
-        let full_img = self.rasterize_tessellated(&clipped, target, ppp, clear_color);
-        self.consume_textures_free(&mut full_output.textures_delta);
-        let full_img = full_img?;
-
-        let cropped = match region {
-            ScreenshotRegionTarget::FullWindow => full_img,
-            ScreenshotRegionTarget::Canvas => {
-                let rect = region_rects
-                    .canvas_rect_pt
-                    .ok_or_else(|| RenderError::InvalidTarget { message: String::from("canvas screenshot region unavailable on current frame") })?;
-                let (cx, cy, cw, ch) = logical_rect_to_pixel_crop(rect, ppp, full_img.width_px, full_img.height_px)?;
-                crop_raster_rgba(&full_img, cx, cy, cw, ch)?
-            }
-            ScreenshotRegionTarget::Dialog => {
-                let rect = region_rects.dialog_rect_pt.ok_or_else(|| RenderError::InvalidTarget {
-                    message: String::from("cannot capture `dialog` screenshot when no modal dialog is open"),
-                })?;
-                let (dx, dy, dw, dh) = logical_rect_to_pixel_crop(rect, ppp, full_img.width_px, full_img.height_px)?;
-                crop_raster_rgba(&full_img, dx, dy, dw, dh)?
-            }
-        };
-
+        let cropped = self.render_egui_screenshot_rgba(ctx, full_output, target, region, region_rects, clear_color)?;
         let out_w = cropped.width_px;
         let out_h = cropped.height_px;
         let png = encode_png(&cropped)?;

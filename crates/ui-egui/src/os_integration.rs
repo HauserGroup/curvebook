@@ -154,7 +154,7 @@ impl OsAdapterStatus {
     }
 }
 
-/// Injectable platform clipboard adapter used by [`crate::UiApp`] and [`crate::HumanPathDriver`].
+/// Injectable platform clipboard adapter used by [`crate::UiApp`] and [`crate::egui_shell::driver::EguiHumanPathDriver`].
 ///
 /// Production desktop sessions delegate to [`SystemPlatformClipboardAdapter`], while parallel
 /// human-path tests install [`StubPlatformClipboardAdapter`] (or a custom implementation) to
@@ -231,7 +231,7 @@ struct StubClipboardInner {
     available: bool,
 }
 
-/// Deterministic in-memory clipboard adapter stub used by [`crate::HumanPathDriver`] and tests
+/// Deterministic in-memory clipboard adapter stub used by [`crate::egui_shell::driver::EguiHumanPathDriver`] and tests
 /// to capture [`ClipboardBundle`] and UTF-8 text writes with zero live OS pasteboard mutation.
 #[derive(Debug, Clone)]
 pub struct StubPlatformClipboardAdapter {

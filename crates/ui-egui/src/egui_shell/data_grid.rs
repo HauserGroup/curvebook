@@ -25,7 +25,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::grid_view::{GridViewState, format_cell_display, parse_localized_number_input};
 use crate::i18n::{LocalePreset, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::views::grid_core::{grid_tr, linked_region_for_cell};
 
 use super::{FrameInspectEntryInput, FrameInspectMeta, LayoutMetrics, PendingUiIntents, Tokens};
@@ -1925,7 +1925,13 @@ mod multi_archetype {
                     role: "gridcell",
                     label: dbuf.acc_buf,
                     command_id: Some("table.setXCells"),
-                    value: Some(serde_json::Value::String(dbuf.text_buf.clone())),
+                    value: Some(serde_json::json!({
+                        "row": row,
+                        "subcol": subcol,
+                        "text": dbuf.text_buf.clone(),
+                        "excluded": excluded,
+                        "selected": is_selected,
+                    })),
                     enabled: editable,
                     disabled_reason: if dbuf.blocked {
                         Some("modal dialog is active")
@@ -2134,6 +2140,7 @@ mod multi_archetype {
         }
 
         if dbuf.record_meta {
+            let inspect_text = if flags.excluded && !dbuf.text_buf.is_empty() { format!("{}*", dbuf.text_buf) } else { dbuf.text_buf.clone() };
             meta.record_response(
                 body_ui,
                 resp,
@@ -2142,12 +2149,19 @@ mod multi_archetype {
                     role: "gridcell",
                     label: dbuf.acc_buf,
                     command_id: Some("table.setCell"),
-                    value: Some(serde_json::Value::String(dbuf.text_buf.clone())),
+                    value: Some(serde_json::json!({
+                        "row": coord.row,
+                        "col": coord.col,
+                        "subcol": coord.subcol,
+                        "text": inspect_text,
+                        "excluded": flags.excluded,
+                        "selected": flags.is_selected,
+                    })),
                     enabled: flags.editable,
                     disabled_reason: if dbuf.blocked {
                         Some("modal dialog is active")
                     } else if flags.mv_is_calc {
-                        Some("calculated variable output is read-only")
+                        Some("Calculated variable cells are formula-derived (read-only).")
                     } else if flags.linked.is_some() {
                         Some("cell is inside a read-only linked region")
                     } else if ds.frozen {

@@ -12,7 +12,7 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::tr;
 use crate::workspace_nav::{ActiveWorkspacePane, FamilyPaneNode, FamilyRelation, NavigatorEntry, NavigatorNestingMode};
 

@@ -19,7 +19,7 @@ use serde_json::{Map, Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, AxisTarget, GRAPH_TYPE_OPTIONS, GraphTypeOption, ThumbnailGlyphKind};
 use crate::i18n::{normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
 use super::unit_spinners::{ScrubUnitFieldConfig, ScrubUnitFieldState, ScrubUnitKind, render_scrub_unit_field};
@@ -640,18 +640,6 @@ fn commit_graph_modal_action(gctx: &mut GraphModalCtx<'_>, state: &mut GraphModa
                             );
                         }
                     }
-                } else if schema == FormatGraphSchema::MvChannelLayer
-                    && let Some(enc) = &fg.mv_encoding
-                {
-                    gctx.intents.push_engine(
-                        "graph.setSpec",
-                        json!({
-                            "sheet_id": gid.as_str(),
-                            "palette": fg.palette,
-                            "multivariate": enc,
-                            "legend": { "visible": fg.show_legend, "bordered": fg.legend_bordered },
-                        }),
-                    );
                 } else if schema == FormatGraphSchema::Heatmap {
                     let clamp = if state.heatmap_auto_range {
                         None
@@ -1077,6 +1065,8 @@ fn render_live_dataset_preview(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>, graph_
         }
     }
 
+    let preview_lbl = tr(gctx.locale, "w5.graph_type.preview").to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Image, true, preview_lbl.clone()));
     gctx.meta.record_response(
         ui,
         &resp,
@@ -3654,6 +3644,8 @@ fn record_checkbox(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, wi
 }
 
 fn record_input(ui: &mut Ui, resp: &Response, meta: &mut FrameInspectMeta, widget_id: &str, label: &str, text: &str, enabled: bool) {
+    let ak_lbl = label.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, ak_lbl.clone()));
     record_if_visible(
         ui,
         resp,

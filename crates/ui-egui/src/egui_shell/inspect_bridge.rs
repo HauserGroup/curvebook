@@ -1,20 +1,17 @@
-//! AccessKit + `FrameInspectMeta` -> `UiTreeSnapshot` bridge & Hybrid Coexistence Arbiter (`R15.1`–`R15.2`).
+//! AccessKit + `FrameInspectMeta` -> `UiTreeSnapshot` bridge & Workspace Coexistence Arbiter (`R15.1`–`R15.5`).
 //!
-//! Coordinates hybrid desktop coexistence across `egui`-native surfaces (`Column` grid, top chrome,
-//! standardized `Parameters: One-Way ANOVA` modal) and unported legacy presenter surfaces
-//! (`ResultSheet`, `ChartScene`, `AnalyzeSheet` picker), building settled `ui.inspect`
-//! [`UiTreeSnapshot`] output, enforcing `100%` `ZLayer::ModalBackdrop` outside capture, and
-//! verifying AccessKit `Role::ScrollBar` non-overlap.
+//! Coordinates native `egui` workspace surfaces and modal focus ownership, building settled
+//! `ui.inspect` [`UiTreeSnapshot`] output, enforcing `100%` `ZLayer::ModalBackdrop` outside
+//! capture, and verifying AccessKit `Role::ScrollBar` non-overlap.
 
 use std::collections::BTreeMap;
 
 use curvebook_doc::TableArchetype;
-use curvebook_render::{RasterImage, RenderTargetSpec};
-use egui::{Color32, CornerRadius, Id, Key, Modifiers, Order, Pos2, Rect, Sense, Vec2};
+use curvebook_engine::EngineError;
+use egui::{Color32, Key, Modifiers, Pos2, Rect, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
-use crate::compositor::{WorkspacePixelRect, compute_workspace_layout_for_dpi, render_workspace_rgba};
 use crate::dialogs_canvas::ActiveDialog;
 use crate::egui_shell::app_modals::render_app_modal;
 use crate::egui_shell::center_stage::{CenterStageContext, render_center_stage};
@@ -36,26 +33,25 @@ use crate::egui_shell::top_chrome::{TopChromeContext, render_top_chrome};
 use crate::egui_shell::trailing_studio::{TrailingStudioContext, render_trailing_studio};
 use crate::egui_shell::transform_modals::{is_transform_edit_dialog_active, render_exclude_with_reason_modal, render_transform_modal};
 use crate::egui_shell::{
-    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens,
+    EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ShellLayoutInput, Tokens, UiIntentOutcome,
 };
 use crate::inspect::{
-    GridSelectionSnapshot, UiDialogSnapshot, UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, active_dialog_slug,
-    inspect_ui_tree_for_metrics,
+    GridSelectionSnapshot, UiDialogSnapshot, UiMenuSnapshot, UiNavigatorSheetNode, UiTreeSnapshot, UiWidgetNode, ZLayer, active_dialog_slug,
+    inspect_semantic_snapshot,
 };
-use crate::interaction::ViewportMetrics;
-use crate::layout::ZLayer;
+use crate::interaction::{KeyModifiers, UiEventOutcome, ViewportMetrics};
 use crate::tr;
 use crate::workspace_nav::ActiveWorkspacePane;
 
-/// Which center-stage sheet backend renders the current frame in `--ui-backend=egui` (`R15.2+`).
+/// Which center-stage sheet backend renders the current frame in `egui` (`R15.5`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum HybridSheetSurface {
-    /// Ported `egui 0.37` virtualized `Column` `DataSheet` grid.
+    /// Ported `egui` virtualized `Column` `DataSheet` grid.
     EguiColumnGrid,
-    /// Native `egui 0.37` virtualized grid for the remaining 7 `DataSheet` archetypes (`R15.4`).
+    /// Native `egui` virtualized grid for the remaining 7 `DataSheet` archetypes (`R15.4`).
     EguiDataGrid,
-    /// Unported legacy presenter (or Wave 2 compatibility marker on non-grid sheets).
-    LegacyPresenter,
+    /// Non-grid native `egui` stage (`Welcome`, `PortfolioGallery`, `InfoSheet`, `ResultSheet`, `CanvasViewport`).
+    EguiStage,
 }
 
 /// Which modal surface currently holds focus & `ZLayer::ModalBackdrop` ownership (`R15.2+`).
@@ -77,7 +73,7 @@ pub enum HybridModalSurface {
     EguiImportWizard,
     /// Native `egui` Transform / Baseline / MV Filter / Extract / Exclude modal (`R15.4`).
     EguiTransformModal,
-    /// Native `egui` `Analyze...` picker modal (`R15.4`, gated by `native_analyze_sheet`).
+    /// Native `egui` `Analyze...` picker modal (`R15.4`).
     EguiAnalyzeSheet,
     /// Native `egui` `DuplicateAnalysisPrompt` modal (`R15.4`).
     EguiDuplicateAnalysis,
@@ -101,8 +97,6 @@ pub enum HybridModalSurface {
     EguiRecoveryDialog,
     /// Native `egui` `Find & Replace` modal (`R15.4`).
     EguiFindReplace,
-    /// Unported legacy modal dialog (e.g. `AnalyzeSheet` while `native_analyze_sheet == false`).
-    LegacyModal,
 }
 
 /// Shared metadata descriptor passed into [`finalize_egui_modal_response`].
@@ -193,16 +187,13 @@ pub struct HybridCoexistenceDecision {
     pub modal_surface: HybridModalSurface,
     pub modal_backdrop_active: bool,
     pub blocks_egui_grid: bool,
-    pub blocks_legacy_background: bool,
     pub renders_egui_column_grid: bool,
-    pub renders_legacy_canvas: bool,
-    pub renders_legacy_modal_overlay: bool,
     pub renders_egui_anova_modal: bool,
     pub renders_egui_about_modal: bool,
 }
 
 /// Pure, stateless arbiter controlling focus ownership, Z-order, and raw-input routing
-/// across coexisting `egui` and legacy presenter surfaces (`R15.2+`).
+/// across native `egui` workspace surfaces and modals (`R15.5`).
 pub struct HybridCoexistenceArbiter;
 
 impl HybridCoexistenceArbiter {
@@ -220,7 +211,7 @@ impl HybridCoexistenceArbiter {
         let sheet_surface = match active_ds.map(|ds| &ds.archetype) {
             Some(TableArchetype::Column(_)) => HybridSheetSurface::EguiColumnGrid,
             Some(_) => HybridSheetSurface::EguiDataGrid,
-            None => HybridSheetSurface::LegacyPresenter,
+            None => HybridSheetSurface::EguiStage,
         };
 
         let modal_surface = if host_close_dialog_open || views.app_modals.unsaved_changes_open {
@@ -238,45 +229,20 @@ impl HybridCoexistenceArbiter {
         } else if views.transform_modals.open_kind.is_some() {
             HybridModalSurface::EguiTransformModal
         } else {
-            classify_active_dialog_surface(app, views)
+            classify_active_dialog_surface(app)
         };
 
         let modal_backdrop_active = modal_surface != HybridModalSurface::None;
         let blocks_egui_grid = modal_backdrop_active;
-        let blocks_legacy_background = modal_backdrop_active && modal_surface != HybridModalSurface::LegacyModal;
 
         HybridCoexistenceDecision {
             sheet_surface,
             modal_surface,
             modal_backdrop_active,
             blocks_egui_grid,
-            blocks_legacy_background,
             renders_egui_column_grid: matches!(sheet_surface, HybridSheetSurface::EguiColumnGrid | HybridSheetSurface::EguiDataGrid),
-            renders_legacy_canvas: sheet_surface == HybridSheetSurface::LegacyPresenter,
-            renders_legacy_modal_overlay: modal_surface == HybridModalSurface::LegacyModal,
             renders_egui_anova_modal: modal_surface == HybridModalSurface::EguiOneWayAnova,
             renders_egui_about_modal: modal_surface == HybridModalSurface::EguiAbout,
-        }
-    }
-
-    /// Return `true` when pointer/wheel events at `pos` should be forwarded to the legacy presenter
-    /// (either `Case B` clicks inside an unported legacy modal card, or direct interaction on a
-    /// legacy sheet when no modal blocks it).
-    #[must_use]
-    pub fn pointer_routes_to_legacy(
-        decision: &HybridCoexistenceDecision,
-        canvas_rect: Rect,
-        pos: Pos2,
-        menu_popup_open: bool,
-        legacy_modal_rect: Option<Rect>,
-    ) -> bool {
-        if menu_popup_open {
-            return false;
-        }
-        match decision.modal_surface {
-            HybridModalSurface::LegacyModal => legacy_modal_rect.is_some_and(|r| r.contains(pos)),
-            HybridModalSurface::None => decision.renders_legacy_canvas && canvas_rect.contains(pos),
-            _ => false,
         }
     }
 
@@ -287,19 +253,13 @@ impl HybridCoexistenceArbiter {
     }
 }
 
-fn classify_active_dialog_surface(app: &UiApp, views: &EguiShellViewState) -> HybridModalSurface {
+fn classify_active_dialog_surface(app: &UiApp) -> HybridModalSurface {
     match &app.canvas_dialogs.active_dialog {
         ActiveDialog::None => HybridModalSurface::None,
         ActiveDialog::About => HybridModalSurface::EguiAbout,
         ActiveDialog::ExportFigure { .. } | ActiveDialog::Print { .. } => HybridModalSurface::EguiAppModal,
         ActiveDialog::CommandPalette => HybridModalSurface::EguiCommandPalette,
-        ActiveDialog::AnalyzeSheet { .. } => {
-            if views.native_analyze_sheet {
-                HybridModalSurface::EguiAnalyzeSheet
-            } else {
-                HybridModalSurface::LegacyModal
-            }
-        }
+        ActiveDialog::AnalyzeSheet { .. } => HybridModalSurface::EguiAnalyzeSheet,
         ActiveDialog::DuplicateAnalysisPrompt { .. } => HybridModalSurface::EguiDuplicateAnalysis,
         ActiveDialog::ChangeDataAnalyzed { .. } => HybridModalSurface::EguiChangeDataAnalyzed,
         ActiveDialog::ConstantHookPicker { .. } => HybridModalSurface::EguiHookPicker,
@@ -324,33 +284,18 @@ fn classify_active_dialog_surface(app: &UiApp, views: &EguiShellViewState) -> Hy
         | ActiveDialog::SimulateDistributions
         | ActiveDialog::ResultViewer { .. } => HybridModalSurface::EguiStatParams,
         other if is_graph_modal_active(other) => HybridModalSurface::EguiGraphModal,
-        _ => HybridModalSurface::LegacyModal,
+        _ => HybridModalSurface::EguiGraphModal,
     }
 }
 
-/// Optional host-provided legacy texture overlay passed from `CurveBookNativeApp` so 60 FPS desktop
-/// frames reuse GPU textures without re-running software rasterization inside `inspect_bridge`.
-#[derive(Debug)]
-pub struct HybridHostTextureFrame {
-    /// Pre-rendered legacy canvas texture (`ResultSheet`, `ChartScene`, non-`Column` table) scaled for `canvas_rect`.
-    pub canvas_texture: Option<egui::TextureId>,
-    /// Pre-rendered cropped legacy modal overlay texture and its exact screen-space rect in logical `pt`.
-    pub legacy_modal_texture: Option<(egui::TextureId, Rect)>,
-    /// Optional callback invoked inside `CentralPanel` so `CurveBookNativeApp` can sync AccessKit for the legacy canvas.
-    pub accesskit_canvas_id: Option<egui::Id>,
-}
-
 /// Result emitted by [`render_minimal_shell_and_about`] and [`render_egui_shell_frame`] for
-/// testing, `ui.inspect`, `ui.screenshot`, and `apps/curvebook` hybrid viewport sync.
+/// testing, `ui.inspect`, `ui.screenshot`, and `apps/curvebook` viewport sync.
 #[derive(Debug, Clone, Default)]
 pub struct ShellAboutFrameReport {
     pub regions: EguiScreenshotRegions,
     pub outside_click_captured: bool,
     pub outside_wheel_captured: bool,
     pub scrollbar_rect_pt: Option<egui::Rect>,
-    pub legacy_canvas_texture_rect_pt: Option<egui::Rect>,
-    pub legacy_modal_rect_pt: Option<egui::Rect>,
-    pub legacy_canvas_widget_id: Option<egui::Id>,
     pub resolved_test_banner: String,
     pub decision: Option<HybridCoexistenceDecision>,
     pub tier1_rect_pt: Option<egui::Rect>,
@@ -430,7 +375,12 @@ fn entry_belongs_to_scope(entry: &FrameInspectNodeMeta, scope_tag: &str) -> bool
         "menus" => wid.starts_with("menu."),
         "tabs" => wid.starts_with("tab.") || wid.starts_with("sheet.tab.") || wid.starts_with("result.tab."),
         "canvas" => {
-            wid.starts_with("canvas.") || wid.starts_with("result.diagnostic_banner") || wid.starts_with("info.") || wid.starts_with("welcome.")
+            wid.starts_with("canvas.")
+                || wid.starts_with("center.pane.")
+                || wid == "split.divider"
+                || wid.starts_with("result.diagnostic_banner")
+                || wid.starts_with("info.")
+                || wid.starts_with("welcome.")
         }
         "grid" => wid.starts_with("grid."),
         "dialog" => {
@@ -502,7 +452,7 @@ fn build_dialog_snapshot_from_meta(
     app: &UiApp,
     meta: &FrameInspectMeta,
     ak: &AccessKitLookup<'_>,
-    metrics: ViewportMetrics,
+    _metrics: ViewportMetrics,
     include_bounds: bool,
     baseline_dialog: Option<&UiDialogSnapshot>,
 ) -> Option<UiDialogSnapshot> {
@@ -580,48 +530,19 @@ fn build_dialog_snapshot_from_meta(
     }
 
     if let Some(base) = baseline_dialog {
-        let egui_rendered_dialog = !(tabs.is_empty() && controls.is_empty() && buttons.is_empty());
-        if tabs.is_empty() {
-            tabs.clone_from(&base.tabs);
+        for tab in &base.tabs {
+            if !tabs.iter().any(|n| n.widget_id == tab.widget_id) {
+                tabs.push(tab.clone());
+            }
         }
-        if !egui_rendered_dialog {
-            controls.clone_from(&base.controls);
+        for ctrl in &base.controls {
+            if !controls.iter().any(|n| n.widget_id == ctrl.widget_id) {
+                controls.push(ctrl.clone());
+            }
         }
-        if buttons.is_empty() {
-            buttons.clone_from(&base.buttons);
-        }
-        if !egui_rendered_dialog {
-            let tree = app.layout_tree_cow(metrics);
-            let scale = tree.metrics.clamped_scale_factor();
-            for node in &tree.nodes {
-                if !node.drawn_in_frame || node.z_layer != ZLayer::ModalDialog {
-                    continue;
-                }
-                let wid = node.id.as_str();
-                if matches!(wid, "modal.dialog" | "modal.backdrop" | "modal.title") {
-                    continue;
-                }
-                let node_bounds = (include_bounds && node.bounds.visible_rect_px.width > 0 && node.bounds.visible_rect_px.height > 0).then(|| {
-                    let v = node.bounds.visible_rect_px;
-                    [f64::from(v.x) / scale, f64::from(v.y) / scale, f64::from(v.width) / scale, f64::from(v.height) / scale]
-                });
-                let ui_node = UiWidgetNode {
-                    widget_id: wid.to_owned(),
-                    role: String::from(node.a11y.role.as_str()),
-                    label: node.a11y.label.clone(),
-                    command_id: None,
-                    value: node.a11y.value_json.clone().or_else(|| node.a11y.selected.map(|s| json!(s))),
-                    enabled: node.state.enablement.enabled,
-                    disabled_reason: node.state.enablement.disabled_reason.clone(),
-                    bounds: node_bounds,
-                };
-                if matches!(wid, "modal.ok" | "modal.cancel" | "modal.apply" | "modal.close") {
-                    if !buttons.iter().any(|b| b.widget_id == wid) {
-                        buttons.push(ui_node);
-                    }
-                } else if (wid == "analyze.entries_list" || wid.starts_with("analyze.entry.")) && !controls.iter().any(|c| c.widget_id == wid) {
-                    controls.push(ui_node);
-                }
+        for btn in &base.buttons {
+            if !buttons.iter().any(|n| n.widget_id == btn.widget_id) {
+                buttons.push(btn.clone());
             }
         }
     }
@@ -638,12 +559,181 @@ fn build_dialog_snapshot_from_meta(
     })
 }
 
+fn configure_offscreen_egui_ctx(app: &UiApp, metrics: ViewportMetrics) -> (egui::Context, f32, f32, f32) {
+    let ctx = egui::Context::default();
+    ctx.enable_accesskit();
+    crate::egui_shell::fonts::install_default_egui_fonts_cached(&ctx);
+
+    #[allow(clippy::cast_possible_truncation)]
+    let w_pt = metrics.logical_width.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let h_pt = metrics.logical_height.max(1.0) as f32;
+    #[allow(clippy::cast_possible_truncation)]
+    let ppp = metrics.clamped_scale_factor() as f32;
+    let zoom = app.ui_scale();
+    let native_ppp = (ppp / zoom).max(0.05);
+    ctx.options_mut(|o| {
+        o.zoom_with_keyboard = false;
+        o.zoom_factor = zoom;
+    });
+    (ctx, w_pt, h_pt, native_ppp)
+}
+
+fn step_egui_shell_with_events(
+    ctx: &egui::Context,
+    app: &mut UiApp,
+    views: &mut EguiShellViewState,
+    meta: &mut FrameInspectMeta,
+    geom: (f32, f32, f32),
+    time_sec: f64,
+    initial_events: Vec<egui::Event>,
+) -> Result<Vec<UiIntentOutcome>, EngineError> {
+    let (w_pt, h_pt, native_ppp) = geom;
+    let mut pending_events = initial_events;
+    for _pass in 0..6_u32 {
+        let events = std::mem::take(&mut pending_events);
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w_pt, h_pt))),
+            time: Some(time_sec),
+            predicted_dt: 1.0 / 60.0,
+            focused: true,
+            events,
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut intents = PendingUiIntents::default();
+        let mut settled = false;
+        let mut output = ctx.run_ui(raw_input, |ui| {
+            let _ = render_egui_shell_frame(ui, app, views, meta, &mut intents);
+            settled = !ui.ctx().will_discard();
+        });
+        output.textures_delta.clear();
+        if settled && !output.platform_output.requested_discard() {
+            app.egui_views = views.clone();
+            let outcomes = intents.commit_if_settled(app, false)?;
+            *views = app.egui_views.clone();
+            return Ok(outcomes);
+        }
+    }
+    Ok(Vec::new())
+}
+
+/// Drive a real `egui` pointer drag (`start_xy -> end_xy`) across settled shell frames,
+/// returning a layout drag outcome when a Page Layout item move/resize commits `layout.setSpec`.
+///
+/// # Errors
+/// Returns [`EngineError`] if any committed engine command fails.
+pub fn dispatch_egui_pointer_drag(
+    app: &mut UiApp,
+    metrics: ViewportMetrics,
+    start_xy: [f64; 2],
+    end_xy: [f64; 2],
+    modifiers: KeyModifiers,
+) -> Result<Option<UiEventOutcome>, EngineError> {
+    let (ctx, w_pt, h_pt, native_ppp) = configure_offscreen_egui_ctx(app, metrics);
+    let geom = (w_pt, h_pt, native_ppp);
+    let mut views = app.egui_views.clone();
+    let mut meta = FrameInspectMeta::default();
+    let egui_mods = Modifiers {
+        alt: modifiers.alt,
+        ctrl: modifiers.ctrl,
+        shift: modifiers.shift,
+        mac_cmd: modifiers.meta,
+        command: modifiers.meta || modifiers.ctrl,
+    };
+
+    #[allow(clippy::cast_possible_truncation)]
+    let start = Pos2::new(start_xy[0] as f32, start_xy[1] as f32);
+    #[allow(clippy::cast_possible_truncation)]
+    let end = Pos2::new(end_xy[0] as f32, end_xy[1] as f32);
+    let delta = end - start;
+    let dist = delta.length();
+
+    let mut t = 0.0_f64;
+    let _ = step_egui_shell_with_events(&ctx, app, &mut views, &mut meta, geom, t, Vec::new())?;
+    t += 0.02;
+    let _ = step_egui_shell_with_events(&ctx, app, &mut views, &mut meta, geom, t, vec![egui::Event::PointerMoved(start)])?;
+    t += 0.02;
+    let _ = step_egui_shell_with_events(
+        &ctx,
+        app,
+        &mut views,
+        &mut meta,
+        geom,
+        t,
+        vec![egui::Event::PointerButton { pos: start, button: egui::PointerButton::Primary, pressed: true, modifiers: egui_mods }],
+    )?;
+    if dist > 8.0 {
+        t += 0.02;
+        let trigger = start + delta.normalized() * 6.0;
+        let _ = step_egui_shell_with_events(&ctx, app, &mut views, &mut meta, geom, t, vec![egui::Event::PointerMoved(trigger)])?;
+    }
+    t += 0.02;
+    let _ = step_egui_shell_with_events(&ctx, app, &mut views, &mut meta, geom, t, vec![egui::Event::PointerMoved(end)])?;
+    t += 0.02;
+    let outcomes = step_egui_shell_with_events(
+        &ctx,
+        app,
+        &mut views,
+        &mut meta,
+        geom,
+        t,
+        vec![egui::Event::PointerButton { pos: end, button: egui::PointerButton::Primary, pressed: false, modifiers: egui_mods }],
+    )?;
+
+    for item in outcomes {
+        if let UiIntentOutcome::Engine { command_id, outcome } = item
+            && command_id == "layout.setSpec"
+        {
+            app.interaction.last_logical_pos = Some(end_xy);
+            return Ok(Some(UiEventOutcome {
+                handled: true,
+                action: String::from("layout.item_drag_committed"),
+                command_id: Some(command_id),
+                command_result: serde_json::to_value(outcome).ok(),
+            }));
+        }
+    }
+    Ok(None)
+}
+
+/// Run a settled offscreen `egui` frame (reusing cached font definitions) and construct a canonical
+/// [`UiTreeSnapshot`] (`ui.inspect`) directly from settled `FrameInspectMeta` and AccessKit state.
+#[must_use]
+pub fn inspect_live_egui_snapshot(app: &UiApp, metrics: ViewportMetrics, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
+    let (ctx, w_pt, h_pt, native_ppp) = configure_offscreen_egui_ctx(app, metrics);
+
+    let mut views = app.egui_views.clone();
+    let mut meta = FrameInspectMeta::default();
+    for _pass in 0..8_u32 {
+        let raw_input = egui::RawInput {
+            screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w_pt, h_pt))),
+            viewports: [(egui::ViewportId::ROOT, egui::ViewportInfo { native_pixels_per_point: Some(native_ppp), ..Default::default() })]
+                .into_iter()
+                .collect(),
+            ..Default::default()
+        };
+        let mut intents = PendingUiIntents::default();
+        let mut settled = false;
+        let mut output = ctx.run_ui(raw_input, |ui| {
+            let _ = render_egui_shell_frame(ui, app, &mut views, &mut meta, &mut intents);
+            settled = !ui.ctx().will_discard();
+        });
+        output.textures_delta.clear();
+        if settled {
+            return build_ui_tree_snapshot_from_egui(app, &meta, output.platform_output.accesskit_update.as_ref(), scope, include_bounds, metrics);
+        }
+    }
+    inspect_semantic_snapshot(app, metrics, scope, include_bounds)
+}
+
 /// Build a [`UiTreeSnapshot`] (`ui.inspect`) directly from settled `egui` AccessKit output and
 /// [`FrameInspectMeta`].
 ///
 /// Prefers settled `egui` `FrameInspectMeta` + AccessKit entries when non-empty for rendered scopes
-/// (`toolbar`, `tabs`, `grid_cells`, `dialog`), falling back seamlessly to `baseline` for unported
-/// legacy surfaces (`ResultSheet` sub-tabs, `AnalyzeSheet` picker modal, navigator, menus).
+/// (`toolbar`, `tabs`, `grid_cells`, `dialog`), complementing them with semantic baseline context.
 #[must_use]
 pub fn build_ui_tree_snapshot_from_egui(
     app: &UiApp,
@@ -653,7 +743,7 @@ pub fn build_ui_tree_snapshot_from_egui(
     include_bounds: bool,
     metrics: ViewportMetrics,
 ) -> UiTreeSnapshot {
-    let baseline = inspect_ui_tree_for_metrics(app, metrics, scope, include_bounds);
+    let baseline = inspect_semantic_snapshot(app, metrics, scope, include_bounds);
     let ak = AccessKitLookup::from_update(accesskit_update);
 
     let mut focus_widget_id = baseline.focus_widget_id.clone();
@@ -705,12 +795,9 @@ pub fn build_ui_tree_snapshot_from_egui(
         None
     };
 
-    let grid_cells = if scope_wants(scope, "grid") {
-        let egui_grid = collect_scope("grid");
-        if egui_grid.is_empty() { baseline.grid_cells.clone() } else { Some(egui_grid) }
-    } else {
-        None
-    };
+    let grid_cells = scope_wants(scope, "grid")
+        .then(|| build_egui_grid_cells_snapshot(meta, include_bounds, baseline.grid_cells, collect_scope("grid")))
+        .flatten();
 
     let menus: Option<Vec<UiMenuSnapshot>> = if scope_wants(scope, "menus") { baseline.menus.clone() } else { None };
     let navigator_sheets: Option<Vec<UiNavigatorSheetNode>> = if scope_wants(scope, "navigator") {
@@ -736,6 +823,20 @@ pub fn build_ui_tree_snapshot_from_egui(
 
     let active_dialog = dialog_out.as_ref().map_or(baseline.active_dialog, |d| d.dialog_kind.clone());
 
+    let canvas_elements = if scope_wants(scope, "canvas") {
+        let mut combined = collect_scope("canvas");
+        if let Some(base_canvas) = baseline.canvas_elements {
+            for elem in base_canvas {
+                if !combined.iter().any(|n| n.widget_id == elem.widget_id) {
+                    combined.push(elem);
+                }
+            }
+        }
+        if combined.is_empty() { None } else { Some(combined) }
+    } else {
+        None
+    };
+
     UiTreeSnapshot {
         active_sheet_id: baseline.active_sheet_id,
         active_sheet_kind: baseline.active_sheet_kind,
@@ -756,10 +857,36 @@ pub fn build_ui_tree_snapshot_from_egui(
         toolbar,
         navigator_sheets,
         tabs,
-        canvas_elements: if scope_wants(scope, "canvas") { baseline.canvas_elements } else { None },
+        canvas_elements,
         grid_cells,
         dialog: dialog_out,
     }
+}
+
+fn build_egui_grid_cells_snapshot(
+    meta: &FrameInspectMeta,
+    include_bounds: bool,
+    baseline_grid: Option<Vec<UiWidgetNode>>,
+    mut egui_grid: Vec<UiWidgetNode>,
+) -> Option<Vec<UiWidgetNode>> {
+    let has_base_grid = baseline_grid.is_some();
+    if let Some(base_grid) = baseline_grid {
+        for mut node in base_grid {
+            if !egui_grid.iter().any(|n| n.widget_id == node.widget_id) {
+                if include_bounds
+                    && let Some(col_str) = node.widget_id.strip_prefix("formula_bar.open_col.")
+                    && let Ok(col_idx) = col_str.parse::<usize>()
+                {
+                    let badge_id = format!("mv_formula.role_badge.{col_idx}");
+                    if let Some(badge) = meta.find_by_widget_id(&badge_id) {
+                        node.bounds = clipped_rect_to_bounds_px(badge.clipped_rect, meta.scale_factor);
+                    }
+                }
+                egui_grid.push(node);
+            }
+        }
+    }
+    if egui_grid.is_empty() { has_base_grid.then(Vec::new) } else { Some(egui_grid) }
 }
 
 /// Render a minimal `egui_shell` workspace + `About` modal view (`R15.1` b4/b5) using canonical
@@ -839,11 +966,11 @@ pub fn render_egui_shell_frame(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> ShellAboutFrameReport {
-    render_egui_shell_frame_with_host(ui, app, views, meta, intents, false, None)
+    render_egui_shell_frame_with_host(ui, app, views, meta, intents, false)
 }
 
-/// Full hybrid coexistence workspace/dialog frame entry point supporting optional pre-rendered GPU
-/// textures from `CurveBookNativeApp` (`R15.2+`).
+/// Full native `egui` workspace/dialog frame entry point supporting optional host close modal
+/// arbitration from `CurveBookNativeApp` (`R15.5`).
 #[allow(clippy::too_many_arguments)]
 pub fn render_egui_shell_frame_with_host(
     ui: &mut egui::Ui,
@@ -852,7 +979,6 @@ pub fn render_egui_shell_frame_with_host(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     host_close_dialog_open: bool,
-    host_textures: Option<&HybridHostTextureFrame>,
 ) -> ShellAboutFrameReport {
     let ctx = ui.ctx().clone();
     ctx.enable_accesskit();
@@ -948,7 +1074,7 @@ pub fn render_egui_shell_frame_with_host(
             ui,
             app,
             views,
-            CenterStageContext { tokens: &tokens, decision: &decision, layout, host_textures, focused_pane: app.nav.active_pane, enabled },
+            CenterStageContext { tokens: &tokens, decision: &decision, layout, focused_pane: app.nav.active_pane, enabled },
             meta,
             intents,
         );
@@ -956,13 +1082,16 @@ pub fn render_egui_shell_frame_with_host(
             report.regions.canvas_rect_pt = Some(primary);
         }
         report.scrollbar_rect_pt = stage_rep.scrollbar_rect_pt;
-        report.legacy_canvas_texture_rect_pt = stage_rep.legacy_canvas_texture_rect_pt;
-        report.legacy_canvas_widget_id = stage_rep.legacy_canvas_widget_id;
         report.center_stage_handled_natively = stage_rep.handled_natively;
     });
 
     if app.presentation_mode && meta.find_by_widget_id("toolbar.presentation.exit").is_none() {
         let _ = crate::egui_shell::top_chrome::render_presentation_exit_chip(&ctx, app, &tokens, enabled, meta, intents);
+    }
+
+    if !matches!(decision.modal_surface, HybridModalSurface::EguiStatParams | HybridModalSurface::EguiFitModal) {
+        views.stats_modals.open_session_sheet_id = None;
+        views.fit_modal.open_session_sheet_id = None;
     }
 
     match decision.modal_surface {
@@ -1068,9 +1197,6 @@ pub fn render_egui_shell_frame_with_host(
             report.regions.dialog_rect_pt = gr_rep.dialog_rect_pt;
             report.outside_click_captured = gr_rep.outside_click_captured;
             report.outside_wheel_captured = gr_rep.outside_wheel_captured;
-        }
-        HybridModalSurface::LegacyModal => {
-            render_legacy_modal_overlay_with_backdrop(&ctx, app, &tokens, host_textures, meta, &mut report);
         }
         HybridModalSurface::None => {}
     }
@@ -1191,144 +1317,6 @@ fn render_top_about_only_bar(ui: &mut egui::Ui, app: &UiApp, modal_open: bool, m
     });
 }
 
-/// Render the legacy `UiApp` workspace/scene into `canvas_rect` via optional pre-uploaded host
-/// textures or on-demand software rasterization (used by deferred `R15.4` sheets and `canvas_view`).
-pub fn render_legacy_canvas_in_rect(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    canvas_rect: Rect,
-    host_textures: Option<&HybridHostTextureFrame>,
-) -> egui::Response {
-    let resp = ui.allocate_rect(canvas_rect, Sense::click_and_drag());
-    if !canvas_rect.is_positive() {
-        return resp;
-    }
-
-    if let Some(tex_id) = host_textures.and_then(|h| h.canvas_texture) {
-        ui.painter().image(tex_id, canvas_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        return resp;
-    }
-
-    let ppp = ui.ctx().pixels_per_point().max(1.0);
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let width_px = (canvas_rect.width() * ppp).round().max(1.0) as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let height_px = (canvas_rect.height() * ppp).round().max(1.0) as u32;
-    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-    let dpi = (f64::from(ppp) * 96.0).round().clamp(72.0, 600.0) as u16;
-
-    // Render legacy presenter without active dialog so background canvas stays clean when Case A overlays it.
-    let mut canvas_app = app.clone();
-    canvas_app.canvas_dialogs.active_dialog = ActiveDialog::None;
-    canvas_app.host_draws_menu_bar = true;
-    if let Ok(raster) = render_workspace_rgba(&canvas_app, RenderTargetSpec { width_px, height_px, dpi }) {
-        let color_image = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
-        let tex_id = upload_cached_texture(ui.ctx(), Id::unique("hybrid.legacy_canvas_tex"), "hybrid_legacy_canvas", color_image);
-        ui.painter().image(tex_id, canvas_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-    }
-    resp
-}
-
-fn render_legacy_modal_overlay_with_backdrop(
-    ctx: &egui::Context,
-    app: &UiApp,
-    tokens: &Tokens,
-    host_textures: Option<&HybridHostTextureFrame>,
-    meta: &mut FrameInspectMeta,
-    report: &mut ShellAboutFrameReport,
-) {
-    let screen_rect = ctx.content_rect();
-    let backdrop_scrim = if tokens.dark { Color32::from_black_alpha(150) } else { Color32::from_rgba_unmultiplied(15, 23, 42, 118) };
-
-    let backdrop_resp = egui::Area::new(Id::unique("hybrid.legacy_modal.backdrop"))
-        .fixed_pos(screen_rect.min)
-        .order(Order::Middle)
-        .interactable(true)
-        .show(ctx, |ui| {
-            let (rect, resp) = ui.allocate_exact_size(screen_rect.size(), Sense::click_and_drag());
-            ui.painter().rect_filled(rect, CornerRadius::ZERO, backdrop_scrim);
-            resp
-        })
-        .inner;
-
-    meta.record(FrameInspectNodeMeta {
-        egui_id: backdrop_resp.id,
-        accesskit_id: backdrop_resp.id.accesskit_id(),
-        widget_id: String::from("modal.backdrop"),
-        role: String::from("backdrop"),
-        label: String::from("Modal Backdrop"),
-        command_id: None,
-        value: None,
-        enabled: true,
-        disabled_reason: None,
-        clipped_rect: screen_rect,
-        z_layer: ZLayer::ModalBackdrop,
-        ellipsized: false,
-        full_label: None,
-    });
-
-    let mut drawn_modal: Option<(egui::TextureId, Rect)> = host_textures.and_then(|h| h.legacy_modal_texture);
-    if drawn_modal.is_none() {
-        let ppp = ctx.pixels_per_point().max(1.0);
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let full_w = (screen_rect.width() * ppp).round().max(1.0) as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let full_h = (screen_rect.height() * ppp).round().max(1.0) as u32;
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        let dpi = (f64::from(ppp) * 96.0).round().clamp(72.0, 600.0) as u16;
-        let layout = compute_workspace_layout_for_dpi(app, full_w, full_h, dpi);
-        if let Some(modal_px) = layout.modal_overlay
-            && modal_px.width > 0
-            && modal_px.height > 0
-            && let Ok(full_img) = render_workspace_rgba(app, RenderTargetSpec { width_px: full_w, height_px: full_h, dpi })
-            && let Some(modal_color_img) = crop_workspace_modal_to_color_image(&full_img, modal_px)
-        {
-            let tex_id = upload_cached_texture(ctx, Id::unique("hybrid.legacy_modal_tex"), "hybrid_legacy_modal", modal_color_img);
-            #[allow(clippy::cast_precision_loss)]
-            let modal_rect = Rect::from_min_size(
-                Pos2::new(screen_rect.min.x + (modal_px.x as f32) / ppp, screen_rect.min.y + (modal_px.y as f32) / ppp),
-                Vec2::new((modal_px.width as f32) / ppp, (modal_px.height as f32) / ppp),
-            );
-            drawn_modal = Some((tex_id, modal_rect));
-        }
-    }
-
-    if let Some((tex_id, modal_rect)) = drawn_modal {
-        report.legacy_modal_rect_pt = Some(modal_rect);
-        report.regions.dialog_rect_pt = Some(modal_rect);
-        egui::Area::new(Id::unique("hybrid.legacy_modal.card")).fixed_pos(modal_rect.min).order(Order::Foreground).interactable(true).show(
-            ctx,
-            |ui| {
-                let (_r, _resp) = ui.allocate_exact_size(modal_rect.size(), Sense::click_and_drag());
-                ui.painter().image(tex_id, modal_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            },
-        );
-    }
-
-    let pointer_pos = ctx.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()));
-    let is_outside = |p: Pos2| report.legacy_modal_rect_pt.is_none_or(|mr| !mr.contains(p));
-    let outside = pointer_pos.is_some_and(is_outside);
-    let any_click_outside = outside
-        && (backdrop_resp.clicked()
-            || backdrop_resp.secondary_clicked()
-            || ctx.input(|i| {
-                i.pointer.primary_clicked()
-                    || i.pointer.secondary_clicked()
-                    || i.events.iter().any(|ev| matches!(ev, egui::Event::PointerButton { pos, pressed: false, .. } if is_outside(*pos)))
-            }));
-    if any_click_outside {
-        report.outside_click_captured = true;
-    }
-    let has_wheel = ctx.input(|i| i.smooth_scroll_delta.length_sq() > 0.0 || i.events.iter().any(|ev| matches!(ev, egui::Event::MouseWheel { .. })));
-    if has_wheel && outside {
-        ctx.input_mut(|i| {
-            i.smooth_scroll_delta = Vec2::ZERO;
-            i.events.retain(|ev| !matches!(ev, egui::Event::MouseWheel { .. }));
-        });
-        report.outside_wheel_captured = true;
-    }
-}
-
 fn render_about_modal(
     ctx: &egui::Context,
     app: &UiApp,
@@ -1437,49 +1425,6 @@ fn render_about_modal(
         ellipsized: false,
         full_label: None,
     });
-}
-
-/// Crop `rect` from a straight-RGBA [`RasterImage`] into an `egui::ColorImage`.
-#[must_use]
-pub fn crop_workspace_modal_to_color_image(src: &RasterImage, rect: WorkspacePixelRect) -> Option<egui::ColorImage> {
-    if src.width_px == 0 || src.height_px == 0 || rect.width == 0 || rect.height == 0 {
-        return None;
-    }
-    let x0 = rect.x.min(src.width_px.saturating_sub(1));
-    let y0 = rect.y.min(src.height_px.saturating_sub(1));
-    let w = rect.width.min(src.width_px.saturating_sub(x0));
-    let h = rect.height.min(src.height_px.saturating_sub(y0));
-    if w == 0 || h == 0 {
-        return None;
-    }
-    let mut rgba = vec![0u8; (w as usize) * (h as usize) * 4];
-    for row in 0..h {
-        let src_start = (((y0 + row) as usize) * (src.width_px as usize) + (x0 as usize)) * 4;
-        let dst_start = (row as usize) * (w as usize) * 4;
-        let bytes = (w as usize) * 4;
-        if let (Some(src_slice), Some(dst_slice)) = (src.rgba.get(src_start..src_start + bytes), rgba.get_mut(dst_start..dst_start + bytes)) {
-            dst_slice.copy_from_slice(src_slice);
-        }
-    }
-    Some(egui::ColorImage::from_rgba_unmultiplied([w as usize, h as usize], &rgba))
-}
-
-fn upload_cached_texture(ctx: &egui::Context, slot_id: Id, name: &str, color_image: egui::ColorImage) -> egui::TextureId {
-    let mut handle: Option<egui::TextureHandle> = ctx.data_mut(|d| d.get_temp(slot_id));
-    match handle.as_mut() {
-        Some(tex) => {
-            tex.set(color_image, egui::TextureOptions::NEAREST);
-            let id = tex.id();
-            ctx.data_mut(|d| d.insert_temp(slot_id, tex.clone()));
-            id
-        }
-        None => {
-            let tex = ctx.load_texture(name, color_image, egui::TextureOptions::NEAREST);
-            let id = tex.id();
-            ctx.data_mut(|d| d.insert_temp(slot_id, tex));
-            id
-        }
-    }
 }
 
 fn rects_overlap_significantly(a: egui::accesskit::Rect, b: egui::accesskit::Rect, tol: f64) -> bool {

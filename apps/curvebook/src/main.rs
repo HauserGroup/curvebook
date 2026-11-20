@@ -26,14 +26,13 @@ use curvebook_format::versioned::{
 use curvebook_render::RenderTargetSpec;
 use curvebook_text::{TrueTypeFontInfo, parse_truetype_font_info};
 use curvebook_ui_egui::control_io::CONTROL_CLIENT_IDLE_TIMEOUT;
-use curvebook_ui_egui::dialogs_canvas::render_workspace_frame_png;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::theme::install_fonts;
 use curvebook_ui_egui::{
-    ControlAuth, ControlPostRequestContext, DEFAULT_UI_SCALE, UiApp, UiThemeMode, bind_control_tcp_listener, extract_ui_scale_from_preferences_extra,
-    normalize_beta_gui_locale, normalize_locale, parse_control_port, serve_control_listener_with_hook, validate_loopback_addr,
-    write_ui_scale_to_preferences_extra,
+    ControlAuth, ControlPostRequestContext, DEFAULT_UI_SCALE, ScreenshotRegionTarget, UiApp, UiThemeMode, bind_control_tcp_listener,
+    extract_ui_scale_from_preferences_extra, normalize_beta_gui_locale, normalize_locale, parse_control_port, serve_control_listener_with_hook,
+    validate_loopback_addr, write_ui_scale_to_preferences_extra,
 };
 
 const RECOVERY_LOCK_TTL_MS: u64 = 300_000;
@@ -48,10 +47,10 @@ options:
   --control-token <token>  bearer token for --control authentication (prefer CURVEBOOK_CONTROL_TOKEN on multi-user systems; CLI args are visible in ps)
   --window                 attach a visible desktop window to --control <port> or CURVEBOOK_CONTROL_PORT
   --gui-only               restrict automation (--control) to interactive GUI actions only
-  --ui-backend <name>      select UI backend (`legacy` default, or `egui`; overrides CURVEBOOK_UI_BACKEND)
+  --ui-backend <name>      select UI backend (`egui` sole desktop backend; `legacy` is rejected; overrides CURVEBOOK_UI_BACKEND)
   --in-window-menus     render the menu bar inside the window on macOS
   --new-instance        open files in a separate application window
-  --headless-once       render one software compositor frame and exit
+  --headless-once       render one egui software frame and exit
   --portable-dir <dir>  store config, shortcuts, and crash-recovery journal under <dir>/curvebook-data
   --ttf-font <path>     load and validate an external TrueType/SFNT (.ttf) font file
   --rulers              show physical canvas rulers on startup
@@ -240,7 +239,7 @@ fn parse_args_with_env_and_backend(
                 i += 1;
             }
             "--ui-backend" => {
-                let raw = args.get(i + 1).ok_or_else(|| String::from("--ui-backend requires `legacy` or `egui`"))?;
+                let raw = args.get(i + 1).ok_or_else(|| String::from("--ui-backend requires `egui` (`legacy` has been removed)"))?;
                 cli_ui_backend = Some(raw.clone());
                 i += 2;
             }
@@ -531,11 +530,13 @@ fn launch_application_with_env(cfg: &LaunchConfig, env_get: impl Fn(&str) -> Opt
                 return Err(String::from("headless desktop host produced empty RGBA framebuffer"));
             }
             let rt = runtime_guard.get_mut()?;
-            let win = rt.window(win_id)?;
-            let png = render_workspace_frame_png(win.app(), RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 })
+            let win = rt.window_mut(win_id)?;
+            let (png, _, _) = win
+                .app_mut()
+                .render_egui_shell_screenshot_png(RenderTargetSpec { width_px: 800, height_px: 520, dpi: 144 }, ScreenshotRegionTarget::FullWindow)
                 .map_err(|err| format!("headless frame render failed: {err}"))?;
             if !png.starts_with(b"\x89PNG\r\n\x1a\n") {
-                return Err(String::from("headless compositor produced invalid PNG signature"));
+                return Err(String::from("headless egui rasterizer produced invalid PNG signature"));
             }
         }
     }
@@ -1204,7 +1205,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
-                ui_backend: UiBackend::Legacy,
+                ui_backend: UiBackend::Egui,
                 in_window_menus: true,
                 new_instance: true,
                 headless_once: false,
@@ -1224,7 +1225,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: true,
-                ui_backend: UiBackend::Legacy,
+                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: true,
@@ -1246,7 +1247,7 @@ mod tests {
                 control_token: None,
                 window: true,
                 gui_only: true,
-                ui_backend: UiBackend::Legacy,
+                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -1278,7 +1279,7 @@ mod tests {
                 control_token: None,
                 window: false,
                 gui_only: false,
-                ui_backend: UiBackend::Legacy,
+                ui_backend: UiBackend::Egui,
                 in_window_menus: false,
                 new_instance: false,
                 headless_once: false,
@@ -2128,7 +2129,7 @@ mod tests {
             in_window_menus: true,
             new_instance: false,
             gui_only: false,
-            ui_backend: UiBackend::Legacy,
+            ui_backend: UiBackend::Egui,
             locale_override: None,
             theme_override: None,
             recovery_root: None,
@@ -2246,11 +2247,17 @@ mod tests {
 
     #[test]
     fn r15_1_ui_backend_flag_env_and_preferences_ui_scale_migration() -> Result<(), Box<dyn std::error::Error>> {
+        let default_egui = super::parse_args_with_env_and_backend(&[], None, None, None)?;
+        assert!(matches!(default_egui, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
+
         let env_egui = super::parse_args_with_env_and_backend(&[], None, None, Some("egui"))?;
         assert!(matches!(env_egui, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));
 
-        let cli_overrides_env = super::parse_args_with_env_and_backend(&[String::from("--ui-backend=legacy")], None, None, Some("egui"))?;
-        assert!(matches!(cli_overrides_env, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Legacy));
+        let cli_legacy_err = super::parse_args_with_env_and_backend(&[String::from("--ui-backend=legacy")], None, None, Some("egui"));
+        assert!(cli_legacy_err.is_err(), "--ui-backend=legacy must be rejected post-R15.5 cutover");
+
+        let env_legacy_err = super::parse_args_with_env_and_backend(&[], None, None, Some("legacy"));
+        assert!(env_legacy_err.is_err(), "CURVEBOOK_UI_BACKEND=legacy must be rejected post-R15.5 cutover");
 
         let cli_split_flag = super::parse_args_with_env_and_backend(&[String::from("--ui-backend"), String::from("egui")], None, None, None)?;
         assert!(matches!(cli_split_flag, CliAction::Launch(ref c) if c.ui_backend == UiBackend::Egui));

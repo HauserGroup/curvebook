@@ -25,11 +25,10 @@ use curvebook_ui_egui::egui_shell::inspect_bridge::{
 };
 use curvebook_ui_egui::egui_shell::stat_anova_modal::resolve_one_way_anova_banner;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, Tokens, UiBackend, UiIntent};
-use curvebook_ui_egui::human_driver::HumanPathDriver;
+use curvebook_ui_egui::inspect::ZLayer;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
-use curvebook_ui_egui::layout::{FocusScope, ZLayer};
 use curvebook_ui_egui::theme::UiThemeSpec;
-use curvebook_ui_egui::{UiApp, UiThemeMode, inspect_ui_tree_for_metrics};
+use curvebook_ui_egui::{UiApp, UiThemeMode};
 use serde_json::json;
 
 const BENCH_COLS: usize = 1_000;
@@ -140,62 +139,6 @@ struct TempDirCleanup(std::path::PathBuf);
 impl Drop for TempDirCleanup {
     fn drop(&mut self) {
         let _ = std::fs::remove_dir_all(&self.0);
-    }
-}
-
-fn run_legacy_1m_column_benchmark(dpi_scale: f64, steady_frames: usize, input_events: usize) -> BackendBenchReport {
-    let doc = build_one_million_cell_column_doc();
-    let metrics = ViewportMetrics::new(BENCH_VIEWPORT_W, BENCH_VIEWPORT_H, dpi_scale);
-    let mut driver = HumanPathDriver::new(UiApp::from_session(Session::from_document(doc)), metrics);
-    driver.app_mut().grid.tool.viewport.viewport_width_px = BENCH_VIEWPORT_W;
-    driver.app_mut().grid.tool.viewport.viewport_height_px = BENCH_VIEWPORT_H;
-
-    // Warm layout & glyph coverage atlas before timed steady-state loop.
-    let warm = driver.render_frame().expect("legacy warm frame");
-    assert_eq!(warm.width_px, metrics.physical_width_px());
-    assert_eq!(warm.height_px, metrics.physical_height_px());
-
-    let mut steady_samples = Vec::with_capacity(steady_frames);
-    let mut visible_cells_last = 0usize;
-    for step in 0..steady_frames {
-        driver.app_mut().grid.tool.viewport.scroll_y_px = ((step * 144) % (950 * 24)) as f64;
-        driver.app_mut().grid.tool.viewport.scroll_x_px = ((step * 220) % (960 * 110)) as f64;
-        let t0 = Instant::now();
-        let _tree = driver.layout_tree();
-        let img = driver.render_frame().expect("legacy 1M steady frame");
-        let elapsed_ms = t0.elapsed().as_secs_f64() * 1_000.0;
-        assert_eq!(img.width_px, metrics.physical_width_px());
-        steady_samples.push(elapsed_ms);
-
-        let win = driver.app().visible_grid_window().expect("legacy visible window");
-        visible_cells_last = win.end_row.saturating_sub(win.start_row) * win.end_col.saturating_sub(win.start_col);
-    }
-
-    // Input-to-paint latency across wheel scroll, pointer click, and keyboard navigation.
-    let grid_center = driver.widget_center_logical("grid.sheet.col-1m").unwrap_or([BENCH_VIEWPORT_W * 0.5, BENCH_VIEWPORT_H * 0.5]);
-    let mut input_samples = Vec::with_capacity(input_events);
-    for step in 0..input_events {
-        match step % 3 {
-            0 => {
-                let _ = driver.wheel_logical(grid_center[0], grid_center[1], 120.0, -72.0, KeyModifiers::default());
-            }
-            1 => {
-                let _ = driver.click_logical(grid_center[0], grid_center[1]);
-            }
-            _ => {
-                let _ = driver.press_key("ArrowDown", KeyModifiers::default());
-            }
-        }
-        input_samples.push(driver.last_input_to_paint_ms());
-    }
-
-    BackendBenchReport {
-        backend: "legacy",
-        dpi_scale,
-        steady_frame: TimingStats::from_samples(steady_samples),
-        input_to_paint: TimingStats::from_samples(input_samples),
-        visible_cells_last,
-        total_cells: BENCH_COLS * BENCH_ROWS * BENCH_SUBCOLS,
     }
 }
 
@@ -338,126 +281,15 @@ fn run_egui_1m_column_benchmark(dpi_scale: f64, steady_frames: usize, input_even
 }
 
 #[test]
-fn r15_2_legacy_1m_column_ci_smoke() {
-    let r1 = run_legacy_1m_column_benchmark(1.0, 6, 4);
-    let r2 = run_legacy_1m_column_benchmark(2.0, 6, 4);
-    print_bench_table_header();
-    r1.print_row();
-    r2.print_row();
-
-    assert_eq!(r1.total_cells, 1_000_000);
-    assert!(r1.visible_cells_last > 0 && r1.visible_cells_last < 2_000, "legacy grid must virtualize: {}", r1.visible_cells_last);
-    assert!(r2.visible_cells_last > 0 && r2.visible_cells_last < 2_000);
-}
-
-#[test]
-fn r15_2_legacy_r10_1_anova_cjk_undo_journal_baseline() {
-    let dir = temp_journal_dir("legacy-r10-1");
-    let _cleanup = TempDirCleanup(dir.clone());
-    let (session, mut journal, _report) = Session::open_dir_with_recovery(&dir, "legacy-qa", 300_000, 1_000).expect("open journal");
-
-    // Seed exact same three-group Column table inside a journaled session.
-    let mut app = UiApp::from_session(session);
-    app.execute_command("sheet.createData", json!({ "sheet_id": "col-spike", "title": "Drug Dose Assay", "kind": "column", "cols": 3, "rows": 6 }))
-        .expect("create");
-    app.execute_command("table.setTitles", json!({ "sheet_id": "col-spike", "titles": ["Control", "Treated", "HighDose"] })).expect("titles");
-    let rows = [[10.0, 14.5, 20.1], [11.2, 15.1, 21.0], [9.8, 13.9, 19.6], [10.6, 14.8, 20.8], [10.4, 15.3, 21.5]];
-    app.execute_command("table.setCells", json!({ "sheet_id": "col-spike", "rows": rows })).expect("set cells");
-    app.session().checkpoint_journal(&mut journal).expect("checkpoint seed");
-    let seed_undo = app.session().undo_depth();
-
-    let mut driver = HumanPathDriver::new(app, ViewportMetrics::new(1280.0, 800.0, 1.0));
-    assert!(driver.verify_parity().is_clean());
-
-    // Inline CJK/IME cell commit + undo verification.
-    let cell_node = driver.find_widget("grid.cell.5.0.0").expect("empty cell row 5");
-    let center = cell_node.bounds.visible_rect_px.center();
-    driver.double_click_logical(f64::from(center[0]), f64::from(center[1])).expect("dblclick row 5");
-    driver.set_ime_preedit(Some(String::from("にほん")));
-    driver.type_text("用量反応").expect("commit CJK cell text");
-    driver.press_key("Enter", KeyModifiers::default()).expect("Enter commits cell");
-    assert_eq!(driver.app().session().undo_depth(), seed_undo + 1, "cell commit must add exactly 1 undo step");
-    if let TableArchetype::Column(col) = &driver.app().document().data_sheets[0].archetype {
-        assert_eq!(col.data_sets[0].cell(5, 0).map(|c| &c.value), Some(&CellValue::Text(String::from("用量反応"))));
-    } else {
-        panic!("expected Column archetype");
-    }
-    driver
-        .app_mut()
-        .session()
-        .record_to_journal(&mut journal, "table.setCell", &json!({ "sheet_id": "col-spike", "row": 5, "col": 0, "subcol": 0, "value": "用量反応" }))
-        .expect("record cell journal");
-
-    // Analyze -> One-Way ANOVA -> Cmd+T -> Assume Gaussian off (R2) -> Update Analysis.
-    driver.click_widget("toolbar.analyze").expect("click toolbar.analyze");
-    assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
-    if driver.find_widget("analyze.entry.stats.one_way_anova").is_none_or(|n| !n.drawn_in_frame) {
-        let _ = driver.wheel_widget("analyze.entries_list", 0.0, -180.0, KeyModifiers::default());
-    }
-    driver.click_widget("analyze.entry.stats.one_way_anova").expect("select one_way_anova");
-    driver.click_widget("modal.ok").expect("confirm AnalyzeSheet");
-    let rs_id = driver.app().document().result_sheets[0].id.clone();
-
-    driver.press_key("T", KeyModifiers { meta: true, ..Default::default() }).expect("Cmd+T");
-    assert!(matches!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
-
-    // Focus trap inside modal.
-    for _ in 0..4 {
-        driver.press_key("Tab", KeyModifiers::default()).expect("Tab inside modal");
-        if let Some(fid) = driver.app().focus_widget_id.clone() {
-            let tree = driver.layout_tree();
-            let node = tree.node(&fid).expect("modal node");
-            assert_eq!(node.a11y.focus_scope, FocusScope::ModalDialog);
-        }
-    }
-
-    driver.click_widget("edit.assume_gaussian").expect("toggle Assume Gaussian off");
-    let tukey = driver.find_widget("edit.post_hoc.tukey").expect("tukey present");
-    assert!(!tukey.state.enablement.enabled);
-    driver.click_widget("modal.ok").expect("confirm Update Analysis");
-    assert_eq!(driver.app().canvas_dialogs.active_dialog, ActiveDialog::None);
-    let rs = driver.app().document().result_sheet(&rs_id).expect("updated result sheet");
-    assert!(rs.title().contains("Kruskal-Wallis"));
-    if let AnalysisKind::OneWayAnova(spec) = &rs.analysis.kind {
-        assert_eq!(spec.multiplicity.method, MultiplicityMethod::DunnRankSum);
-    } else {
-        panic!("expected OneWayAnova spec");
-    }
-
-    // Verify ui.inspect JSON baseline contains active ResultSheet + undo depth.
-    let inspect = inspect_ui_tree_for_metrics(driver.app(), driver.metrics(), None, true);
-    assert_eq!(inspect.active_sheet_id.as_deref(), Some(rs_id.as_str()));
-    assert!(inspect.undo_depth > seed_undo);
-
-    // Undo restores Kruskal-Wallis back to Ordinary One-Way ANOVA.
-    driver.app_mut().execute_command("edit.undo", json!({})).expect("undo analysis update");
-    assert!(driver.app().document().result_sheet(&rs_id).is_some_and(|r| r.title().contains("ANOVA") || r.title().contains("One-Way")));
-
-    // WAL ops.journal replay restores the CJK cell edit cleanly.
-    drop(journal.abandon());
-    assert!(dir.join(JOURNAL_FILE_NAME).exists());
-    let (recovered, _rec_j, _rep) = Session::open_dir_with_recovery(&dir, "legacy-qa-recover", 300_000, 305_000).expect("recover WAL");
-    if let TableArchetype::Column(col) = &recovered.document().data_sheets[0].archetype {
-        assert_eq!(col.data_sets[0].cell(5, 0).map(|c| &c.value), Some(&CellValue::Text(String::from("用量反応"))));
-    } else {
-        panic!("expected Column archetype on WAL recovery");
-    }
-}
-
-#[test]
-#[ignore = "Wave 2 Go/No-Go matched 1M-cell Column release benchmark; run with `cargo test --release -p curvebook-ui-egui --test r15_2_anova_and_1m_bench -- --nocapture --ignored`"]
+#[ignore = "Wave 2 Go/No-Go 1M-cell Column release benchmark; run with `cargo test --release -p curvebook-ui-egui --test r15_2_anova_and_1m_bench -- --nocapture --ignored`"]
 fn r15_2_gonogo_1m_column_matched_benchmark_release() {
     if cfg!(debug_assertions) {
         panic!("Go/No-Go 1M benchmark MUST run in --release mode");
     }
-    let legacy_1x = run_legacy_1m_column_benchmark(1.0, STEADY_FRAMES, INPUT_EVENTS);
-    let legacy_2x = run_legacy_1m_column_benchmark(2.0, STEADY_FRAMES, INPUT_EVENTS);
     let egui_1x = run_egui_1m_column_benchmark(1.0, STEADY_FRAMES, INPUT_EVENTS);
     let egui_2x = run_egui_1m_column_benchmark(2.0, STEADY_FRAMES, INPUT_EVENTS);
 
     print_bench_table_header();
-    legacy_1x.print_row();
-    legacy_2x.print_row();
     egui_1x.print_row();
     egui_2x.print_row();
 
@@ -491,7 +323,6 @@ struct EguiAnovaQaState {
     outside_click_captured: bool,
     outside_wheel_captured: bool,
     dialog_rect_pt: Option<egui::Rect>,
-    legacy_modal_rect_pt: Option<egui::Rect>,
 }
 
 impl EguiAnovaQaState {
@@ -506,7 +337,6 @@ impl EguiAnovaQaState {
             outside_click_captured: false,
             outside_wheel_captured: false,
             dialog_rect_pt: None,
-            legacy_modal_rect_pt: None,
         }
     }
 }
@@ -517,7 +347,6 @@ fn make_egui_qa_driver<'a>(state: EguiAnovaQaState, metrics: ViewportMetrics) ->
         st.outside_click_captured |= rep.outside_click_captured;
         st.outside_wheel_captured |= rep.outside_wheel_captured;
         st.dialog_rect_pt = rep.regions.dialog_rect_pt;
-        st.legacy_modal_rect_pt = rep.legacy_modal_rect_pt;
     });
     driver.set_bleed_policy(TextBleedPolicy::AllowVerticalScrollClip);
     driver.set_post_frame_hook(|st, settled| {
@@ -584,75 +413,36 @@ fn verify_egui_cjk_cell_and_title_ime(driver: &mut EguiHumanPathDriver<'_, EguiA
 
 fn run_egui_case_b_analyze_to_resultsheet(
     driver: &mut EguiHumanPathDriver<'_, EguiAnovaQaState>,
-    metrics: ViewportMetrics,
+    _metrics: ViewportMetrics,
 ) -> Result<SheetId, String> {
-    // Keep explicit legacy `AnalyzeSheet` hybrid Case B coverage intact until `R15.5`.
-    driver.state_mut().views.native_analyze_sheet = false;
-    driver.state_mut().app.egui_views.native_analyze_sheet = false;
     driver.click_widget_id("toolbar.analyze")?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
     let d_case_b = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
     assert_eq!(d_case_b.sheet_surface, HybridSheetSurface::EguiColumnGrid);
-    assert_eq!(d_case_b.modal_surface, HybridModalSurface::LegacyModal);
+    assert_eq!(d_case_b.modal_surface, HybridModalSurface::EguiAnalyzeSheet);
     assert!(d_case_b.blocks_egui_grid);
 
-    // Outside click & wheel absorbed by Case B backdrop.
-    let modal_rect = driver.state().legacy_modal_rect_pt.ok_or("missing legacy AnalyzeSheet modal rect")?;
+    // Outside click & wheel absorbed by backdrop.
+    let modal_rect = driver.state().dialog_rect_pt.ok_or("missing egui AnalyzeSheet modal rect")?;
     let outside = egui::pos2(6.0, 120.0);
     assert!(!modal_rect.contains(outside));
     driver.state_mut().outside_click_captured = false;
     driver.state_mut().outside_wheel_captured = false;
     driver.wheel_at(outside, egui::vec2(0.0, -140.0))?;
     driver.click_at(outside)?;
-    assert!(driver.state().outside_click_captured, "Case B backdrop must capture outside click");
-    assert!(driver.state().outside_wheel_captured, "Case B backdrop must capture outside wheel");
+    assert!(driver.state().outside_click_captured, "backdrop must capture outside click");
+    assert!(driver.state().outside_wheel_captured, "backdrop must capture outside wheel");
 
-    // Scroll `analyze.entries_list` via ui.inspect bounds + ui.pointer_gesture wheel, click One-Way ANOVA, confirm.
+    // Scroll `analyze.entries_list` via pointer wheel in the live driver context, click One-Way ANOVA, confirm.
     for _ in 0..8 {
-        let snap = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
-        if snap.dialog.as_ref().is_some_and(|d| d.controls.iter().any(|c| c.widget_id == "analyze.entry.stats.one_way_anova")) {
+        if driver.frame_meta().find_by_widget_id("analyze.entry.stats.one_way_anova").is_some() {
             break;
         }
-        let lb = snap
-            .dialog
-            .as_ref()
-            .and_then(|d| d.controls.iter().find(|c| c.widget_id == "analyze.entries_list"))
-            .and_then(|c| c.bounds)
-            .ok_or("missing analyze.entries_list bounds")?;
-        let lx = lb[0] + lb[2] * 0.5;
-        let ly = lb[1] + lb[3] * 0.5;
-        let w_rep = driver.state_mut().app.dispatch_control_line(&format!(
-            r#"{{"id":"w","method":"ui.pointer_gesture","params":{{"action":"wheel","x":{lx},"y":{ly},"delta_x":0.0,"delta_y":140.0,"metrics":{{"logical_width":{},"logical_height":{},"scale_factor":{}}}}}}}"#,
-            metrics.logical_width,
-            metrics.logical_height,
-            metrics.clamped_scale_factor()
-        ));
-        assert!(w_rep.contains("\"ok\":true"), "scroll analyze list failed: {w_rep}");
+        let lb = driver.frame_meta().find_by_widget_id("analyze.entries_list").ok_or("missing analyze.entries_list")?.clipped_rect;
+        driver.wheel_at(lb.center(), egui::vec2(0.0, -140.0))?;
     }
-    let snap = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
-    let eb = snap
-        .dialog
-        .as_ref()
-        .and_then(|d| d.controls.iter().find(|c| c.widget_id == "analyze.entry.stats.one_way_anova"))
-        .and_then(|c| c.bounds)
-        .ok_or("missing analyze.entry.stats.one_way_anova")?;
-    let cx = eb[0] + eb[2] * 0.5;
-    let cy = eb[1] + eb[3] * 0.5;
-    let c_rep = driver
-        .state_mut()
-        .app
-        .dispatch_control_line(&format!(
-            r#"{{"id":"c","method":"ui.pointer_gesture","params":{{"action":"click","x":{cx},"y":{cy},"metrics":{{"logical_width":{},"logical_height":{},"scale_factor":{}}}}}}}"#,
-            metrics.logical_width,
-            metrics.logical_height,
-            metrics.clamped_scale_factor()
-        ));
-    assert!(c_rep.contains("\"ok\":true"), "select one_way_anova failed: {c_rep}");
-    let ok_rep = driver
-        .state_mut()
-        .app
-        .dispatch_control_line(r#"{"id":"ok","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}"#);
-    assert!(ok_rep.contains("\"ok\":true"), "confirm analyze_sheet failed: {ok_rep}");
+    driver.click_widget_id("analyze.entry.stats.one_way_anova")?;
+    driver.click_widget_id("modal.ok")?;
     driver.run_settled();
 
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
@@ -661,7 +451,7 @@ fn run_egui_case_b_analyze_to_resultsheet(
     let rs_kind = &driver.state().app.document().result_sheet(&rs_id).ok_or("missing created ResultSheet")?.analysis.kind;
     assert!(matches!(rs_kind, AnalysisKind::OneWayAnova(_)), "expected OneWayAnova ResultSheet, got {rs_kind:?}");
     let d_res = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
-    assert_eq!(d_res.sheet_surface, HybridSheetSurface::LegacyPresenter);
+    assert_eq!(d_res.sheet_surface, HybridSheetSurface::EguiStage);
     Ok(rs_id)
 }
 
@@ -669,7 +459,7 @@ fn run_egui_case_a_anova_modal_and_update(driver: &mut EguiHumanPathDriver<'_, E
     driver.press_key("T", KeyModifiers { meta: true, ..Default::default() })?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
     let d_case_a = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
-    assert_eq!(d_case_a.sheet_surface, HybridSheetSurface::LegacyPresenter);
+    assert_eq!(d_case_a.sheet_surface, HybridSheetSurface::EguiStage);
     assert_eq!(d_case_a.modal_surface, HybridModalSurface::EguiOneWayAnova);
     assert!(d_case_a.renders_egui_anova_modal);
 
@@ -800,10 +590,12 @@ fn r15_2_egui_r10_1_anova_human_path_cjk_inspect_and_journal() -> Result<(), Box
     // Verify 14 Beta locales on Column + EditAnalysisParameters hybrid parity & non-bleed.
     for &locale in &BETA_LOCALE_CODES {
         let mut loc_app = UiApp::from_session(Session::from_document(driver.state().app.document().clone())).with_ui_backend(UiBackend::Egui);
+        loc_app.nav.welcome.open = false;
+        let _ = loc_app.execute_command("sheet.select", json!({ "sheet_id": "col-spike" }));
         let _ = loc_app.set_locale(locale);
         loc_app.sync_views();
         let snap = loc_app.inspect_egui_shell_snapshot(ViewportMetrics::new(1280.0, 800.0, 1.0), Some("grid"), true);
-        assert!(snap.grid_cells.is_some(), "expected grid inspect for locale {locale}");
+        assert!(snap.grid_cells.as_ref().is_some_and(|c| !c.is_empty()), "expected grid inspect for locale {locale}");
     }
 
     // WAL ops.journal replay restores both CJK cell & CJK column title commits.

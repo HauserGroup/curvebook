@@ -16,7 +16,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExcludeWithReasonDialogState};
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::{normalize_locale, try_tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
 use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};

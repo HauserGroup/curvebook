@@ -26,7 +26,7 @@ use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::{UiApp, UiThemeMode, dispatch_gui_action};
 use serde_json::json;
 
-fn modal_parity_violations(report: &curvebook_ui_egui::layout::ParityReport) -> Vec<&curvebook_ui_egui::layout::ParityViolation> {
+fn modal_parity_violations(report: &curvebook_ui_egui::inspect::ParityReport) -> Vec<&curvebook_ui_egui::inspect::ParityViolation> {
     report.violations.iter().filter(|v| v.widget_id != "canvas.viewport" && v.widget_id != "canvas.split.viewport").collect()
 }
 

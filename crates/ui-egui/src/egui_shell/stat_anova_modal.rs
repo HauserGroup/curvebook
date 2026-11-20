@@ -17,7 +17,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, EditAnalysisParametersState};
 use crate::i18n::{normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::modal_predicates::{
     ControlEnablement, is_reml_mixed_effects_active, r1_paired_or_matched_allowed, r1_repeated_measures_tab, r1_sphericity_or_reml_control,
     r1b_post_hoc_option_enabled, r1b_sphericity_correction, r2_assume_gaussian_allowed, r3_control_column_picker, r9_pvalue_precision_spinner,
@@ -1328,6 +1328,8 @@ fn draw_residual_qq_schematic(ui: &mut Ui, rc: &TabRenderCtx<'_>, meta: &mut Fra
         let py = plot.bottom() - plot.height() * *frac + jitter;
         ui.painter().circle_filled(Pos2::new(px, py.clamp(plot.top() + 3.0, plot.bottom() - 3.0)), 2.8, rc.tokens.accent_strong);
     }
+    let ak_title = title.to_owned();
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Image, true, ak_title.clone()));
     record_widget(ui, meta, &resp, "edit.diag.schematic", "image", title, None, None, true, None, ZLayer::ModalDialog, false, None);
 }
 
@@ -2020,6 +2022,29 @@ pub(super) fn attach_modal_hover_tooltip(ui: &Ui, resp: egui::Response, tip: &st
         });
     }
     resp
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(super) fn render_modal_textbox_row(
+    ui: &mut Ui,
+    tokens: &Tokens,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+    widget_id: &str,
+    label: &str,
+    hint: &str,
+    draft: &mut String,
+    width: f32,
+) {
+    ui.horizontal(|ui| {
+        ui.label(egui::RichText::new(label).color(tokens.text_primary));
+        let te_id = Id::unique(widget_id);
+        let resp = ui.add_sized(Vec2::new(width, 22.0), egui::TextEdit::singleline(draft).id(te_id).hint_text(hint));
+        if resp.changed() {
+            intents.push_set_text_field_buffer(widget_id, draft.clone());
+        }
+        record_widget(ui, meta, &resp, widget_id, "textbox", label, None, Some(json!(draft.as_str())), true, None, ZLayer::ModalDialog, false, None);
+    });
 }
 
 #[allow(clippy::too_many_arguments)]

@@ -2,7 +2,7 @@
 //!
 //! Produces [`UiTreeSnapshot`] from the live [`UiApp`] without requiring an OS window, attaching
 //! declarative enablement (`enabled`, `disabled_reason`) from [`crate::modal_predicates`] and
-//! deterministic `[x, y, width, height]` screen bounds from [`compute_workspace_layout_map`](crate::compositor::compute_workspace_layout_map).
+//! deterministic `[x, y, width, height]` screen bounds from the settled `egui_shell::inspect_bridge` pass.
 
 use curvebook_doc::{
     AnalysisKind, ColorChannelMapping, ContingencyMethod, MultivariateSpec, OneWayMethod, PValueFormat, ProjectDocument, RepeatedMeasuresDesign,
@@ -17,8 +17,7 @@ use crate::dialogs_canvas::{
     ActiveDialog, AssumptionDiagnosticBanner, cld_ordering_str, equation_display_mode_str, format_compact_f64, pairwise_display_mode_str,
 };
 use crate::grid_view::format_cell_display;
-use crate::interaction::{ViewportMetrics, WorkspaceLayoutMap};
-use crate::layout::LayoutTree;
+use crate::interaction::ViewportMetrics;
 use crate::menus::tooltips::{menu_bar_tooltips, toolbar_tooltips};
 use crate::modal_predicates::{
     ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget, evaluate_edit_params_tab, is_reml_mixed_effects_active, r_km_trend_test,
@@ -221,19 +220,78 @@ impl UiTreeSnapshot {
 
 const MAX_INSPECT_SELECTED_COORDS: usize = 500;
 
-/// Build a deterministic [`UiTreeSnapshot`] from `app` filtered by `scope` (`all`, `menus`,
-/// `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`), projecting every widget bound
-/// strictly from [`LayoutTree::nodes`] under default viewport metrics.
+/// Deterministic paint/hit-test Z-layer ordering (`Workspace` < ... < `ModalBackdrop` < `ModalDialog` < `Tooltip`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Serialize, Deserialize)]
+#[repr(u8)]
+pub enum ZLayer {
+    Workspace = 0,
+    FloatingOverlay = 10,
+    SplitHandle = 20,
+    DropdownMenu = 30,
+    ModalBackdrop = 40,
+    ModalDialog = 50,
+    ModalDropdown = 60,
+    ContextMenu = 70,
+    Tooltip = 80,
+}
+
+/// Single failed UI invariant detected by driver parity / layout verification gates.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ParityViolation {
+    pub widget_id: String,
+    pub check: String,
+    pub detail: String,
+}
+
+/// Result summary emitted by UI parity / hit-box / accessibility verification passes.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub struct ParityReport {
+    pub checked_nodes: usize,
+    pub checked_text_runs: usize,
+    pub violations: Vec<ParityViolation>,
+}
+
+impl ParityReport {
+    #[must_use]
+    pub fn is_clean(&self) -> bool {
+        self.violations.is_empty()
+    }
+}
+
+/// Screenshot crop target supported by `ui.screenshot`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+pub enum ScreenshotRegionTarget {
+    #[default]
+    FullWindow,
+    Canvas,
+    Dialog,
+}
+
+/// Build a canonical [`UiTreeSnapshot`] from `app` filtered by `scope` (`all`, `menus`,
+/// `toolbar`, `navigator`, `tabs`, `canvas`, `grid`, `dialog`) under default viewport metrics.
 #[must_use]
 pub fn inspect_ui_tree(app: &UiApp, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
     inspect_ui_tree_for_metrics(app, ViewportMetrics::default(), scope, include_bounds)
 }
 
-/// Build a deterministic [`UiTreeSnapshot`] under caller-supplied [`ViewportMetrics`].
+/// Build a canonical [`UiTreeSnapshot`] under caller-supplied [`ViewportMetrics`], backed by the
+/// live `egui_shell::inspect_bridge` pass on native desktop hosts and the semantic state tree on `wasm32`.
 #[must_use]
 pub fn inspect_ui_tree_for_metrics(app: &UiApp, metrics: ViewportMetrics, scope: Option<&str>, include_bounds: bool) -> UiTreeSnapshot {
-    let tree = app.layout_tree_cow(metrics);
-    let layout = tree.to_workspace_layout_map();
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        crate::egui_shell::inspect_bridge::inspect_live_egui_snapshot(app, metrics, scope, include_bounds)
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        inspect_semantic_snapshot(app, metrics, scope, include_bounds)
+    }
+}
+
+/// Build the pure structural/semantic [`UiTreeSnapshot`] baseline from `app` and `ProjectDocument`
+/// (`bounds: None`; overlaid with live `egui` geometry on desktop hosts).
+#[must_use]
+pub(crate) fn inspect_semantic_snapshot(app: &UiApp, _metrics: ViewportMetrics, scope: Option<&str>, _include_bounds: bool) -> UiTreeSnapshot {
     let doc = app.session().document();
     let active_id = doc.active_sheet_id.as_ref();
     let active_kind = active_id.and_then(|id| doc.sheet_section(id)).map(sheet_section_name);
@@ -276,37 +334,14 @@ pub fn inspect_ui_tree_for_metrics(app: &UiApp, metrics: ViewportMetrics, scope:
         status_banner: app.canvas_dialogs.status_banner.clone(),
         context_menu_target: app.interaction.context_menu_target.clone(),
         result_diagnostic_banner,
-        menus: want("menus").then(|| build_menus_snapshot(app, &tree, include_bounds)),
-        toolbar: want("toolbar").then(|| build_toolbar_snapshot(app, &tree, include_bounds)),
-        navigator_sheets: want("navigator").then(|| build_navigator_snapshot(app, doc, &tree, include_bounds)),
-        tabs: want("tabs").then(|| build_tabs_snapshot(app, doc, &tree, include_bounds)),
-        canvas_elements: want("canvas").then(|| build_canvas_snapshot(app, doc, &tree, &layout, include_bounds)),
-        grid_cells: want("grid").then(|| build_grid_cells_snapshot(app, doc, &tree, include_bounds)),
-        dialog: want("dialog").then(|| build_dialog_snapshot(app, doc, &tree, include_bounds)).flatten(),
+        menus: want("menus").then(|| build_menus_snapshot(app)),
+        toolbar: want("toolbar").then(|| build_toolbar_snapshot(app)),
+        navigator_sheets: want("navigator").then(|| build_navigator_snapshot(app, doc)),
+        tabs: want("tabs").then(|| build_tabs_snapshot(app, doc)),
+        canvas_elements: want("canvas").then(|| build_canvas_snapshot(app, doc)),
+        grid_cells: want("grid").then(|| build_grid_cells_snapshot(app, doc)),
+        dialog: want("dialog").then(|| build_dialog_snapshot(app, doc)).flatten(),
     }
-}
-
-fn node_bounds_from_tree(tree: &LayoutTree, widget_id: &str, include_bounds: bool) -> Option<[f64; 4]> {
-    if !include_bounds {
-        return None;
-    }
-    let lookup_id = match widget_id {
-        "dialog.button.ok" | "dialog.button.create" => "modal.ok",
-        "dialog.button.cancel" => "modal.cancel",
-        "dialog.button.close" => "modal.close",
-        "analyze.entry" => "analyze.entries_list",
-        "edit.two_group.welch" => "edit.tg.welch",
-        "edit.factorial.residual_covariance" => "edit.factorial.cov.cs",
-        other => other,
-    };
-    tree.node(widget_id)
-        .or_else(|| tree.node(lookup_id))
-        .filter(|n| n.drawn_in_frame && n.bounds.visible_rect_px.width > 0 && n.bounds.visible_rect_px.height > 0)
-        .map(|n| {
-            let s = tree.metrics.clamped_scale_factor();
-            let v = n.bounds.visible_rect_px;
-            [f64::from(v.x) / s, f64::from(v.y) / s, f64::from(v.width) / s, f64::from(v.height) / s]
-        })
 }
 
 fn build_grid_selection_snapshot(app: &UiApp, doc: &ProjectDocument) -> GridSelectionSnapshot {
@@ -342,17 +377,15 @@ fn collect_brushed_points(app: &UiApp) -> Vec<BrushedPointSnapshot> {
         .collect()
 }
 
-fn build_menus_snapshot(app: &UiApp, tree: &LayoutTree, include_bounds: bool) -> Vec<UiMenuSnapshot> {
+fn build_menus_snapshot(app: &UiApp) -> Vec<UiMenuSnapshot> {
     menu_bar_tooltips(app)
         .into_iter()
         .map(|sec| {
-            let menu_bounds = node_bounds_from_tree(tree, sec.menu_key, include_bounds);
             let items = sec
                 .items
                 .into_iter()
                 .map(|tip| {
                     let widget_id = format!("menu.{}", tip.command_id);
-                    let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
                     UiWidgetNode {
                         widget_id,
                         role: String::from("menuitem"),
@@ -361,16 +394,16 @@ fn build_menus_snapshot(app: &UiApp, tree: &LayoutTree, include_bounds: bool) ->
                         value: None,
                         enabled: tip.enabled,
                         disabled_reason: (!tip.enabled).then(|| format!("{} is currently unavailable in this context.", tip.label)),
-                        bounds,
+                        bounds: None,
                     }
                 })
                 .collect();
-            UiMenuSnapshot { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), bounds: menu_bounds, items }
+            UiMenuSnapshot { menu_key: sec.menu_key.to_owned(), title: sec.title.to_owned(), bounds: None, items }
         })
         .collect()
 }
 
-fn build_toolbar_snapshot(app: &UiApp, tree: &LayoutTree, include_bounds: bool) -> Vec<UiWidgetNode> {
+fn build_toolbar_snapshot(app: &UiApp) -> Vec<UiWidgetNode> {
     toolbar_tooltips(app)
         .into_iter()
         .map(|entry| UiWidgetNode {
@@ -381,12 +414,12 @@ fn build_toolbar_snapshot(app: &UiApp, tree: &LayoutTree, include_bounds: bool) 
             value: None,
             enabled: entry.tooltip.enabled,
             disabled_reason: (!entry.tooltip.enabled).then(|| format!("{} requires a compatible active sheet.", entry.caption)),
-            bounds: node_bounds_from_tree(tree, entry.button.id, include_bounds),
+            bounds: None,
         })
         .collect()
 }
 
-fn build_navigator_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, include_bounds: bool) -> Vec<UiNavigatorSheetNode> {
+fn build_navigator_snapshot(app: &UiApp, doc: &ProjectDocument) -> Vec<UiNavigatorSheetNode> {
     let active_id = doc.active_sheet_id.as_ref();
     let mut out = Vec::new();
     for (folder, sheet_ids) in [
@@ -398,7 +431,6 @@ fn build_navigator_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTre
     ] {
         for (id, title) in sheet_ids {
             let widget_id = format!("nav.sheet.{}", id.as_str());
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             out.push(UiNavigatorSheetNode {
                 widget_id,
                 sheet_id: id.as_str().to_owned(),
@@ -408,14 +440,14 @@ fn build_navigator_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTre
                 role: String::from("treeitem"),
                 label: title.to_owned(),
                 enabled: app.nav.search_query.is_empty() || title.to_ascii_lowercase().contains(&app.nav.search_query.to_ascii_lowercase()),
-                bounds,
+                bounds: None,
             });
         }
     }
     out
 }
 
-fn build_tabs_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, include_bounds: bool) -> Vec<UiWidgetNode> {
+fn build_tabs_snapshot(app: &UiApp, doc: &ProjectDocument) -> Vec<UiWidgetNode> {
     let mut tabs = Vec::new();
     if let Some(rs_id) = doc.active_sheet_id.as_ref()
         && let Some(rs) = doc.result_sheet(rs_id)
@@ -423,7 +455,6 @@ fn build_tabs_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, in
         for (idx, tab) in rs.tabs.iter().enumerate() {
             let active = idx == app.canvas_dialogs.result_view.active_tab_index;
             let widget_id = format!("result.tab.{}", tab.id);
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             tabs.push(UiWidgetNode {
                 widget_id,
                 role: String::from("tab"),
@@ -432,37 +463,25 @@ fn build_tabs_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, in
                 value: Some(json!({ "selected": active, "index": idx, "tab_id": tab.id })),
                 enabled: true,
                 disabled_reason: None,
-                bounds,
+                bounds: None,
             });
         }
     }
-    if let Some(dlg) = build_dialog_snapshot(app, doc, tree, include_bounds) {
+    if let Some(dlg) = build_dialog_snapshot(app, doc) {
         tabs.extend(dlg.tabs);
     }
     tabs
 }
 
-fn build_canvas_snapshot(
-    app: &UiApp,
-    doc: &ProjectDocument,
-    tree: &LayoutTree,
-    layout: &WorkspaceLayoutMap,
-    include_bounds: bool,
-) -> Vec<UiWidgetNode> {
+fn build_canvas_snapshot(app: &UiApp, doc: &ProjectDocument) -> Vec<UiWidgetNode> {
     let Some(active_id) = doc.active_sheet_id.as_ref() else {
         return Vec::new();
     };
     let mut nodes = Vec::new();
-    let scale = tree.metrics.clamped_scale_factor();
-    if let Some(paper) = &layout.scene_paper
+    if (doc.graph_sheet(active_id).is_some() || doc.layout_sheet(active_id).is_some())
         && let Ok(scene) = app.session().render_sheet_scene(active_id)
     {
         for (idx, pt) in scene.plotted_points.iter().enumerate() {
-            let bounds = if include_bounds {
-                paper.scene_pt_to_pixel(pt.center_pt).map(|[x, y]| [(x / scale) - 6.0, (y / scale) - 6.0, 12.0, 12.0])
-            } else {
-                None
-            };
             nodes.push(UiWidgetNode {
                 widget_id: format!("canvas.point.{}.{}.{}", pt.source_cell.row, pt.source_cell.col, idx),
                 role: String::from("datapoint"),
@@ -475,7 +494,7 @@ fn build_canvas_snapshot(
                 })),
                 enabled: true,
                 disabled_reason: None,
-                bounds,
+                bounds: None,
             });
         }
     }
@@ -497,12 +516,11 @@ fn build_canvas_snapshot(
             })),
             enabled: !banner.detail_tab_ids.is_empty(),
             disabled_reason: banner.detail_tab_ids.is_empty().then(|| String::from("No detail tabs available.")),
-            bounds: node_bounds_from_tree(tree, "result.diagnostic_banner", include_bounds),
+            bounds: None,
         });
         for tab_id in &banner.detail_tab_ids {
             let tab_label = rs.tabs.iter().find(|t| &t.id == tab_id).map_or_else(|| tab_id.clone(), |t| t.title.clone());
             let widget_id = format!("result.diagnostic_banner.tab.{tab_id}");
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             nodes.push(UiWidgetNode {
                 widget_id,
                 role: String::from("link"),
@@ -514,14 +532,14 @@ fn build_canvas_snapshot(
                 })),
                 enabled: true,
                 disabled_reason: None,
-                bounds,
+                bounds: None,
             });
         }
     }
     nodes
 }
 
-fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, include_bounds: bool) -> Vec<UiWidgetNode> {
+fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument) -> Vec<UiWidgetNode> {
     let Some(active_id) = doc.active_sheet_id.as_ref() else {
         return Vec::new();
     };
@@ -539,7 +557,6 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
         .into_iter()
         .map(|cell| {
             let widget_id = format!("grid.cell.{}.{}.{}", cell.coord.row, cell.coord.col, cell.coord.subcol);
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             let is_calculated = matches!(
                 &ds.archetype,
                 TableArchetype::MultipleVariables(mv)
@@ -569,7 +586,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
                 })),
                 enabled,
                 disabled_reason,
-                bounds,
+                bounds: None,
             }
         })
         .collect();
@@ -583,7 +600,6 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
         for row in win_start_row..win_end_row {
             for subcol in 0..x_subcols {
                 let widget_id = format!("grid.xcell.{row}.{subcol}");
-                let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
                 let (text, excluded) = if is_generated_x {
                     let generated = match &ds.archetype {
                         TableArchetype::Xy(xy) => xy.x_value_at(row).map_or_else(String::new, format_compact_f64),
@@ -617,7 +633,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
                     })),
                     enabled,
                     disabled_reason,
-                    bounds,
+                    bounds: None,
                 });
             }
         }
@@ -625,7 +641,6 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
     if let TableArchetype::MultipleVariables(mv) = &ds.archetype {
         for (col_idx, var) in mv.variables.iter().enumerate() {
             let widget_id = format!("formula_bar.open_col.{col_idx}");
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             nodes.push(UiWidgetNode {
                 widget_id,
                 role: String::from("button"),
@@ -638,7 +653,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
                 })),
                 enabled: !ds.frozen,
                 disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
-                bounds,
+                bounds: None,
             });
         }
         let fb = &app.grid.formula_bar;
@@ -657,7 +672,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
             })),
             enabled: !ds.frozen,
             disabled_reason: ds.frozen.then(|| String::from("Data sheet is frozen (read-only).")),
-            bounds: node_bounds_from_tree(tree, "formula_bar.input", include_bounds),
+            bounds: None,
         });
         let has_target = fb.target_column.is_some() || !fb.target_title.trim().is_empty();
         let commit_enabled = !ds.frozen && fb.active && has_target && fb.is_valid && fb.parse_error.is_none();
@@ -684,7 +699,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
             })),
             enabled: commit_enabled,
             disabled_reason: commit_disabled_reason,
-            bounds: node_bounds_from_tree(tree, "formula_bar.commit", include_bounds),
+            bounds: None,
         });
         nodes.push(UiWidgetNode {
             widget_id: String::from("formula_bar.cancel"),
@@ -694,7 +709,7 @@ fn build_grid_cells_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTr
             value: Some(json!({ "active": fb.active })),
             enabled: fb.active,
             disabled_reason: (!fb.active).then(|| String::from("Formula bar is not active.")),
-            bounds: node_bounds_from_tree(tree, "formula_bar.cancel", include_bounds),
+            bounds: None,
         });
     }
     nodes
@@ -730,33 +745,23 @@ pub(crate) fn dialog_widget_descriptors(app: &UiApp) -> Option<DialogBuildParts>
     })
 }
 
-fn build_dialog_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, include_bounds: bool) -> Option<UiDialogSnapshot> {
+fn build_dialog_snapshot(app: &UiApp, doc: &ProjectDocument) -> Option<UiDialogSnapshot> {
     let dialogs = &app.canvas_dialogs;
-    let dlg_bounds = node_bounds_from_tree(tree, "modal.dialog", include_bounds);
-    let (title, target_sheet_id, stage, mut tabs, mut controls, buttons_list) = dialog_widget_descriptors(app)?;
-
-    for t in &mut tabs {
-        t.bounds = node_bounds_from_tree(tree, &t.widget_id, include_bounds);
-    }
-    for c in &mut controls {
-        c.bounds = node_bounds_from_tree(tree, &c.widget_id, include_bounds);
-    }
+    let (title, target_sheet_id, stage, tabs, controls, buttons_list) = dialog_widget_descriptors(app)?;
 
     let buttons = buttons_list
         .into_iter()
         .map(|(id, label)| {
             let pred = evaluate_dialog_button(dialogs, doc, id).unwrap_or_else(ControlEnablement::enabled);
-            let widget_id = format!("dialog.button.{id}");
-            let bounds = node_bounds_from_tree(tree, &widget_id, include_bounds);
             UiWidgetNode {
-                widget_id,
+                widget_id: format!("dialog.button.{id}"),
                 role: String::from("button"),
                 label: label.to_owned(),
                 command_id: None,
                 value: None,
                 enabled: pred.enabled,
                 disabled_reason: pred.disabled_reason,
-                bounds,
+                bounds: None,
             }
         })
         .collect();
@@ -766,7 +771,7 @@ fn build_dialog_snapshot(app: &UiApp, doc: &ProjectDocument, tree: &LayoutTree, 
         title: title.to_owned(),
         target_sheet_id,
         stage,
-        bounds: dlg_bounds,
+        bounds: None,
         tabs,
         controls,
         buttons,

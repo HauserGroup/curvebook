@@ -10,7 +10,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::ResultSheetViewState;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
 use crate::i18n::{normalize_locale, try_tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::tr;
 
 /// Semantic classification of a [`ResultTab`] per `gui-layout-spec.md` §8.10.

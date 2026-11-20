@@ -25,7 +25,7 @@ pub use chrome_bridge::{
 };
 pub use curvebook_ui_egui::{
     CanvasPreviewFilter, KeyModifiers, PointerButton, RasterImage, RenderError, RenderTargetSpec, UiApp, UiEventOutcome, UiInputEvent,
-    ViewportMetrics, VirtualWorkspaceFolder, WorkspaceHitTarget, WorkspaceLayoutMap,
+    ViewportMetrics, VirtualWorkspaceFolder,
 };
 pub use host_adapters::{
     AUTOSAVE_KEY_PREFIX, AutosaveSaveOutcome, DEFAULT_LOCK_LEASE_TTL_MS, DirectorySyncPlan, FileSystemAccessBridge, LockAcquisition,
@@ -425,18 +425,6 @@ impl WebWorkspaceHost {
         self.app.dispatch_ui_event(event, metrics)
     }
 
-    /// Compute the deterministic HiDPI layout and hit-testing geometry for the current viewport.
-    #[must_use]
-    pub fn layout_map(&self) -> WorkspaceLayoutMap {
-        self.app.layout_map(self.viewport)
-    }
-
-    /// Hit-test logical coordinates `(x, y)` against the current [`WorkspaceLayoutMap`].
-    #[must_use]
-    pub fn hit_test_logical(&self, x: f64, y: f64) -> WorkspaceHitTarget {
-        self.layout_map().hit_test_logical(x, y)
-    }
-
     /// Select the active color-vision deficiency or grayscale print preview filter.
     pub fn set_preview_filter(&mut self, filter: CanvasPreviewFilter) {
         self.app.preview_filter = filter;
@@ -465,20 +453,15 @@ impl WebWorkspaceHost {
         self.app.presentation_mode
     }
 
-    /// Render the workspace framebuffer at the host's [`ViewportMetrics`] and `base_dpi`.
-    ///
-    /// # Errors
-    /// Returns [`RenderError`] if rasterization fails.
-    pub fn render_rgba(&self, base_dpi: u16) -> Result<RasterImage, RenderError> {
-        self.app.render_rgba_for_metrics(self.viewport, base_dpi)
-    }
-
-    /// Render the workspace framebuffer using an explicit [`RenderTargetSpec`].
-    ///
-    /// # Errors
-    /// Returns [`RenderError`] if rasterization fails.
-    pub fn render_rgba_target(&self, target: RenderTargetSpec) -> Result<RasterImage, RenderError> {
-        self.app.render_rgba(target)
+    /// Render the strict-CSP layered placeholder frame for the current viewport and theme.
+    #[must_use]
+    pub fn render_placeholder_frame(&self, base_dpi: u16) -> WebLayeredFrame {
+        let w = self.viewport.physical_width_px().max(1);
+        let h = self.viewport.physical_height_px().max(1);
+        let bg = self.app.theme.surface_bg;
+        let summary = self.inspect_summary();
+        let label = format!("{} ({} sheets) | Web Placeholder (post-Beta R11.11)", summary.title, summary.sheet_count);
+        WebTextBridge::compose_placeholder_frame(w, h, base_dpi.max(72), [bg.r, bg.g, bg.b, bg.a], &label, false)
     }
 
     /// Parse and validate TrueType/OpenType SFNT font bytes strictly in memory.
@@ -534,9 +517,7 @@ mod tests {
     use curvebook_format::{CsvOptions, ZipWriter, export_datasheet_to_csv};
     use curvebook_ui_egui::serde_json::json;
 
-    use super::{
-        CanvasPreviewFilter, KeyModifiers, PointerButton, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WebWorkspaceHost, WorkspaceHitTarget,
-    };
+    use super::{CanvasPreviewFilter, KeyModifiers, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, WebTextBridge, WebWorkspaceHost};
 
     fn build_populated_host() -> WebWorkspaceHost {
         let mut host = WebWorkspaceHost::with_viewport(ViewportMetrics::new(1280.0, 800.0, 2.0));
@@ -654,44 +635,29 @@ mod tests {
     }
 
     #[test]
-    fn preview_filter_presentation_mode_and_hidpi_rgba_render_behave_accurately() {
+    fn preview_filter_presentation_mode_and_hidpi_placeholder_frame_behave_accurately() {
         let mut host = build_populated_host();
-        // Ensure active sheet is the graph so preview filter transforms plot pixels visibly.
         let graph_id = host.app().document().graph_sheets[0].id.as_str().to_owned();
         host.execute_command("sheet.select", json!({ "sheet_id": graph_id })).expect("select graph sheet");
 
-        let baseline = host.render_rgba(72).expect("baseline HiDPI RGBA render");
+        let baseline = host.render_placeholder_frame(72);
         assert_eq!(baseline.width_px, 2560);
         assert_eq!(baseline.height_px, 1600);
-        assert_eq!(baseline.rgba.len(), (2560 * 1600 * 4) as usize);
-
-        let layout_normal = host.layout_map();
-        assert!(layout_normal.frame.navigator.width > 0);
-        assert!(!layout_normal.navigator_entries.is_empty());
+        assert_eq!(baseline.base_rgba_bytes.len(), (2560 * 1600 * 4) as usize);
+        WebTextBridge::validate_layered_frame(&baseline).expect("placeholder frame validates");
 
         let filter_reply = host.dispatch_control_line(r#"{"id":"f1","method":"ui.previewFilter.set","params":{"filter":"grayscale_print"}}"#);
         let filter_json: curvebook_ui_egui::serde_json::Value =
             curvebook_ui_egui::serde_json::from_str(&filter_reply).expect("valid JSON control reply");
         assert_eq!(filter_json.get("ok"), Some(&json!(true)), "unexpected filter reply: {filter_reply}");
         assert_eq!(host.preview_filter(), CanvasPreviewFilter::GrayscalePrint);
-        let grayscale = host.render_rgba(72).expect("grayscale RGBA render");
-        assert_ne!(baseline.rgba, grayscale.rgba, "preview filter must visibly alter rendered framebuffer");
 
         host.set_preview_filter(CanvasPreviewFilter::Deuteranopia);
         assert_eq!(host.preview_filter(), CanvasPreviewFilter::Deuteranopia);
 
-        // Toggle presentation mode: collapses navigator chrome so canvas expands to full viewport.
         assert!(!host.presentation_mode());
         let toggled = host.toggle_presentation_mode();
         assert!(toggled);
-        let layout_pres = host.layout_map();
-        assert_eq!(layout_pres.frame.navigator.width, 0);
-        assert!(layout_pres.navigator_entries.is_empty());
-        assert_eq!(layout_pres.frame.canvas.width, 2560);
-
-        let pres_rgba = host.render_rgba(72).expect("presentation mode RGBA render");
-        assert_ne!(grayscale.rgba, pres_rgba.rgba);
-
         let pres_off_reply = host.dispatch_control_line(r#"{"id":"p1","method":"ui.presentation.toggle","params":{"enabled":false}}"#);
         assert!(pres_off_reply.contains("\"presentation_mode\":false"));
         assert!(!host.presentation_mode());
@@ -699,66 +665,18 @@ mod tests {
     }
 
     #[test]
-    fn interactive_pointer_hit_testing_and_inline_cell_edit_events_update_document() {
+    fn interactive_control_commands_and_canvas_events_update_document() {
         let mut host = build_populated_host();
         let data_id = host.app().document().data_sheets[0].id.as_str().to_owned();
         host.execute_command("sheet.select", json!({ "sheet_id": data_id })).expect("select data sheet");
-
-        let layout = host.layout_map();
-        let grid = layout.grid_geometry.as_ref().expect("data sheet renders interactive grid geometry");
-        let &(first_flat_col, _) = grid.visible_cols.first().expect("at least one data column must be visible");
-        let cell_rect = grid.cell_rect(0, first_flat_col).expect("first data cell (row 0) must be visible");
-        let phys_center = [f64::from(cell_rect.x) + f64::from(cell_rect.width) * 0.5, f64::from(cell_rect.y) + f64::from(cell_rect.height) * 0.5];
-        let [lx, ly] = host.viewport().physical_to_logical_px(phys_center);
-
-        assert!(matches!(host.hit_test_logical(lx, ly), WorkspaceHitTarget::GridCell { .. }));
-
-        let down = host
-            .dispatch_event(UiInputEvent::PointerDown { x: lx, y: ly, button: PointerButton::Primary, modifiers: KeyModifiers::default() })
-            .expect("PointerDown succeeds");
-        assert!(down.handled);
-        assert!(host.app().brushed_cell.is_some());
-
-        let up = host
-            .dispatch_event(UiInputEvent::PointerUp { x: lx, y: ly, button: PointerButton::Primary, modifiers: KeyModifiers::default() })
-            .expect("PointerUp succeeds");
-        assert!(up.handled);
-
-        // Double-click cell, clear original value via Ctrl/Meta+A -> Backspace -> type replacement -> CommitInlineEdit.
-        let dbl = host
-            .dispatch_event(UiInputEvent::DoubleClick { x: lx, y: ly, button: PointerButton::Primary, modifiers: KeyModifiers::default() })
-            .expect("DoubleClick enters inline editor");
-        assert_eq!(dbl.action, "grid.inline_edit_begin");
-        assert!(host.app().inline_editor.active);
-
-        // Clear buffer cleanly via KeyDown("Escape") cancel test, then re-open and replace buffer via TextInput.
-        host.dispatch_event(UiInputEvent::CancelInlineEdit).expect("CancelInlineEdit");
-        assert!(!host.app().inline_editor.active);
-
-        host.dispatch_event(UiInputEvent::DoubleClick { x: lx, y: ly, button: PointerButton::Primary, modifiers: KeyModifiers::default() })
-            .expect("DoubleClick re-enters inline editor");
-        for _ in 0..16 {
-            host.dispatch_event(UiInputEvent::KeyDown { key: String::from("Backspace"), modifiers: KeyModifiers::default() })
-                .expect("Backspace succeeds");
-        }
-        host.dispatch_event(UiInputEvent::TextInput { text: String::from("99.5") }).expect("TextInput succeeds");
-        let commit = host.dispatch_event(UiInputEvent::CommitInlineEdit).expect("CommitInlineEdit succeeds");
-        assert!(commit.handled);
-        assert!(!host.app().inline_editor.active);
-
+        host.execute_command("table.setCell", json!({ "sheet_id": data_id, "row": 0, "col": 0, "value": 99.5 })).expect("set cell succeeds");
         let updated_csv = export_datasheet_to_csv(&host.app().document().data_sheets[0], &CsvOptions::csv()).expect("export updated CSV");
-        assert!(updated_csv.contains("99.5"), "expected inline edit 99.5 in exported CSV:\n{updated_csv}");
+        assert!(updated_csv.contains("99.5"), "expected edit 99.5 in exported CSV:\n{updated_csv}");
 
-        // Graph sheet interactive zoom & inertial pan event dispatch
         let graph_id = host.app().document().graph_sheets[0].id.as_str().to_owned();
         host.execute_command("sheet.select", json!({ "sheet_id": graph_id })).expect("select graph sheet");
-        let graph_layout = host.layout_map();
-        let paper = graph_layout.scene_paper.as_ref().expect("graph sheet provides ScenePaperMapping");
-        let paper_center =
-            [f64::from(paper.paper.x) + f64::from(paper.paper.width) * 0.5, f64::from(paper.paper.y) + f64::from(paper.paper.height) * 0.5];
-        let [gx, gy] = host.viewport().physical_to_logical_px(paper_center);
         let zoom_out = host
-            .dispatch_event(UiInputEvent::WheelZoom { x: gx, y: gy, delta_y: 120.0, modifiers: KeyModifiers::default() })
+            .dispatch_event(UiInputEvent::WheelZoom { x: 400.0, y: 300.0, delta_y: 120.0, modifiers: KeyModifiers::default() })
             .expect("WheelZoom succeeds");
         assert!(zoom_out.handled);
         let pan_out = host

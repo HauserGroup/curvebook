@@ -15,7 +15,7 @@ use crate::dialogs_canvas::{
 };
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::os_integration::ClipboardBundle;
 use crate::power_wizard::PowerWizardState;
 use crate::theme::{UiThemeMode, UiThemeSpec};
@@ -167,7 +167,7 @@ impl WorkspacePreset {
 }
 
 /// Persistent pure-UI `egui_shell` view states owned alongside [`UiApp`] (`R15.2+`).
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Default)]
 pub struct EguiShellViewState {
     pub column_grid: data_grid::ColumnGridEguiState,
     pub anova_modal: stat_anova_modal::AnovaModalEguiState,
@@ -179,9 +179,6 @@ pub struct EguiShellViewState {
     pub power_studio: power_studio::PowerStudioEguiState,
     pub graph_modals: graph_modals::GraphModalEguiState,
     pub app_modals: app_modals::AppModalsEguiState,
-    /// When `true` (default from Wave 4 integration onward), `ActiveDialog::AnalyzeSheet` routes
-    /// natively to [`stats_modals::render_analyze_sheet_modal`]; set `false` only for legacy Case B parity.
-    pub native_analyze_sheet: bool,
     pub workspace_preset: WorkspacePreset,
     pub top_chrome: top_chrome::TopChromeEguiState,
     pub command_palette: command_palette::CommandPaletteEguiState,
@@ -207,47 +204,6 @@ pub struct EguiShellViewState {
     pub last_shell_layout: Option<ResponsiveShellLayout>,
 }
 
-impl Default for EguiShellViewState {
-    fn default() -> Self {
-        Self {
-            column_grid: data_grid::ColumnGridEguiState::default(),
-            anova_modal: stat_anova_modal::AnovaModalEguiState::default(),
-            manage_vars_modal: manage_vars_modal::ManageVarsModalEguiState::default(),
-            import_wizard: import_wizard::ImportWizardEguiState::default(),
-            transform_modals: transform_modals::TransformModalsEguiState::default(),
-            stats_modals: stats_modals::StatsModalsEguiState::default(),
-            fit_modal: fit_modal::FitModalEguiState::default(),
-            power_studio: power_studio::PowerStudioEguiState::default(),
-            graph_modals: graph_modals::GraphModalEguiState::default(),
-            app_modals: app_modals::AppModalsEguiState::default(),
-            native_analyze_sheet: true,
-            workspace_preset: WorkspacePreset::default(),
-            top_chrome: top_chrome::TopChromeEguiState::default(),
-            command_palette: command_palette::CommandPaletteEguiState::default(),
-            welcome_hub: welcome_hub::WelcomeHubEguiState::default(),
-            leading_dock: leading_dock::LeadingDockEguiState::default(),
-            center_stage: center_stage::CenterStageEguiState::default(),
-            info_view: info_view::InfoViewEguiState::default(),
-            results_view: results_view::ResultsViewEguiState::default(),
-            canvas_view: canvas_view::CanvasViewEguiState::default(),
-            trailing_studio: trailing_studio::TrailingStudioEguiState::default(),
-            status_footer: status_footer::StatusFooterEguiState::default(),
-            launcher_open: false,
-            leading_width_pt: None,
-            trailing_width_pt: None,
-            leading_collapsed_rail: false,
-            trailing_collapsed_rail: false,
-            leading_flyout_open: false,
-            trailing_flyout_open: false,
-            active_sheet_history: Vec::new(),
-            history_cursor: 0,
-            quick_stats_cache: status_footer::QuickStatsCache::default(),
-            progress_modal: None,
-            last_shell_layout: None,
-        }
-    }
-}
-
 /// Resolve any sheet's display title by [`SheetId`] across all five folders.
 #[must_use]
 pub fn doc_sheet_title<'a>(doc: &'a curvebook_doc::ProjectDocument, id: &SheetId) -> Option<&'a str> {
@@ -267,13 +223,6 @@ pub fn doc_sheet_title<'a>(doc: &'a curvebook_doc::ProjectDocument, id: &SheetId
 }
 
 impl EguiShellViewState {
-    /// Builder toggle enabling native `egui` rendering for `ActiveDialog::AnalyzeSheet`.
-    #[must_use]
-    pub const fn with_native_analyze_sheet(mut self, enabled: bool) -> Self {
-        self.native_analyze_sheet = enabled;
-        self
-    }
-
     /// Record an active sheet visit onto `< >` navigation history unless already at the cursor.
     pub fn record_active_sheet_visit(&mut self, sheet_id: &SheetId) {
         if let Some(current) = self.active_sheet_history.get(self.history_cursor)
@@ -314,20 +263,20 @@ impl EguiShellViewState {
     }
 }
 
-/// Active desktop UI presentation backend (`--ui-backend=legacy|egui`, default `Legacy`).
+/// Active desktop UI presentation backend (`--ui-backend=egui`, sole desktop presenter post-R15.5).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default, Serialize, Deserialize)]
 pub enum UiBackend {
     #[default]
-    Legacy,
     Egui,
 }
 
 impl UiBackend {
-    /// Parse a backend selector flag or environment value (`"legacy"` or `"egui"`).
+    /// Parse a backend selector flag or environment value (`"egui"`).
+    ///
+    /// Legacy backend (`"legacy"`) has been retired and returns `None`.
     #[must_use]
     pub fn parse(raw: &str) -> Option<Self> {
         match raw.trim().to_ascii_lowercase().as_str() {
-            "legacy" => Some(Self::Legacy),
             "egui" => Some(Self::Egui),
             _ => None,
         }
@@ -337,28 +286,33 @@ impl UiBackend {
     #[must_use]
     pub const fn as_str(self) -> &'static str {
         match self {
-            Self::Legacy => "legacy",
             Self::Egui => "egui",
         }
     }
 
     /// Resolve backend selection from optional `CURVEBOOK_UI_BACKEND` env and `--ui-backend` CLI flag.
     ///
-    /// CLI flag takes precedence over environment variable; unset inputs resolve to [`Self::Legacy`].
+    /// CLI flag takes precedence over environment variable; unset inputs resolve to [`Self::Egui`].
     ///
     /// # Errors
-    /// Returns an actionable message when a non-empty value is neither `"legacy"` nor `"egui"`.
+    /// Returns an actionable message when `"legacy"` or any non-empty unrecognized value is supplied.
     pub fn from_env_and_args(env_val: Option<&str>, cli_val: Option<&str>) -> Result<Self, String> {
         if let Some(cli) = cli_val.map(str::trim).filter(|s| !s.is_empty()) {
-            return Self::parse(cli).ok_or_else(|| format!("invalid --ui-backend value `{cli}`; expected `legacy` or `egui`"));
+            if cli.eq_ignore_ascii_case("legacy") {
+                return Err(String::from("invalid --ui-backend value `legacy`: legacy UI backend has been retired; use `egui`"));
+            }
+            return Self::parse(cli).ok_or_else(|| format!("invalid --ui-backend value `{cli}`; expected `egui`"));
         }
         if let Some(env_raw) = env_val.map(str::trim).filter(|s| !s.is_empty()) {
-            return Self::parse(env_raw).ok_or_else(|| format!("invalid CURVEBOOK_UI_BACKEND value `{env_raw}`; expected `legacy` or `egui`"));
+            if env_raw.eq_ignore_ascii_case("legacy") {
+                return Err(String::from("invalid CURVEBOOK_UI_BACKEND value `legacy`: legacy UI backend has been retired; use `egui`"));
+            }
+            return Self::parse(env_raw).ok_or_else(|| format!("invalid CURVEBOOK_UI_BACKEND value `{env_raw}`; expected `egui`"));
         }
-        Ok(Self::Legacy)
+        Ok(Self::Egui)
     }
 
-    /// Resolve backend selection from `CURVEBOOK_UI_BACKEND`, defaulting to [`Self::Legacy`].
+    /// Resolve backend selection from `CURVEBOOK_UI_BACKEND`, defaulting to [`Self::Egui`].
     #[must_use]
     pub fn from_process_env() -> Self {
         std::env::var("CURVEBOOK_UI_BACKEND").ok().and_then(|v| Self::parse(&v)).unwrap_or_default()
@@ -1060,6 +1014,7 @@ pub enum UiIntent {
     SetRowTitlesCollapsed { collapsed: bool },
     DialogWidgetClick { widget_id: String },
     DialogButtonAction { action: String },
+    SetTextFieldBuffer { widget_id: String, text: String },
     CustomViewAction { domain: String, payload: String },
     SelectResultTab { index: usize },
     SetActiveInspector { inspector: ActiveInspector },
@@ -1221,6 +1176,11 @@ impl PendingUiIntents {
     /// Enqueue a dialog footer button action (`"ok"`, `"cancel"`, `"apply"`, `"create"`).
     pub fn push_dialog_button(&mut self, action: impl Into<String>) {
         self.queue.push(UiIntent::DialogButtonAction { action: action.into() });
+    }
+
+    /// Synchronize a modal/view text input buffer (`widget_id`) into `app.interaction.text_field_buffers`.
+    pub fn push_set_text_field_buffer(&mut self, widget_id: impl Into<String>, text: impl Into<String>) {
+        self.queue.push(UiIntent::SetTextFieldBuffer { widget_id: widget_id.into(), text: text.into() });
     }
 
     /// Enqueue a view-shard custom action (`"stat_params"`, `"grid_core"`, etc.).
@@ -1663,7 +1623,14 @@ impl PendingUiIntents {
 
 fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
-        UiIntent::EngineCommand { command_id, params } => {
+        UiIntent::EngineCommand { command_id, mut params } => {
+            if matches!(command_id.as_str(), "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze")
+                && params.get("sheet_id").is_none()
+                && let Some(active_id) = app.session.document().active_sheet_id.as_ref()
+                && let Some(obj) = params.as_object_mut()
+            {
+                obj.insert(String::from("sheet_id"), serde_json::Value::String(active_id.as_str().to_owned()));
+            }
             let outcome = app.execute_session_ui_cmd(&command_id, params)?;
             if matches!(command_id.as_str(), "edit.undo" | "edit.redo" | "sheet.select") {
                 crate::interaction::clear_inspector_axis_buffers(app);
@@ -1716,6 +1683,11 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
         UiIntent::DialogButtonAction { action } => {
             let result = crate::gui_actions::execute_dialog_button_action(app, &action)?;
             Ok(UiIntentOutcome::Ui { command_id: format!("dialog.button:{action}"), result: Some(result) })
+        }
+        UiIntent::SetTextFieldBuffer { widget_id, text } => {
+            app.interaction.text_field_buffers.insert(widget_id.clone(), crate::interaction::TextFieldEditState::new(text, false));
+            app.focus_widget_id = Some(widget_id.clone());
+            Ok(UiIntentOutcome::Ui { command_id: format!("textbox.sync:{widget_id}"), result: None })
         }
         UiIntent::CustomViewAction { domain, payload } => {
             let mut shards = std::mem::take(&mut app.view_shards);
@@ -1786,6 +1758,7 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
         }
         UiIntent::SetLauncherOpen { open } => {
             app.egui_views.launcher_open = open;
+            app.nav.welcome.open = open;
         }
         UiIntent::ApplyWorkspacePreset { preset } => {
             let cfg = preset.default_dock_config();
@@ -2579,16 +2552,17 @@ mod tests {
         color32_to_rgba8,
     };
     use crate::UiApp;
-    use crate::layout::ZLayer;
+    use crate::inspect::ZLayer;
     use crate::theme::UiThemeMode;
     use serde_json::json;
 
     #[test]
-    fn backend_switch_parses_env_and_cli_with_legacy_default() {
-        assert_eq!(UiBackend::from_env_and_args(None, None), Ok(UiBackend::Legacy));
+    fn backend_switch_parses_env_and_cli_with_egui_default_and_rejects_legacy() {
+        assert_eq!(UiBackend::from_env_and_args(None, None), Ok(UiBackend::Egui));
         assert_eq!(UiBackend::from_env_and_args(Some("egui"), None), Ok(UiBackend::Egui));
-        assert_eq!(UiBackend::from_env_and_args(Some("egui"), Some("legacy")), Ok(UiBackend::Legacy));
-        assert_eq!(UiBackend::from_env_and_args(Some("legacy"), Some("EGUI")), Ok(UiBackend::Egui));
+        assert_eq!(UiBackend::from_env_and_args(Some("unknown"), Some("EGUI")), Ok(UiBackend::Egui));
+        assert!(UiBackend::from_env_and_args(None, Some("legacy")).is_err());
+        assert!(UiBackend::from_env_and_args(Some("legacy"), None).is_err());
         assert!(UiBackend::from_env_and_args(None, Some("unknown")).is_err());
     }
 

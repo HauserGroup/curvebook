@@ -14,8 +14,8 @@ use crate::egui_shell::{
     FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, WorkspacePreset,
 };
 use crate::i18n::{LOCALES, locale_picker_label, normalize_locale};
+use crate::inspect::ZLayer;
 use crate::interaction::resolve_result_sheet_for_shortcut;
-use crate::layout::ZLayer;
 use crate::menus::{CommandTooltip, command_tooltip, menu_bar_tooltips};
 use crate::tr;
 use curvebook_doc::{AnalysisKind, MultivariateSpec, SheetId, TableArchetype};
@@ -628,24 +628,41 @@ fn render_section_menu_items(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
-    for item in items {
-        render_menu_leaf_item(ui, item, current_locale, meta, intents);
-    }
     if matches!(menu_key, "menu.file" | "file") {
-        let mut added_sep = false;
+        let is_primary_file_cmd =
+            |cmd: &str| matches!(cmd, "project.new" | "file.new" | "project.open" | "project.save" | "export.svg" | "export.pdf" | "export.png");
+        for item in items.iter().filter(|it| is_primary_file_cmd(&it.command_id)) {
+            render_menu_leaf_item(ui, item, current_locale, meta, intents);
+        }
+        let mut added_extra = false;
         for &(label, cmd, aliases) in EXTRA_FILE_MENU_ACTIONS {
             if items.iter().any(|existing| aliases.contains(&existing.command_id.as_str())) {
                 continue;
             }
-            if !added_sep {
+            if !added_extra {
                 ui.separator();
-                added_sep = true;
+                added_extra = true;
             }
-            if ui.button(label).clicked() {
+            let resp = ui.button(label);
+            record_menu_popup_response(
+                ui,
+                &resp,
+                meta,
+                MenuPopupInspect { widget_id: &format!("menu.{cmd}"), label, command_id: Some(cmd), selected: None, enabled: true },
+            );
+            if resp.clicked() {
                 push_menu_command_intent(cmd, None, intents);
                 ui.close();
             }
         }
+        ui.separator();
+        for item in items.iter().filter(|it| !is_primary_file_cmd(&it.command_id)) {
+            render_menu_leaf_item(ui, item, current_locale, meta, intents);
+        }
+        return;
+    }
+    for item in items {
+        render_menu_leaf_item(ui, item, current_locale, meta, intents);
     }
 }
 
@@ -799,6 +816,8 @@ fn is_desktop_host_routed_command(command_id: &str) -> bool {
             | "file.open"
             | "file.open_unpacked_dir"
             | "file.save_as"
+            | "export.svg"
+            | "file.export_svg"
             | "export.pdf"
             | "file.export_pdf"
             | "export.png"

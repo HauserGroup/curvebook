@@ -19,9 +19,8 @@ use egui::{Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Sense, Str
 use serde_json::json;
 
 use crate::UiApp;
-use crate::egui_shell::inspect_bridge::HybridHostTextureFrame;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, rgba8_to_color32};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 const RULER_THICKNESS_PT: f32 = 20.0;
 const BREADCRUMB_HEIGHT_PT: f32 = 28.0;
@@ -74,13 +73,14 @@ pub struct CanvasViewEguiState {
     pub last_snap_readout: Option<String>,
     pub km_at_risk_rows: usize,
     pub tex_equation_count: usize,
+    /// Render uncached scenes inline synchronously (used by software screenshot capture).
+    pub synchronous_raster: bool,
 }
 
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
 #[derive(Debug, Clone, Copy)]
 pub struct CanvasViewContext<'a> {
     pub tokens: &'a Tokens,
-    pub host_textures: Option<&'a HybridHostTextureFrame>,
     pub enabled: bool,
     pub is_secondary_split: bool,
 }
@@ -214,6 +214,8 @@ pub fn render_canvas_view_for_sheet(
     let slot_tag = if ctx_in.is_secondary_split { "split" } else { "main" };
     let wid = if ctx_in.is_secondary_split { "canvas.split.viewport" } else { "canvas.viewport" };
     let resp = ui.allocate_rect(mat_rect, if ctx_in.enabled { Sense::click_and_drag() } else { Sense::hover() });
+    let canvas_enabled = ctx_in.enabled;
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Canvas, canvas_enabled, String::from("Graph / Layout Canvas")));
     report.canvas_widget_id = Some(resp.id);
     meta.record_response(
         ui,
@@ -261,7 +263,7 @@ pub fn render_canvas_view_for_sheet(
     clipped_painter.rect_stroke(paper_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     if let Some(ref sc) = scene {
-        composite_async_scene_texture(ui, app, sc, target_id, paper_rect, ctx_in.host_textures, slot_tag, state, &clipped_painter);
+        composite_async_scene_texture(ui, app, sc, target_id, paper_rect, slot_tag, state, &clipped_painter);
     }
     report.async_rendering_in_flight = state.slot.rendering_in_flight;
 
@@ -370,18 +372,10 @@ fn composite_async_scene_texture(
     scene: &Arc<ChartScene>,
     sheet_id: &SheetId,
     paper_rect: Rect,
-    host_textures: Option<&HybridHostTextureFrame>,
     slot_tag: &str,
     state: &mut CanvasViewEguiState,
     painter: &egui::Painter,
 ) {
-    if let Some(tex_id) = host_textures.and_then(|h| h.canvas_texture) {
-        state.slot.cached_texture = Some(tex_id);
-        state.slot.rendering_in_flight = false;
-        painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-        return;
-    }
-
     let ppp = ui.ctx().pixels_per_point().clamp(1.0, 4.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (paper_rect.width() * ppp).round().clamp(32.0, 4096.0) as u32;
@@ -405,6 +399,29 @@ fn composite_async_scene_texture(
         state.slot.rendering_in_flight = false;
         painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
         return;
+    }
+
+    if state.synchronous_raster {
+        let mut rendered = render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).ok();
+        if let Some(ref mut img) = rendered
+            && app.preview_filter != CanvasPreviewFilter::Normal
+        {
+            apply_canvas_preview_filter(img, app.preview_filter);
+        }
+        state.slot.rendering_in_flight = false;
+        state.slot.last_sheet_id = Some(sheet_id.clone());
+        state.slot.last_mutation_seq = req_key.mutation_seq;
+        state.slot.last_width_px = width_px;
+        state.slot.last_height_px = height_px;
+        state.slot.last_dpi = dpi;
+        state.slot.last_filter_slug = filter_slug.clone();
+        if let Some(raster) = rendered {
+            let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
+            let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
+            state.slot.cached_texture = Some(tex_id);
+            painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+            return;
+        }
     }
 
     let job_id = Id::unique(("egui_shell.canvas_async_job", slot_tag, sheet_id.as_str()));
@@ -440,7 +457,7 @@ fn composite_async_scene_texture(
         state.slot.last_width_px = width_px;
         state.slot.last_height_px = height_px;
         state.slot.last_dpi = dpi;
-        state.slot.last_filter_slug = filter_slug;
+        state.slot.last_filter_slug = filter_slug.clone();
         if let Some(raster) = maybe_img {
             let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
             let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);

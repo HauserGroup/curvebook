@@ -312,8 +312,11 @@ mod tests {
 
         app.hover_command_id = Some(String::from("analyze.run"));
         app.canvas_dialogs.open_command_palette();
-        let frame = crate::render_workspace_frame_png(&app, crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 })?;
-        assert!(frame.len() > 8);
+        let (frame, w, h) = app.render_egui_shell_screenshot_png(
+            crate::RenderTargetSpec { width_px: 480, height_px: 320, dpi: 96 },
+            crate::inspect::ScreenshotRegionTarget::FullWindow,
+        )?;
+        assert!(w == 480 && h == 320 && frame.len() > 8);
 
         // Menu bar covers all 97 engine + 47 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);

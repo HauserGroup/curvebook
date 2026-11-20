@@ -8,8 +8,8 @@ use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriv
 use curvebook_ui_egui::egui_shell::inspect_bridge::{ShellAboutFrameReport, render_egui_shell_frame};
 use curvebook_ui_egui::egui_shell::top_chrome::render_presentation_exit_chip;
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiBackend, WorkspacePreset};
+use curvebook_ui_egui::inspect::ZLayer;
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use curvebook_ui_egui::layout::ZLayer;
 use curvebook_ui_egui::theme::{UiThemeMode, UiThemeSpec};
 use egui::{Key, Modifiers};
 use serde_json::json;

@@ -1639,6 +1639,12 @@ impl GridViewState {
     pub fn visible_frame(&self, doc: &ProjectDocument) -> Option<GridVisibleFrame> {
         let active_id = doc.active_sheet_id.as_ref()?;
         let sheet = doc.data_sheet(active_id)?;
+        Some(self.visible_frame_for_sheet(sheet))
+    }
+
+    /// Materialize the two-tier `(Group x Subcolumn)` visible frame for an explicit [`DataSheet`].
+    #[must_use]
+    pub fn visible_frame_for_sheet(&self, sheet: &DataSheet) -> GridVisibleFrame {
         let total_rows = sheet.archetype.row_count();
         let total_flat_cols = total_flat_data_subcolumns(&sheet.archetype);
         let window = self.tool.visible_window(total_rows, total_flat_cols);
@@ -1667,7 +1673,7 @@ impl GridViewState {
             rows.push(VisibleGridRow { row: r, leading, cells });
         }
 
-        Some(GridVisibleFrame {
+        GridVisibleFrame {
             sheet_id: sheet.id.clone(),
             kind: sheet.kind(),
             frozen: sheet.frozen,
@@ -1679,7 +1685,7 @@ impl GridViewState {
             tier1_groups,
             tier2_subcolumns,
             rows,
-        })
+        }
     }
 
     /// Non-destructively toggle the `Row Titles` column expansion state without mutating `DataSheet`.

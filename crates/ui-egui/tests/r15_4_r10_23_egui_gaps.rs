@@ -14,12 +14,12 @@ use curvebook_doc::{
     VariableRole, XyTable,
 };
 use curvebook_engine::Session;
-use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::fonts::{FontDiscoveryConfig, build_egui_font_definitions_with_config};
 use curvebook_ui_egui::egui_shell::inspect_bridge::render_egui_shell_frame;
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, PendingUiIntents, Tokens, UiBackend};
 use curvebook_ui_egui::i18n::{LOCALES, locale_picker_label};
+use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::os_integration::StubPlatformClipboardAdapter;
 use curvebook_ui_egui::theme::UiThemeMode;

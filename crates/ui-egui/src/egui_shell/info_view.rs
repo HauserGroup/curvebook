@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
 use crate::i18n::{normalize_locale, try_tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 const DEFAULT_SPLIT_RATIO: f32 = 0.38;
 const MIN_SPLIT_RATIO: f32 = 0.24;

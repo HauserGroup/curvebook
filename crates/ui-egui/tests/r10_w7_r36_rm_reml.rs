@@ -1,12 +1,12 @@
-//! Wave 7 UI & Human-Path acceptance tests for R3.6 Mixed-Effects REML & R10.3 b2:
+//! Wave 7 UI & Human-Path acceptance tests for R3.6 Mixed-Effects REML & R10.3 b2 (pure `egui` shell):
 //! 1. Incomplete-block RM `Column` table keeps `edit.paired_or_matched` enabled (`R1`), runs REML,
 //!    and switches `KenwardRoger` vs `Satterthwaite` *df* via repeated-measures controls.
 //! 2. Selecting Mixed-Effects REML disables sphericity (`edit.sphericity.geisser_greenhouse`,
 //!    `edit.rm.assume_sphericity` in `R1b`) and restricts post-hoc choices to Bonferroni, Šídák,
 //!    Holm–Šídák, FDR (`BH`, `BKY`, `BY`), and Fisher's LSD while disabling Tukey/Dunnett/Games-Howell/Dunn.
-//! 3. `TwoGroupMethod::WelchT` disables `edit.tab.diagnostics` & `edit.diag.*` (`R4`) with tooltip + no-op click.
+//! 3. `TwoGroupMethod::WelchT` disables diagnostics checks (`R4`) with tooltip + no-op click.
 //! 4. Multifactor ANOVA on `MultipleVariables` preserves configured interaction order/terms when adding
-//!    and removing grouping factors on the Data / Factor Settings tab.
+//!    and removing grouping factors on the Experimental Design / Model tab.
 //! 5. Three-way RM (`BothFactorsMatched`) and Nested ANOVA switch `KenwardRoger` vs `Satterthwaite` *df*
 //!    end-to-end through the UI.
 //! 6. Staged i18n (`w7_rm_reml::STAGED_ENTRIES`) covers all 16 locales without bumping `i18n::catalog_len()`
@@ -14,16 +14,19 @@
 
 #![forbid(unsafe_code)]
 
+mod human_wf_common;
+
 use curvebook_doc::{
     AnalysisKind, Cell, ColumnDesignHint, ColumnTable, DataSheet, GroupedTable, MixedModelDfMethod, MultipleVariablesTable, MultiplicityMethod,
     NestedTable, ProjectDocument, ResultSheet, ResultTabKind, SheetId, SubcolumnMode, TableArchetype, TwoGroupMethod, TwoGroupSpec, VariableRole,
 };
 use curvebook_engine::Session;
 use curvebook_ui_egui::UiApp;
-use curvebook_ui_egui::human_driver::HumanPathDriver;
-use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
-use curvebook_ui_egui::layout::WidgetNode;
+use curvebook_ui_egui::egui_shell::FrameInspectNodeMeta;
+use curvebook_ui_egui::interaction::ViewportMetrics;
 use curvebook_ui_egui::modal_predicates::{ControlEnablement, evaluate_dialog_widget};
+use egui::{Pos2, vec2};
+use human_wf_common::{EguiWfHarness, ensure};
 use serde_json::json;
 
 type TestRes = Result<(), String>;
@@ -32,67 +35,66 @@ fn err_str<E: std::fmt::Display>(err: E) -> String {
     err.to_string()
 }
 
-fn desktop_driver(app: UiApp) -> HumanPathDriver {
-    HumanPathDriver::new(app, ViewportMetrics::new(1440.0, 900.0, 1.0))
+fn desktop_harness(app: UiApp, metrics: ViewportMetrics) -> EguiWfHarness {
+    EguiWfHarness::from_app(app, metrics)
 }
 
-fn require_node(driver: &mut HumanPathDriver, wid: &str) -> Result<WidgetNode, String> {
-    driver.find_widget(wid).ok_or_else(|| format!("missing widget `{wid}` in LayoutTree"))
+fn require_widget(h: &EguiWfHarness, wid: &str) -> Result<FrameInspectNodeMeta, String> {
+    h.driver.frame_meta().find_by_widget_id(wid).cloned().ok_or_else(|| format!("missing widget `{wid}` in FrameInspectMeta"))
 }
 
-fn scroll_into_view(driver: &mut HumanPathDriver, scroll_id: &str, wid: &str) -> Result<WidgetNode, String> {
-    if driver.widget_center_logical(wid).is_some() {
-        return require_node(driver, wid);
+fn scroll_into_modal_view(h: &mut EguiWfHarness, wid: &str) -> Result<FrameInspectNodeMeta, String> {
+    if let Some(entry) = h.driver.frame_meta().find_by_widget_id(wid)
+        && entry.clipped_rect.is_positive()
+        && entry.clipped_rect.height() >= 8.0
+    {
+        return Ok(entry.clone());
     }
-    for _ in 0..10 {
-        let _ = driver.wheel_widget(scroll_id, 0.0, -140.0, KeyModifiers::default())?;
-        if driver.widget_center_logical(wid).is_some() {
-            return require_node(driver, wid);
+    let anchor = h
+        .driver
+        .frame_meta()
+        .find_by_widget_id("modal.ok")
+        .or_else(|| h.driver.frame_meta().find_by_widget_id("edit.tab.experimental_design"))
+        .map_or(Pos2::new(720.0, 450.0), |e| Pos2::new(e.clipped_rect.center().x, 420.0));
+    for _ in 0..8 {
+        let _ = h.driver.wheel_at(anchor, vec2(0.0, -140.0));
+        if let Some(entry) = h.driver.frame_meta().find_by_widget_id(wid)
+            && entry.clipped_rect.is_positive()
+            && entry.clipped_rect.height() >= 8.0
+        {
+            return Ok(entry.clone());
         }
     }
-    for _ in 0..16 {
-        let _ = driver.wheel_widget(scroll_id, 0.0, 140.0, KeyModifiers::default())?;
-        if driver.widget_center_logical(wid).is_some() {
-            return require_node(driver, wid);
+    for _ in 0..8 {
+        let _ = h.driver.wheel_at(anchor, vec2(0.0, 140.0));
+        if let Some(entry) = h.driver.frame_meta().find_by_widget_id(wid)
+            && entry.clipped_rect.is_positive()
+            && entry.clipped_rect.height() >= 8.0
+        {
+            return Ok(entry.clone());
         }
     }
-    Err(format!("widget `{wid}` could not be scrolled into view inside `{scroll_id}`"))
+    require_widget(h, wid)
 }
 
-fn click_in_content_scroll(driver: &mut HumanPathDriver, wid: &str) -> Result<(), String> {
-    let _ = scroll_into_view(driver, "edit.content_panel", wid)?;
-    driver.click_widget(wid)?;
-    Ok(())
+fn click_modal_widget(h: &mut EguiWfHarness, wid: &str) -> TestRes {
+    let entry = scroll_into_modal_view(h, wid)?;
+    h.driver.click_at(entry.clipped_rect.center())
 }
 
-fn assert_disabled_tooltip_and_noop_click(driver: &mut HumanPathDriver, scroll_id: Option<&str>, wid: &str) -> TestRes {
-    let node = match scroll_id {
-        Some(sid) => scroll_into_view(driver, sid, wid)?,
-        None => require_node(driver, wid)?,
-    };
-    if node.state.enablement.enabled {
-        return Err(format!("expected `{wid}` to be disabled, but it is enabled"));
+fn assert_disabled_tooltip_and_noop_click(h: &mut EguiWfHarness, wid: &str) -> TestRes {
+    let entry = scroll_into_modal_view(h, wid)?;
+    if entry.enabled {
+        return Err(format!("expected disabled `{wid}`, got enabled in FrameInspectMeta"));
     }
-    if node.state.enablement.disabled_reason.as_deref().unwrap_or("").is_empty() {
-        return Err(format!("expected non-empty disabled tooltip reason on `{wid}`"));
+    if entry.disabled_reason.as_deref().is_none_or(|t| t.trim().is_empty()) {
+        return Err(format!("expected non-empty disabled tooltip/reason for `{wid}`"));
     }
-    driver.hover_widget(wid)?;
-    let [lx, ly] = driver.widget_center_logical(wid).ok_or_else(|| format!("disabled widget `{wid}` has no visible center"))?;
-    let before = driver.app().canvas_dialogs.edit_params.clone();
-    let outcome = driver.click_logical(lx, ly)?;
-    if outcome.handled && outcome.action != "modal.pointer_up" {
-        return Err(format!("clicking disabled `{wid}` should be a no-op, got action `{}`", outcome.action));
-    }
-    if driver.app().canvas_dialogs.edit_params.active_tab != before.active_tab || driver.app().canvas_dialogs.edit_params.draft != before.draft {
-        return Err(format!("clicking disabled `{wid}` mutated edit_params state"));
-    }
-    Ok(())
-}
-
-fn assert_parity(driver: &mut HumanPathDriver, context: &str) -> TestRes {
-    let rep = driver.verify_parity();
-    if !rep.is_clean() {
-        return Err(format!("pixel-to-hit-box parity failed at {context}: {:?}", rep));
+    let before = h.app().canvas_dialogs.edit_params.draft.clone();
+    let _ = h.driver.hover_widget_id(wid);
+    let _ = h.driver.click_at(entry.clipped_rect.center());
+    if h.app().canvas_dialogs.edit_params.draft != before {
+        return Err(format!("clicking disabled `{wid}` must be a no-op"));
     }
     Ok(())
 }
@@ -177,32 +179,32 @@ fn w7_r36_r1_incomplete_rm_table_allows_matching_and_switches_kr_vs_satterthwait
         (scalar_val(rs, "Denominator df")?, scalar_val(rs, "P value")?)
     };
 
-    let mut driver = desktop_driver(app);
-    driver.click_widget("toolbar.parameters")?;
-    assert_parity(&mut driver, "incomplete_rm_design_tab")?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.select_sheet(&res_id)?;
+    h.click("toolbar.edit_params")?;
+    h.assert_parity_and_layout("incomplete_rm_design_tab")?;
 
-    // R1 relaxed for incomplete-block RM Column table: matched toggle must remain ENABLED!
-    let paired_node = require_node(&mut driver, "edit.paired_or_matched")?;
-    if !paired_node.state.enablement.enabled || !paired_node.a11y.checked.unwrap_or(false) {
-        return Err(format!("expected edit.paired_or_matched enabled & checked on incomplete RM table, got {paired_node:?}"));
-    }
+    // R1 relaxed for incomplete-block RM Column table: matched toggle must remain ENABLED & checked!
+    let paired_node = require_widget(&h, "edit.paired_or_matched")?;
+    ensure(
+        paired_node.enabled && paired_node.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false),
+        format!("expected edit.paired_or_matched enabled & checked on incomplete RM table, got {paired_node:?}"),
+    )?;
 
     // Switch to Repeated Measures tab: R1b disables sphericity automatically & surfaces KR vs Satterthwaite df controls.
-    driver.click_widget("edit.tab.repeated_measures")?;
-    assert_parity(&mut driver, "incomplete_rm_rm_tab")?;
+    h.click("edit.tab.repeated_measures")?;
+    h.assert_parity_and_layout("incomplete_rm_rm_tab")?;
 
-    let kr_node = scroll_into_view(&mut driver, "edit.content_panel", "edit.rm.df_kenward_roger")?;
-    if !kr_node.a11y.selected.unwrap_or(false) {
-        return Err("expected Kenward-Roger df selected by default on incomplete RM REML".to_owned());
-    }
-    assert_disabled_tooltip_and_noop_click(&mut driver, Some("edit.content_panel"), "edit.sphericity.geisser_greenhouse")?;
-    assert_disabled_tooltip_and_noop_click(&mut driver, Some("edit.content_panel"), "edit.rm.assume_sphericity")?;
+    let kr_node = scroll_into_modal_view(&mut h, "edit.rm.df_kenward_roger")?;
+    ensure(kr_node.value.as_ref().and_then(|v| v.as_bool()).unwrap_or(false), "expected Kenward-Roger df selected by default on incomplete RM REML")?;
+    assert_disabled_tooltip_and_noop_click(&mut h, "edit.sphericity.geisser_greenhouse")?;
+    assert_disabled_tooltip_and_noop_click(&mut h, "edit.rm.assume_sphericity")?;
 
     // Switch to Satterthwaite via human click and confirm OK.
-    click_in_content_scroll(&mut driver, "edit.rm.df_satterthwaite")?;
-    driver.click_widget("modal.ok")?;
+    click_modal_widget(&mut h, "edit.rm.df_satterthwaite")?;
+    h.click("modal.ok")?;
 
-    let rs_sat = result_sheet(driver.app(), &res_id)?;
+    let rs_sat = result_sheet(h.app(), &res_id)?;
     let df_sat = scalar_val(rs_sat, "Denominator df")?;
     let p_sat = scalar_val(rs_sat, "P value")?;
     if (df_kr - df_sat).abs() < 1e-3 || (p_kr - p_sat).abs() < 1e-8 {
@@ -231,32 +233,29 @@ fn w7_r36_r1b_complete_rm_reml_toggle_disables_sphericity_and_restricts_post_hoc
         .map_err(err_str)?;
     let res_id = SheetId::from(res.payload["sheet_id"].as_str().ok_or("missing sheet_id")?);
 
-    let mut driver = desktop_driver(app);
-    driver.click_widget("toolbar.parameters")?;
-    driver.click_widget("edit.tab.repeated_measures")?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.select_sheet(&res_id)?;
+    h.click("toolbar.edit_params")?;
+    h.click("edit.tab.repeated_measures")?;
 
     // Complete RM without mixed_effects_reml keeps sphericity enabled.
-    let gg_init = scroll_into_view(&mut driver, "edit.content_panel", "edit.sphericity.geisser_greenhouse")?;
-    if !gg_init.state.enablement.enabled {
-        return Err("complete RM ANOVA should keep sphericity enabled before Mixed-Effects REML is enabled".to_owned());
-    }
-    driver.click_widget("edit.tab.multiple_comparisons")?;
-    if !scroll_into_view(&mut driver, "edit.content_panel", "edit.post_hoc.tukey")?.state.enablement.enabled {
-        return Err("complete RM ANOVA should allow Tukey before REML toggle".to_owned());
-    }
+    let gg_init = scroll_into_modal_view(&mut h, "edit.sphericity.geisser_greenhouse")?;
+    ensure(gg_init.enabled, "complete RM ANOVA should keep sphericity enabled before Mixed-Effects REML is enabled")?;
+    h.click("edit.tab.multiple_comparisons")?;
+    ensure(scroll_into_modal_view(&mut h, "edit.post_hoc.tukey")?.enabled, "complete RM ANOVA should allow Tukey before REML toggle")?;
 
     // Switch back to Repeated Measures and enable Mixed-Effects REML -> sphericity disables (`R1b`).
-    driver.click_widget("edit.tab.repeated_measures")?;
-    click_in_content_scroll(&mut driver, "edit.rm.mixed_effects_reml")?;
-    assert_parity(&mut driver, "complete_rm_reml_active")?;
-    assert_disabled_tooltip_and_noop_click(&mut driver, Some("edit.content_panel"), "edit.sphericity.geisser_greenhouse")?;
-    assert_disabled_tooltip_and_noop_click(&mut driver, Some("edit.content_panel"), "edit.rm.assume_sphericity")?;
+    h.click("edit.tab.repeated_measures")?;
+    click_modal_widget(&mut h, "edit.rm.mixed_effects_reml")?;
+    h.assert_parity_and_layout("complete_rm_reml_active")?;
+    assert_disabled_tooltip_and_noop_click(&mut h, "edit.sphericity.geisser_greenhouse")?;
+    assert_disabled_tooltip_and_noop_click(&mut h, "edit.rm.assume_sphericity")?;
 
     // Switch to Multiple Comparisons: Tukey/Dunnett/Games-Howell/Dunn disabled; Bonferroni/Sidak/Holm-Sidak/FDR/Fisher's LSD enabled!
-    driver.click_widget("edit.tab.multiple_comparisons")?;
-    assert_parity(&mut driver, "reml_mc_tab")?;
+    h.click("edit.tab.multiple_comparisons")?;
+    h.assert_parity_and_layout("reml_mc_tab")?;
     for disallowed in ["edit.post_hoc.tukey", "edit.post_hoc.dunnett", "edit.post_hoc.games_howell", "edit.post_hoc.dunn"] {
-        assert_disabled_tooltip_and_noop_click(&mut driver, Some("edit.content_panel"), disallowed)?;
+        assert_disabled_tooltip_and_noop_click(&mut h, disallowed)?;
     }
     for allowed in [
         "edit.post_hoc.bonferroni",
@@ -268,18 +267,16 @@ fn w7_r36_r1b_complete_rm_reml_toggle_disables_sphericity_and_restricts_post_hoc
         "edit.post_hoc.by",
         "edit.post_hoc.none",
     ] {
-        let node = scroll_into_view(&mut driver, "edit.content_panel", allowed)?;
-        if !node.state.enablement.enabled {
-            return Err(format!("expected `{allowed}` enabled under Mixed-Effects REML, got disabled"));
-        }
+        let node = scroll_into_modal_view(&mut h, allowed)?;
+        ensure(node.enabled, format!("expected `{allowed}` enabled under Mixed-Effects REML, got disabled"))?;
     }
 
     // Select Fisher's LSD via real click and apply.
-    click_in_content_scroll(&mut driver, "edit.post_hoc.sidak")?;
-    click_in_content_scroll(&mut driver, "edit.post_hoc.fisher_lsd")?;
-    driver.click_widget("modal.ok")?;
+    click_modal_widget(&mut h, "edit.post_hoc.sidak")?;
+    click_modal_widget(&mut h, "edit.post_hoc.fisher_lsd")?;
+    h.click("modal.ok")?;
 
-    let rs = result_sheet(driver.app(), &res_id)?;
+    let rs = result_sheet(h.app(), &res_id)?;
     let AnalysisKind::OneWayAnova(spec) = &rs.analysis.kind else {
         return Err(format!("expected OneWayAnova, got {:?}", rs.analysis.kind));
     };
@@ -310,28 +307,28 @@ fn w7_r36_r4_welch_t_disables_diagnostics_residuals_with_tooltip_and_noop() -> T
     let res = app.execute_command("analysis.run", json!({ "source_sheet_id": "ds-tg", "kind": "unpaired_t_test" })).map_err(err_str)?;
     let res_id = SheetId::from(res.payload["sheet_id"].as_str().ok_or("missing sheet_id")?);
 
-    let mut driver = desktop_driver(app);
-    driver.click_widget("toolbar.parameters")?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.select_sheet(&res_id)?;
+    h.click("toolbar.edit_params")?;
 
-    // Unpaired Student's t keeps Diagnostics / Residuals enabled.
-    driver.click_widget("edit.tab.diagnostics")?;
-    if !require_node(&mut driver, "edit.diag.residuals_table")?.state.enablement.enabled {
-        return Err("expected edit.diag.residuals_table enabled for Student's t".to_owned());
-    }
+    // Unpaired Student's t keeps Diagnostics checkboxes enabled.
+    h.click("edit.tab.diagnostics")?;
+    ensure(require_widget(&h, "edit.diag.qq")?.enabled, "expected edit.diag.qq enabled for Student's t")?;
+    ensure(require_widget(&h, "edit.diag.shapiro")?.enabled, "expected edit.diag.shapiro enabled for Student's t")?;
 
-    // Switch back to Experimental Design and click Welch's t test (`edit.tg.welch`).
-    driver.click_widget("edit.tab.experimental_design")?;
-    click_in_content_scroll(&mut driver, "edit.tg.welch")?;
-    assert_parity(&mut driver, "welch_t_experimental_design")?;
+    // Switch back to Design & Test and click Welch's t test (`edit.tg.welch_t`).
+    h.click("edit.tab.experimental_design")?;
+    click_modal_widget(&mut h, "edit.tg.welch_t")?;
+    h.assert_parity_and_layout("welch_t_experimental_design")?;
 
-    // R4: Diagnostics / Residuals tab must disable under WelchT and hover + click must be a no-op!
-    assert_disabled_tooltip_and_noop_click(&mut driver, None, "edit.tab.diagnostics")?;
-    let res_gate: ControlEnablement = evaluate_dialog_widget(&driver.app().canvas_dialogs, driver.app().document(), "edit.diag.residuals_table");
+    // R4: Diagnostics / Residuals tab must disable under WelchT with tooltip + noop click!
+    assert_disabled_tooltip_and_noop_click(&mut h, "edit.tab.diagnostics")?;
+    let res_gate: ControlEnablement = evaluate_dialog_widget(&h.app().canvas_dialogs, h.app().document(), "edit.diag.residuals_table");
     if res_gate.enabled {
         return Err("expected edit.diag.residuals_table disabled by predicate under WelchT".to_owned());
     }
-    driver.click_widget("modal.ok")?;
-    let rs = result_sheet(driver.app(), &res_id)?;
+    h.click("modal.ok")?;
+    let rs = result_sheet(h.app(), &res_id)?;
     let AnalysisKind::TwoGroupComparison(TwoGroupSpec { method, .. }) = rs.analysis.kind else {
         return Err("expected TwoGroupComparison".to_owned());
     };
@@ -388,14 +385,15 @@ fn w7_r36_r103b2_multifactor_anova_preserves_interactions_across_factor_add_remo
         .map_err(err_str)?;
     let res_id = SheetId::from(res.payload["sheet_id"].as_str().ok_or("missing sheet_id")?);
 
-    let mut driver = desktop_driver(app);
-    driver.click_widget("toolbar.parameters")?;
-    driver.click_widget("edit.tab.factor_settings")?;
-    assert_parity(&mut driver, "mv_factor_settings_tab")?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.select_sheet(&res_id)?;
+    h.click("toolbar.edit_params")?;
+    h.click("edit.tab.experimental_design")?;
+    h.assert_parity_and_layout("mv_factor_settings_tab")?;
 
-    // Configure 3-way interactions on Factor Settings tab.
-    click_in_content_scroll(&mut driver, "edit.fac.order.3")?;
-    let order_now = match driver.app().canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
+    // Configure 3-way interactions on Experimental Design / Model tab.
+    click_modal_widget(&mut h, "edit.fac.order.3")?;
+    let order_now = match h.app().canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::FactorialAnova(f)) => f.max_interaction_order,
         other => return Err(format!("expected FactorialAnova draft, got {other:?}")),
     };
@@ -404,25 +402,25 @@ fn w7_r36_r103b2_multifactor_anova_preserves_interactions_across_factor_add_remo
     }
 
     // Remove factor 2 (`Diet`), add factor 3 (`Timepoint`), remove factor 1 (`Drug`), re-add factor 2 (`Diet`) -> max_interaction_order=3 MUST persist!
-    click_in_content_scroll(&mut driver, "edit.fac.col.2")?;
-    click_in_content_scroll(&mut driver, "edit.fac.col.3")?;
-    click_in_content_scroll(&mut driver, "edit.fac.col.1")?;
-    click_in_content_scroll(&mut driver, "edit.fac.col.2")?;
+    click_modal_widget(&mut h, "edit.fac.col.2")?;
+    click_modal_widget(&mut h, "edit.fac.col.3")?;
+    click_modal_widget(&mut h, "edit.fac.col.1")?;
+    click_modal_widget(&mut h, "edit.fac.col.2")?;
 
-    let (cols_after, order_after) = match driver.app().canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
+    let (cols_after, order_after) = match h.app().canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::FactorialAnova(f)) => (f.multifactor_columns.clone(), f.max_interaction_order),
         _ => return Err("missing FactorialAnova draft".to_owned()),
     };
     if cols_after != vec![0, 2, 3] || order_after != 3 {
         return Err(format!("expected factors=[0,2,3] & preserved max_interaction_order=3, got {cols_after:?}, order={order_after}"));
     }
-    let summary_lbl = require_node(&mut driver, "edit.fac.interaction_summary")?.a11y.label;
-    if !summary_lbl.contains("Genotype × Diet × Timepoint") {
-        return Err(format!("expected updated preserved 3-way term in summary, got `{summary_lbl}`"));
+    let formula_lbl = require_widget(&h, "edit.formula_bar")?.label;
+    if !formula_lbl.contains("Genotype:Diet:Timepoint") {
+        return Err(format!("expected updated preserved 3-way term in formula bar, got `{formula_lbl}`"));
     }
 
-    driver.click_widget("modal.ok")?;
-    let rs = result_sheet(driver.app(), &res_id)?;
+    h.click("modal.ok")?;
+    let rs = result_sheet(h.app(), &res_id)?;
     let AnalysisKind::FactorialAnova(fac) = &rs.analysis.kind else {
         return Err("expected FactorialAnova result".to_owned());
     };
@@ -500,13 +498,13 @@ fn w7_r36_3way_rm_and_nested_df_method_human_path_e2e() -> TestRes {
     let r3_kr_df = scalar_val(result_sheet(&app, &r3_id)?, "A × B × C: Kenward-Roger df")?;
 
     // Test 3-way RM df toggle via human click on Repeated Measures tab.
-    let mut driver = desktop_driver(app);
-    driver.click_widget(&format!("nav.sheet.{}", r3_id.as_str()))?;
-    driver.click_widget("toolbar.parameters")?;
-    driver.click_widget("edit.tab.repeated_measures")?;
-    click_in_content_scroll(&mut driver, "edit.rm.df_satterthwaite")?;
-    driver.click_widget("modal.ok")?;
-    let rs3 = result_sheet(driver.app(), &r3_id)?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.0));
+    h.select_sheet(&r3_id)?;
+    h.click("toolbar.edit_params")?;
+    h.click("edit.tab.repeated_measures")?;
+    click_modal_widget(&mut h, "edit.rm.df.sat")?;
+    h.click("modal.ok")?;
+    let rs3 = result_sheet(h.app(), &r3_id)?;
     let AnalysisKind::FactorialAnova(fac_done) = &rs3.analysis.kind else {
         return Err("expected FactorialAnova".to_owned());
     };
@@ -515,11 +513,11 @@ fn w7_r36_3way_rm_and_nested_df_method_human_path_e2e() -> TestRes {
     }
 
     // Switch to Nested result sheet via navigator widget click and switch KR -> Satterthwaite on Nested Design.
-    driver.click_widget(&format!("nav.sheet.{}", rn_id.as_str()))?;
-    driver.click_widget("toolbar.parameters")?;
-    click_in_content_scroll(&mut driver, "edit.nested.df_satterthwaite")?;
-    driver.click_widget("modal.ok")?;
-    let rsn = result_sheet(driver.app(), &rn_id)?;
+    h.select_sheet(&rn_id)?;
+    h.click("toolbar.edit_params")?;
+    click_modal_widget(&mut h, "edit.rm.df.sat")?;
+    h.click("modal.ok")?;
+    let rsn = result_sheet(h.app(), &rn_id)?;
     let AnalysisKind::NestedComparison(nest_done) = &rsn.analysis.kind else {
         return Err("expected NestedComparison".to_owned());
     };
@@ -569,12 +567,12 @@ fn w7_r36_staged_i18n_16_locales_and_rtl_hidpi_parity() -> TestRes {
     let res_id = SheetId::from(res.payload["sheet_id"].as_str().ok_or("missing sheet_id")?);
     app.locale = String::from("ar");
 
-    let mut driver = HumanPathDriver::new(app, ViewportMetrics::new(1440.0, 900.0, 1.5));
-    driver.click_widget(&format!("nav.sheet.{}", res_id.as_str()))?;
-    driver.click_widget("toolbar.parameters")?;
-    driver.click_widget("edit.tab.repeated_measures")?;
-    assert_parity(&mut driver, "rtl_hidpi_rm_tab")?;
-    driver.click_widget("edit.tab.multiple_comparisons")?;
-    assert_parity(&mut driver, "rtl_hidpi_mc_tab")?;
+    let mut h = desktop_harness(app, ViewportMetrics::new(1440.0, 900.0, 1.5));
+    h.select_sheet(&res_id)?;
+    h.click("toolbar.edit_params")?;
+    h.click("edit.tab.repeated_measures")?;
+    h.assert_parity_and_layout("rtl_hidpi_rm_tab")?;
+    h.click("edit.tab.multiple_comparisons")?;
+    h.assert_parity_and_layout("rtl_hidpi_mc_tab")?;
     Ok(())
 }

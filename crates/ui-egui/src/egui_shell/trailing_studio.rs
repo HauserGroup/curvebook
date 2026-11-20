@@ -32,7 +32,7 @@ use crate::egui_shell::{
     FrameInspectEntryInput, FrameInspectMeta, OKABE_ITO_SERIES_PALETTE, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title, widgets,
 };
 use crate::i18n::{is_rtl_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 const STUDIO_INNER_PAD: f32 = 8.0;
 const SCROLL_BAR_RESERVE_PT: f32 = 16.0;

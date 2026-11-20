@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 use crate::UiApp;
 use crate::control_io::encode_base64;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, doc_sheet_title};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::tr;
 use crate::workspace_nav::{SAMPLE_FIXTURES, SampleFixtureDescriptor, instantiate_sample_fixture};
 
@@ -2257,6 +2257,8 @@ fn render_clipped_text_edit(
         return;
     }
     let resp = ui.add_enabled(enabled, egui::TextEdit::singleline(text).hint_text(hint).desired_width(width));
+    let ak_label = if label.is_empty() { hint.to_owned() } else { label.to_owned() };
+    resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::TextInput, enabled, ak_label.clone()));
     if resp.rect.intersect(ui.clip_rect()).height() >= 4.0 {
         meta.record_response(
             ui,

@@ -211,9 +211,9 @@ fn b4_wheel_pans_on_unmodified_scroll_zooms_with_ctrl_meta_and_scrolls_split_gri
         win.execute_and_journal("sheet.select", json!({ "sheet_id": graph_id.as_str() }))?;
     }
 
-    let map = rt.window(wid)?.app().layout_map(vp);
-    let paper = map.scene_paper.as_ref().ok_or("missing scene paper")?.paper;
-    let center = vp.physical_to_logical_px([f64::from(paper.x) + f64::from(paper.width) * 0.5, f64::from(paper.y) + f64::from(paper.height) * 0.5]);
+    let snap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(wid)?.app(), vp, Some("canvas"), true);
+    let viewport_bounds = snap.find_widget("canvas.viewport").and_then(|n| n.bounds).ok_or("missing canvas.viewport bounds")?;
+    let center = vp.physical_to_logical_px([viewport_bounds[0] + viewport_bounds[2] * 0.5, viewport_bounds[1] + viewport_bounds[3] * 0.5]);
 
     // 1. Unmodified vertical wheel MUST pan, not zoom.
     let zoom0 = rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom;
@@ -296,9 +296,9 @@ fn b4_wheel_pans_on_unmodified_scroll_zooms_with_ctrl_meta_and_scrolls_split_gri
 
     // 5. Split-pane DataGrid header/gutter within grid_geometry.sheet_rect scrolls grid cleanly without altering graph zoom.
     rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("ui.split.toggle") })?;
-    let split_map = rt.window(wid)?.app().layout_map(vp);
-    let g_rect = split_map.grid_geometry.as_ref().ok_or("missing split grid_geometry")?.sheet_rect;
-    let hdr_pt = vp.physical_to_logical_px([f64::from(g_rect.x) + 12.0, f64::from(g_rect.y) + 4.0]);
+    let split_snap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(wid)?.app(), vp, None, true);
+    let g_rect = split_snap.find_widget("center.pane.primary").and_then(|n| n.bounds).ok_or("missing center.pane.primary bounds")?;
+    let hdr_pt = vp.physical_to_logical_px([g_rect[0] + 12.0, g_rect[1] + g_rect[3] * 0.5]);
     let zoom_split = rt.window(wid)?.app().canvas_dialogs.pan_zoom.zoom;
     let grid_scroll = rt.dispatch(DesktopHostEvent::MouseWheel {
         window_id: wid,
@@ -580,7 +580,10 @@ fn r2_s11_01_and_17_secondary_window_close_and_menu_bar_visibility() -> Result<(
     let mut out_vis = ctx.run_ui(raw_vis, |ui| app_visible.step_ui(ui));
     out_vis.textures_delta.clear();
     let visible_canvas_h = app_visible.runtime().window(wv)?.viewport().logical_height;
-    assert!(visible_canvas_h < 630.0, "when menu_bar_visible=true, top menu bar should reserve vertical space (got {visible_canvas_h})");
+    assert!(
+        visible_canvas_h < 630.0 && app_visible.inspect_meta().find_by_widget_id("menu.file").is_some(),
+        "when menu_bar_visible=true, inline egui menu bar must be visible inside top chrome (got canvas_h={visible_canvas_h})"
+    );
 
     let mut rt_hidden = DesktopHostRuntime::new(DesktopHostConfig { in_window_menus: false, ..DesktopHostConfig::default() });
     let wh = rt_hidden.open_window(None, vp)?;
@@ -592,8 +595,8 @@ fn r2_s11_01_and_17_secondary_window_close_and_menu_bar_visibility() -> Result<(
     out_hidden.textures_delta.clear();
     let hidden_canvas_h = app_hidden.runtime().window(wh)?.viewport().logical_height;
     assert!(
-        (hidden_canvas_h - 640.0).abs() < 1.0,
-        "when menu_bar_visible=false, top menu bar must not consume vertical height (got {hidden_canvas_h})"
+        hidden_canvas_h >= visible_canvas_h && app_hidden.inspect_meta().find_by_widget_id("menu.file").is_none(),
+        "when menu_bar_visible=false, inline menu bar must be hidden and consume no extra height (visible={visible_canvas_h}, hidden={hidden_canvas_h})"
     );
     Ok(())
 }

@@ -1,14 +1,9 @@
 #![forbid(unsafe_code)]
-//! Shared test-only parity filtering for `apps/curvebook-web` integration tests (`R14.1`).
-//!
-//! Filters out `text_glyphs` missing-glyph violations strictly when every missing glyph in the
-//! offending [`LayoutTextRun`] is a CJK/RTL character unbacked by the host OS font stack, while
-//! preserving all ASCII/Latin/symbol `text_glyphs` checks and all non-`text_glyphs` invariants.
+#![allow(dead_code)]
+//! Shared host font coverage probe for `apps/curvebook-web` integration tests (`R14.1`, `R15.5`).
 
 use std::sync::OnceLock;
 
-use curvebook_ui_egui::layout::LayoutTree;
-use curvebook_ui_egui::layout::verify::ParityViolation;
 use curvebook_ui_egui::text_bridge::{DesktopTextMeasurer, TextMeasurer, UiTextStyle};
 use curvebook_ui_egui::theme::FontBook;
 
@@ -107,46 +102,4 @@ const fn is_unbacked_cjk_rtl_char(ch: char, coverage: HostScriptCoverage) -> boo
         return !(coverage.ja && coverage.zh_cn && coverage.zh_tw);
     }
     false
-}
-
-fn is_unbacked_cjk_rtl_text_glyph_violation(tree: &LayoutTree, violation: &ParityViolation, coverage: HostScriptCoverage) -> bool {
-    if violation.check != "text_glyphs" {
-        return false;
-    }
-    let mut matched = false;
-    for run in &tree.text_runs {
-        if run.owner_widget_id.0 != violation.widget_id || run.shaped.missing_glyph_count == 0 {
-            continue;
-        }
-        let expected_detail = format!("text run `{}` has {} missing glyph(s)", run.text, run.shaped.missing_glyph_count);
-        if expected_detail != violation.detail {
-            continue;
-        }
-        matched = true;
-        let has_missing_glyph = run.shaped.glyphs.iter().any(|g| g.missing_glyph);
-        let all_missing_are_unbacked_cjk_rtl =
-            has_missing_glyph && run.shaped.glyphs.iter().filter(|g| g.missing_glyph).all(|g| is_unbacked_cjk_rtl_char(g.ch, coverage));
-        if !all_missing_are_unbacked_cjk_rtl {
-            return false;
-        }
-    }
-    matched
-}
-
-/// Filter out `text_glyphs` parity violations caused solely by CJK/RTL characters absent from the
-/// host font stack, while keeping ASCII/Latin `text_glyphs` failures and all non-`text_glyphs`
-/// checks intact.
-#[must_use]
-pub fn filter_unbacked_cjk_rtl_text_glyphs(tree: &LayoutTree, violations: Vec<ParityViolation>) -> Vec<ParityViolation> {
-    filter_unbacked_cjk_rtl_text_glyphs_with_coverage(tree, violations, host_script_coverage())
-}
-
-/// Filter `violations` against `tree` using explicit [`HostScriptCoverage`] flags.
-#[must_use]
-pub fn filter_unbacked_cjk_rtl_text_glyphs_with_coverage(
-    tree: &LayoutTree,
-    violations: Vec<ParityViolation>,
-    coverage: HostScriptCoverage,
-) -> Vec<ParityViolation> {
-    violations.into_iter().filter(|v| !is_unbacked_cjk_rtl_text_glyph_violation(tree, v, coverage)).collect()
 }

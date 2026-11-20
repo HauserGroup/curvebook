@@ -8,15 +8,16 @@ use curvebook::desktop_host::{
     CloseDisposition, DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime, DesktopWindowId, MenuChromeMode, current_epoch_ms,
     default_recovery_ttl_ms,
 };
+use curvebook::gui_window::{CurveBookNativeApp, build_egui_font_definitions};
 use curvebook_doc::{
     Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ConstantValue, DataSheet, GraphKind, GraphSheet, InfoConstant, InfoSheet,
-    ProjectDocument, SheetFolderKind, SubcolumnMode, TableArchetype, XyTable,
+    ProjectDocument, SubcolumnMode, TableArchetype, XyTable,
 };
 use curvebook_engine::Session;
 use curvebook_format::save_project_file;
 use curvebook_platform::process::ProcessCommand;
-use curvebook_ui_egui::compositor::WorkspacePixelRect;
-use curvebook_ui_egui::interaction::{KeyModifiers, PointerButton, ViewportMetrics};
+use curvebook_ui_egui::interaction::ViewportMetrics;
+use eframe::egui;
 use serde_json::json;
 
 fn temp_test_dir(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -24,12 +25,6 @@ fn temp_test_dir(prefix: &str) -> Result<PathBuf, Box<dyn std::error::Error>> {
     let dir = std::env::temp_dir().join(format!("{prefix}-{}-{unique}", std::process::id()));
     fs::create_dir_all(&dir)?;
     Ok(dir)
-}
-
-fn rect_center_logical(rect: WorkspacePixelRect, metrics: ViewportMetrics) -> [f64; 2] {
-    let px = f64::from(rect.x) + f64::from(rect.width) * 0.5;
-    let py = f64::from(rect.y) + f64::from(rect.height) * 0.5;
-    metrics.physical_to_logical_px([px, py])
 }
 
 fn build_desktop_test_project() -> Result<ProjectDocument, Box<dyn std::error::Error>> {
@@ -75,7 +70,7 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Legacy,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: Some(String::from("de")),
         theme_override: Some(String::from("dark")),
         recovery_root: None,
@@ -115,7 +110,7 @@ fn in_window_menus_chrome_and_menu_action_vs_native_mode() -> Result<(), Box<dyn
         in_window_menus: false,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Legacy,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -143,7 +138,7 @@ fn new_instance_isolated_recovery_journals_and_prompt_unsaved_close_guard() -> R
         in_window_menus: true,
         new_instance: true,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Legacy,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: Some(recovery_root.clone()),
@@ -256,107 +251,80 @@ fn navigator_drag_reorder_split_divider_drag_and_ime_unicode_commits() -> Result
     let mut rt = DesktopHostRuntime::new(DesktopHostConfig { initial_viewport: metrics, ..DesktopHostConfig::default() });
     let win = rt.open_window_with_session(Session::from_document(build_desktop_test_project()?), metrics, false)?;
 
+    let ctx = egui::Context::default();
+    ctx.set_fonts(build_egui_font_definitions(None));
+    ctx.set_pixels_per_point(2.0);
+    let mut native = CurveBookNativeApp::new(rt, win, None);
+    let screen = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(1280.0, 800.0));
+    let step = |app_host: &mut CurveBookNativeApp, events: Vec<egui::Event>| {
+        let mut out = ctx.run_ui(egui::RawInput { screen_rect: Some(screen), events, ..Default::default() }, |ui| app_host.step_ui(ui));
+        out.textures_delta.clear();
+    };
+    let settle = |app_host: &mut CurveBookNativeApp| {
+        step(app_host, Vec::new());
+        step(app_host, Vec::new());
+    };
+    let drag_between = |app_host: &mut CurveBookNativeApp, from: egui::Pos2, to: egui::Pos2| {
+        let mid = from.lerp(to, 0.5);
+        step(
+            app_host,
+            vec![
+                egui::Event::PointerMoved(from),
+                egui::Event::PointerButton { pos: from, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            ],
+        );
+        step(app_host, vec![egui::Event::PointerMoved(mid)]);
+        step(app_host, vec![egui::Event::PointerMoved(to)]);
+        step(
+            app_host,
+            vec![egui::Event::PointerButton { pos: to, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE }],
+        );
+        step(app_host, Vec::new());
+    };
+    settle(&mut native);
+
     // 1. Navigator pointer drag-reorder (`data-xy` onto `data-col`).
-    let nav_map = rt.window(win)?.app().layout_map(metrics);
-    let ds0 = nav_map
-        .navigator_entries
-        .iter()
-        .find(|e| e.folder == SheetFolderKind::Data && e.index_in_folder == 0)
-        .ok_or("missing first data nav entry")?;
-    let ds1 = nav_map
-        .navigator_entries
-        .iter()
-        .find(|e| e.folder == SheetFolderKind::Data && e.index_in_folder == 1)
-        .ok_or("missing second data nav entry")?;
-    let start_pt = rect_center_logical(ds0.rect, metrics);
-    let end_pt = rect_center_logical(ds1.rect, metrics);
+    let ds0_center = native.inspect_meta().find_by_widget_id("nav.sheet.data-xy").ok_or("missing nav.sheet.data-xy")?.clipped_rect.center();
+    let ds1_center = native.inspect_meta().find_by_widget_id("nav.sheet.data-col").ok_or("missing nav.sheet.data-col")?.clipped_rect.center();
+    drag_between(&mut native, ds0_center, ds1_center);
+    assert_eq!(native.runtime().window(win)?.app().document().data_sheets[0].id.as_str(), "data-col");
 
-    rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: start_pt[0],
-        y_pt: start_pt[1],
-        button: PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    rt.dispatch(DesktopHostEvent::PointerMoved { window_id: win, x_pt: end_pt[0], y_pt: end_pt[1], modifiers: KeyModifiers::default() })?;
-    let drop_out = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: end_pt[0],
-        y_pt: end_pt[1],
-        button: PointerButton::Primary,
-        pressed: false,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    assert_eq!(drop_out.command_id.as_deref(), Some("sheet.reorder"));
-    assert_eq!(rt.window(win)?.app().document().data_sheets[0].id.as_str(), "data-col");
-
-    // 2. Enable split pane and drag split divider via desktop pointer events.
-    let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "data-xy" }))?;
-    rt.dispatch(DesktopHostEvent::MenuAction { window_id: win, command_id: String::from("ui.split.toggle") })?;
-    assert!(rt.window(win)?.app().split.enabled);
-    let initial_split_ratio = rt.window(win)?.app().split.ratio;
-    let split_map = rt.window(win)?.app().layout_map(metrics);
-    let divider_rect = split_map.split_divider.ok_or("missing split divider rect")?;
-    let div_pt = rect_center_logical(divider_rect, metrics);
-
-    rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: div_pt[0],
-        y_pt: div_pt[1],
-        button: PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    rt.dispatch(DesktopHostEvent::PointerMoved { window_id: win, x_pt: div_pt[0] + 64.0, y_pt: div_pt[1], modifiers: KeyModifiers::default() })?;
-    let div_end = rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: div_pt[0] + 64.0,
-        y_pt: div_pt[1],
-        button: PointerButton::Primary,
-        pressed: false,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    assert_eq!(div_end.action, "split_divider.drag_end");
-    assert!((rt.window(win)?.app().split.ratio - initial_split_ratio).abs() > 0.01);
-    rt.dispatch(DesktopHostEvent::MenuAction { window_id: win, command_id: String::from("ui.split.toggle") })?;
+    // 2. Enable split pane and drag split divider via egui pointer events.
+    let _ = native.runtime_mut().window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "data-xy" }))?;
+    native.runtime_mut().dispatch(DesktopHostEvent::MenuAction { window_id: win, command_id: String::from("ui.split.toggle") })?;
+    settle(&mut native);
+    assert!(native.runtime().window(win)?.app().split.enabled);
+    let initial_split_ratio = native.runtime().window(win)?.app().split.ratio;
+    let div_center = native.inspect_meta().find_by_widget_id("split.divider").ok_or("missing split.divider")?.clipped_rect.center();
+    drag_between(&mut native, div_center, div_center + egui::vec2(64.0, 0.0));
+    assert!((native.runtime().window(win)?.app().split.ratio - initial_split_ratio).abs() > 0.01);
+    native.runtime_mut().dispatch(DesktopHostEvent::MenuAction { window_id: win, command_id: String::from("ui.split.toggle") })?;
+    settle(&mut native);
 
     // 3. Inline cell IME preedit + commit (`"濃度 μmol/L"`).
-    let grid_map = rt.window(win)?.app().layout_map(metrics);
-    let cell_rect = grid_map.grid_geometry.as_ref().and_then(|g| g.cell_rect(2, 0)).ok_or("missing empty cell (2, 0)")?;
-    let cell_pt = rect_center_logical(cell_rect, metrics);
-    rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: cell_pt[0],
-        y_pt: cell_pt[1],
-        button: PointerButton::Primary,
-        pressed: true,
-        click_count: 2,
-        modifiers: KeyModifiers::default(),
-    })?;
-    assert!(rt.window(win)?.app().inline_editor.active);
-
-    rt.dispatch(DesktopHostEvent::ImePreedit { window_id: win, text: String::from("濃"), cursor: Some((0, 3)) })?;
-    assert_eq!(rt.window(win)?.ime_preedit().map(|p| p.text.as_str()), Some("濃"));
-    assert_eq!(rt.window(win)?.app().inline_editor.buffer, "");
-
-    rt.dispatch(DesktopHostEvent::ImeCommit { window_id: win, text: String::from("濃度 μmol/L") })?;
-    assert!(rt.window(win)?.ime_preedit().is_none());
-    assert_eq!(rt.window(win)?.app().inline_editor.buffer, "濃度 μmol/L");
-
-    let commit_cell = rt.dispatch(DesktopHostEvent::KeyboardInput {
-        window_id: win,
-        key: String::from("Enter"),
-        pressed: true,
-        modifiers: KeyModifiers::default(),
-        text: None,
-    })?;
-    assert_eq!(commit_cell.command_id.as_deref(), Some("table.setCell"));
-    let stored_cell = rt
+    let cell_pt = native.inspect_meta().find_by_widget_id("grid.cell.2.0.0").ok_or("missing grid.cell.2.0.0")?.clipped_rect.center();
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerMoved(cell_pt),
+            egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: cell_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, Vec::new());
+    step(
+        &mut native,
+        vec![
+            egui::Event::Ime(egui::ImeEvent::Preedit { text: String::from("濃"), active_range_chars: Some(0..1) }),
+            egui::Event::Ime(egui::ImeEvent::Commit(String::from("濃度 μmol/L"))),
+            egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, Vec::new());
+    let stored_cell = native
+        .runtime()
         .window(win)?
         .app()
         .document()
@@ -366,56 +334,69 @@ fn navigator_drag_reorder_split_divider_drag_and_ime_unicode_commits() -> Result
     assert_eq!(stored_cell.value, CellValue::Text(String::from("濃度 μmol/L")));
 
     // 4. InfoSheet notes IME commit (`"العربية"`).
-    let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "info-1" }))?;
-    let info_map = rt.window(win)?.app().layout_map(metrics);
-    let notes_rect = info_map.info_notes_rect.ok_or("missing info notes rect")?;
-    let notes_pt = rect_center_logical(notes_rect, metrics);
-    rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: notes_pt[0],
-        y_pt: notes_pt[1],
-        button: PointerButton::Primary,
-        pressed: true,
-        click_count: 1,
-        modifiers: KeyModifiers::default(),
-    })?;
-    rt.dispatch(DesktopHostEvent::ImePreedit { window_id: win, text: String::from("ال"), cursor: Some((0, 4)) })?;
-    let _ = rt.dispatch(DesktopHostEvent::RedrawRequested { window_id: win })?;
-    rt.dispatch(DesktopHostEvent::ImeCommit { window_id: win, text: String::from("العربية") })?;
-    let commit_info = rt.dispatch(DesktopHostEvent::KeyboardInput {
-        window_id: win,
-        key: String::from("Enter"),
-        pressed: true,
-        modifiers: KeyModifiers::default(),
-        text: None,
-    })?;
-    assert_eq!(commit_info.command_id.as_deref(), Some("info.setNote"));
-    assert_eq!(rt.window(win)?.app().document().info_sheet(&"info-1".into()).map(|i| i.notes_markdown.as_str()), Some("العربية"));
+    let _ = native.runtime_mut().window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "info-1" }))?;
+    settle(&mut native);
+    let notes_pt = native.inspect_meta().find_by_widget_id("info.notes_editor").ok_or("missing info.notes_editor")?.clipped_rect.center();
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerMoved(notes_pt),
+            egui::Event::PointerButton { pos: notes_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: notes_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, vec![egui::Event::Ime(egui::ImeEvent::Commit(String::from("العربية")))]);
+    let save_pt = native.inspect_meta().find_by_widget_id("info.notes.save").ok_or("missing info.notes.save")?.clipped_rect.center();
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerMoved(save_pt),
+            egui::Event::PointerButton { pos: save_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: save_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, Vec::new());
+    assert_eq!(native.runtime().window(win)?.app().document().info_sheet(&"info-1".into()).map(|i| i.notes_markdown.as_str()), Some("العربية"));
 
-    // 5. Canvas title IME commit (`"濃度 μmol/L"` + `" — العربية"`).
-    let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "graph-xy" }))?;
-    let graph_map = rt.window(win)?.app().layout_map(metrics);
-    let title_rect = graph_map.canvas_title_rect.ok_or("missing canvas title rect")?;
-    let title_pt = rect_center_logical(title_rect, metrics);
-    rt.dispatch(DesktopHostEvent::PointerButton {
-        window_id: win,
-        x_pt: title_pt[0],
-        y_pt: title_pt[1],
-        button: PointerButton::Primary,
-        pressed: true,
-        click_count: 2,
-        modifiers: KeyModifiers::default(),
-    })?;
-    rt.dispatch(DesktopHostEvent::ImeCommit { window_id: win, text: String::from("濃度 μmol/L — العربية") })?;
-    let commit_title = rt.dispatch(DesktopHostEvent::KeyboardInput {
-        window_id: win,
-        key: String::from("Enter"),
-        pressed: true,
-        modifiers: KeyModifiers::default(),
-        text: None,
-    })?;
-    assert_eq!(commit_title.command_id.as_deref(), Some("graph.setSpec"));
-    assert_eq!(rt.window(win)?.app().document().graph_sheet(&"graph-xy".into()).map(|g| g.spec.title.as_str()), Some("濃度 μmol/L — العربية"));
+    // 5. Navigator sheet title rename IME commit (`"濃度 μmol/L — العربية"`).
+    let graph_nav_pt = native.inspect_meta().find_by_widget_id("nav.sheet.graph-xy").ok_or("missing nav.sheet.graph-xy")?.clipped_rect.center();
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerMoved(graph_nav_pt),
+            egui::Event::PointerButton { pos: graph_nav_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: graph_nav_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(
+        &mut native,
+        vec![
+            egui::Event::PointerButton { pos: graph_nav_pt, button: egui::PointerButton::Primary, pressed: true, modifiers: egui::Modifiers::NONE },
+            egui::Event::PointerButton { pos: graph_nav_pt, button: egui::PointerButton::Primary, pressed: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, Vec::new());
+    if native.inspect_meta().find_by_widget_id("nav.rename_input").is_none() {
+        step(
+            &mut native,
+            vec![egui::Event::Key { key: egui::Key::F2, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE }],
+        );
+        step(&mut native, Vec::new());
+    }
+    assert!(native.inspect_meta().find_by_widget_id("nav.rename_input").is_some(), "expected nav.rename_input open");
+    step(
+        &mut native,
+        vec![
+            egui::Event::Key { key: egui::Key::A, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::COMMAND },
+            egui::Event::Ime(egui::ImeEvent::Commit(String::from("濃度 μmol/L — العربية"))),
+            egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE },
+        ],
+    );
+    step(&mut native, Vec::new());
+    assert_eq!(
+        native.runtime().window(win)?.app().document().graph_sheet(&"graph-xy".into()).map(|g| g.title.as_str()),
+        Some("濃度 μmol/L — العربية")
+    );
     Ok(())
 }
 
@@ -427,9 +408,9 @@ fn trackpad_magnify_pinch_zoom_inertial_coasting_and_clipboard() -> Result<(), B
 
     // TrackpadMagnify + TrackpadScroll + AnimationTick coasting on graph-xy.
     let _ = rt.window_mut(win)?.app_mut().execute_command("sheet.select", json!({ "sheet_id": "graph-xy" }))?;
-    let gmap = rt.window(win)?.app().layout_map(metrics);
-    let paper = gmap.scene_paper.as_ref().ok_or("missing scene paper")?;
-    let center = rect_center_logical(paper.paper, metrics);
+    let gsnap = curvebook_ui_egui::inspect_ui_tree_for_metrics(rt.window(win)?.app(), metrics, Some("canvas"), true);
+    let vp_bounds = gsnap.find_widget("canvas.viewport").and_then(|n| n.bounds).ok_or("missing canvas.viewport")?;
+    let center = metrics.physical_to_logical_px([vp_bounds[0] + vp_bounds[2] * 0.5, vp_bounds[1] + vp_bounds[3] * 0.5]);
 
     let zoom_before = rt.window(win)?.app().canvas_dialogs.pan_zoom.zoom;
     let mag_out =
@@ -617,7 +598,7 @@ fn file_dropped_pzfx_and_zip_archive_open_cleanly() -> Result<(), Box<dyn std::e
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
-        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Legacy,
+        ui_backend: curvebook_ui_egui::egui_shell::UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,

@@ -11,7 +11,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
 use crate::i18n::{normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::modal_predicates::{ControlEnablement, evaluate_dialog_button, evaluate_dialog_widget};
 use crate::power_wizard::{PowerEffectInputMode, PowerWizardStage, PowerWizardState};
 
@@ -825,7 +825,7 @@ fn render_power_curve_plot(ui: &mut Ui, res: &PowerAnalysisResult, state: &mut P
         "image",
         &hover_desc,
         None,
-        Some(json!({ "hover_n": state.hover_n })),
+        Some(json!({ "hover_n": state.hover_n, "sensitivity_len": res.sensitivity_table.len() })),
         true,
         None,
         ZLayer::ModalDialog,

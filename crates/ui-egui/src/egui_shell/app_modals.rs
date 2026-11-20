@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExportFigureFormat};
 use crate::i18n::{BETA_ACTIVE_LOCALES, is_rtl_locale, locale_picker_label, normalize_locale, tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 use crate::menus::shortcuts::{ShortcutBinding, normalize_shortcut_combo};
 use crate::theme::UiThemeMode;
 use crate::workspace_nav::NavigatorNestingMode;

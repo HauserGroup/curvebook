@@ -9,7 +9,6 @@
 use curvebook_doc::{Cell, ColumnDesignHint, ColumnTable, DataSheet, SheetId, TableArchetype};
 use curvebook_engine::Session;
 use curvebook_ui_egui::RenderTargetSpec;
-use curvebook_ui_egui::compositor::ScreenshotRegionTarget;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy};
 use curvebook_ui_egui::egui_shell::inspect_bridge::{
@@ -17,6 +16,7 @@ use curvebook_ui_egui::egui_shell::inspect_bridge::{
 };
 use curvebook_ui_egui::egui_shell::stat_anova_modal::{AnovaModalEguiState, AnovaModalTab, render_one_way_anova_modal, resolve_one_way_anova_banner};
 use curvebook_ui_egui::egui_shell::{EguiShellViewState, FrameInspectMeta, PendingUiIntents, Tokens, UiBackend};
+use curvebook_ui_egui::inspect::ScreenshotRegionTarget;
 use curvebook_ui_egui::interaction::{KeyModifiers, ViewportMetrics};
 use curvebook_ui_egui::{UiApp, UiThemeMode};
 use serde_json::json;
@@ -66,21 +66,12 @@ struct CoexistDriverState {
     outside_click_captured: bool,
     outside_wheel_captured: bool,
     dialog_rect_pt: Option<egui::Rect>,
-    legacy_modal_rect_pt: Option<egui::Rect>,
 }
 
 impl CoexistDriverState {
     fn new(app: UiApp) -> Self {
         let views = app.egui_views.clone();
-        Self {
-            app,
-            views,
-            intents: PendingUiIntents::new(),
-            outside_click_captured: false,
-            outside_wheel_captured: false,
-            dialog_rect_pt: None,
-            legacy_modal_rect_pt: None,
-        }
+        Self { app, views, intents: PendingUiIntents::new(), outside_click_captured: false, outside_wheel_captured: false, dialog_rect_pt: None }
     }
 }
 
@@ -90,7 +81,6 @@ fn make_coexist_driver<'a>(state: CoexistDriverState, metrics: ViewportMetrics) 
         st.outside_click_captured |= rep.outside_click_captured;
         st.outside_wheel_captured |= rep.outside_wheel_captured;
         st.dialog_rect_pt = rep.regions.dialog_rect_pt;
-        st.legacy_modal_rect_pt = rep.legacy_modal_rect_pt;
     });
     driver.set_post_frame_hook(|st, settled| {
         if settled {
@@ -104,16 +94,12 @@ fn make_coexist_driver<'a>(state: CoexistDriverState, metrics: ViewportMetrics) 
     driver
 }
 
-fn verify_case_b_backdrop_blocks_grid(
+fn verify_analyze_backdrop_blocks_grid(
     driver: &mut EguiHumanPathDriver<'_, CoexistDriverState>,
-    d_case_b: &curvebook_ui_egui::egui_shell::inspect_bridge::HybridCoexistenceDecision,
     modal_rect: egui::Rect,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let grid_rect = egui::Rect::from_min_size(egui::pos2(0.0, 40.0), egui::vec2(1024.0, 600.0));
-    assert!(HybridCoexistenceArbiter::pointer_routes_to_legacy(d_case_b, grid_rect, modal_rect.center(), false, Some(modal_rect)));
     let outside_pos = egui::pos2(8.0, 120.0);
     assert!(!modal_rect.contains(outside_pos));
-    assert!(!HybridCoexistenceArbiter::pointer_routes_to_legacy(d_case_b, grid_rect, outside_pos, false, Some(modal_rect)));
 
     let prev_scroll = driver.state().views.column_grid.scroll_offset_pt;
     let prev_active = driver.state().app.grid.tool.active;
@@ -121,8 +107,8 @@ fn verify_case_b_backdrop_blocks_grid(
     driver.state_mut().outside_wheel_captured = false;
     driver.wheel_at(outside_pos, egui::vec2(0.0, -180.0))?;
     driver.click_at(outside_pos)?;
-    assert!(driver.state().outside_click_captured, "Case B backdrop must capture outside click over Column grid");
-    assert!(driver.state().outside_wheel_captured, "Case B backdrop must capture outside wheel over Column grid");
+    assert!(driver.state().outside_click_captured, "modal backdrop must capture outside click over Column grid");
+    assert!(driver.state().outside_wheel_captured, "modal backdrop must capture outside wheel over Column grid");
     assert_eq!(driver.state().views.column_grid.scroll_offset_pt, prev_scroll);
     assert_eq!(driver.state().app.grid.tool.active, prev_active);
     Ok(())
@@ -130,65 +116,49 @@ fn verify_case_b_backdrop_blocks_grid(
 
 fn scroll_and_select_one_way_anova(
     driver: &mut EguiHumanPathDriver<'_, CoexistDriverState>,
-    d_case_b: &curvebook_ui_egui::egui_shell::inspect_bridge::HybridCoexistenceDecision,
-    modal_rect: egui::Rect,
     metrics: ViewportMetrics,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let grid_rect = egui::Rect::from_min_size(egui::pos2(0.0, 40.0), egui::vec2(1024.0, 600.0));
-    let snap_before_scroll = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
-    assert_eq!(snap_before_scroll.active_dialog, "analyze_sheet");
-    let dlg_before = snap_before_scroll.dialog.as_ref().ok_or("missing AnalyzeSheet inspect dialog")?;
-    let list_node = dlg_before.controls.iter().find(|c| c.widget_id == "analyze.entries_list").ok_or("missing analyze.entries_list")?;
+    let snap_before = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
+    assert_eq!(snap_before.active_dialog, "analyze_sheet");
+    let dlg_before = snap_before.dialog.as_ref().ok_or("missing AnalyzeSheet inspect dialog")?;
+    assert!(dlg_before.controls.iter().any(|c| c.widget_id.starts_with("analyze.entry.")));
     assert!(dlg_before.buttons.iter().any(|b| b.widget_id == "modal.ok"));
     assert!(dlg_before.buttons.iter().any(|b| b.widget_id == "modal.cancel"));
-    let lb = list_node.bounds.ok_or("missing analyze.entries_list bounds")?;
-    let list_center = egui::pos2((lb[0] + lb[2] * 0.5) as f32, (lb[1] + lb[3] * 0.5) as f32);
-    assert!(HybridCoexistenceArbiter::pointer_routes_to_legacy(d_case_b, grid_rect, list_center, false, Some(modal_rect)));
+
     for _ in 0..8 {
-        let snap_now = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
-        if snap_now.dialog.as_ref().is_some_and(|d| d.controls.iter().any(|c| c.widget_id == "analyze.entry.stats.one_way_anova")) {
+        if driver
+            .frame_meta()
+            .find_by_widget_id("analyze.entry.stats.one_way_anova")
+            .is_some_and(|e| e.clipped_rect.height() >= 8.0 && e.clipped_rect.width() >= 8.0)
+        {
             break;
         }
-        let wheel_list = driver.state_mut().app.dispatch_control_line(&format!(
-            r#"{{"id":"w1","method":"ui.pointer_gesture","params":{{"action":"wheel","x":{},"y":{},"delta_x":0.0,"delta_y":140.0}}}}"#,
-            list_center.x, list_center.y
-        ));
-        assert!(wheel_list.contains("\"ok\":true"), "scroll analyze.entries_list failed: {wheel_list}");
+        let anchor = driver
+            .frame_meta()
+            .entries
+            .iter()
+            .find(|e| e.widget_id.starts_with("analyze.entry.") || e.widget_id == "analyze.search")
+            .map(|e| e.clipped_rect.center())
+            .ok_or("missing AnalyzeSheet entry anchor")?;
+        driver.wheel_at(anchor, egui::vec2(0.0, -140.0))?;
     }
     driver.run_settled();
 
     let snap_b = driver.state_mut().app.inspect_egui_shell_snapshot(metrics, Some("dialog"), true);
     assert_eq!(snap_b.active_dialog, "analyze_sheet");
     let dlg_b = snap_b.dialog.as_ref().ok_or("missing AnalyzeSheet inspect dialog")?;
-    assert!(dlg_b.controls.iter().any(|c| c.widget_id == "analyze.entries_list"));
-    let anova_entry = dlg_b
-        .controls
-        .iter()
-        .find(|c| c.widget_id == "analyze.entry.stats.one_way_anova")
-        .ok_or("missing analyze.entry.stats.one_way_anova after wheel scroll")?;
-    let entry_bounds = anova_entry.bounds.ok_or("missing analyze.entry.stats.one_way_anova bounds")?;
+    assert!(dlg_b.controls.iter().any(|c| c.widget_id == "analyze.entry.stats.one_way_anova"));
     assert!(dlg_b.buttons.iter().any(|b| b.widget_id == "modal.ok"));
     assert!(dlg_b.buttons.iter().any(|b| b.widget_id == "modal.cancel"));
 
-    let entry_cx = entry_bounds[0] + entry_bounds[2] * 0.5;
-    let entry_cy = entry_bounds[1] + entry_bounds[3] * 0.5;
-    let click_anova = driver.state_mut().app.dispatch_control_line(&format!(
-        r#"{{"id":"b1","method":"ui.pointer_gesture","params":{{"action":"click","x":{entry_cx},"y":{entry_cy}}}}}"#
-    ));
-    assert!(click_anova.contains("\"ok\":true"), "select one_way_anova failed: {click_anova}");
-    let confirm_ok = driver
-        .state_mut()
-        .app
-        .dispatch_control_line(r#"{"id":"b2","method":"ui.answer_dialog","params":{"dialog_id":"analyze_sheet","action":"ok"}}"#);
-    assert!(confirm_ok.contains("\"ok\":true"), "confirm analyze_sheet failed: {confirm_ok}");
+    driver.click_widget_id("analyze.entry.stats.one_way_anova")?;
+    driver.click_widget_id("modal.ok")?;
     Ok(())
 }
 
 #[test]
-fn hybrid_case_b_legacy_analyze_over_egui_column_grid_and_focus_handoff_to_resultsheet() -> Result<(), Box<dyn std::error::Error>> {
-    let (mut app, col_id) = seed_column_anova_app(true)?;
-    // Explicitly opt into legacy `AnalyzeSheet` coexistence for Case B regression coverage until `R15.5`.
-    app.egui_views = app.egui_views.clone().with_native_analyze_sheet(false);
+fn egui_analyze_modal_over_column_grid_and_focus_handoff_to_resultsheet() -> Result<(), Box<dyn std::error::Error>> {
+    let (app, col_id) = seed_column_anova_app(true)?;
     let metrics = ViewportMetrics::new(1024.0, 640.0, 1.0);
     let mut driver = make_coexist_driver(CoexistDriverState::new(app), metrics);
 
@@ -198,19 +168,18 @@ fn hybrid_case_b_legacy_analyze_over_egui_column_grid_and_focus_handoff_to_resul
     assert_eq!(d0.modal_surface, HybridModalSurface::None);
     assert!(!d0.blocks_egui_grid);
 
-    // Click `toolbar.analyze` in egui top chrome -> opens legacy `AnalyzeSheet` over `egui` Column grid (Case B).
+    // Click `toolbar.analyze` in egui top chrome -> opens native egui `AnalyzeSheet` modal.
     driver.click_widget_id("toolbar.analyze")?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::AnalyzeSheet { .. }));
 
-    let d_case_b = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
-    assert_eq!(d_case_b.sheet_surface, HybridSheetSurface::EguiColumnGrid);
-    assert_eq!(d_case_b.modal_surface, HybridModalSurface::LegacyModal);
-    assert!(d_case_b.blocks_egui_grid);
-    assert!(d_case_b.renders_legacy_modal_overlay);
+    let d_analyze = HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false);
+    assert_eq!(d_analyze.sheet_surface, HybridSheetSurface::EguiColumnGrid);
+    assert_eq!(d_analyze.modal_surface, HybridModalSurface::EguiAnalyzeSheet);
+    assert!(d_analyze.blocks_egui_grid);
 
-    let modal_rect = driver.state().legacy_modal_rect_pt.ok_or("expected legacy AnalyzeSheet modal rect")?;
-    verify_case_b_backdrop_blocks_grid(&mut driver, &d_case_b, modal_rect)?;
-    scroll_and_select_one_way_anova(&mut driver, &d_case_b, modal_rect, metrics)?;
+    let modal_rect = driver.state().dialog_rect_pt.ok_or("expected egui AnalyzeSheet modal rect")?;
+    verify_analyze_backdrop_blocks_grid(&mut driver, modal_rect)?;
+    scroll_and_select_one_way_anova(&mut driver, metrics)?;
 
     driver.run_settled();
     assert_eq!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::None);
@@ -219,15 +188,14 @@ fn hybrid_case_b_legacy_analyze_over_egui_column_grid_and_focus_handoff_to_resul
     assert!(driver.state().app.document().result_sheet(&rs_id).is_some(), "expected clean focus handoff to newly created ResultSheet");
 
     let d_result = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
-    assert_eq!(d_result.sheet_surface, HybridSheetSurface::LegacyPresenter);
+    assert_eq!(d_result.sheet_surface, HybridSheetSurface::EguiStage);
     assert_eq!(d_result.modal_surface, HybridModalSurface::None);
-    assert!(d_result.renders_legacy_canvas);
     assert!(HybridCoexistenceArbiter::allows_cmd_t_edit_params(&driver.state().app, &d_result, false));
     Ok(())
 }
 
 #[test]
-fn hybrid_case_a_cmd_t_opens_egui_anova_modal_over_resultsheet_with_backdrop_capture() -> Result<(), Box<dyn std::error::Error>> {
+fn egui_cmd_t_opens_anova_modal_over_resultsheet_with_backdrop_capture() -> Result<(), Box<dyn std::error::Error>> {
     let (mut app, col_id) = seed_column_anova_app(true)?;
     let _ = app.execute_command(
         "analysis.run",
@@ -241,14 +209,13 @@ fn hybrid_case_a_cmd_t_opens_egui_anova_modal_over_resultsheet_with_backdrop_cap
     let mut driver = make_coexist_driver(CoexistDriverState::new(app), metrics);
     let initial_result_tab = driver.state().app.canvas_dialogs.result_view.active_tab_index;
 
-    // Press `Cmd+T` directly over legacy ResultSheet -> opens `egui` One-Way ANOVA modal (`Case A`)!
+    // Press `Cmd+T` directly over ResultSheet -> opens `egui` One-Way ANOVA modal!
     driver.press_key("t", KeyModifiers { meta: true, ..Default::default() })?;
     assert!(matches!(driver.state().app.canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }));
 
     let d_case_a = HybridCoexistenceArbiter::evaluate(&driver.state().app, false);
-    assert_eq!(d_case_a.sheet_surface, HybridSheetSurface::LegacyPresenter);
+    assert_eq!(d_case_a.sheet_surface, HybridSheetSurface::EguiStage);
     assert_eq!(d_case_a.modal_surface, HybridModalSurface::EguiOneWayAnova);
-    assert!(d_case_a.blocks_legacy_background);
     assert!(d_case_a.renders_egui_anova_modal);
 
     // Footer button must read `"Update Analysis"` when opened via `Cmd+T` on an existing `ResultSheet`.
@@ -258,17 +225,10 @@ fn hybrid_case_a_cmd_t_opens_egui_anova_modal_over_resultsheet_with_backdrop_cap
     let ok_btn = dlg_a.buttons.iter().find(|b| b.widget_id == "modal.ok").ok_or("missing modal.ok")?;
     assert_eq!(ok_btn.label, "Update Analysis");
 
-    // Outside click & outside wheel behind the egui ANOVA modal must NOT leak to legacy ResultSheet behind it!
+    // Outside click & outside wheel behind the egui ANOVA modal must NOT leak to ResultSheet behind it!
     let dlg_rect = driver.state().dialog_rect_pt.ok_or("expected egui ANOVA dialog rect")?;
     let outside = egui::pos2(6.0, 120.0);
     assert!(!dlg_rect.contains(outside));
-    assert!(!HybridCoexistenceArbiter::pointer_routes_to_legacy(
-        &d_case_a,
-        egui::Rect::from_min_size(egui::pos2(0.0, 32.0), egui::vec2(1024.0, 608.0)),
-        outside,
-        false,
-        None,
-    ));
     driver.state_mut().outside_click_captured = false;
     driver.state_mut().outside_wheel_captured = false;
     driver.wheel_at(outside, egui::vec2(0.0, -180.0))?;
@@ -445,9 +405,8 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
 
     // Verify full hybrid CPU software rasterizer screenshots (`ui.screenshot`) for BOTH coexistence modes at 640x420 & 1440x600.
     for (w_px, h_px) in [(640_u32, 420_u32), (1440_u32, 600_u32)] {
-        // Case B: legacy `AnalyzeSheet` over `egui` `Column` grid.
+        // Dark AnalyzeSheet over egui Column grid.
         let (mut app_b, _) = seed_column_anova_app(true)?;
-        app_b.egui_views = app_b.egui_views.clone().with_native_analyze_sheet(false);
         let doc_b = app_b.document().clone();
         assert!(app_b.canvas_dialogs.open_analyze_dialog(&doc_b, &col_id));
         app_b.set_theme_mode(UiThemeMode::Dark);
@@ -456,7 +415,7 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
         assert_eq!((bw, bh), (w_px, h_px));
         assert_eq!(png_dimensions(&png_b), Some((w_px, h_px)));
 
-        // Case A: `egui` `One-Way ANOVA` modal over legacy `ResultSheet`.
+        // Light One-Way ANOVA modal over ResultSheet.
         let mut app_a = base_app.clone();
         let _ = app_a.execute_command("sheet.select", json!({ "sheet_id": rs_id.as_str() }));
         let doc_a = app_a.document().clone();

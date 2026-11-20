@@ -22,7 +22,6 @@ use curvebook::live_control::{LiveControlBridge, serve_live_control_io};
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::interaction::ViewportMetrics;
-use curvebook_ui_egui::layout::LayoutTree;
 use curvebook_ui_egui::{BETA_ACTIVE_LOCALES, ControlAuth, LOCALES, inspect_ui_tree, normalize_beta_gui_locale};
 use eframe::egui;
 use serde_json::{Value, json};
@@ -121,7 +120,7 @@ fn desktop_menu_bar_sets_host_draws_flag_suppresses_canvas_duplicates_and_drives
         in_window_menus: true,
         new_instance: false,
         gui_only: false,
-        ui_backend: UiBackend::Legacy,
+        ui_backend: UiBackend::Egui,
         locale_override: None,
         theme_override: None,
         recovery_root: None,
@@ -145,12 +144,9 @@ fn desktop_menu_bar_sets_host_draws_flag_suppresses_canvas_duplicates_and_drives
 
     {
         let win = native.runtime().window(win_id)?;
-        assert!(win.app().host_draws_menu_bar, "desktop host painting egui::MenuBar must set host_draws_menu_bar = true");
-        let tree = LayoutTree::build(win.app(), metrics);
-        assert!(
-            !tree.nodes.iter().any(|n| n.id.0.starts_with("menu.")),
-            "canvas LayoutTree must suppress duplicate `menu.*` nodes when host_draws_menu_bar == true"
-        );
+        assert!(!win.app().host_draws_menu_bar, "in-window egui menu bar renders in top_chrome without host suppression");
+        let menus_snap = inspect_ui_tree(win.app(), Some("menus"), true);
+        assert!(menus_snap.menus.as_ref().is_some_and(|m| !m.is_empty()), "expected top menus in egui inspect snapshot");
     }
 
     // Verify theme, locale (14 Beta locales vs 16 registered), RTL fallback, and native File dialog triggers.
@@ -384,6 +380,12 @@ fn cli_ui_backend_egui_env_override_gui_only_and_preferences_ui_scale() -> Resul
 
     let bad = Command::new(bin).args(["--ui-backend=unknown_backend"]).output()?;
     assert!(!bad.status.success(), "unknown --ui-backend value must fail CLI validation");
+
+    let rejected_legacy_cli = Command::new(bin).args(["--ui-backend=legacy"]).output()?;
+    assert!(!rejected_legacy_cli.status.success(), "--ui-backend=legacy must be rejected cleanly after R15.5 cutover");
+
+    let rejected_legacy_env = Command::new(bin).env("CURVEBOOK_UI_BACKEND", "legacy").arg("--headless-once").output()?;
+    assert!(!rejected_legacy_env.status.success(), "CURVEBOOK_UI_BACKEND=legacy must be rejected cleanly after R15.5 cutover");
 
     // Verify CURVEBOOK_UI_BACKEND=egui + `--headless-once` works on the compiled binary.
     let dir = temp_test_dir("cb-r15-bin-egui")?;

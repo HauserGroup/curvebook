@@ -5046,7 +5046,11 @@ impl FormatGraphState {
                 }),
             );
         }
-        vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch)), ToolCommandIntent::new("graph.setSeries", series_obj)]
+        let mut intents = vec![ToolCommandIntent::new("graph.setSpec", Value::Object(spec_patch))];
+        if !matches!(self.graph_kind, Some(GraphKind::MultipleVariables)) {
+            intents.push(ToolCommandIntent::new("graph.setSeries", series_obj));
+        }
+        intents
     }
 }
 
@@ -7957,11 +7961,6 @@ impl CanvasDialogState {
     }
 }
 
-pub use crate::compositor::{
-    WorkspaceFrameLayout, WorkspacePixelRect, compute_workspace_layout, compute_workspace_layout_for_dpi, render_workspace_frame_png,
-    render_workspace_rgba,
-};
-
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{
@@ -7974,7 +7973,6 @@ mod tests {
         ActiveDialog, AssumptionDiagnosticBanner, AxisTarget, CanvasDialogState, CommandPaletteState, ConstantHookPickerState, FormatAxesState,
         HookTargetKind, ResultSheetViewState,
     };
-    use crate::compositor::FramePalette;
     use crate::theme::{UiThemeSpec, wcag_contrast_ratio};
 
     #[test]
@@ -8046,12 +8044,11 @@ mod tests {
     }
 
     #[test]
-    fn frame_palette_meets_wcag_aa_across_all_themes() {
+    fn theme_specs_meet_wcag_aa_across_all_themes() {
         for theme in [UiThemeSpec::light(), UiThemeSpec::dark(), UiThemeSpec::high_contrast()] {
-            let pal = FramePalette::from_theme(&theme);
-            assert!(wcag_contrast_ratio(pal.border, pal.panel) >= 3.0, "border vs panel failed for {:?}", theme.mode);
-            assert!(wcag_contrast_ratio(pal.border, pal.surface) >= 3.0, "border vs surface failed for {:?}", theme.mode);
-            assert!(wcag_contrast_ratio(pal.text, pal.surface) >= 4.5, "text vs surface failed for {:?}", theme.mode);
+            assert!(wcag_contrast_ratio(theme.border, theme.panel_bg) >= 3.0, "border vs panel_bg failed for {:?}", theme.mode);
+            assert!(wcag_contrast_ratio(theme.border, theme.surface) >= 3.0, "border vs surface failed for {:?}", theme.mode);
+            assert!(wcag_contrast_ratio(theme.text_primary, theme.surface) >= 4.5, "text_primary vs surface failed for {:?}", theme.mode);
         }
     }
 

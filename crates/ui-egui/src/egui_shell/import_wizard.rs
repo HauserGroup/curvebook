@@ -13,7 +13,7 @@ use crate::UiApp;
 use crate::dialogs_canvas::ActiveDialog;
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState, ImportReshapeMode, ImportWizardStage, format_cell_display};
 use crate::i18n::{normalize_locale, try_tr};
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
 use super::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, widgets};

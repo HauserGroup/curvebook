@@ -7,7 +7,7 @@ use serde_json::json;
 
 use crate::grid_view::parse_localized_number_input;
 use crate::i18n::LocalePreset;
-use crate::layout::ZLayer;
+use crate::inspect::ZLayer;
 
 use super::{FrameInspectEntryInput, FrameInspectMeta, Tokens};
 
