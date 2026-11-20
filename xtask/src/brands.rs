@@ -35,6 +35,8 @@ use curvebook_ui_egui::{
     ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
 };
 
+use crate::text_decode::{decode_utf16, detect_bomless_utf16};
+
 /// Competitor vendor and product names checked on ASCII token boundaries (including CamelCase / snake_case / kebab-case splits).
 const BRANDS: &[&str] = &[
     "graphpad",
@@ -339,43 +341,6 @@ fn decode_text_file(path: &str, bytes: &[u8]) -> Result<DecodedFile, String> {
         return Ok(DecodedFile::BinaryAsset);
     }
     Err(format!("cannot scan {path}: file is not valid UTF-8 or UTF-16"))
-}
-
-fn detect_bomless_utf16(bytes: &[u8]) -> Option<bool> {
-    if bytes.len() < 8 || !bytes.contains(&0) {
-        return None;
-    }
-    let mut le_ascii = 0usize;
-    let mut be_ascii = 0usize;
-    let (pairs, _) = bytes.as_chunks::<2>();
-    let total_pairs = pairs.len();
-    for &[a, b] in pairs {
-        if a != 0 && (a.is_ascii_graphic() || a.is_ascii_whitespace()) && b == 0 {
-            le_ascii += 1;
-        } else if a == 0 && b != 0 && (b.is_ascii_graphic() || b.is_ascii_whitespace()) {
-            be_ascii += 1;
-        }
-    }
-    if le_ascii >= 4 && le_ascii * 4 >= total_pairs && le_ascii > be_ascii.saturating_mul(2) {
-        Some(true)
-    } else if be_ascii >= 4 && be_ascii * 4 >= total_pairs && be_ascii > le_ascii.saturating_mul(2) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
-    let (pairs, remainder) = bytes.as_chunks::<2>();
-    let units = pairs.iter().map(|&arr| if little_endian { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) });
-    let mut out = String::with_capacity(pairs.len());
-    for ch in char::decode_utf16(units) {
-        out.push(ch.unwrap_or('\u{FFFD}'));
-    }
-    if !remainder.is_empty() {
-        out.push('\u{FFFD}');
-    }
-    out
 }
 
 fn skip_path(path: &str) -> bool {
@@ -3274,6 +3239,10 @@ fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
         ActiveDialog::RandomSampleRows { source_sheet_id: Some(data_id.clone()) },
         ActiveDialog::SimulateDistributions,
         ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id.clone() },
+        ActiveDialog::CreateGraph { source_sheet_id: Some(data_id.clone()) },
+        ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id.clone() },
+        ActiveDialog::FormatEmbeddedTable { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
+        ActiveDialog::FormatImage { sheet_id: graph_id.clone(), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
         ActiveDialog::About,
     ];
@@ -3973,11 +3942,15 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
         ActiveDialog::ExcludeWithReason { sheet_id: data_id.clone() },
         ActiveDialog::FormatSelectedPoints { graph_sheet_id: graph_id.clone() },
         ActiveDialog::PowerAndSampleSize,
-        ActiveDialog::Print { sheet_id: Some(layout_id) },
+        ActiveDialog::Print { sheet_id: Some(layout_id.clone()) },
         ActiveDialog::RandomizeGroups,
-        ActiveDialog::RandomSampleRows { source_sheet_id: Some(data_id) },
+        ActiveDialog::RandomSampleRows { source_sheet_id: Some(data_id.clone()) },
         ActiveDialog::SimulateDistributions,
         ActiveDialog::InsertModelEquation { graph_sheet_id: graph_id },
+        ActiveDialog::CreateGraph { source_sheet_id: Some(data_id) },
+        ActiveDialog::EqualizeScaling { layout_sheet_id: layout_id },
+        ActiveDialog::FormatEmbeddedTable { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
+        ActiveDialog::FormatImage { sheet_id: SheetId::new("graph-1"), target_index: 0, is_layout: false },
         ActiveDialog::CommandPalette,
         ActiveDialog::About,
     ]

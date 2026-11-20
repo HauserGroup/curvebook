@@ -16,7 +16,7 @@ use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_pdf::{PdfColorSpace, PdfExportOptions, render_pdf, render_pdf_pages};
-use curvebook_render::{RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
+use curvebook_render::{MAX_CAPPED_RASTER_DIM_PX, RenderTargetSpec, TiffCompression, encode_png, encode_tiff, render_scene};
 use curvebook_svg::{SvgExportOptions, render_svg};
 use curvebook_tools::{GridCellCoord, PhysicalUnit};
 use serde::{Deserialize, Serialize};
@@ -1231,6 +1231,13 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.print.open"
             | "file.print"
             | "app.about"
+            | "app.feedback"
+            | "ui.view.rowTitles.toggle"
+            | "ui.graph.create.open"
+            | "ui.layout.equalizeScaling.open"
+            | "ui.gridOverlay.toggle"
+            | "ui.embeddedTable.format.open"
+            | "ui.image.format.open"
     ) {
         return Ok(None);
     }
@@ -1308,6 +1315,35 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
                 "version": env!("CARGO_PKG_VERSION"),
             })))
         }
+        "app.feedback" => {
+            if let Some(raw_cat) = params.get("category").and_then(Value::as_str) {
+                let Some(parsed) = crate::feedback::FeedbackCategory::parse(raw_cat) else {
+                    return Err(EngineError::with_code(
+                        ErrorCode::BadInput,
+                        format!("unknown feedback category `{raw_cat}` (expected `bug`, `feature`, or `numerical`)"),
+                    )
+                    .into());
+                };
+                app.canvas_dialogs.feedback.category = parsed;
+            }
+            app.canvas_dialogs.feedback.status_message = None;
+            app.canvas_dialogs.feedback.copied_markdown = false;
+            app.canvas_dialogs.active_dialog = ActiveDialog::Feedback;
+            let preview = app.build_feedback_issue_url();
+            Ok(Some(json!({
+                "dialog": "Feedback",
+                "category": app.canvas_dialogs.feedback.category.slug(),
+                "template": app.canvas_dialogs.feedback.category.template_filename(),
+                "preview_url": preview.url,
+                "truncated": preview.truncated,
+            })))
+        }
+        "ui.view.rowTitles.toggle" => map_ui_result(dispatch_ui_row_titles_toggle(app, params)),
+        "ui.graph.create.open" => map_ui_result(dispatch_ui_create_graph_open(app, params)),
+        "ui.layout.equalizeScaling.open" => map_ui_result(dispatch_ui_equalize_scaling_open(app, params)),
+        "ui.gridOverlay.toggle" => map_ui_result(dispatch_ui_grid_overlay_toggle(app, params)),
+        "ui.embeddedTable.format.open" => map_ui_result(dispatch_ui_embedded_table_format_open(app, params)),
+        "ui.image.format.open" => map_ui_result(dispatch_ui_image_format_open(app, params)),
         _ => Ok(None),
     }
 }
@@ -1445,7 +1481,7 @@ fn dispatch_command_by_id(
     }
     if app.is_gui_only()
         && !is_control_readonly_ui_command(command_id)
-        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "file.print")
+        && (command_id.starts_with("ui.") || command_id == "app.about" || command_id == "app.feedback" || command_id == "file.print")
     {
         return Err(EngineError::with_code(
             ErrorCode::GuiOnlyViolation,
@@ -2106,29 +2142,6 @@ fn opt_u16_bounded_param(params: &Value, key: &str, min: u16, max: u16) -> Resul
     u16::try_from(raw).map(Some).map_err(|_| format!("`{key}` out of range"))
 }
 
-fn build_control_render_spec(scene: &ChartScene, requested_w: Option<u32>, requested_h: Option<u32>, dpi: u16) -> RenderTargetSpec {
-    const MAX_DIM: f64 = 8192.0;
-    let default_w = if scene.width_pt.is_finite() && scene.width_pt > 0.0 {
-        let scaled = (scene.width_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            scaled.clamp(64.0, MAX_DIM) as u32
-        }
-    } else {
-        960
-    };
-    let default_h = if scene.height_pt.is_finite() && scene.height_pt > 0.0 {
-        let scaled = (scene.height_pt * f64::from(dpi) / 72.0).round();
-        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-        {
-            scaled.clamp(64.0, MAX_DIM) as u32
-        }
-    } else {
-        640
-    };
-    RenderTargetSpec { width_px: requested_w.unwrap_or(default_w), height_px: requested_h.unwrap_or(default_h), dpi }
-}
-
 fn enforce_control_payload_budget(bytes_len: usize) -> Result<(), ControlCallError> {
     let max_raw_bytes = (MAX_CONTROL_LINE_BYTES.saturating_mul(3)) / 4 - 4096;
     if bytes_len > max_raw_bytes {
@@ -2145,12 +2158,12 @@ fn handle_render_preview(app: &UiApp, params: &Value) -> Result<Value, ControlCa
     let doc = app.document();
     let sheet_id = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
     let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
 
     let sheet_kind = if doc.graph_sheet(&sheet_id).is_some() { "graph" } else { "layout" };
     let scene = app.session().render_sheet_scene(&sheet_id)?;
-    let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+    let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
     let raster = render_scene(&scene, spec).map_err(|err| format!("preview rasterization failed: {err}"))?;
     let png_bytes = encode_png(&raster).map_err(|err| format!("PNG encode failed: {err}"))?;
     enforce_control_payload_budget(png_bytes.len())?;
@@ -2259,8 +2272,8 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
     let pdf_color_space = parse_pdf_color_space_fields(params, &["pdf_color_space", "color_space"]).map_err(ControlCallError::from)?;
     let all_graphs = opt_bool_param(params, &["all_graphs", "all"]).map_err(ControlCallError::from)?.unwrap_or(false);
     let dpi = opt_u16_bounded_param(params, "dpi", 18, 2400).map_err(ControlCallError::from)?.unwrap_or(144);
-    let width_px = opt_u32_bounded_param(params, "width_px", 1, 8192).map_err(ControlCallError::from)?;
-    let height_px = opt_u32_bounded_param(params, "height_px", 1, 8192).map_err(ControlCallError::from)?;
+    let width_px = opt_u32_bounded_param(params, "width_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
+    let height_px = opt_u32_bounded_param(params, "height_px", 1, MAX_CAPPED_RASTER_DIM_PX).map_err(ControlCallError::from)?;
     let tiff_compression = match opt_non_empty_str_param(params, &["tiff_compression"]).map_err(ControlCallError::from)? {
         Some(raw) => match raw.to_ascii_lowercase().as_str() {
             "none" => TiffCompression::None,
@@ -2322,7 +2335,7 @@ fn handle_doc_export(app: &UiApp, params: &Value) -> Result<Value, ControlCallEr
         "png" | "tiff" => {
             let target_sheet = resolve_renderable_sheet_id(doc, params).map_err(ControlCallError::from)?;
             let scene = app.session().render_sheet_scene(&target_sheet)?;
-            let spec = build_control_render_spec(&scene, width_px, height_px, dpi);
+            let spec = RenderTargetSpec::from_scene_capped(&scene, width_px, height_px, dpi);
             let raster = render_scene(&scene, spec).map_err(|err| format!("rasterization failed: {err}"))?;
             raster_meta = Some((raster.width_px, raster.height_px, raster.dpi));
             let encoded = if format == "png" {
@@ -2977,6 +2990,26 @@ fn dispatch_ui_format_graph_open(app: &mut UiApp, params: &Value) -> Result<Valu
 
 fn dispatch_ui_apply_style_from_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
+    if let Some(arr) = params.get("target_sheet_ids").and_then(Value::as_array) {
+        let targets: Vec<SheetId> = arr.iter().filter_map(Value::as_str).map(SheetId::new).collect();
+        if !targets.is_empty() {
+            if !app.canvas_dialogs.open_apply_style_from_targets(&doc, &targets) {
+                return Err(String::from("none of the requested `target_sheet_ids` matched existing graph sheets"));
+            }
+            return Ok(json!({
+                "dialog": "ApplyStyleFrom",
+                "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
+            }));
+        }
+    }
+    let gallery_graphs: Vec<SheetId> = app.nav.selected_gallery_ids().into_iter().filter(|id| doc.graph_sheet(id).is_some()).collect();
+    if gallery_graphs.len() >= 2 && params.get("sheet_id").is_none() && params.get("sheetId").is_none() {
+        let _ = app.canvas_dialogs.open_apply_style_from_targets(&doc, &gallery_graphs);
+        return Ok(json!({
+            "dialog": "ApplyStyleFrom",
+            "target_sheet_ids": app.canvas_dialogs.apply_style.target_graph_ids.iter().map(SheetId::as_str).collect::<Vec<_>>(),
+        }));
+    }
     let graph_id = resolve_target_graph_id(&doc, params)?;
     if !app.canvas_dialogs.open_apply_style_from(&doc, &graph_id) {
         return Err(format!("graph sheet `{}` not found", graph_id.as_str()));
@@ -3196,22 +3229,192 @@ fn dispatch_ui_pairwise_open(app: &mut UiApp, params: &Value) -> Result<Value, S
 
 fn dispatch_ui_layout_composer_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
     let doc = app.document().clone();
-    let layout_id = if let Some(id) = resolve_sheet_id_param(params)? {
-        if doc.layout_sheet(&id).is_none() {
-            return Err(format!("layout sheet `{}` not found", id.as_str()));
-        }
-        id
-    } else if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
-        active.clone()
-    } else {
-        doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))?
-    };
+    let layout_id = resolve_target_layout_id(&doc, params)?;
     let _ = app.canvas_dialogs.open_page_layout_composer(&doc, &layout_id);
     let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
     if !fields.is_empty() {
         app.canvas_dialogs.page_layout.apply_field_patch(&fields, Some(&doc))?;
     }
     Ok(json!({ "dialog": "PageLayoutComposer", "layout_sheet_id": layout_id.as_str() }))
+}
+
+fn resolve_target_layout_id(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.layout_sheet(&id).is_none() {
+            return Err(format!("layout sheet `{}` not found", id.as_str()));
+        }
+        return Ok(id);
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.layout_sheets.first().map(|l| l.id.clone()).ok_or_else(|| String::from("no layout sheet available"))
+}
+
+fn dispatch_ui_equalize_scaling_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let layout_id = resolve_target_layout_id(&doc, params)?;
+    if !app.canvas_dialogs.open_equalize_scaling(&doc, &layout_id) {
+        return Err(format!("layout sheet `{}` not found", layout_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.equalize_scaling.apply_field_patch(&fields)?;
+    }
+    Ok(json!({ "dialog": "EqualizeScaling", "layout_sheet_id": layout_id.as_str() }))
+}
+
+fn dispatch_ui_create_graph_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let preferred = opt_non_empty_str_param(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"])?.map(SheetId::new);
+    if !app.canvas_dialogs.open_create_graph(&doc, preferred.as_ref()) {
+        return Err(String::from("no source data sheet available to create a graph"));
+    }
+    let fields = filtered_open_patch_fields(params, &["data_sheet_id", "source_sheet_id", "sheet_id", "sheetId"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.create_graph.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "CreateGraph",
+        "source_sheet_id": app.canvas_dialogs.create_graph.source_sheet_id.as_ref().map(SheetId::as_str),
+    }))
+}
+
+fn resolve_canvas_sheet_for_object(doc: &curvebook_doc::ProjectDocument, params: &Value) -> Result<SheetId, String> {
+    if let Some(id) = resolve_sheet_id_param(params)? {
+        if doc.graph_sheet(&id).is_some() || doc.layout_sheet(&id).is_some() {
+            return Ok(id);
+        }
+        return Err(format!("graph or layout sheet `{}` not found", id.as_str()));
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some() || doc.layout_sheet(id).is_some()) {
+        return Ok(active.clone());
+    }
+    doc.graph_sheets
+        .first()
+        .map(|g| g.id.clone())
+        .or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+        .ok_or_else(|| String::from("no graph or layout sheet available"))
+}
+
+fn resolve_target_embedded_index(
+    doc: &curvebook_doc::ProjectDocument,
+    sheet_id: &SheetId,
+    explicit_idx: Option<usize>,
+    want_image: bool,
+) -> Option<usize> {
+    if let Some(gs) = doc.graph_sheet(sheet_id) {
+        if let Some(idx) = explicit_idx {
+            let ok = gs.spec.annotations.get(idx).is_some_and(|a| {
+                if want_image {
+                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
+                } else {
+                    matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
+                }
+            });
+            return ok.then_some(idx);
+        }
+        return gs.spec.annotations.iter().rposition(|a| {
+            if want_image {
+                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedImage { .. })
+            } else {
+                matches!(a, curvebook_doc::GraphAnnotation::EmbeddedResultTable { .. })
+            }
+        });
+    }
+    if let Some(ls) = doc.layout_sheet(sheet_id) {
+        if let Some(idx) = explicit_idx {
+            let ok = ls.spec.items.get(idx).is_some_and(|it| {
+                if want_image {
+                    matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
+                } else {
+                    matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
+                }
+            });
+            return ok.then_some(idx);
+        }
+        return ls.spec.items.iter().rposition(|it| {
+            if want_image {
+                matches!(it, curvebook_doc::LayoutItem::EmbeddedImage { .. })
+            } else {
+                matches!(it, curvebook_doc::LayoutItem::LiveTable { .. })
+            }
+        });
+    }
+    None
+}
+
+fn dispatch_ui_grid_overlay_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    if let Some(spacing) = opt_finite_f64_param(params, &["spacing_pt"])? {
+        if spacing <= 1.0 || spacing > 200.0 {
+            return Err(String::from("`spacing_pt` must be in (1.0, 200.0]"));
+        }
+        app.canvas_dialogs.grid_overlay_spacing_pt = spacing;
+    }
+    if let Some(visible) = opt_bool_param(params, &["visible"])? {
+        app.canvas_dialogs.grid_overlay_visible = visible;
+    } else {
+        app.canvas_dialogs.grid_overlay_visible = !app.canvas_dialogs.grid_overlay_visible;
+    }
+    Ok(json!({
+        "grid_overlay_visible": app.canvas_dialogs.grid_overlay_visible,
+        "spacing_pt": app.canvas_dialogs.grid_overlay_spacing_pt,
+    }))
+}
+
+fn dispatch_ui_embedded_table_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
+    let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
+    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, false)
+        .ok_or_else(|| format!("no embedded result table found on `{}`", sheet_id.as_str()))?;
+    if !app.canvas_dialogs.open_format_embedded_table(&doc, &sheet_id, idx) {
+        return Err(format!("failed opening Format Embedded Table on `{}` index {idx}", sheet_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.format_embedded_table.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "FormatEmbeddedTable",
+        "sheet_id": sheet_id.as_str(),
+        "target_index": idx,
+        "is_layout": app.canvas_dialogs.format_embedded_table.is_layout,
+    }))
+}
+
+fn dispatch_ui_image_format_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let doc = app.document().clone();
+    let sheet_id = resolve_canvas_sheet_for_object(&doc, params)?;
+    let explicit_idx = opt_usize_param(params, &["annotation_index", "panel_index", "item_index"])?;
+    let idx = resolve_target_embedded_index(&doc, &sheet_id, explicit_idx, true)
+        .ok_or_else(|| format!("no embedded image found on `{}`", sheet_id.as_str()))?;
+    if !app.canvas_dialogs.open_format_image(&doc, &sheet_id, idx) {
+        return Err(format!("failed opening Format Image on `{}` index {idx}", sheet_id.as_str()));
+    }
+    let fields = filtered_open_patch_fields(params, &["sheet_id", "sheetId", "annotation_index", "panel_index", "item_index"]);
+    if !fields.is_empty() {
+        app.canvas_dialogs.format_image.apply_field_patch(&fields)?;
+    }
+    Ok(json!({
+        "dialog": "FormatImage",
+        "sheet_id": sheet_id.as_str(),
+        "target_index": idx,
+        "is_layout": app.canvas_dialogs.format_image.is_layout,
+    }))
+}
+
+fn dispatch_ui_row_titles_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
+    let explicit_collapsed = opt_bool_param(params, &["collapsed"])?;
+    let current_collapsed = app.grid.row_titles_collapsed_override.unwrap_or(app.egui_views.column_grid.row_titles_collapsed);
+    let next_collapsed = explicit_collapsed.unwrap_or(!current_collapsed);
+    app.grid.row_titles_collapsed_override = Some(next_collapsed);
+    app.view_shards.grid_core.row_titles_collapsed = next_collapsed;
+    app.egui_views.column_grid.row_titles_collapsed = next_collapsed;
+    Ok(json!({
+        "row_titles_collapsed": next_collapsed,
+        "row_titles_expanded": !next_collapsed,
+    }))
 }
 
 fn dispatch_ui_export_figure_open(app: &mut UiApp, params: &Value) -> Result<Value, String> {
@@ -3673,6 +3876,18 @@ where
             next.font_size_pt *= scalar;
             ScenePrimitive::Text(next)
         }
+        ScenePrimitive::RasterImage(img) => {
+            let mut next = img.clone();
+            next.bounds_pt = map_rect(img.bounds_pt);
+            next.crop = curvebook_doc::CropInsetsPt {
+                left_pt: img.crop.left_pt * scalar,
+                right_pt: img.crop.right_pt * scalar,
+                top_pt: img.crop.top_pt * scalar,
+                bottom_pt: img.crop.bottom_pt * scalar,
+            };
+            next.clip = img.clip.map(map_rect);
+            ScenePrimitive::RasterImage(next)
+        }
         ScenePrimitive::PushClip { rect } => ScenePrimitive::PushClip { rect: map_rect(*rect) },
         ScenePrimitive::PopClip => ScenePrimitive::PopClip,
     }
@@ -3799,8 +4014,13 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::RandomSampleRows { .. } => "RandomSampleRows",
         ActiveDialog::SimulateDistributions => "SimulateDistributions",
         ActiveDialog::InsertModelEquation { .. } => "InsertModelEquation",
+        ActiveDialog::CreateGraph { .. } => "CreateGraph",
+        ActiveDialog::EqualizeScaling { .. } => "EqualizeScaling",
+        ActiveDialog::FormatEmbeddedTable { .. } => "FormatEmbeddedTable",
+        ActiveDialog::FormatImage { .. } => "FormatImage",
         ActiveDialog::CommandPalette => "CommandPalette",
         ActiveDialog::About => "About",
+        ActiveDialog::Feedback => "Feedback",
     }
 }
 

@@ -4,24 +4,25 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    AnalysisKind, BracketLabelMode, BracketStyle, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec, GraphSheet, GraphSpec,
-    GraphicalDataObject, GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord, PairwiseDisplayMode,
-    ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat, WhiskerMethod,
+    AnalysisKind, BracketLabelMode, BracketStyle, CartesianOrientation, CategoricalTickSource, ColumnTable, ErrorBarDirection, ErrorBarSpec,
+    GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, GroupedTable, NestedTable, PairwiseBracketSpec, PairwiseComparisonRecord,
+    PairwiseDisplayMode, ProjectDocument, ReplicateOverlayStyle, ResultStatus, SheetId, SummaryMeasure, TableArchetype, TickLabelFormat,
+    WhiskerMethod,
 };
 use curvebook_math::sum::SummaryMoments;
 use curvebook_palette::{LineDashStyle, MarkerShape, MarkerStyle, Rgba8};
 use curvebook_stats::cld::{CldOptions, compute_cld_from_result_sheet};
 use curvebook_stats::common::{quantile_sorted, quartiles_hinge, sorted_finite};
-use curvebook_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt};
+use curvebook_text::{LocaleNumberPolicy, RichText, format_pvalue_label, measure_text_pt, parse_markup};
 
 use crate::scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, RectPt, ScenePrimitive,
     SourceCellId, StrokePaint, TextAnchor,
 };
 use crate::xy::{
-    AxisErrorTarget, LegendItem, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, configure_plot_rect, emit_directional_error_bar,
-    emit_marker, expand_doc_text, format_point_value, is_log_like, polygon_path, primary_info_sheet_id, render_cartesian_chrome,
-    render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
+    AxisErrorTarget, ChromeAxes, LegendItem, SegmentedAxis, compute_central_tendency, compute_raw_error_bounds, configure_plot_rect,
+    emit_directional_error_bar, emit_marker, expand_doc_text, format_point_value, is_log_like, polygon_path, primary_info_sheet_id,
+    render_cartesian_chrome, render_cartesian_chrome_full, render_legend_and_annotations, resolve_data_sheet, stroke_with_dash, summarize_subcells,
 };
 
 const KDE_SAMPLES: usize = 65;
@@ -97,6 +98,9 @@ pub fn compile_column_or_grouped_graph(graph: &GraphSheet, doc: &ProjectDocument
         scene
             .warnings
             .push(ChartWarning::new("missing_source_sheet", format!("primary data sheet '{}' not found", graph.spec.primary_source_sheet_id)));
+    }
+    if matches!(graph.spec.orientation, CartesianOrientation::Horizontal) {
+        return compile_horizontal_column_or_grouped(graph, doc, scene, primary_opt);
     }
 
     let has_y2 = graph.spec.y2_axis.is_some()
@@ -189,6 +193,366 @@ fn render_empty_axes(graph: &GraphSheet, doc: &ProjectDocument, scene: &mut Char
         None
     };
     render_cartesian_chrome(scene, graph, doc, &x_axis, &y_axis, y2_axis.as_ref(), None);
+}
+
+fn compile_horizontal_column_or_grouped(
+    graph: &GraphSheet,
+    doc: &ProjectDocument,
+    scene: &mut ChartScene,
+    primary_opt: Option<&curvebook_doc::DataSheet>,
+) -> Result<(), ChartError> {
+    let mut tick_positions: Vec<(f64, String)> = Vec::new();
+    let mut items = primary_opt.map(|primary| extract_items(graph, primary, &mut tick_positions, &mut scene.warnings)).unwrap_or_default();
+
+    configure_plot_rect(graph, scene, false, 0.0);
+    let has_y_title = !graph.spec.y_axis.title.trim().is_empty();
+    let max_cat_w_pt = tick_positions.iter().map(|(_, lbl)| measure_text_pt(&parse_markup(lbl), 8.0).width_pt).fold(0.0_f64, f64::max);
+    if max_cat_w_pt > 0.0 {
+        let min_left = if has_y_title { 28.0 + max_cat_w_pt + 10.0 } else { 14.0 + max_cat_w_pt + 8.0 };
+        let right = scene.plot_rect_pt.right();
+        let max_left = (scene.width_pt * 0.42).min((right - 40.0).max(scene.plot_rect_pt.x));
+        let new_left = scene.plot_rect_pt.x.max(min_left).min(max_left);
+        scene.plot_rect_pt.x = new_left;
+        scene.plot_rect_pt.width = (right - new_left).max(40.0);
+    }
+
+    let Some(primary) = primary_opt else {
+        let r = scene.plot_rect_pt;
+        let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &[0.0, 1.0], false, 0.0);
+        let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &[0.0, 1.0], false, 0.0);
+        render_cartesian_chrome_full(scene, graph, doc, &ChromeAxes { x: &x_axis, y: &y_axis, y2: None, cat_x: None, cat_y: None });
+        return Ok(());
+    };
+
+    let (cat_vals, val_vals, _) = collect_domain_values(graph, &items, &tick_positions, &mut scene.warnings);
+    if matches!(graph.spec.grouped_arrangement, GroupedArrangement::Superimposed) {
+        prepare_superimposed_items(&mut items);
+    }
+
+    let include_zero_x = items.iter().any(|it| matches!(it.gdo, GraphicalDataObject::BarWithReplicates { .. }));
+    let r = scene.plot_rect_pt;
+    let x_axis = SegmentedAxis::build(&graph.spec.x_axis, r.x, r.right(), &val_vals, include_zero_x, 0.05);
+    let y_axis = SegmentedAxis::build(&graph.spec.y_axis, r.bottom(), r.y, &cat_vals, false, 0.0);
+
+    let cat_ticks_opt = if tick_positions.is_empty() { None } else { Some(tick_positions.as_slice()) };
+    render_cartesian_chrome_full(scene, graph, doc, &ChromeAxes { x: &x_axis, y: &y_axis, y2: None, cat_x: None, cat_y: cat_ticks_opt });
+
+    let mut stacks = StackAccum::default();
+    for item in &mut items {
+        render_horizontal_item(scene, &graph.spec, item, &x_axis, &y_axis, &mut stacks);
+    }
+
+    let legend_items = build_legend_items(graph, primary);
+    render_legend_and_annotations(scene, graph, doc, &legend_items);
+    Ok(())
+}
+
+fn render_horizontal_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    x_axis: &SegmentedAxis,
+    y_axis: &SegmentedAxis,
+    stacks: &mut StackAccum,
+) {
+    let Some((_, cy)) = y_axis.map_value(item.x_pos) else {
+        return;
+    };
+    let (_, y_lo_pt, _) = y_axis.map_clamped_to_nearest(item.x_pos - 0.5 * item.slot_width_data);
+    let (_, y_hi_pt, _) = y_axis.map_clamped_to_nearest(item.x_pos + 0.5 * item.slot_width_data);
+    let slot = SlotGeom { cx: cy, width_pt: (y_hi_pt - y_lo_pt).abs().max(4.0) };
+
+    match &item.gdo {
+        GraphicalDataObject::BarWithReplicates { .. } => render_horizontal_bar_item(scene, graph_spec, item, slot, x_axis, stacks),
+        GraphicalDataObject::AlignedDotPlot { .. } | GraphicalDataObject::ScatterAndLine { .. } => {
+            render_horizontal_dot_item(scene, graph_spec, item, slot, x_axis);
+        }
+        GraphicalDataObject::FloatingBar { .. } => render_horizontal_floating_item(scene, item, slot, x_axis),
+        GraphicalDataObject::BeforeAfterLines { .. }
+        | GraphicalDataObject::BoxAndWhisker { .. }
+        | GraphicalDataObject::Violin { .. }
+        | GraphicalDataObject::KaplanMeierStep { .. }
+        | GraphicalDataObject::PartsOfWhole { .. } => {}
+    }
+}
+
+fn render_horizontal_bar_item(
+    scene: &mut ChartScene,
+    graph_spec: &GraphSpec,
+    item: &CategorySlotItem,
+    slot: SlotGeom,
+    x_axis: &SegmentedAxis,
+    stacks: &mut StackAccum,
+) {
+    let GraphicalDataObject::BarWithReplicates { summary, fill_color, border_color, border_width_pt, replicate_overlay } = item.gdo else {
+        return;
+    };
+    let cy = slot.cx;
+    let slot_h_pt = slot.width_pt;
+    let clip = scene.plot_rect_pt;
+    let (center, err_lo, err_hi, raw_obs) = match &item.payload {
+        ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper, Vec::new()),
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let Some(c) = compute_central_tendency(&vals, summary, &mut scene.warnings) else {
+                return;
+            };
+            let (lo, hi) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
+            (c, lo, hi, obs.clone())
+        }
+    };
+
+    let (base_data, tip_data) = if let Some(sg) = item.stack_group {
+        if stacks.pos.len() <= sg {
+            stacks.pos.resize(sg + 1, 0.0);
+            stacks.neg.resize(sg + 1, 0.0);
+        }
+        if center >= 0.0 {
+            let b = stacks.pos[sg];
+            stacks.pos[sg] = b + center;
+            (b, b + center)
+        } else {
+            let b = stacks.neg[sg];
+            stacks.neg[sg] = b + center;
+            (b, b + center)
+        }
+    } else {
+        let b = if let Some(seg) = x_axis.segments.first() {
+            if is_log_like(seg.scale) {
+                if center <= 0.0 {
+                    scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {center} omitted on log axis")));
+                    return;
+                }
+                seg.domain_min
+            } else if seg.domain_min <= 0.0 && seg.domain_max >= 0.0 {
+                0.0
+            } else {
+                seg.domain_min
+            }
+        } else {
+            0.0
+        };
+        (b, center)
+    };
+
+    let (_, base_px, _) = x_axis.map_clamped_to_nearest(base_data);
+    let (_, tip_px, tip_clipped) = x_axis.map_clamped_to_nearest(tip_data);
+    if tip_clipped && x_axis.segments.iter().any(|s| is_log_like(s.scale)) && tip_data <= 0.0 {
+        scene.warnings.push(ChartWarning::new("non_positive_on_log_axis", format!("bar value {tip_data} omitted on log axis")));
+        return;
+    }
+
+    let x0 = base_px.min(tip_px);
+    let x1 = base_px.max(tip_px);
+    let bar_rect = RectPt::new(x0, cy - 0.5 * slot_h_pt, (x1 - x0).max(0.5), slot_h_pt);
+    let border = (border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(bar_rect),
+        fill: Some(FillPaint::solid(fill_color)),
+        stroke: border,
+        clip: Some(clip),
+    });
+
+    if let Some(eb) = &item.y_error_bars {
+        let mut eb_use = *eb;
+        let shifted_lo = tip_data - (center - err_lo);
+        let shifted_hi = tip_data + (err_hi - center);
+        if item.stack_group.is_some() {
+            eb_use.direction = if center >= 0.0 { ErrorBarDirection::UpperOnly } else { ErrorBarDirection::LowerOnly };
+        }
+        emit_directional_error_bar(
+            scene,
+            cy,
+            tip_data,
+            shifted_lo,
+            shifted_hi,
+            AxisErrorTarget { axis: x_axis, is_vertical: false, spec: &eb_use, default_color: border_color, clip },
+        );
+    }
+
+    if let Some(overlay) = replicate_overlay
+        && !raw_obs.is_empty()
+        && item.stack_group.is_none()
+    {
+        let dot_style = MarkerStyle {
+            shape: MarkerShape::Circle,
+            fill_mode: curvebook_palette::MarkerFillMode::Filled,
+            size_pt: 3.4,
+            fill_color: border_color,
+            stroke_color: Rgba8::WHITE,
+            stroke_width_pt: 0.4,
+        };
+        let ctx = HorizontalDotCtx {
+            spec: graph_spec,
+            cy,
+            max_half_h: slot_h_pt * 0.40,
+            x_axis,
+            style: overlay,
+            marker: &dot_style,
+            series_label: &item.match_label,
+        };
+        emit_horizontal_replicate_dots(scene, &raw_obs, &ctx);
+    }
+}
+
+fn render_horizontal_dot_item(scene: &mut ChartScene, graph_spec: &GraphSpec, item: &CategorySlotItem, slot: SlotGeom, x_axis: &SegmentedAxis) {
+    let (summary, marker, show_crossbar) = match &item.gdo {
+        GraphicalDataObject::AlignedDotPlot { summary, marker, show_crossbar } => (*summary, *marker, *show_crossbar),
+        GraphicalDataObject::ScatterAndLine { marker, .. } => {
+            let m = marker.unwrap_or(MarkerStyle { fill_color: item.default_color, stroke_color: item.default_color, ..MarkerStyle::default() });
+            (SummaryMeasure::Mean, m, false)
+        }
+        _ => return,
+    };
+    let cy = slot.cx;
+    let slot_h_pt = slot.width_pt;
+    let clip = scene.plot_rect_pt;
+    let raw_obs = match &item.payload {
+        ExtractedKind::Raw(obs) => obs.clone(),
+        ExtractedKind::PreSummarized { center, source, .. } => vec![RawObs { value: *center, source: source.clone() }],
+    };
+    let ctx = HorizontalDotCtx {
+        spec: graph_spec,
+        cy,
+        max_half_h: slot_h_pt * 0.42,
+        x_axis,
+        style: ReplicateOverlayStyle::DeterministicBeeswarm,
+        marker: &marker,
+        series_label: &item.match_label,
+    };
+    emit_horizontal_replicate_dots(scene, &raw_obs, &ctx);
+
+    let (center, lo, hi) = match &item.payload {
+        ExtractedKind::PreSummarized { center, lower, upper, .. } => (*center, *lower, *upper),
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let Some(c) = compute_central_tendency(&vals, summary, &mut scene.warnings) else {
+                return;
+            };
+            let (l, h) = if let Some(eb) = &item.y_error_bars { compute_raw_error_bounds(&vals, c, eb.metric, 0.05) } else { (c, c) };
+            (c, l, h)
+        }
+    };
+    if show_crossbar && let Some((_, c_px)) = x_axis.map_value(center) {
+        let half_bar = (slot_h_pt * 0.35).max(5.0);
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(c_px, cy - half_bar), PointPt::new(c_px, cy + half_bar)),
+            fill: None,
+            stroke: Some(StrokePaint::solid(Rgba8::BLACK, 1.5)),
+            clip: Some(clip),
+        });
+    }
+    if let Some(eb) = &item.y_error_bars {
+        emit_directional_error_bar(
+            scene,
+            cy,
+            center,
+            lo,
+            hi,
+            AxisErrorTarget { axis: x_axis, is_vertical: false, spec: eb, default_color: Rgba8::BLACK, clip },
+        );
+    }
+}
+
+fn render_horizontal_floating_item(scene: &mut ChartScene, item: &CategorySlotItem, slot: SlotGeom, x_axis: &SegmentedAxis) {
+    let GraphicalDataObject::FloatingBar { summary, fill_color, border_color, border_width_pt } = item.gdo else {
+        return;
+    };
+    let cy = slot.cx;
+    let slot_h_pt = slot.width_pt;
+    let clip = scene.plot_rect_pt;
+    let (lo, hi, mid) = match &item.payload {
+        ExtractedKind::PreSummarized { center, lower, upper, .. } => (*lower, *upper, summary.map(|_| *center)),
+        ExtractedKind::Raw(obs) => {
+            let vals = raw_values(obs);
+            let sorted = sorted_finite(&vals);
+            if sorted.is_empty() {
+                return;
+            }
+            let min_v = sorted[0];
+            let max_v = sorted[sorted.len() - 1];
+            let mid_v = summary.and_then(|s| compute_central_tendency(&sorted, s, &mut scene.warnings));
+            (min_v, max_v, mid_v)
+        }
+    };
+
+    let (_, px_lo, _) = x_axis.map_clamped_to_nearest(lo);
+    let (_, px_hi, _) = x_axis.map_clamped_to_nearest(hi);
+    let x0 = px_lo.min(px_hi);
+    let x1 = px_lo.max(px_hi);
+    let rect = RectPt::new(x0, cy - 0.5 * slot_h_pt, (x1 - x0).max(1.0), slot_h_pt);
+    let border = (border_width_pt > 0.0).then(|| StrokePaint::solid(border_color, border_width_pt));
+    scene.primitives.push(ScenePrimitive::Path {
+        path: Path2D::rect(rect),
+        fill: Some(FillPaint::solid(fill_color)),
+        stroke: border,
+        clip: Some(clip),
+    });
+
+    if let Some(m) = mid
+        && let Some((_, px_m)) = x_axis.map_value(m)
+    {
+        scene.primitives.push(ScenePrimitive::Path {
+            path: Path2D::line(PointPt::new(px_m, rect.y), PointPt::new(px_m, rect.bottom())),
+            fill: None,
+            stroke: Some(StrokePaint::solid(border_color, border_width_pt.max(1.2))),
+            clip: Some(clip),
+        });
+    }
+}
+
+struct HorizontalDotCtx<'a> {
+    spec: &'a GraphSpec,
+    cy: f64,
+    max_half_h: f64,
+    x_axis: &'a SegmentedAxis,
+    style: ReplicateOverlayStyle,
+    marker: &'a MarkerStyle,
+    series_label: &'a str,
+}
+
+fn emit_horizontal_replicate_dots(scene: &mut ChartScene, obs: &[RawObs], ctx: &HorizontalDotCtx<'_>) {
+    let clip = scene.plot_rect_pt;
+    let mut mapped: Vec<(f64, &RawObs, MarkerStyle)> = Vec::with_capacity(obs.len());
+    let mut pts_x: Vec<f64> = Vec::with_capacity(obs.len());
+    let mut max_dot_r = (ctx.marker.size_pt * 0.5).max(1.2);
+    for o in obs {
+        let Some(resolved) = crate::resolve_overridden_marker_for_cell(ctx.spec, o.source.col, o.source.row, Some(o.source.subcol), *ctx.marker)
+        else {
+            continue;
+        };
+        if let Some((_, px)) = ctx.x_axis.map_value(o.value) {
+            max_dot_r = max_dot_r.max(resolved.size_pt * 0.5);
+            mapped.push((px, o, resolved));
+            pts_x.push(px);
+        }
+    }
+    if mapped.is_empty() {
+        return;
+    }
+
+    if mapped.len() > MAX_REPLICATE_MARKERS {
+        let total = mapped.len();
+        let keep = subsample_sorted_indices(&pts_x, MAX_REPLICATE_MARKERS);
+        mapped = keep.iter().map(|&idx| mapped[idx]).collect();
+        pts_x = keep.iter().map(|&idx| pts_x[idx]).collect();
+        if !scene.warnings.iter().any(|w| w.code == "replicate_markers_capped") {
+            scene.warnings.push(ChartWarning::new(
+                "replicate_markers_capped",
+                format!("replicate overlay capped to {MAX_REPLICATE_MARKERS} representative markers (from {total} points)"),
+            ));
+        }
+    }
+
+    let offsets = match ctx.style {
+        ReplicateOverlayStyle::AlignedColumn => vec![0.0; mapped.len()],
+        ReplicateOverlayStyle::DeterministicBeeswarm => deterministic_beeswarm_offsets(&pts_x, ctx.max_half_h, max_dot_r),
+    };
+    for (&(px, raw, resolved), dy) in mapped.iter().zip(offsets.iter()) {
+        let dot_pt = PointPt::new(px, ctx.cy + dy);
+        emit_marker(&mut scene.primitives, dot_pt, &resolved, Some(clip));
+        push_col_point_meta(scene, dot_pt, resolved.size_pt, raw, ctx.series_label);
+    }
 }
 
 fn count_active_brackets(graph: &GraphSheet, doc: &ProjectDocument, items: &[CategorySlotItem]) -> usize {
@@ -354,10 +718,11 @@ fn extract_column_items(
     warnings: &mut Vec<ChartWarning>,
 ) -> Vec<CategorySlotItem> {
     let mut items = Vec::with_capacity(table.data_sets.len());
+    let cat_axis = if matches!(graph.spec.orientation, CartesianOrientation::Horizontal) { &graph.spec.y_axis } else { &graph.spec.x_axis };
     for (c, ds) in table.data_sets.iter().enumerate() {
         let (gdo, y_error_bars, default_color, bind_to_right_y2) = resolve_series_style(graph, c);
         let x_pos = (c as f64) + 0.5;
-        let label = match graph.spec.x_axis.tick_format {
+        let label = match cat_axis.tick_format {
             TickLabelFormat::Categorical(CategoricalTickSource::RowNumbers) => format!("{}", c + 1),
             _ => ds.title.clone(),
         };
@@ -482,6 +847,7 @@ fn extract_grouped_items(
     }
     let arrangement = graph.spec.grouped_arrangement;
     let numeric_rows = grouped_row_x_positions(table, graph);
+    let cat_axis = if matches!(graph.spec.orientation, CartesianOrientation::Horizontal) { &graph.spec.y_axis } else { &graph.spec.x_axis };
     let mut items = Vec::with_capacity(nrows * ncols);
 
     match arrangement {
@@ -491,7 +857,7 @@ fn extract_grouped_items(
                 let cluster_w = step * 0.76;
                 let slot_w = cluster_w / (ncols as f64);
                 let row_label = row_display_label(&table.row_titles, r);
-                if matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(_)) || table.row_numeric_spacing.is_none() {
+                if matches!(cat_axis.tick_format, TickLabelFormat::Categorical(_)) || table.row_numeric_spacing.is_none() {
                     tick_positions.push((cx, row_label.clone()));
                 }
                 for c in 0..ncols {
@@ -518,7 +884,7 @@ fn extract_grouped_items(
             let stack_for_row = matches!(arrangement, GroupedArrangement::Stacked);
             for (r, &cx) in numeric_rows.iter().enumerate().take(nrows) {
                 let row_label = row_display_label(&table.row_titles, r);
-                if matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(_)) || table.row_numeric_spacing.is_none() {
+                if matches!(cat_axis.tick_format, TickLabelFormat::Categorical(_)) || table.row_numeric_spacing.is_none() {
                     tick_positions.push((cx, row_label));
                 }
                 for c in 0..ncols {
@@ -533,7 +899,8 @@ fn extract_grouped_items(
 
 fn grouped_row_x_positions(table: &GroupedTable, graph: &GraphSheet) -> Vec<f64> {
     let nrows = table.row_count();
-    if !matches!(graph.spec.x_axis.tick_format, TickLabelFormat::Categorical(_))
+    let cat_axis = if matches!(graph.spec.orientation, CartesianOrientation::Horizontal) { &graph.spec.y_axis } else { &graph.spec.x_axis };
+    if !matches!(cat_axis.tick_format, TickLabelFormat::Categorical(_))
         && let Some(spacing) = &table.row_numeric_spacing
     {
         let mut out = Vec::with_capacity(nrows);

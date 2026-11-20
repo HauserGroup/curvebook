@@ -1,13 +1,21 @@
 //! Publication-quality SVG 1.1 serializer and structural validator.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::io::Write as IoWrite;
 
 use curvebook_chart::{
-    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
+    TextAnchor,
 };
 use curvebook_palette::Rgba8;
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
+use quick_xml::encoding::Decoder;
+use quick_xml::events::{BytesEnd, BytesRef, BytesStart, Event};
+use quick_xml::{Reader as XmlReader, XmlVersion};
 use serde::{Deserialize, Serialize};
 
 use crate::SVG_XMLNS;
@@ -92,13 +100,22 @@ struct SvgRenderCtx<'a> {
     prec: usize,
     opacity_prec: usize,
     clips: ClipRegistry,
+    image_data_uris: BTreeMap<(String, u32, u32, u32), String>,
     body: String,
     clip_depth: usize,
 }
 
 impl<'a> SvgRenderCtx<'a> {
     fn new(options: &'a SvgExportOptions, prec: usize) -> Self {
-        Self { options, prec, opacity_prec: prec.max(3), clips: ClipRegistry::default(), body: String::with_capacity(2048), clip_depth: 0 }
+        Self {
+            options,
+            prec,
+            opacity_prec: prec.max(3),
+            clips: ClipRegistry::default(),
+            image_data_uris: BTreeMap::new(),
+            body: String::with_capacity(2048),
+            clip_depth: 0,
+        }
     }
 
     fn push_indent(&mut self, extra: usize) {
@@ -139,6 +156,7 @@ pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<Stri
                 }
             }
             ScenePrimitive::Text(text) => write_text_element(&mut ctx, text)?,
+            ScenePrimitive::RasterImage(raster) => write_raster_image_element(&mut ctx, raster)?,
             ScenePrimitive::PushClip { rect } => {
                 let clip_id = ctx.clips.register(*rect, ctx.prec)?;
                 ctx.push_indent(0);
@@ -256,6 +274,127 @@ fn write_path_element(
     }
     ctx.body.push_str("/>");
     ctx.push_newline();
+    Ok(())
+}
+
+fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterImage) -> Result<(), SvgError> {
+    let (w, h) = raster.pixel_size;
+    let Some(expected_len) = (w as usize).checked_mul(h as usize).and_then(|p| p.checked_mul(4)) else {
+        return Err(SvgError::InvalidScene { message: String::from("raster image dimensions overflow byte count") });
+    };
+    if w == 0 || h == 0 || raster.rgba.len() != expected_len {
+        return Err(SvgError::InvalidScene { message: String::from("invalid raster image pixel buffer in SVG scene") });
+    }
+    let b = raster.bounds_pt;
+    if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() || b.width <= 0.0 || b.height <= 0.0 {
+        return Err(SvgError::InvalidScene { message: String::from("raster image bounds_pt must be finite and positive") });
+    }
+    if !raster.rotation_deg.is_finite() {
+        return Err(SvgError::InvalidScene { message: String::from("raster image rotation_deg must be finite") });
+    }
+    let Some(vis_doc) = raster.crop.visible_rect(curvebook_doc::RectPt::from(b)) else {
+        return Ok(());
+    };
+    let vis = RectPt::from(vis_doc);
+
+    let key = (raster.asset_id.clone(), w, h, crc32fast::hash(&raster.rgba));
+    let data_uri = if let Some(cached) = ctx.image_data_uris.get(&key) {
+        cached.clone()
+    } else {
+        let png_bytes = encode_rgba_png(w, h, &raster.rgba)?;
+        let encoded = format!("data:image/png;base64,{}", encode_base64(&png_bytes));
+        ctx.image_data_uris.insert(key, encoded.clone());
+        encoded
+    };
+
+    let outer_clip_id = match raster.clip {
+        Some(rect) => Some(ctx.clips.register(rect, ctx.prec)?),
+        None => None,
+    };
+    if let Some(ref clip_id) = outer_clip_id {
+        ctx.push_indent(0);
+        let _ = write!(ctx.body, "<g clip-path=\"url(#{clip_id})\">");
+        ctx.push_newline();
+        ctx.clip_depth += 1;
+    }
+
+    let rotated = raster.rotation_deg.abs() > 1e-9;
+    if rotated {
+        let deg_s = format_scalar(raster.rotation_deg, ctx.prec)?;
+        let cx_s = format_scalar(b.x + 0.5 * b.width, ctx.prec)?;
+        let cy_s = format_scalar(b.y + 0.5 * b.height, ctx.prec)?;
+        ctx.push_indent(0);
+        let _ = write!(ctx.body, "<g transform=\"rotate({deg_s} {cx_s} {cy_s})\">");
+        ctx.push_newline();
+        ctx.clip_depth += 1;
+    }
+
+    let is_cropped = raster.crop.left_pt > 0.0 || raster.crop.right_pt > 0.0 || raster.crop.top_pt > 0.0 || raster.crop.bottom_pt > 0.0;
+    let crop_clip_id = if is_cropped { Some(ctx.clips.register(vis, ctx.prec)?) } else { None };
+
+    let x_s = format_scalar(b.x, ctx.prec)?;
+    let y_s = format_scalar(b.y, ctx.prec)?;
+    let w_s = format_scalar(b.width, ctx.prec)?;
+    let h_s = format_scalar(b.height, ctx.prec)?;
+    ctx.push_indent(0);
+    let _ = write!(ctx.body, "<image x=\"{x_s}\" y=\"{y_s}\" width=\"{w_s}\" height=\"{h_s}\" preserveAspectRatio=\"none\"");
+    if let Some(ref cid) = crop_clip_id {
+        let _ = write!(ctx.body, " clip-path=\"url(#{cid})\"");
+    }
+    let _ = write!(ctx.body, " href=\"{data_uri}\"/>");
+    ctx.push_newline();
+
+    if rotated {
+        ctx.clip_depth -= 1;
+        ctx.push_indent(0);
+        ctx.body.push_str("</g>");
+        ctx.push_newline();
+    }
+    if outer_clip_id.is_some() {
+        ctx.clip_depth -= 1;
+        ctx.push_indent(0);
+        ctx.body.push_str("</g>");
+        ctx.push_newline();
+    }
+    Ok(())
+}
+
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, SvgError> {
+    let row_bytes = (width as usize) * 4;
+    let raw_len = row_bytes.saturating_add(1).saturating_mul(height as usize);
+    let mut scanlines = Vec::with_capacity(raw_len);
+    for row in rgba.chunks_exact(row_bytes) {
+        scanlines.push(0); // Filter type 0 (None)
+        scanlines.extend_from_slice(row);
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&scanlines).map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline compression failed: {err}") })?;
+    let idat = encoder.finish().map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline finish failed: {err}") })?;
+
+    let mut out = Vec::with_capacity(idat.len().saturating_add(96));
+    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+
+    let mut ihdr = [0u8; 13];
+    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    push_png_chunk(&mut out, b"IHDR", &ihdr)?;
+    push_png_chunk(&mut out, b"IDAT", &idat)?;
+    push_png_chunk(&mut out, b"IEND", &[])?;
+    Ok(out)
+}
+
+fn push_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<(), SvgError> {
+    let len = u32::try_from(data.len()).map_err(|_| SvgError::InvalidScene { message: String::from("PNG chunk exceeds 4 GiB") })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(chunk_type);
+    hasher.update(data);
+    out.extend_from_slice(&hasher.finalize().to_be_bytes());
     Ok(())
 }
 
@@ -691,7 +830,7 @@ struct TagValidationState {
     root_closed: bool,
     has_xmlns: bool,
     has_viewbox: bool,
-    stack: Vec<String>,
+    depth: usize,
 }
 
 /// Verify well-formed SVG XML structure: balanced tags, `<svg>` root with standard `xmlns` and
@@ -708,19 +847,34 @@ pub fn validate_svg_structure(svg: &str) -> Result<(), SvgError> {
         return Err(SvgError::ValidationFailed { message: format!("forbidden XML 1.0 character U+{:04X} in SVG content", bad_ch as u32) });
     }
 
-    let bytes = svg.as_bytes();
-    let mut state = TagValidationState::default();
-    let mut pos = 0usize;
+    let mut reader = XmlReader::from_str(svg);
+    reader.config_mut().enable_all_checks(true);
 
-    while pos < bytes.len() {
-        if bytes.get(pos) == Some(&b'<') {
-            pos = process_markup_token(svg, pos, &mut state)?;
-        } else {
-            pos = process_text_node(svg, pos, &state)?;
+    let mut state = TagValidationState::default();
+    loop {
+        let event = reader.read_event().map_err(|err| SvgError::ValidationFailed { message: format!("malformed SVG XML: {err}") })?;
+        match event {
+            Event::Start(start) => validate_start_tag(&start, false, reader.decoder(), &mut state)?,
+            Event::Empty(empty) => validate_start_tag(&empty, true, reader.decoder(), &mut state)?,
+            Event::End(end) => validate_end_tag(&end, &mut state)?,
+            Event::Text(text) => {
+                let decoded = text.decode().map_err(|err| SvgError::ValidationFailed { message: format!("invalid SVG text encoding: {err}") })?;
+                if (!state.root_seen || state.root_closed) && !decoded.trim().is_empty() {
+                    return Err(SvgError::ValidationFailed { message: String::from("unexpected character data outside <svg> root") });
+                }
+            }
+            Event::GeneralRef(entity) => validate_general_ref(&entity, &state)?,
+            Event::CData(_) => {
+                if !state.root_seen || state.root_closed {
+                    return Err(SvgError::ValidationFailed { message: String::from("CDATA outside <svg> root") });
+                }
+            }
+            Event::Comment(_) | Event::Decl(_) | Event::PI(_) | Event::DocType(_) => {}
+            Event::Eof => break,
         }
     }
 
-    if !state.root_seen || !state.root_closed || !state.stack.is_empty() {
+    if !state.root_seen || !state.root_closed || state.depth != 0 {
         return Err(SvgError::ValidationFailed { message: String::from("unclosed or missing <svg> root element") });
     }
     if !state.has_xmlns {
@@ -732,101 +886,12 @@ pub fn validate_svg_structure(svg: &str) -> Result<(), SvgError> {
     Ok(())
 }
 
-fn process_text_node(svg: &str, pos: usize, state: &TagValidationState) -> Result<usize, SvgError> {
-    let tail = svg.get(pos..).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid UTF-8 boundary") })?;
-    let next = tail.find('<').map_or(svg.len(), |rel| pos + rel);
-    let text = svg.get(pos..next).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid text slice") })?;
-    if (!state.root_seen || state.root_closed) && !text.trim().is_empty() {
-        return Err(SvgError::ValidationFailed { message: String::from("unexpected character data outside <svg> root") });
-    }
-    validate_xml_entities(text)?;
-    Ok(next)
-}
-
-fn process_markup_token(svg: &str, pos: usize, state: &mut TagValidationState) -> Result<usize, SvgError> {
-    let rest = svg.get(pos..).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid UTF-8 boundary") })?;
-    if let Some(after) = rest.strip_prefix("<!--") {
-        let end = after.find("-->").ok_or_else(|| SvgError::ValidationFailed { message: String::from("unclosed XML comment") })?;
-        return Ok(pos + 4 + end + 3);
-    }
-    if let Some(after) = rest.strip_prefix("<?") {
-        let end = after.find("?>").ok_or_else(|| SvgError::ValidationFailed { message: String::from("unclosed XML processing instruction") })?;
-        return Ok(pos + 2 + end + 2);
-    }
-    if let Some(after) = rest.strip_prefix("<![CDATA[") {
-        if !state.root_seen || state.root_closed {
-            return Err(SvgError::ValidationFailed { message: String::from("CDATA outside <svg> root") });
-        }
-        let end = after.find("]]>").ok_or_else(|| SvgError::ValidationFailed { message: String::from("unclosed CDATA section") })?;
-        return Ok(pos + 9 + end + 3);
-    }
-    if rest.starts_with("<!") {
-        let gt = find_tag_end(svg, pos + 2)?;
-        return Ok(gt + 1);
-    }
-    if let Some(after) = rest.strip_prefix("</") {
-        let gt = after.find('>').ok_or_else(|| SvgError::ValidationFailed { message: String::from("unclosed closing tag") })?;
-        let raw_name = after.get(..gt).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid closing tag") })?;
-        let name = raw_name.trim();
-        if !is_valid_xml_name(name) {
-            return Err(SvgError::ValidationFailed { message: format!("invalid closing tag name `{name}`") });
-        }
-        let popped = state.stack.pop();
-        if popped.as_deref() != Some(name) {
-            return Err(SvgError::ValidationFailed { message: format!("mismatched closing tag </{name}>") });
-        }
-        if state.stack.is_empty() {
-            state.root_closed = true;
-        }
-        return Ok(pos + 2 + gt + 1);
-    }
-
-    let gt = find_tag_end(svg, pos + 1)?;
-    let inner = svg.get(pos + 1..gt).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid tag slice") })?;
-    validate_opening_tag(inner, state)?;
-    Ok(gt + 1)
-}
-
-fn find_tag_end(svg: &str, start: usize) -> Result<usize, SvgError> {
-    let bytes = svg.as_bytes();
-    let mut quote: Option<u8> = None;
-    let mut i = start;
-    while i < bytes.len() {
-        let b = bytes.get(i).copied().unwrap_or_default();
-        if let Some(q) = quote {
-            if b == q {
-                quote = None;
-            } else if b == b'<' {
-                return Err(SvgError::ValidationFailed { message: String::from("unescaped '<' inside attribute value") });
-            }
-        } else if b == b'"' || b == b'\'' {
-            quote = Some(b);
-        } else if b == b'<' {
-            return Err(SvgError::ValidationFailed { message: String::from("unexpected '<' inside XML tag") });
-        } else if b == b'>' {
-            return Ok(i);
-        }
-        i += 1;
-    }
-    Err(SvgError::ValidationFailed { message: String::from("unclosed XML tag") })
-}
-
-fn validate_opening_tag(inner: &str, state: &mut TagValidationState) -> Result<(), SvgError> {
+fn validate_start_tag(start: &BytesStart<'_>, self_closing: bool, decoder: Decoder, state: &mut TagValidationState) -> Result<(), SvgError> {
     if state.root_closed {
         return Err(SvgError::ValidationFailed { message: String::from("unexpected element after closing </svg>") });
     }
-    let trimmed_end = inner.trim_end();
-    let (self_closing, content) = match trimmed_end.strip_suffix('/') {
-        Some(rest) => (true, rest),
-        None => (false, trimmed_end),
-    };
-    if content.is_empty() || content.starts_with(char::is_whitespace) {
-        return Err(SvgError::ValidationFailed { message: String::from("empty or malformed XML tag name") });
-    }
-    let split_idx = content.find(char::is_whitespace).unwrap_or(content.len());
-    let tag_name = content.get(..split_idx).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid tag name slice") })?;
-    let attrs_raw = content.get(split_idx..).unwrap_or_default();
-
+    let qname = start.name();
+    let tag_name = std::str::from_utf8(qname.as_ref()).map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 tag name") })?;
     if !is_valid_xml_name(tag_name) {
         return Err(SvgError::ValidationFailed { message: format!("invalid XML tag name `{tag_name}`") });
     }
@@ -840,63 +905,76 @@ fn validate_opening_tag(inner: &str, state: &mut TagValidationState) -> Result<(
         false
     };
 
-    parse_and_validate_attributes(attrs_raw, is_root, state)?;
+    validate_tag_attributes(start, is_root, decoder, state)?;
 
     if !self_closing {
-        state.stack.push(tag_name.to_owned());
+        state.depth = state.depth.saturating_add(1);
     } else if is_root {
         state.root_closed = true;
     }
     Ok(())
 }
 
-fn parse_and_validate_attributes(attrs_raw: &str, is_root: bool, state: &mut TagValidationState) -> Result<(), SvgError> {
-    let bytes = attrs_raw.as_bytes();
-    let mut i = 0usize;
-    while i < bytes.len() {
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
+fn validate_end_tag(end: &BytesEnd<'_>, state: &mut TagValidationState) -> Result<(), SvgError> {
+    let qname = end.name();
+    let name = std::str::from_utf8(qname.as_ref()).map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 closing tag") })?;
+    if !is_valid_xml_name(name) {
+        return Err(SvgError::ValidationFailed { message: format!("invalid closing tag name `{name}`") });
+    }
+    let Some(next_depth) = state.depth.checked_sub(1) else {
+        return Err(SvgError::ValidationFailed { message: format!("mismatched closing tag </{name}>") });
+    };
+    state.depth = next_depth;
+    if state.depth == 0 {
+        state.root_closed = true;
+    }
+    Ok(())
+}
+
+fn validate_general_ref(entity: &BytesRef<'_>, state: &TagValidationState) -> Result<(), SvgError> {
+    if !state.root_seen || state.root_closed {
+        return Err(SvgError::ValidationFailed { message: String::from("unexpected character data outside <svg> root") });
+    }
+    match entity.resolve_char_ref() {
+        Ok(Some(ch)) => {
+            if !is_valid_xml_char(ch) {
+                return Err(SvgError::ValidationFailed { message: format!("invalid XML numeric character reference U+{:04X}", ch as u32) });
+            }
+            Ok(())
         }
-        if i >= bytes.len() {
-            break;
+        Ok(None) => {
+            let name = entity.decode().map_err(|err| SvgError::ValidationFailed { message: format!("invalid XML entity reference: {err}") })?;
+            if name.is_empty() || name.chars().any(|c| c.is_ascii_whitespace() || c == '&' || c == '<') {
+                return Err(SvgError::ValidationFailed { message: String::from("malformed XML entity reference") });
+            }
+            Ok(())
         }
-        let name_start = i;
-        while bytes.get(i).is_some_and(|b| !b.is_ascii_whitespace() && *b != b'=') {
-            i += 1;
-        }
-        let name = attrs_raw.get(name_start..i).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid attribute name") })?;
+        Err(err) => Err(SvgError::ValidationFailed { message: format!("invalid XML numeric character reference: {err}") }),
+    }
+}
+
+fn validate_tag_attributes(start: &BytesStart<'_>, is_root: bool, decoder: Decoder, state: &mut TagValidationState) -> Result<(), SvgError> {
+    for raw_attr in start.attributes().with_checks(true) {
+        let attr = raw_attr.map_err(|err| SvgError::ValidationFailed { message: format!("malformed XML attribute: {err}") })?;
+        let name = std::str::from_utf8(attr.key.as_ref())
+            .map_err(|_| SvgError::ValidationFailed { message: String::from("invalid UTF-8 attribute name") })?;
         if !is_valid_xml_name(name) {
             return Err(SvgError::ValidationFailed { message: format!("invalid XML attribute name `{name}`") });
         }
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
+        if attr.value.contains(&b'<') {
+            return Err(SvgError::ValidationFailed { message: String::from("unescaped '<' inside attribute value") });
         }
-        if bytes.get(i) != Some(&b'=') {
-            return Err(SvgError::ValidationFailed { message: format!("expected '=' after attribute `{name}`") });
+        let val = attr
+            .decoded_and_normalized_value(XmlVersion::Implicit1_0, decoder)
+            .map_err(|err| SvgError::ValidationFailed { message: format!("invalid XML attribute `{name}`: {err}") })?;
+        if let Some(bad_ch) = val.chars().find(|&c| !is_valid_xml_char(c)) {
+            return Err(SvgError::ValidationFailed {
+                message: format!("invalid XML numeric character reference U+{:04X} in attribute `{name}`", bad_ch as u32),
+            });
         }
-        i += 1;
-        while bytes.get(i).is_some_and(u8::is_ascii_whitespace) {
-            i += 1;
-        }
-        let quote = match bytes.get(i) {
-            Some(&q @ (b'"' | b'\'')) => q,
-            _ => return Err(SvgError::ValidationFailed { message: format!("expected quoted value for attribute `{name}`") }),
-        };
-        i += 1;
-        let val_start = i;
-        while bytes.get(i).is_some_and(|&b| b != quote) {
-            i += 1;
-        }
-        if bytes.get(i) != Some(&quote) {
-            return Err(SvgError::ValidationFailed { message: format!("unclosed quote for attribute `{name}`") });
-        }
-        let val = attrs_raw.get(val_start..i).ok_or_else(|| SvgError::ValidationFailed { message: String::from("invalid attribute value") })?;
-        i += 1;
-
-        validate_xml_entities(val)?;
         if is_root {
             if name == "xmlns" {
-                if val != SVG_XMLNS {
+                if val.as_ref() != SVG_XMLNS {
                     return Err(SvgError::ValidationFailed { message: String::from("missing standard SVG XML namespace") });
                 }
                 state.has_xmlns = true;
@@ -904,7 +982,7 @@ fn parse_and_validate_attributes(attrs_raw: &str, is_root: bool, state: &mut Tag
                 state.has_viewbox = true;
             }
         }
-        validate_attribute_value(name, val)?;
+        validate_attribute_value(name, val.as_ref())?;
     }
     Ok(())
 }
@@ -1055,26 +1133,6 @@ fn strip_svg_unit(token: &str) -> &str {
     token
 }
 
-fn validate_xml_entities(s: &str) -> Result<(), SvgError> {
-    let mut rest = s;
-    while let Some(idx) = rest.find('&') {
-        let after = rest.get(idx + 1..).unwrap_or_default();
-        let semi = after.find(';').ok_or_else(|| SvgError::ValidationFailed { message: String::from("unescaped '&' in SVG XML") })?;
-        let entity = after.get(..semi).unwrap_or_default();
-        if entity.is_empty() || entity.chars().any(|c| c.is_ascii_whitespace() || c == '&' || c == '<') {
-            return Err(SvgError::ValidationFailed { message: String::from("malformed XML entity reference") });
-        }
-        if let Some(num) = entity.strip_prefix('#') {
-            let cp = if let Some(hex) = num.strip_prefix('x') { u32::from_str_radix(hex, 16).ok() } else { num.parse::<u32>().ok() };
-            if !cp.and_then(char::from_u32).is_some_and(is_valid_xml_char) {
-                return Err(SvgError::ValidationFailed { message: format!("invalid XML numeric character reference `&{entity};`") });
-            }
-        }
-        rest = after.get(semi + 1..).unwrap_or_default();
-    }
-    Ok(())
-}
-
 fn is_valid_xml_name(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -1084,4 +1142,51 @@ fn is_valid_xml_name(name: &str) -> bool {
         return false;
     }
     chars.all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | ':'))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::validate_svg_structure;
+    use crate::SVG_XMLNS;
+
+    #[test]
+    fn validator_accepts_tolerated_xml_constructs_and_entities() {
+        let fixtures = [
+            format!(
+                "<?xml version=\"1.0\" encoding=\"UTF-8\"?><!-- header comment -->\
+                 <svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 120 80\">\
+                 <style><![CDATA[.axis {{ stroke: #000; }}]]></style>\
+                 <text x=\"10\" y=\"20\" data-label=\"A &amp; B &#x03B1;\">1 &lt; 2 &amp; &#160; &#x03B2;</text>\
+                 </svg><!-- trailing comment -->"
+            ),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>"),
+            format!("<?xml-stylesheet type=\"text/css\" href=\"fig.css\"?><svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"></svg>"),
+        ];
+        for fixture in fixtures {
+            validate_svg_structure(&fixture).unwrap_or_else(|err| panic!("expected valid fixture `{fixture}`, got {err}"));
+        }
+    }
+
+    #[test]
+    fn validator_rejects_malformed_xml_comments_cdata_attrs_and_entities() {
+        let invalid = [
+            format!("<!-- unclosed comment <svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>"),
+            format!("<!-- bad -- comment --><svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>"),
+            format!("<![CDATA[outside]]><svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>"),
+            format!("stray text<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/><![CDATA[after]]>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"/>stray"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\" id=\"a<b\"/>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\" id=\"a\" id=\"b\"/>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\" id=\"&#x0B;\"/>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\" id=\"A & B\"/>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"><text>&foo bar;</text></svg>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"><g>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\"><1bad/></svg>"),
+            format!("<svg xmlns=\"{SVG_XMLNS}\" viewBox=\"0 0 10 10\" 1bad=\"x\"/>"),
+        ];
+        for bad in invalid {
+            assert!(validate_svg_structure(&bad).is_err(), "expected validation failure for: {bad}");
+        }
+    }
 }

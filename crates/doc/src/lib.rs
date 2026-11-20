@@ -22,9 +22,11 @@
 pub mod analysis;
 pub mod archetypes;
 pub mod cell;
+pub mod delimited;
 pub mod error;
 pub mod graph;
 pub mod ids;
+pub mod image;
 pub mod info;
 pub mod layout;
 pub mod links;
@@ -53,6 +55,7 @@ pub use archetypes::{
     default_column_label,
 };
 pub use cell::{Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint};
+pub use delimited::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 pub use error::{
     CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
     MAX_SUBCOLUMNS, MAX_TITLE_BYTES, SummaryPointError, validate_cell_grid, validate_confidence_level, validate_data_sets, validate_project_cells,
@@ -60,13 +63,19 @@ pub use error::{
 };
 pub use graph::{
     AdditionalTick, AnnotationShapeKind, AreaFillSpec, AxisScale, AxisSegment, AxisSpec, AxisThreshold, BracketLabelMode, BracketStyle,
-    BreakOrnament, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle, DiagnosticPlotKind,
-    EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet,
-    GraphSpec, GraphicalDataObject, GroupedArrangement, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode,
-    PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateOverlayStyle, SeriesSpec,
-    SizeChannelMapping, SummaryMeasure, TickLabelFormat, WhiskerMethod,
+    BreakOrnament, CartesianOrientation, CategoricalTickSource, CldOrdering, ColorChannelMapping, CompactLetterDisplaySpec, ConnectingLineStyle,
+    DiagnosticPlotKind, EmbeddedTableStyle, EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, ErrorBarSpec, FramePreset, GraphAnnotation,
+    GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HeatmapColumnLabelAngle, HeatmapColumnLabelMode,
+    HeatmapLabelSpec, HeatmapRowLabelMode, LegendSpec, LineConnectionKind, LogitDomain, MultivariateGraphEncoding, MultivariatePlotMode,
+    PairwiseBracketSpec, PairwiseDisplayMode, PartsOfWholeLayout, PointStyleOverride, RegressionOverlaySpec, ReplicateLineMode,
+    ReplicateOverlayStyle, SeriesOffsetSpec, SeriesSpec, SizeChannelMapping, SummaryMeasure, SurvivalDisplayMetric, TickDirection, TickLabelFormat,
+    WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, SourceCellId, extract_template_hooks};
+pub use image::{
+    CropInsetsPt, ImageBorderSpec, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, MAX_IMAGE_DIM_PX, MAX_IMAGE_PIXELS, MAX_PROJECT_IMAGE_ASSETS,
+    ProjectImageAsset, content_addressed_asset_id, is_valid_asset_id, sha256_bytes,
+};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
 pub use layout::{
     CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS, PageOrientation,

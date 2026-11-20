@@ -22,7 +22,7 @@ use crate::egui_shell::{
     EguiShellViewState, FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title,
 };
 use crate::grid_view::{resolve_flat_coord, total_flat_data_subcolumns};
-use crate::i18n::{is_rtl_locale, tr};
+use crate::i18n::{is_rtl_locale, tr_or_fallback};
 use crate::inspect::ZLayer;
 
 /// Hard selection cell cap (`50,000`) preventing pathological UI stalls on 1M-row sheets (`§7.2`).
@@ -48,11 +48,6 @@ pub struct QuickStatsSummary {
     pub truncated_at_cap: bool,
 }
 
-fn tr_fallback<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    let resolved = tr(locale, key);
-    if resolved.is_empty() { fallback } else { resolved }
-}
-
 impl QuickStatsSummary {
     /// Format compact full-telemetry status line (`N`, `Mean`, `SD`, `SEM`, `Median`, `Range`).
     #[must_use]
@@ -63,7 +58,7 @@ impl QuickStatsSummary {
             } else if self.selected_cells > 0 {
                 String::from("N = 0")
             } else {
-                String::from(tr_fallback(locale, "w6.view.status.ready", "Ready"))
+                String::from(tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
             };
         }
         let mut parts = Vec::with_capacity(7);
@@ -328,11 +323,14 @@ impl<'a> StatsAccum<'a> {
 
 #[inline]
 fn scan_dataset_col_range(rows: &[Vec<Cell>], r0: usize, r_end_incl: usize, subcol: usize, acc: &mut StatsAccum<'_>) {
-    let hi = r_end_incl.min(rows.len().saturating_sub(1));
-    if r0 > hi {
+    if rows.is_empty() {
         return;
     }
-    for row_cells in &rows[r0..=hi] {
+    let hi = r_end_incl.min(rows.len() - 1);
+    let Some(slice) = rows.get(r0..=hi) else {
+        return;
+    };
+    for row_cells in slice {
         if let Some(cell) = row_cells.get(subcol) {
             acc.push_cell(cell);
         }
@@ -393,10 +391,11 @@ fn scan_rect_selection(
             TableArchetype::MultipleVariables(t) => {
                 if subcol == 0
                     && let Some(var) = t.variables.get(col)
+                    && !var.cells.is_empty()
                 {
-                    let hi = r_end.min(var.cells.len().saturating_sub(1));
-                    if r0 <= hi {
-                        for cell in &var.cells[r0..=hi] {
+                    let hi = r_end.min(var.cells.len() - 1);
+                    if let Some(slice) = var.cells.get(r0..=hi) {
+                        for cell in slice {
                             acc.push_cell(cell);
                         }
                     }
@@ -709,23 +708,22 @@ fn center_stage_cursor_coords(ui: &egui::Ui, app: &UiApp, views: &EguiShellViewS
     Some((rel_x, rel_y))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn draw_footer_chip(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    label: &str,
-    tooltip: &str,
+struct FooterChipSpec<'a> {
+    label: &'a str,
+    tooltip: &'a str,
     max_w: f32,
     min_w: f32,
     selected: bool,
     enabled: bool,
     accent_override: Option<Color32>,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    role: &str,
-    command_id: Option<&str>,
-    disabled_reason: Option<&str>,
-) -> Response {
+    widget_id: &'a str,
+    role: &'a str,
+    command_id: Option<&'a str>,
+    disabled_reason: Option<&'a str>,
+}
+
+fn draw_footer_chip(ui: &mut egui::Ui, tokens: &Tokens, spec: FooterChipSpec<'_>, meta: &mut FrameInspectMeta) -> Response {
+    let FooterChipSpec { label, tooltip, max_w, min_w, selected, enabled, accent_override, widget_id, role, command_id, disabled_reason } = spec;
     let font_id = egui::FontId::proportional(11.0);
     let text_color = if !enabled {
         tokens.text_disabled
@@ -907,17 +905,16 @@ where
         });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn popup_menu_item(
-    ui: &mut egui::Ui,
-    tokens: &Tokens,
-    label: &str,
+struct PopupMenuItemSpec<'a> {
+    label: &'a str,
     selected: bool,
     accent: Option<Color32>,
-    meta: &mut FrameInspectMeta,
-    widget_id: &str,
-    command_id: Option<&str>,
-) -> bool {
+    widget_id: &'a str,
+    command_id: Option<&'a str>,
+}
+
+fn popup_menu_item(ui: &mut egui::Ui, tokens: &Tokens, spec: PopupMenuItemSpec<'_>, meta: &mut FrameInspectMeta) -> bool {
+    let PopupMenuItemSpec { label, selected, accent, widget_id, command_id } = spec;
     let w = ui.available_width().max(80.0);
     let font_id = egui::FontId::proportional(11.5);
     let tc = accent.unwrap_or(if selected { tokens.text_strong } else { tokens.text_primary });
@@ -1008,18 +1005,20 @@ fn render_footer_history_and_sections(
     let back_resp = draw_footer_chip(
         ui,
         ctx_in.tokens,
-        if is_rtl { ">" } else { "<" },
-        "Previous sheet in history",
-        24.0,
-        22.0,
-        false,
-        ctx_in.enabled && ctx_in.history_can_back,
-        None,
+        FooterChipSpec {
+            label: if is_rtl { ">" } else { "<" },
+            tooltip: "Previous sheet in history",
+            max_w: 24.0,
+            min_w: 22.0,
+            selected: false,
+            enabled: ctx_in.enabled && ctx_in.history_can_back,
+            accent_override: None,
+            widget_id: "status.history.back",
+            role: "button",
+            command_id: None,
+            disabled_reason: (!ctx_in.history_can_back).then_some("no back history"),
+        },
         meta,
-        "status.history.back",
-        "button",
-        None,
-        (!ctx_in.history_can_back).then_some("no back history"),
     );
     if back_resp.clicked() {
         intents.push_history_back();
@@ -1028,18 +1027,20 @@ fn render_footer_history_and_sections(
     let fwd_resp = draw_footer_chip(
         ui,
         ctx_in.tokens,
-        if is_rtl { "<" } else { ">" },
-        "Next sheet in history",
-        24.0,
-        22.0,
-        false,
-        ctx_in.enabled && ctx_in.history_can_forward,
-        None,
+        FooterChipSpec {
+            label: if is_rtl { "<" } else { ">" },
+            tooltip: "Next sheet in history",
+            max_w: 24.0,
+            min_w: 22.0,
+            selected: false,
+            enabled: ctx_in.enabled && ctx_in.history_can_forward,
+            accent_override: None,
+            widget_id: "status.history.forward",
+            role: "button",
+            command_id: None,
+            disabled_reason: (!ctx_in.history_can_forward).then_some("no forward history"),
+        },
         meta,
-        "status.history.forward",
-        "button",
-        None,
-        (!ctx_in.history_can_forward).then_some("no forward history"),
     );
     if fwd_resp.clicked() {
         intents.push_history_forward();
@@ -1055,24 +1056,26 @@ fn render_footer_history_and_sections(
         ];
         for (sec, wid, i18n_key, fallback) in sections {
             let first_id = first_sheet_in_section(doc, sec).cloned();
-            let label = tr_fallback(locale, i18n_key, fallback);
+            let label = tr_or_fallback(locale, i18n_key, fallback);
             let is_selected = !gallery_open && active_section == Some(sec);
             let has_sheets = first_id.is_some();
             let pill_resp = draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                label,
-                label,
-                96.0,
-                36.0,
-                is_selected,
-                ctx_in.enabled && has_sheets,
-                None,
+                FooterChipSpec {
+                    label,
+                    tooltip: label,
+                    max_w: 96.0,
+                    min_w: 36.0,
+                    selected: is_selected,
+                    enabled: ctx_in.enabled && has_sheets,
+                    accent_override: None,
+                    widget_id: wid,
+                    role: "button",
+                    command_id: first_id.as_ref().map(|_| "sheet.select"),
+                    disabled_reason: (!has_sheets).then_some("no sheets in section"),
+                },
                 meta,
-                wid,
-                "button",
-                first_id.as_ref().map(|_| "sheet.select"),
-                (!has_sheets).then_some("no sheets in section"),
             );
             if pill_resp.clicked()
                 && let Some(target_id) = first_id
@@ -1084,22 +1087,24 @@ fn render_footer_history_and_sections(
             }
         }
 
-        let gal_lbl = tr_fallback(locale, "cmd.ui.gallery.toggle", "Gallery");
+        let gal_lbl = tr_or_fallback(locale, "cmd.ui.gallery.toggle", "Gallery");
         let gal_resp = draw_footer_chip(
             ui,
             ctx_in.tokens,
-            gal_lbl,
-            "Portfolio Gallery",
-            88.0,
-            40.0,
-            gallery_open,
-            ctx_in.enabled,
-            None,
+            FooterChipSpec {
+                label: gal_lbl,
+                tooltip: "Portfolio Gallery",
+                max_w: 88.0,
+                min_w: 40.0,
+                selected: gallery_open,
+                enabled: ctx_in.enabled,
+                accent_override: None,
+                widget_id: "status.section.gallery",
+                role: "button",
+                command_id: Some("ui.gallery.toggle"),
+                disabled_reason: None,
+            },
             meta,
-            "status.section.gallery",
-            "button",
-            Some("ui.gallery.toggle"),
-            None,
         );
         if gal_resp.clicked() {
             intents.push_ui("ui.gallery.toggle", json!({}));
@@ -1121,18 +1126,20 @@ fn render_footer_history_and_sections(
     let sw_resp = draw_footer_chip(
         ui,
         ctx_in.tokens,
-        &active_label,
-        "Switch active sheet",
-        switcher_max_w,
-        48.0,
-        views.status_footer.sheet_switcher_open,
-        ctx_in.enabled && any_sheet,
-        None,
+        FooterChipSpec {
+            label: &active_label,
+            tooltip: "Switch active sheet",
+            max_w: switcher_max_w,
+            min_w: 48.0,
+            selected: views.status_footer.sheet_switcher_open,
+            enabled: ctx_in.enabled && any_sheet,
+            accent_override: None,
+            widget_id: "status.sheet_switcher",
+            role: "button",
+            command_id: Some("sheet.select"),
+            disabled_reason: (!any_sheet).then_some("project has no sheets"),
+        },
         meta,
-        "status.sheet_switcher",
-        "button",
-        Some("sheet.select"),
-        (!any_sheet).then_some("project has no sheets"),
     );
     let sheet_anchor = Some(sw_resp.rect);
     if sw_resp.clicked() {
@@ -1219,9 +1226,9 @@ fn render_footer_center_readout(
         String::from("Welcome Hub")
     } else if let Some(sid) = doc.active_sheet_id.as_ref() {
         let title = doc_sheet_title(doc, sid).unwrap_or_else(|| sid.as_str());
-        format!("{} — {title}", tr_fallback(locale, "w6.view.status.ready", "Ready"))
+        format!("{} — {title}", tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
     } else {
-        String::from(tr_fallback(locale, "w6.view.status.ready", "Ready"))
+        String::from(tr_or_fallback(locale, "w6.view.status.ready", "Ready"))
     };
     draw_footer_summary_label(
         ui,
@@ -1252,18 +1259,20 @@ fn render_footer_trailing_controls(
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                "Fit",
-                "Fit canvas to viewport (ui.zoom.fitSheet)",
-                34.0,
-                26.0,
-                false,
-                ctx_in.enabled,
-                None,
+                FooterChipSpec {
+                    label: "Fit",
+                    tooltip: "Fit canvas to viewport (ui.zoom.fitSheet)",
+                    max_w: 34.0,
+                    min_w: 26.0,
+                    selected: false,
+                    enabled: ctx_in.enabled,
+                    accent_override: None,
+                    widget_id: "status.zoom.fit",
+                    role: "button",
+                    command_id: Some("ui.zoom.fitSheet"),
+                    disabled_reason: None,
+                },
                 meta,
-                "status.zoom.fit",
-                "button",
-                Some("ui.zoom.fitSheet"),
-                None,
             )
             .clicked()
             {
@@ -1273,18 +1282,20 @@ fn render_footer_trailing_controls(
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                "+",
-                "Zoom in",
-                22.0,
-                20.0,
-                false,
-                ctx_in.enabled && zoom < 7.99,
-                None,
+                FooterChipSpec {
+                    label: "+",
+                    tooltip: "Zoom in",
+                    max_w: 22.0,
+                    min_w: 20.0,
+                    selected: false,
+                    enabled: ctx_in.enabled && zoom < 7.99,
+                    accent_override: None,
+                    widget_id: "status.zoom.in",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: (zoom >= 7.99).then_some("at maximum zoom"),
+                },
                 meta,
-                "status.zoom.in",
-                "button",
-                None,
-                (zoom >= 7.99).then_some("at maximum zoom"),
             )
             .clicked()
             {
@@ -1295,18 +1306,20 @@ fn render_footer_trailing_controls(
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                &zpct,
-                "Reset zoom to 100%",
-                44.0,
-                36.0,
-                false,
-                ctx_in.enabled,
-                None,
+                FooterChipSpec {
+                    label: &zpct,
+                    tooltip: "Reset zoom to 100%",
+                    max_w: 44.0,
+                    min_w: 36.0,
+                    selected: false,
+                    enabled: ctx_in.enabled,
+                    accent_override: None,
+                    widget_id: "status.zoom.reset",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: None,
+                },
                 meta,
-                "status.zoom.reset",
-                "button",
-                None,
-                None,
             )
             .clicked()
             {
@@ -1316,18 +1329,20 @@ fn render_footer_trailing_controls(
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                "-",
-                "Zoom out",
-                22.0,
-                20.0,
-                false,
-                ctx_in.enabled && zoom > 0.11,
-                None,
+                FooterChipSpec {
+                    label: "-",
+                    tooltip: "Zoom out",
+                    max_w: 22.0,
+                    min_w: 20.0,
+                    selected: false,
+                    enabled: ctx_in.enabled && zoom > 0.11,
+                    accent_override: None,
+                    widget_id: "status.zoom.out",
+                    role: "button",
+                    command_id: None,
+                    disabled_reason: (zoom <= 0.11).then_some("at minimum zoom"),
+                },
                 meta,
-                "status.zoom.out",
-                "button",
-                None,
-                (zoom <= 0.11).then_some("at minimum zoom"),
             )
             .clicked()
             {
@@ -1341,18 +1356,20 @@ fn render_footer_trailing_controls(
             if draw_footer_chip(
                 ui,
                 ctx_in.tokens,
-                lbl,
-                "Toggle page rulers & margin guides",
-                if flags.compact { 28.0 } else { 54.0 },
-                26.0,
-                rulers_on,
-                ctx_in.enabled,
-                None,
+                FooterChipSpec {
+                    label: lbl,
+                    tooltip: "Toggle page rulers & margin guides",
+                    max_w: if flags.compact { 28.0 } else { 54.0 },
+                    min_w: 26.0,
+                    selected: rulers_on,
+                    enabled: ctx_in.enabled,
+                    accent_override: None,
+                    widget_id: "status.rulers",
+                    role: "button",
+                    command_id: Some("ui.rulers.toggle"),
+                    disabled_reason: None,
+                },
                 meta,
-                "status.rulers",
-                "button",
-                Some("ui.rulers.toggle"),
-                None,
             )
             .clicked()
             {
@@ -1370,18 +1387,20 @@ fn render_footer_trailing_controls(
         let cvd_resp = draw_footer_chip(
             ui,
             ctx_in.tokens,
-            &cvd_label,
-            "Color-Vision Deficiency & Grayscale Preview",
-            if flags.compact { 64.0 } else { 94.0 },
-            44.0,
-            filter_active || views.status_footer.filter_popup_open,
-            ctx_in.enabled,
-            filter_active.then_some(ctx_in.tokens.accent_strong),
+            FooterChipSpec {
+                label: &cvd_label,
+                tooltip: "Color-Vision Deficiency & Grayscale Preview",
+                max_w: if flags.compact { 64.0 } else { 94.0 },
+                min_w: 44.0,
+                selected: filter_active || views.status_footer.filter_popup_open,
+                enabled: ctx_in.enabled,
+                accent_override: filter_active.then_some(ctx_in.tokens.accent_strong),
+                widget_id: "status.preview_filter",
+                role: "button",
+                command_id: Some("ui.previewFilter.set"),
+                disabled_reason: None,
+            },
             meta,
-            "status.preview_filter",
-            "button",
-            Some("ui.previewFilter.set"),
-            None,
         );
         preview_anchor = Some(cvd_resp.rect);
         if cvd_resp.clicked() {
@@ -1427,7 +1446,18 @@ fn render_footer_popovers(
             |ui| {
                 for (flt, wid) in options {
                     let lbl = localized_preview_filter_label(locale, flt);
-                    if popup_menu_item(ui, tokens, lbl, app.preview_filter == flt, None, meta, wid, Some("ui.previewFilter.set")) {
+                    if popup_menu_item(
+                        ui,
+                        tokens,
+                        PopupMenuItemSpec {
+                            label: lbl,
+                            selected: app.preview_filter == flt,
+                            accent: None,
+                            widget_id: wid,
+                            command_id: Some("ui.previewFilter.set"),
+                        },
+                        meta,
+                    ) {
                         intents.push_set_preview_filter(flt);
                         close_all = true;
                     }
@@ -1468,7 +1498,12 @@ fn render_footer_popovers(
                         let selected = !gallery_open && doc.active_sheet_id.as_ref() == Some(&sid);
                         let lbl = format!("[{kind_tag}] {title}");
                         let wid = format!("status.sheet_switcher.item.{}", sid.as_str());
-                        if popup_menu_item(ui, tokens, &lbl, selected, None, meta, &wid, Some("sheet.select")) {
+                        if popup_menu_item(
+                            ui,
+                            tokens,
+                            PopupMenuItemSpec { label: &lbl, selected, accent: None, widget_id: &wid, command_id: Some("sheet.select") },
+                            meta,
+                        ) {
                             chosen_sheet = Some(sid);
                         }
                     }
@@ -1498,7 +1533,18 @@ fn render_footer_popovers(
                 for (idx, (name, st, up_id, clr)) in link_info.upstream_links.iter().enumerate() {
                     let lbl = format!("{name} ({st})");
                     let wid = format!("status.link_indicator.item.{idx}");
-                    if popup_menu_item(ui, tokens, &lbl, false, Some(*clr), meta, &wid, up_id.as_ref().map(|_| "sheet.select")) {
+                    if popup_menu_item(
+                        ui,
+                        tokens,
+                        PopupMenuItemSpec {
+                            label: &lbl,
+                            selected: false,
+                            accent: Some(*clr),
+                            widget_id: &wid,
+                            command_id: up_id.as_ref().map(|_| "sheet.select"),
+                        },
+                        meta,
+                    ) {
                         jump_target = up_id.clone();
                         close_link = true;
                     }
@@ -1601,18 +1647,20 @@ pub fn render_status_footer(
                     let link_resp = draw_footer_chip(
                         ui,
                         ctx_in.tokens,
-                        &link_info.badge_text,
-                        &link_info.tooltip,
-                        if compact { 76.0 } else { 126.0 },
-                        36.0,
-                        views.status_footer.link_popover_open,
-                        ctx_in.enabled,
-                        Some(link_info.accent),
+                        FooterChipSpec {
+                            label: &link_info.badge_text,
+                            tooltip: &link_info.tooltip,
+                            max_w: if compact { 76.0 } else { 126.0 },
+                            min_w: 36.0,
+                            selected: views.status_footer.link_popover_open,
+                            enabled: ctx_in.enabled,
+                            accent_override: Some(link_info.accent),
+                            widget_id: "status.link_indicator",
+                            role: "button",
+                            command_id: None,
+                            disabled_reason: None,
+                        },
                         meta,
-                        "status.link_indicator",
-                        "button",
-                        None,
-                        None,
                     );
                     anchors.link = Some(link_resp.rect);
                     if link_resp.clicked() {
@@ -1650,4 +1698,40 @@ pub fn render_status_footer(
 
     report.footer_rect_pt = Some(resp);
     report
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{ColumnDesignHint, ColumnTable, DataSheet, MultipleVariablesTable, TableArchetype};
+
+    use super::{StatsAccum, scan_dataset_col_range, scan_rect_selection};
+
+    #[test]
+    fn quick_stats_empty_column_vec_at_r0_zero_does_not_panic() {
+        let mut scratch = Vec::new();
+        let mut acc = StatsAccum::new(&mut scratch, 16);
+        scan_dataset_col_range(&[], 0, 5, 0, &mut acc);
+        let summary = acc.finalize(6, false);
+        assert_eq!(summary.n, 0);
+        assert_eq!(summary.mean, None);
+
+        // Also exercise `scan_rect_selection` on ragged empty column vectors (Column and MultipleVariables).
+        let col_tbl = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 1).expect("column table");
+        let mut ds_col = DataSheet::new("ds-empty-col", "Empty Col", TableArchetype::Column(col_tbl)).expect("ds");
+        if let TableArchetype::Column(ref mut c) = ds_col.archetype {
+            c.data_sets[0].cells.clear();
+        }
+        let (col_summary, _) = scan_rect_selection(&ds_col, 0, 3, &[(0, 0)], &mut scratch);
+        assert_eq!(col_summary.n, 0);
+        assert_eq!(col_summary.mean, None);
+
+        let mv_tbl = MultipleVariablesTable::new(1, 1).expect("mv table");
+        let mut ds_mv = DataSheet::new("ds-empty-mv", "Empty MV", TableArchetype::MultipleVariables(mv_tbl)).expect("ds");
+        if let TableArchetype::MultipleVariables(ref mut mv) = ds_mv.archetype {
+            mv.variables[0].cells.clear();
+        }
+        let (mv_summary, _) = scan_rect_selection(&ds_mv, 0, 3, &[(0, 0)], &mut scratch);
+        assert_eq!(mv_summary.n, 0);
+        assert_eq!(mv_summary.mean, None);
+    }
 }

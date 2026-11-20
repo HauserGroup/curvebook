@@ -35,7 +35,7 @@ pub const MAX_SHEET_CELLS: usize = 30_000_000;
 pub const MAX_PROJECT_CELLS: usize = 50_000_000;
 
 /// Current `.curvebook` document schema version.
-pub const CURRENT_SCHEMA_VERSION: u32 = 6;
+pub const CURRENT_SCHEMA_VERSION: u32 = 7;
 
 /// Validate a title string against [`MAX_TITLE_BYTES`].
 pub fn validate_title(title: &str) -> Result<(), DocError> {
@@ -201,6 +201,13 @@ pub enum DocError {
         /// Maximum permitted sheets per project ([`MAX_SHEETS_PER_PROJECT`]).
         max: usize,
     },
+    /// Total embedded image asset count exceeded [`crate::MAX_PROJECT_IMAGE_ASSETS`].
+    TooManyImageAssets {
+        /// Attempted total image asset count.
+        count: usize,
+        /// Maximum permitted image assets per project ([`crate::MAX_PROJECT_IMAGE_ASSETS`]).
+        max: usize,
+    },
     /// Title or label UTF-8 byte length exceeded [`MAX_TITLE_BYTES`].
     TitleTooLong {
         /// Actual UTF-8 byte length of the title.
@@ -294,6 +301,7 @@ impl fmt::Display for DocError {
             Self::TooManyCells { count, max } => write!(f, "sheet cell count {count} exceeds maximum {max}"),
             Self::TooManyLayoutItems { count, max } => write!(f, "layout item count {count} exceeds maximum {max}"),
             Self::TooManySheets { count, max } => write!(f, "project sheet count {count} exceeds maximum {max}"),
+            Self::TooManyImageAssets { count, max } => write!(f, "project image asset count {count} exceeds maximum {max}"),
             Self::TitleTooLong { byte_len, max } => write!(f, "title length {byte_len} bytes exceeds maximum {max}"),
             Self::InvalidSubcolumnCount { count } => write!(f, "subcolumn count must be >= 1, got {count}"),
             Self::IncompatibleSubcolumnMode { archetype, mode } => {

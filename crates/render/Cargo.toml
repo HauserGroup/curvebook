@@ -11,8 +11,9 @@ description = "CurveBook deterministic CPU graph and multi-panel publication lay
 workspace = true
 
 [dependencies]
-crc32fast = { workspace = true }
 flate2 = { workspace = true }
+png = { workspace = true }
+weezl = { workspace = true }
 curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-math = { workspace = true }
@@ -21,4 +22,5 @@ curvebook-text = { workspace = true }
 serde = { workspace = true }
 
 [dev-dependencies]
+crc32fast = { workspace = true }
 curvebook-testkit = { workspace = true }

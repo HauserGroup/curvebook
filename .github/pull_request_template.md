@@ -1,6 +1,9 @@
-## Roadmap item
+## Roadmap item or issue
 
-<!-- R<m>.<n> from docs/ROADMAP.md (link issue/claim if applicable). PR title must be plain English ending in (R<m>.<n>). -->
+<!-- Planned work: R<m>.<n> from docs/ROADMAP.md; the PR title is plain English ending in (R<m>.<n>).
+     Reported bug outside planned work: fill in the issue number below, put the same "Fixes #<N>" trailer in the commit message, and leave the issue number out of the title. -->
+
+Fixes #
 
 ## What changed
 
@@ -16,6 +19,7 @@
 
 ## Checklist
 
+- [ ] Issue fixes only: a regression test named `issue_<N>_*` failed before the fix and passes after it (a `D1` oracle with a cited reference for numerical results), and no existing oracle tolerance or reference value was loosened without a reason under **Not verified**.
 - [ ] `cargo xtask ci quick` passes locally. The Workspace CI gate runs the full default suite on GitHub.
 - [ ] No panics in shipped code: no `unwrap()`, `expect()`, `panic!`, `unreachable!`, `todo!` or `unimplemented!` outside tests, and no unchecked indexing on files, parameters, or messages. Errors return typed `Result` values ([AGENTS.md](../AGENTS.md)).
 - [ ] Clean-room & neutral wording: nothing copied from proprietary commercial statistical/graphing applications or `GPL`/`AGPL`/`LGPL` codebases, and no competitor or placeholder suite brand names ([AGENTS.md](../AGENTS.md)).

@@ -4,10 +4,11 @@
 use std::collections::BTreeMap;
 
 use curvebook_doc::{
-    Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, GroupedTable, ImportFilterSpec,
-    ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn,
-    NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode, SurvivalTable, TableArchetype, TableKind, VariableColumn,
-    XyTable, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, ContingencyTable, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions,
+    DelimitedVisitorError, GroupedTable, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS,
+    MAX_SUBCOLUMNS, MultipleVariablesTable, NestedGroupColumn, NestedTable, PartsOfWholeTable, PlacementMode, SheetCellRange, SheetId, SubcolumnMode,
+    SurvivalTable, TableArchetype, TableKind, VariableColumn, XyTable, default_column_label, scan_delimited, transpose_cell_grid, validate_data_sets,
+    validate_rows, validate_subcolumns, validate_title,
 };
 
 use crate::error::FormatError;
@@ -136,14 +137,6 @@ fn looks_like_comma_decimal(lines: &[&str], delim: char) -> bool {
     comma_decimals > dot_decimals
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CsvState {
-    FieldStart,
-    Unquoted,
-    Quoted,
-    AfterQuote,
-}
-
 /// Parse RFC-4180 delimited text into rectangular/jagged string records.
 ///
 /// Strips optional UTF-8 BOM, handles `\r\n` / `\n` / `\r`, quoted delimiters/newlines, and
@@ -177,146 +170,53 @@ pub(crate) fn parse_delimited_records_with_limits(
     Ok(rows.into_iter().map(|r| r.into_iter().map(|f| f.text).collect()).collect())
 }
 
+fn map_csv_scan_error(err: DelimitedScanError) -> FormatError {
+    match err {
+        DelimitedScanError::UnexpectedQuoteInUnquotedField { line } => {
+            FormatError::CsvParse { line, reason: String::from("unexpected quote inside unquoted field") }
+        }
+        DelimitedScanError::UnexpectedCharAfterClosingQuote { line, ch } => {
+            FormatError::CsvParse { line, reason: format!("unexpected character `{ch}` after closing quote") }
+        }
+        DelimitedScanError::UnclosedQuotedField { line } => FormatError::CsvParse { line, reason: String::from("unclosed quoted field at EOF") },
+    }
+}
+
 fn parse_delimited_records_with_quotes_and_limits(
     input: &str,
     opts: &CsvOptions,
     max_cols: usize,
     max_fields: usize,
 ) -> Result<Vec<Vec<ParsedCsvField>>, FormatError> {
-    let text = input.strip_prefix('\u{FEFF}').unwrap_or(input);
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-
     let mut records: Vec<Vec<ParsedCsvField>> = Vec::new();
     let mut current_row: Vec<ParsedCsvField> = Vec::new();
-    let mut field = String::new();
-    let mut field_quoted = false;
-    let mut state = CsvState::FieldStart;
-    let mut line_no = 1_usize;
     let mut total_fields = 0_usize;
-    let mut chars = text.chars().peekable();
+    let scan_opts = DelimitedScanOptions { delimiter: opts.delimiter, quote_char: Some(opts.quote_char) };
 
-    while let Some(ch) = chars.next() {
-        match state {
-            CsvState::FieldStart => {
-                if ch == opts.quote_char {
-                    field_quoted = true;
-                    state = CsvState::Quoted;
-                } else if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    state = CsvState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    push_record(&mut records, &mut current_row, line_no)?;
-                    line_no += 1;
-                    state = CsvState::FieldStart;
-                } else {
-                    field.push(ch);
-                    state = CsvState::Unquoted;
-                }
-            }
-            CsvState::Unquoted => {
-                if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    state = CsvState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    push_record(&mut records, &mut current_row, line_no)?;
-                    line_no += 1;
-                    state = CsvState::FieldStart;
-                } else if ch == opts.quote_char {
-                    return Err(FormatError::CsvParse { line: line_no, reason: String::from("unexpected quote inside unquoted field") });
-                } else {
-                    field.push(ch);
-                }
-            }
-            CsvState::Quoted => {
-                if ch == opts.quote_char {
-                    if chars.peek() == Some(&opts.quote_char) {
-                        let _ = chars.next();
-                        field.push(opts.quote_char);
-                    } else {
-                        state = CsvState::AfterQuote;
-                    }
-                } else {
-                    if ch == '\n' || (ch == '\r' && chars.peek() != Some(&'\n')) {
-                        line_no += 1;
-                    }
-                    field.push(ch);
-                }
-            }
-            CsvState::AfterQuote => {
-                if ch == opts.delimiter {
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    state = CsvState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                    push_record(&mut records, &mut current_row, line_no)?;
-                    line_no += 1;
-                    state = CsvState::FieldStart;
-                } else {
-                    return Err(FormatError::CsvParse { line: line_no, reason: format!("unexpected character `{ch}` after closing quote") });
-                }
-            }
+    scan_delimited(input, scan_opts, |field| {
+        if current_row.len() >= max_cols {
+            return Err(FormatError::CsvParse { line: field.line, reason: format!("column count exceeds limit {max_cols}") });
         }
-    }
-
-    match state {
-        CsvState::Quoted => {
-            return Err(FormatError::CsvParse { line: line_no, reason: String::from("unclosed quoted field at EOF") });
+        let next_total = total_fields.saturating_add(1);
+        if next_total > max_fields {
+            return Err(FormatError::CsvParse { line: field.line, reason: format!("delimited field count exceeds limit {max_fields}") });
         }
-        CsvState::FieldStart => {
-            if !current_row.is_empty() || !field.is_empty() {
-                push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-                push_record(&mut records, &mut current_row, line_no)?;
+        total_fields = next_total;
+        current_row.push(ParsedCsvField { text: field.text, quoted: field.quoted });
+        if field.end_of_record {
+            if records.len() >= MAX_ROWS + 16 {
+                return Err(FormatError::CsvParse { line: field.line, reason: format!("row count exceeds maximum {MAX_ROWS}") });
             }
+            records.push(std::mem::take(&mut current_row));
         }
-        CsvState::Unquoted | CsvState::AfterQuote => {
-            push_field(&mut current_row, &mut field, &mut field_quoted, max_cols, &mut total_fields, max_fields, line_no)?;
-            push_record(&mut records, &mut current_row, line_no)?;
-        }
-    }
+        Ok(())
+    })
+    .map_err(|err| match err {
+        DelimitedVisitorError::Syntax(s) => map_csv_scan_error(s),
+        DelimitedVisitorError::Callback(e) => e,
+    })?;
 
     Ok(records)
-}
-
-fn push_field(
-    row: &mut Vec<ParsedCsvField>,
-    field: &mut String,
-    field_quoted: &mut bool,
-    max_cols: usize,
-    total_fields: &mut usize,
-    max_fields: usize,
-    line_no: usize,
-) -> Result<(), FormatError> {
-    if row.len() >= max_cols {
-        return Err(FormatError::CsvParse { line: line_no, reason: format!("column count exceeds limit {max_cols}") });
-    }
-    let next_total = total_fields.saturating_add(1);
-    if next_total > max_fields {
-        return Err(FormatError::CsvParse { line: line_no, reason: format!("delimited field count exceeds limit {max_fields}") });
-    }
-    *total_fields = next_total;
-    row.push(ParsedCsvField { text: std::mem::take(field), quoted: std::mem::replace(field_quoted, false) });
-    Ok(())
-}
-
-fn push_record(records: &mut Vec<Vec<ParsedCsvField>>, row: &mut Vec<ParsedCsvField>, line_no: usize) -> Result<(), FormatError> {
-    if records.len() >= MAX_ROWS + 16 {
-        return Err(FormatError::CsvParse { line: line_no, reason: format!("row count exceeds maximum {MAX_ROWS}") });
-    }
-    records.push(std::mem::take(row));
-    Ok(())
 }
 
 /// Parse a raw cell token into a typed [`Cell`], honoring missing sentinels, regional decimal
@@ -1448,7 +1348,7 @@ fn place_grid_in_datasheet(
 
     ensure_sheet_capacity(target, needed_rows, start_col, placement.anchor.subcol, grid_cols)?;
     if placement.mode == PlacementMode::InsertRows && start_row < existing_rows {
-        shift_archetype_rows_down(&mut target.archetype, start_row, grid_rows, existing_rows);
+        target.archetype.shift_rows_down(start_row, grid_rows, existing_rows);
     }
     if let Some(hdrs) = headers {
         apply_headers_to_sheet(target, start_col, placement.anchor.subcol, hdrs)?;
@@ -1656,76 +1556,6 @@ fn ensure_sheet_capacity(
     Ok(())
 }
 
-fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
-    if let Some(slice) = rows.get_mut(start_row..end_row)
-        && shift < slice.len()
-    {
-        slice.rotate_right(shift);
-    }
-}
-
-fn shift_archetype_rows_down(arch: &mut TableArchetype, start_row: usize, insert_rows: usize, existing_rows: usize) {
-    if insert_rows == 0 || start_row >= existing_rows {
-        return;
-    }
-    let end = existing_rows + insert_rows;
-    match arch {
-        TableArchetype::Xy(t) => {
-            rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Column(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Grouped(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            if let Some(spacing) = &mut t.row_numeric_spacing {
-                rotate_rows_down(spacing, start_row, insert_rows, end);
-            }
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Contingency(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Survival(t) => {
-            rotate_rows_down(&mut t.times, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.cohorts {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::PartsOfWhole(t) => {
-            rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::MultipleVariables(mv) => {
-            rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
-            for var in &mut mv.variables {
-                rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Nested(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for grp in &mut t.groups {
-                rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
-            }
-        }
-    }
-}
-
 fn grow_datasets(data_sets: &mut Vec<DataSetColumn>, needed_cols: usize, needed_rows: usize, subs: usize) -> Result<(), FormatError> {
     validate_subcolumns(subs)?;
     while data_sets.len() < needed_cols {
@@ -1776,4 +1606,44 @@ fn apply_headers_to_sheet(target: &mut DataSheet, start_col: usize, start_subcol
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    use curvebook_doc::Cell;
+
+    use super::{
+        CsvOptions, parse_csv_field_cell, parse_delimited_records, parse_delimited_records_with_limits,
+        parse_delimited_records_with_quotes_and_limits,
+    };
+    use crate::error::FormatError;
+
+    #[test]
+    fn format_dialect_preserves_quoted_numeric_as_text_blank_lines_and_unicode_quotes() {
+        let mut opts = CsvOptions::csv();
+        opts.delimiter = '§';
+        opts.quote_char = '«';
+        let input = "\u{FEFF}«42.5«§42.5\r\n\r\n«a««b\nc«§««";
+        let rows = parse_delimited_records_with_quotes_and_limits(input, &opts, 16, 64).unwrap();
+        assert_eq!(rows.len(), 3);
+        assert_eq!(parse_csv_field_cell(&rows[0][0], &opts), Cell::text("42.5"));
+        assert_eq!(parse_csv_field_cell(&rows[0][1], &opts), Cell::number(42.5));
+        // Standalone blank line is preserved as a single empty unquoted field in format::csv.
+        assert_eq!(rows[1].len(), 1);
+        assert_eq!(rows[1][0].text, "");
+        assert!(!rows[1][0].quoted);
+        assert_eq!(rows[2][0].text, "a«b\nc");
+        assert!(rows[2][0].quoted);
+        assert_eq!(parse_csv_field_cell(&rows[2][1], &opts), Cell::text(""));
+    }
+
+    #[test]
+    fn format_dialect_enforces_limits_and_reports_line_numbers() {
+        let opts = CsvOptions::csv();
+        assert!(matches!(parse_delimited_records("a,b\nc\"d,e", &opts), Err(FormatError::CsvParse { line: 2, .. })));
+        assert!(matches!(parse_delimited_records("\"a\nb\"z,1", &opts), Err(FormatError::CsvParse { line: 2, .. })));
+        assert!(matches!(parse_delimited_records("1,2\n\"unclosed", &opts), Err(FormatError::CsvParse { line: 2, .. })));
+        assert!(matches!(parse_delimited_records_with_limits("1,2,3", &opts, 2, 100), Err(FormatError::CsvParse { line: 1, .. })));
+        assert!(matches!(parse_delimited_records_with_limits("1,2\n3,4", &opts, 10, 3), Err(FormatError::CsvParse { line: 2, .. })));
+    }
 }

@@ -1561,7 +1561,7 @@ fn resolve_mapped_ui_or_engine_route(app: &UiApp, cmd_id: &str) -> WebCommandRou
         return WebCommandRoute::UiCommand { command_id: ui_cmd.to_owned(), params: contextual_command_params(app, ui_cmd) };
     }
     if curvebook_ui_egui::UI_COMMANDS.iter().any(|s| s.id == cmd_id)
-        || matches!(cmd_id, "ui.print.open" | "app.about" | "ui.palette.open" | "ui.editParams.open")
+        || matches!(cmd_id, "ui.print.open" | "app.about" | "app.feedback" | "ui.palette.open" | "ui.editParams.open")
     {
         return WebCommandRoute::UiCommand { command_id: cmd_id.to_owned(), params: contextual_command_params(app, cmd_id) };
     }
@@ -1945,6 +1945,24 @@ pub fn commit_active_modal_dialog(app: &mut UiApp) -> Result<UiEventOutcome, Str
         ActiveDialog::PageLayoutComposer { .. } => {
             let intents = app.canvas_dialogs.page_layout.commit_intents();
             commit_web_intent_batch(app, intents.into_iter().map(|i| (i.command_id, i.params)), "dialog.page_layout_committed")
+        }
+        ActiveDialog::CreateGraph { .. } => {
+            let intent = app.canvas_dialogs.create_graph.commit_intent().ok_or_else(|| String::from("no source data sheet selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.create_graph_committed")
+        }
+        ActiveDialog::EqualizeScaling { .. } => {
+            let intent =
+                app.canvas_dialogs.equalize_scaling.commit_intent().ok_or_else(|| String::from("no live graph panels available to equalize"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.equalize_scaling_committed")
+        }
+        ActiveDialog::FormatEmbeddedTable { .. } => {
+            let doc = app.document().clone();
+            let intent = app.canvas_dialogs.format_embedded_table.commit_intent(&doc).ok_or_else(|| String::from("no embedded table selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_embedded_table_committed")
+        }
+        ActiveDialog::FormatImage { .. } => {
+            let intent = app.canvas_dialogs.format_image.commit_intent().ok_or_else(|| String::from("no embedded image selected"))?;
+            commit_web_intent_single(app, &intent.command_id, intent.params, "dialog.format_image_committed")
         }
         _ => {
             app.canvas_dialogs.close_dialog();

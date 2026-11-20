@@ -3,7 +3,9 @@
 use std::collections::HashMap;
 use std::hash::{BuildHasherDefault, Hash, Hasher};
 
-use curvebook_chart::{ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor};
+use curvebook_chart::{
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint, TextAnchor,
+};
 use curvebook_palette::{CanvasPreviewFilter, LineDashStyle, Rgba8, simulate_preview_filter};
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{GlyphOutlineCmd, outline_rich_text};
@@ -16,6 +18,18 @@ pub const MAX_RASTER_DIM_PX: u32 = 16_384;
 
 /// Maximum supported total raster pixel budget (`8192 x 8192` = 67,108,864 pixels).
 pub const MAX_RASTER_PIXELS: u64 = 67_108_864;
+
+/// Minimum auto-scaled raster dimension in pixels for capped preview/export outputs.
+pub const MIN_CAPPED_RASTER_DIM_PX: u32 = 64;
+
+/// Maximum auto-scaled raster dimension in pixels for capped preview/export outputs.
+pub const MAX_CAPPED_RASTER_DIM_PX: u32 = 8_192;
+
+/// Default fallback width in pixels when a scene's point width is non-finite or non-positive.
+pub const DEFAULT_CAPPED_RASTER_WIDTH_PX: u32 = 960;
+
+/// Default fallback height in pixels when a scene's point height is non-finite or non-positive.
+pub const DEFAULT_CAPPED_RASTER_HEIGHT_PX: u32 = 640;
 
 /// Alias for uncompressed RGBA pixel buffers compatible with canvas preview filters.
 pub type RgbaPixmap = RasterImage;
@@ -101,6 +115,29 @@ impl RenderTargetSpec {
         let _ = validate_raster_target_dims(width_px, height_px, dpi, "raster")?;
         Ok(Self { width_px, height_px, dpi })
     }
+
+    /// Resolve pixel dimensions for capped preview/export outputs (MCP and desktop control).
+    ///
+    /// Positive finite `scene` point dimensions are scaled by `dpi / 72.0`, rounded to the nearest
+    /// integer pixel, and clamped independently to
+    /// [`MIN_CAPPED_RASTER_DIM_PX`]..=[`MAX_CAPPED_RASTER_DIM_PX`] (`64..=8192`). Non-finite or
+    /// non-positive axes fall back to [`DEFAULT_CAPPED_RASTER_WIDTH_PX`] x
+    /// [`DEFAULT_CAPPED_RASTER_HEIGHT_PX`] (`960 x 640`). Caller-supplied `requested_width_px` and
+    /// `requested_height_px` override the derived dimensions verbatim.
+    #[must_use]
+    pub fn from_scene_capped(scene: &ChartScene, requested_width_px: Option<u32>, requested_height_px: Option<u32>, dpi: u16) -> Self {
+        let scale_axis = |dim_pt: f64, fallback_px: u32| -> u32 {
+            if dim_pt.is_finite() && dim_pt > 0.0 {
+                let scaled = (dim_pt * f64::from(dpi) / 72.0).round();
+                scaled.clamp(f64::from(MIN_CAPPED_RASTER_DIM_PX), f64::from(MAX_CAPPED_RASTER_DIM_PX)) as u32
+            } else {
+                fallback_px
+            }
+        };
+        let default_w = scale_axis(scene.width_pt, DEFAULT_CAPPED_RASTER_WIDTH_PX);
+        let default_h = scale_axis(scene.height_pt, DEFAULT_CAPPED_RASTER_HEIGHT_PX);
+        Self { width_px: requested_width_px.unwrap_or(default_w), height_px: requested_height_px.unwrap_or(default_h), dpi }
+    }
 }
 
 impl RasterImage {
@@ -134,6 +171,17 @@ impl RasterImage {
     #[must_use]
     pub fn expected_byte_len(&self) -> Option<usize> {
         (self.width_px as usize).checked_mul(self.height_px as usize).and_then(|p| p.checked_mul(4))
+    }
+
+    /// Validate target dimensions, DPI, and RGBA byte length for an encoder labeled `label`,
+    /// returning the validated pixel slice without copying.
+    pub(crate) fn validated_rgba(&self, label: &str) -> Result<&[u8], RenderError> {
+        let _ = validate_raster_target_dims(self.width_px, self.height_px, self.dpi, label)?;
+        let expected = self.expected_byte_len().ok_or_else(|| RenderError::InvalidTarget { message: String::from("image byte length overflow") })?;
+        if self.rgba.len() != expected {
+            return Err(RenderError::BufferSizeMismatch { expected, actual: self.rgba.len() });
+        }
+        Ok(&self.rgba)
     }
 
     /// Composite a pixel at `(x, y)` using straight-alpha Porter-Duff `source-over`.
@@ -279,6 +327,16 @@ pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<Rast
                     render_text(&mut img, text, sx, sy, active_clip, &mut scratch);
                 }
             }
+            ScenePrimitive::RasterImage(raster) => {
+                let effective_clip = match raster.clip.and_then(|r| ClipRectPx::from_rect_pt(r, sx, sy)) {
+                    Some(local) => active_clip.intersect(local),
+                    None if raster.clip.is_some() => ClipRectPx::empty(),
+                    None => active_clip,
+                };
+                if !effective_clip.is_empty() {
+                    render_raster_image(&mut img, raster, sx, sy, effective_clip);
+                }
+            }
             ScenePrimitive::PushClip { rect } => {
                 let next = match ClipRectPx::from_rect_pt(*rect, sx, sy) {
                     Some(local) => active_clip.intersect(local),
@@ -295,6 +353,125 @@ pub fn render_scene(scene: &ChartScene, target: RenderTargetSpec) -> Result<Rast
     }
 
     Ok(img)
+}
+
+pub(crate) fn render_raster_image(img: &mut RasterImage, prim: &SceneRasterImage, sx: f64, sy: f64, clip: ClipRectPx) {
+    let (src_w, src_h) = prim.pixel_size;
+    let Some(expected_len) = (src_w as usize).checked_mul(src_h as usize).and_then(|p| p.checked_mul(4)) else {
+        return;
+    };
+    if src_w == 0
+        || src_h == 0
+        || prim.rgba.len() != expected_len
+        || clip.is_empty()
+        || !sx.is_finite()
+        || !sy.is_finite()
+        || sx <= 0.0
+        || sy <= 0.0
+        || !prim.rotation_deg.is_finite()
+    {
+        return;
+    }
+    let Some(vis_doc) = prim.crop.visible_rect(curvebook_doc::RectPt::from(prim.bounds_pt)) else {
+        return;
+    };
+    let bounds = prim.bounds_pt;
+    if !bounds.width.is_finite() || !bounds.height.is_finite() || bounds.width <= 0.0 || bounds.height <= 0.0 {
+        return;
+    }
+
+    let vis = RectPt::from(vis_doc);
+    let cx = bounds.x + 0.5 * bounds.width;
+    let cy = bounds.y + 0.5 * bounds.height;
+    let (sin_t, cos_t) = prim.rotation_deg.to_radians().sin_cos();
+
+    let mut min_px = f64::INFINITY;
+    let mut min_py = f64::INFINITY;
+    let mut max_px = f64::NEG_INFINITY;
+    let mut max_py = f64::NEG_INFINITY;
+    for vx in [vis.x, vis.right()] {
+        for vy in [vis.y, vis.bottom()] {
+            let dx = vx - cx;
+            let dy = vy - cy;
+            let wx = cx + dx * cos_t - dy * sin_t;
+            let wy = cy + dx * sin_t + dy * cos_t;
+            min_px = min_px.min(wx * sx);
+            max_px = max_px.max(wx * sx);
+            min_py = min_py.min(wy * sy);
+            max_py = max_py.max(wy * sy);
+        }
+    }
+
+    let x_lo = (min_px.max(clip.min_x).floor() as i64).clamp(0, i64::from(img.width_px)) as u32;
+    let x_hi = (max_px.min(clip.max_x).ceil() as i64).clamp(0, i64::from(img.width_px)) as u32;
+    let y_lo = (min_py.max(clip.min_y).floor() as i64).clamp(0, i64::from(img.height_px)) as u32;
+    let y_hi = (max_py.min(clip.max_y).ceil() as i64).clamp(0, i64::from(img.height_px)) as u32;
+    if x_lo >= x_hi || y_lo >= y_hi {
+        return;
+    }
+
+    let inv_w = f64::from(src_w) / bounds.width;
+    let inv_h = f64::from(src_h) / bounds.height;
+    let dst_w = img.width_px as usize;
+
+    for py in y_lo..y_hi {
+        let sy_pt = (f64::from(py) + 0.5) / sy;
+        for px in x_lo..x_hi {
+            let sx_pt = (f64::from(px) + 0.5) / sx;
+            let dx = sx_pt - cx;
+            let dy = sy_pt - cy;
+            let ux = cx + dx * cos_t + dy * sin_t;
+            let uy = cy - dx * sin_t + dy * cos_t;
+            if ux < vis.x || ux > vis.right() || uy < vis.y || uy > vis.bottom() {
+                continue;
+            }
+            let u = ((ux - bounds.x) * inv_w - 0.5).clamp(0.0, f64::from(src_w - 1));
+            let v = ((uy - bounds.y) * inv_h - 0.5).clamp(0.0, f64::from(src_h - 1));
+            let sampled = sample_bilinear_rgba(&prim.rgba, src_w, src_h, u, v);
+            let dst_idx = ((py as usize) * dst_w + (px as usize)) * 4;
+            if let Some(dst_px) = img.rgba.get_mut(dst_idx..dst_idx + 4) {
+                blend_pixel_slice(dst_px, sampled, 1.0);
+            }
+        }
+    }
+}
+
+#[inline]
+#[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+fn sample_bilinear_rgba(rgba: &[u8], w: u32, h: u32, u: f64, v: f64) -> Rgba8 {
+    let x0 = (u.floor() as u32).min(w - 1);
+    let y0 = (v.floor() as u32).min(h - 1);
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = (u - f64::from(x0)).clamp(0.0, 1.0);
+    let fy = (v - f64::from(y0)).clamp(0.0, 1.0);
+
+    let w00 = (1.0 - fx) * (1.0 - fy);
+    let w10 = fx * (1.0 - fy);
+    let w01 = (1.0 - fx) * fy;
+    let w11 = fx * fy;
+
+    let load = |x: u32, y: u32| -> (f64, f64, f64, f64) {
+        let idx = ((y as usize) * (w as usize) + (x as usize)) * 4;
+        let Some(px) = rgba.get(idx..idx + 4) else {
+            return (0.0, 0.0, 0.0, 0.0);
+        };
+        let a = f64::from(px[3]);
+        (f64::from(px[0]) * a, f64::from(px[1]) * a, f64::from(px[2]) * a, a)
+    };
+    let (r00, g00, b00, a00) = load(x0, y0);
+    let (r10, g10, b10, a10) = load(x1, y0);
+    let (r01, g01, b01, a01) = load(x0, y1);
+    let (r11, g11, b11, a11) = load(x1, y1);
+
+    let a = a00 * w00 + a10 * w10 + a01 * w01 + a11 * w11;
+    if a <= 1e-9 {
+        return Rgba8::TRANSPARENT;
+    }
+    let r = (r00 * w00 + r10 * w10 + r01 * w01 + r11 * w11) / a;
+    let g = (g00 * w00 + g10 * w10 + g01 * w01 + g11 * w11) / a;
+    let b = (b00 * w00 + b10 * w10 + b01 * w01 + b11 * w11) / a;
+    Rgba8::rgba(clamp_u8(r), clamp_u8(g), clamp_u8(b), clamp_u8(a))
 }
 
 fn is_matching_full_bg_rect(scene: &ChartScene, bg: Rgba8) -> bool {
@@ -352,7 +529,7 @@ impl PointPx {
 }
 
 #[derive(Debug, Clone, Copy)]
-struct ClipRectPx {
+pub(crate) struct ClipRectPx {
     min_x: f64,
     min_y: f64,
     max_x: f64,
@@ -364,7 +541,7 @@ impl ClipRectPx {
         Self { min_x: 0.0, min_y: 0.0, max_x: 0.0, max_y: 0.0 }
     }
 
-    fn from_canvas(width_px: u32, height_px: u32) -> Self {
+    pub(crate) fn from_canvas(width_px: u32, height_px: u32) -> Self {
         Self { min_x: 0.0, min_y: 0.0, max_x: f64::from(width_px), max_y: f64::from(height_px) }
     }
 
@@ -3093,5 +3270,25 @@ mod tests {
         assert_eq!(img_1.rgba, img_2.rgba);
         let non_white = img_1.rgba.as_chunks::<4>().0.iter().filter(|px| *px != &[255, 255, 255, 255]).count();
         assert!(non_white > 10_000, "expected rasterized marker ink, got {non_white}");
+    }
+
+    #[test]
+    fn from_scene_capped_scales_clamps_falls_back_and_honors_overrides() {
+        let normal = ChartScene::new("g1", "Normal", 144.0, 72.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, None, None, 144), RenderTargetSpec { width_px: 288, height_px: 144, dpi: 144 });
+
+        let tiny = ChartScene::new("g2", "Tiny", 1.0, 2.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&tiny, None, None, 72), RenderTargetSpec { width_px: 64, height_px: 64, dpi: 72 });
+
+        let huge = ChartScene::new("g3", "Huge", 10_000.0, 20_000.0, Some(Rgba8::WHITE));
+        assert_eq!(RenderTargetSpec::from_scene_capped(&huge, None, None, 300), RenderTargetSpec { width_px: 8192, height_px: 8192, dpi: 300 });
+
+        let mut invalid = ChartScene::new("g4", "Invalid", 144.0, 72.0, Some(Rgba8::WHITE));
+        invalid.width_pt = f64::NAN;
+        invalid.height_pt = 0.0;
+        assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, None, 144), RenderTargetSpec { width_px: 960, height_px: 640, dpi: 144 });
+
+        assert_eq!(RenderTargetSpec::from_scene_capped(&normal, Some(512), None, 144), RenderTargetSpec { width_px: 512, height_px: 144, dpi: 144 });
+        assert_eq!(RenderTargetSpec::from_scene_capped(&invalid, None, Some(300), 144), RenderTargetSpec { width_px: 960, height_px: 300, dpi: 144 });
     }
 }

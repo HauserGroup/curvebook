@@ -330,6 +330,7 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         }),
         line: None,
         area_fill: None,
+        replicate_lines: curvebook_doc::ReplicateLineMode::default(),
     };
     gsheet.spec.series[0].y_error_bars = Some(ErrorBarSpec {
         metric: ErrorBarMetric::ConfidenceInterval95,
@@ -417,6 +418,9 @@ fn full_project_document_covers_all_eight_archetypes_specs_results_graphs_layout
         source_sheet_id: SheetId::new("res-sim"),
         tab_id: Some(String::from("tab-1")),
         bounds_pt: RectPt::new(220.0, 10.0, 180.0, 120.0),
+        selected_rows: None,
+        selected_cols: None,
+        style: curvebook_doc::EmbeddedTableStyle::default(),
     });
     lspec.items.push(LayoutItem::TextCallout {
         id: String::from("c-1"),

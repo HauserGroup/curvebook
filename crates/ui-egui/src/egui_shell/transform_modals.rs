@@ -2,8 +2,6 @@
 //! extract & rearrange, and exclusion-with-reason modals in `egui 0.37` (`R15.4`,
 //! `gui-layout-spec.md` §8.6).
 
-use std::borrow::Cow;
-
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, BaselineOperation, DataSheet, DerivedColumnFormula, ErrorPropagationMode, MathTransformPreset, SheetId,
     TableArchetype, TableKind, TransformAnalysisSpec,
@@ -15,7 +13,7 @@ use serde_json::{Map, Value, json};
 use crate::UiApp;
 use crate::dialogs_canvas::{ActiveDialog, ExcludeWithReasonDialogState};
 use crate::grid_view::parse_localized_number_input;
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -44,6 +42,43 @@ pub struct MvFilterPredicateRow {
     pub compare_variable: bool,
 }
 
+/// Selected constant-K arithmetic mode for `TransformValues` Y transforms.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum ConstantKOp {
+    /// `Y + K` (`LinearScale { slope: 1.0, intercept: K }`).
+    Add,
+    /// `Y * K` (`LinearScale { slope: K, intercept: 0.0 }`).
+    Multiply,
+    /// `Y / K` (`LinearScale { slope: 1.0 / K, intercept: 0.0 }`, requires `K != 0`).
+    Divide,
+}
+
+impl ConstantKOp {
+    fn from_slug(slug: &str) -> Option<Self> {
+        match slug {
+            "affine_k" => Some(Self::Add),
+            "multiply_k" => Some(Self::Multiply),
+            "divide_k" => Some(Self::Divide),
+            _ => None,
+        }
+    }
+
+    fn infer_from_preset(preset: MathTransformPreset) -> Option<(Self, f64)> {
+        let MathTransformPreset::LinearScale { slope, intercept } = preset else {
+            return None;
+        };
+        if (slope - 1.0).abs() < 1e-12 && intercept.abs() >= 1e-12 {
+            Some((Self::Add, intercept))
+        } else if intercept.abs() < 1e-12 && slope > 0.0 && slope < 1.0 {
+            Some((Self::Divide, 1.0 / slope))
+        } else if intercept.abs() < 1e-12 {
+            Some((Self::Multiply, slope))
+        } else {
+            Some((Self::Add, intercept))
+        }
+    }
+}
+
 /// Persistent transient UI state for `render_transform_modal` and `render_exclude_with_reason_modal`.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TransformModalsEguiState {
@@ -53,12 +88,14 @@ pub struct TransformModalsEguiState {
     pub formula_draft: String,
     pub constant_k_draft: String,
     pub create_new_graph: bool,
+    pub selected_k_op: Option<ConstantKOp>,
+    pub synced_edit_sheet_id: Option<String>,
     pub filter_rows: Vec<MvFilterPredicateRow>,
     pub exclude_reason_draft: String,
     pub validation_error: Option<String>,
     pub standalone_x_preset: Option<String>,
     pub standalone_y_preset: Option<String>,
-    pub zero_conc_sub_draft: String,
+    pub standalone_error_propagation: ErrorPropagationMode,
     pub pharmacology_mode: bool,
     pub baseline_cols: Vec<usize>,
     pub baseline_op: usize,
@@ -86,9 +123,14 @@ pub struct TransformModalFrameReport {
     pub outside_wheel_captured: bool,
 }
 
-fn tr_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> Cow<'a, str> {
-    let norm = normalize_locale(locale);
-    if let Some(s) = try_tr(norm, key).or_else(|| try_tr("en", key)) { Cow::Borrowed(s) } else { Cow::Borrowed(fallback) }
+struct TransformModalCtx<'a> {
+    app: &'a UiApp,
+    ds: Option<&'a DataSheet>,
+    state: &'a mut TransformModalsEguiState,
+    from_edit: bool,
+    tokens: &'a Tokens,
+    meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
 }
 
 /// Return `true` when `ActiveDialog::EditAnalysisParameters` edits a `Transform` analysis spec.
@@ -113,8 +155,14 @@ pub fn render_transform_modal(
     intents: &mut PendingUiIntents,
 ) -> TransformModalFrameReport {
     let from_edit = is_transform_edit_dialog_active(app);
+    if !from_edit {
+        state.synced_edit_sheet_id = None;
+    }
     if !from_edit && state.open_kind.is_none() {
         return TransformModalFrameReport::default();
+    }
+    if from_edit {
+        sync_transform_edit_state(app, state);
     }
 
     let draft_kind = if from_edit { app.canvas_dialogs.edit_params.draft.as_ref().map(|d| &d.kind) } else { None };
@@ -134,43 +182,36 @@ pub fn render_transform_modal(
         ui.set_max_width(inner_w);
         ui.set_max_height(dlg_h);
 
-        ui.heading(RichText::new(title.as_ref()).color(tokens.text_primary));
+        ui.heading(RichText::new(title).color(tokens.text_primary));
         ui.add_space(4.0);
         widgets::divider(ui);
 
+        let mut modal_cx = TransformModalCtx { app, ds: source_sheet, state, from_edit, tokens, meta, intents };
         let body_h = (dlg_h - 92.0).max(110.0);
         egui::ScrollArea::vertical().id_salt("transform_modal_scroll").max_width(inner_w).max_height(body_h).auto_shrink([false, false]).show(
             ui,
             |body| {
                 body.set_max_width((inner_w - 18.0).max(200.0));
                 match effective_kind {
-                    TransformModalKind::TransformValues => {
-                        render_transform_values_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
-                    TransformModalKind::Normalize => render_normalize_body(body, app, source_sheet, state, from_edit, tokens, meta, intents),
-                    TransformModalKind::RemoveBaseline => {
-                        render_remove_baseline_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
-                    TransformModalKind::MvFilterAndTransform => {
-                        render_mv_filter_transform_body(body, app, source_sheet, state, from_edit, tokens, meta, intents)
-                    }
+                    TransformModalKind::TransformValues => render_transform_values_body(body, &mut modal_cx),
+                    TransformModalKind::Normalize => render_normalize_body(body, &mut modal_cx),
+                    TransformModalKind::RemoveBaseline => render_remove_baseline_body(body, &mut modal_cx),
+                    TransformModalKind::MvFilterAndTransform => render_mv_filter_transform_body(body, &mut modal_cx),
                     TransformModalKind::ExtractAndRearrange
                     | TransformModalKind::Transpose
                     | TransformModalKind::PruneRows
                     | TransformModalKind::Simulate
-                    | TransformModalKind::RandomSample => {
-                        render_extract_and_rearrange_body(body, app, source_sheet, effective_kind, state, from_edit, tokens, meta, intents)
-                    }
+                    | TransformModalKind::RandomSample => render_extract_and_rearrange_body(body, &mut modal_cx, effective_kind),
                 }
 
-                if state.hook_picker_open {
+                if modal_cx.state.hook_picker_open {
                     body.add_space(6.0);
-                    render_inline_hook_picker(body, app, state, tokens, meta);
+                    render_inline_hook_picker(body, modal_cx.app, modal_cx.state, modal_cx.tokens, modal_cx.meta);
                 }
 
-                if let Some(err) = &state.validation_error {
+                if let Some(err) = &modal_cx.state.validation_error {
                     body.add_space(4.0);
-                    body.label(RichText::new(err).color(tokens.link_red).size(11.5));
+                    body.label(RichText::new(err).color(modal_cx.tokens.link_red).size(11.5));
                 }
             },
         );
@@ -178,16 +219,16 @@ pub fn render_transform_modal(
         ui.add_space(6.0);
         widgets::divider(ui);
         ui.add_space(4.0);
-        render_transform_footer(ui, app, source_sheet, effective_kind, state, from_edit, tokens, meta, intents);
+        render_transform_footer(ui, &mut modal_cx, effective_kind);
     });
 
-    let title_for_ak = title.as_ref().to_owned();
+    let title_for_ak = title.to_owned();
     modal_resp.response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Dialog, true, title_for_ak.clone()));
 
     let capture = finalize_egui_modal_response(
         ctx,
         &modal_resp,
-        ModalCaptureSpec { widget_id: "dialog.transform", title: title.as_ref(), z_dialog: ZLayer::ModalDialog },
+        ModalCaptureSpec { widget_id: "dialog.transform", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
     TransformModalFrameReport {
@@ -214,17 +255,17 @@ fn resolve_effective_modal_kind(draft_kind: Option<&AnalysisKind>, open_kind: Op
     open_kind.unwrap_or(TransformModalKind::TransformValues)
 }
 
-fn modal_title_for(kind: TransformModalKind, locale: &str) -> Cow<'_, str> {
+fn modal_title_for(kind: TransformModalKind, locale: &str) -> &'static str {
     match kind {
-        TransformModalKind::TransformValues => Cow::Borrowed("Transform Values & Concentrations"),
-        TransformModalKind::Normalize => Cow::Borrowed("Normalize Data"),
-        TransformModalKind::RemoveBaseline => tr_tr(locale, "analysis.remove_baseline", "Remove Baseline & Column Math"),
-        TransformModalKind::MvFilterAndTransform => Cow::Borrowed("Multiple Variables: Filter & Transform"),
-        TransformModalKind::ExtractAndRearrange => Cow::Borrowed("Extract & Rearrange Table"),
-        TransformModalKind::Transpose => Cow::Borrowed("Transpose Table"),
-        TransformModalKind::PruneRows => Cow::Borrowed("Prune Rows"),
-        TransformModalKind::Simulate => Cow::Borrowed("Simulate XY Curve"),
-        TransformModalKind::RandomSample => Cow::Borrowed("Random Sample Rows"),
+        TransformModalKind::TransformValues => "Transform Values & Concentrations",
+        TransformModalKind::Normalize => "Normalize Data",
+        TransformModalKind::RemoveBaseline => tr_or_fallback(locale, "analysis.remove_baseline", "Remove Baseline & Column Math"),
+        TransformModalKind::MvFilterAndTransform => "Multiple Variables: Filter & Transform",
+        TransformModalKind::ExtractAndRearrange => "Extract & Rearrange Table",
+        TransformModalKind::Transpose => "Transpose Table",
+        TransformModalKind::PruneRows => "Prune Rows",
+        TransformModalKind::Simulate => "Simulate XY Curve",
+        TransformModalKind::RandomSample => "Random Sample Rows",
     }
 }
 
@@ -241,37 +282,110 @@ fn resolve_source_sheet<'a>(app: &'a UiApp, state: &TransformModalsEguiState, fr
         .or_else(|| doc.data_sheets.first())
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_transform_values_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
-    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
-    let (cur_x, cur_y, cur_ep) = match draft_spec.as_ref().map(|s| &s.kind) {
-        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })) => {
-            (*x_transform, *y_transform, *error_propagation)
+fn sync_transform_edit_state(app: &UiApp, state: &mut TransformModalsEguiState) {
+    let ActiveDialog::EditAnalysisParameters { result_sheet_id } = &app.canvas_dialogs.active_dialog else {
+        return;
+    };
+    if state.synced_edit_sheet_id.as_deref() == Some(result_sheet_id.as_str()) {
+        return;
+    }
+    state.synced_edit_sheet_id = Some(result_sheet_id.as_str().to_owned());
+    let spec = app.canvas_dialogs.edit_params.draft.as_ref().or_else(|| app.document().result_sheet(result_sheet_id).map(|rs| &rs.analysis));
+    if let Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { y_transform, .. })) = spec.map(|s| &s.kind) {
+        if let Some((op, k)) = y_transform.and_then(ConstantKOp::infer_from_preset) {
+            state.selected_k_op = Some(op);
+            state.constant_k_draft = format!("{k}");
+        } else {
+            state.selected_k_op = None;
         }
-        _ => (
-            state.standalone_x_preset.as_deref().and_then(parse_math_slug),
-            state.standalone_y_preset.as_deref().and_then(parse_math_slug).or(Some(MathTransformPreset::Log10)),
-            ErrorPropagationMode::ReplicateEndpoints,
-        ),
+    } else {
+        state.selected_k_op = None;
+    }
+}
+
+fn parse_k_constant(raw: &str, locale_preset: &crate::i18n::LocalePreset) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_localized_number_input(trimmed, locale_preset).or_else(|| trimmed.parse::<f64>().ok()).filter(|v| v.is_finite())
+}
+
+fn build_linear_scale_for_k(op: ConstantKOp, raw_k: &str, locale_preset: &crate::i18n::LocalePreset) -> Result<MathTransformPreset, String> {
+    let trimmed = raw_k.trim();
+    if trimmed.is_empty() {
+        return Err(String::from("Enter a numeric value for Constant K."));
+    }
+    let Some(k) = parse_k_constant(trimmed, locale_preset) else {
+        return Err(format!("Invalid numeric constant `{trimmed}`."));
+    };
+    match op {
+        ConstantKOp::Add => Ok(MathTransformPreset::LinearScale { slope: 1.0, intercept: k }),
+        ConstantKOp::Multiply => Ok(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 }),
+        ConstantKOp::Divide => {
+            if k.abs() <= f64::EPSILON {
+                Err(String::from("Constant K cannot be 0 when dividing (Y / K)."))
+            } else {
+                Ok(MathTransformPreset::LinearScale { slope: 1.0 / k, intercept: 0.0 })
+            }
+        }
+    }
+}
+
+fn validate_transform_k(active_k_op: Option<ConstantKOp>, raw_k: &str, locale_preset: &crate::i18n::LocalePreset) -> Option<String> {
+    if let Some(op) = active_k_op {
+        return build_linear_scale_for_k(op, raw_k, locale_preset).err();
+    }
+    let trimmed = raw_k.trim();
+    if !trimmed.is_empty() && parse_k_constant(trimmed, locale_preset).is_none() {
+        return Some(format!("Invalid numeric constant `{trimmed}`."));
+    }
+    None
+}
+
+fn render_transform_values_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
+    let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+    if !from_edit {
+        state.selected_k_op = state.standalone_y_preset.as_deref().and_then(ConstantKOp::from_slug);
+    }
+    let active_k_op = state.selected_k_op;
+    let (cur_x, cur_y, cur_ep) = match draft_spec.as_ref().map(|s| &s.kind) {
+        Some(AnalysisKind::Transform(TransformAnalysisSpec::Math { x_transform, y_transform, error_propagation })) if from_edit => {
+            let eff_y = active_k_op.map(|op| build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok()).unwrap_or(*y_transform);
+            (*x_transform, eff_y, *error_propagation)
+        }
+        _ => {
+            let eff_y = match active_k_op {
+                Some(op) => build_linear_scale_for_k(op, &state.constant_k_draft, &app.locale_preset).ok(),
+                None => state.standalone_y_preset.as_deref().and_then(parse_math_slug),
+            };
+            (state.standalone_x_preset.as_deref().and_then(parse_math_slug), eff_y, state.standalone_error_propagation)
+        }
     };
 
     ui.horizontal_wrapped(|row| {
         let std_r = choice_pill(row, tokens, "Standard Functions", !state.pharmacology_mode, true);
-        record_tr_node(row, meta, "edit.transform.mode.standard", "tab", "Standard Functions", None, true, &std_r);
+        meta.record_modal_response(
+            row,
+            &std_r,
+            FrameInspectEntryInput::modal("edit.transform.mode.standard", "tab", "Standard Functions", None, true),
+        );
         if std_r.clicked() {
             state.pharmacology_mode = false;
         }
         let pharm_r = choice_pill(row, tokens, "Pharmacology (-log10[M])", state.pharmacology_mode, true);
-        record_tr_node(row, meta, "edit.transform.mode.pharmacology", "tab", "Pharmacology", None, true, &pharm_r);
+        meta.record_modal_response(
+            row,
+            &pharm_r,
+            FrameInspectEntryInput::modal("edit.transform.mode.pharmacology", "tab", "Pharmacology", None, true),
+        );
         if pharm_r.clicked() {
             state.pharmacology_mode = true;
             if from_edit {
@@ -303,7 +417,11 @@ fn render_transform_values_body(
         for (slug, lbl, preset_opt) in x_choices {
             let active = cur_x == preset_opt;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.x_transform.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.x_transform.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if from_edit {
                     apply_math_patch(draft_spec.as_mut(), Some(preset_opt), None, None, intents);
@@ -313,7 +431,7 @@ fn render_transform_values_body(
             }
         }
         let legacy_x = widgets::secondary_button(row, "Cycle X Transform");
-        record_tr_node(row, meta, "edit.transform.x_transform", "button", "Transform X", None, true, &legacy_x);
+        meta.record_modal_response(row, &legacy_x, FrameInspectEntryInput::modal("edit.transform.x_transform", "button", "Transform X", None, true));
         if legacy_x.clicked() {
             let next = match cur_x {
                 None => Some(MathTransformPreset::Log10),
@@ -328,23 +446,6 @@ fn render_transform_values_body(
             }
         }
     });
-
-    if matches!(cur_x, Some(MathTransformPreset::Log10 | MathTransformPreset::Ln | MathTransformPreset::ConcentrationToNegativeLogM { .. })) {
-        ui.horizontal(|row| {
-            row.label("Zero X substitution:");
-            let zr = row.add(egui::TextEdit::singleline(&mut state.zero_conc_sub_draft).hint_text("e.g. 1e-12 (optional)").desired_width(130.0));
-            record_tr_node(
-                row,
-                meta,
-                "edit.transform.zero_conc_sub",
-                "textbox",
-                "Zero X Substitution",
-                Some(state.zero_conc_sub_draft.clone()),
-                true,
-                &zr,
-            );
-        });
-    }
 
     ui.add_space(6.0);
     // Transform Y choices (`edit.transform.y_transform`).
@@ -364,42 +465,38 @@ fn render_transform_values_body(
             ("divide_k", "Y / K", None),
         ];
         for (slug, lbl, preset_opt) in y_choices {
-            let active = match slug {
-                "affine_k" => matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, .. }) if (slope - 1.0).abs() < 1e-12),
-                "multiply_k" => {
-                    matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, intercept }) if intercept.abs() < 1e-12 && slope >= 1.0)
-                }
-                "divide_k" => matches!(cur_y, Some(MathTransformPreset::LinearScale { slope, intercept }) if intercept.abs() < 1e-12 && slope < 1.0),
-                _ => cur_y == preset_opt,
+            let active = match ConstantKOp::from_slug(slug) {
+                Some(k_op) => active_k_op == Some(k_op),
+                None => active_k_op.is_none() && cur_y == preset_opt,
             };
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.y_transform.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.y_transform.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
-                let target_p = match slug {
-                    "affine_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(0.0);
-                        Some(MathTransformPreset::LinearScale { slope: 1.0, intercept: k })
+                if let Some(k_op) = ConstantKOp::from_slug(slug) {
+                    state.selected_k_op = Some(k_op);
+                    if from_edit {
+                        if let Ok(linear) = build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
+                            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+                        }
+                    } else {
+                        state.standalone_y_preset = Some(slug.to_owned());
                     }
-                    "multiply_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        Some(MathTransformPreset::LinearScale { slope: k, intercept: 0.0 })
-                    }
-                    "divide_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        let slope = if k.abs() > f64::EPSILON { 1.0 / k } else { 1.0 };
-                        Some(MathTransformPreset::LinearScale { slope, intercept: 0.0 })
-                    }
-                    _ => preset_opt,
-                };
-                if from_edit {
-                    apply_math_patch(draft_spec.as_mut(), None, Some(target_p), None, intents);
                 } else {
-                    state.standalone_y_preset = if slug == "none" { None } else { Some(slug.to_owned()) };
+                    state.selected_k_op = None;
+                    if from_edit {
+                        apply_math_patch(draft_spec.as_mut(), None, Some(preset_opt), None, intents);
+                    } else {
+                        state.standalone_y_preset = (slug != "none").then(|| slug.to_owned());
+                    }
                 }
             }
         }
         let legacy_y = widgets::secondary_button(row, "Cycle Y Transform");
-        record_tr_node(row, meta, "edit.transform.y_transform", "button", "Transform Y", None, true, &legacy_y);
+        meta.record_modal_response(row, &legacy_y, FrameInspectEntryInput::modal("edit.transform.y_transform", "button", "Transform Y", None, true));
         if legacy_y.clicked() {
             let next = match cur_y {
                 Some(MathTransformPreset::Log10) => Some(MathTransformPreset::Ln),
@@ -407,6 +504,7 @@ fn render_transform_values_body(
                 Some(MathTransformPreset::Sqrt) => None,
                 _ => Some(MathTransformPreset::Log10),
             };
+            state.selected_k_op = None;
             if from_edit {
                 apply_math_patch(draft_spec.as_mut(), None, Some(next), None, intents);
             } else {
@@ -420,9 +518,20 @@ fn render_transform_values_body(
     ui.horizontal(|row| {
         row.label("Constant K:");
         let kr = row.add(egui::TextEdit::singleline(&mut state.constant_k_draft).hint_text("0.0").desired_width(96.0));
-        record_tr_node(row, meta, "edit.transform.constant_k", "textbox", "Constant K", Some(state.constant_k_draft.clone()), true, &kr);
+        meta.record_modal_response(
+            row,
+            &kr,
+            FrameInspectEntryInput::modal("edit.transform.constant_k", "textbox", "Constant K", Some(state.constant_k_draft.clone()), true),
+        );
+        if kr.changed()
+            && from_edit
+            && let Some(k_op) = state.selected_k_op
+            && let Ok(linear) = build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset)
+        {
+            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+        }
         let hr = widgets::secondary_button(row, "Hook Constant");
-        record_tr_node(row, meta, "edit.transform.hook_k", "button", "Hook Constant", None, true, &hr);
+        meta.record_modal_response(row, &hr, FrameInspectEntryInput::modal("edit.transform.hook_k", "button", "Hook Constant", None, true));
         if hr.clicked() {
             state.hook_picker_open = !state.hook_picker_open;
         }
@@ -437,39 +546,51 @@ fn render_transform_values_body(
         ] {
             let active = cur_ep == mode;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.error_propagation.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
-            if r.clicked() && from_edit {
-                apply_math_patch(draft_spec.as_mut(), None, None, Some(mode), intents);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.error_propagation.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
+            if r.clicked() {
+                if from_edit {
+                    apply_math_patch(draft_spec.as_mut(), None, None, Some(mode), intents);
+                } else {
+                    state.standalone_error_propagation = mode;
+                }
             }
         }
         let legacy_ep = widgets::secondary_button(row, "Toggle Error Prop");
-        record_tr_node(row, meta, "edit.transform.error_propagation", "button", "Error Propagation", None, true, &legacy_ep);
-        if legacy_ep.clicked() && from_edit {
+        meta.record_modal_response(
+            row,
+            &legacy_ep,
+            FrameInspectEntryInput::modal("edit.transform.error_propagation", "button", "Error Propagation", None, true),
+        );
+        if legacy_ep.clicked() {
             let next = if cur_ep == ErrorPropagationMode::ReplicateEndpoints {
                 ErrorPropagationMode::FirstOrderDeltaMethod
             } else {
                 ErrorPropagationMode::ReplicateEndpoints
             };
-            apply_math_patch(draft_spec.as_mut(), None, None, Some(next), intents);
+            if from_edit {
+                apply_math_patch(draft_spec.as_mut(), None, None, Some(next), intents);
+            } else {
+                state.standalone_error_propagation = next;
+            }
         }
     });
 
-    if !from_edit {
-        let cr = ui.checkbox(&mut state.create_new_graph, "Create new graph of transformed results");
-        record_tr_node(ui, meta, "edit.transform.create_graph", "checkbox", "Create New Graph", Some(state.create_new_graph.to_string()), true, &cr);
-    }
+    state.validation_error = validate_transform_k(state.selected_k_op, &state.constant_k_draft, &app.locale_preset);
 
-    state.validation_error = if let Some(k_txt) = (!state.constant_k_draft.trim().is_empty()).then_some(state.constant_k_draft.as_str()) {
-        if parse_localized_number_input(k_txt, &app.locale_preset).is_none() { Some(format!("Invalid numeric constant `{k_txt}`")) } else { None }
-    } else {
-        None
+    let y_preview = match (state.selected_k_op, cur_y) {
+        (_, Some(p)) => format!("{p:?}"),
+        (Some(_), None) => String::from("Invalid Constant K"),
+        (None, None) => String::from("Unchanged"),
     };
-
     let preview = format!(
         "Preview ({}): X -> {}, Y -> {} | Error: {:?}",
         ds.map_or("No sheet", |s| s.title.as_str()),
         cur_x.map_or_else(|| String::from("Unchanged"), |p| format!("{p:?}")),
-        cur_y.map_or_else(|| String::from("Unchanged"), |p| format!("{p:?}")),
+        y_preview,
         cur_ep
     );
     ui.add_space(6.0);
@@ -481,23 +602,18 @@ fn render_transform_values_body(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_normalize_body(
-    ui: &mut Ui,
-    _app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    _from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    _intents: &mut PendingUiIntents,
-) {
+fn render_normalize_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
     ui.label(RichText::new(format!("Normalize Series ({})", ds.map_or("Sheet", |s| s.title.as_str()))).strong().color(tokens.text_primary));
     ui.horizontal_wrapped(|row| {
         row.label("0% Anchor:");
         for (idx, lbl) in [(0usize, "Smallest value"), (1, "First row"), (2, "Fixed 0.0")] {
             let r = choice_pill(row, tokens, lbl, state.norm_zero_idx == idx, true);
-            record_tr_node(row, meta, &format!("edit.transform.norm_zero.{idx}"), "radio", lbl, None, true, &r);
+            meta.record_modal_response(row, &r, FrameInspectEntryInput::modal(&format!("edit.transform.norm_zero.{idx}"), "radio", lbl, None, true));
             if r.clicked() {
                 state.norm_zero_idx = idx;
             }
@@ -507,29 +623,44 @@ fn render_normalize_body(
         row.label("100% Anchor:");
         for (idx, lbl) in [(0usize, "Largest value"), (1, "Sum of column"), (2, "Last row")] {
             let r = choice_pill(row, tokens, lbl, state.norm_hundred_idx == idx, true);
-            record_tr_node(row, meta, &format!("edit.transform.norm_hundred.{idx}"), "radio", lbl, None, true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.norm_hundred.{idx}"), "radio", lbl, None, true),
+            );
             if r.clicked() {
                 state.norm_hundred_idx = idx;
             }
         }
     });
-    ui.horizontal(|row| {
+    ui.horizontal_wrapped(|row| {
         let _ = row.checkbox(&mut state.norm_percent, "Scale output to 0-100% (unchecked = 0-1 fraction)");
         let _ = row.checkbox(&mut state.norm_per_dataset, "Normalize each data set independently");
+        if !from_edit {
+            let cr = row.checkbox(&mut state.create_new_graph, "Create new graph of normalized results");
+            meta.record_modal_response(
+                row,
+                &cr,
+                FrameInspectEntryInput::modal(
+                    "edit.transform.normalize.create_graph",
+                    "checkbox",
+                    "Create New Graph",
+                    Some(state.create_new_graph.to_string()),
+                    true,
+                ),
+            );
+        }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_remove_baseline_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_remove_baseline_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (cur_cols, cur_op) = match draft_spec.as_ref().map(|s| &s.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::RemoveBaseline { baseline_columns, operation })) => {
@@ -553,7 +684,11 @@ fn render_remove_baseline_body(
             let selected = cur_cols.contains(&c);
             let title = ds.map_or_else(|| format!("Col {}", c + 1), |s| s.title_at(c));
             let r = choice_pill(row, tokens, &title, selected, true);
-            record_tr_node(row, meta, &format!("edit.transform.baseline_col.{c}"), "checkbox", &title, Some(selected.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.baseline_col.{c}"), "checkbox", &title, Some(selected.to_string()), true),
+            );
             if r.clicked() {
                 let mut next_cols = cur_cols.clone();
                 if let Some(pos) = next_cols.iter().position(|x| *x == c) {
@@ -587,7 +722,11 @@ fn render_remove_baseline_body(
         ] {
             let active = cur_op == op;
             let r = choice_pill(row, tokens, lbl, active, true);
-            record_tr_node(row, meta, &format!("edit.transform.baseline_operation.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+            meta.record_modal_response(
+                row,
+                &r,
+                FrameInspectEntryInput::modal(&format!("edit.transform.baseline_operation.{slug}"), "radio", lbl, Some(active.to_string()), true),
+            );
             if r.clicked() {
                 if from_edit {
                     if let Some(spec) = draft_spec.as_mut() {
@@ -601,7 +740,11 @@ fn render_remove_baseline_body(
             }
         }
         let legacy_op = widgets::secondary_button(row, "Cycle Operation");
-        record_tr_node(row, meta, "edit.transform.baseline_operation", "button", "Baseline Operation", None, true, &legacy_op);
+        meta.record_modal_response(
+            row,
+            &legacy_op,
+            FrameInspectEntryInput::modal("edit.transform.baseline_operation", "button", "Baseline Operation", None, true),
+        );
         if legacy_op.clicked()
             && from_edit
             && let Some(spec) = draft_spec.as_mut()
@@ -620,17 +763,14 @@ fn render_remove_baseline_body(
     state.validation_error = if cur_cols.is_empty() { Some(String::from("Select at least one baseline column.")) } else { None };
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_mv_filter_transform_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_mv_filter_transform_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let (mut filter_formula, target_arch, derived) = match draft_spec.as_ref().map(|s| &s.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, target_archetype, derived_columns })) => {
@@ -646,7 +786,7 @@ fn render_mv_filter_transform_body(
             (2, "edit.tab.select_cols", "3. Select Columns"),
         ] {
             let r = choice_pill(tabs, tokens, lbl, state.active_tab == idx, true);
-            record_tr_node(tabs, meta, wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true, &r);
+            meta.record_modal_response(tabs, &r, FrameInspectEntryInput::modal(wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true));
             if r.clicked() {
                 state.active_tab = idx;
             }
@@ -662,7 +802,11 @@ fn render_mv_filter_transform_body(
                 let _ = row.add(egui::TextEdit::singleline(&mut state.derived_title_draft).hint_text("Derived1").desired_width(110.0));
                 row.label("Expr:");
                 let er = row.add(egui::TextEdit::singleline(&mut state.formula_draft).hint_text("= log10([Dose])").desired_width(210.0));
-                record_tr_node(row, meta, "edit.transform.formula", "textbox", "Derived Formula", Some(state.formula_draft.clone()), true, &er);
+                meta.record_modal_response(
+                    row,
+                    &er,
+                    FrameInspectEntryInput::modal("edit.transform.formula", "textbox", "Derived Formula", Some(state.formula_draft.clone()), true),
+                );
                 let can_add = !state.derived_title_draft.trim().is_empty() && !state.formula_draft.trim().is_empty();
                 if row.add_enabled(can_add, egui::Button::new("Add Derived")).clicked() {
                     let t = state.derived_title_draft.trim().to_owned();
@@ -691,7 +835,11 @@ fn render_mv_filter_transform_body(
             ui.label(RichText::new("Conjunctive Row Filter Formula:").strong().color(tokens.text_primary));
             let fw = (ui.available_width() - 16.0).clamp(180.0, 420.0);
             let fr = ui.add(egui::TextEdit::singleline(&mut filter_formula).hint_text("[Dose] > 0 && [Arm] == \"Drug\"").desired_width(fw));
-            record_tr_node(ui, meta, "edit.transform.filter_formula", "textbox", "Filter Formula", Some(filter_formula.clone()), true, &fr);
+            meta.record_modal_response(
+                ui,
+                &fr,
+                FrameInspectEntryInput::modal("edit.transform.filter_formula", "textbox", "Filter Formula", Some(filter_formula.clone()), true),
+            );
             if fr.changed() {
                 if from_edit && let Some(spec) = draft_spec.as_mut() {
                     spec.kind = AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform {
@@ -776,7 +924,11 @@ fn render_mv_filter_transform_body(
                         let active = selected.is_empty() || selected.contains(&c);
                         let cname = s.title_at(c);
                         let r = choice_pill(row, tokens, &cname, active, true);
-                        record_tr_node(row, meta, &format!("edit.transform.col.{c}"), "checkbox", &cname, Some(active.to_string()), true, &r);
+                        meta.record_modal_response(
+                            row,
+                            &r,
+                            FrameInspectEntryInput::modal(&format!("edit.transform.col.{c}"), "checkbox", &cname, Some(active.to_string()), true),
+                        );
                         if r.clicked() && from_edit {
                             if let Some(pos) = selected.iter().position(|x| *x == c) {
                                 selected.remove(pos);
@@ -795,18 +947,14 @@ fn render_mv_filter_transform_body(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_extract_and_rearrange_body(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    kind: TransformModalKind,
-    state: &mut TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_extract_and_rearrange_body(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: TransformModalKind) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
     let target_kind = state.extract_target_kind.unwrap_or_else(|| match draft_spec.as_ref().map(|d| &d.kind) {
         Some(AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { target_archetype, .. })) => *target_archetype,
@@ -817,7 +965,7 @@ fn render_extract_and_rearrange_body(
         for (idx, wid, lbl) in [(0usize, "edit.tab.target_format", "1. Target Table Format"), (1, "edit.tab.data_arrangement", "2. Data Arrangement")]
         {
             let r = choice_pill(tabs, tokens, lbl, state.active_tab == idx, true);
-            record_tr_node(tabs, meta, wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true, &r);
+            meta.record_modal_response(tabs, &r, FrameInspectEntryInput::modal(wid, "tab", lbl, Some((state.active_tab == idx).to_string()), true));
             if r.clicked() {
                 state.active_tab = idx;
             }
@@ -840,7 +988,11 @@ fn render_extract_and_rearrange_body(
             ] {
                 let active = target_kind == tk;
                 let r = choice_pill(row, tokens, lbl, active, true);
-                record_tr_node(row, meta, &format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true, &r);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("edit.transform.target_archetype.{slug}"), "radio", lbl, Some(active.to_string()), true),
+                );
                 if r.clicked() {
                     state.extract_target_kind = Some(tk);
                     if from_edit
@@ -858,7 +1010,11 @@ fn render_extract_and_rearrange_body(
             }
         });
         let legacy_ta = widgets::secondary_button(ui, "Cycle Target Archetype");
-        record_tr_node(ui, meta, "edit.transform.target_archetype", "button", "Target Archetype", None, true, &legacy_ta);
+        meta.record_modal_response(
+            ui,
+            &legacy_ta,
+            FrameInspectEntryInput::modal("edit.transform.target_archetype", "button", "Target Archetype", None, true),
+        );
         if legacy_ta.clicked() && from_edit {
             let next_tk = if target_kind == TableKind::Xy { TableKind::Column } else { TableKind::Xy };
             state.extract_target_kind = Some(next_tk);
@@ -904,11 +1060,16 @@ fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModa
                     if let Some(num) = c.value.as_finite_f64() {
                         let lbl = format!("{} -> {num}", c.name);
                         let r = choice_pill(box_ui, tokens, &lbl, false, true);
-                        record_tr_node(box_ui, meta, &format!("edit.transform.hook_item.{found}"), "menuitem", &lbl, None, true, &r);
+                        meta.record_modal_response(
+                            box_ui,
+                            &r,
+                            FrameInspectEntryInput::modal(&format!("edit.transform.hook_item.{found}"), "menuitem", &lbl, None, true),
+                        );
                         found += 1;
                         if r.clicked() {
                             state.constant_k_draft = format!("{num}");
                             state.hook_picker_open = false;
+                            state.validation_error = validate_transform_k(state.selected_k_op, &state.constant_k_draft, &app.locale_preset);
                         }
                     }
                 }
@@ -920,22 +1081,18 @@ fn render_inline_hook_picker(ui: &mut Ui, app: &UiApp, state: &mut TransformModa
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_transform_footer(
-    ui: &mut Ui,
-    app: &UiApp,
-    ds: Option<&DataSheet>,
-    kind: TransformModalKind,
-    state: &TransformModalsEguiState,
-    from_edit: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_transform_footer(ui: &mut Ui, cx: &mut TransformModalCtx<'_>, kind: TransformModalKind) {
+    let app = cx.app;
+    let ds = cx.ds;
+    let from_edit = cx.from_edit;
+    let tokens = cx.tokens;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
     ui.horizontal(|footer| {
-        let cancel_lbl = tr_tr(tokens.locale, "btn.cancel", "Cancel");
-        let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-        record_tr_node(footer, meta, "modal.cancel", "button", cancel_lbl.as_ref(), None, true, &cancel_resp);
+        let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+        let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+        meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
         if cancel_resp.clicked() {
             if from_edit {
                 intents.push_dialog_button("cancel");
@@ -945,32 +1102,67 @@ fn render_transform_footer(
         }
 
         footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-            let ok_lbl = tr_tr(tokens.locale, "btn.ok", "OK");
+            let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
             let can_ok = state.validation_error.is_none();
-            let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl.as_ref(), can_ok);
-            record_tr_node(rhs, meta, "modal.ok", "button", ok_lbl.as_ref(), None, can_ok, &ok_resp);
+            let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
+            meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
             if ok_resp.clicked() {
                 if from_edit {
-                    intents.push_dialog_button("ok");
+                    if commit_edit_transform_k_if_needed(app, kind, state, intents) {
+                        intents.push_dialog_button("ok");
+                    }
                 } else {
                     if let Some(sheet) = ds {
-                        let cmd_params = build_standalone_transform_params(app, sheet, kind, state);
-                        intents.push_engine("transform.run", cmd_params);
+                        match build_standalone_transform_params(app, sheet, kind, state) {
+                            Ok(cmd_params) => {
+                                intents.push_engine("transform.run", cmd_params);
+                                intents.push_close_transform_modal();
+                            }
+                            Err(err) => {
+                                state.validation_error = Some(err);
+                            }
+                        }
+                    } else {
+                        intents.push_close_transform_modal();
                     }
-                    intents.push_close_transform_modal();
                 }
             }
 
             if from_edit {
-                let apply_lbl = tr_tr(tokens.locale, "btn.apply", "Apply");
-                let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl.as_ref()));
-                record_tr_node(rhs, meta, "modal.apply", "button", apply_lbl.as_ref(), None, can_ok, &apply_resp);
-                if apply_resp.clicked() {
+                let apply_lbl = tr_or_fallback(tokens.locale, "btn.apply", "Apply");
+                let apply_resp = rhs.add_enabled(can_ok, egui::Button::new(apply_lbl));
+                meta.record_modal_response(rhs, &apply_resp, FrameInspectEntryInput::modal("modal.apply", "button", apply_lbl, None, can_ok));
+                if apply_resp.clicked() && commit_edit_transform_k_if_needed(app, kind, state, intents) {
                     intents.push_dialog_button("apply");
                 }
             }
         });
     });
+}
+
+fn commit_edit_transform_k_if_needed(
+    app: &UiApp,
+    kind: TransformModalKind,
+    state: &mut TransformModalsEguiState,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    if kind != TransformModalKind::TransformValues {
+        return true;
+    }
+    let Some(k_op) = state.selected_k_op else {
+        return true;
+    };
+    match build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset) {
+        Ok(linear) => {
+            let mut draft_spec = app.canvas_dialogs.edit_params.draft.clone();
+            apply_math_patch(draft_spec.as_mut(), None, Some(Some(linear)), None, intents);
+            true
+        }
+        Err(err) => {
+            state.validation_error = Some(err);
+            false
+        }
+    }
 }
 
 fn apply_math_patch(
@@ -995,51 +1187,57 @@ fn apply_math_patch(
     }
 }
 
-fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: TransformModalKind, state: &TransformModalsEguiState) -> Value {
+fn build_standalone_transform_params(
+    app: &UiApp,
+    ds: &DataSheet,
+    kind: TransformModalKind,
+    state: &TransformModalsEguiState,
+) -> Result<Value, String> {
     match kind {
         TransformModalKind::TransformValues => {
-            let y_t = state.standalone_y_preset.as_deref().unwrap_or("log10");
+            let x_transform = state.standalone_x_preset.as_deref().and_then(parse_math_slug);
+            let y_transform = match state.standalone_y_preset.as_deref() {
+                None | Some("none") => None,
+                Some(slug) => {
+                    if let Some(k_op) = ConstantKOp::from_slug(slug) {
+                        Some(build_linear_scale_for_k(k_op, &state.constant_k_draft, &app.locale_preset)?)
+                    } else {
+                        parse_math_slug(slug)
+                    }
+                }
+            };
             let mut obj = json!({
                 "source_sheet_id": ds.id.as_str(),
-                "kind": "math",
-                "y_transform": match y_t {
-                    "affine_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(0.0);
-                        json!({ "LinearScale": { "slope": 1.0, "intercept": k } })
-                    }
-                    "multiply_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        json!({ "LinearScale": { "slope": k, "intercept": 0.0 } })
-                    }
-                    "divide_k" => {
-                        let k = parse_localized_number_input(&state.constant_k_draft, &app.locale_preset).unwrap_or(1.0);
-                        let slope = if k.abs() > f64::EPSILON { 1.0 / k } else { 1.0 };
-                        json!({ "LinearScale": { "slope": slope, "intercept": 0.0 } })
-                    }
-                    other => Value::String(other.to_owned()),
-                }
+                "kind": AnalysisKind::Transform(TransformAnalysisSpec::Math {
+                    x_transform,
+                    y_transform,
+                    error_propagation: state.standalone_error_propagation,
+                }),
             });
-            if let Some(x_slug) = state.standalone_x_preset.as_deref()
+            if state.create_new_graph
                 && let Some(m) = obj.as_object_mut()
             {
-                let x_val = match x_slug {
-                    "neg_log_m_um" => json!({ "ConcentrationToNegativeLogM": { "molar_unit_factor": 1e-6 } }),
-                    "neg_log_m_nm" => json!({ "ConcentrationToNegativeLogM": { "molar_unit_factor": 1e-9 } }),
-                    other => Value::String(other.to_owned()),
-                };
-                m.insert(String::from("x_transform"), x_val);
+                m.insert(String::from("create_graph"), Value::Bool(true));
             }
-            obj
+            Ok(obj)
         }
-        TransformModalKind::Normalize => json!({
-            "source_sheet_id": ds.id.as_str(),
-            "kind": "normalize",
-            "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
-            "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
-            "as_fraction": !state.norm_percent,
-            "per_data_set": state.norm_per_dataset,
-        }),
-        TransformModalKind::RemoveBaseline => json!({
+        TransformModalKind::Normalize => {
+            let mut obj = json!({
+                "source_sheet_id": ds.id.as_str(),
+                "kind": "normalize",
+                "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
+                "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
+                "as_fraction": !state.norm_percent,
+                "per_data_set": state.norm_per_dataset,
+            });
+            if state.create_new_graph
+                && let Some(m) = obj.as_object_mut()
+            {
+                m.insert(String::from("create_graph"), Value::Bool(true));
+            }
+            Ok(obj)
+        }
+        TransformModalKind::RemoveBaseline => Ok(json!({
             "source_sheet_id": ds.id.as_str(),
             "kind": "remove_baseline",
             "baseline_columns": if state.baseline_cols.is_empty() { vec![0] } else { state.baseline_cols.clone() },
@@ -1049,20 +1247,20 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
                 3 => "fractional_change",
                 _ => "difference",
             },
-        }),
-        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => json!({
+        })),
+        TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => Ok(json!({
             "source_sheet_id": ds.id.as_str(),
             "kind": "select_and_transform",
             "filter_formula": (!state.formula_draft.trim().is_empty()).then_some(state.formula_draft.trim()),
-        }),
-        TransformModalKind::Transpose => json!({ "source_sheet_id": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true }),
+        })),
+        TransformModalKind::Transpose => Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true })),
         TransformModalKind::PruneRows => {
-            json!({ "source_sheet_id": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false })
+            Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false }))
         }
         TransformModalKind::Simulate => {
-            json!({ "source_sheet_id": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 })
+            Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }))
         }
-        TransformModalKind::RandomSample => json!({ "source_sheet_id": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 }),
+        TransformModalKind::RandomSample => Ok(json!({ "source_sheet_id": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 })),
     }
 }
 
@@ -1141,7 +1339,7 @@ pub fn render_exclude_with_reason_modal(
         state.exclude_note_draft = app.canvas_dialogs.exclude_with_reason.note.clone();
     }
 
-    let title = tr_tr(tokens.locale, "w6.view.modal.exclude_with_reason", "Exclude with Reason");
+    let title = tr_or_fallback(tokens.locale, "w6.view.modal.exclude_with_reason", "Exclude with Reason");
     let vp = ctx.content_rect();
     let dlg_w = (vp.width() - 24.0).clamp(280.0, 460.0);
 
@@ -1151,7 +1349,7 @@ pub fn render_exclude_with_reason_modal(
         ui.set_width(inner_w);
         ui.set_min_width(inner_w);
         ui.set_max_width(inner_w);
-        ui.heading(RichText::new(title.as_ref()).color(tokens.text_primary));
+        ui.heading(RichText::new(title).color(tokens.text_primary));
         ui.add_space(6.0);
         ui.label(format!("Target cells selected: {}", app.canvas_dialogs.exclude_with_reason.coords.len()));
         ui.add_space(4.0);
@@ -1160,7 +1358,11 @@ pub fn render_exclude_with_reason_modal(
             for (idx, tag) in ExcludeWithReasonDialogState::preset_reason_tags().iter().enumerate() {
                 let active = app.canvas_dialogs.exclude_with_reason.reason_tag == *tag;
                 let r = choice_pill(row, tokens, tag, active, true);
-                record_tr_node(row, meta, &format!("exclude.preset.{idx}"), "radio", tag, Some(active.to_string()), true, &r);
+                meta.record_modal_response(
+                    row,
+                    &r,
+                    FrameInspectEntryInput::modal(&format!("exclude.preset.{idx}"), "radio", tag, Some(active.to_string()), true),
+                );
                 if r.clicked() {
                     state.exclude_reason_draft = (*tag).to_owned();
                     let mut f = Map::new();
@@ -1174,7 +1376,11 @@ pub fn render_exclude_with_reason_modal(
         ui.horizontal_wrapped(|row| {
             row.label("Reason Tag:");
             let tr_box = row.add(egui::TextEdit::singleline(&mut state.exclude_reason_draft).hint_text("Reason tag").desired_width(180.0));
-            record_tr_node(row, meta, "exclude.reason_tag", "textbox", "Reason Tag", Some(state.exclude_reason_draft.clone()), true, &tr_box);
+            meta.record_modal_response(
+                row,
+                &tr_box,
+                FrameInspectEntryInput::modal("exclude.reason_tag", "textbox", "Reason Tag", Some(state.exclude_reason_draft.clone()), true),
+            );
             if tr_box.changed() {
                 let mut f = Map::new();
                 f.insert(String::from("reason_tag"), Value::String(state.exclude_reason_draft.clone()));
@@ -1188,7 +1394,11 @@ pub fn render_exclude_with_reason_modal(
                 .desired_rows(2)
                 .desired_width((dlg_w - 44.0).max(160.0)),
         );
-        record_tr_node(ui, meta, "exclude.note", "textbox", "Audit Note", Some(state.exclude_note_draft.clone()), true, &nr);
+        meta.record_modal_response(
+            ui,
+            &nr,
+            FrameInspectEntryInput::modal("exclude.note", "textbox", "Audit Note", Some(state.exclude_note_draft.clone()), true),
+        );
         if nr.changed() {
             let mut f = Map::new();
             f.insert(String::from("note"), Value::String(state.exclude_note_draft.clone()));
@@ -1197,17 +1407,17 @@ pub fn render_exclude_with_reason_modal(
 
         ui.add_space(8.0);
         ui.horizontal(|footer| {
-            let cancel_lbl = tr_tr(tokens.locale, "btn.cancel", "Cancel");
-            let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-            record_tr_node(footer, meta, "modal.cancel", "button", cancel_lbl.as_ref(), None, true, &cancel_resp);
+            let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+            let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+            meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal("modal.cancel", "button", cancel_lbl, None, true));
             if cancel_resp.clicked() {
                 intents.push_dialog_button("cancel");
             }
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-                let ok_lbl = tr_tr(tokens.locale, "btn.ok", "OK");
+                let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
                 let can_ok = !state.exclude_reason_draft.trim().is_empty() && !app.canvas_dialogs.exclude_with_reason.coords.is_empty();
-                let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl.as_ref(), can_ok);
-                record_tr_node(rhs, meta, "modal.ok", "button", ok_lbl.as_ref(), None, can_ok, &ok_resp);
+                let ok_resp = widgets::primary_button_enabled(rhs, ok_lbl, can_ok);
+                meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal("modal.ok", "button", ok_lbl, None, can_ok));
                 if ok_resp.clicked() {
                     intents.push_dialog_button("ok");
                 }
@@ -1215,13 +1425,13 @@ pub fn render_exclude_with_reason_modal(
         });
     });
 
-    let title_for_ak = title.as_ref().to_owned();
+    let title_for_ak = title.to_owned();
     modal_resp.response.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Dialog, true, title_for_ak.clone()));
 
     let capture = finalize_egui_modal_response(
         ctx,
         &modal_resp,
-        ModalCaptureSpec { widget_id: "dialog.exclude_with_reason", title: title.as_ref(), z_dialog: ZLayer::ModalDialog },
+        ModalCaptureSpec { widget_id: "dialog.exclude_with_reason", title, z_dialog: ZLayer::ModalDialog },
         meta,
     );
     TransformModalFrameReport {
@@ -1238,37 +1448,4 @@ fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enable
         text = text.color(tokens.accent).strong();
     }
     ui.add_enabled(enabled, egui::Button::new(text).selected(selected))
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_tr_node(
-    ui: &Ui,
-    meta: &mut FrameInspectMeta,
-    wid: &str,
-    role: &str,
-    label: &str,
-    value: Option<String>,
-    enabled: bool,
-    resp: &egui::Response,
-) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
-        return;
-    }
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id: wid,
-            role,
-            label,
-            command_id: None,
-            value: value.map(Value::String),
-            enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
 }

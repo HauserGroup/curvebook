@@ -12,9 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, RwLock};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
-use curvebook_doc::{
-    CellCoord, CellValue, ProjectDocument, SheetCellRange, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource,
-};
+use curvebook_doc::{CellCoord, CellValue, ProjectDocument, SheetId, SheetSection, SubcolumnMode, TableArchetype, TableKind, VariableSource};
 use curvebook_engine::{CommandOutcome, Session, cmd as engine_cmd};
 use curvebook_format::recovery::is_lease_reclaimable;
 use curvebook_format::{
@@ -24,8 +22,10 @@ use curvebook_format::{
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::UiBackend;
 use curvebook_ui_egui::grid_view::ImportOriginKind;
-use curvebook_ui_egui::interaction::{InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics};
-use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, menu_bar_tooltips};
+use curvebook_ui_egui::interaction::{
+    InlineEditorTarget, KeyModifiers, PointerButton, UiEventOutcome, UiInputEvent, ViewportMetrics, build_shortcut_candidates,
+};
+use curvebook_ui_egui::menus::{MenuSectionTooltips, TOOLBAR_BUTTONS, is_desktop_host_routed_command, menu_bar_tooltips};
 use curvebook_ui_egui::theme::UiThemeMode;
 use curvebook_ui_egui::workspace_nav::WelcomeMode;
 use curvebook_ui_egui::{
@@ -1516,6 +1516,9 @@ fn native_export_spec_for_command(command_id: &str) -> Option<NativeExportSpec> 
     Some(spec)
 }
 
+/// File extensions accepted when opening an embedded image via the native OS picker (`WF-57`).
+pub const NATIVE_IMAGE_FILE_EXTENSIONS: &[&str] = &["png", "jpg", "jpeg", "tif", "tiff"];
+
 /// Returns `true` when clicking `command_id` in the native desktop window opens an OS file dialog.
 #[must_use]
 pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
@@ -1533,6 +1536,8 @@ pub fn menu_action_triggers_native_file_dialog(command_id: &str) -> bool {
             | "table.importCsv"
             | "table.importPrism"
             | "table.importPzfx"
+            | "graph.insertImage"
+            | "layout.insertImage"
     ) || native_export_spec_for_command(command_id).is_some()
 }
 
@@ -1555,6 +1560,24 @@ pub fn execute_native_import_at_path(win: &mut DesktopWindowSession, command: &s
         win.app_mut().session_mut().set_file_path(None, false);
     }
     Ok(())
+}
+
+fn resolve_native_export_sheet_id_with_hint(doc: &ProjectDocument, kind: NativeExportTargetKind, hint: Option<&str>) -> Option<SheetId> {
+    if let Some(raw) = hint
+        && let Ok(id) = SheetId::try_new(raw)
+    {
+        let valid = match kind {
+            NativeExportTargetKind::Renderable => matches!(doc.sheet_section(&id), Some(SheetSection::Graphs | SheetSection::Layouts)),
+            NativeExportTargetKind::Graph => doc.graph_sheet(&id).is_some(),
+            NativeExportTargetKind::Layout => doc.layout_sheet(&id).is_some(),
+            NativeExportTargetKind::TableOrResult => doc.data_sheet(&id).is_some() || doc.result_sheet(&id).is_some(),
+            NativeExportTargetKind::Result => doc.result_sheet(&id).is_some(),
+        };
+        if valid {
+            return Some(id);
+        }
+    }
+    resolve_native_export_sheet_id(doc, kind)
 }
 
 fn resolve_native_export_sheet_id(doc: &ProjectDocument, kind: NativeExportTargetKind) -> Option<SheetId> {
@@ -1634,6 +1657,7 @@ pub struct DesktopHostRuntime {
     preferences_persist_hook: Option<PreferencesPersistHook>,
     open_file_dialog_hook: Option<OpenFileDialogHook>,
     file_dialog_adapter: Option<Arc<dyn NativeFileDialogAdapter>>,
+    url_opener: Option<Arc<dyn curvebook_ui_egui::PlatformUrlOpener>>,
 }
 
 impl DesktopHostRuntime {
@@ -1651,6 +1675,7 @@ impl DesktopHostRuntime {
             preferences_persist_hook: None,
             open_file_dialog_hook: None,
             file_dialog_adapter: None,
+            url_opener: None,
         }
     }
 
@@ -1658,6 +1683,15 @@ impl DesktopHostRuntime {
     /// external OS pasteboard changes or OS pasteboard failures).
     pub fn set_clipboard_adapter(&mut self, adapter: Box<dyn OsClipboardAdapter>) {
         self.clipboard_adapter = adapter;
+    }
+
+    /// Install a [`curvebook_ui_egui::PlatformUrlOpener`] across all current and future windows
+    /// owned by this runtime.
+    pub fn set_url_opener(&mut self, opener: Arc<dyn curvebook_ui_egui::PlatformUrlOpener>) {
+        for win in self.windows.values_mut() {
+            win.app.set_url_opener(Arc::clone(&opener));
+        }
+        self.url_opener = Some(opener);
     }
 
     /// Install a callback invoked before closing windows or when UI preference/shortcut state changes.
@@ -1689,7 +1723,8 @@ impl DesktopHostRuntime {
     }
 
     /// Route a file-backed desktop command (`project.open`, `project.save`, `file.save_as`, `export.svg`,
-    /// `export.pdf`, `export.png`, `table.importPzfx`, ...) through the installed [`NativeFileDialogAdapter`].
+    /// `export.pdf`, `export.png`, `graph.exportEmf`, `layout.exportEmf`, `table.importPzfx`, ...)
+    /// through the installed [`NativeFileDialogAdapter`].
     ///
     /// Returns `Ok(None)` when no [`NativeFileDialogAdapter`] is installed or `command_id` does not
     /// trigger a native file dialog.
@@ -1697,6 +1732,26 @@ impl DesktopHostRuntime {
     /// # Errors
     /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
     pub fn dispatch_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Result<Option<DesktopEventOutcome>, String> {
+        self.dispatch_native_file_command_with_params(window_id, command_id, &json!({}))
+    }
+
+    /// Route a file-backed desktop command with explicit JSON `params` (such as `{"path": "..."}`
+    /// from the Welcome Hub open pane or `{"sheet_id": "..."}` from the Export dialog) through the
+    /// desktop host file/save flow (`R15-GUI-13`, `R15-GUI-23`).
+    ///
+    /// # Errors
+    /// Returns an error if the adapter fails, no export target sheet exists, or loading/saving/exporting fails.
+    pub fn dispatch_native_file_command_with_params(
+        &mut self,
+        window_id: DesktopWindowId,
+        command_id: &str,
+        params: &Value,
+    ) -> Result<Option<DesktopEventOutcome>, String> {
+        if matches!(command_id, "project.open" | "file.open")
+            && let Some(explicit_path) = params.get("path").and_then(Value::as_str).map(str::trim).filter(|s| !s.is_empty())
+        {
+            return self.handle_file_dropped(window_id, PathBuf::from(explicit_path)).map(Some);
+        }
         if command_id == "project.open"
             && let Some(mut hook) = self.open_file_dialog_hook.take()
         {
@@ -1790,11 +1845,36 @@ impl DesktopHostRuntime {
                     None => Self::cancelled_file_dialog_outcome(window_id, command_id),
                 }
             }
-            _ => {
-                let spec = native_export_spec_for_command(command_id).ok_or_else(|| format!("unhandled file command `{command_id}`"))?;
+            "graph.insertImage" | "layout.insertImage" => {
+                let target_kind = if command_id == "graph.insertImage" { NativeExportTargetKind::Graph } else { NativeExportTargetKind::Layout };
                 let target_sheet_id = {
                     let win = self.window(window_id)?;
-                    resolve_native_export_sheet_id(win.app().document(), spec.target_kind)
+                    resolve_native_export_sheet_id(win.app().document(), target_kind)
+                        .ok_or_else(|| format!("no matching target sheet available for `{command_id}`"))?
+                };
+                let req = NativeFileDialogRequest {
+                    command_id: command_id.to_owned(),
+                    kind: NativeFileDialogKind::OpenFile,
+                    filter_label: String::from("Images (PNG, JPEG, TIFF)"),
+                    extensions: NATIVE_IMAGE_FILE_EXTENSIONS.iter().map(|s| (*s).to_owned()).collect(),
+                    default_file_name: None,
+                };
+                match adapter.pick(&req)? {
+                    Some(path) => {
+                        let path_str = path.to_string_lossy().into_owned();
+                        let win = self.window_mut(window_id)?;
+                        win.execute_and_journal(command_id, json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str }))?;
+                        Self::completed_file_dialog_outcome(window_id, command_id, &path)
+                    }
+                    None => Self::cancelled_file_dialog_outcome(window_id, command_id),
+                }
+            }
+            _ => {
+                let spec = native_export_spec_for_command(command_id).ok_or_else(|| format!("unhandled file command `{command_id}`"))?;
+                let sheet_hint = params.get("sheet_id").or_else(|| params.get("result_sheet_id")).and_then(Value::as_str);
+                let target_sheet_id = {
+                    let win = self.window(window_id)?;
+                    resolve_native_export_sheet_id_with_hint(win.app().document(), spec.target_kind, sheet_hint)
                         .ok_or_else(|| format!("no matching sheet available for `{}`", spec.command))?
                 };
                 let req = NativeFileDialogRequest {
@@ -1807,7 +1887,7 @@ impl DesktopHostRuntime {
                 match adapter.pick(&req)? {
                     Some(path) => {
                         let path_str = path.to_string_lossy().into_owned();
-                        let params = if spec.command == "result.generateReport" {
+                        let export_params = if spec.command == "result.generateReport" {
                             let report_fmt = match path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase).as_deref() {
                                 Some("tex") => "latex",
                                 Some("txt") => "plain",
@@ -1818,7 +1898,7 @@ impl DesktopHostRuntime {
                             json!({ "sheet_id": target_sheet_id.as_str(), "path": path_str })
                         };
                         let win = self.window_mut(window_id)?;
-                        win.execute_and_journal(spec.command, params)?;
+                        win.execute_and_journal(spec.command, export_params)?;
                         Self::completed_file_dialog_outcome(window_id, spec.command, &path)
                     }
                     None => Self::cancelled_file_dialog_outcome(window_id, spec.command),
@@ -2115,6 +2195,9 @@ impl DesktopHostRuntime {
         let effective_viewport = if viewport.logical_width > 0.0 && viewport.logical_height > 0.0 { viewport } else { self.config.initial_viewport };
 
         let mut app = UiApp::from_session(session);
+        if let Some(opener) = self.url_opener.as_ref() {
+            app.set_url_opener(Arc::clone(opener));
+        }
         if let Err(err) = configure_app_overrides(&mut app, &self.config) {
             if let Some((_, journal, _)) = recovery {
                 abort_journal_lease_best_effort(journal);
@@ -2707,6 +2790,7 @@ impl DesktopHostRuntime {
                 if let Some(p) = archive_path {
                     session.set_file_path(Some(p), clean_archive);
                 }
+                let inherited_url_opener = self.url_opener.clone();
                 let win = self.window_mut(window_id)?;
                 let prev_locale = win.app.locale.clone();
                 let prev_theme = win.app.theme.mode;
@@ -2718,6 +2802,9 @@ impl DesktopHostRuntime {
                 let prev_gui_only = win.app.is_gui_only();
 
                 let mut next_app = UiApp::from_session(session);
+                if let Some(opener) = inherited_url_opener {
+                    next_app.set_url_opener(opener);
+                }
                 let _ = next_app.set_locale(normalize_beta_gui_locale(&prev_locale));
                 next_app.set_theme_mode(prev_theme);
                 next_app.set_ui_scale(prev_ui_scale);
@@ -2879,22 +2966,11 @@ impl DesktopHostRuntime {
             win.app.inline_editor.buffer.clear();
             win.app.inline_editor.caret_byte = 0;
         } else if let Some(sheet_id) = win.app.document().active_sheet_id.clone()
-            && win.app.document().data_sheet(&sheet_id).is_some()
+            && let Some(ds) = win.app.document().data_sheet(&sheet_id).cloned()
+            && !ds.frozen
         {
-            let range = win.app.grid.tool.selection_bounds().or_else(|| win.app.grid.tool.active.map(|c| (c, c)));
-            if let Some((min, max)) = range {
-                let _ = win.execute_and_journal(
-                    "table.clearCells",
-                    json!({
-                        "sheet_id": sheet_id.as_str(),
-                        "row_start": min.row,
-                        "row_end": max.row,
-                        "col_start": min.col,
-                        "col_end": max.col,
-                        "subcol_start": min.subcol,
-                        "subcol_end": max.subcol,
-                    }),
-                )?;
+            for params in win.app.grid.clipboard_target(&ds).clear_cells_requests(&ds) {
+                let _ = win.execute_and_journal("table.clearCells", params)?;
             }
         }
         Ok(DesktopEventOutcome { action: copy_out.action.replacen("copied", "cut", 1), ..copy_out })
@@ -3000,13 +3076,8 @@ impl DesktopHostRuntime {
                     && let Some(ds) = doc.data_sheet(sheet_id)
                 {
                     let dec = win.app.locale_preset.decimal_separator;
-                    let tsv = if let Some((min, max)) = win.app.grid.tool.selection_bounds() {
-                        let range = SheetCellRange::new(CellCoord::new(min.row, min.col, min.subcol), CellCoord::new(max.row, max.col, max.subcol));
-                        ClipboardBundle::tsv_from_datasheet_range(ds, range, dec)
-                    } else {
-                        ClipboardBundle::tsv_from_datasheet(ds, dec)?
-                    };
-                    CopyTarget::TableTsv(tsv)
+                    let plan = win.app.grid.prepare_clipboard_selection(ds, dec)?;
+                    CopyTarget::TableTsv(plan.tsv)
                 } else if let Some(sheet_id) = active_id
                     && matches!(doc.sheet_section(sheet_id), Some(SheetSection::Graphs | SheetSection::Layouts))
                 {
@@ -3291,6 +3362,10 @@ fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
         .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
 }
 
+fn active_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned()
+}
+
 fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
     if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
         return Some(active.clone());
@@ -3396,7 +3471,7 @@ fn resolve_host_or_ui_route(
 ) -> Result<Option<DesktopCommandRoute>, String> {
     match base_cmd {
         "window.new" | "file.newWindow" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.new" })),
-        "window.close" | "file.close" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
+        "window.close" | "file.close" | "file.quit" | "app.quit" => Ok(Some(DesktopCommandRoute::HostAction { action: "window.close" })),
         "edit.copy" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.copy" })),
         "edit.paste" => Ok(Some(DesktopCommandRoute::HostAction { action: "edit.paste" })),
         "toolbar.axes" => Ok(Some(DesktopCommandRoute::UiCommand {
@@ -3462,7 +3537,7 @@ fn resolve_host_or_ui_route(
                 "metrics": { "logical_width": 1024.0, "logical_height": 640.0, "scale_factor": 1.0 }
             }),
         })),
-        cmd if cmd.starts_with("ui.") || cmd == "app.about" => {
+        cmd if cmd.starts_with("ui.") || cmd == "app.about" || cmd == "app.feedback" => {
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: cmd.to_owned(), params: json!({}) }))
         }
         _ => Ok(None),
@@ -3594,17 +3669,17 @@ fn resolve_table_route(app: &UiApp, doc: &ProjectDocument, base_cmd: &str) -> Re
         })),
         "table.paste" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPaste,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.pasteLink" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardPasteLink,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.importCsv" | "table.importPrism" | "table.importPzfx" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::ImportWizardExternalFile,
-            target_sheet_id: resolve_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            target_sheet_id: active_data_sheet_id(doc).map(|id| id.as_str().to_owned()),
             query: None,
         })),
         "table.setRowTitles" | "table.setGroupTitles" | "table.setTitles" | "table.setSubcolumnTitles" => {
@@ -3694,18 +3769,8 @@ fn build_table_context_params(app: &UiApp, doc: &ProjectDocument, cmd: &str) -> 
             Ok(json!({ "sheet_id": id.as_str(), "edits": [{ "row": row, "col": col, "subcol": subcol, "value": existing }] }))
         }
         "table.clearCells" => {
-            if let Some((a, b)) = bounds {
-                let start_row = a.row.min(total_rows - 1);
-                let end_row = b.row.min(total_rows - 1);
-                let start_col = a.col.min(total_cols - 1);
-                let end_col = b.col.min(total_cols - 1);
-                Ok(json!({
-                    "sheet_id": id.as_str(),
-                    "range": {
-                        "start": { "row": start_row, "col": start_col, "subcol": a.subcol },
-                        "end": { "row": end_row, "col": end_col, "subcol": b.subcol }
-                    }
-                }))
+            if let Some(first_req) = app.grid.clipboard_target(ds).clear_cells_requests(ds).into_iter().next() {
+                Ok(first_req)
             } else {
                 Ok(json!({ "sheet_id": id.as_str(), "row": row, "col": col, "subcol": subcol }))
             }
@@ -3874,6 +3939,52 @@ fn resolve_graph_layout_info_only_route(doc: &ProjectDocument, base_cmd: &str, v
             }
             Ok(Some(DesktopCommandRoute::UiCommand { ui_command_id: String::from("ui.canvas.applyPreset"), params }))
         }
+        "edit.pasteResultTable" => {
+            let src = resolve_result_sheet_id(doc).ok_or_else(|| String::from("no result sheet available for `edit.pasteResultTable`"))?;
+            let target =
+                resolve_renderable_sheet_id(doc).ok_or_else(|| String::from("no graph or layout sheet available for `edit.pasteResultTable`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("edit.pasteResultTable"),
+                params: json!({ "source_sheet_id": src.as_str(), "target_sheet_id": target.as_str() }),
+            }))
+        }
+        "edit.pasteImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_renderable_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("edit.pasteImage")),
+        })),
+        "graph.insertImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_graph_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("graph.insertImage")),
+        })),
+        "graph.updateImage" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.image.format.open"),
+            params: sheet_id_obj_or_empty(resolve_graph_sheet_id(doc)),
+        })),
+        "layout.insertImage" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
+            kind: DesktopDialogOpener::CommandPalette,
+            target_sheet_id: resolve_layout_sheet_id(doc).map(|id| id.as_str().to_owned()),
+            query: Some(String::from("layout.insertImage")),
+        })),
+        "layout.updateImage" => Ok(Some(DesktopCommandRoute::UiCommand {
+            ui_command_id: String::from("ui.image.format.open"),
+            params: sheet_id_obj_or_empty(resolve_layout_sheet_id(doc)),
+        })),
+        "layout.equalizeScaling" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.equalizeScaling`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.equalizeScaling"),
+                params: json!({ "sheet_id": id.as_str(), "mode": "match_smallest" }),
+            }))
+        }
+        "layout.reorderPanel" => {
+            let id = resolve_layout_sheet_id(doc).ok_or_else(|| String::from("no layout sheet available for `layout.reorderPanel`"))?;
+            Ok(Some(DesktopCommandRoute::EngineCommand {
+                engine_command_id: String::from("layout.reorderPanel"),
+                params: json!({ "sheet_id": id.as_str(), "panel_index": 0, "action": "bring_to_front" }),
+            }))
+        }
         "info.setNote" => Ok(Some(DesktopCommandRoute::UiDialogOpener {
             kind: DesktopDialogOpener::InfoNotesEditor,
             target_sheet_id: resolve_info_sheet_id(doc).map(|id| id.as_str().to_owned()),
@@ -3911,19 +4022,20 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = false;
             app.grid.import_wizard.origin_kind = ImportOriginKind::Clipboard;
-            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": false }))
         }
         DesktopDialogOpener::ImportWizardPasteLink => {
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = true;
-            app.grid.import_wizard.source_sheet_id = parsed_target.or_else(|| resolve_data_sheet_id(&doc));
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "is_live_link": true }))
         }
         DesktopDialogOpener::ImportWizardExternalFile => {
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.is_live_link = false;
             app.grid.import_wizard.origin_kind = ImportOriginKind::ExternalDelimitedFile;
+            app.grid.import_wizard.target_sheet_id = parsed_target.or_else(|| active_data_sheet_id(&doc));
             Ok(json!({ "dialog": "ImportPasteWizard", "origin_kind": "ExternalDelimitedFile" }))
         }
         DesktopDialogOpener::VariablesDialog => {
@@ -3988,59 +4100,20 @@ fn open_desktop_dialog(app: &mut UiApp, opener: DesktopDialogOpener, target_shee
     }
 }
 
-fn build_shortcut_candidates_for(key: &str, modifiers: KeyModifiers) -> Vec<String> {
-    if key.is_empty() {
-        return Vec::new();
-    }
-    let mut out = Vec::with_capacity(2);
-    let build = |use_cmd_for_ctrl: bool| -> String {
-        let mut parts = Vec::with_capacity(5);
-        if modifiers.meta || (use_cmd_for_ctrl && modifiers.ctrl) {
-            parts.push("Cmd");
-        }
-        if modifiers.ctrl && !(use_cmd_for_ctrl && !modifiers.meta) {
-            parts.push("Ctrl");
-        }
-        if modifiers.alt {
-            parts.push("Alt");
-        }
-        if modifiers.shift {
-            parts.push("Shift");
-        }
-        parts.push(key);
-        parts.join("+")
-    };
-    out.push(build(false));
-    if modifiers.ctrl && !modifiers.meta {
-        out.push(build(true));
-    }
-    out
-}
-
 fn shortcut_uses_desktop_routing(command_id: &str) -> bool {
-    if matches!(
-        command_id,
-        "window.new"
-            | "file.newWindow"
-            | "window.close"
-            | "file.close"
-            | "edit.copy"
-            | "edit.paste"
-            | "project.open"
-            | "file.open"
-            | "project.save"
-            | "file.save"
-            | "project.saveAs"
-            | "file.save_as"
-            | "sheet.createData"
-            | "ui.theme.set"
-            | "ui.locale.set"
-            | "ui.previewFilter.set"
-            | "ui.canvas.applyPreset"
-            | "ui.shortcut.set"
-            | "ui.result.applyRemediation"
-            | "ui.event.dispatch"
-    ) {
+    if is_desktop_host_routed_command(command_id)
+        || matches!(
+            command_id,
+            "sheet.createData"
+                | "ui.theme.set"
+                | "ui.locale.set"
+                | "ui.previewFilter.set"
+                | "ui.canvas.applyPreset"
+                | "ui.shortcut.set"
+                | "ui.result.applyRemediation"
+                | "ui.event.dispatch"
+        )
+    {
         return true;
     }
     engine_cmd::registry()
@@ -4056,7 +4129,7 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         return None;
     }
     let on_result_sheet = app.is_result_sheet_shortcut_context();
-    for candidate in build_shortcut_candidates_for(key, modifiers) {
+    for candidate in build_shortcut_candidates(key, modifiers) {
         if let Some(matched) = app.shortcuts.handle_key_combo_for_context(&candidate, on_result_sheet)
             && shortcut_uses_desktop_routing(&matched.command_id)
         {
@@ -4064,4 +4137,115 @@ pub fn match_routed_desktop_shortcut(app: &UiApp, key: &str, modifiers: KeyModif
         }
     }
     None
+}
+
+#[cfg(test)]
+mod wave_b_host_tests {
+    use super::{DesktopHostConfig, DesktopHostEvent, DesktopHostRuntime};
+    use curvebook_doc::{Cell, CellCoord, CellValue, ColumnDesignHint, ColumnTable, DataSheet, GraphSheet, ProjectDocument, SheetId, TableArchetype};
+    use curvebook_engine::Session;
+    use curvebook_ui_egui::interaction::ViewportMetrics;
+    use serde_json::json;
+
+    fn cell_number(ds: &DataSheet, row: usize, col: usize) -> Option<f64> {
+        match ds.cell(CellCoord::new(row, col, 0))?.value {
+            CellValue::Number(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    #[test]
+    fn desktop_host_large_2x5000_copy_and_cut_do_not_truncate_at_4096_cells() -> Result<(), String> {
+        let rows = 5_000usize;
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 2, rows).map_err(|e| e.to_string())?;
+        for r in 0..rows {
+            col.data_sets[0].cells[r][0] = Cell::number((r + 1) as f64);
+            col.data_sets[1].cells[r][0] = Cell::number((10_000 + r + 1) as f64);
+        }
+        let mut doc = ProjectDocument::new("Host Large Clipboard").map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("ds-large", "Large", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-large"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        {
+            let win = rt.window_mut(wid)?;
+            let ds = win.app.document().data_sheet(&SheetId::new("ds-large")).ok_or("missing ds-large")?.clone();
+            win.app.grid.select_single_sync(CellCoord::new(0, 0, 0).into());
+            win.app.grid.extend_shift_range(&ds, CellCoord::new(rows - 1, 1, 0).into());
+        }
+
+        let out = rt.cut_selection(wid)?;
+        assert!(out.handled);
+        let tsv = rt.clipboard_text.as_deref().ok_or("missing host clipboard_text")?;
+        let lines: Vec<&str> = tsv.lines().collect();
+        assert_eq!(lines.len(), rows);
+        assert_eq!(lines.first().copied(), Some("1\t10001"));
+        assert_eq!(lines.last().copied(), Some("5000\t15000"));
+
+        let ds = rt.window(wid)?.app.document().data_sheet(&SheetId::new("ds-large")).ok_or("missing ds-large")?;
+        assert!(ds.cell(CellCoord::new(rows - 1, 1, 0)).is_some_and(Cell::is_empty));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_host_discontiguous_cut_leaves_unselected_interior_cells_intact() -> Result<(), String> {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 3, 6).map_err(|e| e.to_string())?;
+        for r in 0..6 {
+            for c in 0..3 {
+                col.data_sets[c].cells[r][0] = Cell::number(((r + 1) * 10 + (c + 1)) as f64);
+            }
+        }
+        let mut doc = ProjectDocument::new("Host Discontiguous Cut").map_err(|e| e.to_string())?;
+        let ds = DataSheet::new("ds-1", "Table", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-1"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        {
+            let win = rt.window_mut(wid)?;
+            let ds = win.app.document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?.clone();
+            win.app.grid.select_single_sync(CellCoord::new(0, 0, 0).into());
+            win.app.grid.toggle_cmd_selection(&ds, CellCoord::new(4, 2, 0).into());
+        }
+
+        let out = rt.cut_selection(wid)?;
+        assert!(out.handled);
+        let tsv = rt.clipboard_text.as_deref().ok_or("missing host clipboard_text")?;
+        assert!(tsv.contains("11") && tsv.contains("53") && !tsv.contains("22"), "unexpected TSV: {tsv:?}");
+
+        let ds = rt.window(wid)?.app.document().data_sheet(&SheetId::new("ds-1")).ok_or("missing ds-1")?;
+        assert!(ds.cell(CellCoord::new(0, 0, 0)).is_some_and(Cell::is_empty));
+        assert!(ds.cell(CellCoord::new(4, 2, 0)).is_some_and(Cell::is_empty));
+        assert_eq!(cell_number(ds, 1, 1), Some(22.0));
+        Ok(())
+    }
+
+    #[test]
+    fn desktop_host_paste_link_opener_sets_target_sheet_id_without_clobbering_source_sheet_id() -> Result<(), String> {
+        let mut doc = ProjectDocument::new("Host Import Opener").map_err(|e| e.to_string())?;
+        let col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).map_err(|e| e.to_string())?;
+        let ds_a = DataSheet::new("ds-a", "A", TableArchetype::Column(col)).map_err(|e| e.to_string())?;
+        let graph = GraphSheet::new_uninitialized_for_data("g-1", &ds_a).map_err(|e| e.to_string())?;
+        doc.add_data_sheet(ds_a).map_err(|e| e.to_string())?;
+        doc.add_graph_sheet(graph).map_err(|e| e.to_string())?;
+        doc.active_sheet_id = Some(SheetId::new("ds-a"));
+
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+        let wid = rt.open_window_with_session(Session::from_document(doc), ViewportMetrics::new(1280.0, 800.0, 1.0), false)?;
+        let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("table.pasteLink") })?;
+        let wiz = &rt.window(wid)?.app.grid.import_wizard;
+        assert!(wiz.open && wiz.is_live_link);
+        assert_eq!(wiz.target_sheet_id, Some(SheetId::new("ds-a")));
+        assert_eq!(wiz.source_sheet_id, None, "desktop opener must not overwrite source_sheet_id with target");
+
+        // When a Graph is active, opening Paste Link must leave target_sheet_id = None (never defaulting to source A).
+        rt.window_mut(wid)?.app.execute_command("sheet.select", json!({ "sheet_id": "g-1" })).map_err(|e| e.to_string())?;
+        let _ = rt.dispatch(DesktopHostEvent::MenuAction { window_id: wid, command_id: String::from("table.pasteLink") })?;
+        let wiz2 = &rt.window(wid)?.app.grid.import_wizard;
+        assert_eq!(wiz2.target_sheet_id, None, "graph-active opener must not silently target primary source sheet");
+        Ok(())
+    }
 }

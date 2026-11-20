@@ -749,6 +749,22 @@ pub struct InteractionControllerState {
     pub last_clipboard_text: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub last_clipboard_bundle: Option<crate::os_integration::ClipboardBundle>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_copied_result_table: Option<ResultTableClipboard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub last_clipboard_image_png: Option<Vec<u8>>,
+}
+
+/// Structured copy reference to a [`curvebook_doc::ResultSheet`] selection for graph pasting (`WF-58`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ResultTableClipboard {
+    pub source_sheet_id: SheetId,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub tab_id: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_rows: Option<Vec<usize>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub selected_cols: Option<Vec<usize>>,
 }
 
 /// Structured outcome emitted by [`dispatch_ui_event`].
@@ -1725,7 +1741,13 @@ fn handle_textbox_key(
     Ok(handled.then(|| UiEventOutcome { handled: true, action: format!("textbox.key:{key}"), ..Default::default() }))
 }
 
-fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {
+/// Build the ordered list of canonical shortcut strings for `(key, modifiers)`, including the
+/// `Ctrl`-to-`Cmd` fallback candidate when `ctrl` is pressed without `meta`.
+///
+/// Modifier order is deterministic (`Cmd`, `Ctrl`, `Alt`, `Shift`, `key`). Returns an empty vector
+/// when `key` is empty.
+#[must_use]
+pub fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {
     if key.is_empty() {
         return Vec::new();
     }
@@ -1787,4 +1809,22 @@ fn cancel_inline_edit(app: &mut UiApp) -> UiEventOutcome {
     app.inline_editor.cancel();
     app.grid.tool.editing_buffer = None;
     UiEventOutcome { handled: true, action: String::from("inline_edit.cancelled"), ..Default::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyModifiers, build_shortcut_candidates};
+
+    #[test]
+    fn build_shortcut_candidates_preserves_order_ctrl_to_cmd_fallback_and_combined_ctrl_cmd() {
+        assert!(build_shortcut_candidates("", KeyModifiers::default()).is_empty());
+        assert_eq!(build_shortcut_candidates("Escape", KeyModifiers::default()), vec!["Escape"]);
+        assert_eq!(build_shortcut_candidates("s", KeyModifiers { meta: true, ..Default::default() }), vec!["Cmd+s"]);
+        assert_eq!(build_shortcut_candidates("s", KeyModifiers { ctrl: true, ..Default::default() }), vec!["Ctrl+s", "Cmd+s"]);
+        assert_eq!(
+            build_shortcut_candidates("k", KeyModifiers { ctrl: true, alt: true, shift: true, meta: false }),
+            vec!["Ctrl+Alt+Shift+k", "Cmd+Alt+Shift+k"]
+        );
+        assert_eq!(build_shortcut_candidates("k", KeyModifiers { ctrl: true, meta: true, alt: true, shift: true }), vec!["Cmd+Ctrl+Alt+Shift+k"]);
+    }
 }

@@ -259,6 +259,78 @@ struct LabelSpec<'a> {
     z_layer: ZLayer,
 }
 
+struct WelcomeMiddleCtx<'a> {
+    app: &'a UiApp,
+    state: &'a mut WelcomeHubEguiState,
+    tokens: &'a Tokens,
+    enabled: bool,
+    z_layer: ZLayer,
+    meta: &'a mut FrameInspectMeta,
+    content_w: f32,
+}
+
+struct WelcomeFooterCtx<'a> {
+    app: &'a UiApp,
+    state: &'a mut WelcomeHubEguiState,
+    tokens: &'a Tokens,
+    enabled: bool,
+    cancel_visible: bool,
+    z_layer: ZLayer,
+    meta: &'a mut FrameInspectMeta,
+    intents: &'a mut PendingUiIntents,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct TextEditSpec<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    hint: &'a str,
+    width: f32,
+    enabled: bool,
+    z_layer: ZLayer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ArchRailButtonSpec<'a> {
+    arch: WelcomeArchetypeChoice,
+    width: f32,
+    selected: bool,
+    enabled: bool,
+    locale: &'a str,
+    z_layer: ZLayer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct ActionButtonSpec<'a> {
+    max_w: f32,
+    primary: bool,
+    enabled: bool,
+    label: &'a str,
+    widget_id: &'a str,
+    command_id: Option<&'a str>,
+    disabled_reason: Option<&'a str>,
+    z_layer: ZLayer,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct CheckToggleSpec<'a> {
+    widget_id: &'a str,
+    label: &'a str,
+    checked: bool,
+    enabled: bool,
+    z_layer: ZLayer,
+}
+
+#[derive(Debug, Clone)]
+struct StepperSpec<'a, T> {
+    widget_id: &'a str,
+    label: &'a str,
+    value: T,
+    range: std::ops::RangeInclusive<T>,
+    enabled: bool,
+    z_layer: ZLayer,
+}
+
 /// Render the centered 3-pane Welcome & Workspace Hub inside `CenterStage` (`§8.1`).
 pub fn render_welcome_hub(
     ui: &mut egui::Ui,
@@ -354,7 +426,8 @@ pub fn render_welcome_hub(
 
     let mut footer_ui = card_ui.new_child(egui::UiBuilder::new().max_rect(footer_rect).layout(Layout::top_down(Align::Min)));
     footer_ui.set_clip_rect(footer_rect);
-    render_card_footer(&mut footer_ui, app, state, tokens, card_enabled, cancel_visible, card_z, meta, intents);
+    let mut footer_cx = WelcomeFooterCtx { app, state, tokens, enabled: card_enabled, cancel_visible, z_layer: card_z, meta, intents };
+    render_card_footer(&mut footer_ui, &mut footer_cx);
 
     if state.clone_options_open {
         report.clone_modal_rect_pt = render_clone_options_submodal(ui, app, state, tokens, enabled, meta);
@@ -422,7 +495,7 @@ fn render_left_rail(
 
         for arch in WelcomeArchetypeChoice::ALL {
             let selected = matches!(state.left_mode, WelcomeLeftMode::NewTableArchetype(a) if a == arch);
-            if render_arch_rail_button(ui, arch, row_w, selected, enabled, tokens, locale, z_layer, meta) && enabled {
+            if render_arch_rail_button(ui, tokens, meta, ArchRailButtonSpec { arch, width: row_w, selected, enabled, locale, z_layer }) && enabled {
                 state.left_mode = WelcomeLeftMode::NewTableArchetype(arch);
                 state.schema.archetype = arch;
                 state.schema.selected_sample_index = 0;
@@ -535,40 +608,36 @@ fn render_middle_pane(
     z_layer: ZLayer,
     meta: &mut FrameInspectMeta,
 ) {
-    let locale = &app.locale;
     egui::ScrollArea::vertical().id_salt("welcome_mid_pane_scroll").auto_shrink([false, false]).show(ui, |ui| {
         let content_w = (ui.available_width() - 12.0).max(120.0);
         ui.set_max_width(content_w);
 
-        match state.left_mode {
+        let left_mode = state.left_mode;
+        let mut cx = WelcomeMiddleCtx { app, state, tokens, enabled, z_layer, meta, content_w };
+        match left_mode {
             WelcomeLeftMode::NewTableArchetype(arch) => {
-                render_middle_new_table(ui, locale, arch, state, tokens, enabled, z_layer, meta, content_w);
+                render_middle_new_table(ui, &mut cx, arch);
             }
             WelcomeLeftMode::StarterTemplates => {
-                render_middle_starter_templates(ui, locale, state, tokens, enabled, z_layer, meta, content_w);
+                render_middle_starter_templates(ui, &mut cx);
             }
             WelcomeLeftMode::ClonePipeline => {
-                render_middle_clone_pipeline(ui, app, state, tokens, enabled, z_layer, meta, content_w);
+                render_middle_clone_pipeline(ui, &mut cx);
             }
             WelcomeLeftMode::OpenFile => {
-                render_middle_open_file(ui, locale, state, tokens, enabled, z_layer, meta, content_w);
+                render_middle_open_file(ui, &mut cx);
             }
         }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_middle_new_table(
-    ui: &mut egui::Ui,
-    locale: &str,
-    arch: WelcomeArchetypeChoice,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_middle_new_table(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arch: WelcomeArchetypeChoice) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+
     render_clipped_text_label(
         ui,
         "welcome.section.setup",
@@ -576,21 +645,23 @@ fn render_middle_new_table(
         FontId::proportional(12.5),
         tokens.text_strong,
         z_layer,
-        meta,
+        cx.meta,
     );
     ui.add_space(4.0);
 
     render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
     render_clipped_text_edit(
         ui,
-        "welcome.input.title",
-        tr(locale, "welcome.field.title"),
-        &mut state.schema.title,
-        arch.label(locale),
-        (content_w - 8.0).max(80.0),
-        enabled,
-        z_layer,
-        meta,
+        &mut cx.state.schema.title,
+        cx.meta,
+        TextEditSpec {
+            widget_id: "welcome.input.title",
+            label: tr(locale, "welcome.field.title"),
+            hint: arch.label(locale),
+            width: (content_w - 8.0).max(80.0),
+            enabled,
+            z_layer,
+        },
     );
     ui.add_space(6.0);
 
@@ -602,42 +673,42 @@ fn render_middle_new_table(
                 ui,
                 seg_w,
                 tokens,
-                meta,
+                cx.meta,
                 LabelSpec {
                     widget_id: "welcome.entry_mode.empty",
                     role: "radio",
                     a11y_role: egui::Role::RadioButton,
                     label: tr(locale, "welcome.mode.empty"),
                     command_id: None,
-                    selected: !state.schema.entry_mode_sample,
+                    selected: !cx.state.schema.entry_mode_sample,
                     enabled,
                     disabled_reason: None,
                     z_layer,
                 },
             ) && enabled
             {
-                state.schema.entry_mode_sample = false;
+                cx.state.schema.entry_mode_sample = false;
             }
             if render_pill_button(
                 ui,
                 seg_w,
                 tokens,
-                meta,
+                cx.meta,
                 LabelSpec {
                     widget_id: "welcome.entry_mode.sample",
                     role: "radio",
                     a11y_role: egui::Role::RadioButton,
                     label: tr(locale, "welcome.mode.sample"),
                     command_id: None,
-                    selected: state.schema.entry_mode_sample,
+                    selected: cx.state.schema.entry_mode_sample,
                     enabled,
                     disabled_reason: None,
                     z_layer,
                 },
             ) && enabled
             {
-                state.schema.entry_mode_sample = true;
-                state.schema.selected_sample_index = 0;
+                cx.state.schema.entry_mode_sample = true;
+                cx.state.schema.selected_sample_index = 0;
             }
         });
     } else {
@@ -645,19 +716,19 @@ fn render_middle_new_table(
     }
     ui.add_space(6.0);
 
-    if state.schema.entry_mode_sample {
+    if cx.state.schema.entry_mode_sample {
         let fixtures = matching_samples_for(arch);
         if fixtures.is_empty() {
             render_plain_clipped_label(ui, "No tutorial fixture registered for this archetype.", FontId::proportional(11.0), tokens.text_muted);
         } else {
-            let sel_idx = state.schema.selected_sample_index.min(fixtures.len() - 1);
+            let sel_idx = cx.state.schema.selected_sample_index.min(fixtures.len() - 1);
             for (idx, fx) in fixtures.iter().enumerate() {
                 let wid = format!("welcome.sample.{}", fx.id);
                 if render_pill_button(
                     ui,
                     content_w,
                     tokens,
-                    meta,
+                    cx.meta,
                     LabelSpec {
                         widget_id: &wid,
                         role: "radio",
@@ -671,7 +742,7 @@ fn render_middle_new_table(
                     },
                 ) && enabled
                 {
-                    state.schema.selected_sample_index = idx;
+                    cx.state.schema.selected_sample_index = idx;
                 }
                 ui.add_space(2.0);
             }
@@ -680,7 +751,7 @@ fn render_middle_new_table(
             }
         }
     } else {
-        render_archetype_schema_controls(ui, locale, arch, state, tokens, enabled, z_layer, meta, content_w);
+        render_archetype_schema_controls(ui, cx, arch);
     }
 
     ui.add_space(6.0);
@@ -691,48 +762,47 @@ fn render_middle_new_table(
         FontId::proportional(11.5),
         tokens.text_muted,
         z_layer,
-        meta,
+        cx.meta,
     );
     if render_check_toggle(
         ui,
-        "welcome.toggle.auto_graph",
-        tr(locale, "welcome.toggle.auto_graph"),
-        state.schema.auto_graph,
-        enabled,
         tokens,
-        z_layer,
-        meta,
+        cx.meta,
+        CheckToggleSpec {
+            widget_id: "welcome.toggle.auto_graph",
+            label: tr(locale, "welcome.toggle.auto_graph"),
+            checked: cx.state.schema.auto_graph,
+            enabled,
+            z_layer,
+        },
     ) && enabled
     {
-        state.schema.auto_graph = !state.schema.auto_graph;
+        cx.state.schema.auto_graph = !cx.state.schema.auto_graph;
     }
     if render_check_toggle(
         ui,
-        "welcome.toggle.auto_info",
-        tr(locale, "welcome.toggle.auto_info"),
-        state.schema.auto_info,
-        enabled,
         tokens,
-        z_layer,
-        meta,
+        cx.meta,
+        CheckToggleSpec {
+            widget_id: "welcome.toggle.auto_info",
+            label: tr(locale, "welcome.toggle.auto_info"),
+            checked: cx.state.schema.auto_info,
+            enabled,
+            z_layer,
+        },
     ) && enabled
     {
-        state.schema.auto_info = !state.schema.auto_info;
+        cx.state.schema.auto_info = !cx.state.schema.auto_info;
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_archetype_schema_controls(
-    ui: &mut egui::Ui,
-    locale: &str,
-    arch: WelcomeArchetypeChoice,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_archetype_schema_controls(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>, arch: WelcomeArchetypeChoice) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+
     match arch {
         WelcomeArchetypeChoice::Xy => {
             render_clipped_text_label(
@@ -742,7 +812,7 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.5),
                 tokens.text_muted,
                 z_layer,
-                meta,
+                cx.meta,
             );
             let x_opts: [(&str, &str); 5] = [
                 ("welcome.x_mode.numbers", tr(locale, "welcome.x_mode.numbers")),
@@ -762,21 +832,21 @@ fn render_archetype_schema_controls(
                                 ui,
                                 chip_w,
                                 tokens,
-                                meta,
+                                cx.meta,
                                 LabelSpec {
                                     widget_id: wid,
                                     role: "radio",
                                     a11y_role: egui::Role::RadioButton,
                                     label: lbl,
                                     command_id: None,
-                                    selected: state.schema.x_mode_kind == idx,
+                                    selected: cx.state.schema.x_mode_kind == idx,
                                     enabled,
                                     disabled_reason: None,
                                     z_layer,
                                 },
                             ) && enabled
                             {
-                                state.schema.x_mode_kind = idx;
+                                cx.state.schema.x_mode_kind = idx;
                             }
                         }
                     });
@@ -793,21 +863,10 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.5),
                 tokens.text_muted,
                 z_layer,
-                meta,
+                cx.meta,
             );
-            render_subcolumn_selector(ui, locale, state, tokens, enabled, z_layer, meta, content_w);
-            render_dimension_steppers(
-                ui,
-                locale,
-                state,
-                tokens,
-                enabled,
-                z_layer,
-                meta,
-                tr(locale, "welcome.field.datasets"),
-                tr(locale, "welcome.field.rows"),
-                1..=64,
-            );
+            render_subcolumn_selector(ui, cx);
+            render_dimension_steppers(ui, cx, tr(locale, "welcome.field.datasets"), tr(locale, "welcome.field.rows"), 1..=64);
         }
         WelcomeArchetypeChoice::Column => {
             render_clipped_text_label(
@@ -817,7 +876,7 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.5),
                 tokens.text_muted,
                 z_layer,
-                meta,
+                cx.meta,
             );
             let col_opts: [(&str, &str); 3] = [
                 ("welcome.design.unpaired", tr(locale, "welcome.design.unpaired")),
@@ -829,49 +888,38 @@ fn render_archetype_schema_controls(
                     ui,
                     content_w,
                     tokens,
-                    meta,
+                    cx.meta,
                     LabelSpec {
                         widget_id: wid,
                         role: "radio",
                         a11y_role: egui::Role::RadioButton,
                         label: lbl,
                         command_id: None,
-                        selected: state.schema.col_design_kind == idx,
+                        selected: cx.state.schema.col_design_kind == idx,
                         enabled,
                         disabled_reason: None,
                         z_layer,
                     },
                 ) && enabled
                 {
-                    state.schema.col_design_kind = idx;
-                    state.schema.paired_design = idx == 1;
-                    if idx == 2 && state.schema.y_subcolumn_kind < 2 {
-                        state.schema.y_subcolumn_kind = 2;
+                    cx.state.schema.col_design_kind = idx;
+                    cx.state.schema.paired_design = idx == 1;
+                    if idx == 2 && cx.state.schema.y_subcolumn_kind < 2 {
+                        cx.state.schema.y_subcolumn_kind = 2;
                     }
                 }
                 ui.add_space(2.0);
             }
-            if state.schema.col_design_kind == 2 {
+            if cx.state.schema.col_design_kind == 2 {
                 ui.add_space(4.0);
-                render_summary_subcolumn_selector(ui, locale, state, tokens, enabled, z_layer, meta, content_w);
+                render_summary_subcolumn_selector(ui, cx);
             }
             ui.add_space(4.0);
-            render_dimension_steppers(
-                ui,
-                locale,
-                state,
-                tokens,
-                enabled,
-                z_layer,
-                meta,
-                tr(locale, "welcome.field.datasets"),
-                tr(locale, "welcome.field.rows"),
-                1..=64,
-            );
+            render_dimension_steppers(ui, cx, tr(locale, "welcome.field.datasets"), tr(locale, "welcome.field.rows"), 1..=64);
         }
         WelcomeArchetypeChoice::Grouped => {
-            if state.schema.y_subcolumn_kind == 0 {
-                state.schema.y_subcolumn_kind = 1;
+            if cx.state.schema.y_subcolumn_kind == 0 {
+                cx.state.schema.y_subcolumn_kind = 1;
             }
             render_clipped_text_label(
                 ui,
@@ -880,27 +928,16 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.5),
                 tokens.text_muted,
                 z_layer,
-                meta,
+                cx.meta,
             );
-            render_subcolumn_selector(ui, locale, state, tokens, enabled, z_layer, meta, content_w);
+            render_subcolumn_selector(ui, cx);
             ui.add_space(4.0);
-            render_dimension_steppers(
-                ui,
-                locale,
-                state,
-                tokens,
-                enabled,
-                z_layer,
-                meta,
-                tr(locale, "welcome.field.datasets"),
-                tr(locale, "welcome.field.rows"),
-                1..=64,
-            );
+            render_dimension_steppers(ui, cx, tr(locale, "welcome.field.datasets"), tr(locale, "welcome.field.rows"), 1..=64);
         }
         WelcomeArchetypeChoice::Contingency => {
             render_plain_clipped_label(ui, "Enter integer frequency counts per cross-tabulated cell.", FontId::proportional(11.0), tokens.text_muted);
             ui.add_space(4.0);
-            render_dimension_steppers(ui, locale, state, tokens, enabled, z_layer, meta, "Columns", "Rows", 2..=32);
+            render_dimension_steppers(ui, cx, "Columns", "Rows", 2..=32);
         }
         WelcomeArchetypeChoice::Survival => {
             let t_opts = [
@@ -912,71 +949,77 @@ fn render_archetype_schema_controls(
                     ui,
                     content_w,
                     tokens,
-                    meta,
+                    cx.meta,
                     LabelSpec {
                         widget_id: wid,
                         role: "radio",
                         a11y_role: egui::Role::RadioButton,
                         label: lbl,
                         command_id: None,
-                        selected: state.schema.survival_time_kind == idx,
+                        selected: cx.state.schema.survival_time_kind == idx,
                         enabled,
                         disabled_reason: None,
                         z_layer,
                     },
                 ) && enabled
                 {
-                    state.schema.survival_time_kind = idx;
+                    cx.state.schema.survival_time_kind = idx;
                 }
                 ui.add_space(2.0);
             }
             ui.add_space(4.0);
-            state.schema.survival_event_code = render_i64_stepper(
+            cx.state.schema.survival_event_code = render_i64_stepper(
                 ui,
-                "welcome.survival.event_code",
-                "Event code",
-                state.schema.survival_event_code,
-                -99..=99,
-                enabled,
                 tokens,
-                z_layer,
-                meta,
+                cx.meta,
+                StepperSpec {
+                    widget_id: "welcome.survival.event_code",
+                    label: "Event code",
+                    value: cx.state.schema.survival_event_code,
+                    range: -99..=99,
+                    enabled,
+                    z_layer,
+                },
             );
-            state.schema.survival_censored_code = render_i64_stepper(
+            cx.state.schema.survival_censored_code = render_i64_stepper(
                 ui,
-                "welcome.survival.censored_code",
-                "Censored code",
-                state.schema.survival_censored_code,
-                -99..=99,
-                enabled,
                 tokens,
-                z_layer,
-                meta,
+                cx.meta,
+                StepperSpec {
+                    widget_id: "welcome.survival.censored_code",
+                    label: "Censored code",
+                    value: cx.state.schema.survival_censored_code,
+                    range: -99..=99,
+                    enabled,
+                    z_layer,
+                },
             );
-            if state.schema.survival_event_code == state.schema.survival_censored_code {
-                state.schema.survival_censored_code = i64::from(state.schema.survival_event_code == 0);
+            if cx.state.schema.survival_event_code == cx.state.schema.survival_censored_code {
+                cx.state.schema.survival_censored_code = i64::from(cx.state.schema.survival_event_code == 0);
             }
-            render_dimension_steppers(ui, locale, state, tokens, enabled, z_layer, meta, "Cohorts", tr(locale, "welcome.field.rows"), 1..=32);
+            render_dimension_steppers(ui, cx, "Cohorts", tr(locale, "welcome.field.rows"), 1..=32);
         }
         WelcomeArchetypeChoice::PartsOfWhole => {
             render_plain_clipped_label(ui, "One slice or proportion per category row.", FontId::proportional(11.0), tokens.text_muted);
             if render_check_toggle(
                 ui,
-                "welcome.pow.check_total",
-                "Normalize / 100% total check",
-                state.schema.parts_check_total,
-                enabled,
                 tokens,
-                z_layer,
-                meta,
+                cx.meta,
+                CheckToggleSpec {
+                    widget_id: "welcome.pow.check_total",
+                    label: "Normalize / 100% total check",
+                    checked: cx.state.schema.parts_check_total,
+                    enabled,
+                    z_layer,
+                },
             ) && enabled
             {
-                state.schema.parts_check_total = !state.schema.parts_check_total;
+                cx.state.schema.parts_check_total = !cx.state.schema.parts_check_total;
             }
-            render_dimension_steppers(ui, locale, state, tokens, enabled, z_layer, meta, "Series", "Categories", 1..=16);
+            render_dimension_steppers(ui, cx, "Series", "Categories", 1..=16);
         }
         WelcomeArchetypeChoice::MultipleVariables => {
-            render_dimension_steppers(ui, locale, state, tokens, enabled, z_layer, meta, "Variables", "Observations", 1..=32);
+            render_dimension_steppers(ui, cx, "Variables", "Observations", 1..=32);
             ui.add_space(4.0);
             render_clipped_text_label(
                 ui,
@@ -985,9 +1028,9 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.5),
                 tokens.text_muted,
                 z_layer,
-                meta,
+                cx.meta,
             );
-            let shown_vars = state.schema.cols.clamp(1, 6);
+            let shown_vars = cx.state.schema.cols.clamp(1, 6);
             let roles = [("Cont", "Continuous"), ("Cat", "Categorical"), ("Lbl", "Label")];
             let chip_w = ((content_w - 58.0) / 3.0).clamp(32.0, 68.0);
             for v_idx in 0..shown_vars {
@@ -1001,21 +1044,21 @@ fn render_archetype_schema_controls(
                                 ui,
                                 chip_w,
                                 tokens,
-                                meta,
+                                cx.meta,
                                 LabelSpec {
                                     widget_id: &wid,
                                     role: "radio",
                                     a11y_role: egui::Role::RadioButton,
                                     label: short,
                                     command_id: None,
-                                    selected: state.schema.mv_role_kinds[v_idx] == r_idx,
+                                    selected: cx.state.schema.mv_role_kinds[v_idx] == r_idx,
                                     enabled,
                                     disabled_reason: None,
                                     z_layer,
                                 },
                             ) && enabled
                             {
-                                state.schema.mv_role_kinds[v_idx] = r_idx;
+                                cx.state.schema.mv_role_kinds[v_idx] = r_idx;
                             }
                         }
                     });
@@ -1032,33 +1075,33 @@ fn render_archetype_schema_controls(
                 FontId::proportional(11.0),
                 tokens.text_muted,
             );
-            state.schema.subcols = render_usize_stepper(
+            cx.state.schema.subcols = render_usize_stepper(
                 ui,
-                "welcome.nested.depth",
-                "Subcolumn units",
-                state.schema.subcols.max(2),
-                2..=64,
-                enabled,
                 tokens,
-                z_layer,
-                meta,
+                cx.meta,
+                StepperSpec {
+                    widget_id: "welcome.nested.depth",
+                    label: "Subcolumn units",
+                    value: cx.state.schema.subcols.max(2),
+                    range: 2..=64,
+                    enabled,
+                    z_layer,
+                },
             );
-            render_dimension_steppers(ui, locale, state, tokens, enabled, z_layer, meta, "Groups", "Technical rows", 2..=32);
+            render_dimension_steppers(ui, cx, "Groups", "Technical rows", 2..=32);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_subcolumn_selector(
-    ui: &mut egui::Ui,
-    locale: &str,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     let sub_opts: [(&str, &str); 8] = [
         ("welcome.subcol.single", tr(locale, "welcome.subcol.single")),
         ("welcome.subcol.raw", tr(locale, "welcome.subcol.raw")),
@@ -1106,29 +1149,29 @@ fn render_subcolumn_selector(
     if state.schema.y_subcolumn_kind == 1 {
         state.schema.subcols = render_usize_stepper(
             ui,
-            "welcome.stepper.replicates",
-            tr(locale, "welcome.field.replicates"),
-            state.schema.subcols.max(2),
-            1..=256,
-            enabled,
             tokens,
-            z_layer,
             meta,
+            StepperSpec {
+                widget_id: "welcome.stepper.replicates",
+                label: tr(locale, "welcome.field.replicates"),
+                value: state.schema.subcols.max(2),
+                range: 1..=256,
+                enabled,
+                z_layer,
+            },
         );
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_summary_subcolumn_selector(
-    ui: &mut egui::Ui,
-    locale: &str,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_summary_subcolumn_selector(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     let opts = [
         (2usize, "welcome.subcol.mean_sd_n", tr(locale, "welcome.subcol.mean_sd_n")),
         (3usize, "welcome.subcol.mean_sem_n", tr(locale, "welcome.subcol.mean_sem_n")),
@@ -1159,19 +1202,20 @@ fn render_summary_subcolumn_selector(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_dimension_steppers(
     ui: &mut egui::Ui,
-    locale: &str,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
+    cx: &mut WelcomeMiddleCtx<'_>,
     cols_label: &str,
     rows_label: &str,
     col_range: std::ops::RangeInclusive<usize>,
 ) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     render_clipped_text_label(
         ui,
         "welcome.section.dimensions",
@@ -1181,21 +1225,29 @@ fn render_dimension_steppers(
         z_layer,
         meta,
     );
-    state.schema.cols = render_usize_stepper(ui, "welcome.stepper.cols", cols_label, state.schema.cols, col_range, enabled, tokens, z_layer, meta);
-    state.schema.rows = render_usize_stepper(ui, "welcome.stepper.rows", rows_label, state.schema.rows, 1..=10_000, enabled, tokens, z_layer, meta);
+    state.schema.cols = render_usize_stepper(
+        ui,
+        tokens,
+        meta,
+        StepperSpec { widget_id: "welcome.stepper.cols", label: cols_label, value: state.schema.cols, range: col_range, enabled, z_layer },
+    );
+    state.schema.rows = render_usize_stepper(
+        ui,
+        tokens,
+        meta,
+        StepperSpec { widget_id: "welcome.stepper.rows", label: rows_label, value: state.schema.rows, range: 1..=10_000, enabled, z_layer },
+    );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_middle_starter_templates(
-    ui: &mut egui::Ui,
-    locale: &str,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_middle_starter_templates(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     render_clipped_text_label(
         ui,
         "welcome.template.heading",
@@ -1240,29 +1292,29 @@ fn render_middle_starter_templates(
     render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
     render_clipped_text_edit(
         ui,
-        "welcome.input.title",
-        tr(locale, "welcome.field.title"),
         &mut state.schema.title,
-        "",
-        (content_w - 8.0).max(80.0),
-        enabled,
-        z_layer,
         meta,
+        TextEditSpec {
+            widget_id: "welcome.input.title",
+            label: tr(locale, "welcome.field.title"),
+            hint: "",
+            width: (content_w - 8.0).max(80.0),
+            enabled,
+            z_layer,
+        },
     );
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_middle_clone_pipeline(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_middle_clone_pipeline(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let app = cx.app;
     let locale = &app.locale;
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     render_clipped_text_label(
         ui,
         "welcome.clone.heading",
@@ -1306,14 +1358,16 @@ fn render_middle_clone_pipeline(
     render_plain_clipped_label(ui, tr(locale, "welcome.field.title"), FontId::proportional(11.0), tokens.text_muted);
     render_clipped_text_edit(
         ui,
-        "welcome.input.title",
-        tr(locale, "welcome.field.title"),
         &mut state.schema.title,
-        "Cloned Run",
-        (content_w - 8.0).max(80.0),
-        enabled,
-        z_layer,
         meta,
+        TextEditSpec {
+            widget_id: "welcome.input.title",
+            label: tr(locale, "welcome.field.title"),
+            hint: "Cloned Run",
+            width: (content_w - 8.0).max(80.0),
+            enabled,
+            z_layer,
+        },
     );
 
     ui.add_space(6.0);
@@ -1348,17 +1402,15 @@ fn render_middle_clone_pipeline(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_middle_open_file(
-    ui: &mut egui::Ui,
-    locale: &str,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    content_w: f32,
-) {
+fn render_middle_open_file(ui: &mut egui::Ui, cx: &mut WelcomeMiddleCtx<'_>) {
+    let locale = cx.app.locale.as_str();
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let z_layer = cx.z_layer;
+    let content_w = cx.content_w;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+
     render_clipped_text_label(
         ui,
         "welcome.open.heading",
@@ -1369,18 +1421,28 @@ fn render_middle_open_file(
         meta,
     );
     ui.add_space(4.0);
-    render_plain_clipped_label(ui, "Open a .cbk project or .cbtemplate file path.", FontId::proportional(11.0), tokens.text_muted);
+    render_clipped_text_label(
+        ui,
+        "welcome.open.subtitle",
+        tr(locale, "welcome.open.subtitle"),
+        FontId::proportional(11.0),
+        tokens.text_muted,
+        z_layer,
+        meta,
+    );
     ui.add_space(6.0);
     render_clipped_text_edit(
         ui,
-        "welcome.input.open_path",
-        "Project path",
         &mut state.open_file_path_draft,
-        "/path/to/project.cbk",
-        (content_w - 8.0).max(80.0),
-        enabled,
-        z_layer,
         meta,
+        TextEditSpec {
+            widget_id: "welcome.input.open_path",
+            label: tr(locale, "welcome.open.path_label"),
+            hint: tr(locale, "welcome.open.path_placeholder"),
+            width: (content_w - 8.0).max(80.0),
+            enabled,
+            z_layer,
+        },
     );
 }
 
@@ -1432,7 +1494,7 @@ fn render_right_pane(
                 }
             }
             WelcomeLeftMode::StarterTemplates => "Data -> Info -> Linked Graph",
-            WelcomeLeftMode::OpenFile => "Open existing .cbk workspace",
+            WelcomeLeftMode::OpenFile => tr(locale, "welcome.open.pipeline_label"),
             WelcomeLeftMode::NewTableArchetype(_) => match (state.schema.auto_info, state.schema.auto_graph) {
                 (true, true) => "Data + Info + Graph",
                 (true, false) => "Data + Info",
@@ -1440,7 +1502,7 @@ fn render_right_pane(
                 (false, false) => "Data only",
             },
         };
-        render_plain_clipped_label(ui, pipeline, FontId::proportional(11.0), tokens.text_muted);
+        render_clipped_text_label(ui, "welcome.preview.pipeline", pipeline, FontId::proportional(11.0), tokens.text_muted, z_layer, meta);
     });
     schematic_rect
 }
@@ -1469,22 +1531,34 @@ fn active_preview_archetype(app: &UiApp, state: &WelcomeHubEguiState) -> Welcome
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_card_footer(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    state: &mut WelcomeHubEguiState,
-    tokens: &Tokens,
-    enabled: bool,
-    cancel_visible: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_card_footer(ui: &mut egui::Ui, cx: &mut WelcomeFooterCtx<'_>) {
+    let app = cx.app;
     let locale = &app.locale;
+    let tokens = cx.tokens;
+    let enabled = cx.enabled;
+    let cancel_visible = cx.cancel_visible;
+    let z_layer = cx.z_layer;
+    let state = &mut *cx.state;
+    let meta = &mut *cx.meta;
+    let intents = &mut *cx.intents;
+
     ui.horizontal(|ui| {
         if cancel_visible
-            && render_action_button(ui, 92.0, false, enabled, tr(locale, "btn.cancel"), "welcome.action.cancel", None, None, tokens, z_layer, meta)
+            && render_action_button(
+                ui,
+                tokens,
+                meta,
+                ActionButtonSpec {
+                    max_w: 92.0,
+                    primary: false,
+                    enabled,
+                    label: tr(locale, "btn.cancel"),
+                    widget_id: "welcome.action.cancel",
+                    command_id: None,
+                    disabled_reason: None,
+                    z_layer,
+                },
+            )
             && enabled
         {
             intents.push_set_launcher_open(false);
@@ -1518,7 +1592,22 @@ fn render_card_footer(
         if ui.available_width() > btn_w {
             ui.add_space(ui.available_width() - btn_w);
         }
-        if render_action_button(ui, btn_w, true, cta_enabled, cta_label, cta_id, cta_cmd, disabled_reason, tokens, z_layer, meta) && cta_enabled {
+        if render_action_button(
+            ui,
+            tokens,
+            meta,
+            ActionButtonSpec {
+                max_w: btn_w,
+                primary: true,
+                enabled: cta_enabled,
+                label: cta_label,
+                widget_id: cta_id,
+                command_id: cta_cmd,
+                disabled_reason,
+                z_layer,
+            },
+        ) && cta_enabled
+        {
             dispatch_welcome_primary_action(app, state, intents);
         }
     });
@@ -1632,13 +1721,15 @@ fn render_clone_options_submodal(
 
                 if render_check_toggle(
                     ui,
-                    "welcome.clone.preserve_links",
-                    tr(locale, "welcome.clone.analyses"),
-                    state.schema.clone_include_downstream,
-                    enabled,
                     tokens,
-                    z,
                     meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.preserve_links",
+                        label: tr(locale, "welcome.clone.analyses"),
+                        checked: state.schema.clone_include_downstream,
+                        enabled,
+                        z_layer: z,
+                    },
                 ) && enabled
                 {
                     state.schema.clone_include_downstream = !state.schema.clone_include_downstream;
@@ -1646,13 +1737,15 @@ fn render_clone_options_submodal(
 
                 if render_check_toggle(
                     ui,
-                    "welcome.clone.graphs",
-                    tr(locale, "welcome.clone.graphs"),
-                    state.schema.clone_graphs,
-                    enabled && state.schema.clone_include_downstream,
                     tokens,
-                    z,
                     meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.graphs",
+                        label: tr(locale, "welcome.clone.graphs"),
+                        checked: state.schema.clone_graphs,
+                        enabled: enabled && state.schema.clone_include_downstream,
+                        z_layer: z,
+                    },
                 ) && enabled
                     && state.schema.clone_include_downstream
                 {
@@ -1661,13 +1754,15 @@ fn render_clone_options_submodal(
 
                 if render_check_toggle(
                     ui,
-                    "welcome.clone.layouts",
-                    tr(locale, "welcome.clone.layouts"),
-                    state.schema.clone_layouts,
-                    enabled && state.schema.clone_include_downstream,
                     tokens,
-                    z,
                     meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.layouts",
+                        label: tr(locale, "welcome.clone.layouts"),
+                        checked: state.schema.clone_layouts,
+                        enabled: enabled && state.schema.clone_include_downstream,
+                        z_layer: z,
+                    },
                 ) && enabled
                     && state.schema.clone_include_downstream
                 {
@@ -1721,13 +1816,15 @@ fn render_clone_options_submodal(
                 ui.add_space(4.0);
                 if render_check_toggle(
                     ui,
-                    "welcome.clone.keep_x",
-                    tr(locale, "welcome.clone.keep_x"),
-                    state.schema.clone_keep_x,
-                    enabled,
                     tokens,
-                    z,
                     meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.keep_x",
+                        label: tr(locale, "welcome.clone.keep_x"),
+                        checked: state.schema.clone_keep_x,
+                        enabled,
+                        z_layer: z,
+                    },
                 ) && enabled
                 {
                     state.schema.clone_keep_x = !state.schema.clone_keep_x;
@@ -1735,13 +1832,15 @@ fn render_clone_options_submodal(
 
                 if render_check_toggle(
                     ui,
-                    "welcome.clone.rerun_analyses",
-                    "Re-run analyses immediately",
-                    state.schema.clone_rerun_analyses,
-                    enabled && state.schema.clone_include_downstream,
                     tokens,
-                    z,
                     meta,
+                    CheckToggleSpec {
+                        widget_id: "welcome.clone.rerun_analyses",
+                        label: "Re-run analyses immediately",
+                        checked: state.schema.clone_rerun_analyses,
+                        enabled: enabled && state.schema.clone_include_downstream,
+                        z_layer: z,
+                    },
                 ) && enabled
                     && state.schema.clone_include_downstream
                 {
@@ -1752,32 +1851,36 @@ fn render_clone_options_submodal(
                 ui.horizontal(|ui| {
                     if render_action_button(
                         ui,
-                        92.0,
-                        true,
-                        enabled,
-                        tr(locale, "btn.apply"),
-                        "welcome.clone_modal.apply",
-                        None,
-                        None,
                         tokens,
-                        z,
                         meta,
+                        ActionButtonSpec {
+                            max_w: 92.0,
+                            primary: true,
+                            enabled,
+                            label: tr(locale, "btn.apply"),
+                            widget_id: "welcome.clone_modal.apply",
+                            command_id: None,
+                            disabled_reason: None,
+                            z_layer: z,
+                        },
                     ) && enabled
                     {
                         state.clone_options_open = false;
                     }
                     if render_action_button(
                         ui,
-                        92.0,
-                        false,
-                        enabled,
-                        tr(locale, "btn.close"),
-                        "welcome.clone_modal.close",
-                        None,
-                        None,
                         tokens,
-                        z,
                         meta,
+                        ActionButtonSpec {
+                            max_w: 92.0,
+                            primary: false,
+                            enabled,
+                            label: tr(locale, "btn.close"),
+                            widget_id: "welcome.clone_modal.close",
+                            command_id: None,
+                            disabled_reason: None,
+                            z_layer: z,
+                        },
                     ) && enabled
                     {
                         state.clone_options_open = false;
@@ -2249,18 +2352,8 @@ fn allocate_visible_slot(ui: &mut egui::Ui, size: Vec2, sense: Sense) -> Option<
     Some(ui.allocate_exact_size(size, sense))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_clipped_text_edit(
-    ui: &mut egui::Ui,
-    widget_id: &str,
-    label: &str,
-    text: &mut String,
-    hint: &str,
-    width: f32,
-    enabled: bool,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) {
+fn render_clipped_text_edit(ui: &mut egui::Ui, text: &mut String, meta: &mut FrameInspectMeta, spec: TextEditSpec<'_>) {
+    let TextEditSpec { widget_id, label, hint, width, enabled, z_layer } = spec;
     if !rect_visible_in_clip(ui, Vec2::new(width, 22.0)) {
         ui.allocate_space(Vec2::new(width, 22.0));
         return;
@@ -2313,18 +2406,8 @@ fn render_plain_clipped_label_w(ui: &mut egui::Ui, text: &str, max_w: f32, font:
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_arch_rail_button(
-    ui: &mut egui::Ui,
-    arch: WelcomeArchetypeChoice,
-    width: f32,
-    selected: bool,
-    enabled: bool,
-    tokens: &Tokens,
-    locale: &str,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) -> bool {
+fn render_arch_rail_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ArchRailButtonSpec<'_>) -> bool {
+    let ArchRailButtonSpec { arch, width, selected, enabled, locale, z_layer } = spec;
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(width, 24.0), if enabled { Sense::click() } else { Sense::hover() }) else {
         return false;
     };
@@ -2490,20 +2573,8 @@ fn render_pill_button(ui: &mut egui::Ui, max_w: f32, tokens: &Tokens, meta: &mut
     resp.clicked()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_action_button(
-    ui: &mut egui::Ui,
-    max_w: f32,
-    primary: bool,
-    enabled: bool,
-    label: &str,
-    widget_id: &str,
-    command_id: Option<&str>,
-    disabled_reason: Option<&str>,
-    tokens: &Tokens,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) -> bool {
+fn render_action_button(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: ActionButtonSpec<'_>) -> bool {
+    let ActionButtonSpec { max_w, primary, enabled, label, widget_id, command_id, disabled_reason, z_layer } = spec;
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(max_w.max(22.0), 26.0), if enabled { Sense::click() } else { Sense::hover() })
     else {
         return false;
@@ -2561,17 +2632,8 @@ fn render_action_button(
     resp.clicked()
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_check_toggle(
-    ui: &mut egui::Ui,
-    widget_id: &str,
-    label: &str,
-    checked: bool,
-    enabled: bool,
-    tokens: &Tokens,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) -> bool {
+fn render_check_toggle(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: CheckToggleSpec<'_>) -> bool {
+    let CheckToggleSpec { widget_id, label, checked, enabled, z_layer } = spec;
     let avail_w = ui.available_width().max(40.0);
     let fg = if enabled { tokens.text_primary } else { tokens.text_disabled };
     let mut job = egui::text::LayoutJob::single_section(label.to_owned(), egui::TextFormat::simple(FontId::proportional(11.5), fg));
@@ -2630,18 +2692,8 @@ fn painter_check(painter: &egui::Painter, p0: Pos2, p1: Pos2, p2: Pos2, color: C
     painter.line_segment([p1, p2], Stroke::new(1.5, color));
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_usize_stepper(
-    ui: &mut egui::Ui,
-    widget_id: &str,
-    label: &str,
-    value: usize,
-    range: std::ops::RangeInclusive<usize>,
-    enabled: bool,
-    tokens: &Tokens,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) -> usize {
+fn render_usize_stepper(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: StepperSpec<'_, usize>) -> usize {
+    let StepperSpec { widget_id, label, value, range, enabled, z_layer } = spec;
     let mut out = value.clamp(*range.start(), *range.end());
     if !rect_visible_in_clip(ui, Vec2::new(ui.available_width().max(40.0), 26.0)) {
         ui.allocate_space(Vec2::new(ui.available_width().max(40.0), 26.0));
@@ -2664,15 +2716,41 @@ fn render_usize_stepper(
         }
         let _ = r_resp;
 
-        if render_action_button(ui, 24.0, false, enabled && out > *range.start(), "-", &dec_id, None, None, tokens, z_layer, meta)
-            && enabled
+        if render_action_button(
+            ui,
+            tokens,
+            meta,
+            ActionButtonSpec {
+                max_w: 24.0,
+                primary: false,
+                enabled: enabled && out > *range.start(),
+                label: "-",
+                widget_id: &dec_id,
+                command_id: None,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
             && out > *range.start()
         {
             out -= 1;
         }
         render_plain_clipped_label_w(ui, &out.to_string(), 32.0, FontId::proportional(11.5), tokens.text_strong);
-        if render_action_button(ui, 24.0, false, enabled && out < *range.end(), "+", &inc_id, None, None, tokens, z_layer, meta)
-            && enabled
+        if render_action_button(
+            ui,
+            tokens,
+            meta,
+            ActionButtonSpec {
+                max_w: 24.0,
+                primary: false,
+                enabled: enabled && out < *range.end(),
+                label: "+",
+                widget_id: &inc_id,
+                command_id: None,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
             && out < *range.end()
         {
             out += 1;
@@ -2681,18 +2759,8 @@ fn render_usize_stepper(
     out
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_i64_stepper(
-    ui: &mut egui::Ui,
-    widget_id: &str,
-    label: &str,
-    value: i64,
-    range: std::ops::RangeInclusive<i64>,
-    enabled: bool,
-    tokens: &Tokens,
-    z_layer: ZLayer,
-    meta: &mut FrameInspectMeta,
-) -> i64 {
+fn render_i64_stepper(ui: &mut egui::Ui, tokens: &Tokens, meta: &mut FrameInspectMeta, spec: StepperSpec<'_, i64>) -> i64 {
+    let StepperSpec { widget_id, label, value, range, enabled, z_layer } = spec;
     let mut out = value.clamp(*range.start(), *range.end());
     if !rect_visible_in_clip(ui, Vec2::new(ui.available_width().max(40.0), 26.0)) {
         ui.allocate_space(Vec2::new(ui.available_width().max(40.0), 26.0));
@@ -2710,15 +2778,41 @@ fn render_i64_stepper(
         let (r, _) = ui.allocate_exact_size(Vec2::new(lbl_w, 22.0), Sense::hover());
         ui.painter().with_clip_rect(r.intersect(ui.clip_rect())).galley(Pos2::new(r.left(), r.center().y - g.size().y * 0.5), g, tokens.text_primary);
 
-        if render_action_button(ui, 24.0, false, enabled && out > *range.start(), "-", &dec_id, None, None, tokens, z_layer, meta)
-            && enabled
+        if render_action_button(
+            ui,
+            tokens,
+            meta,
+            ActionButtonSpec {
+                max_w: 24.0,
+                primary: false,
+                enabled: enabled && out > *range.start(),
+                label: "-",
+                widget_id: &dec_id,
+                command_id: None,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
             && out > *range.start()
         {
             out -= 1;
         }
         render_plain_clipped_label_w(ui, &out.to_string(), 32.0, FontId::proportional(11.5), tokens.text_strong);
-        if render_action_button(ui, 24.0, false, enabled && out < *range.end(), "+", &inc_id, None, None, tokens, z_layer, meta)
-            && enabled
+        if render_action_button(
+            ui,
+            tokens,
+            meta,
+            ActionButtonSpec {
+                max_w: 24.0,
+                primary: false,
+                enabled: enabled && out < *range.end(),
+                label: "+",
+                widget_id: &inc_id,
+                command_id: None,
+                disabled_reason: None,
+                z_layer,
+            },
+        ) && enabled
             && out < *range.end()
         {
             out += 1;

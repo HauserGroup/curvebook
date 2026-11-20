@@ -2,13 +2,21 @@
 
 use std::sync::Arc;
 
+use curvebook_doc::{ProjectDocument, SheetId, SheetSection, TableArchetype};
+use curvebook_engine::cmd as engine_cmd;
+use curvebook_palette::CanvasPreviewFilter;
 use egui::{Color32, CornerRadius, FontId, Id, Key, Modifiers, Order, Pos2, Sense, Stroke, StrokeKind, Vec2};
-use serde_json::json;
+use serde_json::{Value, json};
 
 use crate::UiApp;
 use crate::dialogs_canvas::CommandOrigin;
-use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens};
+use crate::egui_shell::app_modals::PreferencesCategory;
+use crate::egui_shell::transform_modals::TransformModalKind;
+use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, FrameInspectNodeMeta, PendingUiIntents, Tokens, UiIntent};
+use crate::grid_view::ImportOriginKind;
+use crate::i18n::BETA_ACTIVE_LOCALES;
 use crate::inspect::ZLayer;
+use crate::theme::UiThemeMode;
 use crate::tr;
 
 /// Resolved Command Palette search row surfaced by [`filter_palette_commands`].
@@ -43,6 +51,10 @@ pub struct CommandPaletteFrameReport {
 }
 
 /// Filter and rank live Engine + UI commands matching `query` via `app.canvas_dialogs.command_palette`.
+///
+/// Parameterised commands that have a dialog or active-sheet route are retained and dispatched
+/// through that route; low-level parameterised commands that cannot run from `{}` without extra
+/// interactive arguments are hidden (`R15-GUI-18`).
 #[must_use]
 pub fn filter_palette_commands(app: &UiApp, query: &str, max_rows: usize) -> Vec<CommandPaletteRow> {
     let mut palette = app.canvas_dialogs.command_palette.clone();
@@ -51,6 +63,7 @@ pub fn filter_palette_commands(app: &UiApp, query: &str, max_rows: usize) -> Vec
     palette
         .matches_with_shortcuts(Some(app.session()), &app.shortcuts)
         .into_iter()
+        .filter(|entry| resolve_palette_route(app, entry.id, matches!(entry.origin, CommandOrigin::Ui)).is_some())
         .take(max_rows.max(1))
         .map(|entry| CommandPaletteRow {
             command_id: entry.id.to_owned(),
@@ -122,7 +135,7 @@ pub fn render_command_palette(
     report.match_count = rows.len();
     clamp_palette_selection(state, &rows);
 
-    let key_nav = consume_palette_keys(ctx, state, &rows, intents);
+    let key_nav = consume_palette_keys(ctx, app, state, &rows, intents);
 
     let top_offset = (screen_rect.height() * 0.10).clamp(16.0, 56.0);
     let card_w = (screen_rect.width() - 32.0).clamp(240.0, 560.0);
@@ -198,7 +211,7 @@ pub fn render_command_palette(
                                 );
                                 ui.scroll_to_rect(target, Some(egui::Align::Center));
                             }
-                            render_palette_rows(ui, app, state, &rows, row_range, tokens, meta, intents);
+                            render_palette_rows(ui, PaletteRowsRenderCtx { app, rows: &rows, row_range, tokens }, state, meta, intents);
                         },
                     );
                 }
@@ -247,6 +260,7 @@ fn clamp_palette_selection(state: &mut CommandPaletteEguiState, rows: &[CommandP
 
 fn consume_palette_keys(
     ctx: &egui::Context,
+    app: &UiApp,
     state: &mut CommandPaletteEguiState,
     rows: &[CommandPaletteRow],
     intents: &mut PendingUiIntents,
@@ -275,22 +289,26 @@ fn consume_palette_keys(
         && let Some(row) = rows.get(state.selected_index)
         && row.enabled
     {
-        commit_palette_row(row, intents);
+        commit_palette_row(app, row, intents);
     }
     PaletteKeyNavResult { moved }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct PaletteRowsRenderCtx<'a> {
+    app: &'a UiApp,
+    rows: &'a [CommandPaletteRow],
+    row_range: std::ops::Range<usize>,
+    tokens: &'a Tokens,
+}
+
 fn render_palette_rows(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    ctx: PaletteRowsRenderCtx<'_>,
     state: &mut CommandPaletteEguiState,
-    rows: &[CommandPaletteRow],
-    row_range: std::ops::Range<usize>,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let PaletteRowsRenderCtx { app, rows, row_range, tokens } = ctx;
     for idx in row_range {
         let Some(row) = rows.get(idx) else {
             continue;
@@ -364,7 +382,7 @@ fn render_palette_rows(
             resp.on_hover_text(rsn);
         } else if resp.clicked() && row.enabled {
             state.selected_index = idx;
-            commit_palette_row(row, intents);
+            commit_palette_row(app, row, intents);
         }
     }
 }
@@ -392,7 +410,9 @@ fn disabled_reason_for_row(app: &UiApp, row: &CommandPaletteRow) -> String {
         | "ui.result.applyRemediation" => String::from("Open a ResultSheet first"),
         "ui.result.appendClusterColumn" => String::from("Requires a Clustering ResultSheet"),
         "ui.table.openFormulaBar" => String::from("Requires a Multiple Variables table"),
-        "ui.layout.composer.open" => String::from("Open a LayoutSheet first"),
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => String::from("Open a LayoutSheet first"),
+        "ui.embeddedTable.format.open" => String::from("Paste a ResultSheet table onto a graph or layout first"),
+        "ui.image.format.open" => String::from("Insert or paste an image onto a graph or layout first"),
         "ui.graph.axes.open" | "ui.graph.format.open" | "ui.changeGraphType.open" | "ui.formatPoints.open" => {
             String::from("Requires at least one GraphSheet")
         }
@@ -404,12 +424,375 @@ fn disabled_reason_for_row(app: &UiApp, row: &CommandPaletteRow) -> String {
     }
 }
 
-fn commit_palette_row(row: &CommandPaletteRow, intents: &mut PendingUiIntents) {
+enum PaletteCommandRoute {
+    UiCommand { command_id: String, params: Value },
+    EngineCommand { command_id: String, params: Value },
+    DirectIntent(UiIntent),
+}
+
+fn sheet_id_param(sheet_id: Option<SheetId>) -> Value {
+    match sheet_id {
+        Some(id) => json!({ "sheet_id": id.as_str() }),
+        None => json!({}),
+    }
+}
+
+fn resolve_any_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id
+        .clone()
+        .or_else(|| doc.data_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.graph_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.result_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.layout_sheets.first().map(|s| s.id.clone()))
+        .or_else(|| doc.info_sheets.first().map(|s| s.id.clone()))
+}
+
+fn resolve_data_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) {
+        return Some(active.clone());
+    }
+    if let Some(active) = doc.active_sheet_id.as_ref() {
+        if let Some(graph) = doc.graph_sheet(active)
+            && doc.data_sheet(&graph.spec.primary_source_sheet_id).is_some()
+        {
+            return Some(graph.spec.primary_source_sheet_id.clone());
+        }
+        if let Some(res) = doc.result_sheet(active)
+            && doc.data_sheet(&res.analysis.source_sheet_id).is_some()
+        {
+            return Some(res.analysis.source_sheet_id.clone());
+        }
+    }
+    doc.data_sheets.first().map(|s| s.id.clone())
+}
+
+fn resolve_mv_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref()
+        && let Some(ds) = doc.data_sheet(active)
+        && matches!(ds.archetype, TableArchetype::MultipleVariables(_))
+    {
+        return Some(ds.id.clone());
+    }
+    doc.data_sheets.iter().find(|ds| matches!(ds.archetype, TableArchetype::MultipleVariables(_))).map(|ds| ds.id.clone())
+}
+
+fn resolve_result_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.result_sheet(id).is_some()).cloned().or_else(|| doc.result_sheets.first().map(|r| r.id.clone()))
+}
+
+fn resolve_graph_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.graph_sheet(id).is_some()).cloned().or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()))
+}
+
+fn resolve_layout_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    doc.active_sheet_id.as_ref().filter(|id| doc.layout_sheet(id).is_some()).cloned().or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+}
+
+fn resolve_renderable_sheet_id(doc: &ProjectDocument) -> Option<SheetId> {
+    if let Some(active) = doc.active_sheet_id.as_ref()
+        && matches!(doc.sheet_section(active), Some(SheetSection::Graphs | SheetSection::Layouts))
+    {
+        return Some(active.clone());
+    }
+    doc.graph_sheets.first().map(|g| g.id.clone()).or_else(|| doc.layout_sheets.first().map(|l| l.id.clone()))
+}
+
+fn next_theme_mode_slug(current: UiThemeMode) -> &'static str {
+    match current {
+        UiThemeMode::Light => "dark",
+        UiThemeMode::Dark => "high_contrast",
+        UiThemeMode::HighContrast => "light",
+    }
+}
+
+fn next_preview_filter_slug(current: CanvasPreviewFilter) -> &'static str {
+    match current {
+        CanvasPreviewFilter::Normal => "deuteranopia",
+        CanvasPreviewFilter::Deuteranopia => "protanopia",
+        CanvasPreviewFilter::Protanopia => "tritanopia",
+        CanvasPreviewFilter::Tritanopia => "grayscale",
+        CanvasPreviewFilter::GrayscalePrint => "normal",
+    }
+}
+
+fn next_locale_slug(current: &str) -> &'static str {
+    if BETA_ACTIVE_LOCALES.is_empty() {
+        return "en";
+    }
+    let idx = BETA_ACTIVE_LOCALES.iter().position(|&loc| loc.eq_ignore_ascii_case(current)).unwrap_or(0);
+    BETA_ACTIVE_LOCALES.get((idx + 1) % BETA_ACTIVE_LOCALES.len()).copied().unwrap_or("en")
+}
+
+fn resolve_palette_ui_route(app: &UiApp, command_id: &str) -> Option<PaletteCommandRoute> {
+    let doc = app.document();
+    match command_id {
+        "ui.event.dispatch" | "ui.screenshot" | "ui.result.applyRemediation" => None,
+        "ui.theme.set" => Some(PaletteCommandRoute::UiCommand {
+            command_id: String::from("ui.theme.set"),
+            params: json!({ "mode": next_theme_mode_slug(app.theme.mode) }),
+        }),
+        "ui.locale.set" => Some(PaletteCommandRoute::UiCommand {
+            command_id: String::from("ui.locale.set"),
+            params: json!({ "locale": next_locale_slug(&app.locale) }),
+        }),
+        "ui.previewFilter.set" => Some(PaletteCommandRoute::UiCommand {
+            command_id: String::from("ui.previewFilter.set"),
+            params: json!({ "filter": next_preview_filter_slug(app.preview_filter) }),
+        }),
+        "ui.canvas.applyPreset" => {
+            let mut params = sheet_id_param(resolve_renderable_sheet_id(doc));
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("preset"), Value::String(String::from("SingleColumn88mm")));
+                obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+            }
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.canvas.applyPreset"), params })
+        }
+        "ui.shortcut.set" => {
+            Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenPreferences { category: Some(PreferencesCategory::KeyboardShortcuts) }))
+        }
+        "app.preferences" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenPreferences { category: None })),
+        "ui.brush.point" => {
+            let params = match (resolve_data_sheet_id(doc), app.grid.tool.active) {
+                (Some(id), Some(coord)) => json!({ "sheet_id": id.as_str(), "row": coord.row, "col": coord.col, "subcol": coord.subcol }),
+                (Some(id), None) => json!({ "sheet_id": id.as_str(), "row": 0, "col": 0, "subcol": 0 }),
+                (None, _) => json!({}),
+            };
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.brush.point"), params })
+        }
+        "ui.graph.axes.open"
+        | "ui.graph.format.open"
+        | "ui.changeGraphType.open"
+        | "ui.formatPoints.open"
+        | "ui.applyStyleFrom.open"
+        | "ui.graph.pairwise.open"
+        | "ui.graph.insertModelEquation" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_graph_sheet_id(doc)) })
+        }
+        "ui.layout.composer.open" | "ui.layout.equalizeScaling.open" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_layout_sheet_id(doc)) })
+        }
+        "ui.editParams.open" | "ui.result.copyMethodsReport" | "ui.result.inspectDiagnostics" | "ui.result.appendClusterColumn" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_result_sheet_id(doc)) })
+        }
+        "ui.analyze.open" | "ui.grid.excludeWithReason" | "ui.table.convertArchetype.open" | "ui.graph.create.open" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_data_sheet_id(doc)) })
+        }
+        "ui.table.openFormulaBar" => Some(PaletteCommandRoute::UiCommand {
+            command_id: command_id.to_owned(),
+            params: sheet_id_param(resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        }),
+        "ui.clonePipeline.open" | "ui.print.open" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_any_sheet_id(doc)) })
+        }
+        "ui.canvas.preflight" | "ui.export.open" | "ui.embeddedTable.format.open" | "ui.image.format.open" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: sheet_id_param(resolve_renderable_sheet_id(doc)) })
+        }
+        _ => Some(PaletteCommandRoute::UiCommand { command_id: command_id.to_owned(), params: json!({}) }),
+    }
+}
+
+fn resolve_palette_dialog_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {
+    let ui_route =
+        |ui_cmd: &str, sheet: Option<SheetId>| Some(PaletteCommandRoute::UiCommand { command_id: ui_cmd.to_owned(), params: sheet_id_param(sheet) });
+    match command_id {
+        "analysis.add" | "analysis.run" | "stats.run" | "fit.run" | "stats.pvalueStack" => ui_route("ui.analyze.open", resolve_data_sheet_id(doc)),
+        "sheet.extractResultTab" => ui_route("ui.analyze.open", resolve_result_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        "transform.run" => match resolve_data_sheet_id(doc) {
+            Some(sheet_id) => {
+                Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenTransformModal { sheet_id, kind: TransformModalKind::TransformValues }))
+            }
+            None => ui_route("ui.analyze.open", None),
+        },
+        "analysis.updateParams" => ui_route("ui.editParams.open", resolve_result_sheet_id(doc)),
+        "analysis.retargetData" => match resolve_result_sheet_id(doc) {
+            Some(result_sheet_id) => {
+                Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenRetargetDialog { result_sheet_id, target_data_sheet_id: None }))
+            }
+            None => ui_route("ui.editParams.open", None),
+        },
+        "sheet.clonePipeline" => ui_route("ui.clonePipeline.open", resolve_any_sheet_id(doc)),
+        "graph.setKind" => ui_route("ui.changeGraphType.open", resolve_graph_sheet_id(doc)),
+        "graph.setSpec" | "graph.setSeries" => ui_route("ui.graph.format.open", resolve_graph_sheet_id(doc)),
+        "graph.setAxes" | "graph.setAdditionalTicks" => ui_route("ui.graph.axes.open", resolve_graph_sheet_id(doc)),
+        "graph.addComparisonBrackets" | "graph.setCompactLetterDisplay" => ui_route("ui.graph.pairwise.open", resolve_graph_sheet_id(doc)),
+        "graph.setRegressionOverlay" | "graph.addAnnotation" => ui_route("ui.graph.insertModelEquation", resolve_graph_sheet_id(doc)),
+        "graph.formatSelectedPoints" => ui_route("ui.formatPoints.open", resolve_graph_sheet_id(doc)),
+        "graph.applyStyleFrom" => ui_route("ui.applyStyleFrom.open", resolve_graph_sheet_id(doc)),
+        "graph.applyCanvasPreset" | "layout.applyCanvasPreset" => {
+            let target = if command_id == "layout.applyCanvasPreset" { resolve_layout_sheet_id(doc) } else { resolve_graph_sheet_id(doc) };
+            let mut params = sheet_id_param(target);
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("preset"), Value::String(String::from("SingleColumn88mm")));
+                obj.insert(String::from("resize_mode"), Value::String(String::from("KeepTypographyPt")));
+            }
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.canvas.applyPreset"), params })
+        }
+        "graph.preflightCheck" => ui_route("ui.canvas.preflight", resolve_renderable_sheet_id(doc)),
+        "layout.setSpec" | "layout.addPanel" => ui_route("ui.layout.composer.open", resolve_layout_sheet_id(doc)),
+        "layout.equalizeScaling" => ui_route("ui.layout.equalizeScaling.open", resolve_layout_sheet_id(doc)),
+        "table.excludeCellsWithReason" => ui_route("ui.grid.excludeWithReason", resolve_data_sheet_id(doc)),
+        "table.randomizeGroups" => Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.table.randomizeGroups"), params: json!({}) }),
+        "table.randomSampleRows" => {
+            let params = match resolve_data_sheet_id(doc) {
+                Some(id) => json!({ "source_sheet_id": id.as_str() }),
+                None => json!({}),
+            };
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.table.randomSampleRows"), params })
+        }
+        "table.simulateDistributions" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.table.simulateDistributions"), params: json!({}) })
+        }
+        "table.convertArchetype" => ui_route("ui.table.convertArchetype.open", resolve_data_sheet_id(doc)),
+        "table.importPlateMap" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.import.reshape.open"), params: json!({ "mode": "Plate96" }) })
+        }
+        "table.importTidyLong" => {
+            Some(PaletteCommandRoute::UiCommand { command_id: String::from("ui.import.reshape.open"), params: json!({ "mode": "TidyLongPivot" }) })
+        }
+        "table.setCalculatedVariable" => ui_route("ui.table.openFormulaBar", resolve_mv_sheet_id(doc).or_else(|| resolve_data_sheet_id(doc))),
+        "table.setVariableRole" | "table.recodeLevels" | "table.setCategoricalOrder" => match resolve_mv_sheet_id(doc) {
+            Some(sheet_id) => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenManageVariables { sheet_id, column: None })),
+            None => ui_route("ui.table.openFormulaBar", None),
+        },
+        "table.paste" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
+            origin: ImportOriginKind::Clipboard,
+            is_live_link: false,
+            target_sheet_id: resolve_data_sheet_id(doc),
+        })),
+        "table.pasteLink" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
+            origin: ImportOriginKind::Clipboard,
+            is_live_link: true,
+            target_sheet_id: resolve_data_sheet_id(doc),
+        })),
+        "table.importCsv" | "table.importPrism" | "table.importPzfx" => Some(PaletteCommandRoute::DirectIntent(UiIntent::OpenImportWizard {
+            origin: ImportOriginKind::ExternalDelimitedFile,
+            is_live_link: false,
+            target_sheet_id: resolve_data_sheet_id(doc),
+        })),
+        "project.instantiateTemplate" => Some(PaletteCommandRoute::DirectIntent(UiIntent::SetLauncherOpen { open: true })),
+        _ => None,
+    }
+}
+
+fn resolve_palette_sheet_engine_route(doc: &ProjectDocument, command_id: &str) -> Option<PaletteCommandRoute> {
+    let eng = |params: Value| Some(PaletteCommandRoute::EngineCommand { command_id: command_id.to_owned(), params });
+    match command_id {
+        "sheet.delete" | "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.freeze" | "sheet.unfreeze" | "sheet.select" => {
+            eng(sheet_id_param(resolve_any_sheet_id(doc)))
+        }
+        "graph.create" => {
+            let params = match resolve_data_sheet_id(doc) {
+                Some(id) => json!({ "data_sheet_id": id.as_str() }),
+                None => json!({}),
+            };
+            eng(params)
+        }
+        "graph.initialize" => {
+            let target = doc
+                .active_sheet_id
+                .as_ref()
+                .filter(|id| doc.graph_sheet(id).is_some())
+                .cloned()
+                .or_else(|| doc.graph_sheets.iter().find(|g| !g.initialized).map(|g| g.id.clone()))
+                .or_else(|| doc.graph_sheets.first().map(|g| g.id.clone()));
+            eng(sheet_id_param(target))
+        }
+        "layout.alignOrigins" => {
+            let mut params = sheet_id_param(resolve_layout_sheet_id(doc));
+            if let Some(obj) = params.as_object_mut() {
+                obj.insert(String::from("align"), Value::Bool(true));
+                obj.insert(String::from("normalize_bounds"), Value::Bool(true));
+            }
+            eng(params)
+        }
+        "project.createCheckpoint" => eng(json!({ "name": format!("Checkpoint {}", doc.checkpoints.len() + 1) })),
+        "export.svg" | "export.pdf" | "export.png" | "export.tiff" => eng(sheet_id_param(resolve_renderable_sheet_id(doc))),
+        "graph.exportSvg" | "graph.exportPdf" | "graph.exportPng" | "graph.exportEmf" => eng(sheet_id_param(resolve_graph_sheet_id(doc))),
+        "layout.exportEmf" => eng(sheet_id_param(resolve_layout_sheet_id(doc))),
+        "table.exportCsv" => {
+            let target = doc
+                .active_sheet_id
+                .as_ref()
+                .filter(|id| doc.data_sheet(id).is_some() || doc.result_sheet(id).is_some())
+                .cloned()
+                .or_else(|| resolve_data_sheet_id(doc))
+                .or_else(|| resolve_result_sheet_id(doc));
+            eng(sheet_id_param(target))
+        }
+        "analysis.exportJson" | "analysis.exportCsv" => eng(sheet_id_param(resolve_result_sheet_id(doc))),
+        "result.generateReport" => {
+            let params = match resolve_result_sheet_id(doc) {
+                Some(id) => json!({ "result_sheet_id": id.as_str(), "format": "markdown" }),
+                None => json!({}),
+            };
+            eng(params)
+        }
+        cmd if crate::menus::is_desktop_host_routed_command(cmd) => {
+            Some(PaletteCommandRoute::UiCommand { command_id: cmd.to_owned(), params: json!({}) })
+        }
+        _ => None,
+    }
+}
+
+fn is_palette_hidden_engine_command(command_id: &str) -> bool {
+    matches!(
+        command_id,
+        "sheet.rename"
+            | "sheet.reorder"
+            | "project.restoreCheckpoint"
+            | "project.deleteCheckpoint"
+            | "project.saveTemplate"
+            | "table.setCell"
+            | "table.setCells"
+            | "table.setXCells"
+            | "table.clearCells"
+            | "table.excludeCells"
+            | "table.setRowTitles"
+            | "table.setGroupTitles"
+            | "table.setTitles"
+            | "table.setSubcolumnTitles"
+            | "info.setNote"
+            | "info.setConstant"
+            | "info.removeConstant"
+            | "edit.pasteImage"
+            | "edit.pasteResultTable"
+            | "graph.insertImage"
+            | "graph.updateImage"
+            | "layout.insertImage"
+            | "layout.updateImage"
+            | "layout.reorderPanel"
+    )
+}
+
+fn resolve_palette_engine_route(app: &UiApp, command_id: &str) -> Option<PaletteCommandRoute> {
+    if is_palette_hidden_engine_command(command_id) {
+        return None;
+    }
+    let doc = app.document();
+    if let Some(route) = resolve_palette_dialog_engine_route(doc, command_id) {
+        return Some(route);
+    }
+    if let Some(route) = resolve_palette_sheet_engine_route(doc, command_id) {
+        return Some(route);
+    }
+    // Only surface remaining engine commands when their schema has no required parameters
+    // (so they can safely execute from `{}` without failing due to missing fields).
+    let spec = engine_cmd::registry().get(command_id)?;
+    let has_required = (spec.input_schema)().get("required").and_then(Value::as_array).is_some_and(|arr| !arr.is_empty());
+    if has_required { None } else { Some(PaletteCommandRoute::EngineCommand { command_id: command_id.to_owned(), params: json!({}) }) }
+}
+
+fn resolve_palette_route(app: &UiApp, command_id: &str, is_ui_command: bool) -> Option<PaletteCommandRoute> {
+    if is_ui_command { resolve_palette_ui_route(app, command_id) } else { resolve_palette_engine_route(app, command_id) }
+}
+
+fn commit_palette_row(app: &UiApp, row: &CommandPaletteRow, intents: &mut PendingUiIntents) {
     intents.push_set_palette_open(false);
-    if row.is_ui_command {
-        intents.push_ui(&row.command_id, json!({}));
-    } else {
-        intents.push_engine(&row.command_id, json!({}));
+    match resolve_palette_route(app, &row.command_id, row.is_ui_command) {
+        Some(PaletteCommandRoute::UiCommand { command_id, params }) => intents.push_ui(command_id, params),
+        Some(PaletteCommandRoute::EngineCommand { command_id, params }) => intents.push_engine(command_id, params),
+        Some(PaletteCommandRoute::DirectIntent(intent)) => intents.push(intent),
+        None => {}
     }
 }
 

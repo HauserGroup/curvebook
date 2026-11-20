@@ -5,17 +5,15 @@
 //! explicit/frequency/alpha/drag ordering, reference level pinning, and single-commit
 //! `PendingUiIntents` settlement.
 
-use std::borrow::Cow;
-
 use curvebook_doc::{
     CategoricalLevelSummary, DataSheet, LevelOrderKind, LevelOrderSpec, MultipleVariablesTable, SheetId, TableArchetype, VariableColumn,
     VariableRole, VariableSource,
 };
 use egui::{Align, Context, Layout, Rect, RichText, Stroke, Ui, vec2};
-use serde_json::{Value, json};
+use serde_json::json;
 
 use crate::UiApp;
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 
 use super::inspect_bridge::{ModalCaptureSpec, finalize_egui_modal_response};
@@ -65,6 +63,7 @@ pub struct ManageVarsModalEguiState {
     pub unit_draft: String,
     pub dragging_level: Option<usize>,
     pub synced_sheet_col: Option<(SheetId, usize)>,
+    pub synced_var_title: Option<String>,
     pub synced_level_key: Option<String>,
     pub level_merge_target_draft: String,
     pub compact_detail_tab: usize,
@@ -79,9 +78,12 @@ pub struct ManageVarsModalFrameReport {
     pub outside_wheel_captured: bool,
 }
 
-fn modal_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> Cow<'a, str> {
-    let norm = normalize_locale(locale);
-    if let Some(s) = try_tr(norm, key).or_else(|| try_tr("en", key)) { Cow::Borrowed(s) } else { Cow::Borrowed(fallback) }
+#[derive(Clone, Copy)]
+struct ManageVarsSheetCtx<'a> {
+    ds: &'a DataSheet,
+    mv: &'a MultipleVariablesTable,
+    col: usize,
+    tokens: &'a Tokens,
 }
 
 fn split_title_and_unit(raw: &str) -> (String, String) {
@@ -125,11 +127,12 @@ pub fn render_manage_vars_modal(
     intents: &mut PendingUiIntents,
 ) -> ManageVarsModalFrameReport {
     if !app.grid.variables_dialog.open {
+        state.synced_sheet_col = None;
+        state.synced_var_title = None;
         return ManageVarsModalFrameReport::default();
     }
 
-    let title_cow = modal_tr(tokens.locale, "mv.vars.title", "Manage Variables & Levels");
-    let title: &str = &title_cow;
+    let title = tr_or_fallback(tokens.locale, "mv.vars.title", "Manage Variables & Levels");
     let viewport = ctx.content_rect();
     let max_w = (viewport.width() - 24.0).clamp(300.0, 780.0);
     let max_h = (viewport.height() - 24.0).clamp(240.0, 560.0);
@@ -148,7 +151,7 @@ pub fn render_manage_vars_modal(
             hdr.with_layout(Layout::right_to_left(Align::Center), |rhs| {
                 let close_lbl = "×";
                 let close_resp = rhs.button(close_lbl);
-                record_modal_btn(rhs, meta, "mv_formula.vars.close", close_lbl, true, &close_resp);
+                meta.record_modal_response(rhs, &close_resp, FrameInspectEntryInput::modal_button("mv_formula.vars.close", close_lbl, true));
                 if close_resp.clicked() {
                     intents.push_close_manage_variables();
                 }
@@ -159,19 +162,25 @@ pub fn render_manage_vars_modal(
         let body_h = (max_h - 92.0).max(120.0);
         if let Some((ds, mv)) = mv_ctx {
             let sel_col = app.grid.variables_dialog.selected_column.unwrap_or(0).min(mv.variables.len().saturating_sub(1));
-            if state.synced_sheet_col.as_ref() != Some(&(ds.id.clone(), sel_col)) {
+            let col_changed = state.synced_sheet_col.as_ref() != Some(&(ds.id.clone(), sel_col));
+            let live_title = mv.variables.get(sel_col).map(|v| v.title.as_str());
+            if col_changed {
                 state.synced_sheet_col = Some((ds.id.clone(), sel_col));
                 state.selected_level = None;
                 state.synced_level_key = None;
                 state.rename_draft.clear();
                 state.dragging_level = None;
-                if let Some(v) = mv.variables.get(sel_col) {
-                    let (n, u) = split_title_and_unit(&v.title);
+            }
+            if col_changed || state.synced_var_title.as_deref() != live_title {
+                state.synced_var_title = live_title.map(str::to_owned);
+                if let Some(title) = live_title {
+                    let (n, u) = split_title_and_unit(title);
                     state.title_draft = n;
                     state.unit_draft = u;
                 }
             }
 
+            let sheet = ManageVarsSheetCtx { ds, mv, col: sel_col, tokens };
             let compact = inner_w < 540.0;
             if compact {
                 egui::ScrollArea::vertical()
@@ -182,11 +191,11 @@ pub fn render_manage_vars_modal(
                     .show(ui, |scroll_ui| {
                         let content_w = (inner_w - 18.0).max(200.0);
                         scroll_ui.set_max_width(content_w);
-                        render_master_pane(scroll_ui, ds, mv, sel_col, state, tokens, meta, intents, content_w);
+                        render_master_pane(scroll_ui, sheet, content_w, state, meta, intents);
                         scroll_ui.add_space(6.0);
                         widgets::divider(scroll_ui);
                         scroll_ui.add_space(6.0);
-                        render_detail_pane(scroll_ui, app, ds, mv, sel_col, state, tokens, meta, intents, body_h);
+                        render_detail_pane(scroll_ui, app, sheet, body_h, state, meta, intents);
                     });
             } else {
                 let left_w = (inner_w * 0.35).clamp(170.0, 240.0);
@@ -201,7 +210,7 @@ pub fn render_manage_vars_modal(
                             .show(left_ui, |inner| {
                                 let lw = (left_w - 16.0).max(140.0);
                                 inner.set_max_width(lw);
-                                render_master_pane(inner, ds, mv, sel_col, state, tokens, meta, intents, lw);
+                                render_master_pane(inner, sheet, lw, state, meta, intents);
                             });
                     });
                     split_ui.separator();
@@ -214,7 +223,7 @@ pub fn render_manage_vars_modal(
                             .show(right_ui, |inner| {
                                 let rw = (right_w - 16.0).max(180.0);
                                 inner.set_max_width(rw);
-                                render_detail_pane(inner, app, ds, mv, sel_col, state, tokens, meta, intents, body_h);
+                                render_detail_pane(inner, app, sheet, body_h, state, meta, intents);
                             });
                     });
                 });
@@ -228,17 +237,17 @@ pub fn render_manage_vars_modal(
         widgets::divider(ui);
         ui.add_space(4.0);
         ui.horizontal(|footer| {
-            let cancel_lbl = modal_tr(tokens.locale, "btn.cancel", "Cancel");
-            let cancel_resp = widgets::secondary_button(footer, cancel_lbl.as_ref());
-            record_modal_btn(footer, meta, "modal.cancel", cancel_lbl.as_ref(), true, &cancel_resp);
+            let cancel_lbl = tr_or_fallback(tokens.locale, "btn.cancel", "Cancel");
+            let cancel_resp = widgets::secondary_button(footer, cancel_lbl);
+            meta.record_modal_response(footer, &cancel_resp, FrameInspectEntryInput::modal_button("modal.cancel", cancel_lbl, true));
             if cancel_resp.clicked() {
                 intents.push_close_manage_variables();
             }
 
             footer.with_layout(Layout::right_to_left(Align::Center), |rhs| {
-                let ok_lbl = modal_tr(tokens.locale, "btn.ok", "OK");
-                let ok_resp = widgets::primary_button(rhs, ok_lbl.as_ref());
-                record_modal_btn(rhs, meta, "modal.ok", ok_lbl.as_ref(), true, &ok_resp);
+                let ok_lbl = tr_or_fallback(tokens.locale, "btn.ok", "OK");
+                let ok_resp = widgets::primary_button(rhs, ok_lbl);
+                meta.record_modal_response(rhs, &ok_resp, FrameInspectEntryInput::modal_button("modal.ok", ok_lbl, true));
                 if ok_resp.clicked() {
                     if let Some((ds, _)) = mv_ctx
                         && !app.grid.variables_dialog.recode_mappings.is_empty()
@@ -268,21 +277,22 @@ pub fn render_manage_vars_modal(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_master_pane(
     ui: &mut Ui,
-    ds: &DataSheet,
-    mv: &MultipleVariablesTable,
-    sel_col: usize,
+    sheet: ManageVarsSheetCtx<'_>,
+    avail_w: f32,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    avail_w: f32,
 ) {
+    let ManageVarsSheetCtx { ds, mv, col: sel_col, tokens } = sheet;
     ui.label(RichText::new("Variables").strong().color(tokens.text_primary));
     let sr = ui.add(egui::TextEdit::singleline(&mut state.search_query).hint_text("Search variables…").desired_width(avail_w));
-    record_modal_ctrl(ui, meta, "mv_formula.vars.search", "searchbox", "Search variables", Some(state.search_query.clone()), true, &sr);
+    meta.record_modal_response(
+        ui,
+        &sr,
+        FrameInspectEntryInput::modal("mv_formula.vars.search", "searchbox", "Search variables", Some(state.search_query.clone()), true),
+    );
 
     ui.add_space(4.0);
     ui.horizontal_wrapped(|row| {
@@ -290,7 +300,7 @@ fn render_master_pane(
             let active = state.filter == filter_kind;
             let resp = choice_pill(row, tokens, label, active, true);
             let wid = format!("mv_formula.vars.filter.{slug}");
-            record_modal_btn(row, meta, &wid, label, true, &resp);
+            meta.record_modal_response(row, &resp, FrameInspectEntryInput::modal_button(&wid, label, true));
             if resp.clicked() {
                 state.filter = filter_kind;
             }
@@ -325,26 +335,23 @@ fn render_master_pane(
             egui::Button::new(RichText::new(&text).color(if selected { tokens.accent } else { tokens.text_primary })).selected(selected),
         );
         let wid = format!("mv_formula.vars.col.{idx}");
-        record_modal_btn(ui, meta, &wid, &text, true, &resp);
+        meta.record_modal_response(ui, &resp, FrameInspectEntryInput::modal_button(&wid, &text, true));
         if resp.clicked() {
             intents.push_select_manage_var_column(ds.id.clone(), idx);
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_detail_pane(
     ui: &mut Ui,
     app: &UiApp,
-    ds: &DataSheet,
-    mv: &MultipleVariablesTable,
-    col: usize,
+    sheet: ManageVarsSheetCtx<'_>,
+    body_h: f32,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
-    body_h: f32,
 ) {
+    let ManageVarsSheetCtx { ds, mv, col, tokens } = sheet;
     let Some(var) = mv.variables.get(col) else {
         ui.label("No variable selected.");
         return;
@@ -358,7 +365,7 @@ fn render_detail_pane(
         ui.horizontal_wrapped(|trow| {
             for (idx, slug, lbl) in [(0usize, "levels", "Role & Levels"), (1, "recode", "Bulk Recode")] {
                 let r = choice_pill(trow, tokens, lbl, state.compact_detail_tab == idx, true);
-                record_modal_btn(trow, meta, &format!("mv_formula.vars.detail_tab.{slug}"), lbl, true, &r);
+                meta.record_modal_response(trow, &r, FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.detail_tab.{slug}"), lbl, true));
                 if r.clicked() {
                     state.compact_detail_tab = idx;
                 }
@@ -375,14 +382,22 @@ fn render_detail_pane(
         ui.horizontal_wrapped(|row| {
             row.label("Name:");
             let nr = row.add(egui::TextEdit::singleline(&mut state.title_draft).hint_text("Variable name").desired_width(120.0));
-            record_modal_ctrl(row, meta, "mv_formula.vars.title_input", "textbox", "Variable Name", Some(state.title_draft.clone()), !ds.frozen, &nr);
+            meta.record_modal_response(
+                row,
+                &nr,
+                FrameInspectEntryInput::modal("mv_formula.vars.title_input", "textbox", "Variable Name", Some(state.title_draft.clone()), !ds.frozen),
+            );
             row.label("Unit:");
             let ur = row.add(egui::TextEdit::singleline(&mut state.unit_draft).hint_text("e.g. uM, mg/kg").desired_width(82.0));
-            record_modal_ctrl(row, meta, "mv_formula.vars.unit_input", "textbox", "Variable Unit", Some(state.unit_draft.clone()), !ds.frozen, &ur);
+            meta.record_modal_response(
+                row,
+                &ur,
+                FrameInspectEntryInput::modal("mv_formula.vars.unit_input", "textbox", "Variable Unit", Some(state.unit_draft.clone()), !ds.frozen),
+            );
             let apply_lbl = "Save";
             let can_save = !ds.frozen && !state.title_draft.trim().is_empty();
             let ar = row.add_enabled(can_save, egui::Button::new(apply_lbl));
-            record_modal_btn(row, meta, "mv_formula.vars.meta.apply", apply_lbl, can_save, &ar);
+            meta.record_modal_response(row, &ar, FrameInspectEntryInput::modal_button("mv_formula.vars.meta.apply", apply_lbl, can_save));
             if ar.clicked() {
                 let next_title = combine_title_and_unit(&state.title_draft, &state.unit_draft);
                 if !next_title.is_empty() {
@@ -397,15 +412,16 @@ fn render_detail_pane(
             row.label("Role:");
             let mut auto_checked = var.role_inferred && !is_calc;
             let auto_resp = row.add_enabled(!ds.frozen && !is_calc, egui::Checkbox::new(&mut auto_checked, "Auto"));
-            record_modal_ctrl(
+            meta.record_modal_response(
                 row,
-                meta,
-                "mv_formula.vars.lock_toggle",
-                "checkbox",
-                "Auto Role",
-                Some(auto_checked.to_string()),
-                !ds.frozen && !is_calc,
                 &auto_resp,
+                FrameInspectEntryInput::modal(
+                    "mv_formula.vars.lock_toggle",
+                    "checkbox",
+                    "Auto Role",
+                    Some(auto_checked.to_string()),
+                    !ds.frozen && !is_calc,
+                ),
             );
             if auto_resp.changed() {
                 let target_role = if auto_checked {
@@ -427,7 +443,7 @@ fn render_detail_pane(
                 let active = var.role == role_kind;
                 let rr = choice_pill(row, tokens, label, active, !ds.frozen && !is_calc);
                 let wid = format!("mv_formula.vars.role.{slug}");
-                record_modal_btn(row, meta, &wid, label, !ds.frozen && !is_calc, &rr);
+                meta.record_modal_response(row, &rr, FrameInspectEntryInput::modal_button(&wid, label, !ds.frozen && !is_calc));
                 if rr.clicked() {
                     intents.push_engine("table.setVariableRole", json!({ "sheet_id": ds.id.as_str(), "col": col, "role": slug }));
                 }
@@ -439,7 +455,7 @@ fn render_detail_pane(
             ui.horizontal_wrapped(|row| {
                 row.label(RichText::new(format!("FX= {formula}")).monospace().color(tokens.role_fx));
                 let fr = widgets::secondary_button(row, "Edit Formula…");
-                record_modal_btn(row, meta, "mv_formula.vars.edit_formula", "Edit Formula", true, &fr);
+                meta.record_modal_response(row, &fr, FrameInspectEntryInput::modal_button("mv_formula.vars.edit_formula", "Edit Formula", true));
                 if fr.clicked() {
                     intents.push_close_manage_variables();
                     intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": col }));
@@ -463,19 +479,27 @@ fn render_detail_pane(
                 let active = std::mem::discriminant(&vd.level_order.order) == std::mem::discriminant(&kind);
                 let r = choice_pill(row, tokens, label, active, !ds.frozen);
                 let wid = format!("mv_formula.vars.order.{slug}");
-                record_modal_btn(row, meta, &wid, label, !ds.frozen, &r);
+                meta.record_modal_response(row, &r, FrameInspectEntryInput::modal_button(&wid, label, !ds.frozen));
                 if r.clicked() {
                     intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: kind, reversed: vd.level_order.reversed }, None);
                 }
             }
             let mut rev = vd.level_order.reversed;
             let rr = row.checkbox(&mut rev, "Reversed");
-            record_modal_ctrl(row, meta, "mv_formula.vars.order.reversed", "checkbox", "Reversed", Some(rev.to_string()), !ds.frozen, &rr);
+            meta.record_modal_response(
+                row,
+                &rr,
+                FrameInspectEntryInput::modal("mv_formula.vars.order.reversed", "checkbox", "Reversed", Some(rev.to_string()), !ds.frozen),
+            );
             if rr.changed() {
                 intents.push_apply_manage_var_order(ds.id.clone(), col, LevelOrderSpec { order: vd.level_order.order.clone(), reversed: rev }, None);
             }
             let apply_ord = row.add_enabled(!ds.frozen, egui::Button::new("Apply Order"));
-            record_modal_btn(row, meta, "mv_formula.vars.order.apply", "Apply Order", !ds.frozen, &apply_ord);
+            meta.record_modal_response(
+                row,
+                &apply_ord,
+                FrameInspectEntryInput::modal_button("mv_formula.vars.order.apply", "Apply Order", !ds.frozen),
+            );
             if apply_ord.clicked() {
                 intents.push_apply_manage_var_order(ds.id.clone(), col, vd.level_order.clone(), None);
             }
@@ -483,7 +507,7 @@ fn render_detail_pane(
 
         ui.add_space(4.0);
         let live_levels = var.ordered_levels();
-        render_levels_inspector(ui, ds, &live_levels, col, state, tokens, meta, intents);
+        render_levels_inspector(ui, sheet, &live_levels, state, meta, intents);
 
         if !tight_h {
             ui.add_space(8.0);
@@ -498,31 +522,33 @@ fn render_detail_pane(
         ui.horizontal_wrapped(|row| {
             row.label("From:");
             let rf = row.add(egui::TextEdit::singleline(&mut state.recode_from_draft).hint_text("Old level").desired_width(92.0));
-            record_modal_ctrl(
+            meta.record_modal_response(
                 row,
-                meta,
-                "mv_formula.vars.recode_from.input",
-                "textbox",
-                "Recode From",
-                Some(state.recode_from_draft.clone()),
-                !ds.frozen,
                 &rf,
+                FrameInspectEntryInput::modal(
+                    "mv_formula.vars.recode_from.input",
+                    "textbox",
+                    "Recode From",
+                    Some(state.recode_from_draft.clone()),
+                    !ds.frozen,
+                ),
             );
             row.label("To:");
             let rt = row.add(egui::TextEdit::singleline(&mut state.recode_to_draft).hint_text("New level").desired_width(92.0));
-            record_modal_ctrl(
+            meta.record_modal_response(
                 row,
-                meta,
-                "mv_formula.vars.recode_to.input",
-                "textbox",
-                "Recode To",
-                Some(state.recode_to_draft.clone()),
-                !ds.frozen,
                 &rt,
+                FrameInspectEntryInput::modal(
+                    "mv_formula.vars.recode_to.input",
+                    "textbox",
+                    "Recode To",
+                    Some(state.recode_to_draft.clone()),
+                    !ds.frozen,
+                ),
             );
             let can_stage = !ds.frozen && !state.recode_from_draft.trim().is_empty();
             let stage_r = row.add_enabled(can_stage, egui::Button::new("Stage"));
-            record_modal_btn(row, meta, "mv_formula.vars.recode_stage", "Stage", can_stage, &stage_r);
+            meta.record_modal_response(row, &stage_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_stage", "Stage", can_stage));
             if stage_r.clicked() {
                 intents.push_stage_manage_var_recode(state.recode_from_draft.trim(), state.recode_to_draft.trim());
             }
@@ -532,12 +558,16 @@ fn render_detail_pane(
         ui.horizontal_wrapped(|row| {
             let can_apply = !ds.frozen && !vd.recode_mappings.is_empty();
             let clear_r = row.add_enabled(can_apply, egui::Button::new("Clear"));
-            record_modal_btn(row, meta, "mv_formula.vars.recode_clear", "Clear", can_apply, &clear_r);
+            meta.record_modal_response(row, &clear_r, FrameInspectEntryInput::modal_button("mv_formula.vars.recode_clear", "Clear", can_apply));
             if clear_r.clicked() {
                 intents.push_clear_manage_var_recodes();
             }
             let apply_r = widgets::primary_button_enabled(row, "Apply Recodes", can_apply);
-            record_modal_btn(row, meta, "mv_formula.vars.recode_apply", "Apply Recodes", can_apply, &apply_r);
+            meta.record_modal_response(
+                row,
+                &apply_r,
+                FrameInspectEntryInput::modal_button("mv_formula.vars.recode_apply", "Apply Recodes", can_apply),
+            );
             if apply_r.clicked() {
                 intents.push_apply_manage_var_recodes(ds.id.clone());
             }
@@ -551,22 +581,24 @@ fn render_detail_pane(
                 }
             };
             let pr = row.label(RichText::new(&preview_txt).size(11.5).color(tokens.text_muted));
-            record_modal_ctrl(row, meta, "mv_formula.vars.recode_preview", "label", &preview_txt, Some(preview_txt.clone()), true, &pr);
+            meta.record_modal_response(
+                row,
+                &pr,
+                FrameInspectEntryInput::modal("mv_formula.vars.recode_preview", "label", &preview_txt, Some(preview_txt.clone()), true),
+            );
         });
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_levels_inspector(
     ui: &mut Ui,
-    ds: &DataSheet,
+    sheet: ManageVarsSheetCtx<'_>,
     levels: &[CategoricalLevelSummary],
-    col: usize,
     state: &mut ManageVarsModalEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ManageVarsSheetCtx { ds, col, tokens, .. } = sheet;
     let mut explicit_names: Vec<String> = levels.iter().map(|l| l.level.clone()).collect();
     let sel_idx = state.selected_level.as_ref().and_then(|s| explicit_names.iter().position(|x| x == s));
 
@@ -574,19 +606,19 @@ fn render_levels_inspector(
     ui.horizontal_wrapped(|bar| {
         let can_up = !ds.frozen && sel_idx.is_some_and(|i| i > 0);
         let can_dn = !ds.frozen && sel_idx.is_some_and(|i| i + 1 < explicit_names.len());
-        let top_lbl = modal_tr(tokens.locale, "w7.mv.move_to_top", "Top");
-        let up_lbl = modal_tr(tokens.locale, "w7.mv.move_up", "Up");
-        let dn_lbl = modal_tr(tokens.locale, "w7.mv.move_down", "Down");
-        let end_lbl = modal_tr(tokens.locale, "w7.mv.move_to_end", "End");
+        let top_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_to_top", "Top");
+        let up_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_up", "Up");
+        let dn_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_down", "Down");
+        let end_lbl = tr_or_fallback(tokens.locale, "w7.mv.move_to_end", "End");
 
         for (wid, lbl, en, target_pos) in [
-            ("mv_formula.vars.move_top", top_lbl.as_ref(), can_up, 0usize),
-            ("mv_formula.vars.move_up", up_lbl.as_ref(), can_up, sel_idx.unwrap_or(0).saturating_sub(1)),
-            ("mv_formula.vars.move_down", dn_lbl.as_ref(), can_dn, (sel_idx.unwrap_or(0) + 1).min(explicit_names.len().saturating_sub(1))),
-            ("mv_formula.vars.move_end", end_lbl.as_ref(), can_dn, explicit_names.len().saturating_sub(1)),
+            ("mv_formula.vars.move_top", top_lbl, can_up, 0usize),
+            ("mv_formula.vars.move_up", up_lbl, can_up, sel_idx.unwrap_or(0).saturating_sub(1)),
+            ("mv_formula.vars.move_down", dn_lbl, can_dn, (sel_idx.unwrap_or(0) + 1).min(explicit_names.len().saturating_sub(1))),
+            ("mv_formula.vars.move_end", end_lbl, can_dn, explicit_names.len().saturating_sub(1)),
         ] {
             let r = choice_pill(bar, tokens, lbl, false, en);
-            record_modal_btn(bar, meta, wid, lbl, en, &r);
+            meta.record_modal_response(bar, &r, FrameInspectEntryInput::modal_button(wid, lbl, en));
             if r.clicked()
                 && let Some(i) = sel_idx
                 && i < explicit_names.len()
@@ -636,7 +668,11 @@ fn render_levels_inspector(
 
                     let title_lbl = if idx == 0 { format!("{} [Ref]", item.level) } else { item.level.clone() };
                     let lvl_r = h.selectable_label(is_selected, &title_lbl);
-                    record_modal_btn(h, meta, &format!("mv_formula.vars.level.{idx}"), &title_lbl, true, &lvl_r);
+                    meta.record_modal_response(
+                        h,
+                        &lvl_r,
+                        FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level.{idx}"), &title_lbl, true),
+                    );
                     if lvl_r.clicked() {
                         state.selected_level = Some(item.level.clone());
                         state.synced_level_key = Some(item.level.clone());
@@ -648,26 +684,35 @@ fn render_levels_inspector(
                     );
 
                     let up_r = choice_pill(h, tokens, "Up", false, !ds.frozen && idx > 0);
-                    record_modal_btn(h, meta, &format!("mv_formula.vars.level_up.{idx}"), "Move Level Up", !ds.frozen && idx > 0, &up_r);
+                    meta.record_modal_response(
+                        h,
+                        &up_r,
+                        FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_up.{idx}"), "Move Level Up", !ds.frozen && idx > 0),
+                    );
                     if up_r.clicked() {
                         commit_reorder = Some((idx, idx.saturating_sub(1)));
                     }
 
                     let dn_r = choice_pill(h, tokens, "Dn", false, !ds.frozen && idx + 1 < levels.len());
-                    record_modal_btn(
+                    meta.record_modal_response(
                         h,
-                        meta,
-                        &format!("mv_formula.vars.level_dn.{idx}"),
-                        "Move Level Down",
-                        !ds.frozen && idx + 1 < levels.len(),
                         &dn_r,
+                        FrameInspectEntryInput::modal_button(
+                            &format!("mv_formula.vars.level_dn.{idx}"),
+                            "Move Level Down",
+                            !ds.frozen && idx + 1 < levels.len(),
+                        ),
                     );
                     if dn_r.clicked() {
                         commit_reorder = Some((idx, idx + 1));
                     }
 
                     let ref_r = choice_pill(h, tokens, "Pin Ref", idx == 0, !ds.frozen);
-                    record_modal_btn(h, meta, &format!("mv_formula.vars.level_ref.{idx}"), "Pin Ref", !ds.frozen, &ref_r);
+                    meta.record_modal_response(
+                        h,
+                        &ref_r,
+                        FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_ref.{idx}"), "Pin Ref", !ds.frozen),
+                    );
                     if ref_r.clicked() {
                         intents.push_apply_manage_var_order(
                             ds.id.clone(),
@@ -682,20 +727,25 @@ fn render_levels_inspector(
                     row.horizontal_wrapped(|edit_row| {
                         edit_row.label("Rename/Merge to:");
                         let er = edit_row.add(egui::TextEdit::singleline(&mut state.rename_draft).hint_text("New level name").desired_width(105.0));
-                        record_modal_ctrl(
+                        meta.record_modal_response(
                             edit_row,
-                            meta,
-                            &format!("mv_formula.vars.level_rename.{idx}"),
-                            "textbox",
-                            "Inline Level Rename",
-                            Some(state.rename_draft.clone()),
-                            !ds.frozen,
                             &er,
+                            FrameInspectEntryInput::modal(
+                                &format!("mv_formula.vars.level_rename.{idx}"),
+                                "textbox",
+                                "Inline Level Rename",
+                                Some(state.rename_draft.clone()),
+                                !ds.frozen,
+                            ),
                         );
                         let trimmed = state.rename_draft.trim();
                         let can_recode = !ds.frozen && !trimmed.is_empty() && trimmed != item.level;
                         let mr = edit_row.add_enabled(can_recode, egui::Button::new("Apply Rename/Merge"));
-                        record_modal_btn(edit_row, meta, &format!("mv_formula.vars.level_merge.{idx}"), "Apply Rename/Merge", can_recode, &mr);
+                        meta.record_modal_response(
+                            edit_row,
+                            &mr,
+                            FrameInspectEntryInput::modal_button(&format!("mv_formula.vars.level_merge.{idx}"), "Apply Rename/Merge", can_recode),
+                        );
                         if mr.clicked() || (er.lost_focus() && er.ctx.input(|i| i.key_pressed(egui::Key::Enter)) && can_recode) {
                             intents.push_engine(
                                 "table.recodeLevels",
@@ -746,60 +796,4 @@ fn choice_pill(ui: &mut Ui, tokens: &Tokens, label: &str, selected: bool, enable
     }
     let btn = egui::Button::new(text).selected(selected);
     ui.add_enabled(enabled, btn)
-}
-
-fn record_modal_btn(ui: &Ui, meta: &mut FrameInspectMeta, wid: &str, label: &str, enabled: bool, resp: &egui::Response) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
-        return;
-    }
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id: wid,
-            role: "button",
-            label,
-            command_id: None,
-            value: None,
-            enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
-}
-
-#[allow(clippy::too_many_arguments)]
-fn record_modal_ctrl(
-    ui: &Ui,
-    meta: &mut FrameInspectMeta,
-    wid: &str,
-    role: &str,
-    label: &str,
-    value: Option<String>,
-    enabled: bool,
-    resp: &egui::Response,
-) {
-    let clipped = resp.interact_rect.intersect(ui.clip_rect());
-    if clipped.width() <= 0.5 || clipped.height() <= 0.5 {
-        return;
-    }
-    meta.record_response(
-        ui,
-        resp,
-        FrameInspectEntryInput {
-            widget_id: wid,
-            role,
-            label,
-            command_id: None,
-            value: value.map(Value::String),
-            enabled,
-            disabled_reason: (!enabled).then_some("unavailable"),
-            z_layer: ZLayer::ModalDialog,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
 }

@@ -11,6 +11,7 @@ pub mod dialogs_canvas;
 pub mod dialogs_r9;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod egui_shell;
+pub mod feedback;
 pub mod grid_view;
 mod gui_actions;
 pub mod i18n;
@@ -48,26 +49,30 @@ pub use dialogs_canvas::{
     RemediationKind, SplitWorkspaceState,
 };
 pub use dialogs_r9::{InsertModelEquationDialogState, RandomSampleRowsDialogState, RandomizeGroupsDialogState, SimulateDistributionsDialogState};
+pub use feedback::{
+    BuiltFeedbackUrl, FeedbackCategory, FeedbackDiagnostics, FeedbackDraft, FeedbackSurface, GITHUB_ISSUES_NEW_BASE, MAX_GITHUB_ISSUE_URL_BYTES,
+    build_feedback_markdown, build_github_issue_url, build_github_issue_url_capped, percent_encode_query_component, validate_github_issue_url,
+};
 pub use grid_view::{GridViewState, ImportReshapeMode, ImportReshapeState};
 pub use i18n::{
     BETA_ACTIVE_LOCALES, LOCALES, LocalePreset, is_beta_active_locale, is_draft_translation_locale, locale_display_name, locale_picker_label,
-    normalize_beta_gui_locale, normalize_locale, tr,
+    normalize_beta_gui_locale, normalize_locale, tr, tr_or_fallback,
 };
 pub use inspect::{ParityReport, ParityViolation, ScreenshotRegionTarget, UiTreeSnapshot, ZLayer, inspect_ui_tree, inspect_ui_tree_for_metrics};
 pub use interaction::{
     CanvasDragTarget, InlineEditorState, InlineEditorTarget, InteractionControllerState, KeyModifiers, LayoutResizeHandle, PointerButton,
-    UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, dispatch_mouse_wheel, dispatch_ui_event,
+    UiEventOutcome, UiInputEvent, ViewportMetrics, VirtualWorkspaceFolder, build_shortcut_candidates, dispatch_mouse_wheel, dispatch_ui_event,
 };
 pub use menus::{
-    CommandTooltip, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry, ShortcutScope, TOOLBAR_BUTTONS,
-    ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip, menu_bar_tooltips, normalize_shortcut_combo,
-    toolbar_caption_command_id, toolbar_tooltips,
+    CommandTooltip, DESKTOP_HOST_ROUTED_COMMANDS, MenuSectionTooltips, ShortcutBinding, ShortcutExecution, ShortcutMatch, ShortcutRegistry,
+    ShortcutScope, TOOLBAR_BUTTONS, ToolbarButtonSpec, ToolbarButtonTooltip, UI_COMMANDS, UiCommandSpec, command_tooltip,
+    is_desktop_host_routed_command, menu_bar_tooltips, normalize_shortcut_combo, toolbar_caption_command_id, toolbar_tooltips,
 };
 pub use modal_predicates::ControlEnablement;
 pub use os_integration::{
-    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, StubPlatformClipboardAdapter, SystemPlatformClipboardAdapter,
-    build_cf_html_payload, discover_os_printers, open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes,
-    read_os_clipboard_text,
+    ClipboardBundle, OsAdapterAvailability, OsAdapterStatus, PlatformClipboardAdapter, PlatformUrlOpener, StubPlatformClipboardAdapter,
+    StubPlatformUrlOpener, SystemPlatformClipboardAdapter, SystemPlatformUrlOpener, build_cf_html_payload, discover_os_printers,
+    open_github_issue_url, open_os_print_preview_dialog, open_os_print_preview_dialog_titled, read_os_clipboard_pdf_bytes, read_os_clipboard_text,
 };
 #[cfg(not(target_arch = "wasm32"))]
 pub use os_integration::{read_os_pasteboard, submit_os_print_job, submit_os_print_pdf_bytes, write_os_clipboard_bundle, write_os_pasteboard};
@@ -255,6 +260,25 @@ impl PartialEq for ClipboardAdapterSlot {
     }
 }
 
+/// Equality-transparent holder for [`UiApp`]'s active [`PlatformUrlOpener`].
+#[derive(Debug, Clone)]
+pub(crate) struct UrlOpenerSlot {
+    pub opener: std::sync::Arc<dyn PlatformUrlOpener>,
+    pub is_custom: bool,
+}
+
+impl Default for UrlOpenerSlot {
+    fn default() -> Self {
+        Self { opener: std::sync::Arc::new(os_integration::SystemPlatformUrlOpener::guarded()), is_custom: false }
+    }
+}
+
+impl PartialEq for UrlOpenerSlot {
+    fn eq(&self, _other: &Self) -> bool {
+        true
+    }
+}
+
 /// Incremental session rollback log captured for atomic `command.batch` execution.
 #[derive(Debug, Clone, PartialEq)]
 pub(crate) struct BatchUndoTracker {
@@ -345,6 +369,7 @@ pub struct UiApp {
     pub egui_views: egui_shell::EguiShellViewState,
     pub view_shards: views::ViewShardStates,
     pub(crate) clipboard_adapter: ClipboardAdapterSlot,
+    pub(crate) url_opener: UrlOpenerSlot,
     #[cfg(not(target_arch = "wasm32"))]
     pub(crate) egui_dispatch_hook: EguiDispatchHookSlot,
     pub(crate) batch_undo_log: Option<BatchUndoTracker>,
@@ -396,6 +421,7 @@ impl UiApp {
             egui_views: egui_shell::EguiShellViewState::default(),
             view_shards: views::ViewShardStates::default(),
             clipboard_adapter: ClipboardAdapterSlot::default(),
+            url_opener: UrlOpenerSlot::default(),
             #[cfg(not(target_arch = "wasm32"))]
             egui_dispatch_hook: EguiDispatchHookSlot::default(),
             batch_undo_log: None,
@@ -670,6 +696,87 @@ impl UiApp {
         self.clipboard_adapter.is_custom
     }
 
+    /// Install a custom [`PlatformUrlOpener`] (such as [`SystemPlatformUrlOpener::live`] for
+    /// interactive desktop windows or [`StubPlatformUrlOpener`] for deterministic tests).
+    pub fn set_url_opener(&mut self, opener: std::sync::Arc<dyn PlatformUrlOpener>) {
+        self.url_opener = UrlOpenerSlot { opener, is_custom: true };
+    }
+
+    /// Borrow the currently configured [`PlatformUrlOpener`].
+    #[must_use]
+    pub fn url_opener(&self) -> &dyn PlatformUrlOpener {
+        self.url_opener.opener.as_ref()
+    }
+
+    /// Return whether a caller explicitly installed a custom [`PlatformUrlOpener`].
+    #[must_use]
+    pub const fn has_custom_url_opener(&self) -> bool {
+        self.url_opener.is_custom
+    }
+
+    /// Capture strictly non-identifying environment diagnostics for the active feedback form.
+    #[must_use]
+    pub fn feedback_diagnostics(&self) -> FeedbackDiagnostics {
+        FeedbackDiagnostics::from_app(self)
+    }
+
+    /// Build the prefilled GitHub new-issue URL for the current `canvas_dialogs.feedback` draft.
+    #[must_use]
+    pub fn build_feedback_issue_url(&self) -> BuiltFeedbackUrl {
+        let diag = self.canvas_dialogs.feedback.include_diagnostics.then(|| self.feedback_diagnostics());
+        build_github_issue_url(&self.canvas_dialogs.feedback, diag.as_ref())
+    }
+
+    /// Build the complete, untruncated Markdown report for the current `canvas_dialogs.feedback` draft.
+    #[must_use]
+    pub fn build_feedback_markdown(&self) -> String {
+        let diag = self.canvas_dialogs.feedback.include_diagnostics.then(|| self.feedback_diagnostics());
+        build_feedback_markdown(&self.canvas_dialogs.feedback, diag.as_ref())
+    }
+
+    /// Validate and open the current feedback draft as a prefilled GitHub issue in the configured
+    /// [`PlatformUrlOpener`], updating `canvas_dialogs.feedback` status fields.
+    ///
+    /// # Errors
+    /// Returns an error if URL validation fails or the configured opener returns an error.
+    pub fn open_feedback_on_github(&mut self) -> Result<(BuiltFeedbackUrl, OsAdapterStatus), String> {
+        let built = self.build_feedback_issue_url();
+        let status = if !self.url_opener.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            validate_github_issue_url(&built.url)?;
+            OsAdapterStatus::unavailable("os-browser", "browser launch disabled under gui_only without custom URL opener")
+        } else {
+            self.url_opener.opener.open_external_url(&built.url)?
+        };
+        self.canvas_dialogs.feedback.last_built_url = Some(built.url.clone());
+        self.canvas_dialogs.feedback.last_url_truncated = built.truncated;
+        self.canvas_dialogs.feedback.status_message = Some(if status.available {
+            if built.truncated {
+                String::from("Opened GitHub issue form (trimmed for URL length — use Copy Markdown for full text).")
+            } else {
+                String::from("Opened GitHub issue form in your browser.")
+            }
+        } else {
+            format!("Browser unavailable ({}). Use Copy Markdown to paste into GitHub.", status.detail)
+        });
+        Ok((built, status))
+    }
+
+    /// Copy the complete Markdown feedback report to the configured [`PlatformClipboardAdapter`].
+    ///
+    /// # Errors
+    /// Returns an error if the clipboard adapter reports an error.
+    pub fn copy_feedback_markdown(&mut self) -> Result<(String, OsAdapterStatus), String> {
+        let markdown = self.build_feedback_markdown();
+        let status = self.write_clipboard_text(&markdown)?;
+        self.canvas_dialogs.feedback.copied_markdown = true;
+        self.canvas_dialogs.feedback.status_message = Some(if status.available {
+            String::from("Copied Markdown feedback report to clipboard.")
+        } else {
+            String::from("Prepared Markdown feedback report (host clipboard unavailable in this session).")
+        });
+        Ok((markdown, status))
+    }
+
     pub(crate) fn write_clipboard_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
         if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
             return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
@@ -689,6 +796,13 @@ impl UiApp {
             return Ok(OsAdapterStatus::unavailable("os-pasteboard", "live OS pasteboard disabled under gui_only without stub adapter"));
         }
         self.clipboard_adapter.adapter.read_text()
+    }
+
+    pub(crate) fn read_clipboard_image(&self) -> Result<Option<Vec<u8>>, String> {
+        if !self.clipboard_adapter.is_custom && (self.is_gui_only() || self.is_human_path_only()) {
+            return Ok(None);
+        }
+        self.clipboard_adapter.adapter.read_image_bytes()
     }
 
     pub(crate) fn toggle_navigator_pane(&mut self) -> bool {
@@ -1485,6 +1599,7 @@ fn run_settled_egui_on_ctx(
     let height_px = (h_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
 
     let mut meta = egui_shell::FrameInspectMeta::default();
+    let mut carried_intents = egui_shell::PendingUiIntents::default();
     for pass in 0..8_u32 {
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(w_pt, h_pt))),
@@ -1493,10 +1608,11 @@ fn run_settled_egui_on_ctx(
                 .collect(),
             ..Default::default()
         };
-        let mut intents = egui_shell::PendingUiIntents::default();
         let mut settled_in_pass = false;
         let mut output = ctx.run_ui(raw_input, |ui| {
-            build_ui(ui, app, &mut meta, &mut intents);
+            let mut pass_intents = egui_shell::PendingUiIntents::default();
+            build_ui(ui, app, &mut meta, &mut pass_intents);
+            carried_intents.merge_pass(pass_intents);
             settled_in_pass = !ui.ctx().will_discard();
         });
         let stamp = egui_shell::GeometryStamp::from_context(u64::from(pass) + 1, ctx, [width_px, height_px], settled_in_pass);
@@ -1509,8 +1625,9 @@ fn run_settled_egui_on_ctx(
             output.textures_delta.clear();
         }
         if settled_in_pass {
-            intents.commit_if_settled(app, false)?;
+            let commit_res = carried_intents.commit_if_settled(app, false);
             app.sync_views();
+            commit_res?;
             return Ok((output, meta, stamp));
         }
     }
@@ -1529,7 +1646,7 @@ mod tests {
 
     #[test]
     fn ui_commands_table_covers_parity_surface() {
-        assert_eq!(UI_COMMANDS.len(), 47);
+        assert_eq!(UI_COMMANDS.len(), 54);
         for required in [
             "ui.navigator.toggle",
             "ui.inspector.toggle",
@@ -1540,6 +1657,12 @@ mod tests {
             "ui.changeGraphType.open",
             "ui.clonePipeline.open",
             "ui.applyStyleFrom.open",
+            "ui.graph.create.open",
+            "ui.layout.equalizeScaling.open",
+            "ui.view.rowTitles.toggle",
+            "ui.gridOverlay.toggle",
+            "ui.embeddedTable.format.open",
+            "ui.image.format.open",
             "ui.zoom.fitSheet",
             "ui.gallery.toggle",
             "ui.rulers.toggle",
@@ -1562,6 +1685,7 @@ mod tests {
             "ui.table.convertArchetype.open",
             "ui.import.reshape.open",
             "app.about",
+            "app.feedback",
         ] {
             assert!(UI_COMMANDS.iter().any(|spec| spec.id == required), "missing UI command {required}");
         }

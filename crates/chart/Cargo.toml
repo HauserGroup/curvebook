@@ -11,6 +11,7 @@ description = "CurveBook scientific graph, error-bar, axis-break and significanc
 workspace = true
 
 [dependencies]
+image = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-fit = { workspace = true }
 curvebook-math = { workspace = true }

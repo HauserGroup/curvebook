@@ -34,6 +34,7 @@ pub mod error;
 pub mod linalg;
 pub mod pvalue;
 pub mod quad;
+pub mod quantile;
 pub mod rng;
 pub mod roots;
 pub mod special;
@@ -46,6 +47,7 @@ pub use linalg::{
     solve_linear_least_squares, svd, sym_eigen,
 };
 pub use pvalue::{ConfidenceLevel, PValueFormat};
+pub use quantile::quantile_type7_sorted;
 pub use rng::DeterministicRng;
 
 /// Percentage vs unit-proportion domain for [`AxisScale::Logit`] (`docs/implementation/graphing-and-layouts.md` §3.1).

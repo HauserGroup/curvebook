@@ -265,6 +265,15 @@ pub fn parse_leading_number(text: &str) -> Option<f64> {
     parse_column_title_numeric_hook(text).ok()
 }
 
+/// Stable lookup key for a per-dataset value in a multi-dataset fit, such as `"AntagConc [DS1]"`.
+///
+/// `data_set_index` is the zero-based source column index, shown one-based. Fixed-constant names,
+/// published scalar keys, and equation-annotation lookups all use this key, so it must stay
+/// independent of column titles. Result tables show titles through their own display labels.
+pub(crate) fn per_dataset_parameter_key(name: &str, data_set_index: usize) -> String {
+    format!("{name} [DS{}]", data_set_index.saturating_add(1))
+}
+
 /// Column selection & multi-factor Cartesian grouping options for `MultipleVariables` tables.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct MultivarExtractionSpec<'a> {

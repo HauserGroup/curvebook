@@ -335,6 +335,34 @@ impl PivotedQr {
         Ok(())
     }
 
+    /// Apply the `k`-th Householder reflector `H_k = I - tau * v_k * v_k^T` in place to `vec`
+    /// using compensated (`Dot2` FMA) inner-product accumulation.
+    fn apply_reflector_compensated(&self, k: usize, tau: f64, vec: &mut [f64]) {
+        if tau == 0.0 {
+            return;
+        }
+        let mut prod_acc = NeumaierSum::new();
+        let mut err_acc = NeumaierSum::new();
+        prod_acc.add(vec.get(k).copied().unwrap_or(0.0));
+        for r in (k + 1)..self.nrows {
+            let vr = self.factors.entry(r, k);
+            let xr = vec.get(r).copied().unwrap_or(0.0);
+            let p = vr * xr;
+            prod_acc.add(p);
+            err_acc.add(vr.mul_add(xr, -p));
+        }
+        let w = tau * (prod_acc.total() + err_acc.total());
+        if let Some(xk) = vec.get_mut(k) {
+            *xk -= w;
+        }
+        for r in (k + 1)..self.nrows {
+            let vr = self.factors.entry(r, k);
+            if let Some(xr) = vec.get_mut(r) {
+                *xr -= w * vr;
+            }
+        }
+    }
+
     /// Compute `Q^T * b` (`m` elements) implicitly from the stored Householder vectors without
     /// allocating `m x m` `Q`.
     ///
@@ -346,29 +374,7 @@ impl PivotedQr {
         }
         let mut y = b.to_vec();
         for (k, &tau) in self.taus.iter().enumerate() {
-            if tau == 0.0 {
-                continue;
-            }
-            let mut prod_acc = NeumaierSum::new();
-            let mut err_acc = NeumaierSum::new();
-            prod_acc.add(y.get(k).copied().unwrap_or(0.0));
-            for r in (k + 1)..self.nrows {
-                let vr = self.factors.entry(r, k);
-                let yr = y.get(r).copied().unwrap_or(0.0);
-                let p = vr * yr;
-                prod_acc.add(p);
-                err_acc.add(vr.mul_add(yr, -p));
-            }
-            let w = tau * (prod_acc.total() + err_acc.total());
-            if let Some(yk) = y.get_mut(k) {
-                *yk -= w;
-            }
-            for r in (k + 1)..self.nrows {
-                let vr = self.factors.entry(r, k);
-                if let Some(yr) = y.get_mut(r) {
-                    *yr -= w * vr;
-                }
-            }
+            self.apply_reflector_compensated(k, tau, &mut y);
         }
         Ok(y)
     }
@@ -380,29 +386,7 @@ impl PivotedQr {
         }
         let mut out = v.to_vec();
         for (k, &tau) in self.taus.iter().enumerate().rev() {
-            if tau == 0.0 {
-                continue;
-            }
-            let mut prod_acc = NeumaierSum::new();
-            let mut err_acc = NeumaierSum::new();
-            prod_acc.add(out.get(k).copied().unwrap_or(0.0));
-            for r in (k + 1)..self.nrows {
-                let vr = self.factors.entry(r, k);
-                let or = out.get(r).copied().unwrap_or(0.0);
-                let p = vr * or;
-                prod_acc.add(p);
-                err_acc.add(vr.mul_add(or, -p));
-            }
-            let w = tau * (prod_acc.total() + err_acc.total());
-            if let Some(ok) = out.get_mut(k) {
-                *ok -= w;
-            }
-            for r in (k + 1)..self.nrows {
-                let vr = self.factors.entry(r, k);
-                if let Some(or) = out.get_mut(r) {
-                    *or -= w * vr;
-                }
-            }
+            self.apply_reflector_compensated(k, tau, &mut out);
         }
         Ok(out)
     }

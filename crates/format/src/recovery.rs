@@ -450,6 +450,15 @@ pub trait JournalBackend {
         Ok(None)
     }
 
+    /// Read the highest journal sequence covered by `snapshot_bytes` without re-reading the
+    /// persisted snapshot file when supported by the backend.
+    ///
+    /// Existing [`JournalBackend`] implementations fall back to [`Self::read_snapshot_covered_seq`].
+    fn read_snapshot_covered_seq_for(&self, snapshot_bytes: &[u8]) -> Result<Option<u64>, FormatError> {
+        let _ = snapshot_bytes;
+        self.read_snapshot_covered_seq()
+    }
+
     /// Clear persisted snapshot-covered sequence metadata once the journal has been cleared cleanly.
     fn clear_snapshot_covered_seq(&mut self) -> Result<(), FormatError> {
         Ok(())
@@ -1354,7 +1363,11 @@ impl JournalBackend for DirectoryJournalBackend {
         let Some(snapshot_bytes) = self.read_snapshot()? else {
             return Ok(None);
         };
-        let actual_crc = crc32fast::hash(&snapshot_bytes);
+        self.read_snapshot_covered_seq_for(&snapshot_bytes)
+    }
+
+    fn read_snapshot_covered_seq_for(&self, snapshot_bytes: &[u8]) -> Result<Option<u64>, FormatError> {
+        let actual_crc = crc32fast::hash(snapshot_bytes);
         let actual_len = u64::try_from(snapshot_bytes.len()).map_err(|_| FormatError::Io(String::from("snapshot length overflow")))?;
         if let Some(seq) = self.read_matching_snapshot_meta(&self.snapshot_meta_path(), actual_crc, actual_len)? {
             return Ok(Some(seq));
@@ -1559,30 +1572,34 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
         Ok(seq)
     }
 
-    /// Persist an atomic snapshot checkpoint binding the covered journal sequence BEFORE
-    /// truncating `ops.journal`.
-    pub fn checkpoint(&mut self, snapshot_bytes: &[u8]) -> Result<(), FormatError> {
-        self.ensure_lease_ownership("checkpoint journal")?;
+    fn publish_snapshot_and_optional_marker(&mut self, snapshot_bytes: &[u8]) -> Result<Option<PublishedSnapshotMarker>, FormatError> {
         let covered_seq = self.next_seq.saturating_sub(1);
         self.backend.write_snapshot_with_seq(snapshot_bytes, covered_seq)?;
-        let backend_stored_seq = self.backend.read_snapshot_covered_seq()? == Some(covered_seq);
+        let backend_stored_seq = self.backend.read_snapshot_covered_seq_for(snapshot_bytes)? == Some(covered_seq);
         if covered_seq > 0 && !backend_stored_seq {
             let marker_seq = self.next_seq;
             let marker = build_snapshot_marker_record(marker_seq, covered_seq, snapshot_bytes)?;
             let line = marker.to_ndjson_line()?;
             self.backend.append_journal_line(&line)?;
-            if let Err(err) = self.backend.clear_journal() {
-                self.next_seq = marker_seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
-                self.pending_record_count = self.pending_record_count.saturating_add(1);
-                let marker_bytes = if line.ends_with('\n') { line.len() } else { line.len().saturating_add(1) };
-                self.pending_journal_bytes = self.pending_journal_bytes.saturating_add(marker_bytes);
-                return Err(err);
-            }
-            self.pending_record_count = 0;
-            self.pending_journal_bytes = 0;
-            return Ok(());
+            let line_bytes = if line.ends_with('\n') { line.len() } else { line.len().saturating_add(1) };
+            return Ok(Some(PublishedSnapshotMarker { seq: marker_seq, line_bytes }));
         }
-        self.backend.clear_journal()?;
+        Ok(None)
+    }
+
+    /// Persist an atomic snapshot checkpoint binding the covered journal sequence BEFORE
+    /// truncating `ops.journal`.
+    pub fn checkpoint(&mut self, snapshot_bytes: &[u8]) -> Result<(), FormatError> {
+        self.ensure_lease_ownership("checkpoint journal")?;
+        let appended_marker = self.publish_snapshot_and_optional_marker(snapshot_bytes)?;
+        if let Err(err) = self.backend.clear_journal() {
+            if let Some(marker) = appended_marker {
+                self.next_seq = marker.seq.checked_add(1).ok_or_else(|| FormatError::Io(String::from("journal sequence number overflow")))?;
+                self.pending_record_count = self.pending_record_count.saturating_add(1);
+                self.pending_journal_bytes = self.pending_journal_bytes.saturating_add(marker.line_bytes);
+            }
+            return Err(err);
+        }
         self.pending_record_count = 0;
         self.pending_journal_bytes = 0;
         Ok(())
@@ -1604,15 +1621,7 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
     /// the underlying backend.
     pub fn close_cleanly(mut self, final_snapshot_bytes: &[u8]) -> Result<B, FormatError> {
         self.ensure_lease_ownership("close journal cleanly")?;
-        let covered_seq = self.next_seq.saturating_sub(1);
-        self.backend.write_snapshot_with_seq(final_snapshot_bytes, covered_seq)?;
-        let backend_stored_seq = self.backend.read_snapshot_covered_seq()? == Some(covered_seq);
-        if covered_seq > 0 && !backend_stored_seq {
-            let marker_seq = self.next_seq;
-            let marker = build_snapshot_marker_record(marker_seq, covered_seq, final_snapshot_bytes)?;
-            let line = marker.to_ndjson_line()?;
-            self.backend.append_journal_line(&line)?;
-        }
+        let _ = self.publish_snapshot_and_optional_marker(final_snapshot_bytes)?;
         self.backend.clear_journal()?;
         self.backend.clear_snapshot_covered_seq()?;
         self.backend.release_lease(&self.lease.owner_id)?;
@@ -1642,6 +1651,32 @@ impl<B: JournalBackend> CrashRecoveryJournal<B> {
     /// Mutably borrow the underlying backend.
     pub fn backend_mut(&mut self) -> &mut B {
         &mut self.backend
+    }
+}
+
+struct PublishedSnapshotMarker {
+    seq: u64,
+    line_bytes: usize,
+}
+
+struct LazySnapshotDigest<'a> {
+    bytes: &'a [u8],
+    digest: Option<(u64, u32)>,
+}
+
+impl<'a> LazySnapshotDigest<'a> {
+    const fn new(bytes: &'a [u8]) -> Self {
+        Self { bytes, digest: None }
+    }
+
+    fn len_and_crc(&mut self) -> Option<(u64, u32)> {
+        if let Some(cached) = self.digest {
+            return Some(cached);
+        }
+        let len = u64::try_from(self.bytes.len()).ok()?;
+        let crc = crc32fast::hash(self.bytes);
+        self.digest = Some((len, crc));
+        Some((len, crc))
     }
 }
 
@@ -1686,13 +1721,15 @@ fn is_snapshot_marker(command_json: &serde_json::Value) -> bool {
     command_json.as_object().is_some_and(|obj| obj.contains_key(SNAPSHOT_MARKER_KEY))
 }
 
-fn extract_matching_snapshot_marker(command_json: &serde_json::Value, snapshot: Option<&[u8]>) -> Option<SnapshotMarkerPayload> {
+fn extract_matching_snapshot_marker(
+    command_json: &serde_json::Value,
+    snapshot_digest: &mut Option<LazySnapshotDigest<'_>>,
+) -> Option<SnapshotMarkerPayload> {
     let obj = command_json.as_object()?;
     let raw_marker = obj.get(SNAPSHOT_MARKER_KEY)?;
     let payload: SnapshotMarkerPayload = serde_json::from_value(raw_marker.clone()).ok()?;
-    let snap = snapshot?;
-    let actual_len = u64::try_from(snap.len()).ok()?;
-    if payload.snapshot_len == actual_len && payload.snapshot_crc32 == crc32fast::hash(snap) { Some(payload) } else { None }
+    let (actual_len, actual_crc) = snapshot_digest.as_mut()?.len_and_crc()?;
+    if payload.snapshot_len == actual_len && payload.snapshot_crc32 == actual_crc { Some(payload) } else { None }
 }
 
 fn flush_pending_bad_line(pending_bad: &mut Option<(usize, String)>, is_tail: bool, state: &mut StreamedJournalParse) {
@@ -1782,6 +1819,7 @@ fn stream_and_parse_journal(
     let mut physical_line_no = 0usize;
     let mut non_empty_lines = 0usize;
     let mut pending_bad: Option<(usize, String)> = None;
+    let mut snapshot_digest = snapshot.map(LazySnapshotDigest::new);
 
     while read_line_bytes_bounded(reader, &mut line_buf, limits.max_line_bytes, &mut state.total_bytes, limits.max_bytes)? {
         physical_line_no = physical_line_no.saturating_add(1);
@@ -1823,7 +1861,7 @@ fn stream_and_parse_journal(
             });
         }
         state.prev_seq = record.seq;
-        if let Some(marker) = extract_matching_snapshot_marker(&record.command_json, snapshot) {
+        if let Some(marker) = extract_matching_snapshot_marker(&record.command_json, &mut snapshot_digest) {
             state.marker_covered_seq = Some(state.marker_covered_seq.map_or(marker.covered_seq, |existing| existing.max(marker.covered_seq)));
         }
         state.records.push(ParsedRecordSummary { seq: record.seq, crc32: record.crc32, command_json: record.command_json });
@@ -1846,7 +1884,10 @@ fn build_cleaned_journal_bytes(seqs: &[u64], crcs: &[u32], commands: &[serde_jso
 
 fn recover_journal_contents<B: JournalBackend>(backend: &mut B, limits: JournalLimits) -> Result<RecoveredJournalState, FormatError> {
     let snapshot = backend.read_snapshot()?;
-    let backend_covered_seq = backend.read_snapshot_covered_seq()?;
+    let backend_covered_seq = match snapshot.as_deref() {
+        Some(bytes) => backend.read_snapshot_covered_seq_for(bytes)?,
+        None => None,
+    };
     let mut reader: Box<dyn std::io::BufRead + '_> = match backend.open_journal_stream(limits.max_bytes)? {
         Some(stream) => stream,
         None => {
@@ -1934,5 +1975,116 @@ fn parse_journal_line(line_no: usize, raw_line: &[u8]) -> Result<JournalOpRecord
             }
             Err(FormatError::Json(format!("malformed entry in {JOURNAL_FILE_NAME} line {line_no}: {err}")))
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{
+        CrashRecoveryJournal, DirectoryJournalBackend, JournalBackend, JournalLockLease, LazySnapshotDigest, MemoryJournalBackend,
+        build_snapshot_marker_record, extract_matching_snapshot_marker,
+    };
+    use crate::error::FormatError;
+
+    #[test]
+    fn lazy_snapshot_digest_caches_length_and_crc_across_markers() {
+        let snap = b"SNAPSHOT-BYTES-FOR-LAZY-DIGEST";
+        let m1 = build_snapshot_marker_record(2, 1, snap).unwrap();
+        let m2 = build_snapshot_marker_record(4, 3, snap).unwrap();
+        let mut digest = Some(LazySnapshotDigest::new(snap));
+        assert!(digest.as_ref().unwrap().digest.is_none());
+
+        let p1 = extract_matching_snapshot_marker(&m1.command_json, &mut digest).unwrap();
+        assert_eq!(p1.covered_seq, 1);
+        let cached = digest.as_ref().unwrap().digest.unwrap();
+        assert_eq!(cached, (snap.len() as u64, crc32fast::hash(snap)));
+
+        let p2 = extract_matching_snapshot_marker(&m2.command_json, &mut digest).unwrap();
+        assert_eq!(p2.covered_seq, 3);
+        assert_eq!(digest.as_ref().unwrap().digest, Some(cached));
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn directory_backend_read_snapshot_covered_seq_for_uses_caller_bytes_without_rereading_snapshot() {
+        let dir = std::env::temp_dir().join(format!("cb-recovery-snap-for-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut backend = DirectoryJournalBackend::open_dir(&dir).unwrap();
+        let snap = b"SNAPSHOT-PAYLOAD-V1";
+        backend.write_snapshot_with_seq(snap, 7).unwrap();
+
+        // Remove snapshot file on disk: `read_snapshot_covered_seq_for` must still match metadata
+        // against caller-supplied bytes without trying to re-read `snapshot.curvebook`.
+        std::fs::remove_file(backend.snapshot_path()).unwrap();
+        assert_eq!(backend.read_snapshot_covered_seq_for(snap).unwrap(), Some(7));
+        assert_eq!(backend.read_snapshot_covered_seq_for(b"DIFFERENT-PAYLOAD").unwrap(), None);
+        assert_eq!(backend.read_snapshot_covered_seq().unwrap(), None);
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn clean_close_and_checkpoint_share_legacy_marker_publication_order() {
+        struct LegacyTraceBackend {
+            inner: MemoryJournalBackend,
+            events: Vec<&'static str>,
+            fail_clear: bool,
+        }
+
+        impl JournalBackend for LegacyTraceBackend {
+            fn acquire_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<Option<JournalLockLease>, FormatError> {
+                self.inner.acquire_lease(lease, now_epoch_ms)
+            }
+            fn renew_lease(&mut self, lease: &JournalLockLease, now_epoch_ms: u64) -> Result<(), FormatError> {
+                self.inner.renew_lease(lease, now_epoch_ms)
+            }
+            fn release_lease(&mut self, owner_id: &str) -> Result<(), FormatError> {
+                self.events.push("release_lease");
+                self.inner.release_lease(owner_id)
+            }
+            fn read_lease(&self) -> Result<Option<JournalLockLease>, FormatError> {
+                self.inner.read_lease()
+            }
+            fn write_snapshot_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+                self.events.push("write_snapshot_atomic");
+                self.inner.write_snapshot_atomic(bytes)
+            }
+            fn read_snapshot(&self) -> Result<Option<Vec<u8>>, FormatError> {
+                self.inner.read_snapshot()
+            }
+            fn append_journal_line(&mut self, ndjson_line: &str) -> Result<(), FormatError> {
+                self.events.push("append_journal_line");
+                self.inner.append_journal_line(ndjson_line)
+            }
+            fn read_journal_bytes(&self) -> Result<Vec<u8>, FormatError> {
+                self.inner.read_journal_bytes()
+            }
+            fn replace_journal_bytes_atomic(&mut self, bytes: &[u8]) -> Result<(), FormatError> {
+                self.inner.replace_journal_bytes_atomic(bytes)
+            }
+            fn clear_journal(&mut self) -> Result<(), FormatError> {
+                self.events.push("clear_journal");
+                if self.fail_clear {
+                    return Err(FormatError::Io(String::from("simulated clear failure")));
+                }
+                self.inner.clear_journal()
+            }
+        }
+
+        let backend = LegacyTraceBackend { inner: MemoryJournalBackend::new(), events: Vec::new(), fail_clear: true };
+        let (mut journal, _) = CrashRecoveryJournal::open_or_recover(backend, "w1", 5_000, 1_000).unwrap();
+        assert_eq!(journal.record_command(serde_json::json!({"op": "a"})).unwrap(), 1);
+        journal.backend_mut().events.clear();
+
+        // Failed checkpoint on legacy backend appends marker before clear_journal and advances next_seq.
+        assert!(journal.checkpoint(b"SNAP-1").is_err());
+        assert_eq!(journal.backend().events, vec!["write_snapshot_atomic", "append_journal_line", "clear_journal"]);
+        assert_eq!(journal.next_seq(), 3);
+
+        // Clean close on legacy backend publishes snapshot -> marker -> clear_journal -> release_lease.
+        journal.backend_mut().fail_clear = false;
+        journal.backend_mut().events.clear();
+        let closed = journal.close_cleanly(b"SNAP-2").unwrap();
+        assert_eq!(closed.events, vec!["write_snapshot_atomic", "append_journal_line", "clear_journal", "release_lease"]);
     }
 }

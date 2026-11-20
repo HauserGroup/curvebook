@@ -170,48 +170,59 @@ fn assert_paths_bit_identical(p1: &Path2D, p2: &Path2D, idx: usize) {
     }
 }
 
+fn assert_primitive_bit_identical(idx: usize, pa: &ScenePrimitive, pb: &ScenePrimitive) {
+    match (pa, pb) {
+        (ScenePrimitive::Text(ta), ScenePrimitive::Text(tb)) => {
+            assert_eq!(ta.rich, tb.rich, "text mismatch at primitive {idx}");
+            assert_eq!(ta.anchor_pt.x.to_bits(), tb.anchor_pt.x.to_bits());
+            assert_eq!(ta.anchor_pt.y.to_bits(), tb.anchor_pt.y.to_bits());
+            assert_eq!(ta.font_size_pt.to_bits(), tb.font_size_pt.to_bits());
+            assert_eq!(ta.rotation_deg.to_bits(), tb.rotation_deg.to_bits());
+            assert_eq!(ta.anchor, tb.anchor);
+            assert_eq!(ta.color, tb.color);
+        }
+        (ScenePrimitive::Path { path: p1, fill: f1, stroke: s1, clip: c1 }, ScenePrimitive::Path { path: p2, fill: f2, stroke: s2, clip: c2 }) => {
+            assert_eq!(f1, f2, "fill mismatch at {idx}");
+            assert_eq!(c1.is_some(), c2.is_some());
+            assert_paths_bit_identical(p1, p2, idx);
+            match (s1, s2) {
+                (Some(sa), Some(sb)) => {
+                    assert_eq!(sa.color, sb.color);
+                    assert_eq!(sa.width_pt.to_bits(), sb.width_pt.to_bits());
+                    assert_eq!(sa.cap, sb.cap);
+                    assert_eq!(sa.join, sb.join);
+                }
+                (None, None) => {}
+                _ => panic!("stroke mismatch at {idx}"),
+            }
+        }
+        (ScenePrimitive::RasterImage(ia), ScenePrimitive::RasterImage(ib)) => {
+            assert_eq!(ia.asset_id, ib.asset_id);
+            assert_eq!(ia.pixel_size, ib.pixel_size);
+            assert_eq!(ia.rgba, ib.rgba);
+            assert_eq!(ia.bounds_pt.x.to_bits(), ib.bounds_pt.x.to_bits());
+            assert_eq!(ia.bounds_pt.y.to_bits(), ib.bounds_pt.y.to_bits());
+            assert_eq!(ia.bounds_pt.width.to_bits(), ib.bounds_pt.width.to_bits());
+            assert_eq!(ia.bounds_pt.height.to_bits(), ib.bounds_pt.height.to_bits());
+            assert_eq!(ia.rotation_deg.to_bits(), ib.rotation_deg.to_bits());
+        }
+        (ScenePrimitive::PushClip { rect: r1 }, ScenePrimitive::PushClip { rect: r2 }) => {
+            assert_eq!(r1.x.to_bits(), r2.x.to_bits());
+            assert_eq!(r1.y.to_bits(), r2.y.to_bits());
+            assert_eq!(r1.width.to_bits(), r2.width.to_bits());
+            assert_eq!(r1.height.to_bits(), r2.height.to_bits());
+        }
+        (ScenePrimitive::PopClip, ScenePrimitive::PopClip) => {}
+        _ => panic!("primitive variant mismatch at {idx}"),
+    }
+}
+
 fn assert_scenes_bit_identical(a: &ChartScene, b: &ChartScene) {
     assert_eq!(a.width_pt.to_bits(), b.width_pt.to_bits());
     assert_eq!(a.height_pt.to_bits(), b.height_pt.to_bits());
     assert_eq!(a.primitives.len(), b.primitives.len(), "primitive count mismatch");
     for (idx, (pa, pb)) in a.primitives.iter().zip(&b.primitives).enumerate() {
-        match (pa, pb) {
-            (ScenePrimitive::Text(ta), ScenePrimitive::Text(tb)) => {
-                assert_eq!(ta.rich, tb.rich, "text mismatch at primitive {idx}");
-                assert_eq!(ta.anchor_pt.x.to_bits(), tb.anchor_pt.x.to_bits());
-                assert_eq!(ta.anchor_pt.y.to_bits(), tb.anchor_pt.y.to_bits());
-                assert_eq!(ta.font_size_pt.to_bits(), tb.font_size_pt.to_bits());
-                assert_eq!(ta.rotation_deg.to_bits(), tb.rotation_deg.to_bits());
-                assert_eq!(ta.anchor, tb.anchor);
-                assert_eq!(ta.color, tb.color);
-            }
-            (
-                ScenePrimitive::Path { path: p1, fill: f1, stroke: s1, clip: c1 },
-                ScenePrimitive::Path { path: p2, fill: f2, stroke: s2, clip: c2 },
-            ) => {
-                assert_eq!(f1, f2, "fill mismatch at {idx}");
-                assert_eq!(c1.is_some(), c2.is_some());
-                assert_paths_bit_identical(p1, p2, idx);
-                match (s1, s2) {
-                    (Some(sa), Some(sb)) => {
-                        assert_eq!(sa.color, sb.color);
-                        assert_eq!(sa.width_pt.to_bits(), sb.width_pt.to_bits());
-                        assert_eq!(sa.cap, sb.cap);
-                        assert_eq!(sa.join, sb.join);
-                    }
-                    (None, None) => {}
-                    _ => panic!("stroke mismatch at {idx}"),
-                }
-            }
-            (ScenePrimitive::PushClip { rect: r1 }, ScenePrimitive::PushClip { rect: r2 }) => {
-                assert_eq!(r1.x.to_bits(), r2.x.to_bits());
-                assert_eq!(r1.y.to_bits(), r2.y.to_bits());
-                assert_eq!(r1.width.to_bits(), r2.width.to_bits());
-                assert_eq!(r1.height.to_bits(), r2.height.to_bits());
-            }
-            (ScenePrimitive::PopClip, ScenePrimitive::PopClip) => {}
-            _ => panic!("primitive variant mismatch at {idx}"),
-        }
+        assert_primitive_bit_identical(idx, pa, pb);
     }
 }
 
@@ -250,6 +261,11 @@ fn assert_scene_backend_ready(scene: &ChartScene) {
                     assert!(!plain.contains(raw), "unexpanded TeX escape `{raw}` in `{plain}`");
                 }
                 assert!(!plain.chars().any(|c| c.is_control() && !matches!(c, '\n' | '\r' | '\t')), "XML-unsafe control character in `{plain}`");
+            }
+            ScenePrimitive::RasterImage(img) => {
+                assert!(img.bounds_pt.x.is_finite() && img.bounds_pt.y.is_finite());
+                assert!(img.bounds_pt.width > 0.0 && img.bounds_pt.height > 0.0);
+                assert!(img.rotation_deg.is_finite());
             }
             ScenePrimitive::PushClip { rect } => {
                 assert!(rect.x.is_finite() && rect.y.is_finite() && rect.width >= 0.0 && rect.height >= 0.0);

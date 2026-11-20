@@ -1689,7 +1689,11 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
     let mut delta: i8 = 0;
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
-        let controls_w = 114.0;
+        let text_col = if enabled { tokens.text_strong } else { tokens.text_disabled };
+        let val_font = FontId::monospace(11.5);
+        let natural_galley = ui.painter().layout_no_wrap(spec.value_text.to_owned(), val_font.clone(), text_col);
+        let val_w = (natural_galley.size().x + 12.0).clamp(42.0, 96.0);
+        let controls_w = val_w + 72.0;
         let lbl_w = (ui.available_width() - controls_w).max(60.0);
         ui.allocate_ui(Vec2::new(lbl_w, 22.0), |ui| {
             render_clipped_text(
@@ -1710,21 +1714,25 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
         if render_modal_seg_btn(ui, tokens, meta, &format!("{}.dec", spec.id_prefix), "-", false, spec.enablement) {
             delta = -1;
         }
-        let val_w = 42.0;
         let (val_rect, val_resp) = ui.allocate_exact_size(Vec2::new(val_w, 22.0), Sense::hover());
         ui.painter().rect_filled(val_rect, CornerRadius::same(3), tokens.input_bg);
         ui.painter().rect_stroke(val_rect, CornerRadius::same(3), Stroke::new(1.0, tokens.divider), StrokeKind::Inside);
-        let text_col = if enabled { tokens.text_strong } else { tokens.text_disabled };
-        ui.painter().with_clip_rect(val_rect.shrink(2.0)).text(
-            val_rect.center(),
-            Align2::CENTER_CENTER,
-            spec.value_text,
-            FontId::monospace(11.5),
-            text_col,
-        );
+        let mut job = egui::text::LayoutJob::single_section(spec.value_text.to_owned(), egui::TextFormat::simple(val_font, text_col));
+        job.wrap =
+            egui::text::TextWrapping { max_width: (val_w - 6.0).max(16.0), max_rows: 1, break_anywhere: true, overflow_character: Some('…') };
+        let galley = ui.painter().layout_job(job);
+        let ellipsized = galley.elided;
+        let text_pos = Pos2::new(val_rect.center().x - galley.size().x * 0.5, val_rect.center().y - galley.size().y * 0.5);
+        ui.painter().with_clip_rect(val_rect.shrink(2.0)).galley(text_pos, galley, text_col);
         let val_name = format!("{}: {}", spec.label, spec.value_text);
         val_resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, enabled, val_name.clone()));
-        let val_resp = if let Some(reason) = spec.enablement.disabled_reason.as_deref() { val_resp.on_hover_text(reason) } else { val_resp };
+        let val_resp = if let Some(reason) = spec.enablement.disabled_reason.as_deref() {
+            val_resp.on_hover_text(reason)
+        } else if ellipsized {
+            val_resp.on_hover_text(spec.value_text)
+        } else {
+            val_resp
+        };
         record_widget(
             ui,
             meta,
@@ -1737,8 +1745,8 @@ pub(super) fn render_stepper_row(ui: &mut Ui, tokens: &Tokens, meta: &mut FrameI
             enabled,
             spec.enablement.disabled_reason.as_deref(),
             ZLayer::ModalDialog,
-            false,
-            None,
+            ellipsized,
+            ellipsized.then_some(spec.value_text),
         );
         if render_modal_seg_btn(ui, tokens, meta, &format!("{}.inc", spec.id_prefix), "+", false, spec.enablement) {
             delta = 1;

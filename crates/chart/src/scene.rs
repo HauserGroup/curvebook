@@ -4,7 +4,7 @@
 use std::fmt;
 
 use curvebook_palette::{LineDashStyle, Rgba8};
-use curvebook_text::{RichSpan, RichText, SpanScript, measure_text_pt, metrics::split_rich_text_lines};
+use curvebook_text::{RichText, effective_span_scale, measure_text_pt, metrics::split_rich_text_lines};
 use serde::{Deserialize, Serialize};
 
 /// Two-dimensional point in PostScript points (`1 pt = 1/72 inch`).
@@ -200,11 +200,28 @@ pub struct PositionedText {
     pub color: Rgba8,
 }
 
+/// Positioned straight-alpha RGBA8 raster image primitive emitted for embedded PNG/JPEG/TIFF images.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneRasterImage {
+    pub asset_id: String,
+    pub media_type: curvebook_doc::ImageMimeKind,
+    pub pixel_size: (u32, u32),
+    pub rgba: Vec<u8>,
+    pub bounds_pt: RectPt,
+    #[serde(default)]
+    pub crop: curvebook_doc::CropInsetsPt,
+    #[serde(default)]
+    pub rotation_deg: f64,
+    #[serde(default)]
+    pub clip: Option<RectPt>,
+}
+
 /// Individual drawing operation inside a compiled [`ChartScene`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScenePrimitive {
     Path { path: Path2D, fill: Option<FillPaint>, stroke: Option<StrokePaint>, clip: Option<RectPt> },
     Text(PositionedText),
+    RasterImage(SceneRasterImage),
     PushClip { rect: RectPt },
     PopClip,
 }
@@ -323,20 +340,6 @@ impl ChartScene {
             }
         }
         best.map(|(_, m)| m)
-    }
-}
-
-fn effective_span_scale(span: &RichSpan) -> f64 {
-    let raw = if span.scale.is_finite() && span.scale > 0.0 { span.scale } else { 1.0 };
-    match span.script {
-        SpanScript::Baseline => raw,
-        SpanScript::Superscript | SpanScript::Subscript => {
-            if (raw - 1.0).abs() <= 1e-9 {
-                0.7
-            } else {
-                raw
-            }
-        }
     }
 }
 

@@ -884,7 +884,7 @@ fn compare_dunnett(
 
 /// Welch standard error `sqrt(s_a^2/n_a + s_b^2/n_b)` and Welch–Satterthwaite df for one pair,
 /// as used by the Games & Howell (1976), Tamhane (1979) T2 and Dunnett (1980) T3 procedures.
-fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
+pub(crate) fn welch_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
     let va = (ga.sd * ga.sd) / ga.n;
     let vb = (gb.sd * gb.sd) / gb.n;
     let v_sum = va + vb;

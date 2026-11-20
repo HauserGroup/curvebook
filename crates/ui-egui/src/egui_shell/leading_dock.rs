@@ -152,6 +152,77 @@ enum DropCommitAction {
     Retarget { result_id: SheetId, target_data_id: SheetId },
 }
 
+#[derive(Clone, Copy)]
+struct RailIconButtonSpec<'a> {
+    widget_id: &'a str,
+    glyph: &'a str,
+    tooltip: &'a str,
+    command_id: Option<&'a str>,
+    selected: bool,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NavigatorTreeCtx<'a> {
+    app: &'a UiApp,
+    dock: LeadingDockContext<'a>,
+    row_w: f32,
+    query: &'a str,
+}
+
+#[derive(Clone, Copy)]
+struct FolderHeaderSpec<'a> {
+    section: SheetSection,
+    count: usize,
+    collapsed: bool,
+    row_w: f32,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct NavigatorRowSpec<'a> {
+    app: &'a UiApp,
+    dock: LeadingDockContext<'a>,
+    entry: &'a NavigatorEntry,
+    section_index: usize,
+    indent_depth: usize,
+    is_nested_parent: bool,
+    nested_collapsed: bool,
+    row_w: f32,
+}
+
+#[derive(Clone, Copy)]
+struct InlineRenameRowSpec<'a> {
+    app: &'a UiApp,
+    entry: &'a NavigatorEntry,
+    rect: Rect,
+    enabled: bool,
+}
+
+#[derive(Clone, Copy)]
+struct SectionNewRowSpec<'a> {
+    section: SheetSection,
+    row_w: f32,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
+struct FamilyHoverPreviewInput<'a> {
+    hovered_family: Option<SheetId>,
+    tokens: &'a Tokens,
+    dock_rect: Rect,
+}
+
+#[derive(Clone, Copy)]
+struct CompactChipSpec<'a> {
+    max_w: f32,
+    widget_id: &'a str,
+    label: &'a str,
+    selected: bool,
+    enabled: bool,
+}
+
 /// Render the Leading Dock (`240 pt -> 36 pt` collapsed rail) containing `Navigator` and `Family`.
 pub fn render_leading_dock(
     ui: &mut egui::Ui,
@@ -252,7 +323,7 @@ pub fn render_leading_dock(
             report.family_rect_pt = Some(fam_rect);
             let mut fam_ui = ui.new_child(egui::UiBuilder::new().max_rect(fam_rect).layout(Layout::top_down(Align::Min)));
             fam_ui.set_clip_rect(fam_rect);
-            render_family_pane(&mut fam_ui, app, state, &ctx_in, &mut signals, meta, intents);
+            render_family_pane(&mut fam_ui, app, &ctx_in, &mut signals, meta, intents);
         } else {
             let fam_bar_rect = Rect::from_min_size(Pos2::new(full_rect.left(), nav_rect.bottom()), Vec2::new(full_rect.width(), family_bar_h));
             report.family_rect_pt = Some(fam_bar_rect);
@@ -272,7 +343,14 @@ pub fn render_leading_dock(
     if ctx_in.layout.leading_collapsed_to_rail {
         report.navigator_rect_pt = Some(panel_resp.response.rect);
     } else {
-        update_family_hover_preview_timer(ui, app, state, hovered_family_this_frame, tokens, panel_resp.response.rect, meta, &mut report);
+        update_family_hover_preview_timer(
+            ui,
+            app,
+            state,
+            FamilyHoverPreviewInput { hovered_family: hovered_family_this_frame, tokens, dock_rect: panel_resp.response.rect },
+            meta,
+            &mut report,
+        );
     }
     report
 }
@@ -337,12 +415,14 @@ fn render_collapsed_icon_rail(
         ui.spacing_mut().item_spacing.y = 4.0;
         let expand_resp = render_rail_icon_button(
             ui,
-            "nav.rail.expand",
-            "»",
-            tr(&app.locale, "menu.view.navigator"),
-            Some("ui.navigator.toggle"),
-            false,
-            enabled,
+            RailIconButtonSpec {
+                widget_id: "nav.rail.expand",
+                glyph: "»",
+                tooltip: tr(&app.locale, "menu.view.navigator"),
+                command_id: Some("ui.navigator.toggle"),
+                selected: false,
+                enabled,
+            },
             tokens,
             meta,
         );
@@ -358,7 +438,12 @@ fn render_collapsed_icon_rail(
             (NavigatorKindChip::Layouts, "L", "nav.rail.layouts"),
         ] {
             let selected = state.kind_chip == chip;
-            let resp = render_rail_icon_button(ui, wid, badge, chip.label(&app.locale), None, selected, enabled, tokens, meta);
+            let resp = render_rail_icon_button(
+                ui,
+                RailIconButtonSpec { widget_id: wid, glyph: badge, tooltip: chip.label(&app.locale), command_id: None, selected, enabled },
+                tokens,
+                meta,
+            );
             if resp.clicked() && enabled {
                 state.kind_chip = chip;
                 intents.push_toggle_leading_collapsed_rail();
@@ -367,12 +452,14 @@ fn render_collapsed_icon_rail(
 
         let fam_resp = render_rail_icon_button(
             ui,
-            "family.rail.toggle",
-            "F",
-            tr(&app.locale, "menu.view.family_pane"),
-            Some("ui.family.toggle"),
-            app.family_open,
-            enabled,
+            RailIconButtonSpec {
+                widget_id: "family.rail.toggle",
+                glyph: "F",
+                tooltip: tr(&app.locale, "menu.view.family_pane"),
+                command_id: Some("ui.family.toggle"),
+                selected: app.family_open,
+                enabled,
+            },
             tokens,
             meta,
         );
@@ -382,18 +469,8 @@ fn render_collapsed_icon_rail(
     });
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_rail_icon_button(
-    ui: &mut egui::Ui,
-    widget_id: &str,
-    glyph: &str,
-    tooltip: &str,
-    command_id: Option<&str>,
-    selected: bool,
-    enabled: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-) -> Response {
+fn render_rail_icon_button(ui: &mut egui::Ui, spec: RailIconButtonSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
+    let RailIconButtonSpec { widget_id, glyph, tooltip, command_id, selected, enabled } = spec;
     let (rect, mut resp) = ui.allocate_exact_size(Vec2::splat(26.0), if enabled { Sense::click() } else { Sense::hover() });
     let bg = if selected {
         tokens.active_bg
@@ -435,7 +512,6 @@ fn render_rail_icon_button(
     resp
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_navigator_pane(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -466,13 +542,23 @@ fn render_navigator_pane(
 
         let is_nested = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
         let view_lbl = if is_nested { "Nested" } else { "Folders" };
-        let view_resp = render_compact_chip(ui, 54.0, "nav.view_mode.toggle", view_lbl, is_nested, enabled, tokens, meta);
+        let view_resp = render_compact_chip(
+            ui,
+            CompactChipSpec { max_w: 54.0, widget_id: "nav.view_mode.toggle", label: view_lbl, selected: is_nested, enabled },
+            tokens,
+            meta,
+        );
         if view_resp.clicked() && enabled {
             let next = if is_nested { NavigatorNestingMode::SeparateFolders } else { NavigatorNestingMode::NestedResultsUnderData };
             intents.push_set_navigator_nesting(next);
         }
 
-        let col_resp = render_compact_chip(ui, 24.0, "nav.collapse_rail", "«", false, enabled, tokens, meta);
+        let col_resp = render_compact_chip(
+            ui,
+            CompactChipSpec { max_w: 24.0, widget_id: "nav.collapse_rail", label: "«", selected: false, enabled },
+            tokens,
+            meta,
+        );
         if col_resp.clicked() && enabled {
             intents.push_toggle_leading_collapsed_rail();
         }
@@ -513,7 +599,12 @@ fn render_navigator_pane(
             },
         );
         if !state.search_draft.is_empty() {
-            let clr_resp = render_compact_chip(ui, 20.0, "nav.search_clear", "×", false, enabled, tokens, meta);
+            let clr_resp = render_compact_chip(
+                ui,
+                CompactChipSpec { max_w: 20.0, widget_id: "nav.search_clear", label: "×", selected: false, enabled },
+                tokens,
+                meta,
+            );
             if clr_resp.clicked() && enabled {
                 state.search_draft.clear();
                 state.last_synced_query.clear();
@@ -530,7 +621,12 @@ fn render_navigator_pane(
             ui.spacing_mut().item_spacing.x = 4.0;
             for &chip in row_chips {
                 let selected = state.kind_chip == chip;
-                let resp = render_compact_chip(ui, chip_w, chip.widget_id(), chip.label(locale), selected, enabled, tokens, meta);
+                let resp = render_compact_chip(
+                    ui,
+                    CompactChipSpec { max_w: chip_w, widget_id: chip.widget_id(), label: chip.label(locale), selected, enabled },
+                    tokens,
+                    meta,
+                );
                 if resp.clicked() && enabled {
                     state.kind_chip = chip;
                 }
@@ -549,27 +645,25 @@ fn render_navigator_pane(
         let row_w = (ui.available_width() - 12.0).max(96.0);
         let q = state.search_draft.trim().to_ascii_lowercase();
         let nested_mode = matches!(app.nav.nesting_mode, NavigatorNestingMode::NestedResultsUnderData);
+        let tree_ctx = NavigatorTreeCtx { app, dock: ctx_in, row_w, query: &q };
 
         if nested_mode {
-            render_nested_navigator_tree(ui, app, state, ctx_in, row_w, &q, signals, meta, intents);
+            render_nested_navigator_tree(ui, tree_ctx, state, signals, meta, intents);
         } else {
-            render_folder_navigator_tree(ui, app, state, ctx_in, row_w, &q, signals, meta, intents);
+            render_folder_navigator_tree(ui, tree_ctx, state, signals, meta, intents);
         }
     });
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_folder_navigator_tree(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    tree: NavigatorTreeCtx<'_>,
     state: &mut LeadingDockEguiState,
-    ctx_in: LeadingDockContext<'_>,
-    row_w: f32,
-    query: &str,
     signals: &mut NavFrameSignals,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query } = tree;
     let tokens = ctx_in.tokens;
     let enabled = ctx_in.enabled;
     let locale = &app.locale;
@@ -582,12 +676,34 @@ fn render_folder_navigator_tree(
         let filtered: Vec<(usize, &NavigatorEntry)> = folder.entries.iter().enumerate().filter(|(_, e)| entry_matches_query(e, query)).collect();
 
         rendered_any = true;
-        render_folder_header(ui, app, folder.section, folder.entries.len(), folder.collapsed, row_w, tokens, enabled, meta, intents);
+        render_folder_header(
+            ui,
+            app,
+            FolderHeaderSpec { section: folder.section, count: folder.entries.len(), collapsed: folder.collapsed, row_w, tokens, enabled },
+            meta,
+            intents,
+        );
         if !folder.collapsed {
             for (section_idx, entry) in filtered {
-                render_navigator_row(ui, app, state, ctx_in, entry, section_idx, 0, false, false, row_w, signals, meta, intents);
+                render_navigator_row(
+                    ui,
+                    NavigatorRowSpec {
+                        app,
+                        dock: ctx_in,
+                        entry,
+                        section_index: section_idx,
+                        indent_depth: 0,
+                        is_nested_parent: false,
+                        nested_collapsed: false,
+                        row_w,
+                    },
+                    state,
+                    signals,
+                    meta,
+                    intents,
+                );
             }
-            render_section_new_row(ui, app, folder.section, row_w, tokens, enabled, meta, intents);
+            render_section_new_row(ui, app, SectionNewRowSpec { section: folder.section, row_w, tokens, enabled }, meta, intents);
         }
         ui.add_space(2.0);
     }
@@ -605,18 +721,15 @@ fn render_folder_navigator_tree(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_nested_navigator_tree(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    tree: NavigatorTreeCtx<'_>,
     state: &mut LeadingDockEguiState,
-    ctx_in: LeadingDockContext<'_>,
-    row_w: f32,
-    query: &str,
     signals: &mut NavFrameSignals,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let NavigatorTreeCtx { app, dock: ctx_in, row_w, query } = tree;
     let doc = app.document();
     let entry_map: BTreeMap<SheetId, (usize, &NavigatorEntry)> =
         app.nav.folders.iter().flat_map(|f| f.entries.iter().enumerate()).map(|(i, e)| (e.sheet_id.clone(), (i, e))).collect();
@@ -640,12 +753,44 @@ fn render_nested_navigator_tree(
             placed.insert(ds.id.clone());
             let has_children = !matching_children.is_empty();
             let collapsed = state.nested_collapsed_parents.contains(&ds.id);
-            render_navigator_row(ui, app, state, ctx_in, data_entry, data_idx, 0, has_children, collapsed, row_w, signals, meta, intents);
+            render_navigator_row(
+                ui,
+                NavigatorRowSpec {
+                    app,
+                    dock: ctx_in,
+                    entry: data_entry,
+                    section_index: data_idx,
+                    indent_depth: 0,
+                    is_nested_parent: has_children,
+                    nested_collapsed: collapsed,
+                    row_w,
+                },
+                state,
+                signals,
+                meta,
+                intents,
+            );
             if !collapsed {
                 for (child, depth) in matching_children {
                     placed.insert(child.sheet_id.clone());
                     let s_idx = entry_map.get(&child.sheet_id).map_or(0, |(idx, _)| *idx);
-                    render_navigator_row(ui, app, state, ctx_in, child, s_idx, depth, false, false, row_w, signals, meta, intents);
+                    render_navigator_row(
+                        ui,
+                        NavigatorRowSpec {
+                            app,
+                            dock: ctx_in,
+                            entry: child,
+                            section_index: s_idx,
+                            indent_depth: depth,
+                            is_nested_parent: false,
+                            nested_collapsed: false,
+                            row_w,
+                        },
+                        state,
+                        signals,
+                        meta,
+                        intents,
+                    );
                 }
             }
         }
@@ -661,12 +806,34 @@ fn render_nested_navigator_tree(
         if !leftovers.is_empty() || folder.section == SheetSection::Data {
             for (idx, entry) in leftovers {
                 any = true;
-                render_navigator_row(ui, app, state, ctx_in, entry, idx, 0, false, false, row_w, signals, meta, intents);
+                render_navigator_row(
+                    ui,
+                    NavigatorRowSpec {
+                        app,
+                        dock: ctx_in,
+                        entry,
+                        section_index: idx,
+                        indent_depth: 0,
+                        is_nested_parent: false,
+                        nested_collapsed: false,
+                        row_w,
+                    },
+                    state,
+                    signals,
+                    meta,
+                    intents,
+                );
             }
         }
     }
 
-    render_section_new_row(ui, app, SheetSection::Data, row_w, ctx_in.tokens, ctx_in.enabled, meta, intents);
+    render_section_new_row(
+        ui,
+        app,
+        SectionNewRowSpec { section: SheetSection::Data, row_w, tokens: ctx_in.tokens, enabled: ctx_in.enabled },
+        meta,
+        intents,
+    );
     if !any && !query.is_empty() {
         ui.label(egui::RichText::new(tr(&app.locale, "nav.no_matches")).size(11.0).color(ctx_in.tokens.text_muted));
     }
@@ -709,7 +876,7 @@ fn collect_data_sheet_children<'a>(
         let linked = layout.spec.items.iter().any(|item| match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => owned_graphs.contains(graph_sheet_id),
             LayoutItem::LiveTable { source_sheet_id, .. } => source_sheet_id == data_id || owned_results.contains(source_sheet_id),
-            LayoutItem::TextCallout { .. } => false,
+            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => false,
         });
         if linked && let Some((_, e)) = entry_map.get(&layout.id) {
             out.push((*e, 2));
@@ -728,19 +895,8 @@ fn allocate_visible_slot(ui: &mut egui::Ui, size: Vec2, sense: Sense) -> Option<
     Some(ui.allocate_exact_size(size, sense))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_folder_header(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    section: SheetSection,
-    count: usize,
-    collapsed: bool,
-    row_w: f32,
-    tokens: &Tokens,
-    enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_folder_header(ui: &mut egui::Ui, app: &UiApp, spec: FolderHeaderSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let FolderHeaderSpec { section, count, collapsed, row_w, tokens, enabled } = spec;
     let Some((rect, mut resp)) = allocate_visible_slot(ui, Vec2::new(row_w, 24.0), if enabled { Sense::click() } else { Sense::hover() }) else {
         return;
     };
@@ -787,22 +943,15 @@ fn render_folder_header(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_navigator_row(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    row: NavigatorRowSpec<'_>,
     state: &mut LeadingDockEguiState,
-    ctx_in: LeadingDockContext<'_>,
-    entry: &NavigatorEntry,
-    section_index: usize,
-    indent_depth: usize,
-    is_nested_parent: bool,
-    nested_collapsed: bool,
-    row_w: f32,
     signals: &mut NavFrameSignals,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let NavigatorRowSpec { app, dock: ctx_in, entry, section_index, indent_depth, is_nested_parent, nested_collapsed, row_w } = row;
     let tokens = ctx_in.tokens;
     let enabled = ctx_in.enabled;
     let doc = app.document();
@@ -817,7 +966,7 @@ fn render_navigator_row(
     let is_renaming = state.renaming_sheet_id.as_ref() == Some(&entry.sheet_id);
 
     if is_renaming {
-        render_inline_rename_row(ui, app, state, entry, rect, tokens, enabled, meta, intents);
+        render_inline_rename_row(ui, InlineRenameRowSpec { app, entry, rect, enabled }, state, meta, intents);
         return;
     }
 
@@ -950,18 +1099,14 @@ fn render_navigator_row(
     );
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_inline_rename_row(
     ui: &mut egui::Ui,
-    app: &UiApp,
+    spec: InlineRenameRowSpec<'_>,
     state: &mut LeadingDockEguiState,
-    entry: &NavigatorEntry,
-    rect: Rect,
-    _tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let InlineRenameRowSpec { app, entry, rect, enabled } = spec;
     let mut child_ui = ui.new_child(egui::UiBuilder::new().max_rect(rect.shrink2(Vec2::new(4.0, 2.0))).layout(Layout::left_to_right(Align::Center)));
     let id = Id::unique(("nav_inline_rename", &entry.sheet_id));
     let edit_resp =
@@ -1037,17 +1182,8 @@ fn evaluate_drag_drop_outcome(
     DragDropOutcome::None
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_section_new_row(
-    ui: &mut egui::Ui,
-    app: &UiApp,
-    section: SheetSection,
-    row_w: f32,
-    tokens: &Tokens,
-    enabled: bool,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_section_new_row(ui: &mut egui::Ui, app: &UiApp, spec: SectionNewRowSpec<'_>, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let SectionNewRowSpec { section, row_w, tokens, enabled } = spec;
     let doc = app.document();
     let (wid, label, cmd, row_enabled, disabled_reason) = match section {
         SheetSection::Data => ("nav.new.data", "+ New Data…", Some("sheet.createData"), enabled, None),
@@ -1147,17 +1283,20 @@ fn render_family_collapsed_strip(
     ui.painter().hline(ui.available_rect_before_wrap().x_range(), ui.cursor().top(), Stroke::new(1.0, tokens.divider));
     let w = ui.available_width().max(80.0);
     let label = format!("▸ {}", tr(&app.locale, "nav.family"));
-    let resp = render_compact_chip(ui, w, "family.header.toggle", &label, false, enabled, tokens, meta);
+    let resp = render_compact_chip(
+        ui,
+        CompactChipSpec { max_w: w, widget_id: "family.header.toggle", label: &label, selected: false, enabled },
+        tokens,
+        meta,
+    );
     if resp.clicked() && enabled {
         intents.push_ui("ui.family.toggle", json!({}));
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_family_pane(
     ui: &mut egui::Ui,
     app: &UiApp,
-    _state: &mut LeadingDockEguiState,
     ctx_in: &LeadingDockContext<'_>,
     signals: &mut NavFrameSignals,
     meta: &mut FrameInspectMeta,
@@ -1179,7 +1318,8 @@ fn render_family_pane(
             tokens.text_strong,
             meta,
         );
-        let col_resp = render_compact_chip(ui, 24.0, "family.toggle", "▾", false, enabled, tokens, meta);
+        let col_resp =
+            render_compact_chip(ui, CompactChipSpec { max_w: 24.0, widget_id: "family.toggle", label: "▾", selected: false, enabled }, tokens, meta);
         if col_resp.clicked() && enabled {
             intents.push_ui("ui.family.toggle", json!({}));
         }
@@ -1349,7 +1489,7 @@ fn compute_active_chain(doc: &ProjectDocument) -> BTreeSet<SheetId> {
                 LayoutItem::LiveTable { source_sheet_id, .. } => {
                     chain.insert(source_sheet_id.clone());
                 }
-                LayoutItem::TextCallout { .. } => {}
+                LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
             }
         }
     }
@@ -1370,17 +1510,15 @@ fn multi_dependency_badge(doc: &ProjectDocument, sheet_id: &SheetId) -> Option<&
     None
 }
 
-#[allow(clippy::too_many_arguments)]
 fn update_family_hover_preview_timer(
     ui: &egui::Ui,
     app: &UiApp,
     state: &mut LeadingDockEguiState,
-    hovered_family: Option<SheetId>,
-    tokens: &Tokens,
-    dock_rect: Rect,
+    input: FamilyHoverPreviewInput<'_>,
     meta: &mut FrameInspectMeta,
     report: &mut LeadingDockFrameReport,
 ) {
+    let FamilyHoverPreviewInput { hovered_family, tokens, dock_rect } = input;
     let now = ui.ctx().input(|i| i.time);
     match hovered_family {
         Some(id) => {
@@ -1656,17 +1794,8 @@ fn draw_sheet_vector_icon(painter: &egui::Painter, rect: Rect, section: SheetSec
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_compact_chip(
-    ui: &mut egui::Ui,
-    max_w: f32,
-    widget_id: &str,
-    label: &str,
-    selected: bool,
-    enabled: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-) -> Response {
+fn render_compact_chip(ui: &mut egui::Ui, spec: CompactChipSpec<'_>, tokens: &Tokens, meta: &mut FrameInspectMeta) -> Response {
+    let CompactChipSpec { max_w, widget_id, label, selected, enabled } = spec;
     let fg = if !enabled {
         tokens.text_disabled
     } else if selected {

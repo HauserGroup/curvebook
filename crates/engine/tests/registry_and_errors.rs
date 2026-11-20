@@ -58,13 +58,13 @@ fn is_valid_command_id_format(id: &str) -> bool {
 fn registry_matches_command_id_category_effect_and_schema_spec() {
     let built = cmd::build_registry().expect("registry build must succeed with zero duplicates");
     let reg = cmd::registry();
-    assert_eq!(built.len(), 97, "expected 97 registered commands");
-    assert_eq!(reg.len(), 97);
+    assert_eq!(built.len(), 105, "expected 105 registered commands");
+    assert_eq!(reg.len(), 105);
 
     let built_ids: BTreeSet<&str> = built.specs().map(|s| s.id).collect();
     let reg_ids: BTreeSet<&str> = reg.specs().map(|s| s.id).collect();
     assert_eq!(built_ids, reg_ids, "cmd::build_registry() IDs must match cmd::registry() 1:1");
-    assert_eq!(reg_ids.len(), 97, "command IDs must be unique across all 97 commands");
+    assert_eq!(reg_ids.len(), 105, "command IDs must be unique across all 105 commands");
 
     let mut group_total = 0usize;
     for &group in CommandGroup::all() {
@@ -74,7 +74,7 @@ fn registry_matches_command_id_category_effect_and_schema_spec() {
         assert!(!group_specs.is_empty(), "group `{}` has zero commands", group.as_str());
         group_total += group_specs.len();
     }
-    assert_eq!(group_total, 97, "CommandGroup::all() partition must sum to 97");
+    assert_eq!(group_total, 105, "CommandGroup::all() partition must sum to 105");
 
     let markdown = cmd::render_commands_markdown();
     assert!(markdown.starts_with("# CurveBook Command Reference\n"), "commands markdown must use canonical `# CurveBook Command Reference` heading");
@@ -187,6 +187,7 @@ fn expected_doc_code(err: &DocError) -> ErrorCode {
         | DocError::TooManyCells { .. }
         | DocError::TooManyLayoutItems { .. }
         | DocError::TooManySheets { .. }
+        | DocError::TooManyImageAssets { .. }
         | DocError::TitleTooLong { .. } => ErrorCode::ResourceLimit,
         DocError::SheetFrozen { .. } => ErrorCode::FrozenSheet,
         DocError::SheetNotFound { .. } => ErrorCode::NotFound,
@@ -314,6 +315,7 @@ fn all_doc_errors() -> Vec<DocError> {
         DocError::TooManyCells { count: 50_000_000, max: 30_000_000 },
         DocError::TooManyLayoutItems { count: 65, max: 64 },
         DocError::TooManySheets { count: 10, max: 5 },
+        DocError::TooManyImageAssets { count: 257, max: 256 },
         DocError::TitleTooLong { byte_len: 300, max: 128 },
         DocError::InvalidSubcolumnCount { count: 0 },
         DocError::IncompatibleSubcolumnMode { archetype: TableKind::Column, mode: SubcolumnMode::Single },

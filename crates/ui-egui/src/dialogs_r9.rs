@@ -537,19 +537,7 @@ pub(crate) fn parse_palette_str(raw: &str) -> Result<PaletteId, String> {
 }
 
 pub(crate) fn parse_journal_preset_str(raw: &str) -> Result<JournalWidthPreset, String> {
-    match norm_key(raw).as_str() {
-        "singlecolumn85mm" | "85mm" => Ok(JournalWidthPreset::SingleColumn85Mm),
-        "singlecolumn89mm" | "89mm" => Ok(JournalWidthPreset::SingleColumn89Mm),
-        "oneandhalfcolumn120mm" | "120mm" => Ok(JournalWidthPreset::OneAndHalfColumn120Mm),
-        "oneandhalfcolumn136mm" | "136mm" => Ok(JournalWidthPreset::OneAndHalfColumn136Mm),
-        "doublecolumn174mm" | "174mm" => Ok(JournalWidthPreset::DoubleColumn174Mm),
-        "doublecolumn183mm" | "183mm" => Ok(JournalWidthPreset::DoubleColumn183Mm),
-        "letterportrait" | "letter" => Ok(JournalWidthPreset::LetterPortrait),
-        "letterlandscape" => Ok(JournalWidthPreset::LetterLandscape),
-        "a4portrait" | "a4" => Ok(JournalWidthPreset::A4Portrait),
-        "a4landscape" => Ok(JournalWidthPreset::A4Landscape),
-        _ => Err(format!("unknown journal preset `{raw}`")),
-    }
+    JournalWidthPreset::from_canonical_name(&norm_key(raw)).ok_or_else(|| format!("unknown journal preset `{raw}`"))
 }
 
 pub(crate) fn parse_page_orientation_str(raw: &str) -> Result<PageOrientation, String> {

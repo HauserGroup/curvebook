@@ -1,29 +1,32 @@
 //! Native `.curvebook` and `.cbtemplate` ZIP archive serialization, deserialization,
 //! schema migration, dimension/float validation, and circular dependency guards.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
-    GraphSheet, HookSource, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, NormalizeAnchor,
-    ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus, SheetId, SheetSection, TableArchetype, TransformAnalysisSpec,
-    extract_template_hooks, validate_data_sets, validate_rows, validate_subcolumns, validate_title,
+    GraphSheet, HookSource, ImageMimeKind, InfoSheet, LayoutItem, LayoutSheet, MAX_DATA_SETS, MAX_IMAGE_ASSET_BYTES, MAX_PROJECT_IMAGE_ASSETS,
+    MAX_ROWS, MAX_SHEETS_PER_PROJECT, MAX_SUBCOLUMNS, NormalizeAnchor, ParameterScope, ProjectDocument, ResultCell, ResultSheet, ResultStatus,
+    SheetId, SheetSection, TableArchetype, TransformAnalysisSpec, extract_template_hooks, is_valid_asset_id, validate_data_sets, validate_rows,
+    validate_subcolumns, validate_title,
 };
 
 use crate::csv::{CsvOptions, export_datasheet_to_csv};
 use crate::error::FormatError;
+use crate::image_asset::validate_image_asset;
 use crate::versioned::{VersionStep, upgrade};
 use crate::zip::{ZipArchive, ZipLimits, ZipWriter, sanitize_zip_path};
 
 const MANIFEST_PATH: &str = "manifest.json";
 const DOCUMENT_PATH: &str = "document.json";
 const SHEETS_DIR: &str = "sheets";
+const ASSETS_DIR: &str = "assets";
 const UNPACKED_TX_DIR: &str = ".curvebook.tx";
 const UNPACKED_TX_NEXT_DIR: &str = "next";
 const UNPACKED_TX_PREV_DIR: &str = "prev";
@@ -34,8 +37,6 @@ pub(crate) const LEGACY_FORMAT_MAGIC: &str = "lumencraft-archive";
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
 const MAX_SHEET_CSV_STEM_LEN: usize = 64;
 const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
-
-static UNPACKED_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum byte length permitted when reading a `.curvebook`, `.cbtemplate`, or `.prism` archive file.
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -67,6 +68,16 @@ pub struct SheetManifestEntry {
     pub crc32: Option<u32>,
 }
 
+/// Index entry inside [`ArchiveManifest`] pointing to content-addressed raster image assets under `assets/`.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct AssetManifestEntry {
+    pub asset_id: String,
+    pub media_type: ImageMimeKind,
+    pub path: String,
+    pub byte_len: u64,
+    pub crc32: u32,
+}
+
 /// Top-level `manifest.json` stored inside `.curvebook` and `.cbtemplate` archives.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct ArchiveManifest {
@@ -76,6 +87,8 @@ pub struct ArchiveManifest {
     pub title: String,
     pub document_crc32: u32,
     pub sheets: Vec<SheetManifestEntry>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub assets: Vec<AssetManifestEntry>,
 }
 
 /// Serialize a [`ProjectDocument`] into deterministic `.curvebook` archive bytes.
@@ -149,7 +162,24 @@ pub fn open_archive_bytes_with_limits(bytes: &[u8], limits: ZipLimits) -> Result
         }
     }
 
-    let doc = decode_and_validate_document(doc_bytes, manifest.schema_version)?;
+    let mut hydrated_assets = HashMap::with_capacity(manifest.assets.len());
+    for entry in &manifest.assets {
+        let asset_bytes = archive.get(&entry.path).ok_or_else(|| FormatError::MissingArchiveEntry { path: entry.path.clone() })?;
+        if asset_bytes.len() as u64 != entry.byte_len {
+            return Err(FormatError::ZipBomb {
+                reason: format!("asset `{}` byte length {} disagrees with manifest {}", entry.path, asset_bytes.len(), entry.byte_len),
+            });
+        }
+        let actual_crc = crc32fast::hash(asset_bytes);
+        if actual_crc != entry.crc32 {
+            return Err(FormatError::CorruptCrc { entry: entry.path.clone(), expected: entry.crc32, actual: actual_crc });
+        }
+        hydrated_assets.insert(entry.asset_id.clone(), (entry.media_type, asset_bytes.to_vec()));
+    }
+
+    let mut doc = parse_and_migrate_document(doc_bytes, manifest.schema_version)?;
+    hydrate_archive_image_assets(&mut doc, &manifest.assets, hydrated_assets)?;
+    validate_project_document(&doc)?;
     Ok((manifest.kind, doc))
 }
 
@@ -183,6 +213,30 @@ fn platform_sync_dir(dir: &Path) -> Result<(), FormatError> {
 #[cfg(target_arch = "wasm32")]
 fn platform_sync_dir(_dir: &Path) -> Result<(), FormatError> {
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_unpacked_entry_file(
+    parent: &Path,
+    target: &Path,
+    rel: &str,
+    bytes: &[u8],
+    existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    let staged = curvebook_platform::fs::write_staged_sibling(parent, target, "stage", bytes, existing_perms)?;
+    let stage_rel = stage_rel_for_entry(rel, staged.path())?;
+    Ok((staged.into_path(), stage_rel))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn stage_unpacked_entry_file(
+    _parent: &Path,
+    _target: &Path,
+    _rel: &str,
+    _bytes: &[u8],
+    _existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    Err(FormatError::Io(String::from("unpacked directory staging is not supported on wasm32")))
 }
 
 fn clamp_peek_schema_version(raw: u64) -> u32 {
@@ -377,30 +431,34 @@ where
 
     let sheets_dir = canon_root.join(SHEETS_DIR);
     let sheets_existed_before = std::fs::symlink_metadata(&sheets_dir).is_ok();
+    let assets_dir = canon_root.join(ASSETS_DIR);
+    let assets_existed_before = std::fs::symlink_metadata(&assets_dir).is_ok();
+    let cleanup_new_dirs = || {
+        if !sheets_existed_before {
+            let _ = std::fs::remove_dir(&sheets_dir);
+        }
+        if !assets_existed_before {
+            let _ = std::fs::remove_dir(&assets_dir);
+        }
+    };
 
     let (staged, mut stage_guard) = match stage_changed_unpacked_entries(&canon_root, &entries) {
         Ok(res) => res,
         Err(err) => {
-            if !sheets_existed_before {
-                let _ = std::fs::remove_dir(&sheets_dir);
-            }
+            cleanup_new_dirs();
             return Err(err);
         }
     };
 
     if let Err(err) = write_unpacked_tx_commit_marker(&canon_root, &staged, &prior_paths, &entries) {
         drop(stage_guard);
-        if !sheets_existed_before {
-            let _ = std::fs::remove_dir(&sheets_dir);
-        }
+        cleanup_new_dirs();
         return Err(err);
     }
 
     if let Err(err) = commit_staged_unpacked_entries_with_rollback(&staged, &mut stage_guard, &mut tx_guard, &mut on_commit_entry, restore_file) {
         drop(stage_guard);
-        if !sheets_existed_before {
-            let _ = std::fs::remove_dir(&sheets_dir);
-        }
+        cleanup_new_dirs();
         return Err(err);
     }
 
@@ -471,6 +529,39 @@ fn validate_sheet_csv_path(raw: &str) -> Result<(), FormatError> {
     Ok(())
 }
 
+fn validate_asset_path(raw: &str, asset_id: &str, media_type: ImageMimeKind) -> Result<(), FormatError> {
+    if !is_valid_asset_id(asset_id) {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    let clean = sanitize_zip_path(raw)?;
+    let expected = format!("{ASSETS_DIR}/{asset_id}.{}", media_type.extension());
+    if clean != expected {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    Ok(())
+}
+
+fn validate_asset_rel_path(raw: &str) -> Result<(), FormatError> {
+    let clean = sanitize_zip_path(raw)?;
+    let Some(file_name) = clean.strip_prefix("assets/") else {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    };
+    if file_name.contains('/') {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    let Some((stem, ext)) = file_name.rsplit_once('.') else {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    };
+    if !is_valid_asset_id(stem) || !matches!(ext, "png" | "jpg" | "tif") {
+        return Err(FormatError::UnsafePath { path: raw.to_owned() });
+    }
+    Ok(())
+}
+
+fn validate_tracked_subpath(raw: &str) -> bool {
+    validate_sheet_csv_path(raw).is_ok() || validate_asset_rel_path(raw).is_ok()
+}
+
 #[derive(serde::Deserialize)]
 struct ManifestHeaderPeek {
     #[serde(default)]
@@ -511,6 +602,27 @@ fn parse_and_validate_manifest(manifest_text: &str) -> Result<ArchiveManifest, F
     for entry in &manifest.sheets {
         if let Some(csv_path) = &entry.csv_path {
             validate_sheet_csv_path(csv_path)?;
+        }
+    }
+    if manifest.assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: manifest.assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+    let mut seen_asset_ids = HashSet::with_capacity(manifest.assets.len());
+    let mut seen_asset_paths = HashSet::with_capacity(manifest.assets.len());
+    for entry in &manifest.assets {
+        validate_asset_path(&entry.path, &entry.asset_id, entry.media_type)?;
+        if entry.byte_len > MAX_IMAGE_ASSET_BYTES as u64 {
+            return Err(FormatError::FileTooLarge {
+                path: entry.path.clone(),
+                actual_bytes: Some(entry.byte_len),
+                limit_bytes: MAX_IMAGE_ASSET_BYTES,
+            });
+        }
+        if !seen_asset_ids.insert(entry.asset_id.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: entry.asset_id.clone() });
+        }
+        if !seen_asset_paths.insert(entry.path.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: entry.path.clone() });
         }
     }
     Ok(manifest)
@@ -664,8 +776,61 @@ pub(crate) fn parse_bounded_json_value(doc_bytes: &[u8]) -> Result<serde_json::V
     }
 }
 
-fn decode_and_validate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
-    decode_and_validate_document_inner(doc_bytes, manifest_schema_version, true)
+fn parse_and_migrate_document(doc_bytes: &[u8], manifest_schema_version: u32) -> Result<ProjectDocument, FormatError> {
+    let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
+    let doc_version = peek.schema_version.map(clamp_peek_schema_version).unwrap_or(manifest_schema_version);
+    if doc_version > CURRENT_SCHEMA_VERSION {
+        return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
+    }
+    if doc_version == CURRENT_SCHEMA_VERSION && peek.schema_version.is_some() {
+        let mut parsed: ProjectDocument = serde_json::from_slice(doc_bytes)?;
+        parsed.schema_version = CURRENT_SCHEMA_VERSION;
+        Ok(parsed)
+    } else {
+        let raw_value = parse_bounded_json_value(doc_bytes)?;
+        let migrated_value = migrate_document_json(raw_value, doc_version)?;
+        Ok(serde_json::from_value(migrated_value)?)
+    }
+}
+
+fn hydrate_archive_image_assets(
+    doc: &mut ProjectDocument,
+    manifest_assets: &[AssetManifestEntry],
+    mut loaded_assets: HashMap<String, (ImageMimeKind, Vec<u8>)>,
+) -> Result<(), FormatError> {
+    if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: doc.image_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+    let mut seen_ids = HashSet::with_capacity(doc.image_assets.len());
+    for asset in &mut doc.image_assets {
+        if !seen_ids.insert(asset.asset_id.clone()) {
+            return Err(FormatError::DuplicateEntry { path: asset.asset_id.clone() });
+        }
+        let expected_path = manifest_assets
+            .iter()
+            .find(|e| e.asset_id == asset.asset_id)
+            .map_or_else(|| format!("{ASSETS_DIR}/{}.{}", asset.asset_id, asset.media_type.extension()), |e| e.path.clone());
+        let Some((loaded_mime, loaded_bytes)) = loaded_assets.remove(&asset.asset_id) else {
+            return Err(FormatError::MissingArchiveEntry { path: expected_path });
+        };
+        if loaded_mime != asset.media_type {
+            return Err(FormatError::Json(format!(
+                "image asset `{}` media_type {:?} in document.json disagrees with {:?} in manifest.json",
+                asset.asset_id, asset.media_type, loaded_mime
+            )));
+        }
+        if !asset.bytes.is_empty() && asset.bytes != loaded_bytes {
+            return Err(FormatError::Json(format!("image asset `{}` inline bytes in document.json disagree with archive payload", asset.asset_id)));
+        }
+        asset.bytes = loaded_bytes;
+    }
+    if let Some(orphan) = manifest_assets.iter().find(|entry| loaded_assets.contains_key(&entry.asset_id)) {
+        return Err(FormatError::Json(format!(
+            "manifest.json declares image asset `{}` (`{}`) missing from document.json",
+            orphan.asset_id, orphan.path
+        )));
+    }
+    Ok(())
 }
 
 fn decode_and_validate_document_inner(
@@ -673,20 +838,7 @@ fn decode_and_validate_document_inner(
     manifest_schema_version: u32,
     validate_checkpoint_entries: bool,
 ) -> Result<ProjectDocument, FormatError> {
-    let peek: DocumentSchemaPeek = serde_json::from_slice(doc_bytes)?;
-    let doc_version = peek.schema_version.map(clamp_peek_schema_version).unwrap_or(manifest_schema_version);
-    if doc_version > CURRENT_SCHEMA_VERSION {
-        return Err(FormatError::UnsupportedSchemaVersion { version: doc_version, max_supported: CURRENT_SCHEMA_VERSION });
-    }
-    let doc: ProjectDocument = if doc_version == CURRENT_SCHEMA_VERSION && peek.schema_version.is_some() {
-        let mut parsed: ProjectDocument = serde_json::from_slice(doc_bytes)?;
-        parsed.schema_version = CURRENT_SCHEMA_VERSION;
-        parsed
-    } else {
-        let raw_value = parse_bounded_json_value(doc_bytes)?;
-        let migrated_value = migrate_document_json(raw_value, doc_version)?;
-        serde_json::from_value(migrated_value)?
-    };
+    let doc = parse_and_migrate_document(doc_bytes, manifest_schema_version)?;
     validate_project_document_inner(&doc, validate_checkpoint_entries)?;
     Ok(doc)
 }
@@ -727,12 +879,26 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
 
-    let mut normalized = doc.clone();
-    normalized.schema_version = CURRENT_SCHEMA_VERSION;
-    let doc_json = serde_json::to_vec_pretty(&normalized)?;
+    let mut asset_entries = Vec::with_capacity(doc.image_assets.len());
+    let mut manifest_assets = Vec::with_capacity(doc.image_assets.len());
+    let normalized: Cow<'_, ProjectDocument> = if doc.schema_version == CURRENT_SCHEMA_VERSION && doc.image_assets.is_empty() {
+        Cow::Borrowed(doc)
+    } else {
+        let mut owned = doc.clone();
+        owned.schema_version = CURRENT_SCHEMA_VERSION;
+        for asset in &mut owned.image_assets {
+            let path = format!("{ASSETS_DIR}/{}.{}", asset.asset_id, asset.media_type.extension());
+            let crc = crc32fast::hash(&asset.bytes);
+            let byte_len = asset.bytes.len() as u64;
+            asset_entries.push((path.clone(), std::mem::take(&mut asset.bytes)));
+            manifest_assets.push(AssetManifestEntry { asset_id: asset.asset_id.clone(), media_type: asset.media_type, path, byte_len, crc32: crc });
+        }
+        Cow::Owned(owned)
+    };
+    let doc_json = serde_json::to_vec_pretty(normalized.as_ref())?;
     let doc_crc = crc32fast::hash(&doc_json);
 
-    let mut entries = Vec::with_capacity(normalized.data_sheets.len() + 2);
+    let mut entries = Vec::with_capacity(normalized.data_sheets.len() + asset_entries.len() + 2);
     entries.push((String::from(DOCUMENT_PATH), doc_json));
 
     let mut manifest_sheets = Vec::with_capacity(normalized.total_sheet_count());
@@ -753,6 +919,7 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
         });
     }
 
+    entries.extend(asset_entries);
     push_metadata_entries(&mut manifest_sheets, &normalized);
 
     let manifest = ArchiveManifest {
@@ -762,6 +929,7 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
         title: normalized.title.clone(),
         document_crc32: doc_crc,
         sheets: manifest_sheets,
+        assets: manifest_assets,
     };
     let manifest_json = serde_json::to_vec_pretty(&manifest)?;
     entries.push((String::from(MANIFEST_PATH), manifest_json));
@@ -864,25 +1032,31 @@ fn read_contained_file(canon_root: &Path, rel: &str, max_entry_bytes: u64, remai
     Ok(buf)
 }
 
-fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), FormatError> {
-    ensure_existing_unpacked_not_newer(canon_root)?;
-    for (rel, _) in entries {
-        resolve_contained_path(canon_root, rel, false)?;
-    }
-    let sheets_path = canon_root.join(SHEETS_DIR);
-    if let Ok(meta) = std::fs::symlink_metadata(&sheets_path) {
+fn check_subdir_symlinks_contained(canon_root: &Path, subdir: &str) -> Result<(), FormatError> {
+    let dir_path = canon_root.join(subdir);
+    if let Ok(meta) = std::fs::symlink_metadata(&dir_path) {
         if meta.file_type().is_symlink() {
-            check_symlink_contained(&sheets_path, canon_root, SHEETS_DIR)?;
+            check_symlink_contained(&dir_path, canon_root, subdir)?;
         } else if meta.is_dir() {
-            for entry in std::fs::read_dir(&sheets_path)? {
+            for entry in std::fs::read_dir(&dir_path)? {
                 let entry = entry?;
                 if entry.file_type()?.is_symlink() {
-                    let rel = format!("{SHEETS_DIR}/{}", entry.file_name().to_string_lossy());
+                    let rel = format!("{subdir}/{}", entry.file_name().to_string_lossy());
                     check_symlink_contained(&entry.path(), canon_root, &rel)?;
                 }
             }
         }
     }
+    Ok(())
+}
+
+fn preflight_unpacked_save(canon_root: &Path, entries: &[(String, Vec<u8>)]) -> Result<(), FormatError> {
+    ensure_existing_unpacked_not_newer(canon_root)?;
+    for (rel, _) in entries {
+        resolve_contained_path(canon_root, rel, false)?;
+    }
+    check_subdir_symlinks_contained(canon_root, SHEETS_DIR)?;
+    check_subdir_symlinks_contained(canon_root, ASSETS_DIR)?;
     Ok(())
 }
 
@@ -1027,13 +1201,13 @@ fn verify_and_read_snapshot(canon_snap: &Path, limits: ZipLimits, collect_entrie
         entries.push((String::from(DOCUMENT_PATH), doc_bytes.clone()));
     }
 
-    let mut seen_csvs = HashSet::new();
+    let mut seen_paths = HashSet::new();
     let mut entry_count = 2_usize;
     for entry in &manifest.sheets {
         let Some(csv_path) = &entry.csv_path else {
             continue;
         };
-        if !seen_csvs.insert(csv_path.as_str()) {
+        if !seen_paths.insert(csv_path.as_str()) {
             return Err(FormatError::DuplicateEntry { path: csv_path.clone() });
         }
         entry_count += 1;
@@ -1052,7 +1226,34 @@ fn verify_and_read_snapshot(canon_snap: &Path, limits: ZipLimits, collect_entrie
         }
     }
 
-    let doc = decode_and_validate_document(&doc_bytes, manifest.schema_version)?;
+    let mut hydrated_assets = HashMap::with_capacity(manifest.assets.len());
+    for entry in &manifest.assets {
+        if !seen_paths.insert(entry.path.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: entry.path.clone() });
+        }
+        entry_count += 1;
+        if entry_count > limits.max_entries {
+            return Err(FormatError::ZipBomb { reason: format!("unpacked entry count exceeds limit {}", limits.max_entries) });
+        }
+        let asset_bytes = read_contained_file(canon_snap, &entry.path, limits.max_entry_uncompressed_bytes, &mut remaining_budget)?;
+        if asset_bytes.len() as u64 != entry.byte_len {
+            return Err(FormatError::ZipBomb {
+                reason: format!("asset `{}` byte length {} disagrees with manifest {}", entry.path, asset_bytes.len(), entry.byte_len),
+            });
+        }
+        let actual_crc = crc32fast::hash(&asset_bytes);
+        if actual_crc != entry.crc32 {
+            return Err(FormatError::CorruptCrc { entry: entry.path.clone(), expected: entry.crc32, actual: actual_crc });
+        }
+        if collect_entries {
+            entries.push((entry.path.clone(), asset_bytes.clone()));
+        }
+        hydrated_assets.insert(entry.asset_id.clone(), (entry.media_type, asset_bytes));
+    }
+
+    let mut doc = parse_and_migrate_document(&doc_bytes, manifest.schema_version)?;
+    hydrate_archive_image_assets(&mut doc, &manifest.assets, hydrated_assets)?;
+    validate_project_document(&doc)?;
     Ok(VerifiedUnpackedSnapshot { manifest, entries, doc })
 }
 
@@ -1140,9 +1341,11 @@ fn write_snapshot_dir(snap_dir: &Path, entries: &[(String, Vec<u8>)]) -> Result<
         file.write_all(bytes)?;
         file.sync_all()?;
     }
-    let snap_sheets = snap_dir.join(SHEETS_DIR);
-    if std::fs::symlink_metadata(&snap_sheets).is_ok_and(|m| m.is_dir()) {
-        platform_sync_dir(&snap_sheets)?;
+    for subdir in [SHEETS_DIR, ASSETS_DIR] {
+        let sub_path = snap_dir.join(subdir);
+        if std::fs::symlink_metadata(&sub_path).is_ok_and(|m| m.is_dir()) {
+            platform_sync_dir(&sub_path)?;
+        }
     }
     platform_sync_dir(snap_dir)
 }
@@ -1171,7 +1374,7 @@ fn begin_unpacked_tx(
 }
 
 fn collect_csv_paths(entries: &[(String, Vec<u8>)]) -> Vec<String> {
-    entries.iter().map(|(rel, _)| rel).filter(|rel| validate_sheet_csv_path(rel).is_ok()).cloned().collect()
+    entries.iter().map(|(rel, _)| rel).filter(|rel| validate_tracked_subpath(rel)).cloned().collect()
 }
 
 fn write_unpacked_tx_commit_marker(
@@ -1270,8 +1473,9 @@ fn reconcile_pending_unpacked_tx(canon_root: &Path) -> Result<(), FormatError> {
     if !recovered {
         if let Some(prev) = prev_dir {
             let prev_snap = verify_and_read_snapshot(&prev, ZipLimits::default(), true)?;
-            let prev_csvs: Vec<String> = prev_snap.manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect();
-            install_recovered_snapshot(canon_root, &prev_snap.entries, &record.new_csv_paths, &prev_csvs)?;
+            let mut prev_tracked: Vec<String> = prev_snap.manifest.sheets.into_iter().filter_map(|e| e.csv_path).collect();
+            prev_tracked.extend(prev_snap.manifest.assets.into_iter().map(|e| e.path));
+            install_recovered_snapshot(canon_root, &prev_snap.entries, &record.new_csv_paths, &prev_tracked)?;
         } else if let Some(err) = primary_err {
             return Err(err);
         } else {
@@ -1290,7 +1494,7 @@ fn unpacked_changes_needed(
     prior_paths: &[String],
     expected_paths: &HashSet<String>,
 ) -> Result<bool, FormatError> {
-    if prior_paths.iter().any(|rel| !expected_paths.contains(rel) && validate_sheet_csv_path(rel).is_ok()) {
+    if prior_paths.iter().any(|rel| !expected_paths.contains(rel) && validate_tracked_subpath(rel)) {
         return Ok(true);
     }
     for (rel, bytes) in entries {
@@ -1303,9 +1507,11 @@ fn unpacked_changes_needed(
 }
 
 fn sync_unpacked_target_dirs(canon_root: &Path) -> Result<(), FormatError> {
-    let sheets_dir = canon_root.join(SHEETS_DIR);
-    if std::fs::symlink_metadata(&sheets_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
-        platform_sync_dir(&sheets_dir)?;
+    for subdir in [SHEETS_DIR, ASSETS_DIR] {
+        let sub_dir = canon_root.join(subdir);
+        if std::fs::symlink_metadata(&sub_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+            platform_sync_dir(&sub_dir)?;
+        }
     }
     platform_sync_dir(canon_root)
 }
@@ -1330,7 +1536,10 @@ fn collect_prior_manifest_csv_paths(canon_root: &Path) -> Result<Vec<String>, Fo
         return Ok(Vec::new());
     }
     ensure_schema_version_supported(manifest.schema_version)?;
-    Ok(manifest.sheets.into_iter().filter_map(|e| e.csv_path).filter(|rel| validate_sheet_csv_path(rel).is_ok()).collect())
+    let mut tracked: Vec<String> =
+        manifest.sheets.into_iter().filter_map(|e| e.csv_path).filter(|rel| validate_sheet_csv_path(rel).is_ok()).collect();
+    tracked.extend(manifest.assets.into_iter().map(|e| e.path).filter(|rel| validate_asset_rel_path(rel).is_ok()));
+    Ok(tracked)
 }
 
 enum PriorSnapshot {
@@ -1411,8 +1620,7 @@ fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>
             ExistingEntryState::NeedsWrite { prior, perms } => (prior, perms),
         };
 
-        let stage_path = create_and_write_stage_file(parent, &target, bytes, existing_perms)?;
-        let stage_rel = stage_rel_for_entry(rel, &stage_path)?;
+        let (stage_path, stage_rel) = stage_unpacked_entry_file(parent, &target, rel, bytes, existing_perms)?;
         guard.push(stage_path.clone());
         staged.push(StagedWrite { rel: rel.clone(), stage_rel, target_path: target, stage_path, prior });
     }
@@ -1431,10 +1639,14 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
             if !meta.file_type().is_symlink()
                 && meta.is_file()
                 && meta.len() == new_bytes.len() as u64
+                && new_bytes.len() <= MAX_ARCHIVE_FILE_BYTES
                 && let Ok(existing) = platform_read_regular_file(target, new_bytes.len())
-                && existing == new_bytes
             {
-                return Ok(ExistingEntryState::Unchanged);
+                if existing == new_bytes {
+                    return Ok(ExistingEntryState::Unchanged);
+                }
+                let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+                return Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms });
             }
             let existing = platform_read_regular_file(target, MAX_ARCHIVE_FILE_BYTES)?;
             let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
@@ -1445,44 +1657,6 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
         }
         Err(err) => Err(FormatError::Io(err.to_string())),
     }
-}
-
-fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], existing_perms: Option<Permissions>) -> Result<PathBuf, FormatError> {
-    let raw_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("entry");
-    let stem: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_').take(48).collect();
-    let safe_stem = if stem.is_empty() { String::from("entry") } else { stem };
-    let pid = std::process::id();
-
-    for _ in 0..32 {
-        let seq = UNPACKED_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let stage_path = parent.join(format!(".{safe_stem}.stage.{pid}.{seq}"));
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(all(unix, not(target_arch = "wasm32")))]
-        if existing_perms.is_some() {
-            opts.mode(0o600);
-        }
-        let write_res = {
-            let mut file = match opts.open(&stage_path) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(FormatError::Io(err.to_string())),
-            };
-            (|| -> Result<(), std::io::Error> {
-                file.write_all(bytes)?;
-                if let Some(perms) = existing_perms {
-                    file.set_permissions(perms)?;
-                }
-                file.sync_all()
-            })()
-        };
-        if let Err(err) = write_res {
-            let _ = std::fs::remove_file(&stage_path);
-            return Err(FormatError::Io(err.to_string()));
-        }
-        return Ok(stage_path);
-    }
-    Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
 }
 
 fn commit_staged_unpacked_entries_with_rollback<F, R>(
@@ -1549,7 +1723,7 @@ where
 
 fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expected_paths: &HashSet<String>) -> Result<(), FormatError> {
     for rel in prior_paths {
-        if expected_paths.contains(rel) || validate_sheet_csv_path(rel).is_err() {
+        if expected_paths.contains(rel) || !validate_tracked_subpath(rel) {
             continue;
         }
         if let Ok(path) = resolve_contained_path(canon_root, rel, true)
@@ -1561,11 +1735,13 @@ fn prune_stale_unpacked_files(canon_root: &Path, prior_paths: &[String], expecte
         }
     }
 
-    let sheets_dir = canon_root.join(SHEETS_DIR);
-    let has_sheet_outputs = expected_paths.iter().any(|p| p.starts_with(&format!("{SHEETS_DIR}/")));
-    if !has_sheet_outputs && std::fs::symlink_metadata(&sheets_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
-        // `remove_dir` succeeds only when empty, preserving any user-managed files inside `sheets/`.
-        let _ = std::fs::remove_dir(&sheets_dir);
+    for subdir in [SHEETS_DIR, ASSETS_DIR] {
+        let sub_dir = canon_root.join(subdir);
+        let has_outputs = expected_paths.iter().any(|p| p.starts_with(&format!("{subdir}/")));
+        if !has_outputs && std::fs::symlink_metadata(&sub_dir).is_ok_and(|m| !m.file_type().is_symlink() && m.is_dir()) {
+            // `remove_dir` succeeds only when empty, preserving any user-managed files inside the subdirectory.
+            let _ = std::fs::remove_dir(&sub_dir);
+        }
     }
     Ok(())
 }
@@ -1683,6 +1859,22 @@ pub fn strip_project_data_for_template(doc: &ProjectDocument) -> Result<ProjectD
         res.eliminated_outliers.clear();
         res.checklist.clear();
     }
+    let mut referenced_assets: HashSet<String> = HashSet::new();
+    for graph in &out.graph_sheets {
+        for ann in &graph.spec.annotations {
+            if let GraphAnnotation::EmbeddedImage { asset_id, .. } = ann {
+                referenced_assets.insert(asset_id.clone());
+            }
+        }
+    }
+    for layout in &out.layout_sheets {
+        for item in &layout.spec.items {
+            if let LayoutItem::EmbeddedImage { asset_id, .. } = item {
+                referenced_assets.insert(asset_id.clone());
+            }
+        }
+    }
+    out.image_assets.retain(|asset| referenced_assets.contains(&asset.asset_id));
     Ok(out)
 }
 
@@ -1693,6 +1885,7 @@ const MIGRATION_STEPS: &[VersionStep] = &[
     VersionStep { from_version: 3, apply: migrate_v3_to_v4 },
     VersionStep { from_version: 4, apply: migrate_v4_to_v5 },
     VersionStep { from_version: 5, apply: migrate_v5_to_v6 },
+    VersionStep { from_version: 6, apply: migrate_v6_to_v7 },
 ];
 
 const _: () = assert!(MIGRATION_STEPS.len() == CURRENT_SCHEMA_VERSION as usize);
@@ -1751,6 +1944,11 @@ fn migrate_v5_to_v6(value: &mut serde_json::Value) -> Result<(), FormatError> {
     Ok(())
 }
 
+fn migrate_v6_to_v7(value: &mut serde_json::Value) -> Result<(), FormatError> {
+    migrate_result_sheet_step(value, 7);
+    Ok(())
+}
+
 fn backfill_top_level_fields(obj: &mut serde_json::Map<String, serde_json::Value>) {
     obj.entry(String::from("title")).or_insert_with(|| serde_json::Value::String(String::from("Untitled Project")));
     obj.entry(String::from("data_sheets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
@@ -1761,6 +1959,7 @@ fn backfill_top_level_fields(obj: &mut serde_json::Map<String, serde_json::Value
     obj.entry(String::from("active_sheet_id")).or_insert(serde_json::Value::Null);
     obj.entry(String::from("family_anchor_sheet_id")).or_insert(serde_json::Value::Null);
     obj.entry(String::from("checkpoints")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
+    obj.entry(String::from("image_assets")).or_insert_with(|| serde_json::Value::Array(Vec::new()));
 }
 
 fn backfill_compatible_fields(value: &mut serde_json::Value, bump_schema_version: bool) {
@@ -1954,6 +2153,17 @@ fn validate_project_document_inner(doc: &ProjectDocument, validate_checkpoint_en
             return Err(FormatError::NonFiniteFloat { location: format!("{}.{field}", layout.id) });
         }
         layout.validate()?;
+    }
+
+    if doc.image_assets.len() > MAX_PROJECT_IMAGE_ASSETS {
+        return Err(FormatError::Doc(curvebook_doc::DocError::TooManyImageAssets { count: doc.image_assets.len(), max: MAX_PROJECT_IMAGE_ASSETS }));
+    }
+    let mut seen_asset_ids = HashSet::with_capacity(doc.image_assets.len());
+    for asset in &doc.image_assets {
+        if !seen_asset_ids.insert(asset.asset_id.as_str()) {
+            return Err(FormatError::DuplicateEntry { path: asset.asset_id.clone() });
+        }
+        validate_image_asset(asset)?;
     }
 
     if validate_checkpoint_entries {
@@ -2356,7 +2566,10 @@ fn collect_graph_deps(gs: &GraphSheet, default_info: Option<&SheetId>) -> Vec<Sh
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
                 deps.push(result_sheet_id.clone());
             }
-            GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
+            GraphAnnotation::TextBox { .. }
+            | GraphAnnotation::LineOrArrow { .. }
+            | GraphAnnotation::Shape { .. }
+            | GraphAnnotation::EmbeddedImage { .. } => {}
         }
     }
     for hook in gs.spec.inline_hooks() {
@@ -2373,7 +2586,7 @@ fn collect_layout_deps(ls: &LayoutSheet, default_info: Option<&SheetId>) -> Vec<
         match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
             LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
-            LayoutItem::TextCallout { .. } => {}
+            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
         }
     }
     for hook in ls.spec.inline_hooks() {
@@ -2842,6 +3055,57 @@ mod tests {
             assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
             save_project_unpacked_dir(&doc_v2, &dir).unwrap();
             assert!(!dir.join(UNPACKED_TX_DIR).exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_archive_entries_normalizes_older_version_identically_to_current() {
+        use super::{ArchiveKind, build_archive_entries};
+
+        let mut current = ProjectDocument::new("Borrow Path").unwrap();
+        current.add_data_sheet(test_col_sheet("sheet-a", "A", 42.0)).unwrap();
+        assert_eq!(current.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let mut legacy = current.clone();
+        legacy.schema_version = 0;
+
+        let current_entries = build_archive_entries(&current, ArchiveKind::Project).unwrap();
+        let legacy_entries = build_archive_entries(&legacy, ArchiveKind::Project).unwrap();
+        assert_eq!(current_entries, legacy_entries);
+    }
+
+    #[test]
+    fn inspect_existing_unpacked_entry_reuses_same_size_buffer_and_handles_missing() {
+        use super::{ExistingEntryState, PriorSnapshot, inspect_existing_unpacked_entry};
+
+        let dir = std::env::temp_dir().join(format!("cb-inspect-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("entry.json");
+
+        assert!(matches!(
+            inspect_existing_unpacked_entry(&path, b"abcd").unwrap(),
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::DidNotExist, perms: None }
+        ));
+
+        std::fs::write(&path, b"abcd").unwrap();
+        assert!(matches!(inspect_existing_unpacked_entry(&path, b"abcd").unwrap(), ExistingEntryState::Unchanged));
+
+        match inspect_existing_unpacked_entry(&path, b"wxyz").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), perms } => {
+                assert_eq!(bytes, b"abcd");
+                assert!(perms.is_some());
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on same-size change"),
+        }
+
+        match inspect_existing_unpacked_entry(&path, b"longer").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), .. } => {
+                assert_eq!(bytes, b"abcd");
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on size change"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -1,5 +1,47 @@
 {
   "$defs": {
+    "AssetManifestEntry": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "pattern": "^img-[0-9a-f]{16}$",
+          "type": "string"
+        },
+        "byte_len": {
+          "maximum": 33554432,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "crc32": {
+          "maximum": 4294967295,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "media_type": {
+          "$ref": "#/$defs/ImageMimeKind"
+        },
+        "path": {
+          "type": "string"
+        }
+      },
+      "required": [
+        "asset_id",
+        "media_type",
+        "path",
+        "byte_len",
+        "crc32"
+      ],
+      "title": "AssetManifestEntry",
+      "type": "object"
+    },
+    "ImageMimeKind": {
+      "enum": [
+        "Png",
+        "Jpeg",
+        "Tiff"
+      ],
+      "type": "string"
+    },
     "SheetId": {
       "description": "Non-whitespace sheet identifier (trimmed non-empty).",
       "minLength": 1,
@@ -61,6 +103,12 @@
   "additionalProperties": false,
   "description": "Draft 2020-12 schema for CurveBook .curvebook / .cbtemplate archive manifest.json files.",
   "properties": {
+    "assets": {
+      "items": {
+        "$ref": "#/$defs/AssetManifestEntry"
+      },
+      "type": "array"
+    },
     "document_crc32": {
       "maximum": 4294967295,
       "minimum": 0,
@@ -78,7 +126,7 @@
       "type": "string"
     },
     "schema_version": {
-      "maximum": 6,
+      "maximum": 7,
       "minimum": 0,
       "type": "integer"
     },

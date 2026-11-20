@@ -5,7 +5,7 @@
 use std::time::Duration;
 
 use curvebook_chart::ChartScene;
-use curvebook_doc::{DataSheet, SheetCellRange, SheetId};
+use curvebook_doc::{DataSheet, MAX_IMAGE_ASSET_BYTES, SheetCellRange, SheetId};
 use curvebook_engine::Session;
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, format_cell_token, write_delimited_records};
 use curvebook_pdf::{PdfExportOptions, render_pdf};
@@ -179,6 +179,14 @@ pub trait PlatformClipboardAdapter: std::fmt::Debug + Send + Sync {
     fn read_text(&self) -> Result<OsAdapterStatus, String> {
         Ok(OsAdapterStatus::unavailable("platform-clipboard", "clipboard read unsupported on this adapter"))
     }
+
+    /// Read PNG/JPEG/TIFF raster image bytes from the platform clipboard, if present.
+    ///
+    /// # Errors
+    /// Returns a descriptive error string when reading clipboard image data fails unexpectedly.
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        Ok(None)
+    }
 }
 
 /// Default platform clipboard adapter delegating to native OS pasteboard tools on desktop targets.
@@ -222,12 +230,24 @@ impl PlatformClipboardAdapter for SystemPlatformClipboardAdapter {
             Ok(OsAdapterStatus::unavailable("wasm-pasteboard", "browser clipboard read requires host DOM bridge"))
         }
     }
+
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            read_os_clipboard_image_bytes()
+        }
+        #[cfg(target_arch = "wasm32")]
+        {
+            Ok(None)
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default)]
 struct StubClipboardInner {
     bundles: Vec<ClipboardBundle>,
     texts: Vec<String>,
+    image_bytes: Option<Vec<u8>>,
     available: bool,
 }
 
@@ -248,14 +268,28 @@ impl StubPlatformClipboardAdapter {
     /// Construct an available in-memory clipboard stub with empty capture buffers.
     #[must_use]
     pub fn new() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: true })) }
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
+                bundles: Vec::new(),
+                texts: Vec::new(),
+                image_bytes: None,
+                available: true,
+            })),
+        }
     }
 
     /// Construct an in-memory clipboard stub simulating a headless environment (`available = false`)
     /// while still recording submitted payloads.
     #[must_use]
     pub fn unavailable() -> Self {
-        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner { bundles: Vec::new(), texts: Vec::new(), available: false })) }
+        Self {
+            inner: std::sync::Arc::new(std::sync::RwLock::new(StubClipboardInner {
+                bundles: Vec::new(),
+                texts: Vec::new(),
+                image_bytes: None,
+                available: false,
+            })),
+        }
     }
 
     /// Return all captured multi-flavor [`ClipboardBundle`] writes in submission order.
@@ -289,20 +323,29 @@ impl StubPlatformClipboardAdapter {
     /// Seed plain UTF-8 / TSV text into the stub clipboard so raw `Cmd/Ctrl+V` reads it.
     pub fn seed_text(&self, text: impl Into<String>) {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = None;
         guard.texts.push(text.into());
     }
 
-    /// Clear all captured bundle and text entries.
+    /// Seed encoded PNG/JPEG/TIFF bytes into the stub clipboard for image paste testing.
+    pub fn seed_image_bytes(&self, bytes: Vec<u8>) {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = Some(bytes);
+    }
+
+    /// Clear all captured bundle, text, and seeded image entries.
     pub fn clear(&self) {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
         guard.bundles.clear();
         guard.texts.clear();
+        guard.image_bytes = None;
     }
 }
 
 impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
     fn write_text(&self, text: &str) -> Result<OsAdapterStatus, String> {
         let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.image_bytes = None;
         guard.texts.push(text.to_owned());
         if guard.available {
             Ok(OsAdapterStatus {
@@ -354,6 +397,201 @@ impl PlatformClipboardAdapter for StubPlatformClipboardAdapter {
             job_id: None,
         })
     }
+
+    fn read_image_bytes(&self) -> Result<Option<Vec<u8>>, String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        if !guard.available {
+            return Ok(None);
+        }
+        Ok(guard.image_bytes.clone())
+    }
+}
+
+/// Injectable platform URL opener used by [`crate::UiApp`] for allowlisted GitHub issue links.
+///
+/// Interactive desktop sessions install [`SystemPlatformUrlOpener::live`], interactive browser
+/// sessions install `WebPlatformUrlOpener`, and headless / test sessions keep the default
+/// [`SystemPlatformUrlOpener::guarded`] or install [`StubPlatformUrlOpener`].
+pub trait PlatformUrlOpener: std::fmt::Debug + Send + Sync {
+    /// Open an allowlisted CurveBook GitHub new-issue URL in the user's browser.
+    ///
+    /// # Errors
+    /// Returns an error if `url` fails [`crate::feedback::validate_github_issue_url`] or if an
+    /// active OS launcher fails.
+    fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String>;
+}
+
+/// Production URL opener delegating to the host OS browser launcher (`open` on macOS,
+/// `xdg-open` on Unix, PowerShell `Start-Process` via stdin on Windows).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct SystemPlatformUrlOpener {
+    allow_live_launch: bool,
+}
+
+impl SystemPlatformUrlOpener {
+    /// Construct a guarded opener that only launches an OS browser when
+    /// `CURVEBOOK_ALLOW_OS_GUI_DIALOG` is set (safe default for tests and headless sessions).
+    #[must_use]
+    pub const fn guarded() -> Self {
+        Self { allow_live_launch: false }
+    }
+
+    /// Construct a live interactive opener for user-driven desktop windows.
+    #[must_use]
+    pub const fn live() -> Self {
+        Self { allow_live_launch: true }
+    }
+}
+
+impl PlatformUrlOpener for SystemPlatformUrlOpener {
+    fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
+        open_github_issue_url(url, self.allow_live_launch)
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+struct StubUrlOpenerInner {
+    urls: Vec<String>,
+    available: bool,
+}
+
+/// In-memory [`PlatformUrlOpener`] test double recording allowlisted URL launches with zero OS side effects.
+#[derive(Debug, Clone)]
+pub struct StubPlatformUrlOpener {
+    inner: std::sync::Arc<std::sync::RwLock<StubUrlOpenerInner>>,
+}
+
+impl Default for StubPlatformUrlOpener {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl StubPlatformUrlOpener {
+    /// Construct an available URL opener stub.
+    #[must_use]
+    pub fn new() -> Self {
+        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubUrlOpenerInner { urls: Vec::new(), available: true })) }
+    }
+
+    /// Construct an unavailable URL opener stub that still records submitted allowlisted URLs.
+    #[must_use]
+    pub fn unavailable() -> Self {
+        Self { inner: std::sync::Arc::new(std::sync::RwLock::new(StubUrlOpenerInner { urls: Vec::new(), available: false })) }
+    }
+
+    /// Return all captured URLs in submission order.
+    #[must_use]
+    pub fn captured_urls(&self) -> Vec<String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.urls.clone()
+    }
+
+    /// Return the most recently captured URL, if any.
+    #[must_use]
+    pub fn last_url(&self) -> Option<String> {
+        let guard = self.inner.read().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.urls.last().cloned()
+    }
+
+    /// Clear all captured URLs.
+    pub fn clear(&self) {
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.urls.clear();
+    }
+}
+
+impl PlatformUrlOpener for StubPlatformUrlOpener {
+    fn open_external_url(&self, url: &str) -> Result<OsAdapterStatus, String> {
+        crate::feedback::validate_github_issue_url(url)?;
+        let mut guard = self.inner.write().unwrap_or_else(std::sync::PoisonError::into_inner);
+        guard.urls.push(url.to_owned());
+        if guard.available {
+            Ok(OsAdapterStatus {
+                available: true,
+                availability: OsAdapterAvailability::Submitted,
+                backend: String::from("stub-browser"),
+                detail: format!("captured {} URL bytes", url.len()),
+                text: Some(url.to_owned()),
+                job_id: None,
+            })
+        } else {
+            Ok(OsAdapterStatus::unavailable("stub-browser", "stubbed browser launcher marked unavailable"))
+        }
+    }
+}
+
+#[cfg(any(all(not(target_arch = "wasm32"), target_os = "windows"), all(not(target_arch = "wasm32"), test)))]
+fn build_windows_url_opener_candidate(stage_dir: &std::path::Path) -> Result<OsCommandCandidate, String> {
+    const PS_OPEN_URL: &str =
+        "$url = [Console]::In.ReadToEnd().Trim()\nif (-not [string]::IsNullOrWhiteSpace($url)) { Start-Process -FilePath $url }\n";
+    let ps1_path = stage_dir.join("open_url.ps1");
+    curvebook_platform::write_atomic(&ps1_path, PS_OPEN_URL.as_bytes()).map_err(|err| format!("failed to stage PowerShell URL launcher: {err}"))?;
+    Ok(OsCommandCandidate {
+        program: String::from("powershell"),
+        args: vec![
+            String::from("-NoProfile"),
+            String::from("-NonInteractive"),
+            String::from("-ExecutionPolicy"),
+            String::from("Bypass"),
+            String::from("-File"),
+            ps1_path.to_string_lossy().into_owned(),
+        ],
+    })
+}
+
+/// Validate `url` against [`crate::feedback::validate_github_issue_url`] and open it in the
+/// host OS browser when `allow_live_launch` is `true` or `CURVEBOOK_ALLOW_OS_GUI_DIALOG` is set.
+///
+/// # Errors
+/// Returns an error if `url` fails allowlist validation or if spawning the host launcher fails.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn open_github_issue_url(url: &str, allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
+    crate::feedback::validate_github_issue_url(url)?;
+    if !allow_live_launch && std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
+        return Ok(OsAdapterStatus::unavailable(
+            "os-browser",
+            "browser launch disabled in headless/test mode; copy Markdown or open the GitHub URL manually",
+        ));
+    }
+
+    #[cfg(target_os = "macos")]
+    let (candidate, stdin_payload, _stage_guard): (OsCommandCandidate, Option<&[u8]>, Option<StageDirGuard>) =
+        (OsCommandCandidate { program: String::from("/usr/bin/open"), args: vec![url.to_owned()] }, None, None);
+    #[cfg(all(unix, not(target_os = "macos")))]
+    let (candidate, stdin_payload, _stage_guard): (OsCommandCandidate, Option<&[u8]>, Option<StageDirGuard>) =
+        (OsCommandCandidate { program: String::from("xdg-open"), args: vec![url.to_owned()] }, None, None);
+    #[cfg(target_os = "windows")]
+    let (candidate, stdin_payload, _stage_guard): (OsCommandCandidate, Option<&[u8]>, Option<StageDirGuard>) = {
+        let stage_dir = StageDirGuard::create("open-url")?;
+        let cand = build_windows_url_opener_candidate(stage_dir.path())?;
+        (cand, Some(url.as_bytes()), Some(stage_dir))
+    };
+
+    match run_candidate_with_stdio(&candidate, stdin_payload, ProcessBounds::default(), false)? {
+        CandidateOutcome::Completed(_output) => Ok(OsAdapterStatus {
+            available: true,
+            availability: OsAdapterAvailability::Submitted,
+            backend: candidate.program,
+            detail: String::from("opened GitHub issue form in default browser"),
+            text: Some(url.to_owned()),
+            job_id: None,
+        }),
+        CandidateOutcome::NotFound => {
+            Ok(OsAdapterStatus::unavailable(candidate.program, "OS browser launcher not found; copy Markdown or open the GitHub URL manually"))
+        }
+    }
+}
+
+/// Validate `url` on `wasm32` targets; browser tabs are opened via `WebPlatformUrlOpener`
+/// installed by `curvebook-web`.
+///
+/// # Errors
+/// Returns an error if `url` fails allowlist validation.
+#[cfg(target_arch = "wasm32")]
+pub fn open_github_issue_url(url: &str, _allow_live_launch: bool) -> Result<OsAdapterStatus, String> {
+    crate::feedback::validate_github_issue_url(url)?;
+    Ok(OsAdapterStatus::unavailable("wasm-browser", "no browser window opener installed; copy Markdown or open the GitHub URL manually"))
 }
 
 #[cfg(not(target_arch = "wasm32"))]
@@ -904,6 +1142,94 @@ function run(argv) {
 #[cfg(target_arch = "wasm32")]
 pub fn read_os_clipboard_pdf_bytes() -> Result<Vec<u8>, String> {
     Err(String::from("OS clipboard PDF read is unavailable in wasm32 builds"))
+}
+
+/// Read PNG, JPEG, or TIFF raster image bytes from the host OS clipboard when available (`WF-57`).
+///
+/// # Errors
+/// Returns a descriptive error string only when a host clipboard backend errors unexpectedly;
+/// returns `Ok(None)` when the clipboard holds no raster image or no display session is active.
+#[cfg(not(target_arch = "wasm32"))]
+pub fn read_os_clipboard_image_bytes() -> Result<Option<Vec<u8>>, String> {
+    #[cfg(target_os = "macos")]
+    {
+        const JXA_READ_IMG: &str = "\
+ObjC.import('Foundation');
+ObjC.import('AppKit');
+function run(argv) {
+  var outPath = argv[0];
+  var pb = $.NSPasteboard.generalPasteboard;
+  var types = ['public.png', 'public.jpeg', 'public.tiff'];
+  for (var i = 0; i < types.length; i++) {
+    var data = pb.dataForType($(types[i]));
+    if (data && !data.isNil() && Number(data.length) > 0) {
+      return data.writeToFileAtomically($(outPath), true) ? String(data.length) : 'ERR';
+    }
+  }
+  return 'EMPTY';
+}";
+        let stage_dir = StageDirGuard::create("pb-read-img")?;
+        let out_path = stage_dir.path().join("clipboard-image.bin");
+        let candidate = OsCommandCandidate {
+            program: String::from("/usr/bin/osascript"),
+            args: vec![
+                String::from("-l"),
+                String::from("JavaScript"),
+                String::from("-e"),
+                String::from(JXA_READ_IMG),
+                out_path.to_string_lossy().into_owned(),
+            ],
+        };
+        let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) else {
+            return Ok(None);
+        };
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if marker == "EMPTY" || marker == "ERR" || !out_path.exists() {
+            return Ok(None);
+        }
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&out_path, MAX_IMAGE_ASSET_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard image: {err}"))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
+    #[cfg(all(unix, not(target_os = "macos")))]
+    {
+        let mut candidates = Vec::new();
+        if has_nonempty_env("WAYLAND_DISPLAY") {
+            candidates.push(OsCommandCandidate::new("wl-paste", &["--type", "image/png"]));
+        }
+        if has_nonempty_env("DISPLAY") {
+            candidates.push(OsCommandCandidate::new("xclip", &["-selection", "clipboard", "-t", "image/png", "-o"]));
+        }
+        for candidate in &candidates {
+            if let Ok(Some(output)) = spawn_candidate_with_stdin(candidate, None)
+                && !output.stdout.is_empty()
+                && output.stdout.len() <= MAX_IMAGE_ASSET_BYTES
+            {
+                return Ok(Some(output.stdout));
+            }
+        }
+        Ok(None)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let stage_dir = StageDirGuard::create("pb-read-img")?;
+        let out_path = stage_dir.path().join("clipboard-image.png");
+        let script = format!(
+            "Add-Type -AssemblyName System.Windows.Forms; $img = [System.Windows.Forms.Clipboard]::GetImage(); if ($null -ne $img) {{ $img.Save('{}', [System.Drawing.Imaging.ImageFormat]::Png); 'OK' }} else {{ 'EMPTY' }}",
+            out_path.to_string_lossy().replace('\'', "''")
+        );
+        let candidate = OsCommandCandidate::new("powershell", &["-NoProfile", "-NonInteractive", "-STA", "-Command", &script]);
+        let Ok(CandidateOutcome::Completed(output)) = run_candidate(&candidate, None, ProcessBounds::default()) else {
+            return Ok(None);
+        };
+        let marker = String::from_utf8_lossy(&output.stdout).trim().to_owned();
+        if marker != "OK" || !out_path.exists() {
+            return Ok(None);
+        }
+        let bytes = curvebook_platform::fs::read_regular_file_bytes(&out_path, MAX_IMAGE_ASSET_BYTES)
+            .map_err(|err| format!("failed to read staged pasteboard image: {err}"))?;
+        Ok((!bytes.is_empty()).then_some(bytes))
+    }
 }
 
 /// Read UTF-8 plain-text payload from the host OS clipboard.
@@ -1756,5 +2082,43 @@ Laser_Lab_01 accepting requests since Mon Nov 14 10:00:00 2026
         let long_cjk = "数据图表".repeat(40);
         let capped = super::sanitize_print_title(&long_cjk);
         assert!(capped.chars().count() <= 64 && capped.len() <= 120 && !capped.is_empty());
+    }
+
+    #[test]
+    fn url_opener_enforces_github_allowlist_and_guards_headless_launch() -> Result<(), String> {
+        use super::{OsAdapterAvailability, PlatformUrlOpener, StubPlatformUrlOpener, SystemPlatformUrlOpener};
+
+        let valid = "https://github.com/HauserGroup/curvebook/issues/new?template=bug_report.yml&title=Test";
+        let stub = StubPlatformUrlOpener::new();
+        assert!(stub.open_external_url("https://example.com/evil").is_err());
+        assert!(stub.captured_urls().is_empty());
+
+        let status = stub.open_external_url(valid)?;
+        assert!(status.available);
+        assert_eq!(status.availability, OsAdapterAvailability::Submitted);
+        assert_eq!(stub.last_url().as_deref(), Some(valid));
+
+        let guarded = SystemPlatformUrlOpener::guarded();
+        assert!(guarded.open_external_url("javascript:alert(1)").is_err());
+        if std::env::var_os("CURVEBOOK_ALLOW_OS_GUI_DIALOG").is_none() {
+            let guarded_status = guarded.open_external_url(valid)?;
+            assert!(!guarded_status.available);
+            assert_eq!(guarded_status.availability, OsAdapterAvailability::Unavailable);
+        }
+
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            let root = std::env::temp_dir().join(format!("curvebook-url-ps1-test-{}", std::process::id()));
+            std::fs::create_dir_all(&root).map_err(|e| format!("create root: {e}"))?;
+            let dir = super::StageDirGuard::create_in(&root, "url")?;
+            let cand = super::build_windows_url_opener_candidate(dir.path())?;
+            assert_eq!(cand.program, "powershell");
+            let ps1 = std::fs::read_to_string(dir.path().join("open_url.ps1")).map_err(|e| format!("read ps1: {e}"))?;
+            assert!(ps1.contains("[Console]::In.ReadToEnd()"));
+            assert!(ps1.contains("Start-Process -FilePath $url"));
+            drop(dir);
+            let _ = std::fs::remove_dir_all(&root);
+        }
+        Ok(())
     }
 }

@@ -306,6 +306,42 @@
       "title": "NamedCheckpoint",
       "type": "object"
     },
+    "ProjectImageAsset": {
+      "additionalProperties": false,
+      "properties": {
+        "asset_id": {
+          "minLength": 4,
+          "type": "string"
+        },
+        "bytes": {
+          "type": "string"
+        },
+        "media_type": {
+          "enum": [
+            "Png",
+            "Jpeg",
+            "Tiff"
+          ],
+          "type": "string"
+        },
+        "pixel_size": {
+          "items": {
+            "minimum": 1,
+            "type": "integer"
+          },
+          "maxItems": 2,
+          "minItems": 2,
+          "type": "array"
+        }
+      },
+      "required": [
+        "asset_id",
+        "media_type",
+        "pixel_size"
+      ],
+      "title": "ProjectImageAsset",
+      "type": "object"
+    },
     "RemediationKind": {
       "enum": [
         "WelchT",
@@ -546,6 +582,12 @@
       },
       "type": "array"
     },
+    "image_assets": {
+      "items": {
+        "$ref": "#/$defs/ProjectImageAsset"
+      },
+      "type": "array"
+    },
     "info_sheets": {
       "items": {
         "$ref": "#/$defs/InfoSheet"
@@ -565,7 +607,7 @@
       "type": "array"
     },
     "schema_version": {
-      "maximum": 6,
+      "maximum": 7,
       "minimum": 1,
       "type": "integer"
     },

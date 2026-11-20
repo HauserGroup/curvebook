@@ -443,12 +443,12 @@ fn two_dataset_noisy_shared_rate_ode_fit_matches_closed_form_oracle() {
     let k_row = result_row(&result, "nonlinear_parameters", "k").unwrap_or(&[]);
     assert_approx_eq(cell_number(k_row.first()), exp_k, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet shared k");
     assert_approx_eq(cell_number(k_row.get(1)), exp_se_k, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet SE(k)");
-    let a1_row = result_row(&result, "nonlinear_parameters", "A [DS1]").unwrap_or(&[]);
-    assert_approx_eq(cell_number(a1_row.first()), exp_a1, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet local A [DS1]");
-    assert_approx_eq(cell_number(a1_row.get(1)), exp_se_a1, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet SE(A [DS1])");
-    let a2_row = result_row(&result, "nonlinear_parameters", "A [DS2]").unwrap_or(&[]);
-    assert_approx_eq(cell_number(a2_row.first()), exp_a2, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet local A [DS2]");
-    assert_approx_eq(cell_number(a2_row.get(1)), exp_se_a2, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet SE(A [DS2])");
+    let a1_row = result_row(&result, "nonlinear_parameters", "A [Group A]").unwrap_or(&[]);
+    assert_approx_eq(cell_number(a1_row.first()), exp_a1, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet local A [Group A]");
+    assert_approx_eq(cell_number(a1_row.get(1)), exp_se_a1, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet SE(A [Group A])");
+    let a2_row = result_row(&result, "nonlinear_parameters", "A [Group B]").unwrap_or(&[]);
+    assert_approx_eq(cell_number(a2_row.first()), exp_a2, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet local A [Group B]");
+    assert_approx_eq(cell_number(a2_row.get(1)), exp_se_a2, ODE_FIT_PARAM_ABS_TOL, 0.0, "sheet SE(A [Group B])");
 
     assert_approx_eq(
         cell_number(result_row(&result, "nonlinear_gof", "Degrees of Freedom").and_then(<[ResultCell]>::first)),

@@ -38,32 +38,33 @@ pub fn run(root: &Path, check: bool) -> Result<(), String> {
 }
 
 pub fn render_catalog(src: &str) -> Result<String, String> {
-    let struct_pos = src.find("pub struct UiCommandSpec").ok_or_else(|| format!("{SRC_REL}: `pub struct UiCommandSpec` not found"))?;
-    let start = leading_doc_and_attr_start(src, struct_pos);
-    let cmd_pos = src[struct_pos..]
-        .find("pub const UI_COMMANDS:")
-        .map(|rel| struct_pos + rel)
-        .ok_or_else(|| format!("{SRC_REL}: `pub const UI_COMMANDS:` not found"))?;
-    let tail = &src[cmd_pos..];
-    let end_rel = tail.find("];").ok_or_else(|| format!("{SRC_REL}: closing `];` for `UI_COMMANDS` not found"))?;
-    let decl = &src[start..cmd_pos + end_rel + 2];
-    Ok(format!("{HEADER}{decl}\n"))
+    let body = strip_leading_inner_doc(src);
+    if body.trim().is_empty() {
+        return Err(format!("{SRC_REL}: source module is empty"));
+    }
+    let mut out = String::with_capacity(HEADER.len() + body.len() + 1);
+    out.push_str(HEADER);
+    out.push_str(body);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    Ok(out)
 }
 
-fn leading_doc_and_attr_start(src: &str, item_pos: usize) -> usize {
-    let line_start = src[..item_pos].rfind('\n').map_or(0, |idx| idx + 1);
-    let mut start = line_start;
-    while start > 0 {
-        let prev_end = start - 1;
-        let prev_start = src[..prev_end].rfind('\n').map_or(0, |idx| idx + 1);
-        let line = src[prev_start..prev_end].trim();
-        if line.starts_with("///") || line.starts_with("#[") {
-            start = prev_start;
+fn strip_leading_inner_doc(src: &str) -> &str {
+    let mut rest = src;
+    loop {
+        let Some(line_end) = rest.find('\n') else {
+            let trimmed = rest.trim();
+            return if trimmed.is_empty() || trimmed.starts_with("//!") { "" } else { rest };
+        };
+        let line = rest[..line_end].trim();
+        if line.is_empty() || line.starts_with("//!") {
+            rest = &rest[line_end + 1..];
         } else {
-            break;
+            return rest;
         }
     }
-    start
 }
 
 fn rustfmt(root: &Path, code: &str) -> Result<String, String> {
@@ -93,12 +94,25 @@ mod tests {
     use super::render_catalog;
 
     #[test]
-    fn extracts_ui_command_spec_and_slice_declaration() {
-        let src = "//! docs\n\n/// Spec doc.\n#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct UiCommandSpec {\n    pub id: &'static str,\n    pub label: &'static str,\n    pub shortcut: &'static str,\n    pub params_doc: &'static str,\n    pub summary: &'static str,\n    pub beginner: &'static str,\n}\n\n/// Table doc.\npub const UI_COMMANDS: &[UiCommandSpec] = &[\n    UiCommandSpec { id: \"app.about\", label: \"About\", shortcut: \"\", params_doc: \"{}\", summary: \"Show about.\", beginner: \"Opens about dialog.\" },\n];\n";
+    fn prepends_generated_banner_and_copies_whole_module_body() {
+        let src = "//! source docs\n//! second line\n\n/// Spec doc.\n#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct UiCommandSpec {\n    pub id: &'static str,\n    pub label: &'static str,\n    pub shortcut: &'static str,\n    pub params_doc: &'static str,\n    pub summary: &'static str,\n    pub beginner: &'static str,\n}\n\n/// Table doc.\npub const UI_COMMANDS: &[UiCommandSpec] = &[\n    UiCommandSpec { id: \"app.about\", label: \"About\", shortcut: \"\", params_doc: \"[]];\", summary: \"Show about.\", beginner: \"Opens about dialog.\" },\n];\n";
         let rendered = render_catalog(src).unwrap();
-        assert!(rendered.contains("Generated from `crates/ui-egui/src/menus/ui_commands.rs`"));
-        assert!(rendered.contains("pub struct UiCommandSpec"));
+        assert!(rendered.starts_with("//! Desktop UI command catalogue for headless MCP discovery"));
+        assert!(!rendered.contains("//! source docs"));
+        assert!(rendered.contains("/// Spec doc.\n#[derive(Copy, Clone, Debug, PartialEq, Eq)]\npub struct UiCommandSpec"));
         assert!(rendered.contains("pub const UI_COMMANDS: &[UiCommandSpec]"));
-        assert!(rendered.contains("id: \"app.about\""));
+        assert!(rendered.contains("params_doc: \"[]];\""));
+        assert!(rendered.ends_with("];\n"));
+    }
+
+    #[test]
+    fn handles_source_without_inner_doc_and_rejects_empty_body() {
+        let bare = "pub const UI_COMMANDS: &[()] = &[];";
+        let rendered = render_catalog(bare).unwrap();
+        assert!(rendered.starts_with("//! Desktop UI command catalogue"));
+        assert!(rendered.ends_with("pub const UI_COMMANDS: &[()] = &[];\n"));
+
+        assert!(render_catalog("//! only inner docs\n\n").is_err());
+        assert!(render_catalog("   \n\t").is_err());
     }
 }

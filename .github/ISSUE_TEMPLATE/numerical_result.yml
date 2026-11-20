@@ -1,7 +1,7 @@
 name: Wrong numerical result
 description: A statistic, p-value, confidence interval, fitted parameter, or plotted value looks incorrect.
 title: "Numerical: "
-labels: ["bug"]
+labels: ["bug", "numerical"]
 body:
   - type: markdown
     attributes:

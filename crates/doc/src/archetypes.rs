@@ -1973,4 +1973,210 @@ impl TableArchetype {
             Self::Nested(t) => t.groups.iter().map(|g| g.cells.iter().map(Vec::len).sum::<usize>()).sum(),
         }
     }
+
+    /// Shift existing rows in `start_row..existing_rows` downward by `insert_rows` inside
+    /// pre-grown row storage so newly inserted rows occupy `start_row..start_row + insert_rows`.
+    ///
+    /// Callers must grow the archetype's row storage to at least `existing_rows + insert_rows`
+    /// before invoking this method. Any slice shorter than `existing_rows + insert_rows` is left
+    /// untouched; if `insert_rows == 0` or `start_row >= existing_rows`, this is a no-op.
+    pub fn shift_rows_down(&mut self, start_row: usize, insert_rows: usize, existing_rows: usize) {
+        if insert_rows == 0 || start_row >= existing_rows {
+            return;
+        }
+        let Some(end) = existing_rows.checked_add(insert_rows) else {
+            return;
+        };
+        match self {
+            Self::Xy(t) => {
+                rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                for ds in &mut t.data_sets {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::Column(t) => {
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                for ds in &mut t.data_sets {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::Grouped(t) => {
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                if let Some(spacing) = &mut t.row_numeric_spacing {
+                    rotate_rows_down(spacing, start_row, insert_rows, end);
+                }
+                for ds in &mut t.data_sets {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::Contingency(t) => {
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                for ds in &mut t.data_sets {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::Survival(t) => {
+                rotate_rows_down(&mut t.times, start_row, insert_rows, end);
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                for ds in &mut t.cohorts {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::PartsOfWhole(t) => {
+                rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
+                for ds in &mut t.data_sets {
+                    rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::MultipleVariables(mv) => {
+                rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
+                for var in &mut mv.variables {
+                    rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
+                }
+            }
+            Self::Nested(t) => {
+                rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
+                for grp in &mut t.groups {
+                    rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
+                }
+            }
+        }
+    }
+}
+
+fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
+    if let Some(slice) = rows.get_mut(start_row..end_row)
+        && shift < slice.len()
+    {
+        slice.rotate_right(shift);
+    }
+}
+
+#[cfg(test)]
+mod shift_rows_tests {
+    use super::{
+        ColumnDesignHint, ColumnTable, ContingencyTable, GroupedTable, MultipleVariablesTable, NestedTable, PartsOfWholeTable, SubcolumnMode,
+        SurvivalTable, TableArchetype, XyTable,
+    };
+    use crate::cell::Cell;
+
+    #[test]
+    fn shift_rows_down_rotates_all_eight_archetypes() {
+        // Xy
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
+        xy.x_cells[0][0] = Cell::number(1.0);
+        xy.x_cells[1][0] = Cell::number(2.0);
+        xy.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        xy.data_sets[0].cells[0][0] = Cell::number(10.0);
+        xy.data_sets[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::Xy(xy);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::Xy(t) = arch {
+            assert_eq!(t.x_cells[2][0], Cell::number(2.0));
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.data_sets[0].cells[2][0], Cell::number(20.0));
+        }
+
+        // Column
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 3).unwrap();
+        col.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        col.data_sets[0].cells[0][0] = Cell::number(10.0);
+        col.data_sets[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::Column(col);
+        arch.shift_rows_down(0, 1, 2);
+        if let TableArchetype::Column(t) = arch {
+            assert_eq!(t.row_titles, vec!["", "r0", "r1"]);
+            assert_eq!(t.data_sets[0].cells[1][0], Cell::number(10.0));
+        }
+
+        // Grouped (including row_numeric_spacing)
+        let mut grp = GroupedTable::new(SubcolumnMode::RawReplicates(1), 1, 3).unwrap();
+        grp.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        grp.row_numeric_spacing = Some(vec![Some(10.0), Some(20.0), None]);
+        grp.data_sets[0].cells[0][0] = Cell::number(10.0);
+        grp.data_sets[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::Grouped(grp);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::Grouped(t) = arch {
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.row_numeric_spacing, Some(vec![Some(10.0), None, Some(20.0)]));
+            assert_eq!(t.data_sets[0].cells[2][0], Cell::number(20.0));
+        }
+
+        // Contingency
+        let mut cont = ContingencyTable::new(1, 3).unwrap();
+        cont.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        cont.data_sets[0].cells[0][0] = Cell::number(10.0);
+        cont.data_sets[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::Contingency(cont);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::Contingency(t) = arch {
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.data_sets[0].cells[2][0], Cell::number(20.0));
+        }
+
+        // Survival
+        let mut surv = SurvivalTable::new(1, 3).unwrap();
+        surv.times = vec![Cell::number(5.0), Cell::number(10.0), Cell::empty()];
+        surv.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        surv.cohorts[0].cells[0][0] = Cell::number(1.0);
+        surv.cohorts[0].cells[1][0] = Cell::number(0.0);
+        let mut arch = TableArchetype::Survival(surv);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::Survival(t) = arch {
+            assert_eq!(t.times[2], Cell::number(10.0));
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.cohorts[0].cells[2][0], Cell::number(0.0));
+        }
+
+        // PartsOfWhole
+        let mut pow = PartsOfWholeTable::new(1, 3).unwrap();
+        pow.slice_labels = vec!["s0".into(), "s1".into(), String::new()];
+        pow.data_sets[0].cells[0][0] = Cell::number(10.0);
+        pow.data_sets[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::PartsOfWhole(pow);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::PartsOfWhole(t) = arch {
+            assert_eq!(t.slice_labels, vec!["s0", "", "s1"]);
+            assert_eq!(t.data_sets[0].cells[2][0], Cell::number(20.0));
+        }
+
+        // MultipleVariables
+        let mut mv = MultipleVariablesTable::new(1, 3).unwrap();
+        mv.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        mv.variables[0].cells[0] = Cell::number(10.0);
+        mv.variables[0].cells[1] = Cell::number(20.0);
+        let mut arch = TableArchetype::MultipleVariables(mv);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::MultipleVariables(t) = arch {
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.variables[0].cells[2], Cell::number(20.0));
+        }
+
+        // Nested
+        let mut nested = NestedTable::new(1, 1, 3).unwrap();
+        nested.row_titles = vec!["r0".into(), "r1".into(), String::new()];
+        nested.groups[0].cells[0][0] = Cell::number(10.0);
+        nested.groups[0].cells[1][0] = Cell::number(20.0);
+        let mut arch = TableArchetype::Nested(nested);
+        arch.shift_rows_down(1, 1, 2);
+        if let TableArchetype::Nested(t) = arch {
+            assert_eq!(t.row_titles, vec!["r0", "", "r1"]);
+            assert_eq!(t.groups[0].cells[2][0], Cell::number(20.0));
+        }
+    }
+
+    #[test]
+    fn shift_rows_down_noops_on_zero_or_past_end() {
+        let mut col = ColumnTable::new(ColumnDesignHint::UnpairedReplicates, 1, 2).unwrap();
+        col.row_titles = vec!["r0".into(), "r1".into()];
+        let mut arch = TableArchetype::Column(col);
+        arch.shift_rows_down(0, 0, 2);
+        arch.shift_rows_down(2, 1, 2);
+        arch.shift_rows_down(0, usize::MAX, 2);
+        if let TableArchetype::Column(t) = arch {
+            assert_eq!(t.row_titles, vec!["r0", "r1"]);
+        }
+    }
 }

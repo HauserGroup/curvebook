@@ -1505,8 +1505,8 @@ mod tests {
         assert!(live_hits.is_empty(), "real workspace live metric drift: {live_hits:?}");
 
         let stale_status = status_md
-            .replace("`97`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
-            .replace("`47`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
+            .replace("`105`** typed `CommandSpec`", "`95`** typed `CommandSpec`")
+            .replace("`54`** typed `UiCommandSpec`", "`32`** typed `UiCommandSpec`");
         let stale_hits = super::check_live_status_metrics(root, &stale_status);
         #[cfg(feature = "full-gates")]
         assert!(stale_hits.iter().any(|v| v.reason.contains("Engine command registry")), "{stale_hits:?}");

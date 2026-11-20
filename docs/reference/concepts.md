@@ -10,7 +10,7 @@ A `ProjectDocument` pairs a project title, persistent analysis/workspace metadat
 
 | Limit Constant | Value | Scope |
 |---|---:|---|
-| `CURRENT_SCHEMA_VERSION` | `6` | Active project document JSON schema version |
+| `CURRENT_SCHEMA_VERSION` | `7` | Active project document JSON schema version |
 | `MAX_SHEETS_PER_PROJECT` | `500` | Maximum sheets across all five navigator sections in one project |
 | `MAX_ROWS` | `1,000,000` | Maximum rows per individual data table |
 | `MAX_DATA_SETS` | `1,024` | Maximum dataset/group/variable columns per data table |

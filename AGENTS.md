@@ -73,8 +73,8 @@ Never delete, truncate, or omit contributor attributions in [docs/contributors.m
 
 One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came from describing an unimplemented command table before it landed and deserializing raw positional tuples. Keep docs and generated files synchronized with the landed typed registries:
 
-- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`97` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
-- **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`47` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
+- **Engine command registry:** `crates/engine/src/cmd/mod.rs` owns the single typed `CommandSpec` registry (`105` commands across `9` `CommandGroup` categories in [`docs/commands.md`](docs/commands.md): `CommandGroup`, `Effects` bitflags including `MUTATES_DOCUMENT` / `READ_ONLY` / `IDEMPOTENT`, JSON Schema input specs, `enabled` predicates, and handlers with `serde_path_to_error` typed parameters), exposed via `cmd::registry()`. Whenever adding or editing an engine command, update its `CommandSpec` entry, tests, and regenerated [`docs/commands.md`](docs/commands.md) (`cargo xtask commands`) in one PR, conforming to [docs/command-ids.md](docs/command-ids.md).
+- **UI command registry:** UI-only actions use the typed `UiCommandSpec` struct slice `UI_COMMANDS` (`54` entries) in `crates/ui-egui/src/menus/ui_commands.rs`. `crates/mcp/src/ui_catalog.rs` is generated from `UI_COMMANDS` by `cargo xtask ui-commands`—never hand-edit `ui_catalog.rs`, and always check sync with `cargo xtask ui-commands --check`.
 - **Strict `--gui-only` channel lock:** Under `curvebook --control <port> --gui-only` or `curvebook-cli mcp [--control-port <p>] --gui-only` (`GuiOnlyPolicy::Strict` in `crates/engine/src/lib.rs`), direct `Caller::Control` / `Caller::Mcp` engine mutations, `doc_inspect`, `resources/read`, and disk-path `ui.screenshot` writes are rejected with `ErrorCode::GuiOnlyViolation` (`"gui_only_violation"`), while the 8 `gui` tools (`ui_inspect`, `ui_screenshot`, `ui_pointer_gesture`, `ui_type_text`, `ui_press_key`, `ui_invoke_menu`, `ui_switch_tab`, `ui_answer_dialog`) drive `UiApp` widgets that commit internally via `Caller::Ui`.
 
 ---
@@ -88,6 +88,7 @@ One of our documented past pitfalls ([docs/pitfalls.md](docs/pitfalls.md)) came 
 1. Check `docs/ROADMAP.md` and open PRs/issues before starting work so two contributors do not duplicate the same `R<m>.<n>` item.
 2. Claim the item first—either by noting your claim in `docs/ROADMAP.md` / the tracking issue before branching—so others see it is in progress.
 3. If you stop without finishing, release the claim promptly and note partial findings cleanly.
+4. For an issue-driven bug fix (see Git Workflow), claim the GitHub issue with a comment instead of a roadmap item.
 
 ### Before You Write Code
 Read these before editing code:
@@ -104,6 +105,13 @@ Read these before editing code:
   `Move atomic saves into curvebook-platform (R0.10)`
   *(This replaces the legacy `M1.1: ...` title-prefix convention.)*
 - Keep each PR focused on **one** roadmap item (`R<m>.<n>`) unless splitting/grouping is explicitly planned in `docs/ROADMAP.md`.
+- **Issue-driven bug fixes:** A fix for a reported GitHub issue that is not part of planned roadmap work needs no roadmap ID.
+  - Branch as `bugfix/issue-<N>-short-slug` (or `hotfix/issue-<N>-short-slug`) and keep the PR to that one issue.
+  - Leave the issue number out of the PR title, because squash-merge appends the PR number to it.
+  - Write `Fixes #<N>` in the PR body and as a trailer in the commit message, so the issue closes whether the fix reaches `main` through a PR or through an integration merge.
+  - Start with a failing regression test named `issue_<N>_*`. For a wrong numerical result it must be a `D1` oracle test that cites a published reference and documents its tolerance.
+  - Never loosen an existing oracle tolerance or reference value in a bug fix without saying why under **Not verified** in the PR.
+  - Run `cargo xtask ci quick` before opening the PR. The project skill `.claude/skills/fix-issue/SKILL.md` walks an agent through these steps.
 
 ### Architecture Rules
 1. **Headless first:** All document/data/analysis/graph mutations execute through `curvebook-engine` (`Session::execute`), ensuring parity across GUI (`ui-egui` via `Caller::Ui`), CLI (`curvebook-cli`), MCP (`curvebook-mcp`), crash-recovery replay (`ops.journal`), and batch runs (`curvebook.batch.v1`). UI layers must never mutate `Project` directly. Under strict `--gui-only`, interactive MCP/control callers must drive `UiApp` widgets rather than calling direct `L5` engine mutation commands.

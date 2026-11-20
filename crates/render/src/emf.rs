@@ -7,12 +7,14 @@
 //! handle lifecycle management.
 
 use curvebook_chart::{
-    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
+    TextAnchor,
 };
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::{
-    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt,
+    RichSpan, RichText, SpanSlope, SpanWeight, effective_span_scale, measure_text_pt,
     metrics::{char_advance_pt, split_rich_text_lines},
+    script_baseline_offset_pt,
 };
 
 use crate::rasterizer::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RasterImage, RenderError};
@@ -299,6 +301,7 @@ impl EmfWriter {
         match primitive {
             ScenePrimitive::Path { path, fill, stroke, clip } => self.emit_path(path, *fill, *stroke, *clip),
             ScenePrimitive::Text(text) => self.emit_text(text),
+            ScenePrimitive::RasterImage(raster) => self.emit_raster_image(raster),
             ScenePrimitive::PushClip { rect } => self.push_clip(*rect),
             ScenePrimitive::PopClip => self.pop_clip(),
         }
@@ -572,7 +575,7 @@ impl EmfWriter {
                     continue;
                 }
                 let span_size_pt = text.font_size_pt * effective_span_scale(span);
-                let baseline_dy = line_y + script_baseline_dy(span.script, text.font_size_pt);
+                let baseline_dy = line_y + script_baseline_offset_pt(span.script, text.font_size_pt);
                 let span_w = measure_text_pt(&RichText::new(vec![span.clone()]), text.font_size_pt).width_pt;
                 let raw_color = span.color.unwrap_or(text.color);
                 if raw_color.a > 0 && span_size_pt > 0.0 {
@@ -755,6 +758,87 @@ impl EmfWriter {
             }
         }
         self.emit_record(EMR_STRETCHDIBITS, &payload)
+    }
+
+    fn emit_raster_image(&mut self, prim: &SceneRasterImage) -> Result<(), RenderError> {
+        let (src_w, src_h) = prim.pixel_size;
+        let expected_len = (src_w as usize).checked_mul(src_h as usize).and_then(|p| p.checked_mul(4));
+        if src_w == 0
+            || src_h == 0
+            || expected_len != Some(prim.rgba.len())
+            || !rect_is_finite(prim.bounds_pt)
+            || prim.bounds_pt.width <= 0.0
+            || prim.bounds_pt.height <= 0.0
+            || !prim.rotation_deg.is_finite()
+        {
+            return Ok(());
+        }
+        let Some(vis_doc) = prim.crop.visible_rect(curvebook_doc::RectPt::from(prim.bounds_pt)) else {
+            return Ok(());
+        };
+        let vis = RectPt::from(vis_doc);
+        let bounds = prim.bounds_pt;
+        let cx = bounds.x + 0.5 * bounds.width;
+        let cy = bounds.y + 0.5 * bounds.height;
+        let (sin_t, cos_t) = prim.rotation_deg.to_radians().sin_cos();
+
+        let mut min_x = f64::INFINITY;
+        let mut min_y = f64::INFINITY;
+        let mut max_x = f64::NEG_INFINITY;
+        let mut max_y = f64::NEG_INFINITY;
+        for vx in [vis.x, vis.right()] {
+            for vy in [vis.y, vis.bottom()] {
+                let dx = vx - cx;
+                let dy = vy - cy;
+                let wx = cx + dx * cos_t - dy * sin_t;
+                let wy = cy + dx * sin_t + dy * cos_t;
+                min_x = min_x.min(wx);
+                max_x = max_x.max(wx);
+                min_y = min_y.min(wy);
+                max_y = max_y.max(wy);
+            }
+        }
+        let aabb = RectPt::new(min_x, min_y, (max_x - min_x).max(0.0), (max_y - min_y).max(0.0));
+        if !rect_is_finite(aabb) || aabb.width <= 0.0 || aabb.height <= 0.0 {
+            return Ok(());
+        }
+
+        let nat_scale = (f64::from(src_w) / bounds.width).max(f64::from(src_h) / bounds.height).max(REF_DPI / 72.0);
+        let max_scale = (2048.0 / aabb.width.max(1e-3)).min(2048.0 / aabb.height.max(1e-3));
+        let scale = nat_scale.min(max_scale).max(1e-3);
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bw = (aabb.width * scale).ceil().clamp(1.0, 2048.0) as u32;
+        #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+        let bh = (aabb.height * scale).ceil().clamp(1.0, 2048.0) as u32;
+        let sx = f64::from(bw) / aabb.width;
+        let sy = f64::from(bh) / aabb.height;
+
+        let opaque_bg = if self.bg_color.a == u8::MAX {
+            self.bg_color
+        } else if self.bg_color.a > 0 {
+            Rgba8::rgb(self.bg_color.r, self.bg_color.g, self.bg_color.b)
+        } else {
+            Rgba8::WHITE
+        };
+        let mut baked = RasterImage::new(bw, bh, 96, opaque_bg)?;
+        let mut shifted = prim.clone();
+        shifted.bounds_pt.x -= aabb.x;
+        shifted.bounds_pt.y -= aabb.y;
+        shifted.clip = None;
+        crate::rasterizer::render_raster_image(&mut baked, &shifted, sx, sy, crate::rasterizer::ClipRectPx::from_canvas(bw, bh));
+
+        let mut pushed_clip = false;
+        if let Some(clip_rect) = prim.clip
+            && rect_is_finite(clip_rect)
+        {
+            self.push_clip(clip_rect)?;
+            pushed_clip = true;
+        }
+        let res = self.emit_stretch_dibits(&baked, aabb);
+        if pushed_clip {
+            self.pop_clip()?;
+        }
+        res
     }
 
     fn create_solid_brush(&mut self, color: Rgba8) -> Result<u32, RenderError> {
@@ -963,28 +1047,6 @@ impl EmfWriter {
         self.n_records =
             self.n_records.checked_add(1).ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF record count overflow") })?;
         Ok(())
-    }
-}
-
-fn effective_span_scale(span: &RichSpan) -> f64 {
-    let raw = if span.scale.is_finite() && span.scale > 0.0 { span.scale } else { 1.0 };
-    match span.script {
-        SpanScript::Baseline => raw,
-        SpanScript::Superscript | SpanScript::Subscript => {
-            if (raw - 1.0).abs() <= 1e-9 {
-                0.7
-            } else {
-                raw
-            }
-        }
-    }
-}
-
-const fn script_baseline_dy(script: SpanScript, base_size_pt: f64) -> f64 {
-    match script {
-        SpanScript::Baseline => 0.0,
-        SpanScript::Superscript => -0.35 * base_size_pt,
-        SpanScript::Subscript => 0.20 * base_size_pt,
     }
 }
 

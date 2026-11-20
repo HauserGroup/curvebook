@@ -38,62 +38,181 @@
 //!   two-regime straight-line data. *Technometrics* 16.
 //! - Huxley, J. S. (1932). *Problems of Relative Growth*. London: Methuen.
 
-use crate::library::{ParametricModel, data_x_min_max, data_y_min_max};
+use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, resolve_from_specs, spec_ids};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
 
-/// Canonical IDs exposed by the general curve equation catalog.
-pub const CURVE_EQUATION_IDS: &[&str] = &[
+/// Ordered single-source-of-truth registrations for the general curve equation family.
+pub(crate) const CURVE_SPECS: &[BuiltinEquationSpec] = &[
     // Exponential
-    "one_phase_decay",
-    "two_phase_decay",
-    "three_phase_decay",
-    "plateau_followed_by_one_phase_decay",
-    "one_phase_association",
-    "plateau_followed_by_one_phase_association",
-    "exponential_growth",
+    BuiltinEquationSpec { id: "one_phase_decay", aliases: &[], build: || Box::new(OnePhaseDecay { params: names(&["Y0", "Plateau", "K"]) }) },
+    BuiltinEquationSpec {
+        id: "two_phase_decay",
+        aliases: &[],
+        build: || Box::new(TwoPhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "KFast", "KSlow"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "three_phase_decay",
+        aliases: &[],
+        build: || Box::new(ThreePhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "PercentSlow", "KFast", "KSlow", "KVerySlow"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "plateau_followed_by_one_phase_decay",
+        aliases: &[],
+        build: || Box::new(PlateauThenDecay { params: names(&["Y0", "X0", "Plateau", "K"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "one_phase_association",
+        aliases: &[],
+        build: || Box::new(OnePhaseAssociation { params: names(&["Y0", "Plateau", "K"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "plateau_followed_by_one_phase_association",
+        aliases: &[],
+        build: || Box::new(PlateauThenAssoc { params: names(&["Y0", "X0", "Plateau", "K"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "exponential_growth",
+        aliases: &[],
+        build: || {
+            Box::new(ExponentialGrowth {
+                id: "exponential_growth",
+                name: "Exponential growth",
+                category: EquationCategory::Exponential,
+                params: names(&["Y0", "k"]),
+            })
+        },
+    },
     // Growth
-    "exponential_plateau",
-    "logistic_growth",
-    "gompertz_growth",
-    "beta_growth_then_decay",
-    "malthusian_growth",
+    BuiltinEquationSpec { id: "exponential_plateau", aliases: &[], build: || Box::new(ExponentialPlateau { params: names(&["YM", "Y0", "k"]) }) },
+    BuiltinEquationSpec { id: "logistic_growth", aliases: &[], build: || Box::new(LogisticGrowth { params: names(&["YM", "Y0", "k"]) }) },
+    BuiltinEquationSpec { id: "gompertz_growth", aliases: &[], build: || Box::new(GompertzGrowth { params: names(&["YM", "Y0", "k"]) }) },
+    BuiltinEquationSpec { id: "beta_growth_then_decay", aliases: &[], build: || Box::new(BetaGrowthDecay { params: names(&["Ym", "te", "tm"]) }) },
+    BuiltinEquationSpec {
+        id: "malthusian_growth",
+        aliases: &[],
+        build: || {
+            Box::new(ExponentialGrowth {
+                id: "malthusian_growth",
+                name: "Malthusian growth",
+                category: EquationCategory::Growth,
+                params: names(&["Y0", "k"]),
+            })
+        },
+    },
     // Radiobiology
-    "linear_quadratic_survival",
+    BuiltinEquationSpec {
+        id: "linear_quadratic_survival",
+        aliases: &[],
+        build: || Box::new(LinearQuadraticSurvival { params: names(&["Alpha", "Beta"]) }),
+    },
     // Peak
-    "gaussian",
-    "gaussian_baseline",
-    "sum_of_two_gaussians",
-    "log_gaussian",
-    "cumulative_gaussian",
-    "lorentzian",
-    "weibull_peak",
+    BuiltinEquationSpec {
+        id: "gaussian",
+        aliases: &[],
+        build: || Box::new(GaussianCurve { with_baseline: false, params: names(&["Amplitude", "Mean", "SD"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "gaussian_baseline",
+        aliases: &[],
+        build: || Box::new(GaussianCurve { with_baseline: true, params: names(&["Baseline", "Amplitude", "Mean", "SD"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "sum_of_two_gaussians",
+        aliases: &[],
+        build: || Box::new(TwoGaussians { params: names(&["Amp1", "Mean1", "SD1", "Amp2", "Mean2", "SD2"]) }),
+    },
+    BuiltinEquationSpec { id: "log_gaussian", aliases: &[], build: || Box::new(LogGaussian { params: names(&["Amplitude", "GeoMean", "GeoSD"]) }) },
+    BuiltinEquationSpec {
+        id: "cumulative_gaussian",
+        aliases: &[],
+        build: || Box::new(CumulativeGaussian { params: names(&["Bottom", "Top", "Mean", "SD"]) }),
+    },
+    BuiltinEquationSpec { id: "lorentzian", aliases: &[], build: || Box::new(LorentzianPeak { params: names(&["Amplitude", "Center", "Width"]) }) },
+    BuiltinEquationSpec { id: "weibull_peak", aliases: &[], build: || Box::new(WeibullPeak { params: names(&["Amplitude", "Scale", "Shape"]) }) },
     // Wave
-    "sine_wave",
-    "damped_sine_wave",
-    "sinc_wave",
+    BuiltinEquationSpec {
+        id: "sine_wave",
+        aliases: &[],
+        build: || Box::new(SineWave { damped: false, params: names(&["Amplitude", "Frequency", "PhaseShift", "Baseline"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "damped_sine_wave",
+        aliases: &[],
+        build: || Box::new(SineWave { damped: true, params: names(&["Amplitude", "Frequency", "PhaseShift", "K", "Baseline"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "sinc_wave",
+        aliases: &[],
+        build: || Box::new(SincWave { params: names(&["Amplitude", "Center", "Width", "Baseline"]) }),
+    },
     // Standard Curves & Polynomials
-    "straight_line",
-    "line_through_origin",
-    "segmental_linear",
-    "hinge_smooth_hyperbolic",
-    "polynomial_2",
-    "polynomial_3",
-    "polynomial_4",
-    "polynomial_5",
-    "polynomial_6",
-    "power_law",
-    "logarithmic_curve",
-    "centered_poly_1",
-    "centered_poly_2",
-    "centered_poly_3",
-    "centered_poly_4",
-    "centered_poly_5",
-    "centered_poly_6",
-    "semi_log_line",
-    "log_log_line",
-    "probit_line",
+    BuiltinEquationSpec {
+        id: "straight_line",
+        aliases: &[],
+        build: || Box::new(StraightLine { through_origin: false, params: names(&["Slope", "YIntercept"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "line_through_origin",
+        aliases: &[],
+        build: || Box::new(StraightLine { through_origin: true, params: names(&["Slope"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "segmental_linear",
+        aliases: &[],
+        build: || Box::new(SegmentalLinear { params: names(&["Intercept1", "Slope1", "X0", "Slope2"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "hinge_smooth_hyperbolic",
+        aliases: &[],
+        build: || Box::new(SmoothHinge { params: names(&["Y0", "X0", "Slope1", "Slope2", "Delta"]) }),
+    },
+    BuiltinEquationSpec { id: "polynomial_2", aliases: &["quadratic"], build: || Box::new(Polynomial { degree: 2 }) },
+    BuiltinEquationSpec { id: "polynomial_3", aliases: &["cubic"], build: || Box::new(Polynomial { degree: 3 }) },
+    BuiltinEquationSpec { id: "polynomial_4", aliases: &["quartic"], build: || Box::new(Polynomial { degree: 4 }) },
+    BuiltinEquationSpec { id: "polynomial_5", aliases: &[], build: || Box::new(Polynomial { degree: 5 }) },
+    BuiltinEquationSpec { id: "polynomial_6", aliases: &[], build: || Box::new(Polynomial { degree: 6 }) },
+    BuiltinEquationSpec { id: "power_law", aliases: &["power_series"], build: || Box::new(PowerCurve { params: names(&["a", "b"]) }) },
+    BuiltinEquationSpec { id: "logarithmic_curve", aliases: &[], build: || Box::new(LogarithmicCurve { params: names(&["a", "b"]) }) },
+    BuiltinEquationSpec {
+        id: "centered_poly_1",
+        aliases: &["centered_linear", "centered_polynomial_1"],
+        build: || Box::new(CenteredPolynomial::new(1)),
+    },
+    BuiltinEquationSpec {
+        id: "centered_poly_2",
+        aliases: &["centered_quadratic", "centered_polynomial_2"],
+        build: || Box::new(CenteredPolynomial::new(2)),
+    },
+    BuiltinEquationSpec {
+        id: "centered_poly_3",
+        aliases: &["centered_cubic", "centered_polynomial_3"],
+        build: || Box::new(CenteredPolynomial::new(3)),
+    },
+    BuiltinEquationSpec {
+        id: "centered_poly_4",
+        aliases: &["centered_quartic", "centered_polynomial_4"],
+        build: || Box::new(CenteredPolynomial::new(4)),
+    },
+    BuiltinEquationSpec { id: "centered_poly_5", aliases: &["centered_polynomial_5"], build: || Box::new(CenteredPolynomial::new(5)) },
+    BuiltinEquationSpec { id: "centered_poly_6", aliases: &["centered_polynomial_6"], build: || Box::new(CenteredPolynomial::new(6)) },
+    BuiltinEquationSpec {
+        id: "semi_log_line",
+        aliases: &["semilog_line"],
+        build: || Box::new(SemiLogLine { params: names(&["Slope", "YIntercept"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "log_log_line",
+        aliases: &["loglog_line"],
+        build: || Box::new(LogLogLine { params: names(&["Slope", "LogYIntercept"]) }),
+    },
+    BuiltinEquationSpec { id: "probit_line", aliases: &[], build: || Box::new(ProbitLine { params: names(&["Slope", "Intercept"]) }) },
 ];
+
+const CURVE_EQUATION_ID_ARRAY: [&str; CURVE_SPECS.len()] = spec_ids::<{ CURVE_SPECS.len() }>(CURVE_SPECS);
+
+/// Canonical IDs exposed by the general curve equation catalog.
+pub const CURVE_EQUATION_IDS: &[&str] = &CURVE_EQUATION_ID_ARRAY;
 
 fn names(slice: &[&str]) -> Vec<String> {
     slice.iter().map(|s| (*s).to_owned()).collect()
@@ -111,58 +230,7 @@ fn safe_exp(arg: f64) -> Option<f64> {
 /// Resolve any non-pharmacology, non-NIST built-in equation ID into a [`ParametricModel`].
 #[must_use]
 pub fn resolve_curve_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
-    match norm_id {
-        "one_phase_decay" => Some(Box::new(OnePhaseDecay { params: names(&["Y0", "Plateau", "K"]) })),
-        "two_phase_decay" => Some(Box::new(TwoPhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "KFast", "KSlow"]) })),
-        "three_phase_decay" => {
-            Some(Box::new(ThreePhaseDecay { params: names(&["Y0", "Plateau", "PercentFast", "PercentSlow", "KFast", "KSlow", "KVerySlow"]) }))
-        }
-        "plateau_followed_by_one_phase_decay" => Some(Box::new(PlateauThenDecay { params: names(&["Y0", "X0", "Plateau", "K"]) })),
-        "one_phase_association" => Some(Box::new(OnePhaseAssociation { params: names(&["Y0", "Plateau", "K"]) })),
-        "plateau_followed_by_one_phase_association" => Some(Box::new(PlateauThenAssoc { params: names(&["Y0", "X0", "Plateau", "K"]) })),
-        "exponential_growth" | "malthusian_growth" => Some(Box::new(ExponentialGrowth {
-            id: if norm_id == "malthusian_growth" { "malthusian_growth" } else { "exponential_growth" },
-            name: if norm_id == "malthusian_growth" { "Malthusian growth" } else { "Exponential growth" },
-            category: if norm_id == "malthusian_growth" { EquationCategory::Growth } else { EquationCategory::Exponential },
-            params: names(&["Y0", "k"]),
-        })),
-        "exponential_plateau" => Some(Box::new(ExponentialPlateau { params: names(&["YM", "Y0", "k"]) })),
-        "logistic_growth" => Some(Box::new(LogisticGrowth { params: names(&["YM", "Y0", "k"]) })),
-        "gompertz_growth" => Some(Box::new(GompertzGrowth { params: names(&["YM", "Y0", "k"]) })),
-        "beta_growth_then_decay" => Some(Box::new(BetaGrowthDecay { params: names(&["Ym", "te", "tm"]) })),
-        "linear_quadratic_survival" => Some(Box::new(LinearQuadraticSurvival { params: names(&["Alpha", "Beta"]) })),
-        "gaussian" => Some(Box::new(GaussianCurve { with_baseline: false, params: names(&["Amplitude", "Mean", "SD"]) })),
-        "gaussian_baseline" => Some(Box::new(GaussianCurve { with_baseline: true, params: names(&["Baseline", "Amplitude", "Mean", "SD"]) })),
-        "sum_of_two_gaussians" => Some(Box::new(TwoGaussians { params: names(&["Amp1", "Mean1", "SD1", "Amp2", "Mean2", "SD2"]) })),
-        "log_gaussian" => Some(Box::new(LogGaussian { params: names(&["Amplitude", "GeoMean", "GeoSD"]) })),
-        "cumulative_gaussian" => Some(Box::new(CumulativeGaussian { params: names(&["Bottom", "Top", "Mean", "SD"]) })),
-        "lorentzian" => Some(Box::new(LorentzianPeak { params: names(&["Amplitude", "Center", "Width"]) })),
-        "weibull_peak" => Some(Box::new(WeibullPeak { params: names(&["Amplitude", "Scale", "Shape"]) })),
-        "sine_wave" => Some(Box::new(SineWave { damped: false, params: names(&["Amplitude", "Frequency", "PhaseShift", "Baseline"]) })),
-        "damped_sine_wave" => Some(Box::new(SineWave { damped: true, params: names(&["Amplitude", "Frequency", "PhaseShift", "K", "Baseline"]) })),
-        "sinc_wave" => Some(Box::new(SincWave { params: names(&["Amplitude", "Center", "Width", "Baseline"]) })),
-        "straight_line" => Some(Box::new(StraightLine { through_origin: false, params: names(&["Slope", "YIntercept"]) })),
-        "line_through_origin" => Some(Box::new(StraightLine { through_origin: true, params: names(&["Slope"]) })),
-        "segmental_linear" => Some(Box::new(SegmentalLinear { params: names(&["Intercept1", "Slope1", "X0", "Slope2"]) })),
-        "hinge_smooth_hyperbolic" => Some(Box::new(SmoothHinge { params: names(&["Y0", "X0", "Slope1", "Slope2", "Delta"]) })),
-        "polynomial_2" | "quadratic" => Some(Box::new(Polynomial { degree: 2 })),
-        "polynomial_3" | "cubic" => Some(Box::new(Polynomial { degree: 3 })),
-        "polynomial_4" | "quartic" => Some(Box::new(Polynomial { degree: 4 })),
-        "polynomial_5" => Some(Box::new(Polynomial { degree: 5 })),
-        "polynomial_6" => Some(Box::new(Polynomial { degree: 6 })),
-        "power_law" | "power_series" => Some(Box::new(PowerCurve { params: names(&["a", "b"]) })),
-        "logarithmic_curve" => Some(Box::new(LogarithmicCurve { params: names(&["a", "b"]) })),
-        "centered_poly_1" | "centered_linear" | "centered_polynomial_1" => Some(Box::new(CenteredPolynomial::new(1))),
-        "centered_poly_2" | "centered_quadratic" | "centered_polynomial_2" => Some(Box::new(CenteredPolynomial::new(2))),
-        "centered_poly_3" | "centered_cubic" | "centered_polynomial_3" => Some(Box::new(CenteredPolynomial::new(3))),
-        "centered_poly_4" | "centered_quartic" | "centered_polynomial_4" => Some(Box::new(CenteredPolynomial::new(4))),
-        "centered_poly_5" | "centered_polynomial_5" => Some(Box::new(CenteredPolynomial::new(5))),
-        "centered_poly_6" | "centered_polynomial_6" => Some(Box::new(CenteredPolynomial::new(6))),
-        "semi_log_line" | "semilog_line" => Some(Box::new(SemiLogLine { params: names(&["Slope", "YIntercept"]) })),
-        "log_log_line" | "loglog_line" => Some(Box::new(LogLogLine { params: names(&["Slope", "LogYIntercept"]) })),
-        "probit_line" => Some(Box::new(ProbitLine { params: names(&["Slope", "Intercept"]) })),
-        _ => None,
-    }
+    resolve_from_specs(CURVE_SPECS, norm_id)
 }
 
 /// One-phase exponential decay `Y = (Y0 - Plateau) * exp(-K * X) + Plateau`.

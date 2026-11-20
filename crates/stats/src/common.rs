@@ -45,19 +45,7 @@ pub fn sorted_finite(values: &[f64]) -> Vec<f64> {
 /// `(p_k, x_(k))` with `p_k = (k - 1) / (n - 1)`, that is, the 0-based position `p * (n - 1)`.
 #[must_use]
 pub fn quantile_sorted(sorted: &[f64], p: f64) -> Option<f64> {
-    let n = sorted.len();
-    if n == 0 || !p.is_finite() {
-        return None;
-    }
-    let pc = p.clamp(0.0, 1.0);
-    if n == 1 {
-        return Some(sorted[0]);
-    }
-    let idx = pc * ((n - 1) as f64);
-    let lo = (idx.floor() as usize).min(n - 1);
-    let hi = (lo + 1).min(n - 1);
-    let frac = idx - (lo as f64);
-    Some(sorted[lo] + frac * (sorted[hi] - sorted[lo]))
+    curvebook_math::quantile_type7_sorted(sorted, p)
 }
 
 /// Quartiles `(Q1, median, Q3)` by the type-6 sample-quantile definition of Hyndman & Fan (1996)
@@ -169,6 +157,14 @@ pub fn ci_cell(lower: f64, upper: f64) -> ResultCell {
     let lo = if lower.is_finite() { CiBound::Finite(lower) } else { CiBound::Open };
     let hi = if upper.is_finite() { CiBound::Finite(upper) } else { CiBound::Open };
     ResultCell::ConfidenceInterval { lower: lo, upper: hi }
+}
+
+/// Build a [`ResultCell::ConfidenceInterval`] when neither bound is `NaN`, or [`ResultCell::Empty`]
+/// if either bound is missing (`NaN`). Infinite bounds still delegate to [`ci_cell`] and render as
+/// [`CiBound::Open`].
+#[must_use]
+pub fn finite_ci_cell(lower: f64, upper: f64) -> ResultCell {
+    if lower.is_nan() || upper.is_nan() { ResultCell::Empty } else { ci_cell(lower, upper) }
 }
 
 /// Build a [`ResultCell::ConfidenceInterval`] from `Option<(f64, f64)>`.
@@ -704,4 +700,22 @@ pub fn select_kth_upper_triangle_half_sum(sorted_x: &[f64], k: u64) -> Result<f6
     let n = sorted_x.len();
     let init_left: Vec<usize> = (0..n).collect();
     select_kth_monotone_matrix(&init_left, n, k, |i, j| normalize_zero(0.5 * sorted_x[i] + 0.5 * sorted_x[j]))
+}
+
+#[cfg(test)]
+mod tests {
+    use curvebook_doc::{CiBound, ResultCell};
+
+    use super::{ci_cell, finite_ci_cell};
+
+    #[test]
+    fn finite_ci_cell_distinguishes_missing_nan_from_open_infinity() {
+        assert_eq!(finite_ci_cell(1.0, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.0), upper: CiBound::Finite(2.0) });
+        assert_eq!(finite_ci_cell(f64::NEG_INFINITY, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.0) });
+        assert_eq!(finite_ci_cell(1.0, f64::INFINITY), ResultCell::ConfidenceInterval { lower: CiBound::Finite(1.0), upper: CiBound::Open });
+        assert_eq!(finite_ci_cell(f64::NAN, 2.0), ResultCell::Empty);
+        assert_eq!(finite_ci_cell(1.0, f64::NAN), ResultCell::Empty);
+        // Existing `ci_cell` keeps mapping non-finite (including NaN) to `CiBound::Open`.
+        assert_eq!(ci_cell(f64::NAN, 2.0), ResultCell::ConfidenceInterval { lower: CiBound::Open, upper: CiBound::Finite(2.0) });
+    }
 }

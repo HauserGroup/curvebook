@@ -23,6 +23,7 @@
 pub mod dd;
 pub mod metrics;
 pub mod nist_strd;
+pub mod r13_datasets;
 pub mod sha256;
 
 pub use dd::{DoubleDouble, oracle_univariate_f64};

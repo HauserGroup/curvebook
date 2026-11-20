@@ -931,9 +931,18 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
         self.pointer_pos = Some(pos);
         let egui_btn = to_egui_pointer_button(button);
         let egui_mods = to_egui_modifiers(modifiers);
-        self.dispatch_events(vec![Event::PointerMoved(pos)]);
-        self.dispatch_events(vec![Event::PointerButton { pos, button: egui_btn, pressed: true, modifiers: egui_mods }]);
-        self.dispatch_events(vec![Event::PointerButton { pos, button: egui_btn, pressed: false, modifiers: egui_mods }]);
+        self.dispatch_events(vec![Event::ModifiersChanged(egui_mods), Event::PointerMoved(pos)]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos, button: egui_btn, pressed: true, modifiers: egui_mods },
+        ]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos, button: egui_btn, pressed: false, modifiers: egui_mods },
+        ]);
+        if !egui_mods.is_none() {
+            self.dispatch_events(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        }
         Ok(())
     }
 
@@ -951,15 +960,33 @@ impl<'a, State> EguiHumanPathDriver<'a, State> {
     /// # Errors
     /// Returns an error if either coordinate is non-finite.
     pub fn drag(&mut self, from: Pos2, to: Pos2) -> Result<(), String> {
+        self.drag_with_modifiers(from, to, KeyModifiers::default())
+    }
+
+    /// Drag primary pointer from `from` to `to` while holding `modifiers` (`Shift`, `Ctrl`, etc.).
+    ///
+    /// # Errors
+    /// Returns an error if either coordinate is non-finite.
+    pub fn drag_with_modifiers(&mut self, from: Pos2, to: Pos2, modifiers: KeyModifiers) -> Result<(), String> {
         validate_finite_pos(from)?;
         validate_finite_pos(to)?;
+        let egui_mods = to_egui_modifiers(modifiers);
         let mid = Pos2::new((from.x + to.x) * 0.5, (from.y + to.y) * 0.5);
         self.pointer_pos = Some(to);
-        self.dispatch_events(vec![Event::PointerMoved(from)]);
-        self.dispatch_events(vec![Event::PointerButton { pos: from, button: EguiPointerButton::Primary, pressed: true, modifiers: Modifiers::NONE }]);
-        self.dispatch_events(vec![Event::PointerMoved(mid)]);
-        self.dispatch_events(vec![Event::PointerMoved(to)]);
-        self.dispatch_events(vec![Event::PointerButton { pos: to, button: EguiPointerButton::Primary, pressed: false, modifiers: Modifiers::NONE }]);
+        self.dispatch_events(vec![Event::ModifiersChanged(egui_mods), Event::PointerMoved(from)]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos: from, button: EguiPointerButton::Primary, pressed: true, modifiers: egui_mods },
+        ]);
+        self.dispatch_events(vec![Event::ModifiersChanged(egui_mods), Event::PointerMoved(mid)]);
+        self.dispatch_events(vec![Event::ModifiersChanged(egui_mods), Event::PointerMoved(to)]);
+        self.dispatch_events(vec![
+            Event::ModifiersChanged(egui_mods),
+            Event::PointerButton { pos: to, button: EguiPointerButton::Primary, pressed: false, modifiers: egui_mods },
+        ]);
+        if !egui_mods.is_none() {
+            self.dispatch_events(vec![Event::ModifiersChanged(Modifiers::NONE)]);
+        }
         Ok(())
     }
 

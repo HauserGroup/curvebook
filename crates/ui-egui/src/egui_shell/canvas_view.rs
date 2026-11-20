@@ -1,7 +1,7 @@
 //! Native `egui` async `ChartScene` / `LayoutScene` viewport (`docs/planning/gui-layout-spec.md`
 //! §8.11A & §8.12, `R15.3`).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, PoisonError, RwLock, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
@@ -20,10 +20,36 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens, rgba8_to_color32};
+use crate::i18n::tr;
 use crate::inspect::ZLayer;
 
 const RULER_THICKNESS_PT: f32 = 20.0;
 const BREADCRUMB_HEIGHT_PT: f32 = 28.0;
+
+/// Active gesture kind on an embedded canvas image or annotation (`R13.4` / `R13.7`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImageGestureKind {
+    Move,
+    ResizeCorner { left: bool, top: bool },
+    Rotate,
+}
+
+/// Interactive drag/resize/rotate state for embedded images & tables on `GraphSheet` and `LayoutSheet`.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ImageTransformGestureState {
+    pub sheet_id: SheetId,
+    pub is_layout: bool,
+    pub target_index: usize,
+    pub kind: ImageGestureKind,
+    pub start_scene_pt: [f64; 2],
+    pub start_screen_pt: [f32; 2],
+    pub initial_bounds_pt: DocRectPt,
+    pub current_bounds_pt: DocRectPt,
+    pub initial_rotation_deg: f64,
+    pub current_rotation_deg: f64,
+    pub initial_lock_aspect: bool,
+    pub shift_unlocked: bool,
+}
 
 /// Live plotted-point / heatmap / colorbar hover readout rendered in the canvas overlay and footer.
 #[derive(Debug, Clone, PartialEq)]
@@ -75,6 +101,14 @@ pub struct CanvasViewEguiState {
     pub tex_equation_count: usize,
     /// Render uncached scenes inline synchronously (used by software screenshot capture).
     pub synchronous_raster: bool,
+    /// Active layout panel right-click Z-order context menu `(layout_sheet_id, item_index, anchor_pos_pt)`.
+    pub layout_context_menu: Option<(SheetId, usize, Pos2)>,
+    /// Selected annotation index on the active `GraphSheet` (`EmbeddedResultTable` or `EmbeddedImage`).
+    pub selected_graph_annotation: Option<usize>,
+    /// Active `GraphSheet` right-click context menu `(graph_sheet_id, opt_ann_index, screen_anchor, scene_pt)`.
+    pub graph_context_menu: Option<(SheetId, Option<usize>, Pos2, [f64; 2])>,
+    /// Active move / corner-resize / rotation gesture on a graph or layout embedded object.
+    pub image_gesture: Option<ImageTransformGestureState>,
 }
 
 /// Input bundle passed to [`render_canvas_view`] (keeping argument count within `<= 7`).
@@ -98,6 +132,7 @@ pub struct CanvasViewFrameReport {
     pub tex_equation_rects_pt: Vec<Rect>,
     pub colorbar_hovered: bool,
     pub async_rendering_in_flight: bool,
+    pub grid_overlay_shown: bool,
 }
 
 #[derive(Clone)]
@@ -106,10 +141,170 @@ struct CachedCompiledScene {
     scene: Arc<ChartScene>,
 }
 
+/// Diagnostic snapshot of the single long-lived async canvas raster worker (`R15-GUI-04`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CanvasAsyncWorkerStats {
+    pub worker_spawn_count: u64,
+    pub submitted_count: u64,
+    pub rendered_count: u64,
+}
+
+/// Inspect runtime statistics for the per-context async canvas raster worker, if initialized.
+#[must_use]
+pub fn canvas_async_worker_stats(ctx: &egui::Context) -> Option<CanvasAsyncWorkerStats> {
+    let worker_id = Id::unique("egui_shell.canvas_async_worker");
+    let handle: AsyncRasterWorkerHandle = ctx.data(|d| d.get_temp(worker_id))?;
+    let guard = handle.owner.results.read().unwrap_or_else(PoisonError::into_inner);
+    Some(CanvasAsyncWorkerStats {
+        worker_spawn_count: guard.worker_spawn_count,
+        submitted_count: guard.submitted_count,
+        rendered_count: guard.rendered_count,
+    })
+}
+
+struct RasterJobRequest {
+    slot_key: (String, SheetId),
+    req_key: RasterRequestKey,
+    scene: Arc<ChartScene>,
+    filter: CanvasPreviewFilter,
+    ctx_wake: egui::Context,
+}
+
+#[derive(Default)]
+struct RasterWorkerResults {
+    completed: Vec<((String, SheetId), RasterRequestKey, Option<RasterImage>)>,
+    last_submitted: Vec<((String, SheetId), RasterRequestKey)>,
+    submitted_count: u64,
+    rendered_count: u64,
+    worker_spawn_count: u64,
+}
+
+struct AsyncRasterWorkerOwner {
+    tx: RwLock<Option<mpsc::Sender<RasterJobRequest>>>,
+    results: Arc<RwLock<RasterWorkerResults>>,
+    join: RwLock<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for AsyncRasterWorkerOwner {
+    fn drop(&mut self) {
+        // Close the request channel first so the worker exits its `recv()` loop cleanly.
+        let _ = self.tx.write().unwrap_or_else(PoisonError::into_inner).take();
+        let handle = self.join.write().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(join_handle) = handle {
+            let _ = join_handle.join();
+        }
+    }
+}
+
 #[derive(Clone)]
-struct AsyncRasterJob {
-    key: RasterRequestKey,
-    output: Arc<OnceLock<Option<RasterImage>>>,
+struct AsyncRasterWorkerHandle {
+    owner: Arc<AsyncRasterWorkerOwner>,
+}
+
+impl AsyncRasterWorkerHandle {
+    fn get_or_spawn(ctx: &egui::Context) -> Option<Self> {
+        let worker_id = Id::unique("egui_shell.canvas_async_worker");
+        if let Some(existing) = ctx.data(|d| d.get_temp::<Self>(worker_id)) {
+            return Some(existing);
+        }
+        let (tx, rx) = mpsc::channel();
+        let results = Arc::new(RwLock::new(RasterWorkerResults { worker_spawn_count: 1, ..RasterWorkerResults::default() }));
+        let results_bg = Arc::clone(&results);
+        let join_handle =
+            std::thread::Builder::new().name(String::from("cb-canvas-raster")).spawn(move || raster_worker_loop(&rx, &results_bg)).ok()?;
+        let handle = Self { owner: Arc::new(AsyncRasterWorkerOwner { tx: RwLock::new(Some(tx)), results, join: RwLock::new(Some(join_handle)) }) };
+        ctx.data_mut(|d| d.insert_temp(worker_id, handle.clone()));
+        Some(handle)
+    }
+
+    fn poll_or_submit(
+        &self,
+        slot_key: (String, SheetId),
+        req_key: RasterRequestKey,
+        scene: &Arc<ChartScene>,
+        filter: CanvasPreviewFilter,
+        ctx_wake: &egui::Context,
+    ) -> Option<Option<RasterImage>> {
+        let mut guard = self.owner.results.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
+            let (_, _, img) = guard.completed.remove(pos);
+            return Some(img);
+        }
+        let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
+        if !already_submitted {
+            let tx_guard = self.owner.tx.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(tx) = tx_guard.as_ref() {
+                let request = RasterJobRequest {
+                    slot_key: slot_key.clone(),
+                    req_key: req_key.clone(),
+                    scene: Arc::clone(scene),
+                    filter,
+                    ctx_wake: ctx_wake.clone(),
+                };
+                if tx.send(request).is_ok() {
+                    if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
+                        entry.1 = req_key;
+                    } else {
+                        guard.last_submitted.push((slot_key, req_key));
+                    }
+                    guard.submitted_count = guard.submitted_count.saturating_add(1);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn coalesce_pending_raster_jobs(rx: &mpsc::Receiver<RasterJobRequest>, pending: &mut Vec<RasterJobRequest>) {
+    while let Ok(next) = rx.try_recv() {
+        if let Some(existing) = pending.iter_mut().find(|job| job.slot_key == next.slot_key) {
+            // Supersede any unstarted request for the same slot before rendering begins.
+            *existing = next;
+        } else {
+            pending.push(next);
+        }
+    }
+}
+
+fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<RasterWorkerResults>) {
+    let mut pending: Vec<RasterJobRequest> = Vec::new();
+    loop {
+        if pending.is_empty() {
+            let Ok(first) = rx.recv() else {
+                return;
+            };
+            pending.push(first);
+        }
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let job = pending.remove(0);
+
+        let rendered =
+            render_scene(&job.scene, RenderTargetSpec { width_px: job.req_key.width_px, height_px: job.req_key.height_px, dpi: job.req_key.dpi })
+                .ok()
+                .map(|mut img| {
+                    if job.filter != CanvasPreviewFilter::Normal {
+                        apply_canvas_preview_filter(&mut img, job.filter);
+                    }
+                    img
+                });
+
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
+        {
+            let mut guard = results.write().unwrap_or_else(PoisonError::into_inner);
+            guard.rendered_count = guard.rendered_count.saturating_add(1);
+            if !superseded {
+                if let Some(slot) = guard.completed.iter_mut().find(|(sk, _, _)| *sk == job.slot_key) {
+                    *slot = (job.slot_key, job.req_key, rendered);
+                } else {
+                    guard.completed.push((job.slot_key, job.req_key, rendered));
+                }
+            }
+        }
+        if !superseded {
+            job.ctx_wake.request_repaint();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -253,7 +448,10 @@ pub fn render_canvas_view_for_sheet(
     report.paper_rect_pt = Some(paper_rect);
 
     if let (Some(tr_r), Some(lr_r)) = (top_ruler_rect, left_ruler_rect) {
-        render_canvas_rulers(ui, mat_rect, tr_r, lr_r, paper_rect, eff_scale, app.canvas_dialogs.ruler_unit, tokens);
+        render_canvas_rulers(
+            ui,
+            CanvasRulersSpec { mat_rect, top_r: tr_r, left_r: lr_r, paper_rect, eff_scale, unit: app.canvas_dialogs.ruler_unit, tokens },
+        );
     }
 
     // Paint paper drop shadow & white sheet backing inside clipped mat_rect
@@ -263,26 +461,36 @@ pub fn render_canvas_view_for_sheet(
     clipped_painter.rect_stroke(paper_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     if let Some(ref sc) = scene {
-        composite_async_scene_texture(ui, app, sc, target_id, paper_rect, slot_tag, state, &clipped_painter);
+        composite_async_scene_texture(
+            ui,
+            app,
+            CompositeSceneSpec { scene: sc, sheet_id: target_id, paper_rect, slot_tag, painter: &clipped_painter },
+            state,
+        );
     }
     report.async_rendering_in_flight = state.slot.rendering_in_flight;
+
+    if app.canvas_dialogs.grid_overlay_visible && !app.presentation_mode {
+        paint_canvas_grid_overlay(&clipped_painter, mat_rect, paper_rect, scene_w_pt, scene_h_pt, app.canvas_dialogs.grid_overlay_spacing_pt, tokens);
+        report.grid_overlay_shown = true;
+    }
 
     if let Some(gs) = gs_opt
         && let Some(ref sc) = scene
     {
-        render_graph_hud_overlays(ui, &clipped_painter, app, gs, sc, paper_rect, &resp, state, &ctx_in, meta, intents, &mut report);
+        render_graph_hud_overlays(
+            ui,
+            GraphHudInput { painter: &clipped_painter, app, gs, scene: sc, mat_rect, paper_rect, canvas_resp: &resp, ctx_in: &ctx_in },
+            state,
+            meta,
+            intents,
+            &mut report,
+        );
     } else if let Some(ls) = ls_opt {
         render_layout_hud_overlays(
             ui,
-            &clipped_painter,
-            app,
-            ls,
-            scene.as_deref(),
-            paper_rect,
-            eff_scale,
-            &resp,
+            LayoutHudInput { painter: &clipped_painter, app, ls, scene: scene.as_deref(), mat_rect, paper_rect, eff_scale, ctx_in: &ctx_in },
             state,
-            &ctx_in,
             meta,
             intents,
             &mut report,
@@ -365,17 +573,16 @@ fn resolve_cached_scene(ctx: &egui::Context, app: &UiApp, sheet_id: &SheetId, sl
     Some(compiled)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn composite_async_scene_texture(
-    ui: &egui::Ui,
-    app: &UiApp,
-    scene: &Arc<ChartScene>,
-    sheet_id: &SheetId,
+struct CompositeSceneSpec<'a> {
+    scene: &'a Arc<ChartScene>,
+    sheet_id: &'a SheetId,
     paper_rect: Rect,
-    slot_tag: &str,
-    state: &mut CanvasViewEguiState,
-    painter: &egui::Painter,
-) {
+    slot_tag: &'a str,
+    painter: &'a egui::Painter,
+}
+
+fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeSceneSpec<'_>, state: &mut CanvasViewEguiState) {
+    let CompositeSceneSpec { scene, sheet_id, paper_rect, slot_tag, painter } = spec;
     let ppp = ui.ctx().pixels_per_point().clamp(1.0, 4.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (paper_rect.width() * ppp).round().clamp(32.0, 4096.0) as u32;
@@ -401,7 +608,8 @@ fn composite_async_scene_texture(
         return;
     }
 
-    if state.synchronous_raster {
+    let worker = (!state.synchronous_raster).then(|| AsyncRasterWorkerHandle::get_or_spawn(ui.ctx())).flatten();
+    if state.synchronous_raster || worker.is_none() {
         let mut rendered = render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).ok();
         if let Some(ref mut img) = rendered
             && app.preview_filter != CanvasPreviewFilter::Normal
@@ -424,50 +632,27 @@ fn composite_async_scene_texture(
         }
     }
 
-    let job_id = Id::unique(("egui_shell.canvas_async_job", slot_tag, sheet_id.as_str()));
-    let existing_job: Option<AsyncRasterJob> = ui.ctx().data(|d| d.get_temp(job_id));
-    let job = match existing_job {
-        Some(j) if j.key == req_key => j,
-        _ => {
-            let output = Arc::new(OnceLock::new());
-            let out_worker = output.clone();
-            let scene_clone = scene.clone();
-            let filter = app.preview_filter;
-            let ctx_wake = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let rendered = render_scene(&scene_clone, RenderTargetSpec { width_px, height_px, dpi }).ok().map(|mut img| {
-                    if filter != CanvasPreviewFilter::Normal {
-                        apply_canvas_preview_filter(&mut img, filter);
-                    }
-                    img
-                });
-                let _ = out_worker.set(rendered);
-                ctx_wake.request_repaint();
-            });
-            let new_job = AsyncRasterJob { key: req_key.clone(), output };
-            ui.ctx().data_mut(|d| d.insert_temp(job_id, new_job.clone()));
-            new_job
+    if let Some(worker) = worker {
+        let slot_key = (slot_tag.to_owned(), sheet_id.clone());
+        if let Some(maybe_img) = worker.poll_or_submit(slot_key, req_key.clone(), scene, app.preview_filter, ui.ctx()) {
+            state.slot.rendering_in_flight = false;
+            state.slot.last_sheet_id = Some(sheet_id.clone());
+            state.slot.last_mutation_seq = req_key.mutation_seq;
+            state.slot.last_width_px = width_px;
+            state.slot.last_height_px = height_px;
+            state.slot.last_dpi = dpi;
+            state.slot.last_filter_slug = filter_slug.clone();
+            if let Some(raster) = maybe_img {
+                let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
+                let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
+                state.slot.cached_texture = Some(tex_id);
+                painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                return;
+            }
+        } else {
+            state.slot.rendering_in_flight = true;
+            ui.ctx().request_repaint();
         }
-    };
-
-    if let Some(maybe_img) = job.output.get() {
-        state.slot.rendering_in_flight = false;
-        state.slot.last_sheet_id = Some(sheet_id.clone());
-        state.slot.last_mutation_seq = req_key.mutation_seq;
-        state.slot.last_width_px = width_px;
-        state.slot.last_height_px = height_px;
-        state.slot.last_dpi = dpi;
-        state.slot.last_filter_slug = filter_slug.clone();
-        if let Some(raster) = maybe_img {
-            let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
-            let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
-            state.slot.cached_texture = Some(tex_id);
-            painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            return;
-        }
-    } else {
-        state.slot.rendering_in_flight = true;
-        ui.ctx().request_repaint();
     }
 
     // While async worker finishes on frame 1, show previous cached texture or crisp vector scene preview
@@ -552,21 +737,35 @@ fn paint_polyline(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
+struct GraphHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    gs: &'a GraphSheet,
+    scene: &'a ChartScene,
+    mat_rect: Rect,
+    paper_rect: Rect,
+    canvas_resp: &'a egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+struct GraphOverlayCtx<'a> {
+    painter: &'a egui::Painter,
+    gs: &'a GraphSheet,
+    doc: &'a ProjectDocument,
+    scene: &'a ChartScene,
+    paper_rect: Rect,
+    tokens: &'a Tokens,
+}
+
 fn render_graph_hud_overlays(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    gs: &GraphSheet,
-    scene: &ChartScene,
-    paper_rect: Rect,
-    canvas_resp: &egui::Response,
+    input: GraphHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let GraphHudInput { painter, app, gs, scene, mat_rect, paper_rect, canvas_resp, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let sx = paper_rect.width() / (scene.width_pt.max(1.0) as f32);
@@ -574,6 +773,17 @@ fn render_graph_hud_overlays(
     let scene_to_screen = |pt: PointPt| pos2(paper_rect.left() + (pt.x as f32) * sx, paper_rect.top() + (pt.y as f32) * sy);
     let screen_to_scene =
         |pos: Pos2| PointPt::new(f64::from((pos.x - paper_rect.left()) / sx.max(1e-4)), f64::from((pos.y - paper_rect.top()) / sy.max(1e-4)));
+
+    let canvas_ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
+    let (ann_claimed_click, ann_opened_ctx_menu) = render_graph_embedded_objects(ui, &canvas_ov, gs, state, meta, intents);
+
+    if ctx_in.enabled && !ann_opened_ctx_menu && canvas_resp.secondary_clicked() {
+        let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(paper_rect.center());
+        let sc_pt = screen_to_scene(anchor);
+        let max_x = (scene.width_pt - 40.0).max(4.0);
+        let max_y = (scene.height_pt - 40.0).max(4.0);
+        state.graph_context_menu = Some((gs.id.clone(), None, anchor, [sc_pt.x.clamp(4.0, max_x), sc_pt.y.clamp(4.0, max_y)]));
+    }
 
     // 1. Highlight any active brushed points (`UiApp::brushed_points`)
     for brushed in &app.brushed_points {
@@ -600,14 +810,33 @@ fn render_graph_hud_overlays(
             state.hover_readout = Some(readout.clone());
             paint_hover_hud_card(painter, pos + vec2(12.0, -24.0), &readout.value_summary, tokens);
         } else if let Some((idx, hit)) = hit_test_point_indexed(scene, scene_pt, 10.0 / f64::from(sx.max(0.25))) {
-            let sheet_title = doc.data_sheet(&hit.source_cell.sheet_id).map_or(hit.source_cell.sheet_id.as_str(), |d| d.title.as_str());
-            let summary = format!("{sheet_title} · {} · Row {} · {}", hit.series_label, hit.source_cell.row + 1, hit.value_summary);
+            let ds_opt = doc.data_sheet(&hit.source_cell.sheet_id);
+            let sheet_title = ds_opt.map_or(hit.source_cell.sheet_id.as_str(), |d| d.title.as_str());
+            let is_spaghetti = gs.spec.series.iter().any(|s| {
+                matches!(
+                    s.gdo,
+                    GraphicalDataObject::ScatterAndLine { replicate_lines: curvebook_doc::ReplicateLineMode::IndividualReplicateTrajectories, .. }
+                )
+            });
+            let (label, summary) = if is_spaghetti {
+                let row_lbl = ds_opt
+                    .and_then(|d| hover_row_title(&d.archetype, hit.source_cell.row))
+                    .filter(|t| !t.trim().is_empty())
+                    .map_or_else(|| format!("Row {}", hit.source_cell.row + 1), str::to_owned);
+                let rep_idx = hit.source_cell.subcol + 1;
+                (
+                    format!("{} (Rep {rep_idx})", hit.series_label),
+                    format!("{sheet_title} · {} · Rep {rep_idx} · {row_lbl} · {}", hit.series_label, hit.value_summary),
+                )
+            } else {
+                (hit.series_label.clone(), format!("{sheet_title} · {} · Row {} · {}", hit.series_label, hit.source_cell.row + 1, hit.value_summary))
+            };
             let readout = CanvasHoverReadout {
                 source_sheet_id: Some(hit.source_cell.sheet_id.clone()),
                 point_index: Some(idx),
                 row: Some(hit.source_cell.row),
                 col: Some(hit.source_cell.col),
-                label: hit.series_label.clone(),
+                label,
                 value_summary: summary.clone(),
             };
             state.hover_readout = Some(readout);
@@ -615,7 +844,7 @@ fn render_graph_hud_overlays(
             painter.circle_stroke(center, 7.0, Stroke::new(2.0, tokens.accent));
             paint_hover_hud_card(painter, center + vec2(10.0, -22.0), &summary, tokens);
 
-            if ctx_in.enabled && canvas_resp.clicked() {
+            if ctx_in.enabled && !ann_claimed_click && canvas_resp.clicked() {
                 let coord = GridCellCoord::new(hit.source_cell.row, hit.source_cell.col, hit.source_cell.subcol);
                 intents.push_brush_point(hit.source_cell.sheet_id.clone(), coord);
                 intents.push_select_grid_cell(coord);
@@ -633,23 +862,27 @@ fn render_graph_hud_overlays(
         }
     }
 
+    let ov = GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens };
+
     // 3. Pairwise Significance Brackets & Compact Letter Display (CLD) HUD
     let has_pairwise_results = doc.result_sheets.iter().any(|r| !r.pairwise_comparisons.is_empty());
     if !gs.spec.comparisons.is_empty() || gs.spec.compact_letter_display.is_some() || has_pairwise_results {
-        render_pairwise_cld_hud(ui, gs, doc, paper_rect, ctx_in.enabled, tokens, meta, intents);
+        render_pairwise_cld_hud(ui, &ov, ctx_in.enabled, meta, intents);
     }
 
     // 4. Axis-Synchronized Kaplan-Meier `Number at risk` Alignment Track
     if should_show_km_track(gs, doc) {
-        let track_rect = render_km_number_at_risk_track(ui, painter, gs, doc, scene, paper_rect, state, tokens, meta);
+        let track_rect = render_km_number_at_risk_track(ui, &ov, state, meta);
         report.km_track_rect_pt = track_rect;
     } else {
         state.km_at_risk_rows = 0;
     }
 
     // 5. Live TeX Curve/Fit Equations via `curvebook-text` layout helpers
-    let eq_rects = render_live_tex_equations(ui, painter, gs, doc, scene, paper_rect, sx, sy, state, tokens, meta);
+    let eq_rects = render_live_tex_equations(ui, &ov, (sx, sy), state, meta);
     report.tex_equation_rects_pt = eq_rects;
+
+    render_graph_context_menu(ui, &canvas_ov, gs, state, meta, intents);
 }
 
 fn hit_test_point_indexed(scene: &ChartScene, pt: PointPt, tol_pt: f64) -> Option<(usize, &curvebook_chart::PlottedPointMeta)> {
@@ -662,6 +895,19 @@ fn hit_test_point_indexed(scene: &ChartScene, pt: PointPt, tol_pt: f64) -> Optio
         }
     }
     best.map(|(i, _, m)| (i, m))
+}
+
+fn hover_row_title(arch: &curvebook_doc::TableArchetype, row: usize) -> Option<&str> {
+    match arch {
+        curvebook_doc::TableArchetype::Xy(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Column(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Grouped(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Contingency(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Survival(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::PartsOfWhole(t) => t.slice_labels.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::MultipleVariables(t) => t.row_titles.get(row).map(String::as_str),
+        curvebook_doc::TableArchetype::Nested(t) => t.row_titles.get(row).map(String::as_str),
+    }
 }
 
 fn rect_pt_contains(r: RectPt, pt: PointPt) -> bool {
@@ -756,17 +1002,8 @@ fn paint_hover_hud_card(painter: &egui::Painter, anchor: Pos2, text: &str, token
     painter.galley(card_rect.min + vec2(6.0, 4.0), galley, tokens.text_strong);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_pairwise_cld_hud(
-    ui: &mut egui::Ui,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    paper_rect: Rect,
-    enabled: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_pairwise_cld_hud(ui: &mut egui::Ui, ov: &GraphOverlayCtx<'_>, enabled: bool, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let GraphOverlayCtx { gs, doc, paper_rect, tokens, .. } = *ov;
     let mode_lbl = match (gs.spec.comparisons.is_empty(), gs.spec.compact_letter_display.is_some()) {
         (false, true) => format!("Brackets ({}) + CLD", gs.spec.comparisons.len()),
         (true, true) => String::from("CLD Active"),
@@ -853,18 +1090,13 @@ struct KmCohortRiskRow {
     counts: Vec<usize>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_km_number_at_risk_track(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
+    ov: &GraphOverlayCtx<'_>,
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Option<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
     let ticks = extract_x_axis_ticks_pt(gs, scene);
     if ticks.is_empty() {
         state.km_at_risk_rows = 0;
@@ -982,7 +1214,7 @@ fn extract_x_axis_ticks_pt(gs: &GraphSheet, scene: &ChartScene) -> Vec<(f64, f64
 
 fn gdo_primary_color(gdo: &GraphicalDataObject) -> Option<Rgba8> {
     match gdo {
-        GraphicalDataObject::ScatterAndLine { marker, line, area_fill } => {
+        GraphicalDataObject::ScatterAndLine { marker, line, area_fill, .. } => {
             marker.as_ref().map(|m| m.fill_color).or_else(|| line.as_ref().map(|l| l.color)).or_else(|| area_fill.as_ref().map(|a| a.fill_color))
         }
         GraphicalDataObject::BarWithReplicates { fill_color, .. }
@@ -1024,20 +1256,15 @@ fn build_km_risk_rows(gs: &GraphSheet, doc: &ProjectDocument, ticks: &[(f64, f64
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_live_tex_equations(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
-    sx: f32,
-    sy: f32,
+    ov: &GraphOverlayCtx<'_>,
+    scale_xy: (f32, f32),
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Vec<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
+    let (sx, sy) = scale_xy;
     let mut rects = Vec::new();
     let mut eq_idx = 0usize;
 
@@ -1206,22 +1433,26 @@ fn paint_equation_segments(
     Rect::from_min_size(origin, vec2(total_w.max(1.0), total_h.max(1.0)))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_layout_hud_overlays(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    ls: &LayoutSheet,
-    scene: Option<&ChartScene>,
+struct LayoutHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    ls: &'a LayoutSheet,
+    scene: Option<&'a ChartScene>,
+    mat_rect: Rect,
     paper_rect: Rect,
     eff_scale: f32,
-    _canvas_resp: &egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+fn render_layout_hud_overlays(
+    ui: &mut egui::Ui,
+    input: LayoutHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let LayoutHudInput { painter, app, ls, scene, mat_rect, paper_rect, eff_scale, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let scene_w = scene.map_or(ls.spec.page_size_pt().width.max(1.0), |s| s.width_pt.max(1.0)) as f32;
@@ -1229,6 +1460,22 @@ fn render_layout_hud_overlays(
     let sx = paper_rect.width() / scene_w;
     let sy = paper_rect.height() / scene_h;
     let _ = eff_scale;
+    let ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
+
+    let selected_img = state.selected_panel_index.and_then(|sel_idx| match ls.spec.items.get(sel_idx) {
+        Some(LayoutItem::EmbeddedImage { bounds_pt, rotation_deg, lock_aspect_ratio, .. }) => {
+            Some((sel_idx, *bounds_pt, *rotation_deg, *lock_aspect_ratio))
+        }
+        _ => None,
+    });
+    let ptr_pos = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()));
+    let resize_or_rot_active = state.image_gesture.as_ref().is_some_and(|g| g.is_layout && g.kind != ImageGestureKind::Move);
+    let pointer_in_img_handle = selected_img.is_some_and(|(sel_idx, init_bounds, _, _)| {
+        let disp = active_gesture_bounds(state, &ls.id, true, sel_idx, init_bounds);
+        let sel_r = doc_rect_to_screen(paper_rect, sx, sy, disp);
+        let h_rects = image_handle_rects(sel_r, mat_rect);
+        ptr_pos.is_some_and(|p| h_rects.iter().any(|hr| hr.contains(p)))
+    });
 
     let mut panel_rects = Vec::with_capacity(ls.spec.items.len());
     for (idx, item) in ls.spec.items.iter().enumerate() {
@@ -1238,11 +1485,10 @@ fn render_layout_hud_overlays(
             && drag.item_index == idx
         {
             bounds = drag.current_bounds_pt;
+        } else {
+            bounds = active_gesture_bounds(state, &ls.id, true, idx, bounds);
         }
-        let r = Rect::from_min_size(
-            pos2(paper_rect.left() + (bounds.x as f32) * sx, paper_rect.top() + (bounds.y as f32) * sy),
-            vec2((bounds.width as f32) * sx, (bounds.height as f32) * sy),
-        );
+        let r = doc_rect_to_screen(paper_rect, sx, sy, bounds);
         panel_rects.push((idx, item, bounds, r));
     }
 
@@ -1268,8 +1514,9 @@ fn render_layout_hud_overlays(
 
     for (idx, item, bounds, r) in panel_rects {
         let selected = state.selected_panel_index == Some(idx);
-        let p_resp =
-            ui.interact(r, Id::unique(("layout_panel", ls.id.as_str(), idx)), if ctx_in.enabled { Sense::click_and_drag() } else { Sense::hover() });
+        let suppress_drag = selected && (pointer_in_img_handle || resize_or_rot_active);
+        let sense = if ctx_in.enabled && !suppress_drag { Sense::click_and_drag() } else { Sense::hover() };
+        let p_resp = ui.interact(r, Id::unique(("layout_panel", ls.id.as_str(), idx)), sense);
 
         let stroke_col = if selected {
             tokens.accent
@@ -1308,18 +1555,33 @@ fn render_layout_hud_overlays(
         );
 
         if ctx_in.enabled {
-            if (p_resp.double_clicked() || p_resp.triple_clicked())
-                && let LayoutItem::LiveGraph { graph_sheet_id, .. } = item
-                && doc.graph_sheet(graph_sheet_id).is_some()
-            {
-                state.slot.layout_return_breadcrumb = Some(ls.id.clone());
-                intents.push_engine("sheet.select", json!({ "sheet_id": graph_sheet_id.as_str() }));
-                return;
+            if p_resp.double_clicked() || p_resp.triple_clicked() {
+                match item {
+                    LayoutItem::LiveGraph { graph_sheet_id, .. } if doc.graph_sheet(graph_sheet_id).is_some() => {
+                        state.slot.layout_return_breadcrumb = Some(ls.id.clone());
+                        intents.push_engine("sheet.select", json!({ "sheet_id": graph_sheet_id.as_str() }));
+                        return;
+                    }
+                    LayoutItem::LiveTable { .. } => {
+                        intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": idx }));
+                        return;
+                    }
+                    LayoutItem::EmbeddedImage { .. } => {
+                        intents.push_ui("ui.image.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": idx }));
+                        return;
+                    }
+                    _ => {}
+                }
             }
             if p_resp.clicked() {
                 state.selected_panel_index = Some(idx);
             }
-            if p_resp.drag_started() {
+            if p_resp.secondary_clicked() {
+                let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r.center());
+                state.selected_panel_index = Some(idx);
+                state.layout_context_menu = Some((ls.id.clone(), idx, anchor));
+            }
+            if !suppress_drag && p_resp.drag_started() {
                 state.selected_panel_index = Some(idx);
                 let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r.center());
                 let scene_pt =
@@ -1364,6 +1626,17 @@ fn render_layout_hud_overlays(
         }
     }
 
+    if let Some((sel_idx, init_bounds, rot_deg, lock_aspect)) = selected_img {
+        render_selected_image_handles(
+            ui,
+            &ov,
+            SelectedImageTarget { sheet_id: &ls.id, is_layout: true, target_idx: sel_idx, init_bounds, init_rot_deg: rot_deg, lock_aspect },
+            state,
+            meta,
+            intents,
+        );
+    }
+
     // Draw active 0.1 pt snap guides (both internal live drag & CanvasToolState active_snap_guides)
     let guides_to_draw = if !state.active_snap_guides.is_empty() { &state.active_snap_guides } else { &app.canvas_dialogs.canvas.active_snap_guides };
     report.snap_guide_count = guides_to_draw.len();
@@ -1388,6 +1661,79 @@ fn render_layout_hud_overlays(
         && let Some(readout) = &state.last_snap_readout
     {
         paint_hover_hud_card(painter, pos2(paper_rect.left() + 8.0, paper_rect.top() + 8.0), readout, tokens);
+    }
+
+    if !ctx_in.enabled {
+        state.layout_context_menu = None;
+    } else if let Some((ref menu_sheet, panel_idx, anchor)) = state.layout_context_menu.clone() {
+        if menu_sheet != &ls.id || panel_idx >= ls.spec.items.len() {
+            state.layout_context_menu = None;
+        } else {
+            let screen = ui.ctx().content_rect();
+            let pos = pos2(
+                anchor.x.clamp(screen.left() + 4.0, (screen.right() - 242.0).max(screen.left() + 4.0)),
+                anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 260.0).max(screen.top() + 4.0)),
+            );
+            let mut close_menu = false;
+            let area_resp = egui::Area::new(Id::unique(("layout_panel_ctx_menu", ls.id.as_str())))
+                .order(egui::Order::Foreground)
+                .fixed_pos(pos)
+                .show(ui.ctx(), |menu_ui| {
+                    egui::Frame::popup(menu_ui.style())
+                        .fill(tokens.surface_bg)
+                        .stroke(Stroke::new(1.0, tokens.border))
+                        .corner_radius(CornerRadius::same(4))
+                        .show(menu_ui, |ui| {
+                            ui.set_min_width(232.0);
+                            for (slug, lbl, action_str) in [
+                                ("front", "Bring to Front", "bring_to_front"),
+                                ("forward", "Bring Forward", "bring_forward"),
+                                ("backward", "Send Backward", "send_backward"),
+                                ("back", "Send to Back", "send_to_back"),
+                            ] {
+                                let wid = format!("canvas.layout_ctx.{slug}");
+                                let btn = ui.add_sized([228.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
+                                meta.record_response(
+                                    ui,
+                                    &btn,
+                                    FrameInspectEntryInput {
+                                        widget_id: &wid,
+                                        role: "menuitem",
+                                        label: lbl,
+                                        command_id: Some("layout.reorderPanel"),
+                                        value: Some(json!(action_str)),
+                                        enabled: true,
+                                        disabled_reason: None,
+                                        z_layer: ZLayer::ContextMenu,
+                                        ellipsized: false,
+                                        full_label: None,
+                                    },
+                                );
+                                if btn.clicked() {
+                                    intents.push_engine(
+                                        "layout.reorderPanel",
+                                        json!({
+                                            "sheet_id": ls.id.as_str(),
+                                            "panel_index": panel_idx,
+                                            "action": action_str,
+                                        }),
+                                    );
+                                    close_menu = true;
+                                }
+                            }
+                            ui.separator();
+                            if append_layout_context_menu_extras(ui, &ov, ls, panel_idx, anchor, meta, intents) {
+                                close_menu = true;
+                            }
+                        });
+                });
+            let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+            let outside_click =
+                ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+            if close_menu || esc || outside_click {
+                state.layout_context_menu = None;
+            }
+        }
     }
 }
 
@@ -1451,29 +1797,36 @@ fn round_tenth_pt(v: f64) -> f64 {
 
 const fn layout_item_bounds_doc(item: &LayoutItem) -> DocRectPt {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => *bounds_pt,
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
     }
 }
 
 fn set_layout_item_bounds_doc(item: &mut LayoutItem, bounds: DocRectPt) {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => {
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => {
             *bounds_pt = bounds;
         }
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_canvas_rulers(
-    ui: &egui::Ui,
+struct CanvasRulersSpec<'a> {
     mat_rect: Rect,
     top_r: Rect,
     left_r: Rect,
     paper_rect: Rect,
     eff_scale: f32,
     unit: PhysicalUnit,
-    tokens: &Tokens,
-) {
+    tokens: &'a Tokens,
+}
+
+fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
+    let CanvasRulersSpec { mat_rect, top_r, left_r, paper_rect, eff_scale, unit, tokens } = spec;
     let corner = Rect::from_min_size(pos2(left_r.left(), top_r.top()), vec2(RULER_THICKNESS_PT, RULER_THICKNESS_PT));
     let unit_lbl = match unit {
         PhysicalUnit::Points => "pt",
@@ -1528,4 +1881,731 @@ fn render_canvas_rulers(
         y += step_px;
         y_idx += 1;
     }
+}
+
+struct CanvasOverlayCtx<'a> {
+    app: &'a UiApp,
+    painter: &'a egui::Painter,
+    mat_rect: Rect,
+    paper_rect: Rect,
+    sx: f32,
+    sy: f32,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
+impl CanvasOverlayCtx<'_> {
+    fn screen_to_scene(&self, pos: Pos2) -> PointPt {
+        PointPt::new(f64::from((pos.x - self.paper_rect.left()) / self.sx.max(1e-4)), f64::from((pos.y - self.paper_rect.top()) / self.sy.max(1e-4)))
+    }
+
+    fn push_scene_paste_table(&self, target_sheet_id: &SheetId, scene_anchor: [f64; 2], intents: &mut PendingUiIntents) {
+        let Some(copied) = self.app.interaction.last_copied_result_table.as_ref() else {
+            return;
+        };
+        let mut params = serde_json::Map::new();
+        params.insert(String::from("source_sheet_id"), json!(copied.source_sheet_id.as_str()));
+        params.insert(String::from("target_sheet_id"), json!(target_sheet_id.as_str()));
+        if let Some(tab_id) = &copied.tab_id {
+            params.insert(String::from("tab_id"), json!(tab_id));
+        }
+        if let Some(rows) = &copied.selected_rows {
+            params.insert(String::from("selected_rows"), json!(rows));
+        }
+        if let Some(cols) = &copied.selected_cols {
+            params.insert(String::from("selected_cols"), json!(cols));
+        }
+        params.insert(String::from("bounds_pt"), json!([scene_anchor[0].max(4.0), scene_anchor[1].max(4.0), 180.0, 90.0]));
+        intents.push_engine("edit.pasteResultTable", serde_json::Value::Object(params));
+    }
+}
+
+fn doc_rect_to_screen(paper_rect: Rect, sx: f32, sy: f32, bounds: DocRectPt) -> Rect {
+    Rect::from_min_size(
+        pos2(paper_rect.left() + (bounds.x as f32) * sx, paper_rect.top() + (bounds.y as f32) * sy),
+        vec2((bounds.width as f32) * sx, (bounds.height as f32) * sy),
+    )
+}
+
+fn active_gesture_bounds(state: &CanvasViewEguiState, sheet_id: &SheetId, is_layout: bool, target_idx: usize, fallback: DocRectPt) -> DocRectPt {
+    if let Some(g) = &state.image_gesture
+        && g.is_layout == is_layout
+        && &g.sheet_id == sheet_id
+        && g.target_index == target_idx
+        && matches!(g.kind, ImageGestureKind::Move | ImageGestureKind::ResizeCorner { .. })
+    {
+        g.current_bounds_pt
+    } else {
+        fallback
+    }
+}
+
+fn active_gesture_rotation(state: &CanvasViewEguiState, sheet_id: &SheetId, is_layout: bool, target_idx: usize, fallback: f64) -> f64 {
+    if let Some(g) = &state.image_gesture
+        && g.is_layout == is_layout
+        && &g.sheet_id == sheet_id
+        && g.target_index == target_idx
+        && g.kind == ImageGestureKind::Rotate
+    {
+        g.current_rotation_deg
+    } else {
+        fallback
+    }
+}
+
+fn paint_canvas_grid_overlay(
+    painter: &egui::Painter,
+    mat_rect: Rect,
+    paper_rect: Rect,
+    scene_w_pt: f32,
+    scene_h_pt: f32,
+    spacing_pt: f64,
+    tokens: &Tokens,
+) {
+    let grid_clip = paper_rect.intersect(mat_rect);
+    if !grid_clip.is_positive() {
+        return;
+    }
+    let gp = painter.with_clip_rect(grid_clip);
+    let spacing = spacing_pt.clamp(4.0, 200.0) as f32;
+    let step_x = (spacing * paper_rect.width() / scene_w_pt.max(1.0)).max(6.0);
+    let step_y = (spacing * paper_rect.height() / scene_h_pt.max(1.0)).max(6.0);
+    let col = Color32::from_rgba_unmultiplied(tokens.accent.r(), tokens.accent.g(), tokens.accent.b(), 48);
+    let stroke = Stroke::new(0.75, col);
+
+    let mut x = paper_rect.left() + step_x;
+    let mut guard = 0usize;
+    while x < paper_rect.right() - 1.0 && guard < 256 {
+        gp.line_segment([pos2(x, grid_clip.top()), pos2(x, grid_clip.bottom())], stroke);
+        x += step_x;
+        guard += 1;
+    }
+    let mut y = paper_rect.top() + step_y;
+    let mut y_guard = 0usize;
+    while y < paper_rect.bottom() - 1.0 && y_guard < 256 {
+        gp.line_segment([pos2(grid_clip.left(), y), pos2(grid_clip.right(), y)], stroke);
+        y += step_y;
+        y_guard += 1;
+    }
+}
+
+fn graph_annotation_embedded_bounds(ann: &GraphAnnotation) -> Option<(DocRectPt, bool, f64, bool)> {
+    match ann {
+        GraphAnnotation::EmbeddedResultTable { bounds_pt, .. } => Some((*bounds_pt, false, 0.0, false)),
+        GraphAnnotation::EmbeddedImage { bounds_pt, rotation_deg, lock_aspect_ratio, .. } => {
+            Some((*bounds_pt, true, *rotation_deg, *lock_aspect_ratio))
+        }
+        _ => None,
+    }
+}
+
+fn render_graph_embedded_objects(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    gs: &GraphSheet,
+    state: &mut CanvasViewEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> (bool, bool) {
+    if let Some(sel) = state.selected_graph_annotation
+        && gs.spec.annotations.get(sel).and_then(graph_annotation_embedded_bounds).is_none()
+    {
+        state.selected_graph_annotation = None;
+    }
+
+    let selected_img = state.selected_graph_annotation.and_then(|sel_idx| {
+        let ann = gs.spec.annotations.get(sel_idx)?;
+        let (bounds, is_img, rot, lock) = graph_annotation_embedded_bounds(ann)?;
+        is_img.then_some((sel_idx, bounds, rot, lock))
+    });
+    let ptr_pos = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos()));
+    let resize_or_rot_active = state.image_gesture.as_ref().is_some_and(|g| !g.is_layout && g.kind != ImageGestureKind::Move);
+    let pointer_in_handle = selected_img.is_some_and(|(sel_idx, init_bounds, _, _)| {
+        let disp = active_gesture_bounds(state, &gs.id, false, sel_idx, init_bounds);
+        let sel_r = doc_rect_to_screen(ov.paper_rect, ov.sx, ov.sy, disp);
+        let h_rects = image_handle_rects(sel_r, ov.mat_rect);
+        ptr_pos.is_some_and(|p| h_rects.iter().any(|hr| hr.contains(p)))
+    });
+
+    let mut claimed_click = false;
+    let mut opened_ctx_menu = false;
+    for (ann_idx, ann) in gs.spec.annotations.iter().enumerate() {
+        let Some((init_bounds, is_image, _, _)) = graph_annotation_embedded_bounds(ann) else {
+            continue;
+        };
+        let bounds = active_gesture_bounds(state, &gs.id, false, ann_idx, init_bounds);
+        let r = doc_rect_to_screen(ov.paper_rect, ov.sx, ov.sy, bounds);
+        let r_vis = r.intersect(ov.mat_rect).intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+        if r_vis.width() < 4.0 || r_vis.height() < 4.0 {
+            continue;
+        }
+        let selected = state.selected_graph_annotation == Some(ann_idx);
+        let suppress_drag = selected && is_image && (pointer_in_handle || resize_or_rot_active);
+        let sense = if ov.enabled && !suppress_drag { Sense::click_and_drag() } else { Sense::hover() };
+        let resp = ui.interact(r_vis, Id::unique(("graph_ann", gs.id.as_str(), ann_idx)), sense);
+        if selected || resp.hovered() {
+            let stroke_col = if selected { ov.tokens.accent } else { ov.tokens.focus_ring };
+            ov.painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(if selected { 2.0 } else { 1.0 }, stroke_col), StrokeKind::Inside);
+        }
+
+        let wid = format!("canvas.graph_ann.{ann_idx}");
+        let lbl = if is_image { "Embedded Image" } else { "Embedded Result Table" };
+        meta.record_response(
+            ui,
+            &resp,
+            FrameInspectEntryInput {
+                widget_id: &wid,
+                role: "button",
+                label: lbl,
+                command_id: None,
+                value: Some(json!({ "selected": selected, "x": bounds.x, "y": bounds.y })),
+                enabled: ov.enabled,
+                disabled_reason: (!ov.enabled).then_some("modal dialog is active"),
+                z_layer: ZLayer::FloatingOverlay,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+
+        if !ov.enabled {
+            continue;
+        }
+        if resp.clicked() {
+            state.selected_graph_annotation = Some(ann_idx);
+            claimed_click = true;
+        }
+        if resp.double_clicked() || resp.triple_clicked() {
+            state.selected_graph_annotation = Some(ann_idx);
+            claimed_click = true;
+            let cmd = if is_image { "ui.image.format.open" } else { "ui.embeddedTable.format.open" };
+            intents.push_ui(cmd, json!({ "sheet_id": gs.id.as_str(), "annotation_index": ann_idx }));
+        }
+        if resp.secondary_clicked() {
+            let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r_vis.center());
+            let sc_pt = ov.screen_to_scene(anchor);
+            state.selected_graph_annotation = Some(ann_idx);
+            state.graph_context_menu = Some((gs.id.clone(), Some(ann_idx), anchor, [sc_pt.x, sc_pt.y]));
+            opened_ctx_menu = true;
+        }
+        if !suppress_drag && resp.drag_started() {
+            state.selected_graph_annotation = Some(ann_idx);
+            let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r_vis.center());
+            let sc = ov.screen_to_scene(ptr);
+            state.image_gesture = Some(ImageTransformGestureState {
+                sheet_id: gs.id.clone(),
+                is_layout: false,
+                target_index: ann_idx,
+                kind: ImageGestureKind::Move,
+                start_scene_pt: [sc.x, sc.y],
+                start_screen_pt: [ptr.x, ptr.y],
+                initial_bounds_pt: init_bounds,
+                current_bounds_pt: init_bounds,
+                initial_rotation_deg: 0.0,
+                current_rotation_deg: 0.0,
+                initial_lock_aspect: true,
+                shift_unlocked: false,
+            });
+        }
+        if resp.dragged()
+            && let Some(g) = state.image_gesture.as_mut()
+            && !g.is_layout
+            && g.sheet_id == gs.id
+            && g.target_index == ann_idx
+            && g.kind == ImageGestureKind::Move
+        {
+            let ptr = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos())).unwrap_or(r_vis.center());
+            let sc = ov.screen_to_scene(ptr);
+            g.current_bounds_pt.x = round_tenth_pt(g.initial_bounds_pt.x + (sc.x - g.start_scene_pt[0]));
+            g.current_bounds_pt.y = round_tenth_pt(g.initial_bounds_pt.y + (sc.y - g.start_scene_pt[1]));
+        }
+        let finish_move = resp.drag_stopped()
+            && state
+                .image_gesture
+                .as_ref()
+                .is_some_and(|g| !g.is_layout && g.sheet_id == gs.id && g.target_index == ann_idx && g.kind == ImageGestureKind::Move);
+        if finish_move && let Some(g) = state.image_gesture.take() {
+            commit_graph_embedded_move(gs, ann_idx, is_image, g.current_bounds_pt, intents);
+        }
+    }
+
+    if let Some((sel_idx, init_bounds, rot_deg, lock_aspect)) = selected_img {
+        render_selected_image_handles(
+            ui,
+            ov,
+            SelectedImageTarget { sheet_id: &gs.id, is_layout: false, target_idx: sel_idx, init_bounds, init_rot_deg: rot_deg, lock_aspect },
+            state,
+            meta,
+            intents,
+        );
+    }
+
+    (claimed_click, opened_ctx_menu)
+}
+
+fn commit_graph_embedded_move(gs: &GraphSheet, ann_idx: usize, is_image: bool, bounds: DocRectPt, intents: &mut PendingUiIntents) {
+    if is_image {
+        intents.push_engine(
+            "graph.updateImage",
+            json!({
+                "sheet_id": gs.id.as_str(),
+                "annotation_index": ann_idx,
+                "bounds_pt": [bounds.x, bounds.y, bounds.width, bounds.height],
+            }),
+        );
+        return;
+    }
+    let mut updated = gs.spec.annotations.clone();
+    if let Some(GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }) = updated.get_mut(ann_idx) {
+        *bounds_pt = bounds;
+        intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "annotations": updated } }));
+    }
+}
+
+fn render_context_menu_item(
+    ui: &mut egui::Ui,
+    meta: &mut FrameInspectMeta,
+    widget_id: &str,
+    label: &str,
+    command_id: Option<&str>,
+    enabled: bool,
+) -> bool {
+    let btn = ui.add_enabled(enabled, egui::Button::new(egui::RichText::new(label).small()).fill(Color32::TRANSPARENT).min_size(vec2(228.0, 26.0)));
+    meta.record_response(
+        ui,
+        &btn,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "menuitem",
+            label,
+            command_id,
+            value: None,
+            enabled,
+            disabled_reason: (!enabled).then_some("Copy a result table selection first"),
+            z_layer: ZLayer::ContextMenu,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    btn.clicked() && enabled
+}
+
+fn render_graph_context_menu(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    gs: &GraphSheet,
+    state: &mut CanvasViewEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    if !ov.enabled {
+        state.graph_context_menu = None;
+        return;
+    }
+    let Some((ref menu_sheet, opt_ann_idx, anchor, scene_anchor)) = state.graph_context_menu.clone() else {
+        return;
+    };
+    if menu_sheet != &gs.id {
+        state.graph_context_menu = None;
+        return;
+    }
+    let screen = ui.ctx().content_rect();
+    let pos = pos2(
+        anchor.x.clamp(screen.left() + 4.0, (screen.right() - 244.0).max(screen.left() + 4.0)),
+        anchor.y.clamp(screen.top() + 4.0, (screen.bottom() - 200.0).max(screen.top() + 4.0)),
+    );
+    let target_is_table =
+        opt_ann_idx.and_then(|i| gs.spec.annotations.get(i)).is_some_and(|a| matches!(a, GraphAnnotation::EmbeddedResultTable { .. }));
+    let target_is_image = opt_ann_idx.and_then(|i| gs.spec.annotations.get(i)).is_some_and(|a| matches!(a, GraphAnnotation::EmbeddedImage { .. }));
+    let has_copied_table = ov.app.interaction.last_copied_result_table.is_some();
+    let locale = ov.tokens.locale;
+
+    let mut close_menu = false;
+    let area_resp =
+        egui::Area::new(Id::unique(("graph_ctx_menu", gs.id.as_str()))).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |menu_ui| {
+            egui::Frame::popup(menu_ui.style())
+                .fill(ov.tokens.surface_bg)
+                .stroke(Stroke::new(1.0, ov.tokens.border))
+                .corner_radius(CornerRadius::same(4))
+                .show(menu_ui, |ui| {
+                    ui.set_min_width(232.0);
+                    if render_context_menu_item(
+                        ui,
+                        meta,
+                        "canvas.graph_ctx.paste_table",
+                        tr(locale, "r13.canvas.paste_table"),
+                        Some("edit.pasteResultTable"),
+                        has_copied_table,
+                    ) {
+                        ov.push_scene_paste_table(&gs.id, scene_anchor, intents);
+                        close_menu = true;
+                    }
+                    if render_context_menu_item(
+                        ui,
+                        meta,
+                        "canvas.graph_ctx.paste_image",
+                        tr(locale, "r13.canvas.paste_image"),
+                        Some("edit.pasteImage"),
+                        true,
+                    ) {
+                        intents.push_paste_image_from_clipboard(gs.id.clone(), Some(scene_anchor));
+                        close_menu = true;
+                    }
+                    if render_context_menu_item(
+                        ui,
+                        meta,
+                        "canvas.graph_ctx.insert_image",
+                        tr(locale, "r13.canvas.insert_image"),
+                        Some("graph.insertImage"),
+                        true,
+                    ) {
+                        intents.push_engine("graph.insertImage", json!({}));
+                        close_menu = true;
+                    }
+                    if let Some(ann_idx) = opt_ann_idx
+                        && target_is_table
+                        && render_context_menu_item(
+                            ui,
+                            meta,
+                            "canvas.graph_ctx.format_embedded_table",
+                            tr(locale, "r13.canvas.format_embedded_table"),
+                            Some("ui.embeddedTable.format.open"),
+                            true,
+                        )
+                    {
+                        intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": gs.id.as_str(), "annotation_index": ann_idx }));
+                        close_menu = true;
+                    }
+                    if let Some(ann_idx) = opt_ann_idx
+                        && target_is_image
+                        && render_context_menu_item(
+                            ui,
+                            meta,
+                            "canvas.graph_ctx.format_image",
+                            tr(locale, "r13.canvas.format_image"),
+                            Some("ui.image.format.open"),
+                            true,
+                        )
+                    {
+                        intents.push_ui("ui.image.format.open", json!({ "sheet_id": gs.id.as_str(), "annotation_index": ann_idx }));
+                        close_menu = true;
+                    }
+                    ui.separator();
+                    if render_context_menu_item(
+                        ui,
+                        meta,
+                        "canvas.graph_ctx.toggle_grid",
+                        tr(locale, "r13.canvas.grid_overlay"),
+                        Some("ui.gridOverlay.toggle"),
+                        true,
+                    ) {
+                        intents.push_ui("ui.gridOverlay.toggle", json!({}));
+                        close_menu = true;
+                    }
+                });
+        });
+
+    let esc = ui.input(|i| i.key_pressed(egui::Key::Escape));
+    let outside_click = ui.input(|i| i.pointer.primary_clicked() && i.pointer.interact_pos().is_some_and(|p| !area_resp.response.rect.contains(p)));
+    if close_menu || esc || outside_click {
+        state.graph_context_menu = None;
+    }
+}
+
+fn append_layout_context_menu_extras(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    ls: &LayoutSheet,
+    panel_idx: usize,
+    anchor: Pos2,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) -> bool {
+    let locale = ov.tokens.locale;
+    let sc_pt = ov.screen_to_scene(anchor);
+    let item_opt = ls.spec.items.get(panel_idx);
+    let mut clicked = false;
+
+    if matches!(item_opt, Some(LayoutItem::LiveTable { .. }))
+        && render_context_menu_item(
+            ui,
+            meta,
+            "canvas.layout_ctx.format_embedded_table",
+            tr(locale, "r13.canvas.format_embedded_table"),
+            Some("ui.embeddedTable.format.open"),
+            true,
+        )
+    {
+        intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
+        clicked = true;
+    }
+    if matches!(item_opt, Some(LayoutItem::EmbeddedImage { .. }))
+        && render_context_menu_item(
+            ui,
+            meta,
+            "canvas.layout_ctx.format_image",
+            tr(locale, "r13.canvas.format_image"),
+            Some("ui.image.format.open"),
+            true,
+        )
+    {
+        intents.push_ui("ui.image.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
+        clicked = true;
+    }
+    if render_context_menu_item(ui, meta, "canvas.layout_ctx.paste_image", tr(locale, "r13.canvas.paste_image"), Some("edit.pasteImage"), true) {
+        intents.push_paste_image_from_clipboard(ls.id.clone(), Some([sc_pt.x, sc_pt.y]));
+        clicked = true;
+    }
+    if render_context_menu_item(ui, meta, "canvas.layout_ctx.insert_image", tr(locale, "r13.canvas.insert_image"), Some("layout.insertImage"), true) {
+        intents.push_engine("layout.insertImage", json!({}));
+        clicked = true;
+    }
+    if render_context_menu_item(ui, meta, "canvas.layout_ctx.toggle_grid", tr(locale, "r13.canvas.grid_overlay"), Some("ui.gridOverlay.toggle"), true)
+    {
+        intents.push_ui("ui.gridOverlay.toggle", json!({}));
+        clicked = true;
+    }
+    clicked
+}
+
+fn image_handle_rects(r: Rect, mat_rect: Rect) -> [Rect; 5] {
+    let nw = Rect::from_center_size(r.left_top(), vec2(10.0, 10.0));
+    let ne = Rect::from_center_size(r.right_top(), vec2(10.0, 10.0));
+    let sw = Rect::from_center_size(r.left_bottom(), vec2(10.0, 10.0));
+    let se = Rect::from_center_size(r.right_bottom(), vec2(10.0, 10.0));
+    let rot_center = pos2(r.center().x, (r.top() - 18.0).max(mat_rect.top() + 8.0));
+    let rot = Rect::from_center_size(rot_center, vec2(10.0, 10.0));
+    [nw, ne, sw, se, rot]
+}
+
+fn shift_modifier_held(ui: &egui::Ui) -> bool {
+    ui.input(|i| {
+        i.events
+            .iter()
+            .rev()
+            .find_map(|ev| match ev {
+                egui::Event::PointerButton { modifiers, .. } => Some(modifiers.shift),
+                egui::Event::ModifiersChanged(m) => Some(m.shift),
+                _ => None,
+            })
+            .unwrap_or(i.modifiers.shift)
+    })
+}
+
+fn normalize_deg_180(deg: f64) -> f64 {
+    let mut d = ((deg + 180.0).rem_euclid(360.0)) - 180.0;
+    if d <= -180.0 {
+        d += 360.0;
+    }
+    d
+}
+
+fn pointer_angle_deg(center: Pos2, pos: Pos2) -> f64 {
+    f64::from((pos.y - center.y).atan2(pos.x - center.x)).to_degrees() + 90.0
+}
+
+struct SelectedImageTarget<'a> {
+    sheet_id: &'a SheetId,
+    is_layout: bool,
+    target_idx: usize,
+    init_bounds: DocRectPt,
+    init_rot_deg: f64,
+    lock_aspect: bool,
+}
+
+fn render_selected_image_handles(
+    ui: &mut egui::Ui,
+    ov: &CanvasOverlayCtx<'_>,
+    target: SelectedImageTarget<'_>,
+    state: &mut CanvasViewEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let SelectedImageTarget { sheet_id, is_layout, target_idx, init_bounds, init_rot_deg, lock_aspect } = target;
+    if !ov.enabled {
+        return;
+    }
+    let disp_bounds = active_gesture_bounds(state, sheet_id, is_layout, target_idx, init_bounds);
+    let disp_rot = active_gesture_rotation(state, sheet_id, is_layout, target_idx, init_rot_deg);
+    let r = doc_rect_to_screen(ov.paper_rect, ov.sx, ov.sy, disp_bounds);
+    let clip_all = ov.mat_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+
+    if state.image_gesture.as_ref().is_some_and(|g| g.sheet_id == *sheet_id && g.is_layout == is_layout && g.target_index == target_idx) {
+        ov.painter.rect_stroke(r, CornerRadius::ZERO, Stroke::new(1.5, ov.tokens.accent), StrokeKind::Inside);
+    }
+
+    let corners = [
+        ("nw", true, true, r.left_top()),
+        ("ne", false, true, r.right_top()),
+        ("sw", true, false, r.left_bottom()),
+        ("se", false, false, r.right_bottom()),
+    ];
+    for (slug, left, top, c_pos) in corners {
+        let h_rect = Rect::from_center_size(c_pos, vec2(10.0, 10.0));
+        let h_vis = h_rect.intersect(clip_all);
+        if h_vis.width() < 4.0 || h_vis.height() < 4.0 {
+            continue;
+        }
+        ov.painter.rect_filled(h_vis, CornerRadius::same(1), ov.tokens.paper_white);
+        ov.painter.rect_stroke(h_vis, CornerRadius::same(1), Stroke::new(1.5, ov.tokens.accent), StrokeKind::Inside);
+        let h_resp = ui.interact(h_vis, Id::unique(("img_handle", sheet_id.as_str(), is_layout, target_idx, slug)), Sense::drag());
+        let wid = format!("canvas.image.handle.{slug}");
+        meta.record_response(
+            ui,
+            &h_resp,
+            FrameInspectEntryInput {
+                widget_id: &wid,
+                role: "button",
+                label: &format!("Resize Handle {}", slug.to_ascii_uppercase()),
+                command_id: None,
+                value: Some(json!({ "bounds_pt": [disp_bounds.x, disp_bounds.y, disp_bounds.width, disp_bounds.height] })),
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::FloatingOverlay,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if h_resp.drag_started() {
+            let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(c_pos);
+            let sc = ov.screen_to_scene(ptr);
+            state.image_gesture = Some(ImageTransformGestureState {
+                sheet_id: sheet_id.clone(),
+                is_layout,
+                target_index: target_idx,
+                kind: ImageGestureKind::ResizeCorner { left, top },
+                start_scene_pt: [sc.x, sc.y],
+                start_screen_pt: [ptr.x, ptr.y],
+                initial_bounds_pt: init_bounds,
+                current_bounds_pt: init_bounds,
+                initial_rotation_deg: init_rot_deg,
+                current_rotation_deg: init_rot_deg,
+                initial_lock_aspect: lock_aspect,
+                shift_unlocked: shift_modifier_held(ui),
+            });
+        }
+        let mut commit_bounds = None;
+        if (h_resp.dragged() || h_resp.drag_stopped())
+            && let Some(g) = state.image_gesture.as_mut()
+            && g.sheet_id == *sheet_id
+            && g.is_layout == is_layout
+            && g.target_index == target_idx
+            && g.kind == (ImageGestureKind::ResizeCorner { left, top })
+        {
+            if let Some(pos) = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos())) {
+                update_corner_resize_gesture(ui, ov, g, pos, left, top);
+            }
+            if h_resp.drag_stopped() {
+                commit_bounds = Some(g.current_bounds_pt);
+            }
+        }
+        if let Some(b) = commit_bounds {
+            state.image_gesture = None;
+            let cmd = if is_layout { "layout.updateImage" } else { "graph.updateImage" };
+            let idx_key = if is_layout { "item_index" } else { "annotation_index" };
+            intents.push_engine(
+                cmd,
+                json!({
+                    "sheet_id": sheet_id.as_str(),
+                    idx_key: target_idx,
+                    "bounds_pt": [b.x, b.y, b.width, b.height],
+                }),
+            );
+        }
+    }
+
+    // Top-center rotation handle
+    let rot_center = pos2(r.center().x, (r.top() - 18.0).max(ov.mat_rect.top() + 8.0));
+    let rot_rect = Rect::from_center_size(rot_center, vec2(10.0, 10.0));
+    let rot_vis = rot_rect.intersect(clip_all);
+    if rot_vis.width() >= 4.0 && rot_vis.height() >= 4.0 {
+        ov.painter.line_segment([pos2(r.center().x, r.top()), rot_center], Stroke::new(1.25, ov.tokens.accent));
+        ov.painter.circle_filled(rot_center, 5.0, ov.tokens.paper_white);
+        ov.painter.circle_stroke(rot_center, 5.0, Stroke::new(1.5, ov.tokens.accent));
+        let rot_resp = ui.interact(rot_vis, Id::unique(("img_rot_handle", sheet_id.as_str(), is_layout, target_idx)), Sense::drag());
+        meta.record_response(
+            ui,
+            &rot_resp,
+            FrameInspectEntryInput {
+                widget_id: "canvas.image.handle.rotate",
+                role: "button",
+                label: "Rotate Handle",
+                command_id: None,
+                value: Some(json!({ "rotation_deg": disp_rot })),
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::FloatingOverlay,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+        if rot_resp.drag_started() {
+            let ptr = ui.input(|i| i.pointer.interact_pos()).unwrap_or(rot_center);
+            let sc = ov.screen_to_scene(ptr);
+            state.image_gesture = Some(ImageTransformGestureState {
+                sheet_id: sheet_id.clone(),
+                is_layout,
+                target_index: target_idx,
+                kind: ImageGestureKind::Rotate,
+                start_scene_pt: [sc.x, sc.y],
+                start_screen_pt: [ptr.x, ptr.y],
+                initial_bounds_pt: init_bounds,
+                current_bounds_pt: init_bounds,
+                initial_rotation_deg: init_rot_deg,
+                current_rotation_deg: init_rot_deg,
+                initial_lock_aspect: lock_aspect,
+                shift_unlocked: shift_modifier_held(ui),
+            });
+        }
+        let mut commit_rot = None;
+        if (rot_resp.dragged() || rot_resp.drag_stopped())
+            && let Some(g) = state.image_gesture.as_mut()
+            && g.sheet_id == *sheet_id
+            && g.is_layout == is_layout
+            && g.target_index == target_idx
+            && g.kind == ImageGestureKind::Rotate
+        {
+            if let Some(pos) = ui.input(|i| i.pointer.latest_pos().or_else(|| i.pointer.interact_pos())) {
+                let start_pos = pos2(g.start_screen_pt[0], g.start_screen_pt[1]);
+                let delta = normalize_deg_180(pointer_angle_deg(r.center(), pos) - pointer_angle_deg(r.center(), start_pos));
+                let raw_deg = normalize_deg_180(g.initial_rotation_deg + delta);
+                g.current_rotation_deg = if shift_modifier_held(ui) { (raw_deg / 15.0).round() * 15.0 } else { round_tenth_pt(raw_deg) };
+                paint_hover_hud_card(ov.painter, pos + vec2(12.0, -18.0), &format!("{:.1}°", g.current_rotation_deg), ov.tokens);
+            }
+            if rot_resp.drag_stopped() {
+                commit_rot = Some(g.current_rotation_deg);
+            }
+        }
+        if let Some(next_rot) = commit_rot {
+            state.image_gesture = None;
+            let cmd = if is_layout { "layout.updateImage" } else { "graph.updateImage" };
+            let idx_key = if is_layout { "item_index" } else { "annotation_index" };
+            intents.push_engine(cmd, json!({ "sheet_id": sheet_id.as_str(), idx_key: target_idx, "rotation_deg": next_rot }));
+        }
+    }
+}
+
+fn update_corner_resize_gesture(ui: &egui::Ui, ov: &CanvasOverlayCtx<'_>, g: &mut ImageTransformGestureState, pos: Pos2, left: bool, top: bool) {
+    let sc = ov.screen_to_scene(pos);
+    let init = g.initial_bounds_pt;
+    let dx = sc.x - g.start_scene_pt[0];
+    let dy = sc.y - g.start_scene_pt[1];
+    let raw_w = if left { init.width - dx } else { init.width + dx }.max(12.0);
+    let raw_h = if top { init.height - dy } else { init.height + dy }.max(12.0);
+    let shift_held = shift_modifier_held(ui);
+    g.shift_unlocked = shift_held;
+
+    let (new_w, new_h) = if g.initial_lock_aspect && !shift_held {
+        let aspect = (init.width / init.height.max(1e-6)).max(1e-4);
+        let rel_dw = (raw_w - init.width).abs() / init.width.max(1.0);
+        let rel_dh = (raw_h - init.height).abs() / init.height.max(1.0);
+        if rel_dw >= rel_dh { (raw_w, (raw_w / aspect).max(12.0)) } else { ((raw_h * aspect).max(12.0), raw_h) }
+    } else {
+        (raw_w, raw_h)
+    };
+
+    let anchor_x = init.x + init.width;
+    let anchor_y = init.y + init.height;
+    let new_x = if left { anchor_x - new_w } else { init.x };
+    let new_y = if top { anchor_y - new_h } else { init.y };
+    g.current_bounds_pt = DocRectPt::new(round_tenth_pt(new_x), round_tenth_pt(new_y), round_tenth_pt(new_w), round_tenth_pt(new_h));
 }

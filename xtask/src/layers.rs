@@ -8,7 +8,7 @@
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::path::Path;
 
-use crate::json::Json;
+use serde_json::Value;
 
 /// Where a workspace crate sits in the dependency graph.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -229,21 +229,21 @@ fn check_dep(c: &Crate, class: Class, layer: u8, d: &Dep, out: &mut Vec<Violatio
 
 /// Build the crate graph from `cargo metadata --format-version 1` (resolved graph when present,
 /// or direct manifest dependencies for minimal synthetic test JSON).
-pub fn from_metadata(meta: &Json) -> Result<Vec<Crate>, String> {
-    let pkgs = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
-    if let Some(resolve_nodes) = meta.get("resolve").and_then(|r| r.get("nodes")).and_then(Json::as_array) {
+pub fn from_metadata(meta: &Value) -> Result<Vec<Crate>, String> {
+    let pkgs = meta.get("packages").and_then(Value::as_array).ok_or_else(|| String::from("metadata: no packages array"))?;
+    if let Some(resolve_nodes) = meta.get("resolve").and_then(|r| r.get("nodes")).and_then(Value::as_array) {
         return from_resolved_metadata(meta, pkgs, resolve_nodes);
     }
     from_declared_metadata(meta, pkgs)
 }
 
-fn from_declared_metadata(meta: &Json, pkgs: &[Json]) -> Result<Vec<Crate>, String> {
+fn from_declared_metadata(meta: &Value, pkgs: &[Value]) -> Result<Vec<Crate>, String> {
     let member_ids: Option<BTreeSet<&str>> =
-        meta.get("workspace_members").and_then(Json::as_array).map(|arr| arr.iter().filter_map(Json::as_str).collect());
+        meta.get("workspace_members").and_then(Value::as_array).map(|arr| arr.iter().filter_map(Value::as_str).collect());
     let mut member_names = BTreeSet::new();
     for p in pkgs {
-        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?;
-        let id = p.get("id").and_then(Json::as_str);
+        let name = p.get("name").and_then(Value::as_str).ok_or_else(|| String::from("package without name"))?;
+        let id = p.get("id").and_then(Value::as_str);
         let is_member = match (&member_ids, id) {
             (Some(ids), Some(pid)) => ids.contains(pid),
             _ => true,
@@ -255,7 +255,7 @@ fn from_declared_metadata(meta: &Json, pkgs: &[Json]) -> Result<Vec<Crate>, Stri
 
     let mut out = Vec::new();
     for p in pkgs {
-        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?.to_owned();
+        let name = p.get("name").and_then(Value::as_str).ok_or_else(|| String::from("package without name"))?.to_owned();
         if !member_names.contains(name.as_str()) {
             continue;
         }
@@ -266,12 +266,12 @@ fn from_declared_metadata(meta: &Json, pkgs: &[Json]) -> Result<Vec<Crate>, Stri
     Ok(out)
 }
 
-fn collect_declared_deps(pkg: &Json, member_names: &BTreeSet<&str>) -> Vec<Dep> {
+fn collect_declared_deps(pkg: &Value, member_names: &BTreeSet<&str>) -> Vec<Dep> {
     let mut deps = Vec::new();
-    for d in pkg.get("dependencies").and_then(Json::as_array).into_iter().flatten() {
-        let dname = d.get("name").and_then(Json::as_str).unwrap_or_default().to_owned();
-        let kind = parse_dep_kind_str(d.get("kind").and_then(Json::as_str));
-        let is_local_curvebook = d.get("path").is_some_and(Json::is_string) && dname.starts_with("curvebook-");
+    for d in pkg.get("dependencies").and_then(Value::as_array).into_iter().flatten() {
+        let dname = d.get("name").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let kind = parse_dep_kind_str(d.get("kind").and_then(Value::as_str));
+        let is_local_curvebook = d.get("path").is_some_and(Value::is_string) && dname.starts_with("curvebook-");
         let workspace = member_names.contains(dname.as_str()) || classify(&dname).is_some() || is_local_curvebook;
         deps.push(Dep { name: dname, kind, workspace });
     }
@@ -286,18 +286,18 @@ fn parse_dep_kind_str(kind: Option<&str>) -> DepKind {
     }
 }
 
-fn from_resolved_metadata(meta: &Json, pkgs: &[Json], resolve_nodes: &[Json]) -> Result<Vec<Crate>, String> {
+fn from_resolved_metadata(meta: &Value, pkgs: &[Value], resolve_nodes: &[Value]) -> Result<Vec<Crate>, String> {
     let mut pkg_by_id = BTreeMap::new();
     let mut pkg_name_by_id = BTreeMap::new();
     for p in pkgs {
-        let id = p.get("id").and_then(Json::as_str).ok_or_else(|| String::from("package without id"))?;
-        let name = p.get("name").and_then(Json::as_str).ok_or_else(|| String::from("package without name"))?;
+        let id = p.get("id").and_then(Value::as_str).ok_or_else(|| String::from("package without id"))?;
+        let name = p.get("name").and_then(Value::as_str).ok_or_else(|| String::from("package without name"))?;
         pkg_by_id.insert(id, p);
         pkg_name_by_id.insert(id, name);
     }
 
-    let member_ids: Vec<&str> = match meta.get("workspace_members").and_then(Json::as_array) {
-        Some(arr) => arr.iter().filter_map(Json::as_str).collect(),
+    let member_ids: Vec<&str> = match meta.get("workspace_members").and_then(Value::as_array) {
+        Some(arr) => arr.iter().filter_map(Value::as_str).collect(),
         None => pkg_by_id.keys().copied().collect(),
     };
     let member_id_set: BTreeSet<&str> = member_ids.iter().copied().collect();
@@ -305,7 +305,7 @@ fn from_resolved_metadata(meta: &Json, pkgs: &[Json], resolve_nodes: &[Json]) ->
 
     let mut node_by_id = BTreeMap::new();
     for node in resolve_nodes {
-        if let Some(id) = node.get("id").and_then(Json::as_str) {
+        if let Some(id) = node.get("id").and_then(Value::as_str) {
             node_by_id.insert(id, node);
         }
     }
@@ -331,7 +331,7 @@ fn from_resolved_metadata(meta: &Json, pkgs: &[Json], resolve_nodes: &[Json]) ->
 
 fn collect_resolved_transitive_deps(
     root_id: &str,
-    node_by_id: &BTreeMap<&str, &Json>,
+    node_by_id: &BTreeMap<&str, &Value>,
     pkg_name_by_id: &BTreeMap<&str, &str>,
     member_id_set: &BTreeSet<&str>,
     out: &mut BTreeSet<(String, DepKind, bool)>,
@@ -371,16 +371,16 @@ fn collect_resolved_transitive_deps(
     }
 }
 
-fn node_edges(node: &Json) -> Vec<(&str, Vec<DepKind>)> {
-    if let Some(deps) = node.get("deps").and_then(Json::as_array) {
+fn node_edges(node: &Value) -> Vec<(&str, Vec<DepKind>)> {
+    if let Some(deps) = node.get("deps").and_then(Value::as_array) {
         let mut edges = Vec::with_capacity(deps.len());
         for d in deps {
-            let Some(pkg) = d.get("pkg").and_then(Json::as_str) else {
+            let Some(pkg) = d.get("pkg").and_then(Value::as_str) else {
                 continue;
             };
             let mut kinds = Vec::new();
-            for dk in d.get("dep_kinds").and_then(Json::as_array).into_iter().flatten() {
-                kinds.push(parse_dep_kind_str(dk.get("kind").and_then(Json::as_str)));
+            for dk in d.get("dep_kinds").and_then(Value::as_array).into_iter().flatten() {
+                kinds.push(parse_dep_kind_str(dk.get("kind").and_then(Value::as_str)));
             }
             if kinds.is_empty() {
                 kinds.push(DepKind::Normal);
@@ -389,7 +389,7 @@ fn node_edges(node: &Json) -> Vec<(&str, Vec<DepKind>)> {
         }
         return edges;
     }
-    node.get("dependencies").and_then(Json::as_array).into_iter().flatten().filter_map(Json::as_str).map(|id| (id, vec![DepKind::Normal])).collect()
+    node.get("dependencies").and_then(Value::as_array).into_iter().flatten().filter_map(Value::as_str).map(|id| (id, vec![DepKind::Normal])).collect()
 }
 
 /// Inspect workspace `Cargo.toml` `[patch]` and `[replace]` sections for banned suite crates
@@ -1114,7 +1114,9 @@ mod tests {
         ALLOWED_RAW_PROCESS_BASELINE, ALLOWED_UI_IO_BASELINE, Class, Crate, Dep, DepKind, TABLE, Violation, check, check_source_hygiene, classify,
         from_metadata, scan_patch_sections,
     };
-    use crate::json::parse;
+    fn parse(s: &str) -> Result<serde_json::Value, serde_json::Error> {
+        serde_json::from_str(s)
+    }
 
     fn c(name: &str, deps: &[(&str, DepKind, bool)]) -> Crate {
         Crate { name: name.into(), deps: deps.iter().map(|(n, k, w)| Dep { name: (*n).into(), kind: *k, workspace: *w }).collect() }

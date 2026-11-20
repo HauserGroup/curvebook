@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use crate::library::normalize_id;
+use crate::types::per_dataset_parameter_key;
 
 /// Formats a floating-point coefficient with `sig_figs` significant figures.
 ///
@@ -280,7 +281,7 @@ impl<'a> EqCtx<'a> {
             }
         }
         if let Some(ds_idx) = self.data_set_index {
-            let ds_target = normalize_id(&format!("{name} [DS{}]", ds_idx + 1));
+            let ds_target = normalize_id(&per_dataset_parameter_key(name, ds_idx));
             for (k, v) in self.params {
                 if normalize_id(k) == ds_target {
                     return Some(*v);

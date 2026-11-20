@@ -5,14 +5,16 @@
 //! `docs/implementation/data-tables-and-transforms.md`).
 
 use std::borrow::Borrow;
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashSet};
 
 use crate::i18n::LocalePreset;
+use crate::os_integration::ClipboardBundle;
 use curvebook_doc::{
     CategoricalLevelSummary, Cell, CellCoord, CellValue, DataSheet, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InternalLinkKind,
     LevelOrderSpec, LinkBorderColor, LinkSource, LinkedDataRegion, ProjectDocument, SheetCellRange, SheetId, SubcolumnMode, TableArchetype,
     TableKind, VariableRole, VariableSource, XColumnMode, default_column_label,
 };
+use curvebook_format::{CsvOptions, format_cell_token, write_delimited_records};
 use curvebook_palette::Rgba8;
 use curvebook_tools::{GridCellCoord, GridToolState, GridVisibleWindow, SelectionQuickStats, ToolCommandIntent};
 use serde::{Deserialize, Serialize};
@@ -992,6 +994,8 @@ pub struct ImportPasteWizardState {
     pub is_live_link: bool,
     pub origin_kind: ImportOriginKind,
     pub raw_clipboard_text: String,
+    #[serde(default)]
+    pub target_sheet_id: Option<SheetId>,
     pub source_sheet_id: Option<SheetId>,
     pub source_tab_id: Option<String>,
     pub source_range: SheetCellRange,
@@ -1013,6 +1017,7 @@ impl Default for ImportPasteWizardState {
             is_live_link: false,
             origin_kind: ImportOriginKind::Clipboard,
             raw_clipboard_text: String::new(),
+            target_sheet_id: None,
             source_sheet_id: None,
             source_tab_id: None,
             source_range: SheetCellRange::default(),
@@ -1213,6 +1218,114 @@ pub struct GridViewState {
     pub active_x_cell: Option<(usize, usize)>,
 }
 
+/// Resolved selection target for grid clipboard copy/cut operations (`R15-GUI-19`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GridClipboardTarget {
+    /// Uncapped contiguous rectangular range clamped to valid sheet bounds.
+    Range(SheetCellRange),
+    /// Exact deduplicated discontiguous cells sorted in reading order.
+    Cells(Vec<CellCoord>),
+    /// No explicit cell selection: copy falls back to whole-sheet TSV, and cut is a no-op.
+    WholeSheetFallback,
+}
+
+impl GridClipboardTarget {
+    /// Build `table.clearCells` parameter payloads clearing only the exact target selection.
+    ///
+    /// - Contiguous ranges emit compact `range` payloads (uncapped in rows, never truncating at
+    ///   `MAX_MATERIALIZED_SELECTION_COORDS`).
+    /// - Discontiguous selections emit a single `cells` payload listing only selected coordinates
+    ///   so unselected cells inside the enclosing bounding box remain untouched.
+    #[must_use]
+    pub fn clear_cells_requests(&self, sheet: &DataSheet) -> Vec<Value> {
+        match self {
+            Self::WholeSheetFallback => Vec::new(),
+            Self::Cells(coords) => {
+                if coords.is_empty() {
+                    return Vec::new();
+                }
+                let cells_json: Vec<Value> = coords.iter().map(|c| json!({ "row": c.row, "col": c.col, "subcol": c.subcol })).collect();
+                vec![json!({ "sheet_id": sheet.id.as_str(), "cells": cells_json })]
+            }
+            Self::Range(range) => range_clear_cells_requests(sheet, *range),
+        }
+    }
+}
+
+/// Prepared clipboard TSV text and exact target used by both `egui` shell and desktop host (`R15-GUI-19`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GridClipboardSelectionPlan {
+    pub tsv: String,
+    pub target: GridClipboardTarget,
+}
+
+impl GridClipboardSelectionPlan {
+    /// Build `table.clearCells` parameter payloads for cutting this selection.
+    #[must_use]
+    pub fn clear_cells_requests(&self, sheet: &DataSheet) -> Vec<Value> {
+        self.target.clear_cells_requests(sheet)
+    }
+}
+
+fn range_clear_cells_requests(sheet: &DataSheet, range: SheetCellRange) -> Vec<Value> {
+    let mut groups: Vec<(usize, usize, usize, usize)> = Vec::new();
+    for col in range.start.col..=range.end.col {
+        let max_sub = data_set_subcolumn_count(&sheet.archetype, col).saturating_sub(1);
+        let s_min = if col == range.start.col { range.start.subcol.min(max_sub) } else { 0 };
+        let s_max = if col == range.end.col { range.end.subcol.min(max_sub) } else { max_sub };
+        if s_min > s_max {
+            continue;
+        }
+        if let Some(last) = groups.last_mut()
+            && last.1 + 1 == col
+            && last.2 == s_min
+            && last.3 == s_max
+        {
+            last.1 = col;
+        } else {
+            groups.push((col, col, s_min, s_max));
+        }
+    }
+    groups
+        .into_iter()
+        .map(|(col_start, col_end, sub_start, sub_end)| {
+            let sub_range =
+                SheetCellRange::new(CellCoord::new(range.start.row, col_start, sub_start), CellCoord::new(range.end.row, col_end, sub_end));
+            json!({ "sheet_id": sheet.id.as_str(), "range": sub_range })
+        })
+        .collect()
+}
+
+fn format_discontiguous_cells_tsv(sheet: &DataSheet, coords: &[CellCoord], decimal_separator: char) -> String {
+    if coords.is_empty() {
+        return String::new();
+    }
+    let mut rows: BTreeSet<usize> = BTreeSet::new();
+    let mut cols: BTreeSet<(usize, usize)> = BTreeSet::new();
+    let mut selected: HashSet<(usize, usize, usize)> = HashSet::with_capacity(coords.len());
+    for c in coords {
+        rows.insert(c.row);
+        cols.insert((c.col, c.subcol));
+        selected.insert((c.row, c.col, c.subcol));
+    }
+    let opts = CsvOptions { decimal_separator, ..CsvOptions::tsv() };
+    let records: Vec<Vec<String>> = rows
+        .into_iter()
+        .map(|row| {
+            cols.iter()
+                .map(|&(col, subcol)| {
+                    if selected.contains(&(row, col, subcol)) {
+                        sheet.cell(CellCoord::new(row, col, subcol)).map_or_else(String::new, |cell| format_cell_token(cell, &opts))
+                    } else {
+                        String::new()
+                    }
+                })
+                .collect()
+        })
+        .collect();
+    write_delimited_records(&records, &opts)
+}
+
 impl GridViewState {
     /// Format the exclusion tooltip string for `coord` on `sheet`, including auditable reason tag
     /// and note when present (`QOL-3`).
@@ -1386,6 +1499,62 @@ impl GridViewState {
 
     fn has_discontiguous_selection(&self) -> bool {
         self.selected_coords.len() > 1 || (!self.selected_coords.is_empty() && self.tool.anchor == self.tool.active)
+    }
+
+    /// Resolve the uncapped clipboard copy/cut target for `sheet` (`R15-GUI-19`):
+    /// - discontiguous selections resolve to their exact deduplicated cell coordinates;
+    /// - contiguous rectangular selections resolve to uncapped `selection_bounds` clamped to `sheet`;
+    /// - empty selections fall back to whole-sheet copy (and cut is a no-op).
+    #[must_use]
+    pub fn clipboard_target(&self, sheet: &DataSheet) -> GridClipboardTarget {
+        let total_rows = sheet.archetype.row_count();
+        let total_cols = sheet.archetype.column_count();
+        if total_rows == 0 || total_cols == 0 {
+            return GridClipboardTarget::WholeSheetFallback;
+        }
+        if self.has_discontiguous_selection() {
+            let mut unique: BTreeSet<(usize, usize, usize)> = BTreeSet::new();
+            for &c in &self.selected_coords {
+                if c.row < total_rows && c.col < total_cols && c.subcol < data_set_subcolumn_count(&sheet.archetype, c.col) {
+                    unique.insert((c.row, c.col, c.subcol));
+                }
+            }
+            if !unique.is_empty() {
+                let coords = unique.into_iter().map(|(row, col, subcol)| CellCoord::new(row, col, subcol)).collect();
+                return GridClipboardTarget::Cells(coords);
+            }
+        }
+        if let Some((min_c, max_c)) = self.tool.selection_bounds()
+            && min_c.row < total_rows
+            && min_c.col < total_cols
+        {
+            let start_row = min_c.row;
+            let end_row = max_c.row.min(total_rows - 1);
+            let start_col = min_c.col;
+            let end_col = max_c.col.min(total_cols - 1);
+            let start_sub = min_c.subcol.min(data_set_subcolumn_count(&sheet.archetype, start_col).saturating_sub(1));
+            let end_sub = max_c.subcol.min(data_set_subcolumn_count(&sheet.archetype, end_col).saturating_sub(1));
+            return GridClipboardTarget::Range(SheetCellRange::new(
+                CellCoord::new(start_row, start_col, start_sub),
+                CellCoord::new(end_row, end_col, end_sub),
+            ));
+        }
+        GridClipboardTarget::WholeSheetFallback
+    }
+
+    /// Format the current grid selection on `sheet` as TSV and capture the exact target used by
+    /// both copy and cut across the `egui` shell and the desktop host (`R15-GUI-19`).
+    ///
+    /// # Errors
+    /// Returns an error if whole-sheet fallback CSV/TSV export fails.
+    pub fn prepare_clipboard_selection(&self, sheet: &DataSheet, decimal_separator: char) -> Result<GridClipboardSelectionPlan, String> {
+        let target = self.clipboard_target(sheet);
+        let tsv = match &target {
+            GridClipboardTarget::Range(range) => ClipboardBundle::tsv_from_datasheet_range(sheet, *range, decimal_separator),
+            GridClipboardTarget::Cells(coords) => format_discontiguous_cells_tsv(sheet, coords, decimal_separator),
+            GridClipboardTarget::WholeSheetFallback => ClipboardBundle::tsv_from_datasheet(sheet, decimal_separator)?,
+        };
+        Ok(GridClipboardSelectionPlan { tsv, target })
     }
 
     fn refresh_selection_stats_slice(&mut self, sheet: &DataSheet) {

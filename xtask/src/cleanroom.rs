@@ -6,6 +6,8 @@ use std::path::Path;
 
 use curvebook_format::{ZipArchive, ZipLimits};
 
+use crate::text_decode::{decode_utf16, detect_bomless_utf16};
+
 const SELF: &str = "xtask/src/cleanroom.rs";
 const AUDIT_DIR_PREFIX: &str = "docs/audit/";
 const HISTORY_AUDIT_DIR_PREFIX: &str = "docs/history/audit/";
@@ -265,43 +267,6 @@ fn scan_text_bytes(display_path: &str, bytes: &[u8], allow_packaged: bool, hits:
     }
     let text = String::from_utf8_lossy(bytes);
     scan_text(display_path, &text, allow_packaged, hits, &mut seen_lines);
-}
-
-fn detect_bomless_utf16(bytes: &[u8]) -> Option<bool> {
-    if bytes.len() < 8 || !bytes.contains(&0) {
-        return None;
-    }
-    let mut le_ascii = 0usize;
-    let mut be_ascii = 0usize;
-    let (pairs, _) = bytes.as_chunks::<2>();
-    let total_pairs = pairs.len();
-    for &[a, b] in pairs {
-        if a != 0 && (a.is_ascii_graphic() || a.is_ascii_whitespace()) && b == 0 {
-            le_ascii += 1;
-        } else if a == 0 && b != 0 && (b.is_ascii_graphic() || b.is_ascii_whitespace()) {
-            be_ascii += 1;
-        }
-    }
-    if le_ascii >= 4 && le_ascii * 4 >= total_pairs && le_ascii > be_ascii.saturating_mul(2) {
-        Some(true)
-    } else if be_ascii >= 4 && be_ascii * 4 >= total_pairs && be_ascii > le_ascii.saturating_mul(2) {
-        Some(false)
-    } else {
-        None
-    }
-}
-
-fn decode_utf16(bytes: &[u8], little_endian: bool) -> String {
-    let (pairs, remainder) = bytes.as_chunks::<2>();
-    let units = pairs.iter().map(|&arr| if little_endian { u16::from_le_bytes(arr) } else { u16::from_be_bytes(arr) });
-    let mut out = String::with_capacity(pairs.len());
-    for ch in char::decode_utf16(units) {
-        out.push(ch.unwrap_or('\u{FFFD}'));
-    }
-    if !remainder.is_empty() {
-        out.push('\u{FFFD}');
-    }
-    out
 }
 
 fn compute_attributed_section_lines(display_path: &str, text: &str, allow_packaged: bool) -> Vec<bool> {

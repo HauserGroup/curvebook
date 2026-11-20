@@ -894,14 +894,17 @@ fn prune_deleted_sheets(doc: &mut ProjectDocument, to_delete: &HashSet<SheetId>)
             GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
                 !to_delete.contains(result_sheet_id)
             }
-            GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => true,
+            GraphAnnotation::TextBox { .. }
+            | GraphAnnotation::LineOrArrow { .. }
+            | GraphAnnotation::Shape { .. }
+            | GraphAnnotation::EmbeddedImage { .. } => true,
         });
     }
     for ls in &mut doc.layout_sheets {
         ls.spec.items.retain(|item| match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => !to_delete.contains(graph_sheet_id),
             LayoutItem::LiveTable { source_sheet_id, .. } => !to_delete.contains(source_sheet_id),
-            LayoutItem::TextCallout { .. } => true,
+            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => true,
         });
     }
     if doc.active_sheet_id.as_ref().is_some_and(|sid| to_delete.contains(sid)) {
@@ -1266,7 +1269,7 @@ fn resolve_family_root_data_id_inner(
                         source_sheet_id
                     }
                     LayoutItem::LiveGraph { graph_sheet_id, .. } => graph_sheet_id,
-                    LayoutItem::TextCallout { .. } => continue,
+                    LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => continue,
                 };
                 match resolve_family_root_data_id_with_visited(doc, target_id, active, visited) {
                     Ok(found) => return Ok(found),
@@ -1515,7 +1518,7 @@ fn clone_downstream_layouts(
         let references_items = ls.spec.items.iter().any(|item| match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => id_map.contains_key(graph_sheet_id),
             LayoutItem::LiveTable { source_sheet_id, .. } => id_map.contains_key(source_sheet_id),
-            LayoutItem::TextCallout { .. } => false,
+            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => false,
         });
         let references_hooks = ls.spec.inline_hooks().iter().any(|hook| hook.upstream_sheet_id().is_some_and(|id| id_map.contains_key(id)));
         if !references_items && !references_hooks {
