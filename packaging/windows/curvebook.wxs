@@ -78,12 +78,12 @@
         <RegistryValue Root="HKMU" Key="Software\Microsoft\Windows\CurrentVersion\App Paths\curvebook.exe" Value="[#CurveBookExe]" Type="string" />
         <RegistryValue Root="HKMU" Key="Software\CurveBook" Name="InstallDir" Value="[INSTALLFOLDER]" Type="string" />
 
-        <ProgId Id="CurveBook.Project" Description="CurveBook Project" Icon="CurveBookIcon.ico" IconIndex="0">
+        <ProgId Id="CurveBook.Project" Description="CurveBook Project" Icon="CurveBookExe" IconIndex="0">
           <Extension Id="curvebook" ContentType="application/vnd.curvebook.project">
             <Verb Id="open" Command="Open" TargetFile="CurveBookExe" Argument="&quot;%1&quot;" />
           </Extension>
         </ProgId>
-        <ProgId Id="CurveBook.Template" Description="CurveBook Project Template" Icon="CurveBookIcon.ico" IconIndex="0">
+        <ProgId Id="CurveBook.Template" Description="CurveBook Project Template" Icon="CurveBookExe" IconIndex="0">
           <Extension Id="cbtemplate" ContentType="application/vnd.curvebook.template">
             <Verb Id="open" Command="Open" TargetFile="CurveBookExe" Argument="&quot;%1&quot;" />
           </Extension>
