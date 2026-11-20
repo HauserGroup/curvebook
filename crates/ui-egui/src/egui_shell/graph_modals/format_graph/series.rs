@@ -1,0 +1,428 @@
+//! Series-based `Format Graph` schema tabs: Appearance, Series & Arrangement, Graph Settings,
+//! and Value Annotations.
+
+use curvebook_doc::{EquationDisplayMode, ErrorBarDirection, ErrorBarMetric, GroupedArrangement};
+use curvebook_palette::{CvdKind, LineDashStyle, MarkerFillMode, PaletteId};
+use egui::{CornerRadius, Sense, Ui, Vec2};
+
+use crate::i18n::tr;
+
+use super::super::super::unit_spinners::{ScrubUnitFieldConfig, render_scrub_unit_field};
+use super::super::helpers::{
+    ButtonEntry, GraphModalCtx, LengthSpinnerSpec, gtr, record_button, record_checkbox, render_length_spinner_pt, rgba_to_color32,
+};
+use super::super::state::GraphModalEguiState;
+use super::render_legend_toggles;
+
+pub(super) fn render_fg_series_appearance(ui: &mut Ui, state: &mut GraphModalEguiState, gctx: &mut GraphModalCtx<'_>) {
+    let fg = gctx.app.canvas_dialogs.format_graph.clone();
+    let series_count = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)).map_or(1, |gs| gs.spec.series.len().max(1));
+
+    // Dataset Scope Header Bar + Apply Globally.
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(egui::RichText::new(gtr(gctx.locale, "fg.scope.series")).strong());
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "format_graph.series_prev",
+                label: "<",
+                command_id: None,
+                selected: false,
+                enabled: fg.selected_series_index > 0,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+            && fg.selected_series_index > 0
+        {
+            let mut next = fg.clone();
+            next.selected_series_index -= 1;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+        ui.label(format!("{} / {}", fg.selected_series_index + 1, series_count));
+        if record_button(
+            ui,
+            gctx.meta,
+            ButtonEntry {
+                widget_id: "format_graph.series_next",
+                label: ">",
+                command_id: None,
+                selected: false,
+                enabled: fg.selected_series_index + 1 < series_count,
+                disabled_reason: None,
+            },
+            gctx.tokens,
+        )
+        .clicked()
+            && fg.selected_series_index + 1 < series_count
+        {
+            let mut next = fg.clone();
+            next.selected_series_index += 1;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+
+        let mut apply_all = state.format_graph_apply_globally;
+        let all_lbl = gtr(gctx.locale, "fg.apply_globally");
+        let chk = ui.checkbox(&mut apply_all, all_lbl);
+        record_checkbox(ui, &chk, gctx.meta, "format_graph.apply_globally", all_lbl, apply_all);
+        if chk.changed() {
+            state.format_graph_apply_globally = apply_all;
+        }
+    });
+
+    ui.add_space(6.0);
+    // Symbol Size via `unit_spinners` (switchable pt/mm/in, single-commit).
+    if let Some(committed) = render_length_spinner_pt(
+        ui,
+        LengthSpinnerSpec {
+            widget_id: "format_graph.marker_size_pt",
+            label: gtr(gctx.locale, "fg.symbol_size"),
+            value_pt: fg.marker_size_pt,
+            min_pt: 1.0,
+            max_pt: 24.0,
+            step_pt: 0.5,
+            enabled: true,
+            disabled_reason: None,
+        },
+        &mut state.symbol_size_spinner,
+        gctx.tokens,
+        gctx.meta,
+    ) {
+        let mut next = fg.clone();
+        next.marker_size_pt = committed;
+        gctx.intents.push_update_format_graph_state(next);
+    }
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(gtr(gctx.locale, "fg.symbol_fill"));
+        for (slug, lbl, mode) in [
+            ("filled", "Filled", MarkerFillMode::Filled),
+            ("open", "Open", MarkerFillMode::Open),
+            ("semi_top", "Semi-Top", MarkerFillMode::SemiFilledTop),
+            ("semi_bottom", "Semi-Bottom", MarkerFillMode::SemiFilledBottom),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.fill.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.marker_fill_mode == mode,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.marker_fill_mode = mode;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        ui.label(gtr(gctx.locale, "fg.line_dash"));
+        for (slug, lbl, dash) in [
+            ("solid", "Solid", LineDashStyle::Solid),
+            ("dashed", "Dashed", LineDashStyle::Dashed),
+            ("dotted", "Dotted", LineDashStyle::Dotted),
+            ("long_dash", "Long Dash", LineDashStyle::LongDash),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.line_dash.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.line_dash == dash,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.line_dash = dash;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.separator();
+    ui.add_space(4.0);
+
+    // Error bars section.
+    let mut eb_enabled = fg.error_bar_enabled;
+    let eb_lbl = tr(gctx.locale, "inspector.error_bars");
+    let eb_chk = ui.checkbox(&mut eb_enabled, eb_lbl);
+    record_checkbox(ui, &eb_chk, gctx.meta, "format_graph.error_bar_enabled", eb_lbl, eb_enabled);
+    if eb_chk.changed() {
+        let mut next = fg.clone();
+        next.error_bar_enabled = eb_enabled;
+        gctx.intents.push_update_format_graph_state(next);
+    }
+
+    if eb_enabled {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (slug, lbl, metric) in [
+                ("sd", "SD", ErrorBarMetric::Sd),
+                ("sem", "SEM", ErrorBarMetric::Sem),
+                ("ci95", "95% CI", ErrorBarMetric::ConfidenceInterval95),
+                ("iqr", "IQR", ErrorBarMetric::InterquartileRange),
+                ("range", "Range", ErrorBarMetric::Range),
+            ] {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.error_bar_metric.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fg.error_bar_spec.metric == metric,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.error_bar_spec.metric = metric;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            for (slug, lbl, dir) in [
+                ("both", "Both", ErrorBarDirection::Both),
+                ("upper", "Upper", ErrorBarDirection::UpperOnly),
+                ("lower", "Lower", ErrorBarDirection::LowerOnly),
+            ] {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.error_bar_dir.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fg.error_bar_spec.direction == dir,
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.error_bar_spec.direction = dir;
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+
+        let stroke_cfg = ScrubUnitFieldConfig {
+            step_per_pt: 0.25,
+            decimals: 2,
+            allow_unit_switch: false,
+            ..ScrubUnitFieldConfig::new("format_graph.error_bar_stroke", gtr(gctx.locale, "fg.error_stroke"), 0.25, 6.0)
+        };
+        let stroke_out =
+            render_scrub_unit_field(ui, fg.error_bar_spec.stroke_width_pt, &mut state.line_thickness_spinner, stroke_cfg, gctx.tokens, gctx.meta);
+        if let Some(committed) = stroke_out.committed_value {
+            let mut next = fg.clone();
+            next.error_bar_spec.stroke_width_pt = committed.clamp(0.25, 6.0);
+            gctx.intents.push_update_format_graph_state(next);
+        }
+    }
+
+    if fg.initial_violin_options.is_some() {
+        ui.add_space(4.0);
+        let mut half = fg.half_violin_with_points;
+        let half_lbl = "Half-Violin + Points (Raincloud)";
+        let chk = ui.checkbox(&mut half, half_lbl);
+        record_checkbox(ui, &chk, gctx.meta, "format_graph.half_violin_with_points", half_lbl, half);
+        if chk.changed() {
+            let mut next = fg;
+            next.half_violin_with_points = half;
+            gctx.intents.push_update_format_graph_state(next);
+        }
+    }
+}
+
+pub(super) fn render_fg_series_arrangement(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let fg = gctx.app.canvas_dialogs.format_graph.clone();
+    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.grouped_arrangement")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (slug, lbl, arr) in [
+            ("interleaved", "Interleaved", GroupedArrangement::Interleaved),
+            ("separated", "Separated", GroupedArrangement::Separated),
+            ("stacked", "Stacked", GroupedArrangement::Stacked),
+            ("superimposed", "Superimposed", GroupedArrangement::Superimposed),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.arrangement.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.grouped_arrangement == arr,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.grouped_arrangement = arr;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(8.0);
+    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.active_series_list")).strong());
+    if let Some(gs) = fg.graph_sheet_id.as_ref().and_then(|id| gctx.app.document().graph_sheet(id)) {
+        for (idx, series) in gs.spec.series.iter().enumerate() {
+            let swatch = fg.preview_swatch(idx);
+            ui.horizontal(|ui| {
+                let (s_rect, _) = ui.allocate_exact_size(Vec2::splat(14.0), Sense::hover());
+                ui.painter().rect_filled(s_rect, CornerRadius::same(3), rgba_to_color32(swatch));
+                let title = series.legend_label.clone().unwrap_or_else(|| format!("Series {}", idx + 1));
+                let axis_lbl = if series.bind_to_right_y2 { "Right Y2" } else { "Left Y" };
+                ui.label(format!("#{}: {} ({axis_lbl})", idx + 1, title));
+            });
+        }
+    }
+}
+
+pub(super) fn render_fg_settings(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let fg = gctx.app.canvas_dialogs.format_graph.clone();
+    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.palette")).strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for &pal in &PaletteId::ALL {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.palette.{pal:?}"),
+                    label: pal.label(),
+                    command_id: None,
+                    selected: fg.palette == pal,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.palette = pal;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        for idx in 0..fg.palette.swatches().len().min(8) {
+            let c = fg.preview_swatch(idx);
+            let (r, _) = ui.allocate_exact_size(Vec2::new(22.0, 14.0), Sense::hover());
+            ui.painter().rect_filled(r, CornerRadius::same(2), rgba_to_color32(c));
+        }
+    });
+
+    ui.add_space(6.0);
+    ui.label(egui::RichText::new("CVD Accessibility Preview").strong());
+    ui.horizontal_wrapped(|ui| {
+        ui.set_max_width(gctx.body_w);
+        for (slug, lbl, cvd) in [
+            ("none", "Normal Vision", None),
+            ("protan", "Protanopia", Some(CvdKind::Protanopia)),
+            ("deutan", "Deuteranopia", Some(CvdKind::Deuteranopia)),
+            ("tritan", "Tritanopia", Some(CvdKind::Tritanopia)),
+            ("achroma", "Grayscale", Some(CvdKind::Achromatopsia)),
+        ] {
+            if record_button(
+                ui,
+                gctx.meta,
+                ButtonEntry {
+                    widget_id: &format!("format_graph.cvd.{slug}"),
+                    label: lbl,
+                    command_id: None,
+                    selected: fg.cvd_preview == cvd,
+                    enabled: true,
+                    disabled_reason: None,
+                },
+                gctx.tokens,
+            )
+            .clicked()
+            {
+                let mut next = fg.clone();
+                next.cvd_preview = cvd;
+                gctx.intents.push_update_format_graph_state(next);
+            }
+        }
+    });
+
+    ui.add_space(6.0);
+    render_legend_toggles(ui, gctx, &fg);
+}
+
+pub(super) fn render_fg_annotations(ui: &mut Ui, gctx: &mut GraphModalCtx<'_>) {
+    let fg = gctx.app.canvas_dialogs.format_graph.clone();
+    ui.label(egui::RichText::new(gtr(gctx.locale, "fg.annotations.heading")).strong());
+    ui.add_space(4.0);
+    let has_eq = fg.model_equation_mode.is_some();
+    if has_eq {
+        ui.horizontal_wrapped(|ui| {
+            ui.set_max_width(gctx.body_w);
+            ui.label(gtr(gctx.locale, "fg.equation_mode"));
+            for (slug, lbl, mode) in
+                [("substituted", "Substituted", EquationDisplayMode::Substituted), ("symbolic", "Symbolic", EquationDisplayMode::Symbolic)]
+            {
+                if record_button(
+                    ui,
+                    gctx.meta,
+                    ButtonEntry {
+                        widget_id: &format!("format_graph.equation.{slug}"),
+                        label: lbl,
+                        command_id: None,
+                        selected: fg.model_equation_mode == Some(mode),
+                        enabled: true,
+                        disabled_reason: None,
+                    },
+                    gctx.tokens,
+                )
+                .clicked()
+                {
+                    let mut next = fg.clone();
+                    next.set_model_equation_mode(mode);
+                    gctx.intents.push_update_format_graph_state(next);
+                }
+            }
+        });
+    } else {
+        ui.label(gtr(gctx.locale, "fg.annotations.empty"));
+    }
+    ui.add_space(6.0);
+    render_legend_toggles(ui, gctx, &fg);
+}
