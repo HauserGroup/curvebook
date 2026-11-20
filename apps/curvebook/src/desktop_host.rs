@@ -724,25 +724,41 @@ fn apply_control_journal_steps(
 
     let mut recorded_any_step = false;
     let mut requires_final_checkpoint = false;
-    for step in ctx.steps {
-        if step.mutated {
-            recorded_any_step = true;
-            dirty_commands.push(step.command_id.clone());
-            if Session::command_requires_wal_checkpoint(&step.command_id) || step.command_id.starts_with("ui.") {
+    if !ctx.rolled_back {
+        for step in ctx.steps {
+            if step.mutated {
+                recorded_any_step = true;
+                dirty_commands.push(step.command_id.clone());
+                if Session::command_requires_wal_checkpoint(&step.command_id) || step.command_id.starts_with("ui.") {
+                    requires_final_checkpoint = true;
+                }
+            } else if step.command_id == "project.save" {
+                recorded_any_step = true;
+                dirty_commands.clear();
                 requires_final_checkpoint = true;
             }
-        } else if step.command_id == "project.save" {
-            recorded_any_step = true;
-            dirty_commands.clear();
-            requires_final_checkpoint = true;
+        }
+
+        if !is_readonly_control_method(ctx.method) {
+            let recorded_mutating_steps = u64::try_from(ctx.steps.iter().filter(|s| s.mutated).count()).unwrap_or(u64::MAX);
+            let seq_delta = app.mutation_seq().wrapping_sub(ctx.prev_mutation_seq);
+            let now_dirty = app.session().is_dirty();
+            let stack_changed = app.session().undo_depth() != ctx.prev_undo_depth || app.session().redo_depth() != ctx.prev_redo_depth;
+            let became_dirty = !ctx.prev_dirty && now_dirty;
+            let unrecorded_mutation = seq_delta > recorded_mutating_steps || (!recorded_any_step && (seq_delta > 0 || stack_changed || became_dirty));
+            if unrecorded_mutation {
+                recorded_any_step = true;
+                requires_final_checkpoint = true;
+                dirty_commands.push(ctx.method.to_owned());
+            }
         }
     }
 
     if recorded_any_step && let Some(journal) = recovery_journal.as_mut() {
         if requires_final_checkpoint {
             // A batch containing any checkpoint-requiring step (`edit.undo`, `edit.redo`,
-            // `READS_FILESYSTEM`, `project.save`, or a UI command) must snapshot the final
-            // post-batch state ONCE without also appending subsequent steps that would
+            // `READS_FILESYSTEM`, `project.save`, a UI command, or an unrecorded mutation) must snapshot
+            // the final post-batch state ONCE without also appending subsequent steps that would
             // double-replay on crash recovery.
             app.session().checkpoint_journal(journal).map_err(|err| format!("failed to checkpoint control WAL batch `{}`: {err}", ctx.method))?;
         } else {
@@ -752,21 +768,6 @@ fn apply_control_journal_steps(
                         .record_outcome_to_journal(journal, &step.command_id, &step.params, true)
                         .map_err(|err| format!("failed to record control WAL entry `{}`: {err}", step.command_id))?;
                 }
-            }
-        }
-    }
-
-    if !recorded_any_step && !ctx.rolled_back && !is_readonly_control_method(ctx.method) {
-        let now_dirty = app.session().is_dirty();
-        let mutated = app.mutation_seq() != ctx.prev_mutation_seq;
-        let stack_changed = app.session().undo_depth() != ctx.prev_undo_depth || app.session().redo_depth() != ctx.prev_redo_depth;
-        let became_dirty = !ctx.prev_dirty && now_dirty;
-        if mutated || stack_changed || became_dirty {
-            dirty_commands.push(ctx.method.to_owned());
-            if let Some(journal) = recovery_journal.as_mut() {
-                app.session()
-                    .checkpoint_journal(journal)
-                    .map_err(|err| format!("failed to checkpoint control UI mutation `{}`: {err}", ctx.method))?;
             }
         }
     }
@@ -891,7 +892,10 @@ where
                 rolled_back: false,
                 request_ok: reply.ok,
             };
-            on_post_request(win.app(), &post_ctx)?;
+            win.with_control_journal_hook(|app_ref, journal_hook| {
+                journal_hook(app_ref, &post_ctx)?;
+                on_post_request(app_ref, &post_ctx)
+            })?;
             win.app_mut().sync_views();
             return Ok(LiveControlFrameOutput { response_bytes, quit: false, close_connection: false, auth_succeeded: None });
         }
@@ -903,7 +907,7 @@ where
     let quit = win
         .with_control_journal_hook(|app, journal_hook| {
             let mut combined_hook = |app_ref: &UiApp, ctx: &ControlPostRequestContext<'_>| -> Result<(), String> {
-                if ctx.request_ok && !ctx.rolled_back {
+                if !ctx.rolled_back {
                     for step in ctx.steps {
                         if step.command_id == "project.save"
                             && let Some(path) = extract_project_save_path(&step.params)
@@ -913,6 +917,10 @@ where
                         } else if step.mutated {
                             clean_after_save = false;
                         }
+                    }
+                    let recorded_mutating_steps = u64::try_from(ctx.steps.iter().filter(|s| s.mutated).count()).unwrap_or(u64::MAX);
+                    if app_ref.mutation_seq().wrapping_sub(ctx.prev_mutation_seq) > recorded_mutating_steps {
+                        clean_after_save = false;
                     }
                 }
                 journal_hook(app_ref, ctx)?;

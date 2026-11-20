@@ -421,7 +421,16 @@ const STUDIO_FORMULA_FUNCS: &[FormulaFnEntry] = &[
     FormulaFnEntry { name: "if", signature: "if(cond, t, f)", insert: "if(", summary: "Conditional branch per row" },
     FormulaFnEntry { name: "coalesce", signature: "coalesce(a, b)", insert: "coalesce(", summary: "First non-missing value" },
     FormulaFnEntry { name: "Info", signature: "Info(\"Key\")", insert: "Info(\"", summary: "Linked InfoSheet constant" },
+    FormulaFnEntry { name: "countif", signature: "countif(cond)", insert: "countif(", summary: "Conditional row count" },
+    FormulaFnEntry { name: "sumif", signature: "sumif(var, cond)", insert: "sumif(", summary: "Conditional column sum" },
+    FormulaFnEntry { name: "meanif", signature: "meanif(var, cond)", insert: "meanif(", summary: "Conditional column mean" },
 ];
+
+/// Return the canonical formula signature shown by the trailing Formula Studio (`#14`).
+#[must_use]
+pub fn studio_formula_signature(name: &str) -> Option<&'static str> {
+    STUDIO_FORMULA_FUNCS.iter().find(|entry| entry.name == name).map(|entry| entry.signature)
+}
 
 #[allow(clippy::too_many_arguments)]
 fn studio_chip(

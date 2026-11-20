@@ -463,8 +463,8 @@ const FORMULA_BUILTINS: &[(&str, &str, FormulaAutocompleteKind, &str)] = &[
     ("percentile(var, p)", "percentile(", FormulaAutocompleteKind::AggregateFunction, "p-th percentile (0..100)"),
     ("zscore(var)", "zscore(", FormulaAutocompleteKind::AggregateFunction, "Standardized z-score"),
     ("countif(cond)", "countif(", FormulaAutocompleteKind::AggregateFunction, "Conditional row count"),
-    ("sumif(cond, var)", "sumif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column sum"),
-    ("meanif(cond, var)", "meanif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column mean"),
+    ("sumif(var, cond)", "sumif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column sum"),
+    ("meanif(var, cond)", "meanif(", FormulaAutocompleteKind::AggregateFunction, "Conditional column mean"),
     ("row_number()", "row_number()", FormulaAutocompleteKind::WindowFunction, "1-based row number"),
     ("rank(var)", "rank(", FormulaAutocompleteKind::WindowFunction, "Competition rank"),
     ("dense_rank(var)", "dense_rank(", FormulaAutocompleteKind::WindowFunction, "Dense rank without gaps"),
@@ -3056,5 +3056,77 @@ mod tests {
         assert_eq!(coords.len(), 50);
         assert_eq!(targets.len(), 50);
         assert!(frame.rows.iter().all(|r| r.cells.iter().all(|c| c.visual.is_selected)));
+    }
+
+    #[test]
+    fn audit_14_conditional_aggregate_hints_match_evaluator_arg_order() {
+        use curvebook_doc::{VariableColumn, VariableSource};
+        use curvebook_engine::Session;
+        use serde_json::json;
+
+        use super::FORMULA_BUILTINS;
+        use crate::UiApp;
+        use crate::egui_shell::trailing_studio::studio_formula_signature;
+        use crate::views::mv_formula::formula_function_signature;
+
+        let find_builtin = |name: &str| {
+            FORMULA_BUILTINS.iter().find(|(label, _, _, _)| label.starts_with(&format!("{name}("))).map(|(label, insert, _, _)| (*label, *insert))
+        };
+        assert_eq!(find_builtin("countif"), Some(("countif(cond)", "countif(")));
+        assert_eq!(find_builtin("sumif"), Some(("sumif(var, cond)", "sumif(")));
+        assert_eq!(find_builtin("meanif"), Some(("meanif(var, cond)", "meanif(")));
+        assert!(
+            !FORMULA_BUILTINS.iter().any(|(label, _, _, _)| label.contains("(cond, var)")),
+            "FORMULA_BUILTINS must not suggest reversed (cond, var) hints"
+        );
+
+        assert_eq!(formula_function_signature("countif"), Some("countif(cond)"));
+        assert_eq!(formula_function_signature("sumif"), Some("sumif(var, cond)"));
+        assert_eq!(formula_function_signature("meanif"), Some("meanif(var, cond)"));
+
+        assert_eq!(studio_formula_signature("countif"), Some("countif(cond)"));
+        assert_eq!(studio_formula_signature("sumif"), Some("sumif(var, cond)"));
+        assert_eq!(studio_formula_signature("meanif"), Some("meanif(var, cond)"));
+
+        let mut mv = MultipleVariablesTable::new(2, 2).unwrap();
+        mv.variables[0] = VariableColumn {
+            title: String::from("Reading"),
+            role: VariableRole::Continuous,
+            role_inferred: false,
+            source: VariableSource::Entered,
+            level_order: Default::default(),
+            cells: vec![Cell::number(1.0), Cell::number(10.0)],
+        };
+        mv.variables[1] = VariableColumn {
+            title: String::from("Flag"),
+            role: VariableRole::Continuous,
+            role_inferred: false,
+            source: VariableSource::Entered,
+            level_order: Default::default(),
+            cells: vec![Cell::number(1.0), Cell::number(0.0)],
+        };
+        let sheet = DataSheet::new("mv-14", "Conditional", TableArchetype::MultipleVariables(mv)).unwrap();
+        let mut doc = ProjectDocument::default();
+        doc.add_data_sheet(sheet).unwrap();
+        doc.active_sheet_id = Some("mv-14".into());
+
+        let mut grid = GridViewState::default();
+        let ds = doc.data_sheet(&"mv-14".into()).unwrap();
+        grid.formula_bar.open_for_new_column(ds, "CondSum", Some(&doc));
+        grid.formula_bar.set_input("= sumi", None, &doc);
+        assert!(grid.formula_bar.completions.iter().any(|c| c.label == "sumif(var, cond)" && c.insert_text == "sumif("));
+        grid.formula_bar.set_input("= meani", None, &doc);
+        assert!(grid.formula_bar.completions.iter().any(|c| c.label == "meanif(var, cond)" && c.insert_text == "meanif("));
+
+        let mut app = UiApp::from_session(Session::from_document(doc));
+        app.execute_command("table.setCalculatedVariable", json!({ "sheet_id": "mv-14", "title": "CondSum", "formula": "= sumif(Reading, Flag)" }))
+            .expect("evaluate sumif(Reading, Flag)");
+        let updated_ds = app.document().data_sheet(&"mv-14".into()).unwrap();
+        let TableArchetype::MultipleVariables(updated_mv) = &updated_ds.archetype else {
+            panic!("expected MultipleVariables table");
+        };
+        let cond_sum = updated_mv.variables.iter().find(|v| v.title == "CondSum").expect("CondSum variable");
+        assert_eq!(cond_sum.cells[0].active_number(), Some(1.0));
+        assert_eq!(cond_sum.cells[1].active_number(), Some(1.0));
     }
 }

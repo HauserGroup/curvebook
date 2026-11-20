@@ -536,3 +536,114 @@ fn audit_5_gui_edit_after_64_undo_eviction_persists_through_crash_recovery() -> 
     rec_rt.close_all_force()?;
     Ok(())
 }
+
+#[test]
+fn audit_118_mixed_batch_gui_menu_then_create_recovers_exact_sheets() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDirGuard::new("audit118-mixed-batch")?;
+    let recovery_dir = dir.path.join("recovery");
+    let auth = ControlAuth::from_token("audit118-mixed-batch-control-token")?;
+    let viewport = ViewportMetrics::new(900.0, 620.0, 1.0);
+
+    {
+        let (session, journal, report) = Session::open_dir_with_recovery(&recovery_dir, "audit118-1", 2_000, 1_000)?;
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(recovery_dir.clone()), ..DesktopHostConfig::default() });
+        let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
+        let win = rt.window_mut(win_id)?;
+
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
+
+        // Non-atomic mixed batch: GUI menu action creates `g1`, followed by `sheet.createData` for `t2`.
+        let batch_req = json!({
+            "id": "b118-1",
+            "method": "command.batch",
+            "token": auth.as_str(),
+            "params": {
+                "atomic": false,
+                "commands": [
+                    { "command": "ui.invoke_menu", "params": { "command_id": "graph.create", "params": { "sheet_id": "g1", "data_sheet_id": "t1", "kind": "column" } } },
+                    { "command": "sheet.createData", "params": { "sheet_id": "t2", "title": "Second", "archetype": "column", "cols": 1, "rows": 2 } }
+                ]
+            }
+        });
+        let input = format!("{batch_req}\n");
+        let mut reader = BufReader::new(Cursor::new(input.into_bytes()));
+        let mut out = Vec::new();
+        let quit = win.serve_control_stream_with_quit(&mut reader, &mut out, &auth)?;
+        assert!(!quit);
+        let resp: Value = serde_json::from_slice(&out)?;
+        assert_eq!(resp["ok"], json!(true), "mixed GUI+create batch failed: {resp}");
+
+        let live_data_ids: Vec<&str> = win.app().session().document().data_sheets.iter().map(|s| s.id.as_str()).collect();
+        let live_graph_ids: Vec<&str> = win.app().session().document().graph_sheets.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(live_data_ids, vec!["t1", "t2"]);
+        assert_eq!(live_graph_ids, vec!["g1"]);
+        drop(rt);
+    }
+
+    let mut rec_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let rec_id = rec_rt.recover_window_from_dir(recovery_dir, viewport, 5_000)?;
+    let rec_doc = rec_rt.window(rec_id)?.app().session().document();
+    let rec_data_ids: Vec<&str> = rec_doc.data_sheets.iter().map(|s| s.id.as_str()).collect();
+    let rec_graph_ids: Vec<&str> = rec_doc.graph_sheets.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(rec_data_ids, vec!["t1", "t2"], "mixed batch recovery must retain all data sheets");
+    assert_eq!(rec_graph_ids, vec!["g1"], "mixed batch recovery must retain GUI menu-created graph sheet");
+    rec_rt.close_all_force()?;
+    Ok(())
+}
+
+#[test]
+fn audit_118_mixed_batch_save_then_gui_mutation_keeps_dirty_and_recovers() -> Result<(), Box<dyn std::error::Error>> {
+    let dir = TempDirGuard::new("audit118-save-dirty")?;
+    let recovery_dir = dir.path.join("recovery");
+    let save_path = dir.path.join("saved-before-gui.curvebook");
+    let auth = ControlAuth::from_token("audit118-save-dirty-control-token")?;
+    let viewport = ViewportMetrics::new(900.0, 620.0, 1.0);
+
+    {
+        let (session, journal, report) = Session::open_dir_with_recovery(&recovery_dir, "audit118-save-1", 2_000, 1_000)?;
+        let mut rt = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(recovery_dir.clone()), ..DesktopHostConfig::default() });
+        let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
+        let win = rt.window_mut(win_id)?;
+
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
+
+        // Mixed batch on live control frame path: save first, then mutate via GUI menu action.
+        let batch_req = json!({
+            "id": "b118-save",
+            "method": "command.batch",
+            "params": {
+                "atomic": false,
+                "commands": [
+                    { "command": "project.save", "params": { "path": save_path.display().to_string() } },
+                    { "command": "ui.invoke_menu", "params": { "command_id": "graph.create", "params": { "sheet_id": "g1", "data_sheet_id": "t1", "kind": "column" } } }
+                ]
+            }
+        });
+        let raw = format!("{batch_req}\n");
+        let frame_out = win.dispatch_live_control_frame_with_hook(raw.as_bytes(), &auth, true, |_, _| Ok(()))?;
+        let resp: Value = serde_json::from_slice(&frame_out.response_bytes)?;
+        assert_eq!(resp["ok"], json!(true), "save+GUI mixed batch failed: {resp}");
+
+        let saved_doc = curvebook_format::open_project_bytes(&fs::read(&save_path)?)?;
+        let saved_data_ids: Vec<&str> = saved_doc.data_sheets.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(saved_data_ids, vec!["t1"]);
+        assert!(saved_doc.graph_sheets.is_empty(), "pre-GUI saved archive must contain 0 graph sheets");
+
+        let live_graph_ids: Vec<&str> = win.app().session().document().graph_sheets.iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(live_graph_ids, vec!["g1"]);
+        assert_eq!(win.app().session().file_path(), Some(save_path.as_path()));
+        assert!(win.app().session().is_dirty(), "post-save GUI mutation must keep session dirty");
+        assert!(win.has_unsaved_changes(), "post-save GUI mutation must keep window marked dirty");
+        drop(rt);
+    }
+
+    let mut rec_rt = DesktopHostRuntime::new(DesktopHostConfig::default());
+    let rec_id = rec_rt.recover_window_from_dir(recovery_dir, viewport, 5_000)?;
+    let rec_doc = rec_rt.window(rec_id)?.app().session().document();
+    let rec_data_ids: Vec<&str> = rec_doc.data_sheets.iter().map(|s| s.id.as_str()).collect();
+    let rec_graph_ids: Vec<&str> = rec_doc.graph_sheets.iter().map(|s| s.id.as_str()).collect();
+    assert_eq!(rec_data_ids, vec!["t1"]);
+    assert_eq!(rec_graph_ids, vec!["g1"], "crash recovery after save + GUI mutation must recover g1");
+    rec_rt.close_all_force()?;
+    Ok(())
+}

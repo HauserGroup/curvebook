@@ -1362,7 +1362,7 @@ fn dispatch_request_inner(
     }
 
     let result = if is_gui_action_method(method.as_str()) {
-        dispatch_gui_action(app, &method, params).map_err(ControlCallError::from)
+        dispatch_gui_action_and_record(app, &method, params, recorded)
     } else {
         match method.as_str() {
             "ping" => Ok(json!({
@@ -1395,6 +1395,41 @@ fn dispatch_request_inner(
     (response, ControlLoopAction::Continue)
 }
 
+fn dispatch_gui_action_and_record(
+    app: &mut UiApp,
+    command_id: &str,
+    params: Value,
+    recorded: Option<&mut Vec<ControlRecordedStep>>,
+) -> Result<Value, ControlCallError> {
+    let seq_before = app.mutation_seq();
+    let undo_before = app.session().undo_depth();
+    let redo_before = app.session().redo_depth();
+    let dirty_before = app.session().is_dirty();
+    let value = dispatch_gui_action(app, command_id, params.clone()).map_err(ControlCallError::from)?;
+    if let Some(steps) = recorded {
+        if command_id == "ui.invoke_menu"
+            && value.get("command_id").and_then(Value::as_str) == Some("project.save")
+            && !value.get("ui").and_then(Value::as_bool).unwrap_or(false)
+        {
+            steps.push(ControlRecordedStep {
+                command_id: String::from("project.save"),
+                params: params.get("params").cloned().unwrap_or(Value::Null),
+                mutated: false,
+            });
+        } else {
+            let mutated = app.mutation_seq() != seq_before
+                || app.session().undo_depth() != undo_before
+                || app.session().redo_depth() != redo_before
+                || (!dirty_before && app.session().is_dirty())
+                || value.get("mutated").and_then(Value::as_bool).unwrap_or(false);
+            if mutated {
+                steps.push(ControlRecordedStep { command_id: command_id.to_owned(), params, mutated: true });
+            }
+        }
+    }
+    Ok(value)
+}
+
 fn is_control_readonly_ui_command(command_id: &str) -> bool {
     command_id == "ui.canvas.preflight"
 }
@@ -1406,7 +1441,7 @@ fn dispatch_command_by_id(
     recorded: Option<&mut Vec<ControlRecordedStep>>,
 ) -> Result<Value, ControlCallError> {
     if is_gui_action_method(command_id) {
-        return dispatch_gui_action(app, command_id, params).map_err(ControlCallError::from);
+        return dispatch_gui_action_and_record(app, command_id, params, recorded);
     }
     if app.is_gui_only()
         && !is_control_readonly_ui_command(command_id)
