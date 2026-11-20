@@ -22,6 +22,7 @@ use crate::theme::{UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
 
 pub mod app_modals;
+pub mod brand;
 pub mod canvas_view;
 pub mod center_stage;
 pub mod command_palette;

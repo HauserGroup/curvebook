@@ -50,9 +50,11 @@ egui_kittest = { version = "0.37", default-features = false }
 fontdb = { version = "0.24", default-features = false }
 js-sys = "0.3"
 muda = { version = "0.21.2", default-features = false }
+png = "0.18"
 rfd = "0.18"
 wasm-bindgen = "=0.2.130"
 web-sys = { version = "0.3", default-features = false, features = ["Window"] }
+winresource = "0.1"
 
 [workspace.lints.rust]
 unsafe_code = "forbid"

@@ -351,6 +351,9 @@ fn render_tier1_bar(
 
     ui.horizontal_centered(|ui| {
         ui.spacing_mut().item_spacing.x = 6.0;
+        let (brand_rect, _) = ui.allocate_exact_size(Vec2::splat(20.0), Sense::hover());
+        crate::egui_shell::brand::paint_mark(ui, brand_rect);
+
         let home_resp =
             chrome_button_fitted(ui, tokens, meta, "toolbar.home", home_label, None, ctx_in.launcher_open, enabled, modal_reason(enabled), 84.0);
         if home_resp.clicked() && enabled {
@@ -377,7 +380,7 @@ fn render_tier1_bar(
 
         // Compute compact right-group budget before placing middle menus/title so right cluster never clips.
         let right_min_reserve = if total_w >= 540.0 { 196.0 } else { 112.0 };
-        let used_left = (home_resp.rect.width() + about_resp.rect.width() + 18.0).min(total_w);
+        let used_left = (brand_rect.width() + home_resp.rect.width() + about_resp.rect.width() + 24.0).min(total_w);
         let middle_budget = (total_w - used_left - right_min_reserve).max(0.0);
 
         state.active_in_window_menu = None;

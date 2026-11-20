@@ -1790,6 +1790,26 @@ fn render_print_modal(
     build_report(ctx, &modal_resp, "dialog.print", title, meta)
 }
 
+fn format_about_version_line(version: &str, build_sha: Option<&str>) -> String {
+    let short_sha = build_sha.map(str::trim).filter(|s| !s.is_empty()).map(|s| s.chars().take(12).collect::<String>());
+    match short_sha {
+        Some(sha) => format!("CurveBook {version} ({sha})"),
+        None => format!("CurveBook {version}"),
+    }
+}
+
+fn format_about_diagnostic_summary(app: &UiApp, build_sha: Option<&str>) -> String {
+    let version_line = format_about_version_line(env!("CARGO_PKG_VERSION"), build_sha);
+    format!(
+        "{version_line}\nTheme: {:?} ({:.0}%)\nLocale: {}\nOS: {} ({})",
+        app.theme.mode,
+        app.theme.ui_scale * 100.0,
+        normalize_locale(&app.locale),
+        std::env::consts::OS,
+        std::env::consts::ARCH,
+    )
+}
+
 fn render_about_modal(
     ctx: &Context,
     app: &UiApp,
@@ -1802,6 +1822,9 @@ fn render_about_modal(
     let locale = normalize_locale(&app.locale);
     let title = tr(locale, "menu.help.about");
     let (inner_w, max_h, body_w) = modal_bounds(ctx, 340.0);
+    let build_sha = option_env!("CURVEBOOK_BUILD_SHA");
+    let version_line = format_about_version_line(env!("CARGO_PKG_VERSION"), build_sha);
+    let copied_id = egui::Id::unique(("egui_shell_app_modal", "dialog.about.copied"));
 
     let modal_resp = egui::Modal::new(egui::Id::unique(("egui_shell_app_modal", "dialog.about"))).backdrop_color(tokens.scrim).show(ctx, |ui| {
         ui.set_min_width(inner_w);
@@ -1819,8 +1842,16 @@ fn render_about_modal(
             .show(ui, |ui| {
                 ui.set_width(body_w);
                 ui.set_max_width(body_w);
-                ui.label(egui::RichText::new(format!("CurveBook {}", env!("CARGO_PKG_VERSION"))).strong());
-                ui.add(egui::Label::new("Native scientific biostatistics, curve fitting, and publication graphing suite.").wrap());
+                ui.horizontal(|ui| {
+                    let (mark_rect, _) = ui.allocate_exact_size(egui::vec2(44.0, 44.0), egui::Sense::hover());
+                    crate::egui_shell::brand::paint_mark(ui, mark_rect);
+                    let text_w = (body_w - 44.0 - ui.spacing().item_spacing.x).max(80.0);
+                    ui.vertical(|ui| {
+                        ui.set_max_width(text_w);
+                        ui.label(egui::RichText::new(&version_line).strong());
+                        ui.add(egui::Label::new("Native scientific biostatistics, curve fitting, and publication graphing suite.").wrap());
+                    });
+                });
                 ui.add_space(6.0);
                 ui.label(format!("Active theme: {:?}, UI scale: {:.0}%", app.theme.mode, app.theme.ui_scale * 100.0));
                 ui.label(format!("Active Beta locales supported: {} (RTL locales excluded at Beta)", BETA_ACTIVE_LOCALES.len()));
@@ -1831,6 +1862,31 @@ fn render_about_modal(
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.set_max_width(body_w);
+            let copied = ctx.data(|d| d.get_temp::<bool>(copied_id).unwrap_or(false));
+            let copy_lbl = if copied { "Copied" } else { "Copy version info" };
+            let copy_resp = ui.button(copy_lbl);
+            app_record_visible(
+                ui,
+                &copy_resp,
+                meta,
+                FrameInspectEntryInput {
+                    widget_id: "dialog.about.copy_version",
+                    role: "button",
+                    label: copy_lbl,
+                    command_id: None,
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::ModalDialog,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+            if copy_resp.clicked() {
+                ui.ctx().copy_text(format_about_diagnostic_summary(app, build_sha));
+                ctx.data_mut(|d| d.insert_temp(copied_id, true));
+            }
+
             let ok_lbl = tr(locale, "btn.ok");
             let ok_resp = ui.button(ok_lbl);
             app_record_visible(
@@ -1851,6 +1907,7 @@ fn render_about_modal(
                 },
             );
             if ok_resp.clicked() {
+                ctx.data_mut(|d| d.insert_temp(copied_id, false));
                 intents.push_ui("dialog.ok", json!({}));
             }
 

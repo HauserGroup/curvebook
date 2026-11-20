@@ -848,6 +848,13 @@ impl CurveBookNativeApp {
 
     fn execute_menu_command(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId, command_id: &str) {
         self.status_banner = None;
+        if command_id == "app.preferences" {
+            if let Ok(win) = self.runtime.window_mut(window_id) {
+                win.app_mut().egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                win.app_mut().egui_views.app_modals.preferences_open = true;
+            }
+            return;
+        }
         if let Some(native_result) = self.try_handle_native_file_command(window_id, command_id) {
             if let Err(err) = native_result {
                 self.status_banner = Some(err);
@@ -1326,6 +1333,54 @@ pub fn run_native_desktop(runtime: DesktopHostRuntime, extra_ttf: Option<Vec<u8>
     run_native_desktop_with_control(runtime, extra_ttf, on_exit_cleanup, None)
 }
 
+/// Runtime window, macOS Dock, taskbar, and app-switcher icon (`assets/app-icon/`, see its README).
+///
+/// macOS uses `curvebook-macos-512.png` (which carries Apple's icon-grid inset); other platforms
+/// use the full-bleed 256 px hicolor PNG.
+fn app_icon() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/curvebook-macos-512.png");
+    #[cfg(not(target_os = "macos"))]
+    let png: &[u8] = include_bytes!("../../../assets/app-icon/hicolor/256x256/apps/org.curvebook.CurveBook.png");
+    eframe::icon_data::from_png_bytes(png).unwrap_or_default()
+}
+
+/// Detect whether `exe_path` is running from inside a packaged macOS `.app` bundle whose
+/// `Contents/Resources/curvebook.icns` is already active via `CFBundleIconFile`.
+#[cfg(any(target_os = "macos", test))]
+fn is_macos_app_bundle_exe(exe_path: &std::path::Path) -> bool {
+    let Some(macos_dir) = exe_path.parent() else {
+        return false;
+    };
+    if macos_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("MacOS") {
+        return false;
+    }
+    let Some(contents_dir) = macos_dir.parent() else {
+        return false;
+    };
+    if contents_dir.file_name().and_then(std::ffi::OsStr::to_str) != Some("Contents") {
+        return false;
+    }
+    let Some(bundle_dir) = contents_dir.parent() else {
+        return false;
+    };
+    bundle_dir.extension().and_then(std::ffi::OsStr::to_str) == Some("app") && contents_dir.join("Resources").join("curvebook.icns").is_file()
+}
+
+/// Select the `ViewportBuilder::with_icon` payload for native desktop launch.
+///
+/// Inside a packaged macOS `.app` bundle, passing [`egui::IconData::default`] instructs `eframe`
+/// not to override the bundle's native `curvebook.icns` (whereas omitting `.with_icon` would fall
+/// back to egui's default icon). Unbundled launches (`cargo run` / bare binary) and non-macOS
+/// platforms use [`app_icon`].
+fn viewport_icon_for_launch() -> egui::IconData {
+    #[cfg(target_os = "macos")]
+    if std::env::current_exe().ok().is_some_and(|exe| is_macos_app_bundle_exe(&exe)) {
+        return egui::IconData::default();
+    }
+    app_icon()
+}
+
 /// Launch the interactive native desktop window while optionally attaching a [`LiveControlChannel`]
 /// so external `--control` automation and human window input share the same live `UiApp` session.
 ///
@@ -1346,6 +1401,7 @@ pub fn run_native_desktop_with_control(
     let native_options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_app_id("org.curvebook.CurveBook")
+            .with_icon(viewport_icon_for_launch())
             .with_inner_size([DEFAULT_WINDOW_WIDTH_PT, DEFAULT_WINDOW_HEIGHT_PT])
             .with_min_inner_size([MIN_WINDOW_WIDTH_PT, MIN_WINDOW_HEIGHT_PT])
             .with_title(initial_title),
@@ -1946,6 +2002,37 @@ mod tests {
             matches!(app.runtime().window(id)?.app().canvas_dialogs.active_dialog, ActiveDialog::EditAnalysisParameters { .. }),
             "Cmd+T on ResultSheet must open egui EditAnalysisParameters modal"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn runtime_app_icon_decodes_from_assets_logo() {
+        let icon = super::app_icon();
+        #[cfg(target_os = "macos")]
+        assert_eq!((icon.width, icon.height), (512, 512));
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!((icon.width, icon.height), (256, 256));
+        assert_eq!(icon.rgba.len(), (icon.width as usize) * (icon.height as usize) * 4);
+        assert_eq!(icon.rgba[3], 0, "outer corner should be transparent");
+        assert!(icon.rgba.as_chunks::<4>().0.iter().any(|px| px[3] == 255), "icon must contain opaque logo pixels");
+    }
+
+    #[test]
+    fn macos_app_bundle_exe_detection_requires_icns() -> Result<(), Box<dyn std::error::Error>> {
+        let base = std::env::temp_dir().join(format!("curvebook-bundle-test-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        let exe = base.join("CurveBook.app").join("Contents").join("MacOS").join("curvebook");
+        let resources = base.join("CurveBook.app").join("Contents").join("Resources");
+        std::fs::create_dir_all(exe.parent().ok_or("missing parent")?)?;
+        std::fs::create_dir_all(&resources)?;
+        std::fs::write(&exe, b"")?;
+
+        assert!(!super::is_macos_app_bundle_exe(&exe), "bundle without curvebook.icns must fall back to runtime icon");
+        std::fs::write(resources.join("curvebook.icns"), b"icns")?;
+        assert!(super::is_macos_app_bundle_exe(&exe), "bundle with curvebook.icns must keep native CFBundleIconFile");
+        assert!(!super::is_macos_app_bundle_exe(std::path::Path::new("/usr/local/bin/curvebook")));
+
+        let _ = std::fs::remove_dir_all(&base);
         Ok(())
     }
 }

@@ -37,6 +37,7 @@ serde_json = { workspace = true }
 egui = { workspace = true }
 egui_extras = { workspace = true }
 fontdb = { workspace = true }
+png = { workspace = true }
 
 [dev-dependencies]
 curvebook-testkit = { workspace = true }
