@@ -31,7 +31,8 @@ use crate::dialogs_r9::sanitize_diagnostics_only_text;
 use crate::egui_shell::{
     FrameInspectEntryInput, FrameInspectMeta, OKABE_ITO_SERIES_PALETTE, PendingUiIntents, ResponsiveShellLayout, Tokens, doc_sheet_title, widgets,
 };
-use crate::i18n::{is_rtl_locale, tr};
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{LocalePreset, is_rtl_locale, tr};
 use crate::inspect::ZLayer;
 
 const STUDIO_INNER_PAD: f32 = 8.0;
@@ -1357,6 +1358,17 @@ fn constant_kind_code(val: &ConstantValue) -> u8 {
     }
 }
 
+fn format_localized_studio_constant(val: &ConstantValue, preset: &LocalePreset) -> String {
+    match val {
+        ConstantValue::Number(v) if v.is_finite() => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            let text = format!("{normalized}");
+            if preset.decimal_separator != '.' { text.replace('.', &preset.decimal_separator.to_string()) } else { text }
+        }
+        _ => val.display_text(),
+    }
+}
+
 fn render_metadata_hooks_studio(
     ui: &mut egui::Ui,
     app: &UiApp,
@@ -1393,7 +1405,7 @@ fn render_metadata_hooks_studio(
         state.info_synced_key = Some((info.id.clone(), sel_key.clone()));
         if let Some(c) = info.get_constant(&sel_key) {
             state.info_name_draft = c.name.clone();
-            state.info_value_draft = c.value.display_text();
+            state.info_value_draft = format_localized_studio_constant(&c.value, &app.locale_preset);
             state.info_units_draft = c.units.clone().unwrap_or_default();
             state.info_kind_draft = constant_kind_code(&c.value);
         } else {
@@ -1405,11 +1417,66 @@ fn render_metadata_hooks_studio(
     }
 
     ui.add_space(4.0);
-    ui.add(egui::TextEdit::singleline(&mut state.info_name_draft).desired_width(ui.available_width()).hint_text("Constant name"));
-    ui.add(
+    let name_resp = ui.add_enabled(
+        ctx_in.enabled,
+        egui::TextEdit::singleline(&mut state.info_name_draft).desired_width(ui.available_width()).hint_text("Constant name"),
+    );
+    meta.record_response(
+        ui,
+        &name_resp,
+        FrameInspectEntryInput {
+            widget_id: "inspector.info.name_input",
+            role: "textbox",
+            label: "Constant name",
+            command_id: None,
+            value: Some(json!(state.info_name_draft)),
+            enabled: ctx_in.enabled,
+            disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    let val_resp = ui.add_enabled(
+        ctx_in.enabled,
         egui::TextEdit::singleline(&mut state.info_value_draft).desired_width(ui.available_width()).hint_text("Value (number / text / YYYY-MM-DD)"),
     );
-    ui.add(egui::TextEdit::singleline(&mut state.info_units_draft).desired_width(ui.available_width()).hint_text("Units (optional)"));
+    meta.record_response(
+        ui,
+        &val_resp,
+        FrameInspectEntryInput {
+            widget_id: "inspector.info.value_input",
+            role: "textbox",
+            label: "Constant value",
+            command_id: None,
+            value: Some(json!(state.info_value_draft)),
+            enabled: ctx_in.enabled,
+            disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
+    let units_resp = ui.add_enabled(
+        ctx_in.enabled,
+        egui::TextEdit::singleline(&mut state.info_units_draft).desired_width(ui.available_width()).hint_text("Units (optional)"),
+    );
+    meta.record_response(
+        ui,
+        &units_resp,
+        FrameInspectEntryInput {
+            widget_id: "inspector.info.units_input",
+            role: "textbox",
+            label: "Units",
+            command_id: None,
+            value: Some(json!(state.info_units_draft)),
+            enabled: ctx_in.enabled,
+            disabled_reason: (!ctx_in.enabled).then_some("modal dialog is active"),
+            z_layer: ZLayer::Workspace,
+            ellipsized: false,
+            full_label: None,
+        },
+    );
 
     ui.horizontal(|ui| {
         ui.spacing_mut().item_spacing.x = 4.0;
@@ -1436,6 +1503,36 @@ fn render_metadata_hooks_studio(
     });
 
     let name_ok = !state.info_name_draft.trim().is_empty();
+    let raw_val = state.info_value_draft.trim();
+    let parsed_num = (state.info_kind_draft == 0 && !raw_val.is_empty()).then(|| parse_localized_number_input(raw_val, &app.locale_preset)).flatten();
+    let value_ok = state.info_kind_draft != 0 || raw_val.is_empty() || parsed_num.is_some();
+    if !value_ok {
+        let err_lbl = "Expected finite number";
+        let err_resp = ui.colored_label(tokens.link_red, err_lbl);
+        meta.record_response(
+            ui,
+            &err_resp,
+            FrameInspectEntryInput {
+                widget_id: "inspector.info.value_error",
+                role: "text",
+                label: err_lbl,
+                command_id: None,
+                value: None,
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::Workspace,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
+    let save_disabled_reason = if !name_ok {
+        Some("constant name cannot be empty")
+    } else if !value_ok {
+        Some("constant numeric value must be a finite number")
+    } else {
+        None
+    };
     ui.add_space(4.0);
     if studio_full_button(
         ui,
@@ -1443,21 +1540,21 @@ fn render_metadata_hooks_studio(
         "Save Constant",
         "Store or update constant on InfoSheet (info.setConstant)",
         false,
-        ctx_in.enabled && name_ok,
+        ctx_in.enabled && name_ok && value_ok,
         true,
         meta,
         "inspector.info.save_const",
         Some("info.setConstant"),
-        (!name_ok).then_some("constant name cannot be empty"),
+        save_disabled_reason,
     ) {
         let kind_str = match state.info_kind_draft {
             1 => "text",
             2 => "date",
             _ => "number",
         };
-        let raw_val = state.info_value_draft.trim();
         let val_json = match state.info_kind_draft {
-            0 => raw_val.parse::<f64>().ok().filter(|v| v.is_finite()).map_or_else(|| json!(raw_val), |n| json!(n)),
+            0 if raw_val.is_empty() => serde_json::Value::Null,
+            0 => parsed_num.map_or_else(|| json!(raw_val), |n| json!(n)),
             _ => json!(raw_val),
         };
         let units_val = if state.info_units_draft.trim().is_empty() { serde_json::Value::Null } else { json!(state.info_units_draft.trim()) };

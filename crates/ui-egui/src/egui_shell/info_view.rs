@@ -10,7 +10,8 @@ use serde_json::json;
 
 use crate::UiApp;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
-use crate::i18n::{normalize_locale, try_tr};
+use crate::grid_view::parse_localized_number_input;
+use crate::i18n::{LocalePreset, normalize_locale, try_tr};
 use crate::inspect::ZLayer;
 
 const DEFAULT_SPLIT_RATIO: f32 = 0.38;
@@ -54,6 +55,15 @@ impl InfoConstantKind {
             Self::Text => Some("text"),
             Self::Number => Some("number"),
             Self::Date => Some("date"),
+        }
+    }
+
+    const fn slug(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Text => "text",
+            Self::Number => "number",
+            Self::Date => "date",
         }
     }
 }
@@ -311,7 +321,7 @@ pub fn render_info_view_for_sheet(
     ui.scope_builder(egui::UiBuilder::new().max_rect(table_rect), |ui| {
         ui.set_clip_rect(table_rect);
         ui.painter().rect_filled(table_rect, CornerRadius::ZERO, tokens.surface_bg);
-        report.hook_badge_count = render_constants_pane(ui, doc, info, state, tokens, enabled, meta, intents);
+        report.hook_badge_count = render_constants_pane(ui, app, info, state, tokens, enabled, meta, intents);
     });
 
     // Draggable 4pt Divider with 8pt hit slop
@@ -361,10 +371,32 @@ pub fn render_info_view_for_sheet(
     report
 }
 
+fn next_unused_constant_name(info: &InfoSheet) -> String {
+    let mut n = 1usize;
+    loop {
+        let candidate = format!("Constant {n}");
+        if !info.constants.iter().any(|c| c.name.trim().eq_ignore_ascii_case(&candidate)) {
+            return candidate;
+        }
+        n = n.saturating_add(1);
+    }
+}
+
+fn format_localized_constant_value(value: &ConstantValue, locale_preset: &LocalePreset) -> String {
+    match value {
+        ConstantValue::Number(v) if v.is_finite() => {
+            let normalized = if *v == 0.0 { 0.0 } else { *v };
+            let text = format!("{normalized}");
+            if locale_preset.decimal_separator != '.' { text.replace('.', &locale_preset.decimal_separator.to_string()) } else { text }
+        }
+        _ => value.display_text(),
+    }
+}
+
 #[allow(clippy::too_many_arguments)]
 fn render_constants_pane(
     ui: &mut egui::Ui,
-    doc: &ProjectDocument,
+    app: &UiApp,
     info: &InfoSheet,
     state: &mut InfoViewEguiState,
     tokens: &Tokens,
@@ -372,6 +404,8 @@ fn render_constants_pane(
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> usize {
+    let doc = app.document();
+    let locale_preset = &app.locale_preset;
     let mut hook_badge_count = 0usize;
     let padded = ui.available_rect_before_wrap().shrink(8.0);
     if !padded.is_positive() {
@@ -407,11 +441,11 @@ fn render_constants_pane(
                     },
                 );
                 if add_resp.clicked() && enabled {
-                    let next_idx = info.constants.len() + 1;
-                    let new_name = format!("Constant {next_idx}");
-                    intents.push_engine("info.setConstant", json!({ "sheet_id": info.id.as_str(), "name": new_name, "value": "" }));
+                    let new_name = next_unused_constant_name(info);
+                    intents
+                        .push_engine("info.setConstant", json!({ "sheet_id": info.id.as_str(), "name": new_name, "value": serde_json::Value::Null }));
                     state.selected_row = Some(info.constants.len());
-                    begin_constant_edit(state, &InfoConstant { name: new_name, value: ConstantValue::Empty, units: None });
+                    begin_constant_edit(state, &InfoConstant { name: new_name, value: ConstantValue::Empty, units: None }, locale_preset);
                 }
             });
         });
@@ -464,7 +498,8 @@ fn render_constants_pane(
                     }
 
                     if is_editing {
-                        render_inline_constant_editor(ui, info, constant, state, tokens, enabled, meta, intents);
+                        let target = InlineConstantTarget { info, constant, locale_preset };
+                        render_inline_constant_editor(ui, target, state, tokens, enabled, meta, intents);
                         continue;
                     }
 
@@ -568,10 +603,10 @@ fn render_constants_pane(
                     );
                     if row_resp.double_clicked() && enabled {
                         state.selected_row = Some(idx);
-                        begin_constant_edit(state, constant);
+                        begin_constant_edit(state, constant, locale_preset);
                     } else if row_resp.clicked() && enabled {
                         if state.selected_row == Some(idx) {
-                            begin_constant_edit(state, constant);
+                            begin_constant_edit(state, constant, locale_preset);
                         } else {
                             state.selected_row = Some(idx);
                         }
@@ -587,25 +622,32 @@ fn render_constants_pane(
     hook_badge_count
 }
 
-fn begin_constant_edit(state: &mut InfoViewEguiState, constant: &InfoConstant) {
+struct InlineConstantTarget<'a> {
+    info: &'a InfoSheet,
+    constant: &'a InfoConstant,
+    locale_preset: &'a LocalePreset,
+}
+
+fn begin_constant_edit(state: &mut InfoViewEguiState, constant: &InfoConstant, locale_preset: &LocalePreset) {
     state.editing_key = Some(constant.name.clone());
-    state.editing_value = constant.value.display_text();
+    state.editing_value = format_localized_constant_value(&constant.value, locale_preset);
     state.editing_units = constant.units.clone().unwrap_or_default();
     state.editing_kind = InfoConstantKind::from_value(&constant.value);
     state.editing_focus_seen = false;
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_inline_constant_editor(
     ui: &mut egui::Ui,
-    info: &InfoSheet,
-    constant: &InfoConstant,
+    target: InlineConstantTarget<'_>,
     state: &mut InfoViewEguiState,
     tokens: &Tokens,
     enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let info = target.info;
+    let constant = target.constant;
+    let locale_preset = target.locale_preset;
     let editor_frame = egui::Frame::NONE
         .fill(tokens.panel_bg)
         .stroke(Stroke::new(1.5, tokens.accent))
@@ -616,13 +658,31 @@ fn render_inline_constant_editor(
         ui.horizontal(|ui| {
             ui.strong(&constant.name);
             for kind in [InfoConstantKind::Auto, InfoConstantKind::Number, InfoConstantKind::Date, InfoConstantKind::Text] {
-                if ui.selectable_label(state.editing_kind == kind, kind.badge()).clicked() && enabled {
+                let kind_resp = ui.selectable_label(state.editing_kind == kind, kind.badge());
+                let kind_wid = format!("info.const.kind.{}", kind.slug());
+                meta.record_response(
+                    ui,
+                    &kind_resp,
+                    FrameInspectEntryInput {
+                        widget_id: &kind_wid,
+                        role: "button",
+                        label: kind.badge(),
+                        command_id: None,
+                        value: Some(json!(state.editing_kind == kind)),
+                        enabled,
+                        disabled_reason: (!enabled).then_some("modal dialog is active"),
+                        z_layer: ZLayer::Workspace,
+                        ellipsized: false,
+                        full_label: None,
+                    },
+                );
+                if kind_resp.clicked() && enabled {
                     state.editing_kind = kind;
                 }
             }
         });
 
-        let valid_input = validate_constant_draft(state.editing_kind, &state.editing_value);
+        let valid_input = validate_constant_draft(state.editing_kind, &state.editing_value, locale_preset);
         ui.horizontal(|ui| {
             let edit_resp = ui.add_enabled(
                 enabled,
@@ -650,15 +710,6 @@ fn render_inline_constant_editor(
                     full_label: None,
                 },
             );
-
-            if state.editing_kind == InfoConstantKind::Date {
-                if ui.add_enabled(enabled, egui::Button::new("-1d")).clicked() {
-                    state.editing_value = step_iso_date(&state.editing_value, -1);
-                }
-                if ui.add_enabled(enabled, egui::Button::new("+1d")).clicked() {
-                    state.editing_value = step_iso_date(&state.editing_value, 1);
-                }
-            }
 
             ui.add_enabled(enabled, TextEdit::singleline(&mut state.editing_units).hint_text("units").desired_width(48.0));
 
@@ -688,7 +739,7 @@ fn render_inline_constant_editor(
             if esc_cancel || cancel_resp.clicked() {
                 state.editing_key = None;
             } else if (save_resp.clicked() || enter_commit) && save_enabled {
-                commit_constant_edit(info, constant, state, intents);
+                commit_constant_edit(info, constant, state, locale_preset, intents);
             }
         });
 
@@ -698,87 +749,70 @@ fn render_inline_constant_editor(
                 InfoConstantKind::Date => "Expected ISO date YYYY-MM-DD",
                 _ => "Invalid value",
             };
-            ui.colored_label(tokens.link_red, err_msg);
+            let err_resp = ui.colored_label(tokens.link_red, err_msg);
+            meta.record_response(
+                ui,
+                &err_resp,
+                FrameInspectEntryInput {
+                    widget_id: "info.const.editor_error",
+                    role: "text",
+                    label: err_msg,
+                    command_id: None,
+                    value: None,
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::Workspace,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
         }
     });
 }
 
-fn validate_constant_draft(kind: InfoConstantKind, draft: &str) -> bool {
+fn validate_constant_draft(kind: InfoConstantKind, draft: &str, locale_preset: &LocalePreset) -> bool {
     let trimmed = draft.trim();
     if trimmed.is_empty() {
         return true;
     }
     match kind {
         InfoConstantKind::Auto | InfoConstantKind::Text => true,
-        InfoConstantKind::Number => trimmed.parse::<f64>().is_ok_and(f64::is_finite),
+        InfoConstantKind::Number => parse_localized_number_input(trimmed, locale_preset).is_some(),
         InfoConstantKind::Date => is_valid_iso_date(trimmed),
     }
 }
 
+/// Validate strict 10-byte ASCII ISO date shape `YYYY-MM-DD` (`0001..=9999`, `01..=12`, `01..=31`).
 fn is_valid_iso_date(raw: &str) -> bool {
     let bytes = raw.as_bytes();
     if bytes.len() != 10 || bytes[4] != b'-' || bytes[7] != b'-' {
         return false;
     }
-    let Ok(y) = raw[0..4].parse::<i32>() else { return false };
-    let Ok(m) = raw[5..7].parse::<u32>() else { return false };
-    let Ok(d) = raw[8..10].parse::<u32>() else { return false };
-    (1..=9999).contains(&y) && (1..=12).contains(&m) && (1..=days_in_month(y, m)).contains(&d)
-}
-
-const fn is_leap_year(y: i32) -> bool {
-    (y % 4 == 0 && y % 100 != 0) || (y % 400 == 0)
-}
-
-const fn days_in_month(y: i32, m: u32) -> u32 {
-    match m {
-        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
-        4 | 6 | 9 | 11 => 30,
-        2 => {
-            if is_leap_year(y) {
-                29
-            } else {
-                28
-            }
-        }
-        _ => 30,
+    if !bytes[0..4].iter().all(u8::is_ascii_digit) || !bytes[5..7].iter().all(u8::is_ascii_digit) || !bytes[8..10].iter().all(u8::is_ascii_digit) {
+        return false;
     }
+    let Ok(year) = raw[0..4].parse::<u16>() else { return false };
+    let Ok(month) = raw[5..7].parse::<u8>() else { return false };
+    let Ok(day) = raw[8..10].parse::<u8>() else { return false };
+    (1..=9999).contains(&year) && (1..=12).contains(&month) && (1..=31).contains(&day)
 }
 
-fn step_iso_date(raw: &str, delta_days: i32) -> String {
-    let base = if is_valid_iso_date(raw.trim()) { raw.trim() } else { "2026-01-01" };
-    let mut y = base[0..4].parse::<i32>().unwrap_or(2026);
-    let mut m = base[5..7].parse::<i32>().unwrap_or(1);
-    let mut d = base[8..10].parse::<i32>().unwrap_or(1) + delta_days;
-    while d > i32::try_from(days_in_month(y, u32::try_from(m).unwrap_or(1))).unwrap_or(30) {
-        d -= i32::try_from(days_in_month(y, u32::try_from(m).unwrap_or(1))).unwrap_or(30);
-        m += 1;
-        if m > 12 {
-            m = 1;
-            y += 1;
-        }
-    }
-    while d < 1 {
-        m -= 1;
-        if m < 1 {
-            m = 12;
-            y -= 1;
-        }
-        d += i32::try_from(days_in_month(y, u32::try_from(m).unwrap_or(1))).unwrap_or(30);
-    }
-    format!("{y:04}-{m:02}-{d:02}")
-}
-
-fn commit_constant_edit(info: &InfoSheet, constant: &InfoConstant, state: &mut InfoViewEguiState, intents: &mut PendingUiIntents) {
+fn commit_constant_edit(
+    info: &InfoSheet,
+    constant: &InfoConstant,
+    state: &mut InfoViewEguiState,
+    locale_preset: &LocalePreset,
+    intents: &mut PendingUiIntents,
+) {
     let trimmed = state.editing_value.trim();
     let units_val = state.editing_units.trim();
     let kind = state.editing_kind;
+    let parsed_num = parse_localized_number_input(trimmed, locale_preset);
 
     let value_json = if trimmed.is_empty() {
         serde_json::Value::Null
-    } else if kind == InfoConstantKind::Number || (kind == InfoConstantKind::Auto && trimmed.parse::<f64>().is_ok_and(f64::is_finite)) {
-        let num = trimmed.parse::<f64>().unwrap_or(0.0);
-        json!(num)
+    } else if kind == InfoConstantKind::Number || (kind == InfoConstantKind::Auto && parsed_num.is_some()) {
+        json!(parsed_num.unwrap_or(0.0))
     } else {
         json!(trimmed)
     };
@@ -1057,4 +1091,53 @@ fn ensure_solid_scrollbar_style(ui: &mut egui::Ui, tokens: &Tokens) {
     scroll.bar_width = tokens.metrics.scroll_bar_thickness.max(10.0);
     scroll.bar_inner_margin = 2.0;
     scroll.bar_outer_margin = 2.0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn iso_date_shape_validation_accepts_valid_and_rejects_edges() {
+        assert!(is_valid_iso_date("2026-11-20"));
+        assert!(is_valid_iso_date("0001-01-01"));
+        assert!(is_valid_iso_date("9999-12-31"));
+        assert!(is_valid_iso_date("2026-01-31"));
+
+        assert!(!is_valid_iso_date("+123-01-01"));
+        assert!(!is_valid_iso_date("-123-01-01"));
+        assert!(!is_valid_iso_date("0000-12-31"));
+        assert!(!is_valid_iso_date("10000-01-01"));
+        assert!(!is_valid_iso_date("2026-13-01"));
+        assert!(!is_valid_iso_date("2026-00-01"));
+        assert!(!is_valid_iso_date("2026-01-00"));
+        assert!(!is_valid_iso_date("2026-01-32"));
+        assert!(!is_valid_iso_date("2026-1-01"));
+        assert!(!is_valid_iso_date("2026/01/01"));
+        assert!(!is_valid_iso_date("2026-+1-01"));
+        assert!(!is_valid_iso_date("2026-01-+1"));
+        assert!(!is_valid_iso_date(""));
+    }
+
+    #[test]
+    fn next_unused_constant_name_avoids_case_insensitive_collisions() {
+        let mut info = InfoSheet::new_preseeded("info-test", "Test").unwrap();
+        info.constants.clear();
+        assert_eq!(next_unused_constant_name(&info), "Constant 1");
+
+        info.constants.push(InfoConstant::new("Constant 2", ConstantValue::Number(2.0), None).unwrap());
+        info.constants.push(InfoConstant::new("Constant 3", ConstantValue::Number(3.0), None).unwrap());
+        assert_eq!(next_unused_constant_name(&info), "Constant 1");
+
+        info.constants.push(InfoConstant::new("constant 1", ConstantValue::Number(1.0), None).unwrap());
+        assert_eq!(next_unused_constant_name(&info), "Constant 4");
+    }
+
+    #[test]
+    fn localized_number_draft_validation_accepts_comma_decimals_in_de_locale() {
+        let de = LocalePreset::for_locale("de");
+        assert!(validate_constant_draft(InfoConstantKind::Number, "1,5", &de));
+        assert!(validate_constant_draft(InfoConstantKind::Number, "-1.234,5", &de));
+        assert!(!validate_constant_draft(InfoConstantKind::Number, "abc", &de));
+    }
 }

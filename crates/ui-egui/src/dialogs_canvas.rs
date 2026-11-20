@@ -4,19 +4,19 @@
 
 use curvebook_chart::{ChartScene, PreflightIssue};
 use curvebook_doc::{
-    AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode, BracketStyle,
-    CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping, ColumnDesignHint,
-    CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec, DiagnosticPlotKind,
-    EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod, FramePreset,
-    GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement, HookSource,
-    JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind, LinearRegressionSpec,
-    MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec, MultivariateGraphEncoding,
-    MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec, OneWayMethod, OutlierSpec,
-    PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode, PanelBadgeStyle, ParameterRule,
-    ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign, ReplicateOverlayStyle,
-    ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping, SubcolumnAggregation,
-    SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod, TwoGroupSpec,
-    VariableRole, WeightingScheme, WhiskerMethod,
+    AdditionalTick, AnalysisKind, AnalysisSpec, AxisSegment, AxisSpec, AxisThreshold, BaselineOperation, BlandAltmanSpec, BracketLabelMode,
+    BracketStyle, CanvasResizeMode, ChecklistItem, ChecklistStatus, CiBound, CldOrdering, ClusterDistance, ClusterLinkage, ColorChannelMapping,
+    ColumnDesignHint, CompactLetterDisplaySpec, ConnectingLineStyle, ContingencyMethod, ContingencySpec, CoxTieMethod, DataSheet, DescriptiveSpec,
+    DiagnosticPlotKind, EquationDisplayMode, ErrorBarMetric, ErrorBarSpec, ErrorPropagationMode, FactorialAnovaSpec, FigureCanvasPreset, FitMethod,
+    FramePreset, GlmFamily, GlmSpec, GraphAnnotation, GraphAxisScale, GraphKind, GraphSheet, GraphSpec, GraphicalDataObject, GroupedArrangement,
+    HookSource, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, LegendSpec, LevelOrderKind, LevelOrderSpec, LineConnectionKind,
+    LinearRegressionSpec, MathTransformPreset, MixedModelDfMethod, MultipleRowTestsSpec, MultiplicityMethod, MultiplicitySpec,
+    MultivariateGraphEncoding, MultivariatePlotMode, MultivariateSpec, NestedAnalysisSpec, NonlinearFitSpec, NormalizeAnchor, OneWayAnovaSpec,
+    OneWayMethod, OutlierSpec, PValueFormat, PValueStackMethod, PValueStackSpec, PageOrientation, PairwiseBracketSpec, PairwiseDisplayMode,
+    PanelBadgeStyle, ParameterRule, ParameterScope, PartsOfWholeLayout, PassingBablokSpec, ProjectDocument, RectPt, RepeatedMeasuresDesign,
+    ReplicateOverlayStyle, ResidualCovariance, ResultCell, ResultSheet, ResultTab, ResultTabKind, RocSpec, SheetId, SizeChannelMapping,
+    SubcolumnAggregation, SumOfSquaresType, SummaryMeasure, SurvivalAnalysisSpec, TableArchetype, TableKind, TransformAnalysisSpec, TwoGroupMethod,
+    TwoGroupSpec, VariableRole, WeightingScheme, WhiskerMethod,
 };
 use curvebook_engine::{EngineError, Session, cmd};
 use curvebook_palette::{ColorRamp, ColormapId, CvdKind, LineDashStyle, MarkerFillMode, MarkerShape, MarkerStyle, PaletteId, Rgba8, simulate_cvd};
@@ -5101,6 +5101,8 @@ pub struct FormatAxesState {
     pub enable_y2: bool,
     pub axis_draft: AxisSpec,
     #[serde(default)]
+    pub open_generation: u64,
+    #[serde(default)]
     pub base_x_thresholds: Vec<AxisThreshold>,
     #[serde(default)]
     pub base_y_thresholds: Vec<AxisThreshold>,
@@ -5108,6 +5110,12 @@ pub struct FormatAxesState {
     pub pending_x_thresholds: Option<Vec<AxisThreshold>>,
     #[serde(default)]
     pub pending_y_thresholds: Option<Vec<AxisThreshold>>,
+    #[serde(default)]
+    pub pending_x_additional_ticks: Option<Vec<AdditionalTick>>,
+    #[serde(default)]
+    pub pending_y_additional_ticks: Option<Vec<AdditionalTick>>,
+    #[serde(default)]
+    pub pending_y2_additional_ticks: Option<Vec<AdditionalTick>>,
 }
 
 impl Default for FormatAxesState {
@@ -5117,10 +5125,14 @@ impl Default for FormatAxesState {
             target_axis: AxisTarget::Y,
             enable_y2: false,
             axis_draft: AxisSpec::linear("Y"),
+            open_generation: 0,
             base_x_thresholds: Vec::new(),
             base_y_thresholds: Vec::new(),
             pending_x_thresholds: None,
             pending_y_thresholds: None,
+            pending_x_additional_ticks: None,
+            pending_y_additional_ticks: None,
+            pending_y2_additional_ticks: None,
         }
     }
 }
@@ -5128,6 +5140,7 @@ impl Default for FormatAxesState {
 impl FormatAxesState {
     /// Load axis `target` (`X`, `Y`, or `Y2`) from `graph`.
     pub fn sync_from_graph(&mut self, graph: &GraphSheet, target: AxisTarget) {
+        self.open_generation = self.open_generation.wrapping_add(1);
         self.graph_sheet_id = Some(graph.id.clone());
         self.target_axis = target;
         self.enable_y2 = graph.spec.y2_axis.is_some();
@@ -5135,11 +5148,34 @@ impl FormatAxesState {
         self.base_y_thresholds = graph.spec.y_axis.thresholds.clone();
         self.pending_x_thresholds = None;
         self.pending_y_thresholds = None;
+        self.pending_x_additional_ticks = None;
+        self.pending_y_additional_ticks = None;
+        self.pending_y2_additional_ticks = None;
         self.axis_draft = match target {
             AxisTarget::X => graph.spec.x_axis.clone(),
             AxisTarget::Y => graph.spec.y_axis.clone(),
             AxisTarget::Y2 => graph.spec.y2_axis.clone().unwrap_or_else(|| AxisSpec::linear("Y2")),
         };
+    }
+
+    /// Stage the active axis's additional ticks so they survive axis-tab switches until OK/Apply.
+    pub fn stage_active_additional_ticks(&mut self) {
+        let ticks = self.axis_draft.additional_ticks.clone();
+        match self.target_axis {
+            AxisTarget::X => self.pending_x_additional_ticks = Some(ticks),
+            AxisTarget::Y => self.pending_y_additional_ticks = Some(ticks),
+            AxisTarget::Y2 => self.pending_y2_additional_ticks = Some(ticks),
+        }
+    }
+
+    /// Stage the active axis's thresholds so they survive axis-tab switches until OK/Apply.
+    pub fn stage_active_thresholds(&mut self) {
+        let thresholds = self.axis_draft.thresholds.clone();
+        match self.target_axis {
+            AxisTarget::X => self.pending_x_thresholds = Some(thresholds),
+            AxisTarget::Y => self.pending_y_thresholds = Some(thresholds),
+            AxisTarget::Y2 => {}
+        }
     }
 
     /// Return the effective X-axis reference thresholds including un-committed inspector edits.
@@ -5207,9 +5243,38 @@ impl FormatAxesState {
         }
     }
 
+    fn set_x_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
+        if self.target_axis == AxisTarget::X {
+            self.axis_draft.additional_ticks = ticks.clone();
+        }
+        self.pending_x_additional_ticks = Some(ticks);
+    }
+
+    fn set_y_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
+        if self.target_axis == AxisTarget::Y {
+            self.axis_draft.additional_ticks = ticks.clone();
+        }
+        self.pending_y_additional_ticks = Some(ticks);
+    }
+
+    fn set_y2_additional_ticks(&mut self, ticks: Vec<AdditionalTick>) {
+        if self.target_axis == AxisTarget::Y2 {
+            self.axis_draft.additional_ticks = ticks.clone();
+        }
+        self.pending_y2_additional_ticks = Some(ticks);
+    }
+
     fn switch_target_axis_preserving_thresholds(&mut self, next: AxisTarget, doc: Option<&ProjectDocument>) {
+        let preserved_generation = self.open_generation;
         let saved_x = (self.target_axis == AxisTarget::X).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_x_thresholds.clone());
         let saved_y = (self.target_axis == AxisTarget::Y).then(|| self.axis_draft.thresholds.clone()).or_else(|| self.pending_y_thresholds.clone());
+        let saved_x_ticks =
+            (self.target_axis == AxisTarget::X).then(|| self.axis_draft.additional_ticks.clone()).or_else(|| self.pending_x_additional_ticks.clone());
+        let saved_y_ticks =
+            (self.target_axis == AxisTarget::Y).then(|| self.axis_draft.additional_ticks.clone()).or_else(|| self.pending_y_additional_ticks.clone());
+        let saved_y2_ticks = (self.target_axis == AxisTarget::Y2)
+            .then(|| self.axis_draft.additional_ticks.clone())
+            .or_else(|| self.pending_y2_additional_ticks.clone());
         if let (Some(d), Some(gid)) = (doc, &self.graph_sheet_id)
             && let Some(gs) = d.graph_sheet(gid)
         {
@@ -5217,11 +5282,21 @@ impl FormatAxesState {
         } else {
             self.target_axis = next;
         }
+        self.open_generation = preserved_generation;
         if let Some(xs) = saved_x {
             self.set_x_thresholds(xs);
         }
         if let Some(ys) = saved_y {
             self.set_y_thresholds(ys);
+        }
+        if let Some(xt) = saved_x_ticks {
+            self.set_x_additional_ticks(xt);
+        }
+        if let Some(yt) = saved_y_ticks {
+            self.set_y_additional_ticks(yt);
+        }
+        if let Some(y2t) = saved_y2_ticks {
+            self.set_y2_additional_ticks(y2t);
         }
     }
 
@@ -5302,10 +5377,26 @@ impl FormatAxesState {
         {
             spec.y_axis.thresholds = ys.clone();
         }
+        if self.target_axis != AxisTarget::X
+            && let Some(ref xt) = self.pending_x_additional_ticks
+        {
+            spec.x_axis.additional_ticks = xt.clone();
+        }
+        if self.target_axis != AxisTarget::Y
+            && let Some(ref yt) = self.pending_y_additional_ticks
+        {
+            spec.y_axis.additional_ticks = yt.clone();
+        }
+        if self.target_axis != AxisTarget::Y2
+            && let Some(ref y2t) = self.pending_y2_additional_ticks
+            && let Some(ref mut y2) = spec.y2_axis
+        {
+            y2.additional_ticks = y2t.clone();
+        }
         Ok(())
     }
 
-    /// Emit `graph.setAxes` intent carrying axis target, validated segments, break ornament, and thresholds.
+    /// Emit `graph.setAxes` intent carrying axis target, validated segments, break ornament, thresholds, and staged additional ticks.
     #[must_use]
     pub fn commit_intent(&self) -> Option<ToolCommandIntent> {
         let id = self.graph_sheet_id.as_ref()?;
@@ -5331,14 +5422,20 @@ impl FormatAxesState {
             }
         }
         if self.target_axis != AxisTarget::X
-            && let Some(ref xs) = self.pending_x_thresholds
+            && let Some(obj) = build_pending_axis_patch(self.pending_x_thresholds.as_deref(), self.pending_x_additional_ticks.as_deref())
         {
-            payload.insert(String::from("x_axis"), serde_json::json!({ "thresholds": xs }));
+            payload.insert(String::from("x_axis"), Value::Object(obj));
         }
         if self.target_axis != AxisTarget::Y
-            && let Some(ref ys) = self.pending_y_thresholds
+            && let Some(obj) = build_pending_axis_patch(self.pending_y_thresholds.as_deref(), self.pending_y_additional_ticks.as_deref())
         {
-            payload.insert(String::from("y_axis"), serde_json::json!({ "thresholds": ys }));
+            payload.insert(String::from("y_axis"), Value::Object(obj));
+        }
+        if self.target_axis != AxisTarget::Y2
+            && self.enable_y2
+            && let Some(obj) = build_pending_axis_patch(None, self.pending_y2_additional_ticks.as_deref())
+        {
+            payload.insert(String::from("y2_axis"), Value::Object(obj));
         }
         Some(ToolCommandIntent::new("graph.setAxes", Value::Object(payload)))
     }
@@ -5446,6 +5543,23 @@ impl FormatAxesState {
         }
         Ok(())
     }
+}
+
+fn build_pending_axis_patch(
+    thresholds: Option<&[AxisThreshold]>,
+    additional_ticks: Option<&[AdditionalTick]>,
+) -> Option<serde_json::Map<String, Value>> {
+    if thresholds.is_none() && additional_ticks.is_none() {
+        return None;
+    }
+    let mut obj = serde_json::Map::new();
+    if let Some(ts) = thresholds {
+        obj.insert(String::from("thresholds"), serde_json::to_value(ts).ok()?);
+    }
+    if let Some(ticks) = additional_ticks {
+        obj.insert(String::from("additional_ticks"), serde_json::to_value(ticks).ok()?);
+    }
+    Some(obj)
 }
 
 fn parse_axis_target_str(raw: &str) -> Result<AxisTarget, String> {
