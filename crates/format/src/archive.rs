@@ -1,6 +1,7 @@
 //! Native `.curvebook` and `.cbtemplate` ZIP archive serialization, deserialization,
 //! schema migration, dimension/float validation, and circular dependency guards.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
@@ -727,9 +728,14 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
 
-    let mut normalized = doc.clone();
-    normalized.schema_version = CURRENT_SCHEMA_VERSION;
-    let doc_json = serde_json::to_vec_pretty(&normalized)?;
+    let normalized = if doc.schema_version == CURRENT_SCHEMA_VERSION {
+        Cow::Borrowed(doc)
+    } else {
+        let mut owned = doc.clone();
+        owned.schema_version = CURRENT_SCHEMA_VERSION;
+        Cow::Owned(owned)
+    };
+    let doc_json = serde_json::to_vec_pretty(normalized.as_ref())?;
     let doc_crc = crc32fast::hash(&doc_json);
 
     let mut entries = Vec::with_capacity(normalized.data_sheets.len() + 2);
@@ -1431,10 +1437,14 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
             if !meta.file_type().is_symlink()
                 && meta.is_file()
                 && meta.len() == new_bytes.len() as u64
+                && new_bytes.len() <= MAX_ARCHIVE_FILE_BYTES
                 && let Ok(existing) = platform_read_regular_file(target, new_bytes.len())
-                && existing == new_bytes
             {
-                return Ok(ExistingEntryState::Unchanged);
+                if existing == new_bytes {
+                    return Ok(ExistingEntryState::Unchanged);
+                }
+                let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+                return Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms });
             }
             let existing = platform_read_regular_file(target, MAX_ARCHIVE_FILE_BYTES)?;
             let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
@@ -2842,6 +2852,57 @@ mod tests {
             assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
             save_project_unpacked_dir(&doc_v2, &dir).unwrap();
             assert!(!dir.join(UNPACKED_TX_DIR).exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_archive_entries_normalizes_older_version_identically_to_current() {
+        use super::{ArchiveKind, build_archive_entries};
+
+        let mut current = ProjectDocument::new("Borrow Path").unwrap();
+        current.add_data_sheet(test_col_sheet("sheet-a", "A", 42.0)).unwrap();
+        assert_eq!(current.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let mut legacy = current.clone();
+        legacy.schema_version = 0;
+
+        let current_entries = build_archive_entries(&current, ArchiveKind::Project).unwrap();
+        let legacy_entries = build_archive_entries(&legacy, ArchiveKind::Project).unwrap();
+        assert_eq!(current_entries, legacy_entries);
+    }
+
+    #[test]
+    fn inspect_existing_unpacked_entry_reuses_same_size_buffer_and_handles_missing() {
+        use super::{ExistingEntryState, PriorSnapshot, inspect_existing_unpacked_entry};
+
+        let dir = std::env::temp_dir().join(format!("cb-inspect-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("entry.json");
+
+        assert!(matches!(
+            inspect_existing_unpacked_entry(&path, b"abcd").unwrap(),
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::DidNotExist, perms: None }
+        ));
+
+        std::fs::write(&path, b"abcd").unwrap();
+        assert!(matches!(inspect_existing_unpacked_entry(&path, b"abcd").unwrap(), ExistingEntryState::Unchanged));
+
+        match inspect_existing_unpacked_entry(&path, b"wxyz").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), perms } => {
+                assert_eq!(bytes, b"abcd");
+                assert!(perms.is_some());
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on same-size change"),
+        }
+
+        match inspect_existing_unpacked_entry(&path, b"longer").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), .. } => {
+                assert_eq!(bytes, b"abcd");
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on size change"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);
