@@ -823,7 +823,9 @@ fn parse_tex_delimiter(s: &str) -> Option<(&'static str, usize)> {
     }
 }
 
-fn lookup_roman_operator(name: &str) -> Option<&'static str> {
+/// Look up a standard TeX roman-font mathematical operator name (e.g., `"log"`, `"sin"`, `"exp"`).
+#[must_use]
+pub fn lookup_roman_operator(name: &str) -> Option<&'static str> {
     match name {
         "log" => Some("log"),
         "ln" => Some("ln"),
@@ -895,7 +897,9 @@ fn lookup_latex_escape(name: &str) -> Option<&'static str> {
     lookup_math_escape(name)
 }
 
-fn lookup_greek_escape(name: &str) -> Option<&'static str> {
+/// Look up a TeX Greek letter escape name (e.g., `"alpha"` -> `"α"`, `"Omega"` -> `"Ω"`).
+#[must_use]
+pub fn lookup_greek_escape(name: &str) -> Option<&'static str> {
     match name {
         "alpha" => Some("\u{03B1}"),
         "beta" => Some("\u{03B2}"),

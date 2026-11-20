@@ -4,7 +4,7 @@
 use std::fmt;
 
 use curvebook_palette::{LineDashStyle, Rgba8};
-use curvebook_text::{RichSpan, RichText, SpanScript, measure_text_pt, metrics::split_rich_text_lines};
+use curvebook_text::{RichText, effective_span_scale, measure_text_pt, metrics::split_rich_text_lines};
 use serde::{Deserialize, Serialize};
 
 /// Two-dimensional point in PostScript points (`1 pt = 1/72 inch`).
@@ -323,20 +323,6 @@ impl ChartScene {
             }
         }
         best.map(|(_, m)| m)
-    }
-}
-
-fn effective_span_scale(span: &RichSpan) -> f64 {
-    let raw = if span.scale.is_finite() && span.scale > 0.0 { span.scale } else { 1.0 };
-    match span.script {
-        SpanScript::Baseline => raw,
-        SpanScript::Superscript | SpanScript::Subscript => {
-            if (raw - 1.0).abs() <= 1e-9 {
-                0.7
-            } else {
-                raw
-            }
-        }
     }
 }
 

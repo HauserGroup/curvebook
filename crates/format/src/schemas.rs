@@ -129,103 +129,108 @@ fn set_u64_max(node: &mut serde_json::Value, def_name: &str, field_name: &str) {
     }
 }
 
+/// Allowed field names at the root of a `curvebook.batch.v1` manifest.
+pub const BATCH_MANIFEST_ROOT_KEYS: &[&str] = &["schema", "template", "project", "inputs", "commands", "exports"];
+
+/// Allowed field names on each entry of `inputs` in a `curvebook.batch.v1` manifest.
+pub const BATCH_MANIFEST_INPUT_KEYS: &[&str] = &[
+    "csv",
+    "tsv",
+    "path",
+    "file",
+    "sheet",
+    "sheet_id",
+    "sheetId",
+    "kind",
+    "table_kind",
+    "tableKind",
+    "subcolumn_mode",
+    "subcolumnMode",
+    "delimiter",
+    "decimal_separator",
+    "decimalSeparator",
+];
+
+/// Allowed field names on each entry of `commands` in a `curvebook.batch.v1` manifest.
+pub const BATCH_MANIFEST_COMMAND_KEYS: &[&str] = &["cmd", "command", "method", "id", "params"];
+
+/// Allowed field names on each entry of `exports` in a `curvebook.batch.v1` manifest.
+pub const BATCH_MANIFEST_EXPORT_KEYS: &[&str] = &[
+    "out",
+    "path",
+    "format",
+    "sheet",
+    "sheet_id",
+    "sheetId",
+    "dpi",
+    "pretty",
+    "tab_index",
+    "tabIndex",
+    "pdf_version",
+    "pdfVersion",
+    "ttf_font",
+    "ttfFont",
+];
+
+const BATCH_EXPORT_FORMATS: &[&str] =
+    &["curvebook", "curvebook.d", "curvebook-dir", "unpacked", "dir", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "tif", "emf"];
+
+fn batch_command_property_schema(key: &str) -> Option<SchemaNode> {
+    match key {
+        "cmd" | "command" | "method" => Some(string_schema().with_min_length(1)),
+        "id" => Some(SchemaNode::default()),
+        "params" => Some(nullable_object_schema()),
+        _ => None,
+    }
+}
+
+fn batch_export_property_schema(key: &str) -> Option<SchemaNode> {
+    match key {
+        "out" | "path" | "sheet" | "sheet_id" | "sheetId" | "ttf_font" | "ttfFont" => Some(nullable_schema(string_schema().with_min_length(1))),
+        "format" => Some(enum_schema(BATCH_EXPORT_FORMATS)),
+        "dpi" => Some(nullable_schema(integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(u16::MAX)))),
+        "pretty" => Some(nullable_schema(bool_schema())),
+        "tab_index" | "tabIndex" => Some(nullable_schema(integer_schema().with_minimum_i64(0))),
+        "pdf_version" | "pdfVersion" => Some(string_schema()),
+        _ => None,
+    }
+}
+
+fn batch_root_property_schema(key: &str) -> Option<SchemaNode> {
+    match key {
+        "schema" => Some(const_string_schema(BATCH_SCHEMA_V1)),
+        "template" | "project" => Some(nullable_schema(string_schema().with_min_length(1))),
+        "inputs" => Some(nullable_schema(array_schema(ref_schema("BatchInput")))),
+        "commands" => Some(nullable_schema(array_schema(ref_schema("BatchCommand")))),
+        "exports" => Some(nullable_schema(array_schema(ref_schema("BatchExport")))),
+        _ => None,
+    }
+}
+
 /// Draft 2020-12 JSON Schema for headless batch runner manifests (`curvebook.batch.v1`).
 pub fn batch_v1_schema() -> serde_json::Value {
-    let batch_input = object_schema(
-        vec![
-            ("csv", nullable_schema(string_schema().with_min_length(1))),
-            ("tsv", nullable_schema(string_schema().with_min_length(1))),
-            ("path", nullable_schema(string_schema().with_min_length(1))),
-            ("file", nullable_schema(string_schema().with_min_length(1))),
-            ("sheet", nullable_schema(string_schema().with_min_length(1))),
-            ("sheet_id", nullable_schema(string_schema().with_min_length(1))),
-            ("sheetId", nullable_schema(string_schema().with_min_length(1))),
-            ("kind", nullable_schema(string_schema().with_min_length(1))),
-            ("table_kind", nullable_schema(string_schema().with_min_length(1))),
-            ("tableKind", nullable_schema(string_schema().with_min_length(1))),
-            ("subcolumn_mode", nullable_schema(string_schema().with_min_length(1))),
-            ("subcolumnMode", nullable_schema(string_schema().with_min_length(1))),
-            ("delimiter", nullable_schema(string_schema().with_min_length(1))),
-            ("decimal_separator", nullable_schema(string_schema().with_min_length(1))),
-            ("decimalSeparator", nullable_schema(string_schema().with_min_length(1))),
-        ],
-        &[],
-        false,
-    )
-    .with_title("BatchInput");
+    let input_props: Vec<(&str, SchemaNode)> =
+        BATCH_MANIFEST_INPUT_KEYS.iter().map(|&key| (key, nullable_schema(string_schema().with_min_length(1)))).collect();
+    let batch_input = object_schema(input_props, &[], false).with_title("BatchInput");
 
-    let batch_command = object_schema(
-        vec![
-            ("cmd", string_schema().with_min_length(1)),
-            ("command", string_schema().with_min_length(1)),
-            ("method", string_schema().with_min_length(1)),
-            ("id", SchemaNode::default()),
-            ("params", nullable_object_schema()),
-        ],
-        &[],
-        false,
-    )
-    .with_title("BatchCommand");
+    let command_props: Vec<(&str, SchemaNode)> =
+        BATCH_MANIFEST_COMMAND_KEYS.iter().filter_map(|&key| batch_command_property_schema(key).map(|schema| (key, schema))).collect();
+    let batch_command = object_schema(command_props, &[], false).with_title("BatchCommand");
 
-    let batch_export = object_schema(
-        vec![
-            ("out", nullable_schema(string_schema().with_min_length(1))),
-            ("path", nullable_schema(string_schema().with_min_length(1))),
-            (
-                "format",
-                enum_schema(&[
-                    "curvebook",
-                    "curvebook.d",
-                    "curvebook-dir",
-                    "unpacked",
-                    "dir",
-                    "csv",
-                    "tsv",
-                    "json",
-                    "svg",
-                    "pdf",
-                    "png",
-                    "tiff",
-                    "tif",
-                    "emf",
-                ]),
-            ),
-            ("sheet", nullable_schema(string_schema().with_min_length(1))),
-            ("sheet_id", nullable_schema(string_schema().with_min_length(1))),
-            ("sheetId", nullable_schema(string_schema().with_min_length(1))),
-            ("dpi", nullable_schema(integer_schema().with_minimum_i64(1).with_maximum_i64(i64::from(u16::MAX)))),
-            ("pretty", nullable_schema(bool_schema())),
-            ("tab_index", nullable_schema(integer_schema().with_minimum_i64(0))),
-            ("tabIndex", nullable_schema(integer_schema().with_minimum_i64(0))),
-            ("pdf_version", string_schema()),
-            ("pdfVersion", string_schema()),
-            ("ttf_font", nullable_schema(string_schema().with_min_length(1))),
-            ("ttfFont", nullable_schema(string_schema().with_min_length(1))),
-        ],
-        &[],
-        false,
-    )
-    .with_title("BatchExport");
+    let export_props: Vec<(&str, SchemaNode)> =
+        BATCH_MANIFEST_EXPORT_KEYS.iter().filter_map(|&key| batch_export_property_schema(key).map(|schema| (key, schema))).collect();
+    let batch_export = object_schema(export_props, &[], false).with_title("BatchExport");
 
-    let node = object_schema(
-        vec![
-            ("schema", const_string_schema(BATCH_SCHEMA_V1)),
-            ("template", nullable_schema(string_schema().with_min_length(1))),
-            ("project", nullable_schema(string_schema().with_min_length(1))),
-            ("inputs", nullable_schema(array_schema(ref_schema("BatchInput")))),
-            ("commands", nullable_schema(array_schema(ref_schema("BatchCommand")))),
-            ("exports", nullable_schema(array_schema(ref_schema("BatchExport")))),
-        ],
-        &["schema"],
-        false,
-    )
-    .with_schema_uri(DRAFT_2020_12_SCHEMA_URI)
-    .with_id(BATCH_V1_SCHEMA_ID)
-    .with_title("BatchManifestV1")
-    .with_description("Draft 2020-12 schema for curvebook.batch.v1 headless batch manifests.")
-    .with_def("BatchInput", batch_input)
-    .with_def("BatchCommand", batch_command)
-    .with_def("BatchExport", batch_export);
+    let root_props: Vec<(&str, SchemaNode)> =
+        BATCH_MANIFEST_ROOT_KEYS.iter().filter_map(|&key| batch_root_property_schema(key).map(|schema| (key, schema))).collect();
+    let node = object_schema(root_props, &["schema"], false)
+        .with_schema_uri(DRAFT_2020_12_SCHEMA_URI)
+        .with_id(BATCH_V1_SCHEMA_ID)
+        .with_title("BatchManifestV1")
+        .with_description("Draft 2020-12 schema for curvebook.batch.v1 headless batch manifests.")
+        .with_def("BatchInput", batch_input)
+        .with_def("BatchCommand", batch_command)
+        .with_def("BatchExport", batch_export);
 
     let mut value = to_json_value(&node);
     if let Some(obj) = value.as_object_mut() {
@@ -250,11 +255,7 @@ pub fn batch_v1_schema() -> serde_json::Value {
         }
         if let Some(exp_def) = defs.get_mut("BatchExport") {
             insert_non_null_string_any_of(exp_def, &["out", "path"], false);
-            set_nullable_enum_property(
-                exp_def,
-                "format",
-                &["curvebook", "curvebook.d", "curvebook-dir", "unpacked", "dir", "csv", "tsv", "json", "svg", "pdf", "png", "tiff", "tif", "emf"],
-            );
+            set_nullable_enum_property(exp_def, "format", BATCH_EXPORT_FORMATS);
             set_nullable_enum_property(exp_def, "pdf_version", &["1.4", "1.7"]);
             set_nullable_enum_property(exp_def, "pdfVersion", &["1.4", "1.7"]);
         }
@@ -334,4 +335,26 @@ pub fn all_persisted_schemas() -> Vec<(&'static str, serde_json::Value)> {
         ("preferences.schema.json", preferences_schema()),
         ("journal-record.schema.json", journal_record_schema()),
     ]
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{BATCH_MANIFEST_COMMAND_KEYS, BATCH_MANIFEST_EXPORT_KEYS, BATCH_MANIFEST_INPUT_KEYS, BATCH_MANIFEST_ROOT_KEYS, batch_v1_schema};
+
+    #[test]
+    fn batch_manifest_key_inventories_match_schema_properties() {
+        let schema = batch_v1_schema();
+        let root_keys: BTreeSet<&str> = schema["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+        assert_eq!(root_keys, BATCH_MANIFEST_ROOT_KEYS.iter().copied().collect());
+
+        let defs = schema["$defs"].as_object().unwrap();
+        for (def_name, expected) in
+            [("BatchInput", BATCH_MANIFEST_INPUT_KEYS), ("BatchCommand", BATCH_MANIFEST_COMMAND_KEYS), ("BatchExport", BATCH_MANIFEST_EXPORT_KEYS)]
+        {
+            let actual: BTreeSet<&str> = defs[def_name]["properties"].as_object().unwrap().keys().map(String::as_str).collect();
+            assert_eq!(actual, expected.iter().copied().collect(), "mismatch in {def_name} properties");
+        }
+    }
 }

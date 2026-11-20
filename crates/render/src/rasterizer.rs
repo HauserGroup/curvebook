@@ -136,6 +136,17 @@ impl RasterImage {
         (self.width_px as usize).checked_mul(self.height_px as usize).and_then(|p| p.checked_mul(4))
     }
 
+    /// Validate target dimensions, DPI, and RGBA byte length for an encoder labeled `label`,
+    /// returning the validated pixel slice without copying.
+    pub(crate) fn validated_rgba(&self, label: &str) -> Result<&[u8], RenderError> {
+        let _ = validate_raster_target_dims(self.width_px, self.height_px, self.dpi, label)?;
+        let expected = self.expected_byte_len().ok_or_else(|| RenderError::InvalidTarget { message: String::from("image byte length overflow") })?;
+        if self.rgba.len() != expected {
+            return Err(RenderError::BufferSizeMismatch { expected, actual: self.rgba.len() });
+        }
+        Ok(&self.rgba)
+    }
+
     /// Composite a pixel at `(x, y)` using straight-alpha Porter-Duff `source-over`.
     pub fn blend_pixel(&mut self, x: u32, y: u32, src: Rgba8) {
         self.blend_pixel_coverage(x, y, src, 1.0);
