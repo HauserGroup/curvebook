@@ -57,64 +57,435 @@
 //! - Morrison, J. F. (1969). Kinetics of the reversible inhibition of enzyme-catalysed reactions by
 //!   tight-binding inhibitors. *Biochimica et Biophysica Acta* 185:269–286.
 
-use crate::library::{ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid};
+use crate::library::{BuiltinEquationSpec, ParametricModel, data_x_min_max, data_y_min_max, estimate_x_at_ymid, resolve_from_specs, spec_ids};
 use crate::types::{DataPoint, DerivedScalar, EquationCategory};
 use curvebook_doc::{ParameterRule, ParameterScope};
 
-/// Canonical IDs exposed by the pharmacology / biochemistry equation catalog.
-pub const PHARMA_EQUATION_IDS: &[&str] = &[
+/// Ordered single-source-of-truth registrations for the pharmacology / biochemistry equation family.
+pub(crate) const PHARMA_SPECS: &[BuiltinEquationSpec] = &[
     // Dose-Response Stimulation
-    "log_agonist_vs_response_3pl",
-    "log_agonist_vs_response_4pl",
-    "log_agonist_vs_response_normalized",
-    "log_agonist_vs_response_normalized_var",
-    "agonist_vs_response_3pl",
-    "agonist_vs_response_4pl",
-    "log_agonist_vs_response_5pl",
-    "bell_shaped_dose_response",
-    "biphasic_dose_response",
-    "log_agonist_vs_response_ecf",
-    "ec50_shift_gaddum_schild",
-    "allosteric_ec50_shift",
-    "operational_model_agonist",
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_3pl",
+        aliases: &["log_agonist_vs_response", "ec50_3pl"],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_agonist_vs_response_3pl",
+                name: "log(agonist) vs. response (three parameters)",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: false,
+                is_inhibition: false,
+                normalized: false,
+                params: names(&["Bottom", "Top", "LogEC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_4pl",
+        aliases: &["log_agonist_vs_response_variable_slope", "4pl"],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_agonist_vs_response_4pl",
+                name: "log(agonist) vs. response, variable Hill slope (four parameters)",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: true,
+                is_inhibition: false,
+                normalized: false,
+                params: names(&["Bottom", "Top", "LogEC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_normalized",
+        aliases: &[],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_agonist_vs_response_normalized",
+                name: "log(agonist) vs. normalized response",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: false,
+                is_inhibition: false,
+                normalized: true,
+                params: names(&["LogEC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_normalized_var",
+        aliases: &[],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_agonist_vs_response_normalized_var",
+                name: "log(agonist) vs. normalized response, variable Hill slope",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: true,
+                is_inhibition: false,
+                normalized: true,
+                params: names(&["LogEC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "agonist_vs_response_3pl",
+        aliases: &["agonist_vs_response"],
+        build: || {
+            Box::new(LinearDoseResponse {
+                id: "agonist_vs_response_3pl",
+                name: "[Agonist] vs. response (three parameters)",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: false,
+                is_inhibition: false,
+                params: names(&["Bottom", "Top", "EC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "agonist_vs_response_4pl",
+        aliases: &[],
+        build: || {
+            Box::new(LinearDoseResponse {
+                id: "agonist_vs_response_4pl",
+                name: "[Agonist] vs. response, variable Hill slope (four parameters)",
+                category: EquationCategory::DoseResponseStimulation,
+                variable_slope: true,
+                is_inhibition: false,
+                params: names(&["Bottom", "Top", "EC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_5pl",
+        aliases: &["5pl"],
+        build: || Box::new(RichardsFivePl { params: names(&["Bottom", "Top", "LogXb", "HillSlope", "S"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "bell_shaped_dose_response",
+        aliases: &[],
+        build: || Box::new(BellShapedDoseResponse { params: names(&["Plateau1", "Plateau2", "Dip", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "biphasic_dose_response",
+        aliases: &[],
+        build: || Box::new(BiphasicDoseResponse { params: names(&["Bottom", "Top", "Frac", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "log_agonist_vs_response_ecf",
+        aliases: &["ecf"],
+        build: || Box::new(DoseResponseEcF { params: names(&["Bottom", "Top", "LogECF", "HillSlope", "F"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "ec50_shift_gaddum_schild",
+        aliases: &["gaddum_schild"],
+        build: || Box::new(GaddumSchild { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "pA2", "SchildSlope", "AntagConc"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "allosteric_ec50_shift",
+        aliases: &[],
+        build: || Box::new(AllostericEc50Shift { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "Kb", "alpha", "ModConc"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "operational_model_agonist",
+        aliases: &[],
+        build: || Box::new(OperationalAgonism { params: names(&["Basal", "Emax", "LogKA", "LogTau", "n"]) }),
+    },
     // Dose-Response Inhibition
-    "log_inhibitor_vs_response_3pl",
-    "log_inhibitor_vs_response_4pl",
-    "log_inhibitor_vs_response_normalized",
-    "log_inhibitor_vs_response_normalized_var",
-    "inhibitor_vs_response_3pl",
-    "inhibitor_vs_response_4pl",
-    "absolute_ic50_4pl",
+    BuiltinEquationSpec {
+        id: "log_inhibitor_vs_response_3pl",
+        aliases: &["log_inhibitor_vs_response", "ic50_3pl"],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_inhibitor_vs_response_3pl",
+                name: "log(inhibitor) vs. response (three parameters)",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: false,
+                is_inhibition: true,
+                normalized: false,
+                params: names(&["Bottom", "Top", "LogIC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_inhibitor_vs_response_4pl",
+        aliases: &["log_inhibitor_vs_response_variable_slope"],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_inhibitor_vs_response_4pl",
+                name: "log(inhibitor) vs. response, variable Hill slope (four parameters)",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: true,
+                is_inhibition: true,
+                normalized: false,
+                params: names(&["Bottom", "Top", "LogIC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_inhibitor_vs_response_normalized",
+        aliases: &[],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_inhibitor_vs_response_normalized",
+                name: "log(inhibitor) vs. normalized response",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: false,
+                is_inhibition: true,
+                normalized: true,
+                params: names(&["LogIC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "log_inhibitor_vs_response_normalized_var",
+        aliases: &[],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "log_inhibitor_vs_response_normalized_var",
+                name: "log(inhibitor) vs. normalized response, variable Hill slope",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: true,
+                is_inhibition: true,
+                normalized: true,
+                params: names(&["LogIC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "inhibitor_vs_response_3pl",
+        aliases: &["inhibitor_vs_response"],
+        build: || {
+            Box::new(LinearDoseResponse {
+                id: "inhibitor_vs_response_3pl",
+                name: "[Inhibitor] vs. response (three parameters)",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: false,
+                is_inhibition: true,
+                params: names(&["Bottom", "Top", "IC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "inhibitor_vs_response_4pl",
+        aliases: &[],
+        build: || {
+            Box::new(LinearDoseResponse {
+                id: "inhibitor_vs_response_4pl",
+                name: "[Inhibitor] vs. response, variable Hill slope (four parameters)",
+                category: EquationCategory::DoseResponseInhibition,
+                variable_slope: true,
+                is_inhibition: true,
+                params: names(&["Bottom", "Top", "IC50", "HillSlope"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "absolute_ic50_4pl",
+        aliases: &[],
+        build: || Box::new(AbsoluteIc50 { params: names(&["Bottom", "Top", "LogIC50", "HillSlope", "Control0", "Control100"]) }),
+    },
     // Receptor Binding
-    "one_site_specific_binding",
-    "one_site_specific_hill",
-    "one_site_total_and_ns",
-    "one_site_total_and_ns_global",
-    "two_site_total_and_ns_global",
-    "one_site_specific_ligand_depletion",
-    "one_site_competition_ligand_depletion",
-    "allosteric_modulator_saturation",
-    "homologous_one_site_competition",
-    "two_sites_specific_binding",
-    "one_site_fit_ki",
-    "one_site_fit_logic50",
-    "two_sites_fit_ki",
-    "dissociation_one_phase",
-    "association_kinetics_one_conc",
-    "association_kinetics_two_conc",
-    "assoc_then_dissoc",
-    "motulsky_mahan_kinetics",
+    BuiltinEquationSpec {
+        id: "one_site_specific_binding",
+        aliases: &[],
+        build: || {
+            Box::new(OneSiteBinding {
+                id: "one_site_specific_binding",
+                name: "One-site specific binding",
+                with_hill: false,
+                with_ns: false,
+                params: names(&["Bmax", "Kd"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "one_site_specific_hill",
+        aliases: &[],
+        build: || {
+            Box::new(OneSiteBinding {
+                id: "one_site_specific_hill",
+                name: "One-site specific binding with Hill slope",
+                with_hill: true,
+                with_ns: false,
+                params: names(&["Bmax", "Kd", "h"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "one_site_total_and_ns",
+        aliases: &[],
+        build: || {
+            Box::new(OneSiteBinding {
+                id: "one_site_total_and_ns",
+                name: "One-site total and nonspecific binding",
+                with_hill: false,
+                with_ns: true,
+                params: names(&["Bmax", "Kd", "NS", "Background"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "one_site_total_and_ns_global",
+        aliases: &[],
+        build: || Box::new(OneSiteTotalAndNsGlobal { params: names(&["Bmax", "Kd", "NS", "Background"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "two_site_total_and_ns_global",
+        aliases: &[],
+        build: || Box::new(TwoSiteTotalAndNsGlobal { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo", "NS", "Background"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "one_site_specific_ligand_depletion",
+        aliases: &[],
+        build: || Box::new(OneSiteSpecificLigandDepletion { params: names(&["Rt", "Kd", "NS"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "one_site_competition_ligand_depletion",
+        aliases: &[],
+        build: || Box::new(OneSiteCompetitionLigandDepletion { params: names(&["Rt", "HotNM", "KdNM", "LogKi", "NS"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "allosteric_modulator_saturation",
+        aliases: &[],
+        build: || Box::new(AllostericModulatorSaturation { params: names(&["Bmax", "Kd", "alpha", "Kb", "ModConc"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "homologous_one_site_competition",
+        aliases: &[],
+        build: || Box::new(HomologousOneSiteCompetition { params: names(&["Bmax", "Kd", "NS", "HotConc"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "two_sites_specific_binding",
+        aliases: &[],
+        build: || Box::new(TwoSiteBinding { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "one_site_fit_ki",
+        aliases: &[],
+        build: || Box::new(CompetitionOneSiteKi { params: names(&["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "one_site_fit_logic50",
+        aliases: &[],
+        build: || {
+            Box::new(LogDoseResponse {
+                id: "one_site_fit_logic50",
+                name: "One-site competitive binding (logIC50)",
+                category: EquationCategory::ReceptorBinding,
+                variable_slope: false,
+                is_inhibition: true,
+                normalized: false,
+                params: names(&["Bottom", "Top", "LogIC50"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "two_sites_fit_ki",
+        aliases: &[],
+        build: || Box::new(CompetitionTwoSiteKi { params: names(&["Top", "Bottom", "FractionHi", "LogKi_1", "LogKi_2", "HotConc_nM", "HotKd_nM"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "dissociation_one_phase",
+        aliases: &[],
+        build: || Box::new(DissociationOnePhase { params: names(&["Y0", "NS", "Koff"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "association_kinetics_one_conc",
+        aliases: &[],
+        build: || Box::new(AssociationOneConc { params: names(&["Ymax", "Kobs"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "association_kinetics_two_conc",
+        aliases: &[],
+        build: || Box::new(AssociationTwoConc { params: names(&["Bmax", "Kon", "Koff", "LigandConc"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "assoc_then_dissoc",
+        aliases: &[],
+        build: || Box::new(AssocThenDissoc { params: names(&["Bmax", "Kon", "Koff", "LigandConc", "Time0"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "motulsky_mahan_kinetics",
+        aliases: &[],
+        build: || Box::new(MotulskyMahanKinetics { params: names(&["Bmax", "kon1", "koff1", "kon2", "koff2", "L", "I"]) }),
+    },
     // Enzyme Kinetics
-    "michaelis_menten",
-    "kcat_enzyme_kinetics",
-    "allosteric_sigmoidal_kinetics",
-    "substrate_inhibition",
-    "competitive_inhibition",
-    "noncompetitive_inhibition",
-    "uncompetitive_inhibition",
-    "mixed_model_inhibition",
-    "morrison_tight_binding_ki",
+    BuiltinEquationSpec {
+        id: "michaelis_menten",
+        aliases: &[],
+        build: || Box::new(MichaelisMenten { kcat_mode: false, params: names(&["Vmax", "Km"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "kcat_enzyme_kinetics",
+        aliases: &["kcat"],
+        build: || Box::new(MichaelisMenten { kcat_mode: true, params: names(&["kcat", "Km", "Et"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "allosteric_sigmoidal_kinetics",
+        aliases: &["allosteric_sigmoidal"],
+        build: || Box::new(AllostericSigmoidal { params: names(&["Vmax", "Khalf", "h"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "substrate_inhibition",
+        aliases: &[],
+        build: || Box::new(SubstrateInhibition { params: names(&["Vmax", "Km", "Ki"]) }),
+    },
+    BuiltinEquationSpec {
+        id: "competitive_inhibition",
+        aliases: &[],
+        build: || {
+            Box::new(EnzymeInhibition {
+                id: "competitive_inhibition",
+                name: "Competitive inhibition",
+                mode: EnzymeInhibMode::Competitive,
+                params: names(&["Vmax", "Km", "Ki", "I"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "noncompetitive_inhibition",
+        aliases: &[],
+        build: || {
+            Box::new(EnzymeInhibition {
+                id: "noncompetitive_inhibition",
+                name: "Noncompetitive inhibition",
+                mode: EnzymeInhibMode::Noncompetitive,
+                params: names(&["Vmax", "Km", "Ki", "I"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "uncompetitive_inhibition",
+        aliases: &[],
+        build: || {
+            Box::new(EnzymeInhibition {
+                id: "uncompetitive_inhibition",
+                name: "Uncompetitive inhibition",
+                mode: EnzymeInhibMode::Uncompetitive,
+                params: names(&["Vmax", "Km", "alphaKi", "I"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "mixed_model_inhibition",
+        aliases: &[],
+        build: || {
+            Box::new(EnzymeInhibition {
+                id: "mixed_model_inhibition",
+                name: "Mixed model inhibition",
+                mode: EnzymeInhibMode::Mixed,
+                params: names(&["Vmax", "Km", "Ki", "Alpha", "I"]),
+            })
+        },
+    },
+    BuiltinEquationSpec {
+        id: "morrison_tight_binding_ki",
+        aliases: &["morrison"],
+        build: || Box::new(MorrisonKi { params: names(&["Vo", "Et", "Ki", "S", "Km"]) }),
+    },
 ];
+
+const PHARMA_EQUATION_ID_ARRAY: [&str; PHARMA_SPECS.len()] = spec_ids::<{ PHARMA_SPECS.len() }>(PHARMA_SPECS);
+
+/// Canonical IDs exposed by the pharmacology / biochemistry equation catalog.
+pub const PHARMA_EQUATION_IDS: &[&str] = &PHARMA_EQUATION_ID_ARRAY;
 
 fn names(slice: &[&str]) -> Vec<String> {
     slice.iter().map(|s| (*s).to_owned()).collect()
@@ -150,210 +521,7 @@ fn sigmoid_from_log_x(x: f64, log_c50: f64, slope: f64) -> Option<(f64, f64)> {
 /// Resolve any pharmacology equation ID (with friendly aliases) into a [`ParametricModel`].
 #[must_use]
 pub fn resolve_pharma_model(norm_id: &str) -> Option<Box<dyn ParametricModel>> {
-    match norm_id {
-        "log_agonist_vs_response_3pl" | "log_agonist_vs_response" | "ec50_3pl" => Some(Box::new(LogDoseResponse {
-            id: "log_agonist_vs_response_3pl",
-            name: "log(agonist) vs. response (three parameters)",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: false,
-            is_inhibition: false,
-            normalized: false,
-            params: names(&["Bottom", "Top", "LogEC50"]),
-        })),
-        "log_agonist_vs_response_4pl" | "log_agonist_vs_response_variable_slope" | "4pl" => Some(Box::new(LogDoseResponse {
-            id: "log_agonist_vs_response_4pl",
-            name: "log(agonist) vs. response, variable Hill slope (four parameters)",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: true,
-            is_inhibition: false,
-            normalized: false,
-            params: names(&["Bottom", "Top", "LogEC50", "HillSlope"]),
-        })),
-        "log_agonist_vs_response_normalized" => Some(Box::new(LogDoseResponse {
-            id: "log_agonist_vs_response_normalized",
-            name: "log(agonist) vs. normalized response",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: false,
-            is_inhibition: false,
-            normalized: true,
-            params: names(&["LogEC50"]),
-        })),
-        "log_agonist_vs_response_normalized_var" => Some(Box::new(LogDoseResponse {
-            id: "log_agonist_vs_response_normalized_var",
-            name: "log(agonist) vs. normalized response, variable Hill slope",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: true,
-            is_inhibition: false,
-            normalized: true,
-            params: names(&["LogEC50", "HillSlope"]),
-        })),
-        "log_inhibitor_vs_response_3pl" | "log_inhibitor_vs_response" | "ic50_3pl" => Some(Box::new(LogDoseResponse {
-            id: "log_inhibitor_vs_response_3pl",
-            name: "log(inhibitor) vs. response (three parameters)",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: false,
-            is_inhibition: true,
-            normalized: false,
-            params: names(&["Bottom", "Top", "LogIC50"]),
-        })),
-        "log_inhibitor_vs_response_4pl" | "log_inhibitor_vs_response_variable_slope" => Some(Box::new(LogDoseResponse {
-            id: "log_inhibitor_vs_response_4pl",
-            name: "log(inhibitor) vs. response, variable Hill slope (four parameters)",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: true,
-            is_inhibition: true,
-            normalized: false,
-            params: names(&["Bottom", "Top", "LogIC50", "HillSlope"]),
-        })),
-        "log_inhibitor_vs_response_normalized" => Some(Box::new(LogDoseResponse {
-            id: "log_inhibitor_vs_response_normalized",
-            name: "log(inhibitor) vs. normalized response",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: false,
-            is_inhibition: true,
-            normalized: true,
-            params: names(&["LogIC50"]),
-        })),
-        "log_inhibitor_vs_response_normalized_var" => Some(Box::new(LogDoseResponse {
-            id: "log_inhibitor_vs_response_normalized_var",
-            name: "log(inhibitor) vs. normalized response, variable Hill slope",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: true,
-            is_inhibition: true,
-            normalized: true,
-            params: names(&["LogIC50", "HillSlope"]),
-        })),
-        "agonist_vs_response_3pl" | "agonist_vs_response" => Some(Box::new(LinearDoseResponse {
-            id: "agonist_vs_response_3pl",
-            name: "[Agonist] vs. response (three parameters)",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: false,
-            is_inhibition: false,
-            params: names(&["Bottom", "Top", "EC50"]),
-        })),
-        "agonist_vs_response_4pl" => Some(Box::new(LinearDoseResponse {
-            id: "agonist_vs_response_4pl",
-            name: "[Agonist] vs. response, variable Hill slope (four parameters)",
-            category: EquationCategory::DoseResponseStimulation,
-            variable_slope: true,
-            is_inhibition: false,
-            params: names(&["Bottom", "Top", "EC50", "HillSlope"]),
-        })),
-        "inhibitor_vs_response_3pl" | "inhibitor_vs_response" => Some(Box::new(LinearDoseResponse {
-            id: "inhibitor_vs_response_3pl",
-            name: "[Inhibitor] vs. response (three parameters)",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: false,
-            is_inhibition: true,
-            params: names(&["Bottom", "Top", "IC50"]),
-        })),
-        "inhibitor_vs_response_4pl" => Some(Box::new(LinearDoseResponse {
-            id: "inhibitor_vs_response_4pl",
-            name: "[Inhibitor] vs. response, variable Hill slope (four parameters)",
-            category: EquationCategory::DoseResponseInhibition,
-            variable_slope: true,
-            is_inhibition: true,
-            params: names(&["Bottom", "Top", "IC50", "HillSlope"]),
-        })),
-        "log_agonist_vs_response_5pl" | "5pl" => Some(Box::new(RichardsFivePl { params: names(&["Bottom", "Top", "LogXb", "HillSlope", "S"]) })),
-        "bell_shaped_dose_response" => {
-            Some(Box::new(BellShapedDoseResponse { params: names(&["Plateau1", "Plateau2", "Dip", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }))
-        }
-        "biphasic_dose_response" => {
-            Some(Box::new(BiphasicDoseResponse { params: names(&["Bottom", "Top", "Frac", "LogEC50_1", "LogEC50_2", "nH1", "nH2"]) }))
-        }
-        "log_agonist_vs_response_ecf" | "ecf" => Some(Box::new(DoseResponseEcF { params: names(&["Bottom", "Top", "LogECF", "HillSlope", "F"]) })),
-        "absolute_ic50_4pl" => Some(Box::new(AbsoluteIc50 { params: names(&["Bottom", "Top", "LogIC50", "HillSlope", "Control0", "Control100"]) })),
-        "ec50_shift_gaddum_schild" | "gaddum_schild" => {
-            Some(Box::new(GaddumSchild { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "pA2", "SchildSlope", "AntagConc"]) }))
-        }
-        "allosteric_ec50_shift" => {
-            Some(Box::new(AllostericEc50Shift { params: names(&["Bottom", "Top", "LogEC50", "HillSlope", "Kb", "alpha", "ModConc"]) }))
-        }
-        "operational_model_agonist" => Some(Box::new(OperationalAgonism { params: names(&["Basal", "Emax", "LogKA", "LogTau", "n"]) })),
-        "one_site_specific_binding" => Some(Box::new(OneSiteBinding {
-            id: "one_site_specific_binding",
-            name: "One-site specific binding",
-            with_hill: false,
-            with_ns: false,
-            params: names(&["Bmax", "Kd"]),
-        })),
-        "one_site_specific_hill" => Some(Box::new(OneSiteBinding {
-            id: "one_site_specific_hill",
-            name: "One-site specific binding with Hill slope",
-            with_hill: true,
-            with_ns: false,
-            params: names(&["Bmax", "Kd", "h"]),
-        })),
-        "one_site_total_and_ns" => Some(Box::new(OneSiteBinding {
-            id: "one_site_total_and_ns",
-            name: "One-site total and nonspecific binding",
-            with_hill: false,
-            with_ns: true,
-            params: names(&["Bmax", "Kd", "NS", "Background"]),
-        })),
-        "one_site_total_and_ns_global" => Some(Box::new(OneSiteTotalAndNsGlobal { params: names(&["Bmax", "Kd", "NS", "Background"]) })),
-        "two_site_total_and_ns_global" => {
-            Some(Box::new(TwoSiteTotalAndNsGlobal { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo", "NS", "Background"]) }))
-        }
-        "one_site_specific_ligand_depletion" => Some(Box::new(OneSiteSpecificLigandDepletion { params: names(&["Rt", "Kd", "NS"]) })),
-        "one_site_competition_ligand_depletion" => {
-            Some(Box::new(OneSiteCompetitionLigandDepletion { params: names(&["Rt", "HotNM", "KdNM", "LogKi", "NS"]) }))
-        }
-        "allosteric_modulator_saturation" => {
-            Some(Box::new(AllostericModulatorSaturation { params: names(&["Bmax", "Kd", "alpha", "Kb", "ModConc"]) }))
-        }
-        "homologous_one_site_competition" => Some(Box::new(HomologousOneSiteCompetition { params: names(&["Bmax", "Kd", "NS", "HotConc"]) })),
-        "two_sites_specific_binding" => Some(Box::new(TwoSiteBinding { params: names(&["BmaxHi", "KdHi", "BmaxLo", "KdLo"]) })),
-        "one_site_fit_ki" => Some(Box::new(CompetitionOneSiteKi { params: names(&["Top", "Bottom", "LogKi", "HotConc_nM", "HotKd_nM"]) })),
-        "one_site_fit_logic50" => Some(Box::new(LogDoseResponse {
-            id: "one_site_fit_logic50",
-            name: "One-site competitive binding (logIC50)",
-            category: EquationCategory::ReceptorBinding,
-            variable_slope: false,
-            is_inhibition: true,
-            normalized: false,
-            params: names(&["Bottom", "Top", "LogIC50"]),
-        })),
-        "two_sites_fit_ki" => {
-            Some(Box::new(CompetitionTwoSiteKi { params: names(&["Top", "Bottom", "FractionHi", "LogKi_1", "LogKi_2", "HotConc_nM", "HotKd_nM"]) }))
-        }
-        "dissociation_one_phase" => Some(Box::new(DissociationOnePhase { params: names(&["Y0", "NS", "Koff"]) })),
-        "association_kinetics_one_conc" => Some(Box::new(AssociationOneConc { params: names(&["Ymax", "Kobs"]) })),
-        "association_kinetics_two_conc" => Some(Box::new(AssociationTwoConc { params: names(&["Bmax", "Kon", "Koff", "LigandConc"]) })),
-        "assoc_then_dissoc" => Some(Box::new(AssocThenDissoc { params: names(&["Bmax", "Kon", "Koff", "LigandConc", "Time0"]) })),
-        "motulsky_mahan_kinetics" => Some(Box::new(MotulskyMahanKinetics { params: names(&["Bmax", "kon1", "koff1", "kon2", "koff2", "L", "I"]) })),
-        "michaelis_menten" => Some(Box::new(MichaelisMenten { kcat_mode: false, params: names(&["Vmax", "Km"]) })),
-        "kcat_enzyme_kinetics" | "kcat" => Some(Box::new(MichaelisMenten { kcat_mode: true, params: names(&["kcat", "Km", "Et"]) })),
-        "allosteric_sigmoidal_kinetics" | "allosteric_sigmoidal" => Some(Box::new(AllostericSigmoidal { params: names(&["Vmax", "Khalf", "h"]) })),
-        "substrate_inhibition" => Some(Box::new(SubstrateInhibition { params: names(&["Vmax", "Km", "Ki"]) })),
-        "competitive_inhibition" => Some(Box::new(EnzymeInhibition {
-            id: "competitive_inhibition",
-            name: "Competitive inhibition",
-            mode: EnzymeInhibMode::Competitive,
-            params: names(&["Vmax", "Km", "Ki", "I"]),
-        })),
-        "noncompetitive_inhibition" => Some(Box::new(EnzymeInhibition {
-            id: "noncompetitive_inhibition",
-            name: "Noncompetitive inhibition",
-            mode: EnzymeInhibMode::Noncompetitive,
-            params: names(&["Vmax", "Km", "Ki", "I"]),
-        })),
-        "uncompetitive_inhibition" => Some(Box::new(EnzymeInhibition {
-            id: "uncompetitive_inhibition",
-            name: "Uncompetitive inhibition",
-            mode: EnzymeInhibMode::Uncompetitive,
-            params: names(&["Vmax", "Km", "alphaKi", "I"]),
-        })),
-        "mixed_model_inhibition" => Some(Box::new(EnzymeInhibition {
-            id: "mixed_model_inhibition",
-            name: "Mixed model inhibition",
-            mode: EnzymeInhibMode::Mixed,
-            params: names(&["Vmax", "Km", "Ki", "Alpha", "I"]),
-        })),
-        "morrison_tight_binding_ki" | "morrison" => Some(Box::new(MorrisonKi { params: names(&["Vo", "Et", "Ki", "S", "Km"]) })),
-        _ => None,
-    }
+    resolve_from_specs(PHARMA_SPECS, norm_id)
 }
 
 /// Three/four-parameter logistic on log10 concentration:

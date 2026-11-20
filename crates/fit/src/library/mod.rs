@@ -73,6 +73,45 @@ pub struct EquationCatalogEntry {
     pub param_names: Vec<String>,
 }
 
+/// Single-source-of-truth registration entry for a built-in parametric model.
+pub(crate) struct BuiltinEquationSpec {
+    /// Canonical snake_case identifier exposed in the catalogue.
+    pub id: &'static str,
+    /// Additional normalized aliases accepted by [`get_builtin_model`].
+    pub aliases: &'static [&'static str],
+    /// Factory constructing the model instance.
+    pub build: fn() -> Box<dyn ParametricModel>,
+}
+
+impl BuiltinEquationSpec {
+    #[must_use]
+    pub fn matches(&self, norm_id: &str) -> bool {
+        self.id == norm_id || self.aliases.contains(&norm_id)
+    }
+
+    #[must_use]
+    pub fn catalog_entry(&self) -> EquationCatalogEntry {
+        let m = (self.build)();
+        EquationCatalogEntry { id: m.id().to_owned(), name: m.name().to_owned(), category: m.category(), param_names: m.param_names().to_vec() }
+    }
+}
+
+/// Resolve a normalized equation identifier against an ordered family registration slice.
+pub(crate) fn resolve_from_specs(specs: &[BuiltinEquationSpec], norm_id: &str) -> Option<Box<dyn ParametricModel>> {
+    specs.iter().find(|spec| spec.matches(norm_id)).map(|spec| (spec.build)())
+}
+
+/// Extract canonical IDs from an ordered family registration slice at compile time.
+pub(crate) const fn spec_ids<const N: usize>(specs: &[BuiltinEquationSpec]) -> [&'static str; N] {
+    let mut out = [""; N];
+    let mut i = 0;
+    while i < N && i < specs.len() {
+        out[i] = specs[i].id;
+        i += 1;
+    }
+    out
+}
+
 /// Look up any built-in equation by canonical `equation_id` (case-insensitive, `-` / `_` normalized).
 #[must_use]
 pub fn get_builtin_model(equation_id: &str) -> Option<Box<dyn ParametricModel>> {
@@ -83,21 +122,7 @@ pub fn get_builtin_model(equation_id: &str) -> Option<Box<dyn ParametricModel>> 
 /// List all built-in equations across every [`EquationCategory`].
 #[must_use]
 pub fn list_builtin_equations() -> Vec<EquationCatalogEntry> {
-    let mut ids = Vec::new();
-    ids.extend(pharma::PHARMA_EQUATION_IDS);
-    ids.extend(curves::CURVE_EQUATION_IDS);
-    ids.extend(nist::NIST_EQUATION_IDS);
-    ids.into_iter()
-        .filter_map(|id| {
-            let m = get_builtin_model(id)?;
-            Some(EquationCatalogEntry {
-                id: m.id().to_owned(),
-                name: m.name().to_owned(),
-                category: m.category(),
-                param_names: m.param_names().to_vec(),
-            })
-        })
-        .collect()
+    pharma::PHARMA_SPECS.iter().chain(curves::CURVE_SPECS.iter()).chain(nist::NIST_SPECS.iter()).map(BuiltinEquationSpec::catalog_entry).collect()
 }
 
 pub(crate) fn normalize_id(raw: &str) -> String {
@@ -151,4 +176,53 @@ pub(crate) fn estimate_x_at_ymid(points: &[DataPoint]) -> f64 {
         }
     }
     0.5 * (sorted.first().map_or(0.0, |v| v.0) + sorted.last().map_or(0.0, |v| v.0))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeSet;
+
+    use super::{curves, get_builtin_model, list_builtin_equations, nist, pharma};
+
+    #[test]
+    fn family_registrations_drive_catalog_and_resolver_without_drift() {
+        let mut seen_tokens = BTreeSet::new();
+        let all_specs = pharma::PHARMA_SPECS.iter().chain(curves::CURVE_SPECS.iter()).chain(nist::NIST_SPECS.iter());
+
+        let mut expected_ids = Vec::new();
+        for spec in all_specs {
+            assert!(seen_tokens.insert(spec.id), "duplicate canonical equation id `{}`", spec.id);
+            let built = (spec.build)();
+            assert_eq!(built.id(), spec.id, "factory id mismatch for `{}`", spec.id);
+            let resolved = get_builtin_model(spec.id).unwrap_or_else(|| panic!("canonical id `{}` failed to resolve", spec.id));
+            assert_eq!(resolved.id(), spec.id);
+            for &alias in spec.aliases {
+                assert!(seen_tokens.insert(alias), "duplicate equation alias `{alias}`");
+                let alias_model = get_builtin_model(alias).unwrap_or_else(|| panic!("alias `{alias}` failed to resolve"));
+                assert_eq!(alias_model.id(), spec.id, "alias `{alias}` resolved to wrong canonical id");
+            }
+            expected_ids.push(spec.id);
+        }
+
+        let pharma_spec_ids: Vec<&str> = pharma::PHARMA_SPECS.iter().map(|s| s.id).collect();
+        let curve_spec_ids: Vec<&str> = curves::CURVE_SPECS.iter().map(|s| s.id).collect();
+        let nist_spec_ids: Vec<&str> = nist::NIST_SPECS.iter().map(|s| s.id).collect();
+        assert_eq!(pharma::PHARMA_EQUATION_IDS, pharma_spec_ids.as_slice());
+        assert_eq!(curves::CURVE_EQUATION_IDS, curve_spec_ids.as_slice());
+        assert_eq!(nist::NIST_EQUATION_IDS, nist_spec_ids.as_slice());
+
+        let catalog = list_builtin_equations();
+        let catalog_ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
+        assert_eq!(catalog_ids, expected_ids);
+        assert_eq!(catalog.len(), 47 + 43 + 27);
+
+        // Spot-check representative aliases across all three families (including hyphen/case normalization).
+        assert_eq!(get_builtin_model("4PL").unwrap().id(), "log_agonist_vs_response_4pl");
+        assert_eq!(get_builtin_model("gaddum-schild").unwrap().id(), "ec50_shift_gaddum_schild");
+        assert_eq!(get_builtin_model("centered-quadratic").unwrap().id(), "centered_poly_2");
+        assert_eq!(get_builtin_model("semilog_line").unwrap().id(), "semi_log_line");
+        assert_eq!(get_builtin_model("misra1a").unwrap().id(), "nist_misra1a");
+        assert_eq!(get_builtin_model("nist_bennett5").unwrap().id(), "nist_bennett5");
+        assert!(get_builtin_model("nist_nist_misra1a").is_none());
+    }
 }
