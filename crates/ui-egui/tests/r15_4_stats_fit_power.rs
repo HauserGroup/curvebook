@@ -545,7 +545,7 @@ fn seven_tab_nonlinear_fit_and_three_branch_hook_browser() -> Result<(), Box<dyn
 
     // Open standalone 3-branch ConstantHookPicker
     let doc_hook = driver.state().app.document().clone();
-    driver.state_mut().app.canvas_dialogs.open_hook_picker(&doc_hook, &fit_id, Some(String::from("Vmax")));
+    driver.state_mut().app.canvas_dialogs.open_hook_picker(&doc_hook, &fit_id, Some(String::from("Bottom")));
     driver.run_settled();
     assert_eq!(
         HybridCoexistenceArbiter::evaluate_with_views(&driver.state().app, &driver.state().views, false).modal_surface,

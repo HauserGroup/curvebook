@@ -142,7 +142,7 @@ fn muda_vs_egui_menubar_1_to_1_parity_across_locales_and_sheet_states() -> Resul
                     win.execute_and_journal("table.setCell", json!({ "sheet_id": "ds-p", "row": r, "col": c, "value": 5.0 + (r + c) as f64 }))?;
                 }
             }
-            win.execute_and_journal("analysis.run", json!({ "source_sheet_id": "ds-p", "kind": "unpaired_t_test", "result_sheet_id": "rs-p" }))?;
+            win.execute_and_journal("analysis.run", json!({ "source_sheet_id": "ds-p", "kind": "unpaired_t_test", "sheet_id": "rs-p" }))?;
             win.execute_and_journal("graph.create", json!({ "sheet_id": "gs-p", "data_sheet_id": "ds-p" }))?;
         }
         let chrome_rich = rt.window(win_id)?.chrome_state();
