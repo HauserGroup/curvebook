@@ -3494,7 +3494,7 @@ impl EditAnalysisParametersState {
             "confidence_percent": spec.confidence_level.percent(),
             "selected_data_sets": spec.selected_data_sets,
             "p_value_format": spec.p_value_format,
-            "custom_title": spec.custom_title,
+            "title": spec.custom_title,
         });
         if let Some(map) = payload.as_object_mut() {
             if matches!(spec.kind, AnalysisKind::Multivariate(MultivariateSpec::CorrelationMatrix { .. })) {
@@ -4119,7 +4119,7 @@ impl ConstantHookPickerState {
                 json!({
                     "sheet_id": target.as_str(),
                     "kind": "text",
-                    "text": opt.template_token,
+                    "markdown": opt.template_token,
                 }),
             )),
         }

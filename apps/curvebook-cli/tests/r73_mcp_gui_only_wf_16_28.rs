@@ -417,7 +417,7 @@ fn r73_gui_only_wf26_to_wf28_multivariate_layouts_and_export() -> Result<(), Str
     )?;
     gui.ui_invoke(
         "layout.addPanel",
-        json!({ "sheet_id": "wf27-layout", "kind": "text", "text": "Composite Figure", "bounds_pt": [24.0, 195.0, 220.0, 22.0] }),
+        json!({ "sheet_id": "wf27-layout", "kind": "text", "markdown": "Composite Figure", "bounds_pt": [24.0, 195.0, 220.0, 22.0] }),
     )?;
     gui.ui_switch_sheet("wf27-layout")?;
     let all_insp = gui.ui_inspect("all", true)?;

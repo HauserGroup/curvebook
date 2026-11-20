@@ -537,9 +537,9 @@ fn load_manifest_inputs(session: &mut Session, inputs: &[BatchInputSpec]) -> Res
         params.insert(String::from("sheet_id"), Value::String(target_sheet_id));
         params.insert(String::from("replace"), Value::Bool(matched_sheet_id.is_some()));
         if let Some(kind) = &input.kind {
-            params.insert(String::from("kind"), Value::String(kind.clone()));
+            params.insert(String::from("archetype"), Value::String(kind.clone()));
         } else if matched_sheet_id.is_none() {
-            params.insert(String::from("kind"), Value::String(String::from("xy")));
+            params.insert(String::from("archetype"), Value::String(String::from("xy")));
         }
         if let Some(mode) = &input.subcolumn_mode {
             params.insert(String::from("subcolumn_mode"), Value::String(mode.clone()));

@@ -66,7 +66,7 @@ fn r1_s11_01_default_single_instance_control_stream_journals_and_recovers_after_
                 "token": auth.as_str(),
                 "params": {
                     "command_id": "sheet.createData",
-                    "params": { "sheet_id": "ctrl-ds", "title": "Control WAL", "archetype": "column", "cols": 2, "rows": 4 }
+                    "params": { "sheet_id": "ctrl-ds", "title": "Control WAL", "kind": "column", "cols": 2, "rows": 4 }
                 }
             }),
             json!({
@@ -173,7 +173,7 @@ fn r1_s11_01_and_s06_03_binary_default_launch_and_control_recovery() -> Result<(
         s.execute_and_record(
             &mut j,
             "sheet.createData",
-            json!({ "sheet_id": "surviving-sheet", "title": "Intact Pre-Corrupt", "archetype": "column", "cols": 1, "rows": 2 }),
+            json!({ "sheet_id": "surviving-sheet", "title": "Intact Pre-Corrupt", "kind": "column", "cols": 1, "rows": 2 }),
         )?;
         let raw_journal_path = recovery_dir.join(JOURNAL_FILE_NAME);
         let mut f = fs::OpenOptions::new().append(true).open(&raw_journal_path)?;
@@ -250,7 +250,7 @@ fn r1_s11_01_and_s06_03_binary_default_launch_and_control_recovery() -> Result<(
                 "token": token,
                 "params": {
                     "command_id": "sheet.createData",
-                    "params": { "sheet_id": "tcp-sheet", "title": "TCP Recovered", "archetype": "column", "cols": 1, "rows": 2 }
+                    "params": { "sheet_id": "tcp-sheet", "title": "TCP Recovered", "kind": "column", "cols": 1, "rows": 2 }
                 }
             }),
             json!({
@@ -306,7 +306,7 @@ fn r1_s11_03_lease_renewal_new_instance_isolation_and_multiwindow_close_all_forc
     std::thread::sleep(Duration::from_millis(15));
     let _ = primary_rt
         .window_mut(w1)?
-        .execute_and_journal("sheet.createData", json!({ "sheet_id": "renew-ds", "title": "Renew", "archetype": "column", "cols": 1, "rows": 1 }))?;
+        .execute_and_journal("sheet.createData", json!({ "sheet_id": "renew-ds", "title": "Renew", "kind": "column", "cols": 1, "rows": 1 }))?;
     let renewed_acquired = DirectoryJournalBackend::open_dir(&recovery_root)?.read_lease()?.ok_or("missing renewed primary lease")?.acquired_epoch_ms;
     assert!(renewed_acquired >= initial_acquired + 10, "lease timestamp should renew per command");
 
@@ -397,8 +397,8 @@ fn audit_2_mixed_batch_undo_and_create_recovers_exact_sheet_count() -> Result<()
         let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
         let win = rt.window_mut(win_id)?;
 
-        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
-        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t2", "title": "Second", "archetype": "column", "cols": 1, "rows": 2 }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "kind": "column", "cols": 1, "rows": 2 }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t2", "title": "Second", "kind": "column", "cols": 1, "rows": 2 }))?;
 
         // Mixed batch: edit.undo removes `t2`, then sheet.createData creates `t3` -> live state has ["t1", "t3"].
         let batch_req = json!({
@@ -409,7 +409,7 @@ fn audit_2_mixed_batch_undo_and_create_recovers_exact_sheet_count() -> Result<()
                 "atomic": true,
                 "commands": [
                     { "command": "edit.undo", "params": {} },
-                    { "command": "sheet.createData", "params": { "sheet_id": "t3", "title": "Third", "archetype": "column", "cols": 1, "rows": 2 } }
+                    { "command": "sheet.createData", "params": { "sheet_id": "t3", "title": "Third", "kind": "column", "cols": 1, "rows": 2 } }
                 ]
             }
         });
@@ -446,10 +446,7 @@ fn audit_5_gui_edit_after_64_undo_eviction_persists_through_crash_recovery() -> 
         let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
         {
             let win = rt.window_mut(win_id)?;
-            win.execute_and_journal(
-                "sheet.createData",
-                json!({ "sheet_id": "s64", "title": "FullUndo", "archetype": "column", "cols": 2, "rows": 4 }),
-            )?;
+            win.execute_and_journal("sheet.createData", json!({ "sheet_id": "s64", "title": "FullUndo", "kind": "column", "cols": 2, "rows": 4 }))?;
             // Fill the 64-entry session undo ring completely.
             for i in 0..64 {
                 win.execute_and_journal("table.setCell", json!({ "sheet_id": "s64", "row": (i % 3) + 1, "col": 0, "value": f64::from(i + 1) }))?;
@@ -550,7 +547,7 @@ fn audit_118_mixed_batch_gui_menu_then_create_recovers_exact_sheets() -> Result<
         let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
         let win = rt.window_mut(win_id)?;
 
-        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "kind": "column", "cols": 1, "rows": 2 }))?;
 
         // Non-atomic mixed batch: GUI menu action creates `g1`, followed by `sheet.createData` for `t2`.
         let batch_req = json!({
@@ -561,7 +558,7 @@ fn audit_118_mixed_batch_gui_menu_then_create_recovers_exact_sheets() -> Result<
                 "atomic": false,
                 "commands": [
                     { "command": "ui.invoke_menu", "params": { "command_id": "graph.create", "params": { "sheet_id": "g1", "data_sheet_id": "t1", "kind": "column" } } },
-                    { "command": "sheet.createData", "params": { "sheet_id": "t2", "title": "Second", "archetype": "column", "cols": 1, "rows": 2 } }
+                    { "command": "sheet.createData", "params": { "sheet_id": "t2", "title": "Second", "kind": "column", "cols": 1, "rows": 2 } }
                 ]
             }
         });
@@ -605,7 +602,7 @@ fn audit_118_mixed_batch_save_then_gui_mutation_keeps_dirty_and_recovers() -> Re
         let win_id = rt.open_window_with_recovery(session, viewport, recovery_dir.clone(), journal, Some(report))?;
         let win = rt.window_mut(win_id)?;
 
-        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "archetype": "column", "cols": 1, "rows": 2 }))?;
+        win.execute_and_journal("sheet.createData", json!({ "sheet_id": "t1", "title": "First", "kind": "column", "cols": 1, "rows": 2 }))?;
 
         // Mixed batch on live control frame path: save first, then mutate via GUI menu action.
         let batch_req = json!({

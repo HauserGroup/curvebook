@@ -276,9 +276,9 @@ impl TableCreationDraft {
             params: json!({
                 "sheet_id": self.sheet_id,
                 "title": self.title,
-                "archetype": self.kind,
+                "kind": self.kind,
                 "cols": self.data_set_count,
-                "row_count": self.row_count,
+                "rows": self.row_count,
                 "replicates": self.replicates,
                 "subcolumn_mode": self.subcolumn_mode,
                 "design_hint": self.column_design,
@@ -640,7 +640,7 @@ pub fn build_set_info_notes_command(sheet_id: &SheetId, markdown: &str, append: 
         "info.setNote",
         json!({
             "sheet_id": sheet_id.as_str(),
-            "note": markdown,
+            "text": markdown,
             "append": append,
         }),
     )

@@ -37,7 +37,7 @@ fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<d
                 "graph_sheet_id": "graph-dose",
                 "title": "Dose Response",
                 "kind": "xy",
-                "data_sets": 1,
+                "cols": 1,
                 "rows": 6,
                 "auto_graph": true
             }
@@ -59,7 +59,7 @@ fn jsonl_control_protocol_end_to_end_over_in_memory_stream() -> Result<(), Box<d
             "id": "c-6",
             "method": "fit.run",
             "params": {
-                "source_sheet": "xy-dose",
+                "source_sheet_id": "xy-dose",
                 "sheet_id": "fit-4pl",
                 "kind": "four_parameter_logistic"
             }
@@ -173,7 +173,7 @@ fn clipboard_bundle_and_print_spool_hardware_adapters() -> Result<(), Box<dyn st
             "graph_sheet_id": "graph-hw",
             "title": "Receptor Binding",
             "kind": "xy",
-            "data_sets": 1,
+            "cols": 1,
             "rows": 4,
             "auto_graph": true
         }),

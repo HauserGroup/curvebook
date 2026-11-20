@@ -560,9 +560,9 @@ fn build_sample_create_params(arch: &TableArchetype, sid: &str, title: &str, aut
     let mut base = json!({
         "sheet_id": sid,
         "title": title,
-        "archetype": arch.kind(),
+        "kind": arch.kind(),
         "cols": arch.column_count(),
-        "row_count": arch.row_count(),
+        "rows": arch.row_count(),
         "auto_graph": auto_graph,
         "auto_info": auto_info,
     });

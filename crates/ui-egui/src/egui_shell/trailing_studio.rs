@@ -1111,7 +1111,7 @@ fn render_mv_formula_studio(
             ) {
                 let mut map = serde_json::Map::new();
                 map.insert(state.mv_recode_from.trim().to_owned(), json!(state.mv_recode_to.trim()));
-                intents.push_engine("table.recodeLevels", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "mapping": map }));
+                intents.push_engine("table.recodeLevels", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "mappings": map }));
             }
         }
     }

@@ -309,7 +309,7 @@ fn execute_role_change(app: &mut UiApp, state: &mut MvFormulaViewState, col: usi
         return Err(String::from("Role updates require an active MultipleVariables sheet."));
     };
     let outcome = app
-        .execute_command("table.setVariableRole", json!({ "sheet_id": sheet_id.as_str(), "column": col, "role": role }))
+        .execute_command("table.setVariableRole", json!({ "sheet_id": sheet_id.as_str(), "col": col, "role": role }))
         .map_err(|err| err.to_string())?;
     if let Some(ds) = app.document().data_sheet(&sheet_id).cloned()
         && app.grid.variables_dialog.selected_column == Some(col)
@@ -608,7 +608,7 @@ fn handle_variables_action(app: &mut UiApp, state: &mut MvFormulaViewState, sub:
         let ref_level =
             app.grid.variables_dialog.ordered_levels.get(idx).map(|l| l.level.clone()).ok_or_else(|| String::from("Level index out of range."))?;
         let outcome = app
-            .execute_command("table.setCategoricalOrder", json!({ "sheet_id": sheet_id.as_str(), "column": col, "reference_level": ref_level }))
+            .execute_command("table.setCategoricalOrder", json!({ "sheet_id": sheet_id.as_str(), "col": col, "reference_level": ref_level }))
             .map_err(|err| err.to_string())?;
         if let Some(ds) = app.document().data_sheet(&sheet_id).cloned() {
             app.grid.variables_dialog.sync_from_sheet(&ds);

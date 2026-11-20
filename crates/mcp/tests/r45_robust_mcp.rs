@@ -62,7 +62,7 @@ fn r45_mcp_robust_fit_renders_not_applicable_status_and_rsdr() {
             "params": {
                 "sheet_id": "xy-1",
                 "title": "Decay",
-                "archetype": "xy",
+                "kind": "xy",
                 "rows": 7,
                 "cols": 1,
                 "replicates": 1,
@@ -78,7 +78,7 @@ fn r45_mcp_robust_fit_renders_not_applicable_status_and_rsdr() {
             "command_id": "table.setXCells",
             "params": {
                 "sheet_id": "xy-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "value": 0.0 },
                     { "row": 1, "value": 1.0 },
                     { "row": 2, "value": 2.0 },
@@ -97,7 +97,7 @@ fn r45_mcp_robust_fit_renders_not_applicable_status_and_rsdr() {
             "command_id": "table.setCells",
             "params": {
                 "sheet_id": "xy-1",
-                "cells": [
+                "edits": [
                     { "row": 0, "col": 0, "subcol": 0, "value": 100.0 },
                     { "row": 1, "col": 0, "subcol": 0, "value": 74.1 },
                     { "row": 2, "col": 0, "subcol": 0, "value": 54.9 },

@@ -154,7 +154,7 @@ fn seed_full_workspace_app() -> Result<UiApp, Box<dyn std::error::Error>> {
     app.set_gui_only(true);
     let _ = app.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-anova", "source_sheet": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-anova", "source_sheet_id": "col-1", "kind": "one_way_anova", "multiplicity": "tukey" }),
     )?;
 
     let mut doc2 = app.document().clone();

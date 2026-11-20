@@ -1177,8 +1177,7 @@ fn dispatch_multivariable_action(app: &mut UiApp, state: &mut InspectorViewState
         && let Ok(col) = raw_col.parse::<usize>()
     {
         let src_id = gs.spec.primary_source_sheet_id.clone();
-        app.execute_command("table.setVariableRole", json!({ "sheet_id": src_id.as_str(), "column": col, "role": role }))
-            .map_err(|e| e.to_string())?;
+        app.execute_command("table.setVariableRole", json!({ "sheet_id": src_id.as_str(), "col": col, "role": role })).map_err(|e| e.to_string())?;
         if let Some(ds) = app.document().data_sheet(&src_id).cloned()
             && app.grid.variables_dialog.open
         {

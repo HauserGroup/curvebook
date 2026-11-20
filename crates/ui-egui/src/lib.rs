@@ -1598,7 +1598,7 @@ mod tests {
         let script = [
             json!({"id": 1, "op": "ping"}),
             json!({"id": 2, "op": "command.list"}),
-            json!({"id": 3, "op": "command.run", "command": "sheet.createData", "params": {"sheet_id": "xy-1", "graph_sheet_id": "graph-xy-1", "title": "Dose", "kind": "xy", "data_sets": 1, "rows": 3, "auto_graph": true}}),
+            json!({"id": 3, "op": "command.run", "command": "sheet.createData", "params": {"sheet_id": "xy-1", "graph_sheet_id": "graph-xy-1", "title": "Dose", "kind": "xy", "cols": 1, "rows": 3, "auto_graph": true}}),
             json!({"id": 4, "op": "table.setXCells", "params": {"sheet_id": "xy-1", "values": [1.0, 2.0, 3.0]}}),
             json!({"id": 5, "op": "table.setCell", "params": {"sheet_id": "xy-1", "row": 0, "col": 0, "subcol": 0, "value": 10.0}}),
             json!({"id": 6, "op": "table.setCell", "params": {"sheet_id": "xy-1", "row": 1, "col": 0, "subcol": 0, "value": 20.0}}),

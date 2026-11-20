@@ -294,11 +294,11 @@ fn slice0_end_to_end_dose_response_vertical_gate() -> GateResult {
                 }
             }),
             json!({ "command": "table.setXCells", "params": { "sheet_id": "dr_xy", "values": xs } }),
-            json!({ "id": "set-y", "method": "table.setCells", "params": { "sheet_id": "dr_xy", "cells": cell_entries } }),
+            json!({ "id": "set-y", "method": "table.setCells", "params": { "sheet_id": "dr_xy", "edits": cell_entries } }),
             json!({
                 "cmd": "fit.run",
                 "params": {
-                    "source_sheet": "dr_xy",
+                    "source_sheet_id": "dr_xy",
                     "sheet_id": "dr_fit",
                     "equation_id": "log_agonist_vs_response_4pl",
                     "weighting": "none",
@@ -320,7 +320,7 @@ fn slice0_end_to_end_dose_response_vertical_gate() -> GateResult {
                     "sheet_id": "dr_graph",
                     "series_index": 0,
                     "color": "#1B9E77",
-                    "error_bars": { "metric": "sem", "direction": "both" }
+                    "y_error_bars": { "metric": "sem", "direction": "both" }
                 }
             }),
             json!({
@@ -446,7 +446,7 @@ fn slice0_end_to_end_dose_response_vertical_gate() -> GateResult {
             json!({ "cmd": "project.open", "params": { "path": "dose_response.curvebook" } }),
             json!({
                 "cmd": "table.setCells",
-                "params": { "sheet_id": "dr_xy", "cells": [{ "row": 2, "col": 0, "subcol": 1, "value": 92.0 }] }
+                "params": { "sheet_id": "dr_xy", "edits": [{ "row": 2, "col": 0, "subcol": 1, "value": 92.0 }] }
             }),
             json!({ "cmd": "analysis.exportJson", "params": { "sheet_id": "dr_fit", "path": "reactive_fit.json", "pretty": true } }),
             json!({ "cmd": "export.svg", "params": { "sheet_id": "dr_graph", "path": "reactive.svg" } }),
@@ -491,11 +491,11 @@ fn nist_strd_eckerle4_and_rat43_through_cli() -> GateResult {
                 "params": { "sheet_id": "eck_xy", "title": "NIST Eckerle4", "kind": "xy", "rows": eckerle.y.len(), "cols": 1 }
             }),
             json!({ "cmd": "table.setXCells", "params": { "sheet_id": "eck_xy", "values": x_vals } }),
-            json!({ "cmd": "table.setCells", "params": { "sheet_id": "eck_xy", "cells": y_cells } }),
+            json!({ "cmd": "table.setCells", "params": { "sheet_id": "eck_xy", "edits": y_cells } }),
             json!({
                 "cmd": "fit.run",
                 "params": {
-                    "source_sheet": "eck_xy",
+                    "source_sheet_id": "eck_xy",
                     "sheet_id": "eck_fit",
                     "equation_id": "nist_eckerle4",
                     "weighting": "none",
@@ -535,11 +535,11 @@ fn nist_strd_eckerle4_and_rat43_through_cli() -> GateResult {
                 "params": { "sheet_id": "rat_xy", "title": "NIST Rat43", "kind": "xy", "rows": rat43.y.len(), "cols": 1 }
             }),
             json!({ "cmd": "table.setXCells", "params": { "sheet_id": "rat_xy", "values": rat_x } }),
-            json!({ "cmd": "table.setCells", "params": { "sheet_id": "rat_xy", "cells": rat_cells } }),
+            json!({ "cmd": "table.setCells", "params": { "sheet_id": "rat_xy", "edits": rat_cells } }),
             json!({
                 "cmd": "fit.run",
                 "params": {
-                    "source_sheet": "rat_xy",
+                    "source_sheet_id": "rat_xy",
                     "sheet_id": "rat_fit",
                     "equation_id": "nist_rat43",
                     "weighting": "none",
@@ -579,7 +579,7 @@ fn cli_batch_template_convert_perf_bench_mcp_and_exit_codes() -> GateResult {
         &tpl_script,
         &[
             json!({ "cmd": "sheet.createData", "params": { "sheet_id": "raw", "title": "Plate Data", "kind": "xy", "rows": 4, "cols": 1, "auto_info": true, "info_sheet_id": "info_1" } }),
-            json!({ "cmd": "graph.create", "params": { "sheet_id": "g_1", "source_sheet_id": "raw", "title": "Batch Dose Curve" } }),
+            json!({ "cmd": "graph.create", "params": { "sheet_id": "g_1", "data_sheet_id": "raw", "title": "Batch Dose Curve" } }),
             json!({ "cmd": "graph.initialize", "params": { "sheet_id": "g_1", "kind": "xy" } }),
             json!({ "cmd": "project.saveTemplate", "params": { "path": "tpl/plate.cbtemplate" } }),
         ],
@@ -604,7 +604,7 @@ fn cli_batch_template_convert_perf_bench_mcp_and_exit_codes() -> GateResult {
         ],
         "commands": [
             { "cmd": "info.setConstant", "params": { "name": "Lot", "value": "A17" } },
-            { "cmd": "fit.run", "params": { "source_sheet": "raw", "sheet_id": "fit_1", "equation_id": "log_agonist_vs_response_4pl" } },
+            { "cmd": "fit.run", "params": { "source_sheet_id": "raw", "sheet_id": "fit_1", "equation_id": "log_agonist_vs_response_4pl" } },
             { "cmd": "graph.setRegressionOverlay", "params": { "sheet_id": "g_1", "result_sheet_id": "fit_1", "series_index": 0 } }
         ],
         "exports": [

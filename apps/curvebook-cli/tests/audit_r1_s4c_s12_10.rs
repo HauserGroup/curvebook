@@ -204,7 +204,7 @@ fn r1_s12_10_documented_batch_manifest_executes_and_replaces_sheet_end_to_end() 
             }
         })
         .to_string(),
-        json!({ "cmd": "graph.create", "params": { "sheet_id": "g_1", "source_sheet_id": "dose_1", "title": "Response Graph" } }).to_string(),
+        json!({ "cmd": "graph.create", "params": { "sheet_id": "g_1", "data_sheet_id": "dose_1", "title": "Response Graph" } }).to_string(),
         json!({ "cmd": "graph.initialize", "params": { "sheet_id": "g_1", "kind": "xy" } }).to_string(),
         json!({ "cmd": "layout.create", "params": { "sheet_id": "layout_1", "title": "Summary Layout" } }).to_string(),
         json!({ "cmd": "project.saveTemplate", "params": { "path": "assay-4pl.cbtemplate" } }).to_string(),

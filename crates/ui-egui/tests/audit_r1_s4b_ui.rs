@@ -197,7 +197,7 @@ fn r1_s11_12_bracket_pointer_drag_resolves_real_category_slots() -> TestRes {
     let mut app = UiApp::from_session(Session::from_document(doc));
     app.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-anova", "source_sheet": "data-col", "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-anova", "source_sheet_id": "data-col", "kind": "one_way_anova", "multiplicity": "tukey" }),
     )
     .map_err(|e| format!("analysis.run failed: {e}"))?;
     app.execute_command("graph.create", json!({ "sheet_id": "gr-col", "data_sheet_id": "data-col", "kind": "column" }))

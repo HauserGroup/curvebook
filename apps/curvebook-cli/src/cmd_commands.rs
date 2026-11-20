@@ -363,14 +363,16 @@ fn build_property_lookup(schema: &Value) -> PropertyLookup {
         }
     }
 
-    if let Some(alias_map) = schema.get("x-aliases").and_then(Value::as_object) {
-        for (canonical, aliases) in alias_map {
-            let Some(&idx) = by_token.get(canonical).or_else(|| by_token.get(&normalize_token(canonical))) else {
-                continue;
-            };
-            if let Some(list) = aliases.as_array() {
-                for alias in list.iter().filter_map(Value::as_str) {
-                    register_flag_tokens(&mut by_token, alias, idx);
+    for alias_key in ["x-deprecated-aliases", "x-aliases"] {
+        if let Some(alias_map) = schema.get(alias_key).and_then(Value::as_object) {
+            for (canonical, aliases) in alias_map {
+                let Some(&idx) = by_token.get(canonical).or_else(|| by_token.get(&normalize_token(canonical))) else {
+                    continue;
+                };
+                if let Some(list) = aliases.as_array() {
+                    for alias in list.iter().filter_map(Value::as_str) {
+                        register_flag_tokens(&mut by_token, alias, idx);
+                    }
                 }
             }
         }
@@ -758,7 +760,7 @@ mod tests {
             "dose_1",
             "--title",
             "Dose Curve",
-            "--archetype",
+            "--kind",
             "XY",
             "--rows",
             "12",
@@ -789,6 +791,36 @@ mod tests {
 
         let bad_int = parse_direct_command_args(spec, &schema, &[String::from("--rows"), String::from("not_a_num")]).err();
         assert!(matches!(bad_int, Some(CliError::Usage(_))));
+    }
+
+    #[test]
+    fn build_property_lookup_resolves_both_x_aliases_and_x_deprecated_aliases() {
+        let spec = registry().get("sheet.createData").unwrap();
+        let legacy_schema = json!({
+            "type": "object",
+            "properties": {
+                "sheet_id": { "type": "string" },
+                "kind": { "type": "string" }
+            },
+            "x-aliases": {
+                "kind": ["archetype"]
+            }
+        });
+        let deprecated_schema = json!({
+            "type": "object",
+            "properties": {
+                "sheet_id": { "type": "string" },
+                "kind": { "type": "string" }
+            },
+            "x-deprecated-aliases": {
+                "kind": ["archetype"]
+            }
+        });
+        let args = vec![String::from("--archetype"), String::from("xy")];
+        let parsed_legacy = parse_direct_command_args(spec, &legacy_schema, &args).unwrap();
+        let parsed_deprecated = parse_direct_command_args(spec, &deprecated_schema, &args).unwrap();
+        assert_eq!(parsed_legacy.params["kind"], json!("xy"));
+        assert_eq!(parsed_deprecated.params["kind"], json!("xy"));
     }
 
     #[test]

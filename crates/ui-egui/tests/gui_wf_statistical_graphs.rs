@@ -763,7 +763,7 @@ fn wf27_multi_panel_layout_drag_snap_apply_style_and_preflight_strict_gui_only()
         "ui.invoke_menu",
         json!({
             "command_id": "layout.addPanel",
-            "params": { "sheet_id": "layout-wf27", "kind": "text", "text": "Multi-panel composite", "bounds_pt": [24.0, 195.0, 220.0, 22.0] }
+            "params": { "sheet_id": "layout-wf27", "kind": "text", "markdown": "Multi-panel composite", "bounds_pt": [24.0, 195.0, 220.0, 22.0] }
         }),
     )?;
     select_sheet(&mut app, "layout-wf27")?;

@@ -1000,7 +1000,7 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
         TransformModalKind::TransformValues => {
             let y_t = state.standalone_y_preset.as_deref().unwrap_or("log10");
             let mut obj = json!({
-                "source_sheet": ds.id.as_str(),
+                "source_sheet_id": ds.id.as_str(),
                 "kind": "math",
                 "y_transform": match y_t {
                     "affine_k" => {
@@ -1032,7 +1032,7 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
             obj
         }
         TransformModalKind::Normalize => json!({
-            "source_sheet": ds.id.as_str(),
+            "source_sheet_id": ds.id.as_str(),
             "kind": "normalize",
             "zero_anchor": match state.norm_zero_idx { 1 => json!("first_row"), 2 => json!({ "FixedValue": 0.0 }), _ => json!("smallest") },
             "hundred_anchor": match state.norm_hundred_idx { 1 => "column_sum", 2 => "last_row", _ => "largest" },
@@ -1040,7 +1040,7 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
             "per_data_set": state.norm_per_dataset,
         }),
         TransformModalKind::RemoveBaseline => json!({
-            "source_sheet": ds.id.as_str(),
+            "source_sheet_id": ds.id.as_str(),
             "kind": "remove_baseline",
             "baseline_columns": if state.baseline_cols.is_empty() { vec![0] } else { state.baseline_cols.clone() },
             "operation": match state.baseline_op {
@@ -1051,14 +1051,18 @@ fn build_standalone_transform_params(app: &UiApp, ds: &DataSheet, kind: Transfor
             },
         }),
         TransformModalKind::MvFilterAndTransform | TransformModalKind::ExtractAndRearrange => json!({
-            "source_sheet": ds.id.as_str(),
+            "source_sheet_id": ds.id.as_str(),
             "kind": "select_and_transform",
             "filter_formula": (!state.formula_draft.trim().is_empty()).then_some(state.formula_draft.trim()),
         }),
-        TransformModalKind::Transpose => json!({ "source_sheet": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true }),
-        TransformModalKind::PruneRows => json!({ "source_sheet": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false }),
-        TransformModalKind::Simulate => json!({ "source_sheet": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 }),
-        TransformModalKind::RandomSample => json!({ "source_sheet": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 }),
+        TransformModalKind::Transpose => json!({ "source_sheet_id": ds.id.as_str(), "kind": "transpose", "swap_row_and_column_titles": true }),
+        TransformModalKind::PruneRows => {
+            json!({ "source_sheet_id": ds.id.as_str(), "kind": "prune_rows", "every_k_rows": 2, "average_window": false })
+        }
+        TransformModalKind::Simulate => {
+            json!({ "source_sheet_id": ds.id.as_str(), "kind": "simulate", "seed": 42, "row_count": 13, "replicates": 3 })
+        }
+        TransformModalKind::RandomSample => json!({ "source_sheet_id": ds.id.as_str(), "kind": "random_sample", "seed": 42, "sample_size": 5 }),
     }
 }
 

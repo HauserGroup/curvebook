@@ -168,7 +168,7 @@ fn build_split_fit_png() -> Result<Vec<u8>, Box<dyn Error>> {
         "fit.run",
         json!({
             "sheet_id": "fit-4pl",
-            "source_sheet": "xy-dose",
+            "source_sheet_id": "xy-dose",
             "kind": "four_parameter_logistic",
             "title": "4PL Dose-Response Fit"
         }),
@@ -213,7 +213,7 @@ fn build_layout_dark_png() -> Result<Vec<u8>, Box<dyn Error>> {
         "fit.run",
         json!({
             "sheet_id": "fit-4pl",
-            "source_sheet": "xy-dose",
+            "source_sheet_id": "xy-dose",
             "kind": "four_parameter_logistic",
             "title": "4PL Fit Analysis"
         }),
@@ -222,7 +222,7 @@ fn build_layout_dark_png() -> Result<Vec<u8>, Box<dyn Error>> {
         "stats.run",
         json!({
             "sheet_id": "anova-eff",
-            "source_sheet": "col-eff",
+            "source_sheet_id": "col-eff",
             "kind": "one_way_anova",
             "title": "One-Way ANOVA"
         }),

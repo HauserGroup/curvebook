@@ -388,7 +388,7 @@ impl VariablesDialogState {
         let role = self.pending_role?;
         Some(ToolCommandIntent {
             command_id: String::from("table.setVariableRole"),
-            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "role": role }),
+            params: json!({ "sheet_id": sheet_id.as_str(), "col": col, "role": role }),
         })
     }
 
@@ -402,7 +402,7 @@ impl VariablesDialogState {
         let mappings: Vec<serde_json::Value> = self.recode_mappings.iter().map(|(from, to)| json!({ "from": from, "to": to })).collect();
         Some(ToolCommandIntent {
             command_id: String::from("table.recodeLevels"),
-            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "mappings": mappings }),
+            params: json!({ "sheet_id": sheet_id.as_str(), "col": col, "mappings": mappings }),
         })
     }
 
@@ -412,7 +412,7 @@ impl VariablesDialogState {
         let col = self.selected_column?;
         Some(ToolCommandIntent {
             command_id: String::from("table.setCategoricalOrder"),
-            params: json!({ "sheet_id": sheet_id.as_str(), "column": col, "order_spec": self.level_order }),
+            params: json!({ "sheet_id": sheet_id.as_str(), "col": col, "order_spec": self.level_order }),
         })
     }
 }
@@ -576,7 +576,7 @@ impl FormulaBarState {
         let mut params = serde_json::Map::new();
         params.insert(String::from("sheet_id"), Value::String(sheet_id.as_str().to_owned()));
         if let Some(col) = self.target_column {
-            params.insert(String::from("column"), json!(col));
+            params.insert(String::from("col"), json!(col));
         }
         if !self.target_title.trim().is_empty() {
             params.insert(String::from("title"), json!(self.target_title));
@@ -1145,14 +1145,14 @@ impl ImportPasteWizardState {
         let spec = self.to_link_spec(doc);
         if self.is_live_link && !matches!(spec.source, LinkSource::Clipboard) {
             let link_id = (!self.link_id.trim().is_empty()).then_some(self.link_id.as_str());
-            let provenance_summary = (!self.provenance_note.trim().is_empty()).then_some(self.provenance_note.as_str());
+            let provenance = (!self.provenance_note.trim().is_empty()).then_some(self.provenance_note.as_str());
             return ToolCommandIntent {
                 command_id: String::from("table.pasteLink"),
                 params: json!({
                     "target_sheet_id": target_sheet_id.as_str(),
                     "link_id": link_id,
                     "link_spec": spec,
-                    "provenance_summary": provenance_summary,
+                    "provenance": provenance,
                     "record_in_info_sheet": self.record_in_info_sheet,
                 }),
             };
