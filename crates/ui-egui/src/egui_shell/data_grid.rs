@@ -4424,6 +4424,12 @@ fn grid_focus_key(sheet_id: &SheetId) -> Id {
     Id::unique(("column_grid_focused", sheet_id.as_str()))
 }
 
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct GridDragAnchor {
+    coord: GridCellCoord,
+    press_pos: Pos2,
+}
+
 fn grid_drag_anchor_key(sheet_id: &SheetId) -> Id {
     Id::unique(("grid_drag_anchor", sheet_id.as_str()))
 }
@@ -4440,7 +4446,11 @@ fn handle_cell_pointer_drag_select(ui: &Ui, sheet_id: &SheetId, coord: GridCellC
         )
     });
     if primary_pressed && !shift && resp.is_pointer_button_down_on() {
-        ui.ctx().data_mut(|d| d.insert_temp(key, Some(coord)));
+        if let Some(press_pos) = ptr_pos
+            && !ui.ctx().will_discard()
+        {
+            ui.ctx().data_mut(|d| d.insert_temp(key, Some(GridDragAnchor { coord, press_pos })));
+        }
         intents.push_select_grid_cell(coord);
         set_grid_focus_active(ui, true);
         return true;
@@ -4448,11 +4458,11 @@ fn handle_cell_pointer_drag_select(ui: &Ui, sheet_id: &SheetId, coord: GridCellC
     let Some(pos) = ptr_pos.filter(|p| resp.rect.contains(*p)) else {
         return false;
     };
-    let _ = pos;
     if primary_down || primary_released {
-        let anchor = ui.ctx().data(|d| d.get_temp::<Option<GridCellCoord>>(key).flatten());
+        let anchor = ui.ctx().data(|d| d.get_temp::<Option<GridDragAnchor>>(key).flatten());
         if let Some(a) = anchor
-            && a != coord
+            && a.coord != coord
+            && pos.distance(a.press_pos) >= 4.0
         {
             intents.push_extend_grid_selection(coord);
             set_grid_focus_active(ui, true);
@@ -4464,7 +4474,7 @@ fn handle_cell_pointer_drag_select(ui: &Ui, sheet_id: &SheetId, coord: GridCellC
 
 fn clear_grid_drag_anchor_if_released(ui: &Ui, sheet_id: &SheetId) {
     if !ui.input(|i| i.pointer.primary_down()) {
-        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridCellCoord>>(grid_drag_anchor_key(sheet_id)));
+        ui.ctx().data_mut(|d| d.remove_temp::<Option<GridDragAnchor>>(grid_drag_anchor_key(sheet_id)));
     }
 }
 
