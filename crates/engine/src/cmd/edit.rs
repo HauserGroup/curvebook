@@ -11,8 +11,8 @@ use crate::cmd::helpers::{
 };
 use crate::cmd::layout::{LayoutImageInsertArgs, insert_image_on_layout, validate_layout_spec_in_doc};
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, empty_object_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema,
-    obj_schema_with_aliases, parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, empty_object_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema, parse_params,
+    str_schema,
 };
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError};
@@ -51,10 +51,9 @@ fn run_edit_redo(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandOutcome, Eng
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct EditPasteResultTableParams {
-    #[serde(alias = "result_sheet_id", alias = "source_sheet", alias = "from_sheet_id")]
     source_sheet_id: String,
-    #[serde(alias = "sheet_id", alias = "id")]
     target_sheet_id: String,
     #[serde(default)]
     tab_id: Option<String>,
@@ -74,7 +73,7 @@ struct EditPasteResultTableParams {
 
 fn schema_edit_paste_result_table() -> Value {
     let idx_arr = nullable_schema(array_schema("Optional zero-based indices to include", int_schema("Index", Some(0), None), None, None));
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("source_sheet_id", non_empty_str_schema("Source ResultSheet (or DataSheet for Layout target) ID")),
             ("target_sheet_id", non_empty_str_schema("Target GraphSheet or LayoutSheet ID")),
@@ -87,7 +86,6 @@ fn schema_edit_paste_result_table() -> Value {
             ("panel_id", nullable_schema(str_schema("Optional panel identifier when pasting onto a LayoutSheet"))),
         ],
         &["source_sheet_id", "target_sheet_id"],
-        vec![("source_sheet_id", &["result_sheet_id", "source_sheet", "from_sheet_id"]), ("target_sheet_id", &["sheet_id", "id"])],
         false,
     )
 }

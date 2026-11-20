@@ -328,8 +328,8 @@ struct LayoutApplyCanvasPresetParams {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutEqualizeScalingParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     #[serde(default)]
     mode: Option<String>,
@@ -342,7 +342,7 @@ struct LayoutEqualizeScalingParams {
 }
 
 fn schema_layout_equalize_scaling() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
             (
@@ -371,25 +371,23 @@ fn schema_layout_equalize_scaling() -> Value {
             ),
         ],
         &["sheet_id"],
-        vec![("sheet_id", &["id"])],
         false,
     )
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct LayoutReorderPanelParams {
-    #[serde(alias = "id")]
     sheet_id: String,
     #[serde(default, deserialize_with = "de_opt_usize")]
     panel_index: Option<usize>,
     #[serde(default)]
     panel_id: Option<String>,
-    #[serde(alias = "operation", alias = "direction", alias = "order")]
     action: String,
 }
 
 fn schema_layout_reorder_panel() -> Value {
-    obj_schema_with_aliases(
+    obj_schema(
         vec![
             ("sheet_id", non_empty_str_schema("Target layout sheet ID")),
             ("panel_index", nullable_schema(int_schema("Zero-based index in `layout.spec.items`", Some(0), None))),
@@ -412,7 +410,6 @@ fn schema_layout_reorder_panel() -> Value {
             ),
         ],
         &["sheet_id", "action"],
-        vec![("sheet_id", &["id"]), ("action", &["operation", "direction", "order"])],
         false,
     )
 }
