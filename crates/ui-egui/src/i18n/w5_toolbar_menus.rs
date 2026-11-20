@@ -424,7 +424,7 @@ pub const ENTRIES: &[CatalogEntry] = &[
         he: "הדפס",
     ]),
     entry!("toolbar.palette" => [
-        en: "Cmd+K",
+        en: "Commands",
         de: "Befehle",
         es: "Comandos",
         fr: "Commandes",

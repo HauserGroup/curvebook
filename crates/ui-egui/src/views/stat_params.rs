@@ -137,6 +137,13 @@ fn handle_prefixed_custom_action(app: &mut UiApp, state: &mut StatParamsViewStat
     if let Some(rest) = payload.strip_prefix("set_multiplicity:") {
         return set_multiplicity_method(app, rest);
     }
+    if let Some(rest) = payload.strip_prefix("set_compare_against_control:") {
+        let cmp = rest.parse::<bool>().map_err(|_| format!("invalid boolean `{rest}`"))?;
+        let mut map = serde_json::Map::new();
+        map.insert(String::from("compare_against_control"), serde_json::Value::Bool(cmp));
+        app.canvas_dialogs.edit_params.apply_field_patch(&map)?;
+        return Ok(true);
+    }
     if let Some(rest) = payload.strip_prefix("set_pvalue_format:") {
         return set_pvalue_format(app, rest);
     }

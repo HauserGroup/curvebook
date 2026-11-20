@@ -415,7 +415,7 @@ fn a4_command_palette_routes_parameterized_commands_and_hides_unrunnable() -> Re
     let app = seed_data_and_graph_app();
 
     // Verify unrunnable low-level parameterised commands are hidden from the palette (`R15-GUI-18`).
-    for hidden_id in ["sheet.rename", "sheet.reorder", "table.setCell", "project.restoreCheckpoint", "info.setConstant", "ui.event.dispatch"] {
+    for hidden_id in ["sheet.rename", "sheet.reorder", "table.setCell", "info.setConstant", "ui.event.dispatch"] {
         let rows = filter_palette_commands(&app, hidden_id, 24);
         assert!(rows.iter().all(|r| r.command_id != hidden_id), "unrunnable parameterised command `{hidden_id}` must be hidden from palette");
     }

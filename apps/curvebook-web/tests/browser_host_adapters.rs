@@ -434,7 +434,6 @@ fn multi_flavor_clipboard_print_and_json_bridge_roundtrip() {
     let roundtrip_events = [
         WebBridgeEvent::ResizeViewport { logical_width: 1440.0, logical_height: 900.0, scale_factor: 2.0 },
         WebBridgeEvent::SetPreviewFilter { filter: CanvasPreviewFilter::Tritanopia },
-        WebBridgeEvent::SetPresentationMode { enabled: true },
         WebBridgeEvent::UiInput { event: UiInputEvent::KeyDown { key: String::from("Escape"), modifiers: KeyModifiers::default() } },
         WebBridgeEvent::AcquireLock { doc_id: String::from("clip-doc"), tab_id: String::from("tab-clip"), now_ms: 5_000 },
     ];

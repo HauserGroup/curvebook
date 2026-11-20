@@ -1141,6 +1141,14 @@ fn collect_transitive(start: &SheetId, adj: &BTreeMap<SheetId, Vec<SheetId>>) ->
     visited
 }
 
+/// Collect all downstream dependent sheet IDs transitively relying on `root_id`.
+#[must_use]
+pub(crate) fn collect_downstream_dependents(doc: &ProjectDocument, root_id: &SheetId) -> Vec<SheetId> {
+    let upstream = build_upstream_map(doc);
+    let downstream = build_downstream_map(&upstream);
+    collect_transitive(root_id, &downstream).into_iter().collect()
+}
+
 fn bfs_distances(start: &SheetId, adj: &BTreeMap<SheetId, Vec<SheetId>>) -> BTreeMap<SheetId, usize> {
     let mut dist = BTreeMap::new();
     let mut queue = VecDeque::new();

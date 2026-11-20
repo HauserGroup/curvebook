@@ -1935,6 +1935,22 @@ fn handle_invoke_menu(app: &mut UiApp, params: &Value) -> Result<Value, EngineEr
         }
     };
     enforce_gui_only_menu_command_policy(app, &cmd_id, &extra_params)?;
+    if extra_params.is_null()
+        && matches!(
+            cmd_id.as_str(),
+            "project.createCheckpoint" | "project.listCheckpoints" | "project.restoreCheckpoint" | "project.deleteCheckpoint"
+        )
+    {
+        let doc = app.document().clone();
+        app.canvas_dialogs.open_checkpoints(&doc);
+        return Ok(json!({
+            "invoked": true,
+            "command_id": cmd_id,
+            "ui": true,
+            "active_dialog": format!("{:?}", app.canvas_dialogs.active_dialog),
+            "result": { "dialog": "Checkpoints" },
+        }));
+    }
     if let Some(ui_val) = dispatch_ui_command_as_ui(app, &cmd_id, &extra_params)? {
         return Ok(json!({
             "invoked": true,
@@ -2388,6 +2404,19 @@ pub(crate) fn patch_active_dialog(app: &mut UiApp, fields: &Map<String, Value>) 
             }
             app.canvas_dialogs.print.apply_field_patch_localized(fields, &preset).map_err(bad_input)?;
         }
+        ActiveDialog::Checkpoints => {
+            if let Some(name) = map_opt_str(fields, &["name", "checkpoints.name"])? {
+                app.canvas_dialogs.checkpoints.name_draft = name.to_owned();
+            }
+            if let Some(note) = map_opt_str(fields, &["note", "checkpoints.note"])? {
+                app.canvas_dialogs.checkpoints.note_draft = note.to_owned();
+            }
+            for k in fields.keys() {
+                if !matches!(k.as_str(), "name" | "checkpoints.name" | "note" | "checkpoints.note") {
+                    return Err(bad_input(format!("unknown checkpoints field `{k}`")));
+                }
+            }
+        }
         ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
             if !fields.is_empty() {
                 return Err(bad_input("active dialog does not accept field patches"));
@@ -2541,6 +2570,23 @@ fn commit_active_dialog_action(app: &mut UiApp, action: &str, params: &Value) ->
         ActiveDialog::FormatImage { .. } => commit_single_intent(app, app.canvas_dialogs.format_image.commit_intent(), action != "apply"),
         ActiveDialog::CommandPalette => commit_command_palette_action(app),
         ActiveDialog::ConstantHookPicker { .. } => commit_single_intent(app, app.canvas_dialogs.hook_picker.commit_intent(), true),
+        ActiveDialog::Checkpoints => {
+            let name = app.canvas_dialogs.checkpoints.name_draft.trim().to_owned();
+            if name.is_empty() {
+                return Err(disabled_err("Enter a checkpoint name before saving."));
+            }
+            let mut params = serde_json::Map::new();
+            params.insert(String::from("name"), Value::String(name));
+            let note = app.canvas_dialogs.checkpoints.note_draft.trim().to_owned();
+            if !note.is_empty() {
+                params.insert(String::from("note"), Value::String(note));
+            }
+            let outcome = app.execute_command("project.createCheckpoint", Value::Object(params))?;
+            let doc = app.document().clone();
+            app.canvas_dialogs.checkpoints.name_draft = format!("Checkpoint {}", doc.checkpoints.len() + 1);
+            app.canvas_dialogs.checkpoints.note_draft.clear();
+            Ok(outcome.payload)
+        }
         ActiveDialog::ResultViewer { .. } | ActiveDialog::About | ActiveDialog::Feedback | ActiveDialog::None => {
             app.canvas_dialogs.close_dialog();
             Ok(json!({ "action": action, "closed": true }))

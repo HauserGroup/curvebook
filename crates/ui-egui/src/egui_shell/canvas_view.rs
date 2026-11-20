@@ -12,10 +12,9 @@ use curvebook_doc::{
 use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
 use curvebook_palette::{CanvasPreviewFilter, Rgba8};
 use curvebook_render::{RasterImage, RenderTargetSpec, apply_canvas_preview_filter, render_scene};
-use curvebook_text::{EquationSegment, SpanScript, SpanSlope, SpanWeight, parse_equation_segments};
 use curvebook_tools::GridCellCoord;
 use curvebook_tools::canvas::{PhysicalUnit, SnapGuide, SnapOrientation, SnapSource};
-use egui::{Color32, CornerRadius, FontFamily, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
+use egui::{Color32, CornerRadius, FontId, Id, Pos2, Rect, Sense, Stroke, StrokeKind, pos2, vec2};
 use serde_json::json;
 
 use crate::UiApp;
@@ -101,8 +100,8 @@ pub struct CanvasViewEguiState {
     pub tex_equation_count: usize,
     /// Render uncached scenes inline synchronously (used by software screenshot capture).
     pub synchronous_raster: bool,
-    /// Active layout panel right-click Z-order context menu `(layout_sheet_id, item_index, anchor_pos_pt)`.
-    pub layout_context_menu: Option<(SheetId, usize, Pos2)>,
+    /// Active layout panel or canvas right-click context menu `(layout_sheet_id, opt_item_index, anchor_pos_pt)`.
+    pub layout_context_menu: Option<(SheetId, Option<usize>, Pos2)>,
     /// Selected annotation index on the active `GraphSheet` (`EmbeddedResultTable` or `EmbeddedImage`).
     pub selected_graph_annotation: Option<usize>,
     /// Active `GraphSheet` right-click context menu `(graph_sheet_id, opt_ann_index, screen_anchor, scene_pt)`.
@@ -389,7 +388,7 @@ pub fn render_canvas_view_for_sheet(
     }
 
     let mut mat_rect = content_rect;
-    let show_rulers = app.canvas_dialogs.rulers_visible && !app.presentation_mode && mat_rect.width() > 96.0 && mat_rect.height() > 96.0;
+    let show_rulers = app.canvas_dialogs.rulers_visible && mat_rect.width() > 96.0 && mat_rect.height() > 96.0;
     let (top_ruler_rect, left_ruler_rect) = if show_rulers {
         let top_r = Rect::from_min_size(
             pos2(mat_rect.left() + RULER_THICKNESS_PT, mat_rect.top()),
@@ -470,7 +469,7 @@ pub fn render_canvas_view_for_sheet(
     }
     report.async_rendering_in_flight = state.slot.rendering_in_flight;
 
-    if app.canvas_dialogs.grid_overlay_visible && !app.presentation_mode {
+    if app.canvas_dialogs.grid_overlay_visible {
         paint_canvas_grid_overlay(&clipped_painter, mat_rect, paper_rect, scene_w_pt, scene_h_pt, app.canvas_dialogs.grid_overlay_spacing_pt, tokens);
         report.grid_overlay_shown = true;
     }
@@ -489,7 +488,17 @@ pub fn render_canvas_view_for_sheet(
     } else if let Some(ls) = ls_opt {
         render_layout_hud_overlays(
             ui,
-            LayoutHudInput { painter: &clipped_painter, app, ls, scene: scene.as_deref(), mat_rect, paper_rect, eff_scale, ctx_in: &ctx_in },
+            LayoutHudInput {
+                painter: &clipped_painter,
+                app,
+                ls,
+                scene: scene.as_deref(),
+                mat_rect,
+                paper_rect,
+                eff_scale,
+                canvas_resp: &resp,
+                ctx_in: &ctx_in,
+            },
             state,
             meta,
             intents,
@@ -1263,7 +1272,7 @@ fn render_live_tex_equations(
     state: &mut CanvasViewEguiState,
     meta: &mut FrameInspectMeta,
 ) -> Vec<Rect> {
-    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
+    let GraphOverlayCtx { gs, doc, scene, paper_rect, .. } = *ov;
     let (sx, sy) = scale_xy;
     let mut rects = Vec::new();
     let mut eq_idx = 0usize;
@@ -1275,18 +1284,14 @@ fn render_live_tex_equations(
         let Some(tex) = resolve_live_equation_tex(doc, result_sheet_id, *data_set_index, *mode) else {
             continue;
         };
-        let segments = parse_equation_segments(&tex);
-        if segments.is_empty() {
+        if tex.trim().is_empty() {
             continue;
         }
         let eff_bounds = resolve_model_equation_hit_bounds(scene, *bounds_pt, *font_size_pt, *bordered).unwrap_or_else(|| RectPt::from(*bounds_pt));
-        let origin = pos2(paper_rect.left() + (eff_bounds.x as f32) * sx + 4.0, paper_rect.top() + (eff_bounds.y as f32) * sy + 4.0);
-        let scaled_font = (*font_size_pt as f32 * sx).clamp(9.0, 26.0);
-        let rendered = paint_equation_segments(ui, painter, origin, &segments, scaled_font, tokens.text_strong);
-        let box_rect = rendered.expand(4.0);
-        if *bordered {
-            painter.rect_stroke(box_rect, CornerRadius::same(2), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
-        }
+        let box_rect = Rect::from_min_size(
+            pos2(paper_rect.left() + (eff_bounds.x as f32) * sx, paper_rect.top() + (eff_bounds.y as f32) * sy),
+            vec2((eff_bounds.width as f32 * sx).max(16.0), (eff_bounds.height as f32 * sy).max(12.0)),
+        );
         let wid = format!("canvas.tex_equation.{eq_idx}");
         let box_vis = box_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
         if box_vis.width() >= 2.0 && box_vis.height() >= 2.0 {
@@ -1349,90 +1354,6 @@ fn resolve_live_equation_tex(doc: &ProjectDocument, result_sheet_id: &SheetId, d
     }
 }
 
-fn measure_equation_segments(ui: &egui::Ui, segments: &[EquationSegment], font_size: f32) -> (f32, f32) {
-    let mut total_w = 0.0_f32;
-    let mut max_h = font_size * 1.15;
-    for seg in segments {
-        match seg {
-            EquationSegment::Inline(rich) => {
-                for span in &rich.spans {
-                    let scale = match span.script {
-                        SpanScript::Baseline => 1.0,
-                        SpanScript::Superscript | SpanScript::Subscript => 0.72,
-                    };
-                    let font = FontId::new((font_size * scale).max(7.0), FontFamily::Proportional);
-                    let galley = ui.fonts_mut(|f| f.layout_no_wrap(span.text.clone(), font, Color32::BLACK));
-                    total_w += galley.size().x;
-                    max_h = max_h.max(galley.size().y);
-                }
-            }
-            EquationSegment::Fraction { numerator, denominator } => {
-                let (nw, nh) = measure_equation_segments(ui, numerator, font_size * 0.85);
-                let (dw, dh) = measure_equation_segments(ui, denominator, font_size * 0.85);
-                total_w += nw.max(dw) + 8.0;
-                max_h = max_h.max(nh + dh + 6.0);
-            }
-        }
-    }
-    (total_w, max_h)
-}
-
-fn paint_equation_segments(
-    ui: &egui::Ui,
-    painter: &egui::Painter,
-    origin: Pos2,
-    segments: &[EquationSegment],
-    font_size: f32,
-    color: Color32,
-) -> Rect {
-    let (total_w, total_h) = measure_equation_segments(ui, segments, font_size);
-    let cy = origin.y + total_h * 0.5;
-    let mut cx = origin.x;
-
-    for seg in segments {
-        match seg {
-            EquationSegment::Inline(rich) => {
-                for span in &rich.spans {
-                    let (scale, dy) = match span.script {
-                        SpanScript::Baseline => (1.0, 0.0),
-                        SpanScript::Superscript => (0.72, -font_size * 0.28),
-                        SpanScript::Subscript => (0.72, font_size * 0.22),
-                    };
-                    let mut job = egui::text::LayoutJob::single_section(
-                        span.text.clone(),
-                        egui::text::TextFormat {
-                            font_id: FontId::new((font_size * scale).max(7.0), FontFamily::Proportional),
-                            color,
-                            italics: span.slope == SpanSlope::Italic,
-                            extra_letter_spacing: if span.weight == SpanWeight::Bold { 0.2 } else { 0.0 },
-                            ..Default::default()
-                        },
-                    );
-                    job.wrap = egui::text::TextWrapping::no_max_width();
-                    let galley = ui.fonts_mut(|f| f.layout_job(job));
-                    let w = galley.size().x;
-                    let h = galley.size().y;
-                    painter.galley(pos2(cx, cy - h * 0.5 + dy), galley, color);
-                    cx += w;
-                }
-            }
-            EquationSegment::Fraction { numerator, denominator } => {
-                let sub_size = (font_size * 0.85).max(7.0);
-                let (nw, nh) = measure_equation_segments(ui, numerator, sub_size);
-                let (dw, dh) = measure_equation_segments(ui, denominator, sub_size);
-                let frac_w = nw.max(dw) + 6.0;
-                paint_equation_segments(ui, painter, pos2(cx + (frac_w - nw) * 0.5, cy - nh - 2.0), numerator, sub_size, color);
-                painter.line_segment([pos2(cx + 1.0, cy), pos2(cx + frac_w - 1.0, cy)], Stroke::new(1.0, color));
-                paint_equation_segments(ui, painter, pos2(cx + (frac_w - dw) * 0.5, cy + 2.0), denominator, sub_size, color);
-                let _ = dh;
-                cx += frac_w + 2.0;
-            }
-        }
-    }
-
-    Rect::from_min_size(origin, vec2(total_w.max(1.0), total_h.max(1.0)))
-}
-
 struct LayoutHudInput<'a> {
     painter: &'a egui::Painter,
     app: &'a UiApp,
@@ -1441,6 +1362,7 @@ struct LayoutHudInput<'a> {
     mat_rect: Rect,
     paper_rect: Rect,
     eff_scale: f32,
+    canvas_resp: &'a egui::Response,
     ctx_in: &'a CanvasViewContext<'a>,
 }
 
@@ -1452,7 +1374,7 @@ fn render_layout_hud_overlays(
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
-    let LayoutHudInput { painter, app, ls, scene, mat_rect, paper_rect, eff_scale, ctx_in } = input;
+    let LayoutHudInput { painter, app, ls, scene, mat_rect, paper_rect, eff_scale, canvas_resp, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let scene_w = scene.map_or(ls.spec.page_size_pt().width.max(1.0), |s| s.width_pt.max(1.0)) as f32;
@@ -1512,6 +1434,7 @@ fn render_layout_hud_overlays(
         })
         .collect();
 
+    let mut panel_opened_ctx_menu = false;
     for (idx, item, bounds, r) in panel_rects {
         let selected = state.selected_panel_index == Some(idx);
         let suppress_drag = selected && (pointer_in_img_handle || resize_or_rot_active);
@@ -1579,7 +1502,8 @@ fn render_layout_hud_overlays(
             if p_resp.secondary_clicked() {
                 let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(r.center());
                 state.selected_panel_index = Some(idx);
-                state.layout_context_menu = Some((ls.id.clone(), idx, anchor));
+                state.layout_context_menu = Some((ls.id.clone(), Some(idx), anchor));
+                panel_opened_ctx_menu = true;
             }
             if !suppress_drag && p_resp.drag_started() {
                 state.selected_panel_index = Some(idx);
@@ -1626,6 +1550,11 @@ fn render_layout_hud_overlays(
         }
     }
 
+    if ctx_in.enabled && !panel_opened_ctx_menu && canvas_resp.secondary_clicked() {
+        let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(paper_rect.center());
+        state.layout_context_menu = Some((ls.id.clone(), None, anchor));
+    }
+
     if let Some((sel_idx, init_bounds, rot_deg, lock_aspect)) = selected_img {
         render_selected_image_handles(
             ui,
@@ -1665,8 +1594,8 @@ fn render_layout_hud_overlays(
 
     if !ctx_in.enabled {
         state.layout_context_menu = None;
-    } else if let Some((ref menu_sheet, panel_idx, anchor)) = state.layout_context_menu.clone() {
-        if menu_sheet != &ls.id || panel_idx >= ls.spec.items.len() {
+    } else if let Some((ref menu_sheet, opt_panel_idx, anchor)) = state.layout_context_menu.clone() {
+        if menu_sheet != &ls.id || opt_panel_idx.is_some_and(|idx| idx >= ls.spec.items.len()) {
             state.layout_context_menu = None;
         } else {
             let screen = ui.ctx().content_rect();
@@ -1685,44 +1614,46 @@ fn render_layout_hud_overlays(
                         .corner_radius(CornerRadius::same(4))
                         .show(menu_ui, |ui| {
                             ui.set_min_width(232.0);
-                            for (slug, lbl, action_str) in [
-                                ("front", "Bring to Front", "bring_to_front"),
-                                ("forward", "Bring Forward", "bring_forward"),
-                                ("backward", "Send Backward", "send_backward"),
-                                ("back", "Send to Back", "send_to_back"),
-                            ] {
-                                let wid = format!("canvas.layout_ctx.{slug}");
-                                let btn = ui.add_sized([228.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
-                                meta.record_response(
-                                    ui,
-                                    &btn,
-                                    FrameInspectEntryInput {
-                                        widget_id: &wid,
-                                        role: "menuitem",
-                                        label: lbl,
-                                        command_id: Some("layout.reorderPanel"),
-                                        value: Some(json!(action_str)),
-                                        enabled: true,
-                                        disabled_reason: None,
-                                        z_layer: ZLayer::ContextMenu,
-                                        ellipsized: false,
-                                        full_label: None,
-                                    },
-                                );
-                                if btn.clicked() {
-                                    intents.push_engine(
-                                        "layout.reorderPanel",
-                                        json!({
-                                            "sheet_id": ls.id.as_str(),
-                                            "panel_index": panel_idx,
-                                            "action": action_str,
-                                        }),
+                            if let Some(panel_idx) = opt_panel_idx {
+                                for (slug, lbl, action_str) in [
+                                    ("front", "Bring to Front", "bring_to_front"),
+                                    ("forward", "Bring Forward", "bring_forward"),
+                                    ("backward", "Send Backward", "send_backward"),
+                                    ("back", "Send to Back", "send_to_back"),
+                                ] {
+                                    let wid = format!("canvas.layout_ctx.{slug}");
+                                    let btn = ui.add_sized([228.0, 26.0], egui::Button::new(lbl).fill(Color32::TRANSPARENT));
+                                    meta.record_response(
+                                        ui,
+                                        &btn,
+                                        FrameInspectEntryInput {
+                                            widget_id: &wid,
+                                            role: "menuitem",
+                                            label: lbl,
+                                            command_id: Some("layout.reorderPanel"),
+                                            value: Some(json!(action_str)),
+                                            enabled: true,
+                                            disabled_reason: None,
+                                            z_layer: ZLayer::ContextMenu,
+                                            ellipsized: false,
+                                            full_label: None,
+                                        },
                                     );
-                                    close_menu = true;
+                                    if btn.clicked() {
+                                        intents.push_engine(
+                                            "layout.reorderPanel",
+                                            json!({
+                                                "sheet_id": ls.id.as_str(),
+                                                "panel_index": panel_idx,
+                                                "action": action_str,
+                                            }),
+                                        );
+                                        close_menu = true;
+                                    }
                                 }
+                                ui.separator();
                             }
-                            ui.separator();
-                            if append_layout_context_menu_extras(ui, &ov, ls, panel_idx, anchor, meta, intents) {
+                            if append_layout_context_menu_extras(ui, &ov, ls, opt_panel_idx, anchor, meta, intents) {
                                 close_menu = true;
                             }
                         });
@@ -2228,6 +2159,11 @@ fn render_graph_context_menu(
                 .corner_radius(CornerRadius::same(4))
                 .show(menu_ui, |ui| {
                     ui.set_min_width(232.0);
+                    if render_context_menu_item(ui, meta, "canvas.graph_ctx.copy_image", "Copy as Image", Some("edit.copy"), true) {
+                        intents.push_workspace_copy(144);
+                        close_menu = true;
+                    }
+                    ui.separator();
                     if render_context_menu_item(
                         ui,
                         meta,
@@ -2315,41 +2251,49 @@ fn append_layout_context_menu_extras(
     ui: &mut egui::Ui,
     ov: &CanvasOverlayCtx<'_>,
     ls: &LayoutSheet,
-    panel_idx: usize,
+    opt_panel_idx: Option<usize>,
     anchor: Pos2,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) -> bool {
     let locale = ov.tokens.locale;
     let sc_pt = ov.screen_to_scene(anchor);
-    let item_opt = ls.spec.items.get(panel_idx);
+    let item_opt = opt_panel_idx.and_then(|idx| ls.spec.items.get(idx));
     let mut clicked = false;
 
-    if matches!(item_opt, Some(LayoutItem::LiveTable { .. }))
-        && render_context_menu_item(
-            ui,
-            meta,
-            "canvas.layout_ctx.format_embedded_table",
-            tr(locale, "r13.canvas.format_embedded_table"),
-            Some("ui.embeddedTable.format.open"),
-            true,
-        )
-    {
-        intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
+    if render_context_menu_item(ui, meta, "canvas.layout_ctx.copy_image", "Copy as Image", Some("edit.copy"), true) {
+        intents.push_workspace_copy(144);
         clicked = true;
     }
-    if matches!(item_opt, Some(LayoutItem::EmbeddedImage { .. }))
-        && render_context_menu_item(
-            ui,
-            meta,
-            "canvas.layout_ctx.format_image",
-            tr(locale, "r13.canvas.format_image"),
-            Some("ui.image.format.open"),
-            true,
-        )
-    {
-        intents.push_ui("ui.image.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
-        clicked = true;
+    ui.separator();
+
+    if let Some(panel_idx) = opt_panel_idx {
+        if matches!(item_opt, Some(LayoutItem::LiveTable { .. }))
+            && render_context_menu_item(
+                ui,
+                meta,
+                "canvas.layout_ctx.format_embedded_table",
+                tr(locale, "r13.canvas.format_embedded_table"),
+                Some("ui.embeddedTable.format.open"),
+                true,
+            )
+        {
+            intents.push_ui("ui.embeddedTable.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
+            clicked = true;
+        }
+        if matches!(item_opt, Some(LayoutItem::EmbeddedImage { .. }))
+            && render_context_menu_item(
+                ui,
+                meta,
+                "canvas.layout_ctx.format_image",
+                tr(locale, "r13.canvas.format_image"),
+                Some("ui.image.format.open"),
+                true,
+            )
+        {
+            intents.push_ui("ui.image.format.open", json!({ "sheet_id": ls.id.as_str(), "panel_index": panel_idx }));
+            clicked = true;
+        }
     }
     if render_context_menu_item(ui, meta, "canvas.layout_ctx.paste_image", tr(locale, "r13.canvas.paste_image"), Some("edit.pasteImage"), true) {
         intents.push_paste_image_from_clipboard(ls.id.clone(), Some([sc_pt.x, sc_pt.y]));

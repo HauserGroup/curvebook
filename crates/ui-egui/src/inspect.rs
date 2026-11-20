@@ -2431,6 +2431,12 @@ fn build_generic_dialog_nodes(app: &UiApp, dialog: &ActiveDialog, bx: f64, by: f
             ));
             (insp_tr(app, "inspector.command_palette", "Command Palette (Cmd+K)"), None)
         }
+        ActiveDialog::Checkpoints => {
+            let st = &app.canvas_dialogs.checkpoints;
+            controls.push(node("checkpoints.name", "textbox", "Checkpoint Name", json!(st.name_draft), ControlEnablement::enabled(), pos(0)));
+            controls.push(node("checkpoints.note", "textbox", "Checkpoint Note", json!(st.note_draft), ControlEnablement::enabled(), pos(1)));
+            (insp_tr(app, "cmd.project.listCheckpoints", "Checkpoints"), None)
+        }
         ActiveDialog::About => (insp_tr(app, "menu.help.about", "About CurveBook"), None),
         ActiveDialog::Feedback => (insp_tr(app, "menu.help.feedback", "Send Feedback..."), None),
         _ => ("", None),
@@ -2487,6 +2493,7 @@ pub(crate) fn active_dialog_slug(dialog: &ActiveDialog) -> String {
         ActiveDialog::FormatImage { .. } => String::from("format_image"),
         ActiveDialog::Print { .. } => String::from("print"),
         ActiveDialog::CommandPalette => String::from("command_palette"),
+        ActiveDialog::Checkpoints => String::from("checkpoints"),
         ActiveDialog::About => String::from("about"),
         ActiveDialog::Feedback => String::from("feedback"),
     }

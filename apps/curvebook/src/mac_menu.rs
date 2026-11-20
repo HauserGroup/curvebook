@@ -126,7 +126,7 @@ pub struct MudaMenuSectionSpec {
     pub extra_file_actions: Vec<(String, String)>,
 }
 
-/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+P"`, `"Cmd+\\"`, `"F11"`, `"Cmd+K / Ctrl+K"`)
+/// Parse CurveBook shortcut notation (e.g. `"Cmd+Shift+I"`, `"Cmd+\\"`, `"F6"`, `"Cmd+K / Ctrl+K"`)
 /// into a [`muda::accelerator::Accelerator`] without panicking on unknown or empty strings.
 #[cfg(target_os = "macos")]
 #[must_use]

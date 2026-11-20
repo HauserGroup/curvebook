@@ -48,14 +48,13 @@ pub struct RightGroup {
     pub switcher_w: f32,
     pub search: SearchVisibility,
     pub split_toggle: bool,
-    pub presentation_toggle: bool,
     pub trailing_extra: bool,
 }
 
 /// Deterministic Tier 1 right-group width solver (`gui-layout-spec.md` §3.1, §9.3).
 ///
 /// As available width shrinks, controls degrade cleanly without jitter:
-/// optional trailing pill -> presentation toggle -> split toggle -> search field collapses to
+/// optional trailing pill -> split toggle -> search field collapses to
 /// icon -> workspace preset switcher narrows to [`MIN_SWITCHER_PT`] -> search icon hides.
 #[must_use]
 pub fn fit_right_group(w: &RightWidths) -> RightGroup {
@@ -78,10 +77,8 @@ pub fn fit_right_group(w: &RightWidths) -> RightGroup {
     let switcher_w = w.switcher.min(room - 8.0 - search_w).max(MIN_SWITCHER_PT);
     let split_end = switcher_w + 8.0 + search_w + w.gap + w.icon;
     let split_toggle = field && room >= split_end;
-    let presentation_end = split_end + w.gap + w.icon;
-    let presentation_toggle = split_toggle && room >= presentation_end;
-    let trailing_extra = presentation_toggle && room >= presentation_end + 10.0 + w.gap + w.trailing_extra;
-    RightGroup { switcher, switcher_w, search, split_toggle, presentation_toggle, trailing_extra }
+    let trailing_extra = split_toggle && room >= split_end + 10.0 + w.gap + w.trailing_extra;
+    RightGroup { switcher, switcher_w, search, split_toggle, trailing_extra }
 }
 
 #[cfg(test)]
@@ -99,7 +96,7 @@ mod tests {
             w if w > MIN_SWITCHER_PT => "narrower switcher",
             _ => "minimal switcher",
         };
-        format!("extra {}, pres {}, split {}, {:?}, {switcher}", g.trailing_extra, g.presentation_toggle, g.split_toggle, g.search)
+        format!("extra {}, split {}, {:?}, {switcher}", g.trailing_extra, g.split_toggle, g.search)
     }
 
     #[test]
@@ -118,28 +115,26 @@ mod tests {
                 SearchVisibility::Hidden => 0.0,
             };
             let split = if g.split_toggle { w.gap + w.icon } else { 0.0 };
-            let pres = if g.presentation_toggle { w.gap + w.icon } else { 0.0 };
             let extra = if g.trailing_extra { 10.0 + w.gap + w.trailing_extra } else { 0.0 };
-            let used = g.switcher_w + 8.0 + search + split + pres + extra;
+            let used = g.switcher_w + 8.0 + search + split + extra;
             assert!(used <= room || g.switcher_w == MIN_SWITCHER_PT && g.search == SearchVisibility::Hidden, "{room}: {g:?} needs {used}");
         }
         assert_eq!(
             stages,
             [
-                "extra true, pres true, split true, Field, full switcher",
-                "extra false, pres true, split true, Field, full switcher",
-                "extra false, pres false, split true, Field, full switcher",
-                "extra false, pres false, split false, Field, full switcher",
-                "extra false, pres false, split false, Icon, full switcher",
-                "extra false, pres false, split false, Icon, narrower switcher",
-                "extra false, pres false, split false, Icon, minimal switcher",
-                "extra false, pres false, split false, Hidden, narrower switcher",
-                "extra false, pres false, split false, Hidden, minimal switcher",
+                "extra true, split true, Field, full switcher",
+                "extra false, split true, Field, full switcher",
+                "extra false, split false, Field, full switcher",
+                "extra false, split false, Icon, full switcher",
+                "extra false, split false, Icon, narrower switcher",
+                "extra false, split false, Icon, minimal switcher",
+                "extra false, split false, Hidden, narrower switcher",
+                "extra false, split false, Hidden, minimal switcher",
             ]
         );
         let pinned = |room| right_stage(&fit_right_group(&right_widths(room, true)));
-        assert_eq!(pinned(700.0), "extra true, pres true, split true, Field, full switcher");
-        assert_eq!(pinned(72.0), "extra false, pres false, split false, Hidden, minimal switcher");
-        assert_eq!(pinned(71.0), "extra false, pres false, split false, Hidden, no switcher");
+        assert_eq!(pinned(700.0), "extra true, split true, Field, full switcher");
+        assert_eq!(pinned(72.0), "extra false, split false, Hidden, minimal switcher");
+        assert_eq!(pinned(71.0), "extra false, split false, Hidden, no switcher");
     }
 }

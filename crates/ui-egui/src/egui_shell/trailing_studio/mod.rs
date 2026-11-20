@@ -440,5 +440,86 @@ pub fn render_trailing_studio(
         .rect;
 
     report.dock_rect_pt = Some(resp);
+    if !ctx_in.layout.trailing_collapsed_to_rail && ctx_in.layout.trailing_visible && ctx_in.layout.trailing_splitter_w_pt > 0.5 {
+        render_trailing_dock_splitter(ui, app, ctx_in, meta, intents);
+    }
     report
+}
+
+fn render_trailing_dock_splitter(
+    ui: &mut egui::Ui,
+    app: &UiApp,
+    ctx_in: TrailingStudioContext<'_>,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let tokens = ctx_in.tokens;
+    let metrics = tokens.metrics;
+    let splitter_w = ctx_in.layout.trailing_splitter_w_pt;
+    egui::Panel::right("egui_shell.trailing_dock_splitter")
+        .exact_size(splitter_w)
+        .resizable(false)
+        .frame(egui::Frame::NONE.fill(tokens.panel_bg))
+        .show(ui, |ui| {
+            let split_rect = ui.available_rect_before_wrap();
+            let _ = ui.allocate_rect(split_rect, Sense::hover());
+            let slop = ((metrics.splitter_hit_slop_w - split_rect.width()) * 0.5).max(0.0);
+            let hit_rect = split_rect.expand2(Vec2::new(slop, 0.0)).intersect(meta.viewport_rect);
+            ui.set_clip_rect(hit_rect);
+            let enabled = ctx_in.enabled;
+            let sense = if enabled { Sense::click_and_drag() } else { Sense::hover() };
+            let resp = ui.interact(hit_rect, ui.scope_id().with("inspector_dock_splitter"), sense);
+            resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Splitter, enabled, "Inspector Dock Splitter"));
+            if enabled && (resp.hovered() || resp.dragged()) {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            let line_col = if enabled && (resp.hovered() || resp.dragged()) { tokens.accent } else { tokens.border };
+            ui.painter().vline(split_rect.center().x, split_rect.y_range(), Stroke::new(1.0, line_col));
+
+            if enabled {
+                if resp.double_clicked() {
+                    let default_w = app.egui_views.workspace_preset.default_dock_config().trailing_width_pt;
+                    intents.push_sync_trailing_width(default_w);
+                } else if resp.dragged() {
+                    let delta_w = -resp.drag_delta().x;
+                    if delta_w.abs() > 0.01 {
+                        let vw = ui.ctx().content_rect().width().max(1.0);
+                        let target_center_min = if !ctx_in.layout.leading_collapsed_to_rail
+                            && !ctx_in.layout.trailing_collapsed_to_rail
+                            && vw >= metrics.inspector_collapse_breakpoint_w
+                        {
+                            480.0
+                        } else {
+                            metrics.center_stage_min_w
+                        };
+                        let max_for_center = (vw
+                            - ctx_in.layout.leading_dock_w_pt
+                            - ctx_in.layout.leading_splitter_w_pt
+                            - ctx_in.layout.trailing_splitter_w_pt
+                            - target_center_min)
+                            .max(metrics.inspector_min_w);
+                        let new_w =
+                            (ctx_in.layout.trailing_dock_w_pt + delta_w).clamp(metrics.inspector_min_w, metrics.inspector_max_w.min(max_for_center));
+                        intents.push_sync_trailing_width(new_w);
+                    }
+                }
+            }
+
+            meta.record_response(
+                ui,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: "inspector.dock_splitter",
+                    role: "splitter",
+                    label: "Inspector Dock Splitter",
+                    command_id: None,
+                    value: Some(json!({ "width_pt": ctx_in.layout.trailing_dock_w_pt })),
+                    enabled,
+                    disabled_reason: (!enabled).then_some("modal dialog is active"),
+                    z_layer: ZLayer::SplitHandle,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        });
 }

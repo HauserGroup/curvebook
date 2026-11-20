@@ -26,8 +26,9 @@ impl CommandTooltip {
     /// Format multi-line hover tooltip copy surfacing localized label, shortcut, `summary`, and `beginner`.
     #[must_use]
     pub fn format_tooltip(&self) -> String {
+        let disp_shortcut = super::shortcuts::format_shortcut_for_platform(&self.shortcut);
         let mut header =
-            if self.shortcut.is_empty() { String::from(self.localized_label) } else { format!("{} ({})", self.localized_label, self.shortcut) };
+            if disp_shortcut.is_empty() { String::from(self.localized_label) } else { format!("{} ({disp_shortcut})", self.localized_label) };
         if !self.enabled {
             header.push_str(" [unavailable]");
         }
@@ -72,7 +73,7 @@ pub fn toolbar_caption_command_id(caption: &str) -> Option<&'static str> {
     match caption {
         "Analyze" => Some("ui.analyze.open"),
         "Axes" => Some("graph.setAxes"),
-        "Cmd+K" => Some("ui.palette.open"),
+        "Commands" | "Cmd+K" => Some("ui.palette.open"),
         _ => None,
     }
 }
@@ -313,7 +314,7 @@ mod tests {
         assert!(save_tip.format_inline_tooltip().contains(save_tip.beginner));
 
         // Compositor quick buttons resolve cleanly.
-        for cap in ["Analyze", "Axes", "Cmd+K"] {
+        for cap in ["Analyze", "Axes", "Commands", "Cmd+K"] {
             let cmd_id = toolbar_caption_command_id(cap).ok_or("missing caption mapping")?;
             let tip = command_tooltip(&app, cmd_id).ok_or("missing command tooltip")?;
             assert!(!tip.summary.is_empty());
@@ -337,7 +338,7 @@ mod tests {
         )?;
         assert!(w == 480 && h == 320 && frame.len() > 8);
 
-        // Menu bar covers all 105 engine + 54 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 105 engine + 53 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -349,7 +350,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 159);
+        assert_eq!(seen.len(), 158);
         Ok(())
     }
 }

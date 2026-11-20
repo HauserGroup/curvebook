@@ -59,7 +59,7 @@ CurveBook is an integrated scientific workbench for structured tabular data entr
 
 ```mermaid
 flowchart TB
-    subgraph TopChrome["Top Window Chrome (70 pt total; hidden in Presentation Mode)"]
+    subgraph TopChrome["Top Window Chrome (70 pt total)"]
         AppBar["Tier 1: Application & Document Bar (32 pt)<br/>Home | Menus | Active Project Header | Command Search (Cmd/Ctrl+K) | Workspace Preset"]
         ActionStrip["Tier 2: Contextual Action Strip (38 pt)<br/>Sheet Lifecycle & Undo | Sheet-Adaptive Primary CTAs | Archetype Quick Actions | Overflow (...)"]
     end
@@ -113,7 +113,6 @@ Minimum supported desktop window size is **`640 × 420 pt`** (default **`1280 ×
 | **Wide Desktop** | `>= 1440 pt` | Both `Navigator` (`240 pt`) and `TrailingDock` (`280–310 pt`) open comfortably alongside a `>= 900 pt` `CenterStage` (ideal for side-by-side Split Comparison). `AppBar` shows full `Cmd/Ctrl+K` search field and workspace preset label. |
 | **Standard Laptop** | `960 – 1439 pt` | `Navigator` (`210–240 pt`), `CenterStage` (`>= 480 pt`), and `TrailingDock` (`250–280 pt`) remain simultaneously visible; `ActionStrip` condenses secondary labels into icon+tooltip buttons before spilling to `⋯`. |
 | **Compact / Tablet** | `640 – 959 pt` | Auto-collapses in strict priority order to preserve `>= 360 pt` for `CenterStage`: (1) `AppBar` search field condenses to a search icon; (2) `TrailingDock` collapses into a `36 pt` vertical tab strip (opening as an overlay flyout when clicked); (3) if `< 760 pt`, `Navigator` collapses into a `36 pt` leading icon strip; (4) Center Split switches from horizontal (`Left || Right`) to vertical (`Top / Bottom`) below `720 pt`. |
-| **Presentation Mode** | Any (`Cmd/Ctrl+Shift+P` / `F11`) | Hides `AppBar`, `ActionStrip`, `Navigator`, `TrailingDock`, and `StatusBar` (`0 pt`), giving **100%** of viewport area to the active `GraphSheet`, `LayoutSheet`, or `PortfolioGallery` (`Escape` exits). |
 
 ### 2.4 Keyboard Focus Cycling & RTL Mirroring
 
@@ -585,7 +584,7 @@ Includes cross-jump buttons (`Change Graph Type…`, `Format Axes…`) plus `Can
 
 | Token | Logical Value | Scaling & Ergonomic Rule |
 |---|---|---|
-| `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)`; `0 pt` in Presentation Mode |
+| `chrome.app_bar_h` | `32 pt` | Scales by `round(px * scale_factor)` |
 | `chrome.action_strip_h` | `38 pt` | Single horizontal row; overflow items collapse into trailing `⋯` popup |
 | `chrome.status_bar_h` | `26 pt` | Fixed single-line footer; tabular numerals for quick-stats & zoom |
 | `dock.navigator_w` | `240 pt` (`180–380 pt`) | Collapses to `36 pt` icon rail; auto-collapses below `760 pt` window width |

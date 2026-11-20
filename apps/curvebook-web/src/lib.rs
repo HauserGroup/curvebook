@@ -2,7 +2,7 @@
 //!
 //! Zero JavaScript bindings and zero OS filesystem, process, or network calls: all archive
 //! decoding, virtual `.curvebook.d` folder editing, interactive pointer/inline-edit dispatch,
-//! color-vision simulation filters, presentation mode, and RGBA framebuffer rendering stay 100%
+//! color-vision simulation filters, and RGBA framebuffer rendering stay 100%
 //! self-contained in memory.
 #![forbid(unsafe_code)]
 
@@ -190,7 +190,6 @@ impl WebWorkspaceHost {
             "warnings": summary.warnings,
             "dirty": summary.dirty,
             "preview_filter": self.app.preview_filter.as_str(),
-            "presentation_mode": self.app.presentation_mode,
             "locale": self.app.locale,
             "virtual_root": self.app.virtual_workspace.root_name,
             "virtual_files": self.app.virtual_workspace.list_files(),
@@ -505,23 +504,6 @@ impl WebWorkspaceHost {
         self.app.preview_filter
     }
 
-    /// Explicitly enable or disable full-canvas presentation mode (`presentation_mode`).
-    pub fn set_presentation_mode(&mut self, enabled: bool) {
-        self.app.presentation_mode = enabled;
-    }
-
-    /// Toggle `presentation_mode` and return the resulting state.
-    pub fn toggle_presentation_mode(&mut self) -> bool {
-        self.app.presentation_mode = !self.app.presentation_mode;
-        self.app.presentation_mode
-    }
-
-    /// Return whether `presentation_mode` is currently enabled.
-    #[must_use]
-    pub const fn presentation_mode(&self) -> bool {
-        self.app.presentation_mode
-    }
-
     /// Render the strict-CSP layered placeholder frame for the current viewport and theme.
     #[must_use]
     pub fn render_placeholder_frame(&self, base_dpi: u16) -> WebLayeredFrame {
@@ -704,7 +686,7 @@ mod tests {
     }
 
     #[test]
-    fn preview_filter_presentation_mode_and_hidpi_placeholder_frame_behave_accurately() {
+    fn preview_filter_and_hidpi_placeholder_frame_behave_accurately() {
         let mut host = build_populated_host();
         let graph_id = host.app().document().graph_sheets[0].id.as_str().to_owned();
         host.execute_command("sheet.select", json!({ "sheet_id": graph_id })).expect("select graph sheet");
@@ -723,13 +705,6 @@ mod tests {
 
         host.set_preview_filter(CanvasPreviewFilter::Deuteranopia);
         assert_eq!(host.preview_filter(), CanvasPreviewFilter::Deuteranopia);
-
-        assert!(!host.presentation_mode());
-        let toggled = host.toggle_presentation_mode();
-        assert!(toggled);
-        let pres_off_reply = host.dispatch_control_line(r#"{"id":"p1","method":"ui.presentation.toggle","params":{"enabled":false}}"#);
-        assert!(pres_off_reply.contains("\"presentation_mode\":false"));
-        assert!(!host.presentation_mode());
         assert!(host.inspect_json().get("virtual_root").is_some());
     }
 

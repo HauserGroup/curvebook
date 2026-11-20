@@ -1,12 +1,11 @@
 #![forbid(unsafe_code)]
 //! `R15.3` Two-Tier Top Chrome, 14-Locale Zero-Bleed Responsive Layout, Split/Workspace Presets,
-//! Presentation Mode, and `Cmd/Ctrl+K` Command Palette Acceptance Tests.
+//! and `Cmd/Ctrl+K` Command Palette Acceptance Tests.
 
 use curvebook_ui_egui::UiApp;
 use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::driver::{BETA_LOCALE_CODES, EguiHumanPathDriver, TextBleedPolicy, build_driver_font_definitions};
 use curvebook_ui_egui::egui_shell::inspect_bridge::{ShellAboutFrameReport, render_egui_shell_frame};
-use curvebook_ui_egui::egui_shell::top_chrome::render_presentation_exit_chip;
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, PendingUiIntents, Tokens, UiBackend, WorkspacePreset};
 use curvebook_ui_egui::inspect::ZLayer;
 use curvebook_ui_egui::interaction::ViewportMetrics;
@@ -47,11 +46,6 @@ fn render_top_chrome_harness(ui: &mut egui::Ui, meta: &mut FrameInspectMeta, sta
         state.wheel_capture_count += 1;
     }
     state.last_report = Some(report);
-
-    if state.app.presentation_mode && meta.find_by_widget_id("toolbar.presentation.exit").is_none() {
-        let tokens = Tokens::from_theme_spec(&state.app.theme, &state.app.locale);
-        let _ = render_presentation_exit_chip(ui.ctx(), &state.app, &tokens, true, meta, &mut intents);
-    }
 
     let will_discard = ui.ctx().will_discard();
     if will_discard {
@@ -254,7 +248,7 @@ fn verify_info_layout_and_overflow(driver: &mut EguiHumanPathDriver<'_, TopChrom
 }
 
 #[test]
-fn top_chrome_split_presets_workspace_presets_and_presentation_mode() -> Result<(), String> {
+fn top_chrome_split_presets_and_workspace_presets() -> Result<(), String> {
     let mut state = TopChromeHarnessState::new("en", true);
     state
         .app
@@ -304,21 +298,6 @@ fn top_chrome_split_presets_workspace_presets_and_presentation_mode() -> Result<
     assert!(!driver.state().app.split.enabled);
     driver.press_egui_key(Key::Backslash, cmd_mod);
     assert!(driver.state().app.split.enabled);
-
-    // 3. Presentation Mode (`Cmd+Shift+P` / button / `F11` -> collapses chrome, preserves exit chip, `Esc` restores chrome).
-    driver.click_widget_id("toolbar.presentation")?;
-    assert!(driver.state().app.presentation_mode);
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.presentation.exit").is_some(), "Presentation mode must preserve exit chip");
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.home").is_none(), "Top chrome must collapse during Presentation Mode");
-
-    driver.click_widget_id("toolbar.presentation.exit")?;
-    assert!(!driver.state().app.presentation_mode);
-    assert!(driver.frame_meta().find_by_widget_id("toolbar.home").is_some(), "Top chrome must restore when exiting Presentation Mode");
-
-    driver.press_egui_key(Key::F11, Modifiers::NONE);
-    assert!(driver.state().app.presentation_mode);
-    driver.press_egui_key(Key::Escape, Modifiers::NONE);
-    assert!(!driver.state().app.presentation_mode);
 
     Ok(())
 }

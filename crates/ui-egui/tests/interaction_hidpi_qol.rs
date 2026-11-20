@@ -575,15 +575,8 @@ fn qol8_qol9_qol10_presets_preflight_cvd_non_mutating_presentation_and_virtual_w
 
     let normal_layout = measure_qol_regions(&app, metrics);
     assert!(normal_layout.navigator.width > 0);
+    assert!(normal_layout.canvas.width > 0);
     assert!(normal_layout.inspector.width > 0);
-
-    let pres_exec = app.handle_key_combo("Cmd+Shift+P").expect("pres shortcut").expect("bound");
-    assert_eq!(pres_exec.command_id, "ui.presentation.toggle");
-    assert!(app.presentation_mode);
-    let pres_layout = measure_qol_regions(&app, metrics);
-    assert_eq!(pres_layout.navigator.width, 0);
-    assert_eq!(pres_layout.inspector.width, 0);
-    assert!(pres_layout.canvas.width > normal_layout.canvas.width);
 
     assert!(VirtualWorkspaceFolder::normalize_rel_path("../etc/passwd").is_err());
     assert!(VirtualWorkspaceFolder::normalize_rel_path("/abs/path").is_err());

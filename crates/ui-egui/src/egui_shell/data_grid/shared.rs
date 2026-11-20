@@ -144,15 +144,15 @@ pub(super) enum AuxInlineTarget {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(super) struct ContextCellTarget {
+pub(in crate::egui_shell) struct ContextCellTarget {
     pub(super) is_x: bool,
     pub(super) row: usize,
     pub(super) col: usize,
     pub(super) subcol: usize,
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct ContextMenuState {
+#[derive(Debug, Clone, PartialEq)]
+pub(in crate::egui_shell) struct ContextMenuState {
     pub(super) pos: Pos2,
     pub(super) row: usize,
     pub(super) cell: Option<ContextCellTarget>,

@@ -92,12 +92,12 @@ fn canonical_ui_inspect_about_dialog_and_toolbar_disablement() -> Result<(), Box
     // Full workspace scope with `include_bounds: true` verifies AccessKit + `FrameInspectMeta` wiring.
     let bounded_egui = app.inspect_egui_shell_snapshot(metrics, None, true);
     let toolbar = bounded_egui.toolbar.as_ref().ok_or("expected egui toolbar nodes")?;
-    let about_btn = toolbar.iter().find(|n| n.widget_id == "toolbar.help.about").ok_or("missing toolbar.help.about")?;
-    assert_eq!(about_btn.role, "button");
-    assert_eq!(about_btn.command_id.as_deref(), Some("app.about"));
-    assert!(!about_btn.enabled, "toolbar button must report disabled when About modal is open");
-    assert_eq!(about_btn.disabled_reason.as_deref(), Some("modal dialog is active"));
-    assert!(about_btn.bounds.is_some_and(|b| b[2] > 0.0 && b[3] > 0.0));
+    let palette_btn = toolbar.iter().find(|n| n.widget_id == "toolbar.command_palette").ok_or("missing toolbar.command_palette")?;
+    assert_eq!(palette_btn.role, "button");
+    assert_eq!(palette_btn.command_id.as_deref(), Some("ui.palette.open"));
+    assert!(!palette_btn.enabled, "toolbar button must report disabled when About modal is open");
+    assert_eq!(palette_btn.disabled_reason.as_deref(), Some("modal dialog is active"));
+    assert!(palette_btn.bounds.is_some_and(|b| b[2] > 0.0 && b[3] > 0.0));
     Ok(())
 }
 

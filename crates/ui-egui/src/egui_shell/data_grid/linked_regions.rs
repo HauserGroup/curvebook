@@ -359,7 +359,8 @@ pub(super) fn render_multi_link_guard_popover(
                         state.active_link_popover = None;
                     }
                 }
-                let ul = row.button("Unlink Region");
+                let can_unlink = !ds.frozen;
+                let ul = row.add_enabled(can_unlink, egui::Button::new("Unlink Region"));
                 record_meta_if_enabled(
                     row,
                     meta,
@@ -369,17 +370,17 @@ pub(super) fn render_multi_link_guard_popover(
                         widget_id: "grid.link_guard.unlink",
                         role: "button",
                         label: "Unlink Region",
-                        command_id: Some("table.unlinkRegion"),
+                        command_id: Some("table.clearCells"),
                         value: None,
-                        enabled: true,
-                        disabled_reason: None,
+                        enabled: can_unlink,
+                        disabled_reason: ds.frozen.then_some("Data sheet is frozen (read-only)."),
                         z_layer: ZLayer::ModalDialog,
                         ellipsized: false,
                         full_label: None,
                     },
                 );
-                if ul.clicked() {
-                    intents.push_engine("table.unlinkRegion", json!({ "sheet_id": ds.id.as_str(), "link_id": pop.region_id }));
+                if ul.clicked() && can_unlink {
+                    intents.push_engine("table.clearCells", json!({ "sheet_id": ds.id.as_str(), "cells": [], "unlink": true }));
                     state.active_link_popover = None;
                 }
                 let dis = row.button("Dismiss");

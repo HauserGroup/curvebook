@@ -1132,7 +1132,10 @@ fn render_tab_multiple_comparisons(ui: &mut Ui, rc: TabRenderCtx<'_>, meta: &mut
             let fallback = if rc.ep.assume_gaussian { "set_multiplicity:tukey" } else { "set_multiplicity:dunn" };
             intents.push_custom_view_action("stat_params", fallback);
         } else {
-            intents.push_ui("ui.answer_dialog", json!({ "fields": { "compare_against_control": next_cmp } }));
+            intents.push_custom_view_action(
+                "stat_params",
+                if next_cmp { "set_compare_against_control:true" } else { "set_compare_against_control:false" },
+            );
         }
     }
 

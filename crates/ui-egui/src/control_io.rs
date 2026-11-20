@@ -1211,7 +1211,6 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
             | "ui.canvas.applyPreset"
             | "ui.canvas.preflight"
             | "ui.previewFilter.set"
-            | "ui.presentation.toggle"
             | "ui.grid.excludeWithReason"
             | "ui.table.convertArchetype.open"
             | "ui.table.randomizeGroups"
@@ -1290,7 +1289,6 @@ fn dispatch_ui_command_detailed(app: &mut UiApp, command_id: &str, params: &Valu
         "ui.canvas.applyPreset" => dispatch_ui_canvas_apply_preset(app, params).map(Some),
         "ui.canvas.preflight" => dispatch_ui_canvas_preflight(app, params).map(Some),
         "ui.previewFilter.set" => map_ui_result(dispatch_ui_preview_filter_set(app, params)),
-        "ui.presentation.toggle" => map_ui_result(dispatch_ui_presentation_toggle(app, params)),
         "ui.grid.excludeWithReason" => dispatch_ui_grid_exclude_with_reason(app, params).map(Some),
         "ui.table.convertArchetype.open" => map_ui_result(dispatch_ui_table_convert_archetype_open(app, params)),
         "ui.table.randomizeGroups" => map_ui_result(dispatch_ui_randomize_groups_open(app, params)),
@@ -1834,7 +1832,6 @@ fn handle_ui_state(app: &mut UiApp) -> Value {
         "split_enabled": app.split.enabled,
         "split_ratio": app.split.ratio,
         "preview_filter": app.preview_filter.as_str(),
-        "presentation_mode": app.presentation_mode,
         "brushed_cell": app.brushed_cell,
         "brushed_points": app.brushed_points,
         "selected_rows": app.grid.selected_rows,
@@ -2563,19 +2560,24 @@ fn dispatch_ui_event_cmd(app: &mut UiApp, params: &Value) -> Result<Value, Strin
 }
 
 fn dispatch_ui_split_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(enabled) = opt_bool_param(params, &["enabled"])? {
+    let enabled_opt = opt_bool_param(params, &["enabled"])?;
+    let ratio_opt = opt_finite_f64_param(params, &["ratio"])?;
+    let primary_opt = opt_non_empty_str_param(params, &["primary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
+    let secondary_opt = opt_non_empty_str_param(params, &["secondary_sheet_id"])?.map(SheetId::try_new).transpose().map_err(|e| e.to_string())?;
+
+    if let Some(enabled) = enabled_opt {
         app.split.enabled = enabled;
     } else {
         app.split.enabled = !app.split.enabled;
     }
-    if let Some(ratio) = opt_finite_f64_param(params, &["ratio"])? {
+    if let Some(ratio) = ratio_opt {
         app.split.set_ratio(ratio);
     }
-    if let Some(raw_p) = opt_non_empty_str_param(params, &["primary_sheet_id"])? {
-        app.split.primary_sheet_id = Some(SheetId::try_new(raw_p).map_err(|e| e.to_string())?);
+    if let Some(p_id) = primary_opt {
+        app.split.primary_sheet_id = Some(p_id);
     }
-    if let Some(raw_s) = opt_non_empty_str_param(params, &["secondary_sheet_id"])? {
-        app.split.secondary_sheet_id = Some(SheetId::try_new(raw_s).map_err(|e| e.to_string())?);
+    if let Some(s_id) = secondary_opt {
+        app.split.secondary_sheet_id = Some(s_id);
     }
     let (primary, secondary) = app.split.resolve_sheets(app.document());
     Ok(json!({
@@ -2791,15 +2793,6 @@ fn dispatch_ui_preview_filter_set(app: &mut UiApp, params: &Value) -> Result<Val
     let filter = CanvasPreviewFilter::from_name(raw).ok_or_else(|| format!("unknown preview filter `{raw}`"))?;
     app.preview_filter = filter;
     Ok(json!({ "preview_filter": app.preview_filter.as_str() }))
-}
-
-fn dispatch_ui_presentation_toggle(app: &mut UiApp, params: &Value) -> Result<Value, String> {
-    if let Some(enabled) = opt_bool_param(params, &["enabled"])? {
-        app.presentation_mode = enabled;
-    } else {
-        app.presentation_mode = !app.presentation_mode;
-    }
-    Ok(json!({ "presentation_mode": app.presentation_mode }))
 }
 
 fn dispatch_ui_grid_exclude_with_reason(app: &mut UiApp, params: &Value) -> Result<Value, ControlCallError> {
@@ -4026,6 +4019,7 @@ const fn active_dialog_name(dialog: &ActiveDialog) -> &'static str {
         ActiveDialog::FormatEmbeddedTable { .. } => "FormatEmbeddedTable",
         ActiveDialog::FormatImage { .. } => "FormatImage",
         ActiveDialog::CommandPalette => "CommandPalette",
+        ActiveDialog::Checkpoints => "Checkpoints",
         ActiveDialog::About => "About",
         ActiveDialog::Feedback => "Feedback",
     }
@@ -4736,11 +4730,11 @@ mod tests {
         )?;
         let res_id = an.payload["sheet_id"].as_str().ok_or("missing result_id")?.to_owned();
 
-        // Set recognizable shortcut + ruler + presentation state that wrong-typed params must NOT clobber.
+        // Set recognizable shortcut + ruler + split state that wrong-typed params must NOT clobber.
         app.shortcuts.set_shortcut("ui.gallery.toggle", "Alt+Shift+G")?;
         let custom_shortcut = app.shortcuts.active_combo("ui.gallery.toggle").ok_or("missing shortcut")?.to_owned();
         let initial_rulers = app.canvas_dialogs.rulers_visible;
-        let initial_pres = app.presentation_mode;
+        let initial_split = app.split.enabled;
 
         let bad_cases = [
             serde_json::json!({"id": 1, "method": "ui.rulers.toggle", "params": {"visible": "false"}}),
@@ -4748,7 +4742,7 @@ mod tests {
             serde_json::json!({"id": 3, "method": "ui.shortcut.reset", "params": {"command_id": 123}}),
             serde_json::json!({"id": 4, "method": "ui.shortcut.reset", "params": {"command_id": ""}}),
             serde_json::json!({"id": 5, "method": "ui.shortcut.set", "params": {"command_id": "ui.gallery.toggle", "shortcut": 99}}),
-            serde_json::json!({"id": 6, "method": "ui.presentation.toggle", "params": {"enabled": "no"}}),
+            serde_json::json!({"id": 6, "method": "ui.gridOverlay.toggle", "params": {"visible": "no"}}),
             serde_json::json!({"id": 7, "method": "ui.split.toggle", "params": {"enabled": "no"}}),
             serde_json::json!({"id": 8, "method": "ui.split.toggle", "params": {"ratio": "half"}}),
             serde_json::json!({"id": 9, "method": "ui.result.inspectDiagnostics", "params": {"result_sheet_id": res_id, "tab_index": "foo"}}),
@@ -4774,7 +4768,7 @@ mod tests {
         // Verify none of the rejected requests silently triggered defaults or reset_all().
         assert_eq!(app.shortcuts.active_combo("ui.gallery.toggle"), Some(custom_shortcut.as_str()));
         assert_eq!(app.canvas_dialogs.rulers_visible, initial_rulers);
-        assert_eq!(app.presentation_mode, initial_pres);
+        assert_eq!(app.split.enabled, initial_split);
 
         // Open FormatSelectedPoints dialog and reject invalid ui.answer_dialog action/fields types.
         let open_reply: serde_json::Value = serde_json::from_str(&handle_control_line(

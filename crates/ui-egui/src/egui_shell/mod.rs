@@ -404,16 +404,16 @@ impl LayoutMetrics {
         (safe_pt * safe_scale).round()
     }
 
-    /// Total top chrome height (`70 pt` normally, `0 pt` in Presentation Mode).
+    /// Total top chrome height (`70 pt`).
     #[must_use]
-    pub const fn top_chrome_height(self, presentation_mode: bool) -> f32 {
-        if presentation_mode { 0.0 } else { self.app_bar_h + self.action_strip_h }
+    pub const fn top_chrome_height(self) -> f32 {
+        self.app_bar_h + self.action_strip_h
     }
 
-    /// Bottom status footer height (`26 pt` normally, `0 pt` in Presentation Mode).
+    /// Bottom status footer height (`26 pt`).
     #[must_use]
-    pub const fn status_bar_height(self, presentation_mode: bool) -> f32 {
-        if presentation_mode { 0.0 } else { self.status_bar_h }
+    pub const fn status_bar_height(self) -> f32 {
+        self.status_bar_h
     }
 
     /// Combined 3-tier frozen column-grid header height (`64 pt`).
@@ -437,29 +437,6 @@ impl LayoutMetrics {
             ViewportTier::NarrowHeadless
         };
         let split_orientation = if w >= self.split_vertical_breakpoint_w { SplitOrientation::Horizontal } else { SplitOrientation::Vertical };
-
-        if input.presentation_mode {
-            return ResponsiveShellLayout {
-                tier,
-                top_chrome_h_pt: 0.0,
-                tier1_app_bar_h_pt: 0.0,
-                tier2_action_strip_h_pt: 0.0,
-                status_bar_h_pt: 0.0,
-                leading_dock_w_pt: 0.0,
-                leading_collapsed_to_rail: false,
-                leading_visible: false,
-                leading_splitter_w_pt: 0.0,
-                family_visible: false,
-                trailing_dock_w_pt: 0.0,
-                trailing_collapsed_to_rail: false,
-                trailing_visible: false,
-                trailing_splitter_w_pt: 0.0,
-                center_stage_w_pt: w,
-                center_stage_h_pt: h,
-                split_orientation,
-                rtl_mirrored: false,
-            };
-        }
 
         let tier1_app_bar_h_pt = self.app_bar_h.min(h * 0.45).max(0.0);
         let tier2_action_strip_h_pt = self.action_strip_h.min((h - tier1_app_bar_h_pt).max(0.0) * 0.65).max(0.0);
@@ -622,7 +599,6 @@ pub enum SplitOrientation {
 pub struct ShellLayoutInput {
     pub viewport_w_pt: f32,
     pub viewport_h_pt: f32,
-    pub presentation_mode: bool,
     pub empty_workspace: bool,
     pub navigator_open: bool,
     pub inspector_open: bool,
@@ -1050,6 +1026,7 @@ pub enum UiIntent {
     SetSplitRatio { ratio: f64 },
     SetPreviewFilter { filter: CanvasPreviewFilter },
     SetPaletteOpen { open: bool },
+    OpenCheckpointsDialog,
     SetLauncherOpen { open: bool },
     ApplyWorkspacePreset { preset: WorkspacePreset },
     SyncLeadingWidth { width_pt: f32 },
@@ -1841,6 +1818,22 @@ fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentO
             Ok(UiIntentOutcome::Engine { command_id, outcome })
         }
         UiIntent::UiCommand { command_id, params } => {
+            if command_id == "edit.cut" {
+                return apply_wave4_grid_wizard_intent(app, UiIntent::GridCutSelection);
+            }
+            if command_id == "edit.copy" {
+                return apply_wave4_grid_wizard_intent(app, UiIntent::WorkspaceCopy { dpi: 144 });
+            }
+            if command_id == "edit.paste" {
+                let doc = app.session.document();
+                let active_id = doc.active_sheet_id.clone();
+                if active_id.as_ref().is_some_and(|id| doc.data_sheet(id).is_some()) {
+                    return apply_wave4_grid_wizard_intent(app, UiIntent::GridPasteFromClipboard { start_coord: None });
+                }
+                if let Some(target_sheet_id) = crate::interaction::resolve_figure_sheet_for_shortcut(app) {
+                    return apply_wave4_grid_wizard_intent(app, UiIntent::CanvasPaste { target_sheet_id, anchor_pt: None });
+                }
+            }
             let result = dispatch_ui_command_as_ui(app, &command_id, &params)?;
             Ok(UiIntentOutcome::Ui { command_id, result })
         }
@@ -1959,6 +1952,10 @@ fn apply_shell_workspace_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
             } else if matches!(app.canvas_dialogs.active_dialog, ActiveDialog::CommandPalette) {
                 app.canvas_dialogs.active_dialog = ActiveDialog::None;
             }
+        }
+        UiIntent::OpenCheckpointsDialog => {
+            let doc = app.session.document().clone();
+            app.canvas_dialogs.open_checkpoints(&doc);
         }
         UiIntent::SetLauncherOpen { open } => {
             app.egui_views.launcher_open = open;
@@ -2948,9 +2945,8 @@ mod tests {
             assert_eq!(visuals.widgets.active.weak_bg_fill, tokens.active_bg);
             assert_eq!(visuals.widgets.open.weak_bg_fill, tokens.hover_bg);
         }
-        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(false), 70.0);
-        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(true), 0.0);
-        assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(false), 26.0);
+        assert_eq!(LayoutMetrics::CANONICAL.top_chrome_height(), 70.0);
+        assert_eq!(LayoutMetrics::CANONICAL.status_bar_height(), 26.0);
         assert_eq!(LayoutMetrics::CANONICAL.grid_header_total_height(), 64.0);
         assert_eq!(ScientificPaletteTokens::okabe_ito_series().len(), 8);
         assert_eq!(ScientificPaletteTokens::viridis_stops().len(), 17);
@@ -3044,14 +3040,13 @@ mod tests {
     }
 
     #[test]
-    fn responsive_shell_layout_enforces_spec_breakpoints_and_presentation_mode() {
+    fn responsive_shell_layout_enforces_spec_breakpoints() {
         use super::{ShellLayoutInput, SplitOrientation, ViewportTier, WorkspacePreset};
 
         let metrics = LayoutMetrics::CANONICAL;
         let base_in = ShellLayoutInput {
             viewport_w_pt: 1440.0,
             viewport_h_pt: 900.0,
-            presentation_mode: false,
             empty_workspace: false,
             navigator_open: true,
             inspector_open: true,
@@ -3088,14 +3083,6 @@ mod tests {
         assert!(tablet_640.trailing_collapsed_to_rail);
         assert_eq!(tablet_640.split_orientation, SplitOrientation::Vertical);
         assert!(tablet_640.center_stage_w_pt >= 360.0);
-
-        let present = metrics.solve_shell_layout(ShellLayoutInput { presentation_mode: true, ..base_in });
-        assert_eq!(present.top_chrome_h_pt, 0.0);
-        assert_eq!(present.status_bar_h_pt, 0.0);
-        assert!(!present.leading_visible);
-        assert!(!present.trailing_visible);
-        assert_eq!(present.center_stage_w_pt, 1440.0);
-        assert_eq!(present.center_stage_h_pt, 900.0);
 
         for preset in WorkspacePreset::ALL {
             assert_eq!(WorkspacePreset::parse(preset.as_str()), Some(preset));

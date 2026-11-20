@@ -224,14 +224,6 @@ pub const UI_COMMANDS: &[UiCommandSpec] = &[
         beginner: "Previews graphs under deuteranopia, protanopia, tritanopia, or grayscale to verify accessible palettes.",
     },
     UiCommandSpec {
-        id: "ui.presentation.toggle",
-        label: "Toggle Presentation Mode",
-        shortcut: "Cmd+Shift+P",
-        params_doc: "{\"enabled\":\"optional bool\"}",
-        summary: "Enter or exit distraction-free full-canvas presentation mode.",
-        beginner: "Hides sidebars and tool chrome so graphs and layouts fill the screen during talks or review.",
-    },
-    UiCommandSpec {
         id: "ui.grid.excludeWithReason",
         label: "Exclude Selection with Auditable Reason...",
         shortcut: "Cmd+Shift+E",
