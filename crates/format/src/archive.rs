@@ -1,13 +1,13 @@
 //! Native `.curvebook` and `.cbtemplate` ZIP archive serialization, deserialization,
 //! schema migration, dimension/float validation, and circular dependency guards.
 
+use std::borrow::Cow;
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fs::{OpenOptions, Permissions};
 use std::io::Write;
 #[cfg(all(unix, not(target_arch = "wasm32")))]
 use std::os::unix::fs::OpenOptionsExt as _;
 use std::path::{Path, PathBuf};
-use std::sync::atomic::{AtomicU64, Ordering};
 
 use curvebook_doc::{
     AnalysisKind, CURRENT_SCHEMA_VERSION, Cell, CellValue, CiBound, CloneDataSheetOptions, ConstantValue, DataSetColumn, DataSheet, GraphAnnotation,
@@ -34,8 +34,6 @@ pub(crate) const LEGACY_FORMAT_MAGIC: &str = "lumencraft-archive";
 const MAX_CHECKPOINTS_PER_PROJECT: usize = 64;
 const MAX_SHEET_CSV_STEM_LEN: usize = 64;
 const MAX_MANIFEST_CSV_STEM_LEN: usize = 128;
-
-static UNPACKED_STAGE_SEQ: AtomicU64 = AtomicU64::new(1);
 
 /// Maximum byte length permitted when reading a `.curvebook`, `.cbtemplate`, or `.prism` archive file.
 pub const MAX_ARCHIVE_FILE_BYTES: usize = 128 * 1024 * 1024;
@@ -183,6 +181,30 @@ fn platform_sync_dir(dir: &Path) -> Result<(), FormatError> {
 #[cfg(target_arch = "wasm32")]
 fn platform_sync_dir(_dir: &Path) -> Result<(), FormatError> {
     Ok(())
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn stage_unpacked_entry_file(
+    parent: &Path,
+    target: &Path,
+    rel: &str,
+    bytes: &[u8],
+    existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    let staged = curvebook_platform::fs::write_staged_sibling(parent, target, "stage", bytes, existing_perms)?;
+    let stage_rel = stage_rel_for_entry(rel, staged.path())?;
+    Ok((staged.into_path(), stage_rel))
+}
+
+#[cfg(target_arch = "wasm32")]
+fn stage_unpacked_entry_file(
+    _parent: &Path,
+    _target: &Path,
+    _rel: &str,
+    _bytes: &[u8],
+    _existing_perms: Option<Permissions>,
+) -> Result<(PathBuf, String), FormatError> {
+    Err(FormatError::Io(String::from("unpacked directory staging is not supported on wasm32")))
 }
 
 fn clamp_peek_schema_version(raw: u64) -> u32 {
@@ -727,9 +749,14 @@ fn build_archive_entries(doc: &ProjectDocument, kind: ArchiveKind) -> Result<Vec
     ensure_schema_version_supported(doc.schema_version)?;
     validate_project_document(doc)?;
 
-    let mut normalized = doc.clone();
-    normalized.schema_version = CURRENT_SCHEMA_VERSION;
-    let doc_json = serde_json::to_vec_pretty(&normalized)?;
+    let normalized = if doc.schema_version == CURRENT_SCHEMA_VERSION {
+        Cow::Borrowed(doc)
+    } else {
+        let mut owned = doc.clone();
+        owned.schema_version = CURRENT_SCHEMA_VERSION;
+        Cow::Owned(owned)
+    };
+    let doc_json = serde_json::to_vec_pretty(normalized.as_ref())?;
     let doc_crc = crc32fast::hash(&doc_json);
 
     let mut entries = Vec::with_capacity(normalized.data_sheets.len() + 2);
@@ -1411,8 +1438,7 @@ fn stage_changed_unpacked_entries(canon_root: &Path, entries: &[(String, Vec<u8>
             ExistingEntryState::NeedsWrite { prior, perms } => (prior, perms),
         };
 
-        let stage_path = create_and_write_stage_file(parent, &target, bytes, existing_perms)?;
-        let stage_rel = stage_rel_for_entry(rel, &stage_path)?;
+        let (stage_path, stage_rel) = stage_unpacked_entry_file(parent, &target, rel, bytes, existing_perms)?;
         guard.push(stage_path.clone());
         staged.push(StagedWrite { rel: rel.clone(), stage_rel, target_path: target, stage_path, prior });
     }
@@ -1431,10 +1457,14 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
             if !meta.file_type().is_symlink()
                 && meta.is_file()
                 && meta.len() == new_bytes.len() as u64
+                && new_bytes.len() <= MAX_ARCHIVE_FILE_BYTES
                 && let Ok(existing) = platform_read_regular_file(target, new_bytes.len())
-                && existing == new_bytes
             {
-                return Ok(ExistingEntryState::Unchanged);
+                if existing == new_bytes {
+                    return Ok(ExistingEntryState::Unchanged);
+                }
+                let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
+                return Ok(ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(existing), perms });
             }
             let existing = platform_read_regular_file(target, MAX_ARCHIVE_FILE_BYTES)?;
             let perms = std::fs::metadata(target).ok().map(|m| m.permissions());
@@ -1445,44 +1475,6 @@ fn inspect_existing_unpacked_entry(target: &Path, new_bytes: &[u8]) -> Result<Ex
         }
         Err(err) => Err(FormatError::Io(err.to_string())),
     }
-}
-
-fn create_and_write_stage_file(parent: &Path, target: &Path, bytes: &[u8], existing_perms: Option<Permissions>) -> Result<PathBuf, FormatError> {
-    let raw_name = target.file_name().and_then(|s| s.to_str()).unwrap_or("entry");
-    let stem: String = raw_name.chars().filter(|c| c.is_ascii_alphanumeric() || *c == '.' || *c == '-' || *c == '_').take(48).collect();
-    let safe_stem = if stem.is_empty() { String::from("entry") } else { stem };
-    let pid = std::process::id();
-
-    for _ in 0..32 {
-        let seq = UNPACKED_STAGE_SEQ.fetch_add(1, Ordering::Relaxed);
-        let stage_path = parent.join(format!(".{safe_stem}.stage.{pid}.{seq}"));
-        let mut opts = OpenOptions::new();
-        opts.write(true).create_new(true);
-        #[cfg(all(unix, not(target_arch = "wasm32")))]
-        if existing_perms.is_some() {
-            opts.mode(0o600);
-        }
-        let write_res = {
-            let mut file = match opts.open(&stage_path) {
-                Ok(file) => file,
-                Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => continue,
-                Err(err) => return Err(FormatError::Io(err.to_string())),
-            };
-            (|| -> Result<(), std::io::Error> {
-                file.write_all(bytes)?;
-                if let Some(perms) = existing_perms {
-                    file.set_permissions(perms)?;
-                }
-                file.sync_all()
-            })()
-        };
-        if let Err(err) = write_res {
-            let _ = std::fs::remove_file(&stage_path);
-            return Err(FormatError::Io(err.to_string()));
-        }
-        return Ok(stage_path);
-    }
-    Err(FormatError::Io(String::from("exhausted unique unpacked staging attempts")))
 }
 
 fn commit_staged_unpacked_entries_with_rollback<F, R>(
@@ -2842,6 +2834,57 @@ mod tests {
             assert_eq!(open_project_unpacked_dir(&dir).unwrap(), doc_v2);
             save_project_unpacked_dir(&doc_v2, &dir).unwrap();
             assert!(!dir.join(UNPACKED_TX_DIR).exists());
+        }
+
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn build_archive_entries_normalizes_older_version_identically_to_current() {
+        use super::{ArchiveKind, build_archive_entries};
+
+        let mut current = ProjectDocument::new("Borrow Path").unwrap();
+        current.add_data_sheet(test_col_sheet("sheet-a", "A", 42.0)).unwrap();
+        assert_eq!(current.schema_version, CURRENT_SCHEMA_VERSION);
+
+        let mut legacy = current.clone();
+        legacy.schema_version = 0;
+
+        let current_entries = build_archive_entries(&current, ArchiveKind::Project).unwrap();
+        let legacy_entries = build_archive_entries(&legacy, ArchiveKind::Project).unwrap();
+        assert_eq!(current_entries, legacy_entries);
+    }
+
+    #[test]
+    fn inspect_existing_unpacked_entry_reuses_same_size_buffer_and_handles_missing() {
+        use super::{ExistingEntryState, PriorSnapshot, inspect_existing_unpacked_entry};
+
+        let dir = std::env::temp_dir().join(format!("cb-inspect-entry-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("entry.json");
+
+        assert!(matches!(
+            inspect_existing_unpacked_entry(&path, b"abcd").unwrap(),
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::DidNotExist, perms: None }
+        ));
+
+        std::fs::write(&path, b"abcd").unwrap();
+        assert!(matches!(inspect_existing_unpacked_entry(&path, b"abcd").unwrap(), ExistingEntryState::Unchanged));
+
+        match inspect_existing_unpacked_entry(&path, b"wxyz").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), perms } => {
+                assert_eq!(bytes, b"abcd");
+                assert!(perms.is_some());
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on same-size change"),
+        }
+
+        match inspect_existing_unpacked_entry(&path, b"longer").unwrap() {
+            ExistingEntryState::NeedsWrite { prior: PriorSnapshot::Existed(bytes), .. } => {
+                assert_eq!(bytes, b"abcd");
+            }
+            _ => panic!("expected NeedsWrite with prior bytes on size change"),
         }
 
         let _ = std::fs::remove_dir_all(&dir);

@@ -4,10 +4,10 @@
 use std::collections::{BTreeMap, BTreeSet};
 
 use curvebook_doc::{
-    BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource,
-    LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, NestedGroupColumn, PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId,
-    TableArchetype, VariableColumn, default_column_label, transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells,
-    validate_subcolumns,
+    BaselineOperation, Cell, CellCoord, CellValue, DataSetColumn, DataSheet, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError,
+    ImportFilterSpec, ImportLinkSpec, InfoSheet, LinkSource, LinkedDataRegion, MAX_DATA_SETS, MAX_ROWS, MAX_SUBCOLUMNS, NestedGroupColumn,
+    PlacementMode, ResultCell, ResultSheet, SheetCellRange, SheetId, TableArchetype, VariableColumn, default_column_label, scan_delimited,
+    transpose_cell_grid, validate_data_sets, validate_rows, validate_sheet_cells, validate_subcolumns,
 };
 
 use crate::error::TransformError;
@@ -286,147 +286,54 @@ fn result_cell_to_cell(rc: &ResultCell) -> Cell {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum DelimState {
-    FieldStart,
-    Unquoted,
-    Quoted,
-    AfterQuote,
-}
-
-fn push_parsed_cell(
-    row: &mut Vec<Cell>,
-    field: &mut String,
-    decimal_sep: char,
-    parse_asterisk: bool,
-    total_cells: &mut usize,
-    max_cols: usize,
-    max_cells: usize,
-) -> Result<(), TransformError> {
-    if row.len() >= max_cols {
-        return Err(TransformError::InvalidSpec { message: format!("delimited column count exceeds limit {max_cols}") });
+fn map_delimited_scan_error(err: DelimitedScanError) -> TransformError {
+    match err {
+        DelimitedScanError::UnexpectedQuoteInUnquotedField { .. } => {
+            TransformError::InvalidInput { message: String::from("unexpected quote inside unquoted delimited field") }
+        }
+        DelimitedScanError::UnexpectedCharAfterClosingQuote { ch, .. } => {
+            TransformError::InvalidInput { message: format!("unexpected character `{ch}` after closing quote in delimited text") }
+        }
+        DelimitedScanError::UnclosedQuotedField { .. } => {
+            TransformError::InvalidInput { message: String::from("unclosed quoted field at end of delimited text") }
+        }
     }
-    let next_total = total_cells.saturating_add(1);
-    if next_total > max_cells {
-        return Err(TransformError::InvalidSpec { message: format!("delimited cell count exceeds limit {max_cells}") });
-    }
-    *total_cells = next_total;
-    let tok = std::mem::take(field);
-    row.push(Cell::parse_import_token(&tok, decimal_sep, parse_asterisk));
-    Ok(())
-}
-
-fn push_parsed_row(rows: &mut Vec<Vec<Cell>>, row: &mut Vec<Cell>) -> Result<(), TransformError> {
-    if rows.len() >= MAX_ROWS + 16 {
-        return Err(TransformError::InvalidSpec { message: format!("delimited row count exceeds limit {MAX_ROWS}") });
-    }
-    rows.push(std::mem::take(row));
-    Ok(())
 }
 
 fn parse_delimited_text(text: &str, delimiter: char, decimal_sep: char, parse_asterisk: bool) -> Result<Vec<Vec<Cell>>, TransformError> {
-    let text = text.strip_prefix('\u{FEFF}').unwrap_or(text);
-    if text.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let quote_char = '"';
     let max_cols = MAX_DATA_SETS.saturating_mul(MAX_SUBCOLUMNS).saturating_add(4);
     let max_cells = MAX_IMPORT_CELLS.saturating_add(65_536);
 
     let mut rows: Vec<Vec<Cell>> = Vec::new();
     let mut current_row: Vec<Cell> = Vec::new();
-    let mut field = String::new();
-    let mut state = DelimState::FieldStart;
     let mut total_cells = 0_usize;
-    let mut chars = text.chars().peekable();
+    let scan_opts = DelimitedScanOptions { delimiter, quote_char: (delimiter != '"').then_some('"') };
 
-    while let Some(ch) = chars.next() {
-        match state {
-            DelimState::FieldStart => {
-                if ch == quote_char && delimiter != quote_char {
-                    state = DelimState::Quoted;
-                } else if ch == delimiter {
-                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                    state = DelimState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    if !current_row.is_empty() || !field.is_empty() {
-                        push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                        push_parsed_row(&mut rows, &mut current_row)?;
-                    }
-                    state = DelimState::FieldStart;
-                } else {
-                    field.push(ch);
-                    state = DelimState::Unquoted;
-                }
-            }
-            DelimState::Unquoted => {
-                if ch == delimiter {
-                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                    state = DelimState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                    push_parsed_row(&mut rows, &mut current_row)?;
-                    state = DelimState::FieldStart;
-                } else if ch == quote_char && delimiter != quote_char {
-                    return Err(TransformError::InvalidInput { message: String::from("unexpected quote inside unquoted delimited field") });
-                } else {
-                    field.push(ch);
-                }
-            }
-            DelimState::Quoted => {
-                if ch == quote_char {
-                    if chars.peek() == Some(&quote_char) {
-                        let _ = chars.next();
-                        field.push(quote_char);
-                    } else {
-                        state = DelimState::AfterQuote;
-                    }
-                } else {
-                    field.push(ch);
-                }
-            }
-            DelimState::AfterQuote => {
-                if ch == delimiter {
-                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                    state = DelimState::FieldStart;
-                } else if ch == '\r' || ch == '\n' {
-                    if ch == '\r' && chars.peek() == Some(&'\n') {
-                        let _ = chars.next();
-                    }
-                    push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                    push_parsed_row(&mut rows, &mut current_row)?;
-                    state = DelimState::FieldStart;
-                } else {
-                    return Err(TransformError::InvalidInput {
-                        message: format!("unexpected character `{ch}` after closing quote in delimited text"),
-                    });
-                }
-            }
+    scan_delimited(text, scan_opts, |field| {
+        if field.end_of_record && field.field_index == 0 && !field.quoted && field.text.is_empty() {
+            return Ok(());
         }
-    }
-
-    match state {
-        DelimState::Quoted => {
-            return Err(TransformError::InvalidInput { message: String::from("unclosed quoted field at end of delimited text") });
+        if current_row.len() >= max_cols {
+            return Err(TransformError::InvalidSpec { message: format!("delimited column count exceeds limit {max_cols}") });
         }
-        DelimState::FieldStart => {
-            if !current_row.is_empty() || !field.is_empty() {
-                push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-                push_parsed_row(&mut rows, &mut current_row)?;
+        let next_total = total_cells.saturating_add(1);
+        if next_total > max_cells {
+            return Err(TransformError::InvalidSpec { message: format!("delimited cell count exceeds limit {max_cells}") });
+        }
+        total_cells = next_total;
+        current_row.push(Cell::parse_import_token(&field.text, decimal_sep, parse_asterisk));
+        if field.end_of_record {
+            if rows.len() >= MAX_ROWS + 16 {
+                return Err(TransformError::InvalidSpec { message: format!("delimited row count exceeds limit {MAX_ROWS}") });
             }
+            rows.push(std::mem::take(&mut current_row));
         }
-        DelimState::Unquoted | DelimState::AfterQuote => {
-            push_parsed_cell(&mut current_row, &mut field, decimal_sep, parse_asterisk, &mut total_cells, max_cols, max_cells)?;
-            push_parsed_row(&mut rows, &mut current_row)?;
-        }
-    }
+        Ok(())
+    })
+    .map_err(|err| match err {
+        DelimitedVisitorError::Syntax(s) => map_delimited_scan_error(s),
+        DelimitedVisitorError::Callback(e) => e,
+    })?;
 
     Ok(rows)
 }
@@ -681,7 +588,7 @@ fn place_grid(target: &mut DataSheet, grid: &[Vec<Cell>], mode: PlacementMode, a
         ensure_sheet_rows(&mut target.archetype, target_rows)?;
     }
     if mode == PlacementMode::InsertRows && start_row < existing_rows {
-        shift_archetype_rows_down(&mut target.archetype, start_row, grid.len(), existing_rows);
+        target.archetype.shift_rows_down(start_row, grid.len(), existing_rows);
         for note in &mut target.exclusion_notes {
             if note.coord.row >= start_row {
                 note.coord.row += grid.len();
@@ -938,76 +845,6 @@ fn ensure_sheet_rows(arch: &mut TableArchetype, min_rows: usize) -> Result<(), T
     Ok(())
 }
 
-fn rotate_rows_down<T>(rows: &mut [T], start_row: usize, shift: usize, end_row: usize) {
-    if let Some(slice) = rows.get_mut(start_row..end_row)
-        && shift < slice.len()
-    {
-        slice.rotate_right(shift);
-    }
-}
-
-fn shift_archetype_rows_down(arch: &mut TableArchetype, start_row: usize, insert_rows: usize, existing_rows: usize) {
-    if insert_rows == 0 || start_row >= existing_rows {
-        return;
-    }
-    let end = existing_rows + insert_rows;
-    match arch {
-        TableArchetype::Xy(t) => {
-            rotate_rows_down(&mut t.x_cells, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Column(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Grouped(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            if let Some(spacing) = &mut t.row_numeric_spacing {
-                rotate_rows_down(spacing, start_row, insert_rows, end);
-            }
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Contingency(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Survival(t) => {
-            rotate_rows_down(&mut t.times, start_row, insert_rows, end);
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for ds in &mut t.cohorts {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::PartsOfWhole(t) => {
-            rotate_rows_down(&mut t.slice_labels, start_row, insert_rows, end);
-            for ds in &mut t.data_sets {
-                rotate_rows_down(&mut ds.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::MultipleVariables(mv) => {
-            rotate_rows_down(&mut mv.row_titles, start_row, insert_rows, end);
-            for var in &mut mv.variables {
-                rotate_rows_down(&mut var.cells, start_row, insert_rows, end);
-            }
-        }
-        TableArchetype::Nested(t) => {
-            rotate_rows_down(&mut t.row_titles, start_row, insert_rows, end);
-            for grp in &mut t.groups {
-                rotate_rows_down(&mut grp.cells, start_row, insert_rows, end);
-            }
-        }
-    }
-}
-
 fn push_dataset_columns(cols: &mut Vec<DataSetColumn>, min_cols: usize, row_count: usize, subs: usize) -> Result<(), TransformError> {
     while cols.len() < min_cols {
         let idx = cols.len();
@@ -1097,4 +934,36 @@ fn format_provenance(spec: &ImportLinkSpec, rows: usize, cols: usize) -> String 
     };
     let tx = if spec.placement.transpose { ", transposed" } else { "" };
     format!("Linked {rows}x{cols} from {origin}{tx}")
+}
+
+#[cfg(test)]
+mod dialect_tests {
+    use curvebook_doc::{Cell, CellValue};
+
+    use super::parse_delimited_text;
+    use crate::error::TransformError;
+
+    #[test]
+    fn transform_dialect_parses_quoted_numbers_skips_blank_lines_and_keeps_quoted_empty_row() {
+        let input = "\u{FEFF}\"42.5\",10*\r\n\r\n\"\"\n\"a\"\"b\nc\",\n";
+        let rows = parse_delimited_text(input, ',', '.', true).unwrap();
+        assert_eq!(rows.len(), 3);
+        // Transform sends quoted fields through Cell::parse_import_token (numeric parsed as Number).
+        assert_eq!(rows[0][0], Cell::number(42.5));
+        assert_eq!(rows[0][1], Cell { value: CellValue::Number(10.0), excluded: true });
+        // Standalone unquoted blank line skipped, while quoted empty line `""` is retained.
+        assert_eq!(rows[1], vec![Cell::empty()]);
+        // Quoted newline + doubled quote + trailing empty field preserved.
+        assert_eq!(rows[2], vec![Cell::text("a\"b\nc"), Cell::empty()]);
+    }
+
+    #[test]
+    fn transform_dialect_handles_quote_as_delimiter_and_maps_syntax_errors() {
+        let rows = parse_delimited_text("1\"2\"3\n4\"5", '"', '.', true).unwrap();
+        assert_eq!(rows, vec![vec![Cell::number(1.0), Cell::number(2.0), Cell::number(3.0)], vec![Cell::number(4.0), Cell::number(5.0)]]);
+
+        assert!(matches!(parse_delimited_text("a\"b,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
+        assert!(matches!(parse_delimited_text("\"a\"x,1", ',', '.', true), Err(TransformError::InvalidInput { .. })));
+        assert!(matches!(parse_delimited_text("\"unclosed", ',', '.', true), Err(TransformError::InvalidInput { .. })));
+    }
 }
