@@ -1451,13 +1451,19 @@ fn round_tenth_pt(v: f64) -> f64 {
 
 const fn layout_item_bounds_doc(item: &LayoutItem) -> DocRectPt {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => *bounds_pt,
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
     }
 }
 
 fn set_layout_item_bounds_doc(item: &mut LayoutItem, bounds: DocRectPt) {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => {
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => {
             *bounds_pt = bounds;
         }
     }

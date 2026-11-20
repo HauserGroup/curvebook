@@ -7,6 +7,7 @@
 
 pub mod column_grouped;
 pub mod equation_box;
+pub mod image_decode;
 pub mod multivariate_layout;
 pub mod scales;
 pub mod scene;
@@ -17,7 +18,7 @@ use curvebook_doc::{GraphKind, GraphSheet, GraphSpec, LayoutSheet, ProjectDocume
 use curvebook_palette::{MarkerStyle, Rgba8};
 pub use scene::{
     ChartError, ChartScene, ChartWarning, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PlottedPointMeta, PointPt, PositionedText, PreflightIssue,
-    RectPt, ScenePrimitive, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
+    RectPt, ScenePrimitive, SceneRasterImage, SourceCellId, StrokePaint, TextAnchor, preflight_check_scene,
 };
 
 use serde::{Deserialize, Serialize};

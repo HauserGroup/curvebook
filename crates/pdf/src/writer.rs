@@ -8,7 +8,8 @@ use std::fmt::Write as FmtWrite;
 use std::io::Write as IoWrite;
 
 use curvebook_chart::{
-    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
+    TextAnchor,
 };
 use curvebook_palette::Rgba8;
 use curvebook_text::glyph_paths::{outline_ttf_glyph, outline_visual_rich_text_rotated};
@@ -146,10 +147,12 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
     let mut encoded_pages = Vec::with_capacity(pages.len());
     let mut all_gs_both = BTreeSet::new();
     let mut all_gs_stroke = BTreeSet::new();
+    let mut image_registry = PdfImageRegistry::default();
 
     for scene in pages {
         validate_scene_bounds(scene)?;
-        let (raw_stream, used) = encode_page_stream(scene, options, embedded_info, parsed_ttf.as_ref())?;
+        let (raw_stream, used) =
+            encode_page_stream(scene, options, embedded_info, parsed_ttf.as_ref(), &mut image_registry, &mut cumulative_stream_bytes)?;
         all_gs_both.extend(used.gs_both.iter().copied());
         all_gs_stroke.extend(used.gs_stroke.iter().copied());
         let stream_bytes = compress_if_requested(raw_stream.into_bytes(), options.compress_streams)?;
@@ -162,7 +165,9 @@ pub fn render_pdf_page_refs(pages: &[&ChartScene], options: &PdfExportOptions) -
         encoded_pages.push(EncodedPage { stream_bytes, used });
     }
 
-    assemble_pdf_document(pages, &encoded_pages, &all_gs_both, &all_gs_stroke, options, embedded_ttf.as_ref())
+    let doc_resources =
+        PdfDocResources { all_gs_both: &all_gs_both, all_gs_stroke: &all_gs_stroke, embedded_ttf: embedded_ttf.as_ref(), images: &image_registry };
+    assemble_pdf_document(pages, &encoded_pages, &doc_resources, options)
 }
 
 struct EmbeddedTrueTypeFont {
@@ -214,11 +219,106 @@ fn resolve_embedded_truetype(options: &PdfExportOptions) -> Result<Option<Embedd
 struct PageResourcesUsed {
     gs_both: BTreeSet<u8>,
     gs_stroke: BTreeSet<u8>,
+    images: BTreeSet<usize>,
 }
 
 struct EncodedPage {
     stream_bytes: Vec<u8>,
     used: PageResourcesUsed,
+}
+
+struct PdfImageEntry {
+    width: u32,
+    height: u32,
+    color_space: PdfColorSpace,
+    color_stream: Vec<u8>,
+    smask_stream: Option<Vec<u8>>,
+}
+
+#[derive(Default)]
+struct PdfImageRegistry {
+    index_by_key: BTreeMap<(String, u32, u32, u64), usize>,
+    entries: Vec<PdfImageEntry>,
+}
+
+struct PdfDocResources<'a> {
+    all_gs_both: &'a BTreeSet<u8>,
+    all_gs_stroke: &'a BTreeSet<u8>,
+    embedded_ttf: Option<&'a EmbeddedTrueTypeFont>,
+    images: &'a PdfImageRegistry,
+}
+
+fn fnv1a_64(bytes: &[u8]) -> u64 {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for &b in bytes {
+        hash ^= u64::from(b);
+        hash = hash.wrapping_mul(0x0100_0000_01b3);
+    }
+    hash
+}
+
+impl PdfImageRegistry {
+    #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
+    fn register(&mut self, raster: &SceneRasterImage, options: &PdfExportOptions, cumulative_stream_bytes: &mut usize) -> Result<usize, PdfError> {
+        let (w, h) = raster.pixel_size;
+        let expected_len = (w as usize)
+            .checked_mul(h as usize)
+            .and_then(|p| p.checked_mul(4))
+            .ok_or_else(|| PdfError::InvalidScene { message: String::from("PDF image dimensions overflow byte length") })?;
+        if w == 0 || h == 0 || raster.rgba.len() != expected_len {
+            return Err(PdfError::InvalidScene { message: String::from("invalid raster image buffer for PDF XObject") });
+        }
+        let key = (raster.asset_id.clone(), w, h, fnv1a_64(&raster.rgba));
+        if let Some(&idx) = self.index_by_key.get(&key) {
+            return Ok(idx);
+        }
+
+        let px_count = (w as usize) * (h as usize);
+        let has_alpha = raster.rgba.as_chunks::<4>().0.iter().any(|&[_, _, _, a]| a < 255);
+        let mut color_raw = match options.color_space {
+            PdfColorSpace::Srgb => Vec::with_capacity(px_count * 3),
+            PdfColorSpace::Grayscale => Vec::with_capacity(px_count),
+            PdfColorSpace::Cmyk => Vec::with_capacity(px_count * 4),
+        };
+        let mut alpha_raw = if has_alpha { Vec::with_capacity(px_count) } else { Vec::new() };
+
+        for &[r, g, b, a] in raster.rgba.as_chunks::<4>().0 {
+            match options.color_space {
+                PdfColorSpace::Srgb => {
+                    color_raw.extend_from_slice(&[r, g, b]);
+                }
+                PdfColorSpace::Grayscale => {
+                    let luma = 0.2126 * f64::from(r) + 0.7152 * f64::from(g) + 0.0722 * f64::from(b);
+                    color_raw.push(luma.round().clamp(0.0, 255.0) as u8);
+                }
+                PdfColorSpace::Cmyk => {
+                    let cmyk = Rgba8::rgb(r, g, b).to_cmyk();
+                    color_raw.push((cmyk.c * 255.0).round().clamp(0.0, 255.0) as u8);
+                    color_raw.push((cmyk.m * 255.0).round().clamp(0.0, 255.0) as u8);
+                    color_raw.push((cmyk.y * 255.0).round().clamp(0.0, 255.0) as u8);
+                    color_raw.push((cmyk.k * 255.0).round().clamp(0.0, 255.0) as u8);
+                }
+            }
+            if has_alpha {
+                alpha_raw.push(a);
+            }
+        }
+
+        let color_stream = compress_if_requested(color_raw, options.compress_streams)?;
+        let smask_stream = if has_alpha { Some(compress_if_requested(alpha_raw, options.compress_streams)?) } else { None };
+        let added = color_stream.len().saturating_add(smask_stream.as_ref().map_or(0, Vec::len));
+        *cumulative_stream_bytes = cumulative_stream_bytes
+            .checked_add(added)
+            .ok_or_else(|| PdfError::ResourceLimit { message: format!("PDF image stream byte count overflows limit {MAX_PDF_OUTPUT_BYTES}") })?;
+        if *cumulative_stream_bytes > MAX_PDF_OUTPUT_BYTES {
+            return Err(PdfError::ResourceLimit { message: format!("PDF embedded image size exceeds maximum {MAX_PDF_OUTPUT_BYTES} bytes") });
+        }
+
+        let idx = self.entries.len();
+        self.entries.push(PdfImageEntry { width: w, height: h, color_space: options.color_space, color_stream, smask_stream });
+        self.index_by_key.insert(key, idx);
+        Ok(idx)
+    }
 }
 
 fn validate_scene_bounds(scene: &ChartScene) -> Result<(), PdfError> {
@@ -249,10 +349,8 @@ fn compress_if_requested(raw: Vec<u8>, compress: bool) -> Result<Vec<u8>, PdfErr
 fn assemble_pdf_document(
     pages: &[&ChartScene],
     encoded_pages: &[EncodedPage],
-    all_gs_both: &BTreeSet<u8>,
-    all_gs_stroke: &BTreeSet<u8>,
+    res: &PdfDocResources<'_>,
     options: &PdfExportOptions,
-    embedded_ttf: Option<&EmbeddedTrueTypeFont>,
 ) -> Result<Vec<u8>, PdfError> {
     // Fixed objects:
     // 1: Catalog, 2: Pages, 3: /F1 Helvetica, 4: /F2 Helvetica-Bold,
@@ -260,7 +358,7 @@ fn assemble_pdf_document(
     let fixed_objs = 8usize;
     let mut next_id = fixed_objs + 1;
 
-    let ttf_ids = embedded_ttf.map(|ttf| {
+    let ttf_ids = res.embedded_ttf.map(|ttf| {
         let font_id = next_id;
         let desc_id = next_id + 1;
         let stream_id = next_id + 2;
@@ -269,22 +367,34 @@ fn assemble_pdf_document(
     });
 
     let mut gs_both_ids = BTreeMap::new();
-    for &alpha in all_gs_both {
+    for &alpha in res.all_gs_both {
         gs_both_ids.insert(alpha, next_id);
         next_id += 1;
     }
     let mut gs_stroke_ids = BTreeMap::new();
-    for &alpha in all_gs_stroke {
+    for &alpha in res.all_gs_stroke {
         gs_stroke_ids.insert(alpha, next_id);
         next_id += 1;
     }
     let gs_ids = ExtGStateIds { both: gs_both_ids, stroke: gs_stroke_ids };
 
+    let mut image_obj_ids = Vec::with_capacity(res.images.entries.len());
+    for entry in &res.images.entries {
+        let im_id = next_id;
+        next_id += 1;
+        let smask_id = entry.smask_stream.as_ref().map(|_| {
+            let sid = next_id;
+            next_id += 1;
+            sid
+        });
+        image_obj_ids.push((im_id, smask_id));
+    }
+
     let pages_base_id = next_id;
     let total_objs = pages_base_id - 1 + pages.len() * 2;
     let mut offsets = vec![0usize; total_objs + 1];
 
-    let mut pdf = Vec::with_capacity(8192 + embedded_ttf.map_or(0, |t| t.compressed_bytes.len()));
+    let mut pdf = Vec::with_capacity(8192 + res.embedded_ttf.map_or(0, |t| t.compressed_bytes.len()));
     let header: &[u8] = match options.version {
         PdfVersion::Pdf14 => b"%PDF-1.4\n%\xE2\xE3\xCF\xD3\n",
         PdfVersion::Pdf17 => b"%PDF-1.7\n%\xE2\xE3\xCF\xD3\n",
@@ -325,12 +435,16 @@ fn assemble_pdf_document(
         write_pdf_obj(&mut pdf, &mut offsets, obj_id, gs.as_bytes());
     }
 
+    let filter_tag = if options.compress_streams { " /Filter /FlateDecode" } else { "" };
+    for (entry, &(im_id, smask_id)) in res.images.entries.iter().zip(image_obj_ids.iter()) {
+        write_pdf_image_objects(&mut pdf, &mut offsets, entry, im_id, smask_id, filter_tag);
+    }
+
     let ttf_font_id = ttf_ids.map(|(_, font_id, _, _)| font_id);
     for (idx, (&scene, encoded)) in pages.iter().zip(encoded_pages.iter()).enumerate() {
         let content_obj_id = pages_base_id + idx * 2;
         let page_obj_id = content_obj_id + 1;
 
-        let filter_tag = if options.compress_streams { " /Filter /FlateDecode" } else { "" };
         let mut content_obj = Vec::with_capacity(encoded.stream_bytes.len() + 96);
         let header = format!("<< /Length {}{} >>\nstream\n", encoded.stream_bytes.len(), filter_tag);
         content_obj.extend_from_slice(header.as_bytes());
@@ -338,7 +452,7 @@ fn assemble_pdf_document(
         content_obj.extend_from_slice(b"\nendstream\n");
         write_pdf_obj(&mut pdf, &mut offsets, content_obj_id, &content_obj);
 
-        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, ttf_font_id, &gs_ids);
+        let page_dict = build_page_dict(scene, options, encoded, content_obj_id, ttf_font_id, &gs_ids, &image_obj_ids);
         write_pdf_obj(&mut pdf, &mut offsets, page_obj_id, page_dict.as_bytes());
     }
 
@@ -420,6 +534,43 @@ fn build_info_dict(pages: &[&ChartScene], options: &PdfExportOptions) -> String 
     dict
 }
 
+fn write_pdf_image_objects(pdf: &mut Vec<u8>, offsets: &mut [usize], entry: &PdfImageEntry, im_id: usize, smask_id: Option<usize>, filter_tag: &str) {
+    let cs_name = match entry.color_space {
+        PdfColorSpace::Srgb => "DeviceRGB",
+        PdfColorSpace::Grayscale => "DeviceGray",
+        PdfColorSpace::Cmyk => "DeviceCMYK",
+    };
+    let smask_tag = match smask_id {
+        Some(sid) => format!(" /SMask {sid} 0 R"),
+        None => String::new(),
+    };
+    let mut img_obj = Vec::with_capacity(entry.color_stream.len() + 192);
+    let header = format!(
+        "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /{cs_name} /BitsPerComponent 8{filter_tag}{smask_tag} /Length {} >>\nstream\n",
+        entry.width,
+        entry.height,
+        entry.color_stream.len()
+    );
+    img_obj.extend_from_slice(header.as_bytes());
+    img_obj.extend_from_slice(&entry.color_stream);
+    img_obj.extend_from_slice(b"\nendstream\n");
+    write_pdf_obj(pdf, offsets, im_id, &img_obj);
+
+    if let (Some(sid), Some(smask_bytes)) = (smask_id, entry.smask_stream.as_ref()) {
+        let mut smask_obj = Vec::with_capacity(smask_bytes.len() + 160);
+        let sheader = format!(
+            "<< /Type /XObject /Subtype /Image /Width {} /Height {} /ColorSpace /DeviceGray /BitsPerComponent 8{filter_tag} /Length {} >>\nstream\n",
+            entry.width,
+            entry.height,
+            smask_bytes.len()
+        );
+        smask_obj.extend_from_slice(sheader.as_bytes());
+        smask_obj.extend_from_slice(smask_bytes);
+        smask_obj.extend_from_slice(b"\nendstream\n");
+        write_pdf_obj(pdf, offsets, sid, &smask_obj);
+    }
+}
+
 fn build_page_dict(
     scene: &ChartScene,
     options: &PdfExportOptions,
@@ -427,6 +578,7 @@ fn build_page_dict(
     content_obj_id: usize,
     ttf_font_id: Option<usize>,
     gs_ids: &ExtGStateIds,
+    image_obj_ids: &[(usize, Option<usize>)],
 ) -> String {
     let mut dict = String::with_capacity(280);
     let _ = write!(dict, "<< /Type /Page /Parent 2 0 R /MediaBox [0.000 0.000 {:.3} {:.3}]", norm_zero(scene.width_pt), norm_zero(scene.height_pt));
@@ -453,6 +605,15 @@ fn build_page_dict(
         for &alpha in &encoded.used.gs_stroke {
             if let Some(&obj_id) = gs_ids.stroke.get(&alpha) {
                 let _ = write!(dict, " /GSs{alpha:03} {obj_id} 0 R");
+            }
+        }
+        dict.push_str(" >>");
+    }
+    if !encoded.used.images.is_empty() {
+        dict.push_str(" /XObject <<");
+        for &im_idx in &encoded.used.images {
+            if let Some(&(obj_id, _)) = image_obj_ids.get(im_idx) {
+                let _ = write!(dict, " /Im{im_idx} {obj_id} 0 R");
             }
         }
         dict.push_str(" >>");
@@ -488,9 +649,11 @@ fn write_pdf_obj(pdf: &mut Vec<u8>, offsets: &mut [usize], obj_id: usize, body: 
 
 fn encode_page_stream<'a>(
     scene: &ChartScene,
-    options: &PdfExportOptions,
+    options: &'a PdfExportOptions,
     embedded_info: Option<&'a TrueTypeFontInfo>,
     embedded_ttf: Option<&'a TrueTypeFont<'a>>,
+    images: &'a mut PdfImageRegistry,
+    cumulative_stream_bytes: &'a mut usize,
 ) -> Result<(String, PageResourcesUsed), PdfError> {
     let mut ctx = StreamCtx {
         buf: String::with_capacity(1024),
@@ -498,8 +661,11 @@ fn encode_page_stream<'a>(
         page_h: scene.height_pt,
         color_space: options.color_space,
         outline_text: options.outline_text,
+        options,
         embedded_info,
         embedded_ttf,
+        images,
+        cumulative_stream_bytes,
     };
     let mut clip_depth = 0usize;
 
@@ -510,6 +676,9 @@ fn encode_page_stream<'a>(
             }
             ScenePrimitive::Text(text) => {
                 ctx.emit_text(text)?;
+            }
+            ScenePrimitive::RasterImage(raster) => {
+                ctx.emit_raster_image(raster)?;
             }
             ScenePrimitive::PushClip { rect } => {
                 ctx.push_clip(*rect)?;
@@ -538,13 +707,58 @@ struct StreamCtx<'a> {
     page_h: f64,
     color_space: PdfColorSpace,
     outline_text: bool,
+    options: &'a PdfExportOptions,
     embedded_info: Option<&'a TrueTypeFontInfo>,
     embedded_ttf: Option<&'a TrueTypeFont<'a>>,
+    images: &'a mut PdfImageRegistry,
+    cumulative_stream_bytes: &'a mut usize,
 }
 
 impl StreamCtx<'_> {
     fn y_pdf(&self, y_scene: f64) -> f64 {
         norm_zero(self.page_h - y_scene)
+    }
+
+    fn emit_raster_image(&mut self, raster: &SceneRasterImage) -> Result<(), PdfError> {
+        let b = raster.bounds_pt;
+        check_finite_rect(b, "raster image bounds")?;
+        if b.width <= 0.0 || b.height <= 0.0 || !raster.rotation_deg.is_finite() {
+            return Err(PdfError::InvalidScene { message: String::from("PDF raster image dimensions and rotation must be valid") });
+        }
+        let Some(vis_doc) = raster.crop.visible_rect(curvebook_doc::RectPt::from(b)) else {
+            return Ok(());
+        };
+        let vis = RectPt::from(vis_doc);
+        let im_idx = self.images.register(raster, self.options, self.cumulative_stream_bytes)?;
+        self.used.images.insert(im_idx);
+
+        self.buf.push_str("q\n");
+        if let Some(c) = raster.clip {
+            check_finite_rect(c, "raster image clip")?;
+            let [llx, lly, _, _] = rect_to_pdf_box(c, self.page_h);
+            let _ = writeln!(self.buf, "{llx:.3} {lly:.3} {:.3} {:.3} re W n", norm_zero(c.width.max(0.0)), norm_zero(c.height.max(0.0)));
+        }
+
+        if raster.rotation_deg.abs() > 1e-9 {
+            let cx = norm_zero(b.x + 0.5 * b.width);
+            let cy_pdf = self.y_pdf(b.y + 0.5 * b.height);
+            let (sin_t, cos_t) = raster.rotation_deg.to_radians().sin_cos();
+            let _ = writeln!(self.buf, "1 0 0 1 {cx:.3} {cy_pdf:.3} cm");
+            let _ = writeln!(self.buf, "{cos_t:.6} {:.6} {sin_t:.6} {cos_t:.6} 0 0 cm", norm_tiny(-sin_t));
+            let _ = writeln!(self.buf, "1 0 0 1 {:.3} {:.3} cm", norm_zero(-cx), norm_zero(-cy_pdf));
+        }
+
+        let is_cropped = raster.crop.left_pt > 0.0 || raster.crop.right_pt > 0.0 || raster.crop.top_pt > 0.0 || raster.crop.bottom_pt > 0.0;
+        if is_cropped {
+            let [vx, vy, _, _] = rect_to_pdf_box(vis, self.page_h);
+            let _ = writeln!(self.buf, "{vx:.3} {vy:.3} {:.3} {:.3} re W n", norm_zero(vis.width), norm_zero(vis.height));
+        }
+
+        let [bx, by, _, _] = rect_to_pdf_box(b, self.page_h);
+        let _ = writeln!(self.buf, "{:.3} 0 0 {:.3} {bx:.3} {by:.3} cm", norm_zero(b.width), norm_zero(b.height));
+        let _ = writeln!(self.buf, "/Im{im_idx} Do");
+        self.buf.push_str("Q\n");
+        Ok(())
     }
 
     fn push_clip(&mut self, rect: RectPt) -> Result<(), PdfError> {

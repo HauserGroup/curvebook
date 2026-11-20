@@ -771,6 +771,21 @@ fn layout_sheet_schema() -> SchemaNode {
     .with_title("LayoutSheet")
 }
 
+fn project_image_asset_schema() -> SchemaNode {
+    let pixel_size_schema = SchemaNode { min_items: Some(2), max_items: Some(2), ..array_schema(integer_schema().with_minimum_i64(1)) };
+    object_schema(
+        vec![
+            ("asset_id", string_schema().with_min_length(4)),
+            ("media_type", enum_schema(&["Png", "Jpeg", "Tiff"])),
+            ("pixel_size", pixel_size_schema),
+            ("bytes", string_schema()),
+        ],
+        &["asset_id", "media_type", "pixel_size"],
+        false,
+    )
+    .with_title("ProjectImageAsset")
+}
+
 fn any_json_schema() -> SchemaNode {
     SchemaNode::default()
 }
@@ -800,6 +815,7 @@ pub fn project_document_schema() -> SchemaNode {
             ("active_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
             ("family_anchor_sheet_id", nullable_schema(ref_schema(SheetId::schema_name()))),
             ("checkpoints", array_schema(ref_schema(NamedCheckpoint::schema_name()))),
+            ("image_assets", array_schema(ref_schema("ProjectImageAsset"))),
         ],
         &[
             "schema_version",
@@ -834,4 +850,5 @@ pub fn project_document_schema() -> SchemaNode {
     .with_def("ResultSheet", result_sheet_schema())
     .with_def("GraphSheet", graph_sheet_schema())
     .with_def("LayoutSheet", layout_sheet_schema())
+    .with_def("ProjectImageAsset", project_image_asset_schema())
 }

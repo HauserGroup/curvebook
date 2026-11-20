@@ -773,6 +773,7 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-text",
  "curvebook-transform",
+ "image",
  "proptest",
  "serde",
 ]
@@ -828,6 +829,7 @@ dependencies = [
  "curvebook-text",
  "curvebook-tools",
  "curvebook-transform",
+ "image",
  "proptest",
  "serde",
  "serde_json",
@@ -855,6 +857,7 @@ dependencies = [
  "curvebook-platform",
  "curvebook-testkit",
  "flate2",
+ "image",
  "proptest",
  "serde",
  "serde_json",
@@ -948,12 +951,14 @@ dependencies = [
 name = "curvebook-svg"
 version = "0.1.0-alpha.2"
 dependencies = [
+ "crc32fast",
  "curvebook-chart",
  "curvebook-doc",
  "curvebook-math",
  "curvebook-palette",
  "curvebook-testkit",
  "curvebook-text",
+ "flate2",
  "serde",
 ]
 
@@ -1789,6 +1794,8 @@ dependencies = [
  "num-traits",
  "png",
  "tiff",
+ "zune-core",
+ "zune-jpeg",
 ]
 
 [[package]]

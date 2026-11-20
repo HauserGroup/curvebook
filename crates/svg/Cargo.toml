@@ -11,6 +11,8 @@ description = "CurveBook vector SVG figure exporter and reader"
 workspace = true
 
 [dependencies]
+crc32fast = { workspace = true }
+flate2 = { workspace = true }
 curvebook-chart = { workspace = true }
 curvebook-doc = { workspace = true }
 curvebook-math = { workspace = true }

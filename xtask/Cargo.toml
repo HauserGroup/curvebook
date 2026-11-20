@@ -16,7 +16,7 @@ curvebook-mcp = { workspace = true, default-features = false }
 curvebook-palette = { workspace = true }
 curvebook-pdf = { workspace = true }
 curvebook-platform = { workspace = true }
-image = { version = "0.25", default-features = false, features = ["png"] }
+image = { workspace = true }
 curvebook-stats = { workspace = true }
 curvebook-svg = { workspace = true }
 curvebook-testkit = { workspace = true }

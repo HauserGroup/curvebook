@@ -1,13 +1,18 @@
 //! Publication-quality SVG 1.1 serializer and structural validator.
 
+use std::collections::BTreeMap;
 use std::fmt::Write;
+use std::io::Write as IoWrite;
 
 use curvebook_chart::{
-    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
+    ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, SceneRasterImage, StrokePaint,
+    TextAnchor,
 };
 use curvebook_palette::Rgba8;
 use curvebook_text::metrics::split_rich_text_lines;
 use curvebook_text::{BUNDLED_FONTS, GlyphOutlineCmd, RichText, SpanScript, SpanSlope, SpanWeight, outline_rich_text};
+use flate2::Compression;
+use flate2::write::ZlibEncoder;
 use serde::{Deserialize, Serialize};
 
 use crate::SVG_XMLNS;
@@ -92,13 +97,22 @@ struct SvgRenderCtx<'a> {
     prec: usize,
     opacity_prec: usize,
     clips: ClipRegistry,
+    image_data_uris: BTreeMap<(String, u32, u32, u32), String>,
     body: String,
     clip_depth: usize,
 }
 
 impl<'a> SvgRenderCtx<'a> {
     fn new(options: &'a SvgExportOptions, prec: usize) -> Self {
-        Self { options, prec, opacity_prec: prec.max(3), clips: ClipRegistry::default(), body: String::with_capacity(2048), clip_depth: 0 }
+        Self {
+            options,
+            prec,
+            opacity_prec: prec.max(3),
+            clips: ClipRegistry::default(),
+            image_data_uris: BTreeMap::new(),
+            body: String::with_capacity(2048),
+            clip_depth: 0,
+        }
     }
 
     fn push_indent(&mut self, extra: usize) {
@@ -139,6 +153,7 @@ pub fn render_svg(scene: &ChartScene, options: &SvgExportOptions) -> Result<Stri
                 }
             }
             ScenePrimitive::Text(text) => write_text_element(&mut ctx, text)?,
+            ScenePrimitive::RasterImage(raster) => write_raster_image_element(&mut ctx, raster)?,
             ScenePrimitive::PushClip { rect } => {
                 let clip_id = ctx.clips.register(*rect, ctx.prec)?;
                 ctx.push_indent(0);
@@ -256,6 +271,127 @@ fn write_path_element(
     }
     ctx.body.push_str("/>");
     ctx.push_newline();
+    Ok(())
+}
+
+fn write_raster_image_element(ctx: &mut SvgRenderCtx<'_>, raster: &SceneRasterImage) -> Result<(), SvgError> {
+    let (w, h) = raster.pixel_size;
+    let Some(expected_len) = (w as usize).checked_mul(h as usize).and_then(|p| p.checked_mul(4)) else {
+        return Err(SvgError::InvalidScene { message: String::from("raster image dimensions overflow byte count") });
+    };
+    if w == 0 || h == 0 || raster.rgba.len() != expected_len {
+        return Err(SvgError::InvalidScene { message: String::from("invalid raster image pixel buffer in SVG scene") });
+    }
+    let b = raster.bounds_pt;
+    if !b.x.is_finite() || !b.y.is_finite() || !b.width.is_finite() || !b.height.is_finite() || b.width <= 0.0 || b.height <= 0.0 {
+        return Err(SvgError::InvalidScene { message: String::from("raster image bounds_pt must be finite and positive") });
+    }
+    if !raster.rotation_deg.is_finite() {
+        return Err(SvgError::InvalidScene { message: String::from("raster image rotation_deg must be finite") });
+    }
+    let Some(vis_doc) = raster.crop.visible_rect(curvebook_doc::RectPt::from(b)) else {
+        return Ok(());
+    };
+    let vis = RectPt::from(vis_doc);
+
+    let key = (raster.asset_id.clone(), w, h, crc32fast::hash(&raster.rgba));
+    let data_uri = if let Some(cached) = ctx.image_data_uris.get(&key) {
+        cached.clone()
+    } else {
+        let png_bytes = encode_rgba_png(w, h, &raster.rgba)?;
+        let encoded = format!("data:image/png;base64,{}", encode_base64(&png_bytes));
+        ctx.image_data_uris.insert(key, encoded.clone());
+        encoded
+    };
+
+    let outer_clip_id = match raster.clip {
+        Some(rect) => Some(ctx.clips.register(rect, ctx.prec)?),
+        None => None,
+    };
+    if let Some(ref clip_id) = outer_clip_id {
+        ctx.push_indent(0);
+        let _ = write!(ctx.body, "<g clip-path=\"url(#{clip_id})\">");
+        ctx.push_newline();
+        ctx.clip_depth += 1;
+    }
+
+    let rotated = raster.rotation_deg.abs() > 1e-9;
+    if rotated {
+        let deg_s = format_scalar(raster.rotation_deg, ctx.prec)?;
+        let cx_s = format_scalar(b.x + 0.5 * b.width, ctx.prec)?;
+        let cy_s = format_scalar(b.y + 0.5 * b.height, ctx.prec)?;
+        ctx.push_indent(0);
+        let _ = write!(ctx.body, "<g transform=\"rotate({deg_s} {cx_s} {cy_s})\">");
+        ctx.push_newline();
+        ctx.clip_depth += 1;
+    }
+
+    let is_cropped = raster.crop.left_pt > 0.0 || raster.crop.right_pt > 0.0 || raster.crop.top_pt > 0.0 || raster.crop.bottom_pt > 0.0;
+    let crop_clip_id = if is_cropped { Some(ctx.clips.register(vis, ctx.prec)?) } else { None };
+
+    let x_s = format_scalar(b.x, ctx.prec)?;
+    let y_s = format_scalar(b.y, ctx.prec)?;
+    let w_s = format_scalar(b.width, ctx.prec)?;
+    let h_s = format_scalar(b.height, ctx.prec)?;
+    ctx.push_indent(0);
+    let _ = write!(ctx.body, "<image x=\"{x_s}\" y=\"{y_s}\" width=\"{w_s}\" height=\"{h_s}\" preserveAspectRatio=\"none\"");
+    if let Some(ref cid) = crop_clip_id {
+        let _ = write!(ctx.body, " clip-path=\"url(#{cid})\"");
+    }
+    let _ = write!(ctx.body, " href=\"{data_uri}\"/>");
+    ctx.push_newline();
+
+    if rotated {
+        ctx.clip_depth -= 1;
+        ctx.push_indent(0);
+        ctx.body.push_str("</g>");
+        ctx.push_newline();
+    }
+    if outer_clip_id.is_some() {
+        ctx.clip_depth -= 1;
+        ctx.push_indent(0);
+        ctx.body.push_str("</g>");
+        ctx.push_newline();
+    }
+    Ok(())
+}
+
+fn encode_rgba_png(width: u32, height: u32, rgba: &[u8]) -> Result<Vec<u8>, SvgError> {
+    let row_bytes = (width as usize) * 4;
+    let raw_len = row_bytes.saturating_add(1).saturating_mul(height as usize);
+    let mut scanlines = Vec::with_capacity(raw_len);
+    for row in rgba.chunks_exact(row_bytes) {
+        scanlines.push(0); // Filter type 0 (None)
+        scanlines.extend_from_slice(row);
+    }
+
+    let mut encoder = ZlibEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(&scanlines).map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline compression failed: {err}") })?;
+    let idat = encoder.finish().map_err(|err| SvgError::InvalidScene { message: format!("PNG scanline finish failed: {err}") })?;
+
+    let mut out = Vec::with_capacity(idat.len().saturating_add(96));
+    out.extend_from_slice(b"\x89PNG\r\n\x1a\n");
+
+    let mut ihdr = [0u8; 13];
+    ihdr[0..4].copy_from_slice(&width.to_be_bytes());
+    ihdr[4..8].copy_from_slice(&height.to_be_bytes());
+    ihdr[8] = 8;
+    ihdr[9] = 6;
+    push_png_chunk(&mut out, b"IHDR", &ihdr)?;
+    push_png_chunk(&mut out, b"IDAT", &idat)?;
+    push_png_chunk(&mut out, b"IEND", &[])?;
+    Ok(out)
+}
+
+fn push_png_chunk(out: &mut Vec<u8>, chunk_type: &[u8; 4], data: &[u8]) -> Result<(), SvgError> {
+    let len = u32::try_from(data.len()).map_err(|_| SvgError::InvalidScene { message: String::from("PNG chunk exceeds 4 GiB") })?;
+    out.extend_from_slice(&len.to_be_bytes());
+    out.extend_from_slice(chunk_type);
+    out.extend_from_slice(data);
+    let mut hasher = crc32fast::Hasher::new();
+    hasher.update(chunk_type);
+    hasher.update(data);
+    out.extend_from_slice(&hasher.finalize().to_be_bytes());
     Ok(())
 }
 

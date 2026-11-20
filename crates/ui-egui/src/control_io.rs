@@ -3638,6 +3638,18 @@ where
             next.font_size_pt *= scalar;
             ScenePrimitive::Text(next)
         }
+        ScenePrimitive::RasterImage(img) => {
+            let mut next = img.clone();
+            next.bounds_pt = map_rect(img.bounds_pt);
+            next.crop = curvebook_doc::CropInsetsPt {
+                left_pt: img.crop.left_pt * scalar,
+                right_pt: img.crop.right_pt * scalar,
+                top_pt: img.crop.top_pt * scalar,
+                bottom_pt: img.crop.bottom_pt * scalar,
+            };
+            next.clip = img.clip.map(map_rect);
+            ScenePrimitive::RasterImage(next)
+        }
         ScenePrimitive::PushClip { rect } => ScenePrimitive::PushClip { rect: map_rect(*rect) },
         ScenePrimitive::PopClip => ScenePrimitive::PopClip,
     }

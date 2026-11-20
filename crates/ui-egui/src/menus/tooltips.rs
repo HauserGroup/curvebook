@@ -318,7 +318,7 @@ mod tests {
         )?;
         assert!(w == 480 && h == 320 && frame.len() > 8);
 
-        // Menu bar covers all 100 engine + 47 UI commands with non-empty summary & beginner guidance.
+        // Menu bar covers all 105 engine + 47 UI commands with non-empty summary & beginner guidance.
         let sections = menu_bar_tooltips(&app);
         assert_eq!(sections.len(), 7);
         let mut seen = HashSet::new();
@@ -330,7 +330,7 @@ mod tests {
                 assert!(seen.insert(item.command_id), "duplicate menu command {}", item.command_id);
             }
         }
-        assert_eq!(seen.len(), 147);
+        assert_eq!(seen.len(), 152);
         Ok(())
     }
 }

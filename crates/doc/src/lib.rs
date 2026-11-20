@@ -25,6 +25,7 @@ pub mod cell;
 pub mod error;
 pub mod graph;
 pub mod ids;
+pub mod image;
 pub mod info;
 pub mod layout;
 pub mod links;
@@ -65,6 +66,10 @@ pub use graph::{
     WhiskerMethod,
 };
 pub use ids::{FloatingNote, HookSource, NoteId, RectPt, SheetId, SizePt, SourceCellId, extract_template_hooks};
+pub use image::{
+    CropInsetsPt, ImageBorderSpec, ImageMimeKind, MAX_IMAGE_ASSET_BYTES, MAX_IMAGE_DIM_PX, MAX_IMAGE_PIXELS, MAX_PROJECT_IMAGE_ASSETS,
+    ProjectImageAsset, content_addressed_asset_id, is_valid_asset_id, sha256_bytes,
+};
 pub use info::{ConstantValue, InfoConstant, InfoSheet, STANDARD_INFO_KEYS};
 pub use layout::{
     CanvasResizeMode, FigureCanvasPreset, JournalWidthPreset, LayoutItem, LayoutSheet, LayoutSpec, MAX_LAYOUT_ITEMS, PageOrientation,

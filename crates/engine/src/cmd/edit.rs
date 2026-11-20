@@ -4,14 +4,15 @@ use curvebook_doc::{DocError, EmbeddedTableStyle, ErrorCode, GraphAnnotation, La
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use crate::cmd::graph::{has_graph_or_layout, parse_rect_pt, parse_rgba8, validate_graph_spec_in_doc};
+use super::analysis::de_present_opt;
+use crate::cmd::graph::{GraphImageInsertArgs, has_graph_or_layout, insert_image_on_graph, parse_rect_pt, parse_rgba8, validate_graph_spec_in_doc};
 use crate::cmd::helpers::{
     parse_sheet_id, require_graph_sheet, require_graph_sheet_mut, require_layout_sheet, require_layout_sheet_mut, require_result_sheet,
 };
-use crate::cmd::layout::validate_layout_spec_in_doc;
+use crate::cmd::layout::{LayoutImageInsertArgs, insert_image_on_layout, validate_layout_spec_in_doc};
 use crate::cmd::params::{
-    any_json_schema, array_schema, bool_schema, empty_object_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema_with_aliases,
-    parse_params, str_schema,
+    any_json_schema, array_schema, bool_schema, empty_object_schema, int_schema, non_empty_str_schema, nullable_schema, obj_schema,
+    obj_schema_with_aliases, parse_params, str_schema,
 };
 use crate::cmd::{CommandGroup, CommandSpec, Ctx, Effects};
 use crate::{CommandOutcome, EngineError};
@@ -264,7 +265,98 @@ fn run_edit_paste_result_table(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandO
     }
 }
 
-static SPECS: [CommandSpec; 3] = [
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EditPasteImageParams {
+    target_sheet_id: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+    #[serde(default)]
+    panel_id: Option<String>,
+    #[serde(default)]
+    badge_override: Option<String>,
+}
+
+fn schema_edit_paste_image() -> Value {
+    let mut props = vec![("target_sheet_id", non_empty_str_schema("Target GraphSheet or LayoutSheet ID"))];
+    props.extend(crate::cmd::image::insert_image_common_props());
+    props.push(("panel_id", nullable_schema(str_schema("Optional panel identifier when pasting onto a LayoutSheet"))));
+    props.push(("badge_override", nullable_schema(str_schema("Optional badge label when pasting onto a LayoutSheet"))));
+    obj_schema(props, &["target_sheet_id"], false)
+}
+
+fn run_edit_paste_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_edit_paste_image();
+    let params: EditPasteImageParams = parse_params(&schema, raw)?;
+    let target_id = parse_sheet_id(&params.target_sheet_id)?;
+    let doc = &mut ctx.session.doc;
+    let section = doc.sheet_section(&target_id).ok_or_else(|| {
+        EngineError::with_code(ErrorCode::NotFound, format!("target graph or layout sheet `{target_id}` not found"))
+            .with_details(json!({ "pointer": "/target_sheet_id", "sheet_id": target_id.as_str() }))
+    })?;
+    match section {
+        SheetSection::Graphs => {
+            if params.panel_id.is_some() || params.badge_override.is_some() {
+                return Err(EngineError::with_code(
+                    ErrorCode::BadInput,
+                    "`panel_id` and `badge_override` apply only when pasting an image onto a LayoutSheet",
+                ));
+            }
+            insert_image_on_graph(
+                doc,
+                &target_id,
+                GraphImageInsertArgs {
+                    command_id: "edit.pasteImage",
+                    path: params.path.as_deref(),
+                    bytes_base64: params.bytes_base64.as_deref(),
+                    asset_id: params.asset_id.as_deref(),
+                    bounds_pt: params.bounds_pt.as_ref(),
+                    rotation_deg: params.rotation_deg,
+                    lock_aspect_ratio: params.lock_aspect_ratio,
+                    crop: params.crop.as_ref(),
+                    border: params.border.as_ref(),
+                },
+            )
+        }
+        SheetSection::Layouts => insert_image_on_layout(
+            doc,
+            &target_id,
+            LayoutImageInsertArgs {
+                command_id: "edit.pasteImage",
+                panel_id: params.panel_id.as_deref(),
+                path: params.path.as_deref(),
+                bytes_base64: params.bytes_base64.as_deref(),
+                asset_id: params.asset_id.as_deref(),
+                bounds_pt: params.bounds_pt.as_ref(),
+                rotation_deg: params.rotation_deg,
+                lock_aspect_ratio: params.lock_aspect_ratio,
+                crop: params.crop.as_ref(),
+                border: params.border.as_ref(),
+                badge_override: params.badge_override.as_deref(),
+            },
+        ),
+        SheetSection::Data | SheetSection::Info | SheetSection::Analyses => {
+            Err(EngineError::with_code(ErrorCode::BadInput, format!("target sheet `{target_id}` must be a graph or layout sheet"))
+                .with_details(json!({ "pointer": "/target_sheet_id" })))
+        }
+    }
+}
+
+static SPECS: [CommandSpec; 4] = [
     CommandSpec {
         id: "edit.undo",
         label: "Undo",
@@ -303,6 +395,19 @@ static SPECS: [CommandSpec; 3] = [
         input_schema: schema_edit_paste_result_table,
         enabled: has_graph_or_layout,
         run: run_edit_paste_result_table,
+    },
+    CommandSpec {
+        id: "edit.pasteImage",
+        label: "Paste Image",
+        menu_path: "Edit/Paste Image",
+        shortcut: "",
+        summary: "Paste or insert a PNG, JPEG, or TIFF raster image onto a graph annotation or multi-panel layout.",
+        beginner: "Pastes an image from bytes, local file path, or existing project asset onto a graph or layout page.",
+        group: CommandGroup::Edit,
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
+        input_schema: schema_edit_paste_image,
+        enabled: has_graph_or_layout,
+        run: run_edit_paste_image,
     },
 ];
 

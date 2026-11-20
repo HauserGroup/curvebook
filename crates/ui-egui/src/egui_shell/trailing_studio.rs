@@ -2334,6 +2334,7 @@ fn render_graph_inspector_studio(
                         GraphAnnotation::Shape { kind, .. } => format!("Shape: {kind:?}"),
                         GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } => format!("Table: {}", result_sheet_id.as_str()),
                         GraphAnnotation::ModelEquation { result_sheet_id, .. } => format!("Equation: {}", result_sheet_id.as_str()),
+                        GraphAnnotation::EmbeddedImage { asset_id, .. } => format!("Image: {asset_id}"),
                     };
                     let wid = format!("inspector.graph.annot.remove.{idx}");
                     if studio_full_button(

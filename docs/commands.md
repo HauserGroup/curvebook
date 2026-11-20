@@ -1,6 +1,6 @@
 # CurveBook Command Reference
 
-Registered commands: 100
+Registered commands: 105
 
 ## Project & Files (`project`)
 
@@ -104,6 +104,14 @@ Registered commands: 100
 - **Parameters:** `path` (any), `return_bytes` (any)
 
 ## Edit & History (`edit`)
+
+### `edit.pasteImage` — Paste Image
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Edit/Paste Image`
+- **Summary:** Paste or insert a PNG, JPEG, or TIFF raster image onto a graph annotation or multi-panel layout.
+- **Beginner note:** Pastes an image from bytes, local file path, or existing project asset onto a graph or layout page.
+- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `target_sheet_id*` (string)
 
 ### `edit.pasteResultTable` — Paste Result Table
 
@@ -633,6 +641,14 @@ Registered commands: 100
 - **Beginner note:** Chooses an initial plot type for a newly created graph sheet.
 - **Parameters:** `kind` (any), `sheet_id*` (string), `title` (any)
 
+### `graph.insertImage` — Insert Image on Graph
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Insert/Image on Graph...`
+- **Summary:** Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.
+- **Beginner note:** Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.
+- **Parameters:** `asset_id` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
+
 ### `graph.preflightCheck` — Preflight Check Figure
 
 - **Effects:** `IDEMPOTENT`
@@ -697,6 +713,14 @@ Registered commands: 100
 - **Beginner note:** Updates visual graph settings such as palette, frame style, legend, or multivariate channels.
 - **Parameters:** `forest_show_pooled_diamond` (any), `heatmap_labels` (any), `initialized` (any), `multivariate` (any), `orientation` (any), `paper_fill` (any), `sheet_id*` (string), `spec` (any), `survival_number_at_risk` (any), `title` (any)
 
+### `graph.updateImage` — Format Embedded Graph Image
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Embedded Image...`
+- **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.
+- **Beginner note:** Crops, rotates, resizes, or frames an embedded image on a graph.
+- **Parameters:** `annotation_index*` (integer), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `lock_aspect_ratio` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
+
 ## Page Layouts (`layout`)
 
 ### `layout.addPanel` — Add Panel to Layout
@@ -739,6 +763,14 @@ Registered commands: 100
 - **Beginner note:** Resizes selected or all graph panels on a layout to match the smallest, largest, or an explicit scale percentage.
 - **Parameters:** `mode` (any), `panel_ids` (any), `panel_indices` (any), `percent` (any), `sheet_id*` (string)
 
+### `layout.insertImage` — Insert Image on Layout
+
+- **Effects:** `MUTATES_DOCUMENT | READS_FILESYSTEM`
+- **Menu:** `Insert/Image on Layout...`
+- **Summary:** Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.
+- **Beginner note:** Places a microscopy image, gel photo, or schematic panel onto a layout page.
+- **Parameters:** `asset_id` (any), `badge_override` (any), `border` (any), `bounds_pt` (any), `bytes_base64` (any), `crop` (any), `lock_aspect_ratio` (any), `panel_id` (any), `path` (any), `rotation_deg` (any), `sheet_id*` (string)
+
 ### `layout.reorderPanel` — Reorder Panel
 
 - **Effects:** `MUTATES_DOCUMENT`
@@ -754,6 +786,14 @@ Registered commands: 100
 - **Summary:** Update a layout sheet's page dimensions, journal preset, grid template, origin alignment, badge style, or background.
 - **Beginner note:** Changes the page setup, grid arrangement, or panel lettering of an existing figure layout.
 - **Parameters:** `align_plot_origins` (any), `background_fill` (any), `grid_template` (any), `height` (any), `orientation` (any), `panel_badges` (any), `preset` (any), `sheet_id*` (string), `spec` (any), `title` (any), `unit` (any), `width` (any)
+
+### `layout.updateImage` — Format Embedded Layout Image
+
+- **Effects:** `MUTATES_DOCUMENT | IDEMPOTENT`
+- **Menu:** `Format/Layout Image...`
+- **Summary:** Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.
+- **Beginner note:** Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.
+- **Parameters:** `badge_override` (any), `border` (any), `bounds_pt` (any), `crop` (any), `height_pt` (any), `item_index` (any), `lock_aspect_ratio` (any), `panel_id` (any), `rotation_deg` (any), `sheet_id*` (string), `width_pt` (any)
 
 ## Vector & Raster Export (`export`)
 

@@ -235,6 +235,32 @@ static SPECS: &[CommandSpec] = &[
         enabled: has_graph_sheet,
         run: run_graph_set_compact_letter_display,
     },
+    CommandSpec {
+        id: "graph.insertImage",
+        label: "Insert Image on Graph",
+        menu_path: "Insert/Image on Graph...",
+        shortcut: "",
+        summary: "Embed a PNG, JPEG, or TIFF raster image annotation onto a graph sheet.",
+        beginner: "Inserts a microscopy micrograph, Western blot, or schematic photo onto a graph.",
+        group: CommandGroup::Graph,
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
+        input_schema: schema_graph_insert_image,
+        enabled: has_graph_sheet,
+        run: run_graph_insert_image,
+    },
+    CommandSpec {
+        id: "graph.updateImage",
+        label: "Format Embedded Graph Image",
+        menu_path: "Format/Embedded Image...",
+        shortcut: "",
+        summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, or border on an embedded graph image.",
+        beginner: "Crops, rotates, resizes, or frames an embedded image on a graph.",
+        group: CommandGroup::Graph,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_graph_update_image,
+        enabled: has_graph_sheet,
+        run: run_graph_update_image,
+    },
 ];
 
 fn has_data_sheet(session: &Session) -> bool {
@@ -1494,8 +1520,14 @@ pub(super) fn validate_graph_spec_in_doc(
         validate_result_sheet_ref(doc, graph_id, &cld.result_sheet_id, "compact_letter_display.result_sheet_id")?;
     }
     for (idx, ann) in spec.annotations.iter().enumerate() {
-        if let GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } = ann {
-            validate_result_sheet_ref(doc, graph_id, result_sheet_id, &format!("annotations[{idx}].result_sheet_id"))?;
+        match ann {
+            GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
+                validate_result_sheet_ref(doc, graph_id, result_sheet_id, &format!("annotations[{idx}].result_sheet_id"))?;
+            }
+            GraphAnnotation::EmbeddedImage { asset_id, .. } if doc.image_asset(asset_id).is_none() => {
+                return Err(EngineError::with_code(ErrorCode::NotFound, format!("annotations[{idx}] image asset `{asset_id}` not found in project")));
+            }
+            _ => {}
         }
     }
     crate::dag::validate_inline_hook_refs(doc, graph_id, &spec.inline_hooks())?;
@@ -2293,6 +2325,16 @@ fn resize_graph_annotation(ann: &mut GraphAnnotation, mode: CanvasResizeMode, sx
         GraphAnnotation::Shape { bounds_pt, stroke_width_pt, .. } => {
             *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
             scale_stroke_or_clamp(stroke_width_pt, mode, scale_1d, "annotations.shape.stroke_width_pt")?;
+        }
+        GraphAnnotation::EmbeddedImage { bounds_pt, crop, border, .. } => {
+            *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
+            crop.left_pt = scale_finite(crop.left_pt, sx, "annotations.image.crop.left_pt")?;
+            crop.right_pt = scale_finite(crop.right_pt, sx, "annotations.image.crop.right_pt")?;
+            crop.top_pt = scale_finite(crop.top_pt, sy, "annotations.image.crop.top_pt")?;
+            crop.bottom_pt = scale_finite(crop.bottom_pt, sy, "annotations.image.crop.bottom_pt")?;
+            if let Some(b) = border {
+                scale_stroke_or_clamp(&mut b.width_pt, mode, scale_1d, "annotations.image.border.width_pt")?;
+            }
         }
     }
     Ok(())
@@ -3500,7 +3542,7 @@ fn parse_line_connection_kind(val: &Value) -> Result<LineConnectionKind, EngineE
     }
 }
 
-fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
+pub(super) fn parse_line_dash_style(val: &Value) -> Result<LineDashStyle, EngineError> {
     if let Ok(d) = serde_json::from_value::<LineDashStyle>(val.clone()) {
         return Ok(d);
     }
@@ -3687,6 +3729,206 @@ fn parse_bracket_style(raw: Option<&str>) -> Result<BracketStyle, EngineError> {
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphInsertImageParams {
+    sheet_id: String,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct GraphUpdateImageParams {
+    sheet_id: String,
+    annotation_index: usize,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    width_pt: Option<f64>,
+    #[serde(default)]
+    height_pt: Option<f64>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+}
+
+pub(super) struct GraphImageInsertArgs<'a> {
+    pub command_id: &'static str,
+    pub path: Option<&'a str>,
+    pub bytes_base64: Option<&'a str>,
+    pub asset_id: Option<&'a str>,
+    pub bounds_pt: Option<&'a Value>,
+    pub rotation_deg: Option<f64>,
+    pub lock_aspect_ratio: Option<bool>,
+    pub crop: Option<&'a Value>,
+    pub border: Option<&'a Option<Value>>,
+}
+
+fn schema_graph_insert_image() -> Value {
+    let mut props = vec![("sheet_id", non_empty_str_schema("Target GraphSheet ID"))];
+    props.extend(super::image::insert_image_common_props());
+    obj_schema(props, &["sheet_id"], false)
+}
+
+fn schema_graph_update_image() -> Value {
+    obj_schema(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target GraphSheet ID")),
+            ("annotation_index", int_schema("Zero-based index of the EmbeddedImage annotation", Some(0), None)),
+            ("bounds_pt", nullable_schema(any_json_schema("Updated placement `[x, y, width, height]` or `RectPt` in points"))),
+            (
+                "width_pt",
+                nullable_schema(num_schema("Updated width in points (> 0); adjusts `height_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            (
+                "height_pt",
+                nullable_schema(num_schema("Updated height in points (> 0); adjusts `width_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            ("rotation_deg", nullable_schema(num_schema("Updated clockwise rotation in degrees", Some(-3600.0), Some(3600.0)))),
+            ("lock_aspect_ratio", nullable_schema(bool_schema("Lock or unlock intrinsic aspect ratio during single-axis resize"))),
+            ("crop", nullable_schema(super::image::crop_schema())),
+            ("border", nullable_schema(super::image::border_schema())),
+        ],
+        &["sheet_id", "annotation_index"],
+        false,
+    )
+}
+
+pub(super) fn insert_image_on_graph(
+    doc: &mut ProjectDocument,
+    graph_id: &curvebook_doc::SheetId,
+    args: GraphImageInsertArgs<'_>,
+) -> Result<CommandOutcome, EngineError> {
+    let canvas_size = require_graph_sheet(doc, graph_id)?.spec.canvas_size_pt;
+    let resolved = super::image::resolve_image_source(doc, args.path, args.bytes_base64, args.asset_id)?;
+    let bounds_pt = super::image::parse_image_insert_bounds(args.bounds_pt, resolved.pixel_size, canvas_size.width, canvas_size.height)?;
+    let rotation_deg = super::image::parse_rotation_deg(args.rotation_deg, 0.0)?;
+    let lock_aspect_ratio = args.lock_aspect_ratio.unwrap_or(true);
+    let crop = super::image::apply_crop_patch(args.crop, bounds_pt, curvebook_doc::CropInsetsPt::default())?;
+    let border = super::image::apply_border_patch(args.border, None)?;
+
+    let mut spec = require_graph_sheet(doc, graph_id)?.spec.clone();
+    spec.annotations.push(GraphAnnotation::EmbeddedImage {
+        asset_id: resolved.asset_id.clone(),
+        bounds_pt,
+        rotation_deg,
+        lock_aspect_ratio,
+        crop,
+        border,
+    });
+    validate_graph_spec_in_doc(doc, graph_id, &spec)?;
+    let ann_idx = spec.annotations.len() - 1;
+    let graph = require_graph_sheet_mut(doc, graph_id)?;
+    graph.spec = spec;
+    graph.initialized = true;
+
+    Ok(CommandOutcome::mutated(
+        args.command_id,
+        format!("embedded {} image `{}` onto graph `{graph_id}`", resolved.media_type.mime_type(), resolved.asset_id),
+        json!({
+            "sheet_id": graph_id.as_str(),
+            "annotation_index": ann_idx,
+            "asset_id": resolved.asset_id,
+            "media_type": resolved.media_type.mime_type(),
+            "pixel_size": [resolved.pixel_size.0, resolved.pixel_size.1],
+            "bounds_pt": bounds_pt,
+        }),
+    ))
+}
+
+fn run_graph_insert_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_insert_image();
+    let params: GraphInsertImageParams = parse_params(&schema, raw)?;
+    let graph_id = parse_sheet_id(&params.sheet_id)?;
+    insert_image_on_graph(
+        &mut ctx.session.doc,
+        &graph_id,
+        GraphImageInsertArgs {
+            command_id: "graph.insertImage",
+            path: params.path.as_deref(),
+            bytes_base64: params.bytes_base64.as_deref(),
+            asset_id: params.asset_id.as_deref(),
+            bounds_pt: params.bounds_pt.as_ref(),
+            rotation_deg: params.rotation_deg,
+            lock_aspect_ratio: params.lock_aspect_ratio,
+            crop: params.crop.as_ref(),
+            border: params.border.as_ref(),
+        },
+    )
+}
+
+fn run_graph_update_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_graph_update_image();
+    let params: GraphUpdateImageParams = parse_params(&schema, raw)?;
+    let graph_id = parse_sheet_id(&params.sheet_id)?;
+    let doc = &ctx.session.doc;
+    let mut spec = require_graph_sheet(doc, &graph_id)?.spec.clone();
+    let ann_len = spec.annotations.len();
+    let Some(ann) = spec.annotations.get_mut(params.annotation_index) else {
+        return Err(EngineError::with_code(
+            ErrorCode::NotFound,
+            format!("annotation_index {} out of bounds ({ann_len} annotations) on `{graph_id}`", params.annotation_index),
+        )
+        .with_details(json!({ "pointer": "/annotation_index" })));
+    };
+    let GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border } = ann else {
+        return Err(EngineError::with_code(
+            ErrorCode::BadInput,
+            format!("annotation {} on `{graph_id}` is not an embedded image", params.annotation_index),
+        )
+        .with_details(json!({ "pointer": "/annotation_index" })));
+    };
+    let asset_id_str = asset_id.clone();
+    let intrinsic_px = doc.image_asset(&asset_id_str).map(|a| a.pixel_size);
+    if let Some(lock) = params.lock_aspect_ratio {
+        *lock_aspect_ratio = lock;
+    }
+    super::image::apply_image_bounds_update(
+        bounds_pt,
+        params.bounds_pt.as_ref(),
+        params.width_pt,
+        params.height_pt,
+        *lock_aspect_ratio,
+        intrinsic_px,
+    )?;
+    *rotation_deg = super::image::parse_rotation_deg(params.rotation_deg, *rotation_deg)?;
+    *crop = super::image::apply_crop_patch(params.crop.as_ref(), *bounds_pt, *crop)?;
+    *border = super::image::apply_border_patch(params.border.as_ref(), *border)?;
+    let updated_summary = json!({
+        "sheet_id": graph_id.as_str(),
+        "annotation_index": params.annotation_index,
+        "asset_id": asset_id_str,
+        "bounds_pt": *bounds_pt,
+        "rotation_deg": *rotation_deg,
+        "lock_aspect_ratio": *lock_aspect_ratio,
+        "crop": *crop,
+        "border": *border,
+    });
+    validate_graph_spec_in_doc(doc, &graph_id, &spec)?;
+    require_graph_sheet_mut(&mut ctx.session.doc, &graph_id)?.spec = spec;
+    Ok(CommandOutcome::mutated("graph.updateImage", format!("updated embedded image on graph `{graph_id}`"), updated_summary))
+}
+
 fn parse_bracket_label_mode(val: Option<&Value>) -> Result<BracketLabelMode, EngineError> {
     let Some(v) = val else {
         return Ok(BracketLabelMode::SummaryStars);
@@ -3721,8 +3963,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_fifteen_graph_commands() {
-        assert_eq!(specs().len(), 15);
+    fn registry_contains_all_seventeen_graph_commands() {
+        assert_eq!(specs().len(), 17);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Graph);
             assert!(!spec.summary.is_empty());

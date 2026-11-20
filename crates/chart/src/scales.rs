@@ -3552,6 +3552,22 @@ pub fn render_annotations(annotations: &[GraphAnnotation], doc: &ProjectDocument
                     },
                 );
             }
+            GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
+                crate::image_decode::emit_embedded_image_primitive(
+                    scene,
+                    doc,
+                    &crate::image_decode::EmbeddedImageDrawSpec {
+                        asset_id,
+                        bounds_pt: *bounds_pt,
+                        rotation_deg: *rotation_deg,
+                        crop: *crop,
+                        border: *border,
+                        clip: None,
+                        badge_override: None,
+                    },
+                    None,
+                );
+            }
         }
     }
 }

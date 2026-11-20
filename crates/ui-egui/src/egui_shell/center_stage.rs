@@ -1411,7 +1411,8 @@ fn paint_gallery_thumbnail(ui: &egui::Ui, doc: &ProjectDocument, card: &Portfoli
                     let b = match item {
                         LayoutItem::LiveGraph { bounds_pt, .. }
                         | LayoutItem::LiveTable { bounds_pt, .. }
-                        | LayoutItem::TextCallout { bounds_pt, .. } => *bounds_pt,
+                        | LayoutItem::TextCallout { bounds_pt, .. }
+                        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
                     };
                     let sub = Rect::from_min_max(
                         pos2(rect.left() + (b.x as f32 / page_w) * rect.width(), rect.top() + (b.y as f32 / page_h) * rect.height()),

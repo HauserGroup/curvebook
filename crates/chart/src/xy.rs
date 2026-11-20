@@ -1163,6 +1163,22 @@ fn render_annotation(scene: &mut ChartScene, doc: &ProjectDocument, info_id: Opt
                 },
             );
         }
+        GraphAnnotation::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, .. } => {
+            crate::image_decode::emit_embedded_image_primitive(
+                scene,
+                doc,
+                &crate::image_decode::EmbeddedImageDrawSpec {
+                    asset_id,
+                    bounds_pt: *bounds_pt,
+                    rotation_deg: *rotation_deg,
+                    crop: *crop,
+                    border: *border,
+                    clip: None,
+                    badge_override: None,
+                },
+                None,
+            );
+        }
     }
 }
 
@@ -2317,6 +2333,14 @@ fn translate_primitives(prims: &mut [ScenePrimitive], dx: f64, dy: f64) {
                 }
             }
             ScenePrimitive::Text(t) => shift(&mut t.anchor_pt),
+            ScenePrimitive::RasterImage(img) => {
+                img.bounds_pt.x += dx;
+                img.bounds_pt.y += dy;
+                if let Some(c) = &mut img.clip {
+                    c.x += dx;
+                    c.y += dy;
+                }
+            }
             ScenePrimitive::PushClip { rect } => {
                 rect.x += dx;
                 rect.y += dy;

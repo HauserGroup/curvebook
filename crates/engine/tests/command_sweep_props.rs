@@ -645,6 +645,72 @@ fn sweep_valid_graph_and_layout_commands(s: &mut Session, covered: &mut BTreeSet
     )?;
     run_valid(s, covered, "layout.equalizeScaling", json!({ "sheet_id": "lay-1", "mode": "match_smallest" }))?;
     run_valid(s, covered, "layout.reorderPanel", json!({ "sheet_id": "lay-1", "panel_index": 0, "action": "bring_to_front" }))?;
+
+    const SAMPLE_PNG_2X2_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAYAAABytg0kAAAAFUlEQVR4nGP4z8DwHwyBdMP///8bAEbOCPny53p1AAAAAElFTkSuQmCC";
+    let g_img = run_valid(
+        s,
+        covered,
+        "graph.insertImage",
+        json!({
+            "sheet_id": "gr-1",
+            "bytes_base64": SAMPLE_PNG_2X2_B64,
+            "bounds_pt": [12.0, 12.0, 48.0, 48.0],
+            "rotation_deg": 0.0,
+            "lock_aspect_ratio": true,
+            "border": { "width_pt": 1.0, "color": "#222222", "dash": "solid" }
+        }),
+    )?;
+    let g_ann_idx = g_img.payload.get("annotation_index").and_then(Value::as_u64).unwrap_or(0);
+    let g_asset_id = g_img.payload.get("asset_id").and_then(Value::as_str).unwrap_or_default().to_string();
+    run_valid(
+        s,
+        covered,
+        "graph.updateImage",
+        json!({
+            "sheet_id": "gr-1",
+            "annotation_index": g_ann_idx,
+            "width_pt": 64.0,
+            "rotation_deg": 15.0,
+            "crop": { "left_pt": 2.0, "right_pt": 2.0 },
+            "border": null
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "layout.insertImage",
+        json!({
+            "sheet_id": "lay-1",
+            "panel_id": "img-sweep-1",
+            "asset_id": g_asset_id,
+            "bounds_pt": [10.0, 170.0, 40.0, 40.0],
+            "badge_override": "C"
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "layout.updateImage",
+        json!({
+            "sheet_id": "lay-1",
+            "panel_id": "img-sweep-1",
+            "height_pt": 48.0,
+            "rotation_deg": -10.0,
+            "crop": { "top_pt": 1.0, "bottom_pt": 1.0 },
+            "border": { "width_pt": 0.75, "color": "#000000", "dash": "dashed" }
+        }),
+    )?;
+    run_valid(
+        s,
+        covered,
+        "edit.pasteImage",
+        json!({
+            "target_sheet_id": "lay-1",
+            "panel_id": "img-sweep-pasted",
+            "bytes_base64": SAMPLE_PNG_2X2_B64,
+            "bounds_pt": [60.0, 170.0, 32.0, 32.0]
+        }),
+    )?;
     Ok(())
 }
 
@@ -853,6 +919,21 @@ fn run_targeted_hostile_cases(base: &Session, command_id: &str) {
             json!({ "source_sheet_id": "missing-res", "target_sheet_id": "gr-seed" }),
             json!({ "source_sheet_id": "res-anova-seed", "target_sheet_id": "col-1" }),
             json!({ "source_sheet_id": "res-anova-seed", "target_sheet_id": "gr-seed", "bounds_pt": [10.0, 10.0, -5.0, 20.0] }),
+        ],
+        "graph.insertImage" | "layout.insertImage" | "edit.pasteImage" => vec![
+            json!({}),
+            json!({ "sheet_id": "gr-seed", "target_sheet_id": "gr-seed" }),
+            json!({ "sheet_id": "gr-seed", "target_sheet_id": "gr-seed", "path": "a.png", "bytes_base64": "aGVsbG8=" }),
+            json!({ "sheet_id": "gr-seed", "target_sheet_id": "gr-seed", "path": "https://example.com/a.png" }),
+            json!({ "sheet_id": "gr-seed", "target_sheet_id": "gr-seed", "bytes_base64": "PHN2Zz48L3N2Zz4=" }),
+            json!({ "sheet_id": "gr-seed", "target_sheet_id": "gr-seed", "bytes_base64": "====" }),
+        ],
+        "graph.updateImage" | "layout.updateImage" => vec![
+            json!({}),
+            json!({ "sheet_id": "missing-sheet", "annotation_index": 0, "panel_id": "missing-panel" }),
+            json!({ "sheet_id": "gr-seed", "annotation_index": 999, "width_pt": 20.0 }),
+            json!({ "sheet_id": "lay-seed", "item_index": 999, "width_pt": -10.0 }),
+            json!({ "sheet_id": "lay-seed", "panel_id": "missing", "crop": { "left_pt": 10000.0 } }),
         ],
         "export.png" | "export.tiff" | "graph.exportPng" => vec![
             json!({ "sheet_id": "gr-seed", "width_px": u32::MAX, "height_px": u32::MAX }),

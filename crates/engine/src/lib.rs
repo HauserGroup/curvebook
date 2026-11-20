@@ -142,6 +142,11 @@ impl From<DocError> for EngineError {
             DocError::TooManySheets { count, max } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "count": count, "max": max })), Some("Delete unused sheets before adding more."))
             }
+            DocError::TooManyImageAssets { count, max } => (
+                ErrorCode::ResourceLimit,
+                Some(json!({ "count": count, "max": max })),
+                Some("Remove unused embedded images before adding more assets."),
+            ),
             DocError::TitleTooLong { byte_len, max } => {
                 (ErrorCode::ResourceLimit, Some(json!({ "byte_len": byte_len, "max": max })), Some("Shorten the title to fit within the byte limit."))
             }
@@ -727,7 +732,9 @@ fn document_allocated_cell_slots(doc: &ProjectDocument) -> usize {
 }
 
 fn document_checkpoint_bytes(doc: &ProjectDocument) -> usize {
-    doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()))
+    let cp_bytes = doc.checkpoints.iter().fold(0usize, |acc, cp| acc.saturating_add(cp.snapshot_json.len()));
+    let asset_bytes = doc.image_assets.iter().fold(0usize, |acc, asset| acc.saturating_add(asset.bytes.len()));
+    cp_bytes.saturating_add(asset_bytes)
 }
 
 pub(crate) fn has_conflicting_convert_preview_aliases(params: &serde_json::Value) -> bool {

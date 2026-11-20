@@ -20,6 +20,7 @@ pub mod analysis;
 pub mod edit;
 pub mod export;
 pub mod graph;
+pub mod image;
 pub mod info;
 pub mod layout;
 pub mod project;

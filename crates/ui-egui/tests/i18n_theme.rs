@@ -189,7 +189,7 @@ fn all_sixteen_locales_are_complete_and_genuinely_translated() {
     let expected_locales = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
     assert_eq!(LOCALES, &expected_locales);
     assert_eq!(LOCALES.len(), 16);
-    assert_eq!(catalog_len(), 782);
+    assert_eq!(catalog_len(), 787);
     assert!(missing_translations().is_empty());
 
     let keys: Vec<&'static str> = all_keys().collect();

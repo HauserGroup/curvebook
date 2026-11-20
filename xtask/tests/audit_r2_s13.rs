@@ -217,7 +217,7 @@ fn r2_s13_08_09_10_11_xtask_cli_gates_and_ci_falsiness() {
     assert!(control_proto.contains("--window"), "R2-S11-09 missing --window in control-protocol.md");
     assert!(control_proto.contains("all synced `UI_COMMANDS`") || control_proto.contains("`45` synced `UI_COMMANDS`"));
     assert!(!control_proto.contains("`32` synced `UI_COMMANDS`"));
-    assert!(agents.contains("`100` commands"));
+    assert!(agents.contains("`105` commands"));
     assert!(!agents.contains("once R0 generators land"));
     assert!(agents.contains("cargo xtask workflows"));
 

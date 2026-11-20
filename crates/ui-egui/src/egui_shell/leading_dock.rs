@@ -709,7 +709,7 @@ fn collect_data_sheet_children<'a>(
         let linked = layout.spec.items.iter().any(|item| match item {
             LayoutItem::LiveGraph { graph_sheet_id, .. } => owned_graphs.contains(graph_sheet_id),
             LayoutItem::LiveTable { source_sheet_id, .. } => source_sheet_id == data_id || owned_results.contains(source_sheet_id),
-            LayoutItem::TextCallout { .. } => false,
+            LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => false,
         });
         if linked && let Some((_, e)) = entry_map.get(&layout.id) {
             out.push((*e, 2));
@@ -1349,7 +1349,7 @@ fn compute_active_chain(doc: &ProjectDocument) -> BTreeSet<SheetId> {
                 LayoutItem::LiveTable { source_sheet_id, .. } => {
                     chain.insert(source_sheet_id.clone());
                 }
-                LayoutItem::TextCallout { .. } => {}
+                LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
             }
         }
     }

@@ -37,6 +37,16 @@ fn all_points_finite(scene: &ChartScene) -> bool {
                     return false;
                 }
             }
+            ScenePrimitive::RasterImage(img) => {
+                if !img.bounds_pt.x.is_finite()
+                    || !img.bounds_pt.y.is_finite()
+                    || !img.bounds_pt.width.is_finite()
+                    || !img.bounds_pt.height.is_finite()
+                    || !img.rotation_deg.is_finite()
+                {
+                    return false;
+                }
+            }
             ScenePrimitive::PushClip { rect } => {
                 if !rect.x.is_finite() || !rect.y.is_finite() || !rect.width.is_finite() || !rect.height.is_finite() {
                     return false;

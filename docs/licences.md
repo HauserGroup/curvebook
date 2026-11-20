@@ -23,6 +23,10 @@ Only permissive, copy-left-free SPDX licences listed below are permitted for Rus
 - **All copyleft licences are strictly banned** in runtime and build dependencies: `GPL-*`, `AGPL-*`, `LGPL-*` (regardless of version or "with classpath exception" variants), as well as clean-room ports/translations from copyleft projects ([AGENTS.md](../AGENTS.md)).
 - Any SPDX identifier not listed in the allowlist above requires explicit maintainer audit and update to `deny.toml` and this file before `Cargo.lock` may introduce it.
 
+### Embedded Raster Image Decoders (`R13.7`)
+- **Supported formats (`PNG`, `JPEG`, `TIFF`):** Image ingestion and decoding use permissive, registry-only dependencies checked by `cargo deny` and `cargo xtask licenses`: `image` (`MIT OR Apache-2.0`, `default-features = false`, features `["png", "jpeg", "tiff"]`), `png` (`MIT OR Apache-2.0`), `zune-jpeg` / `zune-core` (`MIT OR Apache-2.0 OR Zlib`), and `tiff` (`MIT`).
+- **Intentional omission (`SVG` image input):** Embedded SVG image import is intentionally omitted because the Rust SVG parsing/rasterization stack (`usvg` / `resvg` / `simplecss` / `svgtypes`) uses `MPL-2.0`, which sits outside CurveBook's permissive allowlist and introduces external-reference risks. `<svg` and `<?xml` payloads are rejected cleanly at ingest time with an explicit policy error (`R13.7`).
+
 ---
 
 ## 2. Asset & Corpus Licences

@@ -3764,7 +3764,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                 paint_order.push(LayoutPaintOrder::Panel(p_vec_idx));
                 panel_counter += 1;
             }
-            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => {
+            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {
                 paint_order.push(LayoutPaintOrder::Other(item));
             }
         }
@@ -3775,6 +3775,7 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
     }
 
     let mut extra_table_work: usize = 0;
+    let mut layout_image_pixels: u64 = 0;
     for entry in paint_order {
         match entry {
             LayoutPaintOrder::Panel(p_idx) => {
@@ -3821,6 +3822,23 @@ pub fn compile_layout_scene(layout: &LayoutSheet, doc: &ProjectDocument) -> Resu
                     }));
                 }
                 scene.primitives.push(ScenePrimitive::PopClip);
+            }
+            LayoutPaintOrder::Other(LayoutItem::EmbeddedImage { asset_id, bounds_pt, rotation_deg, crop, border, badge_override, .. }) => {
+                check_layout_primitive_budget(scene.primitives.len().saturating_add(extra_table_work), 3, "layout embedded image")?;
+                crate::image_decode::emit_embedded_image_primitive(
+                    &mut scene,
+                    doc,
+                    &crate::image_decode::EmbeddedImageDrawSpec {
+                        asset_id,
+                        bounds_pt: *bounds_pt,
+                        rotation_deg: *rotation_deg,
+                        crop: *crop,
+                        border: *border,
+                        clip: None,
+                        badge_override: badge_override.as_deref(),
+                    },
+                    Some(&mut layout_image_pixels),
+                );
             }
             LayoutPaintOrder::Other(LayoutItem::LiveGraph { .. }) => {}
         }
@@ -3993,6 +4011,21 @@ fn transform_primitive(prim: &ScenePrimitive, tx: f64, ty: f64, s: f64) -> Scene
             font_size_pt: (t.font_size_pt * s).max(4.0),
             rotation_deg: t.rotation_deg,
             color: t.color,
+        }),
+        ScenePrimitive::RasterImage(img) => ScenePrimitive::RasterImage(crate::scene::SceneRasterImage {
+            asset_id: img.asset_id.clone(),
+            media_type: img.media_type,
+            pixel_size: img.pixel_size,
+            rgba: img.rgba.clone(),
+            bounds_pt: transform_rect(img.bounds_pt, tx, ty, s),
+            crop: curvebook_doc::CropInsetsPt {
+                left_pt: img.crop.left_pt * s,
+                right_pt: img.crop.right_pt * s,
+                top_pt: img.crop.top_pt * s,
+                bottom_pt: img.crop.bottom_pt * s,
+            },
+            rotation_deg: img.rotation_deg,
+            clip: img.clip.map(|c| transform_rect(c, tx, ty, s)),
         }),
         ScenePrimitive::PushClip { rect } => ScenePrimitive::PushClip { rect: transform_rect(*rect, tx, ty, s) },
         ScenePrimitive::PopClip => ScenePrimitive::PopClip,

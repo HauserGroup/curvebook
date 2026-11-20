@@ -615,7 +615,9 @@ pub fn hit_test_layout(layout: &LayoutSpec, pt: PointPt, tolerance_pt: f64) -> O
         if rect_contains_with_margin(bounds, pt, 0.0) {
             return Some(match item {
                 LayoutItem::LiveTable { .. } => CanvasHitTarget::EmbeddedTable { index: idx },
-                LayoutItem::LiveGraph { .. } | LayoutItem::TextCallout { .. } => CanvasHitTarget::LayoutPanel { index: idx },
+                LayoutItem::LiveGraph { .. } | LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {
+                    CanvasHitTarget::LayoutPanel { index: idx }
+                }
             });
         }
     }
@@ -938,7 +940,8 @@ fn hit_test_annotation(scene: &ChartScene, annotation: &GraphAnnotation, pt: Poi
     match annotation {
         GraphAnnotation::TextBox { bounds_pt, .. }
         | GraphAnnotation::EmbeddedResultTable { bounds_pt, .. }
-        | GraphAnnotation::Shape { bounds_pt, .. } => rect_contains_with_margin((*bounds_pt).into(), pt, tol),
+        | GraphAnnotation::Shape { bounds_pt, .. }
+        | GraphAnnotation::EmbeddedImage { bounds_pt, .. } => rect_contains_with_margin((*bounds_pt).into(), pt, tol),
         GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, bordered, .. } => {
             resolve_model_equation_hit_bounds(scene, *bounds_pt, *font_size_pt, *bordered)
                 .is_some_and(|rect| rect_contains_with_margin(rect, pt, tol))
@@ -981,15 +984,19 @@ fn hit_test_resize_handles(bounds: RectPt, pt: PointPt, tol: f64) -> Option<Resi
 
 fn layout_item_bounds(item: &LayoutItem) -> DocRectPt {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => *bounds_pt,
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt,
     }
 }
 
 fn set_layout_item_bounds(item: &mut LayoutItem, next: DocRectPt) {
     match item {
-        LayoutItem::LiveGraph { bounds_pt, .. } | LayoutItem::LiveTable { bounds_pt, .. } | LayoutItem::TextCallout { bounds_pt, .. } => {
-            *bounds_pt = next
-        }
+        LayoutItem::LiveGraph { bounds_pt, .. }
+        | LayoutItem::LiveTable { bounds_pt, .. }
+        | LayoutItem::TextCallout { bounds_pt, .. }
+        | LayoutItem::EmbeddedImage { bounds_pt, .. } => *bounds_pt = next,
     }
 }
 

@@ -428,7 +428,7 @@ pub(crate) fn validate_layout_spec_acyclic(doc: &ProjectDocument, layout_id: &Sh
         match item {
             curvebook_doc::LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
             curvebook_doc::LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
-            curvebook_doc::LayoutItem::TextCallout { .. } => {}
+            curvebook_doc::LayoutItem::TextCallout { .. } | curvebook_doc::LayoutItem::EmbeddedImage { .. } => {}
         }
     }
     for hook in spec.inline_hooks() {

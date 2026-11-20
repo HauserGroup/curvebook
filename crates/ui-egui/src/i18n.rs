@@ -5620,6 +5620,96 @@ pub const CATALOG: &[CatalogEntry] = &[
         ar: "إعادة ترتيب اللوحة",
         he: "סדר פאנל מחדש",
     ]),
+    entry!("cmd.graph.insertImage" => [
+        en: "Insert Image on Graph",
+        de: "Bild in Diagramm einfügen",
+        es: "Insertar imagen en el gráfico",
+        fr: "Insérer une image dans le graphique",
+        ja: "グラフに画像を挿入",
+        ko: "그래프에 이미지 삽입",
+        pt_br: "Inserir imagem no gráfico",
+        zh_cn: "在图表中插入图像",
+        zh_tw: "在圖表中插入影像",
+        it: "Inserisci immagine nel grafico",
+        nl: "Afbeelding in grafiek invoegen",
+        pl: "Wstaw obraz na wykresie",
+        ru: "Вставить изображение на график",
+        tr: "Grafiğe görüntü ekle",
+        ar: "إدراج صورة في الرسم البياني",
+        he: "הוסף תמונה לגרף",
+    ]),
+    entry!("cmd.graph.updateImage" => [
+        en: "Format Embedded Graph Image",
+        de: "Eingebettetes Diagrammbild formatieren",
+        es: "Dar formato a la imagen incrustada del gráfico",
+        fr: "Mettre en forme l’image intégrée du graphique",
+        ja: "グラフ埋め込み画像の書式設定",
+        ko: "그래프 삽입 이미지 서식",
+        pt_br: "Formatar imagem incorporada no gráfico",
+        zh_cn: "设置图表嵌入图像格式",
+        zh_tw: "設定圖表嵌入影像格式",
+        it: "Formatta immagine incorporata nel grafico",
+        nl: "Ingesloten grafiekafbeelding opmaken",
+        pl: "Formatuj obraz osadzony na wykresie",
+        ru: "Форматировать встроенное изображение графика",
+        tr: "Gömülü grafik görüntüsünü biçimlendir",
+        ar: "تنسيق الصورة المضمّنة في الرسم البياني",
+        he: "עצב תמונה מוטבעת בגרף",
+    ]),
+    entry!("cmd.layout.insertImage" => [
+        en: "Insert Image on Layout",
+        de: "Bild in Layout einfügen",
+        es: "Insertar imagen en el diseño",
+        fr: "Insérer une image dans la mise en page",
+        ja: "レイアウトに画像を挿入",
+        ko: "레이아웃에 이미지 삽입",
+        pt_br: "Inserir imagem no layout",
+        zh_cn: "在版面中插入图像",
+        zh_tw: "在版面中插入影像",
+        it: "Inserisci immagine nel layout",
+        nl: "Afbeelding in lay-out invoegen",
+        pl: "Wstaw obraz w układzie",
+        ru: "Вставить изображение на макет",
+        tr: "Düzene görüntü ekle",
+        ar: "إدراج صورة في التخطيط",
+        he: "הוסף תמונה לפריסה",
+    ]),
+    entry!("cmd.layout.updateImage" => [
+        en: "Format Embedded Layout Image",
+        de: "Eingebettetes Layoutbild formatieren",
+        es: "Dar formato a la imagen incrustada del diseño",
+        fr: "Mettre en forme l’image intégrée de la mise en page",
+        ja: "レイアウト埋め込み画像の書式設定",
+        ko: "레이아웃 삽입 이미지 서식",
+        pt_br: "Formatar imagem incorporada no layout",
+        zh_cn: "设置版面嵌入图像格式",
+        zh_tw: "設定版面嵌入影像格式",
+        it: "Formatta immagine incorporata nel layout",
+        nl: "Ingesloten lay-outafbeelding opmaken",
+        pl: "Formatuj obraz osadzony w układzie",
+        ru: "Форматировать встроенное изображение макета",
+        tr: "Gömülü düzen görüntüsünü biçimlendir",
+        ar: "تنسيق الصورة المضمّنة في التخطيط",
+        he: "עצב תמונה מוטבעת בפריסה",
+    ]),
+    entry!("cmd.edit.pasteImage" => [
+        en: "Paste Image",
+        de: "Bild einfügen",
+        es: "Pegar imagen",
+        fr: "Coller l’image",
+        ja: "画像を貼り付け",
+        ko: "이미지 붙여넣기",
+        pt_br: "Colar imagem",
+        zh_cn: "粘贴图像",
+        zh_tw: "貼上影像",
+        it: "Incolla immagine",
+        nl: "Afbeelding plakken",
+        pl: "Wklej obraz",
+        ru: "Вставить изображение",
+        tr: "Görüntüyü yapıştır",
+        ar: "لصق صورة",
+        he: "הדבק תמונה",
+    ]),
     entry!("cmd.export.svg" => [
         en: "Export SVG",
         de: "SVG exportieren",
@@ -6235,8 +6325,8 @@ mod tests {
         let expected = ["en", "de", "es", "fr", "ja", "ko", "pt-BR", "zh-CN", "zh-TW", "it", "nl", "pl", "ru", "tr", "ar", "he"];
         assert_eq!(LOCALES, &expected);
         assert_eq!(LOCALES.len(), 16);
-        assert_eq!(catalog_len(), 782);
-        assert_eq!(LOCALES.len() * catalog_len(), 12_512);
+        assert_eq!(catalog_len(), 787);
+        assert_eq!(LOCALES.len() * catalog_len(), 12_592);
         assert!(!CATALOG.is_empty());
 
         let mut seen_keys = HashSet::new();
@@ -6273,7 +6363,7 @@ mod tests {
 
     fn verify_command_catalog_coverage() {
         let engine_specs: Vec<_> = curvebook_engine::cmd::registry().specs().collect();
-        assert_eq!(engine_specs.len(), 100, "expected 100 engine CommandSpec entries");
+        assert_eq!(engine_specs.len(), 105, "expected 105 engine CommandSpec entries");
         assert_eq!(crate::menus::UI_COMMANDS.len(), 47, "expected 47 UiCommandSpec entries");
 
         let mut missing_cmd = Vec::new();

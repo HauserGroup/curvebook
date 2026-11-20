@@ -10,6 +10,7 @@ pub mod archive;
 pub mod csv;
 pub mod error;
 pub mod export;
+pub mod image_asset;
 pub mod prism;
 pub mod pzfx;
 pub mod recovery;
@@ -20,11 +21,11 @@ pub mod xml;
 pub mod zip;
 
 pub use archive::{
-    ArchiveKind, ArchiveManifest, MAX_ARCHIVE_FILE_BYTES, SheetManifestEntry, detect_dependency_cycles, ensure_existing_archive_not_newer,
-    ensure_existing_unpacked_dir_not_newer, instantiate_template_bytes, is_unpacked_project_dir, migrate_document_json, open_archive_bytes,
-    open_archive_bytes_with_limits, open_project_bytes, open_project_file, open_project_unpacked_dir, open_template_bytes, open_template_file,
-    sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir, save_template_bytes, save_template_file,
-    strip_project_data_for_template, validate_project_document,
+    ArchiveKind, ArchiveManifest, AssetManifestEntry, MAX_ARCHIVE_FILE_BYTES, SheetManifestEntry, detect_dependency_cycles,
+    ensure_existing_archive_not_newer, ensure_existing_unpacked_dir_not_newer, instantiate_template_bytes, is_unpacked_project_dir,
+    migrate_document_json, open_archive_bytes, open_archive_bytes_with_limits, open_project_bytes, open_project_file, open_project_unpacked_dir,
+    open_template_bytes, open_template_file, sanitize_circular_hooks, save_project_bytes, save_project_file, save_project_unpacked_dir,
+    save_template_bytes, save_template_file, strip_project_data_for_template, validate_project_document,
 };
 pub use csv::{
     CsvOptions, FilteredDelimitedGrid, ImportBaselineAdjustment, MAX_CSV_FILE_BYTES, apply_csv_import_link, export_datasheet_to_csv,
@@ -33,6 +34,7 @@ pub use csv::{
 };
 pub use error::{FormatError, ImportReport, ImportWarning, ImportWarningKind};
 pub use export::{ResultSheetExportJson, export_result_sheet_json, export_result_sheet_tidy_csv, export_result_tab_csv};
+pub use image_asset::{ingest_image_asset, validate_image_asset};
 pub use prism::{import_prism_bytes, import_prism_bytes_with_limits};
 pub use pzfx::{import_pzfx_bytes, import_pzfx_str};
 #[cfg(not(target_arch = "wasm32"))]

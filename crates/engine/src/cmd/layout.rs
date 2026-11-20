@@ -16,7 +16,7 @@ use super::graph::{
 };
 use super::helpers::{next_unique_sheet_id, parse_sheet_id, require_graph_sheet, require_layout_sheet, require_layout_sheet_mut};
 use super::params::{
-    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema,
+    any_json_schema, array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema,
     obj_schema_with_aliases, parse_params, str_schema,
 };
 use super::{CommandGroup, CommandSpec, Ctx, Effects};
@@ -121,6 +121,32 @@ static SPECS: &[CommandSpec] = &[
         input_schema: schema_layout_reorder_panel,
         enabled: has_layout_sheet,
         run: run_layout_reorder_panel,
+    },
+    CommandSpec {
+        id: "layout.insertImage",
+        label: "Insert Image on Layout",
+        menu_path: "Insert/Image on Layout...",
+        shortcut: "",
+        summary: "Embed a PNG, JPEG, or TIFF raster image item onto a publication layout sheet.",
+        beginner: "Places a microscopy image, gel photo, or schematic panel onto a layout page.",
+        group: CommandGroup::Layout,
+        effects: Effects::MUTATES_DOCUMENT.with(Effects::READS_FILESYSTEM),
+        input_schema: schema_layout_insert_image,
+        enabled: has_layout_sheet,
+        run: run_layout_insert_image,
+    },
+    CommandSpec {
+        id: "layout.updateImage",
+        label: "Format Embedded Layout Image",
+        menu_path: "Format/Layout Image...",
+        shortcut: "",
+        summary: "Update placement bounds, aspect-ratio lock, rotation, crop insets, border, or badge override on a layout image.",
+        beginner: "Crops, rotates, resizes, frames, or labels an embedded image panel on a layout sheet.",
+        group: CommandGroup::Layout,
+        effects: MUTATE_IDEMPOTENT,
+        input_schema: schema_layout_update_image,
+        enabled: has_layout_sheet,
+        run: run_layout_update_image,
     },
 ];
 
@@ -477,6 +503,14 @@ pub(super) fn validate_layout_spec_in_doc(
                     ));
                 }
             }
+            LayoutItem::EmbeddedImage { asset_id, .. } => {
+                if doc.image_asset(asset_id).is_none() {
+                    return Err(EngineError::with_code(
+                        ErrorCode::NotFound,
+                        format!("layout item[{idx}] image asset `{asset_id}` not found in project"),
+                    ));
+                }
+            }
         }
     }
     crate::dag::validate_inline_hook_refs(doc, layout_id, &spec.inline_hooks())?;
@@ -656,7 +690,7 @@ fn run_layout_align_origins(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutc
                 "width": bounds_pt.width,
                 "height": bounds_pt.height,
             })),
-            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => None,
+            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => None,
         })
         .collect();
 
@@ -744,9 +778,7 @@ fn validate_scale_percent_range(p: f64) -> Result<(), EngineError> {
 }
 
 fn layout_item_id(item: &LayoutItem) -> &str {
-    match item {
-        LayoutItem::LiveGraph { id, .. } | LayoutItem::LiveTable { id, .. } | LayoutItem::TextCallout { id, .. } => id.as_str(),
-    }
+    item.id()
 }
 
 fn run_layout_equalize_scaling(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
@@ -961,7 +993,7 @@ fn align_live_graph_bounds(items: &mut [LayoutItem]) {
         .enumerate()
         .filter_map(|(idx, it)| match it {
             LayoutItem::LiveGraph { bounds_pt, .. } => Some((idx, *bounds_pt)),
-            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } => None,
+            LayoutItem::LiveTable { .. } | LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => None,
         })
         .collect();
     if rects.len() < 2 {
@@ -1027,6 +1059,18 @@ fn resize_layout_spec(spec: &mut LayoutSpec, preset: FigureCanvasPreset, mode: C
                 *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
                 if mode == CanvasResizeMode::ProportionalScale {
                     *font_size_pt = scale_finite(*font_size_pt, scale_1d, "layout.text_callout.font_size_pt")?;
+                }
+            }
+            LayoutItem::EmbeddedImage { bounds_pt, crop, border, .. } => {
+                *bounds_pt = scale_rect_pt(*bounds_pt, sx, sy)?;
+                crop.left_pt = scale_finite(crop.left_pt, sx, "layout.image.crop.left_pt")?;
+                crop.right_pt = scale_finite(crop.right_pt, sx, "layout.image.crop.right_pt")?;
+                crop.top_pt = scale_finite(crop.top_pt, sy, "layout.image.crop.top_pt")?;
+                crop.bottom_pt = scale_finite(crop.bottom_pt, sy, "layout.image.crop.bottom_pt")?;
+                if mode == CanvasResizeMode::ProportionalScale
+                    && let Some(b) = border
+                {
+                    b.width_pt = scale_finite(b.width_pt, scale_1d, "layout.image.border.width_pt")?;
                 }
             }
         }
@@ -1180,6 +1224,273 @@ fn parse_panel_badge_style(val: &Value) -> Result<PanelBadgeStyle, EngineError> 
     }
 }
 
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutInsertImageParams {
+    sheet_id: String,
+    #[serde(default)]
+    panel_id: Option<String>,
+    #[serde(default)]
+    path: Option<String>,
+    #[serde(default)]
+    bytes_base64: Option<String>,
+    #[serde(default)]
+    asset_id: Option<String>,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+    #[serde(default)]
+    badge_override: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct LayoutUpdateImageParams {
+    sheet_id: String,
+    #[serde(default)]
+    panel_id: Option<String>,
+    #[serde(default)]
+    item_index: Option<usize>,
+    #[serde(default)]
+    bounds_pt: Option<Value>,
+    #[serde(default)]
+    width_pt: Option<f64>,
+    #[serde(default)]
+    height_pt: Option<f64>,
+    #[serde(default)]
+    rotation_deg: Option<f64>,
+    #[serde(default)]
+    lock_aspect_ratio: Option<bool>,
+    #[serde(default)]
+    crop: Option<Value>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    border: Option<Option<Value>>,
+    #[serde(default, deserialize_with = "de_present_opt")]
+    badge_override: Option<Option<String>>,
+}
+
+pub(super) struct LayoutImageInsertArgs<'a> {
+    pub command_id: &'static str,
+    pub panel_id: Option<&'a str>,
+    pub path: Option<&'a str>,
+    pub bytes_base64: Option<&'a str>,
+    pub asset_id: Option<&'a str>,
+    pub bounds_pt: Option<&'a Value>,
+    pub rotation_deg: Option<f64>,
+    pub lock_aspect_ratio: Option<bool>,
+    pub crop: Option<&'a Value>,
+    pub border: Option<&'a Option<Value>>,
+    pub badge_override: Option<&'a str>,
+}
+
+fn schema_layout_insert_image() -> Value {
+    let mut props = vec![
+        ("sheet_id", non_empty_str_schema("Target LayoutSheet ID")),
+        ("panel_id", nullable_schema(str_schema("Optional explicit layout panel identifier"))),
+    ];
+    props.extend(super::image::insert_image_common_props());
+    props.push(("badge_override", nullable_schema(str_schema("Optional panel badge text rendered in top-left corner"))));
+    obj_schema(props, &["sheet_id"], false)
+}
+
+fn schema_layout_update_image() -> Value {
+    obj_schema(
+        vec![
+            ("sheet_id", non_empty_str_schema("Target LayoutSheet ID")),
+            ("panel_id", nullable_schema(str_schema("Target EmbeddedImage `panel_id` (provide `panel_id` or `item_index`)"))),
+            ("item_index", nullable_schema(int_schema("Zero-based index of the EmbeddedImage item", Some(0), None))),
+            ("bounds_pt", nullable_schema(any_json_schema("Updated placement `[x, y, width, height]` or `RectPt` in points"))),
+            (
+                "width_pt",
+                nullable_schema(num_schema("Updated width in points (> 0); adjusts `height_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            (
+                "height_pt",
+                nullable_schema(num_schema("Updated height in points (> 0); adjusts `width_pt` when aspect ratio is locked", Some(0.001), None)),
+            ),
+            ("rotation_deg", nullable_schema(num_schema("Updated clockwise rotation in degrees", Some(-3600.0), Some(3600.0)))),
+            ("lock_aspect_ratio", nullable_schema(bool_schema("Lock or unlock intrinsic aspect ratio during single-axis resize"))),
+            ("crop", nullable_schema(super::image::crop_schema())),
+            ("border", nullable_schema(super::image::border_schema())),
+            ("badge_override", nullable_schema(str_schema("Updated corner badge label; pass null to clear"))),
+        ],
+        &["sheet_id"],
+        false,
+    )
+}
+
+fn unique_layout_panel_id(items: &[LayoutItem], requested: Option<&str>) -> String {
+    if let Some(id) = requested.map(str::trim).filter(|s| !s.is_empty()) {
+        return id.to_owned();
+    }
+    let mut seq = items.len().saturating_add(1);
+    loop {
+        let candidate = format!("panel-{seq}");
+        if items.iter().all(|it| it.id() != candidate) {
+            return candidate;
+        }
+        seq += 1;
+    }
+}
+
+pub(super) fn insert_image_on_layout(
+    doc: &mut curvebook_doc::ProjectDocument,
+    layout_id: &curvebook_doc::SheetId,
+    args: LayoutImageInsertArgs<'_>,
+) -> Result<CommandOutcome, EngineError> {
+    let page_pt = {
+        let layout = require_layout_sheet(doc, layout_id)?;
+        if layout.spec.items.len() >= MAX_LAYOUT_ITEMS {
+            return Err(DocError::TooManyLayoutItems { count: layout.spec.items.len() + 1, max: MAX_LAYOUT_ITEMS }.into());
+        }
+        layout.spec.page_size_pt()
+    };
+    let resolved = super::image::resolve_image_source(doc, args.path, args.bytes_base64, args.asset_id)?;
+    let bounds_pt = super::image::parse_image_insert_bounds(args.bounds_pt, resolved.pixel_size, page_pt.width, page_pt.height)?;
+    let rotation_deg = super::image::parse_rotation_deg(args.rotation_deg, 0.0)?;
+    let lock_aspect_ratio = args.lock_aspect_ratio.unwrap_or(true);
+    let crop = super::image::apply_crop_patch(args.crop, bounds_pt, curvebook_doc::CropInsetsPt::default())?;
+    let border = super::image::apply_border_patch(args.border, None)?;
+
+    let mut candidate_spec = require_layout_sheet(doc, layout_id)?.spec.clone();
+    let panel_id = unique_layout_panel_id(&candidate_spec.items, args.panel_id);
+    candidate_spec
+        .add_item(LayoutItem::EmbeddedImage {
+            id: panel_id.clone(),
+            asset_id: resolved.asset_id.clone(),
+            bounds_pt,
+            rotation_deg,
+            lock_aspect_ratio,
+            crop,
+            border,
+            badge_override: args.badge_override.map(str::to_owned),
+        })
+        .map_err(DocError::from)?;
+    validate_layout_spec_in_doc(doc, layout_id, &candidate_spec)?;
+    let item_index = candidate_spec.items.len() - 1;
+    require_layout_sheet_mut(doc, layout_id)?.spec = candidate_spec;
+
+    Ok(CommandOutcome::mutated(
+        args.command_id,
+        format!("embedded {} image `{}` onto layout `{layout_id}`", resolved.media_type.mime_type(), resolved.asset_id),
+        json!({
+            "sheet_id": layout_id.as_str(),
+            "panel_id": panel_id,
+            "item_index": item_index,
+            "asset_id": resolved.asset_id,
+            "media_type": resolved.media_type.mime_type(),
+            "pixel_size": [resolved.pixel_size.0, resolved.pixel_size.1],
+            "bounds_pt": bounds_pt,
+        }),
+    ))
+}
+
+fn run_layout_insert_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_layout_insert_image();
+    let params: LayoutInsertImageParams = parse_params(&schema, raw)?;
+    let layout_id = parse_sheet_id(&params.sheet_id)?;
+    insert_image_on_layout(
+        &mut ctx.session.doc,
+        &layout_id,
+        LayoutImageInsertArgs {
+            command_id: "layout.insertImage",
+            panel_id: params.panel_id.as_deref(),
+            path: params.path.as_deref(),
+            bytes_base64: params.bytes_base64.as_deref(),
+            asset_id: params.asset_id.as_deref(),
+            bounds_pt: params.bounds_pt.as_ref(),
+            rotation_deg: params.rotation_deg,
+            lock_aspect_ratio: params.lock_aspect_ratio,
+            crop: params.crop.as_ref(),
+            border: params.border.as_ref(),
+            badge_override: params.badge_override.as_deref(),
+        },
+    )
+}
+
+fn run_layout_update_image(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    let schema = schema_layout_update_image();
+    let params: LayoutUpdateImageParams = parse_params(&schema, raw)?;
+    let layout_id = parse_sheet_id(&params.sheet_id)?;
+    let doc = &ctx.session.doc;
+    let mut candidate_spec = require_layout_sheet(doc, &layout_id)?.spec.clone();
+    let len = candidate_spec.items.len();
+
+    let idx_from_num = match params.item_index {
+        Some(idx) if idx >= len => {
+            return Err(EngineError::with_code(ErrorCode::NotFound, format!("item_index {idx} out of bounds ({len} items) on `{layout_id}`"))
+                .with_details(json!({ "pointer": "/item_index" })));
+        }
+        opt => opt,
+    };
+    let idx_from_id = match params.panel_id.as_deref() {
+        Some(pid) => {
+            let pos = candidate_spec.items.iter().position(|it| it.id() == pid).ok_or_else(|| {
+                EngineError::with_code(ErrorCode::NotFound, format!("panel `{pid}` not found on layout `{layout_id}`"))
+                    .with_details(json!({ "pointer": "/panel_id" }))
+            })?;
+            Some(pos)
+        }
+        None => None,
+    };
+    let target_idx = match (idx_from_num, idx_from_id) {
+        (Some(a), Some(b)) if a != b => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "`item_index` and `panel_id` refer to different layout items"));
+        }
+        (Some(a), _) | (None, Some(a)) => a,
+        (None, None) => {
+            return Err(EngineError::with_code(ErrorCode::BadInput, "provide either `panel_id` or `item_index`"));
+        }
+    };
+
+    let item = &mut candidate_spec.items[target_idx];
+    let LayoutItem::EmbeddedImage { id: item_id, asset_id, bounds_pt, rotation_deg, lock_aspect_ratio, crop, border, badge_override } = item else {
+        return Err(EngineError::with_code(ErrorCode::BadInput, format!("layout item `{target_idx}` on `{layout_id}` is not an embedded image")));
+    };
+    let panel_id_str = item_id.clone();
+    let asset_id_str = asset_id.clone();
+    let intrinsic_px = doc.image_asset(&asset_id_str).map(|a| a.pixel_size);
+    if let Some(lock) = params.lock_aspect_ratio {
+        *lock_aspect_ratio = lock;
+    }
+    super::image::apply_image_bounds_update(
+        bounds_pt,
+        params.bounds_pt.as_ref(),
+        params.width_pt,
+        params.height_pt,
+        *lock_aspect_ratio,
+        intrinsic_px,
+    )?;
+    *rotation_deg = super::image::parse_rotation_deg(params.rotation_deg, *rotation_deg)?;
+    *crop = super::image::apply_crop_patch(params.crop.as_ref(), *bounds_pt, *crop)?;
+    *border = super::image::apply_border_patch(params.border.as_ref(), *border)?;
+    if let Some(next_badge) = params.badge_override {
+        *badge_override = next_badge;
+    }
+    let summary = json!({
+        "sheet_id": layout_id.as_str(),
+        "panel_id": panel_id_str,
+        "item_index": target_idx,
+        "asset_id": asset_id_str,
+        "bounds_pt": *bounds_pt,
+        "rotation_deg": *rotation_deg,
+        "lock_aspect_ratio": *lock_aspect_ratio,
+        "crop": *crop,
+        "border": *border,
+        "badge_override": *badge_override,
+    });
+    validate_layout_spec_in_doc(doc, &layout_id, &candidate_spec)?;
+    require_layout_sheet_mut(&mut ctx.session.doc, &layout_id)?.spec = candidate_spec;
+    Ok(CommandOutcome::mutated("layout.updateImage", format!("updated embedded image on layout `{layout_id}`"), summary))
+}
+
 #[cfg(test)]
 mod tests {
     use curvebook_doc::{Cell, DataSheet, ErrorCode, ProjectDocument, SheetId, SubcolumnMode, TableArchetype, XyTable};
@@ -1202,8 +1513,8 @@ mod tests {
     }
 
     #[test]
-    fn registry_contains_all_seven_layout_commands() {
-        assert_eq!(specs().len(), 7);
+    fn registry_contains_all_nine_layout_commands() {
+        assert_eq!(specs().len(), 9);
         for spec in specs() {
             assert_eq!(spec.group, CommandGroup::Layout);
             assert!(!spec.summary.is_empty());

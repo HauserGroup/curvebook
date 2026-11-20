@@ -6,6 +6,7 @@ use crate::SheetSection;
 use crate::error::{CURRENT_SCHEMA_VERSION, DocError, MAX_SHEETS_PER_PROJECT, validate_title};
 use crate::graph::{GraphAnnotation, GraphSheet};
 use crate::ids::{HookSource, SheetId};
+use crate::image::{MAX_PROJECT_IMAGE_ASSETS, ProjectImageAsset};
 use crate::info::InfoSheet;
 use crate::layout::{LayoutItem, LayoutSheet};
 use crate::links::DataSheet;
@@ -80,6 +81,9 @@ pub struct ProjectDocument {
     /// Named snapshots created via `project.createCheckpoint` (`QOL-11`).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub checkpoints: Vec<NamedCheckpoint>,
+    /// Content-addressed PNG/JPEG/TIFF raster images referenced by `EmbeddedImage` items (`R13.7`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub image_assets: Vec<ProjectImageAsset>,
 }
 
 impl Default for ProjectDocument {
@@ -95,6 +99,7 @@ impl Default for ProjectDocument {
             active_sheet_id: None,
             family_anchor_sheet_id: None,
             checkpoints: Vec::new(),
+            image_assets: Vec::new(),
         }
     }
 }
@@ -274,6 +279,35 @@ impl ProjectDocument {
         self.layout_sheets.iter_mut().find(|s| &s.id == id)
     }
 
+    /// Look up a stored [`ProjectImageAsset`] by its content-addressed `asset_id`.
+    #[must_use]
+    pub fn image_asset(&self, asset_id: &str) -> Option<&ProjectImageAsset> {
+        self.image_assets.iter().find(|a| a.asset_id == asset_id)
+    }
+
+    /// Insert `asset` if its content-addressed `asset_id` is not already registered, enforcing
+    /// [`MAX_PROJECT_IMAGE_ASSETS`]. Returns the canonical `asset_id` on success.
+    pub fn upsert_image_asset(&mut self, asset: ProjectImageAsset) -> Result<String, DocError> {
+        if let Some(existing) = self.image_asset(&asset.asset_id) {
+            if existing.media_type != asset.media_type || existing.pixel_size != asset.pixel_size || existing.bytes != asset.bytes {
+                return Err(DocError::InvalidCellValue {
+                    archetype: crate::TableKind::Xy,
+                    row: 0,
+                    col: 0,
+                    reason: "image asset id collision with mismatched payload",
+                });
+            }
+            return Ok(existing.asset_id.clone());
+        }
+        let next = self.image_assets.len().saturating_add(1);
+        if next > MAX_PROJECT_IMAGE_ASSETS {
+            return Err(DocError::TooManyImageAssets { count: next, max: MAX_PROJECT_IMAGE_ASSETS });
+        }
+        let id = asset.asset_id.clone();
+        self.image_assets.push(asset);
+        Ok(id)
+    }
+
     /// Resolve the paired [`InfoSheet`] ID for a `DataSheet` or (chained) `ResultSheet` source,
     /// without falling back to the project's first info sheet.
     #[must_use]
@@ -346,7 +380,10 @@ impl ProjectDocument {
                     GraphAnnotation::EmbeddedResultTable { result_sheet_id, .. } | GraphAnnotation::ModelEquation { result_sheet_id, .. } => {
                         deps.push(result_sheet_id.clone())
                     }
-                    GraphAnnotation::TextBox { .. } | GraphAnnotation::LineOrArrow { .. } | GraphAnnotation::Shape { .. } => {}
+                    GraphAnnotation::TextBox { .. }
+                    | GraphAnnotation::LineOrArrow { .. }
+                    | GraphAnnotation::Shape { .. }
+                    | GraphAnnotation::EmbeddedImage { .. } => {}
                 }
             }
             let paired_info = self.paired_info_sheet_id(&gs.spec.primary_source_sheet_id).cloned().or_else(|| default_info.clone());
@@ -358,7 +395,7 @@ impl ProjectDocument {
                 match item {
                     LayoutItem::LiveGraph { graph_sheet_id, .. } => deps.push(graph_sheet_id.clone()),
                     LayoutItem::LiveTable { source_sheet_id, .. } => deps.push(source_sheet_id.clone()),
-                    LayoutItem::TextCallout { .. } => {}
+                    LayoutItem::TextCallout { .. } | LayoutItem::EmbeddedImage { .. } => {}
                 }
             }
             for hook in ls.spec.inline_hooks() {

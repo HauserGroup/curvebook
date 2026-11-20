@@ -9,6 +9,7 @@ use curvebook_palette::{ColorRamp, LineDashStyle, MarkerFillMode, MarkerShape, M
 use crate::archetypes::{ColumnDesignHint, LevelOrderSpec, TableArchetype, VariableRole};
 use crate::error::{DocError, validate_title};
 use crate::ids::{FloatingNote, HookSource, RectPt, SheetId, SizePt, extract_template_hooks};
+use crate::image::{CropInsetsPt, ImageBorderSpec};
 use crate::links::DataSheet;
 
 /// Specialized diagnostic plot subtypes (`docs/implementation/graphing-and-layouts.md` §2.5).
@@ -1088,6 +1089,25 @@ pub enum GraphAnnotation {
         #[serde(default)]
         bordered: bool,
     },
+    /// Embedded PNG/JPEG/TIFF raster image referencing [`crate::ProjectImageAsset::asset_id`].
+    EmbeddedImage {
+        /// Content-addressed [`crate::ProjectImageAsset::asset_id`] stored on [`crate::ProjectDocument::image_assets`].
+        asset_id: String,
+        /// Placement bounding rectangle in canvas typographic points (`width > 0`, `height > 0`).
+        bounds_pt: RectPt,
+        /// Clockwise rotation angle in degrees around the center of `bounds_pt`.
+        #[serde(default)]
+        rotation_deg: f64,
+        /// When `true`, interactive corner handles preserve the intrinsic aspect ratio.
+        #[serde(default = "default_true")]
+        lock_aspect_ratio: bool,
+        /// Four-edge inward crop insets measured in typographic points.
+        #[serde(default)]
+        crop: CropInsetsPt,
+        /// Optional outline stroke framing the cropped image region.
+        #[serde(default)]
+        border: Option<ImageBorderSpec>,
+    },
 }
 
 /// Legend visibility, placement, and frame configuration on a [`GraphSpec`].
@@ -1625,6 +1645,20 @@ impl GraphSpec {
                     }
                 }
                 GraphAnnotation::LineOrArrow { .. } => {}
+                GraphAnnotation::EmbeddedImage { bounds_pt, crop, border, .. } => {
+                    if bounds_pt.width <= 0.0 || bounds_pt.height <= 0.0 {
+                        return Err(DocError::InvalidCellValue {
+                            archetype: crate::TableKind::Xy,
+                            row: 0,
+                            col: 0,
+                            reason: "spec.annotations.embedded_image bounds_pt width and height must be > 0",
+                        });
+                    }
+                    crop.validate(crate::TableKind::Xy)?;
+                    if let Some(b) = border {
+                        b.validate(crate::TableKind::Xy)?;
+                    }
+                }
             }
         }
         for ov in &self.point_overrides {
@@ -1899,6 +1933,18 @@ fn annotation_non_finite(ann: &GraphAnnotation) -> Option<&'static str> {
         GraphAnnotation::ModelEquation { bounds_pt, font_size_pt, .. } => {
             if !rect_is_finite(*bounds_pt) || !font_size_pt.is_finite() {
                 return Some("spec.annotations.model_equation");
+            }
+            None
+        }
+        GraphAnnotation::EmbeddedImage { bounds_pt, rotation_deg, crop, border, .. } => {
+            if !rect_is_finite(*bounds_pt) || !rotation_deg.is_finite() {
+                return Some("spec.annotations.embedded_image");
+            }
+            if let Some(field) = crop.first_non_finite_float("spec.annotations.embedded_image.crop") {
+                return Some(field);
+            }
+            if border.is_some_and(|b| !b.width_pt.is_finite()) {
+                return Some("spec.annotations.embedded_image.border.width_pt");
             }
             None
         }

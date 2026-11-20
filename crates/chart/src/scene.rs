@@ -200,11 +200,28 @@ pub struct PositionedText {
     pub color: Rgba8,
 }
 
+/// Positioned straight-alpha RGBA8 raster image primitive emitted for embedded PNG/JPEG/TIFF images.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct SceneRasterImage {
+    pub asset_id: String,
+    pub media_type: curvebook_doc::ImageMimeKind,
+    pub pixel_size: (u32, u32),
+    pub rgba: Vec<u8>,
+    pub bounds_pt: RectPt,
+    #[serde(default)]
+    pub crop: curvebook_doc::CropInsetsPt,
+    #[serde(default)]
+    pub rotation_deg: f64,
+    #[serde(default)]
+    pub clip: Option<RectPt>,
+}
+
 /// Individual drawing operation inside a compiled [`ChartScene`].
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub enum ScenePrimitive {
     Path { path: Path2D, fill: Option<FillPaint>, stroke: Option<StrokePaint>, clip: Option<RectPt> },
     Text(PositionedText),
+    RasterImage(SceneRasterImage),
     PushClip { rect: RectPt },
     PopClip,
 }
