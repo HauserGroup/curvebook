@@ -24,7 +24,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 /// Current persisted format version of [`JournalOpRecord`] entries in `ops.journal`.
-pub const CURRENT_JOURNAL_VERSION: u32 = 1;
+pub const CURRENT_JOURNAL_VERSION: u32 = 2;
 /// Current persisted format version of [`JournalLockLease`] files (`curvebook.lock`).
 pub const CURRENT_LOCK_VERSION: u32 = 1;
 
@@ -262,7 +262,7 @@ impl JournalLockLease {
 /// Single NDJSON line record in `ops.journal`: `{ "format_version", "seq", "crc32", "command_json" }`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JournalOpRecord {
-    /// Persisted schema version of this journal record (`1`).
+    /// Persisted schema version of this journal record (`1` for legacy entries, `2` for canonical).
     #[serde(default = "default_v1")]
     pub format_version: u32,
     /// Monotonically increasing 1-based command sequence number.
@@ -301,6 +301,30 @@ impl JournalOpRecord {
         if self.crc32 != actual {
             return Err(FormatError::CorruptCrc { entry: format!("{JOURNAL_FILE_NAME}#seq_{}", self.seq), expected: self.crc32, actual });
         }
+        Ok(())
+    }
+
+    /// Verify raw record CRC first, then migrate older journal records (`format_version == 1`)
+    /// to [`CURRENT_JOURNAL_VERSION`] in memory by normalizing retired parameter spellings and
+    /// recomputing `crc32` over `(seq, upgraded_command_json)`.
+    ///
+    /// Returns `Ok(true)` if an upgrade occurred and `Ok(false)` when already at the current version.
+    pub fn upgrade_to_current(&mut self) -> Result<bool, FormatError> {
+        self.validate_version()?;
+        self.verify_crc()?;
+        if self.format_version == CURRENT_JOURNAL_VERSION {
+            return Ok(false);
+        }
+        self.upgrade_verified_to_current()?;
+        Ok(true)
+    }
+
+    fn upgrade_verified_to_current(&mut self) -> Result<(), FormatError> {
+        let raw_cmd = std::mem::replace(&mut self.command_json, serde_json::Value::Null);
+        let upgraded = crate::versioned::upgrade_journal_command_json(raw_cmd, self.format_version, CURRENT_JOURNAL_VERSION)?;
+        self.crc32 = compute_record_crc32(self.seq, &upgraded)?;
+        self.command_json = upgraded;
+        self.format_version = CURRENT_JOURNAL_VERSION;
         Ok(())
     }
 
@@ -1778,7 +1802,7 @@ fn stream_and_parse_journal(
         }
         flush_pending_bad_line(&mut pending_bad, false, &mut state);
 
-        let record = match parse_journal_line(physical_line_no, &line_buf) {
+        let mut record = match parse_journal_line(physical_line_no, &line_buf) {
             Ok(record) => record,
             Err(err @ FormatError::UnsupportedSchemaVersion { .. }) => return Err(err),
             Err(err) => {
@@ -1787,7 +1811,12 @@ fn stream_and_parse_journal(
             }
         };
 
+        // CRITICAL CRC ORDERING: verify CRC32 against the raw persisted v1 payload FIRST,
+        // then upgrade v1 aliases to canonical v2 spellings and recompute in-memory CRC32.
         record.verify_crc()?;
+        if record.format_version < CURRENT_JOURNAL_VERSION {
+            record.upgrade_verified_to_current()?;
+        }
         if record.seq == 0 || record.seq <= state.prev_seq {
             return Err(FormatError::InvalidPipeline {
                 reason: format!("non-monotonic journal sequence {} after {} at line {physical_line_no}", record.seq, state.prev_seq),

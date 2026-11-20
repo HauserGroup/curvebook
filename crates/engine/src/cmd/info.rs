@@ -201,6 +201,7 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
                 "removed": false,
                 "recalculated_sheets": 0,
             }),
+            warnings: Vec::new(),
         });
     }
     let recalc = recalculate_dirty_with_links(&mut ctx.session.doc, std::slice::from_ref(&info_id), false)?;
@@ -215,6 +216,7 @@ fn run_info_remove_constant(ctx: &mut Ctx<'_>, params: Value) -> Result<CommandO
             "removed": true,
             "recalculated_sheets": recalc.recalculated_sheets,
         }),
+        warnings: Vec::new(),
     })
 }
 

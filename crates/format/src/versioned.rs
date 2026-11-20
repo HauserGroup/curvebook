@@ -3,6 +3,9 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use curvebook_doc::param_spellings::{
+    canonical_batch_command_key, canonical_batch_export_key, canonical_batch_input_key, canonical_command_param_alias,
+};
 use serde::{Deserialize, Serialize};
 
 use crate::error::FormatError;
@@ -221,4 +224,167 @@ pub fn validate_batch_manifest_version(value: &serde_json::Value) -> Result<(), 
         return Err(FormatError::UnsupportedSchemaVersion { version, max_supported: 1 });
     }
     Err(FormatError::UnsupportedFormat { reason: format!("unsupported batch manifest schema `{schema_str}` (expected `{BATCH_SCHEMA_V1}`)") })
+}
+
+const JOURNAL_MIGRATION_STEPS: &[VersionStep] = &[VersionStep { from_version: 1, apply: migrate_journal_command_v1_to_v2 }];
+
+fn extract_object_kind(val: &serde_json::Value) -> Option<String> {
+    val.as_object().and_then(|obj| obj.get("kind")).and_then(serde_json::Value::as_str).map(str::to_owned)
+}
+
+fn rename_key_if_present(obj: &mut serde_json::Map<String, serde_json::Value>, old_key: &str, canonical_key: &str) -> Option<(String, String)> {
+    if old_key == canonical_key || !obj.contains_key(old_key) {
+        return None;
+    }
+    let moved = obj.remove(old_key);
+    if !obj.contains_key(canonical_key)
+        && let Some(val) = moved
+    {
+        obj.insert(canonical_key.to_owned(), val);
+    }
+    Some((old_key.to_owned(), canonical_key.to_owned()))
+}
+
+fn normalize_command_params_recursive(
+    command_id: &str,
+    path: &mut Vec<String>,
+    kind: Option<&str>,
+    val: &mut serde_json::Value,
+    hits: &mut Vec<(String, String)>,
+) {
+    match val {
+        serde_json::Value::Object(obj) => {
+            let local_kind = extract_object_kind(&serde_json::Value::Object(obj.clone()));
+            let eff_kind = local_kind.as_deref().or(kind);
+            let keys: Vec<String> = obj.keys().cloned().collect();
+            let path_refs: Vec<&str> = path.iter().map(String::as_str).collect();
+            for key in keys {
+                if let Some(canonical) = canonical_command_param_alias(command_id, &path_refs, eff_kind, &key)
+                    && let Some(pair) = rename_key_if_present(obj, &key, canonical)
+                {
+                    hits.push(pair);
+                }
+            }
+            let next_keys: Vec<String> = obj.keys().cloned().collect();
+            for child_key in next_keys {
+                if let Some(child_val) = obj.get_mut(&child_key) {
+                    path.push(child_key);
+                    normalize_command_params_recursive(command_id, path, eff_kind, child_val, hits);
+                    path.pop();
+                }
+            }
+        }
+        serde_json::Value::Array(items) => {
+            for item in items {
+                normalize_command_params_recursive(command_id, path, kind, item, hits);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Normalize deprecated parameter spellings in a command's `params` JSON object in place,
+/// returning `(deprecated_key, canonical_key)` replacements applied.
+pub fn normalize_command_params_in_place(command_id: &str, params: &mut serde_json::Value) -> Vec<(String, String)> {
+    let mut hits = Vec::new();
+    let mut path = Vec::new();
+    let kind = extract_object_kind(params);
+    normalize_command_params_recursive(command_id, &mut path, kind.as_deref(), params, &mut hits);
+    hits
+}
+
+fn migrate_journal_command_v1_to_v2(command_json: &mut serde_json::Value) -> Result<(), FormatError> {
+    let Some(obj) = command_json.as_object_mut() else {
+        return Ok(());
+    };
+    // Only upgrade CurveBook command envelopes (`{ "command_id" | "id" | "command": "<area>.<cmd>", "params": ... }`);
+    // arbitrary non-command payloads stored by recovery unit tests stay untouched.
+    let cmd_str = obj
+        .get("command_id")
+        .or_else(|| obj.get("command"))
+        .or_else(|| obj.get("id"))
+        .and_then(serde_json::Value::as_str)
+        .filter(|s| s.contains('.'))
+        .map(str::to_owned);
+    let Some(command_id) = cmd_str else {
+        return Ok(());
+    };
+    if !obj.contains_key("command_id") {
+        if obj.get("command").and_then(serde_json::Value::as_str).is_some() {
+            let _ = rename_key_if_present(obj, "command", "command_id");
+        } else if obj.get("id").and_then(serde_json::Value::as_str).is_some() {
+            let _ = rename_key_if_present(obj, "id", "command_id");
+        }
+    }
+    if let Some(params) = obj.get_mut("params") {
+        let _ = normalize_command_params_in_place(&command_id, params);
+    }
+    Ok(())
+}
+
+/// Upgrade a CRC-verified `ops.journal` `command_json` payload from `from_version` to `to_version`.
+pub(crate) fn upgrade_journal_command_json(value: serde_json::Value, from_version: u32, to_version: u32) -> Result<serde_json::Value, FormatError> {
+    upgrade(value, from_version, 1, to_version, JOURNAL_MIGRATION_STEPS)
+}
+
+fn normalize_manifest_section(
+    arr: Option<&mut serde_json::Value>,
+    section_name: &str,
+    resolver: fn(&str) -> Option<&'static str>,
+    warnings: &mut Vec<String>,
+) {
+    let Some(items) = arr.and_then(serde_json::Value::as_array_mut) else {
+        return;
+    };
+    for (idx, item) in items.iter_mut().enumerate() {
+        let Some(obj) = item.as_object_mut() else {
+            continue;
+        };
+        let keys: Vec<String> = obj.keys().cloned().collect();
+        for key in keys {
+            if let Some(canonical) = resolver(&key)
+                && let Some((old, canon)) = rename_key_if_present(obj, &key, canonical)
+            {
+                warnings.push(format!("batch manifest `{section_name}[{idx}].{old}` is deprecated; use `{canon}` instead"));
+            }
+        }
+    }
+}
+
+/// Upgrade deprecated section keys and command parameter aliases inside a `curvebook.batch.v1`
+/// manifest in place, returning human-readable deprecation notices for any upgraded fields.
+pub fn normalize_batch_manifest_v1_with_warnings(manifest: &mut serde_json::Value) -> Result<Vec<String>, FormatError> {
+    validate_batch_manifest_version(manifest)?;
+    let Some(root) = manifest.as_object_mut() else {
+        return Err(FormatError::Json(String::from("batch manifest root payload must be a JSON object")));
+    };
+
+    let mut warnings = Vec::new();
+    normalize_manifest_section(root.get_mut("inputs"), "inputs", canonical_batch_input_key, &mut warnings);
+    normalize_manifest_section(root.get_mut("exports"), "exports", canonical_batch_export_key, &mut warnings);
+    normalize_manifest_section(root.get_mut("commands"), "commands", canonical_batch_command_key, &mut warnings);
+
+    if let Some(commands) = root.get_mut("commands").and_then(serde_json::Value::as_array_mut) {
+        for (idx, entry) in commands.iter_mut().enumerate() {
+            let Some(obj) = entry.as_object_mut() else {
+                continue;
+            };
+            let Some(cmd_id) = obj.get("cmd").and_then(serde_json::Value::as_str).map(str::to_owned) else {
+                continue;
+            };
+            if let Some(params) = obj.get_mut("params") {
+                for (old, canon) in normalize_command_params_in_place(&cmd_id, params) {
+                    warnings.push(format!("batch manifest `commands[{idx}]` (`{cmd_id}`) parameter `{old}` is deprecated; use `{canon}` instead"));
+                }
+            }
+        }
+    }
+
+    Ok(warnings)
+}
+
+/// Upgrade deprecated section keys and command parameter aliases inside a `curvebook.batch.v1`
+/// manifest in place without returning deprecation notices.
+pub fn normalize_batch_manifest_v1(manifest: &mut serde_json::Value) -> Result<(), FormatError> {
+    normalize_batch_manifest_v1_with_warnings(manifest).map(|_| ())
 }

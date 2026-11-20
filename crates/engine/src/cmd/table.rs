@@ -26,7 +26,7 @@ use super::helpers::{
 };
 use super::params::{
     array_schema, bool_schema, enum_str_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema, obj_schema_with_aliases,
-    parse_params, str_schema,
+    parse_params, record_deprecated_object_aliases, str_schema,
 };
 use super::project::recalculate_dirty_with_links;
 use super::spellings::{self, first_present};
@@ -848,6 +848,43 @@ fn anchor_schema() -> Value {
             ("col", &["target_col", "targetCol", "data_set", "dataSet", "column"]),
             ("subcol", &["target_subcol", "targetSubcol", "subcolumn", "replicate"]),
         ],
+        true,
+    )
+}
+
+pub(super) fn import_filter_schema() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("row_start", nullable_schema(int_schema("First zero-based source row to include", Some(0), None))),
+            ("row_end", nullable_schema(int_schema("Last zero-based source row to include", Some(0), None))),
+            ("col_start", nullable_schema(int_schema("First zero-based source column to include", Some(0), None))),
+            ("col_end", nullable_schema(int_schema("Last zero-based source column to include", Some(0), None))),
+            ("decimate_every_k", nullable_schema(int_schema("Keep every k-th source row (>= 1)", Some(1), None))),
+            ("unstack_group_column", nullable_schema(int_schema("Optional grouping column index for unstacking", Some(0), None))),
+            ("parse_asterisk_exclusions", nullable_schema(bool_schema("Interpret `*` suffix tokens as excluded cells"))),
+        ],
+        &[],
+        vec![
+            ("row_start", &["rowStart"]),
+            ("row_end", &["rowEnd"]),
+            ("col_start", &["colStart"]),
+            ("col_end", &["colEnd"]),
+            ("decimate_every_k", &["decimateEveryK", "every_nth_row", "everyNthRow"]),
+            ("unstack_group_column", &["unstackGroupColumn"]),
+            ("parse_asterisk_exclusions", &["parseAsteriskExclusions", "parse_asterisk_exclusion", "parseAsteriskExclusion"]),
+        ],
+        true,
+    )
+}
+
+pub(super) fn baseline_schema() -> Value {
+    obj_schema_with_aliases(
+        vec![
+            ("col", nullable_schema(int_schema("Zero-based reference baseline column index (default 0)", Some(0), None))),
+            ("op", nullable_schema(str_schema("Baseline operation: difference, ratio, percent_change, or fractional_change"))),
+        ],
+        &[],
+        vec![("col", &["column", "reference_col", "referenceCol"]), ("op", &["operation", "mode"])],
         true,
     )
 }
@@ -2386,7 +2423,7 @@ fn schema_paste() -> Value {
             ("delimiter", delimiter_schema()),
             ("decimal_separator", decimal_sep_schema()),
             ("normalize_decimal", bool_schema("Infer European comma decimal separator when ambiguous")),
-            ("filter", nullable_schema(json!({ "type": "object", "description": "Optional row/col/decimation filter" }))),
+            ("filter", nullable_schema(import_filter_schema())),
             ("anchor", anchor_schema()),
             ("start_row", int_schema("Anchor row index (default 0)", Some(0), None)),
             ("start_col", int_schema("Anchor column index (default 0)", Some(0), None)),
@@ -2986,6 +3023,7 @@ fn parse_level_order_from_params(p: &SetCategoricalOrderParams) -> Result<LevelO
             order: Option<OrderParamValue>,
             reversed: Option<bool>,
         }
+        record_deprecated_object_aliases(spec_val, &[("kind", "order"), ("mode", "order")]);
         let nested: NestedOrderSpec = serde_json::from_value(spec_val.clone())
             .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid `order_spec`: {err}")))?;
         return resolve_level_order_fields(nested.levels.as_deref(), nested.order.as_ref(), nested.reversed.unwrap_or(false));
@@ -3319,6 +3357,11 @@ fn resolve_simulation_noise(noise_kind: Option<&str>, noise_sd: Option<f64>, cv_
 }
 
 fn run_simulate_xy(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
+    if let Some(arr) = raw.get("parameters").or_else(|| raw.get("params")).and_then(Value::as_array) {
+        for item in arr {
+            record_deprecated_object_aliases(item, &[("key", "name")]);
+        }
+    }
     let p: SimulateXyParams = parse_params(&schema_simulate_xy(), raw)?;
     let sim_params = resolve_simulation_parameters(p.parameters)?;
     let noise = resolve_simulation_noise(p.noise_kind.as_deref(), p.noise_sd, p.cv_percent)?;
@@ -4611,22 +4654,16 @@ struct RandomizeGroupsParams {
 }
 
 fn schema_randomize_groups() -> Value {
+    let group_obj = obj_schema_with_aliases(
+        vec![("label", non_empty_str_schema("Treatment arm label")), ("weight", int_schema("Allocation weight", Some(1), None))],
+        &["label"],
+        vec![("label", &["name"])],
+        true,
+    );
     let group_item = json!({
         "anyOf": [
             { "type": "string", "minLength": 1 },
-            {
-                "type": "object",
-                "properties": {
-                    "label": { "type": "string", "minLength": 1 },
-                    "name": { "type": "string", "minLength": 1 },
-                    "weight": { "type": "integer", "minimum": 1 }
-                },
-                "anyOf": [
-                    { "required": ["label"] },
-                    { "required": ["name"] }
-                ],
-                "additionalProperties": true
-            }
+            group_obj
         ]
     });
     obj_schema_with_aliases(
@@ -4874,13 +4911,11 @@ struct SimulateDistributionsParams {
 
 fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<f64, EngineError> {
     for src in sources {
-        for key in keys {
-            if let Some(val) = src.get(*key) {
-                return val
-                    .as_f64()
-                    .filter(|v| v.is_finite())
-                    .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a finite number")));
-            }
+        if let Some((_, val)) = super::spellings::first_present_with_key(*src, keys) {
+            return val
+                .as_f64()
+                .filter(|v| v.is_finite())
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a finite number")));
         }
     }
     Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing numeric parameter `{field_name}`")))
@@ -4888,12 +4923,10 @@ fn find_dist_f64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], fie
 
 fn find_dist_u64(sources: &[&serde_json::Map<String, Value>], keys: &[&str], field_name: &str, idx: usize) -> Result<u64, EngineError> {
     for src in sources {
-        for key in keys {
-            if let Some(val) = src.get(*key) {
-                return val.as_u64().ok_or_else(|| {
-                    EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a non-negative integer"))
-                });
-            }
+        if let Some((_, val)) = super::spellings::first_present_with_key(*src, keys) {
+            return val
+                .as_u64()
+                .ok_or_else(|| EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}].{field_name} must be a non-negative integer")));
         }
     }
     Err(EngineError::with_code(ErrorCode::BadInput, format!("columns[{idx}] missing integer parameter `{field_name}`")))
@@ -4969,21 +5002,24 @@ fn parse_simulated_column_spec(item: &Value, idx: usize) -> Result<SimulatedColu
 }
 
 fn schema_simulate_distributions() -> Value {
-    let col_schema = json!({
-        "type": "object",
-        "description": "Column distribution specification `{ name, distribution, ... }` supporting uniform (`min`, `max`), gaussian (`mean`, `sd`), log_normal (`mean_log`, `sd_log`), binomial (`trials`, `p`), poisson (`lambda`), exponential (`rate`)",
-        "properties": {
-            "name": { "type": "string", "minLength": 1 },
-            "distribution": {
-                "anyOf": [
-                    { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
-                    { "type": "object" }
-                ]
-            }
-        },
-        "required": ["name", "distribution"],
-        "additionalProperties": true
-    });
+    let col_schema = super::params::with_aliases(
+        json!({
+            "type": "object",
+            "description": "Column distribution specification `{ name, distribution, ... }` supporting uniform (`min`, `max`), gaussian (`mean`, `sd`), log_normal (`mean_log`, `sd_log`), binomial (`trials`, `p`), poisson (`lambda`), exponential (`rate`)",
+            "properties": {
+                "name": { "type": "string", "minLength": 1 },
+                "distribution": {
+                    "anyOf": [
+                        { "type": "string", "enum": ["uniform", "gaussian", "log_normal", "binomial", "poisson", "exponential"] },
+                        { "type": "object" }
+                    ]
+                }
+            },
+            "required": ["name", "distribution"],
+            "additionalProperties": true
+        }),
+        vec![("name", &["title"])],
+    );
     obj_schema_with_aliases(
         vec![
             ("columns", array_schema("Simulated column distribution specifications", col_schema, Some(1), None)),
@@ -5158,18 +5194,22 @@ mod tests {
     #[test]
     fn cell_title_exclusion_paste_export_and_multivar_round_trip() {
         let mut s = seeded_session();
-        s.execute("table.setCell", json!({ "sheetId": "xy-1", "coord": { "row": 0, "column": 0 }, "value": 12.5 })).expect("setCell alias");
-        s.execute("table.setCells", json!({ "sheet_id": "col-1", "grid": [[1.0, 2.0], [3.0, 4.0]] })).expect("setCells grid");
+        let alias_out =
+            s.execute("table.setCell", json!({ "sheetId": "xy-1", "coord": { "row": 0, "column": 0 }, "value": 12.5 })).expect("setCell alias");
+        assert!(!alias_out.warnings.is_empty(), "deprecated aliases should emit warnings");
+        s.execute("table.setCells", json!({ "sheet_id": "col-1", "rows": [[1.0, 2.0], [3.0, 4.0]] })).expect("setCells rows");
         s.execute("table.setXCells", json!({ "sheet_id": "xy-1", "values": [1.0, 2.0, 3.0] })).expect("setXCells");
         s.execute("table.setRowTitles", json!({ "sheet_id": "col-1", "titles": ["R1", null] })).expect("setRowTitles");
         let gt_out = s.execute("table.setGroupTitles", json!({ "sheet_id": "col-1", "titles": ["G1", "G2"] })).expect("setGroupTitles");
         assert_eq!(gt_out.command_id, "table.setGroupTitles");
-        let st_out = s.execute("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Dose", "y_titles": ["Resp"] })).expect("setTitles");
+        assert!(gt_out.warnings.is_empty());
+        let st_out = s.execute("table.setTitles", json!({ "sheet_id": "xy-1", "x_title": "Dose", "titles": ["Resp"] })).expect("setTitles");
         assert_eq!(st_out.command_id, "table.setTitles");
+        assert!(st_out.warnings.is_empty());
         s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-1", "col": 0, "titles": ["A", "B", "C"] })).expect("setSubcolumnTitles");
 
         s.execute("table.excludeCells", json!({ "sheet_id": "col-1", "row": 0, "col": 0 })).expect("exclude");
-        s.execute("table.excludeCellsWithReason", json!({ "sheet_id": "col-1", "reason": "outlier", "coords": [[1, 0]] }))
+        s.execute("table.excludeCellsWithReason", json!({ "sheet_id": "col-1", "reason_tag": "outlier", "coords": [[1, 0]] }))
             .expect("excludeWithReason");
         let audit = s.execute("table.exclusionAuditReport", json!({ "sheet_id": "col-1" })).expect("audit");
         assert!(!audit.mutated);
@@ -5177,7 +5217,7 @@ mod tests {
         assert_eq!(audit.payload.get("annotated_count").and_then(Value::as_u64), Some(1));
 
         s.execute("table.clearCells", json!({ "sheet_id": "col-1", "row_start": 0, "row_end": 0, "col_start": 1, "col_end": 1 })).expect("clear");
-        s.execute("table.paste", json!({ "sheet_id": "col-1", "tsv": "5\t6\n7\t8" })).expect("paste");
+        s.execute("table.paste", json!({ "sheet_id": "col-1", "text": "5\t6\n7\t8" })).expect("paste");
         s.execute("table.pasteLink", json!({ "target_sheet_id": "xy-1", "source_sheet_id": "col-1" })).expect("pasteLink");
 
         let tmp_dir = std::env::temp_dir().join(format!("cb-w9b-table-test-{}", std::process::id()));
@@ -5195,7 +5235,7 @@ mod tests {
             json!({ "sheet_id": "mv-1", "edits": [{ "row": 0, "col": 0, "value": "A" }, { "row": 0, "col": 1, "value": 10.0 }] }),
         )
         .expect("mv cells");
-        s.execute("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mapping": { "A": "Alpha" } })).expect("recodeLevels");
+        s.execute("table.recodeLevels", json!({ "sheet_id": "mv-1", "col": 0, "mappings": { "A": "Alpha" } })).expect("recodeLevels");
         s.execute("table.setCategoricalOrder", json!({ "sheet_id": "mv-1", "col": 0, "order": ["Alpha"] })).expect("setCategoricalOrder");
         s.execute("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "title": "Double", "formula": "= [Dose] * 2" }))
             .expect("setCalculatedVariable");
@@ -5219,7 +5259,7 @@ mod tests {
     fn nested_subcolumn_titles_preserve_biological_unit_width_and_checkpoint_roundtrip() -> Result<(), String> {
         let mut s = Session::new();
         // rows (4) > biological_units (2)
-        s.execute("sheet.createData", json!({ "sheet_id": "nest-tall", "archetype": "nested", "cols": 2, "rows": 4, "replicates": 2 }))
+        s.execute("sheet.createData", json!({ "sheet_id": "nest-tall", "kind": "nested", "cols": 2, "rows": 4, "replicates": 2 }))
             .map_err(|e| e.to_string())?;
         s.execute("table.setSubcolumnTitles", json!({ "sheet_id": "nest-tall", "col": 0, "titles": ["Unit 1", "Unit 2"] }))
             .map_err(|e| e.to_string())?;

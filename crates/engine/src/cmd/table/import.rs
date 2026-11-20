@@ -22,9 +22,9 @@ use serde_json::{Value, json};
 use crate::{CommandOutcome, EngineError, ErrorCode, ExternalPathPolicy, dag};
 
 use super::{
-    BaselineInput, CellRangeInput, PlacementFields, anchor_schema, cell_range_schema, col_ref_schema, decimal_sep_schema, delimiter_schema,
-    ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions, parse_import_filter_val, parse_table_kind, parse_target_archetype_kind,
-    resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter, resolve_subcolumn_mode,
+    BaselineInput, CellRangeInput, PlacementFields, anchor_schema, baseline_schema, cell_range_schema, col_ref_schema, decimal_sep_schema,
+    delimiter_schema, ensure_mv_edit_preserves_calculated, ensure_range_outside_linked_regions, import_filter_schema, parse_import_filter_val,
+    parse_table_kind, parse_target_archetype_kind, resolve_baseline_adjustment, resolve_decimal_char, resolve_delimiter, resolve_subcolumn_mode,
 };
 use crate::cmd::Ctx;
 use crate::cmd::helpers::{
@@ -34,7 +34,7 @@ use crate::cmd::helpers::{
 };
 use crate::cmd::params::{
     any_json_schema, array_schema, bool_schema, int_schema, non_empty_str_schema, nullable_schema, num_schema, obj_schema_with_aliases, parse_params,
-    str_schema,
+    record_deprecated_object_aliases, str_schema,
 };
 use crate::cmd::project::recalculate_dirty_with_links;
 
@@ -140,8 +140,8 @@ pub(super) fn schema_paste_link() -> Value {
             ("delimiter", delimiter_schema()),
             ("decimal_separator", decimal_sep_schema()),
             ("normalize_decimal", bool_schema("Infer European decimal separator when ambiguous")),
-            ("filter", nullable_schema(json!({ "type": "object" }))),
-            ("baseline", nullable_schema(json!({ "type": "object" }))),
+            ("filter", nullable_schema(import_filter_schema())),
+            ("baseline", nullable_schema(baseline_schema())),
             ("exclude_row_predicate", nullable_schema(str_schema("Optional predicate excluding matching linked rows"))),
             ("link_id", nullable_schema(str_schema("Custom link identifier"))),
             ("provenance", nullable_schema(str_schema("Custom provenance note recorded in linked InfoSheet"))),
@@ -456,7 +456,7 @@ pub(super) fn schema_import_csv() -> Value {
                 "archetype",
                 nullable_schema(str_schema("Target archetype (XY, Column, Grouped, Contingency, Survival, PartsOfWhole, MultipleVariables, Nested)")),
             ),
-            ("filter", nullable_schema(json!({ "type": "object" }))),
+            ("filter", nullable_schema(import_filter_schema())),
             ("link", bool_schema("When importing from `path` into an existing sheet, keep a live file link")),
             ("anchor", anchor_schema()),
             ("start_row", int_schema("Target anchor row", Some(0), None)),
@@ -1056,6 +1056,19 @@ pub(super) fn parse_plate_well_role(val: &Value) -> Result<PlateWellRole, Engine
         #[serde(alias = "rep")]
         replicate: Option<usize>,
     }
+    record_deprecated_object_aliases(
+        val,
+        &[
+            ("type", "role"),
+            ("kind", "role"),
+            ("groupName", "group_name"),
+            ("group", "group_name"),
+            ("dilutionX", "dilution_x"),
+            ("x", "dilution_x"),
+            ("concentration", "dilution_x"),
+            ("rep", "replicate"),
+        ],
+    );
     let obj: RoleObj =
         serde_json::from_value(val.clone()).map_err(|_| EngineError::with_code(ErrorCode::BadInput, "plate well role must be a string or object"))?;
     if let Some(kind) = obj.role.as_deref() {
@@ -1093,6 +1106,10 @@ pub(super) fn parse_plate_template_obj(val: &Value, default_name: &str) -> Resul
         #[serde(alias = "roles")]
         wells: Vec<Value>,
     }
+    record_deprecated_object_aliases(
+        val,
+        &[("plate_geometry", "geometry"), ("plateGeometry", "geometry"), ("title", "name"), ("xTitle", "x_title"), ("roles", "wells")],
+    );
     let obj: TplObj = serde_json::from_value(val.clone())
         .map_err(|err| EngineError::with_code(ErrorCode::BadInput, format!("invalid plate `template` object: {err}")))?;
     let geometry = obj.geometry.resolve()?;

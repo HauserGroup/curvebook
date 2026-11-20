@@ -25,8 +25,8 @@ pub use curvebook_doc::{ErrorCategory, ErrorCode, RemediationKind};
 use curvebook_fit::FitError;
 #[cfg(not(target_arch = "wasm32"))]
 use curvebook_format::DirectoryJournalBackend;
-use curvebook_format::FormatError;
 use curvebook_format::recovery::{CrashRecoveryJournal, JournalBackend, JournalRecoveryWarning, RecoveryReport};
+use curvebook_format::{FormatError, normalize_command_params_in_place};
 use curvebook_math::MathError;
 use curvebook_pdf::PdfError;
 use curvebook_platform::PlatformError;
@@ -629,7 +629,13 @@ mod structured_error_and_dispatch_tests {
             true
         }
         fn noop_run(_ctx: &mut Ctx<'_>, _params: Value) -> Result<CommandOutcome, EngineError> {
-            Ok(CommandOutcome { command_id: String::from("test.read"), mutated: false, message: String::from("ok"), payload: json!({}) })
+            Ok(CommandOutcome {
+                command_id: String::from("test.read"),
+                mutated: false,
+                message: String::from("ok"),
+                payload: json!({}),
+                warnings: Vec::new(),
+            })
         }
         fn mutating_fail(ctx: &mut Ctx<'_>, _params: Value) -> Result<CommandOutcome, EngineError> {
             ctx.session.doc.title = String::from("Corrupted Title");
@@ -679,19 +685,22 @@ pub struct CommandOutcome {
     pub mutated: bool,
     pub message: String,
     pub payload: serde_json::Value,
+    /// Non-fatal warnings emitted during execution (for example retired parameter aliases).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub warnings: Vec<String>,
 }
 
 impl CommandOutcome {
     /// Construct a mutating command outcome.
     #[must_use]
     pub fn mutated(command_id: impl Into<String>, message: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self { command_id: command_id.into(), mutated: true, message: message.into(), payload }
+        Self { command_id: command_id.into(), mutated: true, message: message.into(), payload, warnings: Vec::new() }
     }
 
     /// Construct a read-only command outcome (leaves undo stack and dirty state untouched).
     #[must_use]
     pub fn read_only(command_id: impl Into<String>, message: impl Into<String>, payload: serde_json::Value) -> Self {
-        Self { command_id: command_id.into(), mutated: false, message: message.into(), payload }
+        Self { command_id: command_id.into(), mutated: false, message: message.into(), payload, warnings: Vec::new() }
     }
 }
 
@@ -954,7 +963,8 @@ impl Session {
         caller: Caller,
         cancelled: &AtomicBool,
     ) -> Result<CommandOutcome, EngineError> {
-        let journal_params = params.clone();
+        let mut journal_params = params.clone();
+        let _ = normalize_command_params_in_place(command_id, &mut journal_params);
         self.execute_with_caller_and_hook(command_id, params, caller, cancelled, |session, outcome| {
             session.record_outcome_to_journal(journal, command_id, &journal_params, outcome.mutated)
         })
@@ -1021,7 +1031,8 @@ fn replay_recovered_commands(
                 ));
         };
         let params = cmd.get("params").cloned().unwrap_or_else(|| json!({}));
-        if let Err(err) = session.execute(command_id, params) {
+        let cancel = AtomicBool::new(false);
+        if let Err(err) = session.execute_with_caller(command_id, params, Caller::Replay, &cancel) {
             if skip_unreplayable {
                 skipped.push(JournalRecoveryWarning {
                     line: 0,
@@ -1034,6 +1045,25 @@ fn replay_recovered_commands(
         }
     }
     Ok(skipped)
+}
+
+fn invoke_spec_run(
+    session: &mut Session,
+    spec: &cmd::CommandSpec,
+    params: Value,
+    caller: Caller,
+    cancelled: &AtomicBool,
+) -> Result<CommandOutcome, EngineError> {
+    let scope = cmd::params::DeprecationScope::enter();
+    let mut outcome = guard::run_guarded(spec.id, || {
+        let mut ctx = cmd::Ctx { session, caller, cancelled };
+        (spec.run)(&mut ctx, params)
+    })?;
+    let warnings = scope.finish_warnings(spec.id);
+    if caller != Caller::Replay {
+        outcome.warnings.extend(warnings);
+    }
+    Ok(outcome)
 }
 
 impl Default for Session {
@@ -1277,10 +1307,7 @@ impl Session {
         if read_only {
             let before_active = self.doc.active_sheet_id.clone();
             let before_anchor = self.doc.family_anchor_sheet_id.clone();
-            let res = guard::run_guarded(spec.id, || {
-                let mut ctx = cmd::Ctx { session: self, caller, cancelled };
-                (spec.run)(&mut ctx, params)
-            })?;
+            let res = invoke_spec_run(self, spec, params, caller, cancelled)?;
             if let Err(hook_err) = after_commit(self, &res) {
                 self.doc.active_sheet_id = before_active;
                 self.doc.family_anchor_sheet_id = before_anchor;
@@ -1311,10 +1338,7 @@ impl Session {
                 || self.undo_checkpoint_bytes().saturating_add(document_checkpoint_bytes(&self.doc)) > MAX_UNDO_CHECKPOINT_BYTES_BUDGET);
         let undo_backup = redo_may_evict.then(|| self.undo_stack.clone());
 
-        let res = guard::run_guarded(spec.id, || {
-            let mut ctx = cmd::Ctx { session: self, caller, cancelled };
-            (spec.run)(&mut ctx, params)
-        })?;
+        let res = invoke_spec_run(self, spec, params, caller, cancelled)?;
         if let Err(hook_err) = after_commit(self, &res) {
             if res.mutated {
                 if spec.id == "edit.undo" {
@@ -1352,19 +1376,13 @@ impl Session {
         let clears_file_path_on_mutate = matches!(spec.id, "file.new" | "project.new" | "project.instantiateTemplate")
             || (matches!(spec.id, "table.importPrism" | "table.importPzfx") && !params.get("merge").and_then(Value::as_bool).unwrap_or(false))
             || (spec.id == "project.open"
-                && !params
-                    .get("path")
-                    .or_else(|| params.get("file_path"))
-                    .or_else(|| params.get("filePath"))
+                && !cmd::spellings::first_present(&params, &["path", "file_path", "filePath"])
                     .and_then(Value::as_str)
                     .is_some_and(|s| !s.trim().is_empty()));
         let before = self.doc.clone();
         let before_path = self.file_path.clone();
         let before_dirty = self.dirty;
-        let outcome = guard::run_guarded(spec.id, || {
-            let mut ctx = cmd::Ctx { session: self, caller, cancelled };
-            (spec.run)(&mut ctx, params)
-        });
+        let outcome = invoke_spec_run(self, spec, params, caller, cancelled);
 
         match outcome {
             Ok(res) => {

@@ -615,7 +615,7 @@ Registered commands: 97
 - **Menu:** `Format/Selected Points...`
 - **Summary:** Apply, merge, replace, or clear per-point visual overrides across one or more selected graph points.
 - **Beginner note:** Highlights or hides specific data points (changing color, symbol, size, border, or visibility) without modifying the whole series.
-- **Parameters:** `border_width_pt` (any), `clear` (boolean), `color` (any), `fill_color` (any), `fill_mode` (any), `hidden` (boolean), `mode` (string), `overrides` (array), `points` (array), `shape` (any), `sheet_id*` (string), `size_pt` (any), `stroke_width_pt` (any), `symbol` (any)
+- **Parameters:** `border_width_pt` (any), `clear` (boolean), `color` (any), `fill_color` (any), `fill_mode` (any), `hidden` (boolean), `mode` (string), `overrides` (array), `points` (array), `sheet_id*` (string), `size_pt` (any), `symbol` (any)
 
 ### `graph.initialize` — Initialize Graph
 

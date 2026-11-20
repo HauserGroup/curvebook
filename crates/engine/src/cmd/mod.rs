@@ -310,7 +310,13 @@ mod tests {
     use crate::cmd::params::{empty_object_schema, non_empty_str_schema, obj_schema};
 
     fn noop_run(ctx: &mut Ctx<'_>, _params: Value) -> Result<CommandOutcome, EngineError> {
-        Ok(CommandOutcome { command_id: String::from("test.noop"), mutated: false, message: format!("caller={:?}", ctx.caller), payload: json!({}) })
+        Ok(CommandOutcome {
+            command_id: String::from("test.noop"),
+            mutated: false,
+            message: format!("caller={:?}", ctx.caller),
+            payload: json!({}),
+            warnings: Vec::new(),
+        })
     }
 
     fn always_enabled(_session: &Session) -> bool {

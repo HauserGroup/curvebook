@@ -164,7 +164,7 @@ fn xy_session() -> Session {
     setup(
         &mut s,
         "sheet.createData",
-        json!({ "sheet_id": "xy", "title": "Dose", "archetype": "xy", "rows": 8, "cols": 1, "replicates": 2, "auto_info": true, "auto_graph": false }),
+        json!({ "sheet_id": "xy", "title": "Dose", "kind": "xy", "rows": 8, "cols": 1, "replicates": 2, "auto_info": true, "auto_graph": false }),
     );
     let log_doses = [-9.0, -8.0, -7.0, -6.5, -6.0, -5.5, -5.0, -4.0];
     let mut x_cells = Vec::new();
@@ -175,15 +175,15 @@ fn xy_session() -> Session {
         y_cells.push(json!({ "row": row, "col": 0, "subcol": 0, "value": ideal - 0.8 }));
         y_cells.push(json!({ "row": row, "col": 0, "subcol": 1, "value": ideal + 0.8 }));
     }
-    setup(&mut s, "table.setXCells", json!({ "sheet_id": "xy", "cells": x_cells }));
-    setup(&mut s, "table.setCells", json!({ "sheet_id": "xy", "cells": y_cells }));
+    setup(&mut s, "table.setXCells", json!({ "sheet_id": "xy", "edits": x_cells }));
+    setup(&mut s, "table.setCells", json!({ "sheet_id": "xy", "edits": y_cells }));
     setup(&mut s, "info.setConstant", json!({ "sheet_id": "xy", "name": "Floor", "value": 0.0 }));
     s
 }
 
 fn xy_with_transform(extra: Value) -> Session {
     let mut s = xy_session();
-    let mut params = json!({ "source_sheet": "xy", "sheet_id": "res" });
+    let mut params = json!({ "source_sheet_id": "xy", "sheet_id": "res" });
     merge(&mut params, &extra);
     setup(&mut s, "transform.run", params);
     s
@@ -191,17 +191,13 @@ fn xy_with_transform(extra: Value) -> Session {
 
 fn xy_graph_session() -> Session {
     let mut s = xy_session();
-    setup(&mut s, "graph.create", json!({ "sheet_id": "g", "source_sheet_id": "xy", "kind": "xy", "title": "Dose graph" }));
+    setup(&mut s, "graph.create", json!({ "sheet_id": "g", "data_sheet_id": "xy", "kind": "xy", "title": "Dose graph" }));
     s
 }
 
 fn column_session() -> Session {
     let mut s = Session::new();
-    setup(
-        &mut s,
-        "sheet.createData",
-        json!({ "sheet_id": "col", "title": "Cohorts", "archetype": "column", "rows": 6, "cols": 3, "auto_graph": false }),
-    );
+    setup(&mut s, "sheet.createData", json!({ "sheet_id": "col", "title": "Cohorts", "kind": "column", "rows": 6, "cols": 3, "auto_graph": false }));
     setup(&mut s, "table.setGroupTitles", json!({ "sheet_id": "col", "titles": ["Vehicle", "Low", "High"] }));
     setup(
         &mut s,
@@ -213,11 +209,7 @@ fn column_session() -> Session {
 
 fn pvalue_session() -> Session {
     let mut s = Session::new();
-    setup(
-        &mut s,
-        "sheet.createData",
-        json!({ "sheet_id": "pv", "title": "P values", "archetype": "column", "rows": 6, "cols": 2, "auto_graph": false }),
-    );
+    setup(&mut s, "sheet.createData", json!({ "sheet_id": "pv", "title": "P values", "kind": "column", "rows": 6, "cols": 2, "auto_graph": false }));
     setup(
         &mut s,
         "table.paste",
@@ -231,7 +223,7 @@ fn contingency_session() -> Session {
     setup(
         &mut s,
         "sheet.createData",
-        json!({ "sheet_id": "ct", "title": "Response", "archetype": "contingency", "rows": 2, "cols": 2, "auto_graph": false }),
+        json!({ "sheet_id": "ct", "title": "Response", "kind": "contingency", "rows": 2, "cols": 2, "auto_graph": false }),
     );
     setup(&mut s, "table.paste", json!({ "sheet_id": "ct", "text": "9\t2\n3\t10" }));
     s
@@ -257,7 +249,7 @@ fn mv_session(with_missing: bool) -> Session {
     setup(
         &mut s,
         "sheet.createData",
-        json!({ "sheet_id": "mv", "title": "Clinical", "archetype": "multiple_variables", "rows": MV_ROWS.len(), "cols": 5, "auto_graph": false }),
+        json!({ "sheet_id": "mv", "title": "Clinical", "kind": "multiple_variables", "rows": MV_ROWS.len(), "cols": 5, "auto_graph": false }),
     );
     setup(&mut s, "table.setGroupTitles", json!({ "sheet_id": "mv", "titles": ["Response", "Time", "Status", "Cohort", "Age"] }));
     let mut text = String::new();
@@ -282,7 +274,7 @@ impl Fx {
             Self::XyGraph => xy_graph_session(),
             Self::XyGraphFit => {
                 let mut s = xy_graph_session();
-                setup(&mut s, "fit.run", json!({ "source_sheet": "xy", "sheet_id": "fit", "kind": "four_parameter_logistic" }));
+                setup(&mut s, "fit.run", json!({ "source_sheet_id": "xy", "sheet_id": "fit", "kind": "four_parameter_logistic" }));
                 s
             }
             Self::Col => column_session(),
@@ -295,7 +287,7 @@ impl Fx {
             Self::Ct => contingency_session(),
             Self::CtRes => {
                 let mut s = contingency_session();
-                setup(&mut s, "stats.run", json!({ "source_sheet": "ct", "sheet_id": "res", "kind": "contingency" }));
+                setup(&mut s, "stats.run", json!({ "source_sheet_id": "ct", "sheet_id": "res", "kind": "contingency" }));
                 s
             }
             Self::Mv => mv_session(false),
@@ -305,13 +297,13 @@ impl Fx {
                 setup(
                     &mut s,
                     "stats.run",
-                    json!({ "source_sheet": "mv", "sheet_id": "res", "kind": "cox_ph", "time_column": 1, "status_column": 2, "predictor_columns": [0] }),
+                    json!({ "source_sheet_id": "mv", "sheet_id": "res", "kind": "cox_ph", "time_column": 1, "status_column": 2, "predictor_columns": [0] }),
                 );
                 s
             }
             Self::MvCluster => {
                 let mut s = mv_session(false);
-                setup(&mut s, "stats.run", json!({ "source_sheet": "mv", "sheet_id": "res", "kind": "clustering" }));
+                setup(&mut s, "stats.run", json!({ "source_sheet_id": "mv", "sheet_id": "res", "kind": "clustering" }));
                 s
             }
         }
@@ -480,8 +472,16 @@ fn custom(out: &mut Vec<Case>, group: &'static str, label: &str, fixture: Fx, co
 // Corpus: analysis.rs
 // ---------------------------------------------------------------------------
 
+fn canonical_spelling(group: &str) -> &'static str {
+    spellings_of(group)[0]
+}
+
+fn deprecated_spellings(group: &str) -> &'static [&'static str] {
+    &spellings_of(group)[1..]
+}
+
 fn transform_run(kind: &str) -> Value {
-    json!({ "source_sheet": "xy", "sheet_id": "res", "kind": kind })
+    json!({ "source_sheet_id": "xy", "sheet_id": "res", "kind": kind })
 }
 
 fn update_res() -> Value {
@@ -509,7 +509,7 @@ fn transform_specs() -> Vec<GroupSpec> {
         // The simulate shorthand's default equation id is unknown to the simulator, so pin a built-in one.
         spec(
             site("TRANSFORM_ROW_COUNT", "run/", Fx::Xy, "transform.run"),
-            top(json!({ "source_sheet": "xy", "sheet_id": "res", "kind": "simulate", "equation_id": "hill_4pl" })),
+            top(json!({ "source_sheet_id": "xy", "sheet_id": "res", "kind": "simulate", "equation_id": "hill_4pl" })),
             json!(5),
         )
         .alt("7", json!(7))
@@ -518,7 +518,7 @@ fn transform_specs() -> Vec<GroupSpec> {
 }
 
 fn select_base() -> Value {
-    json!({ "source_sheet": "mv", "sheet_id": "res", "kind": "select_and_transform", "target_archetype": "MultipleVariables" })
+    json!({ "source_sheet_id": "mv", "sheet_id": "res", "kind": "select_and_transform", "target_archetype": "MultipleVariables" })
 }
 
 fn derived_specs() -> Vec<GroupSpec> {
@@ -545,7 +545,7 @@ fn derived_specs() -> Vec<GroupSpec> {
 }
 
 fn stats_on(sheet: &str, kind: &str, extra: Value) -> Value {
-    let mut base = json!({ "source_sheet": sheet, "sheet_id": "res", "kind": kind });
+    let mut base = json!({ "source_sheet_id": sheet, "sheet_id": "res", "kind": kind });
     merge(&mut base, &extra);
     base
 }
@@ -652,7 +652,7 @@ fn glm_specs() -> Vec<GroupSpec> {
 }
 
 fn fit_base(extra: Value) -> Value {
-    let mut base = json!({ "source_sheet": "xy", "sheet_id": "res", "kind": "four_parameter_logistic" });
+    let mut base = json!({ "source_sheet_id": "xy", "sheet_id": "res", "kind": "four_parameter_logistic" });
     merge(&mut base, &extra);
     base
 }
@@ -665,7 +665,7 @@ fn fit_specs() -> Vec<GroupSpec> {
     let in_comparison = |inner: Value| nested(inner, with_params(fit_base(json!({})), "comparison", |obj| obj));
     let in_rule = |inner: Value| nested(inner, with_params(fit_base(json!({})), "parameter_rules", |obj| Value::Array(vec![obj])));
     vec![
-        spec(site("LINEAR_DEMING", "", Fx::Xy, "fit.run"), top(json!({ "source_sheet": "xy", "sheet_id": "res", "kind": "linear" })), json!(true))
+        spec(site("LINEAR_DEMING", "", Fx::Xy, "fit.run"), top(json!({ "source_sheet_id": "xy", "sheet_id": "res", "kind": "linear" })), json!(true))
             .alt("false", json!(false))
             .wrong(json!("yes")),
         fit("NONLINEAR_FIT_METHOD", json!({}), json!("robust")).alt("poisson", json!("poisson")).wrong(json!(5)),
@@ -989,13 +989,30 @@ fn document_hash(session: &Session) -> String {
     format!("{:016x}", fnv1a64(text.as_bytes()))
 }
 
-fn run_case(case: &Case, fixtures: &HashMap<Fx, Session>) -> String {
+fn run_case_detailed(
+    case: &Case,
+    fixtures: &HashMap<Fx, Session>,
+) -> (Result<curvebook_engine::CommandOutcome, curvebook_engine::EngineError>, String) {
     let mut session = fixtures.get(&case.fixture).cloned().unwrap_or_else(|| panic!("missing fixture {:?}", case.fixture));
     let cancelled = AtomicBool::new(false);
     match session.execute_with_caller(case.command, case.params.clone(), case.caller, &cancelled) {
-        Ok(_) => format!("ok:{}", document_hash(&session)),
-        Err(err) => format!("err:{:?}:{err}", err.code),
+        Ok(outcome) => {
+            let label = if outcome.warnings.is_empty() {
+                format!("ok:{}", document_hash(&session))
+            } else {
+                format!("ok[deprecated:{}]:{}", outcome.warnings.len(), document_hash(&session))
+            };
+            (Ok(outcome), label)
+        }
+        Err(err) => {
+            let formatted = format!("err:{:?}:{err}", err.code);
+            (Err(err), formatted)
+        }
     }
+}
+
+fn run_case(case: &Case, fixtures: &HashMap<Fx, Session>) -> String {
+    run_case_detailed(case, fixtures).1
 }
 
 fn build_fixtures() -> HashMap<Fx, Session> {
@@ -1141,4 +1158,65 @@ fn groups_match_engine_spelling_tables() {
     let engine: Vec<(&str, Vec<&str>)> = curvebook_engine::cmd::spellings::ALL.iter().map(|(name, s)| (*name, s.to_vec())).collect();
     let corpus: Vec<(&str, Vec<&str>)> = GROUPS.iter().map(|(name, s)| (*name, s.to_vec())).collect();
     assert_eq!(corpus, engine, "GROUPS must list exactly the tables in `curvebook_engine::cmd::spellings::ALL`, in the same order");
+}
+
+#[test]
+fn retired_spellings_emit_deprecation_warnings_while_canonical_emits_none() {
+    for (group, spellings) in GROUPS {
+        let canonical = canonical_spelling(group);
+        let retired = deprecated_spellings(group);
+        assert_eq!(canonical, spellings[0]);
+        assert!(!retired.is_empty(), "group `{group}` must mark at least one retired spelling");
+        assert!(!canonical.chars().any(char::is_uppercase), "canonical spelling `{canonical}` in `{group}` must be snake_case");
+    }
+
+    let fixtures = build_fixtures();
+    let cases = corpus();
+    let mut canonical_hashes: BTreeMap<(String, String), String> = BTreeMap::new();
+
+    for case in &cases {
+        let leaf = case.label.rsplit_once('/').map_or(case.label.as_str(), |(_, r)| r);
+        let canonical = canonical_spelling(case.group);
+        let retired = deprecated_spellings(case.group);
+        let variant_key = (case.group.to_owned(), case.label.rsplit_once('/').map_or_else(String::new, |(v, _)| v.to_owned()));
+        let (result, outcome_str) = run_case_detailed(case, &fixtures);
+
+        let strict_false_only = case.fixture == Fx::ColStrict && leaf.starts_with("false_only:");
+        if leaf == "baseline" {
+            if let Ok(outcome) = result {
+                assert!(outcome.warnings.is_empty(), "baseline `{}` emitted unexpected deprecation warning(s): {:?}", case.key(), outcome.warnings);
+            }
+        } else if leaf == format!("spelling:{canonical}") || leaf == format!("false_only:{canonical}") {
+            if strict_false_only {
+                assert!(result.is_err(), "strict MCP false_only `{}` should be blocked", case.key());
+                continue;
+            }
+            let outcome = result.unwrap_or_else(|e| panic!("canonical `{}` failed: {e}", case.key()));
+            assert!(outcome.warnings.is_empty(), "canonical `{}` emitted unexpected deprecation warning(s): {:?}", case.key(), outcome.warnings);
+            if leaf == format!("spelling:{canonical}") {
+                let hash = outcome_str.strip_prefix("ok:").expect("canonical outcome must have no deprecated prefix");
+                canonical_hashes.insert(variant_key, hash.to_owned());
+            }
+        } else if let Some(used_spelling) = leaf.strip_prefix("spelling:").or_else(|| leaf.strip_prefix("false_only:")) {
+            assert!(retired.contains(&used_spelling), "unexpected non-canonical spelling `{used_spelling}` in `{}`", case.key());
+            if strict_false_only {
+                assert!(result.is_err(), "strict MCP false_only `{}` should be blocked", case.key());
+                continue;
+            }
+            let outcome = result.unwrap_or_else(|e| panic!("retired spelling `{}` failed during deprecation window: {e}", case.key()));
+            assert!(
+                outcome.warnings.iter().any(|w| w.contains(used_spelling) && w.contains(canonical) && w.contains(case.command)),
+                "retired spelling `{}` expected warning naming `{used_spelling}`, `{canonical}`, and `{}`; got {:?}",
+                case.key(),
+                case.command,
+                outcome.warnings
+            );
+            if leaf.starts_with("spelling:")
+                && let Some(canon_hash) = canonical_hashes.get(&variant_key)
+            {
+                let dep_hash = outcome_str.rsplit_once(':').map_or("", |(_, h)| h);
+                assert_eq!(dep_hash, canon_hash.as_str(), "retired spelling `{}` changed document hash during deprecation window", case.key());
+            }
+        }
+    }
 }

@@ -47,12 +47,14 @@
           "type": "string"
         },
         "command": {
+          "deprecated": true,
           "minLength": 1,
           "pattern": "\\S",
           "type": "string"
         },
         "id": {},
         "method": {
+          "deprecated": true,
           "minLength": 1,
           "pattern": "\\S",
           "type": "string"
@@ -65,7 +67,13 @@
         }
       },
       "title": "BatchCommand",
-      "type": "object"
+      "type": "object",
+      "x-deprecated-aliases": {
+        "cmd": [
+          "command",
+          "method"
+        ]
+      }
     },
     "BatchExport": {
       "additionalProperties": false,
@@ -140,6 +148,7 @@
           ]
         },
         "pdfVersion": {
+          "deprecated": true,
           "enum": [
             "1.4",
             "1.7",
@@ -175,6 +184,7 @@
           ]
         },
         "sheetId": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -182,6 +192,7 @@
           ]
         },
         "sheet_id": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -189,6 +200,7 @@
           ]
         },
         "tabIndex": {
+          "deprecated": true,
           "minimum": 0,
           "type": [
             "integer",
@@ -203,6 +215,7 @@
           ]
         },
         "ttfFont": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -218,7 +231,22 @@
         }
       },
       "title": "BatchExport",
-      "type": "object"
+      "type": "object",
+      "x-deprecated-aliases": {
+        "pdf_version": [
+          "pdfVersion"
+        ],
+        "sheet": [
+          "sheet_id",
+          "sheetId"
+        ],
+        "tab_index": [
+          "tabIndex"
+        ],
+        "ttf_font": [
+          "ttfFont"
+        ]
+      }
     },
     "BatchInput": {
       "additionalProperties": false,
@@ -277,6 +305,7 @@
           ]
         },
         "decimalSeparator": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -326,6 +355,7 @@
           ]
         },
         "sheetId": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -333,6 +363,7 @@
           ]
         },
         "sheet_id": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -340,6 +371,7 @@
           ]
         },
         "subcolumnMode": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -354,6 +386,7 @@
           ]
         },
         "tableKind": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -361,6 +394,7 @@
           ]
         },
         "table_kind": {
+          "deprecated": true,
           "minLength": 1,
           "type": [
             "string",
@@ -376,7 +410,23 @@
         }
       },
       "title": "BatchInput",
-      "type": "object"
+      "type": "object",
+      "x-deprecated-aliases": {
+        "decimal_separator": [
+          "decimalSeparator"
+        ],
+        "kind": [
+          "table_kind",
+          "tableKind"
+        ],
+        "sheet": [
+          "sheet_id",
+          "sheetId"
+        ],
+        "subcolumn_mode": [
+          "subcolumnMode"
+        ]
+      }
     }
   },
   "$id": "https://github.com/HauserGroup/curvebook/blob/main/docs/schemas/batch-v1.schema.json",
