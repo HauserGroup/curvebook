@@ -10,12 +10,53 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use curvebook_format::ZipWriter;
 
 static TEMP_SEQ: AtomicU64 = AtomicU64::new(0);
+static CLEAN_FIXTURES: OnceLock<Result<CleanFixtures, String>> = OnceLock::new();
+
+struct CleanFixtures {
+    icon_32: Vec<u8>,
+    icon_svg: Vec<u8>,
+    mime_xml: Vec<u8>,
+    desktop_entry: Vec<u8>,
+    assets_md: Vec<u8>,
+    notice: Vec<u8>,
+    #[cfg(target_os = "macos")]
+    plist_tpl: String,
+    #[cfg(target_os = "macos")]
+    icns: Vec<u8>,
+}
+
+impl CleanFixtures {
+    fn shared(root: &Path) -> Result<&'static Self, String> {
+        let cached = CLEAN_FIXTURES.get_or_init(|| Self::load(root));
+        match cached {
+            Ok(fx) => Ok(fx),
+            Err(err) => Err(err.clone()),
+        }
+    }
+
+    fn load(root: &Path) -> Result<Self, String> {
+        let read_bytes = |rel: &str| fs::read(root.join(rel)).map_err(|e| format!("read {rel}: {e}"));
+        Ok(Self {
+            icon_32: read_bytes("assets/app-icon/hicolor/32x32/apps/org.curvebook.CurveBook.png")?,
+            icon_svg: read_bytes("assets/ui/toolbar_menus/new_project.svg")?,
+            mime_xml: read_bytes("packaging/linux/org.curvebook.CurveBook.mime.xml")?,
+            desktop_entry: read_bytes("packaging/linux/org.curvebook.CurveBook.desktop")?,
+            assets_md: read_bytes("ASSETS.md")?,
+            notice: read_bytes("NOTICE")?,
+            #[cfg(target_os = "macos")]
+            plist_tpl: fs::read_to_string(root.join("packaging/macos/Info.plist.in")).map_err(|e| format!("read Info.plist.in: {e}"))?,
+            #[cfg(target_os = "macos")]
+            icns: read_bytes("assets/app-icon/curvebook.icns")?,
+        })
+    }
+}
 
 struct TempDirGuard {
     path: PathBuf,
@@ -248,11 +289,12 @@ fn build_ustar_bytes(entries: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
     Ok(tar)
 }
 
-/// Build a SVR4/GNU `!<arch>\n` `.deb` archive (with trailing `/` member names, matching `nfpm` / GNU binutils).
-fn build_gnu_ar_deb(members: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
+/// Build an `!<arch>\n` `.deb` archive in memory (`trailing_slash = true` for SVR4/GNU `ar`,
+/// `false` for BSD `ar`).
+fn build_ar_deb(members: &[(&str, &[u8])], trailing_slash: bool) -> Result<Vec<u8>, String> {
     let mut out = Vec::from(&b"!<arch>\n"[..]);
     for &(name, payload) in members {
-        let tagged = format!("{name}/");
+        let tagged = if trailing_slash { format!("{name}/") } else { name.to_owned() };
         if tagged.len() > 16 {
             return Err(format!("ar member name > 16 bytes: {tagged}"));
         }
@@ -267,6 +309,18 @@ fn build_gnu_ar_deb(members: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
         }
     }
     Ok(out)
+}
+
+/// Build a SVR4/GNU `!<arch>\n` `.deb` archive (with trailing `/` member names, matching `nfpm` / GNU binutils).
+fn build_gnu_ar_deb(members: &[(&str, &[u8])]) -> Result<Vec<u8>, String> {
+    build_ar_deb(members, true)
+}
+
+/// Build a pure-Rust `.deb` in memory with either BSD or GNU `ar` headers, avoiding subprocess spawns.
+fn build_pure_deb(control_txt: &str, data_entries: &[(&str, &[u8])], trailing_slash: bool) -> Result<Vec<u8>, String> {
+    let ctrl_tgz = gzip_stored(&build_ustar_bytes(&[("control", control_txt.as_bytes())])?);
+    let data_tgz = gzip_stored(&build_ustar_bytes(data_entries)?);
+    build_ar_deb(&[("debian-binary", b"2.0\n"), ("control.tar.gz", &ctrl_tgz), ("data.tar.gz", &data_tgz)], trailing_slash)
 }
 
 /// Build a `.deb` at test time using host `ar` + `tar` when present (falling back to pure-Rust ustar+ar on Windows).
@@ -477,7 +531,20 @@ fn try_create_macos_dmg(src_folder: &Path, dmg_out: &Path) -> bool {
     let src_str = src_folder.to_string_lossy();
     let out_str = dmg_out.to_string_lossy();
     Command::new("/usr/bin/hdiutil")
-        .args(["create", "-srcfolder", src_str.as_ref(), "-volname", "CurveBook", "-fs", "HFS+", "-format", "UDZO", "-ov", out_str.as_ref()])
+        .args([
+            "create",
+            "-srcfolder",
+            src_str.as_ref(),
+            "-volname",
+            "CurveBook",
+            "-fs",
+            "HFS+",
+            "-format",
+            "UDRO",
+            "-nospotlight",
+            "-ov",
+            out_str.as_ref(),
+        ])
         .output()
         .is_ok_and(|o| o.status.success() && dmg_out.is_file())
 }
@@ -489,12 +556,7 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     let rel_dir = fx.path.join("release");
     fs::create_dir_all(&rel_dir).unwrap();
 
-    let icon_32 = fs::read(root.join("assets/app-icon/hicolor/32x32/apps/org.curvebook.CurveBook.png")).unwrap();
-    let icon_svg = fs::read(root.join("assets/app-icon/hicolor/scalable/apps/org.curvebook.CurveBook.svg")).unwrap();
-    let mime_xml = fs::read(root.join("packaging/linux/org.curvebook.CurveBook.mime.xml")).unwrap();
-    let desktop_entry = fs::read(root.join("packaging/linux/org.curvebook.CurveBook.desktop")).unwrap();
-    let assets_md = fs::read(root.join("ASSETS.md")).unwrap();
-    let notice = fs::read(root.join("NOTICE")).unwrap();
+    let assets = CleanFixtures::shared(&root)?;
 
     // 1. Plain HTML compliance report
     fs::write(
@@ -508,20 +570,20 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     web_zip
         .add_file("curvebook-web-0.1.0/index.html", b"<!doctype html><title>CurveBook</title><input accept=\".curvebook,.pzfx,.prism\">".to_vec())
         .unwrap();
-    web_zip.add_file("curvebook-web-0.1.0/icons/32/org.curvebook.CurveBook.png", icon_32.clone()).unwrap();
-    web_zip.add_file("curvebook-web-0.1.0/icons/org.curvebook.CurveBook.svg", icon_svg).unwrap();
-    web_zip.add_file("curvebook-web-0.1.0/ASSETS.md", assets_md.clone()).unwrap();
-    web_zip.add_file("curvebook-web-0.1.0/NOTICE", notice.clone()).unwrap();
+    web_zip.add_file("curvebook-web-0.1.0/icons/32/org.curvebook.CurveBook.png", assets.icon_32.clone()).unwrap();
+    web_zip.add_file("curvebook-web-0.1.0/icons/new_project.svg", assets.icon_svg.clone()).unwrap();
+    web_zip.add_file("curvebook-web-0.1.0/ASSETS.md", assets.assets_md.clone()).unwrap();
+    web_zip.add_file("curvebook-web-0.1.0/NOTICE", assets.notice.clone()).unwrap();
     fs::write(rel_dir.join("curvebook-web-0.1.0.zip"), web_zip.finish().unwrap()).unwrap();
 
     // 3. Linux/FreeBSD `.tar.gz` (including installed Freedesktop `usr/share/mime/packages/org.curvebook.CurveBook.xml`!)
     let tgz_bytes = gzip_stored(&build_ustar_bytes(&[
         ("curvebook-0.1.0-linux-x86_64/usr/bin/curvebook", b"\x7fELF_clean_binary_stub"),
-        ("curvebook-0.1.0-linux-x86_64/usr/share/applications/org.curvebook.CurveBook.desktop", &desktop_entry),
-        ("curvebook-0.1.0-linux-x86_64/usr/share/mime/packages/org.curvebook.CurveBook.xml", &mime_xml),
-        ("curvebook-0.1.0-linux-x86_64/usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &icon_32),
-        ("curvebook-0.1.0-linux-x86_64/usr/share/doc/curvebook/ASSETS.md", &assets_md),
-        ("curvebook-0.1.0-linux-x86_64/usr/share/doc/curvebook/NOTICE", &notice),
+        ("curvebook-0.1.0-linux-x86_64/usr/share/applications/org.curvebook.CurveBook.desktop", &assets.desktop_entry),
+        ("curvebook-0.1.0-linux-x86_64/usr/share/mime/packages/org.curvebook.CurveBook.xml", &assets.mime_xml),
+        ("curvebook-0.1.0-linux-x86_64/usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &assets.icon_32),
+        ("curvebook-0.1.0-linux-x86_64/usr/share/doc/curvebook/ASSETS.md", &assets.assets_md),
+        ("curvebook-0.1.0-linux-x86_64/usr/share/doc/curvebook/NOTICE", &assets.notice),
     ])?);
     fs::write(rel_dir.join("curvebook-0.1.0-linux-x86_64.tar.gz"), tgz_bytes).unwrap();
 
@@ -529,16 +591,14 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     let clean_ctrl = "Package: curvebook\nVersion: 0.1.0\nArchitecture: amd64\nMaintainer: CurveBook Contributors\nDescription: Clean-room biostatistics and graphing\n";
     let deb_entries: &[(&str, &[u8])] = &[
         ("usr/bin/curvebook", b"\x7fELF_clean_deb_stub"),
-        ("usr/share/applications/org.curvebook.CurveBook.desktop", &desktop_entry),
-        ("usr/share/mime/packages/org.curvebook.CurveBook.xml", &mime_xml),
-        ("usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &icon_32),
-        ("usr/share/doc/curvebook/NOTICE", &notice),
+        ("usr/share/applications/org.curvebook.CurveBook.desktop", &assets.desktop_entry),
+        ("usr/share/mime/packages/org.curvebook.CurveBook.xml", &assets.mime_xml),
+        ("usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &assets.icon_32),
+        ("usr/share/doc/curvebook/NOTICE", &assets.notice),
     ];
     build_deb_via_host_ar_and_tar(&fx.path, &rel_dir.join("curvebook-0.1.0-linux-x86_64.deb"), clean_ctrl, deb_entries)?;
 
-    let gnu_ctrl_tgz = gzip_stored(&build_ustar_bytes(&[("control", clean_ctrl.as_bytes())])?);
-    let gnu_data_tgz = gzip_stored(&build_ustar_bytes(deb_entries)?);
-    let gnu_deb = build_gnu_ar_deb(&[("debian-binary", b"2.0\n"), ("control.tar.gz", &gnu_ctrl_tgz), ("data.tar.gz", &gnu_data_tgz)])?;
+    let gnu_deb = build_pure_deb(clean_ctrl, deb_entries, true)?;
     fs::write(rel_dir.join("curvebook-0.1.0-linux-aarch64.deb"), gnu_deb).unwrap();
 
     // 5. `.rpm` built dynamically at test time when the host has `bsdtar`
@@ -546,9 +606,9 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     if host_can_unpack_rpm() {
         let rpm_bytes = build_synthetic_rpm(&[
             ("usr/bin/curvebook", b"\x7fELF_clean_rpm_stub"),
-            ("usr/share/applications/org.curvebook.CurveBook.desktop", &desktop_entry),
-            ("usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &icon_32),
-            ("usr/share/doc/curvebook/NOTICE", &notice),
+            ("usr/share/applications/org.curvebook.CurveBook.desktop", &assets.desktop_entry),
+            ("usr/share/icons/hicolor/32x32/apps/org.curvebook.CurveBook.png", &assets.icon_32),
+            ("usr/share/doc/curvebook/NOTICE", &assets.notice),
         ]);
         fs::write(rel_dir.join("curvebook-0.1.0-linux-x86_64.rpm"), rpm_bytes).unwrap();
         expected_assets += 1;
@@ -566,10 +626,9 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
     {
         let dmg_src = fx.path.join("dmg-src");
         fs::create_dir_all(dmg_src.join("CurveBook.app/Contents/Resources")).unwrap();
-        let tpl = fs::read_to_string(root.join("packaging/macos/Info.plist.in")).unwrap();
-        let plist = tpl.replace("@VERSION@", "0.1.0").replace("@SHORT_VERSION@", "0.1.0").replace("@BUILD_SHA@", "abc1234");
+        let plist = assets.plist_tpl.replace("@VERSION@", "0.1.0").replace("@SHORT_VERSION@", "0.1.0").replace("@BUILD_SHA@", "abc1234");
         fs::write(dmg_src.join("CurveBook.app/Contents/Info.plist"), plist).unwrap();
-        fs::copy(root.join("assets/app-icon/curvebook.icns"), dmg_src.join("CurveBook.app/Contents/Resources/curvebook.icns")).unwrap();
+        fs::write(dmg_src.join("CurveBook.app/Contents/Resources/curvebook.icns"), &assets.icns).unwrap();
         std::os::unix::fs::symlink("/Applications", dmg_src.join("Applications")).unwrap();
         let dmg_out = rel_dir.join("curvebook-0.1.0-macos-universal.dmg");
         if try_create_macos_dmg(&dmg_src, &dmg_out) {
@@ -600,6 +659,9 @@ fn r026_clean_release_directory_passes_sha256_and_all_container_scanners() -> Re
 #[test]
 fn r026_planted_brand_tokens_inside_each_container_fail_closed_naming_container() -> Result<(), String> {
     let fx = TempDirGuard::new("planted-brands")?;
+    let dir = fx.path.join("planted-all");
+    fs::create_dir_all(&dir).unwrap();
+
     let brand_gp = join(&["Gr", "aph", "Pad"]);
     let brand_op = join(&["Ori", "gin", "Pro"]);
     let brand_sp = join(&["SP", "SS"]);
@@ -607,181 +669,97 @@ fn r026_planted_brand_tokens_inside_each_container_fail_closed_naming_container(
     let suite_ac = join(&["Art", "Cr", "aft"]);
 
     // 1. Planted token inside `.zip`
-    {
-        let dir = fx.path.join("case-zip");
-        fs::create_dir_all(&dir).unwrap();
-        let mut zw = ZipWriter::new();
-        zw.add_file("curvebook-cli/README.md", format!("Compatibility wrapper for {brand_gp} scripts\n").into_bytes()).unwrap();
-        fs::write(dir.join("curvebook-cli-0.1.0.zip"), zw.finish().unwrap()).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-cli-0.1.0.zip!curvebook-cli/README.md"), "{stderr}");
-    }
+    let mut zw = ZipWriter::new();
+    zw.add_file("curvebook-cli/README.md", format!("Compatibility wrapper for {brand_gp} scripts\n").into_bytes()).unwrap();
+    fs::write(dir.join("curvebook-cli-0.1.0.zip"), zw.finish().unwrap()).unwrap();
 
     // 2. Planted token inside `.tar.gz`
-    {
-        let dir = fx.path.join("case-tgz");
-        fs::create_dir_all(&dir).unwrap();
-        let tgz = gzip_stored(&build_ustar_bytes(&[(
-            "curvebook-0.1.0-freebsd/share/doc/curvebook/README.md",
-            format!("Replaces {brand_op} desktop installations\n").as_bytes(),
-        )])?);
-        fs::write(dir.join("curvebook-0.1.0-freebsd-x86_64.tar.gz"), tgz).unwrap();
-        write_sha256sums_for_dir(&dir)?;
+    let tgz = gzip_stored(&build_ustar_bytes(&[(
+        "curvebook-0.1.0-freebsd/share/doc/curvebook/README.md",
+        format!("Replaces {brand_op} desktop installations\n").as_bytes(),
+    )])?);
+    fs::write(dir.join("curvebook-0.1.0-freebsd-x86_64.tar.gz"), tgz).unwrap();
 
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-0.1.0-freebsd-x86_64.tar.gz!"), "{stderr}");
-    }
-
-    // 3. Planted token inside `.deb` `data.tar.gz` (built at test time via `ar` + `tar`)
-    {
-        let dir = fx.path.join("case-deb-data");
-        fs::create_dir_all(&dir).unwrap();
-        let ctrl = "Package: curvebook\nVersion: 0.1.0\nDescription: Clean control\n";
-        let leak = format!("[Desktop Entry]\nName=CurveBook\nKeywords=biostatistics;{brand_sp};\n");
-        build_deb_via_host_ar_and_tar(
-            &fx.path,
-            &dir.join("curvebook-0.1.0-amd64.deb"),
-            ctrl,
-            &[("usr/share/applications/org.curvebook.CurveBook.desktop", leak.as_bytes())],
-        )?;
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-0.1.0-amd64.deb!"), "{stderr}");
-    }
+    // 3. Planted token inside `.deb` `data.tar.gz`
+    let ctrl = "Package: curvebook\nVersion: 0.1.0\nDescription: Clean control\n";
+    let leak = format!("[Desktop Entry]\nName=CurveBook\nKeywords=biostatistics;{brand_sp};\n");
+    let deb_data = build_pure_deb(ctrl, &[("usr/share/applications/org.curvebook.CurveBook.desktop", leak.as_bytes())], false)?;
+    fs::write(dir.join("curvebook-0.1.0-amd64.deb"), deb_data).unwrap();
 
     // 4. Planted token inside `.deb` `control.tar.gz` metadata
-    {
-        let dir = fx.path.join("case-deb-ctrl");
-        fs::create_dir_all(&dir).unwrap();
-        let dirty_ctrl = format!("Package: curvebook\nVersion: 0.1.0\nDescription: Suite tool by {suite_ac}\n");
-        build_deb_via_host_ar_and_tar(
-            &fx.path,
-            &dir.join("curvebook-ctrl-leak.deb"),
-            &dirty_ctrl,
-            &[("usr/share/doc/curvebook/README.txt", b"Clean payload\n")],
-        )?;
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-ctrl-leak.deb!_deb_control/"), "{stderr}");
-    }
+    let dirty_ctrl = format!("Package: curvebook\nVersion: 0.1.0\nDescription: Suite tool by {suite_ac}\n");
+    let deb_ctrl = build_pure_deb(&dirty_ctrl, &[("usr/share/doc/curvebook/README.txt", b"Clean payload\n")], true)?;
+    fs::write(dir.join("curvebook-ctrl-leak.deb"), deb_ctrl).unwrap();
 
     // 5. Planted token inside `.rpm` (when the host has `bsdtar`)
-    if host_can_unpack_rpm() {
-        let dir = fx.path.join("case-rpm");
-        fs::create_dir_all(&dir).unwrap();
-        let leak = format!("Bundled {brand_mt} macro reference\n");
-        let rpm = build_synthetic_rpm(&[("usr/share/doc/curvebook/NOTES.txt", leak.as_bytes())]);
+    let has_rpm = host_can_unpack_rpm();
+    if has_rpm {
+        let rpm_leak = format!("Bundled {brand_mt} macro reference\n");
+        let rpm = build_synthetic_rpm(&[("usr/share/doc/curvebook/NOTES.txt", rpm_leak.as_bytes())]);
         fs::write(dir.join("curvebook-0.1.0-1.x86_64.rpm"), rpm).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-0.1.0-1.x86_64.rpm!usr/share/doc/curvebook/NOTES.txt"), "{stderr}");
     }
 
     // 6. Planted token inside `.AppImage.zsync` metadata header before binary block-hash trailer
-    {
-        let dir = fx.path.join("case-zsync");
-        fs::create_dir_all(&dir).unwrap();
-        let mut zsync =
-            format!("zsync: 0.6.2\nFilename: curvebook.AppImage\nURL: https://example.org/{suite_ac}/curvebook.AppImage\n\n").into_bytes();
-        zsync.extend_from_slice(&[0xff, 0x00, 0xa5, 0x5a]);
-        fs::write(dir.join("curvebook-0.1.0-linux-x86_64.AppImage.zsync"), zsync).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-0.1.0-linux-x86_64.AppImage.zsync"), "{stderr}");
-    }
+    let mut zsync = format!("zsync: 0.6.2\nFilename: curvebook.AppImage\nURL: https://example.org/{suite_ac}/curvebook.AppImage\n\n").into_bytes();
+    zsync.extend_from_slice(&[0xff, 0x00, 0xa5, 0x5a]);
+    fs::write(dir.join("curvebook-0.1.0-linux-x86_64.AppImage.zsync"), zsync).unwrap();
 
     // 7. Planted token inside `THIRD-PARTY-LICENSES.html`
-    {
-        let dir = fx.path.join("case-html");
-        fs::create_dir_all(&dir).unwrap();
-        fs::write(
-            dir.join("THIRD-PARTY-LICENSES.html"),
-            format!("<!doctype html><html><head><title>{brand_gp} Third-Party Notices</title></head><body>Clean body</body></html>\n"),
-        )
-        .unwrap();
-        write_sha256sums_for_dir(&dir)?;
+    fs::write(
+        dir.join("THIRD-PARTY-LICENSES.html"),
+        format!("<!doctype html><html><head><title>{brand_gp} Third-Party Notices</title></head><body>Clean body</body></html>\n"),
+    )
+    .unwrap();
 
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("THIRD-PARTY-LICENSES.html"), "{stderr}");
+    write_sha256sums_for_dir(&dir)?;
+
+    let out = run_release_scan(&[dir.to_str().unwrap()])?;
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("curvebook-cli-0.1.0.zip!curvebook-cli/README.md"), "{stderr}");
+    assert!(stderr.contains("curvebook-0.1.0-freebsd-x86_64.tar.gz!"), "{stderr}");
+    assert!(stderr.contains("curvebook-0.1.0-amd64.deb!"), "{stderr}");
+    assert!(stderr.contains("curvebook-ctrl-leak.deb!_deb_control/"), "{stderr}");
+    if has_rpm {
+        assert!(stderr.contains("curvebook-0.1.0-1.x86_64.rpm!usr/share/doc/curvebook/NOTES.txt"), "{stderr}");
     }
+    assert!(stderr.contains("curvebook-0.1.0-linux-x86_64.AppImage.zsync"), "{stderr}");
+    assert!(stderr.contains("THIRD-PARTY-LICENSES.html"), "{stderr}");
     Ok(())
 }
 
 #[test]
 fn r026_planted_cleanroom_copyright_and_unattributed_assets_or_fonts_fail_closed() -> Result<(), String> {
     let fx = TempDirGuard::new("cleanroom-assets")?;
+    let dir = fx.path.join("planted-all");
+    fs::create_dir_all(&dir).unwrap();
     let vendor_dm = join(&["Dot", "mat", "ics"]);
 
     // 1. Vendor copyright header inside `.deb` payload caught by `cleanroom`
-    {
-        let dir = fx.path.join("cleanroom-deb");
-        fs::create_dir_all(&dir).unwrap();
-        let notice_leak = format!("<!-- \u{00a9} 2025 {vendor_dm}. All rights reserved. -->\n");
-        build_deb_via_host_ar_and_tar(
-            &fx.path,
-            &dir.join("curvebook-vendor-notice.deb"),
-            "Package: curvebook\nVersion: 0.1.0\n",
-            &[("usr/share/doc/curvebook/sample.xml", notice_leak.as_bytes())],
-        )?;
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-vendor-notice.deb!") && stderr.contains("[cleanroom]"), "{stderr}");
-    }
+    let notice_leak = format!("<!-- \u{00a9} 2025 {vendor_dm}. All rights reserved. -->\n");
+    let deb = build_pure_deb("Package: curvebook\nVersion: 0.1.0\n", &[("usr/share/doc/curvebook/sample.xml", notice_leak.as_bytes())], false)?;
+    fs::write(dir.join("curvebook-vendor-notice.deb"), deb).unwrap();
 
     // 2. Unattributed `.svg` visual asset inside `.tar.gz` caught by `assets`
-    {
-        let dir = fx.path.join("unattributed-svg");
-        fs::create_dir_all(&dir).unwrap();
-        let tgz = gzip_stored(&build_ustar_bytes(&[(
-            "curvebook-0.1.0/usr/share/icons/rogue-unattributed.svg",
-            b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"8\" cy=\"8\" r=\"4\"/></svg>",
-        )])?);
-        fs::write(dir.join("curvebook-rogue-asset.tar.gz"), tgz).unwrap();
-        write_sha256sums_for_dir(&dir)?;
-
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-rogue-asset.tar.gz!") && stderr.contains("unattributed asset"), "{stderr}");
-    }
+    let tgz = gzip_stored(&build_ustar_bytes(&[(
+        "curvebook-0.1.0/usr/share/icons/rogue-unattributed.svg",
+        b"<svg xmlns=\"http://www.w3.org/2000/svg\"><circle cx=\"8\" cy=\"8\" r=\"4\"/></svg>",
+    )])?);
+    fs::write(dir.join("curvebook-rogue-asset.tar.gz"), tgz).unwrap();
 
     // 3. Bundled `.ttf` font inside `.zip` caught by zero-bundled-fonts policy
-    {
-        let dir = fx.path.join("bundled-font");
-        fs::create_dir_all(&dir).unwrap();
-        let mut zw = ZipWriter::new();
-        zw.add_file("curvebook-web/fonts/Forbidden.ttf", vec![0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
-        fs::write(dir.join("curvebook-web-font.zip"), zw.finish().unwrap()).unwrap();
-        write_sha256sums_for_dir(&dir)?;
+    let mut zw = ZipWriter::new();
+    zw.add_file("curvebook-web/fonts/Forbidden.ttf", vec![0x00, 0x01, 0x00, 0x00, 0x00]).unwrap();
+    fs::write(dir.join("curvebook-web-font.zip"), zw.finish().unwrap()).unwrap();
 
-        let out = run_release_scan(&[dir.to_str().unwrap()])?;
-        assert!(!out.status.success());
-        let stderr = String::from_utf8_lossy(&out.stderr);
-        assert!(stderr.contains("curvebook-web-font.zip!") && stderr.contains("zero-bundled-fonts"), "{stderr}");
-    }
+    write_sha256sums_for_dir(&dir)?;
+
+    let out = run_release_scan(&[dir.to_str().unwrap()])?;
+    assert!(!out.status.success());
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("curvebook-vendor-notice.deb!") && stderr.contains("[cleanroom]"), "{stderr}");
+    assert!(stderr.contains("curvebook-rogue-asset.tar.gz!") && stderr.contains("unattributed asset"), "{stderr}");
+    assert!(stderr.contains("curvebook-web-font.zip!") && stderr.contains("zero-bundled-fonts"), "{stderr}");
     Ok(())
 }
 

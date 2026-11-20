@@ -1,12 +1,187 @@
 //! End-to-end regression tests for `cargo xtask docs-site` (`R12.1`, `R12.4`).
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
+use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 static TEST_SEQ: AtomicU64 = AtomicU64::new(0);
+static SIM_REPO_TEMPLATE: OnceLock<Result<SimRepoTemplate, String>> = OnceLock::new();
+
+struct SimRepoTemplate {
+    files: Vec<(PathBuf, Vec<u8>)>,
+}
+
+impl SimRepoTemplate {
+    fn shared() -> Result<&'static Self, String> {
+        match SIM_REPO_TEMPLATE.get_or_init(Self::build_from_workspace) {
+            Ok(tpl) => Ok(tpl),
+            Err(err) => Err(err.clone()),
+        }
+    }
+
+    fn build_from_workspace() -> Result<Self, String> {
+        let root = workspace_root()?;
+        let mut files = Vec::new();
+
+        for file in ["AGENTS.md", "NOTICE"] {
+            let bytes = fs::read(root.join(file)).map_err(|e| format!("read {file}: {e}"))?;
+            files.push((PathBuf::from(file), bytes));
+        }
+
+        // Collect only the docs subtrees that `docs-site` reads or resolves links against,
+        // skipping archival/planning directories (`docs/{history,audit,planning,evidence,implementation}`)
+        // and internal tracking tables (`ROADMAP.md`, `STATUS.md`, `gui-workflows.md`).
+        let mut docs_paths = Vec::new();
+        collect_docs_subset(&root, &mut docs_paths)?;
+        let mut needed_assets = BTreeSet::new();
+        for rel in &docs_paths {
+            let bytes = fs::read(root.join(rel)).map_err(|e| format!("read {}: {e}", rel.display()))?;
+            let rel_slash = rel.to_string_lossy().replace('\\', "/");
+            if rel_slash.starts_with("docs/images/") {
+                needed_assets.insert(rel_slash);
+            }
+            files.push((rel.clone(), bytes));
+        }
+
+        // Filter `ASSETS.md` and `ATTRIBUTION.md` down to `docs/images/*` and their transitive
+        // parent-source chain so `assets::load_repo_asset_catalog` validates genuine provenance
+        // without copying or SHA-256 hashing unrelated megabyte icons in `assets/`.
+        let assets_md = fs::read_to_string(root.join("ASSETS.md")).map_err(|e| format!("read ASSETS.md: {e}"))?;
+        let (filtered_assets_md, transitive_assets) = filter_assets_markdown(&assets_md, &needed_assets);
+        files.push((PathBuf::from("ASSETS.md"), filtered_assets_md.into_bytes()));
+
+        let attr_md = fs::read_to_string(root.join("ATTRIBUTION.md")).map_err(|e| format!("read ATTRIBUTION.md: {e}"))?;
+        let filtered_attr_md = filter_attribution_table(&attr_md, &transitive_assets);
+        files.push((PathBuf::from("ATTRIBUTION.md"), filtered_attr_md.into_bytes()));
+
+        for asset_rel in transitive_assets {
+            if asset_rel.starts_with("assets/") {
+                let bytes = fs::read(root.join(&asset_rel)).map_err(|e| format!("read {asset_rel}: {e}"))?;
+                files.push((PathBuf::from(asset_rel), bytes));
+            }
+        }
+
+        Ok(Self { files })
+    }
+
+    fn materialize_into(&self, dst_root: &Path) -> Result<(), String> {
+        for (rel, bytes) in &self.files {
+            let dst = dst_root.join(rel);
+            if let Some(parent) = dst.parent() {
+                fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
+            }
+            fs::write(&dst, bytes).map_err(|e| format!("write {}: {e}", dst.display()))?;
+        }
+        Ok(())
+    }
+}
+
+fn collect_docs_subset(root: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let docs_dir = root.join("docs");
+    let mut entries: Vec<_> = fs::read_dir(&docs_dir).map_err(|e| format!("read_dir {}: {e}", docs_dir.display()))?.filter_map(Result::ok).collect();
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let p = entry.path();
+        let Some(name) = p.file_name().and_then(|n| n.to_str()) else {
+            continue;
+        };
+        if p.is_file() {
+            if !matches!(name, "ROADMAP.md" | "STATUS.md" | "gui-workflows.md") {
+                out.push(Path::new("docs").join(name));
+            }
+        } else if p.is_dir() && matches!(name, "images" | "schemas" | "release" | "manual" | "reference") {
+            collect_rel_files_recursive(root, &p, out)?;
+        }
+    }
+    Ok(())
+}
+
+fn collect_rel_files_recursive(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) -> Result<(), String> {
+    let mut entries: Vec<_> = fs::read_dir(dir).map_err(|e| format!("read_dir {}: {e}", dir.display()))?.filter_map(Result::ok).collect();
+    entries.sort_by_key(|e| e.path());
+    for entry in entries {
+        let p = entry.path();
+        if p.is_dir() {
+            collect_rel_files_recursive(root, &p, out)?;
+        } else if p.is_file() {
+            let rel = p.strip_prefix(root).map_err(|e| e.to_string())?.to_path_buf();
+            out.push(rel);
+        }
+    }
+    Ok(())
+}
+
+fn parse_table_row_asset_path(line: &str) -> Option<(&str, &str)> {
+    let trimmed = line.trim();
+    if !trimmed.starts_with('|') || !trimmed.ends_with('|') {
+        return None;
+    }
+    let cells: Vec<&str> = trimmed[1..trimmed.len() - 1].split('|').map(str::trim).collect();
+    let [asset_cell, _, source_cell, ..] = cells.as_slice() else {
+        return None;
+    };
+    let path = asset_cell.strip_prefix('`')?.strip_suffix('`')?.trim();
+    if path.is_empty() {
+        return None;
+    }
+    Some((path, source_cell))
+}
+
+fn extract_backticked_paths(source: &str) -> Vec<&str> {
+    let mut out = Vec::new();
+    let mut rest = source;
+    while let Some(start) = rest.find('`') {
+        let after = &rest[start + 1..];
+        let Some(end) = after.find('`') else {
+            break;
+        };
+        let token = after[..end].trim();
+        if token.contains('/') {
+            out.push(token);
+        }
+        rest = &after[end + 1..];
+    }
+    out
+}
+
+fn filter_assets_markdown(assets_md: &str, seed: &BTreeSet<String>) -> (String, BTreeSet<String>) {
+    let mut source_by_asset = BTreeMap::new();
+    for line in assets_md.lines() {
+        if let Some((path, source)) = parse_table_row_asset_path(line) {
+            source_by_asset.insert(path.to_owned(), source.to_owned());
+        }
+    }
+    let mut needed = seed.clone();
+    let mut queue: Vec<String> = seed.iter().cloned().collect();
+    while let Some(path) = queue.pop() {
+        if let Some(src) = source_by_asset.get(&path) {
+            for parent in extract_backticked_paths(src) {
+                if needed.insert(parent.to_owned()) {
+                    queue.push(parent.to_owned());
+                }
+            }
+        }
+    }
+    let filtered = filter_attribution_table(assets_md, &needed);
+    (filtered, needed)
+}
+
+fn filter_attribution_table(md: &str, keep: &BTreeSet<String>) -> String {
+    let mut out = String::with_capacity(md.len());
+    for line in md.lines() {
+        if let Some((path, _)) = parse_table_row_asset_path(line)
+            && !keep.contains(path)
+        {
+            continue;
+        }
+        out.push_str(line);
+        out.push('\n');
+    }
+    out
+}
 
 fn workspace_root() -> Result<PathBuf, String> {
     Path::new(env!("CARGO_MANIFEST_DIR")).parent().map(Path::to_path_buf).ok_or_else(|| String::from("CARGO_MANIFEST_DIR has no parent"))
@@ -145,12 +320,7 @@ fn docs_site_check_passes_without_r12_3_and_with_partial_analyses_md() -> Result
     let root = workspace_root()?;
     let sandbox = WorkspaceScratchDir::new(&root, "partial-r12-3")?;
     let sim_root = &sandbox.path;
-
-    for file in ["AGENTS.md", "ASSETS.md", "ATTRIBUTION.md", "NOTICE"] {
-        fs::copy(root.join(file), sim_root.join(file)).map_err(|e| format!("copy {file}: {e}"))?;
-    }
-    copy_dir_recursive(&root.join("assets"), &sim_root.join("assets"))?;
-    copy_dir_recursive(&root.join("docs"), &sim_root.join("docs"))?;
+    SimRepoTemplate::shared()?.materialize_into(sim_root)?;
 
     // Explicitly remove R12.3 files if present to exercise absent-methods behavior.
     for omitted in ["analyses.md", "fitting.md"] {
@@ -205,13 +375,7 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     let root = workspace_root()?;
     let sandbox = WorkspaceScratchDir::new(&root, "snapshot-sim")?;
     let sim_root = &sandbox.path;
-
-    // Copy minimal workspace metadata/assets/docs into isolated sandbox git repo.
-    for file in ["AGENTS.md", "ASSETS.md", "ATTRIBUTION.md", "NOTICE"] {
-        fs::copy(root.join(file), sim_root.join(file)).map_err(|e| format!("copy {file}: {e}"))?;
-    }
-    copy_dir_recursive(&root.join("assets"), &sim_root.join("assets"))?;
-    copy_dir_recursive(&root.join("docs"), &sim_root.join("docs"))?;
+    SimRepoTemplate::shared()?.materialize_into(sim_root)?;
 
     // Populate all 13 `docs/reference/*.md` files simulating post-merge `@r12-methods-ref`.
     let ref_dir = sim_root.join("docs/reference");
@@ -300,20 +464,5 @@ fn docs_site_ingests_populated_reference_markdown_and_verifies_release_snapshot(
     assert!(!fail_res.status.success(), "mismatched tag commit in manifest must fail --check");
     assert!(String::from_utf8_lossy(&fail_res.stderr).contains("does not match release tag"));
 
-    Ok(())
-}
-
-fn copy_dir_recursive(src: &Path, dst: &Path) -> Result<(), String> {
-    fs::create_dir_all(dst).map_err(|e| format!("create {}: {e}", dst.display()))?;
-    for entry in fs::read_dir(src).map_err(|e| format!("read_dir {}: {e}", src.display()))? {
-        let entry = entry.map_err(|e| e.to_string())?;
-        let p = entry.path();
-        let out_p = dst.join(entry.file_name());
-        if p.is_dir() {
-            copy_dir_recursive(&p, &out_p)?;
-        } else if p.is_file() {
-            fs::copy(&p, &out_p).map_err(|e| format!("copy {} -> {}: {e}", p.display(), out_p.display()))?;
-        }
-    }
     Ok(())
 }

@@ -4,9 +4,11 @@ use std::path::Path;
 use std::time::Instant;
 
 use crate::{
-    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, commands, cursors, docs_site, has_cargo_nextest, licenses,
-    pending, run_cargo, run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
+    assets, brands, citations, cleanroom, cmd_i18n_report, cmd_layers, cmd_test, cmd_wasm, cursors, has_cargo_nextest, licenses, pending, run_cargo,
+    run_cargo_strs, schemas, screenshots, secrets, status, telemetry, ui_commands, web_fonts, workflows,
 };
+#[cfg(feature = "full-gates")]
+use crate::{commands, docs_site};
 
 // Keep existing UI frame/latency (`r10_*`, including `r10_phase7_gates`), human-path
 // input-to-paint budgets (`human_wf_*`), grid, and curve-fit throughput gates off the
@@ -150,9 +152,19 @@ pub(crate) fn policy(root: &Path, include_i18n: bool) -> Result<(), String> {
         cmd_i18n_report(root)?;
     }
     ui_commands::run(root, true)?;
-    commands::run(root, true)?;
+    #[cfg(feature = "full-gates")]
+    {
+        commands::run(root, true)?;
+    }
     schemas::run(root, true)?;
-    docs_site::run_check(root)?;
+    #[cfg(feature = "full-gates")]
+    {
+        docs_site::run_check(root)?;
+    }
+    #[cfg(not(feature = "full-gates"))]
+    {
+        println!("ci policy: skipping `commands --check` and `docs-site --check` (`full-gates` feature disabled)");
+    }
     cmd_layers(root)?;
     secrets::run(root)?;
     licenses::run(root, &[])?;

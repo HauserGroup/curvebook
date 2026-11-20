@@ -4,20 +4,33 @@
 use std::collections::BTreeSet;
 use std::path::Path;
 
+#[cfg(feature = "full-gates")]
 use curvebook_chart::compile_graph;
+#[cfg(feature = "full-gates")]
 use curvebook_doc::{
     AnalysisKind, AnalysisSpec, ConstantValue, GraphSheet, InfoSheet, LayoutItem, LayoutSheet, LayoutSpec, ProjectDocument, ResultSheet, SheetId,
     TableKind,
 };
+#[cfg(feature = "full-gates")]
 use curvebook_engine::{Session, cmd::registry as engine_cmd_registry};
-use curvebook_format::{ZipArchive, ZipLimits, save_project_bytes, save_template_bytes};
+use curvebook_format::{ZipArchive, ZipLimits};
+#[cfg(feature = "full-gates")]
+use curvebook_format::{save_project_bytes, save_template_bytes};
+#[cfg(feature = "full-gates")]
 use curvebook_mcp::{GuiSessionHost, McpServerState, dispatch_json_value};
+#[cfg(feature = "full-gates")]
 use curvebook_pdf::{PdfExportOptions, render_pdf};
+#[cfg(feature = "full-gates")]
 use curvebook_svg::{SvgExportOptions, render_svg};
+#[cfg(feature = "full-gates")]
 use curvebook_ui_egui::dialogs_canvas::{ANALYSIS_CATALOG, ActiveInspector, AnalysisCategory, CommandPaletteState};
+#[cfg(feature = "full-gates")]
 use curvebook_ui_egui::i18n;
+#[cfg(feature = "full-gates")]
 use curvebook_ui_egui::menus::{TOOLBAR_BUTTONS, UI_COMMANDS, menu_bar_tooltips, toolbar_tooltips};
+#[cfg(feature = "full-gates")]
 use curvebook_ui_egui::workspace_nav::{SAMPLE_FIXTURES, TableCreationDraft, WelcomeMode, instantiate_sample_fixture};
+#[cfg(feature = "full-gates")]
 use curvebook_ui_egui::{
     ActiveDialog, ClipboardBundle, EguiSurfaceCapture, EguiSurfaceScanner, UiApp, UiTreeSnapshot, ViewportMetrics, inspect_ui_tree,
 };
@@ -169,22 +182,43 @@ enum DecodedFile {
 
 pub fn run(root: &Path) -> Result<(), String> {
     let files = crate::repo_files(root)?;
+    #[cfg_attr(not(feature = "full-gates"), allow(unused_mut))]
     let (mut hits, dist_stats) = scan_tree(root, &files)?;
+    #[cfg(feature = "full-gates")]
     hits.extend(check_ui_surfaces()?);
     if hits.is_empty() {
-        let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
-        if let Some(stats) = dist_stats {
-            println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
-                files.len(),
-                stats.files,
-                stats.archive_entries
-            );
-        } else {
-            println!(
-                "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
-                files.len()
-            );
+        #[cfg(feature = "full-gates")]
+        {
+            let i18n_total = i18n::LOCALES.len() * i18n::catalog_len();
+            if let Some(stats) = dist_stats {
+                println!(
+                    "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                    files.len(),
+                    stats.files,
+                    stats.archive_entries
+                );
+            } else {
+                println!(
+                    "brands: 0 unapproved brand or suite mentions across {} tracked files ({i18n_total} i18n entries, 16-locale live egui shell, MCP headless+gui-only JSON-RPC surfaces, 5 sheets, 26 dialogs, 7 inspectors, and export/icon metadata clean)",
+                    files.len()
+                );
+            }
+        }
+        #[cfg(not(feature = "full-gates"))]
+        {
+            if let Some(stats) = dist_stats {
+                println!(
+                    "brands: 0 unapproved brand or suite mentions across {} tracked files and {} dist/ files ({} archive entries) (light mode: live egui/MCP/export sweep skipped without `full-gates`)",
+                    files.len(),
+                    stats.files,
+                    stats.archive_entries
+                );
+            } else {
+                println!(
+                    "brands: 0 unapproved brand or suite mentions across {} tracked files (light mode: live egui/MCP/export sweep skipped without `full-gates`)",
+                    files.len()
+                );
+            }
         }
         return Ok(());
     }
@@ -2354,6 +2388,7 @@ fn check_single_string(path: &str, line: usize, text: &str, prism_policy: PrismP
 /// Scan arbitrary UI, `egui_shell`, AccessKit, or tooltip `&str` slices for external
 /// brands and suite names. Allows `.prism` / `*.prism` only inside explicit import/export
 /// file-type descriptions.
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_text_runs<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2375,6 +2410,7 @@ where
 
 /// Strictly scan text runs, rejecting every external brand, suite name, and `"prism"` mention
 /// (including `.prism`).
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_text_runs_strict<I, S>(source: &str, runs: I) -> Vec<BrandHit>
 where
@@ -2390,6 +2426,7 @@ where
 
 /// Scan `(label, text)` pairs (for example `(node.id, node.a11y.label)` or `(key, text)`),
 /// tagging each hit with `label`.
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_labeled_text_runs<'a, I>(runs: I) -> Vec<BrandHit>
 where
@@ -2407,6 +2444,7 @@ where
     out
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn is_i18n_format_extension_key(key: &str) -> bool {
     let lower = key.to_ascii_lowercase();
     lower.contains("file_filter")
@@ -2420,6 +2458,7 @@ fn is_i18n_format_extension_key(key: &str) -> bool {
 ///
 /// Rejects `"prism"` (including `.prism`) everywhere outside explicit file-extension/filter keys,
 /// and permits lowercase Italian `"statistica"` only inside `locale == "it"`.
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_i18n_catalog_entries<'a, I>(entries: I) -> Vec<BrandHit>
 where
@@ -2440,6 +2479,7 @@ where
 }
 
 /// Scan all registered 16-locale `i18n::CATALOG` translations and locale display names.
+#[cfg(feature = "full-gates")]
 #[must_use]
 pub fn check_i18n_catalog() -> Vec<BrandHit> {
     let mut entries: Vec<(&str, &str, &str)> = Vec::with_capacity(i18n::CATALOG.len() * i18n::LOCALES.len() + i18n::LOCALES.len());
@@ -2971,6 +3011,7 @@ fn visit_json_strings(source: &str, val: &serde_json::Value, idx_hint: usize, ou
 }
 
 /// Inspect a desktop or browser window title string strictly.
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -2978,6 +3019,7 @@ pub fn check_window_title(source: &str, title: &str) -> Vec<BrandHit> {
     out
 }
 
+#[cfg(feature = "full-gates")]
 fn collect_snapshot_strings(snap: &UiTreeSnapshot, context: &str, hits: &mut Vec<BrandHit>) {
     let mut runs: Vec<(String, String)> = Vec::new();
     if let Some(banner) = &snap.status_banner {
@@ -3036,6 +3078,7 @@ fn collect_snapshot_strings(snap: &UiTreeSnapshot, context: &str, hits: &mut Vec
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn check_labeled_ui_pairs<'a>(runs: impl IntoIterator<Item = (&'a str, &'a str)>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
     for (idx, (label, text)) in runs.into_iter().enumerate() {
         let policy =
@@ -3044,6 +3087,7 @@ fn check_labeled_ui_pairs<'a>(runs: impl IntoIterator<Item = (&'a str, &'a str)>
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn check_ui_strings_with_locale<'a>(source: &str, runs: impl IntoIterator<Item = &'a str>, allow_it_statistica: bool, hits: &mut Vec<BrandHit>) {
     for (idx, text) in runs.into_iter().enumerate() {
         let policy =
@@ -3052,6 +3096,7 @@ fn check_ui_strings_with_locale<'a>(source: &str, runs: impl IntoIterator<Item =
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn push_widget_node_runs(prefix: &str, node: &curvebook_ui_egui::inspect::UiWidgetNode, out: &mut Vec<(String, String)>) {
     out.push((format!("{prefix}:{}", node.widget_id), node.label.clone()));
     if let Some(reason) = &node.disabled_reason {
@@ -3062,6 +3107,7 @@ fn push_widget_node_runs(prefix: &str, node: &curvebook_ui_egui::inspect::UiWidg
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
     let mut doc = ProjectDocument::new("CurveBook Brand Sweep").map_err(|e| format!("project init: {e}"))?;
     for (idx, fixture) in SAMPLE_FIXTURES.iter().enumerate() {
@@ -3104,6 +3150,7 @@ fn build_brands_sweep_document() -> Result<ProjectDocument, String> {
     Ok(doc)
 }
 
+#[cfg(feature = "full-gates")]
 fn check_tooltips_and_catalogs(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
     for &btn in TOOLBAR_BUTTONS {
         hits.extend(check_labeled_text_runs([("TOOLBAR_BUTTONS.id", btn.id), ("TOOLBAR_BUTTONS.label_key", btn.label_key)]));
@@ -3168,6 +3215,7 @@ fn check_tooltips_and_catalogs(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
     let data_id = SheetId::new("data-1");
     let res_id = SheetId::new("res-1");
@@ -3237,6 +3285,7 @@ fn check_all_dialogs_and_inspectors(app: &mut UiApp, hits: &mut Vec<BrandHit>) {
     app.canvas_dialogs.active_dialog = ActiveDialog::None;
 }
 
+#[cfg(feature = "full-gates")]
 fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let graph = doc.graph_sheet(&SheetId::new("graph-1")).ok_or_else(|| String::from("sweep graph-1 missing"))?;
     let mut scene = compile_graph(graph, doc).map_err(|e| format!("compile sweep graph: {e}"))?;
@@ -3276,6 +3325,7 @@ fn check_export_metadata_sweep(doc: &ProjectDocument, hits: &mut Vec<BrandHit>) 
 /// all 26 `ActiveDialog` states, all 7 `ActiveInspector` tabs, live 16-locale `egui_shell` renders,
 /// live MCP headless & `--gui-only` JSON-RPC surfaces, `CommandPalette`, engine/UI command catalogs,
 /// and SVG/PDF/HTML/manifest/window export metadata.
+#[cfg(feature = "full-gates")]
 pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = check_i18n_catalog();
 
@@ -3298,10 +3348,12 @@ pub fn check_ui_surfaces() -> Result<Vec<BrandHit>, String> {
     Ok(hits)
 }
 
+#[cfg(feature = "full-gates")]
 struct BrandsGuiSessionHost {
     app: UiApp,
 }
 
+#[cfg(feature = "full-gates")]
 impl BrandsGuiSessionHost {
     fn new(mut app: UiApp, gui_only: bool) -> Self {
         app.set_gui_only(gui_only);
@@ -3309,6 +3361,7 @@ impl BrandsGuiSessionHost {
     }
 }
 
+#[cfg(feature = "full-gates")]
 impl GuiSessionHost for BrandsGuiSessionHost {
     fn call_gui(&mut self, method: &str, mut params: serde_json::Value) -> Result<serde_json::Value, curvebook_engine::EngineError> {
         if method == "ui.screenshot"
@@ -3341,6 +3394,7 @@ impl GuiSessionHost for BrandsGuiSessionHost {
     }
 }
 
+#[cfg(any(feature = "full-gates", test))]
 #[derive(Clone, Copy)]
 struct McpScanCtx<'a> {
     source: &'a str,
@@ -3353,6 +3407,7 @@ struct McpScanCtx<'a> {
 /// `resources/list`, `resources/read`, `prompts/list`, `prompts/get`) for prohibited vendor,
 /// product, retired-suite, or pre-rename tokens while preserving the narrow `.prism`/`.pzfx`
 /// file-format boundary on `open_file` and `table_import_prism` / `table.importPrism`.
+#[cfg(any(feature = "full-gates", test))]
 #[must_use]
 pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&str>, response: &serde_json::Value) -> Vec<BrandHit> {
     let mut out = Vec::new();
@@ -3361,6 +3416,7 @@ pub fn check_mcp_rpc_response(source: &str, method: &str, called_tool: Option<&s
     out
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, out: &mut Vec<BrandHit>) {
     match val {
         serde_json::Value::Object(map) => scan_mcp_json_object(ctx, ptr, map, out),
@@ -3374,6 +3430,7 @@ fn scan_mcp_json_value(ctx: McpScanCtx<'_>, ptr: &str, val: &serde_json::Value, 
     }
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     if ctx.method == "tools/call"
         && map.get("type").and_then(serde_json::Value::as_str) == Some("image")
@@ -3395,6 +3452,7 @@ fn scan_mcp_json_object(ctx: McpScanCtx<'_>, ptr: &str, map: &serde_json::Map<St
     }
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<String, serde_json::Value>, out: &mut Vec<BrandHit>) {
     let block_src = format!("{source}:{ptr}");
     for (idx, k) in map.keys().enumerate() {
@@ -3407,6 +3465,7 @@ fn scan_mcp_inline_png_block(source: &str, ptr: &str, map: &serde_json::Map<Stri
     }
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     let Some(rest) = ptr.strip_prefix("/result/tools/") else {
         return false;
@@ -3417,6 +3476,7 @@ fn is_top_tool_field_ptr(ptr: &str, field: &str) -> bool {
     !idx_seg.is_empty() && idx_seg.bytes().all(|b| b.is_ascii_digit()) && tail == field
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Vec<BrandHit>) {
     if (ctx.method == "tools/call" || ctx.method == "resources/read") && ptr.ends_with("/text") {
         let trimmed = text.trim_start();
@@ -3449,6 +3509,7 @@ fn scan_mcp_leaf_string(ctx: McpScanCtx<'_>, ptr: &str, text: &str, out: &mut Ve
     check_single_string_with_extra(&full_source, 1, text, policy, true, out);
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> bool {
     if text != "table_import_prism" {
         return false;
@@ -3461,6 +3522,7 @@ fn is_exact_canonical_mcp_import_name(ctx: McpScanCtx<'_>, ptr: &str, text: &str
         && (ptr.ends_with("/name") || ptr.ends_with("/mcp_tool"))
 }
 
+#[cfg(any(feature = "full-gates", test))]
 fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> PrismPolicy<'a> {
     if ctx.method == "tools/list" {
         if ctx.entry_tool_name == Some("open_file") {
@@ -3504,6 +3566,7 @@ fn mcp_leaf_prism_policy<'a>(ctx: McpScanCtx<'_>, ptr: &str, text: &str) -> Pris
     PrismPolicy::Strict
 }
 
+#[cfg(feature = "full-gates")]
 fn send_mcp_rpc(state: &mut McpServerState, method: &str, params: serde_json::Value) -> Result<serde_json::Value, String> {
     let req = serde_json::json!({
         "jsonrpc": "2.0",
@@ -3514,6 +3577,7 @@ fn send_mcp_rpc(state: &mut McpServerState, method: &str, params: serde_json::Va
     dispatch_json_value(req, state).ok_or_else(|| format!("MCP `{method}` produced no JSON-RPC response"))
 }
 
+#[cfg(feature = "full-gates")]
 fn ensure_mcp_ok<'a>(label: &str, resp: &'a serde_json::Value) -> Result<&'a serde_json::Value, String> {
     if let Some(err) = resp.get("error") {
         return Err(format!("MCP `{label}` returned unexpected JSON-RPC error: {err}"));
@@ -3530,6 +3594,7 @@ fn ensure_mcp_ok<'a>(label: &str, resp: &'a serde_json::Value) -> Result<&'a ser
 /// `tools/list` (core + all progressive `CommandGroup`s + `gui`), `resources/list` + `resources/read`,
 /// `prompts/list` + `prompts/get`, and `tools/call` (`doc_inspect`, `render_preview`, `export`,
 /// `ui_inspect`, `ui_screenshot`).
+#[cfg(feature = "full-gates")]
 pub fn check_mcp_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = Vec::new();
     let doc = build_brands_sweep_document()?;
@@ -3541,6 +3606,7 @@ pub fn check_mcp_surfaces() -> Result<Vec<BrandHit>, String> {
     Ok(hits)
 }
 
+#[cfg(feature = "full-gates")]
 fn check_mcp_headless_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let mut state = McpServerState::from_session(session);
 
@@ -3588,6 +3654,7 @@ fn check_mcp_headless_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result
     Ok(())
 }
 
+#[cfg(feature = "full-gates")]
 fn check_mcp_headless_previews_and_inspect(state: &mut McpServerState, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let overview = send_mcp_rpc(state, "tools/call", serde_json::json!({ "name": "doc_inspect", "arguments": {} }))?;
     ensure_mcp_ok("headless:doc_inspect", &overview)?;
@@ -3617,6 +3684,7 @@ fn check_mcp_headless_previews_and_inspect(state: &mut McpServerState, hits: &mu
     Ok(())
 }
 
+#[cfg(feature = "full-gates")]
 fn check_mcp_gui_only_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let mut app = UiApp::from_session(session);
     app.sync_views();
@@ -3657,6 +3725,7 @@ fn check_mcp_gui_only_mode(session: Session, hits: &mut Vec<BrandHit>) -> Result
     Ok(())
 }
 
+#[cfg(feature = "full-gates")]
 fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui_only: bool, hits: &mut Vec<BrandHit>) -> Result<(), String> {
     let res_list = send_mcp_rpc(state, "resources/list", serde_json::json!({}))?;
     let res_ok = ensure_mcp_ok(&format!("{prefix}:resources/list"), &res_list)?;
@@ -3707,6 +3776,7 @@ fn check_mcp_resources_and_prompts(state: &mut McpServerState, prefix: &str, gui
     Ok(())
 }
 
+#[cfg(feature = "full-gates")]
 fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
     match name {
         "dose_response_curve_fit" => {
@@ -3726,6 +3796,7 @@ fn prompt_arg_variants(name: &str) -> Vec<(&'static str, serde_json::Value)> {
     }
 }
 
+#[cfg(feature = "full-gates")]
 fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
     for spec in engine_cmd_registry().specs() {
         let is_import_prism = spec.id == "table.importPrism";
@@ -3763,6 +3834,7 @@ fn check_engine_and_ui_commands(hits: &mut Vec<BrandHit>) {
 /// across ALL `16` `LOCALES`, all `5` sheet kinds, all `4` `WelcomeMode`s, all `7` `ActiveInspector`
 /// tabs, all `26` `ActiveDialog` variants, open dropdown menus, toolbar overflow, split view, and
 /// portfolio gallery.
+#[cfg(feature = "full-gates")]
 pub fn check_live_egui_shell_surfaces() -> Result<Vec<BrandHit>, String> {
     let mut hits = Vec::new();
     let desktop_vp = ViewportMetrics::new(1440.0, 900.0, 1.0);
@@ -3871,6 +3943,7 @@ pub fn check_live_egui_shell_surfaces() -> Result<Vec<BrandHit>, String> {
     Ok(hits)
 }
 
+#[cfg(feature = "full-gates")]
 fn sweep_dialog_states() -> Vec<ActiveDialog> {
     let data_id = SheetId::new("data-1");
     let res_id = SheetId::new("res-1");
@@ -3910,6 +3983,7 @@ fn sweep_dialog_states() -> Vec<ActiveDialog> {
     ]
 }
 
+#[cfg(feature = "full-gates")]
 fn collect_egui_surface_hits(
     context: &str,
     allow_it_statistica: bool,
@@ -4547,6 +4621,7 @@ pub(crate) fn scan_compliance_text(display_path: &str, text: &str) -> Vec<BrandH
 
 /// Scan a generated static documentation site directory under the narrow generated-HTML
 /// format-boundary policy while keeping `PrismPolicy::Strict` on non-HTML text and suite brands.
+#[cfg(feature = "full-gates")]
 pub fn check_docs_site_dir(dir: &Path) -> Result<Vec<BrandHit>, String> {
     if !dir.exists() {
         return Err(format!("docs-site directory `{}` does not exist", dir.display()));
@@ -4648,10 +4723,11 @@ mod tests {
         assert!(ui_hits.iter().any(|h| h.brand == "vectorcraft"), "{ui_hits:?}");
     }
 
+    #[cfg(feature = "full-gates")]
+    use super::check_i18n_catalog;
     use super::{
-        BrandHit, check_html_metadata, check_i18n_catalog, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata,
-        check_pdf_metadata, check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked,
-        skip_path,
+        BrandHit, check_html_metadata, check_i18n_catalog_entries, check_labeled_text_runs, check_manifest_metadata, check_pdf_metadata,
+        check_svg_metadata, check_text_runs, check_text_runs_strict, check_window_title, run, scan_file, scan_repo_checked, skip_path,
     };
 
     fn temp_dir(label: &str) -> PathBuf {
@@ -5078,6 +5154,7 @@ pub fn status_line() -> &'static str {
 
     #[test]
     fn checks_16_locale_i18n_catalog_and_entries() {
+        #[cfg(feature = "full-gates")]
         assert_eq!(check_i18n_catalog(), Vec::new());
 
         let entries = [
