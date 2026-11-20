@@ -12,8 +12,9 @@ use curvebook_chart::{
 };
 use curvebook_palette::{LineDashStyle, Rgba8};
 use curvebook_text::{
-    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt,
+    RichSpan, RichText, SpanSlope, SpanWeight, effective_span_scale, measure_text_pt,
     metrics::{char_advance_pt, split_rich_text_lines},
+    script_baseline_offset_pt,
 };
 
 use crate::rasterizer::{MAX_RASTER_DIM_PX, MAX_RASTER_PIXELS, RasterImage, RenderError};
@@ -574,7 +575,7 @@ impl EmfWriter {
                     continue;
                 }
                 let span_size_pt = text.font_size_pt * effective_span_scale(span);
-                let baseline_dy = line_y + script_baseline_dy(span.script, text.font_size_pt);
+                let baseline_dy = line_y + script_baseline_offset_pt(span.script, text.font_size_pt);
                 let span_w = measure_text_pt(&RichText::new(vec![span.clone()]), text.font_size_pt).width_pt;
                 let raw_color = span.color.unwrap_or(text.color);
                 if raw_color.a > 0 && span_size_pt > 0.0 {
@@ -1046,28 +1047,6 @@ impl EmfWriter {
         self.n_records =
             self.n_records.checked_add(1).ok_or_else(|| RenderError::EncodingFailed { message: String::from("EMF record count overflow") })?;
         Ok(())
-    }
-}
-
-fn effective_span_scale(span: &RichSpan) -> f64 {
-    let raw = if span.scale.is_finite() && span.scale > 0.0 { span.scale } else { 1.0 };
-    match span.script {
-        SpanScript::Baseline => raw,
-        SpanScript::Superscript | SpanScript::Subscript => {
-            if (raw - 1.0).abs() <= 1e-9 {
-                0.7
-            } else {
-                raw
-            }
-        }
-    }
-}
-
-const fn script_baseline_dy(script: SpanScript, base_size_pt: f64) -> f64 {
-    match script {
-        SpanScript::Baseline => 0.0,
-        SpanScript::Superscript => -0.35 * base_size_pt,
-        SpanScript::Subscript => 0.20 * base_size_pt,
     }
 }
 

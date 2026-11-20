@@ -22,6 +22,7 @@
 pub mod analysis;
 pub mod archetypes;
 pub mod cell;
+pub mod delimited;
 pub mod error;
 pub mod graph;
 pub mod ids;
@@ -54,6 +55,7 @@ pub use archetypes::{
     default_column_label,
 };
 pub use cell::{Cell, CellValue, ExplicitErrorBounds, ReplicateStacking, SubcolumnMode, SummarizedPoint};
+pub use delimited::{DelimitedField, DelimitedScanError, DelimitedScanOptions, DelimitedVisitorError, format_linked_paste_tsv_cell, scan_delimited};
 pub use error::{
     CURRENT_SCHEMA_VERSION, ConfidenceLevel, DocError, MAX_DATA_SETS, MAX_PROJECT_CELLS, MAX_ROWS, MAX_SHEET_CELLS, MAX_SHEETS_PER_PROJECT,
     MAX_SUBCOLUMNS, MAX_TITLE_BYTES, SummaryPointError, validate_cell_grid, validate_confidence_level, validate_data_sets, validate_project_cells,

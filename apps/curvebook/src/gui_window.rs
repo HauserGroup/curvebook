@@ -12,7 +12,7 @@ use curvebook_ui_egui::dialogs_canvas::ActiveDialog;
 use curvebook_ui_egui::egui_shell::rasterizer::EguiScreenshotRegions;
 use curvebook_ui_egui::egui_shell::{FrameInspectMeta, GeometryStamp, PendingUiIntents, Tokens, UiIntent, inspect_bridge, top_chrome};
 use curvebook_ui_egui::interaction::KeyModifiers;
-use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp};
+use curvebook_ui_egui::{ControlAuth, ControlPostRequestContext, ControlRequest, UiApp, is_desktop_host_routed_command};
 use eframe::egui;
 
 use crate::desktop_host::{
@@ -123,6 +123,7 @@ pub struct CurveBookNativeApp {
     inspect_meta: FrameInspectMeta,
     last_regions: EguiScreenshotRegions,
     pending_intents: PendingUiIntents,
+    discarded_carry_passes: u8,
     deferred_live_requests: Vec<LiveControlRequest>,
     pending_synthetic_egui_batches: VecDeque<Vec<egui::Event>>,
     pending_live_gesture: Option<DeferredLivePointerGesture>,
@@ -155,6 +156,7 @@ impl CurveBookNativeApp {
             inspect_meta: FrameInspectMeta::default(),
             last_regions: EguiScreenshotRegions::default(),
             pending_intents: PendingUiIntents::default(),
+            discarded_carry_passes: 0,
             deferred_live_requests: Vec::new(),
             pending_synthetic_egui_batches: VecDeque::new(),
             pending_live_gesture: None,
@@ -530,19 +532,14 @@ impl CurveBookNativeApp {
     }
 
     fn commit_pending_intents(&mut self, ctx: &egui::Context, window_id: DesktopWindowId, will_discard: bool) {
-        if self.pending_intents.is_empty() {
+        if self.pending_intents.is_empty() || will_discard {
+            // Preserve pass-0 intents across discarded layout passes (`R15-GUI-05`) until settled.
             return;
         }
-        let mut raw_intents = std::mem::take(&mut self.pending_intents);
-        if will_discard {
-            if let Ok(win) = self.runtime.window_mut(window_id) {
-                let _ = raw_intents.commit_if_settled(win.app_mut(), true);
-            }
-            return;
-        }
+        let raw_intents = std::mem::take(&mut self.pending_intents);
 
         let mut remaining_intents = PendingUiIntents::default();
-        let mut host_commands = Vec::new();
+        let mut host_commands: Vec<(String, serde_json::Value)> = Vec::new();
         let mut host_copy = false;
         let mut host_cut = false;
         let mut host_paste = false;
@@ -552,8 +549,10 @@ impl CurveBookNativeApp {
         });
         for intent in raw_intents.intents().iter().cloned() {
             match &intent {
-                UiIntent::UiCommand { command_id, .. } | UiIntent::EngineCommand { command_id, .. } if is_host_routed_intent_command(command_id) => {
-                    host_commands.push(command_id.clone());
+                UiIntent::UiCommand { command_id, params } | UiIntent::EngineCommand { command_id, params }
+                    if is_desktop_host_routed_command(command_id) =>
+                {
+                    host_commands.push((command_id.clone(), params.clone()));
                 }
                 UiIntent::EngineCommand { command_id, params }
                     if (command_id == "graph.insertImage" || command_id == "layout.insertImage")
@@ -561,10 +560,10 @@ impl CurveBookNativeApp {
                         && params.get("bytes_base64").is_none()
                         && params.get("asset_id").is_none() =>
                 {
-                    host_commands.push(command_id.clone());
+                    host_commands.push((command_id.clone(), params.clone()));
                 }
                 UiIntent::CustomViewAction { domain, payload } if domain == "welcome" && payload == "action:open_file" => {
-                    host_commands.push(String::from("project.open"));
+                    host_commands.push((String::from("project.open"), serde_json::json!({})));
                 }
                 UiIntent::WorkspaceCopy { .. } if !active_is_result => {
                     host_copy = true;
@@ -594,24 +593,28 @@ impl CurveBookNativeApp {
             let prev_redo = win.app().session().redo_depth();
             let prev_dirty = win.app().session().is_dirty();
             let prev_mutation_seq = win.app().mutation_seq();
-            let command_hint = remaining_intents.intents().iter().find_map(|intent| match intent {
+            let fallback_command_hint = remaining_intents.intents().iter().find_map(|intent| match intent {
                 UiIntent::EngineCommand { command_id, .. } | UiIntent::UiCommand { command_id, .. } => Some(command_id.clone()),
                 _ => None,
             });
-            if let Err(err) = remaining_intents.commit_if_settled(win.app_mut(), false) {
-                self.status_banner = Some(err.to_string());
-            } else {
-                if let Err(err) = win.record_ui_mutation_checkpoint(command_hint.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq) {
-                    self.status_banner = Some(err);
-                }
-                unsaved_action = win.app_mut().egui_views.app_modals.pending_unsaved_action.take();
-                let changed = Some(win.app().ui_scale()) != prev_scale
-                    || Some(win.app().theme.mode) != prev_theme
-                    || Some(win.app().locale.clone()) != prev_locale
-                    || Some(&win.app().shortcuts) != prev_shortcuts.as_ref();
-                if changed {
-                    self.runtime.notify_preferences_changed(window_id);
-                }
+            let batch = remaining_intents.commit_all_if_settled(win.app_mut(), false);
+            let mut batch_err = batch.first_error().map(ToString::to_string);
+            let command_hint = batch.first_succeeded_command_id().map(str::to_owned).or(fallback_command_hint);
+            if let Err(err) = win.record_ui_mutation_checkpoint(command_hint.as_deref(), prev_undo, prev_redo, prev_dirty, prev_mutation_seq)
+                && batch_err.is_none()
+            {
+                batch_err = Some(err);
+            }
+            if let Some(err) = batch_err {
+                self.status_banner = Some(err);
+            }
+            unsaved_action = win.app_mut().egui_views.app_modals.pending_unsaved_action.take();
+            let changed = Some(win.app().ui_scale()) != prev_scale
+                || Some(win.app().theme.mode) != prev_theme
+                || Some(win.app().locale.clone()) != prev_locale
+                || Some(&win.app().shortcuts) != prev_shortcuts.as_ref();
+            if changed {
+                self.runtime.notify_preferences_changed(window_id);
             }
         }
         if let Some(action) = unsaved_action {
@@ -626,8 +629,8 @@ impl CurveBookNativeApp {
         if host_paste && let Err(err) = self.runtime.dispatch(DesktopHostEvent::ClipboardPaste { window_id, text_override: None }) {
             self.status_banner = Some(err);
         }
-        for cmd_id in host_commands {
-            self.execute_menu_command(Some(ctx), window_id, &cmd_id);
+        for (cmd_id, params) in host_commands {
+            self.execute_menu_command_with_params(Some(ctx), window_id, &cmd_id, &params);
         }
     }
 
@@ -665,7 +668,6 @@ impl CurveBookNativeApp {
     pub fn step_ui(&mut self, ui: &mut egui::Ui) {
         let ctx = ui.ctx().clone();
         self.frame_seq = self.frame_seq.wrapping_add(1);
-        self.pending_intents = PendingUiIntents::default();
         let _ = self.poll_live_control(&ctx);
         let initial_window_id = self.active_window_id();
 
@@ -734,7 +736,7 @@ impl CurveBookNativeApp {
         };
         self.inspect_meta = next_meta;
         self.last_regions = report.regions;
-        self.pending_intents = next_intents;
+        self.pending_intents.merge_pass(next_intents);
         self.menu_popup_was_open |= report.menu_popup_open;
 
         if let Ok(win) = self.runtime.window(input_window_id)
@@ -742,14 +744,16 @@ impl CurveBookNativeApp {
             && self.inspect_meta.find_by_widget_id("toolbar.presentation.exit").is_none()
         {
             let tokens = Tokens::from_theme_spec(&win.app().theme, &win.app().locale);
+            let mut chip_intents = PendingUiIntents::default();
             let _ = top_chrome::render_presentation_exit_chip(
                 &ctx,
                 win.app(),
                 &tokens,
                 !modal_backdrop_active,
                 &mut self.inspect_meta,
-                &mut self.pending_intents,
+                &mut chip_intents,
             );
+            self.pending_intents.merge_pass(chip_intents);
         }
 
         let canvas_rect = report.regions.canvas_rect_pt.unwrap_or(available_rect);
@@ -760,9 +764,17 @@ impl CurveBookNativeApp {
         self.sync_window_title(&ctx, post_window_id);
 
         let will_discard = ctx.will_discard();
-        self.commit_pending_intents(&ctx, post_window_id, will_discard);
-        if will_discard {
+        let force_commit = will_discard && self.discarded_carry_passes >= 7;
+        if will_discard && !force_commit {
+            self.discarded_carry_passes = self.discarded_carry_passes.saturating_add(1);
+            self.commit_pending_intents(&ctx, post_window_id, true);
             ctx.request_repaint();
+        } else {
+            self.discarded_carry_passes = 0;
+            self.commit_pending_intents(&ctx, post_window_id, false);
+            if will_discard {
+                ctx.request_repaint();
+            }
         }
         let content_rect = ctx.content_rect();
         let ppp = ctx.pixels_per_point().clamp(0.5, 8.0);
@@ -855,15 +867,25 @@ impl CurveBookNativeApp {
     }
 
     fn execute_menu_command(&mut self, ctx: Option<&egui::Context>, window_id: DesktopWindowId, command_id: &str) {
+        self.execute_menu_command_with_params(ctx, window_id, command_id, &serde_json::json!({}));
+    }
+
+    fn execute_menu_command_with_params(
+        &mut self,
+        ctx: Option<&egui::Context>,
+        window_id: DesktopWindowId,
+        command_id: &str,
+        params: &serde_json::Value,
+    ) {
         self.status_banner = None;
         if command_id == "app.preferences" {
             if let Ok(win) = self.runtime.window_mut(window_id) {
-                win.app_mut().egui_views.app_modals.preferences.shortcut_conflict_error = None;
-                win.app_mut().egui_views.app_modals.preferences_open = true;
+                let shortcuts = win.app().shortcuts.clone();
+                win.app_mut().egui_views.app_modals.open_preferences(&shortcuts, None);
             }
             return;
         }
-        if let Some(native_result) = self.try_handle_native_file_command(window_id, command_id) {
+        if let Some(native_result) = self.try_handle_native_file_command_with_params(window_id, command_id, params) {
             if let Err(err) = native_result {
                 self.status_banner = Some(err);
             }
@@ -886,11 +908,16 @@ impl CurveBookNativeApp {
         }
     }
 
-    fn try_handle_native_file_command(&mut self, window_id: DesktopWindowId, command_id: &str) -> Option<Result<(), String>> {
+    fn try_handle_native_file_command_with_params(
+        &mut self,
+        window_id: DesktopWindowId,
+        command_id: &str,
+        params: &serde_json::Value,
+    ) -> Option<Result<(), String>> {
         if !menu_action_triggers_native_file_dialog(command_id) {
             return None;
         }
-        let outcome = match self.runtime.dispatch_native_file_command(window_id, command_id) {
+        let outcome = match self.runtime.dispatch_native_file_command_with_params(window_id, command_id, params) {
             Ok(Some(outcome)) => outcome,
             Ok(None) => return None,
             Err(err) => return Some(Err(err)),
@@ -1247,31 +1274,6 @@ fn ensure_params_object(params: &mut serde_json::Value) -> Option<&mut serde_jso
         *params = serde_json::Value::Object(serde_json::Map::new());
     }
     params.as_object_mut()
-}
-
-fn is_host_routed_intent_command(command_id: &str) -> bool {
-    matches!(
-        command_id,
-        "project.open"
-            | "project.save"
-            | "project.saveAs"
-            | "file.open"
-            | "file.open_unpacked_dir"
-            | "file.save_as"
-            | "export.svg"
-            | "file.export_svg"
-            | "export.pdf"
-            | "file.export_pdf"
-            | "export.png"
-            | "file.export_png"
-            | "window.new"
-            | "file.newWindow"
-            | "window.close"
-            | "file.close"
-            | "file.quit"
-            | "app.quit"
-            | "edit.copy"
-    )
 }
 
 fn to_key_modifiers(modifiers: egui::Modifiers) -> KeyModifiers {
@@ -2044,6 +2046,127 @@ mod tests {
         assert!(!super::is_macos_app_bundle_exe(std::path::Path::new("/usr/local/bin/curvebook")));
 
         let _ = std::fs::remove_dir_all(&base);
+        Ok(())
+    }
+
+    #[test]
+    fn r15_6_a1_host_records_checkpoint_and_banner_on_partial_batch_error() -> Result<(), Box<dyn std::error::Error>> {
+        use std::sync::atomic::AtomicUsize;
+
+        let rec_dir = std::env::temp_dir().join(format!("curvebook-r15-6-a1-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&rec_dir);
+        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig { recovery_root: Some(rec_dir.clone()), ..DesktopHostConfig::default() });
+        let pref_calls = Arc::new(AtomicUsize::new(0));
+        let pref_calls_hook = Arc::clone(&pref_calls);
+        runtime.set_preferences_persist_hook(move |_| {
+            pref_calls_hook.fetch_add(1, Ordering::Relaxed);
+        });
+        let win_id = runtime.open_window(None, ViewportMetrics::new(1024.0, 640.0, 1.0))?;
+        let mut native = CurveBookNativeApp::new(runtime, win_id, None);
+        let ctx = egui::Context::default();
+
+        native.pending_intents.push_engine(
+            "sheet.createData",
+            serde_json::json!({ "sheet_id": "ds-a1-host", "title": "A1 Host", "kind": "column", "auto_graph": false }),
+        );
+        native.pending_intents.push_engine("sheet.delete", serde_json::json!({ "sheet_id": "missing-sheet" }));
+        native.pending_intents.push(UiIntent::SetUiScale(1.25));
+
+        native.commit_pending_intents(&ctx, win_id, false);
+
+        assert!(native.status_banner().is_some(), "failing intent must be surfaced in host status_banner");
+        let win = native.runtime().window(win_id)?;
+        assert!(win.app().document().data_sheet(&curvebook_doc::SheetId::from("ds-a1-host")).is_some(), "succeeding intent must land");
+        assert!(
+            win.dirty_commands().iter().any(|c| c == "sheet.createData"),
+            "record_ui_mutation_checkpoint must run on partial error: {:?}",
+            win.dirty_commands()
+        );
+        assert!((win.app().ui_scale() - 1.25).abs() < 1e-4, "trailing preference intent must apply");
+        assert!(pref_calls.load(Ordering::Relaxed) >= 1, "notify_preferences_changed must still run");
+
+        let _ = std::fs::remove_dir_all(&rec_dir);
+        Ok(())
+    }
+
+    #[test]
+    fn r15_6_a3_welcome_open_by_path_honors_dirty_check_and_emf_routes_to_host_save() -> Result<(), Box<dyn std::error::Error>> {
+        use crate::desktop_host::{NativeFileDialogKind, StubNativeFileDialogAdapter};
+
+        let tmp_dir = std::env::temp_dir().join(format!("curvebook-r15-6-a3-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&tmp_dir);
+        std::fs::create_dir_all(&tmp_dir)?;
+        let saved_project = tmp_dir.join("saved-assay.curvebook");
+        let emf_out = tmp_dir.join("figure-out.emf");
+
+        // Build and save a real `.curvebook` archive with a data sheet and graph sheet.
+        {
+            let mut seed = UiApp::new();
+            let _ = seed.execute_command(
+                "sheet.createData",
+                serde_json::json!({ "sheet_id": "ds-saved", "title": "Saved Assay", "kind": "xy", "data_sets": 1, "rows": 3, "auto_graph": false }),
+            )?;
+            let _ = seed.execute_command("table.setXCells", serde_json::json!({ "sheet_id": "ds-saved", "values": [1.0, 2.0, 3.0] }))?;
+            let _ = seed.execute_command("table.setCells", serde_json::json!({ "sheet_id": "ds-saved", "rows": [[5.0], [10.0], [15.0]] }))?;
+            let _ =
+                seed.execute_command("graph.create", serde_json::json!({ "sheet_id": "gs-emf", "data_sheet_id": "ds-saved", "title": "EMF Graph" }))?;
+            let _ = seed.execute_command("project.save", serde_json::json!({ "path": saved_project.to_string_lossy(), "unpacked": false }))?;
+        }
+        assert!(saved_project.exists(), "fixture .curvebook archive must exist");
+
+        let adapter = Arc::new(StubNativeFileDialogAdapter::new());
+        let mut runtime = DesktopHostRuntime::new(DesktopHostConfig::default());
+        runtime.set_file_dialog_adapter(Arc::clone(&adapter) as Arc<dyn NativeFileDialogAdapter>);
+        let win_id = runtime.open_window(None, ViewportMetrics::new(1024.0, 640.0, 1.0))?;
+        let mut native = CurveBookNativeApp::new(runtime, win_id, None);
+        let ctx = egui::Context::default();
+
+        // 1. Clean window: Welcome Hub `project.open` with explicit `path` loads directly without opening OS picker.
+        native.pending_intents.push_engine("project.open", serde_json::json!({ "path": saved_project.to_string_lossy() }));
+        native.commit_pending_intents(&ctx, win_id, false);
+        assert!(native.status_banner().is_none(), "clean open-by-path failed: {:?}", native.status_banner());
+        assert!(adapter.requests().is_empty(), "open-by-path must NOT invoke the OS file picker");
+        assert!(
+            native.runtime().window(win_id)?.app().document().data_sheet(&curvebook_doc::SheetId::from("ds-saved")).is_some(),
+            "saved project must load into clean window"
+        );
+        assert_eq!(native.runtime().window_count(), 1);
+
+        // 2. Dirty window: mutate a cell so `has_unsaved_changes() == true`; opening by path must preserve the dirty
+        //    document and open the target project in a new window rather than silently overwriting unsaved work.
+        {
+            let win = native.runtime_mut().window_mut(win_id)?;
+            win.execute_and_journal("table.setCell", serde_json::json!({ "sheet_id": "ds-saved", "row": 0, "col": 0, "value": 999.0 }))?;
+            assert!(win.has_unsaved_changes());
+        }
+        native.pending_intents.push_engine("project.open", serde_json::json!({ "path": saved_project.to_string_lossy() }));
+        native.commit_pending_intents(&ctx, win_id, false);
+        assert!(native.status_banner().is_none(), "dirty open-by-path failed: {:?}", native.status_banner());
+        assert!(adapter.requests().is_empty(), "dirty open-by-path must NOT invoke the OS file picker");
+        assert_eq!(native.runtime().window_count(), 2, "dirty window must be preserved while target opens in a new window");
+        let orig_cell = native
+            .runtime()
+            .window(win_id)?
+            .app()
+            .document()
+            .data_sheet(&curvebook_doc::SheetId::from("ds-saved"))
+            .and_then(|ds| ds.cell(curvebook_doc::CellCoord::new(0, 0, 0)))
+            .ok_or("missing original dirty cell")?;
+        assert_eq!(orig_cell.value, curvebook_doc::CellValue::Number(999.0), "dirty window edit must remain intact");
+
+        // 3. Export dialog EMF option routes `graph.exportEmf` through the host SaveFile dialog and writes EMF bytes to disk.
+        adapter.push_response("graph.exportEmf", Some(emf_out.clone()));
+        native.pending_intents.push_engine("graph.exportEmf", serde_json::json!({ "sheet_id": "gs-emf" }));
+        native.commit_pending_intents(&ctx, win_id, false);
+        assert!(native.status_banner().is_none(), "EMF host export failed: {:?}", native.status_banner());
+        let reqs = adapter.requests();
+        assert_eq!(reqs.len(), 1, "expected 1 SaveFile request for graph.exportEmf");
+        assert_eq!(reqs[0].command_id, "graph.exportEmf");
+        assert_eq!(reqs[0].kind, NativeFileDialogKind::SaveFile);
+        let emf_bytes = std::fs::read(&emf_out)?;
+        assert!(emf_bytes.len() > 80, "expected non-empty EMF output written to disk, got {} bytes", emf_bytes.len());
+
+        let _ = std::fs::remove_dir_all(&tmp_dir);
         Ok(())
     }
 }

@@ -1741,7 +1741,13 @@ fn handle_textbox_key(
     Ok(handled.then(|| UiEventOutcome { handled: true, action: format!("textbox.key:{key}"), ..Default::default() }))
 }
 
-fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {
+/// Build the ordered list of canonical shortcut strings for `(key, modifiers)`, including the
+/// `Ctrl`-to-`Cmd` fallback candidate when `ctrl` is pressed without `meta`.
+///
+/// Modifier order is deterministic (`Cmd`, `Ctrl`, `Alt`, `Shift`, `key`). Returns an empty vector
+/// when `key` is empty.
+#[must_use]
+pub fn build_shortcut_candidates(key: &str, modifiers: KeyModifiers) -> Vec<String> {
     if key.is_empty() {
         return Vec::new();
     }
@@ -1803,4 +1809,22 @@ fn cancel_inline_edit(app: &mut UiApp) -> UiEventOutcome {
     app.inline_editor.cancel();
     app.grid.tool.editing_buffer = None;
     UiEventOutcome { handled: true, action: String::from("inline_edit.cancelled"), ..Default::default() }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{KeyModifiers, build_shortcut_candidates};
+
+    #[test]
+    fn build_shortcut_candidates_preserves_order_ctrl_to_cmd_fallback_and_combined_ctrl_cmd() {
+        assert!(build_shortcut_candidates("", KeyModifiers::default()).is_empty());
+        assert_eq!(build_shortcut_candidates("Escape", KeyModifiers::default()), vec!["Escape"]);
+        assert_eq!(build_shortcut_candidates("s", KeyModifiers { meta: true, ..Default::default() }), vec!["Cmd+s"]);
+        assert_eq!(build_shortcut_candidates("s", KeyModifiers { ctrl: true, ..Default::default() }), vec!["Ctrl+s", "Cmd+s"]);
+        assert_eq!(
+            build_shortcut_candidates("k", KeyModifiers { ctrl: true, alt: true, shift: true, meta: false }),
+            vec!["Ctrl+Alt+Shift+k", "Cmd+Alt+Shift+k"]
+        );
+        assert_eq!(build_shortcut_candidates("k", KeyModifiers { ctrl: true, meta: true, alt: true, shift: true }), vec!["Cmd+Ctrl+Alt+Shift+k"]);
+    }
 }

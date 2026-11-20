@@ -1,7 +1,7 @@
 //! Native `egui` async `ChartScene` / `LayoutScene` viewport (`docs/planning/gui-layout-spec.md`
 //! §8.11A & §8.12, `R15.3`).
 
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, PoisonError, RwLock, mpsc};
 
 use curvebook_chart::equation_box::resolve_model_equation_hit_bounds;
 use curvebook_chart::{ChartScene, PathCmd, PointPt, RectPt, ScenePrimitive};
@@ -141,10 +141,170 @@ struct CachedCompiledScene {
     scene: Arc<ChartScene>,
 }
 
+/// Diagnostic snapshot of the single long-lived async canvas raster worker (`R15-GUI-04`).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CanvasAsyncWorkerStats {
+    pub worker_spawn_count: u64,
+    pub submitted_count: u64,
+    pub rendered_count: u64,
+}
+
+/// Inspect runtime statistics for the per-context async canvas raster worker, if initialized.
+#[must_use]
+pub fn canvas_async_worker_stats(ctx: &egui::Context) -> Option<CanvasAsyncWorkerStats> {
+    let worker_id = Id::unique("egui_shell.canvas_async_worker");
+    let handle: AsyncRasterWorkerHandle = ctx.data(|d| d.get_temp(worker_id))?;
+    let guard = handle.owner.results.read().unwrap_or_else(PoisonError::into_inner);
+    Some(CanvasAsyncWorkerStats {
+        worker_spawn_count: guard.worker_spawn_count,
+        submitted_count: guard.submitted_count,
+        rendered_count: guard.rendered_count,
+    })
+}
+
+struct RasterJobRequest {
+    slot_key: (String, SheetId),
+    req_key: RasterRequestKey,
+    scene: Arc<ChartScene>,
+    filter: CanvasPreviewFilter,
+    ctx_wake: egui::Context,
+}
+
+#[derive(Default)]
+struct RasterWorkerResults {
+    completed: Vec<((String, SheetId), RasterRequestKey, Option<RasterImage>)>,
+    last_submitted: Vec<((String, SheetId), RasterRequestKey)>,
+    submitted_count: u64,
+    rendered_count: u64,
+    worker_spawn_count: u64,
+}
+
+struct AsyncRasterWorkerOwner {
+    tx: RwLock<Option<mpsc::Sender<RasterJobRequest>>>,
+    results: Arc<RwLock<RasterWorkerResults>>,
+    join: RwLock<Option<std::thread::JoinHandle<()>>>,
+}
+
+impl Drop for AsyncRasterWorkerOwner {
+    fn drop(&mut self) {
+        // Close the request channel first so the worker exits its `recv()` loop cleanly.
+        let _ = self.tx.write().unwrap_or_else(PoisonError::into_inner).take();
+        let handle = self.join.write().unwrap_or_else(PoisonError::into_inner).take();
+        if let Some(join_handle) = handle {
+            let _ = join_handle.join();
+        }
+    }
+}
+
 #[derive(Clone)]
-struct AsyncRasterJob {
-    key: RasterRequestKey,
-    output: Arc<OnceLock<Option<RasterImage>>>,
+struct AsyncRasterWorkerHandle {
+    owner: Arc<AsyncRasterWorkerOwner>,
+}
+
+impl AsyncRasterWorkerHandle {
+    fn get_or_spawn(ctx: &egui::Context) -> Option<Self> {
+        let worker_id = Id::unique("egui_shell.canvas_async_worker");
+        if let Some(existing) = ctx.data(|d| d.get_temp::<Self>(worker_id)) {
+            return Some(existing);
+        }
+        let (tx, rx) = mpsc::channel();
+        let results = Arc::new(RwLock::new(RasterWorkerResults { worker_spawn_count: 1, ..RasterWorkerResults::default() }));
+        let results_bg = Arc::clone(&results);
+        let join_handle =
+            std::thread::Builder::new().name(String::from("cb-canvas-raster")).spawn(move || raster_worker_loop(&rx, &results_bg)).ok()?;
+        let handle = Self { owner: Arc::new(AsyncRasterWorkerOwner { tx: RwLock::new(Some(tx)), results, join: RwLock::new(Some(join_handle)) }) };
+        ctx.data_mut(|d| d.insert_temp(worker_id, handle.clone()));
+        Some(handle)
+    }
+
+    fn poll_or_submit(
+        &self,
+        slot_key: (String, SheetId),
+        req_key: RasterRequestKey,
+        scene: &Arc<ChartScene>,
+        filter: CanvasPreviewFilter,
+        ctx_wake: &egui::Context,
+    ) -> Option<Option<RasterImage>> {
+        let mut guard = self.owner.results.write().unwrap_or_else(PoisonError::into_inner);
+        if let Some(pos) = guard.completed.iter().position(|(sk, rk, _)| *sk == slot_key && *rk == req_key) {
+            let (_, _, img) = guard.completed.remove(pos);
+            return Some(img);
+        }
+        let already_submitted = guard.last_submitted.iter().any(|(sk, rk)| *sk == slot_key && *rk == req_key);
+        if !already_submitted {
+            let tx_guard = self.owner.tx.read().unwrap_or_else(PoisonError::into_inner);
+            if let Some(tx) = tx_guard.as_ref() {
+                let request = RasterJobRequest {
+                    slot_key: slot_key.clone(),
+                    req_key: req_key.clone(),
+                    scene: Arc::clone(scene),
+                    filter,
+                    ctx_wake: ctx_wake.clone(),
+                };
+                if tx.send(request).is_ok() {
+                    if let Some(entry) = guard.last_submitted.iter_mut().find(|(sk, _)| *sk == slot_key) {
+                        entry.1 = req_key;
+                    } else {
+                        guard.last_submitted.push((slot_key, req_key));
+                    }
+                    guard.submitted_count = guard.submitted_count.saturating_add(1);
+                }
+            }
+        }
+        None
+    }
+}
+
+fn coalesce_pending_raster_jobs(rx: &mpsc::Receiver<RasterJobRequest>, pending: &mut Vec<RasterJobRequest>) {
+    while let Ok(next) = rx.try_recv() {
+        if let Some(existing) = pending.iter_mut().find(|job| job.slot_key == next.slot_key) {
+            // Supersede any unstarted request for the same slot before rendering begins.
+            *existing = next;
+        } else {
+            pending.push(next);
+        }
+    }
+}
+
+fn raster_worker_loop(rx: &mpsc::Receiver<RasterJobRequest>, results: &RwLock<RasterWorkerResults>) {
+    let mut pending: Vec<RasterJobRequest> = Vec::new();
+    loop {
+        if pending.is_empty() {
+            let Ok(first) = rx.recv() else {
+                return;
+            };
+            pending.push(first);
+        }
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let job = pending.remove(0);
+
+        let rendered =
+            render_scene(&job.scene, RenderTargetSpec { width_px: job.req_key.width_px, height_px: job.req_key.height_px, dpi: job.req_key.dpi })
+                .ok()
+                .map(|mut img| {
+                    if job.filter != CanvasPreviewFilter::Normal {
+                        apply_canvas_preview_filter(&mut img, job.filter);
+                    }
+                    img
+                });
+
+        coalesce_pending_raster_jobs(rx, &mut pending);
+        let superseded = pending.iter().any(|p| p.slot_key == job.slot_key);
+        {
+            let mut guard = results.write().unwrap_or_else(PoisonError::into_inner);
+            guard.rendered_count = guard.rendered_count.saturating_add(1);
+            if !superseded {
+                if let Some(slot) = guard.completed.iter_mut().find(|(sk, _, _)| *sk == job.slot_key) {
+                    *slot = (job.slot_key, job.req_key, rendered);
+                } else {
+                    guard.completed.push((job.slot_key, job.req_key, rendered));
+                }
+            }
+        }
+        if !superseded {
+            job.ctx_wake.request_repaint();
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -288,7 +448,10 @@ pub fn render_canvas_view_for_sheet(
     report.paper_rect_pt = Some(paper_rect);
 
     if let (Some(tr_r), Some(lr_r)) = (top_ruler_rect, left_ruler_rect) {
-        render_canvas_rulers(ui, mat_rect, tr_r, lr_r, paper_rect, eff_scale, app.canvas_dialogs.ruler_unit, tokens);
+        render_canvas_rulers(
+            ui,
+            CanvasRulersSpec { mat_rect, top_r: tr_r, left_r: lr_r, paper_rect, eff_scale, unit: app.canvas_dialogs.ruler_unit, tokens },
+        );
     }
 
     // Paint paper drop shadow & white sheet backing inside clipped mat_rect
@@ -298,7 +461,12 @@ pub fn render_canvas_view_for_sheet(
     clipped_painter.rect_stroke(paper_rect, CornerRadius::ZERO, Stroke::new(1.0, tokens.border), StrokeKind::Inside);
 
     if let Some(ref sc) = scene {
-        composite_async_scene_texture(ui, app, sc, target_id, paper_rect, slot_tag, state, &clipped_painter);
+        composite_async_scene_texture(
+            ui,
+            app,
+            CompositeSceneSpec { scene: sc, sheet_id: target_id, paper_rect, slot_tag, painter: &clipped_painter },
+            state,
+        );
     }
     report.async_rendering_in_flight = state.slot.rendering_in_flight;
 
@@ -310,20 +478,19 @@ pub fn render_canvas_view_for_sheet(
     if let Some(gs) = gs_opt
         && let Some(ref sc) = scene
     {
-        render_graph_hud_overlays(ui, &clipped_painter, app, gs, sc, mat_rect, paper_rect, &resp, state, &ctx_in, meta, intents, &mut report);
+        render_graph_hud_overlays(
+            ui,
+            GraphHudInput { painter: &clipped_painter, app, gs, scene: sc, mat_rect, paper_rect, canvas_resp: &resp, ctx_in: &ctx_in },
+            state,
+            meta,
+            intents,
+            &mut report,
+        );
     } else if let Some(ls) = ls_opt {
         render_layout_hud_overlays(
             ui,
-            &clipped_painter,
-            app,
-            ls,
-            scene.as_deref(),
-            mat_rect,
-            paper_rect,
-            eff_scale,
-            &resp,
+            LayoutHudInput { painter: &clipped_painter, app, ls, scene: scene.as_deref(), mat_rect, paper_rect, eff_scale, ctx_in: &ctx_in },
             state,
-            &ctx_in,
             meta,
             intents,
             &mut report,
@@ -406,17 +573,16 @@ fn resolve_cached_scene(ctx: &egui::Context, app: &UiApp, sheet_id: &SheetId, sl
     Some(compiled)
 }
 
-#[allow(clippy::too_many_arguments)]
-fn composite_async_scene_texture(
-    ui: &egui::Ui,
-    app: &UiApp,
-    scene: &Arc<ChartScene>,
-    sheet_id: &SheetId,
+struct CompositeSceneSpec<'a> {
+    scene: &'a Arc<ChartScene>,
+    sheet_id: &'a SheetId,
     paper_rect: Rect,
-    slot_tag: &str,
-    state: &mut CanvasViewEguiState,
-    painter: &egui::Painter,
-) {
+    slot_tag: &'a str,
+    painter: &'a egui::Painter,
+}
+
+fn composite_async_scene_texture(ui: &egui::Ui, app: &UiApp, spec: CompositeSceneSpec<'_>, state: &mut CanvasViewEguiState) {
+    let CompositeSceneSpec { scene, sheet_id, paper_rect, slot_tag, painter } = spec;
     let ppp = ui.ctx().pixels_per_point().clamp(1.0, 4.0);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (paper_rect.width() * ppp).round().clamp(32.0, 4096.0) as u32;
@@ -442,7 +608,8 @@ fn composite_async_scene_texture(
         return;
     }
 
-    if state.synchronous_raster {
+    let worker = (!state.synchronous_raster).then(|| AsyncRasterWorkerHandle::get_or_spawn(ui.ctx())).flatten();
+    if state.synchronous_raster || worker.is_none() {
         let mut rendered = render_scene(scene, RenderTargetSpec { width_px, height_px, dpi }).ok();
         if let Some(ref mut img) = rendered
             && app.preview_filter != CanvasPreviewFilter::Normal
@@ -465,50 +632,27 @@ fn composite_async_scene_texture(
         }
     }
 
-    let job_id = Id::unique(("egui_shell.canvas_async_job", slot_tag, sheet_id.as_str()));
-    let existing_job: Option<AsyncRasterJob> = ui.ctx().data(|d| d.get_temp(job_id));
-    let job = match existing_job {
-        Some(j) if j.key == req_key => j,
-        _ => {
-            let output = Arc::new(OnceLock::new());
-            let out_worker = output.clone();
-            let scene_clone = scene.clone();
-            let filter = app.preview_filter;
-            let ctx_wake = ui.ctx().clone();
-            std::thread::spawn(move || {
-                let rendered = render_scene(&scene_clone, RenderTargetSpec { width_px, height_px, dpi }).ok().map(|mut img| {
-                    if filter != CanvasPreviewFilter::Normal {
-                        apply_canvas_preview_filter(&mut img, filter);
-                    }
-                    img
-                });
-                let _ = out_worker.set(rendered);
-                ctx_wake.request_repaint();
-            });
-            let new_job = AsyncRasterJob { key: req_key.clone(), output };
-            ui.ctx().data_mut(|d| d.insert_temp(job_id, new_job.clone()));
-            new_job
+    if let Some(worker) = worker {
+        let slot_key = (slot_tag.to_owned(), sheet_id.clone());
+        if let Some(maybe_img) = worker.poll_or_submit(slot_key, req_key.clone(), scene, app.preview_filter, ui.ctx()) {
+            state.slot.rendering_in_flight = false;
+            state.slot.last_sheet_id = Some(sheet_id.clone());
+            state.slot.last_mutation_seq = req_key.mutation_seq;
+            state.slot.last_width_px = width_px;
+            state.slot.last_height_px = height_px;
+            state.slot.last_dpi = dpi;
+            state.slot.last_filter_slug = filter_slug.clone();
+            if let Some(raster) = maybe_img {
+                let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
+                let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
+                state.slot.cached_texture = Some(tex_id);
+                painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
+                return;
+            }
+        } else {
+            state.slot.rendering_in_flight = true;
+            ui.ctx().request_repaint();
         }
-    };
-
-    if let Some(maybe_img) = job.output.get() {
-        state.slot.rendering_in_flight = false;
-        state.slot.last_sheet_id = Some(sheet_id.clone());
-        state.slot.last_mutation_seq = req_key.mutation_seq;
-        state.slot.last_width_px = width_px;
-        state.slot.last_height_px = height_px;
-        state.slot.last_dpi = dpi;
-        state.slot.last_filter_slug = filter_slug.clone();
-        if let Some(raster) = maybe_img {
-            let color_img = egui::ColorImage::from_rgba_unmultiplied([raster.width_px as usize, raster.height_px as usize], &raster.rgba);
-            let tex_id = upload_canvas_texture(ui.ctx(), slot_tag, color_img);
-            state.slot.cached_texture = Some(tex_id);
-            painter.image(tex_id, paper_rect, Rect::from_min_max(Pos2::ZERO, Pos2::new(1.0, 1.0)), Color32::WHITE);
-            return;
-        }
-    } else {
-        state.slot.rendering_in_flight = true;
-        ui.ctx().request_repaint();
     }
 
     // While async worker finishes on frame 1, show previous cached texture or crisp vector scene preview
@@ -593,22 +737,35 @@ fn paint_polyline(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_graph_hud_overlays(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    gs: &GraphSheet,
-    scene: &ChartScene,
+struct GraphHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    gs: &'a GraphSheet,
+    scene: &'a ChartScene,
     mat_rect: Rect,
     paper_rect: Rect,
-    canvas_resp: &egui::Response,
+    canvas_resp: &'a egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+struct GraphOverlayCtx<'a> {
+    painter: &'a egui::Painter,
+    gs: &'a GraphSheet,
+    doc: &'a ProjectDocument,
+    scene: &'a ChartScene,
+    paper_rect: Rect,
+    tokens: &'a Tokens,
+}
+
+fn render_graph_hud_overlays(
+    ui: &mut egui::Ui,
+    input: GraphHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let GraphHudInput { painter, app, gs, scene, mat_rect, paper_rect, canvas_resp, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let sx = paper_rect.width() / (scene.width_pt.max(1.0) as f32);
@@ -617,8 +774,8 @@ fn render_graph_hud_overlays(
     let screen_to_scene =
         |pos: Pos2| PointPt::new(f64::from((pos.x - paper_rect.left()) / sx.max(1e-4)), f64::from((pos.y - paper_rect.top()) / sy.max(1e-4)));
 
-    let ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
-    let (ann_claimed_click, ann_opened_ctx_menu) = render_graph_embedded_objects(ui, &ov, gs, state, meta, intents);
+    let canvas_ov = CanvasOverlayCtx { app, painter, mat_rect, paper_rect, sx, sy, tokens, enabled: ctx_in.enabled };
+    let (ann_claimed_click, ann_opened_ctx_menu) = render_graph_embedded_objects(ui, &canvas_ov, gs, state, meta, intents);
 
     if ctx_in.enabled && !ann_opened_ctx_menu && canvas_resp.secondary_clicked() {
         let anchor = ui.input(|i| i.pointer.interact_pos()).unwrap_or(paper_rect.center());
@@ -705,25 +862,27 @@ fn render_graph_hud_overlays(
         }
     }
 
+    let ov = GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens };
+
     // 3. Pairwise Significance Brackets & Compact Letter Display (CLD) HUD
     let has_pairwise_results = doc.result_sheets.iter().any(|r| !r.pairwise_comparisons.is_empty());
     if !gs.spec.comparisons.is_empty() || gs.spec.compact_letter_display.is_some() || has_pairwise_results {
-        render_pairwise_cld_hud(ui, gs, doc, paper_rect, ctx_in.enabled, tokens, meta, intents);
+        render_pairwise_cld_hud(ui, &ov, ctx_in.enabled, meta, intents);
     }
 
     // 4. Axis-Synchronized Kaplan-Meier `Number at risk` Alignment Track
     if should_show_km_track(gs, doc) {
-        let track_rect = render_km_number_at_risk_track(ui, painter, gs, doc, scene, paper_rect, state, tokens, meta);
+        let track_rect = render_km_number_at_risk_track(ui, &ov, state, meta);
         report.km_track_rect_pt = track_rect;
     } else {
         state.km_at_risk_rows = 0;
     }
 
     // 5. Live TeX Curve/Fit Equations via `curvebook-text` layout helpers
-    let eq_rects = render_live_tex_equations(ui, painter, gs, doc, scene, paper_rect, sx, sy, state, tokens, meta);
+    let eq_rects = render_live_tex_equations(ui, &ov, (sx, sy), state, meta);
     report.tex_equation_rects_pt = eq_rects;
 
-    render_graph_context_menu(ui, &ov, gs, state, meta, intents);
+    render_graph_context_menu(ui, &canvas_ov, gs, state, meta, intents);
 }
 
 fn hit_test_point_indexed(scene: &ChartScene, pt: PointPt, tol_pt: f64) -> Option<(usize, &curvebook_chart::PlottedPointMeta)> {
@@ -843,17 +1002,8 @@ fn paint_hover_hud_card(painter: &egui::Painter, anchor: Pos2, text: &str, token
     painter.galley(card_rect.min + vec2(6.0, 4.0), galley, tokens.text_strong);
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_pairwise_cld_hud(
-    ui: &mut egui::Ui,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    paper_rect: Rect,
-    enabled: bool,
-    tokens: &Tokens,
-    meta: &mut FrameInspectMeta,
-    intents: &mut PendingUiIntents,
-) {
+fn render_pairwise_cld_hud(ui: &mut egui::Ui, ov: &GraphOverlayCtx<'_>, enabled: bool, meta: &mut FrameInspectMeta, intents: &mut PendingUiIntents) {
+    let GraphOverlayCtx { gs, doc, paper_rect, tokens, .. } = *ov;
     let mode_lbl = match (gs.spec.comparisons.is_empty(), gs.spec.compact_letter_display.is_some()) {
         (false, true) => format!("Brackets ({}) + CLD", gs.spec.comparisons.len()),
         (true, true) => String::from("CLD Active"),
@@ -940,18 +1090,13 @@ struct KmCohortRiskRow {
     counts: Vec<usize>,
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_km_number_at_risk_track(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
+    ov: &GraphOverlayCtx<'_>,
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Option<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
     let ticks = extract_x_axis_ticks_pt(gs, scene);
     if ticks.is_empty() {
         state.km_at_risk_rows = 0;
@@ -1111,20 +1256,15 @@ fn build_km_risk_rows(gs: &GraphSheet, doc: &ProjectDocument, ticks: &[(f64, f64
     out
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_live_tex_equations(
     ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    gs: &GraphSheet,
-    doc: &ProjectDocument,
-    scene: &ChartScene,
-    paper_rect: Rect,
-    sx: f32,
-    sy: f32,
+    ov: &GraphOverlayCtx<'_>,
+    scale_xy: (f32, f32),
     state: &mut CanvasViewEguiState,
-    tokens: &Tokens,
     meta: &mut FrameInspectMeta,
 ) -> Vec<Rect> {
+    let GraphOverlayCtx { painter, gs, doc, scene, paper_rect, tokens } = *ov;
+    let (sx, sy) = scale_xy;
     let mut rects = Vec::new();
     let mut eq_idx = 0usize;
 
@@ -1293,23 +1433,26 @@ fn paint_equation_segments(
     Rect::from_min_size(origin, vec2(total_w.max(1.0), total_h.max(1.0)))
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_layout_hud_overlays(
-    ui: &mut egui::Ui,
-    painter: &egui::Painter,
-    app: &UiApp,
-    ls: &LayoutSheet,
-    scene: Option<&ChartScene>,
+struct LayoutHudInput<'a> {
+    painter: &'a egui::Painter,
+    app: &'a UiApp,
+    ls: &'a LayoutSheet,
+    scene: Option<&'a ChartScene>,
     mat_rect: Rect,
     paper_rect: Rect,
     eff_scale: f32,
-    _canvas_resp: &egui::Response,
+    ctx_in: &'a CanvasViewContext<'a>,
+}
+
+fn render_layout_hud_overlays(
+    ui: &mut egui::Ui,
+    input: LayoutHudInput<'_>,
     state: &mut CanvasViewEguiState,
-    ctx_in: &CanvasViewContext<'_>,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
     report: &mut CanvasViewFrameReport,
 ) {
+    let LayoutHudInput { painter, app, ls, scene, mat_rect, paper_rect, eff_scale, ctx_in } = input;
     let doc = app.document();
     let tokens = ctx_in.tokens;
     let scene_w = scene.map_or(ls.spec.page_size_pt().width.max(1.0), |s| s.width_pt.max(1.0)) as f32;
@@ -1484,7 +1627,14 @@ fn render_layout_hud_overlays(
     }
 
     if let Some((sel_idx, init_bounds, rot_deg, lock_aspect)) = selected_img {
-        render_selected_image_handles(ui, &ov, &ls.id, true, sel_idx, (init_bounds, rot_deg, lock_aspect), state, meta, intents);
+        render_selected_image_handles(
+            ui,
+            &ov,
+            SelectedImageTarget { sheet_id: &ls.id, is_layout: true, target_idx: sel_idx, init_bounds, init_rot_deg: rot_deg, lock_aspect },
+            state,
+            meta,
+            intents,
+        );
     }
 
     // Draw active 0.1 pt snap guides (both internal live drag & CanvasToolState active_snap_guides)
@@ -1665,17 +1815,18 @@ fn set_layout_item_bounds_doc(item: &mut LayoutItem, bounds: DocRectPt) {
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_canvas_rulers(
-    ui: &egui::Ui,
+struct CanvasRulersSpec<'a> {
     mat_rect: Rect,
     top_r: Rect,
     left_r: Rect,
     paper_rect: Rect,
     eff_scale: f32,
     unit: PhysicalUnit,
-    tokens: &Tokens,
-) {
+    tokens: &'a Tokens,
+}
+
+fn render_canvas_rulers(ui: &egui::Ui, spec: CanvasRulersSpec<'_>) {
+    let CanvasRulersSpec { mat_rect, top_r, left_r, paper_rect, eff_scale, unit, tokens } = spec;
     let corner = Rect::from_min_size(pos2(left_r.left(), top_r.top()), vec2(RULER_THICKNESS_PT, RULER_THICKNESS_PT));
     let unit_lbl = match unit {
         PhysicalUnit::Points => "pt",
@@ -1978,7 +2129,14 @@ fn render_graph_embedded_objects(
     }
 
     if let Some((sel_idx, init_bounds, rot_deg, lock_aspect)) = selected_img {
-        render_selected_image_handles(ui, ov, &gs.id, false, sel_idx, (init_bounds, rot_deg, lock_aspect), state, meta, intents);
+        render_selected_image_handles(
+            ui,
+            ov,
+            SelectedImageTarget { sheet_id: &gs.id, is_layout: false, target_idx: sel_idx, init_bounds, init_rot_deg: rot_deg, lock_aspect },
+            state,
+            meta,
+            intents,
+        );
     }
 
     (claimed_click, opened_ctx_menu)
@@ -2245,18 +2403,24 @@ fn pointer_angle_deg(center: Pos2, pos: Pos2) -> f64 {
     f64::from((pos.y - center.y).atan2(pos.x - center.x)).to_degrees() + 90.0
 }
 
-#[allow(clippy::too_many_arguments)]
+struct SelectedImageTarget<'a> {
+    sheet_id: &'a SheetId,
+    is_layout: bool,
+    target_idx: usize,
+    init_bounds: DocRectPt,
+    init_rot_deg: f64,
+    lock_aspect: bool,
+}
+
 fn render_selected_image_handles(
     ui: &mut egui::Ui,
     ov: &CanvasOverlayCtx<'_>,
-    sheet_id: &SheetId,
-    is_layout: bool,
-    target_idx: usize,
-    (init_bounds, init_rot_deg, lock_aspect): (DocRectPt, f64, bool),
+    target: SelectedImageTarget<'_>,
     state: &mut CanvasViewEguiState,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let SelectedImageTarget { sheet_id, is_layout, target_idx, init_bounds, init_rot_deg, lock_aspect } = target;
     if !ov.enabled {
         return;
     }

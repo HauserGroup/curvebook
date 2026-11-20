@@ -45,7 +45,8 @@ pub fn run(root: &Path, args: &[String]) -> Result<(), String> {
     }
 
     let summary = std::fs::read_to_string(&out.summary_json).map_err(|e| format!("{}: {e}", out.summary_json.display()))?;
-    for line in summary_lines(&crate::json::parse(&summary)?)? {
+    let summary_doc: serde_json::Value = serde_json::from_str(&summary).map_err(|e| format!("{}: {e}", out.summary_json.display()))?;
+    for line in summary_lines(&summary_doc)? {
         println!("coverage: {line}");
     }
     println!("coverage: lcov report  {}", out.lcov.display());
@@ -145,17 +146,14 @@ fn plan(opts: &Options, nextest: bool, out: &Outputs) -> Vec<Vec<String>> {
 
 /// Workspace totals from an `llvm-cov export -summary-only` JSON document
 /// (`data[0].totals.{lines,functions,regions}.{covered,count}`).
-fn summary_lines(doc: &crate::json::Json) -> Result<Vec<String>, String> {
+fn summary_lines(doc: &serde_json::Value) -> Result<Vec<String>, String> {
     let totals = doc
         .get("data")
-        .and_then(crate::json::Json::as_array)
-        .and_then(<[crate::json::Json]>::first)
+        .and_then(serde_json::Value::as_array)
+        .and_then(|arr| arr.first())
         .and_then(|d| d.get("totals"))
         .ok_or_else(|| String::from("coverage summary has no `data[0].totals`"))?;
-    let number = |metric: &crate::json::Json, key: &str| match metric.get(key) {
-        Some(crate::json::Json::Number(n)) => n.parse::<u64>().ok(),
-        _ => None,
-    };
+    let number = |metric: &serde_json::Value, key: &str| metric.get(key).and_then(serde_json::Value::as_u64);
     let mut lines = Vec::new();
     for name in ["lines", "functions", "regions"] {
         let metric = totals.get(name).ok_or_else(|| format!("coverage summary has no `totals.{name}`"))?;
@@ -209,7 +207,7 @@ fn rustc_output(root: &Path, args: &[&str]) -> Option<String> {
 fn coverage_output_dir(root: &Path) -> Result<PathBuf, String> {
     let meta = crate::cargo_metadata(root)?;
     let target =
-        meta.get("target_directory").and_then(crate::json::Json::as_str).ok_or_else(|| String::from("cargo metadata has no `target_directory`"))?;
+        meta.get("target_directory").and_then(serde_json::Value::as_str).ok_or_else(|| String::from("cargo metadata has no `target_directory`"))?;
     Ok(PathBuf::from(target).join("llvm-cov"))
 }
 
@@ -265,12 +263,13 @@ mod tests {
 
     #[test]
     fn summary_reads_workspace_totals_and_rejects_malformed_documents() {
-        let doc = crate::json::parse(
+        let doc: serde_json::Value = serde_json::from_str(
             r#"{"data":[{"totals":{"lines":{"count":200,"covered":150,"percent":75.0},
                 "functions":{"count":0,"covered":0,"percent":0},
                 "regions":{"count":8,"covered":1,"percent":12.5}}}],"type":"llvm.coverage.json.export"}"#,
-        );
-        let lines = doc.and_then(|d| summary_lines(&d));
+        )
+        .unwrap();
+        let lines = summary_lines(&doc);
         assert_eq!(
             lines,
             Ok(strs(&[
@@ -279,8 +278,14 @@ mod tests {
                 "regions          1 / 8        covered (12.5%)",
             ]))
         );
-        for bad in [r#"{}"#, r#"{"data":[]}"#, r#"{"data":[{"totals":{"lines":{"count":1}}}]}"#] {
-            assert!(crate::json::parse(bad).and_then(|d| summary_lines(&d)).is_err(), "{bad}");
+        for bad in [
+            r#"{}"#,
+            r#"{"data":[]}"#,
+            r#"{"data":[{"totals":{"lines":{"count":1}}}]}"#,
+            r#"{"data":[{"totals":{"lines":{"count":1.5,"covered":1},"functions":{"count":0,"covered":0},"regions":{"count":0,"covered":0}}}]}"#,
+            r#"{"data":[{"totals":{"lines":{"count":1,"covered":-1},"functions":{"count":0,"covered":0},"regions":{"count":0,"covered":0}}}]}"#,
+        ] {
+            assert!(serde_json::from_str::<serde_json::Value>(bad).map_err(|e| e.to_string()).and_then(|d| summary_lines(&d)).is_err(), "{bad}");
         }
     }
 }

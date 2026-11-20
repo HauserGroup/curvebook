@@ -772,20 +772,8 @@ fn summary_center(values: &[f64], sorted: &[f64], measure: curvebook_doc::Summar
 }
 
 fn percentile_linear(sorted: &[f64], q: f64) -> f64 {
-    let n = sorted.len();
-    if n == 0 {
-        return 0.0;
-    }
-    if n == 1 {
-        return sorted.first().copied().unwrap_or(0.0);
-    }
-    let idx_f = crate::clamp_f64_safe(q, 0.0, 1.0) * ((n - 1) as f64);
-    let lo = idx_f.floor() as usize;
-    let hi = idx_f.ceil() as usize;
-    let frac = idx_f - (lo as f64);
-    let a = sorted.get(lo).copied().unwrap_or(0.0);
-    let b = sorted.get(hi).copied().unwrap_or(a);
-    a + (b - a) * frac
+    let qc = crate::clamp_f64_safe(q, 0.0, 1.0);
+    curvebook_math::quantile_type7_sorted(sorted, qc).unwrap_or(0.0)
 }
 
 fn emit_replicate_dots(scene: &mut ChartScene, cx: f64, spread_w: f64, sorted: &[f64], y_map: AxisMapping, clip: RectPt, color: Rgba8) {
@@ -4312,5 +4300,24 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn percentile_linear_preserves_empty_default_exact_rank_and_extreme_span() {
+        use super::percentile_linear;
+
+        assert_eq!(percentile_linear(&[], 0.5), 0.0);
+        assert_eq!(percentile_linear(&[7.5], 0.5), 7.5);
+        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], 0.25), 17.5);
+        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], 0.5), 25.0);
+        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::NAN), 10.0);
+        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::NEG_INFINITY), 10.0);
+        assert_eq!(percentile_linear(&[10.0, 20.0, 30.0, 40.0], f64::INFINITY), 40.0);
+
+        // Exact-rank endpoints and non-exact midpoint on extreme finite spans must not produce NaN or Inf.
+        let extreme = [f64::MIN, f64::MAX];
+        assert_eq!(percentile_linear(&extreme, 0.0), f64::MIN);
+        assert_eq!(percentile_linear(&extreme, 1.0), f64::MAX);
+        assert_eq!(percentile_linear(&extreme, 0.5), 0.0);
     }
 }

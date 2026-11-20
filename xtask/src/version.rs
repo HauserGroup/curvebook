@@ -49,18 +49,9 @@ pub fn read_workspace_version(cargo_toml: &str) -> Result<String, String> {
 }
 
 pub fn validate_semver(ver: &str) -> Result<(), String> {
-    let (core, pre) = match ver.split_once('-') {
-        Some((c, p)) => (c, Some(p)),
-        None => (ver, None),
-    };
-    let parts: Vec<&str> = core.split('.').collect();
-    if parts.len() != 3 || !parts.iter().all(|p| !p.is_empty() && p.chars().all(|c| c.is_ascii_digit())) {
-        return Err(format!("invalid version `{ver}`: expected X.Y.Z or X.Y.Z-prerelease"));
-    }
-    if let Some(p) = pre
-        && (p.is_empty() || !p.chars().all(|c| c.is_ascii_alphanumeric() || c == '.' || c == '-'))
-    {
-        return Err(format!("invalid prerelease `{p}` in `{ver}`"));
+    let parsed = semver::Version::parse(ver).map_err(|err| format!("invalid version `{ver}`: expected X.Y.Z or X.Y.Z-prerelease ({err})"))?;
+    if !parsed.build.is_empty() {
+        return Err(format!("invalid version `{ver}`: build metadata is not supported for workspace version"));
     }
     Ok(())
 }
@@ -113,8 +104,12 @@ mod tests {
     fn reads_validates_and_replaces_workspace_version() {
         let toml = "[workspace]\nmembers = []\n\n[workspace.package]\nversion = \"0.1.0\"\nedition = \"2024\"\n";
         assert_eq!(read_workspace_version(toml).unwrap(), "0.1.0");
-        validate_semver("0.2.0-rc.1").unwrap();
-        assert!(validate_semver("1.2").is_err());
+        for good in ["0.1.0", "0.2.0-rc.1", "1.0.0-alpha.2", "1.2.3-beta-1.0"] {
+            validate_semver(good).unwrap();
+        }
+        for bad in ["", "1.2", "v0.1.0", "0.1.0+build.1", "0.1.0-", "0.1.0-alpha..1", "01.2.3", "0.1.0-01", " 0.1.0 "] {
+            assert!(validate_semver(bad).is_err(), "expected failure for `{bad}`");
+        }
         let next = replace_workspace_version(toml, "0.2.0-rc.1").unwrap();
         assert_eq!(read_workspace_version(&next).unwrap(), "0.2.0-rc.1");
     }

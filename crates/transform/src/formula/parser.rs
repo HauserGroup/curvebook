@@ -255,13 +255,33 @@ enum TokenKind {
 #[derive(Debug, Clone)]
 struct Token {
     pos: usize,
+    end: usize,
     kind: TokenKind,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ColRefKind {
+    Bracketed,
+    Ident,
+    ColumnByName,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ColRefSpan {
+    start: usize,
+    end: usize,
+    name: String,
+    kind: ColRefKind,
 }
 
 /// Parse a formula string into an [`Expr`] AST.
 ///
 /// Strips any leading `=`, enforces nesting and token bounds, and rejects trailing tokens.
 pub fn parse_formula(input: &str) -> Result<Expr, TransformError> {
+    parse_formula_internal(input, false).map(|(expr, _)| expr)
+}
+
+fn parse_formula_internal(input: &str, collect_refs: bool) -> Result<(Expr, Vec<ColRefSpan>), TransformError> {
     let after_leading_ws = input.trim_start();
     let after_eq = after_leading_ws.strip_prefix('=').unwrap_or(after_leading_ws);
     let body_with_tail = after_eq.trim_start();
@@ -271,12 +291,79 @@ pub fn parse_formula(input: &str) -> Result<Expr, TransformError> {
     }
     let offset = input.len() - body_with_tail.len();
     let tokens = tokenize(body, offset)?;
-    let mut parser = Parser { tokens, cursor: 0, depth: 0 };
+    let mut parser = Parser { tokens, cursor: 0, depth: 0, ref_spans: collect_refs.then(Vec::new) };
     let expr = parser.parse_expr(0)?;
     if let Some(tok) = parser.peek() {
         return Err(TransformError::ParseError { position: tok.pos, message: format!("unexpected trailing token `{:?}`", tok.kind) });
     }
-    Ok(expr)
+    Ok((expr, parser.ref_spans.unwrap_or_default()))
+}
+
+fn escape_formula_string_literal(raw: &str) -> String {
+    let mut out = String::with_capacity(raw.len());
+    for ch in raw.chars() {
+        match ch {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
+/// Rewrite column references in `formula` according to simultaneous `(old_title, new_title)` renames.
+///
+/// Matches column names using exact trimmed case-sensitive lookup (consistent with
+/// `MultipleVariablesTable::find_variable`), preserving string literals, partial substrings,
+/// function names, window keywords, and `Info(...)` metadata lookups untouched.
+///
+/// Returns `Some(rewritten)` if at least one column reference was updated, or `None` if no
+/// references matched or `formula` could not be parsed.
+#[must_use]
+pub fn rewrite_formula_column_refs(formula: &str, renames: &[(&str, &str)]) -> Option<String> {
+    let pairs: Vec<(&str, &str)> =
+        renames.iter().map(|(old, new)| (old.trim(), new.trim())).filter(|(old, new)| !old.is_empty() && !new.is_empty() && old != new).collect();
+    if pairs.is_empty() {
+        return None;
+    }
+    let (_, spans) = parse_formula_internal(formula, true).ok()?;
+    let mut edits: Vec<(usize, usize, String)> = Vec::new();
+    for span in spans {
+        let needle = span.name.trim();
+        let Some(&(_, new_title)) = pairs.iter().find(|&&(old, _)| old == needle) else {
+            continue;
+        };
+        let replacement = match span.kind {
+            ColRefKind::Bracketed | ColRefKind::Ident => {
+                if new_title.contains(']') {
+                    format!("col(\"{}\")", escape_formula_string_literal(new_title))
+                } else {
+                    format!("[{new_title}]")
+                }
+            }
+            ColRefKind::ColumnByName => format!("\"{}\"", escape_formula_string_literal(new_title)),
+        };
+        edits.push((span.start, span.end, replacement));
+    }
+    if edits.is_empty() {
+        return None;
+    }
+    edits.sort_by_key(|(start, _, _)| *start);
+    let mut out = String::with_capacity(formula.len() + edits.len() * 8);
+    let mut cursor = 0usize;
+    for (start, end, replacement) in edits {
+        if start < cursor || end > formula.len() || start > end {
+            return None;
+        }
+        out.push_str(formula.get(cursor..start)?);
+        out.push_str(&replacement);
+        cursor = end;
+    }
+    out.push_str(formula.get(cursor..)?);
+    Some(out)
 }
 
 struct Lexer<'a> {
@@ -347,7 +434,7 @@ impl<'a> Lexer<'a> {
         if !val.is_finite() {
             return Err(self.err(start, format!("numeric literal `{slice}` overflows IEEE-754 f64")));
         }
-        Ok(Token { pos: self.base_offset + start, kind: TokenKind::Number(val) })
+        Ok(Token { pos: self.base_offset + start, end: self.base_offset + self.pos, kind: TokenKind::Number(val) })
     }
 
     fn lex_string(&mut self, quote: u8) -> Result<Token, TransformError> {
@@ -357,7 +444,7 @@ impl<'a> Lexer<'a> {
         while let Some(ch) = self.next_char() {
             if ch == quote as char {
                 self.pos += ch.len_utf8();
-                return Ok(Token { pos: self.base_offset + start, kind: TokenKind::Text(out) });
+                return Ok(Token { pos: self.base_offset + start, end: self.base_offset + self.pos, kind: TokenKind::Text(out) });
             }
             if ch == '\\' {
                 self.pos += 1;
@@ -391,7 +478,7 @@ impl<'a> Lexer<'a> {
                 if name.is_empty() {
                     return Err(self.err(start, "empty bracketed column reference `[]`"));
                 }
-                return Ok(Token { pos: self.base_offset + start, kind: TokenKind::BracketIdent(name) });
+                return Ok(Token { pos: self.base_offset + start, end: self.base_offset + self.pos, kind: TokenKind::BracketIdent(name) });
             }
             self.pos += ch.len_utf8();
         }
@@ -418,7 +505,7 @@ impl<'a> Lexer<'a> {
         if ident == "$" {
             return Err(self.err(start, "expected variable name after `$`"));
         }
-        Ok(Token { pos: self.base_offset + start, kind: TokenKind::Ident(ident.to_owned()) })
+        Ok(Token { pos: self.base_offset + start, end: self.base_offset + self.pos, kind: TokenKind::Ident(ident.to_owned()) })
     }
 
     fn lex_operator(&mut self) -> Result<Token, TransformError> {
@@ -453,7 +540,7 @@ impl<'a> Lexer<'a> {
             }
         };
         self.pos += advance;
-        Ok(Token { pos: self.base_offset + start, kind })
+        Ok(Token { pos: self.base_offset + start, end: self.base_offset + self.pos, kind })
     }
 }
 
@@ -493,6 +580,7 @@ struct Parser {
     tokens: Vec<Token>,
     cursor: usize,
     depth: usize,
+    ref_spans: Option<Vec<ColRefSpan>>,
 }
 
 impl Parser {
@@ -598,8 +686,13 @@ impl Parser {
         match tok.kind {
             TokenKind::Number(v) => Ok(Expr::Number(v)),
             TokenKind::Text(s) => Ok(Expr::Text(s)),
-            TokenKind::BracketIdent(name) => Ok(Expr::Var(VarRef::Bracketed(name))),
-            TokenKind::Ident(name) => self.parse_ident_or_call(tok.pos, name),
+            TokenKind::BracketIdent(name) => {
+                if let Some(spans) = &mut self.ref_spans {
+                    spans.push(ColRefSpan { start: tok.pos, end: tok.end, name: name.clone(), kind: ColRefKind::Bracketed });
+                }
+                Ok(Expr::Var(VarRef::Bracketed(name)))
+            }
+            TokenKind::Ident(name) => self.parse_ident_or_call(tok.pos, tok.end, name),
             TokenKind::LParen => {
                 let inner = self.parse_expr(0)?;
                 match self.advance() {
@@ -612,7 +705,7 @@ impl Parser {
         }
     }
 
-    fn parse_ident_or_call(&mut self, pos: usize, name: String) -> Result<Expr, TransformError> {
+    fn parse_ident_or_call(&mut self, pos: usize, end: usize, name: String) -> Result<Expr, TransformError> {
         if !matches!(self.peek().map(|t| &t.kind), Some(TokenKind::LParen)) {
             if name.eq_ignore_ascii_case("$row") {
                 return Ok(Expr::Var(VarRef::RowOneBased));
@@ -620,13 +713,25 @@ impl Parser {
             if name.eq_ignore_ascii_case("$index") {
                 return Ok(Expr::Var(VarRef::IndexZeroBased));
             }
+            if let Some(spans) = &mut self.ref_spans {
+                spans.push(ColRefSpan { start: pos, end, name: name.clone(), kind: ColRefKind::Ident });
+            }
             return Ok(Expr::Var(VarRef::Ident(name)));
         }
         self.advance();
         let mut args = Vec::new();
+        let mut first_arg_text_span: Option<(usize, usize)> = None;
         if !matches!(self.peek().map(|t| &t.kind), Some(TokenKind::RParen)) {
             loop {
+                let arg_tok_span = self.peek().and_then(|t| match t.kind {
+                    TokenKind::Text(_) => Some((t.pos, t.end)),
+                    _ => None,
+                });
+                let before_cursor = self.cursor;
                 args.push(self.parse_expr(0)?);
+                if args.len() == 1 && self.cursor == before_cursor + 1 {
+                    first_arg_text_span = arg_tok_span;
+                }
                 match self.peek().map(|t| &t.kind) {
                     Some(TokenKind::Comma) => {
                         self.advance();
@@ -644,8 +749,21 @@ impl Parser {
                 }
             }
         }
-        let _ = self.advance();
+        let rparen_end = self.advance().map_or(end, |t| t.end);
         let expr = normalize_special_call(pos, name, args)?;
+        if let Some(spans) = &mut self.ref_spans {
+            match &expr {
+                Expr::Var(VarRef::InfoConstant(_)) => {
+                    spans.retain(|s| s.start < pos || s.end > rparen_end);
+                }
+                Expr::Var(VarRef::ColumnByName(col_name)) => {
+                    if let Some((str_start, str_end)) = first_arg_text_span {
+                        spans.push(ColRefSpan { start: str_start, end: str_end, name: col_name.clone(), kind: ColRefKind::ColumnByName });
+                    }
+                }
+                _ => {}
+            }
+        }
         self.parse_call_postfix_clauses(expr)
     }
 
@@ -668,7 +786,7 @@ impl Parser {
 
     fn expect_lparen(&mut self, msg: &str) -> Result<usize, TransformError> {
         match self.peek().cloned() {
-            Some(Token { kind: TokenKind::LParen, pos }) => {
+            Some(Token { kind: TokenKind::LParen, pos, .. }) => {
                 let _ = self.advance();
                 Ok(pos)
             }
@@ -1017,4 +1135,39 @@ fn normalize_special_call(pos: usize, name: String, args: Vec<Expr>) -> Result<E
         };
     }
     Ok(Expr::Call { name, args })
+}
+
+#[cfg(test)]
+mod rewrite_tests {
+    use super::{parse_formula, rewrite_formula_column_refs};
+
+    #[test]
+    fn rewrites_bracketed_bare_and_col_refs_preserving_literals_and_info() {
+        assert_eq!(rewrite_formula_column_refs("[Dose] / [Weight]", &[("Dose", "Dose (mg/kg)")]), Some(String::from("[Dose (mg/kg)] / [Weight]")));
+        assert_eq!(
+            rewrite_formula_column_refs("= [ Dose ] / [Weight]", &[("Dose", "Dose (mg/kg)")]),
+            Some(String::from("= [Dose (mg/kg)] / [Weight]"))
+        );
+        assert_eq!(rewrite_formula_column_refs("Dose / Weight", &[("Dose", "Dose (mg/kg)")]), Some(String::from("[Dose (mg/kg)] / Weight")));
+        assert_eq!(
+            rewrite_formula_column_refs("col(\"Dose\") + col('Weight')", &[("Dose", "Dose (mg/kg)")]),
+            Some(String::from("col(\"Dose (mg/kg)\") + col('Weight')"))
+        );
+        // String literals, partial substrings, different case, and Info(...) must remain untouched.
+        assert_eq!(
+            rewrite_formula_column_refs("IF([Dose] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])", &[("Dose", "Dose (mg/kg)")]),
+            Some(String::from("IF([Dose (mg/kg)] > 0, \"[Dose] ok\", '[Dose]') + [Dose2] + [dose] + Info([Dose])"))
+        );
+        assert_eq!(rewrite_formula_column_refs("\"[Dose]\" + [Dose_2] + [dose]", &[("Dose", "Dose (mg/kg)")]), None);
+    }
+
+    #[test]
+    fn simultaneous_swap_and_closing_bracket_titles_parse_cleanly() {
+        let swapped = rewrite_formula_column_refs("[Dose] / [Weight]", &[("Dose", "Weight"), ("Weight", "Dose")]);
+        assert_eq!(swapped, Some(String::from("[Weight] / [Dose]")));
+
+        let with_bracket = rewrite_formula_column_refs("[Dose] * 2", &[("Dose", "Dose [mg]")]).expect("rewritten");
+        assert_eq!(with_bracket, "col(\"Dose [mg]\") * 2");
+        assert!(parse_formula(&with_bracket).is_ok());
+    }
 }

@@ -1,7 +1,7 @@
 //! Native desktop `egui 0.37` shell contracts, canonical layout/color tokens, single-commit
 //! intent buffer, AccessKit inspection metadata, and adapted pure-`egui` widget helpers (`R15`).
 
-use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetCellRange, SheetId, SheetSection};
+use curvebook_doc::{CellCoord, ConfidenceLevel, ErrorCode, LevelOrderSpec, SheetId, SheetSection};
 use curvebook_engine::{CommandOutcome, EngineError, Session};
 use curvebook_palette::{CIVIDIS_STOPS, CanvasPreviewFilter, OKABE_ITO, Rgba8, VIRIDIS_STOPS};
 use egui::{Color32, CornerRadius, FontId, Rect, Stroke, TextStyle, Visuals};
@@ -17,7 +17,6 @@ use crate::dialogs_canvas::{
 use crate::grid_view::{ImportOriginKind, ImportPasteWizardState};
 use crate::i18n;
 use crate::inspect::ZLayer;
-use crate::os_integration::ClipboardBundle;
 use crate::power_wizard::PowerWizardState;
 use crate::theme::{UiThemeMode, UiThemeSpec};
 use crate::workspace_nav::{ActiveWorkspacePane, NavigatorNestingMode};
@@ -1119,8 +1118,6 @@ pub enum UiIntent {
     SetShortcutBinding { command_id: String, combo: String },
     ResetShortcutBinding { command_id: Option<String> },
     UpdatePreferencesDraft(Box<app_modals::PreferencesModalState>),
-    OpenRecoveryDialog { summary: Box<app_modals::RecoveryDialogSummary> },
-    ResolveRecoveryDialog { decision: app_modals::RecoveryDecision },
     ResolveUnsavedChanges { action: app_modals::UnsavedCloseAction },
     OpenFindReplace { initial_query: Option<String> },
     CloseFindReplace,
@@ -1137,6 +1134,56 @@ pub enum UiIntentOutcome {
     Engine { command_id: String, outcome: CommandOutcome },
     Ui { command_id: String, result: Option<serde_json::Value> },
     ShellUpdated,
+}
+
+/// Per-intent batch commit report returned by [`PendingUiIntents::commit_all_if_settled`].
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct UiIntentBatchResult {
+    pub results: Vec<Result<UiIntentOutcome, EngineError>>,
+}
+
+impl UiIntentBatchResult {
+    /// Collect all successful [`UiIntentOutcome`] entries in FIFO order.
+    #[must_use]
+    pub fn outcomes(&self) -> Vec<UiIntentOutcome> {
+        self.results.iter().filter_map(|res| res.as_ref().ok().cloned()).collect()
+    }
+
+    /// Return the first [`EngineError`] encountered during batch execution, if any.
+    #[must_use]
+    pub fn first_error(&self) -> Option<&EngineError> {
+        self.results.iter().find_map(|res| res.as_ref().err())
+    }
+
+    /// Return the first command ID that succeeded in this batch, useful for recovery journal labels.
+    #[must_use]
+    pub fn first_succeeded_command_id(&self) -> Option<&str> {
+        self.results.iter().find_map(|res| match res {
+            Ok(UiIntentOutcome::Engine { command_id, .. } | UiIntentOutcome::Ui { command_id, .. }) => Some(command_id.as_str()),
+            _ => None,
+        })
+    }
+
+    /// Convert to `Result<Vec<UiIntentOutcome>, EngineError>`, preserving the first error when any
+    /// intent in the batch failed.
+    ///
+    /// # Errors
+    /// Returns the first [`EngineError`] encountered in the batch.
+    pub fn into_first_error_result(self) -> Result<Vec<UiIntentOutcome>, EngineError> {
+        let mut outcomes = Vec::with_capacity(self.results.len());
+        let mut first_err: Option<EngineError> = None;
+        for res in self.results {
+            match res {
+                Ok(out) => outcomes.push(out),
+                Err(err) => {
+                    if first_err.is_none() {
+                        first_err = Some(err);
+                    }
+                }
+            }
+        }
+        if let Some(err) = first_err { Err(err) } else { Ok(outcomes) }
+    }
 }
 
 /// Single-commit FIFO queue buffering GUI intents across discardable `egui` layout passes.
@@ -1178,6 +1225,33 @@ impl PendingUiIntents {
     /// Enqueue a typed [`UiIntent`].
     pub fn push(&mut self, intent: UiIntent) {
         self.queue.push(intent);
+    }
+
+    /// Merge intents captured in a subsequent layout pass of the same frame without duplicating
+    /// intents already buffered from an earlier discarded pass (`R15-GUI-05`).
+    ///
+    /// Preserves intra-pass multiplicity: if the earlier pass buffered `k` copies of an intent and
+    /// `next_pass` buffers `m` copies, the merged queue retains `max(k, m)` copies in FIFO order.
+    pub fn merge_pass(&mut self, next_pass: Self) {
+        if self.queue.is_empty() {
+            self.queue = next_pass.queue;
+            return;
+        }
+        if next_pass.queue.is_empty() {
+            return;
+        }
+        let mut unmatched_existing = vec![true; self.queue.len()];
+        for intent in next_pass.queue {
+            if let Some(pos) =
+                self.queue.iter().enumerate().position(|(idx, existing)| unmatched_existing.get(idx).copied().unwrap_or(false) && *existing == intent)
+            {
+                if let Some(slot) = unmatched_existing.get_mut(pos) {
+                    *slot = false;
+                }
+            } else {
+                self.queue.push(intent);
+            }
+        }
     }
 
     /// Enqueue an engine command to execute once via `Caller::Ui` after layout settles.
@@ -1430,7 +1504,7 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::GridPasteFromClipboard { start_coord });
     }
 
-    /// Copy selection or active Graph/Layout vector [`ClipboardBundle`] cleanly on commit.
+    /// Copy selection or active Graph/Layout vector [`crate::os_integration::ClipboardBundle`] cleanly on commit.
     pub fn push_workspace_copy(&mut self, dpi: u16) {
         self.queue.push(UiIntent::WorkspaceCopy { dpi });
     }
@@ -1620,16 +1694,6 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::UpdatePreferencesDraft(Box::new(draft)));
     }
 
-    /// Open the crash/session recovery prompt with `summary`.
-    pub fn push_open_recovery_dialog(&mut self, summary: app_modals::RecoveryDialogSummary) {
-        self.queue.push(UiIntent::OpenRecoveryDialog { summary: Box::new(summary) });
-    }
-
-    /// Record the user's decision on `RecoveryDialog` (`RestoreSession` / `DiscardRecovery` / `Dismiss`).
-    pub fn push_resolve_recovery(&mut self, decision: app_modals::RecoveryDecision) {
-        self.queue.push(UiIntent::ResolveRecoveryDialog { decision });
-    }
-
     /// Record the user's decision on `UnsavedChanges` (`Save` / `DontSave` / `Cancel`).
     pub fn push_resolve_unsaved_changes(&mut self, action: app_modals::UnsavedCloseAction) {
         self.queue.push(UiIntent::ResolveUnsavedChanges { action });
@@ -1683,49 +1747,85 @@ impl PendingUiIntents {
         self.queue.push(UiIntent::ResetFeedbackDraft);
     }
 
-    /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
+    /// Commit every buffered intent one by one via `Session::execute_as_ui` (`Caller::Ui`) when
+    /// `!will_discard`, collecting per-intent results instead of aborting on the first failure.
     ///
-    /// When `will_discard` is `true`, clears the buffer without executing any mutations so
-    /// multi-pass `ctx.request_discard()` layouts never duplicate undo steps or journal entries.
+    /// When `will_discard` is `true`, leaves the buffered intents intact without executing any
+    /// mutations so first-pass input intents survive `egui` layout discard retries and commit once
+    /// the frame settles (`R15-GUI-05`).
     ///
-    /// # Errors
-    /// Returns [`EngineError`] if any queued engine or UI command fails validation or preconditions.
-    pub fn commit_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> Result<Vec<UiIntentOutcome>, EngineError> {
-        let pending = std::mem::take(&mut self.queue);
-        if will_discard || pending.is_empty() {
-            return Ok(Vec::new());
+    /// Always runs `app.sync_views()` and `sync_history_with_document()` after processing a
+    /// non-empty batch so earlier/later mutations never leave views or history stale, and mirrors
+    /// the first batch error into `app.canvas_dialogs.status_banner`.
+    pub fn commit_all_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> UiIntentBatchResult {
+        if will_discard || self.queue.is_empty() {
+            return UiIntentBatchResult::default();
         }
-        let mut outcomes = Vec::with_capacity(pending.len());
+        let pending = std::mem::take(&mut self.queue);
+        let mut results = Vec::with_capacity(pending.len());
+        let mut first_err_msg: Option<String> = None;
         for intent in pending {
-            outcomes.push(apply_single_ui_intent(app, intent)?);
+            let res = apply_single_ui_intent(app, intent);
+            if let Err(ref err) = res
+                && first_err_msg.is_none()
+            {
+                first_err_msg = Some(err.to_string());
+            }
+            results.push(res);
+        }
+        if let Some(msg) = first_err_msg {
+            app.canvas_dialogs.status_banner = Some(msg);
         }
         app.sync_views();
         app.egui_views.sync_history_with_document(app.session.document());
-        Ok(outcomes)
+        UiIntentBatchResult { results }
+    }
+
+    /// Commit buffered intents once via `Session::execute_as_ui` (`Caller::Ui`) when `!will_discard`.
+    ///
+    /// Applies every queued intent one by one (without dropping later intents on an earlier error),
+    /// preserves queued intents while `will_discard` is `true`, always syncs views and navigation
+    /// history, and returns the first [`EngineError`] if any failed.
+    ///
+    /// # Errors
+    /// Returns the first [`EngineError`] if any queued engine or UI command fails validation or preconditions.
+    pub fn commit_if_settled(&mut self, app: &mut UiApp, will_discard: bool) -> Result<Vec<UiIntentOutcome>, EngineError> {
+        self.commit_all_if_settled(app, will_discard).into_first_error_result()
     }
 
     /// Commit only [`UiIntent::EngineCommand`] items directly on `session` (`Caller::Ui`) when `!will_discard`.
     ///
     /// # Errors
-    /// Returns [`EngineError`] if any queued command fails.
+    /// Returns the first [`EngineError`] if any queued command fails.
     pub fn commit_engine_intents_on_session(&mut self, session: &mut Session, will_discard: bool) -> Result<Vec<CommandOutcome>, EngineError> {
-        let pending = std::mem::take(&mut self.queue);
-        if will_discard || pending.is_empty() {
+        if will_discard || self.queue.is_empty() {
             return Ok(Vec::new());
         }
+        let pending = std::mem::take(&mut self.queue);
         let mut outcomes = Vec::new();
+        let mut first_err: Option<EngineError> = None;
         for intent in pending {
             if let UiIntent::EngineCommand { command_id, params } = intent {
-                outcomes.push(session.execute_as_ui(&command_id, params)?);
+                match session.execute_as_ui(&command_id, params) {
+                    Ok(out) => outcomes.push(out),
+                    Err(err) => {
+                        if first_err.is_none() {
+                            first_err = Some(err);
+                        }
+                    }
+                }
             }
         }
-        Ok(outcomes)
+        if let Some(err) = first_err { Err(err) } else { Ok(outcomes) }
     }
 }
 
 fn apply_single_ui_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::EngineCommand { command_id, mut params } => {
+            if command_id == "project.open" && app.session.is_dirty() && params.get("force").and_then(serde_json::Value::as_bool) != Some(true) {
+                return Err(EngineError::with_code(ErrorCode::Conflict, "unsaved changes exist; save or discard before opening another project"));
+            }
             if matches!(command_id.as_str(), "sheet.duplicate" | "sheet.duplicateFamily" | "sheet.delete" | "sheet.freeze" | "sheet.unfreeze")
                 && params.get("sheet_id").is_none()
                 && let Some(active_id) = app.session.document().active_sheet_id.as_ref()
@@ -1994,8 +2094,6 @@ fn apply_wave4_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutco
         | UiIntent::SetShortcutBinding { .. }
         | UiIntent::ResetShortcutBinding { .. }
         | UiIntent::UpdatePreferencesDraft(_)
-        | UiIntent::OpenRecoveryDialog { .. }
-        | UiIntent::ResolveRecoveryDialog { .. }
         | UiIntent::ResolveUnsavedChanges { .. }
         | UiIntent::OpenFindReplace { .. }
         | UiIntent::CloseFindReplace
@@ -2069,7 +2167,7 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             app.grid.import_wizard.open = true;
             app.grid.import_wizard.origin_kind = origin;
             app.grid.import_wizard.is_live_link = is_live_link;
-            app.grid.import_wizard.source_sheet_id = target_sheet_id
+            app.grid.import_wizard.target_sheet_id = target_sheet_id
                 .or_else(|| app.session.document().active_sheet_id.as_ref().filter(|id| app.session.document().data_sheet(id).is_some()).cloned());
             Ok(UiIntentOutcome::ShellUpdated)
         }
@@ -2078,17 +2176,33 @@ fn apply_wave4_grid_wizard_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
             Ok(UiIntentOutcome::ShellUpdated)
         }
         UiIntent::CommitImportWizard { close_after } => {
+            let doc = app.session.document();
             let target_id = app
-                .session
-                .document()
-                .active_sheet_id
+                .grid
+                .import_wizard
+                .target_sheet_id
                 .as_ref()
-                .filter(|id| app.session.document().data_sheet(id).is_some())
+                .filter(|id| doc.data_sheet(id).is_some())
                 .cloned()
-                .or_else(|| app.grid.import_wizard.source_sheet_id.clone())
-                .or_else(|| app.session.document().data_sheets.first().map(|s| s.id.clone()))
-                .ok_or_else(|| EngineError::with_code(ErrorCode::Conflict, "no data sheet available for import wizard"))?;
-            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(app.session.document()));
+                .or_else(|| doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned())
+                .ok_or_else(|| {
+                    EngineError::with_code(
+                        ErrorCode::Conflict,
+                        "no target data sheet available for import wizard; activate or select a target data sheet first",
+                    )
+                })?;
+            if matches!(app.grid.import_wizard.origin_kind, ImportOriginKind::InternalDataSheet | ImportOriginKind::InternalResultSheet) {
+                let Some(src_id) = app.grid.import_wizard.source_sheet_id.as_ref() else {
+                    return Err(EngineError::with_code(ErrorCode::Conflict, "select a source sheet before committing an internal link or import"));
+                };
+                if src_id == &target_id {
+                    return Err(EngineError::with_code(
+                        ErrorCode::Conflict,
+                        format!("cannot link or import sheet `{}` onto itself; choose a different source or target sheet", target_id.as_str()),
+                    ));
+                }
+            }
+            let tool_intent = app.grid.import_wizard.build_command_intent(&target_id, Some(doc));
             let outcome = app.execute_session_ui_cmd(&tool_intent.command_id, tool_intent.params)?;
             if close_after {
                 app.grid.import_wizard.open = false;
@@ -2223,46 +2337,31 @@ fn execute_workspace_copy(app: &mut UiApp, dpi: u16) -> Result<UiIntentOutcome, 
 }
 
 fn execute_grid_clipboard_copy(app: &mut UiApp, cut: bool) -> Result<UiIntentOutcome, EngineError> {
-    let doc = app.session.document();
-    let Some(ds_id) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()).cloned() else {
-        return Ok(UiIntentOutcome::ShellUpdated);
+    let (plan, clear_reqs, frozen) = {
+        let doc = app.session.document();
+        let Some(ds_id) = doc.active_sheet_id.as_ref().filter(|id| doc.data_sheet(id).is_some()) else {
+            return Ok(UiIntentOutcome::ShellUpdated);
+        };
+        let Some(ds) = doc.data_sheet(ds_id) else {
+            return Ok(UiIntentOutcome::ShellUpdated);
+        };
+        let plan = app
+            .grid
+            .prepare_clipboard_selection(ds, app.locale_preset.decimal_separator)
+            .map_err(|msg| EngineError::with_code(ErrorCode::Conflict, msg))?;
+        let clear_reqs = if cut && !ds.frozen { plan.clear_cells_requests(ds) } else { Vec::new() };
+        (plan, clear_reqs, ds.frozen)
     };
-    let Some(ds) = doc.data_sheet(&ds_id) else {
-        return Ok(UiIntentOutcome::ShellUpdated);
-    };
-    let coords = app.grid.all_selected_coords(ds);
-    let range = if let Some(first) = coords.first() {
-        let mut min_r = first.row;
-        let mut max_r = first.row;
-        let mut min_c = first.col;
-        let mut max_c = first.col;
-        let mut min_s = first.subcol;
-        let mut max_s = first.subcol;
-        for c in &coords {
-            min_r = min_r.min(c.row);
-            max_r = max_r.max(c.row);
-            min_c = min_c.min(c.col);
-            max_c = max_c.max(c.col);
-            min_s = min_s.min(c.subcol);
-            max_s = max_s.max(c.subcol);
+    app.interaction.last_clipboard_text = Some(plan.tsv.clone());
+    let _ = app.write_clipboard_text(&plan.tsv);
+    if cut && !frozen && !clear_reqs.is_empty() {
+        let mut last_outcome = None;
+        for params in clear_reqs {
+            last_outcome = Some(app.execute_session_ui_cmd("table.clearCells", params)?);
         }
-        let _ = (min_s, max_s);
-        Some(SheetCellRange::new(CellCoord::new(min_r, min_c, min_s), CellCoord::new(max_r, max_c, max_s)))
-    } else {
-        None
-    };
-    let tsv = match range {
-        Some(r) => ClipboardBundle::tsv_from_datasheet_range(ds, r, app.locale_preset.decimal_separator),
-        None => ClipboardBundle::tsv_from_datasheet(ds, app.locale_preset.decimal_separator).unwrap_or_default(),
-    };
-    app.interaction.last_clipboard_text = Some(tsv.clone());
-    let _ = app.write_clipboard_text(&tsv);
-    if cut
-        && !ds.frozen
-        && let Some(r) = range
-    {
-        let outcome = app.execute_session_ui_cmd("table.clearCells", serde_json::json!({ "sheet_id": ds_id.as_str(), "range": r }))?;
-        return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
+        if let Some(outcome) = last_outcome {
+            return Ok(UiIntentOutcome::Engine { command_id: String::from("table.clearCells"), outcome });
+        }
     }
     Ok(UiIntentOutcome::ShellUpdated)
 }
@@ -2398,11 +2497,7 @@ fn apply_wave4_modal_state_intent(app: &mut UiApp, intent: UiIntent) -> Result<U
 fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiIntentOutcome, EngineError> {
     match intent {
         UiIntent::OpenPreferences { category } => {
-            if let Some(cat) = category {
-                app.egui_views.app_modals.preferences.active_category = cat;
-            }
-            app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
-            app.egui_views.app_modals.preferences_open = true;
+            app.egui_views.app_modals.open_preferences(&app.shortcuts, category);
         }
         UiIntent::ClosePreferences { save } => {
             if save {
@@ -2411,41 +2506,46 @@ fn apply_wave4_app_modal_intent(app: &mut UiApp, intent: UiIntent) -> Result<UiI
                     let scale = (pct / 100.0).clamp(0.75, 3.0) as f32;
                     app.theme.ui_scale = scale;
                 }
+                if let Some(staged) = app.egui_views.app_modals.preferences.staged_shortcuts.take() {
+                    app.shortcuts = staged;
+                }
             }
+            app.egui_views.app_modals.preferences.discard_shortcut_draft();
             app.egui_views.app_modals.preferences_open = false;
         }
-        UiIntent::SetShortcutBinding { command_id, combo } => match app.shortcuts.set_shortcut(&command_id, &combo) {
-            Ok(()) => {
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
-            }
-            Err(err) => {
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
-                return Err(EngineError::with_code(ErrorCode::Conflict, err));
-            }
-        },
-        UiIntent::ResetShortcutBinding { command_id } => match command_id {
-            Some(id) => {
-                if let Err(err) = app.shortcuts.reset_shortcut(&id) {
+        UiIntent::SetShortcutBinding { command_id, combo } => {
+            let staged = app.egui_views.app_modals.preferences.staged_shortcuts.get_or_insert_with(|| app.shortcuts.clone());
+            match staged.set_shortcut(&command_id, &combo) {
+                Ok(()) => {
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
+                Err(err) => {
                     app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
                     return Err(EngineError::with_code(ErrorCode::Conflict, err));
                 }
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
             }
-            None => {
-                app.shortcuts.reset_all();
-                app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+        }
+        UiIntent::ResetShortcutBinding { command_id } => {
+            let staged = app.egui_views.app_modals.preferences.staged_shortcuts.get_or_insert_with(|| app.shortcuts.clone());
+            match command_id {
+                Some(id) => {
+                    if let Err(err) = staged.reset_shortcut(&id) {
+                        app.egui_views.app_modals.preferences.shortcut_conflict_error = Some(err.clone());
+                        return Err(EngineError::with_code(ErrorCode::Conflict, err));
+                    }
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
+                None => {
+                    staged.reset_all();
+                    app.egui_views.app_modals.preferences.shortcut_conflict_error = None;
+                }
             }
-        },
-        UiIntent::UpdatePreferencesDraft(draft) => {
+        }
+        UiIntent::UpdatePreferencesDraft(mut draft) => {
+            if draft.staged_shortcuts.is_none() {
+                draft.staged_shortcuts = app.egui_views.app_modals.preferences.staged_shortcuts.take();
+            }
             app.egui_views.app_modals.preferences = *draft;
-        }
-        UiIntent::OpenRecoveryDialog { summary } => {
-            app.egui_views.app_modals.recovery_summary = *summary;
-            app.egui_views.app_modals.recovery_open = true;
-        }
-        UiIntent::ResolveRecoveryDialog { decision } => {
-            app.egui_views.app_modals.last_recovery_decision = Some(decision);
-            app.egui_views.app_modals.recovery_open = false;
         }
         UiIntent::ResolveUnsavedChanges { action } => {
             app.egui_views.app_modals.pending_unsaved_action = Some(action);
@@ -2612,6 +2712,9 @@ pub struct FrameInspectNodeMeta {
     pub full_label: Option<String>,
 }
 
+/// Minimum clipped width and height (logical `pt`) required before a modal widget is recorded in [`FrameInspectMeta`].
+pub const MODAL_INSPECT_MIN_CLIP_EXTENT_PT: f32 = 0.5;
+
 /// Parameter bundle for [`FrameInspectMeta::record_response`].
 #[derive(Debug, Clone)]
 pub struct FrameInspectEntryInput<'a> {
@@ -2625,6 +2728,32 @@ pub struct FrameInspectEntryInput<'a> {
     pub z_layer: ZLayer,
     pub ellipsized: bool,
     pub full_label: Option<&'a str>,
+}
+
+impl<'a> FrameInspectEntryInput<'a> {
+    /// Construct modal-dialog inspection metadata with [`ZLayer::ModalDialog`] and the default
+    /// `"unavailable"` disabled reason when `enabled` is `false`.
+    #[must_use]
+    pub fn modal(widget_id: &'a str, role: &'a str, label: &'a str, value: Option<String>, enabled: bool) -> Self {
+        Self {
+            widget_id,
+            role,
+            label,
+            command_id: None,
+            value: value.map(serde_json::Value::String),
+            enabled,
+            disabled_reason: (!enabled).then_some("unavailable"),
+            z_layer: ZLayer::ModalDialog,
+            ellipsized: false,
+            full_label: None,
+        }
+    }
+
+    /// Construct modal-dialog button inspection metadata (`role = "button"`, `value = None`).
+    #[must_use]
+    pub fn modal_button(widget_id: &'a str, label: &'a str, enabled: bool) -> Self {
+        Self::modal(widget_id, "button", label, None, enabled)
+    }
 }
 
 /// Settled-pass (`!ctx.will_discard()`) side-table mapping `egui`/AccessKit nodes to CurveBook
@@ -2698,6 +2827,21 @@ impl FrameInspectMeta {
             ellipsized: input.ellipsized,
             full_label: input.full_label.map(str::to_owned),
         });
+    }
+
+    /// Record inspection metadata for a modal-dialog widget when its clipped interaction rectangle
+    /// exceeds [`MODAL_INSPECT_MIN_CLIP_EXTENT_PT`] in both axes, enforcing [`ZLayer::ModalDialog`]
+    /// and a default `"unavailable"` disabled reason when `input.enabled` is `false`.
+    pub fn record_modal_response(&mut self, ui: &egui::Ui, resp: &egui::Response, mut input: FrameInspectEntryInput<'_>) {
+        let clipped = resp.interact_rect.intersect(ui.clip_rect());
+        if clipped.width() <= MODAL_INSPECT_MIN_CLIP_EXTENT_PT || clipped.height() <= MODAL_INSPECT_MIN_CLIP_EXTENT_PT {
+            return;
+        }
+        input.z_layer = ZLayer::ModalDialog;
+        if !input.enabled && input.disabled_reason.is_none() {
+            input.disabled_reason = Some("unavailable");
+        }
+        self.record_response(ui, resp, input);
     }
 
     /// Look up the first recorded entry matching `widget_id`.
@@ -2819,15 +2963,23 @@ mod tests {
     fn pending_intents_discard_on_multi_pass_and_commit_once_when_settled() -> Result<(), Box<dyn std::error::Error>> {
         let mut app = UiApp::new();
         let mut intents = PendingUiIntents::new();
-        intents.push_engine("sheet.createData", json!({"sheet_id": "d-1", "title": "Discard Test", "kind": "column", "auto_graph": false}));
+        let create_params = json!({"sheet_id": "d-1", "title": "Committed Test", "kind": "column", "auto_graph": false});
+        intents.push_engine("sheet.createData", create_params.clone());
         let discarded = intents.commit_if_settled(&mut app, true)?;
         assert!(discarded.is_empty());
-        assert!(intents.is_empty());
+        // Pass-0 intents stay buffered across discarded passes until the frame settles (`R15-GUI-05`).
+        assert_eq!(intents.len(), 1);
         assert_eq!(app.document().total_sheet_count(), 0);
 
-        intents.push_engine("sheet.createData", json!({"sheet_id": "d-1", "title": "Committed Test", "kind": "column", "auto_graph": false}));
+        // Re-running on pass 1 and merging the identical intent deduplicates cleanly.
+        let mut pass1 = PendingUiIntents::new();
+        pass1.push_engine("sheet.createData", create_params);
+        intents.merge_pass(pass1);
+        assert_eq!(intents.len(), 1);
+
         let committed = intents.commit_if_settled(&mut app, false)?;
         assert_eq!(committed.len(), 1);
+        assert!(intents.is_empty());
         assert_eq!(app.document().total_sheet_count(), 1);
         assert_eq!(app.session().undo_depth(), 1);
         Ok(())

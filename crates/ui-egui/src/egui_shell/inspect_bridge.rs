@@ -91,10 +91,8 @@ pub enum HybridModalSurface {
     EguiGraphModal,
     /// Native `egui` `Export Figure` / `Print` utility modal (`R15.4`).
     EguiAppModal,
-    /// Native `egui` 5-category `Preferences` modal (`R15.4`).
+    /// Native `egui` 4-category `Preferences` modal (`R15.4`).
     EguiPreferences,
-    /// Native `egui` `Recovery` session restore modal (`R15.4`).
-    EguiRecoveryDialog,
     /// Native `egui` `Find & Replace` modal (`R15.4`).
     EguiFindReplace,
 }
@@ -216,8 +214,6 @@ impl HybridCoexistenceArbiter {
 
         let modal_surface = if host_close_dialog_open || views.app_modals.unsaved_changes_open {
             HybridModalSurface::HostUnsavedClose
-        } else if views.app_modals.recovery_open {
-            HybridModalSurface::EguiRecoveryDialog
         } else if views.app_modals.preferences_open {
             HybridModalSurface::EguiPreferences
         } else if views.app_modals.find_replace_open {
@@ -591,7 +587,8 @@ fn step_egui_shell_with_events(
 ) -> Result<Vec<UiIntentOutcome>, EngineError> {
     let (w_pt, h_pt, native_ppp) = geom;
     let mut pending_events = initial_events;
-    for _pass in 0..6_u32 {
+    let mut carried_intents = PendingUiIntents::default();
+    for pass in 0..6_u32 {
         let events = std::mem::take(&mut pending_events);
         let raw_input = egui::RawInput {
             screen_rect: Some(egui::Rect::from_min_size(Pos2::ZERO, Vec2::new(w_pt, h_pt))),
@@ -604,16 +601,17 @@ fn step_egui_shell_with_events(
                 .collect(),
             ..Default::default()
         };
-        let mut intents = PendingUiIntents::default();
         let mut settled = false;
         let mut output = ctx.run_ui(raw_input, |ui| {
-            let _ = render_egui_shell_frame(ui, app, views, meta, &mut intents);
+            let mut pass_intents = PendingUiIntents::default();
+            let _ = render_egui_shell_frame(ui, app, views, meta, &mut pass_intents);
+            carried_intents.merge_pass(pass_intents);
             settled = !ui.ctx().will_discard();
         });
         output.textures_delta.clear();
-        if settled && !output.platform_output.requested_discard() {
+        if (settled && !output.platform_output.requested_discard()) || pass == 5 {
             app.egui_views = views.clone();
-            let outcomes = intents.commit_if_settled(app, false)?;
+            let outcomes = carried_intents.commit_if_settled(app, false)?;
             *views = app.egui_views.clone();
             return Ok(outcomes);
         }
@@ -1105,7 +1103,6 @@ pub fn render_egui_shell_frame_with_host(
         | HybridModalSurface::EguiAppModal
         | HybridModalSurface::HostUnsavedClose
         | HybridModalSurface::EguiPreferences
-        | HybridModalSurface::EguiRecoveryDialog
         | HybridModalSurface::EguiFindReplace => {
             let app_rep = render_app_modal(&ctx, app, &mut views.app_modals, host_close_dialog_open, &tokens, meta, intents);
             report.regions.dialog_rect_pt = app_rep.dialog_rect_pt;

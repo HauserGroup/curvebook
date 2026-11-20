@@ -21,6 +21,7 @@ This folder holds the reusable playbook. Finished rounds are archived, read-only
 | **Round 2 delta audit** | `ebcc622..fda1cc0` (`38` commits), re-verified at `1e9dc59` (`2026-11-16`) | **Closed** — all `149` surviving items remediated under [`R0.19`](../history/roadmap/r0.md#r019-round-2-delta-code-audit-remediation-ebcc622fda1cc0) | [`round2-post-ebcc622.md`](../history/audit/round2-post-ebcc622.md), [`findings/r2/`](../history/audit/findings/r2/) |
 | **R0–R9 milestone review ledger (`R0.25`)** | `main` @ `2a948b0` (`2026-11-16`) | **Closed** — `RV-01`–`RV-99` remediated (`RV-28`, `RV-45` rejected); third pass `RV-75`–`RV-99` closed in Wave 8 ([`R0.25`](../history/roadmap/r0.md#r025-r0r9-milestone-review-ledger-remediation-2026-11-16)) | [`review-2026-11-16-ledger.md`](../history/audit/review-2026-11-16-ledger.md) |
 | **Local code audit (2026-11-18)** | Baseline `3c78fdb`, waves 1–6, remediation re-check at `ce80964` | **Open** — findings recorded through 2026-11-19, including the GitHub issues closed into it on that date | [`local-code-audit-2026-11-18.md`](local-code-audit-2026-11-18.md) |
+| **R15 egui GUI audit (2026-11-20)** | `main` @ `49c7a30`, GUI code in `7803093..49c7a30` | **Closed** — 5 tranches, 28 findings (2 High, 17 Medium, 9 Low) | [`r15-gui-audit-2026-11-20.md`](r15-gui-audit-2026-11-20.md) |
 
 ## Playbook baseline & git-worktree workflow
 

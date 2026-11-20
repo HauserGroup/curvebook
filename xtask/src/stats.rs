@@ -3,7 +3,8 @@
 
 use std::path::{Path, PathBuf};
 
-use crate::json::Json;
+use serde_json::Value;
+
 use crate::layers;
 
 #[derive(Debug, Default, Clone, PartialEq, Eq)]
@@ -23,12 +24,12 @@ pub fn run(root: &Path, exact: bool) -> Result<(), String> {
     Ok(())
 }
 
-fn collect_workspace_stats(meta: &Json) -> Result<Vec<PkgStats>, String> {
-    let pkgs = meta.get("packages").and_then(Json::as_array).ok_or_else(|| String::from("metadata: missing packages"))?;
+fn collect_workspace_stats(meta: &Value) -> Result<Vec<PkgStats>, String> {
+    let pkgs = meta.get("packages").and_then(Value::as_array).ok_or_else(|| String::from("metadata: missing packages"))?;
     let mut rows = Vec::with_capacity(pkgs.len());
     for pkg in pkgs {
-        let name = pkg.get("name").and_then(Json::as_str).ok_or_else(|| String::from("metadata: package without name"))?.to_owned();
-        let manifest = pkg.get("manifest_path").and_then(Json::as_str).ok_or_else(|| format!("{name}: missing manifest_path"))?;
+        let name = pkg.get("name").and_then(Value::as_str).ok_or_else(|| String::from("metadata: package without name"))?.to_owned();
+        let manifest = pkg.get("manifest_path").and_then(Value::as_str).ok_or_else(|| format!("{name}: missing manifest_path"))?;
         let pkg_dir = Path::new(manifest).parent().map_or_else(|| PathBuf::from("."), Path::to_path_buf);
         let mut st = PkgStats { layer: layers::describe(layers::classify(&name)), name, ..PkgStats::default() };
         walk_rs(&pkg_dir, &mut st)?;

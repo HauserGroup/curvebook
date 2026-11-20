@@ -2,8 +2,8 @@
 //! and interactive `Convert Table Archetype…` dialog view builders (`R10.12`, `R10.4`).
 
 use curvebook_doc::{
-    Cell, CellCoord, CellValue, CiBound, DataSheet, ImportFilterSpec, ImportPlacementSpec, PlacementMode, ResultCell, SheetCellRange, SheetId,
-    TableArchetype, TableKind,
+    Cell, CellCoord, CiBound, DataSheet, ImportFilterSpec, ImportPlacementSpec, PlacementMode, ResultCell, SheetCellRange, SheetId, TableArchetype,
+    TableKind, format_linked_paste_tsv_cell,
 };
 use curvebook_format::{CsvOptions, parse_delimited_records};
 use curvebook_transform::{
@@ -1059,7 +1059,7 @@ fn serialize_preview_as_tsv(preview: &ImportPreviewGrid, include_headers: bool) 
         lines.push(preview.headers.join("\t"));
     }
     for row in &preview.rows {
-        let toks: Vec<String> = row.iter().map(format_cell_tsv).collect();
+        let toks: Vec<String> = row.iter().map(format_linked_paste_tsv_cell).collect();
         lines.push(toks.join("\t"));
     }
     lines.join("\n")
@@ -1078,19 +1078,10 @@ fn serialize_preview_as_csv_with_headers(preview: &ImportPreviewGrid) -> String 
         if !preview.row_labels.is_empty() {
             toks.push(preview.row_labels.get(r_idx).cloned().unwrap_or_default());
         }
-        toks.extend(row.iter().map(format_cell_tsv));
+        toks.extend(row.iter().map(format_linked_paste_tsv_cell));
         lines.push(toks.join("\t"));
     }
     lines.join("\n")
-}
-
-fn format_cell_tsv(cell: &Cell) -> String {
-    let base = match &cell.value {
-        CellValue::Empty => String::new(),
-        CellValue::Number(v) => v.to_string(),
-        CellValue::Text(s) => s.replace(['\t', '\n', '\r'], " "),
-    };
-    if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
 }
 
 // ============================================================================

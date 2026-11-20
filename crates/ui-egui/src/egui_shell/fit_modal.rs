@@ -1,6 +1,7 @@
 //! 7-tab `Nonlinear Curve Fitting` modal (plus MV `[Data]` tab) and 3-branch `Hook Constant`
 //! browser in `egui 0.37` (`R15.4`, `gui-layout-spec.md` §8.9).
 
+use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
 use curvebook_doc::{
@@ -8,7 +9,8 @@ use curvebook_doc::{
     SheetId, TableArchetype, WeightingScheme,
 };
 use curvebook_fit::{
-    CompiledDslModel, DslEquationKind, EquationCatalogEntry, EquationCategory, ParametricModel, format_model_equation_tex, list_builtin_equations,
+    CompiledDslModel, DataPoint, DslEquationKind, EquationCatalogEntry, EquationCategory, MultivarExtractionSpec, ParametricModel,
+    extract_datasets_from_sheet_with_options, format_model_equation_tex, list_builtin_equations, resolve_model_from_spec,
 };
 use egui::{Context, Id, Key, Modifiers, Rect, Stroke, TextEdit, Ui, Vec2};
 
@@ -104,6 +106,11 @@ pub struct FitModalEguiState {
     pub expand_info_branch: bool,
     pub expand_analysis_branch: bool,
     pub expand_document_branch: bool,
+    pub x_min_draft: String,
+    pub x_max_draft: String,
+    pub initial_override_drafts: BTreeMap<String, String>,
+    pub lower_bound_drafts: BTreeMap<String, String>,
+    pub upper_bound_drafts: BTreeMap<String, String>,
 }
 
 /// Frame geometry and modal capture report emitted by `fit_modal`.
@@ -173,7 +180,9 @@ pub fn render_fit_modal(
     };
     let banner = format!("{eq_label}  |  {:?}  |  {} CI", nl.method, if nl.profile_likelihood_ci { "Profile-likelihood" } else { "Wald-t" });
     let param_names = resolve_parameter_names(nl);
-    let alerts = compute_fit_alerts(nl, &param_names);
+    let locale_preset = &app.locale_preset;
+    let (alerts, blocking_error) = compute_fit_alerts(nl, &param_names, state, locale_preset);
+    let commit_en = blocking_error.as_deref().map_or_else(ControlEnablement::enabled, ControlEnablement::disabled);
     let locale = normalize_locale(&app.locale);
     let is_create = doc.result_sheet(result_sheet_id).is_none();
 
@@ -239,17 +248,20 @@ pub fn render_fit_modal(
                     });
             }
         },
-        |ui, state, _avail_w, _avail_h, meta, intents| match state.active_tab {
-            FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
-            FitModalTab::Model => {
-                render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
+        |ui, state, _avail_w, _avail_h, meta, intents| {
+            let tab_ctx = FitTabCtx { result_sheet_id, doc, spec, nl, param_names: &param_names, locale_preset };
+            match state.active_tab {
+                FitModalTab::Data => render_fit_data_tab(ui, doc, spec, nl, tokens, meta, intents),
+                FitModalTab::Model => {
+                    render_fit_model_tab(ctx, ui, FitModelTabCtx { doc, spec, nl, param_names: &param_names }, state, tokens, meta, intents)
+                }
+                FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, tokens, meta, intents),
+                FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, &tab_ctx, state, tokens, meta, intents),
+                FitModalTab::InitialValues => render_fit_initial_tab(ui, &tab_ctx, state, tokens, meta, intents),
+                FitModalTab::Range => render_fit_range_tab(ui, &tab_ctx, state, tokens, meta, intents),
+                FitModalTab::Weight => render_fit_weight_tab(ui, spec, nl, tokens, meta, intents),
+                FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
             }
-            FitModalTab::Compare => render_fit_compare_tab(ui, spec, nl, tokens, meta, intents),
-            FitModalTab::Constrain => render_fit_constrain_tab(ctx, ui, result_sheet_id, doc, spec, nl, &param_names, tokens, meta, intents),
-            FitModalTab::InitialValues => render_fit_initial_tab(ui, spec, nl, &param_names, tokens, meta, intents),
-            FitModalTab::Range => render_fit_range_tab(ui, spec, nl, tokens, meta, intents),
-            FitModalTab::Weight => render_fit_weight_tab(ui, spec, nl, tokens, meta, intents),
-            FitModalTab::Output => render_fit_output_tab(ui, spec, nl, state, tokens, meta, intents),
         },
         |ui, _state, meta, intents| {
             ui.horizontal(|ui| {
@@ -267,12 +279,12 @@ pub fn render_fit_modal(
                 }
                 ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                     let ok_lbl = if is_create { "Fit Curve" } else { tr(locale, "btn.ok") };
-                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &ControlEnablement::enabled()) {
+                    if render_modal_action_button(ui, tokens, meta, "modal.ok", ok_lbl, true, false, &commit_en) {
                         intents.push_dialog_button("ok");
                     }
                     if !is_create
                         && doc.result_sheet(result_sheet_id).is_some()
-                        && render_modal_action_button(ui, tokens, meta, "modal.apply", "Update Fit", false, false, &ControlEnablement::enabled())
+                        && render_modal_action_button(ui, tokens, meta, "modal.apply", "Update Fit", false, false, &commit_en)
                     {
                         intents.push_dialog_button("apply");
                     }
@@ -295,7 +307,7 @@ pub fn render_fit_modal(
 
     if ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Escape)) {
         intents.push_dialog_button("cancel");
-    } else if !ctx.egui_wants_keyboard_input() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
+    } else if !ctx.egui_wants_keyboard_input() && blocking_error.is_none() && ctx.input_mut(|i| i.consume_key(Modifiers::NONE, Key::Enter)) {
         intents.push_dialog_button("ok");
     } else if ctx.input_mut(|i| i.consume_key(Modifiers::CTRL, Key::Tab) || i.consume_key(Modifiers::CTRL, Key::PageDown)) {
         step_fit_tab(&tabs, state, 1, intents);
@@ -311,6 +323,96 @@ pub fn render_fit_modal(
     }
 }
 
+struct FitTabCtx<'a> {
+    result_sheet_id: &'a SheetId,
+    doc: &'a ProjectDocument,
+    spec: &'a curvebook_doc::AnalysisSpec,
+    nl: &'a NonlinearFitSpec,
+    param_names: &'a [String],
+    locale_preset: &'a LocalePreset,
+}
+
+/// Format a finite floating-point fit parameter or domain bound concisely without
+/// truncating small scientific values (for example `1e-7`) to `0.000`.
+fn format_fit_number(value: f64) -> String {
+    if !value.is_finite() {
+        return format!("{value}");
+    }
+    if value == 0.0 {
+        return String::from("0");
+    }
+    let abs = value.abs();
+    if !(1e-4..1e6).contains(&abs) {
+        let raw = format!("{value:.6e}");
+        if let Some((mantissa, exp)) = raw.split_once('e') {
+            let trimmed_m = mantissa.trim_end_matches('0').trim_end_matches('.');
+            return format!("{trimmed_m}e{exp}");
+        }
+        return raw;
+    }
+    let raw = format!("{value:.6}");
+    let trimmed = raw.trim_end_matches('0').trim_end_matches('.');
+    if trimmed == "-0" || trimmed.is_empty() { String::from("0") } else { trimmed.to_owned() }
+}
+
+fn parse_fit_number(raw: &str, preset: &LocalePreset) -> Option<f64> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    parse_localized_number_input(trimmed, preset).or_else(|| trimmed.parse::<f64>().ok()).filter(|v| v.is_finite())
+}
+
+fn resolve_fit_source_sheet<'a>(doc: &'a ProjectDocument, spec: &curvebook_doc::AnalysisSpec) -> Option<&'a curvebook_doc::DataSheet> {
+    doc.data_sheet(&spec.source_sheet_id).or_else(|| doc.result_sheet(&spec.source_sheet_id).and_then(|rs| rs.analyzable_data.as_ref()))
+}
+
+fn extract_fit_data_points(doc: &ProjectDocument, spec: &curvebook_doc::AnalysisSpec, nl: &NonlinearFitSpec) -> Vec<DataPoint> {
+    let Some(sheet) = resolve_fit_source_sheet(doc, spec) else {
+        return Vec::new();
+    };
+    let mv_spec = MultivarExtractionSpec { group_columns: &nl.mv_group_columns, x_columns: &nl.mv_x_columns, y_column: nl.mv_y_column };
+    let Ok(datasets) = extract_datasets_from_sheet_with_options(sheet, &spec.selected_data_sets, &mv_spec) else {
+        return Vec::new();
+    };
+    datasets.into_iter().flat_map(|d| d.points.into_iter()).filter(|p| p.x0().is_finite() && p.y.is_finite()).collect()
+}
+
+fn extract_source_x_range(doc: &ProjectDocument, spec: &curvebook_doc::AnalysisSpec, nl: &NonlinearFitSpec) -> Option<(f64, f64)> {
+    let mut lo = f64::INFINITY;
+    let mut hi = f64::NEG_INFINITY;
+    for p in extract_fit_data_points(doc, spec, nl) {
+        let x = p.x0();
+        if x.is_finite() {
+            lo = lo.min(x);
+            hi = hi.max(x);
+        }
+    }
+    if lo.is_finite() && hi.is_finite() {
+        return Some((lo, hi));
+    }
+    let sheet = resolve_fit_source_sheet(doc, spec)?;
+    if let TableArchetype::Xy(xy) = &sheet.archetype {
+        for r in 0..xy.row_count() {
+            if let Some(x) = xy.raw_x_value_at(r)
+                && x.is_finite()
+            {
+                lo = lo.min(x);
+                hi = hi.max(x);
+            }
+        }
+    }
+    (lo.is_finite() && hi.is_finite()).then_some((lo, hi))
+}
+
+fn seed_x_domain_bounds(doc: &ProjectDocument, spec: &curvebook_doc::AnalysisSpec, nl: &NonlinearFitSpec) -> (f64, f64) {
+    match extract_source_x_range(doc, spec, nl) {
+        Some((lo, hi)) if lo < hi => (lo, hi),
+        Some((lo, _)) => (lo, lo + 1.0),
+        None => (0.0, 100.0),
+    }
+}
+
 fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersState, nl: &NonlinearFitSpec, state: &mut FitModalEguiState) {
     if state.open_session_sheet_id.as_deref() != Some(result_sheet_id.as_str()) {
         state.open_session_sheet_id = Some(result_sheet_id.as_str().to_owned());
@@ -319,6 +421,26 @@ fn sync_fit_modal_state(result_sheet_id: &SheetId, ep: &EditAnalysisParametersSt
         state.custom_equation_draft =
             nl.custom_dsl.clone().unwrap_or_else(|| String::from("Y = Bottom + (Top - Bottom) / (1 + 10^((LogEC50 - X) * HillSlope))"));
         state.r2_threshold_draft = nl.flag_r_squared_below.map_or_else(String::new, |v| format!("{v}"));
+        let (xmin_str, xmax_str) = match nl.x_range_filter {
+            Some((lo, hi)) => (lo.map_or_else(String::new, format_fit_number), hi.map_or_else(String::new, format_fit_number)),
+            None => (String::new(), String::new()),
+        };
+        state.x_min_draft = xmin_str;
+        state.x_max_draft = xmax_str;
+        state.initial_override_drafts.clear();
+        state.lower_bound_drafts.clear();
+        state.upper_bound_drafts.clear();
+        for rule in &nl.parameter_rules {
+            if let Some(init) = rule.initial_override {
+                state.initial_override_drafts.insert(rule.name.clone(), format_fit_number(init));
+            }
+            if let Some(lo) = rule.lower_bound {
+                state.lower_bound_drafts.insert(rule.name.clone(), format_fit_number(lo));
+            }
+            if let Some(hi) = rule.upper_bound {
+                state.upper_bound_drafts.insert(rule.name.clone(), format_fit_number(hi));
+            }
+        }
     }
 }
 
@@ -345,12 +467,63 @@ fn resolve_parameter_names(nl: &NonlinearFitSpec) -> Vec<String> {
     nl.parameter_rules.iter().map(|r| r.name.clone()).collect()
 }
 
-fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String]) -> Vec<String> {
+fn check_draft_numeric_alerts(
+    nl: &NonlinearFitSpec,
+    params: &[String],
+    state: &FitModalEguiState,
+    preset: &LocalePreset,
+    alerts: &mut Vec<String>,
+    blocking: &mut Option<String>,
+) {
+    let mut record_blocking = |msg: String| {
+        if blocking.is_none() {
+            *blocking = Some(msg.clone());
+        }
+        alerts.push(msg);
+    };
+    if nl.x_range_filter.is_some() {
+        if !state.x_min_draft.trim().is_empty() && parse_fit_number(&state.x_min_draft, preset).is_none() {
+            record_blocking(format!("Range alert: X min (`{}`) must be a finite number.", state.x_min_draft.trim()));
+        }
+        if !state.x_max_draft.trim().is_empty() && parse_fit_number(&state.x_max_draft, preset).is_none() {
+            record_blocking(format!("Range alert: X max (`{}`) must be a finite number.", state.x_max_draft.trim()));
+        }
+    }
+    for p in params {
+        if let Some(raw) = state.initial_override_drafts.get(p)
+            && !raw.trim().is_empty()
+            && parse_fit_number(raw, preset).is_none()
+        {
+            record_blocking(format!("Initial value alert on `{p}`: `{}` is not a finite number.", raw.trim()));
+        }
+        if let Some(raw) = state.lower_bound_drafts.get(p)
+            && !raw.trim().is_empty()
+            && parse_fit_number(raw, preset).is_none()
+        {
+            record_blocking(format!("Constraint alert on `{p}`: lower bound `{}` is not a finite number.", raw.trim()));
+        }
+        if let Some(raw) = state.upper_bound_drafts.get(p)
+            && !raw.trim().is_empty()
+            && parse_fit_number(raw, preset).is_none()
+        {
+            record_blocking(format!("Constraint alert on `{p}`: upper bound `{}` is not a finite number.", raw.trim()));
+        }
+    }
+}
+
+fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String], state: &FitModalEguiState, preset: &LocalePreset) -> (Vec<String>, Option<String>) {
     let mut alerts = Vec::new();
+    let mut blocking: Option<String> = None;
+    check_draft_numeric_alerts(nl, params, state, preset, &mut alerts, &mut blocking);
+
     if let Some((Some(xmin), Some(xmax))) = nl.x_range_filter
         && xmin >= xmax
     {
-        alerts.push(format!("Range alert: X min ({xmin}) must be strictly less than X max ({xmax})."));
+        let msg = format!("Range alert: X min ({}) must be strictly less than X max ({}).", format_fit_number(xmin), format_fit_number(xmax));
+        if blocking.is_none() {
+            blocking = Some(msg.clone());
+        }
+        alerts.push(msg);
     }
     if let Some((Some(ymin), Some(ymax))) = nl.y_range_filter
         && ymin >= ymax
@@ -370,25 +543,44 @@ fn compute_fit_alerts(nl: &NonlinearFitSpec, params: &[String]) -> Vec<String> {
         if let (Some(lo), Some(hi)) = (rule.lower_bound, rule.upper_bound)
             && lo >= hi
         {
-            alerts.push(format!("Constraint conflict on `{}`: lower bound ({lo}) >= upper bound ({hi}).", rule.name));
+            let msg = format!(
+                "Constraint conflict on `{}`: lower bound ({}) >= upper bound ({}).",
+                rule.name,
+                format_fit_number(lo),
+                format_fit_number(hi)
+            );
+            if blocking.is_none() {
+                blocking = Some(msg.clone());
+            }
+            alerts.push(msg);
         }
         if let Some(init) = rule.initial_override {
             if let Some(lo) = rule.lower_bound
                 && init < lo
             {
-                alerts.push(format!("Identifiability warning: `{}` initial ({init}) < lower bound ({lo}).", rule.name));
+                alerts.push(format!(
+                    "Identifiability warning: `{}` initial ({}) < lower bound ({}).",
+                    rule.name,
+                    format_fit_number(init),
+                    format_fit_number(lo)
+                ));
             }
             if let Some(hi) = rule.upper_bound
                 && init > hi
             {
-                alerts.push(format!("Identifiability warning: `{}` initial ({init}) > upper bound ({hi}).", rule.name));
+                alerts.push(format!(
+                    "Identifiability warning: `{}` initial ({}) > upper bound ({}).",
+                    rule.name,
+                    format_fit_number(init),
+                    format_fit_number(hi)
+                ));
             }
         }
     }
     if !params.is_empty() && fixed_count >= params.len() && !nl.plot_function_only {
         alerts.push(String::from("Identifiability alert: all parameters are fixed; enable Plot Function Only or unfix >= 1 parameter."));
     }
-    alerts
+    (alerts, blocking)
 }
 
 struct FitMvGridCtx<'a> {
@@ -713,6 +905,9 @@ fn render_fit_model_tab(
                     fit.custom_dsl = None;
                     fit.parameter_rules.clear();
                 }
+                state.initial_override_drafts.clear();
+                state.lower_bound_drafts.clear();
+                state.upper_bound_drafts.clear();
                 intents.push_set_edit_params_draft(next);
             }
         }
@@ -799,25 +994,21 @@ fn render_fit_compare_tab(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_fit_constrain_tab(
     ctx: &Context,
     ui: &mut Ui,
-    result_sheet_id: &SheetId,
-    doc: &ProjectDocument,
-    spec: &curvebook_doc::AnalysisSpec,
-    nl: &NonlinearFitSpec,
-    params: &[String],
+    tab_ctx: &FitTabCtx<'_>,
+    state: &mut FitModalEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let FitTabCtx { result_sheet_id, doc, spec, nl, param_names, locale_preset } = *tab_ctx;
     render_section_title(ui, tokens, "Parameter Constraints, Sharing & Constant Hooks");
     let hook_target_key = Id::unique("fit_modal.inline_hook_param");
     let mut hook_target: Option<String> = ctx.data(|d| d.get_temp(hook_target_key)).flatten();
-    let preset = LocalePreset::for_locale(tokens.locale);
 
-    for p in params {
+    for p in param_names {
         let existing_idx = nl.parameter_rules.iter().position(|r| r.name == *p);
         let rule = existing_idx.map_or_else(
             || ParameterRule { name: p.clone(), scope: ParameterScope::Local, initial_override: None, lower_bound: None, upper_bound: None },
@@ -858,13 +1049,13 @@ fn render_fit_constrain_tab(
 
             if let ParameterScope::Constant(val) = rule.scope {
                 let buf_id = Id::unique(("fit_con_const", p.as_str()));
-                let mut text: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| format!("{val}"));
+                let mut text: String = ctx.data(|d| d.get_temp(buf_id)).unwrap_or_else(|| format_fit_number(val));
                 ui.horizontal(|ui| {
                     ui.label("Constant value:");
                     let ed = ui.add_sized(Vec2::new(90.0, 20.0), TextEdit::singleline(&mut text));
                     ctx.data_mut(|d| d.insert_temp(buf_id, text.clone()));
                     if ed.changed()
-                        && let Some(parsed) = parse_localized_number_input(&text, &preset).filter(|v| v.is_finite())
+                        && let Some(parsed) = parse_fit_number(&text, locale_preset)
                     {
                         update_param_rule(spec, p, |r| r.scope = ParameterScope::Constant(parsed), intents);
                     }
@@ -872,6 +1063,8 @@ fn render_fit_constrain_tab(
             } else if let ParameterScope::HookedConstant(ref src) = rule.scope {
                 ui.label(egui::RichText::new(format!("Linked hook: {}", format_hook_source_short(src))).small().color(tokens.accent_strong));
             }
+
+            render_param_bound_inputs(ui, tab_ctx, p, &rule, state, meta, intents);
         });
     }
 
@@ -905,63 +1098,171 @@ fn render_fit_constrain_tab(
     }
 }
 
+fn render_param_bound_inputs(
+    ui: &mut Ui,
+    tab_ctx: &FitTabCtx<'_>,
+    param: &str,
+    rule: &ParameterRule,
+    state: &mut FitModalEguiState,
+    meta: &mut FrameInspectMeta,
+    intents: &mut PendingUiIntents,
+) {
+    let FitTabCtx { spec, locale_preset, .. } = *tab_ctx;
+    let lo_draft =
+        state.lower_bound_drafts.entry(param.to_owned()).or_insert_with(|| rule.lower_bound.map(format_fit_number).unwrap_or_default()).clone();
+    let hi_draft =
+        state.upper_bound_drafts.entry(param.to_owned()).or_insert_with(|| rule.upper_bound.map(format_fit_number).unwrap_or_default()).clone();
+    let mut lo_text = lo_draft;
+    let mut hi_text = hi_draft;
+
+    ui.horizontal_wrapped(|ui| {
+        ui.label("Lower bound:");
+        let lo_resp =
+            ui.add_sized(Vec2::new(96.0, 20.0), TextEdit::singleline(&mut lo_text).id(Id::unique(("fit_con_lower", param))).hint_text("None"));
+        record_widget(
+            ui,
+            meta,
+            &lo_resp,
+            &format!("fit.con.lower.{param}"),
+            "textbox",
+            &format!("{param} Lower Bound"),
+            None,
+            Some(serde_json::json!(lo_text)),
+            true,
+            None,
+            ZLayer::ModalDialog,
+            false,
+            None,
+        );
+        if lo_resp.changed() {
+            if lo_text.trim().is_empty() {
+                update_param_rule(spec, param, |r| r.lower_bound = None, intents);
+            } else if let Some(val) = parse_fit_number(&lo_text, locale_preset) {
+                update_param_rule(spec, param, |r| r.lower_bound = Some(val), intents);
+            }
+        }
+
+        ui.label("Upper bound:");
+        let hi_resp =
+            ui.add_sized(Vec2::new(96.0, 20.0), TextEdit::singleline(&mut hi_text).id(Id::unique(("fit_con_upper", param))).hint_text("None"));
+        record_widget(
+            ui,
+            meta,
+            &hi_resp,
+            &format!("fit.con.upper.{param}"),
+            "textbox",
+            &format!("{param} Upper Bound"),
+            None,
+            Some(serde_json::json!(hi_text)),
+            true,
+            None,
+            ZLayer::ModalDialog,
+            false,
+            None,
+        );
+        if hi_resp.changed() {
+            if hi_text.trim().is_empty() {
+                update_param_rule(spec, param, |r| r.upper_bound = None, intents);
+            } else if let Some(val) = parse_fit_number(&hi_text, locale_preset) {
+                update_param_rule(spec, param, |r| r.upper_bound = Some(val), intents);
+            }
+        }
+    });
+
+    state.lower_bound_drafts.insert(param.to_owned(), lo_text);
+    state.upper_bound_drafts.insert(param.to_owned(), hi_text);
+}
+
 fn render_fit_initial_tab(
     ui: &mut Ui,
-    spec: &curvebook_doc::AnalysisSpec,
-    nl: &NonlinearFitSpec,
-    params: &[String],
+    tab_ctx: &FitTabCtx<'_>,
+    state: &mut FitModalEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let FitTabCtx { doc, spec, nl, param_names, locale_preset, .. } = *tab_ctx;
     render_section_title(ui, tokens, "Initial Parameter Guesses");
-    let heuristic_vals = curvebook_fit::get_builtin_model(&nl.equation_id).map(|m| m.initial_guess(&[])).unwrap_or_default();
-    for (idx, p) in params.iter().enumerate() {
+    let data_points = extract_fit_data_points(doc, spec, nl);
+    let has_data = !data_points.is_empty();
+    let heuristic_vals = resolve_model_from_spec(nl).ok().map(|m| m.initial_guess(&data_points)).unwrap_or_default();
+
+    for (idx, p) in param_names.iter().enumerate() {
         let rule = nl.parameter_rules.iter().find(|r| r.name == *p);
         let override_val = rule.and_then(|r| r.initial_override);
         let auto_guess = heuristic_vals.get(idx).copied().unwrap_or(1.0);
         let is_auto = override_val.is_none();
+        let auto_str = format_fit_number(auto_guess);
+        let auto_btn_lbl = if has_data { format!("Auto ({auto_str})") } else { format!("Model default ({auto_str})") };
+        let mut init_text =
+            state.initial_override_drafts.entry(p.clone()).or_insert_with(|| override_val.map(format_fit_number).unwrap_or_default()).clone();
+
         ui.horizontal_wrapped(|ui| {
             ui.label(egui::RichText::new(p).strong());
-            if render_modal_seg_btn(
-                ui,
-                tokens,
-                meta,
-                &format!("fit.init.auto.{p}"),
-                &format!("Auto ({auto_guess:.3})"),
-                is_auto,
-                &ControlEnablement::enabled(),
-            ) {
+            if render_modal_seg_btn(ui, tokens, meta, &format!("fit.init.auto.{p}"), &auto_btn_lbl, is_auto, &ControlEnablement::enabled()) {
+                init_text.clear();
                 update_param_rule(spec, p, |r| r.initial_override = None, intents);
             }
+
+            let input_resp = ui.add_sized(
+                Vec2::new(108.0, 22.0),
+                TextEdit::singleline(&mut init_text).id(Id::unique(("fit_init_input", p.as_str()))).hint_text(&auto_str),
+            );
+            record_widget(
+                ui,
+                meta,
+                &input_resp,
+                &format!("fit.init.input.{p}"),
+                "textbox",
+                &format!("{p} Initial Value"),
+                None,
+                Some(serde_json::json!(init_text)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+            if input_resp.changed() {
+                if init_text.trim().is_empty() {
+                    update_param_rule(spec, p, |r| r.initial_override = None, intents);
+                } else if let Some(val) = parse_fit_number(&init_text, locale_preset) {
+                    update_param_rule(spec, p, |r| r.initial_override = Some(val), intents);
+                }
+            }
+
             let cur = override_val.unwrap_or(auto_guess);
+            let cur_text = format_fit_number(cur);
             let step = render_stepper_row(
                 ui,
                 tokens,
                 meta,
                 StepperSpec {
                     id_prefix: &format!("fit.init.val.{p}"),
-                    label: "Initial Value",
-                    value_text: &format!("{cur:.3}"),
+                    label: "Step",
+                    value_text: &cur_text,
                     enablement: &ControlEnablement::enabled(),
                 },
             );
             if step != 0 {
                 let next_v = cur + f64::from(step) * 0.5;
+                init_text = format_fit_number(next_v);
                 update_param_rule(spec, p, |r| r.initial_override = Some(next_v), intents);
             }
         });
+        state.initial_override_drafts.insert(p.clone(), init_text);
     }
 }
 
 fn render_fit_range_tab(
     ui: &mut Ui,
-    spec: &curvebook_doc::AnalysisSpec,
-    nl: &NonlinearFitSpec,
+    tab_ctx: &FitTabCtx<'_>,
+    state: &mut FitModalEguiState,
     tokens: &Tokens,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let FitTabCtx { doc, spec, nl, locale_preset, .. } = *tab_ctx;
     render_section_title(ui, tokens, "Fit X Domain & Curve Plot Window");
     let has_x_filter = nl.x_range_filter.is_some();
     if render_modal_checkbox(
@@ -975,9 +1276,73 @@ fn render_fit_range_tab(
     ) {
         let mut next = spec.clone();
         if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
-            fit.x_range_filter = if has_x_filter { None } else { Some((Some(0.0), Some(100.0))) };
+            if has_x_filter {
+                fit.x_range_filter = None;
+                state.x_min_draft.clear();
+                state.x_max_draft.clear();
+            } else {
+                let (seed_min, seed_max) = seed_x_domain_bounds(doc, spec, nl);
+                state.x_min_draft = format_fit_number(seed_min);
+                state.x_max_draft = format_fit_number(seed_max);
+                fit.x_range_filter = Some((Some(seed_min), Some(seed_max)));
+            }
         }
         intents.push_set_edit_params_draft(next);
+    }
+    if let Some((cur_lo, cur_hi)) = nl.x_range_filter {
+        ui.horizontal_wrapped(|ui| {
+            ui.label("X min:");
+            let min_resp =
+                ui.add_sized(Vec2::new(100.0, 22.0), TextEdit::singleline(&mut state.x_min_draft).id(Id::unique("fit.wr.x_min")).hint_text("Min X"));
+            record_widget(
+                ui,
+                meta,
+                &min_resp,
+                "fit.wr.x_min",
+                "textbox",
+                "X min",
+                None,
+                Some(serde_json::json!(state.x_min_draft)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+
+            ui.label("X max:");
+            let max_resp =
+                ui.add_sized(Vec2::new(100.0, 22.0), TextEdit::singleline(&mut state.x_max_draft).id(Id::unique("fit.wr.x_max")).hint_text("Max X"));
+            record_widget(
+                ui,
+                meta,
+                &max_resp,
+                "fit.wr.x_max",
+                "textbox",
+                "X max",
+                None,
+                Some(serde_json::json!(state.x_max_draft)),
+                true,
+                None,
+                ZLayer::ModalDialog,
+                false,
+                None,
+            );
+
+            if min_resp.changed() || max_resp.changed() {
+                let next_lo =
+                    if state.x_min_draft.trim().is_empty() { Some(None) } else { parse_fit_number(&state.x_min_draft, locale_preset).map(Some) };
+                let next_hi =
+                    if state.x_max_draft.trim().is_empty() { Some(None) } else { parse_fit_number(&state.x_max_draft, locale_preset).map(Some) };
+                let lo_val = next_lo.unwrap_or(cur_lo);
+                let hi_val = next_hi.unwrap_or(cur_hi);
+                let mut next = spec.clone();
+                if let AnalysisKind::NonlinearRegression(fit) = &mut next.kind {
+                    fit.x_range_filter = Some((lo_val, hi_val));
+                }
+                intents.push_set_edit_params_draft(next);
+            }
+        });
     }
     if render_modal_checkbox(
         ui,
@@ -1532,5 +1897,83 @@ fn format_hook_source_short(src: &HookSource) -> String {
         HookSource::ColumnTitleValue { data_sheet_id, data_set_index } => {
             format!("Title({}:col {data_set_index})", data_sheet_id.as_str())
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{FitModalEguiState, compute_fit_alerts, format_fit_number, parse_fit_number, seed_x_domain_bounds};
+    use crate::i18n::LocalePreset;
+    use curvebook_doc::{
+        AnalysisKind, AnalysisSpec, Cell, DataSheet, NonlinearFitSpec, ParameterRule, ParameterScope, ProjectDocument, SheetId, SubcolumnMode,
+        TableArchetype, XyTable,
+    };
+
+    #[test]
+    fn format_fit_number_preserves_scientific_values() {
+        assert_eq!(format_fit_number(0.0), "0");
+        assert_eq!(format_fit_number(-0.0), "0");
+        assert_eq!(format_fit_number(1e-7), "1e-7");
+        assert_eq!(format_fit_number(2.5e-8), "2.5e-8");
+        assert_eq!(format_fit_number(-9.0), "-9");
+        assert_eq!(format_fit_number(-4.5), "-4.5");
+        assert_eq!(format_fit_number(100.0), "100");
+    }
+
+    #[test]
+    fn parse_fit_number_supports_scientific_and_comma_decimal_locales() {
+        let us = LocalePreset::for_locale("en");
+        let de = LocalePreset::for_locale("de");
+        assert!((parse_fit_number("1e-7", &us).unwrap() - 1e-7).abs() < 1e-18);
+        assert!((parse_fit_number("-9.5", &us).unwrap() - (-9.5)).abs() < 1e-12);
+        assert!((parse_fit_number("-4,25", &de).unwrap() - (-4.25)).abs() < 1e-12);
+        assert!(parse_fit_number("not-a-number", &us).is_none());
+        assert!(parse_fit_number("", &us).is_none());
+    }
+
+    #[test]
+    fn seed_x_domain_bounds_uses_actual_xy_data_range_and_falls_back_when_empty() {
+        let mut doc = ProjectDocument::new("Fit Range Seed").unwrap();
+        let xy_id = SheetId::try_new("xy-dose").unwrap();
+        let mut xy = XyTable::new(SubcolumnMode::Single, 1, 6).unwrap();
+        for (r, x) in [-9.0, -8.0, -7.0, -6.0, -5.0, -4.0].into_iter().enumerate() {
+            xy.x_cells[r][0] = Cell::number(x);
+            *xy.data_sets[0].cell_mut(r, 0).unwrap() = Cell::number(10.0 + r as f64 * 15.0);
+        }
+        doc.data_sheets.push(DataSheet::new(xy_id.clone(), "Dose", TableArchetype::Xy(xy)).unwrap());
+
+        let nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+        let spec = AnalysisSpec::new("fit-1", xy_id, AnalysisKind::NonlinearRegression(nl.clone())).unwrap();
+        assert_eq!(seed_x_domain_bounds(&doc, &spec, &nl), (-9.0, -4.0));
+
+        let empty_id = SheetId::try_new("xy-empty").unwrap();
+        let empty_xy = XyTable::new(SubcolumnMode::Single, 1, 3).unwrap();
+        doc.data_sheets.push(DataSheet::new(empty_id.clone(), "Empty", TableArchetype::Xy(empty_xy)).unwrap());
+        let empty_spec = AnalysisSpec::new("fit-empty", empty_id, AnalysisKind::NonlinearRegression(nl.clone())).unwrap();
+        assert_eq!(seed_x_domain_bounds(&doc, &empty_spec, &nl), (0.0, 100.0));
+    }
+
+    #[test]
+    fn compute_fit_alerts_blocks_inverted_x_domain_and_inverted_bounds() {
+        let us = LocalePreset::for_locale("en");
+        let mut nl = NonlinearFitSpec::new("log_agonist_vs_response_4pl");
+        nl.x_range_filter = Some((Some(-4.0), Some(-9.0)));
+        let state = FitModalEguiState { x_min_draft: String::from("-4"), x_max_draft: String::from("-9"), ..Default::default() };
+        let (alerts, blocking) = compute_fit_alerts(&nl, &[String::from("Bottom")], &state, &us);
+        assert!(!alerts.is_empty());
+        assert!(blocking.is_some());
+
+        nl.x_range_filter = Some((Some(-9.0), Some(-4.0)));
+        nl.parameter_rules.push(ParameterRule {
+            name: String::from("Bottom"),
+            scope: ParameterScope::Local,
+            initial_override: Some(1e-7),
+            lower_bound: Some(10.0),
+            upper_bound: Some(5.0),
+        });
+        let valid_x_state = FitModalEguiState { x_min_draft: String::from("-9"), x_max_draft: String::from("-4"), ..Default::default() };
+        let (alerts2, blocking2) = compute_fit_alerts(&nl, &[String::from("Bottom")], &valid_x_state, &us);
+        assert!(alerts2.iter().any(|a| a.contains("Constraint conflict")));
+        assert!(blocking2.is_some());
     }
 }

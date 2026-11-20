@@ -7,7 +7,8 @@ use curvebook_doc::{
     HookSource, ImportFilterSpec, ImportLinkSpec, ImportPlacementSpec, InfoSheet, InternalLinkKind, LevelOrderKind, LevelOrderSpec, LinkSource,
     MAX_DATA_SETS, MultipleVariablesTable, MultiplicityMethod, MultivariateSpec, NestedGroupColumn, NestedTable, NormalizeAnchor, ParameterScope,
     PlacementMode, ProjectDocument, ResultSheet, SheetCellRange, SheetId, SimulationNoise, SizeChannelMapping, SubcolumnMode, SurvivalAnalysisSpec,
-    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode, validate_rows, validate_title,
+    TableArchetype, TableKind, TransformAnalysisSpec, VariableColumn, VariableRole, VariableSource, XColumnMode, format_linked_paste_tsv_cell,
+    validate_rows, validate_title,
 };
 use curvebook_format::{CsvOptions, export_datasheet_to_csv, export_result_sheet_tidy_csv};
 use curvebook_transform::{
@@ -1575,6 +1576,62 @@ fn run_set_titles(ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, Engin
     run_set_titles_with_id("table.setTitles", ctx, raw)
 }
 
+fn propagate_mv_variable_renames(doc: &mut ProjectDocument, sheet_id: &SheetId, old_titles: &[String]) {
+    let renames: Vec<(String, String)> = {
+        let Some(ds) = doc.data_sheet(sheet_id) else {
+            return;
+        };
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+            return;
+        };
+        let mut pairs = Vec::new();
+        for (idx, old_title) in old_titles.iter().enumerate() {
+            let old_t = old_title.trim();
+            if old_t.is_empty() || old_titles[..idx].iter().any(|prev| prev.trim() == old_t) {
+                continue;
+            }
+            if let Some(var) = mv.variables.get(idx) {
+                let new_t = var.title.trim();
+                if !new_t.is_empty() && old_t != new_t {
+                    pairs.push((old_t.to_owned(), new_t.to_owned()));
+                }
+            }
+        }
+        pairs
+    };
+    if renames.is_empty() {
+        return;
+    }
+    let rename_refs: Vec<(&str, &str)> = renames.iter().map(|(o, n)| (o.as_str(), n.as_str())).collect();
+    if let Some(ds) = doc.data_sheet_mut(sheet_id)
+        && let TableArchetype::MultipleVariables(mv) = &mut ds.archetype
+    {
+        for var in &mut mv.variables {
+            if let VariableSource::Calculated { formula } = &mut var.source
+                && let Some(rewritten) = curvebook_transform::formula::rewrite_formula_column_refs(formula, &rename_refs)
+            {
+                *formula = rewritten;
+            }
+        }
+    }
+    for rs in &mut doc.result_sheets {
+        if rs.analysis.source_sheet_id == *sheet_id
+            && let AnalysisKind::Transform(TransformAnalysisSpec::SelectAndTransform { filter_formula, derived_columns, .. }) = &mut rs.analysis.kind
+        {
+            if let Some(f) = filter_formula.as_mut()
+                && let Some(rewritten) = curvebook_transform::formula::rewrite_formula_column_refs(f, &rename_refs)
+            {
+                *f = rewritten;
+            }
+            for dc in derived_columns {
+                if let Some(rewritten) = curvebook_transform::formula::rewrite_formula_column_refs(&dc.formula, &rename_refs) {
+                    dc.formula = rewritten;
+                }
+            }
+        }
+    }
+}
+
 fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Result<CommandOutcome, EngineError> {
     let p: SetTitlesParams = parse_params(&schema_set_titles(), raw)?;
     let id = parse_sheet_id(&p.sheet_id)?;
@@ -1583,6 +1640,10 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
     }
     let doc = &mut ctx.session.doc;
     let ds = require_unfrozen_data_sheet_mut(doc, &id)?;
+    let old_mv_titles: Option<Vec<String>> = match &ds.archetype {
+        TableArchetype::MultipleVariables(mv) => Some(mv.variables.iter().map(|v| v.title.clone()).collect()),
+        _ => None,
+    };
     if let Some(xt) = p.x_title.as_deref() {
         validate_title(xt)?;
     }
@@ -1633,6 +1694,10 @@ fn run_set_titles_with_id(command_id: &str, ctx: &mut Ctx<'_>, raw: Value) -> Re
             set_row_title(&mut ds.archetype, idx, title)?;
             updated = updated.saturating_add(1);
         }
+    }
+
+    if let Some(old_titles) = old_mv_titles.as_deref() {
+        propagate_mv_variable_renames(doc, &id, old_titles);
     }
 
     let recalc = recalculate_dirty_with_links(doc, std::slice::from_ref(&id), false)?;
@@ -2459,20 +2524,11 @@ fn serialize_2d_rows_as_tsv(rows_arr: &[Vec<Value>], decimal_separator: char) ->
         let mut tokens = Vec::with_capacity(row_cells.len());
         for cell_val in row_cells {
             let cell = parse_cell_value_with_options(cell_val, decimal_separator, true)?;
-            tokens.push(format_cell_as_tsv_token(&cell));
+            tokens.push(format_linked_paste_tsv_cell(&cell));
         }
         lines.push(tokens.join("\t"));
     }
     Ok(lines.join("\n"))
-}
-
-fn format_cell_as_tsv_token(cell: &Cell) -> String {
-    let base = match &cell.value {
-        CellValue::Empty => String::new(),
-        CellValue::Number(v) => v.to_string(),
-        CellValue::Text(s) => s.replace(['\t', '\n', '\r'], " "),
-    };
-    if cell.excluded && !base.is_empty() { format!("{base}*") } else { base }
 }
 
 fn apply_paste_payload(
@@ -5306,6 +5362,66 @@ mod tests {
         nt_wide.validate().map_err(|e| e.to_string())?;
         assert_eq!(nt_wide.groups[0].subcolumn_titles.len(), 4);
         assert_eq!(nt_wide.groups[0].subcolumn_titles[3], "Unit 4");
+        Ok(())
+    }
+
+    #[test]
+    fn mv_set_titles_rewrites_calculated_formulas_reevaluates_and_undoes_atomically() -> Result<(), String> {
+        let mut s = Session::new();
+        s.execute("sheet.createData", json!({ "sheet_id": "mv-1", "archetype": "multiple_variables", "cols": 3, "rows": 3 }))
+            .map_err(|e| e.to_string())?;
+        s.execute("table.setTitles", json!({ "sheet_id": "mv-1", "titles": ["Dose", "Weight", "Ratio"] })).map_err(|e| e.to_string())?;
+        s.execute(
+            "table.setCells",
+            json!({
+                "sheet_id": "mv-1",
+                "edits": [
+                    { "row": 0, "col": 0, "value": 10.0 },
+                    { "row": 1, "col": 0, "value": 20.0 },
+                    { "row": 2, "col": 0, "value": 30.0 },
+                    { "row": 0, "col": 1, "value": 2.0 },
+                    { "row": 1, "col": 1, "value": 4.0 },
+                    { "row": 2, "col": 1, "value": 5.0 },
+                ]
+            }),
+        )
+        .map_err(|e| e.to_string())?;
+        s.execute("table.setCalculatedVariable", json!({ "sheet_id": "mv-1", "col": 2, "formula": "[Dose] / [Weight]" }))
+            .map_err(|e| e.to_string())?;
+
+        // Rename `Dose` -> `Dose (mg/kg)`: formula must rewrite & evaluate cleanly in the same command.
+        let undo_before = s.undo_depth();
+        s.execute("table.setTitles", json!({ "sheet_id": "mv-1", "col": 0, "title": "Dose (mg/kg)" })).map_err(|e| e.to_string())?;
+        assert_eq!(s.undo_depth(), undo_before + 1);
+
+        let ds = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
+        let TableArchetype::MultipleVariables(mv) = &ds.archetype else {
+            return Err(String::from("expected MultipleVariables"));
+        };
+        assert_eq!(mv.variables[0].title, "Dose (mg/kg)");
+        assert_eq!(mv.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose (mg/kg)] / [Weight]") });
+        assert_eq!(mv.variables[2].cells[0].active_number(), Some(5.0));
+        assert_eq!(mv.variables[2].cells[1].active_number(), Some(5.0));
+        assert_eq!(mv.variables[2].cells[2].active_number(), Some(6.0));
+
+        // Update a Dose cell afterwards to prove ongoing recalculation works with the rewritten formula.
+        s.execute("table.setCell", json!({ "sheet_id": "mv-1", "row": 0, "col": 0, "value": 14.0 })).map_err(|e| e.to_string())?;
+        let ds2 = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
+        let TableArchetype::MultipleVariables(mv2) = &ds2.archetype else {
+            return Err(String::from("expected MultipleVariables"));
+        };
+        assert_eq!(mv2.variables[2].cells[0].active_number(), Some(7.0));
+
+        // Undo cell edit, then undo rename -> restores BOTH original title `Dose` and `[Dose] / [Weight]`.
+        s.execute("edit.undo", json!({})).map_err(|e| e.to_string())?;
+        s.execute("edit.undo", json!({})).map_err(|e| e.to_string())?;
+        let ds_undo = s.document().data_sheet(&SheetId::new("mv-1")).ok_or_else(|| String::from("missing mv-1"))?;
+        let TableArchetype::MultipleVariables(mv_undo) = &ds_undo.archetype else {
+            return Err(String::from("expected MultipleVariables"));
+        };
+        assert_eq!(mv_undo.variables[0].title, "Dose");
+        assert_eq!(mv_undo.variables[2].source, VariableSource::Calculated { formula: String::from("[Dose] / [Weight]") });
+        assert_eq!(mv_undo.variables[2].cells[0].active_number(), Some(5.0));
         Ok(())
     }
 }

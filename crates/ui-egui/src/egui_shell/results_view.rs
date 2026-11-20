@@ -9,7 +9,7 @@ use serde_json::json;
 use crate::UiApp;
 use crate::dialogs_canvas::ResultSheetViewState;
 use crate::egui_shell::{FrameInspectEntryInput, FrameInspectMeta, PendingUiIntents, Tokens};
-use crate::i18n::{normalize_locale, try_tr};
+use crate::i18n::tr_or_fallback;
 use crate::inspect::ZLayer;
 use crate::tr;
 
@@ -92,11 +92,6 @@ pub struct ResultsViewFrameReport {
     pub active_tab_index: usize,
     pub active_tab_category: Option<ResultTabCategory>,
     pub has_ambiguity_callout: bool,
-}
-
-fn res_tr<'a>(locale: &str, key: &str, fallback: &'a str) -> &'a str {
-    let norm = normalize_locale(locale);
-    try_tr(norm, key).or_else(|| try_tr("en", key)).unwrap_or(fallback)
 }
 
 #[derive(Debug, Clone)]
@@ -250,7 +245,7 @@ pub fn render_results_view_for_sheet(
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 4.0;
             let edit_lbl = if hdr_rect.width() >= 520.0 {
-                res_tr(&app.locale, "results.parameters", "Edit Parameters (Cmd+T)")
+                tr_or_fallback(&app.locale, "results.parameters", "Edit Parameters (Cmd+T)")
             } else {
                 tr(&app.locale, "toolbar.parameters")
             };
@@ -277,7 +272,7 @@ pub fn render_results_view_for_sheet(
             }
 
             if hdr_rect.width() >= 420.0 {
-                let copy_lbl = res_tr(&app.locale, "btn.copy", "Copy");
+                let copy_lbl = tr_or_fallback(&app.locale, "btn.copy", "Copy");
                 let has_tabs = !rs.tabs.is_empty();
                 let copy_resp = ui.add_enabled(enabled && has_tabs, egui::Button::new(RichText::new(copy_lbl).small()));
                 meta.record_response(
@@ -312,7 +307,7 @@ pub fn render_results_view_for_sheet(
                 FrameInspectEntryInput {
                     widget_id: "result.tabs.prev",
                     role: "button",
-                    label: res_tr(&app.locale, "results.prev_tabs", "Previous Tab"),
+                    label: tr_or_fallback(&app.locale, "results.prev_tabs", "Previous Tab"),
                     command_id: None,
                     value: None,
                     enabled: can_prev,
@@ -467,7 +462,7 @@ pub fn render_results_view_for_sheet(
                 FrameInspectEntryInput {
                     widget_id: "result.tabs.next",
                     role: "button",
-                    label: res_tr(&app.locale, "results.next_tabs", "Next Tab"),
+                    label: tr_or_fallback(&app.locale, "results.next_tabs", "Next Tab"),
                     command_id: None,
                     value: None,
                     enabled: can_next,
@@ -511,7 +506,8 @@ pub fn render_results_view_for_sheet(
         report.active_tab_category = Some(category);
 
         // Sub-header strip identifying Inferential Report vs Plot-Ready Derived Matrix
-        render_tab_category_bar(ui, rs, tab, category, tokens, enabled, meta, intents);
+        let tab_ctx = ResultTabRenderCtx { rs, tab, tokens, enabled };
+        render_tab_category_bar(ui, &tab_ctx, category, meta, intents);
 
         let is_survival_summary = matches!(rs.analysis.kind, AnalysisKind::Survival(_)) && matches!(tab.kind, ResultTabKind::MainSummary);
         let tab_has_ambig_cell = tab_contains_ambiguity(tab, rs.analysis.p_value_format, is_survival_summary);
@@ -526,13 +522,13 @@ pub fn render_results_view_for_sheet(
 
         let scroll_out =
             egui::ScrollArea::both().id_salt(("egui_shell.results.body", rs.id.as_str(), &tab.id)).auto_shrink([false, false]).show(ui, |ui| {
-                render_result_tab_table(ui, rs, tab, active_idx, is_survival_summary, state, tokens, enabled, meta, intents);
+                render_result_tab_table(ui, &tab_ctx, active_idx, is_survival_summary, state, meta, intents);
                 if !tab.footnotes.is_empty() {
                     ui.add_space(6.0);
                     let fn_max_w = (body_rect.width() - 24.0).max(80.0);
                     ui.allocate_ui(vec2(fn_max_w, 0.0), |ui| {
                         ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
-                        let fn_lbl = res_tr(&app.locale, "results.footnotes", "Footnotes");
+                        let fn_lbl = tr_or_fallback(&app.locale, "results.footnotes", "Footnotes");
                         ui.add(egui::Label::new(RichText::new(fn_lbl).small().strong().color(tokens.text_strong)).wrap());
                         for note in &tab.footnotes {
                             ui.add(egui::Label::new(RichText::new(note).small().color(tokens.text_muted)).wrap());
@@ -564,17 +560,21 @@ fn tab_contains_ambiguity(tab: &ResultTab, p_format: PValueFormat, is_survival_s
     false
 }
 
-#[allow(clippy::too_many_arguments)]
+struct ResultTabRenderCtx<'a> {
+    rs: &'a ResultSheet,
+    tab: &'a ResultTab,
+    tokens: &'a Tokens,
+    enabled: bool,
+}
+
 fn render_tab_category_bar(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
-    tab: &ResultTab,
+    ctx: &ResultTabRenderCtx<'_>,
     category: ResultTabCategory,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ResultTabRenderCtx { rs, tab, tokens, enabled } = *ctx;
     let bar_rect = ui.allocate_space(vec2(ui.available_width().max(1.0), 26.0)).1;
     ui.painter().rect_filled(bar_rect, CornerRadius::ZERO, tokens.header_bg);
     ui.painter()
@@ -709,7 +709,7 @@ fn render_result_table_header(ui: &mut egui::Ui, tab: &ResultTab, tokens: &Token
     let corner_rect = Rect::from_min_size(hdr_rect.min, vec2(layout.row_stub_w, layout.row_h));
     let corner_vis = corner_rect.intersect(hdr_vis);
     if corner_vis.width() >= 4.0 && corner_vis.height() >= 4.0 {
-        let corner_lbl = res_tr(tokens.locale, "results.row_metric", "Row / Metric");
+        let corner_lbl = tr_or_fallback(tokens.locale, "results.row_metric", "Row / Metric");
         let _ = paint_table_cell_text(
             ui,
             corner_rect,
@@ -746,19 +746,16 @@ fn render_result_table_header(ui: &mut egui::Ui, tab: &ResultTab, tokens: &Token
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_result_section_row(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
-    tab: &ResultTab,
+    ctx: &ResultTabRenderCtx<'_>,
     r_idx: usize,
     row_lbl: &str,
     state: &mut ResultsViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     layout: ResultTableLayout,
     meta: &mut FrameInspectMeta,
 ) -> String {
+    let ResultTabRenderCtx { rs, tab, tokens, enabled } = *ctx;
     let sec_key = format!("{}:{}:{r_idx}", rs.id.as_str(), tab.id);
     let is_collapsed = state.collapsed_sections.contains(&sec_key);
     let out_key = sec_key.clone();
@@ -866,22 +863,25 @@ fn update_result_cell_selection_from_pointer(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
-fn render_result_data_row(
-    ui: &mut egui::Ui,
-    rs: &ResultSheet,
+struct ResultDataRowInput<'a> {
     active_tab_idx: usize,
     r_idx: usize,
-    row_lbl: &str,
-    row: &[ResultCell],
+    row_lbl: &'a str,
+    row: &'a [ResultCell],
     is_survival_summary: bool,
     ptr: ResultPointerInput,
     layout: ResultTableLayout,
+}
+
+fn render_result_data_row(
+    ui: &mut egui::Ui,
+    ctx: &ResultTabRenderCtx<'_>,
+    input: ResultDataRowInput<'_>,
     state: &mut ResultsViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
 ) {
+    let ResultTabRenderCtx { rs, tokens, enabled, .. } = *ctx;
+    let ResultDataRowInput { active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout } = input;
     let row_rect = ui.allocate_space(vec2(layout.total_w, layout.row_h)).1;
     let row_vis = row_rect.intersect(layout.visible_clip);
     if row_vis.width() < 4.0 || row_vis.height() < 4.0 {
@@ -982,19 +982,16 @@ fn render_result_data_row(
     }
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_result_tab_table(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
-    tab: &ResultTab,
+    ctx: &ResultTabRenderCtx<'_>,
     active_tab_idx: usize,
     is_survival_summary: bool,
     state: &mut ResultsViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ResultTabRenderCtx { rs, tab, tokens, .. } = *ctx;
     let prev_range = state.selected_range(&rs.id, active_tab_idx);
     let ptr_down = ui.input(|i| i.pointer.primary_down());
     let ptr_released = ui.input(|i| i.pointer.primary_released());
@@ -1032,7 +1029,7 @@ fn render_result_tab_table(
     for (r_idx, row) in tab.rows.iter().enumerate() {
         let row_lbl = tab.row_labels.get(r_idx).map_or("", String::as_str);
         if !row_lbl.is_empty() && row.iter().all(|c| matches!(c, ResultCell::Empty)) {
-            current_section = Some(render_result_section_row(ui, rs, tab, r_idx, row_lbl, state, tokens, enabled, layout, meta));
+            current_section = Some(render_result_section_row(ui, ctx, r_idx, row_lbl, state, layout, meta));
             continue;
         }
         if let Some(sec_key) = &current_section
@@ -1040,7 +1037,7 @@ fn render_result_tab_table(
         {
             continue;
         }
-        render_result_data_row(ui, rs, active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout, state, tokens, enabled, meta);
+        render_result_data_row(ui, ctx, ResultDataRowInput { active_tab_idx, r_idx, row_lbl, row, is_survival_summary, ptr, layout }, state, meta);
     }
 
     if ptr_released || !ptr_down {
@@ -1054,20 +1051,18 @@ fn render_result_tab_table(
         intents.push_sync_result_selection(rs.id.clone(), active_tab_idx, (*ra, *ca), (*rf, *cf));
     }
 
-    render_result_context_menu(ui, rs, active_tab_idx, state, tokens, enabled, meta, intents);
+    render_result_context_menu(ui, ctx, active_tab_idx, state, meta, intents);
 }
 
-#[allow(clippy::too_many_arguments)]
 fn render_result_context_menu(
     ui: &mut egui::Ui,
-    rs: &ResultSheet,
+    ctx: &ResultTabRenderCtx<'_>,
     active_tab_idx: usize,
     state: &mut ResultsViewEguiState,
-    tokens: &Tokens,
-    enabled: bool,
     meta: &mut FrameInspectMeta,
     intents: &mut PendingUiIntents,
 ) {
+    let ResultTabRenderCtx { rs, tokens, enabled, .. } = *ctx;
     if !enabled {
         state.context_menu = None;
         return;
@@ -1181,7 +1176,7 @@ fn render_empty_or_failed_result_body(
                 }
             }
             ResultStatus::Dirty => {
-                ui.colored_label(tokens.text_muted, res_tr(tokens.locale, "w6.view.results.status_pending", "Status: Recalculation pending"));
+                ui.colored_label(tokens.text_muted, tr_or_fallback(tokens.locale, "w6.view.results.status_pending", "Status: Recalculation pending"));
             }
             ResultStatus::UpToDate => {
                 ui.colored_label(tokens.text_muted, "No tabular output generated for this result sheet.");

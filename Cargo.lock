@@ -860,6 +860,7 @@ dependencies = [
  "flate2",
  "image",
  "proptest",
+ "quick-xml",
  "serde",
  "serde_json",
 ]
@@ -934,7 +935,9 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-text",
  "flate2",
+ "png",
  "serde",
+ "weezl",
 ]
 
 [[package]]
@@ -960,6 +963,7 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-text",
  "flate2",
+ "quick-xml",
  "serde",
 ]
 
@@ -4396,6 +4400,7 @@ dependencies = [
  "curvebook-testkit",
  "curvebook-ui-egui",
  "image",
+ "semver",
  "serde_json",
 ]
 

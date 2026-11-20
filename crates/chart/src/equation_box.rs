@@ -31,7 +31,9 @@
 use curvebook_doc::{AnalysisKind, EquationDisplayMode, ProjectDocument, ResultSheet, ResultStatus, SheetId};
 use curvebook_fit::tex_format::{format_model_equation_tex, format_polynomial_equation_tex};
 use curvebook_palette::Rgba8;
-use curvebook_text::{RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, measure_text_pt, parse_markup};
+use curvebook_text::{
+    RichSpan, RichText, SpanScript, SpanSlope, SpanWeight, lookup_greek_escape, lookup_roman_operator, measure_text_pt, parse_markup,
+};
 
 use crate::scene::{
     ChartScene, FillPaint, LineCap, LineJoin, Path2D, PathCmd, PointPt, PositionedText, RectPt, ScenePrimitive, StrokePaint, TextAnchor,
@@ -1364,100 +1366,6 @@ fn try_parse_matched_delim(rest: &str, open_ch: char, depth: usize) -> Option<(V
         i += ch.len_utf8();
     }
     None
-}
-
-fn lookup_roman_operator(name: &str) -> Option<&'static str> {
-    match name {
-        "log" => Some("log"),
-        "ln" => Some("ln"),
-        "exp" => Some("exp"),
-        "sin" => Some("sin"),
-        "cos" => Some("cos"),
-        "tan" => Some("tan"),
-        "sinh" => Some("sinh"),
-        "cosh" => Some("cosh"),
-        "tanh" => Some("tanh"),
-        "arcsin" => Some("arcsin"),
-        "arccos" => Some("arccos"),
-        "arctan" => Some("arctan"),
-        "sec" => Some("sec"),
-        "csc" => Some("csc"),
-        "cot" => Some("cot"),
-        "max" => Some("max"),
-        "min" => Some("min"),
-        "lim" => Some("lim"),
-        "sup" => Some("sup"),
-        "inf" => Some("inf"),
-        "arg" => Some("arg"),
-        "det" => Some("det"),
-        "dim" => Some("dim"),
-        "gcd" => Some("gcd"),
-        "lg" => Some("lg"),
-        "erf" => Some("erf"),
-        "erfc" => Some("erfc"),
-        _ => None,
-    }
-}
-
-fn lookup_greek_escape(name: &str) -> Option<&'static str> {
-    match name {
-        "alpha" => Some("\u{03B1}"),
-        "beta" => Some("\u{03B2}"),
-        "gamma" => Some("\u{03B3}"),
-        "delta" => Some("\u{03B4}"),
-        "epsilon" => Some("\u{03B5}"),
-        "varepsilon" => Some("\u{03F5}"),
-        "zeta" => Some("\u{03B6}"),
-        "eta" => Some("\u{03B7}"),
-        "theta" => Some("\u{03B8}"),
-        "vartheta" => Some("\u{03D1}"),
-        "iota" => Some("\u{03B9}"),
-        "kappa" => Some("\u{03BA}"),
-        "varkappa" => Some("\u{03F0}"),
-        "lambda" => Some("\u{03BB}"),
-        "mu" | "micro" => Some("\u{03BC}"),
-        "nu" => Some("\u{03BD}"),
-        "xi" => Some("\u{03BE}"),
-        "omicron" => Some("\u{03BF}"),
-        "pi" => Some("\u{03C0}"),
-        "varpi" => Some("\u{03D6}"),
-        "rho" => Some("\u{03C1}"),
-        "varrho" => Some("\u{03F1}"),
-        "varsigma" => Some("\u{03C2}"),
-        "sigma" => Some("\u{03C3}"),
-        "tau" => Some("\u{03C4}"),
-        "upsilon" => Some("\u{03C5}"),
-        "phi" => Some("\u{03C6}"),
-        "varphi" => Some("\u{03D5}"),
-        "chi" => Some("\u{03C7}"),
-        "psi" => Some("\u{03C8}"),
-        "omega" => Some("\u{03C9}"),
-        "Alpha" => Some("\u{0391}"),
-        "Beta" => Some("\u{0392}"),
-        "Gamma" => Some("\u{0393}"),
-        "Delta" => Some("\u{0394}"),
-        "Epsilon" => Some("\u{0395}"),
-        "Zeta" => Some("\u{0396}"),
-        "Eta" => Some("\u{0397}"),
-        "Theta" => Some("\u{0398}"),
-        "Iota" => Some("\u{0399}"),
-        "Kappa" => Some("\u{039A}"),
-        "Lambda" => Some("\u{039B}"),
-        "Mu" => Some("\u{039C}"),
-        "Nu" => Some("\u{039D}"),
-        "Xi" => Some("\u{039E}"),
-        "Omicron" => Some("\u{039F}"),
-        "Pi" => Some("\u{03A0}"),
-        "Rho" => Some("\u{03A1}"),
-        "Sigma" => Some("\u{03A3}"),
-        "Tau" => Some("\u{03A4}"),
-        "Upsilon" => Some("\u{03A5}"),
-        "Phi" => Some("\u{03A6}"),
-        "Chi" => Some("\u{03A7}"),
-        "Psi" => Some("\u{03A8}"),
-        "Omega" | "ohm" => Some("\u{03A9}"),
-        _ => None,
-    }
 }
 
 fn lookup_math_escape(name: &str) -> Option<&'static str> {

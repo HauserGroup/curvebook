@@ -8,7 +8,10 @@ use std::sync::atomic::AtomicBool;
 use curvebook_doc::{ErrorCode, ProjectDocument, ResultStatus};
 use curvebook_engine::cmd::Caller;
 use curvebook_engine::{EngineError, ExternalPathPolicy, Session};
-use curvebook_format::{MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, instantiate_template_bytes};
+use curvebook_format::schemas::{BATCH_MANIFEST_COMMAND_KEYS, BATCH_MANIFEST_EXPORT_KEYS, BATCH_MANIFEST_INPUT_KEYS, BATCH_MANIFEST_ROOT_KEYS};
+use curvebook_format::{
+    BATCH_SCHEMA_V1, FormatError, MAX_ARCHIVE_FILE_BYTES, MAX_CSV_FILE_BYTES, instantiate_template_bytes, validate_batch_manifest_version,
+};
 use curvebook_pdf::PdfVersion;
 use curvebook_platform::PlatformError;
 use serde_json::{Map, Value, json};
@@ -20,43 +23,7 @@ use crate::cmd_convert::{
 use crate::error::CliError;
 use crate::sandbox::{PathResolver, WorkdirGuard};
 
-const BATCH_SCHEMA_V1: &str = "curvebook.batch.v1";
 const MAX_SCRIPT_FILE_BYTES: usize = 64 * 1024 * 1024;
-const MANIFEST_ROOT_KEYS: &[&str] = &["schema", "template", "project", "inputs", "commands", "exports"];
-const MANIFEST_INPUT_KEYS: &[&str] = &[
-    "csv",
-    "tsv",
-    "path",
-    "file",
-    "sheet",
-    "sheet_id",
-    "sheetId",
-    "kind",
-    "table_kind",
-    "tableKind",
-    "subcolumn_mode",
-    "subcolumnMode",
-    "delimiter",
-    "decimal_separator",
-    "decimalSeparator",
-];
-const MANIFEST_COMMAND_KEYS: &[&str] = &["cmd", "command", "method", "id", "params"];
-const MANIFEST_EXPORT_KEYS: &[&str] = &[
-    "out",
-    "path",
-    "format",
-    "sheet",
-    "sheet_id",
-    "sheetId",
-    "dpi",
-    "pretty",
-    "tab_index",
-    "tabIndex",
-    "pdf_version",
-    "pdfVersion",
-    "ttf_font",
-    "ttfFont",
-];
 
 struct RunnerArgs {
     source_path: String,
@@ -356,20 +323,23 @@ fn extract_cmd_name(map: &Map<String, Value>, line_label: usize) -> Result<Strin
 
 fn parse_batch_manifest(raw_text: &str, resolver: &PathResolver) -> Result<ParsedManifest, CliError> {
     let mut val: Value = serde_json::from_str(raw_text).map_err(|err| CliError::Schema(format!("invalid manifest JSON: {err}")))?;
-    let Some(obj) = val.as_object() else {
+    if !val.is_object() {
         return Err(CliError::Schema(String::from("batch manifest root must be a JSON object")));
-    };
-
-    let schema = obj.get("schema").and_then(Value::as_str).unwrap_or("");
-    if schema != BATCH_SCHEMA_V1 {
-        return Err(CliError::Schema(format!("manifest `schema` must be `{BATCH_SCHEMA_V1}` (got `{schema}`)")));
     }
+
+    validate_batch_manifest_version(&val).map_err(|err| match err {
+        FormatError::UnsupportedSchemaVersion { version, max_supported } => CliError::Schema(format!(
+            "unsupported batch manifest schema version {version} (max supported: {max_supported}; expected `{BATCH_SCHEMA_V1}`)"
+        )),
+        FormatError::UnsupportedFormat { reason } | FormatError::Json(reason) => CliError::Schema(reason),
+        other => CliError::Schema(other.to_string()),
+    })?;
 
     let warnings = curvebook_format::normalize_batch_manifest_v1_with_warnings(&mut val).map_err(|err| CliError::Schema(err.to_string()))?;
     let Some(obj) = val.as_object() else {
         return Err(CliError::Schema(String::from("batch manifest root must be a JSON object")));
     };
-    reject_unknown_keys(obj, MANIFEST_ROOT_KEYS, "manifest")?;
+    reject_unknown_keys(obj, BATCH_MANIFEST_ROOT_KEYS, "manifest")?;
 
     let template_path = parse_optional_resolved_path(obj, "template", resolver)?;
     let project_path = parse_optional_resolved_path(obj, "project", resolver)?;
@@ -413,7 +383,7 @@ fn parse_manifest_inputs(val: Option<&Value>, resolver: &PathResolver) -> Result
         let Some(obj) = item.as_object() else {
             return Err(CliError::Schema(format!("{context} must be an object")));
         };
-        reject_unknown_keys(obj, MANIFEST_INPUT_KEYS, &context)?;
+        reject_unknown_keys(obj, BATCH_MANIFEST_INPUT_KEYS, &context)?;
         let raw_path = opt_obj_str(obj, &["csv", "tsv", "path", "file"], &context)?
             .ok_or_else(|| CliError::Schema(format!("{context} requires a string `csv` (or `path`) field")))?;
         let csv_path = resolver.resolve(raw_path)?;
@@ -444,7 +414,7 @@ fn parse_manifest_commands(val: Option<&Value>, resolver: &PathResolver) -> Resu
         let Some(obj) = item.as_object() else {
             return Err(CliError::Schema(format!("command #{} must be a JSON object", idx + 1)));
         };
-        reject_unknown_keys(obj, MANIFEST_COMMAND_KEYS, &format!("manifest `commands[{idx}]`"))?;
+        reject_unknown_keys(obj, BATCH_MANIFEST_COMMAND_KEYS, &format!("manifest `commands[{idx}]`"))?;
         out.push(parse_command_value(idx, item.clone(), resolver)?);
     }
     Ok(out)
@@ -472,7 +442,7 @@ fn parse_single_export_entry(idx: usize, item: &Value, resolver: &PathResolver) 
     let Some(obj) = item.as_object() else {
         return Err(CliError::Schema(format!("{context} must be an object")));
     };
-    reject_unknown_keys(obj, MANIFEST_EXPORT_KEYS, &context)?;
+    reject_unknown_keys(obj, BATCH_MANIFEST_EXPORT_KEYS, &context)?;
     let raw_out =
         opt_obj_str(obj, &["out", "path"], &context)?.ok_or_else(|| CliError::Schema(format!("{context} requires string `out` (or `path`)")))?;
     let out_path = resolver.resolve(raw_out)?;
