@@ -41,7 +41,7 @@ use crate::common::{
 use crate::error::StatsError;
 use crate::multiplicity::{
     GroupComparisonInput, MultiplicityProcedure, PairwiseComparisonDetail, compare_dunn_ranks, compare_groups_pairwise_with_confidence,
-    compare_groups_with_confidence, linear_trend_test, try_adjust_p_values,
+    compare_groups_with_confidence, linear_trend_test, try_adjust_p_values, welch_pair_se_df,
 };
 
 /// Execute a [`OneWayAnovaSpec`] against a `Column` or `MultipleVariables` [`DataSheet`].
@@ -1163,18 +1163,6 @@ fn validate_rm_parametric_multiplicity(method: MultiplicityMethod) -> Result<(),
     Ok(())
 }
 
-fn welch_group_pair_se_df(ga: &GroupComparisonInput, gb: &GroupComparisonInput) -> (f64, f64) {
-    let va = (ga.sd * ga.sd) / ga.n;
-    let vb = (gb.sd * gb.sd) / gb.n;
-    let v_sum = va + vb;
-    if v_sum <= 0.0 {
-        return (0.0, (ga.n + gb.n - 2.0).max(1.0));
-    }
-    let denom = (va * va) / (ga.n - 1.0).max(1.0) + (vb * vb) / (gb.n - 1.0).max(1.0);
-    let df = if denom > 0.0 { (v_sum * v_sum) / denom } else { (ga.n + gb.n - 2.0).max(1.0) };
-    (v_sum.sqrt(), df.max(1.0))
-}
-
 /// Pairwise unequal-variance Welch–Satterthwaite comparisons against a designated control arm
 /// using Dunnett's (1955) multivariate-*t* with heteroscedastic variance-ratio correlation loadings.
 fn append_welch_dunnett_vs_control(
@@ -1210,7 +1198,7 @@ fn append_welch_dunnett_vs_control(
     let mut details = Vec::with_capacity(treats.len());
     for tr in treats {
         let diff = tr.mean - ctrl.mean;
-        let (se, df) = welch_group_pair_se_df(tr, ctrl);
+        let (se, df) = welch_pair_se_df(tr, ctrl);
         let (t_stat, raw_p, adj_p) = if se > 0.0 {
             let t = diff / se;
             let rp = student_t_two_sided_p(t, df)?;
@@ -1382,7 +1370,7 @@ fn append_welch_multiplicity(
                 for j in (i + 1)..k {
                     let ga = &inputs[i];
                     let gb = &inputs[j];
-                    let (se, df) = welch_group_pair_se_df(ga, gb);
+                    let (se, df) = welch_pair_se_df(ga, gb);
                     entries.push(NamedSliceContrast {
                         id_a: ga.index,
                         id_b: gb.index,
