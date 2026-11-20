@@ -902,23 +902,27 @@ fn render_km_number_at_risk_track(
         }
     }
 
-    let track_resp = ui.allocate_rect(track_rect, Sense::hover());
-    meta.record_response(
-        ui,
-        &track_resp,
-        FrameInspectEntryInput {
-            widget_id: "canvas.km_number_at_risk",
-            role: "label",
-            label: "Kaplan-Meier Number at Risk",
-            command_id: None,
-            value: Some(json!({ "cohorts": rows.len(), "ticks": ticks.len() })),
-            enabled: true,
-            disabled_reason: None,
-            z_layer: ZLayer::FloatingOverlay,
-            ellipsized: false,
-            full_label: None,
-        },
-    );
+    let track_vis = track_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+    if track_vis.width() >= 2.0 && track_vis.height() >= 2.0 {
+        let track_resp = ui.allocate_rect(track_vis, Sense::hover());
+        track_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Label, true, String::from("Kaplan-Meier Number at Risk")));
+        meta.record_response(
+            ui,
+            &track_resp,
+            FrameInspectEntryInput {
+                widget_id: "canvas.km_number_at_risk",
+                role: "label",
+                label: "Kaplan-Meier Number at Risk",
+                command_id: None,
+                value: Some(json!({ "cohorts": rows.len(), "ticks": ticks.len() })),
+                enabled: true,
+                disabled_reason: None,
+                z_layer: ZLayer::FloatingOverlay,
+                ellipsized: false,
+                full_label: None,
+            },
+        );
+    }
 
     Some(track_rect)
 }
@@ -1040,23 +1044,28 @@ fn render_live_tex_equations(
             painter.rect_stroke(box_rect, CornerRadius::same(2), Stroke::new(1.0, tokens.border), StrokeKind::Inside);
         }
         let wid = format!("canvas.tex_equation.{eq_idx}");
-        let resp = ui.allocate_rect(box_rect, Sense::hover());
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id: &wid,
-                role: "label",
-                label: &tex,
-                command_id: None,
-                value: Some(json!({ "tex": tex })),
-                enabled: true,
-                disabled_reason: None,
-                z_layer: ZLayer::FloatingOverlay,
-                ellipsized: false,
-                full_label: None,
-            },
-        );
+        let box_vis = box_rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+        if box_vis.width() >= 2.0 && box_vis.height() >= 2.0 {
+            let resp = ui.allocate_rect(box_vis, Sense::hover());
+            let ak_tex = tex.clone();
+            resp.widget_info(move || egui::WidgetInfo::labeled(egui::Role::Label, true, ak_tex.clone()));
+            meta.record_response(
+                ui,
+                &resp,
+                FrameInspectEntryInput {
+                    widget_id: &wid,
+                    role: "label",
+                    label: &tex,
+                    command_id: None,
+                    value: Some(json!({ "tex": tex })),
+                    enabled: true,
+                    disabled_reason: None,
+                    z_layer: ZLayer::FloatingOverlay,
+                    ellipsized: false,
+                    full_label: None,
+                },
+            );
+        }
         rects.push(box_rect);
         eq_idx += 1;
     }

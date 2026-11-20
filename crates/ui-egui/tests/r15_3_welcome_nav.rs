@@ -575,3 +575,15 @@ fn responsive_viewports_and_all_14_beta_locales_zero_bleed_and_rasterizer() -> R
     }
     Ok(())
 }
+
+#[test]
+fn welcome_hub_grouped_direct_create_uses_valid_replicates_mode() -> Result<(), Box<dyn std::error::Error>> {
+    let app = new_test_app();
+    let mut driver = make_shell_driver(app, 1440.0, 600.0);
+    driver.click_widget_id("welcome.arch.grouped")?;
+    driver.click_widget_id("welcome.btn.create")?;
+    let ds = driver.state().app.document().data_sheets.last().ok_or("expected created Grouped DataSheet")?;
+    assert!(matches!(ds.archetype, TableArchetype::Grouped(_)), "expected Grouped table without manual subcol click");
+    assert_clean_parity(&driver, "grouped direct create");
+    Ok(())
+}

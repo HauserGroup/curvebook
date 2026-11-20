@@ -590,3 +590,39 @@ fn column_grid_1m_cells_virtualization_and_release_frame_budget() -> Result<(), 
     assert!(max_input_ms <= input_budget_ms, "1M-cell Column grid input-to-paint exceeded: {max_input_ms:.2}ms > {input_budget_ms:.2}ms");
     Ok(())
 }
+
+#[test]
+fn column_grid_cmd_ctrl_cut_and_paste_roundtrip() -> Result<(), String> {
+    let mut driver = build_column_driver(4, 10, SubcolumnMode::Single, 1024.0, 640.0);
+    let src_val = driver
+        .state()
+        .app
+        .document()
+        .data_sheet(&SheetId::from("col-main"))
+        .and_then(|ds| ds.cell(CellCoord::new(0, 0, 0)))
+        .and_then(|c| c.value.finite_f64())
+        .ok_or("missing (0,0,0) value")?;
+
+    driver.click_widget_id("grid.cell.0.0.0")?;
+    driver.press_key("x", KeyModifiers { meta: true, ..Default::default() })?;
+    let cleared = driver
+        .state()
+        .app
+        .document()
+        .data_sheet(&SheetId::from("col-main"))
+        .and_then(|ds| ds.cell(CellCoord::new(0, 0, 0)))
+        .is_some_and(|c| c.value.is_empty());
+    assert!(cleared, "Cmd+X must cut/clear selected ColumnGrid cell");
+
+    driver.click_widget_id("grid.cell.1.1.0")?;
+    driver.press_key("v", KeyModifiers { ctrl: true, ..Default::default() })?;
+    let pasted = driver
+        .state()
+        .app
+        .document()
+        .data_sheet(&SheetId::from("col-main"))
+        .and_then(|ds| ds.cell(CellCoord::new(1, 1, 0)))
+        .and_then(|c| c.value.finite_f64());
+    assert_eq!(pasted, Some(src_val), "Ctrl+V must paste cut value into active ColumnGrid cell");
+    Ok(())
+}

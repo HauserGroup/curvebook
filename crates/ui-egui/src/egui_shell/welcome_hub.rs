@@ -422,6 +422,9 @@ fn render_left_rail(
                 } else if state.schema.cols < 2 {
                     state.schema.cols = 3;
                 }
+                if matches!(arch, WelcomeArchetypeChoice::Grouped) && state.schema.y_subcolumn_kind == 0 {
+                    state.schema.y_subcolumn_kind = 1;
+                }
             }
             ui.add_space(2.0);
         }
@@ -858,6 +861,9 @@ fn render_archetype_schema_controls(
             );
         }
         WelcomeArchetypeChoice::Grouped => {
+            if state.schema.y_subcolumn_kind == 0 {
+                state.schema.y_subcolumn_kind = 1;
+            }
             render_clipped_text_label(
                 ui,
                 "welcome.section.y_format",
@@ -1808,7 +1814,7 @@ fn build_empty_create_params(arch: WelcomeArchetypeChoice, schema: &WelcomeSchem
                 map.insert(String::from("subcolumn_mode"), json!(subcol));
             }
             WelcomeArchetypeChoice::Grouped => {
-                map.insert(String::from("subcolumn_mode"), json!(subcolumn_mode_from_index(schema.y_subcolumn_kind, schema.subcols)));
+                map.insert(String::from("subcolumn_mode"), json!(subcolumn_mode_from_index(schema.y_subcolumn_kind.max(1), schema.subcols)));
                 map.insert(String::from("replicates"), json!(schema.subcols.clamp(1, 256)));
                 map.insert(String::from("row_factor_title"), json!(schema.row_factor_title));
                 map.insert(String::from("column_factor_title"), json!(schema.column_factor_title));

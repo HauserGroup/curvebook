@@ -797,6 +797,8 @@ fn canvas_view_async_raster_hover_pairwise_cld_km_tex_layout_drilldown() -> Resu
     assert!(driver.state().view.slot.cached_texture.is_some(), "async raster slot must cache GPU texture cleanly");
     assert!(driver.state().eq_count >= 1, "TeX equation overlay must render & record bounds");
     assert!(driver.frame_meta().find_by_widget_id("canvas.tex_equation.0").is_some());
+    let tex_parity = driver.verify_pixel_to_hit_box_parity();
+    assert!(tex_parity.is_clean(), "canvas.tex_equation parity violations: {:?}", tex_parity.violations);
 
     let paper = driver.state().paper_rect.expect("paper rect");
     let scene = driver.state().app.session().render_sheet_scene(&SheetId::new("g-1"))?;
@@ -820,6 +822,8 @@ fn canvas_view_async_raster_hover_pairwise_cld_km_tex_layout_drilldown() -> Resu
     assert!(driver.state().km_rect.is_some(), "KM Number at risk track must reserve & render");
     assert!(driver.frame_meta().find_by_widget_id("canvas.km_number_at_risk").is_some());
     assert!(driver.state().view.km_at_risk_rows >= 2);
+    let km_parity = driver.verify_pixel_to_hit_box_parity();
+    assert!(km_parity.is_clean(), "canvas.km_number_at_risk parity violations: {:?}", km_parity.violations);
 
     driver.state_mut().app.execute_command("sheet.select", json!({ "sheet_id": "lay-1" }))?;
     driver.run_settled();
@@ -972,6 +976,73 @@ fn all_14_beta_locales_and_viewports_pass_parity_and_scrollbar_non_overlap() -> 
                 let sb_violations = driver.check_scrollbar_non_overlap();
                 assert!(sb_violations.is_empty(), "scrollbar overlap for locale={locale}, mode={target}, vp={vp:?}: {sb_violations:?}");
             }
+        }
+    }
+    Ok(())
+}
+
+#[test]
+fn result_sheet_wide_tabs_many_sections_and_clipped_columns_pass_parity() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = make_full_project_app()?;
+    let mut wide_tabs = Vec::new();
+    let titles = [
+        "ANOVA summary",
+        "Multiple Comparisons — BH FDR-adjusted q values",
+        "Comparison of survival curves & hazard ratios",
+        "Homoscedasticity & Residual Diagnostics",
+        "Bootstrap Parameter Confidence Intervals",
+        "Covariance & Leverage Diagnostics",
+    ];
+    for (i, title) in titles.into_iter().enumerate() {
+        let col_headers: Vec<String> = (0..14).map(|c| format!("Parameter Column {c}")).collect();
+        let mut row_labels = Vec::new();
+        let mut rows = Vec::new();
+        for r in 0..28 {
+            if r % 5 == 0 {
+                row_labels.push(format!("Section {r} — Omnibus Diagnostic Metrics & Subgroup Totals"));
+                rows.push(vec![ResultCell::Empty; 14]);
+            } else {
+                row_labels.push(format!("Long Diagnostic Metric Row Label Number {r}"));
+                rows.push((0..14).map(|c| num_result_cell(100.1234 + (r * 10 + c) as f64)).collect());
+            }
+        }
+        wide_tabs.push(ResultTab {
+            id: format!("wide-tab-{i}"),
+            title: String::from(title),
+            kind: if i % 2 == 0 { ResultTabKind::MainSummary } else { ResultTabKind::MultipleComparisons },
+            column_headers: col_headers,
+            row_labels,
+            rows,
+            footnotes: vec![String::from(
+                "Footnote: Extended multi-line explanatory note verifying horizontal wrapping inside ResultSheet body without horizontal clip bleed.",
+            )],
+        });
+    }
+    let mut doc = app.document().clone();
+    if let Some(rs) = doc.result_sheet_mut(&SheetId::new("res-1")) {
+        rs.tabs = wide_tabs;
+    }
+    *app.session_mut() = Session::from_document(doc);
+    app.execute_command("sheet.select", json!({ "sheet_id": "res-1" }))?;
+    app.sync_views();
+
+    for vp in [ViewportMetrics::new(640.0, 420.0, 1.0), ViewportMetrics::new(1440.0, 600.0, 1.0)] {
+        let mut stage_app = app.clone();
+        stage_app.sync_views();
+        let tokens = Tokens::for_mode(curvebook_ui_egui::UiThemeMode::Light);
+        let mut driver = make_stage_driver(StageHarness::new(stage_app), vp, tokens);
+        let parity = driver.verify_pixel_to_hit_box_parity();
+        assert!(parity.is_clean(), "result sheet parity violations at {vp:?}: {:?}", parity.violations);
+        assert!(driver.check_scrollbar_non_overlap().is_empty(), "result sheet scrollbar overlap at {vp:?}");
+        for entry in &driver.frame_meta().entries {
+            if entry.widget_id.starts_with("result.tab.") {
+                assert!(entry.clipped_rect.width() <= 140.0, "tab `{}` too wide: {:?}", entry.widget_id, entry.clipped_rect);
+            }
+        }
+        if driver.frame_meta().find_by_widget_id("result.tabs.next").is_some_and(|e| e.enabled) {
+            driver.click_widget_id("result.tabs.next")?;
+            let after_next = driver.verify_pixel_to_hit_box_parity();
+            assert!(after_next.is_clean(), "post-next parity violations at {vp:?}: {:?}", after_next.violations);
         }
     }
     Ok(())

@@ -670,3 +670,35 @@ fn responsive_640x420_1440x600_scrollbar_non_overlap_themes_and_all_14_beta_loca
 
     Ok(())
 }
+
+#[test]
+fn studio_assumptions_wrap_and_offscreen_scroll_buttons_culled_at_1440x600() -> Result<(), Box<dyn std::error::Error>> {
+    let mut app = seed_full_workspace_app()?;
+    let mut doc = app.document().clone();
+    if let Some(rs) = doc.result_sheet_mut(&SheetId::new("res-anova")) {
+        rs.checklist.insert(
+            0,
+            ChecklistItem {
+                assumption: String::from("Repeated-measures condition normality (Shapiro-Wilk)"),
+                status: ChecklistStatus::Warn,
+                diagnostic_metric: Some(String::from("VeryLongDiagnosticMetricHeader W = 0.8421, p = 0.0142 across treatment conditions")),
+                explanation: String::from(
+                    "Long assumption diagnostic explanation verifying word wrap inside 280pt Studio card without horizontal overflow.",
+                ),
+                remediation: None,
+            },
+        );
+    }
+    *app.session_mut() = Session::from_document(doc);
+
+    for sheet_id in ["res-anova", "graph-1", "layout-1"] {
+        let _ = app.execute_command("sheet.select", json!({ "sheet_id": sheet_id }))?;
+        app.sync_views();
+        let tokens = Tokens::from_theme_spec(&UiThemeSpec::for_mode(UiThemeMode::Light), "en");
+        let driver = make_shell_driver(ShellDriverState::new(app.clone()), ViewportMetrics::new(1440.0, 600.0, 1.0), tokens);
+        let parity = driver.verify_pixel_to_hit_box_parity();
+        assert!(parity.is_clean(), "{sheet_id} studio 1440x600 parity violations: {:?}", parity.violations);
+        assert!(driver.check_scrollbar_non_overlap().is_empty(), "{sheet_id} scrollbar overlap at 1440x600");
+    }
+    Ok(())
+}

@@ -4735,6 +4735,37 @@ fn handle_grid_keyboard_shortcuts(ui: &mut Ui, rctx: &GridRenderCtx<'_>, state: 
         return;
     }
 
+    // Clipboard Cut & Paste (`Cmd/Ctrl + X`, `Cmd/Ctrl + V`)
+    let cut_requested = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Cut)))
+        || pressed_key_event_modifiers(ui, Key::X).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+    if cut_requested {
+        if !rctx.ds.frozen {
+            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
+                open_link_popover(state, reg, rctx.locale);
+                ui.ctx().request_repaint();
+                return;
+            }
+            intents.push_grid_cut_selection();
+        }
+        ui.ctx().request_repaint();
+        return;
+    }
+
+    let paste_requested = ui.input(|i| i.events.iter().any(|ev| matches!(ev, egui::Event::Paste(_))))
+        || pressed_key_event_modifiers(ui, Key::V).is_some_and(|m| m.command || m.mac_cmd || m.ctrl);
+    if paste_requested {
+        if !rctx.ds.frozen {
+            if let Some(reg) = linked_region_for_cell(rctx.ds, active.row, active.col) {
+                open_link_popover(state, reg, rctx.locale);
+                ui.ctx().request_repaint();
+                return;
+            }
+            intents.push_grid_paste_from_clipboard(Some(active));
+        }
+        ui.ctx().request_repaint();
+        return;
+    }
+
     // Navigation & Clear keys
     let nav_payload = if let Some(m) = pressed_key_event_modifiers(ui, Key::ArrowUp) {
         Some(if m.shift { "nav:shift_up" } else { "nav:up" })

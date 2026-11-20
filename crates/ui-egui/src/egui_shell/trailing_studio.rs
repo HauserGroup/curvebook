@@ -23,7 +23,7 @@ use curvebook_math::AxisScale;
 use curvebook_palette::{CanvasPreviewFilter, MarkerShape, MarkerStyle, PaletteId, Rgba8};
 use curvebook_tools::GridCellCoord;
 use curvebook_transform::{DependencyTarget, extract_dependencies, parse_formula, validate_no_formula_cycle};
-use egui::{Color32, Pos2, Response, Sense, Stroke, StrokeKind, Vec2};
+use egui::{Color32, Pos2, Sense, Stroke, StrokeKind, Vec2};
 use serde_json::json;
 
 use crate::UiApp;
@@ -438,7 +438,7 @@ fn studio_chip(
     role: &str,
     command_id: Option<&str>,
     disabled_reason: Option<&str>,
-) -> Response {
+) -> bool {
     let font_id = egui::FontId::proportional(11.5);
     let tc = if !enabled {
         tokens.text_disabled
@@ -448,13 +448,34 @@ fn studio_chip(
         tokens.text_primary
     };
     let max_text_w = (max_w - 14.0).max(12.0);
-    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
+    let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id.clone(), tc);
     job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
     job.wrap.max_width = max_text_w;
     let galley = ui.fonts_mut(|f| f.layout_job(job));
-    let ellipsized = galley.elided;
     let w = (galley.size().x + 14.0).clamp(24.0_f32.min(max_w), max_w.max(24.0));
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, SECTION_BTN_H), if enabled { Sense::click() } else { Sense::hover() });
+    let rect = ui.allocate_space(Vec2::new(w, SECTION_BTN_H)).1;
+    let visible = rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+    if !visible.is_positive() || visible.width() < 4.0 || visible.height() < 4.0 {
+        return false;
+    }
+
+    let resp =
+        ui.interact(visible, ui.make_persistent_id(("egui_shell.studio_chip", widget_id)), if enabled { Sense::click() } else { Sense::hover() });
+    let (galley, ellipsized) = if visible.width() < rect.width() - 0.5 {
+        let mut vis_job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
+        vis_job.wrap = egui::text::TextWrapping {
+            max_width: (visible.width() - 14.0).max(4.0),
+            max_rows: 1,
+            break_anywhere: true,
+            overflow_character: Some('…'),
+        };
+        let vg = ui.fonts_mut(|f| f.layout_job(vis_job));
+        let ve = vg.elided;
+        (vg, ve)
+    } else {
+        let e = galley.elided;
+        (galley, e)
+    };
 
     let bg = if !enabled {
         tokens.panel_bg
@@ -476,10 +497,10 @@ fn studio_chip(
     };
     let sw = if border_override.is_some() { 1.5 } else { 1.0 };
 
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect(rect, 4.0, bg, Stroke::new(sw, bc), StrokeKind::Inside);
-        let tp = Pos2::new(rect.min.x + 7.0, rect.center().y - galley.size().y * 0.5);
-        let painter = ui.painter().with_clip_rect(rect.shrink2(Vec2::new(4.0, 1.0)));
+    let painter = ui.painter().with_clip_rect(visible);
+    painter.rect(rect, 4.0, bg, Stroke::new(sw, bc), StrokeKind::Inside);
+    if galley.size().x <= visible.width() - 8.0 || ellipsized {
+        let tp = Pos2::new(visible.min.x + 7.0, rect.center().y - galley.size().y * 0.5);
         painter.galley(tp, galley, tc);
     }
 
@@ -501,25 +522,23 @@ fn studio_chip(
         resp
     };
 
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role,
-                label,
-                command_id,
-                value: None,
-                enabled,
-                disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
+    meta.record_response(
+        ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id,
+            role,
+            label,
+            command_id,
+            value: None,
+            enabled,
+            disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
+            z_layer: ZLayer::Workspace,
+            ellipsized,
+            full_label: ellipsized.then_some(label),
+        },
+    );
+    resp.clicked() && enabled
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -535,7 +554,7 @@ fn studio_full_button(
     widget_id: &str,
     command_id: Option<&str>,
     disabled_reason: Option<&str>,
-) -> Response {
+) -> bool {
     let w = ui.available_width().max(48.0);
     let font_id = egui::FontId::proportional(11.5);
     let tc = if !enabled {
@@ -547,12 +566,22 @@ fn studio_full_button(
     } else {
         tokens.text_primary
     };
+    let rect = ui.allocate_space(Vec2::new(w, 24.0)).1;
+    let visible = rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect);
+    if !visible.is_positive() || visible.width() < 4.0 || visible.height() < 4.0 {
+        return false;
+    }
+
     let mut job = egui::text::LayoutJob::simple_singleline(label.to_owned(), font_id, tc);
     job.wrap = egui::text::TextWrapping { max_rows: 1, break_anywhere: true, overflow_character: Some('…'), ..Default::default() };
-    job.wrap.max_width = (w - 16.0).max(16.0);
+    job.wrap.max_width = (visible.width() - 16.0).max(8.0);
     let galley = ui.fonts_mut(|f| f.layout_job(job));
     let ellipsized = galley.elided;
-    let (rect, resp) = ui.allocate_exact_size(Vec2::new(w, 24.0), if enabled { Sense::click() } else { Sense::hover() });
+    let resp = ui.interact(
+        visible,
+        ui.make_persistent_id(("egui_shell.studio_full_button", widget_id)),
+        if enabled { Sense::click() } else { Sense::hover() },
+    );
 
     let bg = if !enabled {
         tokens.panel_bg
@@ -573,10 +602,10 @@ fn studio_full_button(
         tokens.button_border
     };
 
-    if ui.is_rect_visible(rect) {
-        ui.painter().rect(rect, 5.0, bg, Stroke::new(1.0, bc), StrokeKind::Inside);
-        let tp = Pos2::new(rect.min.x + ((rect.width() - galley.size().x) * 0.5).max(8.0), rect.center().y - galley.size().y * 0.5);
-        let painter = ui.painter().with_clip_rect(rect.shrink2(Vec2::new(4.0, 1.0)));
+    let painter = ui.painter().with_clip_rect(visible);
+    painter.rect(rect, 5.0, bg, Stroke::new(1.0, bc), StrokeKind::Inside);
+    if galley.size().x <= visible.width() - 8.0 || ellipsized {
+        let tp = Pos2::new(visible.min.x + ((visible.width() - galley.size().x) * 0.5).max(8.0), rect.center().y - galley.size().y * 0.5);
         painter.galley(tp, galley, tc);
     }
 
@@ -593,25 +622,23 @@ fn studio_full_button(
         resp
     };
 
-    if rect.intersect(ui.clip_rect()).intersect(meta.viewport_rect).is_positive() {
-        meta.record_response(
-            ui,
-            &resp,
-            FrameInspectEntryInput {
-                widget_id,
-                role: "button",
-                label,
-                command_id,
-                value: None,
-                enabled,
-                disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
-                z_layer: ZLayer::Workspace,
-                ellipsized,
-                full_label: ellipsized.then_some(label),
-            },
-        );
-    }
-    resp
+    meta.record_response(
+        ui,
+        &resp,
+        FrameInspectEntryInput {
+            widget_id,
+            role: "button",
+            label,
+            command_id,
+            value: None,
+            enabled,
+            disabled_reason: (!enabled).then_some(disabled_reason).flatten(),
+            z_layer: ZLayer::Workspace,
+            ellipsized,
+            full_label: ellipsized.then_some(label),
+        },
+    );
+    resp.clicked() && enabled
 }
 
 fn surface_localized_title(locale: &str, surface: StudioContextSurface) -> &'static str {
@@ -681,7 +708,7 @@ fn render_collapsed_rail(
             Some("ui.inspector.toggle"),
             (!enabled).then_some("modal dialog is active"),
         );
-        if expand_resp.clicked() && enabled {
+        if expand_resp && enabled {
             intents.push_toggle_trailing_collapsed_rail();
         }
 
@@ -721,7 +748,7 @@ fn render_collapsed_rail(
                 None,
                 None,
             );
-            if r.clicked() {
+            if r {
                 intents.push_toggle_trailing_collapsed_rail();
             }
         }
@@ -786,7 +813,7 @@ fn render_mv_formula_studio(
             let hl = state.mv_operand_highlights.iter().find(|h| h.variable_index == idx).map(MvOperandHighlight::color32);
             let wid = format!("inspector.mv.col.{idx}");
             let r = studio_chip(ui, tokens, &var.title, &var.title, max_w, idx == active_col, ctx_in.enabled, hl, meta, &wid, "button", None, None);
-            if r.clicked() {
+            if r {
                 state.mv_selected_col = idx;
                 state.mv_synced_col = None;
             }
@@ -860,7 +887,7 @@ fn render_mv_formula_studio(
                 for (i, hl) in state.mv_operand_highlights.iter().enumerate() {
                     let lbl = format!("[{}] {}", hl.variable_title, hl.color_hex);
                     let wid = format!("inspector.mv.operand_highlight.{i}");
-                    studio_chip(
+                    let _ = studio_chip(
                         ui,
                         tokens,
                         &lbl,
@@ -893,9 +920,7 @@ fn render_mv_formula_studio(
             "inspector.mv.apply_formula",
             Some("table.setCalculatedVariable"),
             (!can_apply).then_some("enter a valid non-circular formula"),
-        )
-        .clicked()
-        {
+        ) {
             let title =
                 if state.mv_title_draft.trim().is_empty() { format!("Calc {}", col_count + 1) } else { state.mv_title_draft.trim().to_owned() };
             let mut params = json!({
@@ -934,7 +959,7 @@ fn render_mv_formula_studio(
                     None,
                     None,
                 );
-                if r.clicked() {
+                if r {
                     if !state.mv_formula_draft.is_empty() && !state.mv_formula_draft.ends_with(['(', ' ', '+', '-', '*', '/']) {
                         state.mv_formula_draft.push(' ');
                     }
@@ -971,7 +996,7 @@ fn render_mv_formula_studio(
                     None,
                     None,
                 );
-                if r.clicked() {
+                if r {
                     state.mv_selected_fn = String::from(func.name);
                     state.mv_formula_draft.push_str(func.insert);
                 }
@@ -1016,7 +1041,7 @@ fn render_mv_formula_studio(
                     Some("table.setVariableRole"),
                     (cur_role == VariableRole::Calculated).then_some("calculated columns lock Calculated role"),
                 );
-                if r.clicked() {
+                if r {
                     intents.push_engine("table.setVariableRole", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "role": slug }));
                 }
             }
@@ -1049,7 +1074,7 @@ fn render_mv_formula_studio(
                         Some("table.setCategoricalOrder"),
                         None,
                     );
-                    if r.clicked() {
+                    if r {
                         intents.push_engine(
                             "table.setCategoricalOrder",
                             json!({ "sheet_id": ds.id.as_str(), "col": active_col, "order": order_slug, "reversed": var.level_order.reversed }),
@@ -1074,9 +1099,7 @@ fn render_mv_formula_studio(
                 "inspector.mv.recode_apply",
                 Some("table.recodeLevels"),
                 (!can_recode).then_some("enter source and target level names"),
-            )
-            .clicked()
-            {
+            ) {
                 let mut map = serde_json::Map::new();
                 map.insert(state.mv_recode_from.trim().to_owned(), json!(state.mv_recode_to.trim()));
                 intents.push_engine("table.recodeLevels", json!({ "sheet_id": ds.id.as_str(), "col": active_col, "mapping": map }));
@@ -1099,9 +1122,7 @@ fn render_mv_formula_studio(
         "inspector.mv.manage_vars",
         Some("ui.table.openFormulaBar"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui("ui.table.openFormulaBar", json!({ "sheet_id": ds.id.as_str(), "col": active_col }));
     }
 }
@@ -1135,9 +1156,7 @@ fn render_table_selection_studio(
             "inspector.table.select_first",
             Some("sheet.select"),
             doc.data_sheets.is_empty().then_some("no data sheets available"),
-        )
-        .clicked()
-            && let Some(first) = doc.data_sheets.first()
+        ) && let Some(first) = doc.data_sheets.first()
         {
             intents.push_engine("sheet.select", json!({ "sheet_id": first.id.as_str() }));
         }
@@ -1178,9 +1197,7 @@ fn render_table_selection_studio(
                 "button",
                 None,
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 state.table_decimals = opt;
             }
         }
@@ -1214,9 +1231,7 @@ fn render_table_selection_studio(
         "inspector.table.exclude_subset",
         Some("table.excludeCells"),
         ds.frozen.then_some("sheet is frozen").or_else(|| (!has_bounds).then_some("select cells first")),
-    )
-    .clicked()
-        && let Some((a, b)) = bounds
+    ) && let Some((a, b)) = bounds
     {
         intents.push_engine(
             "table.excludeCells",
@@ -1245,9 +1260,7 @@ fn render_table_selection_studio(
         "inspector.table.include_subset",
         Some("table.excludeCells"),
         ds.frozen.then_some("sheet is frozen").or_else(|| (!has_bounds).then_some("select cells first")),
-    )
-    .clicked()
-        && let Some((a, b)) = bounds
+    ) && let Some((a, b)) = bounds
     {
         intents.push_engine(
             "table.excludeCells",
@@ -1277,9 +1290,7 @@ fn render_table_selection_studio(
         "inspector.table.style_subset",
         Some("ui.formatPoints.open"),
         downstream_graph.is_none().then_some("no downstream graph linked to this table"),
-    )
-    .clicked()
-        && let Some(gid) = downstream_graph
+    ) && let Some(gid) = downstream_graph
     {
         intents.push_ui("ui.formatPoints.open", json!({ "sheet_id": gid.as_str() }));
     }
@@ -1302,9 +1313,7 @@ fn render_table_selection_studio(
                 &wid,
                 up_id.as_ref().map(|_| "sheet.select"),
                 up_id.is_none().then_some("external or clipboard provenance"),
-            )
-            .clicked()
-                && let Some(sid) = up_id
+            ) && let Some(sid) = up_id
             {
                 intents.push_engine("sheet.select", json!({ "sheet_id": sid.as_str() }));
             }
@@ -1326,9 +1335,7 @@ fn render_table_selection_studio(
         "inspector.table.format_table",
         Some("ui.table.convertArchetype.open"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui("ui.table.convertArchetype.open", json!({ "sheet_id": ds.id.as_str() }));
     }
 }
@@ -1365,7 +1372,7 @@ fn render_metadata_hooks_studio(
             let selected = state.info_selected_constant.as_deref() == Some(c.name.as_str());
             let lbl = format!("{} = {}", c.name, c.value.display_text());
             let wid = format!("inspector.info.const.{idx}");
-            if studio_chip(ui, tokens, &lbl, &lbl, max_w, selected, ctx_in.enabled, None, meta, &wid, "button", None, None).clicked() {
+            if studio_chip(ui, tokens, &lbl, &lbl, max_w, selected, ctx_in.enabled, None, meta, &wid, "button", None, None) {
                 state.info_selected_constant = Some(c.name.clone());
                 state.info_synced_key = None;
             }
@@ -1413,9 +1420,7 @@ fn render_metadata_hooks_studio(
                 "button",
                 None,
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 state.info_kind_draft = idx;
             }
         }
@@ -1435,9 +1440,7 @@ fn render_metadata_hooks_studio(
         "inspector.info.save_const",
         Some("info.setConstant"),
         (!name_ok).then_some("constant name cannot be empty"),
-    )
-    .clicked()
-    {
+    ) {
         let kind_str = match state.info_kind_draft {
             1 => "text",
             2 => "date",
@@ -1476,7 +1479,6 @@ fn render_metadata_hooks_studio(
             Some("info.removeConstant"),
             None,
         )
-        .clicked()
     {
         intents.push_engine("info.removeConstant", json!({ "sheet_id": info.id.as_str(), "name": existing_name }));
     }
@@ -1503,9 +1505,7 @@ fn render_metadata_hooks_studio(
                 &wid,
                 Some("sheet.select"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_engine("sheet.select", json!({ "sheet_id": item.target_sheet_id.as_str() }));
             }
         }
@@ -1527,9 +1527,7 @@ fn render_metadata_hooks_studio(
             "inspector.info.open_hook_browser",
             Some("ui.graph.insertModelEquation"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_ui("ui.graph.insertModelEquation", json!({ "sheet_id": first_graph.id.as_str() }));
         }
     }
@@ -1587,7 +1585,7 @@ fn render_results_interpret_studio(
         ResultStatus::UpToDate => ("Up to date", tokens.link_green),
         ResultStatus::Dirty => ("Recalculating", tokens.accent_strong),
         ResultStatus::Failed { message, .. } => {
-            ui.label(egui::RichText::new(format!("Failed: {message}")).size(11.0).color(tokens.link_red));
+            ui.add(egui::Label::new(egui::RichText::new(format!("Failed: {message}")).size(11.0).color(tokens.link_red)).wrap());
             ("Failed", tokens.link_red)
         }
     };
@@ -1595,9 +1593,14 @@ fn render_results_interpret_studio(
     let warn_n = rs.checklist.iter().filter(|c| c.status == ChecklistStatus::Warn).count();
     let pass_n = rs.checklist.iter().filter(|c| c.status == ChecklistStatus::Pass).count();
 
-    ui.horizontal(|ui| {
-        ui.label(egui::RichText::new(status_lbl).size(11.0).strong().color(status_clr));
-        ui.label(egui::RichText::new(format!("• {} pass / {} warn / {} viol", pass_n, warn_n, violated_n)).size(11.0).color(tokens.text_muted));
+    ui.horizontal_wrapped(|ui| {
+        ui.add(egui::Label::new(egui::RichText::new(status_lbl).size(11.0).strong().color(status_clr)).wrap());
+        ui.add(
+            egui::Label::new(
+                egui::RichText::new(format!("• {} pass / {} warn / {} viol", pass_n, warn_n, violated_n)).size(11.0).color(tokens.text_muted),
+            )
+            .wrap(),
+        );
     });
 
     ui.add_space(4.0);
@@ -1615,7 +1618,7 @@ fn render_results_interpret_studio(
         ui.spacing_mut().item_spacing.x = 4.0;
         let per_w = ((ui.available_width() - 8.0) / 3.0).max(52.0);
         for (idx, (_, wid, lbl, tab_val)) in tabs.into_iter().enumerate() {
-            if studio_chip(ui, tokens, lbl, lbl, per_w, cur_tab_idx == idx, ctx_in.enabled, None, meta, wid, "tab", None, None).clicked() {
+            if studio_chip(ui, tokens, lbl, lbl, per_w, cur_tab_idx == idx, ctx_in.enabled, None, meta, wid, "tab", None, None) {
                 state.results_tab = tab_val;
             }
         }
@@ -1624,7 +1627,7 @@ fn render_results_interpret_studio(
     ui.add_space(4.0);
     match state.results_tab {
         ResultsStudioTab::Assumptions => {
-            ui.label(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted));
+            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted)).wrap());
             ui.horizontal(|ui| {
                 ui.spacing_mut().item_spacing.x = 4.0;
                 if studio_chip(
@@ -1641,9 +1644,7 @@ fn render_results_interpret_studio(
                     "button",
                     None,
                     None,
-                )
-                .clicked()
-                {
+                ) {
                     state.results_severity_flagged_only = false;
                 }
                 if studio_chip(
@@ -1660,9 +1661,7 @@ fn render_results_interpret_studio(
                     "button",
                     None,
                     None,
-                )
-                .clicked()
-                {
+                ) {
                     state.results_severity_flagged_only = true;
                 }
             });
@@ -1681,14 +1680,15 @@ fn render_results_interpret_studio(
                     .corner_radius(4.0)
                     .inner_margin(egui::Margin::same(6))
                     .show(ui, |ui| {
-                        ui.horizontal(|ui| {
-                            ui.label(egui::RichText::new(tag).size(10.0).strong().color(clr));
-                            ui.label(egui::RichText::new(&item.assumption).size(11.0).strong().color(tokens.text_strong));
+                        ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
+                        ui.horizontal_wrapped(|ui| {
+                            ui.add(egui::Label::new(egui::RichText::new(tag).size(10.0).strong().color(clr)));
+                            ui.add(egui::Label::new(egui::RichText::new(&item.assumption).size(11.0).strong().color(tokens.text_strong)).wrap());
                         });
                         if let Some(metric) = &item.diagnostic_metric {
-                            ui.label(egui::RichText::new(metric).size(10.5).color(tokens.text_primary));
+                            ui.add(egui::Label::new(egui::RichText::new(metric).size(10.5).color(tokens.text_primary)).wrap());
                         }
-                        ui.label(egui::RichText::new(safe_text).size(10.5).color(tokens.text_muted));
+                        ui.add(egui::Label::new(egui::RichText::new(safe_text).size(10.5).color(tokens.text_muted)).wrap());
                     });
                 ui.add_space(3.0);
             }
@@ -1697,18 +1697,21 @@ fn render_results_interpret_studio(
             }
         }
         ResultsStudioTab::Guidance => {
-            ui.label(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted));
+            ui.add(egui::Label::new(egui::RichText::new(tr(locale, "results.diagnostics_only")).size(10.5).color(tokens.text_muted)).wrap());
             ui.add_space(4.0);
             let src_title = doc_sheet_title(doc, &rs.analysis.source_sheet_id).unwrap_or(rs.analysis.source_sheet_id.as_str());
-            ui.label(egui::RichText::new(format!("Analysis: {}", rs.title())).size(11.5).strong().color(tokens.text_strong));
+            ui.add(egui::Label::new(egui::RichText::new(format!("Analysis: {}", rs.title())).size(11.5).strong().color(tokens.text_strong)).wrap());
             widgets::dim_label(ui, &format!("Source table: {src_title} • Pairwise comparisons: {}", rs.pairwise_comparisons.len()));
             if !rs.scalars.is_empty() {
                 ui.add_space(4.0);
                 widgets::subheader(ui, "Key Diagnostic Scalars");
                 for scalar in rs.scalars.iter().take(6) {
-                    ui.horizontal(|ui| {
-                        ui.label(egui::RichText::new(&scalar.key).size(11.0).color(tokens.text_muted));
-                        ui.label(egui::RichText::new(format!("{:.4}", scalar.value)).size(11.0).strong().color(tokens.text_primary));
+                    ui.horizontal_wrapped(|ui| {
+                        ui.add(egui::Label::new(egui::RichText::new(&scalar.key).size(11.0).color(tokens.text_muted)).wrap());
+                        ui.add(
+                            egui::Label::new(egui::RichText::new(format!("{:.4}", scalar.value)).size(11.0).strong().color(tokens.text_primary))
+                                .wrap(),
+                        );
                     });
                 }
             }
@@ -1719,9 +1722,7 @@ fn render_results_interpret_studio(
                 for (slug, lbl) in [("plain", "Txt"), ("markdown", "MD"), ("latex", "TeX")] {
                     let wid = format!("inspector.methods.fmt.{slug}");
                     let sel = state.methods_format == slug;
-                    if studio_chip(ui, tokens, lbl, "Methods export format", 48.0, sel, ctx_in.enabled, None, meta, &wid, "button", None, None)
-                        .clicked()
-                    {
+                    if studio_chip(ui, tokens, lbl, "Methods export format", 48.0, sel, ctx_in.enabled, None, meta, &wid, "button", None, None) {
                         state.methods_format = String::from(slug);
                     }
                 }
@@ -1740,9 +1741,7 @@ fn render_results_interpret_studio(
                 "inspector.copy_methods",
                 Some("ui.result.copyMethodsReport"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 state.last_copied_methods = true;
                 state.last_copied_methods_text = report.clone();
                 ui.ctx().copy_text(state.last_copied_methods_text.clone());
@@ -1781,9 +1780,7 @@ fn render_results_interpret_studio(
         "inspector.results.edit_params",
         Some("ui.editParams.open"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui("ui.editParams.open", json!({ "result_sheet_id": rs.id.as_str() }));
     }
 }
@@ -1885,7 +1882,7 @@ fn render_graph_inspector_studio(
         ui.spacing_mut().item_spacing.x = 3.0;
         let per_w = ((ui.available_width() - 12.0) / 5.0).max(34.0);
         for (lbl, wid, tab_kind) in tab_defs {
-            if studio_chip(ui, tokens, lbl, lbl, per_w, state.graph_tab == tab_kind, ctx_in.enabled, None, meta, wid, "tab", None, None).clicked() {
+            if studio_chip(ui, tokens, lbl, lbl, per_w, state.graph_tab == tab_kind, ctx_in.enabled, None, meta, wid, "tab", None, None) {
                 state.graph_tab = tab_kind;
             }
         }
@@ -1910,7 +1907,6 @@ fn render_graph_inspector_studio(
                         let swatch = Color32::from_rgba_unmultiplied(rgba.r, rgba.g, rgba.b, 255);
                         let wid = format!("inspector.graph.series.{idx}");
                         if studio_chip(ui, tokens, &lbl, &lbl, 110.0, idx == sel_idx, ctx_in.enabled, Some(swatch), meta, &wid, "button", None, None)
-                            .clicked()
                         {
                             state.graph_series_index = idx;
                         }
@@ -1943,9 +1939,7 @@ fn render_graph_inspector_studio(
                         "button",
                         Some("graph.setSpec"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         let mut next_series = gs.spec.series.clone();
                         for (i, s) in next_series.iter_mut().enumerate() {
                             set_series_primary_color(s, pal.color_at(i));
@@ -1979,9 +1973,7 @@ fn render_graph_inspector_studio(
                             "button",
                             Some("graph.setSeries"),
                             None,
-                        )
-                        .clicked()
-                        {
+                        ) {
                             let mut cloned = series.clone();
                             if set_series_marker_shape(&mut cloned, shape) {
                                 intents.push_engine(
@@ -2020,9 +2012,7 @@ fn render_graph_inspector_studio(
                             "button",
                             Some("graph.setSeries"),
                             None,
-                        )
-                        .clicked()
-                        {
+                        ) {
                             let val = match metric {
                                 None => serde_json::Value::Null,
                                 Some(m) => json!(ErrorBarSpec {
@@ -2064,9 +2054,7 @@ fn render_graph_inspector_studio(
                             "button",
                             Some("graph.setSpec"),
                             None,
-                        )
-                        .clicked()
-                        {
+                        ) {
                             intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "grouped_arrangement": arr } }));
                         }
                     }
@@ -2088,9 +2076,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.more_format",
                 Some("ui.graph.format.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.graph.format.open", json!({ "sheet_id": gs.id.as_str() }));
             }
             if studio_full_button(
@@ -2105,9 +2091,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.more_bubble",
                 Some("ui.graph.bubblePlot.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.graph.bubblePlot.open", json!({ "sheet_id": gs.id.as_str() }));
             }
             if studio_full_button(
@@ -2122,9 +2106,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.apply_style",
                 Some("ui.applyStyleFrom.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.applyStyleFrom.open", json!({ "sheet_id": gs.id.as_str() }));
             }
         }
@@ -2148,9 +2130,7 @@ fn render_graph_inspector_studio(
                         "button",
                         None,
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         state.graph_axis_target = idx;
                     }
                 }
@@ -2188,9 +2168,7 @@ fn render_graph_inspector_studio(
                         "button",
                         Some("graph.setAxes"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         let mut next_axis = target_axis.clone();
                         for seg in &mut next_axis.segments {
                             seg.scale = sc;
@@ -2228,9 +2206,7 @@ fn render_graph_inspector_studio(
                         "button",
                         Some("graph.setAxes"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         intents.push_engine("graph.setAxes", json!({ "sheet_id": gs.id.as_str(), "frame_preset": fp }));
                     }
                 }
@@ -2251,9 +2227,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.more_axes",
                 Some("ui.graph.axes.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.graph.axes.open", json!({ "sheet_id": gs.id.as_str() }));
             }
         }
@@ -2272,9 +2246,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.legend_visible",
                 Some("graph.setSpec"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 legend.visible = !legend.visible;
                 intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "legend": legend } }));
             }
@@ -2290,9 +2262,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.legend_border",
                 Some("graph.setSpec"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 legend.bordered = !legend.bordered;
                 intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "legend": legend } }));
             }
@@ -2321,9 +2291,7 @@ fn render_graph_inspector_studio(
                         "button",
                         Some("graph.setSpec"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "pairwise_display_mode": mode } }));
                     }
                 }
@@ -2344,9 +2312,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.more_pairwise",
                 Some("ui.graph.pairwise.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.graph.pairwise.open", json!({ "sheet_id": gs.id.as_str() }));
             }
         }
@@ -2382,9 +2348,7 @@ fn render_graph_inspector_studio(
                         &wid,
                         Some("graph.setSpec"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         let mut next_annots = gs.spec.annotations.clone();
                         next_annots.remove(idx);
                         intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "annotations": next_annots } }));
@@ -2404,9 +2368,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.add_equation",
                 Some("ui.graph.insertModelEquation"),
                 doc.result_sheets.is_empty().then_some("no result sheets available"),
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.graph.insertModelEquation", json!({ "sheet_id": gs.id.as_str() }));
             }
         }
@@ -2428,9 +2390,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.canvas_bg",
                 Some("graph.setSpec"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 let next_fill = if paper_on { serde_json::Value::Null } else { json!(Rgba8::WHITE) };
                 intents.push_engine("graph.setSpec", json!({ "sheet_id": gs.id.as_str(), "spec": { "paper_fill": next_fill } }));
             }
@@ -2456,9 +2416,7 @@ fn render_graph_inspector_studio(
                         "button",
                         Some("graph.applyCanvasPreset"),
                         None,
-                    )
-                    .clicked()
-                    {
+                    ) {
                         intents.push_engine("graph.applyCanvasPreset", json!({ "sheet_id": gs.id.as_str(), "preset": preset }));
                     }
                 }
@@ -2478,9 +2436,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.grayscale_toggle",
                 Some("ui.previewFilter.set"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_set_preview_filter(if is_gray { CanvasPreviewFilter::Normal } else { CanvasPreviewFilter::GrayscalePrint });
             }
 
@@ -2499,9 +2455,7 @@ fn render_graph_inspector_studio(
                 "inspector.graph.export_fig",
                 Some("ui.export.figure.open"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_ui("ui.export.figure.open", json!({ "sheet_id": gs.id.as_str() }));
             }
         }
@@ -2560,9 +2514,7 @@ fn render_data_point_drill_back_studio(
         "inspector.drill_back.back",
         None,
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_clear_brush();
     }
 
@@ -2625,9 +2577,7 @@ fn render_data_point_drill_back_studio(
         "inspector.drill_back.toggle_exclude",
         Some("table.excludeCells"),
         ds_frozen.then_some("source sheet is frozen"),
-    )
-    .clicked()
-    {
+    ) {
         intents.push_engine(
             "table.excludeCells",
             json!({
@@ -2652,9 +2602,7 @@ fn render_data_point_drill_back_studio(
         "inspector.drill_back.format_point",
         Some("ui.formatPoints.open"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui(
             "ui.formatPoints.open",
             json!({
@@ -2677,9 +2625,7 @@ fn render_data_point_drill_back_studio(
         "inspector.drill_back.jump",
         Some("sheet.select"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_engine("sheet.select", json!({ "sheet_id": brushed.sheet_id.as_str() }));
         intents.push_select_grid_cell(GridCellCoord::new(brushed.row, brushed.col, brushed.subcol));
     }
@@ -2721,9 +2667,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "preset": "85mm" }));
         }
         if studio_chip(
@@ -2740,9 +2684,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "width": 114.0, "height": 90.0, "unit": "mm" }));
         }
         if studio_chip(
@@ -2759,9 +2701,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "preset": "174mm" }));
         }
         if studio_chip(
@@ -2778,9 +2718,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "preset": "a4_portrait" }));
         }
         if studio_chip(
@@ -2797,9 +2735,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "preset": "letter_portrait" }));
         }
     });
@@ -2823,9 +2759,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "orientation": "portrait" }));
         }
         if studio_chip(
@@ -2842,9 +2776,7 @@ fn render_page_layout_composer_studio(
             "button",
             Some("layout.setSpec"),
             None,
-        )
-        .clicked()
-        {
+        ) {
             intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "orientation": "landscape" }));
         }
     });
@@ -2867,9 +2799,7 @@ fn render_page_layout_composer_studio(
             "button",
             None,
             None,
-        )
-        .clicked()
-        {
+        ) {
             state.layout_margin_mm = state.layout_margin_mm.saturating_sub(2).max(2);
         }
         ui.label(egui::RichText::new(format!("{} mm", state.layout_margin_mm)).size(11.0).strong().color(tokens.text_primary));
@@ -2887,9 +2817,7 @@ fn render_page_layout_composer_studio(
             "button",
             None,
             None,
-        )
-        .clicked()
-        {
+        ) {
             state.layout_margin_mm = (state.layout_margin_mm + 2).min(40);
         }
     });
@@ -2914,9 +2842,7 @@ fn render_page_layout_composer_studio(
                 "button",
                 None,
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 state.layout_dpi = dpi;
             }
         }
@@ -2935,9 +2861,7 @@ fn render_page_layout_composer_studio(
             "button",
             None,
             None,
-        )
-        .clicked()
-        {
+        ) {
             state.snap_enabled = !state.snap_enabled;
         }
     });
@@ -2963,9 +2887,7 @@ fn render_page_layout_composer_studio(
                 "button",
                 Some("layout.setSpec"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "grid_template": [rows, cols] }));
             }
         }
@@ -2985,9 +2907,7 @@ fn render_page_layout_composer_studio(
         "inspector.layout.align_origins",
         Some("layout.alignOrigins"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents
             .push_engine("layout.alignOrigins", json!({ "sheet_id": ls.id.as_str(), "align": !spec.align_plot_origins, "normalize_bounds": true }));
     }
@@ -3014,9 +2934,7 @@ fn render_page_layout_composer_studio(
                 "button",
                 Some("layout.setSpec"),
                 None,
-            )
-            .clicked()
-            {
+            ) {
                 intents.push_engine("layout.setSpec", json!({ "sheet_id": ls.id.as_str(), "panel_badges": slug }));
             }
         }
@@ -3037,9 +2955,7 @@ fn render_page_layout_composer_studio(
         "inspector.layout.more_composer",
         Some("ui.layout.composer.open"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui("ui.layout.composer.open", json!({ "sheet_id": ls.id.as_str() }));
     }
     if studio_full_button(
@@ -3054,9 +2970,7 @@ fn render_page_layout_composer_studio(
         "inspector.layout.export_fig",
         Some("ui.export.figure.open"),
         None,
-    )
-    .clicked()
-    {
+    ) {
         intents.push_ui("ui.export.figure.open", json!({ "sheet_id": ls.id.as_str(), "dpi": state.layout_dpi }));
     }
 }
@@ -3167,7 +3081,7 @@ pub fn render_trailing_studio(
                         Some("ui.inspector.toggle"),
                         None,
                     );
-                    if c_resp.clicked() {
+                    if c_resp {
                         intents.push_toggle_trailing_collapsed_rail();
                     }
                 });
@@ -3183,6 +3097,7 @@ pub fn render_trailing_studio(
             egui::ScrollArea::vertical().id_salt("egui_shell.trailing_studio.scroll").auto_shrink([false, false]).show(ui, |ui| {
                 egui::Frame::NONE.inner_margin(egui::Margin { right: STUDIO_INNER_PAD as i8, ..Default::default() }).show(ui, |ui| {
                     ui.set_max_width(content_max_w);
+                    ui.style_mut().wrap_mode = Some(egui::TextWrapMode::Wrap);
                     match surface {
                         StudioContextSurface::MultipleVariablesFormula => {
                             if let Some(ds) = active_id.and_then(|id| doc.data_sheet(id))
