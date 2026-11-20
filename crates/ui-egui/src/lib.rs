@@ -1469,16 +1469,16 @@ fn run_settled_egui_on_ctx(
     let h_pt = if logical_size_pt[1].is_finite() && logical_size_pt[1] > 0.0 { logical_size_pt[1] } else { 640.0 };
     let ppp = if pixels_per_point.is_finite() && pixels_per_point > 0.0 { pixels_per_point } else { 1.0 };
     let zoom = app.ui_scale();
-    // `Tokens::apply_to_ctx` sets `zoom_factor = self.ui_scale` while `egui` computes
-    // `pixels_per_point = zoom_factor * native_pixels_per_point`. Apply theme tokens BEFORE
-    // entering `ctx.run_ui` so pass-0 `ui.style().visuals` reflects the target light/dark
-    // theme (not fresh `Theme::Dark` defaults), and pass `native_ppp = ppp / zoom`.
+    // Pre-seed `zoom_factor` BEFORE calling `apply_theme_to_ctx` (never `set_zoom_factor` prior
+    // to frame 0, which queues `new_zoom_factor` and makes `egui` overwrite pass-0 `screen_rect`
+    // with its `10_000x10_000` default `content_rect`). Apply theme tokens before `ctx.run_ui`
+    // so pass-0 `ui.style().visuals` reflects the target light/dark theme immediately.
     let native_ppp = (ppp / zoom).max(0.05);
-    egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_to_ctx(ctx);
     ctx.options_mut(|o| {
         o.zoom_with_keyboard = false;
         o.zoom_factor = zoom;
     });
+    egui_shell::Tokens::from_theme_spec(&app.theme, &app.locale).apply_theme_to_ctx(ctx);
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
     let width_px = (w_pt * ppp).round().clamp(1.0, 16_384.0) as u32;
     #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]

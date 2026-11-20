@@ -976,17 +976,23 @@ impl Tokens {
         self.configure_style(ui.style_mut());
     }
 
-    /// Install these tokens, visuals, canonical typography sizes, non-overlapping scrollbar gutter,
-    /// and `ui_scale` once per frame on `ctx`.
-    pub fn apply_to_ctx(&self, ctx: &egui::Context) {
+    /// Install these tokens, visuals, canonical typography sizes, and non-overlapping scrollbar
+    /// gutter once per frame on `ctx` without changing `zoom_factor`.
+    pub fn apply_theme_to_ctx(&self, ctx: &egui::Context) {
         let egui_theme = if self.dark { egui::Theme::Dark } else { egui::Theme::Light };
         ctx.data_mut(|d| d.insert_temp(egui::Id::NULL, *self));
         ctx.set_theme(egui_theme);
-        ctx.set_zoom_factor(self.ui_scale.clamp(0.75, 3.0));
         ctx.set_visuals(self.to_visuals());
         ctx.all_styles_mut(|style| {
             self.configure_style(style);
         });
+    }
+
+    /// Install these tokens, visuals, canonical typography sizes, non-overlapping scrollbar gutter,
+    /// and `ui_scale` once per frame on `ctx`.
+    pub fn apply_to_ctx(&self, ctx: &egui::Context) {
+        self.apply_theme_to_ctx(ctx);
+        ctx.set_zoom_factor(self.ui_scale.clamp(0.75, 3.0));
     }
 
     /// Verify all primary text and interactive UI boundary pairs satisfy WCAG 2.1 AA contrast.
