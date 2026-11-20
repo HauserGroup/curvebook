@@ -266,7 +266,7 @@ fn multi_row_selection_format_selected_points_and_result_sheet_chaining_work() -
     let mv = app
         .execute_command(
             "sheet.createData",
-            json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "cols": 3, "rows": 5, "titles": ["F1", "F2", "F3"] }),
+            json!({ "sheet_id": "mv-1", "kind": "multiple_variables", "cols": 3, "rows": 5, "variables": ["F1", "F2", "F3"] }),
         )
         .map_err(|e| err_str("create mv", e))?;
     assert!(mv.mutated);

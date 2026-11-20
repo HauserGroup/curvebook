@@ -4491,7 +4491,7 @@ mod tests {
                 ]
             }),
         )?;
-        let g = app.execute_command("graph.create", serde_json::json!({ "source_sheet_id": "ds-1", "kind": "column", "title": "G1" }))?;
+        let g = app.execute_command("graph.create", serde_json::json!({ "data_sheet_id": "ds-1", "kind": "column", "title": "G1" }))?;
         let graph_id = g.payload["sheet_id"].as_str().ok_or("missing graph_id")?.to_owned();
         let an = app.execute_command(
             "analysis.run",

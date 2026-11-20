@@ -223,7 +223,7 @@ fn batch_workdir_guard_blocks_outside_ttf_and_supports_pdf_options() -> TestResu
         "schema": "curvebook.batch.v1",
         "inputs": [{ "sheet": "raw", "csv": "inputs/dose.csv", "kind": "xy" }],
         "commands": [
-            { "cmd": "graph.create", "params": { "sheet_id": "g_1", "source_sheet_id": "raw", "title": "Batch PDF Curve" } },
+            { "cmd": "graph.create", "params": { "sheet_id": "g_1", "data_sheet_id": "raw", "title": "Batch PDF Curve" } },
             { "cmd": "graph.initialize", "params": { "sheet_id": "g_1", "kind": "xy" } }
         ],
         "exports": [
@@ -252,7 +252,7 @@ fn batch_workdir_guard_blocks_outside_ttf_and_supports_pdf_options() -> TestResu
         "schema": "curvebook.batch.v1",
         "inputs": [{ "sheet": "raw", "csv": "inputs/dose.csv", "kind": "xy" }],
         "commands": [
-            { "cmd": "graph.create", "params": { "sheet_id": "g_1", "source_sheet_id": "raw", "title": "Batch PDF Curve" } },
+            { "cmd": "graph.create", "params": { "sheet_id": "g_1", "data_sheet_id": "raw", "title": "Batch PDF Curve" } },
             { "cmd": "graph.initialize", "params": { "sheet_id": "g_1", "kind": "xy" } }
         ],
         "exports": [{ "sheet": "g_1", "format": "pdf", "out": "out/bad_ttf.pdf", "ttf_font": "fonts/bad.ttf" }]

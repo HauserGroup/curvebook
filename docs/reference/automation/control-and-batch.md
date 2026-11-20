@@ -31,7 +31,7 @@ A `curvebook.batch.v1` manifest is a deterministic JSON document validated stric
 Single-call manifest structure (top-level keys):
 
 ```json
-{"schema":"curvebook.batch.v1","project":"in.curvebook","inputs":[{"csv":"assay.csv","sheet":"data-2","kind":"xy"}],"commands":[{"cmd":"fit.run","id":"step-1","params":{"sheet_id":"data-2","equation_id":"log_agonist_vs_response_4pl"}}],"exports":[{"out":"out.curvebook","format":"curvebook"},{"sheet_id":"graph-1","out":"out.svg","format":"svg"}]}
+{"schema":"curvebook.batch.v1","project":"in.curvebook","inputs":[{"csv":"assay.csv","sheet":"data-2","kind":"xy"}],"commands":[{"cmd":"fit.run","id":"step-1","params":{"source_sheet_id":"data-2","sheet_id":"fit-1","equation_id":"log_agonist_vs_response_4pl"}}],"exports":[{"out":"out.curvebook","format":"curvebook"},{"sheet_id":"graph-1","out":"out.svg","format":"svg"}]}
 ```
 
 - `schema`: Required constant `"curvebook.batch.v1"`.

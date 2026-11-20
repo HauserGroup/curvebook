@@ -168,7 +168,7 @@ fn w7_r36_r1_incomplete_rm_table_allows_matching_and_switches_kr_vs_satterthwait
                 "source_sheet_id": "ds-rm-inc",
                 "kind": "rm_one_way_anova",
                 "residual_covariance": "unstructured",
-                "multiplicity_method": "bonferroni"
+                "multiplicity": "bonferroni"
             }),
         )
         .map_err(err_str)?;
@@ -227,7 +227,7 @@ fn w7_r36_r1b_complete_rm_reml_toggle_disables_sphericity_and_restricts_post_hoc
             json!({
                 "source_sheet_id": "ds-rm-comp",
                 "kind": "rm_one_way_anova",
-                "multiplicity_method": "tukey"
+                "multiplicity": "tukey"
             }),
         )
         .map_err(err_str)?;

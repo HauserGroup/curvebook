@@ -314,10 +314,8 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
 
     // Human creates an initial sheet and toggles rulers inside the live window session.
     rt.dispatch(DesktopHostEvent::MenuAction { window_id: win_id, command_id: String::from("ui.rulers.toggle") })?;
-    rt.window_mut(win_id)?.execute_and_journal(
-        "sheet.createData",
-        json!({ "sheet_id": "human-ds", "title": "Human Table", "archetype": "column", "cols": 1, "rows": 2 }),
-    )?;
+    rt.window_mut(win_id)?
+        .execute_and_journal("sheet.createData", json!({ "sheet_id": "human-ds", "title": "Human Table", "kind": "column", "cols": 1, "rows": 2 }))?;
     rt.window_mut(win_id)?.execute_and_journal("table.setCell", json!({ "sheet_id": "human-ds", "row": 0, "col": 0, "value": 11.25 }))?;
 
     let auth = ControlAuth::generate()?;
@@ -393,10 +391,10 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
             assert!(data_sheets.iter().any(|ds| ds["id"] == "human-ds"), "control client must see human-created sheet: {inspect}");
 
             for req in [
-                json!({"id": "a3", "method": "sheet.createData", "params": {"sheet_id": "agent-xy", "graph_sheet_id": "agent-graph", "title": "Agent Curve", "kind": "xy", "data_sets": 1, "rows": 4, "auto_graph": true}}),
+                json!({"id": "a3", "method": "sheet.createData", "params": {"sheet_id": "agent-xy", "graph_sheet_id": "agent-graph", "title": "Agent Curve", "kind": "xy", "cols": 1, "rows": 4, "auto_graph": true}}),
                 json!({"id": "a4", "method": "table.setXCells", "params": {"sheet_id": "agent-xy", "values": [1.0, 2.0, 3.0, 4.0]}}),
                 json!({"id": "a5", "method": "table.setCells", "params": {"sheet_id": "agent-xy", "rows": [[10.0], [20.0], [40.0], [80.0]]}}),
-                json!({"id": "a6", "method": "fit.run", "params": {"source_sheet": "agent-xy", "sheet_id": "agent-fit", "kind": "linear"}}),
+                json!({"id": "a6", "method": "fit.run", "params": {"source_sheet_id": "agent-xy", "sheet_id": "agent-fit", "kind": "linear"}}),
                 json!({"id": "a7", "method": "ui.theme.set", "params": {"mode": "dark"}}),
             ] {
                 let resp = send_json_line(&mut w, &mut r, &req).map_err(|e| e.to_string())?;
@@ -464,7 +462,7 @@ fn shared_live_window_human_and_control_edits_render_repaint_and_persist() -> Re
     assert!(agent_stage_done.load(Ordering::Acquire), "agent stage did not complete in time");
     app.runtime_mut().window_mut(win_id)?.execute_and_journal(
         "sheet.createData",
-        json!({ "sheet_id": "human-mid", "title": "Human Mid-Session", "archetype": "column", "cols": 1, "rows": 2 }),
+        json!({ "sheet_id": "human-mid", "title": "Human Mid-Session", "kind": "column", "cols": 1, "rows": 2 }),
     )?;
     app.runtime_mut()
         .window_mut(win_id)?

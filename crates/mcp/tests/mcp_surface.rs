@@ -160,7 +160,7 @@ fn progressive_toolsets_snapshot_per_command_group_and_list_changed_notification
             "arguments": {
                 "sheet_id": "xy-toolset",
                 "title": "Toolset Created XY",
-                "archetype": "xy",
+                "kind": "xy",
                 "rows": 4,
                 "cols": 1
             }
@@ -292,7 +292,7 @@ fn initialize_resources_and_prompts_work_end_to_end() {
             "params": {
                 "sheet_id": "xy-res",
                 "title": "Resource Assay",
-                "archetype": "xy",
+                "kind": "xy",
                 "rows": 5,
                 "cols": 1,
                 "replicates": 1,
@@ -565,7 +565,7 @@ fn r10_10_analysis_toolset_exposes_and_executes_stats_pvalue_stack() {
     let created = call_tool(
         &mut state,
         "sheet_create_data",
-        json!({ "sheet_id": "mcp-pvals", "title": "MCP P Stack", "archetype": "column", "rows": 4, "cols": 1 }),
+        json!({ "sheet_id": "mcp-pvals", "title": "MCP P Stack", "kind": "column", "rows": 4, "cols": 1 }),
     )
     .expect("sheet_create_data");
     assert!(!created.is_error, "sheet_create_data failed: {created:?}");

@@ -199,7 +199,7 @@ fn egui_cmd_t_opens_anova_modal_over_resultsheet_with_backdrop_capture() -> Resu
     let (mut app, col_id) = seed_column_anova_app(true)?;
     let _ = app.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-anova-a", "source_sheet": col_id.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-anova-a", "source_sheet_id": col_id.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
     )?;
     let _ = app.execute_command("sheet.select", json!({ "sheet_id": "res-anova-a" }));
     let rs_id_str = "res-anova-a";
@@ -271,7 +271,7 @@ fn anova_modal_predicates_r1_to_r9_tabs_and_method_ref_behave_cleanly() -> Resul
     let (mut app_unequal, col_unequal) = seed_column_anova_app(false)?;
     let _ = app_unequal.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-unequal", "source_sheet": col_unequal.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-unequal", "source_sheet_id": col_unequal.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
     )?;
     let rs_id = SheetId::try_new("res-unequal")?;
     let doc_unequal = app_unequal.document().clone();
@@ -348,7 +348,7 @@ fn anova_modal_predicates_r1_to_r9_tabs_and_method_ref_behave_cleanly() -> Resul
     let (mut app_eq, col_eq) = seed_column_anova_app(true)?;
     let _ = app_eq.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-eq", "source_sheet": col_eq.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-eq", "source_sheet_id": col_eq.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
     )?;
     let rs_eq = SheetId::try_new("res-eq")?;
     let doc_eq = app_eq.document().clone();
@@ -372,7 +372,7 @@ fn all_14_beta_locales_and_hybrid_screenshots_pass_at_640x420_and_1440x600() -> 
     let (mut base_app, col_id) = seed_column_anova_app(true)?;
     let _ = base_app.execute_command(
         "analysis.run",
-        json!({ "sheet_id": "res-locales", "source_sheet": col_id.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
+        json!({ "sheet_id": "res-locales", "source_sheet_id": col_id.as_str(), "kind": "one_way_anova", "multiplicity": "tukey" }),
     )?;
     let rs_id = SheetId::try_new("res-locales")?;
 

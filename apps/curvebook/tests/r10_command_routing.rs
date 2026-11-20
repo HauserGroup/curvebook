@@ -40,7 +40,7 @@ fn build_populated_routing_app() -> Result<UiApp, Box<dyn std::error::Error>> {
             "sheet_id": "data-xy",
             "title": "Dose Response",
             "kind": "xy",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 5,
             "auto_info": true,
             "auto_graph": false
@@ -68,7 +68,7 @@ fn build_populated_routing_app() -> Result<UiApp, Box<dyn std::error::Error>> {
             "sheet_id": "data-col",
             "title": "Column Data",
             "kind": "column",
-            "data_sets": 2,
+            "cols": 2,
             "rows": 4,
             "auto_info": false,
             "auto_graph": false
@@ -515,7 +515,7 @@ fn mouse_wheel_scrolls_data_grid_and_ignores_non_canvas_without_zooming() -> Res
     let mut session = Session::from_document(ProjectDocument::default());
     let _ = session.execute(
         "sheet.createData",
-        json!({ "sheet_id": "big-ds", "title": "Large Table", "kind": "column", "data_sets": 2, "rows": 80, "auto_graph": true }),
+        json!({ "sheet_id": "big-ds", "title": "Large Table", "kind": "column", "cols": 2, "rows": 80, "auto_graph": true }),
     )?;
     let _ = session.execute("sheet.select", json!({ "sheet_id": "big-ds" }))?;
 

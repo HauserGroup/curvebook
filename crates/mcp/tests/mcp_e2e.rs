@@ -175,7 +175,7 @@ fn slice0_populate_and_fit(state: &mut McpServerState) -> Result<(), String> {
             "params": {
                 "sheet_id": "xy-1",
                 "title": "Agonist Dose-Response",
-                "archetype": "xy",
+                "kind": "xy",
                 "rows": 7,
                 "cols": 1,
                 "replicates": 2,
@@ -394,7 +394,7 @@ fn command_batch_atomic_rolls_back_all_mutations_on_failure() {
         "command_run",
         json!({
             "command_id": "sheet.createData",
-            "params": { "sheet_id": "base-xy", "archetype": "xy", "rows": 3, "cols": 1 }
+            "params": { "sheet_id": "base-xy", "kind": "xy", "rows": 3, "cols": 1 }
         }),
     )
     .expect("create base-xy");
@@ -408,7 +408,7 @@ fn command_batch_atomic_rolls_back_all_mutations_on_failure() {
             "commands": [
                 {
                     "command_id": "sheet.createData",
-                    "params": { "sheet_id": "ephemeral-1", "archetype": "column", "rows": 3, "cols": 2 }
+                    "params": { "sheet_id": "ephemeral-1", "kind": "column", "rows": 3, "cols": 2 }
                 },
                 {
                     "command_id": "table.setCell",
@@ -542,7 +542,7 @@ fn newline_transport_supports_layout_rendering_and_multipage_pdf() {
                         "commands": [
                             {
                                 "command_id": "sheet.createData",
-                                "params": { "sheet_id": "d1", "archetype": "column", "rows": 4, "cols": 2, "auto_graph": true, "graph_sheet_id": "g1" }
+                                "params": { "sheet_id": "d1", "kind": "column", "rows": 4, "cols": 2, "auto_graph": true, "graph_sheet_id": "g1" }
                             },
                             {
                                 "command_id": "table.setCells",
@@ -717,7 +717,7 @@ fn rv14_atomic_command_batch_reports_persisted_filesystem_side_effects_accuratel
             "params": {
                 "sheet_id": "rv14-xy",
                 "graph_sheet_id": "rv14-graph",
-                "archetype": "xy",
+                "kind": "xy",
                 "rows": 3,
                 "cols": 1,
                 "auto_graph": true
@@ -751,7 +751,7 @@ fn rv14_atomic_command_batch_reports_persisted_filesystem_side_effects_accuratel
             "commands": [
                 {
                     "command_id": "sheet.createData",
-                    "params": { "sheet_id": "rv14-ephemeral", "archetype": "column", "rows": 2, "cols": 1 }
+                    "params": { "sheet_id": "rv14-ephemeral", "kind": "column", "rows": 2, "cols": 1 }
                 },
                 {
                     "command_id": "export.svg",

@@ -560,7 +560,7 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
         "ui_invoke_menu",
         json!({
             "command_id": "sheet.createData",
-            "params": { "archetype": "Column", "rows": 5, "cols": 3 }
+            "params": { "kind": "Column", "rows": 5, "cols": 3 }
         }),
     )
     .expect("invoke menu with params");
@@ -586,7 +586,7 @@ fn gui_tools_forward_extended_parameters_and_reject_screenshot_path_in_gui_only(
     assert_eq!(calls[4].1["hover_fraction_x"], json!(0.45));
     assert_eq!(calls[4].1["hover_n"], json!(18.0));
     assert_eq!(calls[4].1["metrics"]["width_px"], json!(1280.0));
-    assert_eq!(calls[5].1["params"]["archetype"], json!("Column"));
+    assert_eq!(calls[5].1["params"]["kind"], json!("Column"));
     assert_eq!(calls[6].1["sheet_id"], json!("result-1"));
     assert_eq!(calls[7].1["tab"], json!(2));
     assert_eq!(calls[8].1["patches"]["alpha"], json!(0.01));
