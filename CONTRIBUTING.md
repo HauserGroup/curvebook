@@ -70,6 +70,17 @@ Before writing code or opening a pull request, read [AGENTS.md](AGENTS.md) and [
    ```
    Or run `cargo xtask ci quick` for the policy gates plus Clippy and tests of the crates your branch changed and their dependents; hosted CI runs the full `cargo xtask ci` stages on every pull request.
 
+### Fixing a reported bug
+
+Bug reports arrive through the **Bug report** and **Wrong numerical result** issue templates, labelled `bug` (and `numerical` for wrong results).
+
+1. **Triage:** a maintainer tries the reported steps. If the bug reproduces, add `confirmed`; if the steps are missing or do not reproduce it, add `needs-repro` and ask the reporter. Apply both labels by hand after reading the report, never on submission.
+2. **Claim:** comment on the issue before branching. A fix that is not planned roadmap work needs no `R<m>.<n>` ID: branch as `bugfix/issue-<N>-short-slug`.
+3. **Test first:** add a regression test named `issue_<N>_*` that fails before the fix. For a wrong numerical result, make it a `D1` oracle test that cites a published reference and documents its tolerance.
+4. **Fix and verify:** fix the cause, then run `cargo xtask ci quick`.
+5. **Link:** put `Fixes #<N>` in the PR body and as a commit-message trailer; leave the issue number out of the PR title. Merging to `main` closes the issue and links the fixing commit.
+6. **Tell the reporter:** when a release ships, the release checklist ([releasing.md](docs/release/releasing.md#4-closing-roadmap-items-after-release)) comments on each issue closed since the previous release.
+
 ---
 
 ## 5. AI Coding Agents

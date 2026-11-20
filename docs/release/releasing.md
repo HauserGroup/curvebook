@@ -205,3 +205,8 @@ Once the release build passes verification and is published:
    cargo xtask pending
    ```
 4. Confirm release notes link only verified changes, `THIRD-PARTY-LICENSES.html` and `SHA256SUMS.txt` are published cleanly alongside installers, and open issues closed by `(R<m>.<n>)` PRs are updated.
+5. Tell reporters their fix shipped. List the issues completed since the previous release tag and add a short comment to each naming the new release (for example *"Included in `v0.1.0-alpha.2`."*):
+   ```sh
+   gh issue list --state closed --search "reason:completed closed:>=<previous tag date, YYYY-MM-DD>" --limit 200
+   ```
+   Skip issues whose fixing commit is not in the release (check with `git merge-base --is-ancestor <sha> <new tag>`).
